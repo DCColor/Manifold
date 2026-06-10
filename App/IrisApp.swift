@@ -7,5 +7,6 @@ struct IrisApp: App {
             ContentView()
                 .frame(minWidth: 720, minHeight: 460)
         }
+        .windowStyle(.hiddenTitleBar)
     }
 }

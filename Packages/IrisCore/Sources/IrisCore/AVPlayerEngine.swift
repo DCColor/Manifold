@@ -1,7 +1,8 @@
 import AVFoundation
 import Combine
 
-/// Step-2 playback engine: AVPlayer plus accurate transport state.
+/// Step-2 playback engine: AVPlayer plus accurate transport state and the
+/// loaded clip's display size (for sizing the window to the video).
 @MainActor
 public final class AVPlayerEngine: ObservableObject {
 
@@ -10,6 +11,10 @@ public final class AVPlayerEngine: ObservableObject {
     @Published public private(set) var isPlaying = false
     @Published public private(set) var currentTime: Double = 0
     @Published public private(set) var duration: Double = 0
+
+    /// The clip's correct *display* size in points (accounts for non-square
+    /// pixels / anamorphic). nil until a clip is loaded and resolved.
+    @Published public private(set) var displaySize: CGSize?
 
     private var timeObserverToken: Any?
     private var cancellables = Set<AnyCancellable>()
@@ -31,8 +36,6 @@ public final class AVPlayerEngine: ObservableObject {
             }
         }
 
-        // When a clip reaches its end, AVPlayer pauses but doesn't always report
-        // it via timeControlStatus — so we listen for the explicit end notification.
         NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -48,10 +51,31 @@ public final class AVPlayerEngine: ObservableObject {
     }
 
     public func load(url: URL) {
-        let item = AVPlayerItem(url: url)
+        let asset = AVURLAsset(url: url)
+        let item = AVPlayerItem(asset: asset)
         player.replaceCurrentItem(with: item)
         currentTime = 0
         duration = 0
+        displaySize = nil
+        resolveDisplaySize(for: asset)
+    }
+
+    /// Load the first video track's size + preferred transform off the main
+    /// thread, compute the true display rect, then publish it on the main thread.
+    private func resolveDisplaySize(for asset: AVURLAsset) {
+        Task {
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let naturalSize = try? await track.load(.naturalSize),
+                  let transform = try? await track.load(.preferredTransform)
+            else { return }
+            // Applying the track's transform yields the correct display shape,
+            // including rotation and anamorphic pixel-aspect correction.
+            let displayRect = CGRect(origin: .zero, size: naturalSize).applying(transform)
+            let size = CGSize(width: abs(displayRect.width), height: abs(displayRect.height))
+            await MainActor.run {
+                self.displaySize = size
+            }
+        }
     }
 
     public func play() { player.play() }
@@ -61,13 +85,11 @@ public final class AVPlayerEngine: ObservableObject {
         isPlaying ? pause() : play()
     }
 
-    /// Fast, tolerant seek for live scrubbing (cheap — decodes from nearest keyframe).
     public func scrubSeek(to seconds: Double) {
         let target = CMTime(seconds: seconds, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
     }
 
-    /// Exact, frame-accurate seek — used once when the user releases the scrubber.
     public func exactSeek(to seconds: Double) {
         let target = CMTime(seconds: seconds, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
