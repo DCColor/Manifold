@@ -20,7 +20,6 @@ build/
 # Swift Package Manager
 .build/
 .swiftpm/
-Packages/
 Package.resolved
 
 # CocoaPods
@@ -54,3 +53,9 @@ npm-debug.log
 # Environment
 .env
 .env.local
+
+# XcodeGen generates the project — it's a build artifact, not source
+*.xcodeproj/
+
+# XcodeGen generates the project — it's a build artifact, not source
+*.xcodeproj/
