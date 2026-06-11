@@ -58,7 +58,8 @@ struct ContentView: View {
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
-        .onAppear { if engine.hasMedia && !isDocked { scheduleIdle() } }
+        .onAppear { armIdleIfNeeded() }
+        .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
@@ -167,11 +168,19 @@ struct ContentView: View {
         if !pinned { scheduleIdle() }
     }
 
+    // Start the auto-hide countdown when appropriate (overlay mode, media loaded,
+    // not pinned). Safe to call repeatedly — it cancels any prior pending task.
+    private func armIdleIfNeeded() {
+        guard engine.hasMedia, !isDocked, !pinned else { return }
+        hudVisible = true
+        scheduleIdle()
+    }
+
     private func scheduleIdle() {
         idleTask?.cancel()
         idleTask = Task {
             try? await Task.sleep(for: .seconds(2.0))
-            if !Task.isCancelled && !isScrubbing && !pinned {
+            if !Task.isCancelled && !isScrubbing && !pinned && !isDocked {
                 hudVisible = false
             }
         }
