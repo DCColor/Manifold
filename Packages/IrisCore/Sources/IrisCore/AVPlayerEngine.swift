@@ -13,6 +13,9 @@ public final class AVPlayerEngine: ObservableObject {
     @Published public private(set) var hasMedia = false
     @Published public private(set) var metadata: VideoMetadata?
 
+    /// Raw start-timecode info for the loaded clip (nil if no TC track).
+    public private(set) var tcInfo: TimecodeReader.Result?
+
     private var timeObserverToken: Any?
     private var cancellables = Set<AnyCancellable>()
 
@@ -57,6 +60,7 @@ public final class AVPlayerEngine: ObservableObject {
         duration = 0
         displaySize = nil
         metadata = nil
+        tcInfo = nil
         hasMedia = true
         resolveDisplaySize(for: asset)
         resolveMetadata(for: asset, url: url)
@@ -100,7 +104,9 @@ public final class AVPlayerEngine: ObservableObject {
                 }
             }
 
-            meta.startTimecode = TimecodeReader.readStartTimecode(url: url)?.timecode
+            let tc = TimecodeReader.readStartTimecode(url: url)
+            meta.startTimecode = tc?.timecode
+            await MainActor.run { self.tcInfo = tc }
             meta.chapters = await Self.chapters(for: asset)
 
             let resolved = meta
@@ -251,5 +257,31 @@ public final class AVPlayerEngine: ObservableObject {
     public func exactSeek(to seconds: Double) {
         let target = CMTime(seconds: seconds, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Current frame number from the START of the file (0-based, like Resolve).
+    public var currentFrame: Int {
+        let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
+        return Int((currentTime * fps).rounded())
+    }
+
+    /// Total frame count of the clip (0-based: last frame = total - 1).
+    public var totalFrames: Int {
+        let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
+        return max(Int((duration * fps).rounded()) - 1, 0)
+    }
+
+    /// Live source timecode at the current position (start TC + elapsed frames).
+    /// nil if the file has no timecode track.
+    public func currentSourceTimecode(at seconds: Double) -> String? {
+        guard let tc = tcInfo, tc.nfr > 0 else { return nil }
+        let elapsedFrames = Int((seconds * Double(tc.nfr)).rounded())
+        return TimecodeReader.format(frameCount: tc.startFrame + elapsedFrames,
+                                     nfr: tc.nfr, fps: tc.fps, dropFrame: tc.dropFrame)
+    }
+
+    /// Source timecode at the END of the clip.
+    public func endSourceTimecode() -> String? {
+        currentSourceTimecode(at: duration)
     }
 }

@@ -1,6 +1,8 @@
 import SwiftUI
 import IrisCore
 
+enum ReadoutMode: CaseIterable { case source, frame, elapsed }
+
 struct ContentView: View {
     @ObservedObject var engine: AVPlayerEngine
 
@@ -15,6 +17,7 @@ struct ContentView: View {
     @State private var hudVisible = true
     @State private var pinned = false
     @State private var showInspector = false
+    @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
     // In docked mode the controls are always shown; in overlay they auto-hide.
@@ -89,9 +92,11 @@ struct ContentView: View {
     private func controls(showPin: Bool) -> some View {
         VStack(spacing: 10) {
             HStack(spacing: 12) {
-                Text(timeString(isScrubbing ? scrubValue : engine.currentTime))
+                Text(leadingReadout)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.85))
+                    .frame(minWidth: 86, alignment: .leading)
+                    .onTapGesture { cycleReadout() }
 
                 Slider(
                     value: Binding(
@@ -113,9 +118,11 @@ struct ContentView: View {
                     }
                 )
 
-                Text(timeString(engine.duration))
+                Text(trailingReadout)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.85))
+                    .frame(minWidth: 86, alignment: .trailing)
+                    .onTapGesture { cycleReadout() }
             }
 
             HStack(spacing: 16) {
@@ -201,6 +208,44 @@ struct ContentView: View {
             if !Task.isCancelled && !isScrubbing && !pinned && !isDocked {
                 hudVisible = false
             }
+        }
+    }
+
+    private var displayTime: Double { isScrubbing ? scrubValue : engine.currentTime }
+
+    private var leadingReadout: String {
+        switch effectiveMode {
+        case .source:  return engine.currentSourceTimecode(at: displayTime) ?? timeString(displayTime)
+        case .elapsed: return timeString(displayTime)
+        case .frame:   return "\(Int((displayTime * frameRateOrDefault).rounded()))"
+        }
+    }
+
+    private var trailingReadout: String {
+        switch effectiveMode {
+        case .source:  return engine.endSourceTimecode() ?? timeString(engine.duration)
+        case .elapsed: return timeString(engine.duration)
+        case .frame:   return "\(engine.totalFrames)"
+        }
+    }
+
+    private var frameRateOrDefault: Double {
+        let f = engine.metadata?.frameRate ?? 0
+        return f > 0 ? f : 24
+    }
+
+    // If source TC is requested but the file has none, fall back to elapsed.
+    private var effectiveMode: ReadoutMode {
+        if readoutMode == .source && engine.currentSourceTimecode(at: 0) == nil {
+            return .elapsed
+        }
+        return readoutMode
+    }
+
+    private func cycleReadout() {
+        let all = ReadoutMode.allCases
+        if let i = all.firstIndex(of: readoutMode) {
+            readoutMode = all[(i + 1) % all.count]
         }
     }
 

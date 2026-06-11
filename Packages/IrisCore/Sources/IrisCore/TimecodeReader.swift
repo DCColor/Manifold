@@ -11,6 +11,9 @@ public enum TimecodeReader {
     public struct Result: Equatable, Sendable {
         public var timecode: String   // "01:00:00:00" or "01:00:00;00"
         public var dropFrame: Bool
+        public var startFrame: Int     // raw start frame count
+        public var nfr: Int            // integer frames per second (e.g. 24, 30)
+        public var fps: Double         // exact rate (e.g. 23.976)
     }
 
     public static func readStartTimecode(url: URL) -> Result? {
@@ -33,11 +36,12 @@ public enum TimecodeReader {
             // Chunk offset (stco/co64) points at the timecode sample in the file.
             guard let frameCount = readStartFrameCount(fh, stbl: stbl) else { continue }
 
-            let tc = format(frameCount: frameCount,
+            let tc = format(frameCount: Int(frameCount),
                             nfr: tmcdInfo.numberOfFrames,
                             fps: tmcdInfo.fps,
                             dropFrame: tmcdInfo.dropFrame)
-            return Result(timecode: tc, dropFrame: tmcdInfo.dropFrame)
+            return Result(timecode: tc, dropFrame: tmcdInfo.dropFrame,
+                          startFrame: Int(frameCount), nfr: tmcdInfo.numberOfFrames, fps: tmcdInfo.fps)
         }
         return nil
     }
@@ -157,10 +161,10 @@ public enum TimecodeReader {
 
     // MARK: - Formatting (Flip's proven math, correct SMPTE ; notation)
 
-    private static func format(frameCount: UInt32, nfr: Int, fps: Double, dropFrame: Bool) -> String {
+    public static func format(frameCount: Int, nfr: Int, fps: Double, dropFrame: Bool) -> String {
         guard nfr > 0 else { return "—" }
         let nfrI = Int(nfr)
-        var fc = Int(frameCount)
+        var fc = frameCount
         let hh: Int, mm: Int, ss: Int, ff: Int
 
         if dropFrame {
