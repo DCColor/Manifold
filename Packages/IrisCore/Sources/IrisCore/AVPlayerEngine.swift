@@ -101,18 +101,6 @@ public final class AVPlayerEngine: ObservableObject {
             let resolved = meta
             await MainActor.run {
                 self.metadata = resolved
-                print("""
-                ── Iris metadata ──────────────
-                codec:     \(resolved.codecName)
-                size:      \(resolved.resolutionString)
-                fps:       \(resolved.frameRateString)
-                container: \(resolved.container)
-                primaries: \(resolved.labeled(resolved.colorPrimaries, resolved.colorPrimariesCode))
-                transfer:  \(resolved.labeled(resolved.transferFunction, resolved.transferFunctionCode))
-                matrix:    \(resolved.labeled(resolved.colorMatrix, resolved.colorMatrixCode))
-                nclc:      \(resolved.nclcTriple)
-                ───────────────────────────────
-                """)
             }
         }
     }

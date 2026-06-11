@@ -14,6 +14,7 @@ struct ContentView: View {
 
     @State private var hudVisible = true
     @State private var pinned = false
+    @State private var showInspector = false
     @State private var idleTask: Task<Void, Never>?
 
     // In docked mode the controls are always shown; in overlay they auto-hide.
@@ -55,6 +56,19 @@ struct ContentView: View {
                 .keyboardShortcut(.tab, modifiers: [])
                 .opacity(0)
         }
+        .overlay(alignment: .topTrailing) {
+            if showInspector && engine.hasMedia {
+                InspectorPanel(metadata: engine.metadata)
+                    .padding(16)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showInspector)
+        .background(
+            Button("") { showInspector.toggle() }
+                .keyboardShortcut("i", modifiers: [])
+                .opacity(0)
+        )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
@@ -123,6 +137,10 @@ struct ContentView: View {
                     .help("Guides (coming soon)").disabled(true)
                 Button { } label: { Image(systemName: "textformat") }
                     .help("Overlay data (coming soon)").disabled(true)
+                Button { showInspector.toggle() } label: {
+                    Image(systemName: "info.circle")
+                }
+                .help("Inspector (I)")
 
                 Spacer()
 
