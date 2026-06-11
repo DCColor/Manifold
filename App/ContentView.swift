@@ -3,8 +3,11 @@ import IrisCore
 
 struct ContentView: View {
     @ObservedObject var engine: AVPlayerEngine
-    @State private var isImporterPresented = false
 
+    @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
+    private var mode: ControlDisplayMode { ControlDisplayMode(rawValue: controlModeRaw) ?? .overlay }
+
+    @State private var isImporterPresented = false
     @State private var isScrubbing = false
     @State private var scrubValue: Double = 0
 
@@ -12,39 +15,30 @@ struct ContentView: View {
     @State private var pinned = false
     @State private var idleTask: Task<Void, Never>?
 
+    static let dockedBarHeight: CGFloat = 64
+
     var body: some View {
-        ZStack {
-            VideoSurfaceView(player: engine.player)
-                .background(.black)
-                .ignoresSafeArea()
-
-            if engine.hasMedia {
-                VStack {
-                    Spacer()
-                    transportHUD
-                        .padding(16)
-                }
-                .opacity(hudVisible ? 1 : 0)
-                .animation(.easeInOut(duration: 0.30), value: hudVisible)
+        Group {
+            if mode == .docked {
+                dockedLayout
             } else {
-                emptyState
+                overlayLayout
             }
-
+        }
+        .background(
             WindowConfigurator(
-                buttonsVisible: engine.hasMedia ? hudVisible : true,
-                displaySize: engine.displaySize
+                buttonsVisible: engine.hasMedia ? (mode == .docked ? true : hudVisible) : true,
+                displaySize: engine.displaySize,
+                mode: mode,
+                barHeight: Self.dockedBarHeight
             )
             .frame(width: 0, height: 0)
-
+        )
+        .background(
             Button("") { togglePin() }
                 .keyboardShortcut(.tab, modifiers: [])
-                .frame(width: 0, height: 0)
                 .opacity(0)
-        }
-        .onContinuousHover { phase in
-            if case .active = phase { wakeHUD() }
-        }
-        .onAppear { if engine.hasMedia { scheduleIdle() } }
+        )
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
@@ -57,25 +51,54 @@ struct ContentView: View {
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "film")
-                .font(.system(size: 52, weight: .ultraLight))
-                .foregroundStyle(.white.opacity(0.45))
-            Text("Open a file to begin")
-                .font(.title3)
-                .foregroundStyle(.white.opacity(0.65))
-            Button {
-                isImporterPresented = true
-            } label: {
-                Label("Open…", systemImage: "folder")
+    private var overlayLayout: some View {
+        ZStack {
+            VideoSurfaceView(player: engine.player)
+                .background(.black)
+                .ignoresSafeArea()
+
+            if engine.hasMedia {
+                VStack {
+                    Spacer()
+                    controls(showPin: true)
+                        .padding(12)
+                        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+                        .frame(maxWidth: 760)
+                        .padding(16)
+                }
+                .opacity(hudVisible ? 1 : 0)
+                .animation(.easeInOut(duration: 0.30), value: hudVisible)
+            } else {
+                emptyState
             }
-            .controlSize(.large)
-            .tint(.white)
         }
+        .onContinuousHover { phase in
+            if case .active = phase { wakeHUD() }
+        }
+        .onAppear { if engine.hasMedia { scheduleIdle() } }
     }
 
-    private var transportHUD: some View {
+    private var dockedLayout: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                VideoSurfaceView(player: engine.player)
+                    .background(.black)
+                if !engine.hasMedia { emptyState }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if engine.hasMedia {
+                controls(showPin: false)
+                    .padding(.horizontal, 16)
+                    .frame(height: Self.dockedBarHeight)
+                    .frame(maxWidth: .infinity)
+                    .background(.black)
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    private func controls(showPin: Bool) -> some View {
         VStack(spacing: 10) {
             HStack(spacing: 12) {
                 Text(timeString(isScrubbing ? scrubValue : engine.currentTime))
@@ -108,18 +131,11 @@ struct ContentView: View {
             }
 
             HStack(spacing: 16) {
-                Button {
-                    isImporterPresented = true
-                } label: {
-                    Image(systemName: "folder")
-                }
-                .help("Open…")
+                Button { isImporterPresented = true } label: { Image(systemName: "folder") }
+                    .help("Open…")
 
-                Button {
-                    engine.togglePlayPause()
-                } label: {
-                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill")
-                        .frame(width: 24)
+                Button { engine.togglePlayPause() } label: {
+                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill").frame(width: 24)
                 }
                 .keyboardShortcut(.space, modifiers: [])
 
@@ -136,31 +152,44 @@ struct ContentView: View {
 
                 Spacer()
 
-                Button {
-                    togglePin()
-                } label: {
-                    Image(systemName: pinned ? "pin.fill" : "pin")
+                if showPin {
+                    Button { togglePin() } label: {
+                        Image(systemName: pinned ? "pin.fill" : "pin")
+                    }
+                    .help(pinned ? "Unpin controls (Tab)" : "Pin controls (Tab)")
                 }
-                .help(pinned ? "Unpin controls (Tab)" : "Pin controls (Tab)")
             }
             .buttonStyle(.plain)
             .foregroundStyle(.white.opacity(0.9))
             .imageScale(.large)
         }
-        .padding(12)
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-        .frame(maxWidth: 760)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "film")
+                .font(.system(size: 52, weight: .ultraLight))
+                .foregroundStyle(.white.opacity(0.45))
+            Text("Open a file to begin")
+                .font(.title3)
+                .foregroundStyle(.white.opacity(0.65))
+            Button { isImporterPresented = true } label: {
+                Label("Open…", systemImage: "folder")
+            }
+            .controlSize(.large)
+            .tint(.white)
+        }
     }
 
     private func togglePin() {
-        guard engine.hasMedia else { return }
+        guard engine.hasMedia, mode == .overlay else { return }
         pinned.toggle()
         idleTask?.cancel()
         hudVisible = pinned
     }
 
     private func wakeHUD() {
-        guard engine.hasMedia else { return }
+        guard engine.hasMedia, mode == .overlay else { return }
         hudVisible = true
         if !pinned { scheduleIdle() }
     }

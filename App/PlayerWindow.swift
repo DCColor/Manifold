@@ -1,13 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// Full-bleed NSWindow tweaks paired with .windowStyle(.hiddenTitleBar).
-/// On cold launch with no clip, opens at a neutral default 16:9 (overriding any
-/// restored frame). Once a clip's `displaySize` is known, locks the window to the
-/// clip's aspect and sizes it to the screen. Traffic-light buttons fade with the HUD.
+/// Full-bleed NSWindow tweaks. Overlay mode locks the window to the clip's pure
+/// aspect. Docked mode locks the window to "clip aspect + bar height".
 struct WindowConfigurator: NSViewRepresentable {
     var buttonsVisible: Bool
     var displaySize: CGSize?
+    var mode: ControlDisplayMode
+    var barHeight: CGFloat
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -16,8 +16,6 @@ struct WindowConfigurator: NSViewRepresentable {
             guard let window = view.window else { return }
             window.isMovableByWindowBackground = true
             window.backgroundColor = .black
-
-            // No clip yet → neutral default 16:9, no aspect lock, centered.
             if !hasClip {
                 window.contentAspectRatio = .zero
                 let defaultSize: NSSize
@@ -49,14 +47,20 @@ struct WindowConfigurator: NSViewRepresentable {
         }
 
         guard let size = displaySize, size.width > 0, size.height > 0 else { return }
-        let aspect = NSSize(width: size.width, height: size.height)
-        if window.contentAspectRatio != aspect {
-            window.contentAspectRatio = aspect
+
+        let extraH = (mode == .docked) ? barHeight : 0
+        let targetAspect = NSSize(width: size.width, height: size.height + extraH)
+
+        if window.contentAspectRatio != targetAspect {
+            window.contentAspectRatio = targetAspect
             if let screen = window.screen ?? NSScreen.main {
                 let maxW = screen.visibleFrame.width * 0.8
                 let maxH = screen.visibleFrame.height * 0.8
-                let scale = min(maxW / size.width, maxH / size.height, 1.0)
-                let contentSize = NSSize(width: size.width * scale, height: size.height * scale)
+                let scale = min(maxW / size.width, (maxH - extraH) / size.height, 1.0)
+                let contentSize = NSSize(
+                    width: size.width * scale,
+                    height: size.height * scale + extraH
+                )
                 window.setContentSize(contentSize)
                 window.center()
             }
