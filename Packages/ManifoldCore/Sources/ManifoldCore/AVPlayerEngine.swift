@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Combine
 
 @MainActor
@@ -102,8 +103,12 @@ public final class AVPlayerEngine: ObservableObject {
                     meta.colorMatrix = c.matrixName
                     meta.colorMatrixCode = c.matrixCode
                 }
+                if let rate = try? await track.load(.estimatedDataRate), rate > 0 {
+                    meta.videoDataRate = Double(rate)
+                }
             }
 
+            meta.audioTracks = await Self.audioTracks(for: asset)
             let tc = TimecodeReader.readStartTimecode(url: url)
             meta.startTimecode = tc?.timecode
             await MainActor.run { self.tcInfo = tc }
@@ -113,10 +118,16 @@ public final class AVPlayerEngine: ObservableObject {
             await MainActor.run {
                 self.metadata = resolved
                 print("""
-                ── Iris TC/chapters ───────────
+                ── Manifold metadata ──────────
+                codec:     \(resolved.codecName)
+                size:      \(resolved.resolutionString)
+                fps:       \(resolved.frameRateString)
+                vid rate:  \(resolved.videoDataRateString)
+                container: \(resolved.container)
+                nclc:      \(resolved.nclcTriple)
                 timecode:  \(resolved.startTimecode ?? "(none)")
-                chapters:  \(resolved.chapters.count)
-                \(resolved.chapters.map { "  • \(String(format: "%.2f", $0.time))s  \($0.title)" }.joined(separator: "\n"))
+                audio:     \(resolved.audioTracks.count) track(s)
+                \(resolved.audioTracks.enumerated().map { "  [\($0)] \($1.codecName) · \($1.summary) · \($1.dataRateString)" }.joined(separator: "\n"))
                 ───────────────────────────────
                 """)
             }
@@ -223,6 +234,44 @@ public final class AVPlayerEngine: ObservableObject {
             result.append(ChapterMarker(time: time.isFinite ? time : 0, title: title))
         }
         return result
+    }
+
+    private static func audioTracks(for asset: AVURLAsset) async -> [AudioTrackInfo] {
+        guard let tracks = try? await asset.loadTracks(withMediaType: .audio) else { return [] }
+        var result: [AudioTrackInfo] = []
+        for track in tracks {
+            var info = AudioTrackInfo()
+            if let rate = try? await track.load(.estimatedDataRate), rate > 0 {
+                info.dataRate = Double(rate)
+            }
+            if let formats = try? await track.load(.formatDescriptions), let fmt = formats.first {
+                let sub = CMFormatDescriptionGetMediaSubType(fmt)
+                info.codecName = audioCodecName(sub)
+                if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee {
+                    info.sampleRate = asbd.mSampleRate
+                    info.channelCount = Int(asbd.mChannelsPerFrame)
+                    if asbd.mBitsPerChannel > 0 {
+                        info.bitDepth = Int(asbd.mBitsPerChannel)
+                    }
+                }
+            }
+            info.layoutName = VideoMetadata.layoutName(forChannels: info.channelCount)
+            result.append(info)
+        }
+        return result
+    }
+
+    private static func audioCodecName(_ code: FourCharCode) -> String {
+        switch code {
+        case kAudioFormatLinearPCM: return "PCM"
+        case kAudioFormatMPEG4AAC: return "AAC"
+        case kAudioFormatAppleLossless: return "ALAC"
+        case kAudioFormatAC3: return "AC-3"
+        case kAudioFormatEnhancedAC3: return "E-AC-3"
+        case kAudioFormatFLAC: return "FLAC"
+        case kAudioFormatOpus: return "Opus"
+        default: return fourCCString(code)
+        }
     }
 
     private static func fourCC(_ s: String) -> FourCharCode {
