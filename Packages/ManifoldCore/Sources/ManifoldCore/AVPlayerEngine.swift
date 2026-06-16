@@ -109,6 +109,7 @@ public final class AVPlayerEngine: ObservableObject {
             }
 
             meta.audioTracks = await Self.audioTracks(for: asset)
+            meta.textTracks = await Self.textTracks(for: asset)
             let tc = TimecodeReader.readStartTimecode(url: url)
             meta.startTimecode = tc?.timecode
             await MainActor.run { self.tcInfo = tc }
@@ -126,8 +127,11 @@ public final class AVPlayerEngine: ObservableObject {
                 container: \(resolved.container)
                 nclc:      \(resolved.nclcTriple)
                 timecode:  \(resolved.startTimecode ?? "(none)")
+                chapters:  \(resolved.chapters.count)
                 audio:     \(resolved.audioTracks.count) track(s)
                 \(resolved.audioTracks.enumerated().map { "  [\($0)] \($1.codecName) · \($1.summary) · \($1.dataRateString)" }.joined(separator: "\n"))
+                text:      \(resolved.textTracks.count) track(s)
+                \(resolved.textTracks.enumerated().map { "  [\($0)] \($1.kind) · \($1.summary)" }.joined(separator: "\n"))
                 ───────────────────────────────
                 """)
             }
@@ -270,6 +274,42 @@ public final class AVPlayerEngine: ObservableObject {
         case kAudioFormatEnhancedAC3: return "E-AC-3"
         case kAudioFormatFLAC: return "FLAC"
         case kAudioFormatOpus: return "Opus"
+        default: return fourCCString(code)
+        }
+    }
+
+    private static func textTracks(for asset: AVURLAsset) async -> [TextTrackInfo] {
+        var result: [TextTrackInfo] = []
+        let mediaTypes: [(AVMediaType, String)] = [
+            (.closedCaption, "Closed Caption"),
+            (.subtitle, "Subtitle"),
+            (.text, "Timed Text")
+        ]
+        for (mediaType, kindName) in mediaTypes {
+            guard let tracks = try? await asset.loadTracks(withMediaType: mediaType) else { continue }
+            for track in tracks {
+                var info = TextTrackInfo()
+                info.kind = kindName
+                if let formats = try? await track.load(.formatDescriptions), let fmt = formats.first {
+                    info.format = textFormatName(CMFormatDescriptionGetMediaSubType(fmt))
+                }
+                if let lang = (try? await track.load(.languageCode)) ?? nil, !lang.isEmpty {
+                    info.language = lang
+                }
+                result.append(info)
+            }
+        }
+        return result
+    }
+
+    private static func textFormatName(_ code: FourCharCode) -> String {
+        switch fourCCString(code).replacingOccurrences(of: "'", with: "") {
+        case "c608": return "CEA-608"
+        case "c708": return "CEA-708"
+        case "wvtt": return "WebVTT"
+        case "tx3g": return "Timed Text (tx3g)"
+        case "stpp": return "TTML / IMSC"
+        case "text": return "Text"
         default: return fourCCString(code)
         }
     }

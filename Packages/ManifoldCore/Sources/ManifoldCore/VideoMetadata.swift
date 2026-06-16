@@ -34,6 +34,18 @@ public struct AudioTrackInfo: Equatable, Sendable {
     }
 }
 
+public struct TextTrackInfo: Equatable, Sendable {
+    public var kind: String = "—"        // "Closed Caption", "Subtitle", "Timed Text"
+    public var format: String = "—"      // "CEA-608", "CEA-708", "WebVTT", "TTML", etc.
+    public var language: String = "—"
+
+    public var summary: String {
+        var s = format
+        if language != "—" && !language.isEmpty { s += " · \(language)" }
+        return s
+    }
+}
+
 public struct VideoMetadata: Equatable, Sendable {
     public var codecName: String = "—"
     public var width: Int = 0
@@ -52,6 +64,7 @@ public struct VideoMetadata: Equatable, Sendable {
     public var startTimecode: String?
     public var chapters: [ChapterMarker] = []
     public var audioTracks: [AudioTrackInfo] = []
+    public var textTracks: [TextTrackInfo] = []
 
     public var resolutionString: String {
         (width > 0 && height > 0) ? "\(width) × \(height)" : "—"
