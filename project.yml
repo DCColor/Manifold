@@ -1,4 +1,4 @@
-name: Iris
+name: Manifold
 options:
   bundleIdPrefix: com.graviton
   deploymentTarget:
@@ -6,17 +6,17 @@ options:
   createIntermediateGroups: true
 
 packages:
-  IrisCore:
-    path: Packages/IrisCore
+  ManifoldCore:
+    path: Packages/ManifoldCore
 
 targets:
-  Iris:
+  Manifold:
     type: application
     platform: macOS
     sources:
       - App
     dependencies:
-      - package: IrisCore
+      - package: ManifoldCore
     info:
       path: App/Info.generated.plist
       properties:
@@ -31,8 +31,8 @@ targets:
             LSHandlerRank: Alternate
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.graviton.iris
-        PRODUCT_NAME: Iris
+        PRODUCT_BUNDLE_IDENTIFIER: com.graviton.manifold
+        PRODUCT_NAME: Manifold
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES

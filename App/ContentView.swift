@@ -1,5 +1,5 @@
 import SwiftUI
-import IrisCore
+import ManifoldCore
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 

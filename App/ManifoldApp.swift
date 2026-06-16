@@ -1,8 +1,8 @@
 import SwiftUI
-import IrisCore
+import ManifoldCore
 
 @main
-struct IrisApp: App {
+struct ManifoldApp: App {
     @StateObject private var engine = AVPlayerEngine()
 
     var body: some Scene {

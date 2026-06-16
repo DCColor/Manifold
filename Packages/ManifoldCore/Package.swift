@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "IrisCore",
+    name: "ManifoldCore",
     platforms: [
         .macOS(.v15)
     ],
     products: [
-        .library(name: "IrisCore", targets: ["IrisCore"])
+        .library(name: "ManifoldCore", targets: ["ManifoldCore"])
     ],
     targets: [
         .target(
-            name: "IrisCore",
+            name: "ManifoldCore",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

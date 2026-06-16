@@ -1,5 +1,5 @@
 import SwiftUI
-import IrisCore
+import ManifoldCore
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 /// Summoned via the info button or the "I" shortcut; matches the HUD aesthetic.
