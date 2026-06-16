@@ -31,18 +31,23 @@ struct InspectorPanel: View {
 
                 if !m.audioTracks.isEmpty {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
-                    Text(m.audioTracks.count == 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
-                        .font(.system(.caption2, design: .default).weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .padding(.bottom, 4)
+                    SectionHeader(m.audioTracks.count == 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
                     ForEach(Array(m.audioTracks.enumerated()), id: \.offset) { index, track in
                         AudioTrackRow(index: index, track: track, showIndex: m.audioTracks.count > 1)
                     }
                 }
 
+                if !m.textTracks.isEmpty {
+                    Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+                    SectionHeader(m.textTracks.count == 1 ? "Timed Text" : "Timed Text (\(m.textTracks.count))")
+                    ForEach(Array(m.textTracks.enumerated()), id: \.offset) { index, track in
+                        MetadataRow(label: track.kind, value: track.summary)
+                    }
+                }
+
                 if !m.chapters.isEmpty {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
-                    MetadataRow(label: "Chapters", value: "\(m.chapters.count)")
+                    MetadataRow(label: "Markers", value: "\(m.chapters.count)")
                 }
             } else {
                 Text("No media loaded")
@@ -57,6 +62,17 @@ struct InspectorPanel: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
         )
+    }
+}
+
+private struct SectionHeader: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text)
+            .font(.system(.caption2, design: .default).weight(.semibold))
+            .foregroundStyle(.white.opacity(0.45))
+            .padding(.bottom, 4)
     }
 }
 
@@ -79,7 +95,6 @@ private struct MetadataRow: View {
     }
 }
 
-/// One audio track: label on top (codec + layout), detail line below.
 private struct AudioTrackRow: View {
     let index: Int
     let track: AudioTrackInfo
