@@ -83,6 +83,10 @@ public final class AVPlayerEngine: ObservableObject {
         Task {
             var meta = VideoMetadata()
             meta.container = url.pathExtension.uppercased()
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
+                meta.fileCreatedDate = attrs[.creationDate] as? Date
+                meta.fileModifiedDate = attrs[.modificationDate] as? Date
+            }
 
             if let track = try? await asset.loadTracks(withMediaType: .video).first {
                 if let naturalSize = try? await track.load(.naturalSize) {
@@ -115,6 +119,21 @@ public final class AVPlayerEngine: ObservableObject {
             await MainActor.run { self.tcInfo = tc }
             meta.chapters = await Self.chapters(for: asset)
 
+            if let createdItem = (try? await asset.load(.creationDate)) ?? nil,
+               let dateValue = (try? await createdItem.load(.dateValue)) ?? nil {
+                meta.creationDate = dateValue
+            }
+            let common = (try? await asset.load(.commonMetadata)) ?? []
+            for item in common {
+                guard let key = item.commonKey else { continue }
+                if key == .commonKeyCreator || key == .commonKeyAuthor {
+                    if let s = (try? await item.load(.stringValue)) ?? nil, !s.isEmpty { meta.creator = s }
+                }
+                if key == .commonKeySoftware {
+                    if let s = (try? await item.load(.stringValue)) ?? nil, !s.isEmpty { meta.software = s }
+                }
+            }
+
             let resolved = meta
             await MainActor.run {
                 self.metadata = resolved
@@ -127,11 +146,13 @@ public final class AVPlayerEngine: ObservableObject {
                 container: \(resolved.container)
                 nclc:      \(resolved.nclcTriple)
                 timecode:  \(resolved.startTimecode ?? "(none)")
-                chapters:  \(resolved.chapters.count)
+                created:   \(VideoMetadata.dateString(resolved.creationDate)) (embedded)
+                fs-created:\(VideoMetadata.dateString(resolved.fileCreatedDate))
+                fs-mod:    \(VideoMetadata.dateString(resolved.fileModifiedDate))
+                creator:   \(resolved.creator ?? "(none)")
+                software:  \(resolved.software ?? "(none)")
                 audio:     \(resolved.audioTracks.count) track(s)
-                \(resolved.audioTracks.enumerated().map { "  [\($0)] \($1.codecName) · \($1.summary) · \($1.dataRateString)" }.joined(separator: "\n"))
                 text:      \(resolved.textTracks.count) track(s)
-                \(resolved.textTracks.enumerated().map { "  [\($0)] \($1.kind) · \($1.summary)" }.joined(separator: "\n"))
                 ───────────────────────────────
                 """)
             }

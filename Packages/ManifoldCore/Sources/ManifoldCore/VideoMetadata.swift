@@ -54,6 +54,12 @@ public struct VideoMetadata: Equatable, Sendable {
     public var container: String = "—"
     public var videoDataRate: Double = 0    // bits/sec (estimated)
 
+    public var creationDate: Date?       // embedded media creation date (from container)
+    public var fileCreatedDate: Date?    // filesystem created (on this disk)
+    public var fileModifiedDate: Date?   // filesystem modified (Finder's "modified")
+    public var creator: String?          // author/creator tag, if present
+    public var software: String?         // authoring tool / encoder, if present
+
     public var colorPrimaries: String = "—"
     public var transferFunction: String = "—"
     public var colorMatrix: String = "—"
@@ -95,5 +101,13 @@ public struct VideoMetadata: Equatable, Sendable {
         case 8: return "7.1"
         default: return n > 0 ? "\(n) ch" : "—"
         }
+    }
+
+    public static func dateString(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: date)
     }
 }
