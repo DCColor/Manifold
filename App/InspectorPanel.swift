@@ -2,7 +2,6 @@ import SwiftUI
 import ManifoldCore
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
-/// Summoned via the info button or the "I" shortcut; matches the HUD aesthetic.
 struct InspectorPanel: View {
     let metadata: VideoMetadata?
 
@@ -17,16 +16,34 @@ struct InspectorPanel: View {
                 MetadataRow(label: "Codec", value: m.codecName)
                 MetadataRow(label: "Resolution", value: m.resolutionString)
                 MetadataRow(label: "Frame Rate", value: m.frameRateString)
+                if let tc = m.startTimecode {
+                    MetadataRow(label: "Start TC", value: tc)
+                }
+                MetadataRow(label: "Data Rate", value: m.videoDataRateString)
                 MetadataRow(label: "Container", value: m.container)
 
-                Divider()
-                    .overlay(.white.opacity(0.15))
-                    .padding(.vertical, 6)
+                Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
 
                 MetadataRow(label: "Primaries", value: m.labeled(m.colorPrimaries, m.colorPrimariesCode))
                 MetadataRow(label: "Transfer", value: m.labeled(m.transferFunction, m.transferFunctionCode))
                 MetadataRow(label: "Matrix", value: m.labeled(m.colorMatrix, m.colorMatrixCode))
                 MetadataRow(label: "nclc", value: m.nclcTriple)
+
+                if !m.audioTracks.isEmpty {
+                    Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+                    Text(m.audioTracks.count == 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
+                        .font(.system(.caption2, design: .default).weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .padding(.bottom, 4)
+                    ForEach(Array(m.audioTracks.enumerated()), id: \.offset) { index, track in
+                        AudioTrackRow(index: index, track: track, showIndex: m.audioTracks.count > 1)
+                    }
+                }
+
+                if !m.chapters.isEmpty {
+                    Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+                    MetadataRow(label: "Chapters", value: "\(m.chapters.count)")
+                }
             } else {
                 Text("No media loaded")
                     .font(.system(.caption, design: .default))
@@ -34,7 +51,7 @@ struct InspectorPanel: View {
             }
         }
         .padding(14)
-        .frame(width: 260, alignment: .leading)
+        .frame(width: 280, alignment: .leading)
         .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
@@ -43,7 +60,6 @@ struct InspectorPanel: View {
     }
 }
 
-/// One label/value row in the inspector.
 private struct MetadataRow: View {
     let label: String
     let value: String
@@ -58,6 +74,34 @@ private struct MetadataRow: View {
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.92))
                 .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+/// One audio track: label on top (codec + layout), detail line below.
+private struct AudioTrackRow: View {
+    let index: Int
+    let track: AudioTrackInfo
+    let showIndex: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(showIndex ? "Track \(index + 1)" : "Track")
+                    .font(.system(.caption, design: .default))
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer(minLength: 16)
+                Text("\(track.codecName) · \(track.layoutName)")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.92))
+            }
+            HStack(alignment: .firstTextBaseline) {
+                Spacer(minLength: 0)
+                Text("\(track.sampleRateString) · \(track.bitDepthString) · \(track.dataRateString)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
         }
         .padding(.vertical, 3)
     }
