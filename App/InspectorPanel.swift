@@ -49,6 +49,22 @@ struct InspectorPanel: View {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
                     MetadataRow(label: "Markers", value: "\(m.chapters.count)")
                 }
+
+                if hasFileInfo(m) {
+                    Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+                    SectionHeader("File")
+                    if let s = m.software { MetadataRow(label: "Software", value: s) }
+                    if let c = m.creator { MetadataRow(label: "Creator", value: c) }
+                    if m.creationDate != nil {
+                        MetadataRow(label: "Encoded", value: VideoMetadata.dateString(m.creationDate))
+                    }
+                    if m.fileCreatedDate != nil {
+                        MetadataRow(label: "Added to Disk", value: VideoMetadata.dateString(m.fileCreatedDate))
+                    }
+                    if m.fileModifiedDate != nil {
+                        MetadataRow(label: "Modified", value: VideoMetadata.dateString(m.fileModifiedDate))
+                    }
+                }
             } else {
                 Text("No media loaded")
                     .font(.system(.caption, design: .default))
@@ -62,6 +78,11 @@ struct InspectorPanel: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
         )
+    }
+
+    private func hasFileInfo(_ m: VideoMetadata) -> Bool {
+        m.software != nil || m.creator != nil || m.creationDate != nil
+            || m.fileCreatedDate != nil || m.fileModifiedDate != nil
     }
 }
 
