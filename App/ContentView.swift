@@ -91,8 +91,10 @@ struct ContentView: View {
                 ZStack(alignment: .topTrailing) {
                     Color.black
                     SampleBufferSurfaceView { nsView in
-                        frameSurfaceView = nsView
-                        frameEngine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
+                        Task { @MainActor in
+                            frameSurfaceView = nsView
+                            frameEngine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
+                        }
                     }
                     VStack(alignment: .trailing, spacing: 8) {
                         Text(String(format: "%.2f / %.2f s", frameEngine.currentTime, frameEngine.duration))
