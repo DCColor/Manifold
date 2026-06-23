@@ -149,6 +149,7 @@ private struct AudioTrackRow: View {
                         .foregroundStyle(.white.opacity(0.92))
                     + Text(track.layoutName)
                         .foregroundStyle(.white.opacity(layoutOpacity))
+                        .italic(track.layoutConfidence != .declared)
                 )
                 .font(.system(.caption, design: .monospaced))
             }

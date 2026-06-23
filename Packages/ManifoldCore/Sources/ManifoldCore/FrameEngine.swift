@@ -15,6 +15,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     @Published public private(set) var displaySize: CGSize?
     @Published public private(set) var hasMedia = false
     @Published public private(set) var metadata: VideoMetadata?
+    @Published public private(set) var currentURL: URL?
     public private(set) var tcInfo: TimecodeReader.Result?
 
     private let synchronizer = AVSampleBufferRenderSynchronizer()
@@ -49,6 +50,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     public func load(url: URL, autoplay: Bool) {
+        currentURL = url
         Task { await loadAsset(url: url, autoplay: autoplay) }
     }
 
@@ -88,6 +90,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         isPlaying = false
         currentTime = 0
         hasMedia = false
+        currentURL = nil
     }
 
     public func seek(to seconds: Double) {

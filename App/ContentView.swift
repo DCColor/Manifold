@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var pinned = false
     @State private var showInspector = false
     @State private var showFileNameOverlay = false
+    @State private var showGetFlipSheet = false
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -125,6 +126,31 @@ struct ContentView: View {
                 wakeHUD()
             }
         }
+        .sheet(isPresented: $showGetFlipSheet) {
+            VStack(spacing: 16) {
+                Image(systemName: "arrow.up.forward.app")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary)
+                Text("Edit in Flip")
+                    .font(.title2).bold()
+                Text("Flip edits audio layout declarations, timecode, color tags, and other metadata — and writes them back to your file. Manifold inspects; Flip edits.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 12) {
+                    Button("Not Now") { showGetFlipSheet = false }
+                    Button("Get Flip") {
+                        if let url = URL(string: "https://graviton.tools/flip") {
+                            NSWorkspace.shared.open(url)
+                        }
+                        showGetFlipSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(28)
+            .frame(width: 380)
+        }
     }
 
     private func controls(showPin: Bool) -> some View {
@@ -193,6 +219,12 @@ struct ContentView: View {
                 }
                 .help("Inspector (I)")
 
+                Button(action: editInFlip) {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .help("Edit in Flip")
+                .disabled(engine.currentURL == nil)
+
                 Spacer()
 
                 if showPin {
@@ -221,6 +253,21 @@ struct ContentView: View {
             }
             .controlSize(.large)
             .tint(.white)
+        }
+    }
+
+    /// Open the current file in Flip (tools.graviton.flip). If Flip isn't
+    /// installed, show the upsell sheet. Sniff happens on press.
+    private func editInFlip() {
+        guard let url = engine.currentURL else { return }
+        let flipBundleID = "tools.graviton.flip"
+        if let flipURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: flipBundleID) {
+            let config = NSWorkspace.OpenConfiguration()
+            NSWorkspace.shared.open([url], withApplicationAt: flipURL, configuration: config) { _, error in
+                if let error { print("Edit in Flip: open failed — \(error.localizedDescription)") }
+            }
+        } else {
+            showGetFlipSheet = true
         }
     }
 
