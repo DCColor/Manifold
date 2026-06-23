@@ -1,10 +1,9 @@
 import AVFoundation
 import Combine
 
-/// Frame-level playback engine (Step 4c-2): decodes a file via AVAssetReader and
-/// plays it through an AVSampleBufferRenderSynchronizer driving the surface's
-/// renderer. Video only; play/pause via the synchronizer's rate. Seek, audio,
-/// and PlaybackEngine conformance arrive in 4c-3.
+/// Frame-level playback engine (Step 4c-3b): decode + play via
+/// AVSampleBufferRenderSynchronizer, with seeking by rebuilding the reader at a
+/// target time. Video only; audio + PlaybackEngine conformance still to come.
 @MainActor
 public final class FrameEngine: ObservableObject {
 
@@ -15,6 +14,8 @@ public final class FrameEngine: ObservableObject {
     private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var renderer: AVSampleBufferVideoRenderer?
 
+    private var asset: AVURLAsset?
+    private var videoTrack: AVAssetTrack?
     private var reader: AVAssetReader?
     private var trackOutput: AVAssetReaderTrackOutput?
     private let pumpQueue = DispatchQueue(label: "com.graviton.manifold.framepump")
@@ -22,15 +23,13 @@ public final class FrameEngine: ObservableObject {
 
     public init() {}
 
-    /// Attach the display surface's renderer. Call once when the surface exists.
     public func attach(renderer: AVSampleBufferVideoRenderer) {
         self.renderer = renderer
         synchronizer.addRenderer(renderer)
     }
 
-    /// Load a file and begin feeding frames to the attached renderer.
     public func load(url: URL) {
-        Task { await start(url: url) }
+        Task { await loadAsset(url: url) }
     }
 
     public func play() {
@@ -47,27 +46,55 @@ public final class FrameEngine: ObservableObject {
         isPlaying ? pause() : play()
     }
 
-    private func start(url: URL) async {
-        guard let renderer else {
-            print("FrameEngine: no renderer attached")
-            return
-        }
+    /// Seek to a time in seconds: rebuild the reader positioned there.
+    public func seek(to seconds: Double) {
+        let clamped = max(0, min(seconds, duration))
+        Task { await beginReading(from: clamped, resumePlaying: isPlaying) }
+    }
 
-        // Stop any prior session.
-        synchronizer.rate = 0
-        renderer.flush()
-        reader?.cancelReading()
-
+    private func loadAsset(url: URL) async {
         let asset = AVURLAsset(url: url)
+        self.asset = asset
+
         if let dur = try? await asset.load(.duration) {
             let seconds = CMTimeGetSeconds(dur)
             if seconds.isFinite { self.duration = seconds }
         }
-        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-              let newReader = try? AVAssetReader(asset: asset) else {
-            print("FrameEngine: reader setup failed")
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else {
+            print("FrameEngine: no video track")
             return
         }
+        self.videoTrack = track
+
+        if timeObserver == nil {
+            let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+            timeObserver = synchronizer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+                guard let self else { return }
+                let t = CMTimeGetSeconds(time)
+                if t.isFinite { self.currentTime = t }
+            }
+        }
+
+        print("FrameEngine: loaded — duration \(self.duration)s")
+        await beginReading(from: 0, resumePlaying: true)
+    }
+
+    /// Build a fresh reader starting at `time` and (re)start the frame pump.
+    private func beginReading(from time: Double, resumePlaying: Bool) async {
+        guard let asset, let track = videoTrack, let renderer else { return }
+
+        // Tear down the current session.
+        synchronizer.rate = 0
+        renderer.stopRequestingMediaData()
+        reader?.cancelReading()
+        renderer.flush()
+
+        guard let newReader = try? AVAssetReader(asset: asset) else {
+            print("FrameEngine: reader create failed"); return
+        }
+        // Start the read at the target time.
+        let start = CMTime(seconds: time, preferredTimescale: 600)
+        newReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
 
         let outputSettings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -77,15 +104,14 @@ public final class FrameEngine: ObservableObject {
         guard newReader.canAdd(output) else { print("FrameEngine: cannot add output"); return }
         newReader.add(output)
         guard newReader.startReading() else {
-            print("FrameEngine: startReading failed: \(String(describing: newReader.error))")
-            return
+            print("FrameEngine: startReading failed: \(String(describing: newReader.error))"); return
         }
 
         self.reader = newReader
         self.trackOutput = output
 
-        // Start the clock at zero, then pump frames under the renderer's back-pressure.
-        synchronizer.setRate(0, time: .zero)
+        // Reset the clock to the seek target.
+        synchronizer.setRate(0, time: start)
 
         renderer.requestMediaDataWhenReady(on: pumpQueue) { [weak self] in
             guard let self else { return }
@@ -100,17 +126,7 @@ public final class FrameEngine: ObservableObject {
             }
         }
 
-        if timeObserver == nil {
-            let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
-            timeObserver = synchronizer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-                guard let self else { return }
-                let t = CMTimeGetSeconds(time)
-                if t.isFinite { self.currentTime = t }
-            }
-        }
-
-        print("FrameEngine: playback session started — duration \(self.duration)s")
-        // Auto-start playback for the test.
-        play()
+        if resumePlaying { play() }
+        print("FrameEngine: reading from \(time)s")
     }
 }

@@ -94,8 +94,20 @@ struct ContentView: View {
                         frameSurfaceView = nsView
                         frameEngine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
                     }
-                    Button("Close Frame Test") { showFrameEngineTest = false }
-                        .padding()
+                    VStack(alignment: .trailing, spacing: 8) {
+                        Text(String(format: "%.2f / %.2f s", frameEngine.currentTime, frameEngine.duration))
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .padding(8)
+                            .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+                        HStack(spacing: 8) {
+                            Button("−5s") { frameEngine.seek(to: frameEngine.currentTime - 5) }
+                            Button("+5s") { frameEngine.seek(to: frameEngine.currentTime + 5) }
+                            Button(frameEngine.isPlaying ? "Pause" : "Play") { frameEngine.togglePlayPause() }
+                        }
+                        Button("Close Frame Test") { showFrameEngineTest = false }
+                    }
+                    .padding()
                 }
                 .ignoresSafeArea()
             }
