@@ -43,8 +43,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.addRenderer(renderer)
     }
 
+    /// PlaybackEngine conformance: bare load defaults to autoplay.
     public func load(url: URL) {
-        Task { await loadAsset(url: url) }
+        load(url: url, autoplay: true)
+    }
+
+    public func load(url: URL, autoplay: Bool) {
+        Task { await loadAsset(url: url, autoplay: autoplay) }
     }
 
     public func play() {
@@ -137,7 +142,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         currentSourceTimecode(at: duration)
     }
 
-    private func loadAsset(url: URL) async {
+    private func loadAsset(url: URL, autoplay: Bool) async {
         let asset = AVURLAsset(url: url)
         self.asset = asset
         self.hasMedia = true
@@ -192,7 +197,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
 
         print("FrameEngine: loaded — duration \(self.duration)s, audio: \(self.audioTrack != nil)")
-        await beginReading(from: 0, resumePlaying: true)
+        await beginReading(from: 0, resumePlaying: autoplay)
     }
 
     private func beginReading(from time: Double, resumePlaying: Bool) async {

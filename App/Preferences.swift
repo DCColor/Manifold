@@ -30,6 +30,8 @@ final class Preferences: ObservableObject {
         set { controlModeRaw = newValue.rawValue }
     }
 
+    @AppStorage("autoplayOnLoad") var autoplayOnLoad: Bool = true
+
     private init() {}
 }
 
@@ -38,6 +40,7 @@ struct SettingsView: View {
     // @AppStorage here drives the picker and persists the choice. It reads/writes
     // the same "controlDisplayMode" key as Preferences above, so they stay in sync.
     @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
+    @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = true
 
     var body: some View {
         Form {
@@ -47,6 +50,8 @@ struct SettingsView: View {
                 }
             }
             .pickerStyle(.inline)
+
+            Toggle("Autoplay on open", isOn: $autoplayOnLoad)
         }
         .padding(20)
         .frame(width: 360)

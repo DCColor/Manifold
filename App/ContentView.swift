@@ -121,7 +121,7 @@ struct ContentView: View {
             allowsMultipleSelection: false
         ) { result in
             if case .success(let urls) = result, let url = urls.first {
-                engine.load(url: url)
+                engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 wakeHUD()
             }
         }

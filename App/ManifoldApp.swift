@@ -10,7 +10,7 @@ struct ManifoldApp: App {
             ContentView(engine: engine)
                 .frame(minWidth: 720, minHeight: 460)
                 .onOpenURL { url in
-                    engine.load(url: url)
+                    engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 }
         }
         .windowStyle(.hiddenTitleBar)
