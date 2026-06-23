@@ -131,6 +131,12 @@ private struct AudioTrackRow: View {
     let track: AudioTrackInfo
     let showIndex: Bool
 
+    /// Declared layouts read at full confidence; inferred/undeclared are muted
+    /// so a guess never looks like a fact.
+    private var layoutOpacity: Double {
+        track.layoutConfidence == .declared ? 0.92 : 0.5
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(alignment: .firstTextBaseline) {
@@ -138,9 +144,13 @@ private struct AudioTrackRow: View {
                     .font(.system(.caption, design: .default))
                     .foregroundStyle(.white.opacity(0.55))
                 Spacer(minLength: 16)
-                Text("\(track.codecName) · \(track.layoutName)")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.92))
+                (
+                    Text("\(track.codecName) · ")
+                        .foregroundStyle(.white.opacity(0.92))
+                    + Text(track.layoutName)
+                        .foregroundStyle(.white.opacity(layoutOpacity))
+                )
+                .font(.system(.caption, design: .monospaced))
             }
             HStack(alignment: .firstTextBaseline) {
                 Spacer(minLength: 0)

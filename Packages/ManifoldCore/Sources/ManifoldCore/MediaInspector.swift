@@ -325,6 +325,7 @@ public enum MediaInspector {
             "L R C LFE Ls Rs": "5.1 SMPTE",
             "L C R Ls Rs LFE": "5.1 Film",
             "L R C Ls Rs Lss Rss": "7.0 SMPTE",
+            "L C R Ls Rs Lss Rss": "7.0 Film",
             "L R C LFE Ls Rs Lss Rss": "7.1 SMPTE",
             "L C R LFE Ls Rs Lss Rss": "7.1 Film",
             "L C R Ls Rs Lss Rss LFE": "7.1 Film"
