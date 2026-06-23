@@ -225,6 +225,12 @@ struct ContentView: View {
                 .help("Edit in Flip")
                 .disabled(engine.currentURL == nil)
 
+                Button(action: { Task { await engine.reinspect() } }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh metadata")
+                .disabled(engine.currentURL == nil)
+
                 Spacer()
 
                 if showPin {

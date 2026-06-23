@@ -54,6 +54,22 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         Task { await loadAsset(url: url, autoplay: autoplay) }
     }
 
+    /// If the current file's modification date has changed since it was opened
+    /// (e.g. edited in Flip), re-read its metadata. Metadata-only — does not
+    /// disturb playback (a metadata edit doesn't change the essence). Returns
+    /// true if a refresh occurred. Constructs a FRESH asset to avoid AVFoundation
+    /// serving cached metadata for the rewritten file.
+    /// Re-read the current file's metadata from disk (e.g. after editing it in
+    /// Flip). Metadata-only — does not disturb playback. Uses a fresh asset to
+    /// avoid AVFoundation serving cached metadata for a rewritten file.
+    public func reinspect() async {
+        guard let url = currentURL else { return }
+        let freshAsset = AVURLAsset(url: url)
+        self.tcInfo = MediaInspector.timecode(for: url)
+        let meta = await MediaInspector.metadata(for: freshAsset, url: url)
+        self.metadata = meta
+    }
+
     public func play() {
         synchronizer.rate = 1.0
         isPlaying = true

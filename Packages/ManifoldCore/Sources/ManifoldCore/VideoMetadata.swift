@@ -100,19 +100,6 @@ public struct VideoMetadata: Equatable, Sendable {
         return "\(name) (\(code))"
     }
 
-    /// Map a channel count to a layout name (Flip's LAYOUTS table).
-    public static func layoutName(forChannels n: Int) -> String {
-        switch n {
-        case 1: return "Mono"
-        case 2: return "Stereo"
-        case 3: return "L R C"
-        case 4: return "Quad"
-        case 6: return "5.1"
-        case 8: return "7.1"
-        default: return n > 0 ? "\(n) ch" : "—"
-        }
-    }
-
     public static func dateString(_ date: Date?) -> String {
         guard let date else { return "—" }
         let f = DateFormatter()
