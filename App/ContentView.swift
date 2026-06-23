@@ -18,6 +18,10 @@ struct ContentView: View {
     @State private var pinned = false
     @State private var showInspector = false
     @State private var showFileNameOverlay = false
+    @State private var showFrameEngineTest = false
+    @State private var openIsFrameTest = false
+    @StateObject private var frameEngine = FrameEngine()
+    @State private var frameSurfaceView: SampleBufferNSView?
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -82,6 +86,22 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
+        .overlay {
+            if showFrameEngineTest {
+                ZStack(alignment: .topTrailing) {
+                    Color.black
+                    SampleBufferSurfaceView { nsView in
+                        frameSurfaceView = nsView
+                        frameEngine.onFrame = { buf in
+                            nsView.enqueue(buf)
+                        }
+                    }
+                    Button("Close Frame Test") { showFrameEngineTest = false }
+                        .padding()
+                }
+                .ignoresSafeArea()
+            }
+        }
         .background(
             Button("") { showInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [])
@@ -90,6 +110,14 @@ struct ContentView: View {
         .background(
             Button("") { showFileNameOverlay.toggle() }
                 .keyboardShortcut("n", modifiers: [])
+                .opacity(0)
+        )
+        .background(
+            Button("") {
+                openIsFrameTest = true
+                isImporterPresented = true
+            }
+                .keyboardShortcut("f", modifiers: [.control, .option])
                 .opacity(0)
         )
         .onContinuousHover { phase in
@@ -102,9 +130,18 @@ struct ContentView: View {
             allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
             allowsMultipleSelection: false
         ) { result in
+            let wasFrameTest = openIsFrameTest
+            openIsFrameTest = false
             if case .success(let urls) = result, let url = urls.first {
-                engine.load(url: url)
-                wakeHUD()
+                if wasFrameTest {
+                    showFrameEngineTest = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        frameEngine.loadFirstFrame(url: url)
+                    }
+                } else {
+                    engine.load(url: url)
+                    wakeHUD()
+                }
             }
         }
     }
