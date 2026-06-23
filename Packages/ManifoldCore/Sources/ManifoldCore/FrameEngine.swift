@@ -9,6 +9,8 @@ import Combine
 public final class FrameEngine: ObservableObject {
 
     @Published public private(set) var isPlaying = false
+    @Published public private(set) var currentTime: Double = 0
+    @Published public private(set) var duration: Double = 0
 
     private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var renderer: AVSampleBufferVideoRenderer?
@@ -16,6 +18,7 @@ public final class FrameEngine: ObservableObject {
     private var reader: AVAssetReader?
     private var trackOutput: AVAssetReaderTrackOutput?
     private let pumpQueue = DispatchQueue(label: "com.graviton.manifold.framepump")
+    private var timeObserver: Any?
 
     public init() {}
 
@@ -56,6 +59,10 @@ public final class FrameEngine: ObservableObject {
         reader?.cancelReading()
 
         let asset = AVURLAsset(url: url)
+        if let dur = try? await asset.load(.duration) {
+            let seconds = CMTimeGetSeconds(dur)
+            if seconds.isFinite { self.duration = seconds }
+        }
         guard let track = try? await asset.loadTracks(withMediaType: .video).first,
               let newReader = try? AVAssetReader(asset: asset) else {
             print("FrameEngine: reader setup failed")
@@ -93,7 +100,16 @@ public final class FrameEngine: ObservableObject {
             }
         }
 
-        print("FrameEngine: playback session started")
+        if timeObserver == nil {
+            let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+            timeObserver = synchronizer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+                guard let self else { return }
+                let t = CMTimeGetSeconds(time)
+                if t.isFinite { self.currentTime = t }
+            }
+        }
+
+        print("FrameEngine: playback session started — duration \(self.duration)s")
         // Auto-start playback for the test.
         play()
     }
