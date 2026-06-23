@@ -1,60 +1,100 @@
 import AVFoundation
 import Combine
 
-/// Frame-level playback engine (Step 4c, in progress).
-///
-/// Decodes a file into CMSampleBuffers via AVAssetReader. In 4c-1 it only
-/// decodes and hands over the FIRST frame (proving decode → surface). Timing,
-/// playback, and PlaybackEngine conformance arrive in 4c-2 / 4c-3.
+/// Frame-level playback engine (Step 4c-2): decodes a file via AVAssetReader and
+/// plays it through an AVSampleBufferRenderSynchronizer driving the surface's
+/// renderer. Video only; play/pause via the synchronizer's rate. Seek, audio,
+/// and PlaybackEngine conformance arrive in 4c-3.
 @MainActor
 public final class FrameEngine: ObservableObject {
 
-    /// Called with each decoded frame ready for display.
-    /// The surface's enqueue() is hooked up to this.
-    public var onFrame: ((CMSampleBuffer) -> Void)?
+    @Published public private(set) var isPlaying = false
+
+    private let synchronizer = AVSampleBufferRenderSynchronizer()
+    private var renderer: AVSampleBufferVideoRenderer?
+
+    private var reader: AVAssetReader?
+    private var trackOutput: AVAssetReaderTrackOutput?
+    private let pumpQueue = DispatchQueue(label: "com.graviton.manifold.framepump")
 
     public init() {}
 
-    /// 4c-1: decode and emit just the first video frame of the file.
-    public func loadFirstFrame(url: URL) {
-        Task {
-            await decodeFirstFrame(url: url)
-        }
+    /// Attach the display surface's renderer. Call once when the surface exists.
+    public func attach(renderer: AVSampleBufferVideoRenderer) {
+        self.renderer = renderer
+        synchronizer.addRenderer(renderer)
     }
 
-    private func decodeFirstFrame(url: URL) async {
+    /// Load a file and begin feeding frames to the attached renderer.
+    public func load(url: URL) {
+        Task { await start(url: url) }
+    }
+
+    public func play() {
+        synchronizer.rate = 1.0
+        isPlaying = true
+    }
+
+    public func pause() {
+        synchronizer.rate = 0
+        isPlaying = false
+    }
+
+    public func togglePlayPause() {
+        isPlaying ? pause() : play()
+    }
+
+    private func start(url: URL) async {
+        guard let renderer else {
+            print("FrameEngine: no renderer attached")
+            return
+        }
+
+        // Stop any prior session.
+        synchronizer.rate = 0
+        renderer.flush()
+        reader?.cancelReading()
+
         let asset = AVURLAsset(url: url)
-        guard let track = try? await asset.loadTracks(withMediaType: .video).first else {
-            print("FrameEngine: no video track")
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let newReader = try? AVAssetReader(asset: asset) else {
+            print("FrameEngine: reader setup failed")
             return
         }
-        guard let reader = try? AVAssetReader(asset: asset) else {
-            print("FrameEngine: could not create reader")
-            return
-        }
-        // Decode to a pixel format the display layer accepts.
+
         let outputSettings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: outputSettings)
         output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else {
-            print("FrameEngine: cannot add output")
+        guard newReader.canAdd(output) else { print("FrameEngine: cannot add output"); return }
+        newReader.add(output)
+        guard newReader.startReading() else {
+            print("FrameEngine: startReading failed: \(String(describing: newReader.error))")
             return
         }
-        reader.add(output)
-        guard reader.startReading() else {
-            print("FrameEngine: startReading failed: \(String(describing: reader.error))")
-            return
+
+        self.reader = newReader
+        self.trackOutput = output
+
+        // Start the clock at zero, then pump frames under the renderer's back-pressure.
+        synchronizer.setRate(0, time: .zero)
+
+        renderer.requestMediaDataWhenReady(on: pumpQueue) { [weak self] in
+            guard let self else { return }
+            guard let output = self.trackOutput, let renderer = self.renderer else { return }
+            while renderer.isReadyForMoreMediaData {
+                guard self.reader?.status == .reading,
+                      let next = output.copyNextSampleBuffer() else {
+                    renderer.stopRequestingMediaData()
+                    return
+                }
+                renderer.enqueue(next)
+            }
         }
-        guard let sample = output.copyNextSampleBuffer() else {
-            print("FrameEngine: no first sample")
-            return
-        }
-        print("FrameEngine: decoded first frame OK")
-        let frame = sample
-        await MainActor.run {
-            self.onFrame?(frame)
-        }
+
+        print("FrameEngine: playback session started")
+        // Auto-start playback for the test.
+        play()
     }
 }

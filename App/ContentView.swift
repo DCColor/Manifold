@@ -92,9 +92,7 @@ struct ContentView: View {
                     Color.black
                     SampleBufferSurfaceView { nsView in
                         frameSurfaceView = nsView
-                        frameEngine.onFrame = { buf in
-                            nsView.enqueue(buf)
-                        }
+                        frameEngine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
                     }
                     Button("Close Frame Test") { showFrameEngineTest = false }
                         .padding()
@@ -136,7 +134,7 @@ struct ContentView: View {
                 if wasFrameTest {
                     showFrameEngineTest = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        frameEngine.loadFirstFrame(url: url)
+                        frameEngine.load(url: url)
                     }
                 } else {
                     engine.load(url: url)
