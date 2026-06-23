@@ -3,7 +3,7 @@ import ManifoldCore
 
 @main
 struct ManifoldApp: App {
-    @StateObject private var engine = AVPlayerEngine()
+    @StateObject private var engine = FrameEngine()
 
     var body: some Scene {
         WindowGroup {

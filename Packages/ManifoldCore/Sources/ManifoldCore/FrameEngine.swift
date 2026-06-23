@@ -88,9 +88,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return max(Int((duration * fps).rounded()) - 1, 0)
     }
 
-    /// Scrub seek (tolerant) and exact seek both map to seek(to:) for now.
-    public func scrubSeek(to seconds: Double) { seek(to: seconds) }
-    public func exactSeek(to seconds: Double) { seek(to: seconds) }
+    /// During a scrub drag: just track the target and show it on the clock,
+    /// WITHOUT rebuilding the reader every tick (that storms the decoder).
+    public func scrubSeek(to seconds: Double) {
+        let clamped = max(0, min(seconds, duration))
+        currentTime = clamped
+    }
+
+    /// On scrub release (or a discrete seek): do the real reader rebuild.
+    public func exactSeek(to seconds: Double) {
+        seek(to: seconds)
+    }
 
     public func currentSourceTimecode(at seconds: Double) -> String? {
         guard let tc = tcInfo, tc.nfr > 0 else { return nil }
@@ -211,6 +219,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 vRenderer.stopRequestingMediaData(); return
             }
             while vRenderer.isReadyForMoreMediaData {
+                guard self.sessionToken.isCurrent(token) else {
+                    vRenderer.stopRequestingMediaData(); return
+                }
                 guard vReader.status == .reading, let next = vOut.copyNextSampleBuffer() else {
                     vRenderer.stopRequestingMediaData(); return
                 }
@@ -227,6 +238,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     aRenderer.stopRequestingMediaData(); return
                 }
                 while aRenderer.isReadyForMoreMediaData {
+                    guard self.sessionToken.isCurrent(token) else {
+                        aRenderer.stopRequestingMediaData(); return
+                    }
                     guard aReader.status == .reading, let next = aOut.copyNextSampleBuffer() else {
                         aRenderer.stopRequestingMediaData(); return
                     }

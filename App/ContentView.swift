@@ -4,7 +4,7 @@ import ManifoldCore
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
 struct ContentView: View {
-    @ObservedObject var engine: AVPlayerEngine
+    @ObservedObject var engine: FrameEngine
 
     @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
     private var mode: ControlDisplayMode { ControlDisplayMode(rawValue: controlModeRaw) ?? .overlay }
@@ -30,7 +30,11 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            VideoSurfaceView(player: engine.player)
+            SampleBufferSurfaceView { nsView in
+                Task { @MainActor in
+                    engine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
+                }
+            }
                 .background(.black)
                 .ignoresSafeArea()
 
