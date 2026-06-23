@@ -107,7 +107,10 @@ struct ContentView: View {
                             Button("+5s") { frameEngine.seek(to: frameEngine.currentTime + 5) }
                             Button(frameEngine.isPlaying ? "Pause" : "Play") { frameEngine.togglePlayPause() }
                         }
-                        Button("Close Frame Test") { showFrameEngineTest = false }
+                        Button("Close Frame Test") {
+                            frameEngine.stop()
+                            showFrameEngineTest = false
+                        }
                     }
                     .padding()
                 }

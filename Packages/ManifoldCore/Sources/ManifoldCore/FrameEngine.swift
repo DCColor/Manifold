@@ -7,11 +7,15 @@ import Combine
 /// with a per-session token so a seek can retire a stale pump cleanly. Only
 /// published UI state is mutated on the main actor.
 @MainActor
-public final class FrameEngine: ObservableObject {
+public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     @Published public private(set) var isPlaying = false
     @Published public private(set) var currentTime: Double = 0
     @Published public private(set) var duration: Double = 0
+    @Published public private(set) var displaySize: CGSize?
+    @Published public private(set) var hasMedia = false
+    @Published public private(set) var metadata: VideoMetadata?
+    public private(set) var tcInfo: TimecodeReader.Result?
 
     private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
@@ -54,14 +58,66 @@ public final class FrameEngine: ObservableObject {
         isPlaying ? pause() : play()
     }
 
+    /// Fully stop playback and tear down the current reading session.
+    public func stop() {
+        _ = sessionToken.next()          // retire any in-flight pump
+        synchronizer.rate = 0
+        videoRenderer?.stopRequestingMediaData()
+        audioRenderer.stopRequestingMediaData()
+        reader?.cancelReading()
+        videoRenderer?.flush()
+        audioRenderer.flush()
+        isPlaying = false
+        currentTime = 0
+        hasMedia = false
+    }
+
     public func seek(to seconds: Double) {
         let clamped = max(0, min(seconds, duration))
         Task { await beginReading(from: clamped, resumePlaying: isPlaying) }
     }
 
+    /// Current frame from the start of the file (0-based).
+    public var currentFrame: Int {
+        let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
+        return Int((currentTime * fps).rounded())
+    }
+
+    public var totalFrames: Int {
+        let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
+        return max(Int((duration * fps).rounded()) - 1, 0)
+    }
+
+    /// Scrub seek (tolerant) and exact seek both map to seek(to:) for now.
+    public func scrubSeek(to seconds: Double) { seek(to: seconds) }
+    public func exactSeek(to seconds: Double) { seek(to: seconds) }
+
+    public func currentSourceTimecode(at seconds: Double) -> String? {
+        guard let tc = tcInfo, tc.nfr > 0 else { return nil }
+        let elapsedFrames = Int((seconds * Double(tc.nfr)).rounded())
+        return TimecodeReader.format(frameCount: tc.startFrame + elapsedFrames,
+                                     nfr: tc.nfr, fps: tc.fps, dropFrame: tc.dropFrame)
+    }
+
+    public func endSourceTimecode() -> String? {
+        currentSourceTimecode(at: duration)
+    }
+
     private func loadAsset(url: URL) async {
         let asset = AVURLAsset(url: url)
         self.asset = asset
+        self.hasMedia = true
+
+        // Same inspection as AVPlayerEngine, via the shared inspector.
+        self.tcInfo = MediaInspector.timecode(for: url)
+        Task { [weak self] in
+            let meta = await MediaInspector.metadata(for: asset, url: url)
+            await MainActor.run { self?.metadata = meta }
+        }
+        Task { [weak self] in
+            let size = await MediaInspector.displaySize(for: asset)
+            await MainActor.run { self?.displaySize = size }
+        }
 
         if let dur = try? await asset.load(.duration) {
             let seconds = CMTimeGetSeconds(dur)
