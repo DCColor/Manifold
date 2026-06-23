@@ -26,6 +26,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var audioTrack: AVAssetTrack?
     private var reader: AVAssetReader?
     private var timeObserver: Any?
+    private var imageGenerator: AVAssetImageGenerator?
+    private let videoPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.video")
+    private let audioPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.audio")
 
     /// Increments each new reading session; a pump checks its captured token
     /// against this and stops if it's been superseded (e.g. by a seek).
@@ -60,11 +63,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// Fully stop playback and tear down the current reading session.
     public func stop() {
-        _ = sessionToken.next()          // retire any in-flight pump
+        _ = sessionToken.next()
         synchronizer.rate = 0
         videoRenderer?.stopRequestingMediaData()
         audioRenderer.stopRequestingMediaData()
-        reader?.cancelReading()
+
+        let readerToCancel = reader
+        reader = nil
+        // Serialize cancellation behind both pump queues so it can't overlap an
+        // in-flight copyNextSampleBuffer() on either queue.
+        videoPumpQueue.async {
+            self.audioPumpQueue.async {
+                readerToCancel?.cancelReading()
+            }
+        }
+
         videoRenderer?.flush()
         audioRenderer.flush()
         isPlaying = false
@@ -100,6 +113,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         seek(to: seconds)
     }
 
+    /// Generate a single preview frame (CGImage) at the given time, for scrub
+    /// preview. Tolerant and downscaled for speed; isolated from the playback
+    /// pump. Returns nil if generation fails.
+    public func previewImage(at seconds: Double) async -> CGImage? {
+        guard let generator = imageGenerator else { return nil }
+        let time = CMTime(seconds: max(0, min(seconds, duration)), preferredTimescale: 600)
+        return await withCheckedContinuation { continuation in
+            generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, image, _, _, _ in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
     public func currentSourceTimecode(at seconds: Double) -> String? {
         guard let tc = tcInfo, tc.nfr > 0 else { return nil }
         let elapsedFrames = Int((seconds * Double(tc.nfr)).rounded())
@@ -115,6 +141,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let asset = AVURLAsset(url: url)
         self.asset = asset
         self.hasMedia = true
+
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.maximumSize = CGSize(width: 960, height: 540)
+        self.imageGenerator = generator
 
         // Same inspection as AVPlayerEngine, via the shared inspector.
         self.tcInfo = MediaInspector.timecode(for: url)
@@ -171,7 +204,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.rate = 0
         videoRenderer.stopRequestingMediaData()
         audioRenderer.stopRequestingMediaData()
-        reader?.cancelReading()
+        let oldReader = reader
+        reader = nil
+        videoPumpQueue.async {
+            self.audioPumpQueue.async {
+                oldReader?.cancelReading()
+            }
+        }
         videoRenderer.flush()
         audioRenderer.flush()
 
@@ -213,8 +252,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // Capture LOCALS for the pumps — no reaching through self.
         let vRenderer = videoRenderer
         let vReader = newReader
-        let videoQueue = DispatchQueue(label: "com.graviton.manifold.pump.video")
-        vRenderer.requestMediaDataWhenReady(on: videoQueue) { [token, weak self] in
+        vRenderer.requestMediaDataWhenReady(on: videoPumpQueue) { [token, weak self] in
             guard let self, self.sessionToken.isCurrent(token) else {
                 vRenderer.stopRequestingMediaData(); return
             }
@@ -232,8 +270,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         if let aOut {
             let aRenderer = audioRenderer
             let aReader = newReader
-            let audioQueue = DispatchQueue(label: "com.graviton.manifold.pump.audio")
-            aRenderer.requestMediaDataWhenReady(on: audioQueue) { [token, weak self] in
+            aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [token, weak self] in
                 guard let self, self.sessionToken.isCurrent(token) else {
                     aRenderer.stopRequestingMediaData(); return
                 }

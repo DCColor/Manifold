@@ -13,6 +13,10 @@ struct ContentView: View {
     @State private var isImporterPresented = false
     @State private var isScrubbing = false
     @State private var scrubValue: Double = 0
+    @State private var scrubPreviewImage: CGImage?
+    @State private var previewRequestInFlight = false
+    @State private var lastPreviewTime: Double = -1
+    @State private var wasPlayingBeforeScrub = false
 
     @State private var hudVisible = true
     @State private var pinned = false
@@ -30,9 +34,16 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            SampleBufferSurfaceView { nsView in
-                Task { @MainActor in
-                    engine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
+            ZStack {
+                SampleBufferSurfaceView { nsView in
+                    Task { @MainActor in
+                        engine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
+                    }
+                }
+                if isScrubbing, let preview = scrubPreviewImage {
+                    Image(decorative: preview, scale: 1.0)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
                 }
             }
                 .background(.black)
@@ -143,6 +154,9 @@ struct ContentView: View {
             if case .active = phase { wakeHUD() }
         }
         .onAppear { armIdleIfNeeded() }
+        .onDisappear {
+            engine.stop()
+        }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -180,16 +194,22 @@ struct ContentView: View {
                         set: { newValue in
                             scrubValue = newValue
                             engine.scrubSeek(to: newValue)
+                            requestScrubPreview(at: newValue)
                         }
                     ),
                     in: 0...max(engine.duration, 0.1),
                     onEditingChanged: { editing in
                         if editing {
+                            wasPlayingBeforeScrub = engine.isPlaying
+                            if engine.isPlaying { engine.pause() }
                             scrubValue = engine.currentTime
                             isScrubbing = true
                         } else {
                             engine.exactSeek(to: scrubValue)
                             isScrubbing = false
+                            scrubPreviewImage = nil
+                            lastPreviewTime = -1
+                            if wasPlayingBeforeScrub { engine.play() }
                         }
                     }
                 )
@@ -316,6 +336,21 @@ struct ContentView: View {
             return .elapsed
         }
         return readoutMode
+    }
+
+    private func requestScrubPreview(at time: Double) {
+        // Throttle: skip if a request is in flight or the time barely moved.
+        guard !previewRequestInFlight else { return }
+        guard abs(time - lastPreviewTime) > 0.05 else { return }
+        previewRequestInFlight = true
+        lastPreviewTime = time
+        Task {
+            let image = await engine.previewImage(at: time)
+            await MainActor.run {
+                if isScrubbing { scrubPreviewImage = image }
+                previewRequestInFlight = false
+            }
+        }
     }
 
     private func cycleReadout() {
