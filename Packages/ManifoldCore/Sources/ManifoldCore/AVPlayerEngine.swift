@@ -83,6 +83,7 @@ public final class AVPlayerEngine: ObservableObject, PlaybackEngine {
         Task {
             var meta = VideoMetadata()
             meta.container = url.pathExtension.uppercased()
+            meta.fileName = url.lastPathComponent
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
                 meta.fileCreatedDate = attrs[.creationDate] as? Date
                 meta.fileModifiedDate = attrs[.modificationDate] as? Date

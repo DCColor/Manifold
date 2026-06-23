@@ -13,6 +13,16 @@ struct InspectorPanel: View {
                 .padding(.bottom, 8)
 
             if let m = metadata {
+                SectionHeader("File Name")
+                Text(m.fileName)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 8)
+
+                Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
+
                 MetadataRow(label: "Codec", value: m.codecName)
                 MetadataRow(label: "Resolution", value: m.resolutionString)
                 MetadataRow(label: "Frame Rate", value: m.frameRateString)

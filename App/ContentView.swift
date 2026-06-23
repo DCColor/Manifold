@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var hudVisible = true
     @State private var pinned = false
     @State private var showInspector = false
+    @State private var showFileNameOverlay = false
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -67,9 +68,28 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: showInspector)
+        .overlay(alignment: .top) {
+            if showFileNameOverlay, engine.hasMedia, let name = engine.metadata?.fileName {
+                Text(name)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                    .padding(.top, 24)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
         .background(
             Button("") { showInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [])
+                .opacity(0)
+        )
+        .background(
+            Button("") { showFileNameOverlay.toggle() }
+                .keyboardShortcut("n", modifiers: [])
                 .opacity(0)
         )
         .onContinuousHover { phase in

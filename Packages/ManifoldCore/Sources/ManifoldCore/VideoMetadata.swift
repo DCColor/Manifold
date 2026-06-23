@@ -51,6 +51,7 @@ public struct VideoMetadata: Equatable, Sendable {
     public var width: Int = 0
     public var height: Int = 0
     public var frameRate: Double = 0
+    public var fileName: String = "—"
     public var container: String = "—"
     public var videoDataRate: Double = 0    // bits/sec (estimated)
 
