@@ -3,7 +3,7 @@ import AudioToolbox
 import Combine
 
 @MainActor
-public final class AVPlayerEngine: ObservableObject {
+public final class AVPlayerEngine: ObservableObject, PlaybackEngine {
 
     public let player = AVPlayer()
 
