@@ -6,10 +6,19 @@ public struct ChapterMarker: Equatable, Sendable {
     public var title: String
 }
 
+/// Whether an audio track's layout name came from a real declaration, a marked
+/// inference from channel count, or is an honest unknown.
+public enum LayoutConfidence: Equatable, Sendable {
+    case declared      // from real channel descriptions / known tag
+    case inferred      // guessed from channel count, no declaration
+    case undeclared    // no declaration and no confident guess
+}
+
 public struct AudioTrackInfo: Equatable, Sendable {
     public var codecName: String = "—"
     public var channelCount: Int = 0
     public var layoutName: String = "—"
+    public var layoutConfidence: LayoutConfidence = .undeclared
     public var sampleRate: Double = 0      // Hz
     public var bitDepth: Int = 0
     public var dataRate: Double = 0         // bits/sec (estimated)

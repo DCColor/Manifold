@@ -200,8 +200,13 @@ public enum MediaInspector {
                         info.bitDepth = Int(asbd.mBitsPerChannel)
                     }
                 }
+                let layout = audioLayout(from: fmt, channelCount: info.channelCount)
+                info.layoutName = layout.name
+                info.layoutConfidence = layout.confidence
+            } else {
+                info.layoutName = info.channelCount > 0 ? "\(info.channelCount) ch" : "—"
+                info.layoutConfidence = .undeclared
             }
-            info.layoutName = VideoMetadata.layoutName(forChannels: info.channelCount)
             result.append(info)
         }
         return result
@@ -218,6 +223,142 @@ public enum MediaInspector {
         case kAudioFormatOpus: return "Opus"
         default: return fourCCString(code)
         }
+    }
+
+    // MARK: - Audio channel layout derivation (ported interpretation from Flip)
+
+    /// Short role names in channel order, derived from the format description's
+    /// AudioChannelLayout. Returns nil if no usable layout/roles are present.
+    private static func channelRoles(from fmt: CMFormatDescription) -> [String]? {
+        var size = 0
+        guard let rawPtr = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &size) else {
+            return nil
+        }
+
+        // Read the fixed header fields safely.
+        let tag = rawPtr.pointee.mChannelLayoutTag
+
+        // Camp B: explicit per-channel descriptions.
+        if tag == kAudioChannelLayoutTag_UseChannelDescriptions {
+            let count = Int(rawPtr.pointee.mNumberChannelDescriptions)
+            guard count > 0 else { return nil }
+
+            // mChannelDescriptions is a C flexible-array member. Its byte offset
+            // within AudioChannelLayout is the size of the two leading UInt32 fields
+            // (mChannelLayoutTag, mChannelBitmap) plus the UInt32 count =
+            // offsetof(AudioChannelLayout, mChannelDescriptions). Compute it from
+            // the struct layout rather than via the imported fixed-size tuple.
+            let headerSize = MemoryLayout<AudioChannelLayout>.offset(of: \.mChannelDescriptions)!
+            let descStride = MemoryLayout<AudioChannelDescription>.stride
+
+            // Bound check against the reported size.
+            guard size >= headerSize + count * descStride else { return nil }
+
+            let base = UnsafeRawPointer(rawPtr).advanced(by: headerSize)
+            var roles: [String] = []
+            roles.reserveCapacity(count)
+            for i in 0..<count {
+                let desc = base.advanced(by: i * descStride)
+                    .loadUnaligned(as: AudioChannelDescription.self)
+                roles.append(roleName(for: desc.mChannelLabel))
+            }
+            return roles
+        }
+
+        // Camp A: a known layout tag.
+        if let seq = roleSequence(forTag: tag) { return seq }
+
+        // Bitmap or unknown tag: no role info we trust.
+        return nil
+    }
+
+    /// Apple AudioChannelLabel -> short role name (Flip vocabulary, normalized).
+    private static func roleName(for label: AudioChannelLabel) -> String {
+        switch label {
+        case kAudioChannelLabel_Left: return "L"
+        case kAudioChannelLabel_Right: return "R"
+        case kAudioChannelLabel_Center: return "C"
+        case kAudioChannelLabel_LFEScreen: return "LFE"
+        case kAudioChannelLabel_LeftSurround: return "Ls"
+        case kAudioChannelLabel_RightSurround: return "Rs"
+        case kAudioChannelLabel_CenterSurround: return "Cs"
+        case kAudioChannelLabel_LeftSurroundDirect: return "Lsd"
+        case kAudioChannelLabel_RightSurroundDirect: return "Rsd"
+        case kAudioChannelLabel_RearSurroundLeft: return "Lss"   // Apple Rls -> Flip Lss
+        case kAudioChannelLabel_RearSurroundRight: return "Rss"  // Apple Rrs -> Flip Rss
+        case kAudioChannelLabel_LeftCenter: return "Lc"
+        case kAudioChannelLabel_RightCenter: return "Rc"
+        case kAudioChannelLabel_Mono: return "Mono"
+        case kAudioChannelLabel_Unused: return "—"
+        default: return "?(\(label))"   // unmapped label — show raw value
+        }
+    }
+
+    /// For Camp A known tags, the canonical role sequence (so tag-based files name
+    /// identically to description-based ones).
+    private static func roleSequence(forTag tag: AudioChannelLayoutTag) -> [String]? {
+        switch tag {
+        case kAudioChannelLayoutTag_Mono:   return ["Mono"]
+        case kAudioChannelLayoutTag_Stereo: return ["L", "R"]
+        case kAudioChannelLayoutTag_MPEG_5_1_A: return ["L", "R", "C", "LFE", "Ls", "Rs"]   // 5.1 SMPTE
+        case kAudioChannelLayoutTag_MPEG_5_1_C: return ["L", "C", "R", "Ls", "Rs", "LFE"]   // 5.1 Film
+        case kAudioChannelLayoutTag_MPEG_7_1_C: return ["L", "R", "C", "LFE", "Ls", "Rs", "Lss", "Rss"] // 7.1
+        default: return nil
+        }
+    }
+
+    /// Map a role SEQUENCE to a layout name. This is the heart of the fix:
+    /// the SEQUENCE determines the layout, distinguishing SMPTE vs Film, Quad vs LCRS.
+    /// Returns nil if the sequence matches no known layout.
+    private static func layoutName(forRoles roles: [String]) -> String? {
+        let seq = roles.joined(separator: " ")
+        let table: [String: String] = [
+            "Mono": "Mono",
+            "L R": "Stereo",
+            "L C R": "3.0",
+            "L R C": "3.0",
+            "L C R Cs": "4.0 (LCRS)",
+            "L R C Cs": "4.0 (LRCS)",
+            "L R Ls Rs": "4.0 (Quad)",
+            "L C R Ls Rs": "5.0 Film",
+            "L R C Ls Rs": "5.0 SMPTE",
+            "L R C LFE Ls Rs": "5.1 SMPTE",
+            "L C R Ls Rs LFE": "5.1 Film",
+            "L R C Ls Rs Lss Rss": "7.0 SMPTE",
+            "L R C LFE Ls Rs Lss Rss": "7.1 SMPTE",
+            "L C R LFE Ls Rs Lss Rss": "7.1 Film",
+            "L C R Ls Rs Lss Rss LFE": "7.1 Film"
+        ]
+        return table[seq]
+    }
+
+    /// Most-common layout for a channel count, used ONLY as a marked inference
+    /// when no declaration is present. Returns nil for counts with no common layout.
+    private static func inferredLayoutName(forChannels n: Int) -> String? {
+        switch n {
+        case 1: return "Mono"
+        case 2: return "Stereo"
+        case 6: return "5.1"
+        case 8: return "7.1"
+        default: return nil   // 3,4,5,7,etc. are ambiguous — don't guess
+        }
+    }
+
+    /// Derive a layout name + confidence for an audio format description.
+    static func audioLayout(from fmt: CMFormatDescription, channelCount: Int) -> (name: String, confidence: LayoutConfidence) {
+        // Tier 1: real declaration via channel descriptions / known tag.
+        if let roles = channelRoles(from: fmt) {
+            let meaningful = roles.filter { $0 != "?" && !$0.hasPrefix("?(") && $0 != "—" }
+            if !meaningful.isEmpty, let name = layoutName(forRoles: roles) {
+                return (name, .declared)
+            }
+        }
+        // Tier 2: inferred from channel count (marked).
+        if let inferred = inferredLayoutName(forChannels: channelCount) {
+            return ("\(inferred) (inferred)", .inferred)
+        }
+        // Tier 3: honest unknown.
+        return (channelCount > 0 ? "\(channelCount) ch" : "—", .undeclared)
     }
 
     private static func textTracks(for asset: AVURLAsset) async -> [TextTrackInfo] {
