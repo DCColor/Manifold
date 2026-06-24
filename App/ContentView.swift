@@ -23,6 +23,8 @@ struct ContentView: View {
     @State private var showInspector = false
     @State private var showFileNameOverlay = false
     @State private var showGetFlipSheet = false
+    @State private var showMetalTest = false
+    @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -108,6 +110,22 @@ struct ContentView: View {
                 .keyboardShortcut("n", modifiers: [])
                 .opacity(0)
         )
+        .background(
+            Button("") {
+                if let renderer = metalRenderer {
+                    engine.onVideoFrame = { [weak renderer] sb in
+                        renderer?.render(sb)
+                    }
+                    showMetalTest.toggle()
+                    // Re-trigger the pump so the tap (snapshotted at beginReading) takes effect.
+                    if let url = engine.currentURL {
+                        engine.load(url: url, autoplay: engine.isPlaying)
+                    }
+                }
+            }
+            .keyboardShortcut("m", modifiers: [.control, .option])
+            .opacity(0)
+        )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
@@ -150,6 +168,29 @@ struct ContentView: View {
             }
             .padding(28)
             .frame(width: 380)
+        }
+        .overlay {
+            if showMetalTest, let renderer = metalRenderer {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("METAL TEST — passthrough renderer")
+                            .font(.caption).foregroundStyle(.white)
+                        Spacer()
+                        Button("Close") {
+                            engine.onVideoFrame = nil
+                            showMetalTest = false
+                            if let url = engine.currentURL {
+                                engine.load(url: url, autoplay: engine.isPlaying)
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .background(.black)
+                    MetalSurfaceView(renderer: renderer)
+                        .background(.black)
+                }
+                .background(.black)
+            }
         }
     }
 

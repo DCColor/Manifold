@@ -18,6 +18,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     @Published public private(set) var currentURL: URL?
     public private(set) var tcInfo: TimecodeReader.Result?
 
+    /// Optional tap: called on the video pump queue with each decoded frame,
+    /// in ADDITION to the normal display enqueue. Used by a parallel Metal
+    /// renderer. Called on a background queue — consumers must hop threads as needed.
+    public var onVideoFrame: ((CMSampleBuffer) -> Void)?
+
     private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
     private let audioRenderer = AVSampleBufferAudioRenderer()
@@ -276,6 +281,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // Capture LOCALS for the pumps — no reaching through self.
         let vRenderer = videoRenderer
         let vReader = newReader
+        let frameTap = onVideoFrame
         vRenderer.requestMediaDataWhenReady(on: videoPumpQueue) { [token, weak self] in
             guard let self, self.sessionToken.isCurrent(token) else {
                 vRenderer.stopRequestingMediaData(); return
@@ -288,6 +294,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     vRenderer.stopRequestingMediaData(); return
                 }
                 vRenderer.enqueue(next)
+                frameTap?(next)
             }
         }
 
