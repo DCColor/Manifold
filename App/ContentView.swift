@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var showFileNameOverlay = false
     @State private var showGetFlipSheet = false
     @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
+    @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -40,7 +41,8 @@ struct ContentView: View {
                     }
                 }
                 // Metal is the visible surface (opaque, drawn on top).
-                if let renderer = metalRenderer {
+                // M4 tuning: hide Metal to reveal the reference AVSampleBufferDisplayLayer underneath.
+                if let renderer = metalRenderer, !showReferenceLayer {
                     MetalSurfaceView(renderer: renderer)
                 }
                 if isScrubbing, let preview = scrubPreviewImage {
@@ -89,6 +91,17 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .topLeading) {
+            if engine.hasMedia {
+                Text(showReferenceLayer ? "REFERENCE (AVSampleBufferDisplayLayer)" : "METAL")
+                    .font(.caption2.monospaced())
+                    .padding(4)
+                    .background(.black.opacity(0.6))
+                    .foregroundStyle(showReferenceLayer ? .yellow : .green)
+                    .padding(8)
+                    .allowsHitTesting(false)
+            }
+        }
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .overlay(alignment: .top) {
             if showFileNameOverlay, engine.hasMedia, let name = engine.metadata?.fileName {
@@ -112,6 +125,11 @@ struct ContentView: View {
         .background(
             Button("") { showFileNameOverlay.toggle() }
                 .keyboardShortcut("n", modifiers: [])
+                .opacity(0)
+        )
+        .background(
+            Button("") { showReferenceLayer.toggle() }
+                .keyboardShortcut("r", modifiers: [.control, .option])
                 .opacity(0)
         )
         .onContinuousHover { phase in

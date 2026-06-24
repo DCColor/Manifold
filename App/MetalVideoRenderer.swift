@@ -68,6 +68,8 @@ final class MetalVideoRenderer {
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = true
         metalLayer.isOpaque = true
+        // Colorspace is set per-frame in renderPixelBuffer, derived from the
+        // pixel buffer's own color attachments (matching the reference layer).
 
         let cacheStatus = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
         guard cacheStatus == kCVReturnSuccess else {
@@ -166,6 +168,16 @@ final class MetalVideoRenderer {
         let width  = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
+        // Tag the layer with the buffer's OWN colorspace (same tags the reference
+        // AVSampleBufferDisplayLayer uses), so WindowServer color-manages identically.
+        if let attachments = CVBufferCopyAttachments(pixelBuffer, .shouldPropagate),
+           let cs = CVImageBufferCreateColorSpaceFromAttachments(attachments)?.takeRetainedValue() {
+            if metalLayer.colorspace != cs {
+                metalLayer.colorspace = cs
+                print("Metal layer colorspace: \(cs)")
+            }
+        }
+
         guard let lumaTexture = makeTexture(pixelBuffer, planeIndex: 0,
                                             pixelFormat: .r8Unorm,
                                             width: width, height: height),
@@ -219,6 +231,21 @@ final class MetalVideoRenderer {
         default:
             // Rec.709 (default): Kr=0.2126, Kb=0.0722
             return ColorParams(a: 1.5748, b: 0.1873, c: 0.4681, d: 1.8556)
+        }
+    }
+
+    /// Read the content's transfer function from the pixel buffer attachment.
+    /// Returned as a CICP-ish code: 1=709, 16=PQ, 18=HLG, else 0.
+    private func transferCode(for pixelBuffer: CVPixelBuffer) -> Int {
+        let tf = (CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) as? String) ?? ""
+        let tf709 = kCVImageBufferTransferFunction_ITU_R_709_2 as String
+        let tfPQ = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String
+        let tfHLG = kCVImageBufferTransferFunction_ITU_R_2100_HLG as String
+        switch tf {
+        case tf709: return 1
+        case tfPQ: return 16
+        case tfHLG: return 18
+        default: return 0
         }
     }
 
