@@ -23,7 +23,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// renderer. Called on a background queue — consumers must hop threads as needed.
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
 
-    private let synchronizer = AVSampleBufferRenderSynchronizer()
+    /// Optional: called when the engine flushes for a seek/reload, so a parallel
+    /// renderer can clear its frame queue. Called on the main actor.
+    public var onFlush: (() -> Void)?
+
+    nonisolated(unsafe) private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
     private let audioRenderer = AVSampleBufferAudioRenderer()
 
@@ -47,6 +51,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public func attach(renderer: AVSampleBufferVideoRenderer) {
         self.videoRenderer = renderer
         synchronizer.addRenderer(renderer)
+    }
+
+    /// The synchronizer's current playback time, readable from any thread
+    /// (e.g. a CVDisplayLink render loop). The synchronizer handles its own
+    /// thread-safety for this call, so it is nonisolated despite @MainActor.
+    public nonisolated func currentSyncTime() -> CMTime {
+        synchronizer.currentTime()
     }
 
     /// PlaybackEngine conformance: bare load defaults to autoplay.
@@ -242,6 +253,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         videoRenderer.flush()
         audioRenderer.flush()
+        onFlush?()
 
         guard let newReader = try? AVAssetReader(asset: asset) else {
             print("FrameEngine: reader create failed"); return

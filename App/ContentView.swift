@@ -23,7 +23,6 @@ struct ContentView: View {
     @State private var showInspector = false
     @State private var showFileNameOverlay = false
     @State private var showGetFlipSheet = false
-    @State private var showMetalTest = false
     @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
@@ -34,10 +33,15 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             ZStack {
+                // AV surface stays for pump + synchronizer clock, but is covered by Metal.
                 SampleBufferSurfaceView { nsView in
                     Task { @MainActor in
                         engine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
                     }
+                }
+                // Metal is the visible surface (opaque, drawn on top).
+                if let renderer = metalRenderer {
+                    MetalSurfaceView(renderer: renderer)
                 }
                 if isScrubbing, let preview = scrubPreviewImage {
                     Image(decorative: preview, scale: 1.0)
@@ -110,28 +114,21 @@ struct ContentView: View {
                 .keyboardShortcut("n", modifiers: [])
                 .opacity(0)
         )
-        .background(
-            Button("") {
-                if let renderer = metalRenderer {
-                    engine.onVideoFrame = { [weak renderer] sb in
-                        renderer?.render(sb)
-                    }
-                    showMetalTest.toggle()
-                    // Re-trigger the pump so the tap (snapshotted at beginReading) takes effect.
-                    if let url = engine.currentURL {
-                        engine.load(url: url, autoplay: engine.isPlaying)
-                    }
-                }
-            }
-            .keyboardShortcut("m", modifiers: [.control, .option])
-            .opacity(0)
-        )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
-        .onAppear { armIdleIfNeeded() }
+        .onAppear {
+            armIdleIfNeeded()
+            if let renderer = metalRenderer {
+                renderer.clock = { engine.currentSyncTime().seconds }
+                engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
+                engine.onFlush = { [weak renderer] in renderer?.flush() }
+                renderer.start()
+            }
+        }
         .onDisappear {
             engine.stop()
+            metalRenderer?.stop()
         }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
         .fileImporter(
@@ -168,29 +165,6 @@ struct ContentView: View {
             }
             .padding(28)
             .frame(width: 380)
-        }
-        .overlay {
-            if showMetalTest, let renderer = metalRenderer {
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("METAL TEST — passthrough renderer")
-                            .font(.caption).foregroundStyle(.white)
-                        Spacer()
-                        Button("Close") {
-                            engine.onVideoFrame = nil
-                            showMetalTest = false
-                            if let url = engine.currentURL {
-                                engine.load(url: url, autoplay: engine.isPlaying)
-                            }
-                        }
-                    }
-                    .padding(8)
-                    .background(.black)
-                    MetalSurfaceView(renderer: renderer)
-                        .background(.black)
-                }
-                .background(.black)
-            }
         }
     }
 

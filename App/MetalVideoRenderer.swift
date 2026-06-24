@@ -4,19 +4,29 @@ import CoreVideo
 import CoreMedia
 import QuartzCore
 
-/// Renders decoded NV12 video frames to a CAMetalLayer via a passthrough shader.
-/// Parallel test path for M1 — proves the Metal pixel pipeline (texture upload +
-/// YCbCr→RGB) independent of the AVSampleBufferDisplayLayer. Timing is NOT yet
-/// synchronizer-gated (M2's job): each frame is drawn as it arrives.
+/// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
+/// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
+/// the current playback clock each display refresh. Engine-agnostic — it knows
+/// nothing about FrameEngine, only a clock closure returning the current time.
 final class MetalVideoRenderer {
 
-    /// The layer the owning NSView hosts.
     let metalLayer = CAMetalLayer()
+
+    /// Returns the current playback time in seconds. Set by the owner before start().
+    var clock: (() -> Double)?
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache!
+
+    // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
+    private struct QueuedFrame { let pts: Double; let pixelBuffer: CVPixelBuffer }
+    private var frameQueue: [QueuedFrame] = []
+    private let queueLock = NSLock()
+    private let maxQueued = 12   // bounded buffer
+
+    private var displayLink: CVDisplayLink?
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -57,19 +67,97 @@ final class MetalVideoRenderer {
         }
     }
 
-    /// Render one decoded frame. Called from the engine's onVideoFrame tap
-    /// (background queue). Extracts the NV12 pixel buffer's two planes as Metal
-    /// textures and draws the full-screen quad.
-    func render(_ sampleBuffer: CMSampleBuffer) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        renderPixelBuffer(pixelBuffer)
+    deinit {
+        stop()
     }
+
+    // MARK: - Frame intake (called from the engine's tap, background queue)
+
+    /// Enqueue a decoded frame for presentation-timed display.
+    func enqueue(_ sampleBuffer: CMSampleBuffer) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        guard pts.isFinite else { return }
+
+        queueLock.lock()
+        frameQueue.append(QueuedFrame(pts: pts, pixelBuffer: pixelBuffer))
+        frameQueue.sort { $0.pts < $1.pts }
+        // Bound the queue: drop the oldest if over capacity.
+        if frameQueue.count > maxQueued {
+            frameQueue.removeFirst(frameQueue.count - maxQueued)
+        }
+        queueLock.unlock()
+    }
+
+    /// Clear all queued frames (call on seek).
+    func flush() {
+        queueLock.lock()
+        frameQueue.removeAll()
+        queueLock.unlock()
+    }
+
+    // MARK: - Display link lifecycle
+
+    func start() {
+        guard displayLink == nil else { return }
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let link else { print("MetalVideoRenderer: CVDisplayLink create failed"); return }
+
+        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
+            let renderer = Unmanaged<MetalVideoRenderer>.fromOpaque(userInfo!).takeUnretainedValue()
+            renderer.displayTick()
+            return kCVReturnSuccess
+        }
+        CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+        CVDisplayLinkStart(link)
+        displayLink = link
+    }
+
+    func stop() {
+        if let link = displayLink {
+            CVDisplayLinkStop(link)
+            displayLink = nil
+        }
+        flush()
+    }
+
+    // MARK: - Per-refresh presentation
+
+    /// Called each display refresh (on the CVDisplayLink thread). Picks the
+    /// newest frame whose PTS <= current playback time and renders it.
+    private func displayTick() {
+        guard let now = clock?() else { return }
+
+        queueLock.lock()
+        // Find the newest frame with pts <= now.
+        var chosen: CVPixelBuffer?
+        var dropCount = 0
+        for (i, frame) in frameQueue.enumerated() {
+            if frame.pts <= now {
+                chosen = frame.pixelBuffer
+                dropCount = i
+            } else {
+                break
+            }
+        }
+        // Remove everything up to and including the chosen frame (consumed + stale).
+        if chosen != nil, dropCount < frameQueue.count {
+            frameQueue.removeFirst(dropCount + 1)
+        }
+        queueLock.unlock()
+
+        if let pb = chosen {
+            renderPixelBuffer(pb)
+        }
+    }
+
+    // MARK: - Drawing
 
     private func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
         let width  = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
-        // Plane 0 = luma (R8), Plane 1 = chroma (RG8, half-res).
         guard let lumaTexture = makeTexture(pixelBuffer, planeIndex: 0,
                                             pixelFormat: .r8Unorm,
                                             width: width, height: height),
@@ -78,7 +166,6 @@ final class MetalVideoRenderer {
                                               width: width / 2, height: height / 2)
         else { return }
 
-        // Match the drawable size to the video for a 1:1 render (gravity handled by layer frame).
         if metalLayer.drawableSize != CGSize(width: width, height: height) {
             metalLayer.drawableSize = CGSize(width: width, height: height)
         }
@@ -104,7 +191,6 @@ final class MetalVideoRenderer {
         cmdBuffer.commit()
     }
 
-    /// Bridge one plane of a CVPixelBuffer to an MTLTexture via the cache.
     private func makeTexture(_ pixelBuffer: CVPixelBuffer, planeIndex: Int,
                              pixelFormat: MTLPixelFormat, width: Int, height: Int) -> MTLTexture? {
         var cvTexture: CVMetalTexture?
