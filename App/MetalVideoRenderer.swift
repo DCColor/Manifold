@@ -4,6 +4,14 @@ import CoreVideo
 import CoreMedia
 import QuartzCore
 
+/// Matches the shader's ColorParams struct (memory layout).
+private struct ColorParams {
+    var a: Float  // Cr -> R
+    var b: Float  // Cb -> G
+    var c: Float  // Cr -> G
+    var d: Float  // Cb -> B
+}
+
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
@@ -181,14 +189,37 @@ final class MetalVideoRenderer {
         guard let cmdBuffer = commandQueue.makeCommandBuffer(),
               let encoder = cmdBuffer.makeRenderCommandEncoder(descriptor: passDesc) else { return }
 
+        var params = colorParams(for: pixelBuffer)
         encoder.setRenderPipelineState(pipelineState)
         encoder.setFragmentTexture(lumaTexture, index: 0)
         encoder.setFragmentTexture(chromaTexture, index: 1)
+        encoder.setFragmentBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 
         cmdBuffer.present(drawable)
         cmdBuffer.commit()
+    }
+
+    /// Read the YCbCr matrix from the pixel buffer's attachment and return the
+    /// RGB conversion coefficients. Defaults to Rec.709 if absent/unknown.
+    private func colorParams(for pixelBuffer: CVPixelBuffer) -> ColorParams {
+        let matrix = (CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String) ?? ""
+        let m601 = kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String
+        let m2020 = kCVImageBufferYCbCrMatrix_ITU_R_2020 as String
+
+        // Coefficients per matrix. Standard derivations from Kr/Kb.
+        switch matrix {
+        case m601:
+            // Rec.601: Kr=0.299, Kb=0.114
+            return ColorParams(a: 1.5960, b: 0.3917, c: 0.8129, d: 2.0172)
+        case m2020:
+            // Rec.2020: Kr=0.2627, Kb=0.0593
+            return ColorParams(a: 1.4746, b: 0.1646, c: 0.5714, d: 1.8814)
+        default:
+            // Rec.709 (default): Kr=0.2126, Kb=0.0722
+            return ColorParams(a: 1.5748, b: 0.1873, c: 0.4681, d: 1.8556)
+        }
     }
 
     private func makeTexture(_ pixelBuffer: CVPixelBuffer, planeIndex: Int,
