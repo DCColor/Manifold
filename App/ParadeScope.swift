@@ -152,46 +152,46 @@ final class ParadeScopeModel: ObservableObject {
 /// composited trace plus a subtle 8-bit code-level graticule and R|G|B separators.
 struct ParadeScopeView: View {
     @ObservedObject var model: ParadeScopeModel
-
-    private let levels: [(label: String, value: Double)] = [
-        ("255",        255),
-        ("235 (100)",  235),
-        ("128",        128),
-        ("16 (0)",      16),
-        ("0",            0)
-    ]
+    // Same key as Preferences.scopeScale — @AppStorage here for live graticule updates.
+    @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
     var body: some View {
         GeometryReader { geo in
-            ZStack {
-                Color.black
-                if let img = model.image {
-                    Image(decorative: img, scale: 1.0)
-                        .resizable()
-                        .interpolation(.none)
+            VStack(spacing: 0) {
+                // Header strip: name (left) + intensity slider (right). Own band.
+                HStack(spacing: 4) {
+                    Text("PARADE · RGB (\(scopeScale.headerTag))")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Image(systemName: "sun.max")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.white.opacity(0.4))
+                    Slider(value: Preferences.shared.paradeIntensityBinding,
+                           in: Preferences.scopeIntensityRange)
+                        .controlSize(.mini)
+                        .frame(width: 70)
                 }
-                graticule
-                VStack {
-                    HStack(spacing: 4) {
-                        Text("PARADE · RGB (8-bit)")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Spacer(minLength: 4)
-                        Image(systemName: "sun.max")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.white.opacity(0.4))
-                        Slider(value: Preferences.shared.paradeIntensityBinding,
-                               in: Preferences.scopeIntensityRange)
-                            .controlSize(.mini)
-                            .frame(width: 70)
+                .padding(.horizontal, 6)
+                .frame(height: scopeHeaderHeight)
+
+                // Scope area below the header: trace + graticule, vertically inset.
+                ZStack {
+                    Color.black
+                    if let img = model.image {
+                        Image(decorative: img, scale: 1.0)
+                            .resizable()
+                            .interpolation(.none)
+                            .padding(.vertical, scopePlotInset)
                     }
-                    Spacer()
+                    graticule
+                        .padding(.vertical, scopePlotInset)
                 }
-                .padding(6)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
             .onAppear { model.setDisplayWidth(geo.size.width) }
@@ -201,19 +201,8 @@ struct ParadeScopeView: View {
 
     private var graticule: some View {
         Canvas { ctx, size in
-            // Horizontal code-level reference lines spanning all three columns.
-            for (label, value) in levels {
-                let y = size.height * (1.0 - value / 255.0)
-                var path = Path()
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: size.width, y: y))
-                ctx.stroke(path, with: .color(.white.opacity(0.12)), lineWidth: 0.5)
-                ctx.draw(
-                    Text(label).font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.4)),
-                    at: CGPoint(x: size.width - 4, y: y), anchor: .trailing
-                )
-            }
+            // Two-tier value-axis graticule (same as waveform), spanning all 3 columns.
+            drawValueGraticule(ctx, size: size, scale: scopeScale)
             // Thin R|G|B column separators at 1/3 and 2/3.
             for frac in [1.0 / 3.0, 2.0 / 3.0] {
                 let x = size.width * frac

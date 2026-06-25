@@ -48,6 +48,10 @@ final class Preferences: ObservableObject {
     @AppStorage("vectorscopeIntensity") var vectorscopeIntensity: Double = 1.0
     @AppStorage("globalScopeIntensity") var globalScopeIntensity: Double = 1.0
 
+    // Global vertical scale for the value-axis scopes (waveform/parade). Stored as the
+    // enum's String raw value. Default .bit10 (the 1023 ruler read in Resolve).
+    @AppStorage("scopeScale") var scopeScale: ScopeScale = .bit10
+
     /// Slider range shared by every scope-intensity control (per-scope + master).
     /// 0.25 = quite dim, 3.0 = quite hot, 1.0 = current default look.
     static let scopeIntensityRange: ClosedRange<Double> = 0.25...3.0
@@ -74,6 +78,7 @@ struct SettingsView: View {
     @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
     @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = true
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
+    @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
     var body: some View {
         Form {
@@ -85,6 +90,12 @@ struct SettingsView: View {
             .pickerStyle(.inline)
 
             Toggle("Autoplay on open", isOn: $autoplayOnLoad)
+
+            Picker("Scope Scale", selection: $scopeScale) {
+                ForEach(ScopeScale.selectable) { scale in
+                    Text(scale.label).tag(scale)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Scope Intensity (master — scales all scopes)")
