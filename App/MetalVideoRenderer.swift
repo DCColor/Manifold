@@ -20,6 +20,10 @@ private struct ColorParams {
 /// nothing about FrameEngine, only a clock closure returning the current time.
 final class MetalVideoRenderer {
 
+    // M3b: 10-bit migration touches here — change this format (e.g. .bgra10_xr or
+    // rgb10a2 variant) when the engine decodes native 10-bit.
+    static let renderPixelFormat: MTLPixelFormat = .bgra8Unorm
+
     let metalLayer = CAMetalLayer()
 
     /// Returns the current playback time in seconds. Set by the owner before start().
@@ -30,10 +34,12 @@ final class MetalVideoRenderer {
     private let pipelineState: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache!
 
-    // Most-recently-rendered drawable texture, stashed for on-demand frame export.
-    // Reference only — no per-frame readback. Read on the main thread by
-    // exportCurrentFrame(); written on the CVDisplayLink thread in renderPixelBuffer.
-    private var lastRenderedTexture: MTLTexture?
+    // Persistent owned offscreen render target: the single source of truth for
+    // display (1:1 blitted to the drawable), frame export, and future scopes.
+    // Written/used on the CVDisplayLink render thread; read back (via its own
+    // serialized command buffer) by readbackRenderedFrame() from the main thread.
+    private var offscreenTexture: MTLTexture?
+    private var offscreenSize: (w: Int, h: Int)?
 
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
     private struct QueuedFrame { let pts: Double; let pixelBuffer: CVPixelBuffer }
@@ -61,7 +67,7 @@ final class MetalVideoRenderer {
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = vfn
         desc.fragmentFunction = ffn
-        desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+        desc.colorAttachments[0].pixelFormat = Self.renderPixelFormat
 
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: desc) else {
             print("MetalVideoRenderer: pipeline creation failed"); return nil
@@ -72,7 +78,7 @@ final class MetalVideoRenderer {
         self.pipelineState = pipeline
 
         metalLayer.device = device
-        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.pixelFormat = Self.renderPixelFormat
         // framebufferOnly = false so the drawable texture can be used as a blit
         // source for on-demand frame export (exportCurrentFrame). Minor cost; no
         // effect on the normal display path.
@@ -276,10 +282,15 @@ final class MetalVideoRenderer {
             metalLayer.drawableSize = CGSize(width: width, height: height)
         }
 
+        // Render into the persistent owned offscreen texture (1:1 with the drawable),
+        // then blit it to the drawable for display. The offscreen texture is the
+        // single source of truth for display, export, and scopes.
+        ensureOffscreenTexture(width: width, height: height)
+        guard let offscreen = offscreenTexture else { return }
         guard let drawable = metalLayer.nextDrawable() else { return }
 
         let passDesc = MTLRenderPassDescriptor()
-        passDesc.colorAttachments[0].texture = drawable.texture
+        passDesc.colorAttachments[0].texture = offscreen
         passDesc.colorAttachments[0].loadAction = .clear
         passDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         passDesc.colorAttachments[0].storeAction = .store
@@ -295,34 +306,53 @@ final class MetalVideoRenderer {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
 
+        // 1:1 blit offscreen -> drawable (same size and format). Color-neutral.
+        if let blit = cmdBuffer.makeBlitCommandEncoder() {
+            blit.copy(from: offscreen, sourceSlice: 0, sourceLevel: 0,
+                      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: width, height: height, depth: 1),
+                      to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
+                      destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+            blit.endEncoding()
+        }
+
         cmdBuffer.present(drawable)
         cmdBuffer.commit()
-
-        // Stash the rendered texture for on-demand export. Reference only.
-        lastRenderedTexture = drawable.texture
     }
 
-    // MARK: - Frame export (on-demand, manual)
-
-    /// Read back the most-recently-rendered frame and write it to a PNG on the
-    /// Desktop, tagged with the layer's source-derived colorspace so a
-    /// non-color-managed app (e.g. Resolve) reads the raw code values. Manual only.
-    func exportCurrentFrame() {
-        guard let src = lastRenderedTexture else {
-            print("[EXPORT] no rendered frame yet"); return
+    /// (Re)create the persistent offscreen render target when missing or when the
+    /// size changes. Kept 1:1 with the current drawable size — resolution-neutral.
+    private func ensureOffscreenTexture(width: Int, height: Int) {
+        if offscreenTexture != nil, let size = offscreenSize, size.w == width, size.h == height {
+            return
         }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: Self.renderPixelFormat, width: width, height: height, mipmapped: false)
+        desc.storageMode = .private
+        desc.usage = [.renderTarget, .shaderRead]   // render into it; allow blit source
+        offscreenTexture = device.makeTexture(descriptor: desc)
+        offscreenSize = (width, height)
+    }
+
+    /// Blit the persistent offscreen texture into a CPU-readable shared texture and
+    /// read it back. Shared by frame export and (future) in-app scopes. Uses its own
+    /// command buffer + waitUntilCompleted on the SAME queue as rendering, so it
+    /// can't tear against an in-flight render (command buffers are atomic units).
+    // M3b: 10-bit migration touches here — the bytesPerRow math assumes 4 bytes/pixel
+    // bgra8; a 10-bit format changes stride and channel extraction.
+    private func readbackRenderedFrame() -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
+        guard let src = offscreenTexture else { return nil }
         let width = src.width
         let height = src.height
 
-        // Blit the (private) drawable texture into a CPU-readable shared texture.
         let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: src.pixelFormat, width: width, height: height, mipmapped: false)
+            pixelFormat: Self.renderPixelFormat, width: width, height: height, mipmapped: false)
         desc.storageMode = .shared
         desc.usage = [.shaderRead]
         guard let cpuTex = device.makeTexture(descriptor: desc),
               let cmd = commandQueue.makeCommandBuffer(),
               let blit = cmd.makeBlitCommandEncoder() else {
-            print("[EXPORT] readback setup failed"); return
+            return nil
         }
         blit.copy(from: src, sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
@@ -333,19 +363,33 @@ final class MetalVideoRenderer {
         cmd.commit()
         cmd.waitUntilCompleted()
 
-        // Read the shared texture into a CPU buffer.
         let bytesPerRow = width * 4
-        var data = Data(count: bytesPerRow * height)
-        data.withUnsafeMutableBytes { raw in
+        var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        bytes.withUnsafeMutableBytes { raw in
             cpuTex.getBytes(raw.baseAddress!, bytesPerRow: bytesPerRow,
                             from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
         }
+        return (bytes, width, height, bytesPerRow)
+    }
+
+    // MARK: - Frame export (on-demand, manual)
+
+    /// Read back the most-recently-rendered frame and write it to a PNG on the
+    /// Desktop, tagged with the layer's source-derived colorspace so a
+    /// non-color-managed app (e.g. Resolve) reads the raw code values. Manual only.
+    func exportCurrentFrame() {
+        guard let frame = readbackRenderedFrame() else {
+            print("[EXPORT] no rendered frame yet"); return
+        }
+        let (bytes, width, height, bytesPerRow) = frame
+        let data = Data(bytes)
 
         // CRITICAL: tag with the layer's source-derived colorspace (CoreMedia709),
         // NOT deviceRGB/sRGB — so the consumer reads the raw code values under the
         // file's real colorspace. Fall back to 709 only if the layer has none.
         let cs = metalLayer.colorspace ?? CGColorSpace(name: CGColorSpace.itur_709)!
-        // bgra8Unorm: bytes B,G,R,A read as a little-endian 32-bit word, alpha first.
+        // M3b: 10-bit migration touches here — CGImage bitsPerComponent/bitmapInfo
+        // assume 8-bit bgra.
         let bitmapInfo = CGBitmapInfo(rawValue:
             CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
         guard let provider = CGDataProvider(data: data as CFData),
@@ -371,7 +415,7 @@ final class MetalVideoRenderer {
         if CGImageDestinationFinalize(dest) {
             let csName = cs.name.map { "\($0)" } ?? "\(cs)"
             print("[EXPORT] wrote \(url.path)")
-            print("[EXPORT] texture format=\(src.pixelFormat) colorspace=\(csName)")
+            print("[EXPORT] texture format=\(Self.renderPixelFormat) colorspace=\(csName)")
         } else {
             print("[EXPORT] PNG finalize failed")
         }
