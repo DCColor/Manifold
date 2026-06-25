@@ -3,6 +3,8 @@ import Metal
 import CoreVideo
 import CoreMedia
 import QuartzCore
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Matches the shader's ColorParams struct (memory layout).
 private struct ColorParams {
@@ -27,6 +29,11 @@ final class MetalVideoRenderer {
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache!
+
+    // Most-recently-rendered drawable texture, stashed for on-demand frame export.
+    // Reference only — no per-frame readback. Read on the main thread by
+    // exportCurrentFrame(); written on the CVDisplayLink thread in renderPixelBuffer.
+    private var lastRenderedTexture: MTLTexture?
 
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
     private struct QueuedFrame { let pts: Double; let pixelBuffer: CVPixelBuffer }
@@ -66,7 +73,10 @@ final class MetalVideoRenderer {
 
         metalLayer.device = device
         metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
+        // framebufferOnly = false so the drawable texture can be used as a blit
+        // source for on-demand frame export (exportCurrentFrame). Minor cost; no
+        // effect on the normal display path.
+        metalLayer.framebufferOnly = false
         metalLayer.isOpaque = true
         // Colorspace is set per-frame in renderPixelBuffer, derived from the
         // pixel buffer's own color attachments (matching the reference layer).
@@ -287,6 +297,84 @@ final class MetalVideoRenderer {
 
         cmdBuffer.present(drawable)
         cmdBuffer.commit()
+
+        // Stash the rendered texture for on-demand export. Reference only.
+        lastRenderedTexture = drawable.texture
+    }
+
+    // MARK: - Frame export (on-demand, manual)
+
+    /// Read back the most-recently-rendered frame and write it to a PNG on the
+    /// Desktop, tagged with the layer's source-derived colorspace so a
+    /// non-color-managed app (e.g. Resolve) reads the raw code values. Manual only.
+    func exportCurrentFrame() {
+        guard let src = lastRenderedTexture else {
+            print("[EXPORT] no rendered frame yet"); return
+        }
+        let width = src.width
+        let height = src.height
+
+        // Blit the (private) drawable texture into a CPU-readable shared texture.
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: src.pixelFormat, width: width, height: height, mipmapped: false)
+        desc.storageMode = .shared
+        desc.usage = [.shaderRead]
+        guard let cpuTex = device.makeTexture(descriptor: desc),
+              let cmd = commandQueue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            print("[EXPORT] readback setup failed"); return
+        }
+        blit.copy(from: src, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: width, height: height, depth: 1),
+                  to: cpuTex, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+
+        // Read the shared texture into a CPU buffer.
+        let bytesPerRow = width * 4
+        var data = Data(count: bytesPerRow * height)
+        data.withUnsafeMutableBytes { raw in
+            cpuTex.getBytes(raw.baseAddress!, bytesPerRow: bytesPerRow,
+                            from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
+
+        // CRITICAL: tag with the layer's source-derived colorspace (CoreMedia709),
+        // NOT deviceRGB/sRGB — so the consumer reads the raw code values under the
+        // file's real colorspace. Fall back to 709 only if the layer has none.
+        let cs = metalLayer.colorspace ?? CGColorSpace(name: CGColorSpace.itur_709)!
+        // bgra8Unorm: bytes B,G,R,A read as a little-endian 32-bit word, alpha first.
+        let bitmapInfo = CGBitmapInfo(rawValue:
+            CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cgImage = CGImage(width: width, height: height,
+                                    bitsPerComponent: 8, bitsPerPixel: 32,
+                                    bytesPerRow: bytesPerRow, space: cs,
+                                    bitmapInfo: bitmapInfo, provider: provider,
+                                    decode: nil, shouldInterpolate: false,
+                                    intent: .defaultIntent) else {
+            print("[EXPORT] CGImage creation failed"); return
+        }
+
+        let ts = Int(Date().timeIntervalSince1970)
+        let dir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        let url = dir.appendingPathComponent("Manifold_frame_\(ts).png")
+
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            print("[EXPORT] destination create failed"); return
+        }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        if CGImageDestinationFinalize(dest) {
+            let csName = cs.name.map { "\($0)" } ?? "\(cs)"
+            print("[EXPORT] wrote \(url.path)")
+            print("[EXPORT] texture format=\(src.pixelFormat) colorspace=\(csName)")
+        } else {
+            print("[EXPORT] PNG finalize failed")
+        }
     }
 
     /// Read the YCbCr matrix from the pixel buffer's attachment and return the

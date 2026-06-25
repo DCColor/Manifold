@@ -132,6 +132,11 @@ struct ContentView: View {
                 .keyboardShortcut("r", modifiers: [.control, .option])
                 .opacity(0)
         )
+        .background(
+            Button("") { metalRenderer?.exportCurrentFrame() }
+                .keyboardShortcut("e", modifiers: [.control, .option])
+                .opacity(0)
+        )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
