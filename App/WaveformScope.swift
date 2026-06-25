@@ -166,7 +166,7 @@ struct WaveformScopeView: View {
             }
             .padding(6)
         }
-        .frame(width: 512, height: 300)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
     }

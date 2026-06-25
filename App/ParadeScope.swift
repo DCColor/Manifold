@@ -167,7 +167,7 @@ struct ParadeScopeView: View {
             }
             .padding(6)
         }
-        .frame(width: 600, height: 300)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
     }

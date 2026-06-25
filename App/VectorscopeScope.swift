@@ -142,8 +142,6 @@ final class VectorscopeScopeModel: ObservableObject {
 struct VectorscopeScopeView: View {
     @ObservedObject var model: VectorscopeScopeModel
 
-    private let plotSize: CGFloat = 300
-
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -164,8 +162,9 @@ struct VectorscopeScopeView: View {
                 }
                 graticule
             }
-            .frame(width: plotSize, height: plotSize)
+            .aspectRatio(1, contentMode: .fit)   // stay square, fit available space
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))

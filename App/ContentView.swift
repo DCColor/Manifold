@@ -25,11 +25,17 @@ struct ContentView: View {
     @State private var showGetFlipSheet = false
     @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
-    @State private var showWaveform = false
+
+    // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
+    // so video + tray both scale with the window. trayHeightFraction is the tunable ratio.
+    static let trayHeightFraction: CGFloat = 0.33   // bottom third
+    @State private var showTray = false
+    // Per-scope presence WITHIN the tray (default on, so opening the tray shows all three).
+    @State private var showWaveform = true
     @StateObject private var waveformModel = WaveformScopeModel()
-    @State private var showParade = false
+    @State private var showParade = true
     @StateObject private var paradeModel = ParadeScopeModel()
-    @State private var showVectorscope = false
+    @State private var showVectorscope = true
     @StateObject private var vectorscopeModel = VectorscopeScopeModel()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
@@ -38,112 +44,19 @@ struct ContentView: View {
     private var controlsShown: Bool { isDocked ? true : hudVisible }
 
     var body: some View {
-        ZStack {
-            ZStack {
-                // AV surface stays for pump + synchronizer clock, but is covered by Metal.
-                SampleBufferSurfaceView { nsView in
-                    Task { @MainActor in
-                        engine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
-                    }
-                }
-                // Metal is the visible surface (opaque, drawn on top).
-                // M4 tuning: hide Metal to reveal the reference AVSampleBufferDisplayLayer underneath.
-                if let renderer = metalRenderer, !showReferenceLayer {
-                    MetalSurfaceView(renderer: renderer)
-                }
-                if isScrubbing, let preview = scrubPreviewImage {
-                    Image(decorative: preview, scale: 1.0)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                videoRegion
+                    .frame(height: showTray
+                           ? geo.size.height * (1 - Self.trayHeightFraction)
+                           : geo.size.height)
+                if showTray {
+                    scopesTray
+                        .frame(height: geo.size.height * Self.trayHeightFraction)
                 }
             }
-                .background(.black)
-                .ignoresSafeArea()
-
-            if engine.hasMedia {
-                VStack {
-                    Spacer()
-                    controls(showPin: !isDocked)
-                        .padding(isDocked ? 14 : 12)
-                        .background(
-                            isDocked
-                                ? AnyShapeStyle(.black.opacity(0.85))
-                                : AnyShapeStyle(.black.opacity(0.55)),
-                            in: RoundedRectangle(cornerRadius: isDocked ? 0 : 12)
-                        )
-                        .frame(maxWidth: isDocked ? .infinity : 760)
-                        .padding(isDocked ? 0 : 16)
-                }
-                .opacity(controlsShown ? 1 : 0)
-                .animation(.easeInOut(duration: 0.30), value: controlsShown)
-            } else {
-                emptyState
-            }
-
-            WindowConfigurator(
-                buttonsVisible: engine.hasMedia ? controlsShown : true,
-                displaySize: engine.displaySize
-            )
-            .frame(width: 0, height: 0)
-
-            Button("") { togglePin() }
-                .keyboardShortcut(.tab, modifiers: [])
-                .opacity(0)
         }
-        .overlay(alignment: .topTrailing) {
-            if showInspector && engine.hasMedia {
-                InspectorPanel(metadata: engine.metadata)
-                    .padding(16)
-                    .transition(.opacity)
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if showWaveform {
-                WaveformScopeView(model: waveformModel)
-                    .padding(16)
-                    .transition(.opacity)
-            }
-        }
-        .overlay(alignment: .bottomLeading) {
-            if showParade {
-                ParadeScopeView(model: paradeModel)
-                    .padding(16)
-                    .transition(.opacity)
-            }
-        }
-        .overlay(alignment: .topLeading) {
-            if showVectorscope {
-                VectorscopeScopeView(model: vectorscopeModel)
-                    .padding(16)
-                    .transition(.opacity)
-            }
-        }
-        .overlay(alignment: .topLeading) {
-            if engine.hasMedia {
-                Text(showReferenceLayer ? "REFERENCE (AVSampleBufferDisplayLayer)" : "METAL")
-                    .font(.caption2.monospaced())
-                    .padding(4)
-                    .background(.black.opacity(0.6))
-                    .foregroundStyle(showReferenceLayer ? .yellow : .green)
-                    .padding(8)
-                    .allowsHitTesting(false)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: showInspector)
-        .overlay(alignment: .top) {
-            if showFileNameOverlay, engine.hasMedia, let name = engine.metadata?.fileName {
-                Text(name)
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.95))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.black.opacity(0.6), in: Capsule())
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
-                    .padding(.top, 24)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
+        .ignoresSafeArea()
         .background(
             Button("") { showInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [])
@@ -165,43 +78,24 @@ struct ContentView: View {
                 .opacity(0)
         )
         .background(
-            Button("") {
-                showWaveform.toggle()
-                if showWaveform {
-                    waveformModel.renderer = metalRenderer
-                    waveformModel.start()
-                } else {
-                    waveformModel.stop()
-                }
-            }
-            .keyboardShortcut("w", modifiers: [.control, .option])
-            .opacity(0)
+            Button("") { showTray.toggle(); updateScopeSampling() }
+                .keyboardShortcut("t", modifiers: [.control, .option])
+                .opacity(0)
         )
         .background(
-            Button("") {
-                showParade.toggle()
-                if showParade {
-                    paradeModel.renderer = metalRenderer
-                    paradeModel.start()
-                } else {
-                    paradeModel.stop()
-                }
-            }
-            .keyboardShortcut("p", modifiers: [.control, .option])
-            .opacity(0)
+            Button("") { showWaveform.toggle(); updateScopeSampling() }
+                .keyboardShortcut("w", modifiers: [.control, .option])
+                .opacity(0)
         )
         .background(
-            Button("") {
-                showVectorscope.toggle()
-                if showVectorscope {
-                    vectorscopeModel.renderer = metalRenderer
-                    vectorscopeModel.start()
-                } else {
-                    vectorscopeModel.stop()
-                }
-            }
-            .keyboardShortcut("v", modifiers: [.control, .option])
-            .opacity(0)
+            Button("") { showParade.toggle(); updateScopeSampling() }
+                .keyboardShortcut("p", modifiers: [.control, .option])
+                .opacity(0)
+        )
+        .background(
+            Button("") { showVectorscope.toggle(); updateScopeSampling() }
+                .keyboardShortcut("v", modifiers: [.control, .option])
+                .opacity(0)
         )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
@@ -218,6 +112,9 @@ struct ContentView: View {
         .onDisappear {
             engine.stop()
             metalRenderer?.stop()
+            waveformModel.stop()
+            paradeModel.stop()
+            vectorscopeModel.stop()
         }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
         .onChange(of: engine.metadata) { _, meta in
@@ -266,6 +163,142 @@ struct ContentView: View {
             .padding(28)
             .frame(width: 380)
         }
+    }
+
+    /// Source aspect ratio (falls back to 16:9 before metadata loads).
+    private var videoAspect: CGFloat {
+        if let s = engine.displaySize, s.width > 0, s.height > 0 { return s.width / s.height }
+        return 16.0 / 9.0
+    }
+
+    /// The video region: aspect-fit picture (never cropped/stretched), transport
+    /// controls, empty state, and the picture-only overlays (inspector, filename,
+    /// METAL indicator). Fills whatever height the split gives it.
+    private var videoRegion: some View {
+        ZStack {
+            Color.black
+            ZStack {
+                // AV surface stays for pump + synchronizer clock, covered by Metal.
+                SampleBufferSurfaceView { nsView in
+                    Task { @MainActor in
+                        engine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
+                    }
+                }
+                // Metal is the visible surface; hide to reveal the AV reference (⌃⌥R).
+                if let renderer = metalRenderer, !showReferenceLayer {
+                    MetalSurfaceView(renderer: renderer)
+                }
+            }
+            .aspectRatio(videoAspect, contentMode: .fit)   // full image, aspect preserved
+
+            if isScrubbing, let preview = scrubPreviewImage {
+                Image(decorative: preview, scale: 1.0)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            }
+
+            if engine.hasMedia {
+                VStack {
+                    Spacer()
+                    controls(showPin: !isDocked)
+                        .padding(isDocked ? 14 : 12)
+                        .background(
+                            isDocked
+                                ? AnyShapeStyle(.black.opacity(0.85))
+                                : AnyShapeStyle(.black.opacity(0.55)),
+                            in: RoundedRectangle(cornerRadius: isDocked ? 0 : 12)
+                        )
+                        .frame(maxWidth: isDocked ? .infinity : 760)
+                        .padding(isDocked ? 0 : 16)
+                }
+                .opacity(controlsShown ? 1 : 0)
+                .animation(.easeInOut(duration: 0.30), value: controlsShown)
+            } else {
+                emptyState
+            }
+
+            WindowConfigurator(
+                buttonsVisible: engine.hasMedia ? controlsShown : true,
+                displaySize: engine.displaySize
+            )
+            .frame(width: 0, height: 0)
+
+            Button("") { togglePin() }
+                .keyboardShortcut(.tab, modifiers: [])
+                .opacity(0)
+        }
+        .clipped()
+        .overlay(alignment: .topTrailing) {
+            if showInspector && engine.hasMedia {
+                InspectorPanel(metadata: engine.metadata)
+                    .padding(16)
+                    .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if engine.hasMedia {
+                Text(showReferenceLayer ? "REFERENCE (AVSampleBufferDisplayLayer)" : "METAL")
+                    .font(.caption2.monospaced())
+                    .padding(4)
+                    .background(.black.opacity(0.6))
+                    .foregroundStyle(showReferenceLayer ? .yellow : .green)
+                    .padding(8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .top) {
+            if showFileNameOverlay, engine.hasMedia, let name = engine.metadata?.fileName {
+                Text(name)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                    .padding(.top, 24)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showInspector)
+        .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
+    }
+
+    /// The scopes tray: the three scopes side by side, each an equal third of the
+    /// tray width, scaling to fit. Reuses the existing scope views/models unchanged.
+    private var scopesTray: some View {
+        HStack(spacing: 1) {
+            if showWaveform {
+                WaveformScopeView(model: waveformModel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if showParade {
+                ParadeScopeView(model: paradeModel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if showVectorscope {
+                VectorscopeScopeView(model: vectorscopeModel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .clipped()
+    }
+
+    /// A scope samples only when the tray is open AND that scope is enabled.
+    /// Stops sampling otherwise (no wasted readback when the tray is closed).
+    private func updateScopeSampling() {
+        if showTray && showWaveform {
+            waveformModel.renderer = metalRenderer; waveformModel.start()
+        } else { waveformModel.stop() }
+
+        if showTray && showParade {
+            paradeModel.renderer = metalRenderer; paradeModel.start()
+        } else { paradeModel.stop() }
+
+        if showTray && showVectorscope {
+            vectorscopeModel.renderer = metalRenderer; vectorscopeModel.start()
+        } else { vectorscopeModel.stop() }
     }
 
     private func controls(showPin: Bool) -> some View {
