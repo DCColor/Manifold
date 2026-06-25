@@ -81,6 +81,89 @@ final class MetalVideoRenderer {
         stop()
     }
 
+    // MARK: - Source colorspace (set once per source)
+
+    /// Derive the layer's colorspace from the source's authoritative color tags
+    /// (CICP codes from MediaInspector) and assign it ONCE. Re-call on each new
+    /// source. This replaces the per-frame buffer-attachment derivation, which
+    /// could flip to an unspecified-primaries space on some frames.
+    func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?) {
+        // Never assign nil — makeColorSpace guarantees non-nil, but guard anyway.
+        guard let cs = Self.makeColorSpace(primaries: primaries, transfer: transfer, matrix: matrix) else { return }
+        // Assign inside a synchronized transaction (actions disabled) so this
+        // once-per-source mutation can't tear against an in-flight frame on the
+        // CVDisplayLink render thread.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        metalLayer.colorspace = cs
+        CATransaction.commit()
+    }
+
+    /// Build a CoreVideo nclc attachments dict from MediaInspector's authoritative
+    /// codes and run it through CVImageBufferCreateColorSpaceFromAttachments — the
+    /// SAME function the reference AVSampleBufferDisplayLayer path uses. This yields
+    /// the CoreMedia-family space (correct 709 toe, matches reference) but fed from
+    /// stable source tags, not the flaky per-frame buffer. Absent/nil/unknown tags
+    /// fall back to the full 709 attachment set; never returns nil.
+    private static func makeColorSpace(primaries: Int?, transfer: Int?, matrix: Int?) -> CGColorSpace? {
+        let p709 = kCVImageBufferColorPrimaries_ITU_R_709_2
+        let t709 = kCVImageBufferTransferFunction_ITU_R_709_2
+        let m709 = kCVImageBufferYCbCrMatrix_ITU_R_709_2
+
+        let prim: CFString
+        let trans: CFString
+        let mat: CFString
+
+        switch (primaries, transfer) {
+        case (12, _):   // Display P3 (P3 D65) primaries; transfer/matrix from source else 709
+            prim = kCVImageBufferColorPrimaries_P3_D65
+            trans = transferAttachment(transfer) ?? t709
+            mat = matrixAttachment(matrix) ?? m709
+        case (9, 16):   // Rec.2020 + PQ
+            prim = kCVImageBufferColorPrimaries_ITU_R_2020
+            trans = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+            mat = kCVImageBufferYCbCrMatrix_ITU_R_2020
+        case (9, 18):   // Rec.2020 + HLG
+            prim = kCVImageBufferColorPrimaries_ITU_R_2020
+            trans = kCVImageBufferTransferFunction_ITU_R_2100_HLG
+            mat = kCVImageBufferYCbCrMatrix_ITU_R_2020
+        case (1, 1):    // Rec.709 full set
+            prim = p709; trans = t709; mat = m709
+        default:        // absent / nil / unknown / unspecified -> 709
+            prim = p709; trans = t709; mat = m709
+        }
+
+        let dict: [CFString: Any] = [
+            kCVImageBufferColorPrimariesKey: prim,
+            kCVImageBufferTransferFunctionKey: trans,
+            kCVImageBufferYCbCrMatrixKey: mat
+        ]
+        if let cs = CVImageBufferCreateColorSpaceFromAttachments(dict as CFDictionary)?.takeRetainedValue() {
+            return cs
+        }
+        // Last resort so the layer is never untagged.
+        return CGColorSpace(name: CGColorSpace.itur_709)
+    }
+
+    /// MediaInspector transfer code -> CV transfer attachment, or nil if unknown.
+    private static func transferAttachment(_ code: Int?) -> CFString? {
+        switch code {
+        case 1:  return kCVImageBufferTransferFunction_ITU_R_709_2
+        case 16: return kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+        case 18: return kCVImageBufferTransferFunction_ITU_R_2100_HLG
+        default: return nil
+        }
+    }
+
+    /// MediaInspector matrix code -> CV matrix attachment, or nil if unknown.
+    private static func matrixAttachment(_ code: Int?) -> CFString? {
+        switch code {
+        case 1: return kCVImageBufferYCbCrMatrix_ITU_R_709_2
+        case 9: return kCVImageBufferYCbCrMatrix_ITU_R_2020
+        default: return nil
+        }
+    }
+
     // MARK: - Frame intake (called from the engine's tap, background queue)
 
     /// Enqueue a decoded frame for presentation-timed display.
@@ -168,15 +251,8 @@ final class MetalVideoRenderer {
         let width  = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
-        // Tag the layer with the buffer's OWN colorspace (same tags the reference
-        // AVSampleBufferDisplayLayer uses), so WindowServer color-manages identically.
-        if let attachments = CVBufferCopyAttachments(pixelBuffer, .shouldPropagate),
-           let cs = CVImageBufferCreateColorSpaceFromAttachments(attachments)?.takeRetainedValue() {
-            if metalLayer.colorspace != cs {
-                metalLayer.colorspace = cs
-                print("Metal layer colorspace: \(cs)")
-            }
-        }
+        // Layer colorspace is set ONCE per source in setSourceColorSpace(...) from
+        // MediaInspector's authoritative tags — NOT per-frame from the buffer.
 
         guard let lumaTexture = makeTexture(pixelBuffer, planeIndex: 0,
                                             pixelFormat: .r8Unorm,

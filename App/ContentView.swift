@@ -149,6 +149,17 @@ struct ContentView: View {
             metalRenderer?.stop()
         }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
+        .onChange(of: engine.metadata) { _, meta in
+            // Derive the Metal layer colorspace once per source from the
+            // inspector's authoritative color tags (not per-frame from buffers).
+            if let meta {
+                metalRenderer?.setSourceColorSpace(
+                    primaries: meta.colorPrimariesCode,
+                    transfer: meta.transferFunctionCode,
+                    matrix: meta.colorMatrixCode
+                )
+            }
+        }
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
