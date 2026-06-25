@@ -29,6 +29,8 @@ struct ContentView: View {
     @StateObject private var waveformModel = WaveformScopeModel()
     @State private var showParade = false
     @StateObject private var paradeModel = ParadeScopeModel()
+    @State private var showVectorscope = false
+    @StateObject private var vectorscopeModel = VectorscopeScopeModel()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -110,6 +112,13 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .topLeading) {
+            if showVectorscope {
+                VectorscopeScopeView(model: vectorscopeModel)
+                    .padding(16)
+                    .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .topLeading) {
             if engine.hasMedia {
                 Text(showReferenceLayer ? "REFERENCE (AVSampleBufferDisplayLayer)" : "METAL")
                     .font(.caption2.monospaced())
@@ -179,6 +188,19 @@ struct ContentView: View {
                 }
             }
             .keyboardShortcut("p", modifiers: [.control, .option])
+            .opacity(0)
+        )
+        .background(
+            Button("") {
+                showVectorscope.toggle()
+                if showVectorscope {
+                    vectorscopeModel.renderer = metalRenderer
+                    vectorscopeModel.start()
+                } else {
+                    vectorscopeModel.stop()
+                }
+            }
+            .keyboardShortcut("v", modifiers: [.control, .option])
             .opacity(0)
         )
         .onContinuousHover { phase in
