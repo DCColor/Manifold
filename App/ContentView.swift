@@ -23,6 +23,10 @@ struct ContentView: View {
     @State private var showInspector = false
     @State private var showFileNameOverlay = false
     @State private var showGetFlipSheet = false
+    @State private var showGuidesPanel = false
+    // Framing guide — same keys as Preferences; @AppStorage here for live overlay updates.
+    @AppStorage("guideActive") private var guideActive = false
+    @AppStorage("guideAspect") private var guideAspect = 2.39
     @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
 
@@ -195,6 +199,13 @@ struct ContentView: View {
                 }
             }
             .aspectRatio(videoAspect, contentMode: .fit)   // full image, aspect preserved
+            // Framing guide overlay — bounds == displayed video rect, so it tracks
+            // letterbox/pillarbox + scaling. Above the video, below the controls.
+            .overlay {
+                if guideActive {
+                    GuideOverlay(aspect: guideAspect)
+                }
+            }
 
             if isScrubbing, let preview = scrubPreviewImage {
                 Image(decorative: preview, scale: 1.0)
@@ -363,8 +374,11 @@ struct ContentView: View {
                     .help("Volume (coming soon)").disabled(true)
                 Button { } label: { Image(systemName: "repeat") }
                     .help("Loop (coming soon)").disabled(true)
-                Button { } label: { Image(systemName: "grid") }
-                    .help("Guides (coming soon)").disabled(true)
+                Button { showGuidesPanel.toggle() } label: { Image(systemName: "grid") }
+                    .help("Framing guides")
+                    .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {
+                        GuidesPanel()
+                    }
                 Button { } label: { Image(systemName: "textformat") }
                     .help("Overlay data (coming soon)").disabled(true)
                 Button { showInspector.toggle() } label: {

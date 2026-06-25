@@ -52,6 +52,11 @@ final class Preferences: ObservableObject {
     // enum's String raw value. Default .bit10 (the 1023 ruler read in Resolve).
     @AppStorage("scopeScale") var scopeScale: ScopeScale = .bit10
 
+    // Framing guide (non-destructive aspect-ratio crop overlay). Persists whether a
+    // guide is shown and which aspect. Default: off.
+    @AppStorage("guideActive") var guideActive: Bool = false
+    @AppStorage("guideAspect") var guideAspect: Double = 2.39
+
     /// Slider range shared by every scope-intensity control (per-scope + master).
     /// 0.25 = quite dim, 3.0 = quite hot, 1.0 = current default look.
     static let scopeIntensityRange: ClosedRange<Double> = 0.25...3.0
