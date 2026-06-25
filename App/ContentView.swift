@@ -379,6 +379,38 @@ struct ContentView: View {
                 .help("Refresh metadata")
                 .disabled(engine.currentURL == nil)
 
+                // Export the current frame (ACTION) — sits with the file/action controls.
+                Button(action: { metalRenderer?.exportCurrentFrame() }) {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .help("Export frame (⌃⌥E)")
+                .disabled(engine.currentURL == nil)
+
+                Divider().frame(height: 16).overlay(.white.opacity(0.25))
+
+                // Scopes + tray (VIEW STATE) cluster — separated from the actions.
+                Button { showTray.toggle(); updateScopeSampling() } label: {
+                    Image(systemName: "chart.bar.xaxis")
+                }
+                .foregroundStyle(showTray ? Color.green : .white.opacity(0.9))
+                .help("Scopes tray (⌃⌥T)")
+
+                scopeToggle("WFM", on: showWaveform) {
+                    showWaveform.toggle()
+                    if showWaveform { showTray = true }
+                    updateScopeSampling()
+                }
+                scopeToggle("RGB", on: showParade) {
+                    showParade.toggle()
+                    if showParade { showTray = true }
+                    updateScopeSampling()
+                }
+                scopeToggle("VEC", on: showVectorscope) {
+                    showVectorscope.toggle()
+                    if showVectorscope { showTray = true }
+                    updateScopeSampling()
+                }
+
                 Spacer()
 
                 if showPin {
@@ -423,6 +455,21 @@ struct ContentView: View {
         } else {
             showGetFlipSheet = true
         }
+    }
+
+    /// A per-scope toggle pill: tinted/filled green when on, dimmed when off — so the
+    /// active scopes are visible at a glance. Drives the same @State the keys toggle.
+    private func scopeToggle(_ label: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(on ? Color.white.opacity(0.18) : .clear,
+                            in: RoundedRectangle(cornerRadius: 4))
+        }
+        .foregroundStyle(on ? Color.green : .white.opacity(0.35))
+        .help(label)
     }
 
     private func togglePin() {
