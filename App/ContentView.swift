@@ -24,9 +24,6 @@ struct ContentView: View {
     @State private var showFileNameOverlay = false
     @State private var showGetFlipSheet = false
     @State private var showGuidesPanel = false
-    // Framing guide — same keys as Preferences; @AppStorage here for live overlay updates.
-    @AppStorage("guideActive") private var guideActive = false
-    @AppStorage("guideAspect") private var guideAspect = 2.39
     @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
 
@@ -200,12 +197,9 @@ struct ContentView: View {
             }
             .aspectRatio(videoAspect, contentMode: .fit)   // full image, aspect preserved
             // Framing guide overlay — bounds == displayed video rect, so it tracks
-            // letterbox/pillarbox + scaling. Above the video, below the controls.
-            .overlay {
-                if guideActive {
-                    GuideOverlay(aspect: guideAspect)
-                }
-            }
+            // letterbox/pillarbox + scaling. Self-contained (reads guide prefs); draws
+            // nothing when off. Above the video, below the controls.
+            .overlay { GuideOverlay() }
 
             if isScrubbing, let preview = scrubPreviewImage {
                 Image(decorative: preview, scale: 1.0)

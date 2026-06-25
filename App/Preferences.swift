@@ -52,10 +52,25 @@ final class Preferences: ObservableObject {
     // enum's String raw value. Default .bit10 (the 1023 ruler read in Resolve).
     @AppStorage("scopeScale") var scopeScale: ScopeScale = .bit10
 
-    // Framing guide (non-destructive aspect-ratio crop overlay). Persists whether a
-    // guide is shown and which aspect. Default: off.
-    @AppStorage("guideActive") var guideActive: Bool = false
+    // Framing guide (non-destructive overlay). Canonical declarations; the overlay,
+    // panel, and Settings bind these same keys. Defaults reproduce Pass 1's look.
+    // Which guide is active: off / a preset aspect (guideAspect) / custom (customW/H).
+    @AppStorage("guideMode") var guideMode: GuideMode = .off
     @AppStorage("guideAspect") var guideAspect: Double = 2.39
+    @AppStorage("customW") var customW: Double = 9
+    @AppStorage("customH") var customH: Double = 16
+    // Safe lines (independent of the crop guide).
+    @AppStorage("safeLinesOn") var safeLinesOn: Bool = false
+    @AppStorage("safeTop") var safeTop: Double = 0.10
+    @AppStorage("safeBottom") var safeBottom: Double = 0.90
+    // Styling (moved out of Pass 1 code constants; tunable in Settings).
+    @AppStorage("guideDarkenOpacity") var guideDarkenOpacity: Double = 0.85
+    @AppStorage("guideDarkenColor") var guideDarkenColorHex: String = "000000"
+    @AppStorage("guideLineColor") var guideLineColorHex: String = "FFFFFF"
+    @AppStorage("guideLineWidth") var guideLineWidth: Double = 2
+    @AppStorage("safeLineColor") var safeLineColorHex: String = "FFFF00"
+    @AppStorage("safeLineWidth") var safeLineWidth: Double = 1
+    @AppStorage("safeLineOpacity") var safeLineOpacity: Double = 0.75
 
     /// Slider range shared by every scope-intensity control (per-scope + master).
     /// 0.25 = quite dim, 3.0 = quite hot, 1.0 = current default look.
@@ -119,6 +134,20 @@ struct SettingsView: View {
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
+    // Framing-guide styling (defaults reproduce Pass 1's look).
+    @AppStorage("guideDarkenOpacity") private var guideDarkenOpacity = 0.85
+    @AppStorage("guideDarkenColor") private var guideDarkenHex = "000000"
+    @AppStorage("guideLineColor") private var guideLineHex = "FFFFFF"
+    @AppStorage("guideLineWidth") private var guideLineWidth = 2.0
+    @AppStorage("safeLineColor") private var safeLineHex = "FFFF00"
+    @AppStorage("safeLineWidth") private var safeLineWidth = 1.0
+    @AppStorage("safeLineOpacity") private var safeLineOpacity = 0.75
+
+    private func colorBinding(_ hex: Binding<String>) -> Binding<Color> {
+        Binding(get: { ScopeColorCodec.color(fromHex: hex.wrappedValue) },
+                set: { hex.wrappedValue = ScopeColorCodec.hex(from: $0) })
+    }
+
     var body: some View {
         Form {
             Picker("Controls", selection: $controlModeRaw) {
@@ -142,6 +171,24 @@ struct SettingsView: View {
                     Image(systemName: "sun.min").foregroundStyle(.secondary)
                     Slider(value: $globalScopeIntensity, in: Preferences.scopeIntensityRange)
                     Image(systemName: "sun.max").foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Framing Guides") {
+                ColorPicker("Outside (darken) color", selection: colorBinding($guideDarkenHex))
+                HStack {
+                    Text("Outside opacity")
+                    Slider(value: $guideDarkenOpacity, in: 0.0...1.0)
+                }
+                ColorPicker("Guide line color", selection: colorBinding($guideLineHex))
+                Stepper("Guide line width: \(Int(guideLineWidth)) pt",
+                        value: $guideLineWidth, in: 1...10, step: 1)
+                ColorPicker("Safe line color", selection: colorBinding($safeLineHex))
+                Stepper("Safe line width: \(Int(safeLineWidth)) pt",
+                        value: $safeLineWidth, in: 1...8, step: 1)
+                HStack {
+                    Text("Safe line opacity")
+                    Slider(value: $safeLineOpacity, in: 0.0...1.0)
                 }
             }
         }
