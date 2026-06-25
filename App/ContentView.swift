@@ -27,6 +27,8 @@ struct ContentView: View {
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
     @State private var showWaveform = false
     @StateObject private var waveformModel = WaveformScopeModel()
+    @State private var showParade = false
+    @StateObject private var paradeModel = ParadeScopeModel()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -100,6 +102,13 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            if showParade {
+                ParadeScopeView(model: paradeModel)
+                    .padding(16)
+                    .transition(.opacity)
+            }
+        }
         .overlay(alignment: .topLeading) {
             if engine.hasMedia {
                 Text(showReferenceLayer ? "REFERENCE (AVSampleBufferDisplayLayer)" : "METAL")
@@ -157,6 +166,19 @@ struct ContentView: View {
                 }
             }
             .keyboardShortcut("w", modifiers: [.control, .option])
+            .opacity(0)
+        )
+        .background(
+            Button("") {
+                showParade.toggle()
+                if showParade {
+                    paradeModel.renderer = metalRenderer
+                    paradeModel.start()
+                } else {
+                    paradeModel.stop()
+                }
+            }
+            .keyboardShortcut("p", modifiers: [.control, .option])
             .opacity(0)
         )
         .onContinuousHover { phase in

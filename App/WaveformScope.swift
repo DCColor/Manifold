@@ -21,6 +21,7 @@ final class WaveformScopeModel: ObservableObject {
     private let workQueue = DispatchQueue(label: "com.graviton.manifold.scope.waveform",
                                           qos: .userInitiated)
     private var sampling = false   // gate: skip a tick if the prior compute is still running
+    private var readbackTexture: MTLTexture?   // this scope's own readback destination
 
     /// Perceptual-smoothness cap, NOT a framerate sync — independent of the source
     /// frame rate (a 24 fps and a 60 fps clip both update the scope at this rate).
@@ -57,7 +58,7 @@ final class WaveformScopeModel: ObservableObject {
         // The completion fires off the render thread once the GPU is done; we then
         // compute on workQueue and publish on main. This avoids the waitUntilCompleted
         // stall that landed the scope 2-3 presented frames late.
-        let issued = renderer.readbackRenderedFrameAsync { [weak self] bytes, w, h, bpr in
+        let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             // Called on Metal's completion thread (background). Hop to workQueue for
             // the heavy luma compute, then publish + clear the gate on main.
             guard let self else { return }

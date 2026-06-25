@@ -41,11 +41,6 @@ final class MetalVideoRenderer {
     private var offscreenTexture: MTLTexture?
     private var offscreenSize: (w: Int, h: Int)?
 
-    // Scope-only shared readback texture, reused across async samples. Separate from
-    // the export path's per-call texture. Safe to reuse because the scope's overlap
-    // gate keeps only one async readback in flight at a time (see WaveformScopeModel).
-    private var scopeReadbackTexture: MTLTexture?
-
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
     private struct QueuedFrame { let pts: Double; let pixelBuffer: CVPixelBuffer }
     private var frameQueue: [QueuedFrame] = []
@@ -388,28 +383,29 @@ final class MetalVideoRenderer {
     /// Returns true if a readback was issued (completion WILL fire); false if it
     /// couldn't be set up (completion will NOT fire — caller should clear its gate).
     ///
-    /// The caller MUST gate this so only one async readback is in flight at a time:
-    /// the scope's shared texture is reused, so a new blit must not start before the
-    /// previous completion handler has read it.
+    /// The caller MUST gate this so only one async readback is in flight at a time
+    /// for a given `cache` texture: a new blit must not start before the previous
+    /// completion handler has read it. The destination texture is CALLER-OWNED
+    /// (passed via `cache`), so multiple scopes can sample concurrently — each owns
+    /// its own destination and its own gate, and no two scopes blit into one texture.
     @discardableResult
     func readbackRenderedFrameAsync(
+        into cache: inout MTLTexture?,
         completion: @escaping (_ bytes: [UInt8], _ width: Int, _ height: Int, _ bytesPerRow: Int) -> Void
     ) -> Bool {
         guard let src = offscreenTexture else { return false }
         let width = src.width
         let height = src.height
 
-        // Reuse the scope's shared texture; recreate on size change.
-        if scopeReadbackTexture == nil
-            || scopeReadbackTexture?.width != width
-            || scopeReadbackTexture?.height != height {
+        // Reuse the caller's texture; (re)create it on first use or size change.
+        if cache == nil || cache?.width != width || cache?.height != height {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: Self.renderPixelFormat, width: width, height: height, mipmapped: false)
             desc.storageMode = .shared
             desc.usage = [.shaderRead]
-            scopeReadbackTexture = device.makeTexture(descriptor: desc)
+            cache = device.makeTexture(descriptor: desc)
         }
-        guard let cpuTex = scopeReadbackTexture,
+        guard let cpuTex = cache,
               let cmd = commandQueue.makeCommandBuffer(),
               let blit = cmd.makeBlitCommandEncoder() else {
             return false
