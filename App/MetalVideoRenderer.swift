@@ -463,21 +463,25 @@ final class MetalVideoRenderer {
         }
 
         let ts = Int(Date().timeIntervalSince1970)
-        let dir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        let url = dir.appendingPathComponent("Manifold_frame_\(ts).png")
+        let filename = "Manifold_frame_\(ts).png"
 
-        guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-            print("[EXPORT] destination create failed"); return
-        }
-        CGImageDestinationAddImage(dest, cgImage, nil)
-        if CGImageDestinationFinalize(dest) {
-            let csName = cs.name.map { "\($0)" } ?? "\(cs)"
-            print("[EXPORT] wrote \(url.path)")
-            print("[EXPORT] texture format=\(Self.renderPixelFormat) colorspace=\(csName)")
-        } else {
-            print("[EXPORT] PNG finalize failed")
+        // Write into the user-chosen folder (security-scoped, resolved from a bookmark),
+        // or ~/Desktop by default / on stale bookmark. Image encoding/colorspace above
+        // is unchanged — only the destination differs.
+        Preferences.shared.withExportDirectory { dir in
+            let url = dir.appendingPathComponent(filename)
+            guard let dest = CGImageDestinationCreateWithURL(
+                url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+                print("[EXPORT] destination create failed"); return
+            }
+            CGImageDestinationAddImage(dest, cgImage, nil)
+            if CGImageDestinationFinalize(dest) {
+                let csName = cs.name.map { "\($0)" } ?? "\(cs)"
+                print("[EXPORT] wrote \(url.path)")
+                print("[EXPORT] texture format=\(Self.renderPixelFormat) colorspace=\(csName)")
+            } else {
+                print("[EXPORT] PNG finalize failed")
+            }
         }
     }
 

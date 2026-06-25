@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// How the transport controls are presented.
 enum ControlDisplayMode: String, CaseIterable, Identifiable {
@@ -122,6 +123,57 @@ final class Preferences: ObservableObject {
                 })
     }
 
+    // Frame-export destination folder, stored as a SECURITY-SCOPED BOOKMARK so write
+    // access to a user-picked folder survives relaunch (robust under hardened runtime /
+    // if sandboxing is ever added). Empty = default to ~/Desktop.
+    @AppStorage("exportFolderBookmark") var exportFolderBookmark: Data = Data()
+
+    private static var desktopURL: URL {
+        FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// Store the chosen folder as a security-scoped bookmark.
+    func setExportFolder(_ url: URL) {
+        if let data = try? url.bookmarkData(options: [.withSecurityScope],
+                                            includingResourceValuesForKeys: nil,
+                                            relativeTo: nil) {
+            exportFolderBookmark = data
+        }
+    }
+
+    /// Clear the chosen folder (revert to ~/Desktop).
+    func clearExportFolder() { exportFolderBookmark = Data() }
+
+    /// Resolve the export folder and run `body` with it, bracketing security-scoped
+    /// access. Falls back to ~/Desktop if no folder is chosen or the bookmark is
+    /// stale/unresolvable (never fails the export).
+    func withExportDirectory(_ body: (URL) -> Void) {
+        guard !exportFolderBookmark.isEmpty else { body(Self.desktopURL); return }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: exportFolderBookmark,
+                                 options: [.withSecurityScope],
+                                 relativeTo: nil, bookmarkDataIsStale: &stale),
+              !stale else {
+            print("[EXPORT] export-folder bookmark stale/unresolvable — using Desktop")
+            body(Self.desktopURL); return
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        body(url)
+    }
+
+    /// Display string for Settings (resolves the bookmark for show only).
+    static func displayPath(forBookmark data: Data) -> String {
+        guard !data.isEmpty else { return "Desktop (default)" }
+        var stale = false
+        if let url = try? URL(resolvingBookmarkData: data, options: [.withSecurityScope],
+                              relativeTo: nil, bookmarkDataIsStale: &stale), !stale {
+            return url.path
+        }
+        return "Desktop (default)"
+    }
+
     private init() {}
 }
 
@@ -143,56 +195,104 @@ struct SettingsView: View {
     @AppStorage("safeLineWidth") private var safeLineWidth = 1.0
     @AppStorage("safeLineOpacity") private var safeLineOpacity = 0.75
 
+    // For reactive display of the chosen export folder (writes go via Preferences).
+    @AppStorage("exportFolderBookmark") private var exportFolderBookmark = Data()
+
+    private func chooseExportFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose a folder for exported frames"
+        if panel.runModal() == .OK, let url = panel.url {
+            Preferences.shared.setExportFolder(url)
+        }
+    }
+
     private func colorBinding(_ hex: Binding<String>) -> Binding<Color> {
         Binding(get: { ScopeColorCodec.color(fromHex: hex.wrappedValue) },
                 set: { hex.wrappedValue = ScopeColorCodec.hex(from: $0) })
     }
 
+    private func pct(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
+
+    /// Consistent labeled slider row with a trailing value readout.
+    private func sliderRow(_ label: String, _ value: Binding<Double>,
+                           in range: ClosedRange<Double>, readout: String) -> some View {
+        LabeledContent(label) {
+            HStack(spacing: 8) {
+                Slider(value: value, in: range).frame(width: 160)
+                Text(readout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+    }
+
     var body: some View {
         Form {
-            Picker("Controls", selection: $controlModeRaw) {
-                ForEach(ControlDisplayMode.allCases) { mode in
-                    Text(mode.label).tag(mode.rawValue)
+            Section("Playback") {
+                Picker("Controls", selection: $controlModeRaw) {
+                    ForEach(ControlDisplayMode.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
                 }
-            }
-            .pickerStyle(.inline)
+                .pickerStyle(.inline)
 
-            Toggle("Autoplay on open", isOn: $autoplayOnLoad)
-
-            Picker("Scope Scale", selection: $scopeScale) {
-                ForEach(ScopeScale.selectable) { scale in
-                    Text(scale.label).tag(scale)
-                }
+                Toggle("Autoplay on open", isOn: $autoplayOnLoad)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Scope Intensity (master — scales all scopes)")
-                HStack(spacing: 6) {
-                    Image(systemName: "sun.min").foregroundStyle(.secondary)
-                    Slider(value: $globalScopeIntensity, in: Preferences.scopeIntensityRange)
-                    Image(systemName: "sun.max").foregroundStyle(.secondary)
+            Section("Scopes") {
+                Picker("Scope Scale", selection: $scopeScale) {
+                    ForEach(ScopeScale.selectable) { scale in
+                        Text(scale.label).tag(scale)
+                    }
+                }
+                LabeledContent("Master scope intensity") {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sun.min").foregroundStyle(.secondary)
+                        Slider(value: $globalScopeIntensity, in: Preferences.scopeIntensityRange)
+                            .frame(width: 160)
+                        Image(systemName: "sun.max").foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Section("Frame Export") {
+                LabeledContent("Folder") {
+                    Text(Preferences.displayPath(forBookmark: exportFolderBookmark))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                HStack {
+                    Button("Choose…") { chooseExportFolder() }
+                    if !exportFolderBookmark.isEmpty {
+                        Button("Use Desktop") { Preferences.shared.clearExportFolder() }
+                    }
                 }
             }
 
             Section("Framing Guides") {
+                // Crop guide
                 ColorPicker("Outside (darken) color", selection: colorBinding($guideDarkenHex))
-                HStack {
-                    Text("Outside opacity")
-                    Slider(value: $guideDarkenOpacity, in: 0.0...1.0)
-                }
+                sliderRow("Outside opacity", $guideDarkenOpacity, in: 0.0...1.0,
+                          readout: pct(guideDarkenOpacity))
                 ColorPicker("Guide line color", selection: colorBinding($guideLineHex))
                 Stepper("Guide line width: \(Int(guideLineWidth)) pt",
                         value: $guideLineWidth, in: 1...10, step: 1)
+                // Safe lines
                 ColorPicker("Safe line color", selection: colorBinding($safeLineHex))
                 Stepper("Safe line width: \(Int(safeLineWidth)) pt",
                         value: $safeLineWidth, in: 1...8, step: 1)
-                HStack {
-                    Text("Safe line opacity")
-                    Slider(value: $safeLineOpacity, in: 0.0...1.0)
-                }
+                sliderRow("Safe line opacity", $safeLineOpacity, in: 0.0...1.0,
+                          readout: pct(safeLineOpacity))
             }
         }
-        .padding(20)
-        .frame(width: 360)
+        .formStyle(.grouped)
+        .frame(width: 440)
+        .frame(minHeight: 520)
     }
 }
