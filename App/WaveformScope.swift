@@ -1,5 +1,31 @@
 import SwiftUI
 import CoreGraphics
+import AppKit
+
+/// Stores/restores a scope trace color as a 6-digit sRGB hex string (no alpha) so it
+/// can live in @AppStorage, and converts to RGB floats for the trace compute.
+enum ScopeColorCodec {
+    static func hex(from color: Color) -> String {
+        let ns = NSColor(color).usingColorSpace(.sRGB) ?? .white
+        let r = Int((ns.redComponent * 255).rounded())
+        let g = Int((ns.greenComponent * 255).rounded())
+        let b = Int((ns.blueComponent * 255).rounded())
+        return String(format: "%02X%02X%02X", r, g, b)
+    }
+    static func color(fromHex hex: String) -> Color {
+        let (r, g, b) = rgb(fromHex: hex)
+        return Color(.sRGB, red: Double(r), green: Double(g), blue: Double(b))
+    }
+    /// RGB floats 0–1 for the trace compute. Falls back to white on a bad string.
+    static func rgb(fromHex hex: String) -> (r: Float, g: Float, b: Float) {
+        var s = hex
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = Int(s, radix: 16) else { return (1, 1, 1) }
+        return (Float((v >> 16) & 0xFF) / 255.0,
+                Float((v >> 8) & 0xFF) / 255.0,
+                Float(v & 0xFF) / 255.0)
+    }
+}
 
 /// Snap a rendered slot width (points) to the nearest 64 and clamp — used by all
 /// scopes to size their internal compute buffer to the slot they actually occupy,
@@ -184,6 +210,8 @@ final class WaveformScopeModel: ObservableObject {
         let gain = baseGain
             * Float(Preferences.shared.waveformIntensity)
             * Float(Preferences.shared.globalScopeIntensity)
+        // Trace hue (snapshot on main); brightness stays the intensity's job.
+        let color = ScopeColorCodec.rgb(fromHex: Preferences.shared.waveformTraceColorHex)
 
         // NON-BLOCKING readback: issue the GPU->CPU copy and return immediately.
         // The completion fires off the render thread once the GPU is done; we then
@@ -194,7 +222,7 @@ final class WaveformScopeModel: ObservableObject {
             // the heavy luma compute, then publish + clear the gate on main.
             guard let self else { return }
             self.workQueue.async {
-                let img = self.computeWaveform(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain)
+                let img = self.computeWaveform(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain, color: color)
                 DispatchQueue.main.async {
                     if let img { self.image = img }
                     self.sampling = false   // gate held from issue until compute published
@@ -208,7 +236,7 @@ final class WaveformScopeModel: ObservableObject {
 
     /// Build the luma waveform as a green-on-black RGBA CGImage.
     /// BGRA byte order (bytes B,G,R,A); row stride uses bytesPerRow, not width*4.
-    private func computeWaveform(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float) -> CGImage? {
+    private func computeWaveform(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float, color: (r: Float, g: Float, b: Float)) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let scopeW = columns
         let bins = lumaBins
@@ -243,11 +271,14 @@ final class WaveformScopeModel: ObservableObject {
         var pixels = [UInt8](repeating: 0, count: scopeW * bins * 4)
         for i in 0..<(scopeW * bins) {
             let v = scopeBrightness(count: accum[i], maxCount: maxCount, gain: gain)
+            // final pixel = traceColor × computedIntensity (hue from picker, brightness
+            // from the curve — orthogonal). Default green reproduces the old (0,v,0).
+            let fv = Float(v)
             let o = i * 4
-            pixels[o + 0] = 0      // R
-            pixels[o + 1] = v      // G — green trace
-            pixels[o + 2] = 0      // B
-            pixels[o + 3] = 255    // A
+            pixels[o + 0] = UInt8(fv * color.r)
+            pixels[o + 1] = UInt8(fv * color.g)
+            pixels[o + 2] = UInt8(fv * color.b)
+            pixels[o + 3] = 255
         }
 
         let cs = CGColorSpaceCreateDeviceRGB()
@@ -285,6 +316,18 @@ struct WaveformScopeView: View {
                            in: Preferences.scopeIntensityRange)
                         .controlSize(.mini)
                         .frame(width: 70)
+                    ColorPicker("", selection: Preferences.shared.waveformTraceColorBinding)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                    Button {
+                        Preferences.shared.waveformTraceColorHex = Preferences.defaultWaveformTraceColorHex
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .help("Reset trace color")
                 }
                 .padding(.horizontal, 6)
                 .frame(height: scopeHeaderHeight)

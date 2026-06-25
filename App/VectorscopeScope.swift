@@ -89,10 +89,12 @@ final class VectorscopeScopeModel: ObservableObject {
         let gain = baseGain
             * Float(Preferences.shared.vectorscopeIntensity)
             * Float(Preferences.shared.globalScopeIntensity)
+        // Trace hue (snapshot on main); brightness stays the intensity's job.
+        let color = ScopeColorCodec.rgb(fromHex: Preferences.shared.vectorscopeTraceColorHex)
         let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             guard let self else { return }
             self.workQueue.async {
-                let img = self.computeVectorscope(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain)
+                let img = self.computeVectorscope(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain, color: color)
                 DispatchQueue.main.async {
                     if let img { self.image = img }
                     self.sampling = false
@@ -104,7 +106,7 @@ final class VectorscopeScopeModel: ObservableObject {
 
     /// Plot each sampled pixel's chroma into the plane buffer; log-normalize; emit a
     /// white-on-black trace image. BGRA byte order; bytesPerRow; rowStride subsampling.
-    private func computeVectorscope(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float) -> CGImage? {
+    private func computeVectorscope(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float, color: (r: Float, g: Float, b: Float)) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let plane = self.plane
         let center = Float(plane) * 0.5
@@ -137,8 +139,13 @@ final class VectorscopeScopeModel: ObservableObject {
         var pixels = [UInt8](repeating: 0, count: plane * plane * 4)
         for i in 0..<(plane * plane) {
             let v = scopeBrightness(count: accum[i], maxCount: maxCount, gain: gain)
+            // final pixel = traceColor × computedIntensity. Default white reproduces (v,v,v).
+            let fv = Float(v)
             let o = i * 4
-            pixels[o + 0] = v; pixels[o + 1] = v; pixels[o + 2] = v; pixels[o + 3] = 255   // white trace
+            pixels[o + 0] = UInt8(fv * color.r)
+            pixels[o + 1] = UInt8(fv * color.g)
+            pixels[o + 2] = UInt8(fv * color.b)
+            pixels[o + 3] = 255
         }
 
         let cs = CGColorSpaceCreateDeviceRGB()
@@ -173,6 +180,18 @@ struct VectorscopeScopeView: View {
                            in: Preferences.scopeIntensityRange)
                         .controlSize(.mini)
                         .frame(width: 70)
+                    ColorPicker("", selection: Preferences.shared.vectorscopeTraceColorBinding)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                    Button {
+                        Preferences.shared.vectorscopeTraceColorHex = Preferences.defaultVectorscopeTraceColorHex
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .help("Reset trace color")
                 }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 4)

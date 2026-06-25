@@ -68,6 +68,40 @@ final class Preferences: ObservableObject {
         Binding(get: { self.vectorscopeIntensity }, set: { self.vectorscopeIntensity = $0 })
     }
 
+    // Per-scope trace COLOR (hue the trace is painted in; intensity stays orthogonal).
+    // Stored as 6-digit sRGB hex. Defaults reproduce the current look: waveform green,
+    // vectorscope white. (Parade is intentionally excluded — its R/G/B are locked.)
+    // Default trace colors — single source so the @AppStorage default and the
+    // header reset buttons can't drift apart.
+    static let defaultWaveformTraceColorHex = "00FF00"     // green
+    static let defaultVectorscopeTraceColorHex = "FFFFFF"  // white
+    @AppStorage("waveformTraceColor") var waveformTraceColorHex: String = Preferences.defaultWaveformTraceColorHex
+    @AppStorage("vectorscopeTraceColor") var vectorscopeTraceColorHex: String = Preferences.defaultVectorscopeTraceColorHex
+
+    var waveformTraceColorBinding: Binding<Color> {
+        Binding(get: { ScopeColorCodec.color(fromHex: self.waveformTraceColorHex) },
+                set: { self.waveformTraceColorHex = ScopeColorCodec.hex(from: $0) })
+    }
+    var vectorscopeTraceColorBinding: Binding<Color> {
+        Binding(get: { ScopeColorCodec.color(fromHex: self.vectorscopeTraceColorHex) },
+                set: { self.vectorscopeTraceColorHex = ScopeColorCodec.hex(from: $0) })
+    }
+
+    // Parade is two-state: default RGB columns, or monochrome (all three columns in
+    // one chosen color). Picking a color activates monochrome; the reset button (RGB)
+    // turns it off. Parade has NO per-channel colors.
+    @AppStorage("paradeMonochrome") var paradeMonochrome: Bool = false
+    @AppStorage("paradeMonoColor") var paradeMonoColorHex: String = "FFFFFF"
+
+    /// Swatch binding: setting a color also switches the parade into monochrome mode.
+    var paradeMonoColorBinding: Binding<Color> {
+        Binding(get: { ScopeColorCodec.color(fromHex: self.paradeMonoColorHex) },
+                set: {
+                    self.paradeMonoColorHex = ScopeColorCodec.hex(from: $0)
+                    self.paradeMonochrome = true
+                })
+    }
+
     private init() {}
 }
 

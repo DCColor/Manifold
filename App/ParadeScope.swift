@@ -63,12 +63,16 @@ final class ParadeScopeModel: ObservableObject {
         let gain = baseGain
             * Float(Preferences.shared.paradeIntensity)
             * Float(Preferences.shared.globalScopeIntensity)
+        // Snapshot the two-state mode on main: default RGB, or monochrome in one hue.
+        let mono = Preferences.shared.paradeMonochrome
+        let monoColor = ScopeColorCodec.rgb(fromHex: Preferences.shared.paradeMonoColorHex)
         // NON-BLOCKING readback into this scope's OWN texture (independent of the
         // waveform's). Compute on workQueue, publish on main, clear the gate on main.
         let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             guard let self else { return }
             self.workQueue.async {
-                let img = self.computeParade(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain)
+                let img = self.computeParade(bytes: bytes, width: w, height: h, bytesPerRow: bpr,
+                                             gain: gain, mono: mono, monoColor: monoColor)
                 DispatchQueue.main.async {
                     if let img { self.image = img }
                     self.sampling = false
@@ -82,7 +86,8 @@ final class ParadeScopeModel: ObservableObject {
     /// RGBA image. Per-channel histograms (NO luma weighting); BGRA byte order;
     /// row stride subsampling; log normalization with a SHARED max across channels
     /// so inter-channel trace density stays comparable.
-    private func computeParade(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float) -> CGImage? {
+    private func computeParade(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int,
+                               gain: Float, mono: Bool, monoColor: (r: Float, g: Float, b: Float)) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let colW = columnWidth
         let bins = self.bins
@@ -126,15 +131,22 @@ final class ParadeScopeModel: ObservableObject {
                 let vR = intensity(accR[row * colW + bx])
                 let vG = intensity(accG[row * colW + bx])
                 let vB = intensity(accB[row * colW + bx])
+                let oR = (rowOut + (0 * colW + bx)) * 4   // R channel column (left)
+                let oG = (rowOut + (1 * colW + bx)) * 4   // G channel column (mid)
+                let oB = (rowOut + (2 * colW + bx)) * 4   // B channel column (right)
 
-                var o = (rowOut + (0 * colW + bx)) * 4   // R column
-                pixels[o + 0] = vR; pixels[o + 1] = 0; pixels[o + 2] = 0; pixels[o + 3] = 255
-
-                o = (rowOut + (1 * colW + bx)) * 4       // G column
-                pixels[o + 0] = 0; pixels[o + 1] = vG; pixels[o + 2] = 0; pixels[o + 3] = 255
-
-                o = (rowOut + (2 * colW + bx)) * 4       // B column
-                pixels[o + 0] = 0; pixels[o + 1] = 0; pixels[o + 2] = vB; pixels[o + 3] = 255
+                if mono {
+                    // All three columns in ONE hue; brightness still per-channel.
+                    let fR = Float(vR), fG = Float(vG), fB = Float(vB)
+                    pixels[oR + 0] = UInt8(fR * monoColor.r); pixels[oR + 1] = UInt8(fR * monoColor.g); pixels[oR + 2] = UInt8(fR * monoColor.b); pixels[oR + 3] = 255
+                    pixels[oG + 0] = UInt8(fG * monoColor.r); pixels[oG + 1] = UInt8(fG * monoColor.g); pixels[oG + 2] = UInt8(fG * monoColor.b); pixels[oG + 3] = 255
+                    pixels[oB + 0] = UInt8(fB * monoColor.r); pixels[oB + 1] = UInt8(fB * monoColor.g); pixels[oB + 2] = UInt8(fB * monoColor.b); pixels[oB + 3] = 255
+                } else {
+                    // Default: red / green / blue columns (unchanged).
+                    pixels[oR + 0] = vR; pixels[oR + 1] = 0; pixels[oR + 2] = 0; pixels[oR + 3] = 255
+                    pixels[oG + 0] = 0; pixels[oG + 1] = vG; pixels[oG + 2] = 0; pixels[oG + 3] = 255
+                    pixels[oB + 0] = 0; pixels[oB + 1] = 0; pixels[oB + 2] = vB; pixels[oB + 3] = 255
+                }
             }
         }
 
@@ -173,6 +185,18 @@ struct ParadeScopeView: View {
                            in: Preferences.scopeIntensityRange)
                         .controlSize(.mini)
                         .frame(width: 70)
+                    // Pick a color -> monochrome in that color.
+                    ColorPicker("", selection: Preferences.shared.paradeMonoColorBinding)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                    // Reset -> standard RGB columns.
+                    Button { Preferences.shared.paradeMonochrome = false } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .help("Reset parade to RGB")
                 }
                 .padding(.horizontal, 6)
                 .frame(height: scopeHeaderHeight)
