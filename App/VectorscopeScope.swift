@@ -12,8 +12,18 @@ final class VectorscopeScopeModel: ObservableObject {
     @Published var image: CGImage?
     weak var renderer: MetalVideoRenderer?
 
-    // Square chroma-plane buffer.
-    static let plane = 300
+    // Square chroma-plane buffer. Tracks the rendered square side, clamped — a
+    // bigger slot gives a crisper plot. (Light touch: the vectorscope is usually
+    // height-limited in the tray, so this mostly stays near the previous 300.)
+    private var plane = 300
+    private let minPlane = 256
+    private let maxPlane = 600
+
+    /// Track the rendered square side so the plane buffer resolution scales with size.
+    func setDisplaySide(_ side: CGFloat) {
+        let p = scopeBucketWidth(side, min: minPlane, max: maxPlane)
+        if p != plane { plane = p }
+    }
 
     /// Chroma -> plot position, as a FRACTION of the plot dimension per chroma unit.
     /// Calibrated to 75% color bars (the broadcast/Resolve convention): at this scale
@@ -75,10 +85,14 @@ final class VectorscopeScopeModel: ObservableObject {
     private func tick() {
         guard !sampling, let renderer else { return }
         sampling = true
+        // Effective gain (Preferences read on main): baseGain × vectorscope × global master.
+        let gain = baseGain
+            * Float(Preferences.shared.vectorscopeIntensity)
+            * Float(Preferences.shared.globalScopeIntensity)
         let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             guard let self else { return }
             self.workQueue.async {
-                let img = self.computeVectorscope(bytes: bytes, width: w, height: h, bytesPerRow: bpr)
+                let img = self.computeVectorscope(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain)
                 DispatchQueue.main.async {
                     if let img { self.image = img }
                     self.sampling = false
@@ -90,9 +104,9 @@ final class VectorscopeScopeModel: ObservableObject {
 
     /// Plot each sampled pixel's chroma into the plane buffer; log-normalize; emit a
     /// white-on-black trace image. BGRA byte order; bytesPerRow; rowStride subsampling.
-    private func computeVectorscope(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> CGImage? {
+    private func computeVectorscope(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
-        let plane = Self.plane
+        let plane = self.plane
         let center = Float(plane) * 0.5
         let s = Self.chromaScaleFrac * Float(plane)   // chroma units -> plane pixels
 
@@ -115,14 +129,14 @@ final class VectorscopeScopeModel: ObservableObject {
             }
         }
 
+        // Per-frame max for normalization; gain+gamma brightness curve so dense chroma
+        // clusters glow and sparse excursions stay dark (no uniform wash).
         var maxCount: UInt32 = 1
         for c in accum where c > maxCount { maxCount = c }
-        let denom = log(1.0 + Float(maxCount))
 
         var pixels = [UInt8](repeating: 0, count: plane * plane * 4)
         for i in 0..<(plane * plane) {
-            let c = accum[i]
-            let v: UInt8 = c == 0 ? 0 : UInt8(min(255.0, 255.0 * log(1.0 + Float(c)) / denom))
+            let v = scopeBrightness(count: accum[i], maxCount: maxCount, gain: gain)
             let o = i * 4
             pixels[o + 0] = v; pixels[o + 1] = v; pixels[o + 2] = v; pixels[o + 3] = 255   // white trace
         }
@@ -143,31 +157,48 @@ struct VectorscopeScopeView: View {
     @ObservedObject var model: VectorscopeScopeModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("VECTORSCOPE · 709")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.5))
-                Spacer()
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-
-            ZStack {
-                Color.black
-                if let img = model.image {
-                    Image(decorative: img, scale: 1.0)
-                        .resizable()
-                        .interpolation(.none)
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                HStack(spacing: 4) {
+                    Text("VECTORSCOPE · 709")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Image(systemName: "sun.max")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.white.opacity(0.4))
+                    Slider(value: Preferences.shared.vectorscopeIntensityBinding,
+                           in: Preferences.scopeIntensityRange)
+                        .controlSize(.mini)
+                        .frame(width: 70)
                 }
-                graticule
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+
+                ZStack {
+                    Color.black
+                    if let img = model.image {
+                        Image(decorative: img, scale: 1.0)
+                            .resizable()
+                            .interpolation(.none)
+                    }
+                    graticule
+                }
+                .aspectRatio(1, contentMode: .fit)   // stay square, fit available space
             }
-            .aspectRatio(1, contentMode: .fit)   // stay square, fit available space
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
+            // The plot is the largest square fitting the slot (minus the header), so
+            // track the smaller dimension as the square side.
+            .onAppear { model.setDisplaySide(min(geo.size.width, geo.size.height)) }
+            .onChange(of: min(geo.size.width, geo.size.height)) { _, side in
+                model.setDisplaySide(side)
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
     }
 
     private var graticule: some View {

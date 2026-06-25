@@ -16,8 +16,18 @@ final class ParadeScopeModel: ObservableObject {
     weak var renderer: MetalVideoRenderer?
 
     // Each channel column is columnWidth px; the full image is 3 columns wide.
-    private let columnWidth = 192
-    private let bins = 256   // 8-bit channel value bins
+    // columnWidth tracks the per-channel slot width (slot/3), clamped.
+    private var columnWidth = 192
+    private let minColumnWidth = 128
+    private let maxColumnWidth = 512
+    private let bins = 256   // 8-bit channel value bins (value axis — unchanged)
+
+    /// Track the scope's rendered slot width; each of the three channel sub-columns
+    /// gets a third of it, so the parade resolution scales with display width.
+    func setDisplayWidth(_ width: CGFloat) {
+        let w = scopeBucketWidth(width / 3.0, min: minColumnWidth, max: maxColumnWidth)
+        if w != columnWidth { columnWidth = w }
+    }
 
     private var timer: Timer?
     private let workQueue = DispatchQueue(label: "com.graviton.manifold.scope.parade",
@@ -49,12 +59,16 @@ final class ParadeScopeModel: ObservableObject {
     private func tick() {
         guard !sampling, let renderer else { return }
         sampling = true
+        // Effective gain (Preferences read on main): baseGain × parade × global master.
+        let gain = baseGain
+            * Float(Preferences.shared.paradeIntensity)
+            * Float(Preferences.shared.globalScopeIntensity)
         // NON-BLOCKING readback into this scope's OWN texture (independent of the
         // waveform's). Compute on workQueue, publish on main, clear the gate on main.
         let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             guard let self else { return }
             self.workQueue.async {
-                let img = self.computeParade(bytes: bytes, width: w, height: h, bytesPerRow: bpr)
+                let img = self.computeParade(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain)
                 DispatchQueue.main.async {
                     if let img { self.image = img }
                     self.sampling = false
@@ -68,7 +82,7 @@ final class ParadeScopeModel: ObservableObject {
     /// RGBA image. Per-channel histograms (NO luma weighting); BGRA byte order;
     /// row stride subsampling; log normalization with a SHARED max across channels
     /// so inter-channel trace density stays comparable.
-    private func computeParade(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> CGImage? {
+    private func computeParade(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
         let colW = columnWidth
         let bins = self.bins
@@ -98,9 +112,9 @@ final class ParadeScopeModel: ObservableObject {
         for c in accR where c > maxCount { maxCount = c }
         for c in accG where c > maxCount { maxCount = c }
         for c in accB where c > maxCount { maxCount = c }
-        let denom = log(1.0 + Float(maxCount))
+        // Shared max across channels -> comparable scaling; gain+gamma brightness curve.
         func intensity(_ c: UInt32) -> UInt8 {
-            c == 0 ? 0 : UInt8(min(255.0, 255.0 * log(1.0 + Float(c)) / denom))
+            scopeBrightness(count: c, maxCount: maxCount, gain: gain)
         }
 
         // Composite: column 0 = R (red trace), 1 = G (green), 2 = B (blue).
@@ -148,28 +162,41 @@ struct ParadeScopeView: View {
     ]
 
     var body: some View {
-        ZStack {
-            Color.black
-            if let img = model.image {
-                Image(decorative: img, scale: 1.0)
-                    .resizable()
-                    .interpolation(.none)
-            }
-            graticule
-            VStack {
-                HStack {
-                    Text("PARADE · RGB (8-bit)")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                if let img = model.image {
+                    Image(decorative: img, scale: 1.0)
+                        .resizable()
+                        .interpolation(.none)
+                }
+                graticule
+                VStack {
+                    HStack(spacing: 4) {
+                        Text("PARADE · RGB (8-bit)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 4)
+                        Image(systemName: "sun.max")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.white.opacity(0.4))
+                        Slider(value: Preferences.shared.paradeIntensityBinding,
+                               in: Preferences.scopeIntensityRange)
+                            .controlSize(.mini)
+                            .frame(width: 70)
+                    }
                     Spacer()
                 }
-                Spacer()
+                .padding(6)
             }
-            .padding(6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
+            .onAppear { model.setDisplayWidth(geo.size.width) }
+            .onChange(of: geo.size.width) { _, w in model.setDisplayWidth(w) }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
     }
 
     private var graticule: some View {

@@ -32,6 +32,29 @@ final class Preferences: ObservableObject {
 
     @AppStorage("autoplayOnLoad") var autoplayOnLoad: Bool = true
 
+    // Scope trace intensity — multiplies the brightness-curve gain. 1.0 = current look.
+    // Per-scope values combine MULTIPLICATIVELY with the global master.
+    @AppStorage("waveformIntensity") var waveformIntensity: Double = 1.0
+    @AppStorage("paradeIntensity") var paradeIntensity: Double = 1.0
+    @AppStorage("vectorscopeIntensity") var vectorscopeIntensity: Double = 1.0
+    @AppStorage("globalScopeIntensity") var globalScopeIntensity: Double = 1.0
+
+    /// Slider range shared by every scope-intensity control (per-scope + master).
+    /// 0.25 = quite dim, 3.0 = quite hot, 1.0 = current default look.
+    static let scopeIntensityRange: ClosedRange<Double> = 0.25...3.0
+
+    // Two-way bindings so the per-scope header sliders drive these without
+    // redeclaring @AppStorage in each scope view (Preferences stays the one owner).
+    var waveformIntensityBinding: Binding<Double> {
+        Binding(get: { self.waveformIntensity }, set: { self.waveformIntensity = $0 })
+    }
+    var paradeIntensityBinding: Binding<Double> {
+        Binding(get: { self.paradeIntensity }, set: { self.paradeIntensity = $0 })
+    }
+    var vectorscopeIntensityBinding: Binding<Double> {
+        Binding(get: { self.vectorscopeIntensity }, set: { self.vectorscopeIntensity = $0 })
+    }
+
     private init() {}
 }
 
@@ -41,6 +64,7 @@ struct SettingsView: View {
     // the same "controlDisplayMode" key as Preferences above, so they stay in sync.
     @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
     @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = true
+    @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
 
     var body: some View {
         Form {
@@ -52,6 +76,15 @@ struct SettingsView: View {
             .pickerStyle(.inline)
 
             Toggle("Autoplay on open", isOn: $autoplayOnLoad)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Scope Intensity (master — scales all scopes)")
+                HStack(spacing: 6) {
+                    Image(systemName: "sun.min").foregroundStyle(.secondary)
+                    Slider(value: $globalScopeIntensity, in: Preferences.scopeIntensityRange)
+                    Image(systemName: "sun.max").foregroundStyle(.secondary)
+                }
+            }
         }
         .padding(20)
         .frame(width: 360)

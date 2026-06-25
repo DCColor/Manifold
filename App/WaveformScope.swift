@@ -1,6 +1,37 @@
 import SwiftUI
 import CoreGraphics
 
+/// Snap a rendered slot width (points) to the nearest 64 and clamp — used by all
+/// scopes to size their internal compute buffer to the slot they actually occupy,
+/// so a wider scope computes MORE horizontal detail instead of upscaling a fixed
+/// buffer. Snapping avoids reallocating the buffer on every sub-pixel resize:
+/// the value only changes when the width crosses a 64-pt boundary.
+func scopeBucketWidth(_ width: CGFloat, min lo: Int, max hi: Int) -> Int {
+    let snapped = ((Int(Swift.max(0, width)) + 32) / 64) * 64
+    return Swift.max(lo, Swift.min(hi, snapped))
+}
+
+// MARK: - Trace brightness mapping (shared by all scopes)
+
+// baseGain is the gain at intensity 1.0 — i.e. perScope=global=1.0 reproduces the
+// current look. The user-facing intensities multiply this (see each scope's tick).
+// gamma/floor stay fixed good constants; only the gain side is user-driven.
+let baseGain: Float = 1.6      // dense bins reach full white a bit before the very max
+let traceGamma: Float = 1.25   // gentle low-end darkening without eating mid-density structure
+let traceFloor: Float = 0.008  // brightness below this clamps to pure black (kills pure haze only)
+
+/// Map an accumulated bin count to 0–255 trace brightness with a gain + gamma curve.
+/// `gain` is the effective gain (baseGain × perScopeIntensity × globalScopeIntensity).
+/// gamma > 1 pushes low counts toward black so sparse areas stay dark and dense areas
+/// build to full brightness — a Resolve-style readable trace.
+func scopeBrightness(count: UInt32, maxCount: UInt32, gain: Float) -> UInt8 {
+    guard count > 0, maxCount > 0 else { return 0 }
+    let normalized = Float(count) / Float(maxCount)
+    var b = powf(Swift.min(normalized * gain, 1.0), traceGamma)
+    if b < traceFloor { b = 0 }
+    return UInt8(Swift.min(255.0, b * 255.0))
+}
+
 /// Native luma waveform scope. Pure consumer of MetalVideoRenderer.readbackRenderedFrame()
 /// — it samples the PRE-DISPLAY offscreen texture (raw code values), never screen pixels,
 /// so it agrees with a Resolve waveform on the same frame. Sampling is throttled here
@@ -13,9 +44,19 @@ final class WaveformScopeModel: ObservableObject {
     /// Set by the owner when the scope is shown. Weak — the renderer outlives nothing here.
     weak var renderer: MetalVideoRenderer?
 
-    // Scope intensity buffer dimensions. Width = column buckets, height = luma bins (8-bit).
-    private let scopeWidth = 512
+    // Scope intensity buffer dimensions. Width = column buckets (tracks the rendered
+    // slot width, clamped); height = luma bins (8-bit, value axis — unchanged).
+    private var columns = 512
+    private let minColumns = 256
+    private let maxColumns = 1024
     private let lumaBins = 256
+
+    /// Track the scope's rendered slot width so the per-column histogram resolution
+    /// scales with display width (wider scope -> finer detail, no upscaling smear).
+    func setDisplayWidth(_ width: CGFloat) {
+        let w = scopeBucketWidth(width, min: minColumns, max: maxColumns)
+        if w != columns { columns = w }
+    }
 
     private var timer: Timer?
     private let workQueue = DispatchQueue(label: "com.graviton.manifold.scope.waveform",
@@ -54,6 +95,12 @@ final class WaveformScopeModel: ObservableObject {
         guard !sampling, let renderer else { return }
         sampling = true
 
+        // Snapshot the effective gain on the main thread (Preferences read here):
+        // baseGain × this scope's intensity × the global master.
+        let gain = baseGain
+            * Float(Preferences.shared.waveformIntensity)
+            * Float(Preferences.shared.globalScopeIntensity)
+
         // NON-BLOCKING readback: issue the GPU->CPU copy and return immediately.
         // The completion fires off the render thread once the GPU is done; we then
         // compute on workQueue and publish on main. This avoids the waitUntilCompleted
@@ -63,7 +110,7 @@ final class WaveformScopeModel: ObservableObject {
             // the heavy luma compute, then publish + clear the gate on main.
             guard let self else { return }
             self.workQueue.async {
-                let img = self.computeWaveform(bytes: bytes, width: w, height: h, bytesPerRow: bpr)
+                let img = self.computeWaveform(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain)
                 DispatchQueue.main.async {
                     if let img { self.image = img }
                     self.sampling = false   // gate held from issue until compute published
@@ -77,9 +124,9 @@ final class WaveformScopeModel: ObservableObject {
 
     /// Build the luma waveform as a green-on-black RGBA CGImage.
     /// BGRA byte order (bytes B,G,R,A); row stride uses bytesPerRow, not width*4.
-    private func computeWaveform(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> CGImage? {
+    private func computeWaveform(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int, gain: Float) -> CGImage? {
         guard width > 0, height > 0 else { return nil }
-        let scopeW = scopeWidth
+        let scopeW = columns
         let bins = lumaBins
 
         // 2D histogram: [bin * scopeW + bucket] = pixel count.
@@ -105,16 +152,13 @@ final class WaveformScopeModel: ObservableObject {
             }
         }
 
-        // Per-frame log normalization: faint traces stay visible, dense ones don't blow out.
+        // Per-frame max for normalization (brightness adapts to content per frame).
         var maxCount: UInt32 = 1
         for c in accum where c > maxCount { maxCount = c }
-        let denom = log(1.0 + Float(maxCount))
 
         var pixels = [UInt8](repeating: 0, count: scopeW * bins * 4)
         for i in 0..<(scopeW * bins) {
-            let c = accum[i]
-            let v: UInt8 = c == 0 ? 0
-                : UInt8(min(255.0, 255.0 * log(1.0 + Float(c)) / denom))
+            let v = scopeBrightness(count: accum[i], maxCount: maxCount, gain: gain)
             let o = i * 4
             pixels[o + 0] = 0      // R
             pixels[o + 1] = v      // G — green trace
@@ -147,28 +191,41 @@ struct WaveformScopeView: View {
     ]
 
     var body: some View {
-        ZStack {
-            Color.black
-            if let img = model.image {
-                Image(decorative: img, scale: 1.0)
-                    .resizable()
-                    .interpolation(.none)
-            }
-            graticule
-            VStack {
-                HStack {
-                    Text("WAVEFORM · luma (8-bit)")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                if let img = model.image {
+                    Image(decorative: img, scale: 1.0)
+                        .resizable()
+                        .interpolation(.none)
+                }
+                graticule
+                VStack {
+                    HStack(spacing: 4) {
+                        Text("WAVEFORM · luma (8-bit)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 4)
+                        Image(systemName: "sun.max")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.white.opacity(0.4))
+                        Slider(value: Preferences.shared.waveformIntensityBinding,
+                               in: Preferences.scopeIntensityRange)
+                            .controlSize(.mini)
+                            .frame(width: 70)
+                    }
                     Spacer()
                 }
-                Spacer()
+                .padding(6)
             }
-            .padding(6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
+            .onAppear { model.setDisplayWidth(geo.size.width) }
+            .onChange(of: geo.size.width) { _, w in model.setDisplayWidth(w) }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.white.opacity(0.15)))
     }
 
     private var graticule: some View {
