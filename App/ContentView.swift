@@ -25,6 +25,8 @@ struct ContentView: View {
     @State private var showGetFlipSheet = false
     @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
+    @State private var showWaveform = false
+    @StateObject private var waveformModel = WaveformScopeModel()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -91,6 +93,13 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if showWaveform {
+                WaveformScopeView(model: waveformModel)
+                    .padding(16)
+                    .transition(.opacity)
+            }
+        }
         .overlay(alignment: .topLeading) {
             if engine.hasMedia {
                 Text(showReferenceLayer ? "REFERENCE (AVSampleBufferDisplayLayer)" : "METAL")
@@ -136,6 +145,19 @@ struct ContentView: View {
             Button("") { metalRenderer?.exportCurrentFrame() }
                 .keyboardShortcut("e", modifiers: [.control, .option])
                 .opacity(0)
+        )
+        .background(
+            Button("") {
+                showWaveform.toggle()
+                if showWaveform {
+                    waveformModel.renderer = metalRenderer
+                    waveformModel.start()
+                } else {
+                    waveformModel.stop()
+                }
+            }
+            .keyboardShortcut("w", modifiers: [.control, .option])
+            .opacity(0)
         )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }

@@ -41,6 +41,11 @@ final class MetalVideoRenderer {
     private var offscreenTexture: MTLTexture?
     private var offscreenSize: (w: Int, h: Int)?
 
+    // Scope-only shared readback texture, reused across async samples. Separate from
+    // the export path's per-call texture. Safe to reuse because the scope's overlap
+    // gate keeps only one async readback in flight at a time (see WaveformScopeModel).
+    private var scopeReadbackTexture: MTLTexture?
+
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
     private struct QueuedFrame { let pts: Double; let pixelBuffer: CVPixelBuffer }
     private var frameQueue: [QueuedFrame] = []
@@ -340,7 +345,9 @@ final class MetalVideoRenderer {
     /// can't tear against an in-flight render (command buffers are atomic units).
     // M3b: 10-bit migration touches here — the bytesPerRow math assumes 4 bytes/pixel
     // bgra8; a 10-bit format changes stride and channel extraction.
-    private func readbackRenderedFrame() -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
+    // Internal (not private) so native scopes can sample the pre-display offscreen
+    // texture. Stays per-call / full-res — the THROTTLE lives in the scope consumer.
+    func readbackRenderedFrame() -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
         guard let src = offscreenTexture else { return nil }
         let width = src.width
         let height = src.height
@@ -370,6 +377,63 @@ final class MetalVideoRenderer {
                             from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
         }
         return (bytes, width, height, bytesPerRow)
+    }
+
+    /// NON-BLOCKING readback for the continuous scope path. Blits the offscreen
+    /// texture into the scope's own shared texture, then reads it back in the
+    /// command buffer's completion handler (no waitUntilCompleted) — so the caller
+    /// never stalls the GPU pipeline. `completion` is invoked off the render thread
+    /// (on Metal's completion-handler thread) once the GPU has finished.
+    ///
+    /// Returns true if a readback was issued (completion WILL fire); false if it
+    /// couldn't be set up (completion will NOT fire — caller should clear its gate).
+    ///
+    /// The caller MUST gate this so only one async readback is in flight at a time:
+    /// the scope's shared texture is reused, so a new blit must not start before the
+    /// previous completion handler has read it.
+    @discardableResult
+    func readbackRenderedFrameAsync(
+        completion: @escaping (_ bytes: [UInt8], _ width: Int, _ height: Int, _ bytesPerRow: Int) -> Void
+    ) -> Bool {
+        guard let src = offscreenTexture else { return false }
+        let width = src.width
+        let height = src.height
+
+        // Reuse the scope's shared texture; recreate on size change.
+        if scopeReadbackTexture == nil
+            || scopeReadbackTexture?.width != width
+            || scopeReadbackTexture?.height != height {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: Self.renderPixelFormat, width: width, height: height, mipmapped: false)
+            desc.storageMode = .shared
+            desc.usage = [.shaderRead]
+            scopeReadbackTexture = device.makeTexture(descriptor: desc)
+        }
+        guard let cpuTex = scopeReadbackTexture,
+              let cmd = commandQueue.makeCommandBuffer(),
+              let blit = cmd.makeBlitCommandEncoder() else {
+            return false
+        }
+        blit.copy(from: src, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: width, height: height, depth: 1),
+                  to: cpuTex, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+
+        let bytesPerRow = width * 4
+        cmd.addCompletedHandler { _ in
+            // GPU finished — safe to read the shared texture. Runs on a Metal
+            // completion thread (not the render thread, not main, non-blocking).
+            var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+            bytes.withUnsafeMutableBytes { raw in
+                cpuTex.getBytes(raw.baseAddress!, bytesPerRow: bytesPerRow,
+                                from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+            }
+            completion(bytes, width, height, bytesPerRow)
+        }
+        cmd.commit()
+        return true
     }
 
     // MARK: - Frame export (on-demand, manual)
