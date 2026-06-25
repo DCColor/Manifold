@@ -33,6 +33,10 @@ final class Preferences: ObservableObject {
 
     @AppStorage("autoplayOnLoad") var autoplayOnLoad: Bool = true
 
+    // Output volume (0–1), persisted across launches. Stored as Double (@AppStorage
+    // has no Float). Mute is intentionally NOT persisted — always start unmuted.
+    @AppStorage("playbackVolume") var playbackVolume: Double = 1.0
+
     // Scope arrangement (persisted across launches). Canonical declaration lives here;
     // ContentView binds the same keys via @AppStorage for SwiftUI reactivity.
     // NOTE: showReferenceLayer (⌃⌥R) is intentionally NOT persisted — it's a diagnostic

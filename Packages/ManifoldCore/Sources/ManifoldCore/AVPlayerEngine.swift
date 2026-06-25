@@ -80,6 +80,15 @@ public final class AVPlayerEngine: ObservableObject, PlaybackEngine {
     public func play() { player.play() }
     public func pause() { player.pause() }
 
+    // Audio output gain/mute via AVPlayer's native controls (protocol symmetry).
+    public var volume: Float { player.volume }
+    public var isMuted: Bool { player.isMuted }
+    public func setVolume(_ v: Float) {
+        player.volume = min(1, max(0, v))
+        player.isMuted = false
+    }
+    public func toggleMute() { player.isMuted.toggle() }
+
     public func togglePlayPause() {
         isPlaying ? pause() : play()
     }

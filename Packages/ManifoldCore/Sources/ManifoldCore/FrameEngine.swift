@@ -16,6 +16,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     @Published public private(set) var hasMedia = false
     @Published public private(set) var metadata: VideoMetadata?
     @Published public private(set) var currentURL: URL?
+    // Audio output gain/mute (passthrough to the persistent audioRenderer).
+    @Published public private(set) var volume: Float = 1.0
+    @Published public private(set) var isMuted: Bool = false
     public private(set) var tcInfo: TimecodeReader.Result?
 
     /// Optional tap: called on the video pump queue with each decoded frame,
@@ -84,6 +87,23 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.tcInfo = MediaInspector.timecode(for: url)
         let meta = await MediaInspector.metadata(for: freshAsset, url: url)
         self.metadata = meta
+    }
+
+    /// Set output gain (0–1). Writes through to the persistent audio renderer.
+    /// Adjusting volume unmutes (standard behavior). Does not touch audio decode.
+    public func setVolume(_ v: Float) {
+        let clamped = min(1, max(0, v))
+        volume = clamped
+        audioRenderer.volume = clamped
+        if isMuted {
+            isMuted = false
+            audioRenderer.isMuted = false
+        }
+    }
+
+    public func toggleMute() {
+        isMuted.toggle()
+        audioRenderer.isMuted = isMuted
     }
 
     public func play() {

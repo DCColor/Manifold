@@ -24,6 +24,12 @@ public protocol PlaybackEngine: AnyObject {
     // Derived readouts
     var totalFrames: Int { get }
 
+    // Audio output (gain/mute only — not the audio essence/decode)
+    var volume: Float { get }      // 0–1 linear
+    var isMuted: Bool { get }
+    func setVolume(_ v: Float)
+    func toggleMute()
+
     // Transport / loading
     func load(url: URL)
     func play()

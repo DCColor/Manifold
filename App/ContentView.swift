@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var showFileNameOverlay = false
     @State private var showGetFlipSheet = false
     @State private var showGuidesPanel = false
+    @State private var volumeHovering = false
     @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
 
@@ -111,6 +112,8 @@ struct ContentView: View {
                 engine.onFlush = { [weak renderer] in renderer?.flush() }
                 renderer.start()
             }
+            // Apply persisted volume (mute is not persisted — starts unmuted).
+            engine.setVolume(Float(Preferences.shared.playbackVolume))
             // Persisted arrangement may reopen the tray with scopes already on —
             // start their sampling to match the restored visibility.
             updateScopeSampling()
@@ -364,8 +367,30 @@ struct ContentView: View {
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
 
-                Button { } label: { Image(systemName: "speaker.wave.2.fill") }
-                    .help("Volume (coming soon)").disabled(true)
+                HStack(spacing: 6) {
+                    Button { engine.toggleMute() } label: {
+                        Image(systemName: speakerSymbol)
+                    }
+                    .help(engine.isMuted ? "Unmute" : "Mute")
+                    if volumeHovering {
+                        Slider(
+                            value: Binding(
+                                get: { Double(engine.volume) },
+                                set: { newValue in
+                                    engine.setVolume(Float(newValue))
+                                    Preferences.shared.playbackVolume = newValue
+                                }
+                            ),
+                            in: 0...1
+                        )
+                        .controlSize(.mini)
+                        .frame(width: 70)
+                        .transition(.opacity.combined(with: .move(edge: .leading)))
+                    }
+                }
+                .onHover { h in
+                    withAnimation(.easeInOut(duration: 0.15)) { volumeHovering = h }
+                }
                 Button { } label: { Image(systemName: "repeat") }
                     .help("Loop (coming soon)").disabled(true)
                 Button { showGuidesPanel.toggle() } label: { Image(systemName: "grid") }
@@ -483,6 +508,12 @@ struct ContentView: View {
         }
         .foregroundStyle(on ? Color.green : .white.opacity(0.35))
         .help(label)
+    }
+
+    /// Speaker icon reflecting mute + volume level.
+    private var speakerSymbol: String {
+        if engine.isMuted || engine.volume <= 0.0001 { return "speaker.slash.fill" }
+        return engine.volume < 0.5 ? "speaker.wave.1.fill" : "speaker.wave.2.fill"
     }
 
     private func togglePin() {
