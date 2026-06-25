@@ -101,6 +101,33 @@ struct ContentView: View {
                 .keyboardShortcut("v", modifiers: [.control, .option])
                 .opacity(0)
         )
+        // JKL shuttle transport (bare keys — pro NLE muscle memory).
+        .background(
+            Button("") { engine.shuttleBackward() }
+                .keyboardShortcut("j", modifiers: [])
+                .opacity(0)
+        )
+        .background(
+            Button("") { engine.shuttlePause() }
+                .keyboardShortcut("k", modifiers: [])
+                .opacity(0)
+        )
+        .background(
+            Button("") { engine.shuttleForward() }
+                .keyboardShortcut("l", modifiers: [])
+                .opacity(0)
+        )
+        // Frame jog (arrow keys — back/forward one frame, pauses).
+        .background(
+            Button("") { engine.stepFrame(by: -1) }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .opacity(0)
+        )
+        .background(
+            Button("") { engine.stepFrame(by: 1) }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .opacity(0)
+        )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }

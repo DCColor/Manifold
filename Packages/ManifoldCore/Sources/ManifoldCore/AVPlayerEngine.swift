@@ -13,6 +13,9 @@ public final class AVPlayerEngine: ObservableObject, PlaybackEngine {
     @Published public private(set) var displaySize: CGSize?
     @Published public private(set) var hasMedia = false
     @Published public private(set) var metadata: VideoMetadata?
+    @Published public private(set) var shuttleRate: Float = 0
+
+    private let maxShuttleRate: Float = 8
 
     /// Raw start-timecode info for the loaded clip (nil if no TC track).
     public private(set) var tcInfo: TimecodeReader.Result?
@@ -91,6 +94,25 @@ public final class AVPlayerEngine: ObservableObject, PlaybackEngine {
 
     public func togglePlayPause() {
         isPlaying ? pause() : play()
+    }
+
+    // JKL shuttle — AVPlayer drives rate natively (reverse only if the item's
+    // canPlayReverse is true; otherwise the rate is clamped to 0 by AVPlayer).
+    public func setShuttleRate(_ rate: Float) {
+        let clamped = max(-maxShuttleRate, min(maxShuttleRate, rate))
+        shuttleRate = clamped
+        player.rate = clamped
+    }
+    public func shuttleForward() {
+        setShuttleRate(shuttleRate < 1 ? 1 : min(shuttleRate * 2, maxShuttleRate))
+    }
+    public func shuttleBackward() {
+        setShuttleRate(shuttleRate > -1 ? -1 : max(shuttleRate * 2, -maxShuttleRate))
+    }
+    public func shuttlePause() { setShuttleRate(0) }
+    public func stepFrame(by frames: Int) {
+        setShuttleRate(0)
+        player.currentItem?.step(byCount: frames)
     }
 
     public func scrubSeek(to seconds: Double) {

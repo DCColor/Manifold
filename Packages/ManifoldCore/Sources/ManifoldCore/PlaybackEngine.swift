@@ -30,6 +30,14 @@ public protocol PlaybackEngine: AnyObject {
     func setVolume(_ v: Float)
     func toggleMute()
 
+    // JKL shuttle transport (signed rate: + forward, 0 paused, - reverse)
+    var shuttleRate: Float { get }
+    func setShuttleRate(_ rate: Float)
+    func shuttleForward()   // L — step up forward speed
+    func shuttleBackward()  // J — step up reverse speed
+    func shuttlePause()     // K — pause
+    func stepFrame(by frames: Int)
+
     // Transport / loading
     func load(url: URL)
     func play()

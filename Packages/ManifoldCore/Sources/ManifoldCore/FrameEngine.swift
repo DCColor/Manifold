@@ -19,7 +19,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     // Audio output gain/mute (passthrough to the persistent audioRenderer).
     @Published public private(set) var volume: Float = 1.0
     @Published public private(set) var isMuted: Bool = false
+    // JKL shuttle transport rate (transient session state — not persisted).
+    // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
+    // synchronizer directly; reverse is a best-effort jog (see setShuttleRate).
+    @Published public private(set) var shuttleRate: Float = 0
     public private(set) var tcInfo: TimecodeReader.Result?
+
+    /// Maximum shuttle multiplier in either direction (1 → 2 → 4 → 8).
+    private let maxShuttleRate: Float = 8
+    /// Reverse jog: the forward-only AVAssetReader pump cannot decode backward,
+    /// so reverse "playback" is a timer that re-seeks toward the head. Best-effort.
+    private var reverseTimer: Timer?
+    private let reverseTickInterval: Double = 0.1
 
     /// Optional tap: called on the video pump queue with each decoded frame,
     /// in ADDITION to the normal display enqueue. Used by a parallel Metal
@@ -95,34 +106,113 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let clamped = min(1, max(0, v))
         volume = clamped
         audioRenderer.volume = clamped
-        if isMuted {
-            isMuted = false
-            audioRenderer.isMuted = false
-        }
+        if isMuted { isMuted = false }
+        applyAudioMute()
     }
 
     public func toggleMute() {
         isMuted.toggle()
-        audioRenderer.isMuted = isMuted
+        applyAudioMute()
     }
 
-    public func play() {
-        synchronizer.rate = 1.0
-        isPlaying = true
+    /// Effective renderer mute = the user's mute OR an active non-1× shuttle.
+    /// Fast-forward replays audio at >1× (pitch/garble), so we mute off-speed and
+    /// restore the user's choice when returning to 1× — standard NLE behavior.
+    private func applyAudioMute() {
+        let offSpeed = shuttleRate != 0 && shuttleRate != 1
+        audioRenderer.isMuted = isMuted || offSpeed
     }
 
-    public func pause() {
-        synchronizer.rate = 0
-        isPlaying = false
-    }
+    public func play() { setShuttleRate(1) }
+
+    public func pause() { setShuttleRate(0) }
 
     public func togglePlayPause() {
         isPlaying ? pause() : play()
     }
 
+    // MARK: - JKL shuttle transport
+
+    /// Core rate control. Positive rates are REAL forward playback driven by the
+    /// synchronizer (the pump feeds frames as fast as the renderer requests).
+    /// Zero pauses. Negative rates start a best-effort reverse jog (the
+    /// forward-only reader can't decode backward — see startReverseJog).
+    public func setShuttleRate(_ rate: Float) {
+        let clamped = max(-maxShuttleRate, min(maxShuttleRate, rate))
+        if clamped >= 0 { stopReverseJog() }
+        shuttleRate = clamped
+        applyAudioMute()
+        if clamped > 0 {
+            synchronizer.rate = clamped
+            isPlaying = true
+        } else if clamped == 0 {
+            synchronizer.rate = 0
+            isPlaying = false
+        } else {
+            synchronizer.rate = 0      // synchronizer can't drive the backward pump
+            isPlaying = true
+            startReverseJog()
+        }
+    }
+
+    /// L — step forward (1 → 2 → 4 → 8). Tapping forward while reversed or paused
+    /// snaps to 1× (direction switch interrupts).
+    public func shuttleForward() {
+        setShuttleRate(shuttleRate < 1 ? 1 : min(shuttleRate * 2, maxShuttleRate))
+    }
+
+    /// J — step reverse (-1 → -2 → -4 → -8). Tapping reverse while forward or
+    /// paused snaps to -1× (direction switch interrupts).
+    public func shuttleBackward() {
+        setShuttleRate(shuttleRate > -1 ? -1 : max(shuttleRate * 2, -maxShuttleRate))
+    }
+
+    /// K — pause from any shuttle speed.
+    public func shuttlePause() { setShuttleRate(0) }
+
+    /// Step exactly one frame and pause (arrow-key jog). Re-seeks to the target
+    /// frame via the reader and holds it at rate 0.
+    public func stepFrame(by frames: Int) {
+        let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
+        setShuttleRate(0)
+        let target = max(0, min(currentTime + Double(frames) / fps, duration))
+        currentTime = target
+        Task { await beginReading(from: target, resumePlaying: false) }
+    }
+
+    private func startReverseJog() {
+        reverseTimer?.invalidate()
+        let speed = -shuttleRate                 // positive magnitude
+        let tick = reverseTickInterval
+        let timer = Timer(timeInterval: tick, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.reverseStep(speed: speed, tick: tick) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        reverseTimer = timer
+    }
+
+    private func reverseStep(speed: Float, tick: Double) {
+        let newTime = currentTime - Double(speed) * tick
+        if newTime <= 0 {
+            currentTime = 0
+            setShuttleRate(0)                    // hit the head — stop at 0
+            return
+        }
+        currentTime = newTime
+        Task { await beginReading(from: newTime, resumePlaying: false) }
+    }
+
+    private func stopReverseJog() {
+        reverseTimer?.invalidate()
+        reverseTimer = nil
+    }
+
     /// Fully stop playback and tear down the current reading session.
     public func stop() {
         _ = sessionToken.next()
+        stopReverseJog()
+        shuttleRate = 0
+        applyAudioMute()
         synchronizer.rate = 0
         videoRenderer?.stopRequestingMediaData()
         audioRenderer.stopRequestingMediaData()
@@ -243,6 +333,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                         if self.isPlaying {
                             self.synchronizer.rate = 0
                             self.isPlaying = false
+                            self.shuttleRate = 0
+                            self.applyAudioMute()
                         }
                     } else {
                         self.currentTime = t
