@@ -29,13 +29,15 @@ struct ContentView: View {
     // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
     // so video + tray both scale with the window. trayHeightFraction is the tunable ratio.
     static let trayHeightFraction: CGFloat = 0.33   // bottom third
-    @State private var showTray = false
+    // Persisted scope arrangement — same UserDefaults keys declared on Preferences
+    // (the canonical owner); @AppStorage here gives SwiftUI reactivity + write-through.
+    @AppStorage("showTray") private var showTray = false
     // Per-scope presence WITHIN the tray (default on, so opening the tray shows all three).
-    @State private var showWaveform = true
+    @AppStorage("showWaveform") private var showWaveform = true
     @StateObject private var waveformModel = WaveformScopeModel()
-    @State private var showParade = true
+    @AppStorage("showParade") private var showParade = true
     @StateObject private var paradeModel = ParadeScopeModel()
-    @State private var showVectorscope = true
+    @AppStorage("showVectorscope") private var showVectorscope = true
     @StateObject private var vectorscopeModel = VectorscopeScopeModel()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
@@ -108,6 +110,9 @@ struct ContentView: View {
                 engine.onFlush = { [weak renderer] in renderer?.flush() }
                 renderer.start()
             }
+            // Persisted arrangement may reopen the tray with scopes already on —
+            // start their sampling to match the restored visibility.
+            updateScopeSampling()
         }
         .onDisappear {
             engine.stop()

@@ -32,6 +32,15 @@ final class Preferences: ObservableObject {
 
     @AppStorage("autoplayOnLoad") var autoplayOnLoad: Bool = true
 
+    // Scope arrangement (persisted across launches). Canonical declaration lives here;
+    // ContentView binds the same keys via @AppStorage for SwiftUI reactivity.
+    // NOTE: showReferenceLayer (⌃⌥R) is intentionally NOT persisted — it's a diagnostic
+    // toggle that must always default OFF on launch, so it stays transient @State.
+    @AppStorage("showTray") var showTray: Bool = false
+    @AppStorage("showWaveform") var showWaveform: Bool = true
+    @AppStorage("showParade") var showParade: Bool = true
+    @AppStorage("showVectorscope") var showVectorscope: Bool = true
+
     // Scope trace intensity — multiplies the brightness-curve gain. 1.0 = current look.
     // Per-scope values combine MULTIPLICATIVELY with the global master.
     @AppStorage("waveformIntensity") var waveformIntensity: Double = 1.0
