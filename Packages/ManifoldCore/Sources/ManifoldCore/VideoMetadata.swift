@@ -76,6 +76,10 @@ public struct VideoMetadata: Equatable, Sendable {
     public var colorPrimariesCode: Int?
     public var transferFunctionCode: Int?
     public var colorMatrixCode: Int?
+    /// Source-signaled color range, read from the file's format description
+    /// (NOT the decoded buffer). One of "Full", "Video (Legal)", "Untagged"
+    /// (flag absent), or "—" (no video format description).
+    public var colorRange: String = "—"
 
     public var startTimecode: String?
     public var chapters: [ChapterMarker] = []

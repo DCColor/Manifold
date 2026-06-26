@@ -35,6 +35,7 @@ public enum MediaInspector {
                 meta.transferFunctionCode = c.transCode
                 meta.colorMatrix = c.matrixName
                 meta.colorMatrixCode = c.matrixCode
+                meta.colorRange = colorRange(for: fmt)
             }
             if let rate = try? await track.load(.estimatedDataRate), rate > 0 {
                 meta.videoDataRate = Double(rate)
@@ -159,6 +160,26 @@ public enum MediaInspector {
         return (name(prim), code(prim),
                 name(trans), code(trans),
                 name(matrix), code(matrix))
+    }
+
+    /// Read the SOURCE color range from the file's video format description —
+    /// specifically the `FullRangeVideo` extension (a CFBoolean), the file's
+    /// ORIGINAL signaling. This is deliberately NOT read from the decoded pixel
+    /// buffer: the engine forces a video-range decode, so a buffer would always
+    /// report video-range even for full-range sources.
+    ///
+    /// - true  -> "Full"
+    /// - false -> "Video (Legal)"
+    /// - flag absent -> "Untagged" (the file simply didn't signal it — common
+    ///   for some ProRes exports; we report the absence honestly rather than
+    ///   assuming a default).
+    private static func colorRange(for fmt: CMFormatDescription) -> String {
+        guard let raw = CMFormatDescriptionGetExtension(
+            fmt, extensionKey: kCMFormatDescriptionExtension_FullRangeVideo) else {
+            return "Untagged"
+        }
+        guard let isFull = raw as? Bool else { return "Untagged" }
+        return isFull ? "Full" : "Video (Legal)"
     }
 
     /// Read chapter markers (title + start time) from the asset, if any.

@@ -37,6 +37,7 @@ struct InspectorPanel: View {
                 MetadataRow(label: "Primaries", value: m.labeled(m.colorPrimaries, m.colorPrimariesCode))
                 MetadataRow(label: "Transfer", value: m.labeled(m.transferFunction, m.transferFunctionCode))
                 MetadataRow(label: "Matrix", value: m.labeled(m.colorMatrix, m.colorMatrixCode))
+                MetadataRow(label: "Range", value: m.colorRange)
                 MetadataRow(label: "nclc", value: m.nclcTriple)
 
                 if !m.audioTracks.isEmpty {
