@@ -12,6 +12,7 @@ private struct ColorParams {
     var b: Float  // Cb -> G
     var c: Float  // Cr -> G
     var d: Float  // Cb -> B
+    var isFullRange: Int32  // 0 = video/legal (expand), 1 = full (passthrough)
 }
 
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
@@ -492,17 +493,25 @@ final class MetalVideoRenderer {
         let m601 = kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String
         let m2020 = kCVImageBufferYCbCrMatrix_ITU_R_2020 as String
 
+        // Range flag matches the SHADER's expansion to the ACTUAL decoded data:
+        // read the buffer's own pixel-format type, which the engine set in Step 2
+        // from the shared SourceColorRange. Reading it off the buffer guarantees
+        // the shader's expansion can't drift from the decode format — the two
+        // halves of one decision agree by construction.
+        let isFull: Int32 =
+            CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ? 1 : 0
+
         // Coefficients per matrix. Standard derivations from Kr/Kb.
         switch matrix {
         case m601:
             // Rec.601: Kr=0.299, Kb=0.114
-            return ColorParams(a: 1.5960, b: 0.3917, c: 0.8129, d: 2.0172)
+            return ColorParams(a: 1.5960, b: 0.3917, c: 0.8129, d: 2.0172, isFullRange: isFull)
         case m2020:
             // Rec.2020: Kr=0.2627, Kb=0.0593
-            return ColorParams(a: 1.4746, b: 0.1646, c: 0.5714, d: 1.8814)
+            return ColorParams(a: 1.4746, b: 0.1646, c: 0.5714, d: 1.8814, isFullRange: isFull)
         default:
             // Rec.709 (default): Kr=0.2126, Kb=0.0722
-            return ColorParams(a: 1.5748, b: 0.1873, c: 0.4681, d: 1.8556)
+            return ColorParams(a: 1.5748, b: 0.1873, c: 0.4681, d: 1.8556, isFullRange: isFull)
         }
     }
 

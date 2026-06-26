@@ -16,6 +16,7 @@ struct ColorParams {
     float b;  // Cb -> G
     float c;  // Cr -> G
     float d;  // Cb -> B
+    int isFullRange;  // 0 = video/legal range (expand), nonzero = full range (passthrough)
 };
 
 vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]]) {
@@ -46,10 +47,22 @@ fragment float4 passthroughFragment(VertexOut in [[stage_in]],
     float y  = lumaTex.sample(s, in.texCoord).r;
     float2 cbcr = chromaTex.sample(s, in.texCoord).rg;
 
-    // Video-range expansion (the engine forces video-range output).
-    y = (y - 16.0/255.0) * (255.0/219.0);
-    float cb = (cbcr.r - 128.0/255.0) * (255.0/224.0);
-    float cr = (cbcr.g - 128.0/255.0) * (255.0/224.0);
+    // Range handling. Chroma is ALWAYS centered (subtract the neutral 128/255) —
+    // that's a chroma offset, not range expansion, and applies to both ranges.
+    // What differs is the SCALE: video/legal data is encoded in 16–235 (luma) /
+    // 16–240 (chroma) and must be expanded to 0–1; full-range data already spans
+    // 0–1 and must NOT be expanded (expanding it is the double-expansion bug).
+    float cb, cr;
+    if (params.isFullRange != 0) {
+        // Full range: luma passthrough, chroma centered only (no scale).
+        cb = cbcr.r - 128.0/255.0;
+        cr = cbcr.g - 128.0/255.0;
+    } else {
+        // Video/legal range: expand luma 16–235→0–1 and chroma 16–240→0–1.
+        y  = (y - 16.0/255.0) * (255.0/219.0);
+        cb = (cbcr.r - 128.0/255.0) * (255.0/224.0);
+        cr = (cbcr.g - 128.0/255.0) * (255.0/224.0);
+    }
 
     // YCbCr -> RGB using the matrix coefficients passed in.
     float r = y + params.a * cr;
