@@ -47,6 +47,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     private var asset: AVURLAsset?
     private var videoTrack: AVAssetTrack?
+    /// 8-bit 4:2:0 decode format, range-aware: video-range by default, full-range
+    /// only for tagged-full sources (set once per load in loadAsset). See M3b.
+    private var videoPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
     private var audioTrack: AVAssetTrack?
     private var reader: AVAssetReader?
     private var timeObserver: Any?
@@ -320,6 +323,22 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.videoTrack = vTrack
         self.audioTrack = try? await asset.loadTracks(withMediaType: .audio).first
 
+        // M3b (range part, 8-bit): pick the decode pixel format from the SOURCE's
+        // signaled range, read from the same format-description determination the
+        // inspector uses. Tagged-full → full-range decode (let full data through);
+        // tagged-legal / untagged → video-range decode (unchanged, the safe
+        // default for the common untagged ProRes case). Bit depth stays 8-bit.
+        if let formats = try? await vTrack.load(.formatDescriptions), let fmt = formats.first {
+            switch MediaInspector.sourceColorRange(for: fmt) {
+            case .full:
+                videoPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            case .videoLegal, .untagged:
+                videoPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            }
+        } else {
+            videoPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        }
+
         if timeObserver == nil {
             let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
             timeObserver = synchronizer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
@@ -374,7 +393,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         newReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
 
         let videoSettings: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            kCVPixelBufferPixelFormatTypeKey as String: videoPixelFormat
         ]
         let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: videoSettings)
         vOut.alwaysCopiesSampleData = false

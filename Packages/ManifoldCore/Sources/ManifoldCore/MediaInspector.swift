@@ -35,7 +35,7 @@ public enum MediaInspector {
                 meta.transferFunctionCode = c.transCode
                 meta.colorMatrix = c.matrixName
                 meta.colorMatrixCode = c.matrixCode
-                meta.colorRange = colorRange(for: fmt)
+                meta.colorRange = sourceColorRange(for: fmt).displayName
             }
             if let rate = try? await track.load(.estimatedDataRate), rate > 0 {
                 meta.videoDataRate = Double(rate)
@@ -162,24 +162,41 @@ public enum MediaInspector {
                 name(matrix), code(matrix))
     }
 
+    /// The SOURCE color range as signaled by the file's video format description.
+    /// `.untagged` means the file did not signal range — reported honestly rather
+    /// than assumed (common for some ProRes exports).
+    public enum SourceColorRange: Sendable {
+        case full          // tagged full range
+        case videoLegal    // tagged video/legal range
+        case untagged      // FullRangeVideo extension absent
+
+        public var displayName: String {
+            switch self {
+            case .full:       return "Full"
+            case .videoLegal: return "Video (Legal)"
+            case .untagged:   return "Untagged"
+            }
+        }
+    }
+
     /// Read the SOURCE color range from the file's video format description —
     /// specifically the `FullRangeVideo` extension (a CFBoolean), the file's
     /// ORIGINAL signaling. This is deliberately NOT read from the decoded pixel
-    /// buffer: the engine forces a video-range decode, so a buffer would always
-    /// report video-range even for full-range sources.
+    /// buffer: the engine may force a video-range decode, so a buffer could
+    /// report video-range even for a full-range source. This is the single
+    /// source of truth for range — both the inspector display and the engine's
+    /// range-aware decode-format request read it.
     ///
-    /// - true  -> "Full"
-    /// - false -> "Video (Legal)"
-    /// - flag absent -> "Untagged" (the file simply didn't signal it — common
-    ///   for some ProRes exports; we report the absence honestly rather than
-    ///   assuming a default).
-    private static func colorRange(for fmt: CMFormatDescription) -> String {
+    /// - flag true  -> `.full`
+    /// - flag false -> `.videoLegal`
+    /// - flag absent (or unexpected type) -> `.untagged`
+    public static func sourceColorRange(for fmt: CMFormatDescription) -> SourceColorRange {
         guard let raw = CMFormatDescriptionGetExtension(
             fmt, extensionKey: kCMFormatDescriptionExtension_FullRangeVideo) else {
-            return "Untagged"
+            return .untagged
         }
-        guard let isFull = raw as? Bool else { return "Untagged" }
-        return isFull ? "Full" : "Video (Legal)"
+        guard let isFull = raw as? Bool else { return .untagged }
+        return isFull ? .full : .videoLegal
     }
 
     /// Read chapter markers (title + start time) from the asset, if any.
