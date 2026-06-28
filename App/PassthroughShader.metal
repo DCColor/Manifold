@@ -16,7 +16,8 @@ struct ColorParams {
     float b;  // Cb -> G
     float c;  // Cr -> G
     float d;  // Cb -> B
-    int isFullRange;  // 0 = video/legal range (expand), nonzero = full range (passthrough)
+    int isFullRange;       // 0 = video/legal range (expand), nonzero = full range (passthrough)
+    int chromaConvention;  // full-range chroma only: 0 = full-swing (÷255), 1 = Resolve (×219/224)
 };
 
 vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]]) {
@@ -54,9 +55,19 @@ fragment float4 passthroughFragment(VertexOut in [[stage_in]],
     // 0–1 and must NOT be expanded (expanding it is the double-expansion bug).
     float cb, cr;
     if (params.isFullRange != 0) {
-        // Full range: luma passthrough, chroma centered only (no scale).
-        cb = cbcr.r - 128.0/255.0;
-        cr = cbcr.g - 128.0/255.0;
+        // Full range: luma passthrough. Chroma centered, then scaled per the
+        // selected convention (legal branch and luma are untouched by this).
+        if (params.chromaConvention == 1) {
+            // Resolve: chroma scaled by 219/224 — Resolve expands full-range
+            // chroma by the LUMA factor (255/219), so the matching inverse is
+            // (×255/255)·(219/224). Renders a Resolve full file (Cr≈226) correct.
+            cb = (cbcr.r - 128.0/255.0) * (219.0/224.0);
+            cr = (cbcr.g - 128.0/255.0) * (219.0/224.0);
+        } else {
+            // Full-swing / spec: chroma centered only, scale 255 (no expansion).
+            cb = cbcr.r - 128.0/255.0;
+            cr = cbcr.g - 128.0/255.0;
+        }
     } else {
         // Video/legal range: expand luma 16–235→0–1 and chroma 16–240→0–1.
         y  = (y - 16.0/255.0) * (255.0/219.0);

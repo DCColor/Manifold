@@ -6,6 +6,47 @@ import Combine
 /// and capture LOCAL reader/output/renderer references (never reach through self),
 /// with a per-session token so a seek can retire a stale pump cleanly. Only
 /// published UI state is mutated on the main actor.
+/// User assertion of a clip's color range, overriding the file's tag. Transient
+/// per-file (resets to `.auto` on each load) — never globally persisted, since
+/// one file's correct override would be wrong for the next.
+public enum RangeOverride: String, CaseIterable, Sendable {
+    case auto    // trust the file's tag (full if tagged-full; else video/legal)
+    case full    // force full-range decode regardless of tag
+    case legal   // force video/legal-range decode regardless of tag
+
+    public var label: String {
+        switch self {
+        case .auto:  return "Auto"
+        case .full:  return "Full"
+        case .legal: return "Legal"
+        }
+    }
+}
+
+/// How to interpret FULL-range chroma — a decode property, not a UI concept.
+/// Two conventions exist in the wild (verified against real files):
+///  - `.fullSwing`: chroma scale 255 (H.273 / full-swing spec). Renders a
+///    spec-conformant full file (75% red Cr≈224) correctly.
+///  - `.resolve`: chroma scaled by 219/224 (net ~260.8). Resolve expands
+///    full-range chroma by the LUMA factor (255/219), storing Cr≈226 for 75%
+///    red; this inverse renders Resolve full files correctly (~191).
+/// Only affects the full-range path; legal is unchanged either way. The numeric
+/// rawValue is passed to the shader.
+public enum FullRangeChromaConvention: Int32, CaseIterable, Sendable {
+    case fullSwing = 0
+    case resolve   = 1
+
+    /// The single shipping default — Resolve, the common case for this audience.
+    public static let defaultConvention: FullRangeChromaConvention = .resolve
+
+    public var label: String {
+        switch self {
+        case .fullSwing: return "Full-swing (spec)"
+        case .resolve:   return "Resolve"
+        }
+    }
+}
+
 @MainActor
 public final class FrameEngine: ObservableObject, PlaybackEngine {
 
@@ -47,9 +88,31 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     private var asset: AVURLAsset?
     private var videoTrack: AVAssetTrack?
-    /// 8-bit 4:2:0 decode format, range-aware: video-range by default, full-range
-    /// only for tagged-full sources (set once per load in loadAsset). See M3b.
-    private var videoPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    /// The source's signaled range (from the format description), captured once
+    /// per load. Combined with `rangeOverride` to derive the effective range.
+    private var sourceRange: MediaInspector.SourceColorRange = .untagged
+    /// User range assertion. Transient per-file: reset to `.auto` on each load.
+    @Published public private(set) var rangeOverride: RangeOverride = .auto
+    /// Effective full-range flag fed to the shader (override resolves source
+    /// range). Decode is ALWAYS 420v (raw, unclipped); this flag — not the buffer
+    /// format — decides whether the shader expands (legal/video) or passes through
+    /// (full). Published for the UI.
+    @Published public private(set) var effectiveIsFullRange: Bool = false
+    /// Thread-safe mirror of `effectiveIsFullRange` for the render thread
+    /// (CVDisplayLink), which cannot touch main-actor state.
+    private nonisolated let rangeLock = NSLock()
+    private nonisolated(unsafe) var effectiveRangeMirror = false
+    /// Active full-range chroma convention (decode property). Default Resolve —
+    /// the common case for this audience; full-swing/spec path retained. No
+    /// runtime control yet — this is just the default + an inspector readout.
+    @Published public private(set) var fullRangeChromaConvention: FullRangeChromaConvention = .defaultConvention
+    /// Render-thread mirror of `fullRangeChromaConvention` (guarded by `rangeLock`).
+    private nonisolated(unsafe) var chromaConventionMirror: Int32 = FullRangeChromaConvention.defaultConvention.rawValue
+    /// Convention rawValue, readable from the render thread (CVDisplayLink).
+    public nonisolated func currentChromaConventionRaw() -> Int32 {
+        rangeLock.lock(); defer { rangeLock.unlock() }
+        return chromaConventionMirror
+    }
     private var audioTrack: AVAssetTrack?
     private var reader: AVAssetReader?
     private var timeObserver: Any?
@@ -323,21 +386,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.videoTrack = vTrack
         self.audioTrack = try? await asset.loadTracks(withMediaType: .audio).first
 
-        // M3b (range part, 8-bit): pick the decode pixel format from the SOURCE's
-        // signaled range, read from the same format-description determination the
-        // inspector uses. Tagged-full → full-range decode (let full data through);
-        // tagged-legal / untagged → video-range decode (unchanged, the safe
-        // default for the common untagged ProRes case). Bit depth stays 8-bit.
+        // Range (8-bit): capture the SOURCE's signaled range (same format-
+        // description determination the inspector uses) and reset the user
+        // override to Auto for the new file (transient per-file). Decode is ALWAYS
+        // 420v; the override drives the shader's expansion via effectiveIsFullRange.
+        rangeOverride = .auto
         if let formats = try? await vTrack.load(.formatDescriptions), let fmt = formats.first {
-            switch MediaInspector.sourceColorRange(for: fmt) {
-            case .full:
-                videoPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            case .videoLegal, .untagged:
-                videoPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            }
+            sourceRange = MediaInspector.sourceColorRange(for: fmt)
         } else {
-            videoPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            sourceRange = .untagged
         }
+        updateEffectiveRange()
 
         if timeObserver == nil {
             let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
@@ -366,6 +425,36 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         await beginReading(from: 0, resumePlaying: autoplay)
     }
 
+    /// Resolve override + source range into the effective full-range flag the
+    /// shader uses. Auto trusts the tag (full only if tagged-full); Full and Legal
+    /// force their respective ranges. Decode stays 420v regardless — only this
+    /// flag changes, so the shader expands (legal/video) or passes through (full).
+    private func updateEffectiveRange() {
+        let isFull: Bool
+        switch rangeOverride {
+        case .auto:  isFull = (sourceRange == .full)
+        case .full:  isFull = true
+        case .legal: isFull = false
+        }
+        effectiveIsFullRange = isFull
+        rangeLock.lock(); effectiveRangeMirror = isFull; rangeLock.unlock()
+    }
+
+    /// Effective full-range flag, readable from the render thread (CVDisplayLink).
+    public nonisolated func currentEffectiveIsFullRange() -> Bool {
+        rangeLock.lock(); defer { rangeLock.unlock() }
+        return effectiveRangeMirror
+    }
+
+    /// Apply a manual range override. Decode is always 420v, so the buffer never
+    /// changes — only the shader's expansion flag does. No reader rebuild needed;
+    /// the next rendered frame (or a forced refresh when paused) reflects it.
+    public func setRangeOverride(_ override: RangeOverride) {
+        guard override != rangeOverride else { return }
+        rangeOverride = override
+        updateEffectiveRange()
+    }
+
     private func beginReading(from time: Double, resumePlaying: Bool) async {
         guard let asset, let vTrack = videoTrack, let videoRenderer else { return }
 
@@ -392,8 +481,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let start = CMTime(seconds: time, preferredTimescale: 600)
         newReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
 
+        // Always decode 420v (raw video-range): returns the file's stored values
+        // unclipped. Range handling happens in the shader via effectiveIsFullRange
+        // — never by requesting a full-range decode, which would pre-expand and
+        // clip super-white / sub-black content.
         let videoSettings: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: videoPixelFormat
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]
         let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: videoSettings)
         vOut.alwaysCopiesSampleData = false

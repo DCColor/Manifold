@@ -135,6 +135,8 @@ struct ContentView: View {
             armIdleIfNeeded()
             if let renderer = metalRenderer {
                 renderer.clock = { engine.currentSyncTime().seconds }
+                renderer.isFullRangeProvider = { engine.currentEffectiveIsFullRange() }
+                renderer.chromaConventionProvider = { engine.currentChromaConventionRaw() }
                 engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
                 engine.onFlush = { [weak renderer] in renderer?.flush() }
                 renderer.start()
@@ -153,6 +155,11 @@ struct ContentView: View {
             vectorscopeModel.stop()
         }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
+        .onChange(of: engine.effectiveIsFullRange) { _, _ in
+            // Range override changed: decode is unchanged (always 420v), so just
+            // re-render the current frame with the new shader flag (covers paused).
+            metalRenderer?.setNeedsRefresh()
+        }
         .onChange(of: engine.metadata) { _, meta in
             // Derive the Metal layer colorspace once per source from the
             // inspector's authoritative color tags (not per-frame from buffers).
@@ -270,7 +277,7 @@ struct ContentView: View {
         .clipped()
         .overlay(alignment: .topTrailing) {
             if showInspector && engine.hasMedia {
-                InspectorPanel(metadata: engine.metadata)
+                InspectorPanel(metadata: engine.metadata, engine: engine)
                     .padding(16)
                     .transition(.opacity)
             }

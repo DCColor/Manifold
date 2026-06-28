@@ -4,6 +4,17 @@ import ManifoldCore
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 struct InspectorPanel: View {
     let metadata: VideoMetadata?
+    @ObservedObject var engine: FrameEngine
+
+    /// Range as displayed: the file's tag, annotated when the user is asserting
+    /// an override (honest that it's an assertion, not read from the file).
+    private func rangeValue(_ m: VideoMetadata) -> String {
+        switch engine.rangeOverride {
+        case .auto:  return m.colorRange
+        case .full:  return "\(m.colorRange) → Full (override)"
+        case .legal: return "\(m.colorRange) → Legal (override)"
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -37,7 +48,17 @@ struct InspectorPanel: View {
                 MetadataRow(label: "Primaries", value: m.labeled(m.colorPrimaries, m.colorPrimariesCode))
                 MetadataRow(label: "Transfer", value: m.labeled(m.transferFunction, m.transferFunctionCode))
                 MetadataRow(label: "Matrix", value: m.labeled(m.colorMatrix, m.colorMatrixCode))
-                MetadataRow(label: "Range", value: m.colorRange)
+                MetadataRow(label: "Range", value: rangeValue(m))
+                RangeOverrideRow(
+                    selection: Binding(
+                        get: { engine.rangeOverride },
+                        set: { engine.setRangeOverride($0) }
+                    )
+                )
+                // Active full-range chroma convention — readout only (no control).
+                // Only meaningful when the effective range is Full; "—" otherwise.
+                MetadataRow(label: "Full Chroma",
+                            value: engine.effectiveIsFullRange ? engine.fullRangeChromaConvention.label : "—")
                 MetadataRow(label: "nclc", value: m.nclcTriple)
 
                 if !m.audioTracks.isEmpty {
@@ -122,6 +143,32 @@ private struct MetadataRow: View {
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.92))
                 .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+/// Segmented Auto / Full / Legal control for asserting a clip's color range,
+/// placed under the Range row so the user can correct an untagged/mistagged file
+/// right where its tag state is shown.
+private struct RangeOverrideRow: View {
+    @Binding var selection: RangeOverride
+
+    var body: some View {
+        HStack(alignment: .center) {
+            Text("Override")
+                .font(.system(.caption, design: .default))
+                .foregroundStyle(.white.opacity(0.55))
+            Spacer(minLength: 16)
+            Picker("", selection: $selection) {
+                ForEach(RangeOverride.allCases, id: \.self) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.mini)
+            .fixedSize()
         }
         .padding(.vertical, 3)
     }

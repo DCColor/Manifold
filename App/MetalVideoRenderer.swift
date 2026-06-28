@@ -12,7 +12,8 @@ private struct ColorParams {
     var b: Float  // Cb -> G
     var c: Float  // Cr -> G
     var d: Float  // Cb -> B
-    var isFullRange: Int32  // 0 = video/legal (expand), 1 = full (passthrough)
+    var isFullRange: Int32        // 0 = video/legal (expand), 1 = full (passthrough)
+    var chromaConvention: Int32   // full-range only: 0 = full-swing (÷255), 1 = Resolve (×219/224)
 }
 
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
@@ -29,6 +30,16 @@ final class MetalVideoRenderer {
 
     /// Returns the current playback time in seconds. Set by the owner before start().
     var clock: (() -> Double)?
+
+    /// Returns the engine's effective full-range flag (override + source range).
+    /// Read per-frame on the render thread; the engine's accessor is thread-safe.
+    /// When nil, defaults to video/legal (expand).
+    var isFullRangeProvider: (() -> Bool)?
+
+    /// Returns the engine's full-range chroma convention rawValue (0 = full-swing,
+    /// 1 = Resolve). Read per-frame on the render thread (thread-safe accessor).
+    /// Only affects the full-range path. When nil, defaults to 1 (Resolve).
+    var chromaConventionProvider: (() -> Int32)?
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -49,6 +60,20 @@ final class MetalVideoRenderer {
     private let maxQueued = 12   // bounded buffer
 
     private var displayLink: CVDisplayLink?
+
+    // Last rendered frame + a refresh request, so a range-override change while
+    // PAUSED (no new frame arriving) still re-renders with the new shader flag.
+    // lastPixelBuffer is touched only on the render thread; pendingRefresh is
+    // guarded because setNeedsRefresh() is called from the main thread.
+    private var lastPixelBuffer: CVPixelBuffer?
+    private let refreshLock = NSLock()
+    private var pendingRefresh = false
+
+    /// Request a one-shot re-render of the current frame (e.g. after a range
+    /// override change while paused). Picked up on the next display refresh.
+    func setNeedsRefresh() {
+        refreshLock.lock(); pendingRefresh = true; refreshLock.unlock()
+    }
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -259,12 +284,18 @@ final class MetalVideoRenderer {
 
         if let pb = chosen {
             renderPixelBuffer(pb)
+        } else {
+            // No new frame (e.g. paused). If a range/override change requested a
+            // refresh, re-render the last frame so the shader-flag change shows.
+            refreshLock.lock(); let refresh = pendingRefresh; pendingRefresh = false; refreshLock.unlock()
+            if refresh, let pb = lastPixelBuffer { renderPixelBuffer(pb) }
         }
     }
 
     // MARK: - Drawing
 
     private func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
+        lastPixelBuffer = pixelBuffer   // retained for paused refresh (render thread only)
         let width  = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
@@ -493,25 +524,26 @@ final class MetalVideoRenderer {
         let m601 = kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String
         let m2020 = kCVImageBufferYCbCrMatrix_ITU_R_2020 as String
 
-        // Range flag matches the SHADER's expansion to the ACTUAL decoded data:
-        // read the buffer's own pixel-format type, which the engine set in Step 2
-        // from the shared SourceColorRange. Reading it off the buffer guarantees
-        // the shader's expansion can't drift from the decode format — the two
-        // halves of one decision agree by construction.
-        let isFull: Int32 =
-            CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ? 1 : 0
+        // Range flag comes from ENGINE STATE (override + source range), NOT the
+        // buffer format. The buffer is always 420v raw (unclipped); the engine
+        // decides whether the shader expands (legal/video) or passes through
+        // (full). Read per-frame so an override change shows on the next frame.
+        let isFull: Int32 = (isFullRangeProvider?() ?? false) ? 1 : 0
+        // Full-range chroma convention from engine state (0=full-swing, 1=Resolve).
+        // Only consulted by the full-range branch; nil defaults to Resolve.
+        let chromaConv: Int32 = chromaConventionProvider?() ?? 1
 
         // Coefficients per matrix. Standard derivations from Kr/Kb.
         switch matrix {
         case m601:
             // Rec.601: Kr=0.299, Kb=0.114
-            return ColorParams(a: 1.5960, b: 0.3917, c: 0.8129, d: 2.0172, isFullRange: isFull)
+            return ColorParams(a: 1.5960, b: 0.3917, c: 0.8129, d: 2.0172, isFullRange: isFull, chromaConvention: chromaConv)
         case m2020:
             // Rec.2020: Kr=0.2627, Kb=0.0593
-            return ColorParams(a: 1.4746, b: 0.1646, c: 0.5714, d: 1.8814, isFullRange: isFull)
+            return ColorParams(a: 1.4746, b: 0.1646, c: 0.5714, d: 1.8814, isFullRange: isFull, chromaConvention: chromaConv)
         default:
             // Rec.709 (default): Kr=0.2126, Kb=0.0722
-            return ColorParams(a: 1.5748, b: 0.1873, c: 0.4681, d: 1.8556, isFullRange: isFull)
+            return ColorParams(a: 1.5748, b: 0.1873, c: 0.4681, d: 1.8556, isFullRange: isFull, chromaConvention: chromaConv)
         }
     }
 
