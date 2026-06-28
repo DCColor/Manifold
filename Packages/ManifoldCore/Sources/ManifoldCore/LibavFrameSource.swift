@@ -34,7 +34,7 @@ public final class LibavFrameSource: FrameSource, @unchecked Sendable {
 
     private let url: URL
     /// Decoded CVPixelBuffer format — the SAME parameter `FileFrameSource` carries.
-    /// 8-bit 420v today; M3b widens to 10-bit (420v10/p010) without touching callers.
+    /// M3b: 10-bit x420 (P010-compatible), keeping HQX's native 10-bit precision.
     private let pixelFormat: OSType
     private let isCurrent: @Sendable () -> Bool
     private let pumpQueue: DispatchQueue
@@ -171,12 +171,15 @@ public final class LibavFrameSource: FrameSource, @unchecked Sendable {
         guard let pool = ensurePool(width: W, height: H),
               let pixelBuffer = makePixelBuffer(from: pool) else { return nil }
 
-        // swscale: source → NV12 (== 420v biplanar layout). Force src/dst range
+        // swscale: source → the biplanar 420 layout matching `pixelFormat`. M3b:
+        // P010 (10-bit, high-aligned in 16-bit) for x420, keeping the DNxHR HQX
+        // 10-bit precision (the old NV12 path threw away 2 bits). Force src/dst range
         // EQUAL so it does NOT remap range — we preserve the file's stored values
         // unclipped (the shader expands legal/full via the engine's flag, exactly
-        // like the AVFoundation 420v decode). 709 coefficients for the YUV repack.
+        // like the AVFoundation decode). 709 coefficients for the YUV repack.
+        let dstFmt = Self.swsDestFormat(for: pixelFormat)
         guard let sws = sws_getContext(Int32(W), Int32(H), srcFmt,
-                                       Int32(W), Int32(H), AV_PIX_FMT_NV12,
+                                       Int32(W), Int32(H), dstFmt,
                                        Int32(SWS_BILINEAR.rawValue), nil, nil, nil) else { return nil }
         defer { sws_freeContext(sws) }
         let coeff = sws_getCoefficients(SWS_CS_ITU709)
@@ -267,14 +270,16 @@ public final class LibavFrameSource: FrameSource, @unchecked Sendable {
 
     // MARK: - First-light diagnostic (TEMPORARY — remove after verification)
 
-    /// Decode+convert the first frame of `path` and report the center NV12 sample
+    /// Decode+convert the first frame of `path` and report the center 10-bit sample
     /// plus the RGB the shader would produce (709 coefficients, full-range = no
-    /// expansion). Proves the decode→420v pipeline + range read end-to-end, headless.
+    /// expansion). Proves the decode→x420 10-bit pipeline + range read end-to-end,
+    /// headless. Reads the x420 16-bit planes the SAME way the Metal shader does
+    /// (r16Unorm sample = rawU16/65535) so the predicted RGB matches the display.
     /// 75% red full should land ~RGB(191,0,0).
     public static func firstLightProbe(path: String) -> String {
         let q = DispatchQueue(label: "com.graviton.manifold.libav.probe")
         let src = LibavFrameSource(url: URL(fileURLWithPath: path),
-                                   pixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                   pixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
                                    isCurrent: { true }, pumpQueue: q)
         let info: StreamInfo
         do { info = try src.open() } catch { return "open failed: \(error)" }
@@ -285,10 +290,12 @@ public final class LibavFrameSource: FrameSource, @unchecked Sendable {
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         let W = CVPixelBufferGetWidth(pb), H = CVPixelBufferGetHeight(pb)
-        let yB = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!.assumingMemoryBound(to: UInt8.self)
-        let yS = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-        let cB = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!.assumingMemoryBound(to: UInt8.self)
-        let cS = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        // x420 planes are 16-bit (10 bits high-aligned). Read as UInt16, exactly
+        // what .r16Unorm sampling sees; normalize by 65535 like the shader.
+        let yB = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!.assumingMemoryBound(to: UInt16.self)
+        let yS = CVPixelBufferGetBytesPerRowOfPlane(pb, 0) / 2
+        let cB = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!.assumingMemoryBound(to: UInt16.self)
+        let cS = CVPixelBufferGetBytesPerRowOfPlane(pb, 1) / 2
         var sy = 0.0, scb = 0.0, scr = 0.0, n = 0.0
         for yy in (H/2 - 20)..<(H/2 + 20) {
             for xx in (W/2 - 20)..<(W/2 + 20) {
@@ -299,14 +306,35 @@ public final class LibavFrameSource: FrameSource, @unchecked Sendable {
                 n += 1
             }
         }
-        let Y = sy / n, Cb = scb / n, Cr = scr / n
-        let r = Y + 1.5748 * (Cr - 128)
-        let g = Y - 0.1873 * (Cb - 128) - 0.4681 * (Cr - 128)
-        let b = Y + 1.8556 * (Cb - 128)
-        return String(format: "%dx%d src=%@ range=%@ matrix=%@ | centerNV12 Y=%.0f Cb=%.0f Cr=%.0f"
-            + " -> shaderRGB(full)=(%.0f,%.0f,%.0f)  [75%% red full ~ (191,0,0)]",
+        // Raw 10-bit code (high-aligned >> 6) for readability, and the normalized
+        // [0,1] the shader uses (rawU16/65535).
+        let y10 = (sy / n) / 64, cb10 = (scb / n) / 64, cr10 = (scr / n) / 64
+        let Y = (sy / n) / 65535, Cb = (scb / n) / 65535, Cr = (scr / n) / 65535
+        // Shader full-range Resolve-convention math (matches PassthroughShader).
+        let neutral = 128.0 / 255.0, k = 219.0 / 224.0
+        let cb = (Cb - neutral) * k, cr = (Cr - neutral) * k
+        let r = (Y + 1.5748 * cr) * 255
+        let g = (Y - 0.1873 * cb - 0.4681 * cr) * 255
+        let b = (Y + 1.8556 * cb) * 255
+        return String(format: "%dx%d src=%@ range=%@ matrix=%@ | center10bit Y=%.0f Cb=%.0f Cr=%.0f"
+            + " -> shaderRGB(full,Resolve)=(%.0f,%.0f,%.0f)  [75%% red full ~ (191,0,0)]",
             W, H, info.sourcePixelFormat, info.rangeName, info.matrixName,
-            Y, Cb, Cr, max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+            y10, cb10, cr10, max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+    }
+
+    /// swscale destination pixel format matching the CVPixelBuffer `pixelFormat`.
+    /// P010 (10-bit, high-aligned in 16-bit) is byte-compatible with Apple's x420
+    /// 10-bit biplanar; NV12 with the 8-bit 420v. Keeps `pixelFormat` the single
+    /// parameter that drives both the pool and the conversion target.
+    private static func swsDestFormat(for cvFormat: OSType) -> AVPixelFormat {
+        switch cvFormat {
+        case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+             kCVPixelFormatType_420YpCbCr10BiPlanarFullRange:
+            // P010LE: 10-bit, high-aligned in 16-bit LE — byte-compatible with x420.
+            return AV_PIX_FMT_P010LE
+        default:
+            return AV_PIX_FMT_NV12   // 8-bit 420v
+        }
     }
 
     // MARK: - libav color enum → CoreVideo attachment mapping

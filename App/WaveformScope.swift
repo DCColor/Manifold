@@ -251,9 +251,11 @@ final class WaveformScopeModel: ObservableObject {
                 let rowBase = y * bytesPerRow
                 for x in 0..<width {
                     let p = rowBase + x * 4
-                    let b = Float(buf[p + 0])
-                    let g = Float(buf[p + 1])
-                    let r = Float(buf[p + 2])
+                    // Readback is rgb10a2 (M3b 10-bit target); unpack to 8-bit inline.
+                    let px = MetalVideoRenderer.rgb10a2Channels(buf, p)
+                    let b = Float(px.b)
+                    let g = Float(px.g)
+                    let r = Float(px.r)
                     // Rec.709 luma on display-RGB 0-255 values.
                     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
                     let lv = min(255, max(0, Int(luma + 0.5)))

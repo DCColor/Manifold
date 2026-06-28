@@ -127,9 +127,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
     /// Decoded video format requested at the decode-request site. A named property
-    /// rather than a magic constant so Stage 2 (libav) / M3b (10-bit) can vary it.
-    /// Today: 420v 8-bit (raw video-range; range expansion stays in the shader).
-    private let videoPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    /// rather than a magic constant so the sources/decoders can vary it.
+    /// M3b: 10-bit 420 biplanar (x420, raw video-range). 10-bit ProRes and DNxHR
+    /// HQX now flow through at full bit depth; 8-bit sources decode cleanly into the
+    /// 10-bit container. Range expansion stays in the shader (the VideoRange label
+    /// is just the container — raw values are preserved, exactly as the 8-bit path).
+    private let videoPixelFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
     private var timeObserver: Any?
     private var imageGenerator: AVAssetImageGenerator?
     private let videoPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.video")

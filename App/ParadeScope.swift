@@ -101,9 +101,11 @@ final class ParadeScopeModel: ObservableObject {
                 let rowBase = y * bytesPerRow
                 for x in 0..<width {
                     let p = rowBase + x * 4
-                    let b = Int(buf[p + 0])
-                    let g = Int(buf[p + 1])
-                    let r = Int(buf[p + 2])
+                    // Readback is rgb10a2 (M3b 10-bit target); unpack to 8-bit inline.
+                    let px = MetalVideoRenderer.rgb10a2Channels(buf, p)
+                    let b = Int(px.b)
+                    let g = Int(px.g)
+                    let r = Int(px.r)
                     let bucket = (x * colW) / width
                     accR[((bins - 1) - r) * colW + bucket] &+= 1
                     accG[((bins - 1) - g) * colW + bucket] &+= 1

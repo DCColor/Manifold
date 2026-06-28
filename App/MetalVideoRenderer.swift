@@ -22,9 +22,12 @@ private struct ColorParams {
 /// nothing about FrameEngine, only a clock closure returning the current time.
 final class MetalVideoRenderer {
 
-    // M3b: 10-bit migration touches here — change this format (e.g. .bgra10_xr or
-    // rgb10a2 variant) when the engine decodes native 10-bit.
-    static let renderPixelFormat: MTLPixelFormat = .bgra8Unorm
+    // M3b: 10-bit render target. rgb10a2Unorm — CAMetalLayer-compatible (the 1:1
+    // blit to the drawable stays same-format), 4 bytes/pixel packed 10-10-10-2.
+    // Display + export get full 10-bit; the scope readback downconverts to 8-bit so
+    // the existing CPU scopes are untouched (true 10-bit scopes = the GPU project).
+    // Propagates to the layer + pipeline color attachment via the references below.
+    static let renderPixelFormat: MTLPixelFormat = .rgb10a2Unorm
 
     let metalLayer = CAMetalLayer()
 
@@ -302,11 +305,19 @@ final class MetalVideoRenderer {
         // Layer colorspace is set ONCE per source in setSourceColorSpace(...) from
         // MediaInspector's authoritative tags — NOT per-frame from the buffer.
 
+        // M3b: pick texture sample formats from the buffer's bit depth. 10-bit x420
+        // planes are 16-bit (10 bits high-aligned), sampled as r16/rg16; 8-bit 420v
+        // as r8/rg8. The shader reads NORMALIZED values either way, so its YCbCr math
+        // is unchanged (r16Unorm of a high-aligned 10-bit sample ≈ code/1024, ~the
+        // same normalized level as r8Unorm's code/255, within ~0.3% — sub-code).
+        let is10Bit = Self.isTenBit(CVPixelBufferGetPixelFormatType(pixelBuffer))
+        let lumaFormat: MTLPixelFormat = is10Bit ? .r16Unorm : .r8Unorm
+        let chromaFormat: MTLPixelFormat = is10Bit ? .rg16Unorm : .rg8Unorm
         guard let lumaTexture = makeTexture(pixelBuffer, planeIndex: 0,
-                                            pixelFormat: .r8Unorm,
+                                            pixelFormat: lumaFormat,
                                             width: width, height: height),
               let chromaTexture = makeTexture(pixelBuffer, planeIndex: 1,
-                                              pixelFormat: .rg8Unorm,
+                                              pixelFormat: chromaFormat,
                                               width: width / 2, height: height / 2)
         else { return }
 
@@ -370,8 +381,10 @@ final class MetalVideoRenderer {
     /// read it back. Shared by frame export and (future) in-app scopes. Uses its own
     /// command buffer + waitUntilCompleted on the SAME queue as rendering, so it
     /// can't tear against an in-flight render (command buffers are atomic units).
-    // M3b: 10-bit migration touches here — the bytesPerRow math assumes 4 bytes/pixel
-    // bgra8; a 10-bit format changes stride and channel extraction.
+    // M3b: the render target is now rgb10a2Unorm — still 4 bytes/pixel, so the
+    // bytesPerRow math is unchanged, but the bytes are PACKED 10-10-10-2, not bgra8.
+    // This raw form is consumed by the 10-bit export (exportCurrentFrame unpacks it);
+    // the scope path uses readbackRenderedFrameAsync, which downconverts to bgra8.
     // Internal (not private) so native scopes can sample the pre-display offscreen
     // texture. Stays per-call / full-res — the THROTTLE lives in the scope consumer.
     func readbackRenderedFrame() -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
@@ -453,15 +466,59 @@ final class MetalVideoRenderer {
         cmd.addCompletedHandler { _ in
             // GPU finished — safe to read the shared texture. Runs on a Metal
             // completion thread (not the render thread, not main, non-blocking).
-            var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
-            bytes.withUnsafeMutableBytes { raw in
+            // Hands back the RAW rgb10a2 bytes (4 B/px) with a single allocation —
+            // the scopes unpack each pixel inline (rgb10a2Channels) in their own
+            // already-subsampled loop. The earlier full-frame rgb10a2→bgra8 pass
+            // (a second 33MB buffer + an un-subsampled 8.3M-px loop, per readback)
+            // was an M3b regression that jerked playback whenever a scope was shown.
+            var packed = [UInt8](repeating: 0, count: bytesPerRow * height)
+            packed.withUnsafeMutableBytes { raw in
                 cpuTex.getBytes(raw.baseAddress!, bytesPerRow: bytesPerRow,
                                 from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
             }
-            completion(bytes, width, height, bytesPerRow)
+            completion(packed, width, height, bytesPerRow)
         }
         cmd.commit()
         return true
+    }
+
+    /// Unpack one rgb10a2Unorm pixel (the format `readbackRenderedFrameAsync`
+    /// returns) to 8-bit R,G,B — the top 8 bits of each 10-bit channel, matching
+    /// the 8-bit values the scopes consumed pre-M3b. `p` is the byte offset of the
+    /// pixel (little-endian 32-bit: R[0:10] G[10:20] B[20:30] A[30:32]).
+    @inline(__always)
+    static func rgb10a2Channels(_ buf: UnsafeBufferPointer<UInt8>, _ p: Int) -> (r: UInt8, g: UInt8, b: UInt8) {
+        let px = UInt32(buf[p]) | (UInt32(buf[p + 1]) << 8)
+            | (UInt32(buf[p + 2]) << 16) | (UInt32(buf[p + 3]) << 24)
+        return (UInt8((px & 0x3FF) >> 2),
+                UInt8(((px >> 10) & 0x3FF) >> 2),
+                UInt8(((px >> 20) & 0x3FF) >> 2))
+    }
+
+    /// Unpack an rgb10a2Unorm buffer to 16-bit RGBA (alpha skipped/opaque). Each
+    /// 10-bit channel is left-shifted into the 16-bit range (×64) so a 16-bit PNG
+    /// preserves the full 10-bit precision. Channel order R,G,B,A (byteOrder16Little).
+    private static func rgb10a2ToRGBA16(_ src: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> [UInt16] {
+        var out = [UInt16](repeating: 0, count: width * 4 * height)
+        src.withUnsafeBytes { inRaw in
+            out.withUnsafeMutableBufferPointer { outBuf in
+                for y in 0..<height {
+                    let inRow = y * bytesPerRow
+                    let outRow = y * width * 4
+                    for x in 0..<width {
+                        let p = inRow + x * 4
+                        let px = UInt32(inRaw[p]) | (UInt32(inRaw[p + 1]) << 8)
+                            | (UInt32(inRaw[p + 2]) << 16) | (UInt32(inRaw[p + 3]) << 24)
+                        let o = outRow + x * 4
+                        outBuf[o + 0] = UInt16((px & 0x3FF) << 6)
+                        outBuf[o + 1] = UInt16(((px >> 10) & 0x3FF) << 6)
+                        outBuf[o + 2] = UInt16(((px >> 20) & 0x3FF) << 6)
+                        outBuf[o + 3] = 0xFFFF
+                    }
+                }
+            }
+        }
+        return out
     }
 
     // MARK: - Frame export (on-demand, manual)
@@ -474,20 +531,23 @@ final class MetalVideoRenderer {
             print("[EXPORT] no rendered frame yet"); return
         }
         let (bytes, width, height, bytesPerRow) = frame
-        let data = Data(bytes)
 
         // CRITICAL: tag with the layer's source-derived colorspace (CoreMedia709),
         // NOT deviceRGB/sRGB — so the consumer reads the raw code values under the
         // file's real colorspace. Fall back to 709 only if the layer has none.
         let cs = metalLayer.colorspace ?? CGColorSpace(name: CGColorSpace.itur_709)!
-        // M3b: 10-bit migration touches here — CGImage bitsPerComponent/bitmapInfo
-        // assume 8-bit bgra.
+        // M3b: the readback is now rgb10a2 (packed 10-10-10-2). Unpack to 16-bit RGBA
+        // (10-bit value placed in the high bits) so the export carries the full 10-bit
+        // precision — a 16-bit PNG rather than the old 8-bit one.
+        let rgba16 = Self.rgb10a2ToRGBA16(bytes, width: width, height: height, bytesPerRow: bytesPerRow)
+        let outBytesPerRow = width * 8   // 4 channels × 16-bit
+        let data = rgba16.withUnsafeBytes { Data($0) }
         let bitmapInfo = CGBitmapInfo(rawValue:
-            CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+            CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue)
         guard let provider = CGDataProvider(data: data as CFData),
               let cgImage = CGImage(width: width, height: height,
-                                    bitsPerComponent: 8, bitsPerPixel: 32,
-                                    bytesPerRow: bytesPerRow, space: cs,
+                                    bitsPerComponent: 16, bitsPerPixel: 64,
+                                    bytesPerRow: outBytesPerRow, space: cs,
                                     bitmapInfo: bitmapInfo, provider: provider,
                                     decode: nil, shouldInterpolate: false,
                                     intent: .defaultIntent) else {
@@ -560,6 +620,13 @@ final class MetalVideoRenderer {
         case tfHLG: return 18
         default: return 0
         }
+    }
+
+    /// True for the 10-bit 420 biplanar CV formats (x420 / xf20) whose planes are
+    /// 16-bit-per-sample (10 bits high-aligned).
+    static func isTenBit(_ pf: OSType) -> Bool {
+        pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
     }
 
     private func makeTexture(_ pixelBuffer: CVPixelBuffer, planeIndex: Int,

@@ -119,9 +119,11 @@ final class VectorscopeScopeModel: ObservableObject {
                 let rowBase = y * bytesPerRow
                 for x in 0..<width {
                     let p = rowBase + x * 4
-                    let (cb, cr) = Self.chroma(r: Float(buf[p + 2]),
-                                               g: Float(buf[p + 1]),
-                                               b: Float(buf[p + 0]))
+                    // Readback is rgb10a2 (M3b 10-bit target); unpack to 8-bit inline.
+                    let rgb = MetalVideoRenderer.rgb10a2Channels(buf, p)
+                    let (cb, cr) = Self.chroma(r: Float(rgb.r),
+                                               g: Float(rgb.g),
+                                               b: Float(rgb.b))
                     let px = Int(center + cb * s + 0.5)
                     let py = Int(center - cr * s + 0.5)   // Cr up (Y flip)
                     if px >= 0, px < plane, py >= 0, py < plane {
