@@ -59,3 +59,8 @@ npm-debug.log
 
 # XcodeGen generates the project — it's a build artifact, not source
 *.xcodeproj/
+
+# Vendored static libav (FFmpeg) binaries + headers — bundle-local, not source.
+# See ThirdParty/ffmpeg/README.md for provenance/rebuild. Keep the README tracked.
+ThirdParty/ffmpeg/lib/
+ThirdParty/ffmpeg/include/

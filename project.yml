@@ -41,3 +41,34 @@ targets:
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
+        # Vendored static libav (ThirdParty/ffmpeg) — linked statically into the
+        # app binary. Bundle-local only: no Homebrew/system ffmpeg, no rpath dylib.
+        # The C bridge (CFFmpeg module) lives in ManifoldCore; these flags satisfy
+        # the libav symbols at the final app link. The static archives bake into the
+        # binary, so there's nothing extra to sign (no disable-library-validation
+        # needed — that's only for separately-bundled dylibs).
+        # The CFFmpeg clang module (in ManifoldCore) is re-scanned in the app's
+        # compilation context, so the app target also needs the libav header path
+        # for <libavcodec/...> to resolve when that module is (re)built here.
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/ThirdParty/ffmpeg/include
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/ThirdParty/ffmpeg/lib
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lavformat
+          - -lavcodec
+          - -lavutil
+          - -lswscale
+          - -lswresample
+          - -lz
+          - -lbz2
+          - -liconv
+          - -framework
+          - CoreFoundation
+          - -framework
+          - CoreServices
+          - -framework
+          - Security

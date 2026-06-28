@@ -1,0 +1,10 @@
+// Clang module wrapping the vendored static libav headers so Swift in
+// ManifoldCore can call avcodec/avformat/avutil/swscale directly. Marked [system]
+// so warnings from the third-party libav headers don't break our build. The
+// header search path to ThirdParty/ffmpeg/include and the actual static-lib
+// linking are supplied by the build (Package.swift cSettings + the app's
+// linker flags) — this module just defines the umbrella surface.
+module CFFmpeg [system] {
+    header "shim.h"
+    export *
+}
