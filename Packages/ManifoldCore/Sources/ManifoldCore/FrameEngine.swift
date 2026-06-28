@@ -115,6 +115,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
     private var audioTrack: AVAssetTrack?
     private var reader: AVAssetReader?
+    /// The current file's video `FrameSource`. The file decode now flows through
+    /// this (Stage 1 seam): it owns the video pump and emits frames via
+    /// `onVideoFrame`, which we route to the display renderer + Metal tap below.
+    /// Recreated per reading session (a seek retires the old one via `stop()`).
+    private var currentSource: FileFrameSource?
+    /// Decoded video format requested at the decode-request site. A named property
+    /// rather than a magic constant so Stage 2 (libav) / M3b (10-bit) can vary it.
+    /// Today: 420v 8-bit (raw video-range; range expansion stays in the shader).
+    private let videoPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
     private var timeObserver: Any?
     private var imageGenerator: AVAssetImageGenerator?
     private let videoPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.video")
@@ -150,20 +159,75 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         Task { await loadAsset(url: url, autoplay: autoplay) }
     }
 
-    /// If the current file's modification date has changed since it was opened
-    /// (e.g. edited in Flip), re-read its metadata. Metadata-only — does not
-    /// disturb playback (a metadata edit doesn't change the essence). Returns
-    /// true if a refresh occurred. Constructs a FRESH asset to avoid AVFoundation
-    /// serving cached metadata for the rewritten file.
     /// Re-read the current file's metadata from disk (e.g. after editing it in
-    /// Flip). Metadata-only — does not disturb playback. Uses a fresh asset to
-    /// avoid AVFoundation serving cached metadata for a rewritten file.
+    /// Flip). Uses a FRESH asset to avoid AVFoundation serving cached metadata for
+    /// a rewritten file. The inspector readout always refreshes (cheap, display-
+    /// only). If the COLOR-relevant tags actually changed, the render path is
+    /// re-derived to match exactly what a fresh open produces — otherwise playback
+    /// is left completely undisturbed.
+    ///
+    /// Why the render path needs more than a metadata refresh: the shader reads the
+    /// YCbCr→RGB matrix and transfer from the DECODED pixel buffer's attachments,
+    /// and the range from `sourceRange` — both seeded from the DECODE asset, not the
+    /// inspector. Re-reading metadata fixes the inspector (and, via the UI's
+    /// metadata observer, the layer colorspace) but the decode keeps running on the
+    /// stale asset, so the conversion matrix / transfer / range stay old until the
+    /// file is reopened. Adopting the fresh asset for decode and rebuilding at the
+    /// current position re-stamps buffers with the new attachments and re-reads the
+    /// range — the same derivation a fresh open performs.
     public func reinspect() async {
         guard let url = currentURL else { return }
         let freshAsset = AVURLAsset(url: url)
-        self.tcInfo = MediaInspector.timecode(for: url)
-        let meta = await MediaInspector.metadata(for: freshAsset, url: url)
-        self.metadata = meta
+        let newTc = MediaInspector.timecode(for: url)
+        let newMeta = await MediaInspector.metadata(for: freshAsset, url: url)
+
+        // Inspector always refreshes.
+        let old = self.metadata
+        self.tcInfo = newTc
+        self.metadata = newMeta
+
+        // Re-derive the render path ONLY when a color-relevant tag changed, so a
+        // no-op refresh (or a non-color metadata edit) never disturbs playback.
+        let colorChanged =
+            old?.colorPrimariesCode   != newMeta.colorPrimariesCode ||
+            old?.transferFunctionCode != newMeta.transferFunctionCode ||
+            old?.colorMatrixCode      != newMeta.colorMatrixCode ||
+            old?.colorRange           != newMeta.colorRange
+        guard colorChanged else { return }
+
+        // Adopt the fresh asset for DECODE too (the stale one may serve cached
+        // format descriptions for the rewritten file).
+        self.asset = freshAsset
+
+        // Rebuild the scrub-preview generator on the fresh asset.
+        let generator = AVAssetImageGenerator(asset: freshAsset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.maximumSize = CGSize(width: 960, height: 540)
+        self.imageGenerator = generator
+
+        guard let vTrack = try? await freshAsset.loadTracks(withMediaType: .video).first else { return }
+        self.videoTrack = vTrack
+        self.audioTrack = try? await freshAsset.loadTracks(withMediaType: .audio).first
+
+        // Re-read the source range from the fresh format description and reset the
+        // per-file override to Auto — a fresh open does the same; the new tags are
+        // authoritative. updateEffectiveRange() pushes the thread-safe mirror the
+        // render thread reads, so this can't race the CVDisplayLink.
+        rangeOverride = .auto
+        if let formats = try? await vTrack.load(.formatDescriptions), let fmt = formats.first {
+            sourceRange = MediaInspector.sourceColorRange(for: fmt)
+        } else {
+            sourceRange = .untagged
+        }
+        updateEffectiveRange()
+
+        // Rebuild the decode at the current position, preserving play state, so the
+        // shader reads buffers stamped with the NEW color attachments. The layer
+        // colorspace re-applies separately via the UI's metadata observer
+        // (setSourceColorSpace, CATransaction-guarded).
+        await beginReading(from: currentTime, resumePlaying: isPlaying)
     }
 
     /// Set output gain (0–1). Writes through to the persistent audio renderer.
@@ -280,7 +344,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         shuttleRate = 0
         applyAudioMute()
         synchronizer.rate = 0
-        videoRenderer?.stopRequestingMediaData()
+        currentSource?.stop()           // retire the video pump (FrameSource seam)
+        currentSource = nil
         audioRenderer.stopRequestingMediaData()
 
         let readerToCancel = reader
@@ -462,7 +527,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let token = sessionToken.next()
 
         synchronizer.rate = 0
-        videoRenderer.stopRequestingMediaData()
+        currentSource?.stop()           // retire the prior session's video pump
+        currentSource = nil
         audioRenderer.stopRequestingMediaData()
         let oldReader = reader
         reader = nil
@@ -481,17 +547,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let start = CMTime(seconds: time, preferredTimescale: 600)
         newReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
 
-        // Always decode 420v (raw video-range): returns the file's stored values
-        // unclipped. Range handling happens in the shader via effectiveIsFullRange
-        // — never by requesting a full-range decode, which would pre-expand and
-        // clip super-white / sub-black content.
-        let videoSettings: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        ]
-        let vOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: videoSettings)
-        vOut.alwaysCopiesSampleData = false
-        guard newReader.canAdd(vOut) else { print("FrameEngine: cannot add video output"); return }
-        newReader.add(vOut)
+        // The file decode now flows through the FrameSource seam: FileFrameSource
+        // owns the video output + pump and emits frames via onVideoFrame (wired to
+        // the consumers below). Always decode videoPixelFormat (420v, raw video-
+        // range): the file's stored values, unclipped — range handling happens in
+        // the shader via effectiveIsFullRange, never by a full-range decode (which
+        // would pre-expand and clip super-white / sub-black content).
+        // Currency is gated by the session token — the SAME monotonic authority the
+        // engine already uses (bumped to `token` above). A superseded source's pump
+        // sees this go false and bows out without touching the shared renderer, so
+        // rapid create→retire churn (J jog, aggressive scrub) can't let a dying
+        // source cancel the live one.
+        let session = sessionToken
+        guard let source = FileFrameSource(reader: newReader,
+                                           track: vTrack,
+                                           pixelFormat: videoPixelFormat,
+                                           pacingRenderer: videoRenderer,
+                                           pumpQueue: videoPumpQueue,
+                                           isCurrent: { session.isCurrent(token) }) else {
+            print("FrameEngine: cannot add video output"); return
+        }
 
         var aOut: AVAssetReaderTrackOutput?
         if let aTrack = audioTrack {
@@ -514,25 +589,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.reader = newReader
         synchronizer.setRate(0, time: start)
 
-        // Capture LOCALS for the pumps — no reaching through self.
+        // Route the FrameSource's frames to the SAME two consumers as before:
+        // the reference AVSampleBufferVideoRenderer (display + sync clock) and the
+        // engine's Metal tap (onVideoFrame, set by the UI). Set unconditionally so
+        // the display path enqueues even when no Metal tap is attached — exactly
+        // the old pump's behavior, just routed through the protocol.
         let vRenderer = videoRenderer
-        let vReader = newReader
         let frameTap = onVideoFrame
-        vRenderer.requestMediaDataWhenReady(on: videoPumpQueue) { [token, weak self] in
-            guard let self, self.sessionToken.isCurrent(token) else {
-                vRenderer.stopRequestingMediaData(); return
-            }
-            while vRenderer.isReadyForMoreMediaData {
-                guard self.sessionToken.isCurrent(token) else {
-                    vRenderer.stopRequestingMediaData(); return
-                }
-                guard vReader.status == .reading, let next = vOut.copyNextSampleBuffer() else {
-                    vRenderer.stopRequestingMediaData(); return
-                }
-                vRenderer.enqueue(next)
-                frameTap?(next)
-            }
+        source.onVideoFrame = { sb in
+            vRenderer.enqueue(sb)
+            frameTap?(sb)
         }
+        self.currentSource = source
+        try? source.start()
 
         if let aOut {
             let aRenderer = audioRenderer
