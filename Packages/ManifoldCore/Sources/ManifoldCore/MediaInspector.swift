@@ -108,6 +108,18 @@ public enum MediaInspector {
         return fourCCString(code)
     }
 
+    /// Whether this video format needs the libav decode path (VideoToolbox can't
+    /// decode it). Stage 2b: DNxHR/DNxHD (`AVdh`/`AVdn`) route to LibavFrameSource;
+    /// Stage 3 can refine this (e.g. detect the actual VT failure) but the codec
+    /// FourCC is an honest, cheap signal.
+    public static func requiresLibavDecode(_ fmt: CMFormatDescription) -> Bool {
+        let code = CMFormatDescriptionGetMediaSubType(fmt)
+        let dnx: Set<FourCharCode> = [
+            fourCC("AVdh"), fourCC("AVdn"), fourCC("dnxh"), fourCC("dnxd")
+        ]
+        return dnx.contains(code)
+    }
+
     private static func colorTags(for fmt: CMFormatDescription)
         -> (primName: String, primCode: Int?,
             transName: String, transCode: Int?,

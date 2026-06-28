@@ -120,6 +120,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// `onVideoFrame`, which we route to the display renderer + Metal tap below.
     /// Recreated per reading session (a seek retires the old one via `stop()`).
     private var currentSource: FileFrameSource?
+    /// The libav-backed video source, used for formats VideoToolbox can't decode
+    /// (DNxHR). Stage 2b first light: a single static frame. When set, the
+    /// AVFoundation decode path is bypassed for this file.
+    private var libavSource: LibavFrameSource?
+    /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
+    private var useLibav = false
     /// Decoded video format requested at the decode-request site. A named property
     /// rather than a magic constant so Stage 2 (libav) / M3b (10-bit) can vary it.
     /// Today: 420v 8-bit (raw video-range; range expansion stays in the shader).
@@ -346,6 +352,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.rate = 0
         currentSource?.stop()           // retire the video pump (FrameSource seam)
         currentSource = nil
+        libavSource?.stop()             // retire the libav source (DNxHR path)
+        libavSource = nil
         audioRenderer.stopRequestingMediaData()
 
         let readerToCancel = reader
@@ -456,8 +464,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // override to Auto for the new file (transient per-file). Decode is ALWAYS
         // 420v; the override drives the shader's expansion via effectiveIsFullRange.
         rangeOverride = .auto
+        useLibav = false
         if let formats = try? await vTrack.load(.formatDescriptions), let fmt = formats.first {
             sourceRange = MediaInspector.sourceColorRange(for: fmt)
+            // DNxHR can't decode through VideoToolbox; route it to libav. Its real
+            // range (DNxHR/MXF ACLR) comes from libav's color_range, applied in
+            // beginLibavReading — overriding the often-untagged AVFoundation read.
+            useLibav = MediaInspector.requiresLibavDecode(fmt)
         } else {
             sourceRange = .untagged
         }
@@ -520,7 +533,65 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         updateEffectiveRange()
     }
 
+    /// Stage 2b FIRST LIGHT: the libav decode path (DNxHR). Opens the file with
+    /// libav, reads the real range (ACLR) to drive the shader's expansion, decodes
+    /// ONE frame, converts it to the same 420v contract the AVFoundation source
+    /// produces, and routes it to the SAME consumers (the reference renderer +
+    /// Metal tap). No playback pacing yet — a single static frame. Currency is the
+    /// session token, identical to the AVFoundation source.
+    private func beginLibavReading(from time: Double, resumePlaying: Bool) async {
+        guard let url = currentURL, let videoRenderer else { return }
+
+        let token = sessionToken.next()
+        synchronizer.rate = 0
+        currentSource?.stop(); currentSource = nil      // retire any AVFoundation pump
+        libavSource?.stop(); libavSource = nil
+        audioRenderer.stopRequestingMediaData()
+        videoRenderer.stopRequestingMediaData()
+        videoRenderer.flush(); audioRenderer.flush(); onFlush?()
+
+        let session = sessionToken
+        let source = LibavFrameSource(url: url,
+                                      pixelFormat: videoPixelFormat,
+                                      isCurrent: { session.isCurrent(token) },
+                                      pumpQueue: videoPumpQueue)
+        let info: LibavFrameSource.StreamInfo
+        do {
+            info = try source.open()
+        } catch {
+            print("FrameEngine: libav open failed for \(url.lastPathComponent): \(error)")
+            return
+        }
+
+        // The libav-reported range is authoritative for DNxHR (ACLR), where the
+        // AVFoundation FullRangeVideo extension is often absent. Drive the shader's
+        // expansion from it.
+        sourceRange = info.isFullRange ? .full : .videoLegal
+        updateEffectiveRange()
+        print("FrameEngine: libav first light — \(info.width)x\(info.height), "
+            + "src \(info.sourcePixelFormat), range \(info.rangeName), matrix \(info.matrixName)")
+
+        // Same consumer wiring as the AVFoundation source: display renderer +
+        // Metal tap, both fed off the source's onVideoFrame.
+        let vRenderer = videoRenderer
+        let frameTap = onVideoFrame
+        source.onVideoFrame = { sb in
+            vRenderer.enqueue(sb)
+            frameTap?(sb)
+        }
+        self.libavSource = source
+
+        // Anchor the clock at the requested time so the static frame (PTS 0) is
+        // chosen by the renderer's displayTick (now == 0).
+        synchronizer.setRate(0, time: CMTime(seconds: time, preferredTimescale: 600))
+        try? source.start()
+    }
+
     private func beginReading(from time: Double, resumePlaying: Bool) async {
+        if useLibav {
+            await beginLibavReading(from: time, resumePlaying: resumePlaying)
+            return
+        }
         guard let asset, let vTrack = videoTrack, let videoRenderer else { return }
 
         // Retire any prior pump session.

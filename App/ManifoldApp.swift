@@ -10,6 +10,12 @@ struct ManifoldApp: App {
     // Written to stderr (unbuffered) so it's visible immediately on launch.
     init() {
         FileHandle.standardError.write(Data("[FFmpegProbe] \(FFmpegProbe.summary())\n".utf8))
+        // Stage 2b first-light headless check — decode+convert one DNxHR frame and
+        // report the center RGB. TEMPORARY, remove with FFmpegProbe.
+        let probePath = "/Volumes/DCCOLOR/TEST FLIP/CS Validation Manifold/RED75_709_HQ_Full_111_DNX_HXQ.mov"
+        if FileManager.default.fileExists(atPath: probePath) {
+            FileHandle.standardError.write(Data("[LibavFirstLight] \(LibavFrameSource.firstLightProbe(path: probePath))\n".utf8))
+        }
     }
 
     var body: some Scene {
