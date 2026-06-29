@@ -270,10 +270,12 @@ final class MetalVideoRenderer {
         queueLock.lock()
         // Find the newest frame with pts <= now.
         var chosen: CVPixelBuffer?
+        var chosenPts: Double = -1
         var dropCount = 0
         for (i, frame) in frameQueue.enumerated() {
             if frame.pts <= now {
                 chosen = frame.pixelBuffer
+                chosenPts = frame.pts
                 dropCount = i
             } else {
                 break
@@ -287,11 +289,39 @@ final class MetalVideoRenderer {
 
         if let pb = chosen {
             renderPixelBuffer(pb)
+            tickPresentedFPS(chosenPts)
         } else {
             // No new frame (e.g. paused). If a range/override change requested a
             // refresh, re-render the last frame so the shader-flag change shows.
             refreshLock.lock(); let refresh = pendingRefresh; pendingRefresh = false; refreshLock.unlock()
             if refresh, let pb = lastPixelBuffer { renderPixelBuffer(pb) }
+        }
+    }
+
+    // TEMPORARY presented-fps instrumentation (Stage 3a). Counts DISTINCT source
+    // frames actually selected by displayTick (a frame re-shown across multiple
+    // 60/120Hz refreshes counts once) and logs the rate once per wall-second — the
+    // real on-screen playback rate, not the isolated decode rate. Touched only on
+    // the CVDisplayLink thread. Remove with the other Stage-3 probes.
+    private var pf_presentedCount = 0
+    private var pf_windowStartNs: UInt64 = 0
+    private var pf_lastPresentedPts: Double = -1
+
+    private func tickPresentedFPS(_ pts: Double) {
+        if pts != pf_lastPresentedPts {
+            pf_lastPresentedPts = pts
+            pf_presentedCount += 1
+        }
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        if pf_windowStartNs == 0 { pf_windowStartNs = nowNs; return }
+        let elapsed = nowNs - pf_windowStartNs
+        if elapsed >= 1_000_000_000 {
+            if pf_presentedCount > 0 {
+                let fps = Double(pf_presentedCount) * 1e9 / Double(elapsed)
+                FileHandle.standardError.write(Data(String(format: "[LibavPlay] presented %.1f fps\n", fps).utf8))
+            }
+            pf_windowStartNs = nowNs
+            pf_presentedCount = 0
         }
     }
 
