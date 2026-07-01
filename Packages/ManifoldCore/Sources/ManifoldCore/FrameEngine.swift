@@ -572,19 +572,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         meta.colorRange = (info.isFullRange
             ? MediaInspector.SourceColorRange.full
             : MediaInspector.SourceColorRange.videoLegal).displayName
+        meta.startTimecode = info.startTimecode   // MXF Material Package TC (libav)
 
-        // Data rate: prefer libav's video-stream bit_rate; else estimate from file
-        // size / duration (total incl. audio, but video dominates for DNxHR) — same
-        // "estimated" spirit as the .mov path's estimatedDataRate.
+        // Feed the SAME transport time-display path the .mov tmcd path uses: build a
+        // TimecodeReader.Result from libav's TC string + frame rate so the scrubber/
+        // controls show REAL timecode (start TC + elapsed), not a 00:00:00 counter.
+        // Nil string → no source TC (transport falls back to the elapsed counter).
+        if let tcString = info.startTimecode {
+            self.tcInfo = TimecodeReader.parse(timecode: tcString, fps: info.frameRate)
+        }
+
+        // Data rate: estimate from file size / duration (libav reports no per-stream
+        // bit_rate for MXF DNxHR; video dominates so audio/overhead is negligible) —
+        // same "estimated" spirit as the .mov path's estimatedDataRate.
         var fileSize: Int64 = 0
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
             meta.fileModifiedDate = attrs[.modificationDate] as? Date
             meta.fileCreatedDate = attrs[.creationDate] as? Date
             fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
         }
-        if info.bitRate > 0 {
-            meta.videoDataRate = Double(info.bitRate)
-        } else if fileSize > 0, info.durationSeconds > 0 {
+        if fileSize > 0, info.durationSeconds > 0 {
             meta.videoDataRate = Double(fileSize) * 8 / info.durationSeconds
         }
         self.metadata = meta
@@ -644,10 +651,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                           pacingRenderer: videoRenderer,
                                           pumpQueue: videoPumpQueue)
             do {
-                // threadCount 0 = auto: lights up frame/slice threading (HQX supports
-                // it), dropping 4K 10-bit decode ~12.5ms → ~1.1ms so the single-thread
-                // source cost stops contending with the 4K render pipeline.
-                let info = try source.open(threadCount: 0)
+                // open() enables auto-threaded decode so the 4K 10-bit source cost
+                // doesn't contend with the render pipeline (locks 23.976fps).
+                let info = try source.open()
                 sourceRange = info.isFullRange ? .full : .videoLegal
                 updateEffectiveRange()
                 // MXF: AVFoundation is blind to the container, so the UI facts

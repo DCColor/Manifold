@@ -5,7 +5,9 @@ import Foundation
 /// from the timecode sample and the rate/drop-frame from the sample description,
 /// then formats with correct SMPTE notation (";" before frames = drop-frame).
 ///
-/// MOV/MP4 only. MXF timecode (KLV) arrives with the ffmpeg backend later.
+/// MOV/MP4 use `readStartTimecode` (atom walk). MXF (via the libav backend) already
+/// has a formatted TC string from the container — `parse` turns it into the SAME
+/// `Result`, so both feed one transport timecode display path.
 public enum TimecodeReader {
 
     public struct Result: Equatable, Sendable {
@@ -14,6 +16,34 @@ public enum TimecodeReader {
         public var startFrame: Int     // raw start frame count
         public var nfr: Int            // integer frames per second (e.g. 24, 30)
         public var fps: Double         // exact rate (e.g. 23.976)
+    }
+
+    /// Parse a formatted SMPTE timecode string ("HH:MM:SS:FF", or ";FF" for
+    /// drop-frame — as libav/MXF provides it) plus the exact `fps` into a `Result`
+    /// with the same {startFrame, nfr, fps, dropFrame} the MOV tmcd path yields.
+    /// `startFrame` is computed as the exact inverse of `format(...)` so a round-trip
+    /// reproduces the string (drop-frame gaps accounted for). Returns nil if the
+    /// string isn't a valid timecode.
+    public static func parse(timecode: String, fps: Double) -> Result? {
+        guard fps > 0 else { return nil }
+        let dropFrame = timecode.contains(";")
+        let parts = timecode.split(whereSeparator: { $0 == ":" || $0 == ";" })
+        guard parts.count == 4,
+              let hh = Int(parts[0]), let mm = Int(parts[1]),
+              let ss = Int(parts[2]), let ff = Int(parts[3]) else { return nil }
+        let nfr = Int(fps.rounded())
+        guard nfr > 0 else { return nil }
+        var startFrame = (hh * 3600 + mm * 60 + ss) * nfr + ff
+        if dropFrame {
+            // Inverse of format()'s drop-frame adjustment: real continuous frame count.
+            let dropFrames = Int((fps * 0.066666).rounded())   // 2 @29.97, 4 @59.94
+            let totalMinutes = 60 * hh + mm
+            startFrame -= dropFrames * (totalMinutes - totalMinutes / 10)
+        }
+        // Canonicalize via format() (validates + normalizes ';' notation).
+        let canonical = format(frameCount: startFrame, nfr: nfr, fps: fps, dropFrame: dropFrame)
+        return Result(timecode: canonical, dropFrame: dropFrame,
+                      startFrame: startFrame, nfr: nfr, fps: fps)
     }
 
     public static func readStartTimecode(url: URL) -> Result? {

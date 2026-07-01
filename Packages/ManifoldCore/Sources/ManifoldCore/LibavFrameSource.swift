@@ -49,11 +49,13 @@ public final class LibavFrameSource: @unchecked Sendable {
         // file at all (MXF) — for the UI (duration/size/fps) and layer colorspace.
         public let durationSeconds: Double
         public let frameRate: Double
-        public let bitRate: Int64        // video stream bits/sec (0 if libav can't say)
         public let codecName: String
         public let primariesCode: Int?   // CICP (libav enum rawValue == CICP)
         public let transferCode: Int?
         public let matrixCode: Int?
+        /// Start timecode as libav formats it (HH:MM:SS:FF, ';FF' for drop-frame) —
+        /// the MXF Material Package TC. Nil if the file carries none.
+        public let startTimecode: String?
     }
 
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
@@ -82,11 +84,6 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// playback resumes exactly at the target. pumpQueue-only. -1 = no skip pending.
     private var skipToSeconds: Double = -1
 
-    // TEMPORARY perf instrumentation (Stage 3a jerkiness diagnosis). Nanoseconds.
-    var pf_decodeNs: UInt64 = 0
-    var pf_swsCtxNs: UInt64 = 0
-    var pf_scaleNs: UInt64 = 0
-
     // AVERROR codes (macros that don't import to Swift): AVERROR(EAGAIN) = -EAGAIN;
     // AVERROR_EOF = -FFERRTAG('E','O','F',' ').
     private static let errEAGAIN: Int32 = -Int32(EAGAIN)
@@ -111,11 +108,7 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// Open the container + decoder and read the stream facts (color, timebase,
     /// start time, audio presence). Cheap (no decode). Called synchronously by the
     /// engine so it can set its range flag before playback. Throws on failure.
-    ///
-    /// `threadCount`: 0 = auto (multithreaded decode — the engine's production value;
-    /// HQX frame-threads ~11×), a positive number forces that count, nil leaves the
-    /// libav default of 1 (single-threaded — used by the perf probe for comparison).
-    public func open(threadCount: Int32? = nil) throws -> StreamInfo {
+    public func open() throws -> StreamInfo {
         var ctx: UnsafeMutablePointer<AVFormatContext>? = nil
         guard avformat_open_input(&ctx, url.path, nil, nil) == 0, ctx != nil else { throw LibavError.open }
         guard avformat_find_stream_info(ctx, nil) >= 0 else { avformat_close_input(&ctx); throw LibavError.open }
@@ -139,7 +132,9 @@ public final class LibavFrameSource: @unchecked Sendable {
         guard let codec = avcodec_find_decoder(cid) else { avformat_close_input(&ctx); throw LibavError.noDecoder }
         guard let cctx = avcodec_alloc_context3(codec) else { avformat_close_input(&ctx); throw LibavError.noDecoder }
         avcodec_parameters_to_context(cctx, par)
-        if let threadCount { cctx.pointee.thread_count = threadCount }   // diagnostic (0 = auto)
+        // Auto multithreaded decode: HQX frame/slice-threads ~11×, so the 4K 10-bit
+        // decode cost stops contending with the render pipeline (locks 23.976fps).
+        cctx.pointee.thread_count = 0
         var cctxOpt: UnsafeMutablePointer<AVCodecContext>? = cctx
         guard avcodec_open2(cctx, codec, nil) == 0 else {
             avcodec_free_context(&cctxOpt); avformat_close_input(&ctx); throw LibavError.decoderOpen
@@ -171,6 +166,19 @@ public final class LibavFrameSource: @unchecked Sendable {
         func cicp(_ raw: some BinaryInteger) -> Int? {   // 0 reserved, 2 unspecified → nil
             let v = Int(raw); return (v == 0 || v == 2) ? nil : v
         }
+        // Start timecode: libav's mxf demuxer surfaces the MATERIAL PACKAGE TC at the
+        // format metadata "timecode" (pre-formatted, drop-frame ';' handled). Fall
+        // back to a stream-level "timecode" (e.g. MOV tmcd) for robustness.
+        var startTimecode: String? = av_dict_get(ctx!.pointee.metadata, "timecode", nil, 0)
+            .map { String(cString: $0.pointee.value) }
+        if startTimecode == nil {
+            for i in 0..<Int(ctx!.pointee.nb_streams) {
+                if let st = ctx!.pointee.streams[i],
+                   let e = av_dict_get(st.pointee.metadata, "timecode", nil, 0) {
+                    startTimecode = String(cString: e.pointee.value); break
+                }
+            }
+        }
         return StreamInfo(
             width: width, height: height,
             isFullRange: range == AVCOL_RANGE_JPEG,
@@ -180,11 +188,11 @@ public final class LibavFrameSource: @unchecked Sendable {
             matrixName: Self.matrixName(par.pointee.color_space),
             durationSeconds: durationSeconds,
             frameRate: frameRate,
-            bitRate: par.pointee.bit_rate,
             codecName: codecName,
             primariesCode: cicp(par.pointee.color_primaries.rawValue),
             transferCode: cicp(par.pointee.color_trc.rawValue),
-            matrixCode: cicp(par.pointee.color_space.rawValue))
+            matrixCode: cicp(par.pointee.color_space.rawValue),
+            startTimecode: startTimecode)
     }
 
     /// Seek to `time` and arm the continuous decode pump for this session. The pump
@@ -242,11 +250,9 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// intra DNxHR and reordered codecs alike).
     private func nextFrame() -> CMSampleBuffer? {
         guard let fmtCtx, let codecCtx, let pkt, let frame else { return nil }
-        let t0 = DispatchTime.now().uptimeNanoseconds   // TEMP: decode timing
         while true {
             let ret = avcodec_receive_frame(codecCtx, frame)
             if ret == 0 {
-                pf_decodeNs = DispatchTime.now().uptimeNanoseconds - t0   // TEMP
                 let ts = frame.pointee.best_effort_timestamp != Int64.min
                     ? frame.pointee.best_effort_timestamp : frame.pointee.pts
                 let sec = ptsSeconds(ts)
@@ -299,12 +305,10 @@ public final class LibavFrameSource: @unchecked Sendable {
               let pixelBuffer = makePixelBuffer(from: pool) else { return nil }
 
         let dstFmt = Self.swsDestFormat(for: pixelFormat)
-        let tctx = DispatchTime.now().uptimeNanoseconds   // TEMP: sws_getContext timing
         guard let sws = sws_getContext(Int32(W), Int32(H), srcFmt,
                                        Int32(W), Int32(H), dstFmt,
                                        Int32(SWS_BILINEAR.rawValue), nil, nil, nil) else { return nil }
         defer { sws_freeContext(sws) }
-        pf_swsCtxNs = DispatchTime.now().uptimeNanoseconds - tctx   // TEMP
         // Force src/dst range EQUAL → no range remap; preserve stored values unclipped.
         let coeff = sws_getCoefficients(SWS_CS_ITU709)
         let r: Int32 = (frame.pointee.color_range == AVCOL_RANGE_JPEG) ? 1 : 0
@@ -329,9 +333,7 @@ public final class LibavFrameSource: @unchecked Sendable {
             Int32(CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)),
             0, 0
         ]
-        let tscale = DispatchTime.now().uptimeNanoseconds   // TEMP
         let scaled = sws_scale(sws, srcData, &srcStride, 0, Int32(H), &dst, &dstStride)
-        pf_scaleNs = DispatchTime.now().uptimeNanoseconds - tscale   // TEMP
         CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
         guard scaled > 0 else { return nil }
 
@@ -387,104 +389,6 @@ public final class LibavFrameSource: @unchecked Sendable {
             allocator: nil, imageBuffer: pb, formatDescription: formatDesc,
             sampleTiming: &timing, sampleBufferOut: &sb) == noErr else { return nil }
         return sb
-    }
-
-    // MARK: - First-light diagnostic (TEMPORARY — remove after verification)
-
-    /// Headless playback check: decode several frames continuously (reporting the
-    /// PTS sequence + implied fps), test a seek (PTS should land near the target),
-    /// and verify the first frame's center color (75% red full ~ RGB(191,0,0)).
-    /// Proves continuous decode + timestamps + seek without the GUI.
-    public static func firstLightProbe(path: String) -> String {
-        let q = DispatchQueue(label: "com.graviton.manifold.libav.probe")
-        let r = AVSampleBufferVideoRenderer()
-        let src = LibavFrameSource(url: URL(fileURLWithPath: path),
-                                   pixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                                   pacingRenderer: r, pumpQueue: q)
-        let info: StreamInfo
-        do { info = try src.open() } catch { return "open failed: \(error)" }
-        defer { src.freeContexts() }
-
-        // Decode 6 frames continuously; record PTS (seconds) + center color of frame 0.
-        var ptsSeq: [Double] = []
-        var colorLine = ""
-        for i in 0..<6 {
-            guard let sb = src.nextFrame() else { break }
-            ptsSeq.append(CMSampleBufferGetPresentationTimeStamp(sb).seconds)
-            if i == 0, let pb = CMSampleBufferGetImageBuffer(sb) { colorLine = centerColor(pb) }
-        }
-        guard !ptsSeq.isEmpty else { return "decode failed (\(info.sourcePixelFormat))" }
-        let dpts = ptsSeq.count >= 2 ? ptsSeq[1] - ptsSeq[0] : 0
-        let fps = dpts > 0 ? 1.0 / dpts : 0
-
-        // Seek to ~2s and decode one frame — its PTS should land near 2.0.
-        src.seekOnPump(toSeconds: 2.0)
-        let seekPts = src.nextFrame().map { CMSampleBufferGetPresentationTimeStamp($0).seconds } ?? -1
-
-        let seq = ptsSeq.prefix(4).map { String(format: "%.3f", $0) }.joined(separator: ",")
-        return String(format: "%dx%d audio=%@ range=%@ meta[dur=%.2fs fps=%.3f bitrate=%lldbps codes=%d/%d/%d] | PTS[%@…] Δ=%.4fs (~%.2f fps) | seek→2.0s landed %.3fs | %@",
-            info.width, info.height, info.hasAudio ? "yes" : "no", info.rangeName,
-            info.durationSeconds, info.frameRate, info.bitRate,
-            info.primariesCode ?? -1, info.transferCode ?? -1, info.matrixCode ?? -1,
-            seq, dpts, fps, seekPts, colorLine)
-    }
-
-    /// TEMPORARY Stage 3a perf diagnosis: report the codec's thread settings and the
-    /// average per-frame decode / sws_getContext / sws_scale times over 30 frames vs
-    /// the 23.976fps budget (~41.7ms). Decode-bound vs convert-bound, headless.
-    public static func perfProbe(path: String) -> String {
-        func measure(threadCount: Int32?) -> String {
-            let q = DispatchQueue(label: "com.graviton.manifold.libav.perf")
-            let r = AVSampleBufferVideoRenderer()
-            let src = LibavFrameSource(url: URL(fileURLWithPath: path),
-                                       pixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                                       pacingRenderer: r, pumpQueue: q)
-            guard (try? src.open(threadCount: threadCount)) != nil else { return "open failed" }
-            defer { src.freeContexts() }
-            let tc = src.codecCtx?.pointee.thread_count ?? -1
-            let active = src.codecCtx?.pointee.active_thread_type ?? -1
-            var dec: UInt64 = 0, ctx: UInt64 = 0, scl: UInt64 = 0, wall: UInt64 = 0, n = 0
-            for _ in 0..<30 {
-                let w0 = DispatchTime.now().uptimeNanoseconds
-                guard src.nextFrame() != nil else { break }
-                wall += DispatchTime.now().uptimeNanoseconds - w0
-                dec += src.pf_decodeNs; ctx += src.pf_swsCtxNs; scl += src.pf_scaleNs; n += 1
-            }
-            guard n > 0 else { return "no frames" }
-            let ms = { (v: UInt64) in Double(v) / Double(n) / 1_000_000 }
-            return String(format: "tc=%d active=0x%x decode=%.1f swsCtx=%.1f swsScale=%.1f total=%.1fms (~%.1ffps)",
-                tc, active, ms(dec), ms(ctx), ms(scl), ms(wall), 1000.0 / ms(wall))
-        }
-        // Current path (no thread setting) vs auto-threaded (thread_count=0).
-        return "budget 41.7ms@23.976 | CURRENT[\(measure(threadCount: nil))] | AUTO-THREADED[\(measure(threadCount: 0))]"
-    }
-
-    private static func centerColor(_ pb: CVPixelBuffer) -> String {
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-        let W = CVPixelBufferGetWidth(pb), H = CVPixelBufferGetHeight(pb)
-        let yB = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!.assumingMemoryBound(to: UInt16.self)
-        let yS = CVPixelBufferGetBytesPerRowOfPlane(pb, 0) / 2
-        let cB = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!.assumingMemoryBound(to: UInt16.self)
-        let cS = CVPixelBufferGetBytesPerRowOfPlane(pb, 1) / 2
-        var sy = 0.0, scb = 0.0, scr = 0.0, n = 0.0
-        for yy in (H/2 - 20)..<(H/2 + 20) {
-            for xx in (W/2 - 20)..<(W/2 + 20) {
-                sy += Double(yB[yy * yS + xx])
-                let cx = (xx / 2) * 2
-                scb += Double(cB[(yy / 2) * cS + cx])
-                scr += Double(cB[(yy / 2) * cS + cx + 1])
-                n += 1
-            }
-        }
-        let Y = (sy / n) / 65535, Cb = (scb / n) / 65535, Cr = (scr / n) / 65535
-        let neutral = 128.0 / 255.0, k = 219.0 / 224.0
-        let cb = (Cb - neutral) * k, cr = (Cr - neutral) * k
-        let red = (Y + 1.5748 * cr) * 255
-        let grn = (Y - 0.1873 * cb - 0.4681 * cr) * 255
-        let blu = (Y + 1.8556 * cb) * 255
-        return String(format: "shaderRGB(full)=(%.0f,%.0f,%.0f) [75%% red ~191,0,0]",
-            max(0, min(255, red)), max(0, min(255, grn)), max(0, min(255, blu)))
     }
 
     /// swscale destination format matching `pixelFormat` (P010 ↔ x420 10-bit, NV12 ↔ 420v).

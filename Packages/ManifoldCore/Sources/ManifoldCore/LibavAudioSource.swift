@@ -63,45 +63,6 @@ public final class LibavAudioSource: @unchecked Sendable {
         return -Int32(bitPattern: tag)
     }()
 
-    /// TEMPORARY headless check: report the audio format + decode a few PCM frames
-    /// (PTS sequence + total samples) to prove decode→PCM→CMSampleBuffer end-to-end.
-    public static func audioProbe(path: String) -> String {
-        // Report the file's audio codec + whether a decoder is present in the static
-        // build (works even when the decoder is missing — the key diagnostic).
-        var ctx: UnsafeMutablePointer<AVFormatContext>? = nil
-        guard avformat_open_input(&ctx, path, nil, nil) == 0, ctx != nil else { return "open_input failed" }
-        defer { avformat_close_input(&ctx) }
-        guard avformat_find_stream_info(ctx, nil) >= 0 else { return "find_stream_info failed" }
-        for i in 0..<Int(ctx!.pointee.nb_streams) {
-            guard let st = ctx!.pointee.streams[i], let par = st.pointee.codecpar,
-                  par.pointee.codec_type == AVMEDIA_TYPE_AUDIO else { continue }
-            let cid = par.pointee.codec_id
-            let name = String(cString: avcodec_get_name(cid))
-            let rate = par.pointee.sample_rate
-            let ch = par.pointee.ch_layout.nb_channels
-            let hasDecoder = avcodec_find_decoder(cid) != nil
-            if !hasDecoder {
-                return "codec=\(name) \(rate)Hz \(ch)ch — DECODER NOT IN STATIC BUILD (rebuild FFmpeg with --enable-decoder=\(name))"
-            }
-            // Decoder present: exercise the real decode path.
-            let q = DispatchQueue(label: "com.graviton.manifold.libav.audioprobe")
-            let src = LibavAudioSource(url: URL(fileURLWithPath: path),
-                                       pacingRenderer: AVSampleBufferAudioRenderer(), pumpQueue: q)
-            guard let info = try? src.open() else { return "codec=\(name) — open failed" }
-            defer { src.freeContexts() }
-            var pts: [Double] = []; var totalSamples = 0
-            for _ in 0..<5 {
-                guard let sb = src.nextFrame() else { break }
-                pts.append(CMSampleBufferGetPresentationTimeStamp(sb).seconds)
-                totalSamples += CMSampleBufferGetNumSamples(sb)
-            }
-            let seq = pts.prefix(4).map { String(format: "%.3f", $0) }.joined(separator: ",")
-            return String(format: "%@ %dHz %dch (%@) | decoded %d frames PTS[%@…] samples=%d",
-                info.codecName, info.sampleRate, info.channels, info.layoutName, pts.count, seq, totalSamples)
-        }
-        return "no audio stream"
-    }
-
     public init(url: URL, pacingRenderer: AVSampleBufferAudioRenderer, pumpQueue: DispatchQueue) {
         self.url = url
         self.pacingRenderer = pacingRenderer

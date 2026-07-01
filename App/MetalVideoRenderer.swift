@@ -298,30 +298,36 @@ final class MetalVideoRenderer {
         }
     }
 
-    // TEMPORARY presented-fps instrumentation (Stage 3a). Counts DISTINCT source
-    // frames actually selected by displayTick (a frame re-shown across multiple
-    // 60/120Hz refreshes counts once) and logs the rate once per wall-second — the
-    // real on-screen playback rate, not the isolated decode rate. Touched only on
-    // the CVDisplayLink thread. Remove with the other Stage-3 probes.
-    private var pf_presentedCount = 0
-    private var pf_windowStartNs: UInt64 = 0
-    private var pf_lastPresentedPts: Double = -1
+    // Presented-fps tracking: the REAL on-screen playback rate — counts DISTINCT
+    // source frames actually selected by displayTick (a frame re-shown across several
+    // 60/120Hz refreshes counts once), recomputed once per wall-second. Useful for a
+    // pro player to catch dropped frames during review. Touched only on the
+    // CVDisplayLink thread. The latest value is exposed via `presentedFPS`; the
+    // per-second log is DEBUG-only (no release spam).
+    // FUTURE: surface `presentedFPS` on-screen next to the nominal frame rate, with a
+    // dropped-frame count (nominal − presented). Not built yet.
+    private(set) var presentedFPS: Double = 0
+    private var presentedFrameCount = 0
+    private var presentedWindowStartNs: UInt64 = 0
+    private var lastPresentedPts: Double = -1
 
     private func tickPresentedFPS(_ pts: Double) {
-        if pts != pf_lastPresentedPts {
-            pf_lastPresentedPts = pts
-            pf_presentedCount += 1
+        if pts != lastPresentedPts {
+            lastPresentedPts = pts
+            presentedFrameCount += 1
         }
         let nowNs = DispatchTime.now().uptimeNanoseconds
-        if pf_windowStartNs == 0 { pf_windowStartNs = nowNs; return }
-        let elapsed = nowNs - pf_windowStartNs
+        if presentedWindowStartNs == 0 { presentedWindowStartNs = nowNs; return }
+        let elapsed = nowNs - presentedWindowStartNs
         if elapsed >= 1_000_000_000 {
-            if pf_presentedCount > 0 {
-                let fps = Double(pf_presentedCount) * 1e9 / Double(elapsed)
-                FileHandle.standardError.write(Data(String(format: "[LibavPlay] presented %.1f fps\n", fps).utf8))
+            presentedFPS = Double(presentedFrameCount) * 1e9 / Double(elapsed)
+            #if DEBUG
+            if presentedFrameCount > 0 {
+                FileHandle.standardError.write(Data(String(format: "[Play] presented %.1f fps\n", presentedFPS).utf8))
             }
-            pf_windowStartNs = nowNs
-            pf_presentedCount = 0
+            #endif
+            presentedWindowStartNs = nowNs
+            presentedFrameCount = 0
         }
     }
 
