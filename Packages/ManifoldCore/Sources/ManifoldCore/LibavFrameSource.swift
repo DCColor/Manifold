@@ -45,6 +45,15 @@ public final class LibavFrameSource: @unchecked Sendable {
         public let rangeName: String
         public let sourcePixelFormat: String
         public let matrixName: String
+        // Container-sourced facts the engine needs when AVFoundation can't open the
+        // file at all (MXF) — for the UI (duration/size/fps) and layer colorspace.
+        public let durationSeconds: Double
+        public let frameRate: Double
+        public let bitRate: Int64        // video stream bits/sec (0 if libav can't say)
+        public let codecName: String
+        public let primariesCode: Int?   // CICP (libav enum rawValue == CICP)
+        public let transferCode: Int?
+        public let matrixCode: Int?
     }
 
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
@@ -149,13 +158,33 @@ public final class LibavFrameSource: @unchecked Sendable {
 
         let range = par.pointee.color_range
         let srcPix = av_get_pix_fmt_name(AVPixelFormat(par.pointee.format)).map { String(cString: $0) } ?? "?"
+
+        // Container facts for the AVFoundation-blind (MXF) load path.
+        let durTicks = ctx!.pointee.duration
+        let durationSeconds = (durTicks == Int64.min) ? 0 : Double(durTicks) / 1_000_000
+        // MXF often leaves avg_frame_rate unset; av_guess_frame_rate falls back to
+        // r_frame_rate / codec timebase so we get 23.976 like the .mov path.
+        let fr = av_guess_frame_rate(ctx, stream, nil)
+        let frameRate = fr.den != 0 ? Double(fr.num) / Double(fr.den) : 0
+        var codecName = String(cString: avcodec_get_name(cid))
+        if codecName == "dnxhd" { codecName = "DNxHR" }
+        func cicp(_ raw: some BinaryInteger) -> Int? {   // 0 reserved, 2 unspecified → nil
+            let v = Int(raw); return (v == 0 || v == 2) ? nil : v
+        }
         return StreamInfo(
             width: width, height: height,
             isFullRange: range == AVCOL_RANGE_JPEG,
             hasAudio: hasAudio,
             rangeName: Self.rangeName(range),
             sourcePixelFormat: srcPix,
-            matrixName: Self.matrixName(par.pointee.color_space))
+            matrixName: Self.matrixName(par.pointee.color_space),
+            durationSeconds: durationSeconds,
+            frameRate: frameRate,
+            bitRate: par.pointee.bit_rate,
+            codecName: codecName,
+            primariesCode: cicp(par.pointee.color_primaries.rawValue),
+            transferCode: cicp(par.pointee.color_trc.rawValue),
+            matrixCode: cicp(par.pointee.color_space.rawValue))
     }
 
     /// Seek to `time` and arm the continuous decode pump for this session. The pump
@@ -393,8 +422,10 @@ public final class LibavFrameSource: @unchecked Sendable {
         let seekPts = src.nextFrame().map { CMSampleBufferGetPresentationTimeStamp($0).seconds } ?? -1
 
         let seq = ptsSeq.prefix(4).map { String(format: "%.3f", $0) }.joined(separator: ",")
-        return String(format: "%dx%d audio=%@ range=%@ | PTS[%@…] Δ=%.4fs (~%.2f fps) | seek→2.0s landed %.3fs | %@",
+        return String(format: "%dx%d audio=%@ range=%@ meta[dur=%.2fs fps=%.3f bitrate=%lldbps codes=%d/%d/%d] | PTS[%@…] Δ=%.4fs (~%.2f fps) | seek→2.0s landed %.3fs | %@",
             info.width, info.height, info.hasAudio ? "yes" : "no", info.rangeName,
+            info.durationSeconds, info.frameRate, info.bitRate,
+            info.primariesCode ?? -1, info.transferCode ?? -1, info.matrixCode ?? -1,
             seq, dpts, fps, seekPts, colorLine)
     }
 

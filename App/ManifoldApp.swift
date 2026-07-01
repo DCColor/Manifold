@@ -20,6 +20,17 @@ struct ManifoldApp: App {
             FileHandle.standardError.write(Data("[LibavPerf] \(LibavFrameSource.perfProbe(path: probePath))\n".utf8))
             FileHandle.standardError.write(Data("[LibavAudio] \(LibavAudioSource.audioProbe(path: probePath))\n".utf8))
         }
+        // Stage 3b MXF: verify the same libav pipeline demuxes MXF (video color/range
+        // + audio). TEMPORARY. 75red MXF = color/range ref; SPOT = commercial w/ audio.
+        let mxfVideo = "/Volumes/DCCOLOR/TEST FLIP/CS Validation Manifold/75red_Full_111_DNX HQX.mxf"
+        let mxfAudio = "/Volumes/DCCOLOR/TEST FLIP/CS Validation Manifold/SPOT MXF WITH AUDIO.mxf"
+        if FileManager.default.fileExists(atPath: mxfVideo) {
+            FileHandle.standardError.write(Data("[MXFVideo] \(LibavFrameSource.firstLightProbe(path: mxfVideo))\n".utf8))
+        }
+        if FileManager.default.fileExists(atPath: mxfAudio) {
+            FileHandle.standardError.write(Data("[MXFAudio] \(LibavAudioSource.audioProbe(path: mxfAudio))\n".utf8))
+            FileHandle.standardError.write(Data("[MXFCommercialVideo] \(LibavFrameSource.firstLightProbe(path: mxfAudio))\n".utf8))
+        }
         // M3b: verify the AVFoundation path accepts x420 (10-bit) decode for 10-bit
         // ProRes AND 8-bit sources (8-bit must not regress). TEMPORARY. Fire-and-
         // forget — prints to stderr when each finishes (don't block init).

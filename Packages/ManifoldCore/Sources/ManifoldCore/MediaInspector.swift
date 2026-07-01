@@ -120,6 +120,43 @@ public enum MediaInspector {
         return dnx.contains(code)
     }
 
+    /// CICP numeric code → human-readable name, mirroring `colorTags`' name strings
+    /// exactly. Used by the libav/MXF metadata path (which has the codes but no CV
+    /// attachment strings) so its inspector rows match the .mov/AVFoundation path.
+    public static func primariesName(forCode code: Int?) -> String {
+        switch code {
+        case 1:  return "Rec. 709"
+        case 9:  return "Rec. 2020"
+        case 6:  return "SMPTE-C"
+        case 5:  return "EBU 3213"
+        case 12: return "P3 D65"
+        case 11: return "DCI-P3"
+        case 10: return "ST 428-1"
+        default: return "—"
+        }
+    }
+    public static func transferName(forCode code: Int?) -> String {
+        switch code {
+        case 1:  return "Rec. 709"
+        case 16: return "PQ (ST 2084)"
+        case 18: return "HLG"
+        case 13: return "sRGB"
+        case 8:  return "Linear"
+        case 17: return "ST 428-1"
+        case 7:  return "SMPTE 240M"
+        default: return "—"
+        }
+    }
+    public static func matrixName(forCode code: Int?) -> String {
+        switch code {
+        case 1:  return "Rec. 709"
+        case 9:  return "Rec. 2020"
+        case 7:  return "SMPTE 240M"
+        case 6:  return "SMPTE-C / 170M"
+        default: return "—"
+        }
+    }
+
     private static func colorTags(for fmt: CMFormatDescription)
         -> (primName: String, primCode: Int?,
             transName: String, transCode: Int?,

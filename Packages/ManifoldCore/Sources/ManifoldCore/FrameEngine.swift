@@ -440,6 +440,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavSource?.stop(); libavSource = nil
         libavAudioSource?.stop(); libavAudioSource = nil
 
+        // MXF: AVFoundation can't demux it — route straight to libav (container-based
+        // detection; not a VT-failed fallback). Its metadata comes from libav.
+        if url.pathExtension.lowercased() == "mxf" {
+            self.asset = nil
+            self.videoTrack = nil
+            await loadMXF(url: url, autoplay: autoplay)
+            return
+        }
+
         let asset = AVURLAsset(url: url)
         self.asset = asset
         self.hasMedia = true
@@ -489,31 +498,96 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         updateEffectiveRange()
 
-        if timeObserver == nil {
-            let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
-            timeObserver = synchronizer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-                // This closure runs on .main; hop to the main actor explicitly.
-                let t = CMTimeGetSeconds(time)
-                guard t.isFinite else { return }
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    if self.duration > 0 && t >= self.duration {
-                        self.currentTime = self.duration
-                        if self.isPlaying {
-                            self.synchronizer.rate = 0
-                            self.isPlaying = false
-                            self.shuttleRate = 0
-                            self.applyAudioMute()
-                        }
-                    } else {
-                        self.currentTime = t
-                    }
-                }
-            }
-        }
+        installTimeObserverIfNeeded()
 
         print("FrameEngine: loaded — duration \(self.duration)s, audio: \(self.audioTrack != nil)")
         await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    /// The periodic clock observer that publishes `currentTime` and stops at the end.
+    /// Shared by the AVFoundation and libav/MXF load paths (added once).
+    private func installTimeObserverIfNeeded() {
+        guard timeObserver == nil else { return }
+        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+        timeObserver = synchronizer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            let t = CMTimeGetSeconds(time)
+            guard t.isFinite else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.duration > 0 && t >= self.duration {
+                    self.currentTime = self.duration
+                    if self.isPlaying {
+                        self.synchronizer.rate = 0
+                        self.isPlaying = false
+                        self.shuttleRate = 0
+                        self.applyAudioMute()
+                    }
+                } else {
+                    self.currentTime = t
+                }
+            }
+        }
+    }
+
+    /// The MXF load path. AVFoundation has no MXF demuxer, so it can't open the file
+    /// at all — MXF routes DIRECTLY to libav (not an AVFoundation-attempt-then-fall-
+    /// back). All the facts AVFoundation normally supplies (duration, size, fps,
+    /// color) are read from libav in `beginLibavReading` (gated on `videoTrack == nil`).
+    private func loadMXF(url: URL, autoplay: Bool) async {
+        self.hasMedia = true
+        self.tcInfo = MediaInspector.timecode(for: url)   // nil for MXF; harmless
+        self.imageGenerator = nil                          // no AVFoundation scrub preview for MXF
+        self.videoTrack = nil                              // AVFoundation blind → libav supplies metadata
+        self.audioTrack = nil
+        self.rangeOverride = .auto
+        self.useLibav = true
+        installTimeObserverIfNeeded()
+        await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    /// Populate the UI-facing metadata/duration/size from libav's stream facts, for
+    /// the MXF path where AVFoundation supplies nothing. Color codes drive the layer
+    /// colorspace (via the metadata observer → setSourceColorSpace) exactly as the
+    /// AVFoundation-read codes do; the shader's YCbCr matrix still comes from the
+    /// pixel-buffer attachment the source sets. Called on the main actor.
+    private func applyLibavMetadata(_ info: LibavFrameSource.StreamInfo, url: URL) {
+        if info.durationSeconds.isFinite, info.durationSeconds > 0 { self.duration = info.durationSeconds }
+        if info.width > 0, info.height > 0 { self.displaySize = CGSize(width: info.width, height: info.height) }
+
+        var meta = VideoMetadata()
+        meta.fileName = url.lastPathComponent
+        meta.container = url.pathExtension.uppercased()
+        meta.codecName = info.codecName
+        meta.width = info.width
+        meta.height = info.height
+        meta.frameRate = info.frameRate
+        meta.colorPrimariesCode = info.primariesCode
+        meta.transferFunctionCode = info.transferCode
+        meta.colorMatrixCode = info.matrixCode
+        // Resolve the human-readable names the SAME way the .mov path does (the
+        // inspector renders `labeled(name, code)`; without the name it shows "— (1)").
+        meta.colorPrimaries = MediaInspector.primariesName(forCode: info.primariesCode)
+        meta.transferFunction = MediaInspector.transferName(forCode: info.transferCode)
+        meta.colorMatrix = MediaInspector.matrixName(forCode: info.matrixCode)
+        meta.colorRange = (info.isFullRange
+            ? MediaInspector.SourceColorRange.full
+            : MediaInspector.SourceColorRange.videoLegal).displayName
+
+        // Data rate: prefer libav's video-stream bit_rate; else estimate from file
+        // size / duration (total incl. audio, but video dominates for DNxHR) — same
+        // "estimated" spirit as the .mov path's estimatedDataRate.
+        var fileSize: Int64 = 0
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
+            meta.fileModifiedDate = attrs[.modificationDate] as? Date
+            meta.fileCreatedDate = attrs[.creationDate] as? Date
+            fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        }
+        if info.bitRate > 0 {
+            meta.videoDataRate = Double(info.bitRate)
+        } else if fileSize > 0, info.durationSeconds > 0 {
+            meta.videoDataRate = Double(fileSize) * 8 / info.durationSeconds
+        }
+        self.metadata = meta
     }
 
     /// Resolve override + source range into the effective full-range flag the
@@ -576,9 +650,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 let info = try source.open(threadCount: 0)
                 sourceRange = info.isFullRange ? .full : .videoLegal
                 updateEffectiveRange()
+                // MXF: AVFoundation is blind to the container, so the UI facts
+                // (duration/size/fps/color/codec) come from libav. .mov-DNx already
+                // has them from AVFoundation (videoTrack set) — leave those untouched.
+                if videoTrack == nil { applyLibavMetadata(info, url: url) }
                 print("FrameEngine: libav opened — \(info.width)x\(info.height), "
                     + "src \(info.sourcePixelFormat), range \(info.rangeName), "
-                    + "matrix \(info.matrixName), audio=\(info.hasAudio) (video-only)")
+                    + "matrix \(info.matrixName), audio=\(info.hasAudio)")
             } catch {
                 print("FrameEngine: libav open failed for \(url.lastPathComponent): \(error)")
                 return
