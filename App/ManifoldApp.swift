@@ -18,6 +18,7 @@ struct ManifoldApp: App {
         if FileManager.default.fileExists(atPath: probePath) {
             FileHandle.standardError.write(Data("[LibavFirstLight] \(LibavFrameSource.firstLightProbe(path: probePath))\n".utf8))
             FileHandle.standardError.write(Data("[LibavPerf] \(LibavFrameSource.perfProbe(path: probePath))\n".utf8))
+            FileHandle.standardError.write(Data("[LibavAudio] \(LibavAudioSource.audioProbe(path: probePath))\n".utf8))
         }
         // M3b: verify the AVFoundation path accepts x420 (10-bit) decode for 10-bit
         // ProRes AND 8-bit sources (8-bit must not regress). TEMPORARY. Fire-and-

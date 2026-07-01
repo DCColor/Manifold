@@ -124,6 +124,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// (DNxHR). Stage 2b first light: a single static frame. When set, the
     /// AVFoundation decode path is bypassed for this file.
     private var libavSource: LibavFrameSource?
+    /// The libav audio sibling — decodes the DNx file's audio to PCM on the shared
+    /// `audioRenderer` (same synchronizer → A/V sync). Nil if the file has no audio.
+    private var libavAudioSource: LibavAudioSource?
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
     /// Decoded video format requested at the decode-request site. A named property
@@ -355,8 +358,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.rate = 0
         currentSource?.stop()           // retire the video pump (FrameSource seam)
         currentSource = nil
-        libavSource?.stop()             // retire the libav source (DNxHR path)
+        libavSource?.stop()             // retire the libav sources (DNxHR path)
         libavSource = nil
+        libavAudioSource?.stop()
+        libavAudioSource = nil
         audioRenderer.stopRequestingMediaData()
 
         let readerToCancel = reader
@@ -430,9 +435,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     private func loadAsset(url: URL, autoplay: Bool) async {
-        // New file: retire any prior libav source (it's bound to the old file). The
-        // per-file LibavFrameSource is created lazily in beginLibavReading.
+        // New file: retire any prior libav sources (bound to the old file). The
+        // per-file libav video+audio sources are created lazily in beginLibavReading.
         libavSource?.stop(); libavSource = nil
+        libavAudioSource?.stop(); libavAudioSource = nil
 
         let asset = AVURLAsset(url: url)
         self.asset = asset
@@ -586,12 +592,28 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 frameTap?(sb)
             }
             libavSource = source
+
+            // Audio (if present): decode the audio stream to interleaved-float PCM
+            // and feed the SHARED audioRenderer on the SAME synchronizer → A/V sync
+            // is free. Absent audio → video-only (no source created).
+            let audio = LibavAudioSource(url: url, pacingRenderer: audioRenderer, pumpQueue: audioPumpQueue)
+            if let ainfo = try? audio.open() {
+                let aRenderer = audioRenderer
+                audio.onAudioFrame = { sb in aRenderer.enqueue(sb) }
+                libavAudioSource = audio
+                print("FrameEngine: libav audio — \(ainfo.codecName) \(ainfo.sampleRate)Hz "
+                    + "\(ainfo.channels)ch (\(ainfo.layoutName))")
+            } else {
+                print("FrameEngine: libav — no audio stream (video-only)")
+            }
         }
 
-        // Anchor the clock at the seek target, then seek + arm the continuous pump.
+        // Anchor the clock at the seek target, then seek + arm both pumps (video +
+        // audio) with the SAME session token so they retire together cleanly.
         let session = sessionToken
         synchronizer.setRate(0, time: CMTime(seconds: time, preferredTimescale: 600))
         libavSource?.arm(fromSeconds: time, isCurrent: { session.isCurrent(token) })
+        libavAudioSource?.arm(fromSeconds: time, isCurrent: { session.isCurrent(token) })
         if resumePlaying { play() }
     }
 
