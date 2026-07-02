@@ -25,6 +25,16 @@ private struct WaveformParams {
     var rowStride: UInt32  // process every rowStride-th source row
 }
 
+/// Matches the shader's ParadeParams struct (memory layout). GPU RGB parade. Same layout
+/// as WaveformParams; kept separate for the clearer `colW` field name (per-channel width).
+private struct ParadeParams {
+    var width: UInt32      // source (offscreen) width
+    var height: UInt32     // source (offscreen) height
+    var colW: UInt32       // per-channel column buckets
+    var bins: UInt32       // value bins (histogram rows)
+    var rowStride: UInt32  // process every rowStride-th source row
+}
+
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
@@ -65,12 +75,15 @@ final class MetalVideoRenderer {
     private let pipelineState: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache!
 
-    // GPU scopes (Phase 1 prototype). Compute pipeline for the luma waveform kernel and
-    // a REUSABLE device histogram buffer (shared storage so the CPU can read it back).
-    // The buffer is grown on demand and never per-frame-allocated; the scope consumer
-    // gates to one in-flight compute at a time, so reuse can't tear.
+    // GPU scopes. Compute pipelines for the scope kernels + REUSABLE device histogram
+    // buffers (shared storage so the CPU can read them back). Buffers grow on demand and
+    // are never per-frame-allocated; each scope consumer gates to one in-flight compute at
+    // a time, so reuse can't tear. (Waveform: Phase 1. Parade: Phase 2 — same pattern, one
+    // buffer with 3 R/G/B regions.)
     private let waveformPipelineState: MTLComputePipelineState?
     private var histogramBuffer: MTLBuffer?
+    private let paradePipelineState: MTLComputePipelineState?
+    private var paradeHistogramBuffer: MTLBuffer?
 
     // Persistent owned offscreen render target: the single source of truth for
     // display (1:1 blitted to the drawable), frame export, and future scopes.
@@ -133,12 +146,17 @@ final class MetalVideoRenderer {
             print("MetalVideoRenderer: pipeline creation failed"); return nil
         }
 
-        // GPU waveform compute pipeline (same default library). Non-fatal if it fails —
-        // the scope simply falls back to its CPU path; the display path is unaffected.
+        // GPU scope compute pipelines (same default library). Non-fatal if either fails —
+        // that scope simply falls back to its CPU path; the display path is unaffected.
         if let wfn = library.makeFunction(name: "waveformKernel") {
             self.waveformPipelineState = try? device.makeComputePipelineState(function: wfn)
         } else {
             self.waveformPipelineState = nil
+        }
+        if let pfn = library.makeFunction(name: "paradeKernel") {
+            self.paradePipelineState = try? device.makeComputePipelineState(function: pfn)
+        } else {
+            self.paradePipelineState = nil
         }
 
         self.device = device
@@ -651,6 +669,58 @@ final class MetalVideoRenderer {
             let ptr = hist.contents().bindMemory(to: UInt32.self, capacity: count)
             let arr = Array(UnsafeBufferPointer(start: ptr, count: count))
             completion(arr, scopeW, bins)
+        }
+        cmd.commit()
+        return true
+    }
+
+    /// GPU RGB-parade histograms (Phase 2). Runs `paradeKernel` over the offscreen and
+    /// reads back only the small histogram — three per-channel regions in ONE buffer,
+    /// laid out [R | G | B], each colW*bins (total 3*colW*bins*4 bytes ≈ 3–12MB, still
+    /// trivial vs the old 33MB frame readback). Mirrors computeWaveformGPU exactly; the
+    /// caller slices the flat result into R/G/B. Encodes on the scope's OWN command
+    /// buffer. Caller MUST gate to one in-flight compute at a time (the buffer is cleared
+    /// + accumulated + read per call). Returns true if a compute was issued.
+    @discardableResult
+    func computeParadeGPU(
+        colW: Int, bins: Int, rowStride: Int,
+        completion: @escaping (_ hist: [UInt32], _ colW: Int, _ bins: Int) -> Void
+    ) -> Bool {
+        guard let pipeline = paradePipelineState, let src = offscreenTexture else { return false }
+        let width = src.width
+        let height = src.height
+        let count = colW * bins * 3          // R | G | B regions
+        guard count > 0 else { return false }
+
+        let neededBytes = count * MemoryLayout<UInt32>.stride
+        if paradeHistogramBuffer == nil || paradeHistogramBuffer!.length < neededBytes {
+            paradeHistogramBuffer = device.makeBuffer(length: neededBytes, options: .storageModeShared)
+        }
+        guard let hist = paradeHistogramBuffer,
+              let cmd = commandQueue.makeCommandBuffer() else { return false }
+
+        if let blit = cmd.makeBlitCommandEncoder() {
+            blit.fill(buffer: hist, range: 0..<neededBytes, value: 0)
+            blit.endEncoding()
+        }
+
+        guard let enc = cmd.makeComputeCommandEncoder() else { return false }
+        enc.setComputePipelineState(pipeline)
+        enc.setTexture(src, index: 0)
+        enc.setBuffer(hist, offset: 0, index: 0)
+        var params = ParadeParams(width: UInt32(width), height: UInt32(height),
+                                  colW: UInt32(colW), bins: UInt32(bins),
+                                  rowStride: UInt32(max(1, rowStride)))
+        enc.setBytes(&params, length: MemoryLayout<ParadeParams>.stride, index: 1)
+        let tpg = MTLSize(width: 16, height: 16, depth: 1)
+        let tgs = MTLSize(width: (width + 15) / 16, height: (height + 15) / 16, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
+        enc.endEncoding()
+
+        cmd.addCompletedHandler { _ in
+            let ptr = hist.contents().bindMemory(to: UInt32.self, capacity: count)
+            let arr = Array(UnsafeBufferPointer(start: ptr, count: count))
+            completion(arr, colW, bins)
         }
         cmd.commit()
         return true

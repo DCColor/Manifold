@@ -125,3 +125,44 @@ kernel void waveformKernel(texture2d<float, access::read> offscreen [[texture(0)
     uint row = (p.bins - 1u) - uint(bin);            // luma-max at top, matching CPU
     atomic_fetch_add_explicit(&hist[row * p.scopeW + bucket], 1u, memory_order_relaxed);
 }
+
+// MARK: - GPU scopes (Phase 2: RGB parade)
+
+// Uniforms for paradeKernel. Same layout as WaveformParams; `colW` is the PER-CHANNEL
+// column-bucket count (each of R/G/B occupies its own colW×bins histogram region).
+struct ParadeParams {
+    uint width;      // source (offscreen) width in pixels
+    uint height;     // source (offscreen) height in pixels
+    uint colW;       // per-channel horizontal column buckets
+    uint bins;       // value bins (histogram height) — 1024 (10-bit), like the waveform
+    uint rowStride;  // process every rowStride-th source row (full-res: 1)
+};
+
+// RGB parade: three per-channel value histograms (R, G, B), computed directly on the
+// rgb10a2 offscreen. Mirrors waveformKernel but bins EACH channel's value instead of a
+// single luma. ONE buffer, three contiguous regions laid out [R | G | B], each colW*bins:
+//   hist[channel*colW*bins + row*colW + bucket],  row = (bins-1)-bin  (value-max at top).
+// Column/bucket mapping and row convention match the CPU parade exactly. Full-res.
+kernel void paradeKernel(texture2d<float, access::read> offscreen [[texture(0)]],
+                         device atomic_uint *hist               [[buffer(0)]],
+                         constant ParadeParams &p               [[buffer(1)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    if ((gid.y % p.rowStride) != 0u) return;
+
+    float4 c = offscreen.read(gid);
+    uint bucket = (gid.x * p.colW) / p.width;        // source column -> per-channel bucket
+    uint region = p.colW * p.bins;                   // per-channel histogram size
+    float scale = float(p.bins - 1u);
+
+    // Per channel: round value to [0, bins-1], row = (bins-1)-bin (value-max at top).
+    int rb = clamp(int(c.r * scale + 0.5), 0, int(p.bins) - 1);
+    int gb = clamp(int(c.g * scale + 0.5), 0, int(p.bins) - 1);
+    int bb = clamp(int(c.b * scale + 0.5), 0, int(p.bins) - 1);
+    uint rRow = (p.bins - 1u) - uint(rb);
+    uint gRow = (p.bins - 1u) - uint(gb);
+    uint bRow = (p.bins - 1u) - uint(bb);
+    atomic_fetch_add_explicit(&hist[0u * region + rRow * p.colW + bucket], 1u, memory_order_relaxed);
+    atomic_fetch_add_explicit(&hist[1u * region + gRow * p.colW + bucket], 1u, memory_order_relaxed);
+    atomic_fetch_add_explicit(&hist[2u * region + bRow * p.colW + bucket], 1u, memory_order_relaxed);
+}

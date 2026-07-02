@@ -2,6 +2,11 @@ import SwiftUI
 import CoreGraphics
 import Metal
 
+/// Trace-image pixel height (rows) for the parade — matches the waveform's sharpness fix.
+/// The GPU 1024-bin per-channel histograms map down to this many rows in
+/// buildParadeTraceImage; a power-of-2 divisor of 1024 (256/512/1024) maps cleanest.
+let paradeDisplayRows = 512
+
 /// Native RGB parade scope: three side-by-side waveform columns (R | G | B), each
 /// plotting one channel's per-column value distribution. Pure consumer of
 /// MetalVideoRenderer.readbackRenderedFrameAsync (the same non-blocking readback the
@@ -9,6 +14,13 @@ import Metal
 /// values), never screen pixels. Independent of the luma waveform: own gate, own
 /// readback texture, so both can run at once without colliding.
 final class ParadeScopeModel: ObservableObject {
+
+    /// A/B toggle (Phase 2 GPU-scopes). `true` = compute the 3 per-channel histograms on
+    /// the GPU (paradeKernel over the offscreen, tiny readback); `false` = the original CPU
+    /// path (full-frame readback + 8.3M-pixel bin loop). Both feed the SAME trace-build
+    /// (buildParadeTraceImage) + graticule — output pixel-equivalent within luma rounding.
+    /// Mirrors WaveformScopeModel.useGPUWaveform. Debug flag; no UI surface yet.
+    static var useGPUParade = true
 
     /// The composited three-column parade image (R|G|B), published to the view.
     @Published var image: CGImage?
@@ -20,7 +32,11 @@ final class ParadeScopeModel: ObservableObject {
     private var columnWidth = 192
     private let minColumnWidth = 128
     private let maxColumnWidth = 512
-    private let bins = 256   // 8-bit channel value bins (value axis — unchanged)
+    private let bins = 256   // CPU path: 8-bit channel value bins (value axis)
+
+    /// GPU-path per-channel histogram precision: TRUE 10-bit (1024 bins), like the
+    /// waveform. Mapped down to paradeDisplayRows in buildParadeTraceImage.
+    private let gpuBins = 1024
 
     /// Track the scope's rendered slot width; each of the three channel sub-columns
     /// gets a third of it, so the parade resolution scales with display width.
@@ -38,8 +54,11 @@ final class ParadeScopeModel: ObservableObject {
     /// Perceptual-smoothness cap — independent of source frame rate (same as waveform).
     private let updateHz = 24.0
 
-    /// Process every Nth source row (columns stay full-res). Same default as waveform.
+    /// CPU path: process every Nth source row (columns stay full-res). Legacy fallback.
     private let rowStride = 2
+
+    /// GPU path: process EVERY row (full-res) — cheap on the GPU, like the waveform.
+    private let gpuRowStride = 1
 
     func start() {
         guard timer == nil else { return }
@@ -66,8 +85,35 @@ final class ParadeScopeModel: ObservableObject {
         // Snapshot the two-state mode on main: default RGB, or monochrome in one hue.
         let mono = Preferences.shared.paradeMonochrome
         let monoColor = ScopeColorCodec.rgb(fromHex: Preferences.shared.paradeMonoColorHex)
-        // NON-BLOCKING readback into this scope's OWN texture (independent of the
-        // waveform's). Compute on workQueue, publish on main, clear the gate on main.
+
+        if Self.useGPUParade {
+            // GPU PATH: the 3 per-channel histograms are computed by paradeKernel over the
+            // offscreen; only the small histogram (≤12MB) is read back — no 33MB frame
+            // copy, no CPU bin loop. The completion fires on Metal's completion thread; hop
+            // to workQueue to slice R/G/B + build the trace, then publish on main.
+            let colW = columnWidth
+            let bins = gpuBins
+            let issued = renderer.computeParadeGPU(colW: colW, bins: bins, rowStride: gpuRowStride) { [weak self] hist, cw, b in
+                guard let self else { return }
+                self.workQueue.async {
+                    let n = cw * b
+                    let r = Array(hist[0..<n])
+                    let g = Array(hist[n..<(2 * n)])
+                    let bl = Array(hist[(2 * n)..<(3 * n)])
+                    let img = self.buildParadeTraceImage(r: r, g: g, b: bl, colW: cw, bins: b,
+                                                         gain: gain, mono: mono, monoColor: monoColor)
+                    DispatchQueue.main.async {
+                        if let img { self.image = img }
+                        self.sampling = false
+                    }
+                }
+            }
+            if !issued { sampling = false }
+            return
+        }
+
+        // CPU PATH (original). NON-BLOCKING readback into this scope's OWN texture
+        // (independent of the waveform's). Compute on workQueue, publish on main.
         let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             guard let self else { return }
             self.workQueue.async {
@@ -114,25 +160,58 @@ final class ParadeScopeModel: ObservableObject {
             }
         }
 
-        // Shared max across all three channels -> comparable brightness scaling.
+        // Build the composited image from the three histograms (shared with the GPU path).
+        return buildParadeTraceImage(r: accR, g: accG, b: accB, colW: colW, bins: bins,
+                                     gain: gain, mono: mono, monoColor: monoColor)
+    }
+
+    /// Composite three per-channel value histograms (each colW*bins, layout
+    /// [row*colW + bucket], row = value-max at top) into the R|G|B parade CGImage. Shared
+    /// UNCHANGED by both the CPU and GPU paths — only the histogram SOURCE differs (CPU bin
+    /// loop vs paradeKernel). Small CPU pass over the ~few-MB histograms, not the frame.
+    private func buildParadeTraceImage(r accR: [UInt32], g accG: [UInt32], b accB: [UInt32],
+                                       colW: Int, bins: Int, gain: Float,
+                                       mono: Bool, monoColor: (r: Float, g: Float, b: Float)) -> CGImage? {
+        let n = colW * bins
+        guard colW > 0, bins > 0, accR.count >= n, accG.count >= n, accB.count >= n else { return nil }
+        // Trace-image height; never more than the source bins (CPU 256 caps at 256, GPU
+        // 1024 maps to paradeDisplayRows). Same mapping as the waveform's buildTraceImage.
+        let displayRows = min(bins, max(1, paradeDisplayRows))
+
+        // Map a source channel histogram (bins rows) down to displayRows by summing source
+        // row srow into display row srow*displayRows/bins — no dropped rows, value-max stays
+        // at the top. groupSize 1 (256->256) is the CPU no-op; groups of 2 (1024->512) GPU.
+        func mapDown(_ acc: [UInt32]) -> [UInt32] {
+            if displayRows == bins { return acc }
+            var d = [UInt32](repeating: 0, count: colW * displayRows)
+            for srow in 0..<bins {
+                let drow = (srow * displayRows) / bins
+                let dBase = drow * colW
+                let sBase = srow * colW
+                for x in 0..<colW { d[dBase + x] &+= acc[sBase + x] }
+            }
+            return d
+        }
+        let dR = mapDown(accR), dG = mapDown(accG), dB = mapDown(accB)
+
+        // Shared max across all three DISPLAY histograms -> comparable inter-channel scaling.
         var maxCount: UInt32 = 1
-        for c in accR where c > maxCount { maxCount = c }
-        for c in accG where c > maxCount { maxCount = c }
-        for c in accB where c > maxCount { maxCount = c }
-        // Shared max across channels -> comparable scaling; gain+gamma brightness curve.
+        for c in dR where c > maxCount { maxCount = c }
+        for c in dG where c > maxCount { maxCount = c }
+        for c in dB where c > maxCount { maxCount = c }
         func intensity(_ c: UInt32) -> UInt8 {
             scopeBrightness(count: c, maxCount: maxCount, gain: gain)
         }
 
         // Composite: column 0 = R (red trace), 1 = G (green), 2 = B (blue).
         let totalW = colW * 3
-        var pixels = [UInt8](repeating: 0, count: totalW * bins * 4)
-        for row in 0..<bins {
+        var pixels = [UInt8](repeating: 0, count: totalW * displayRows * 4)
+        for row in 0..<displayRows {
             let rowOut = row * totalW
             for bx in 0..<colW {
-                let vR = intensity(accR[row * colW + bx])
-                let vG = intensity(accG[row * colW + bx])
-                let vB = intensity(accB[row * colW + bx])
+                let vR = intensity(dR[row * colW + bx])
+                let vG = intensity(dG[row * colW + bx])
+                let vB = intensity(dB[row * colW + bx])
                 let oR = (rowOut + (0 * colW + bx)) * 4   // R channel column (left)
                 let oG = (rowOut + (1 * colW + bx)) * 4   // G channel column (mid)
                 let oB = (rowOut + (2 * colW + bx)) * 4   // B channel column (right)
@@ -155,7 +234,7 @@ final class ParadeScopeModel: ObservableObject {
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
         guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
-        return CGImage(width: totalW, height: bins,
+        return CGImage(width: totalW, height: displayRows,
                        bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: totalW * 4,
                        space: cs, bitmapInfo: bitmapInfo, provider: provider,
                        decode: nil, shouldInterpolate: false, intent: .defaultIntent)
