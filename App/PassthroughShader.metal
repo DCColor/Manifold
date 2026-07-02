@@ -82,3 +82,46 @@ fragment float4 passthroughFragment(VertexOut in [[stage_in]],
 
     return float4(r, g, b, 1.0);
 }
+
+// MARK: - GPU scopes (Phase 1 prototype: luma waveform)
+
+// Uniforms for waveformKernel. Mirrors WaveformParams in MetalVideoRenderer.swift
+// (field order + type must match exactly).
+struct WaveformParams {
+    uint width;      // source (offscreen) width in pixels
+    uint height;     // source (offscreen) height in pixels
+    uint scopeW;     // horizontal column buckets (histogram width)
+    uint bins;       // luma bins (histogram height) — 256 for the CPU-matching prototype
+    uint rowStride;  // process every rowStride-th source row (match CPU rowStride=2)
+};
+
+// Luma waveform histogram, computed directly on the GPU-resident offscreen texture
+// (post-shader display RGB, range-expanded). One thread per source pixel; each thread
+// bins its pixel's Rec.709 luma into a per-column column of the histogram via an atomic
+// increment. Output layout matches the CPU path EXACTLY: hist[row*scopeW + bucket],
+// row = (bins-1) - bin so luma-max sits at the top row.
+//
+// The offscreen texture is rgb10a2Unorm; Metal decodes it to a normalized float4 on
+// read (no manual 10-bit unpack — that's the CPU path's rgb10a2Channels job). Computing
+// 709 luma on the normalized float and binning to (bins-1) is equivalent to the CPU's
+// 8-bit-domain luma within rounding.
+kernel void waveformKernel(texture2d<float, access::read> offscreen [[texture(0)]],
+                           device atomic_uint *hist                 [[buffer(0)]],
+                           constant WaveformParams &p               [[buffer(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    // Guard the ragged edge (grid is rounded up to the threadgroup size).
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    // Row subsample: match the CPU, which walks rows 0, rowStride, 2*rowStride, …
+    if ((gid.y % p.rowStride) != 0u) return;
+
+    float4 c = offscreen.read(gid);
+    // Rec.709 luma on the normalized display RGB (same coeffs as the CPU path).
+    float luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    // Round-to-nearest into [0, bins-1] — mirrors the CPU's Int(luma*255 + 0.5).
+    int bin = int(luma * float(p.bins - 1u) + 0.5);
+    bin = clamp(bin, 0, int(p.bins) - 1);
+
+    uint bucket = (gid.x * p.scopeW) / p.width;      // source column -> scope bucket
+    uint row = (p.bins - 1u) - uint(bin);            // luma-max at top, matching CPU
+    atomic_fetch_add_explicit(&hist[row * p.scopeW + bucket], 1u, memory_order_relaxed);
+}

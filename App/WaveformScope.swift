@@ -46,6 +46,14 @@ let baseGain: Float = 1.6      // dense bins reach full white a bit before the v
 let traceGamma: Float = 1.25   // gentle low-end darkening without eating mid-density structure
 let traceFloor: Float = 0.008  // brightness below this clamps to pure black (kills pure haze only)
 
+/// Trace-image pixel height (rows) for the waveform. The GPU 1024-bin histogram is
+/// mapped down to this many rows in buildTraceImage; the image is then scaled to fill
+/// the panel. Taller = sharper (less upscale of the small image), at a tiny CPU cost on
+/// the ~1MB histogram. A/B lever: try 256 / 512 / 1024 — best kept a power-of-2 divisor
+/// of the 1024 GPU bins so the group-sum is exact (any value ≤1024 still counts every
+/// pixel — see buildTraceImage — but divisors map cleanest).
+let waveformDisplayRows = 512
+
 /// Map an accumulated bin count to 0–255 trace brightness with a gain + gamma curve.
 /// `gain` is the effective gain (baseGain × perScopeIntensity × globalScopeIntensity).
 /// gamma > 1 pushes low counts toward black so sparse areas stay dark and dense areas
@@ -92,7 +100,9 @@ enum ScopeScale: String, CaseIterable, Identifiable {
     var headerTag: String {
         switch self {
         case .bit8:  return "8-bit"
-        // M3b: when real 10-bit decode lands, change this tag to just "10-bit".
+        // Shared with parade (still CPU/8-bit), so this stays honest for that path. The
+        // waveform's GPU path computes a genuine 10-bit histogram and overrides this to
+        // plain "10-bit" locally (see WaveformScopeView.headerTag).
         case .bit10: return "10-bit scale (8-bit data)"
         case .ire:   return "IRE"
         case .pq:    return "PQ"
@@ -148,6 +158,14 @@ enum ScopeScale: String, CaseIterable, Identifiable {
 /// (the renderer's readback stays per-call/full-res for ⌃⌥E export).
 final class WaveformScopeModel: ObservableObject {
 
+    /// A/B toggle (Phase 1 GPU-scopes prototype). `true` = compute the histogram on the
+    /// GPU (waveformKernel over the offscreen texture, tiny readback); `false` = the
+    /// original CPU path (full-frame readback + 8.3M-pixel bin loop). Both paths are kept
+    /// side-by-side and feed the SAME trace-build (buildTraceImage) + graticule, so the
+    /// output should be pixel-equivalent within luma rounding — flip this to validate.
+    /// Debug flag: flip in the debugger or edit here; no UI surface yet.
+    static var useGPUWaveform = true
+
     /// The computed waveform trace image (green-on-black), published to the view.
     @Published var image: CGImage?
 
@@ -159,7 +177,17 @@ final class WaveformScopeModel: ObservableObject {
     private var columns = 512
     private let minColumns = 256
     private let maxColumns = 1024
+    // Display rows of the trace image (the panel is 256px tall). The CPU path also uses
+    // this as its histogram bin count; the GPU path computes at gpuLumaBins precision and
+    // maps down to these rows in buildTraceImage.
     private let lumaBins = 256
+
+    /// GPU-path histogram precision: TRUE 10-bit (1024 bins). The offscreen render target
+    /// is rgb10a2 — the CPU path quantized luma to 8-bit (256 bins), throwing the low 2
+    /// bits away ("10-bit scale (8-bit data)"). The GPU kernel bins the full 10-bit luma,
+    /// then buildTraceImage maps 1024 → 256 display rows. Cheap: the histogram grows to
+    /// scopeW*1024*4 ≈ 1–4MB, still trivial vs the old 33MB frame readback.
+    private let gpuLumaBins = 1024
 
     /// Track the scope's rendered slot width so the per-column histogram resolution
     /// scales with display width (wider scope -> finer detail, no upscaling smear).
@@ -179,10 +207,17 @@ final class WaveformScopeModel: ObservableObject {
     /// The overlap gate drops ticks if compute can't keep up; it never slows playback.
     private let updateHz = 24.0
 
-    /// Process every Nth source row in the luma compute (columns stay full-res).
+    /// CPU path: process every Nth source row in the luma compute (columns stay full-res).
     /// 1 = every row (most accurate), 2 = default, 4 = cheapest. A waveform is a
     /// per-column luma distribution, so halving rows is visually equivalent at ~half cost.
+    /// (Kept at 2 — this is the legacy fallback path; the GPU path runs full-res below.)
     private let rowStride = 2
+
+    /// GPU path: process EVERY row (full-res). Row subsampling was only to match the CPU
+    /// path for the A/B comparison — now proven, so the GPU samples every pixel. Full-res
+    /// is cheap on the GPU (the kernel is the fast part) and yields a denser, more accurate
+    /// trace, especially for thin features (fine text, single-pixel edges).
+    private let gpuRowStride = 1
 
     func start() {
         guard timer == nil else { return }
@@ -213,9 +248,32 @@ final class WaveformScopeModel: ObservableObject {
         // Trace hue (snapshot on main); brightness stays the intensity's job.
         let color = ScopeColorCodec.rgb(fromHex: Preferences.shared.waveformTraceColorHex)
 
-        // NON-BLOCKING readback: issue the GPU->CPU copy and return immediately.
-        // The completion fires off the render thread once the GPU is done; we then
-        // compute on workQueue and publish on main. This avoids the waitUntilCompleted
+        if Self.useGPUWaveform {
+            // GPU PATH: the histogram is computed by waveformKernel over the GPU-resident
+            // offscreen texture; only the small histogram (≤1MB) is read back — no 33MB
+            // frame copy, no CPU bin loop. The completion fires on Metal's completion
+            // thread; hop to workQueue for the tiny trace-build, then publish on main.
+            let scopeW = columns
+            // True 10-bit histogram at full source resolution — both cheap on the GPU,
+            // both impossible on the CPU path (which quantized to 8-bit + subsampled rows).
+            let bins = gpuLumaBins
+            let issued = renderer.computeWaveformGPU(scopeW: scopeW, bins: bins, rowStride: gpuRowStride) { [weak self] hist, sw, b in
+                guard let self else { return }
+                self.workQueue.async {
+                    let img = self.buildTraceImage(histogram: hist, scopeW: sw, bins: b, gain: gain, color: color)
+                    DispatchQueue.main.async {
+                        if let img { self.image = img }
+                        self.sampling = false
+                    }
+                }
+            }
+            if !issued { sampling = false }
+            return
+        }
+
+        // CPU PATH (original). NON-BLOCKING readback: issue the GPU->CPU copy and return
+        // immediately. The completion fires off the render thread once the GPU is done; we
+        // then compute on workQueue and publish on main. This avoids the waitUntilCompleted
         // stall that landed the scope 2-3 presented frames late.
         let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             // Called on Metal's completion thread (background). Hop to workQueue for
@@ -266,13 +324,50 @@ final class WaveformScopeModel: ObservableObject {
             }
         }
 
+        // Build the trace image from the accumulated histogram (shared with the GPU path).
+        return buildTraceImage(histogram: accum, scopeW: scopeW, bins: bins, gain: gain, color: color)
+    }
+
+    /// Turn a luma histogram (layout [row*scopeW + bucket], row = luma-max at top) into
+    /// the green-on-black trace CGImage. Shared UNCHANGED by both the CPU and GPU paths —
+    /// only the histogram's SOURCE differs (CPU bin loop vs waveformKernel). This is the
+    /// small CPU pass (operates on the ~1MB histogram, not the frame).
+    /// BGRA-agnostic RGBA output; row stride = scopeW*4.
+    private func buildTraceImage(histogram accum: [UInt32], scopeW: Int, bins: Int, gain: Float, color: (r: Float, g: Float, b: Float)) -> CGImage? {
+        guard scopeW > 0, bins > 0, accum.count >= scopeW * bins else { return nil }
+        // Trace-image height. Never more than the source bins (no invented rows): the GPU
+        // path (1024 bins) uses waveformDisplayRows; the CPU fallback (256 bins) caps at 256.
+        let displayRows = min(bins, max(1, waveformDisplayRows))
+
+        // Map the source histogram (bins rows, luma-max at row 0) down to displayRows by
+        // SUMMING source rows into display rows. Each source row srow is assigned to display
+        // row srow*displayRows/bins — so EVERY sampled pixel is counted (no dropped rows) for
+        // ANY displayRows ≤ bins, and a power-of-2 divisor (256/512/1024) yields exact equal
+        // groups. Row 0 stays luma-max at the top. maxCount is scanned on the SUMMED display
+        // histogram below, so the gain/gamma curve maps onto the same displayed-count scale.
+        let display: [UInt32]
+        if displayRows == bins {
+            display = accum
+        } else {
+            var d = [UInt32](repeating: 0, count: scopeW * displayRows)
+            for srow in 0..<bins {
+                let drow = (srow * displayRows) / bins
+                let dBase = drow * scopeW
+                let sBase = srow * scopeW
+                for x in 0..<scopeW {
+                    d[dBase + x] &+= accum[sBase + x]
+                }
+            }
+            display = d
+        }
+
         // Per-frame max for normalization (brightness adapts to content per frame).
         var maxCount: UInt32 = 1
-        for c in accum where c > maxCount { maxCount = c }
+        for c in display where c > maxCount { maxCount = c }
 
-        var pixels = [UInt8](repeating: 0, count: scopeW * bins * 4)
-        for i in 0..<(scopeW * bins) {
-            let v = scopeBrightness(count: accum[i], maxCount: maxCount, gain: gain)
+        var pixels = [UInt8](repeating: 0, count: scopeW * displayRows * 4)
+        for i in 0..<(scopeW * displayRows) {
+            let v = scopeBrightness(count: display[i], maxCount: maxCount, gain: gain)
             // final pixel = traceColor × computedIntensity (hue from picker, brightness
             // from the curve — orthogonal). Default green reproduces the old (0,v,0).
             let fv = Float(v)
@@ -286,7 +381,7 @@ final class WaveformScopeModel: ObservableObject {
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
         guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
-        return CGImage(width: scopeW, height: bins,
+        return CGImage(width: scopeW, height: displayRows,
                        bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: scopeW * 4,
                        space: cs, bitmapInfo: bitmapInfo, provider: provider,
                        decode: nil, shouldInterpolate: false, intent: .defaultIntent)
@@ -300,12 +395,21 @@ struct WaveformScopeView: View {
     // Same key as Preferences.scopeScale — @AppStorage here for live graticule updates.
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
+    /// Header scale tag. The GPU path computes a real 10-bit histogram from the rgb10a2
+    /// offscreen, so on the 10-bit scale it reads plain "10-bit" — the old "(8-bit data)"
+    /// caveat was only true for the CPU fallback (which still shows it). Other scales
+    /// (8-bit / IRE) are display remaps and keep the shared enum tag unchanged.
+    private var headerTag: String {
+        if WaveformScopeModel.useGPUWaveform, scopeScale == .bit10 { return "10-bit" }
+        return scopeScale.headerTag
+    }
+
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 // Header strip: name (left) + intensity slider (right). Own band.
                 HStack(spacing: 4) {
-                    Text("WAVEFORM · luma (\(scopeScale.headerTag))")
+                    Text("WAVEFORM · luma (\(headerTag))")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
@@ -339,6 +443,12 @@ struct WaveformScopeView: View {
                 ZStack {
                     Color.black
                     if let img = model.image {
+                        // .none (nearest-neighbor): keeps the thin bright trace crisp
+                        // against black. A smoothing filter (.low/.high) would blur the
+                        // trace into the background and read softer — the wrong direction
+                        // for a scope. Softness came from upscaling the small 256-row
+                        // image; the fix is the taller source (waveformDisplayRows), not
+                        // smoothing here. Sharpness lever if ever wanted: swap to .low.
                         Image(decorative: img, scale: 1.0)
                             .resizable()
                             .interpolation(.none)

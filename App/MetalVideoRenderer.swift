@@ -16,6 +16,15 @@ private struct ColorParams {
     var chromaConvention: Int32   // full-range only: 0 = full-swing (÷255), 1 = Resolve (×219/224)
 }
 
+/// Matches the shader's WaveformParams struct (memory layout). GPU waveform prototype.
+private struct WaveformParams {
+    var width: UInt32      // source (offscreen) width
+    var height: UInt32     // source (offscreen) height
+    var scopeW: UInt32     // histogram column buckets
+    var bins: UInt32       // luma bins (histogram rows)
+    var rowStride: UInt32  // process every rowStride-th source row
+}
+
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
@@ -48,6 +57,13 @@ final class MetalVideoRenderer {
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache!
+
+    // GPU scopes (Phase 1 prototype). Compute pipeline for the luma waveform kernel and
+    // a REUSABLE device histogram buffer (shared storage so the CPU can read it back).
+    // The buffer is grown on demand and never per-frame-allocated; the scope consumer
+    // gates to one in-flight compute at a time, so reuse can't tear.
+    private let waveformPipelineState: MTLComputePipelineState?
+    private var histogramBuffer: MTLBuffer?
 
     // Persistent owned offscreen render target: the single source of truth for
     // display (1:1 blitted to the drawable), frame export, and future scopes.
@@ -100,6 +116,14 @@ final class MetalVideoRenderer {
 
         guard let pipeline = try? device.makeRenderPipelineState(descriptor: desc) else {
             print("MetalVideoRenderer: pipeline creation failed"); return nil
+        }
+
+        // GPU waveform compute pipeline (same default library). Non-fatal if it fails —
+        // the scope simply falls back to its CPU path; the display path is unaffected.
+        if let wfn = library.makeFunction(name: "waveformKernel") {
+            self.waveformPipelineState = try? device.makeComputePipelineState(function: wfn)
+        } else {
+            self.waveformPipelineState = nil
         }
 
         self.device = device
@@ -513,6 +537,67 @@ final class MetalVideoRenderer {
                                 from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
             }
             completion(packed, width, height, bytesPerRow)
+        }
+        cmd.commit()
+        return true
+    }
+
+    /// GPU luma-waveform histogram (Phase 1 prototype). Runs `waveformKernel` over the
+    /// persistent GPU-resident offscreen texture — NO 33MB frame readback — and reads
+    /// back only the small histogram (scopeW*bins*4 bytes, ≤1MB). This is the whole win:
+    /// the 8.3M-pixel bin loop moves to the GPU, off the CPU/display path.
+    ///
+    /// Encodes on the scope's OWN command buffer (not the render command buffer), so
+    /// scope work never blocks the display. `completion` fires off the render thread on
+    /// Metal's completion thread with the histogram as a flat [UInt32] in the SAME layout
+    /// the CPU path uses: hist[row*scopeW + bucket].
+    ///
+    /// The caller MUST gate to one in-flight compute at a time (the reusable histogram
+    /// buffer is cleared + accumulated + read per call). Returns true if a compute was
+    /// issued (completion WILL fire); false otherwise (caller should clear its gate).
+    @discardableResult
+    func computeWaveformGPU(
+        scopeW: Int, bins: Int, rowStride: Int,
+        completion: @escaping (_ hist: [UInt32], _ scopeW: Int, _ bins: Int) -> Void
+    ) -> Bool {
+        guard let pipeline = waveformPipelineState, let src = offscreenTexture else { return false }
+        let width = src.width
+        let height = src.height
+        let count = scopeW * bins
+        guard count > 0 else { return false }
+
+        // Grow the reusable histogram buffer on demand (shared so the CPU can read it).
+        let neededBytes = count * MemoryLayout<UInt32>.stride
+        if histogramBuffer == nil || histogramBuffer!.length < neededBytes {
+            histogramBuffer = device.makeBuffer(length: neededBytes, options: .storageModeShared)
+        }
+        guard let hist = histogramBuffer,
+              let cmd = commandQueue.makeCommandBuffer() else { return false }
+
+        // Clear this frame's histogram to zero (blit fill), then accumulate.
+        if let blit = cmd.makeBlitCommandEncoder() {
+            blit.fill(buffer: hist, range: 0..<neededBytes, value: 0)
+            blit.endEncoding()
+        }
+
+        guard let enc = cmd.makeComputeCommandEncoder() else { return false }
+        enc.setComputePipelineState(pipeline)
+        enc.setTexture(src, index: 0)
+        enc.setBuffer(hist, offset: 0, index: 0)
+        var params = WaveformParams(width: UInt32(width), height: UInt32(height),
+                                    scopeW: UInt32(scopeW), bins: UInt32(bins),
+                                    rowStride: UInt32(max(1, rowStride)))
+        enc.setBytes(&params, length: MemoryLayout<WaveformParams>.stride, index: 1)
+        let tpg = MTLSize(width: 16, height: 16, depth: 1)
+        let tgs = MTLSize(width: (width + 15) / 16, height: (height + 15) / 16, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
+        enc.endEncoding()
+
+        cmd.addCompletedHandler { _ in
+            // GPU done — read the small histogram out of the shared buffer (one copy).
+            let ptr = hist.contents().bindMemory(to: UInt32.self, capacity: count)
+            let arr = Array(UnsafeBufferPointer(start: ptr, count: count))
+            completion(arr, scopeW, bins)
         }
         cmd.commit()
         return true
