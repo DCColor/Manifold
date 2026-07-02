@@ -161,6 +161,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.currentTime()
     }
 
+    /// True when transport is paused (synchronizer rate 0). Readable from any thread
+    /// (the CVDisplayLink render loop), same thread-safety rationale as currentSyncTime().
+    public nonisolated func isPausedNow() -> Bool {
+        synchronizer.rate == 0
+    }
+
     /// PlaybackEngine conformance: bare load defaults to autoplay.
     public func load(url: URL) {
         load(url: url, autoplay: true)

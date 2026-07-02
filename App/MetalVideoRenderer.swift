@@ -43,6 +43,13 @@ final class MetalVideoRenderer {
     /// Returns the current playback time in seconds. Set by the owner before start().
     var clock: (() -> Double)?
 
+    /// Returns true when transport is PAUSED (synchronizer rate 0). Read per-refresh on
+    /// the render thread (thread-safe accessor). Gates the post-seek one-shot render (see
+    /// displayTick) to the paused state ONLY — normal playback keeps the strict pts<=now
+    /// selection untouched. When nil, defaults to paused (safe: the relaxation is a
+    /// one-shot and only fires right after a flush anyway).
+    var isPausedProvider: (() -> Bool)?
+
     /// Returns the engine's effective full-range flag (override + source range).
     /// Read per-frame on the render thread; the engine's accessor is thread-safe.
     /// When nil, defaults to video/legal (expand).
@@ -87,6 +94,14 @@ final class MetalVideoRenderer {
     private var lastPixelBuffer: CVPixelBuffer?
     private let refreshLock = NSLock()
     private var pendingRefresh = false
+
+    // Set by flush() (i.e. a seek). Arms a ONE-SHOT relaxed render in displayTick: while
+    // PAUSED, if no queued frame satisfies the strict pts<=now gate (a decoder that seeks
+    // to the frame just AFTER the target — libav overshoot), render the nearest queued
+    // frame anyway so the paused offscreen (scope data source) + display reflect the
+    // seeked-to frame instead of the previous one. Guarded (set on main via flush(), read
+    // on the render thread). Decoder-agnostic; does NOT touch the playing-state path.
+    private var pendingSeekRender = false
 
     /// Request a one-shot re-render of the current frame (e.g. after a range
     /// override change while paused). Picked up on the next display refresh.
@@ -256,6 +271,10 @@ final class MetalVideoRenderer {
         queueLock.lock()
         frameQueue.removeAll()
         queueLock.unlock()
+        // A seek just cleared the queue. Arm the one-shot: if we're paused and the next
+        // delivered frame overshoots the pinned clock (pts > now), displayTick renders it
+        // anyway so the paused offscreen isn't left on the previous frame.
+        refreshLock.lock(); pendingSeekRender = true; refreshLock.unlock()
     }
 
     // MARK: - Display link lifecycle
@@ -314,11 +333,45 @@ final class MetalVideoRenderer {
         if let pb = chosen {
             renderPixelBuffer(pb)
             tickPresentedFPS(chosenPts)
+            // A frame satisfied the strict gate — the post-seek one-shot is moot. Clear it
+            // so a seek that resolves normally (incl. seek-and-play) never touches the
+            // relaxed branch below.
+            refreshLock.lock(); pendingSeekRender = false; refreshLock.unlock()
         } else {
-            // No new frame (e.g. paused). If a range/override change requested a
-            // refresh, re-render the last frame so the shader-flag change shows.
-            refreshLock.lock(); let refresh = pendingRefresh; pendingRefresh = false; refreshLock.unlock()
-            if refresh, let pb = lastPixelBuffer { renderPixelBuffer(pb) }
+            // No frame satisfies pts<=now (e.g. paused). Two one-shot fallbacks:
+            refreshLock.lock()
+            let refresh = pendingRefresh; pendingRefresh = false
+            let seekRender = pendingSeekRender
+            refreshLock.unlock()
+
+            if refresh, let pb = lastPixelBuffer {
+                // Range/override change while paused: re-render the last frame so the
+                // shader-flag change shows.
+                renderPixelBuffer(pb)
+            } else if seekRender, isPausedProvider?() ?? true {
+                // Post-seek + PAUSED: the decoder overshot the seek target (the only
+                // queued frame's pts is just past the pinned clock), so the strict gate
+                // rejected it. Render the EARLIEST queued frame ONCE so the paused
+                // offscreen shows the seeked-to frame instead of the previous one. Fires
+                // at most once per seek (cleared on render); the paused-only guard keeps
+                // normal playback pacing on the strict gate above. Decoder-agnostic.
+                queueLock.lock()
+                let nearest = frameQueue.first
+                if nearest != nil { frameQueue.removeFirst() }
+                queueLock.unlock()
+                if let nearest {
+                    // TEMP (STEP 1 confirm — REMOVE after validating): prove the overshoot
+                    // is why the strict gate rejected the frame (pts > now on a paused seek).
+                    #if DEBUG
+                    FileHandle.standardError.write(Data(String(
+                        format: "[ScopeSeek] paused-seek overshoot: nearest.pts=%.4f now=%.4f Δ=%+.4f → relaxed render\n",
+                        nearest.pts, now, nearest.pts - now).utf8))
+                    #endif
+                    refreshLock.lock(); pendingSeekRender = false; refreshLock.unlock()
+                    renderPixelBuffer(nearest.pixelBuffer)
+                    tickPresentedFPS(nearest.pts)
+                }
+            }
         }
     }
 

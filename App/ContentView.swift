@@ -135,6 +135,7 @@ struct ContentView: View {
             armIdleIfNeeded()
             if let renderer = metalRenderer {
                 renderer.clock = { engine.currentSyncTime().seconds }
+                renderer.isPausedProvider = { engine.isPausedNow() }
                 renderer.isFullRangeProvider = { engine.currentEffectiveIsFullRange() }
                 renderer.chromaConventionProvider = { engine.currentChromaConventionRaw() }
                 engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
