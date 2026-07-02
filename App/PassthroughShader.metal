@@ -166,3 +166,44 @@ kernel void paradeKernel(texture2d<float, access::read> offscreen [[texture(0)]]
     atomic_fetch_add_explicit(&hist[1u * region + gRow * p.colW + bucket], 1u, memory_order_relaxed);
     atomic_fetch_add_explicit(&hist[2u * region + bRow * p.colW + bucket], 1u, memory_order_relaxed);
 }
+
+// MARK: - GPU scopes (Phase 3: vectorscope)
+
+// Uniforms for vectorscopeKernel. `plane` is the square chroma-plane side; `chromaScale`
+// is VectorscopeScopeModel.chromaScaleFrac (chroma-units → fraction of the plane).
+struct VectorscopeParams {
+    uint width;        // source (offscreen) width in pixels
+    uint height;       // source (offscreen) height in pixels
+    uint plane;        // square chroma-plane side (histogram is plane×plane)
+    uint rowStride;    // process every rowStride-th source row (full-res: 1)
+    float chromaScale; // chromaScaleFrac — chroma units → fraction of the plane
+};
+
+// Vectorscope: a 2-D chroma-plane scatter (Cb horizontal, Cr vertical) on the offscreen.
+// Per pixel: Rec.709 luma, then Cb=(B-Y)/1.8556, Cr=(R-Y)/1.5748 in the 0–255 domain
+// (channels ×255 to match the CPU path's 8-bit chroma magnitude), mapped to plane pixels
+// with center = plane/2 and s = chromaScale*plane. Cr is flipped (up) for display, exactly
+// like the CPU path. Out-of-plane chroma is skipped (matches the CPU's bounds guard).
+// Output: hist[py*plane + px], a plane×plane 2-D histogram aligned to the graticule.
+kernel void vectorscopeKernel(texture2d<float, access::read> offscreen [[texture(0)]],
+                              device atomic_uint *hist                 [[buffer(0)]],
+                              constant VectorscopeParams &p            [[buffer(1)]],
+                              uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    if ((gid.y % p.rowStride) != 0u) return;
+
+    float4 c = offscreen.read(gid);
+    // 0–255 domain to match the CPU chroma magnitude (identical formulas/coeffs).
+    float r = c.r * 255.0, g = c.g * 255.0, b = c.b * 255.0;
+    float y  = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    float cb = (b - y) / 1.8556;
+    float cr = (r - y) / 1.5748;
+
+    float center = float(p.plane) * 0.5;
+    float s = p.chromaScale * float(p.plane);       // chroma units -> plane pixels
+    int px = int(center + cb * s + 0.5);
+    int py = int(center - cr * s + 0.5);            // Cr up (Y flip), matching CPU
+    if (px >= 0 && px < int(p.plane) && py >= 0 && py < int(p.plane)) {
+        atomic_fetch_add_explicit(&hist[uint(py) * p.plane + uint(px)], 1u, memory_order_relaxed);
+    }
+}

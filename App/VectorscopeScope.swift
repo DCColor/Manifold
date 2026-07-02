@@ -9,6 +9,13 @@ import Metal
 /// of the waveform/parade: own gate, own readback texture, runs alongside them.
 final class VectorscopeScopeModel: ObservableObject {
 
+    /// A/B toggle (Phase 3 GPU-scopes). `true` = compute the 2-D chroma-plane histogram on
+    /// the GPU (vectorscopeKernel over the offscreen, tiny readback); `false` = the original
+    /// CPU path (full-frame readback + 8.3M-pixel bin loop). Both feed the SAME trace-build
+    /// (buildVectorscopeTraceImage) + graticule — output pixel-equivalent within the same
+    /// 10-bit-float-vs-8-bit rounding as waveform/parade. Mirrors the other two toggles.
+    static var useGPUVectorscope = true
+
     @Published var image: CGImage?
     weak var renderer: MetalVideoRenderer?
 
@@ -65,7 +72,10 @@ final class VectorscopeScopeModel: ObservableObject {
     private var readbackTexture: MTLTexture?
 
     private let updateHz = 24.0
+    /// CPU path: process every Nth source row. Legacy fallback.
     private let rowStride = 2
+    /// GPU path: process EVERY row (full-res) — cheap on the GPU, like waveform/parade.
+    private let gpuRowStride = 1
 
     func start() {
         guard timer == nil else { return }
@@ -91,6 +101,29 @@ final class VectorscopeScopeModel: ObservableObject {
             * Float(Preferences.shared.globalScopeIntensity)
         // Trace hue (snapshot on main); brightness stays the intensity's job.
         let color = ScopeColorCodec.rgb(fromHex: Preferences.shared.vectorscopeTraceColorHex)
+
+        if Self.useGPUVectorscope {
+            // GPU PATH: the plane×plane chroma histogram is computed by vectorscopeKernel over
+            // the offscreen; only the small plane buffer (≤~1.4MB) is read back — no 33MB frame
+            // copy, no CPU bin loop. Completion on Metal's thread; build the trace on workQueue.
+            let plane = self.plane
+            let issued = renderer.computeVectorscopeGPU(plane: plane,
+                                                        chromaScale: Self.chromaScaleFrac,
+                                                        rowStride: gpuRowStride) { [weak self] hist, p in
+                guard let self else { return }
+                self.workQueue.async {
+                    let img = self.buildVectorscopeTraceImage(histogram: hist, plane: p, gain: gain, color: color)
+                    DispatchQueue.main.async {
+                        if let img { self.image = img }
+                        self.sampling = false
+                    }
+                }
+            }
+            if !issued { sampling = false }
+            return
+        }
+
+        // CPU PATH (original).
         let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
             guard let self else { return }
             self.workQueue.async {
@@ -132,6 +165,19 @@ final class VectorscopeScopeModel: ObservableObject {
                 }
             }
         }
+
+        // Build the trace image from the plane histogram (shared with the GPU path).
+        return buildVectorscopeTraceImage(histogram: accum, plane: plane, gain: gain, color: color)
+    }
+
+    /// Turn a plane×plane chroma histogram (layout hist[py*plane + px], Cb horizontal, Cr
+    /// up) into the white-on-black scatter CGImage. Shared UNCHANGED by both the CPU and
+    /// GPU paths — only the histogram SOURCE differs (CPU bin loop vs vectorscopeKernel).
+    /// The image is square (plane×plane), matching the circular display; NO row-downsample
+    /// (unlike waveform/parade — the vectorscope isn't a value histogram).
+    private func buildVectorscopeTraceImage(histogram accum: [UInt32], plane: Int, gain: Float,
+                                            color: (r: Float, g: Float, b: Float)) -> CGImage? {
+        guard plane > 0, accum.count >= plane * plane else { return nil }
 
         // Per-frame max for normalization; gain+gamma brightness curve so dense chroma
         // clusters glow and sparse excursions stay dark (no uniform wash).

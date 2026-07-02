@@ -35,6 +35,16 @@ private struct ParadeParams {
     var rowStride: UInt32  // process every rowStride-th source row
 }
 
+/// Matches the shader's VectorscopeParams struct (memory layout). GPU vectorscope — a
+/// square plane×plane 2-D chroma histogram (different geometry from the value histograms).
+private struct VectorscopeParams {
+    var width: UInt32       // source (offscreen) width
+    var height: UInt32      // source (offscreen) height
+    var plane: UInt32       // square chroma-plane side
+    var rowStride: UInt32   // process every rowStride-th source row
+    var chromaScale: Float  // chromaScaleFrac — chroma units → fraction of the plane
+}
+
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
@@ -84,6 +94,8 @@ final class MetalVideoRenderer {
     private var histogramBuffer: MTLBuffer?
     private let paradePipelineState: MTLComputePipelineState?
     private var paradeHistogramBuffer: MTLBuffer?
+    private let vectorscopePipelineState: MTLComputePipelineState?
+    private var vectorscopeHistogramBuffer: MTLBuffer?
 
     // Persistent owned offscreen render target: the single source of truth for
     // display (1:1 blitted to the drawable), frame export, and future scopes.
@@ -157,6 +169,11 @@ final class MetalVideoRenderer {
             self.paradePipelineState = try? device.makeComputePipelineState(function: pfn)
         } else {
             self.paradePipelineState = nil
+        }
+        if let vfn = library.makeFunction(name: "vectorscopeKernel") {
+            self.vectorscopePipelineState = try? device.makeComputePipelineState(function: vfn)
+        } else {
+            self.vectorscopePipelineState = nil
         }
 
         self.device = device
@@ -613,36 +630,40 @@ final class MetalVideoRenderer {
         return true
     }
 
-    /// GPU luma-waveform histogram (Phase 1 prototype). Runs `waveformKernel` over the
-    /// persistent GPU-resident offscreen texture — NO 33MB frame readback — and reads
-    /// back only the small histogram (scopeW*bins*4 bytes, ≤1MB). This is the whole win:
-    /// the 8.3M-pixel bin loop moves to the GPU, off the CPU/display path.
+    /// Shared GPU-scope dispatch (waveform / parade / vectorscope — the "three-of-a-kind"
+    /// extraction). Runs a scope compute kernel over the persistent GPU-resident offscreen
+    /// texture — NO 33MB frame readback — into a reusable device histogram buffer, and reads
+    /// back only the small histogram (a flat [UInt32] of `count`). This is the whole win: the
+    /// 8.3M-pixel bin loop moves to the GPU, off the CPU/display path.
     ///
-    /// Encodes on the scope's OWN command buffer (not the render command buffer), so
-    /// scope work never blocks the display. `completion` fires off the render thread on
-    /// Metal's completion thread with the histogram as a flat [UInt32] in the SAME layout
-    /// the CPU path uses: hist[row*scopeW + bucket].
+    /// The clear/dispatch/readback boilerplate is identical across the three scopes; only the
+    /// pipeline, reusable buffer, uniforms, and histogram `count` differ — injected here. Each
+    /// kernel binds: texture(0) = offscreen, buffer(0) = histogram (atomic_uint), buffer(1) =
+    /// its uniforms (set by `setParams`). Encodes on the scope's OWN command buffer (not the
+    /// render command buffer), so scope work never blocks the display. `completion` fires off
+    /// the render thread on Metal's completion thread with the histogram.
     ///
-    /// The caller MUST gate to one in-flight compute at a time (the reusable histogram
-    /// buffer is cleared + accumulated + read per call). Returns true if a compute was
-    /// issued (completion WILL fire); false otherwise (caller should clear its gate).
+    /// The caller MUST gate to one in-flight compute at a time per buffer (the reusable buffer
+    /// is cleared + accumulated + read per call). Returns true if a compute was issued
+    /// (completion WILL fire); false otherwise (caller should clear its gate).
     @discardableResult
-    func computeWaveformGPU(
-        scopeW: Int, bins: Int, rowStride: Int,
-        completion: @escaping (_ hist: [UInt32], _ scopeW: Int, _ bins: Int) -> Void
+    private func dispatchScopeKernel(
+        pipeline: MTLComputePipelineState?,
+        buffer: inout MTLBuffer?,
+        count: Int,
+        setParams: (MTLComputeCommandEncoder) -> Void,
+        completion: @escaping (_ hist: [UInt32]) -> Void
     ) -> Bool {
-        guard let pipeline = waveformPipelineState, let src = offscreenTexture else { return false }
+        guard let pipeline, let src = offscreenTexture, count > 0 else { return false }
         let width = src.width
         let height = src.height
-        let count = scopeW * bins
-        guard count > 0 else { return false }
 
         // Grow the reusable histogram buffer on demand (shared so the CPU can read it).
         let neededBytes = count * MemoryLayout<UInt32>.stride
-        if histogramBuffer == nil || histogramBuffer!.length < neededBytes {
-            histogramBuffer = device.makeBuffer(length: neededBytes, options: .storageModeShared)
+        if buffer == nil || buffer!.length < neededBytes {
+            buffer = device.makeBuffer(length: neededBytes, options: .storageModeShared)
         }
-        guard let hist = histogramBuffer,
+        guard let hist = buffer,
               let cmd = commandQueue.makeCommandBuffer() else { return false }
 
         // Clear this frame's histogram to zero (blit fill), then accumulate.
@@ -655,10 +676,7 @@ final class MetalVideoRenderer {
         enc.setComputePipelineState(pipeline)
         enc.setTexture(src, index: 0)
         enc.setBuffer(hist, offset: 0, index: 0)
-        var params = WaveformParams(width: UInt32(width), height: UInt32(height),
-                                    scopeW: UInt32(scopeW), bins: UInt32(bins),
-                                    rowStride: UInt32(max(1, rowStride)))
-        enc.setBytes(&params, length: MemoryLayout<WaveformParams>.stride, index: 1)
+        setParams(enc)   // scope-specific uniforms at buffer(1) — called synchronously
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
         let tgs = MTLSize(width: (width + 15) / 16, height: (height + 15) / 16, depth: 1)
         enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
@@ -667,63 +685,63 @@ final class MetalVideoRenderer {
         cmd.addCompletedHandler { _ in
             // GPU done — read the small histogram out of the shared buffer (one copy).
             let ptr = hist.contents().bindMemory(to: UInt32.self, capacity: count)
-            let arr = Array(UnsafeBufferPointer(start: ptr, count: count))
-            completion(arr, scopeW, bins)
+            completion(Array(UnsafeBufferPointer(start: ptr, count: count)))
         }
         cmd.commit()
         return true
     }
 
-    /// GPU RGB-parade histograms (Phase 2). Runs `paradeKernel` over the offscreen and
-    /// reads back only the small histogram — three per-channel regions in ONE buffer,
-    /// laid out [R | G | B], each colW*bins (total 3*colW*bins*4 bytes ≈ 3–12MB, still
-    /// trivial vs the old 33MB frame readback). Mirrors computeWaveformGPU exactly; the
-    /// caller slices the flat result into R/G/B. Encodes on the scope's OWN command
-    /// buffer. Caller MUST gate to one in-flight compute at a time (the buffer is cleared
-    /// + accumulated + read per call). Returns true if a compute was issued.
+    /// GPU luma-waveform histogram (Phase 1). scopeW*bins buffer, layout hist[row*scopeW +
+    /// bucket] matching the CPU path. Thin wrapper over dispatchScopeKernel.
+    @discardableResult
+    func computeWaveformGPU(
+        scopeW: Int, bins: Int, rowStride: Int,
+        completion: @escaping (_ hist: [UInt32], _ scopeW: Int, _ bins: Int) -> Void
+    ) -> Bool {
+        guard let src = offscreenTexture else { return false }
+        var params = WaveformParams(width: UInt32(src.width), height: UInt32(src.height),
+                                    scopeW: UInt32(scopeW), bins: UInt32(bins),
+                                    rowStride: UInt32(max(1, rowStride)))
+        return dispatchScopeKernel(
+            pipeline: waveformPipelineState, buffer: &histogramBuffer, count: scopeW * bins,
+            setParams: { $0.setBytes(&params, length: MemoryLayout<WaveformParams>.stride, index: 1) },
+            completion: { completion($0, scopeW, bins) })
+    }
+
+    /// GPU RGB-parade histograms (Phase 2). Three per-channel regions in ONE buffer, laid
+    /// out [R | G | B], each colW*bins (total 3*colW*bins). The caller slices the flat
+    /// result into R/G/B. Thin wrapper over dispatchScopeKernel.
     @discardableResult
     func computeParadeGPU(
         colW: Int, bins: Int, rowStride: Int,
         completion: @escaping (_ hist: [UInt32], _ colW: Int, _ bins: Int) -> Void
     ) -> Bool {
-        guard let pipeline = paradePipelineState, let src = offscreenTexture else { return false }
-        let width = src.width
-        let height = src.height
-        let count = colW * bins * 3          // R | G | B regions
-        guard count > 0 else { return false }
-
-        let neededBytes = count * MemoryLayout<UInt32>.stride
-        if paradeHistogramBuffer == nil || paradeHistogramBuffer!.length < neededBytes {
-            paradeHistogramBuffer = device.makeBuffer(length: neededBytes, options: .storageModeShared)
-        }
-        guard let hist = paradeHistogramBuffer,
-              let cmd = commandQueue.makeCommandBuffer() else { return false }
-
-        if let blit = cmd.makeBlitCommandEncoder() {
-            blit.fill(buffer: hist, range: 0..<neededBytes, value: 0)
-            blit.endEncoding()
-        }
-
-        guard let enc = cmd.makeComputeCommandEncoder() else { return false }
-        enc.setComputePipelineState(pipeline)
-        enc.setTexture(src, index: 0)
-        enc.setBuffer(hist, offset: 0, index: 0)
-        var params = ParadeParams(width: UInt32(width), height: UInt32(height),
+        guard let src = offscreenTexture else { return false }
+        var params = ParadeParams(width: UInt32(src.width), height: UInt32(src.height),
                                   colW: UInt32(colW), bins: UInt32(bins),
                                   rowStride: UInt32(max(1, rowStride)))
-        enc.setBytes(&params, length: MemoryLayout<ParadeParams>.stride, index: 1)
-        let tpg = MTLSize(width: 16, height: 16, depth: 1)
-        let tgs = MTLSize(width: (width + 15) / 16, height: (height + 15) / 16, depth: 1)
-        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
-        enc.endEncoding()
+        return dispatchScopeKernel(
+            pipeline: paradePipelineState, buffer: &paradeHistogramBuffer, count: colW * bins * 3,
+            setParams: { $0.setBytes(&params, length: MemoryLayout<ParadeParams>.stride, index: 1) },
+            completion: { completion($0, colW, bins) })
+    }
 
-        cmd.addCompletedHandler { _ in
-            let ptr = hist.contents().bindMemory(to: UInt32.self, capacity: count)
-            let arr = Array(UnsafeBufferPointer(start: ptr, count: count))
-            completion(arr, colW, bins)
-        }
-        cmd.commit()
-        return true
+    /// GPU vectorscope histogram (Phase 3). A square plane×plane 2-D chroma histogram,
+    /// layout hist[py*plane + px] matching the CPU path (Cb horizontal, Cr up). Thin wrapper
+    /// over dispatchScopeKernel. `chromaScale` = VectorscopeScopeModel.chromaScaleFrac.
+    @discardableResult
+    func computeVectorscopeGPU(
+        plane: Int, chromaScale: Float, rowStride: Int,
+        completion: @escaping (_ hist: [UInt32], _ plane: Int) -> Void
+    ) -> Bool {
+        guard let src = offscreenTexture else { return false }
+        var params = VectorscopeParams(width: UInt32(src.width), height: UInt32(src.height),
+                                       plane: UInt32(plane), rowStride: UInt32(max(1, rowStride)),
+                                       chromaScale: chromaScale)
+        return dispatchScopeKernel(
+            pipeline: vectorscopePipelineState, buffer: &vectorscopeHistogramBuffer, count: plane * plane,
+            setParams: { $0.setBytes(&params, length: MemoryLayout<VectorscopeParams>.stride, index: 1) },
+            completion: { completion($0, plane) })
     }
 
     /// Unpack one rgb10a2Unorm pixel (the format `readbackRenderedFrameAsync`
