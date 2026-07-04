@@ -132,9 +132,17 @@ public final class LibavFrameSource: @unchecked Sendable {
         guard let codec = avcodec_find_decoder(cid) else { avformat_close_input(&ctx); throw LibavError.noDecoder }
         guard let cctx = avcodec_alloc_context3(codec) else { avformat_close_input(&ctx); throw LibavError.noDecoder }
         avcodec_parameters_to_context(cctx, par)
-        // Auto multithreaded decode: HQX frame/slice-threads ~11×, so the 4K 10-bit
-        // decode cost stops contending with the render pipeline (locks 23.976fps).
-        cctx.pointee.thread_count = 0
+        // Multithreaded decode: HQX frame/slice-threads give ~11×, so the 4K 10-bit decode
+        // cost stops contending with the render pipeline (locks 23.976fps). BUT thread_count=0
+        // (= one thread per core) saturated EVERY core at decode priority, starving the Metal
+        // scope-compute completion callbacks — they waited ~190ms for a free GCD thread,
+        // landing the scopes ~5 frames behind the picture. Leave ONE core free so completion
+        // callbacks + UI get scheduled promptly. Re-verify 24fps holds: decode has ample
+        // headroom (one fewer worker on an N-core machine), and the freed core removes the
+        // scope-latency starvation. (Cores−1, floor 1.)
+        let decodeThreads = max(1, ProcessInfo.processInfo.activeProcessorCount - 1)
+        cctx.pointee.thread_count = Int32(decodeThreads)
+        print("FrameEngine: libav decode threads = \(decodeThreads) (of \(ProcessInfo.processInfo.activeProcessorCount) cores)")
         var cctxOpt: UnsafeMutablePointer<AVCodecContext>? = cctx
         guard avcodec_open2(cctx, codec, nil) == 0 else {
             avcodec_free_context(&cctxOpt); avformat_close_input(&ctx); throw LibavError.decoderOpen

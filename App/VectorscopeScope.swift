@@ -1,6 +1,8 @@
 import SwiftUI
 import CoreGraphics
 import Metal
+import Combine
+import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Debug too)
 
 /// Native vectorscope: a 2D chroma-plane (Cb horizontal, Cr vertical) scatter on a
 /// circular graticule with the six color-bar target boxes (R, G, B, Cy, Mg, Yl).
@@ -65,36 +67,66 @@ final class VectorscopeScopeModel: ObservableObject {
         return (cb, cr)
     }
 
-    private var timer: Timer?
     private let workQueue = DispatchQueue(label: "com.graviton.manifold.scope.vector",
                                           qos: .userInitiated)
-    private var sampling = false
     private var readbackTexture: MTLTexture?
 
-    private let updateHz = 24.0
+    // Render-coupled sampling state (main-only) — see WaveformScopeModel for the rationale.
+    private var active = false
+    private var sampling = false
+    private var pendingSample = false
+    /// Live pref-coupling (paused re-sample on a scope-pref change) — see WaveformScopeModel.
+    private var prefsObserver: AnyCancellable?
+
     /// CPU path: process every Nth source row. Legacy fallback.
     private let rowStride = 2
     /// GPU path: process EVERY row (full-res) — cheap on the GPU, like waveform/parade.
     private let gpuRowStride = 1
 
+    /// Mark visible and sample the current offscreen frame once (covers tray-open while
+    /// paused). Sampling is otherwise render-coupled (frameRendered) + pref-coupled (below),
+    /// not timer-driven.
     func start() {
-        guard timer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / updateHz, repeats: true) { [weak self] _ in
-            self?.tick()
+        active = true
+        if prefsObserver == nil {
+            prefsObserver = NotificationCenter.default
+                .publisher(for: UserDefaults.didChangeNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.requestSample() }
         }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        requestSample()
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        active = false
+        pendingSample = false
+        prefsObserver?.cancel()
+        prefsObserver = nil
         image = nil
     }
 
-    private func tick() {
-        guard !sampling, let renderer else { return }
+    /// Render-coupled trigger (CVDisplayLink render thread) — hops to main; the GPU compute
+    /// self-commits on its own command buffer, so this never blocks the render.
+    func frameRendered() {
+        DispatchQueue.main.async { [weak self] in self?.requestSample() }
+    }
+
+    private func requestSample() {
+        guard active, renderer != nil else { return }
+        if sampling { pendingSample = true; return }
+        startSample()
+    }
+
+    /// Release the gate (main); if a frame arrived mid-cycle, re-sample the latest at once.
+    private func finishSample() {
+        sampling = false
+        if pendingSample { startSample() }
+    }
+
+    private func startSample() {
+        guard let renderer else { return }
         sampling = true
+        pendingSample = false
         // Effective gain (Preferences read on main): baseGain × vectorscope × global master.
         let gain = baseGain
             * Float(Preferences.shared.vectorscopeIntensity)
@@ -105,18 +137,17 @@ final class VectorscopeScopeModel: ObservableObject {
         if Self.useGPUVectorscope {
             // GPU PATH: the plane×plane chroma histogram is computed by vectorscopeKernel over
             // the offscreen; only the small plane buffer (≤~1.4MB) is read back — no 33MB frame
-            // copy, no CPU bin loop. Completion on Metal's thread; build the trace on workQueue.
+            // copy, no CPU bin loop. The trace-build runs right here on the GPU completion
+            // thread (a fast -O ScopeTrace call), then hops to main to publish.
             let plane = self.plane
             let issued = renderer.computeVectorscopeGPU(plane: plane,
                                                         chromaScale: Self.chromaScaleFrac,
                                                         rowStride: gpuRowStride) { [weak self] hist, p in
                 guard let self else { return }
-                self.workQueue.async {
-                    let img = self.buildVectorscopeTraceImage(histogram: hist, plane: p, gain: gain, color: color)
-                    DispatchQueue.main.async {
-                        if let img { self.image = img }
-                        self.sampling = false
-                    }
+                let img = self.buildVectorscopeTraceImage(histogram: hist, plane: p, gain: gain, color: color)
+                DispatchQueue.main.async {
+                    if self.active, let img { self.image = img }
+                    self.finishSample()
                 }
             }
             if !issued { sampling = false }
@@ -129,8 +160,8 @@ final class VectorscopeScopeModel: ObservableObject {
             self.workQueue.async {
                 let img = self.computeVectorscope(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain, color: color)
                 DispatchQueue.main.async {
-                    if let img { self.image = img }
-                    self.sampling = false
+                    if self.active, let img { self.image = img }
+                    self.finishSample()
                 }
             }
         }
@@ -179,22 +210,10 @@ final class VectorscopeScopeModel: ObservableObject {
                                             color: (r: Float, g: Float, b: Float)) -> CGImage? {
         guard plane > 0, accum.count >= plane * plane else { return nil }
 
-        // Per-frame max for normalization; gain+gamma brightness curve so dense chroma
-        // clusters glow and sparse excursions stay dark (no uniform wash).
-        var maxCount: UInt32 = 1
-        for c in accum where c > maxCount { maxCount = c }
-
-        var pixels = [UInt8](repeating: 0, count: plane * plane * 4)
-        for i in 0..<(plane * plane) {
-            let v = scopeBrightness(count: accum[i], maxCount: maxCount, gain: gain)
-            // final pixel = traceColor × computedIntensity. Default white reproduces (v,v,v).
-            let fv = Float(v)
-            let o = i * 4
-            pixels[o + 0] = UInt8(fv * color.r)
-            pixels[o + 1] = UInt8(fv * color.g)
-            pixels[o + 2] = UInt8(fv * color.b)
-            pixels[o + 3] = 255
-        }
+        // Numeric build (max scan → LUT → RGBA fill) is in ScopeTrace, compiled -O even in
+        // Debug so it's fast during development.
+        let pixels = ScopeTrace.vectorscopePixels(histogram: accum, plane: plane, gain: gain,
+                                                  colorR: color.r, colorG: color.g, colorB: color.b)
 
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)

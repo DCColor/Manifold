@@ -70,6 +70,17 @@ final class MetalVideoRenderer {
     /// one-shot and only fires right after a flush anyway).
     var isPausedProvider: (() -> Bool)?
 
+    /// Called on the CVDisplayLink render thread at the END of every renderPixelBuffer —
+    /// i.e. every time the offscreen texture is updated to a new displayed frame (normal
+    /// playback, paused refresh, AND the post-seek relaxed render). Lets the scopes couple
+    /// their sampling to the render instead of a free-running timer, eliminating the
+    /// timer/render misalignment latency. The callback must NOT block: it just triggers the
+    /// scopes, which commit their own compute command buffers (the render never waits on
+    /// scope work). Set by the owner; same set-on-main / read-on-render-thread pattern as
+    /// the providers above. Fires only when the offscreen was actually written (after the
+    /// render command buffer is committed — a bailed render doesn't signal).
+    var onFrameRendered: (() -> Void)?
+
     /// Returns the engine's effective full-range flag (override + source range).
     /// Read per-frame on the render thread; the engine's accessor is thread-safe.
     /// When nil, defaults to video/legal (expand).
@@ -82,6 +93,14 @@ final class MetalVideoRenderer {
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
+    /// Dedicated command queue for GPU scope compute (dispatchScopeKernel), SEPARATE from
+    /// the render's commandQueue. This is the scope-latency fix: on the shared queue, a
+    /// scope's compute buffer executed in-order AFTER the render buffer — which includes the
+    /// present/vsync wait — so every scope cycle waited ~a frame behind the render and they
+    /// piled up (~4:1 coalescing, 4–5 frames late). On its own queue, scope work runs
+    /// CONCURRENTLY with renders instead of behind them, and — just as important — a render
+    /// never waits behind scope buffers (removes the latent playback-delay risk).
+    private let scopeCommandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private var textureCache: CVMetalTextureCache!
 
@@ -97,12 +116,34 @@ final class MetalVideoRenderer {
     private let vectorscopePipelineState: MTLComputePipelineState?
     private var vectorscopeHistogramBuffer: MTLBuffer?
 
-    // Persistent owned offscreen render target: the single source of truth for
-    // display (1:1 blitted to the drawable), frame export, and future scopes.
-    // Written/used on the CVDisplayLink render thread; read back (via its own
-    // serialized command buffer) by readbackRenderedFrame() from the main thread.
-    private var offscreenTexture: MTLTexture?
+    // Offscreen render targets — the source of truth for display (1:1 blitted to the
+    // drawable), frame export, and scopes. A RING (not a single texture): the render writes
+    // into offscreenWriteIndex, then — once that render's GPU work COMPLETES — publishes that
+    // index as offscreenReadableIndex. Consumers (export, CPU readback, GPU scopes) only ever
+    // sample the readable buffer, i.e. a FULLY-written frame. This is what makes moving scope
+    // compute to its own command queue SAFE:
+    //   • read-after-write: readable is published in the render's completion handler, so a
+    //     reader never sees a half-written frame (no cross-queue event needed).
+    //   • write-during-read: the render's NEXT write targets a DIFFERENT ring texture, so a
+    //     scope reading the readable buffer on its own queue can't race the render overwriting
+    //     it — that buffer isn't reused until offscreenRingCount renders later (~2 frames),
+    //     far longer than a scope's ~ms read.
+    private static let offscreenRingCount = 2
+    private var offscreenRing: [MTLTexture] = []
     private var offscreenSize: (w: Int, h: Int)?
+    private var offscreenWriteIndex = 0             // render thread only
+    private let offscreenIndexLock = NSLock()
+    private var offscreenReadableIndex = -1         // guarded: set in render completion, read by consumers
+
+    /// The most-recently-COMPLETED offscreen frame — the single source of truth for export,
+    /// CPU readback, and GPU scopes. Nil until the first render completes. Same name as the
+    /// old single texture, so all readers are unchanged; only renderPixelBuffer writes the
+    /// ring directly.
+    private var offscreenTexture: MTLTexture? {
+        offscreenIndexLock.lock(); defer { offscreenIndexLock.unlock() }
+        guard offscreenReadableIndex >= 0, offscreenReadableIndex < offscreenRing.count else { return nil }
+        return offscreenRing[offscreenReadableIndex]
+    }
 
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
     private struct QueuedFrame { let pts: Double; let pixelBuffer: CVPixelBuffer }
@@ -178,6 +219,11 @@ final class MetalVideoRenderer {
 
         self.device = device
         self.commandQueue = queue
+        // Dedicated scope queue (falls back to the render queue if creation fails — degraded
+        // to the old shared-queue behavior, but never nil).
+        let scopeQueue = device.makeCommandQueue() ?? queue
+        scopeQueue.label = "com.graviton.manifold.scope"
+        self.scopeCommandQueue = scopeQueue
         self.pipelineState = pipeline
 
         metalLayer.device = device
@@ -473,11 +519,13 @@ final class MetalVideoRenderer {
             metalLayer.drawableSize = CGSize(width: width, height: height)
         }
 
-        // Render into the persistent owned offscreen texture (1:1 with the drawable),
-        // then blit it to the drawable for display. The offscreen texture is the
-        // single source of truth for display, export, and scopes.
+        // Render into this frame's ring texture (1:1 with the drawable), then blit it to the
+        // drawable for display. We write the WRITE-index buffer (not the readable one); it's
+        // published as readable in the completion handler below, once its GPU write is done.
         ensureOffscreenTexture(width: width, height: height)
-        guard let offscreen = offscreenTexture else { return }
+        let writeIndex = offscreenWriteIndex
+        guard writeIndex < offscreenRing.count else { return }
+        let offscreen = offscreenRing[writeIndex]
         guard let drawable = metalLayer.nextDrawable() else { return }
 
         let passDesc = MTLRenderPassDescriptor()
@@ -508,20 +556,45 @@ final class MetalVideoRenderer {
         }
 
         cmdBuffer.present(drawable)
+
+        // Publish this buffer as the readable frame + trigger scope sampling ONLY once the
+        // render's GPU work has COMPLETED — so scopes (on their own queue) read a fully-written
+        // frame, never a half-drawn one (read-after-write safety without a cross-queue event).
+        // Runs on a Metal completion thread; onFrameRendered just enqueues (non-blocking).
+        cmdBuffer.addCompletedHandler { [weak self] _ in
+            guard let self else { return }
+            self.offscreenIndexLock.lock()
+            self.offscreenReadableIndex = writeIndex
+            self.offscreenIndexLock.unlock()
+            self.onFrameRendered?()
+        }
         cmdBuffer.commit()
+        // Advance so the NEXT render targets a different ring texture (write-during-read
+        // safety: a scope reading this frame's buffer won't be overwritten until the ring
+        // wraps ~offscreenRingCount frames later).
+        offscreenWriteIndex = (writeIndex + 1) % Self.offscreenRingCount
     }
 
     /// (Re)create the persistent offscreen render target when missing or when the
     /// size changes. Kept 1:1 with the current drawable size — resolution-neutral.
     private func ensureOffscreenTexture(width: Int, height: Int) {
-        if offscreenTexture != nil, let size = offscreenSize, size.w == width, size.h == height {
+        if !offscreenRing.isEmpty, let size = offscreenSize, size.w == width, size.h == height {
             return
         }
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: Self.renderPixelFormat, width: width, height: height, mipmapped: false)
         desc.storageMode = .private
-        desc.usage = [.renderTarget, .shaderRead]   // render into it; allow blit source
-        offscreenTexture = device.makeTexture(descriptor: desc)
+        desc.usage = [.renderTarget, .shaderRead]   // render into it; allow blit / scope-read source
+        var ring: [MTLTexture] = []
+        for _ in 0..<Self.offscreenRingCount {
+            guard let t = device.makeTexture(descriptor: desc) else { return }
+            ring.append(t)
+        }
+        offscreenIndexLock.lock()
+        offscreenRing = ring
+        offscreenReadableIndex = -1     // no completed frame in the fresh ring yet
+        offscreenIndexLock.unlock()
+        offscreenWriteIndex = 0
         offscreenSize = (width, height)
     }
 
@@ -663,8 +736,11 @@ final class MetalVideoRenderer {
         if buffer == nil || buffer!.length < neededBytes {
             buffer = device.makeBuffer(length: neededBytes, options: .storageModeShared)
         }
+        // Commit on the DEDICATED scope queue (not the render's) so scope compute runs
+        // concurrently with renders instead of serialized behind them + the present/vsync wait.
+        // `src` is the readable (completed) frame — safe to read off-queue (see offscreen ring).
         guard let hist = buffer,
-              let cmd = commandQueue.makeCommandBuffer() else { return false }
+              let cmd = scopeCommandQueue.makeCommandBuffer() else { return false }
 
         // Clear this frame's histogram to zero (blit fill), then accumulate.
         if let blit = cmd.makeBlitCommandEncoder() {

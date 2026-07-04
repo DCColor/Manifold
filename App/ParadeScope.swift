@@ -1,6 +1,8 @@
 import SwiftUI
 import CoreGraphics
 import Metal
+import Combine
+import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Debug too)
 
 /// Trace-image pixel height (rows) for the parade — matches the waveform's sharpness fix.
 /// The GPU 1024-bin per-channel histograms map down to this many rows in
@@ -45,14 +47,16 @@ final class ParadeScopeModel: ObservableObject {
         if w != columnWidth { columnWidth = w }
     }
 
-    private var timer: Timer?
     private let workQueue = DispatchQueue(label: "com.graviton.manifold.scope.parade",
                                           qos: .userInitiated)
-    private var sampling = false                 // per-scope overlap gate
     private var readbackTexture: MTLTexture?     // this scope's own readback destination
 
-    /// Perceptual-smoothness cap — independent of source frame rate (same as waveform).
-    private let updateHz = 24.0
+    // Render-coupled sampling state (main-only) — see WaveformScopeModel for the rationale.
+    private var active = false
+    private var sampling = false
+    private var pendingSample = false
+    /// Live pref-coupling (paused re-sample on a scope-pref change) — see WaveformScopeModel.
+    private var prefsObserver: AnyCancellable?
 
     /// CPU path: process every Nth source row (columns stay full-res). Legacy fallback.
     private let rowStride = 2
@@ -60,24 +64,50 @@ final class ParadeScopeModel: ObservableObject {
     /// GPU path: process EVERY row (full-res) — cheap on the GPU, like the waveform.
     private let gpuRowStride = 1
 
+    /// Mark visible and sample the current offscreen frame once (covers tray-open while
+    /// paused). Sampling is otherwise render-coupled (frameRendered) + pref-coupled (below),
+    /// not timer-driven.
     func start() {
-        guard timer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / updateHz, repeats: true) { [weak self] _ in
-            self?.tick()
+        active = true
+        if prefsObserver == nil {
+            prefsObserver = NotificationCenter.default
+                .publisher(for: UserDefaults.didChangeNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.requestSample() }
         }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        requestSample()
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        active = false
+        pendingSample = false
+        prefsObserver?.cancel()
+        prefsObserver = nil
         image = nil
     }
 
-    private func tick() {
-        guard !sampling, let renderer else { return }
+    /// Render-coupled trigger (CVDisplayLink render thread) — hops to main; the GPU compute
+    /// self-commits on its own command buffer, so this never blocks the render.
+    func frameRendered() {
+        DispatchQueue.main.async { [weak self] in self?.requestSample() }
+    }
+
+    private func requestSample() {
+        guard active, renderer != nil else { return }
+        if sampling { pendingSample = true; return }
+        startSample()
+    }
+
+    /// Release the gate (main); if a frame arrived mid-cycle, re-sample the latest at once.
+    private func finishSample() {
+        sampling = false
+        if pendingSample { startSample() }
+    }
+
+    private func startSample() {
+        guard let renderer else { return }
         sampling = true
+        pendingSample = false
         // Effective gain (Preferences read on main): baseGain × parade × global master.
         let gain = baseGain
             * Float(Preferences.shared.paradeIntensity)
@@ -88,24 +118,22 @@ final class ParadeScopeModel: ObservableObject {
 
         if Self.useGPUParade {
             // GPU PATH: the 3 per-channel histograms are computed by paradeKernel over the
-            // offscreen; only the small histogram (≤12MB) is read back — no 33MB frame
-            // copy, no CPU bin loop. The completion fires on Metal's completion thread; hop
-            // to workQueue to slice R/G/B + build the trace, then publish on main.
+            // offscreen; only the small histogram (≤12MB) is read back — no 33MB frame copy,
+            // no CPU bin loop. The trace-build runs right here on the GPU completion thread
+            // (a fast -O ScopeTrace call), then hops to main to publish.
             let colW = columnWidth
             let bins = gpuBins
             let issued = renderer.computeParadeGPU(colW: colW, bins: bins, rowStride: gpuRowStride) { [weak self] hist, cw, b in
                 guard let self else { return }
-                self.workQueue.async {
-                    let n = cw * b
-                    let r = Array(hist[0..<n])
-                    let g = Array(hist[n..<(2 * n)])
-                    let bl = Array(hist[(2 * n)..<(3 * n)])
-                    let img = self.buildParadeTraceImage(r: r, g: g, b: bl, colW: cw, bins: b,
-                                                         gain: gain, mono: mono, monoColor: monoColor)
-                    DispatchQueue.main.async {
-                        if let img { self.image = img }
-                        self.sampling = false
-                    }
+                let n = cw * b
+                let r = Array(hist[0..<n])
+                let g = Array(hist[n..<(2 * n)])
+                let bl = Array(hist[(2 * n)..<(3 * n)])
+                let img = self.buildParadeTraceImage(r: r, g: g, b: bl, colW: cw, bins: b,
+                                                     gain: gain, mono: mono, monoColor: monoColor)
+                DispatchQueue.main.async {
+                    if self.active, let img { self.image = img }
+                    self.finishSample()
                 }
             }
             if !issued { sampling = false }
@@ -120,8 +148,8 @@ final class ParadeScopeModel: ObservableObject {
                 let img = self.computeParade(bytes: bytes, width: w, height: h, bytesPerRow: bpr,
                                              gain: gain, mono: mono, monoColor: monoColor)
                 DispatchQueue.main.async {
-                    if let img { self.image = img }
-                    self.sampling = false
+                    if self.active, let img { self.image = img }
+                    self.finishSample()
                 }
             }
         }
@@ -175,61 +203,15 @@ final class ParadeScopeModel: ObservableObject {
         let n = colW * bins
         guard colW > 0, bins > 0, accR.count >= n, accG.count >= n, accB.count >= n else { return nil }
         // Trace-image height; never more than the source bins (CPU 256 caps at 256, GPU
-        // 1024 maps to paradeDisplayRows). Same mapping as the waveform's buildTraceImage.
+        // 1024 maps to paradeDisplayRows). Same mapping as the waveform's trace-build.
         let displayRows = min(bins, max(1, paradeDisplayRows))
-
-        // Map a source channel histogram (bins rows) down to displayRows by summing source
-        // row srow into display row srow*displayRows/bins — no dropped rows, value-max stays
-        // at the top. groupSize 1 (256->256) is the CPU no-op; groups of 2 (1024->512) GPU.
-        func mapDown(_ acc: [UInt32]) -> [UInt32] {
-            if displayRows == bins { return acc }
-            var d = [UInt32](repeating: 0, count: colW * displayRows)
-            for srow in 0..<bins {
-                let drow = (srow * displayRows) / bins
-                let dBase = drow * colW
-                let sBase = srow * colW
-                for x in 0..<colW { d[dBase + x] &+= acc[sBase + x] }
-            }
-            return d
-        }
-        let dR = mapDown(accR), dG = mapDown(accG), dB = mapDown(accB)
-
-        // Shared max across all three DISPLAY histograms -> comparable inter-channel scaling.
-        var maxCount: UInt32 = 1
-        for c in dR where c > maxCount { maxCount = c }
-        for c in dG where c > maxCount { maxCount = c }
-        for c in dB where c > maxCount { maxCount = c }
-        func intensity(_ c: UInt32) -> UInt8 {
-            scopeBrightness(count: c, maxCount: maxCount, gain: gain)
-        }
-
-        // Composite: column 0 = R (red trace), 1 = G (green), 2 = B (blue).
         let totalW = colW * 3
-        var pixels = [UInt8](repeating: 0, count: totalW * displayRows * 4)
-        for row in 0..<displayRows {
-            let rowOut = row * totalW
-            for bx in 0..<colW {
-                let vR = intensity(dR[row * colW + bx])
-                let vG = intensity(dG[row * colW + bx])
-                let vB = intensity(dB[row * colW + bx])
-                let oR = (rowOut + (0 * colW + bx)) * 4   // R channel column (left)
-                let oG = (rowOut + (1 * colW + bx)) * 4   // G channel column (mid)
-                let oB = (rowOut + (2 * colW + bx)) * 4   // B channel column (right)
 
-                if mono {
-                    // All three columns in ONE hue; brightness still per-channel.
-                    let fR = Float(vR), fG = Float(vG), fB = Float(vB)
-                    pixels[oR + 0] = UInt8(fR * monoColor.r); pixels[oR + 1] = UInt8(fR * monoColor.g); pixels[oR + 2] = UInt8(fR * monoColor.b); pixels[oR + 3] = 255
-                    pixels[oG + 0] = UInt8(fG * monoColor.r); pixels[oG + 1] = UInt8(fG * monoColor.g); pixels[oG + 2] = UInt8(fG * monoColor.b); pixels[oG + 3] = 255
-                    pixels[oB + 0] = UInt8(fB * monoColor.r); pixels[oB + 1] = UInt8(fB * monoColor.g); pixels[oB + 2] = UInt8(fB * monoColor.b); pixels[oB + 3] = 255
-                } else {
-                    // Default: red / green / blue columns (unchanged).
-                    pixels[oR + 0] = vR; pixels[oR + 1] = 0; pixels[oR + 2] = 0; pixels[oR + 3] = 255
-                    pixels[oG + 0] = 0; pixels[oG + 1] = vG; pixels[oG + 2] = 0; pixels[oG + 3] = 255
-                    pixels[oB + 0] = 0; pixels[oB + 1] = 0; pixels[oB + 2] = vB; pixels[oB + 3] = 255
-                }
-            }
-        }
+        // Numeric build (downsample × 3, shared max, LUT, R|G|B composite) is in ScopeTrace,
+        // compiled -O even in Debug so it's fast during development.
+        let pixels = ScopeTrace.paradePixels(r: accR, g: accG, b: accB, colW: colW, bins: bins,
+                                             displayRows: displayRows, gain: gain, mono: mono,
+                                             monoR: monoColor.r, monoG: monoColor.g, monoB: monoColor.b)
 
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)

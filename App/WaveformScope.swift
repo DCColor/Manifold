@@ -1,6 +1,8 @@
 import SwiftUI
 import CoreGraphics
 import AppKit
+import Combine
+import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Debug too)
 
 /// Stores/restores a scope trace color as a 6-digit sRGB hex string (no alpha) so it
 /// can live in @AppStorage, and converts to RGB floats for the trace compute.
@@ -41,30 +43,17 @@ func scopeBucketWidth(_ width: CGFloat, min lo: Int, max hi: Int) -> Int {
 
 // baseGain is the gain at intensity 1.0 — i.e. perScope=global=1.0 reproduces the
 // current look. The user-facing intensities multiply this (see each scope's tick).
-// gamma/floor stay fixed good constants; only the gain side is user-driven.
+// The gamma/floor curve constants live in ScopeTrace (ManifoldCore); baseGain stays here
+// because it feeds the gain the models compute on the main thread.
 let baseGain: Float = 1.6      // dense bins reach full white a bit before the very max
-let traceGamma: Float = 1.25   // gentle low-end darkening without eating mid-density structure
-let traceFloor: Float = 0.008  // brightness below this clamps to pure black (kills pure haze only)
 
 /// Trace-image pixel height (rows) for the waveform. The GPU 1024-bin histogram is
-/// mapped down to this many rows in buildTraceImage; the image is then scaled to fill
+/// mapped down to this many rows in the trace-build; the image is then scaled to fill
 /// the panel. Taller = sharper (less upscale of the small image), at a tiny CPU cost on
 /// the ~1MB histogram. A/B lever: try 256 / 512 / 1024 — best kept a power-of-2 divisor
 /// of the 1024 GPU bins so the group-sum is exact (any value ≤1024 still counts every
-/// pixel — see buildTraceImage — but divisors map cleanest).
+/// pixel — see ScopeTrace.waveformPixels — but divisors map cleanest).
 let waveformDisplayRows = 512
-
-/// Map an accumulated bin count to 0–255 trace brightness with a gain + gamma curve.
-/// `gain` is the effective gain (baseGain × perScopeIntensity × globalScopeIntensity).
-/// gamma > 1 pushes low counts toward black so sparse areas stay dark and dense areas
-/// build to full brightness — a Resolve-style readable trace.
-func scopeBrightness(count: UInt32, maxCount: UInt32, gain: Float) -> UInt8 {
-    guard count > 0, maxCount > 0 else { return 0 }
-    let normalized = Float(count) / Float(maxCount)
-    var b = powf(Swift.min(normalized * gain, 1.0), traceGamma)
-    if b < traceFloor { b = 0 }
-    return UInt8(Swift.min(255.0, b * 255.0))
-}
 
 // MARK: - Vertical scale (waveform + parade value axis)
 
@@ -196,16 +185,26 @@ final class WaveformScopeModel: ObservableObject {
         if w != columns { columns = w }
     }
 
-    private var timer: Timer?
     private let workQueue = DispatchQueue(label: "com.graviton.manifold.scope.waveform",
                                           qos: .userInitiated)
-    private var sampling = false   // gate: skip a tick if the prior compute is still running
     private var readbackTexture: MTLTexture?   // this scope's own readback destination
 
-    /// Perceptual-smoothness cap, NOT a framerate sync — independent of the source
-    /// frame rate (a 24 fps and a 60 fps clip both update the scope at this rate).
-    /// The overlap gate drops ticks if compute can't keep up; it never slows playback.
-    private let updateHz = 24.0
+    // Render-coupled sampling state (all touched only on main). `active` = this scope is
+    // visible and should sample. `sampling` = a compute cycle is in flight (the one-in-
+    // flight gate). `pendingSample` = a frame rendered while sampling — coalesce and
+    // re-sample the LATEST frame once the in-flight cycle publishes (so the final frame of
+    // a burst / a paused frame is never missed).
+    private var active = false
+    private var sampling = false
+    private var pendingSample = false
+
+    /// Live pref-coupling: re-sample the current frame when a scope-display preference
+    /// changes (intensity/gain/trace color/scale…) so a paused colorist sees the trace
+    /// respond without needing a render. All scope prefs are @AppStorage, which does NOT
+    /// drive Preferences.objectWillChange — so we observe UserDefaults.didChangeNotification
+    /// (posted AFTER the write, so the re-sample reads the NEW value). Coalesced by the
+    /// existing gate; no separate throttle. Active only while the scope is visible.
+    private var prefsObserver: AnyCancellable?
 
     /// CPU path: process every Nth source row in the luma compute (columns stay full-res).
     /// 1 = every row (most accurate), 2 = default, 4 = cheapest. A waveform is a
@@ -219,26 +218,51 @@ final class WaveformScopeModel: ObservableObject {
     /// trace, especially for thin features (fine text, single-pixel edges).
     private let gpuRowStride = 1
 
+    /// Mark the scope visible and sample the current offscreen frame once (covers opening
+    /// the tray while paused — the offscreen already holds the current frame). Sampling is
+    /// otherwise driven by the renderer's per-frame callback (frameRendered) plus a
+    /// preference-change re-sample (below), not a timer.
     func start() {
-        guard timer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / updateHz, repeats: true) { [weak self] _ in
-            self?.tick()
+        active = true
+        if prefsObserver == nil {
+            prefsObserver = NotificationCenter.default
+                .publisher(for: UserDefaults.didChangeNotification)
+                .receive(on: DispatchQueue.main)   // deliver on main; value is already written
+                .sink { [weak self] _ in self?.requestSample() }
         }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        requestSample()
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        active = false
+        pendingSample = false
+        prefsObserver?.cancel()
+        prefsObserver = nil
         image = nil
     }
 
-    private func tick() {
-        // Throttle gate + renderer presence. The gate is touched only on the main
-        // thread (set here; cleared in the async completion's main hop below).
-        guard !sampling, let renderer else { return }
+    /// Render-coupled trigger: called by MetalVideoRenderer on the CVDisplayLink render
+    /// thread right after a new frame is written to the offscreen. Hops to main so the gate
+    /// + Preferences reads stay on main; the GPU compute self-commits on its own command
+    /// buffer, so this never blocks the render path.
+    func frameRendered() {
+        DispatchQueue.main.async { [weak self] in self?.requestSample() }
+    }
+
+    /// Main-thread entry to the one-in-flight gate. If a cycle is already running, remember
+    /// to re-sample when it finishes (coalescing bursts to the latest frame); otherwise
+    /// start a cycle now.
+    private func requestSample() {
+        guard active, renderer != nil else { return }
+        if sampling { pendingSample = true; return }
+        startSample()
+    }
+
+    private func startSample() {
+        // The gate is claimed here (main); released on the completion's main hop below.
+        guard let renderer else { return }
         sampling = true
+        pendingSample = false
 
         // Snapshot the effective gain on the main thread (Preferences read here):
         // baseGain × this scope's intensity × the global master.
@@ -251,20 +275,18 @@ final class WaveformScopeModel: ObservableObject {
         if Self.useGPUWaveform {
             // GPU PATH: the histogram is computed by waveformKernel over the GPU-resident
             // offscreen texture; only the small histogram (≤1MB) is read back — no 33MB
-            // frame copy, no CPU bin loop. The completion fires on Metal's completion
-            // thread; hop to workQueue for the tiny trace-build, then publish on main.
+            // frame copy, no CPU bin loop. The trace-build runs right here on the GPU
+            // completion thread (it's a fast -O ScopeTrace call), then hops to main to publish.
             let scopeW = columns
             // True 10-bit histogram at full source resolution — both cheap on the GPU,
             // both impossible on the CPU path (which quantized to 8-bit + subsampled rows).
             let bins = gpuLumaBins
             let issued = renderer.computeWaveformGPU(scopeW: scopeW, bins: bins, rowStride: gpuRowStride) { [weak self] hist, sw, b in
                 guard let self else { return }
-                self.workQueue.async {
-                    let img = self.buildTraceImage(histogram: hist, scopeW: sw, bins: b, gain: gain, color: color)
-                    DispatchQueue.main.async {
-                        if let img { self.image = img }
-                        self.sampling = false
-                    }
+                let img = self.buildTraceImage(histogram: hist, scopeW: sw, bins: b, gain: gain, color: color)
+                DispatchQueue.main.async {
+                    if self.active, let img { self.image = img }
+                    self.finishSample()
                 }
             }
             if !issued { sampling = false }
@@ -282,14 +304,22 @@ final class WaveformScopeModel: ObservableObject {
             self.workQueue.async {
                 let img = self.computeWaveform(bytes: bytes, width: w, height: h, bytesPerRow: bpr, gain: gain, color: color)
                 DispatchQueue.main.async {
-                    if let img { self.image = img }
-                    self.sampling = false   // gate held from issue until compute published
+                    if self.active, let img { self.image = img }
+                    self.finishSample()   // gate held from issue until compute published
                 }
             }
         }
         // If no readback was issued (no frame yet / setup failed), the completion
-        // will never fire — release the gate so the next tick can try again.
+        // will never fire — release the gate so the next request can try again.
         if !issued { sampling = false }
+    }
+
+    /// Release the one-in-flight gate (main) and, if a frame arrived while this cycle was
+    /// running, immediately sample the latest offscreen frame — so the final frame of a
+    /// burst (or a paused frame) is never left unsampled.
+    private func finishSample() {
+        sampling = false
+        if pendingSample { startSample() }
     }
 
     /// Build the luma waveform as a green-on-black RGBA CGImage.
@@ -339,44 +369,11 @@ final class WaveformScopeModel: ObservableObject {
         // path (1024 bins) uses waveformDisplayRows; the CPU fallback (256 bins) caps at 256.
         let displayRows = min(bins, max(1, waveformDisplayRows))
 
-        // Map the source histogram (bins rows, luma-max at row 0) down to displayRows by
-        // SUMMING source rows into display rows. Each source row srow is assigned to display
-        // row srow*displayRows/bins — so EVERY sampled pixel is counted (no dropped rows) for
-        // ANY displayRows ≤ bins, and a power-of-2 divisor (256/512/1024) yields exact equal
-        // groups. Row 0 stays luma-max at the top. maxCount is scanned on the SUMMED display
-        // histogram below, so the gain/gamma curve maps onto the same displayed-count scale.
-        let display: [UInt32]
-        if displayRows == bins {
-            display = accum
-        } else {
-            var d = [UInt32](repeating: 0, count: scopeW * displayRows)
-            for srow in 0..<bins {
-                let drow = (srow * displayRows) / bins
-                let dBase = drow * scopeW
-                let sBase = srow * scopeW
-                for x in 0..<scopeW {
-                    d[dBase + x] &+= accum[sBase + x]
-                }
-            }
-            display = d
-        }
-
-        // Per-frame max for normalization (brightness adapts to content per frame).
-        var maxCount: UInt32 = 1
-        for c in display where c > maxCount { maxCount = c }
-
-        var pixels = [UInt8](repeating: 0, count: scopeW * displayRows * 4)
-        for i in 0..<(scopeW * displayRows) {
-            let v = scopeBrightness(count: display[i], maxCount: maxCount, gain: gain)
-            // final pixel = traceColor × computedIntensity (hue from picker, brightness
-            // from the curve — orthogonal). Default green reproduces the old (0,v,0).
-            let fv = Float(v)
-            let o = i * 4
-            pixels[o + 0] = UInt8(fv * color.r)
-            pixels[o + 1] = UInt8(fv * color.g)
-            pixels[o + 2] = UInt8(fv * color.b)
-            pixels[o + 3] = 255
-        }
+        // Numeric build (downsample → maxCount → LUT → RGBA fill) is in ScopeTrace, compiled
+        // -O even in Debug so it's fast during development (it's ~100× slower under -Onone).
+        let pixels = ScopeTrace.waveformPixels(histogram: accum, scopeW: scopeW, bins: bins,
+                                               displayRows: displayRows, gain: gain,
+                                               colorR: color.r, colorG: color.g, colorB: color.b)
 
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)

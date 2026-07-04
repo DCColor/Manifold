@@ -334,7 +334,12 @@ struct ContentView: View {
     }
 
     /// A scope samples only when the tray is open AND that scope is enabled.
-    /// Stops sampling otherwise (no wasted readback when the tray is closed).
+    /// Stops sampling otherwise (no wasted work when the tray is closed).
+    ///
+    /// Sampling is render-coupled: the renderer's onFrameRendered fires on every offscreen
+    /// update and fans out to each active scope (each no-ops if it isn't visible). We install
+    /// that callback only while at least one scope is active, and clear it otherwise, so a
+    /// closed tray adds ZERO per-frame overhead on the render thread.
     private func updateScopeSampling() {
         if showTray && showWaveform {
             waveformModel.renderer = metalRenderer; waveformModel.start()
@@ -347,6 +352,15 @@ struct ContentView: View {
         if showTray && showVectorscope {
             vectorscopeModel.renderer = metalRenderer; vectorscopeModel.start()
         } else { vectorscopeModel.stop() }
+
+        let anyActive = showTray && (showWaveform || showParade || showVectorscope)
+        metalRenderer?.onFrameRendered = anyActive
+            ? { [weak waveformModel, weak paradeModel, weak vectorscopeModel] in
+                waveformModel?.frameRendered()
+                paradeModel?.frameRendered()
+                vectorscopeModel?.frameRendered()
+              }
+            : nil
     }
 
     private func controls(showPin: Bool) -> some View {

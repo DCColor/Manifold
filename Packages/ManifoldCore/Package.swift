@@ -33,9 +33,22 @@ let package = Package(
                 .unsafeFlags(["-I", ffmpegInclude])
             ]
         ),
+        // Pure numeric scope trace-build (histogram → RGBA). Compiled -O EVEN IN DEBUG: the
+        // hot loops are ~100× slower under -Onone (a Debug-build artifact), which lagged the
+        // scopes during development. The -O here (appended after SwiftPM's per-config flags,
+        // so it wins) keeps them fast in Debug; Release is unaffected (already -O). Re-exported
+        // by ManifoldCore below so `import ManifoldCore` exposes `ScopeTrace`.
+        .target(
+            name: "ScopeCompute",
+            path: "Sources/ScopeCompute",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-O"])
+            ]
+        ),
         .target(
             name: "ManifoldCore",
-            dependencies: ["CFFmpeg"],
+            dependencies: ["CFFmpeg", "ScopeCompute"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.
