@@ -134,6 +134,10 @@ final class MetalVideoRenderer {
     private var vectorscopeHistogramBuffer: MTLBuffer?
     private let ciePipelineState: MTLComputePipelineState?
     private var cieHistogramBuffer: MTLBuffer?
+    /// CIE scope mode: true = CIE 1976 u'v', false = CIE 1931 xy. Flipped live (⌃⌥X) on main;
+    /// read on main in computeCIEGPU. The CIE scope's graticule mirrors this (kept in sync by
+    /// the toggle) so scatter + overlay agree on the mode.
+    var cieUseUV: Bool = true
 
     // Offscreen render targets — the source of truth for display (1:1 blitted to the
     // drawable), frame export, and scopes. A RING (not a single texture): the render writes
@@ -796,17 +800,18 @@ final class MetalVideoRenderer {
     /// CIE scope simply doesn't draw — display unaffected).
     @discardableResult
     func computeCIEGPU(
-        planeW: Int, planeH: Int, useUV: Bool,
-        uMin: Float, uMax: Float, vMin: Float, vMax: Float,
+        planeW: Int, planeH: Int,
         completion: @escaping (_ hist: [UInt32], _ planeW: Int, _ planeH: Int) -> Void
     ) -> Bool {
         guard let src = offscreenTexture else { return false }
+        // Mode + plane bounds from the single shared source of truth (also used by the graticule).
+        let bounds = CIEPlaneBounds.forMode(useUV: cieUseUV)
         var params = CIEParams(width: UInt32(src.width), height: UInt32(src.height),
                                planeW: UInt32(planeW), planeH: UInt32(planeH),
                                primariesCode: Int32(sourcePrimariesCode ?? 1),
                                transferCode: Int32(sourceTransferCode ?? 1),
-                               useUV: useUV ? 1 : 0,
-                               uMin: uMin, uMax: uMax, vMin: vMin, vMax: vMax)
+                               useUV: cieUseUV ? 1 : 0,
+                               uMin: bounds.aMin, uMax: bounds.aMax, vMin: bounds.bMin, vMax: bounds.bMax)
         return dispatchScopeKernel(
             pipeline: ciePipelineState, buffer: &cieHistogramBuffer, count: planeW * planeH,
             setParams: { $0.setBytes(&params, length: MemoryLayout<CIEParams>.stride, index: 1) },

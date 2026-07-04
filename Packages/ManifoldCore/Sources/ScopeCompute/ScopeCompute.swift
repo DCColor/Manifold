@@ -152,25 +152,66 @@ public enum ScopeTrace {
         return pixels
     }
 
-    /// CIE chromaticity scatter. planeW×planeH 2-D u'v' histogram (layout `[row*planeW + col]`,
-    /// v' up — the row flip is done in the kernel) → RGBA buffer (NO downsample). Per-frame max
-    /// + LUT fill, identical pattern to the vectorscope. The spectral-locus + gamut-triangle
-    /// overlays are drawn by the view's graticule Canvas, not baked here.
-    public static func ciePixels(histogram accum: [UInt32], planeW: Int, planeH: Int, gain: Float,
+    /// CIE chromaticity scatter. planeW×planeH 2-D histogram (layout `[row*planeW + col]`, the
+    /// vertical axis already flipped in the kernel) → RGBA buffer (NO downsample). Overlays
+    /// (spectral locus + gamut triangles) are drawn by the view's graticule Canvas, not here.
+    ///
+    /// DEDICATED brightness (NOT the shared value-scope LUT): the CIE scatter is FAR sparser
+    /// than the value scopes — a frame's distinct chromaticities are few bins with small counts,
+    /// so a linear count→brightness map reads nearly black. Instead each populated bin gets a
+    /// LOG-COMPRESSED brightness (log1p(count)/log1p(max)) so a single-pixel bin still lights up,
+    /// times a hardcoded `gain`, with a gentle implicit floor (log of count≥1 is already > 0).
+    /// Computed inline per POPULATED bin (sparse → cheap; no giant maxCount-sized LUT).
+    ///
+    /// POINT-DILATION: each populated bin is splatted as a small dot (radius `dilation`, a
+    /// (2r+1)² square with a soft edge falloff) via a MAX-blend, so sparse scatters read as
+    /// visible points instead of lone pixels. CIE-only — the other scopes' builds are untouched.
+    public static func ciePixels(histogram accum: [UInt32], planeW: Int, planeH: Int,
+                                 gain: Float, dilation: Int,
                                  colorR: Float, colorG: Float, colorB: Float) -> [UInt8] {
         let count = planeW * planeH
+        guard accum.count >= count, count > 0 else { return [UInt8](repeating: 0, count: max(0, count) * 4) }
+
         var maxCount: UInt32 = 1
         for c in accum where c > maxCount { maxCount = c }
-        let lut = brightnessLUT(maxCount: maxCount, gain: gain)
+        let logMax = log1p(Float(maxCount))   // > 0 (maxCount ≥ 1)
 
         var pixels = [UInt8](repeating: 0, count: count * 4)
-        for i in 0..<count {
-            let fv = Float(lut[Int(accum[i])])
-            let o = i * 4
-            pixels[o + 0] = UInt8(min(255, fv * colorR))
-            pixels[o + 1] = UInt8(min(255, fv * colorG))
-            pixels[o + 2] = UInt8(min(255, fv * colorB))
-            pixels[o + 3] = 255
+        let rad = max(0, dilation)
+
+        for by in 0..<planeH {
+            let rowBase = by * planeW
+            for bx in 0..<planeW {
+                let cnt = accum[rowBase + bx]
+                if cnt == 0 { continue }
+                // Log-compressed, gained brightness for this bin.
+                var norm = (log1p(Float(cnt)) / logMax) * gain
+                if norm > 1 { norm = 1 }
+                let fv = norm * 255.0
+                if fv <= 0 { continue }
+
+                // Splat a soft dot (center bright, edges dimmer) with a MAX-blend.
+                let y0 = max(0, by - rad), y1 = min(planeH - 1, by + rad)
+                let x0 = max(0, bx - rad), x1 = min(planeW - 1, bx + rad)
+                for yy in y0...y1 {
+                    let dy = yy >= by ? yy - by : by - yy
+                    let outRow = yy * planeW
+                    for xx in x0...x1 {
+                        let dx = xx >= bx ? xx - bx : bx - xx
+                        let dist = dy > dx ? dy : dx
+                        let falloff: Float = dist == 0 ? 1.0 : (dist == 1 ? 0.6 : 0.3)
+                        let val = fv * falloff
+                        let o = (outRow + xx) * 4
+                        let nr = UInt8(min(255, val * colorR))
+                        let ng = UInt8(min(255, val * colorG))
+                        let nb = UInt8(min(255, val * colorB))
+                        if nr > pixels[o + 0] { pixels[o + 0] = nr }
+                        if ng > pixels[o + 1] { pixels[o + 1] = ng }
+                        if nb > pixels[o + 2] { pixels[o + 2] = nb }
+                        pixels[o + 3] = 255
+                    }
+                }
+            }
         }
         return pixels
     }

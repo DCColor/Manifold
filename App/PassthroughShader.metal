@@ -217,15 +217,18 @@ kernel void vectorscopeKernel(texture2d<float, access::read> offscreen [[texture
 struct CIEParams {
     uint  width;         // source (offscreen) width in pixels
     uint  height;        // source (offscreen) height in pixels
-    uint  planeW;        // histogram width  (u' axis)
-    uint  planeH;        // histogram height (v' axis)
+    uint  planeW;        // histogram width  (horizontal axis)
+    uint  planeH;        // histogram height (vertical axis)
     int   primariesCode; // CICP primaries (1=709, 9=2020, 11/12=P3); default→709
     int   transferCode;  // CICP transfer  (1=709, 13=sRGB, 16=PQ, 18=HLG); default→gamma 2.4
-    uint  useUV;         // 1 = u'v' (Stage A only supports this; xy deferred)
-    float uMin;          // u' plane lower bound
-    float uMax;          // u' plane upper bound
-    float vMin;          // v' plane lower bound
-    float vMax;          // v' plane upper bound
+    uint  useUV;         // 1 = CIE 1976 u'v', 0 = CIE 1931 xy
+    // Plane bounds. GENERIC per-axis bounds (not literally u'/v'): the host fills them with the
+    // active mode's bounds — u'v' (0/0.62, 0/0.60) or xy (0/0.75, 0/0.85). u* = horizontal
+    // axis, v* = vertical axis. Same bounds are used by the graticule so overlay + scatter align.
+    float uMin;          // horizontal-axis lower bound
+    float uMax;          // horizontal-axis upper bound
+    float vMin;          // vertical-axis lower bound
+    float vMax;          // vertical-axis upper bound
 };
 
 // sRGB EOTF (piecewise) — transferCode 13.
@@ -311,17 +314,30 @@ kernel void cieKernel(texture2d<float, access::read> offscreen [[texture(0)]],
     if (any(isnan(lin))) return;
 
     float3 xyz = cieRGBtoXYZ(lin, p.primariesCode);
-    float denom = xyz.x + 15.0 * xyz.y + 3.0 * xyz.z;
-    if (denom < 1e-6) return;                            // near-black: no meaningful chromaticity
-    float up = 4.0 * xyz.x / denom;                     // CIE 1976 u'
-    float vp = 9.0 * xyz.y / denom;                     // CIE 1976 v'
-    if (isnan(up) || isnan(vp)) return;
 
-    // Map u'v' → plane, normalized by the shared bounds; flip v for image row order.
-    float fu = (up - p.uMin) / (p.uMax - p.uMin);
-    float fv = (vp - p.vMin) / (p.vMax - p.vMin);
-    int col = int(fu * float(p.planeW));
-    int row = int((1.0 - fv) * float(p.planeH));
+    // Project to the active chromaticity space. `a` = horizontal coord, `b` = vertical coord.
+    float a, b;
+    if (p.useUV != 0u) {
+        // CIE 1976 u'v'.
+        float denom = xyz.x + 15.0 * xyz.y + 3.0 * xyz.z;
+        if (denom < 1e-6) return;                        // near-black: no meaningful chromaticity
+        a = 4.0 * xyz.x / denom;                         // u'
+        b = 9.0 * xyz.y / denom;                         // v'
+    } else {
+        // CIE 1931 xy.
+        float denom = xyz.x + xyz.y + xyz.z;
+        if (denom < 1e-6) return;
+        a = xyz.x / denom;                               // x
+        b = xyz.y / denom;                               // y
+    }
+    if (isnan(a) || isnan(b)) return;
+
+    // Map to the plane, normalized by the active-mode bounds; flip the vertical axis for
+    // image row order. Same bounds the graticule uses, so overlay + scatter align in both modes.
+    float fa = (a - p.uMin) / (p.uMax - p.uMin);
+    float fb = (b - p.vMin) / (p.vMax - p.vMin);
+    int col = int(fa * float(p.planeW));
+    int row = int((1.0 - fb) * float(p.planeH));
     if (col >= 0 && col < int(p.planeW) && row >= 0 && row < int(p.planeH)) {
         atomic_fetch_add_explicit(&hist[uint(row) * p.planeW + uint(col)], 1u, memory_order_relaxed);
     }

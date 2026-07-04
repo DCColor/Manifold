@@ -85,26 +85,9 @@ struct ContentView: View {
                 .keyboardShortcut("e", modifiers: [.control, .option])
                 .opacity(0)
         )
-        .background(
-            Button("") { showTray.toggle(); updateScopeSampling() }
-                .keyboardShortcut("t", modifiers: [.control, .option])
-                .opacity(0)
-        )
-        .background(
-            Button("") { showWaveform.toggle(); updateScopeSampling() }
-                .keyboardShortcut("w", modifiers: [.control, .option])
-                .opacity(0)
-        )
-        .background(
-            Button("") { showParade.toggle(); updateScopeSampling() }
-                .keyboardShortcut("p", modifiers: [.control, .option])
-                .opacity(0)
-        )
-        .background(
-            Button("") { showVectorscope.toggle(); updateScopeSampling() }
-                .keyboardShortcut("v", modifiers: [.control, .option])
-                .opacity(0)
-        )
+        // Scope shortcuts (tray + per-scope toggles + CIE live toggles) consolidated into one
+        // hidden group so the view body's modifier chain stays type-checkable.
+        .background(scopeShortcuts)
         // JKL shuttle transport (bare keys — pro NLE muscle memory).
         .background(
             Button("") { engine.shuttleBackward() }
@@ -176,6 +159,8 @@ struct ContentView: View {
                     matrix: meta.colorMatrixCode
                 )
             }
+            // Feed the CIE header the detected source space (honest about untagged → 709 assumed).
+            cieModel.spaceReadout = meta.map(Self.cieSpaceReadout) ?? ""
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -358,7 +343,9 @@ struct ContentView: View {
         // Stage A: the CIE scope occupies the vectorscope's slot — sample it (not the
         // vectorscope) when that slot is shown. vectorscopeModel stays stopped but intact.
         if showTray && showVectorscope {
-            cieModel.renderer = metalRenderer; cieModel.start()
+            cieModel.renderer = metalRenderer
+            cieModel.spaceReadout = engine.metadata.map(Self.cieSpaceReadout) ?? ""
+            cieModel.start()
         } else { cieModel.stop() }
         vectorscopeModel.stop()
 
@@ -370,6 +357,54 @@ struct ContentView: View {
                 cieModel?.frameRendered()
               }
             : nil
+    }
+
+    /// Hidden keyboard shortcuts for the scopes tray + per-scope + CIE live toggles. Grouped into
+    /// one view (instead of many chained `.background(Button…)`) to keep the main body's type-check
+    /// tractable.
+    ///   ⌃⌥T  scopes tray;  ⌃⌥W/P/V  waveform / parade / vectorscope(-slot) presence.
+    ///   ⌃⌥X  CIE u'v' ↔ xy — flips renderer (kernel) + model (graticule/header) together, then
+    ///        setNeedsRefresh re-plots the current frame (covers paused).
+    ///   ⌃⌥1/2/3  CIE per-triangle show/hide (overlay-only → SwiftUI re-renders immediately).
+    @ViewBuilder private var scopeShortcuts: some View {
+        Group {
+            Button("") { showTray.toggle(); updateScopeSampling() }
+                .keyboardShortcut("t", modifiers: [.control, .option])
+            Button("") { showWaveform.toggle(); updateScopeSampling() }
+                .keyboardShortcut("w", modifiers: [.control, .option])
+            Button("") { showParade.toggle(); updateScopeSampling() }
+                .keyboardShortcut("p", modifiers: [.control, .option])
+            Button("") { showVectorscope.toggle(); updateScopeSampling() }
+                .keyboardShortcut("v", modifiers: [.control, .option])
+            Button("") {
+                metalRenderer?.cieUseUV.toggle()
+                cieModel.useUV.toggle()
+                metalRenderer?.setNeedsRefresh()
+            }
+            .keyboardShortcut("x", modifiers: [.control, .option])
+            Button("") { cieModel.show709.toggle() }
+                .keyboardShortcut("1", modifiers: [.control, .option])
+            Button("") { cieModel.showP3.toggle() }
+                .keyboardShortcut("2", modifiers: [.control, .option])
+            Button("") { cieModel.show2020.toggle() }
+                .keyboardShortcut("3", modifiers: [.control, .option])
+        }
+        .opacity(0)
+    }
+
+    /// CIE header readout of the DETECTED source space (primaries · transfer). Honest about
+    /// untagged sources: CICP primaries nil / Unspecified (2) means the kernel assumes 709, so the
+    /// header SAYS "untagged → 709 (assumed)" rather than laundering the default into a confident
+    /// label. Same for an absent/unspecified transfer (assumed 709 gamma).
+    private static func cieSpaceReadout(_ meta: VideoMetadata) -> String {
+        func known(_ s: String) -> Bool { !s.isEmpty && s != "—" }
+        let primUntagged = (meta.colorPrimariesCode == nil) || (meta.colorPrimariesCode == 2)
+        let transUntagged = (meta.transferFunctionCode == nil) || (meta.transferFunctionCode == 2)
+        let primStr = (!primUntagged && known(meta.colorPrimaries))
+            ? meta.colorPrimaries : "untagged → 709 (assumed)"
+        let transStr = (!transUntagged && known(meta.transferFunction))
+            ? meta.transferFunction : "709 gamma (assumed)"
+        return "\(primStr) · \(transStr)"
     }
 
     private func controls(showPin: Bool) -> some View {

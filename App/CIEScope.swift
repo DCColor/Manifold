@@ -4,43 +4,63 @@ import Metal
 import Combine
 import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Debug too)
 
-/// Native CIE chromaticity scope (Stage A): a CIE 1976 u'v' scatter of the frame's pixels, plotted
-/// in the SOURCE gamut. Samples the GPU-resident PRE-DISPLAY offscreen texture (source-primaries,
-/// transfer-encoded RGB): cieKernel linearizes each pixel (by the source transfer), converts
-/// source-primaries linear RGB → XYZ → u'v', and builds a planeW×planeH histogram on the GPU. Only
-/// the tiny histogram is read back; ScopeTrace paints the scatter and the graticule Canvas overlays
-/// the spectral-locus horseshoe + 709/P3/2020 gamut triangles. Render-coupled, mirroring the
-/// vectorscope. Stage A: u'v' only, all three triangles always shown; xy toggle / per-triangle
-/// show-hide / dedicated prefs are later stages (it reuses the vectorscope's intensity + trace color
-/// prefs for now).
+/// Per-mode plot bounds for the CIE plane — the SINGLE source of truth shared by the kernel
+/// dispatch (computeCIEGPU) and the graticule/scatter mapping, so overlay + scatter align in BOTH
+/// modes. `a` = horizontal axis (u' or x), `b` = vertical axis (v' or y). The plane stays square;
+/// independent axis bounds map into it (a mild stretch, same as u'v' already does 0.62 vs 0.60).
+struct CIEPlaneBounds {
+    let aMin: Float, aMax: Float, bMin: Float, bMax: Float
+    /// CIE 1976 u'v' — frames the whole locus with a little headroom.
+    static let uv = CIEPlaneBounds(aMin: 0, aMax: 0.62, bMin: 0, bMax: 0.60)
+    /// CIE 1931 xy — standard diagram bounds.
+    static let xy = CIEPlaneBounds(aMin: 0, aMax: 0.75, bMin: 0, bMax: 0.85)
+    static func forMode(useUV: Bool) -> CIEPlaneBounds { useUV ? uv : xy }
+}
+
+/// Native CIE chromaticity scope: a CIE 1976 u'v' (or CIE 1931 xy) scatter of the frame's pixels,
+/// plotted in the SOURCE gamut. Samples the GPU-resident PRE-DISPLAY offscreen texture
+/// (source-primaries, transfer-encoded RGB): cieKernel linearizes each pixel by the source
+/// transfer, converts source-primaries linear RGB → XYZ → chromaticity, and builds a
+/// planeW×planeH histogram on the GPU. Only the tiny histogram is read back; ScopeTrace paints the
+/// scatter (dedicated log-brightness + point-dilation) and the graticule Canvas overlays the
+/// spectral-locus horseshoe + 709/P3/2020 gamut triangles. Render-coupled, mirroring the
+/// vectorscope. Stage B: xy toggle (⌃⌥X), per-triangle show/hide (⌃⌥1/2/3), dedicated hardcoded
+/// intensity, and a detected-space header readout. Prefs wiring is a later unified pass.
 final class CIEScopeModel: ObservableObject {
 
     @Published var image: CGImage?
     weak var renderer: MetalVideoRenderer?
 
-    // u'v' plane bounds — SHARED with the graticule draw code (single source of truth) so the
-    // GPU scatter and the SwiftUI overlay map chromaticity to the plot identically. Chosen to
-    // frame the whole spectral locus with a little headroom (u' ≲ 0.62, v' ≲ 0.60).
-    static let uMin: Float = 0.0
-    static let uMax: Float = 0.62
-    static let vMin: Float = 0.0
-    static let vMax: Float = 0.60
+    // MARK: - Live view state (flipped from ContentView keyboard shortcuts)
 
-    // Square histogram side, tracking the rendered slot (clamped), like the vectorscope.
-    private var plane = 300
-    private let minPlane = 256
-    private let maxPlane = 600
+    /// true = CIE 1976 u'v', false = CIE 1931 xy. Kept in sync with renderer.cieUseUV by the ⌃⌥X
+    /// handler — the renderer drives the kernel, this drives the graticule + header.
+    @Published var useUV: Bool = true
+    /// Per-gamut triangle visibility (default all ON). Overlay-only, so toggling re-renders the
+    /// Canvas immediately (no re-plot needed).
+    @Published var show709: Bool = true
+    @Published var showP3: Bool = true
+    @Published var show2020: Bool = true
+    /// Detected source space, appended to the header (set from ContentView on metadata change).
+    /// Honest about untagged sources (e.g. "untagged → 709 (assumed)").
+    @Published var spaceReadout: String = ""
 
-    /// Track the rendered square side so the plane buffer resolution scales with size.
-    func setDisplaySide(_ side: CGFloat) {
-        let p = scopeBucketWidth(side, min: minPlane, max: maxPlane)
-        if p != plane { plane = p }
-    }
+    /// Header title for the active mode.
+    var modeLabel: String { useUV ? "CIE 1976 u′v′" : "CIE 1931 xy" }
 
-    // MARK: - Graticule reference data (xy chromaticities; converted to u'v' in the draw code)
+    // MARK: - Dedicated (hardcoded) trace tuning — Stage B; exposed in the prefs pass later.
 
-    /// CIE 1976 u'v' from CIE 1931 xy. Single conversion used by every overlay element so the
-    /// locus, the gamut triangles, and the white point are all consistent with the GPU mapping.
+    /// Log-compressed brightness gain. The CIE scatter's most-saturated corners are its SPARSEST
+    /// bins (few fully-saturated pixels), so it's boosted hard to make the gamut extent read.
+    private static let cieGain: Float = 5.0
+    /// Point-dilation radius (1 → a 3px soft dot) so sparse single-pixel bins are visible.
+    private static let cieDilation: Int = 1
+    /// Hardcoded white trace (the gamut triangles carry the color; the scatter is neutral).
+    private static let traceColor: (r: Float, g: Float, b: Float) = (1, 1, 1)
+
+    // MARK: - Graticule reference data (xy chromaticities; mapped per-mode in the draw code)
+
+    /// CIE 1976 u'v' from CIE 1931 xy. Used only in u'v' mode (xy mode plots the stored xy directly).
     @inline(__always)
     static func uv(x: CGFloat, y: CGFloat) -> (u: CGFloat, v: CGFloat) {
         let d = -2 * x + 12 * y + 3
@@ -114,7 +134,7 @@ final class CIEScopeModel: ObservableObject {
         let color: Color
     }
 
-    /// 709 / P3 / 2020 gamut triangles (xy primaries) — all three always shown in Stage A.
+    /// 709 / P3 / 2020 gamut triangles (xy primaries). Visibility per-triangle (show709/…).
     static let gamuts: [Gamut] = [
         Gamut(name: "709",  r: (0.640, 0.330), g: (0.300, 0.600), b: (0.150, 0.060),
               color: Color(white: 0.85)),
@@ -127,15 +147,34 @@ final class CIEScopeModel: ObservableObject {
     /// D65 white point (xy).
     static let whiteXY: (x: CGFloat, y: CGFloat) = (0.3127, 0.3290)
 
-    // Render-coupled sampling state (main-only) — see WaveformScopeModel for the rationale.
+    /// Is a gamut currently visible? (drives both its triangle and its legend entry.)
+    func isVisible(_ gamut: Gamut) -> Bool {
+        switch gamut.name {
+        case "709":  return show709
+        case "P3":   return showP3
+        default:     return show2020
+        }
+    }
+
+    // MARK: - Plane sizing
+
+    private var plane = 300
+    private let minPlane = 256
+    private let maxPlane = 600
+
+    /// Track the rendered square side so the plane buffer resolution scales with size.
+    func setDisplaySide(_ side: CGFloat) {
+        let p = scopeBucketWidth(side, min: minPlane, max: maxPlane)
+        if p != plane { plane = p }
+    }
+
+    // MARK: - Render-coupled sampling state (main-only) — see WaveformScopeModel for the rationale.
+
     private var active = false
     private var sampling = false
     private var pendingSample = false
-    /// Live pref-coupling (paused re-sample on a scope-pref change) — see WaveformScopeModel.
     private var prefsObserver: AnyCancellable?
 
-    /// Mark visible and sample the current offscreen frame once (covers tray-open while paused).
-    /// Sampling is otherwise render-coupled (frameRendered) + pref-coupled (below).
     func start() {
         active = true
         if prefsObserver == nil {
@@ -167,7 +206,6 @@ final class CIEScopeModel: ObservableObject {
         startSample()
     }
 
-    /// Release the gate (main); if a frame arrived mid-cycle, re-sample the latest at once.
     private func finishSample() {
         sampling = false
         if pendingSample { startSample() }
@@ -177,23 +215,16 @@ final class CIEScopeModel: ObservableObject {
         guard let renderer else { return }
         sampling = true
         pendingSample = false
-        // Effective gain (Preferences read on main). Stage A reuses the vectorscope's intensity
-        // + global master; a dedicated CIE intensity is a later stage.
-        let gain = baseGain
-            * Float(Preferences.shared.vectorscopeIntensity)
-            * Float(Preferences.shared.globalScopeIntensity)
-        // Trace hue (snapshot on main); reuses the vectorscope trace color for now.
-        let color = ScopeColorCodec.rgb(fromHex: Preferences.shared.vectorscopeTraceColorHex)
 
-        // cieKernel builds the planeW×planeH u'v' histogram over the GPU-resident offscreen; only
-        // the small plane buffer is read back. The trace-build runs on the GPU completion thread
-        // (a fast -O ScopeTrace call), then hops to main to publish.
+        // cieKernel builds the planeW×planeH histogram over the GPU-resident offscreen (mode +
+        // bounds come from renderer.cieUseUV — the single source of truth); only the small plane
+        // buffer is read back. The trace-build runs on the GPU completion thread (fast -O call).
         let plane = self.plane
-        let issued = renderer.computeCIEGPU(planeW: plane, planeH: plane, useUV: true,
-                                            uMin: Self.uMin, uMax: Self.uMax,
-                                            vMin: Self.vMin, vMax: Self.vMax) { [weak self] hist, w, h in
+        let gain = Self.cieGain, dilation = Self.cieDilation, color = Self.traceColor
+        let issued = renderer.computeCIEGPU(planeW: plane, planeH: plane) { [weak self] hist, w, h in
             guard let self else { return }
-            let img = self.buildCIETraceImage(histogram: hist, planeW: w, planeH: h, gain: gain, color: color)
+            let img = self.buildCIETraceImage(histogram: hist, planeW: w, planeH: h,
+                                              gain: gain, dilation: dilation, color: color)
             DispatchQueue.main.async {
                 if self.active, let img { self.image = img }
                 self.finishSample()
@@ -202,13 +233,15 @@ final class CIEScopeModel: ObservableObject {
         if !issued { sampling = false }
     }
 
-    /// Turn a planeW×planeH u'v' histogram (layout hist[row*planeW + col], v' up) into the
-    /// scatter CGImage. NO row-downsample (it's a 2-D scatter, not a value histogram).
+    /// Turn a planeW×planeH chromaticity histogram (vertical axis already flipped in-kernel) into
+    /// the scatter CGImage. NO row-downsample (it's a 2-D scatter, not a value histogram).
     private func buildCIETraceImage(histogram accum: [UInt32], planeW: Int, planeH: Int,
-                                    gain: Float, color: (r: Float, g: Float, b: Float)) -> CGImage? {
+                                    gain: Float, dilation: Int,
+                                    color: (r: Float, g: Float, b: Float)) -> CGImage? {
         guard planeW > 0, planeH > 0, accum.count >= planeW * planeH else { return nil }
 
-        let pixels = ScopeTrace.ciePixels(histogram: accum, planeW: planeW, planeH: planeH, gain: gain,
+        let pixels = ScopeTrace.ciePixels(histogram: accum, planeW: planeW, planeH: planeH,
+                                          gain: gain, dilation: dilation,
                                           colorR: color.r, colorG: color.g, colorB: color.b)
 
         let cs = CGColorSpaceCreateDeviceRGB()
@@ -221,8 +254,8 @@ final class CIEScopeModel: ObservableObject {
     }
 }
 
-/// Floating square CIE chromaticity panel: u'v' scatter image + spectral-locus horseshoe and
-/// 709/P3/2020 gamut-triangle overlays. Header "CIE 1976 u'v'".
+/// Floating square CIE chromaticity panel: chromaticity scatter + spectral-locus horseshoe and
+/// 709/P3/2020 gamut-triangle overlays. Header shows the active mode + detected source space.
 struct CIEScopeView: View {
     @ObservedObject var model: CIEScopeModel
 
@@ -230,31 +263,14 @@ struct CIEScopeView: View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
-                    Text("CIE 1976 u′v′")
+                    Text(model.spaceReadout.isEmpty
+                         ? model.modeLabel
+                         : "\(model.modeLabel)  ·  \(model.spaceReadout)")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 4)
-                    Image(systemName: "sun.max")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.white.opacity(0.4))
-                    Slider(value: Preferences.shared.vectorscopeIntensityBinding,
-                           in: Preferences.scopeIntensityRange)
-                        .controlSize(.mini)
-                        .frame(width: 70)
-                    ColorPicker("", selection: Preferences.shared.vectorscopeTraceColorBinding)
-                        .labelsHidden()
-                        .controlSize(.mini)
-                    Button {
-                        Preferences.shared.vectorscopeTraceColorHex = Preferences.defaultVectorscopeTraceColorHex
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 9))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .help("Reset trace color")
                 }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 4)
@@ -281,22 +297,29 @@ struct CIEScopeView: View {
         }
     }
 
-    /// Map a u'v' coordinate to a point in the plot — the SAME normalization the kernel uses
-    /// (fu/fv over the shared bounds, v' flipped for image row order), so overlay and scatter align.
-    private func point(u: CGFloat, v: CGFloat, in size: CGSize) -> CGPoint {
-        let fu = (u - CGFloat(CIEScopeModel.uMin)) / CGFloat(CIEScopeModel.uMax - CIEScopeModel.uMin)
-        let fv = (v - CGFloat(CIEScopeModel.vMin)) / CGFloat(CIEScopeModel.vMax - CIEScopeModel.vMin)
-        return CGPoint(x: fu * size.width, y: (1 - fv) * size.height)
+    /// Map an xy chromaticity to a plot point for the ACTIVE mode — the SAME normalization the
+    /// kernel uses (per-mode bounds, vertical axis flipped for image row order), so overlay and
+    /// scatter align in both u'v' and xy. In u'v' mode the stored xy is converted; in xy mode it's
+    /// plotted directly.
+    private func plot(x: CGFloat, y: CGFloat, in size: CGSize) -> CGPoint {
+        let bounds = CIEPlaneBounds.forMode(useUV: model.useUV)
+        let a: CGFloat, b: CGFloat
+        if model.useUV {
+            let (u, v) = CIEScopeModel.uv(x: x, y: y)
+            a = u; b = v
+        } else {
+            a = x; b = y
+        }
+        let fa = (a - CGFloat(bounds.aMin)) / CGFloat(bounds.aMax - bounds.aMin)
+        let fb = (b - CGFloat(bounds.bMin)) / CGFloat(bounds.bMax - bounds.bMin)
+        return CGPoint(x: fa * size.width, y: (1 - fb) * size.height)
     }
 
     private var graticule: some View {
         Canvas { ctx, size in
             // Spectral-locus horseshoe: closed polyline (locus + line of purples).
             var locus = Path()
-            let pts = CIEScopeModel.spectralLocusXY.map { xy -> CGPoint in
-                let (u, v) = CIEScopeModel.uv(x: xy.x, y: xy.y)
-                return point(u: u, v: v, in: size)
-            }
+            let pts = CIEScopeModel.spectralLocusXY.map { plot(x: $0.x, y: $0.y, in: size) }
             if let first = pts.first {
                 locus.move(to: first)
                 for p in pts.dropFirst() { locus.addLine(to: p) }
@@ -304,27 +327,26 @@ struct CIEScopeView: View {
             }
             ctx.stroke(locus, with: .color(.white.opacity(0.35)), lineWidth: 0.75)
 
-            // Gamut triangles — vertices from xy primaries via the shared uv() conversion.
-            for gamut in CIEScopeModel.gamuts {
-                let rP = triPoint(gamut.r, size)
-                let gP = triPoint(gamut.g, size)
-                let bP = triPoint(gamut.b, size)
+            // Gamut triangles — vertices from xy primaries, only if their flag is set.
+            for gamut in CIEScopeModel.gamuts where model.isVisible(gamut) {
+                let rP = plot(x: gamut.r.x, y: gamut.r.y, in: size)
+                let gP = plot(x: gamut.g.x, y: gamut.g.y, in: size)
+                let bP = plot(x: gamut.b.x, y: gamut.b.y, in: size)
                 var tri = Path()
                 tri.move(to: rP); tri.addLine(to: gP); tri.addLine(to: bP); tri.closeSubpath()
                 ctx.stroke(tri, with: .color(gamut.color.opacity(0.85)), lineWidth: 0.9)
             }
 
             // D65 white-point marker (small cross).
-            let (wu, wv) = CIEScopeModel.uv(x: CIEScopeModel.whiteXY.x, y: CIEScopeModel.whiteXY.y)
-            let w = point(u: wu, v: wv, in: size)
+            let w = plot(x: CIEScopeModel.whiteXY.x, y: CIEScopeModel.whiteXY.y, in: size)
             var cross = Path()
             cross.move(to: CGPoint(x: w.x - 4, y: w.y)); cross.addLine(to: CGPoint(x: w.x + 4, y: w.y))
             cross.move(to: CGPoint(x: w.x, y: w.y - 4)); cross.addLine(to: CGPoint(x: w.x, y: w.y + 4))
             ctx.stroke(cross, with: .color(.white.opacity(0.7)), lineWidth: 0.75)
 
-            // Legend (top-left) — name + swatch color for each gamut.
+            // Legend (top-left) — swatch + name for each VISIBLE gamut only.
             var ly: CGFloat = 8
-            for gamut in CIEScopeModel.gamuts {
+            for gamut in CIEScopeModel.gamuts where model.isVisible(gamut) {
                 var swatch = Path()
                 swatch.move(to: CGPoint(x: 8, y: ly + 4)); swatch.addLine(to: CGPoint(x: 20, y: ly + 4))
                 ctx.stroke(swatch, with: .color(gamut.color.opacity(0.9)), lineWidth: 1.5)
@@ -336,10 +358,5 @@ struct CIEScopeView: View {
                 ly += 12
             }
         }
-    }
-
-    private func triPoint(_ xy: (x: CGFloat, y: CGFloat), _ size: CGSize) -> CGPoint {
-        let (u, v) = CIEScopeModel.uv(x: xy.x, y: xy.y)
-        return point(u: u, v: v, in: size)
     }
 }
