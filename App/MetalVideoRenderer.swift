@@ -598,16 +598,12 @@ final class MetalVideoRenderer {
         offscreenSize = (width, height)
     }
 
-    /// Blit the persistent offscreen texture into a CPU-readable shared texture and
-    /// read it back. Shared by frame export and (future) in-app scopes. Uses its own
-    /// command buffer + waitUntilCompleted on the SAME queue as rendering, so it
-    /// can't tear against an in-flight render (command buffers are atomic units).
-    // M3b: the render target is now rgb10a2Unorm — still 4 bytes/pixel, so the
-    // bytesPerRow math is unchanged, but the bytes are PACKED 10-10-10-2, not bgra8.
-    // This raw form is consumed by the 10-bit export (exportCurrentFrame unpacks it);
-    // the scope path uses readbackRenderedFrameAsync, which downconverts to bgra8.
-    // Internal (not private) so native scopes can sample the pre-display offscreen
-    // texture. Stays per-call / full-res — the THROTTLE lives in the scope consumer.
+    /// Blit the most-recent completed offscreen frame into a CPU-readable shared texture and
+    /// read it back (BLOCKING — own command buffer + waitUntilCompleted on the render queue, so
+    /// it can't tear against an in-flight render). Used by the ⌃⌥E frame export only; the scopes
+    /// sample the offscreen on the GPU (dispatchScopeKernel) and never read the full frame back.
+    // M3b: the render target is rgb10a2Unorm — 4 bytes/pixel, PACKED 10-10-10-2 (not bgra8).
+    // exportCurrentFrame unpacks this raw form to a 16-bit PNG (rgb10a2ToRGBA16).
     func readbackRenderedFrame() -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
         guard let src = offscreenTexture else { return nil }
         let width = src.width
@@ -638,69 +634,6 @@ final class MetalVideoRenderer {
                             from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
         }
         return (bytes, width, height, bytesPerRow)
-    }
-
-    /// NON-BLOCKING readback for the continuous scope path. Blits the offscreen
-    /// texture into the scope's own shared texture, then reads it back in the
-    /// command buffer's completion handler (no waitUntilCompleted) — so the caller
-    /// never stalls the GPU pipeline. `completion` is invoked off the render thread
-    /// (on Metal's completion-handler thread) once the GPU has finished.
-    ///
-    /// Returns true if a readback was issued (completion WILL fire); false if it
-    /// couldn't be set up (completion will NOT fire — caller should clear its gate).
-    ///
-    /// The caller MUST gate this so only one async readback is in flight at a time
-    /// for a given `cache` texture: a new blit must not start before the previous
-    /// completion handler has read it. The destination texture is CALLER-OWNED
-    /// (passed via `cache`), so multiple scopes can sample concurrently — each owns
-    /// its own destination and its own gate, and no two scopes blit into one texture.
-    @discardableResult
-    func readbackRenderedFrameAsync(
-        into cache: inout MTLTexture?,
-        completion: @escaping (_ bytes: [UInt8], _ width: Int, _ height: Int, _ bytesPerRow: Int) -> Void
-    ) -> Bool {
-        guard let src = offscreenTexture else { return false }
-        let width = src.width
-        let height = src.height
-
-        // Reuse the caller's texture; (re)create it on first use or size change.
-        if cache == nil || cache?.width != width || cache?.height != height {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: Self.renderPixelFormat, width: width, height: height, mipmapped: false)
-            desc.storageMode = .shared
-            desc.usage = [.shaderRead]
-            cache = device.makeTexture(descriptor: desc)
-        }
-        guard let cpuTex = cache,
-              let cmd = commandQueue.makeCommandBuffer(),
-              let blit = cmd.makeBlitCommandEncoder() else {
-            return false
-        }
-        blit.copy(from: src, sourceSlice: 0, sourceLevel: 0,
-                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                  sourceSize: MTLSize(width: width, height: height, depth: 1),
-                  to: cpuTex, destinationSlice: 0, destinationLevel: 0,
-                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-        blit.endEncoding()
-
-        let bytesPerRow = width * 4
-        cmd.addCompletedHandler { _ in
-            // GPU finished — safe to read the shared texture. Runs on a Metal
-            // completion thread (not the render thread, not main, non-blocking).
-            // Hands back the RAW rgb10a2 bytes (4 B/px) with a single allocation —
-            // the scopes unpack each pixel inline (rgb10a2Channels) in their own
-            // already-subsampled loop. The earlier full-frame rgb10a2→bgra8 pass
-            // (a second 33MB buffer + an un-subsampled 8.3M-px loop, per readback)
-            // was an M3b regression that jerked playback whenever a scope was shown.
-            var packed = [UInt8](repeating: 0, count: bytesPerRow * height)
-            packed.withUnsafeMutableBytes { raw in
-                cpuTex.getBytes(raw.baseAddress!, bytesPerRow: bytesPerRow,
-                                from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
-            }
-            completion(packed, width, height, bytesPerRow)
-        }
-        cmd.commit()
-        return true
     }
 
     /// Shared GPU-scope dispatch (waveform / parade / vectorscope — the "three-of-a-kind"
@@ -818,19 +751,6 @@ final class MetalVideoRenderer {
             pipeline: vectorscopePipelineState, buffer: &vectorscopeHistogramBuffer, count: plane * plane,
             setParams: { $0.setBytes(&params, length: MemoryLayout<VectorscopeParams>.stride, index: 1) },
             completion: { completion($0, plane) })
-    }
-
-    /// Unpack one rgb10a2Unorm pixel (the format `readbackRenderedFrameAsync`
-    /// returns) to 8-bit R,G,B — the top 8 bits of each 10-bit channel, matching
-    /// the 8-bit values the scopes consumed pre-M3b. `p` is the byte offset of the
-    /// pixel (little-endian 32-bit: R[0:10] G[10:20] B[20:30] A[30:32]).
-    @inline(__always)
-    static func rgb10a2Channels(_ buf: UnsafeBufferPointer<UInt8>, _ p: Int) -> (r: UInt8, g: UInt8, b: UInt8) {
-        let px = UInt32(buf[p]) | (UInt32(buf[p + 1]) << 8)
-            | (UInt32(buf[p + 2]) << 16) | (UInt32(buf[p + 3]) << 24)
-        return (UInt8((px & 0x3FF) >> 2),
-                UInt8(((px >> 10) & 0x3FF) >> 2),
-                UInt8(((px >> 20) & 0x3FF) >> 2))
     }
 
     /// Unpack an rgb10a2Unorm buffer to 16-bit RGBA (alpha skipped/opaque). Each

@@ -9,20 +9,11 @@ import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Deb
 /// buildParadeTraceImage; a power-of-2 divisor of 1024 (256/512/1024) maps cleanest.
 let paradeDisplayRows = 512
 
-/// Native RGB parade scope: three side-by-side waveform columns (R | G | B), each
-/// plotting one channel's per-column value distribution. Pure consumer of
-/// MetalVideoRenderer.readbackRenderedFrameAsync (the same non-blocking readback the
-/// luma waveform uses) — it samples the PRE-DISPLAY offscreen texture (raw code
-/// values), never screen pixels. Independent of the luma waveform: own gate, own
-/// readback texture, so both can run at once without colliding.
+/// Native RGB parade scope: three side-by-side waveform columns (R | G | B), each plotting
+/// one channel's per-column value distribution. Samples the GPU-resident PRE-DISPLAY offscreen
+/// texture: paradeKernel bins the three 10-bit per-channel histograms on the GPU, only the tiny
+/// histogram is read back, and ScopeTrace composites the R|G|B image. Render-coupled sampling.
 final class ParadeScopeModel: ObservableObject {
-
-    /// A/B toggle (Phase 2 GPU-scopes). `true` = compute the 3 per-channel histograms on
-    /// the GPU (paradeKernel over the offscreen, tiny readback); `false` = the original CPU
-    /// path (full-frame readback + 8.3M-pixel bin loop). Both feed the SAME trace-build
-    /// (buildParadeTraceImage) + graticule — output pixel-equivalent within luma rounding.
-    /// Mirrors WaveformScopeModel.useGPUWaveform. Debug flag; no UI surface yet.
-    static var useGPUParade = true
 
     /// The composited three-column parade image (R|G|B), published to the view.
     @Published var image: CGImage?
@@ -34,10 +25,9 @@ final class ParadeScopeModel: ObservableObject {
     private var columnWidth = 192
     private let minColumnWidth = 128
     private let maxColumnWidth = 512
-    private let bins = 256   // CPU path: 8-bit channel value bins (value axis)
 
-    /// GPU-path per-channel histogram precision: TRUE 10-bit (1024 bins), like the
-    /// waveform. Mapped down to paradeDisplayRows in buildParadeTraceImage.
+    /// Per-channel histogram precision: TRUE 10-bit (1024 bins), like the waveform. Mapped
+    /// down to paradeDisplayRows in buildParadeTraceImage.
     private let gpuBins = 1024
 
     /// Track the scope's rendered slot width; each of the three channel sub-columns
@@ -47,10 +37,6 @@ final class ParadeScopeModel: ObservableObject {
         if w != columnWidth { columnWidth = w }
     }
 
-    private let workQueue = DispatchQueue(label: "com.graviton.manifold.scope.parade",
-                                          qos: .userInitiated)
-    private var readbackTexture: MTLTexture?     // this scope's own readback destination
-
     // Render-coupled sampling state (main-only) — see WaveformScopeModel for the rationale.
     private var active = false
     private var sampling = false
@@ -58,10 +44,7 @@ final class ParadeScopeModel: ObservableObject {
     /// Live pref-coupling (paused re-sample on a scope-pref change) — see WaveformScopeModel.
     private var prefsObserver: AnyCancellable?
 
-    /// CPU path: process every Nth source row (columns stay full-res). Legacy fallback.
-    private let rowStride = 2
-
-    /// GPU path: process EVERY row (full-res) — cheap on the GPU, like the waveform.
+    /// Process EVERY row (full-res) — cheap on the GPU, like the waveform.
     private let gpuRowStride = 1
 
     /// Mark visible and sample the current offscreen frame once (covers tray-open while
@@ -116,87 +99,29 @@ final class ParadeScopeModel: ObservableObject {
         let mono = Preferences.shared.paradeMonochrome
         let monoColor = ScopeColorCodec.rgb(fromHex: Preferences.shared.paradeMonoColorHex)
 
-        if Self.useGPUParade {
-            // GPU PATH: the 3 per-channel histograms are computed by paradeKernel over the
-            // offscreen; only the small histogram (≤12MB) is read back — no 33MB frame copy,
-            // no CPU bin loop. The trace-build runs right here on the GPU completion thread
-            // (a fast -O ScopeTrace call), then hops to main to publish.
-            let colW = columnWidth
-            let bins = gpuBins
-            let issued = renderer.computeParadeGPU(colW: colW, bins: bins, rowStride: gpuRowStride) { [weak self] hist, cw, b in
-                guard let self else { return }
-                let n = cw * b
-                let r = Array(hist[0..<n])
-                let g = Array(hist[n..<(2 * n)])
-                let bl = Array(hist[(2 * n)..<(3 * n)])
-                let img = self.buildParadeTraceImage(r: r, g: g, b: bl, colW: cw, bins: b,
-                                                     gain: gain, mono: mono, monoColor: monoColor)
-                DispatchQueue.main.async {
-                    if self.active, let img { self.image = img }
-                    self.finishSample()
-                }
-            }
-            if !issued { sampling = false }
-            return
-        }
-
-        // CPU PATH (original). NON-BLOCKING readback into this scope's OWN texture
-        // (independent of the waveform's). Compute on workQueue, publish on main.
-        let issued = renderer.readbackRenderedFrameAsync(into: &readbackTexture) { [weak self] bytes, w, h, bpr in
+        // paradeKernel bins the 3 per-channel histograms over the GPU-resident offscreen; only
+        // the small histogram (≤12MB) is read back — no full-frame copy. The trace-build runs
+        // right here on the GPU completion thread (a fast -O ScopeTrace call), then publishes.
+        let colW = columnWidth
+        let bins = gpuBins   // true 10-bit per-channel, full source resolution
+        let issued = renderer.computeParadeGPU(colW: colW, bins: bins, rowStride: gpuRowStride) { [weak self] hist, cw, b in
             guard let self else { return }
-            self.workQueue.async {
-                let img = self.computeParade(bytes: bytes, width: w, height: h, bytesPerRow: bpr,
-                                             gain: gain, mono: mono, monoColor: monoColor)
-                DispatchQueue.main.async {
-                    if self.active, let img { self.image = img }
-                    self.finishSample()
-                }
+            let n = cw * b
+            let r = Array(hist[0..<n])
+            let g = Array(hist[n..<(2 * n)])
+            let bl = Array(hist[(2 * n)..<(3 * n)])
+            let img = self.buildParadeTraceImage(r: r, g: g, b: bl, colW: cw, bins: b,
+                                                 gain: gain, mono: mono, monoColor: monoColor)
+            DispatchQueue.main.async {
+                if self.active, let img { self.image = img }
+                self.finishSample()
             }
         }
         if !issued { sampling = false }
     }
 
-    /// Build the three-column RGB parade as one composited green/red/blue-tinted
-    /// RGBA image. Per-channel histograms (NO luma weighting); BGRA byte order;
-    /// row stride subsampling; log normalization with a SHARED max across channels
-    /// so inter-channel trace density stays comparable.
-    private func computeParade(bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int,
-                               gain: Float, mono: Bool, monoColor: (r: Float, g: Float, b: Float)) -> CGImage? {
-        guard width > 0, height > 0 else { return nil }
-        let colW = columnWidth
-        let bins = self.bins
-
-        var accR = [UInt32](repeating: 0, count: colW * bins)
-        var accG = [UInt32](repeating: 0, count: colW * bins)
-        var accB = [UInt32](repeating: 0, count: colW * bins)
-
-        bytes.withUnsafeBufferPointer { buf in
-            for y in stride(from: 0, to: height, by: rowStride) {
-                let rowBase = y * bytesPerRow
-                for x in 0..<width {
-                    let p = rowBase + x * 4
-                    // Readback is rgb10a2 (M3b 10-bit target); unpack to 8-bit inline.
-                    let px = MetalVideoRenderer.rgb10a2Channels(buf, p)
-                    let b = Int(px.b)
-                    let g = Int(px.g)
-                    let r = Int(px.r)
-                    let bucket = (x * colW) / width
-                    accR[((bins - 1) - r) * colW + bucket] &+= 1
-                    accG[((bins - 1) - g) * colW + bucket] &+= 1
-                    accB[((bins - 1) - b) * colW + bucket] &+= 1
-                }
-            }
-        }
-
-        // Build the composited image from the three histograms (shared with the GPU path).
-        return buildParadeTraceImage(r: accR, g: accG, b: accB, colW: colW, bins: bins,
-                                     gain: gain, mono: mono, monoColor: monoColor)
-    }
-
     /// Composite three per-channel value histograms (each colW*bins, layout
-    /// [row*colW + bucket], row = value-max at top) into the R|G|B parade CGImage. Shared
-    /// UNCHANGED by both the CPU and GPU paths — only the histogram SOURCE differs (CPU bin
-    /// loop vs paradeKernel). Small CPU pass over the ~few-MB histograms, not the frame.
+    /// [row*colW + bucket], row = value-max at top) into the R|G|B parade CGImage.
     private func buildParadeTraceImage(r accR: [UInt32], g accG: [UInt32], b accB: [UInt32],
                                        colW: Int, bins: Int, gain: Float,
                                        mono: Bool, monoColor: (r: Float, g: Float, b: Float)) -> CGImage? {
