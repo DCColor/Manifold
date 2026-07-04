@@ -41,6 +41,10 @@ struct ContentView: View {
     @StateObject private var paradeModel = ParadeScopeModel()
     @AppStorage("showVectorscope") private var showVectorscope = true
     @StateObject private var vectorscopeModel = VectorscopeScopeModel()
+    // Stage A: the CIE chromaticity scope temporarily occupies the vectorscope's tray slot for
+    // development/validation. vectorscopeModel is kept intact (not shown / not sampling) — the
+    // configurable layout that lets both coexist is a later stage.
+    @StateObject private var cieModel = CIEScopeModel()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -154,6 +158,7 @@ struct ContentView: View {
             waveformModel.stop()
             paradeModel.stop()
             vectorscopeModel.stop()
+            cieModel.stop()
         }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
         .onChange(of: engine.effectiveIsFullRange) { _, _ in
@@ -324,7 +329,8 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if showVectorscope {
-                VectorscopeScopeView(model: vectorscopeModel)
+                // Stage A: CIE scope in the vectorscope slot (temporary swap).
+                CIEScopeView(model: cieModel)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -349,16 +355,19 @@ struct ContentView: View {
             paradeModel.renderer = metalRenderer; paradeModel.start()
         } else { paradeModel.stop() }
 
+        // Stage A: the CIE scope occupies the vectorscope's slot — sample it (not the
+        // vectorscope) when that slot is shown. vectorscopeModel stays stopped but intact.
         if showTray && showVectorscope {
-            vectorscopeModel.renderer = metalRenderer; vectorscopeModel.start()
-        } else { vectorscopeModel.stop() }
+            cieModel.renderer = metalRenderer; cieModel.start()
+        } else { cieModel.stop() }
+        vectorscopeModel.stop()
 
         let anyActive = showTray && (showWaveform || showParade || showVectorscope)
         metalRenderer?.onFrameRendered = anyActive
-            ? { [weak waveformModel, weak paradeModel, weak vectorscopeModel] in
+            ? { [weak waveformModel, weak paradeModel, weak cieModel] in
                 waveformModel?.frameRendered()
                 paradeModel?.frameRendered()
-                vectorscopeModel?.frameRendered()
+                cieModel?.frameRendered()
               }
             : nil
     }

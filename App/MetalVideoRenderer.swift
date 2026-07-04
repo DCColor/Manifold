@@ -45,6 +45,23 @@ private struct VectorscopeParams {
     var chromaScale: Float  // chromaScaleFrac — chroma units → fraction of the plane
 }
 
+/// Matches the shader's CIEParams struct (memory layout). GPU CIE chromaticity scope — a
+/// planeW×planeH 2-D u'v' histogram. `primariesCode`/`transferCode` are the source's CICP
+/// codes (RGB→XYZ matrix + EOTF choice); u/v Min/Max are the u'v' plane bounds.
+private struct CIEParams {
+    var width: UInt32          // source (offscreen) width
+    var height: UInt32         // source (offscreen) height
+    var planeW: UInt32         // histogram width  (u' axis)
+    var planeH: UInt32         // histogram height (v' axis)
+    var primariesCode: Int32   // CICP primaries (1=709, 9=2020, 11/12=P3); default→709
+    var transferCode: Int32    // CICP transfer  (1=709, 13=sRGB, 16=PQ, 18=HLG); default→gamma 2.4
+    var useUV: UInt32          // 1 = u'v' (Stage A; xy deferred)
+    var uMin: Float            // u' plane lower bound
+    var uMax: Float            // u' plane upper bound
+    var vMin: Float            // v' plane lower bound
+    var vMax: Float            // v' plane upper bound
+}
+
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
@@ -115,6 +132,8 @@ final class MetalVideoRenderer {
     private var paradeHistogramBuffer: MTLBuffer?
     private let vectorscopePipelineState: MTLComputePipelineState?
     private var vectorscopeHistogramBuffer: MTLBuffer?
+    private let ciePipelineState: MTLComputePipelineState?
+    private var cieHistogramBuffer: MTLBuffer?
 
     // Offscreen render targets — the source of truth for display (1:1 blitted to the
     // drawable), frame export, and scopes. A RING (not a single texture): the render writes
@@ -216,6 +235,11 @@ final class MetalVideoRenderer {
         } else {
             self.vectorscopePipelineState = nil
         }
+        if let cfn = library.makeFunction(name: "cieKernel") {
+            self.ciePipelineState = try? device.makeComputePipelineState(function: cfn)
+        } else {
+            self.ciePipelineState = nil
+        }
 
         self.device = device
         self.commandQueue = queue
@@ -248,11 +272,23 @@ final class MetalVideoRenderer {
 
     // MARK: - Source colorspace (set once per source)
 
+    /// The source's raw CICP color tags, retained per source for the GPU CIE scope. The
+    /// layer-colorspace path below CONSUMES the codes into a CGColorSpace and keeps nothing,
+    /// but the CIE kernel needs the numeric primaries (RGB→XYZ matrix choice) and transfer
+    /// (linearization EOTF) directly. Set at the TOP of setSourceColorSpace — before the
+    /// colorspace guard — so they survive even if CGColorSpace construction fails. nil → 709.
+    private(set) var sourcePrimariesCode: Int?
+    private(set) var sourceTransferCode: Int?
+
     /// Derive the layer's colorspace from the source's authoritative color tags
     /// (CICP codes from MediaInspector) and assign it ONCE. Re-call on each new
     /// source. This replaces the per-frame buffer-attachment derivation, which
     /// could flip to an unspecified-primaries space on some frames.
     func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?) {
+        // Store the raw CICP codes FIRST (before the colorspace guard) so the CIE scope can
+        // pick its RGB→XYZ matrix + EOTF even when CGColorSpace construction below fails.
+        sourcePrimariesCode = primaries
+        sourceTransferCode = transfer
         // Never assign nil — makeColorSpace guarantees non-nil, but guard anyway.
         guard let cs = Self.makeColorSpace(primaries: primaries, transfer: transfer, matrix: matrix) else { return }
         // Assign inside a synchronized transaction (actions disabled) so this
@@ -751,6 +787,30 @@ final class MetalVideoRenderer {
             pipeline: vectorscopePipelineState, buffer: &vectorscopeHistogramBuffer, count: plane * plane,
             setParams: { $0.setBytes(&params, length: MemoryLayout<VectorscopeParams>.stride, index: 1) },
             completion: { completion($0, plane) })
+    }
+
+    /// GPU CIE chromaticity histogram (Phase 4). A planeW×planeH 2-D u'v' histogram, layout
+    /// hist[row*planeW + col] (v' up — the row flip is in-kernel). The RGB→XYZ matrix + EOTF
+    /// are selected from the STORED source CICP codes (sourcePrimariesCode/sourceTransferCode,
+    /// nil → 709). Thin wrapper over dispatchScopeKernel; non-fatal if the pipeline is nil (the
+    /// CIE scope simply doesn't draw — display unaffected).
+    @discardableResult
+    func computeCIEGPU(
+        planeW: Int, planeH: Int, useUV: Bool,
+        uMin: Float, uMax: Float, vMin: Float, vMax: Float,
+        completion: @escaping (_ hist: [UInt32], _ planeW: Int, _ planeH: Int) -> Void
+    ) -> Bool {
+        guard let src = offscreenTexture else { return false }
+        var params = CIEParams(width: UInt32(src.width), height: UInt32(src.height),
+                               planeW: UInt32(planeW), planeH: UInt32(planeH),
+                               primariesCode: Int32(sourcePrimariesCode ?? 1),
+                               transferCode: Int32(sourceTransferCode ?? 1),
+                               useUV: useUV ? 1 : 0,
+                               uMin: uMin, uMax: uMax, vMin: vMin, vMax: vMax)
+        return dispatchScopeKernel(
+            pipeline: ciePipelineState, buffer: &cieHistogramBuffer, count: planeW * planeH,
+            setParams: { $0.setBytes(&params, length: MemoryLayout<CIEParams>.stride, index: 1) },
+            completion: { completion($0, planeW, planeH) })
     }
 
     /// Unpack an rgb10a2Unorm buffer to 16-bit RGBA (alpha skipped/opaque). Each

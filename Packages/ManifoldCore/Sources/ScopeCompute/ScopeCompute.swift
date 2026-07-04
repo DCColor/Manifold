@@ -151,4 +151,27 @@ public enum ScopeTrace {
         }
         return pixels
     }
+
+    /// CIE chromaticity scatter. planeW×planeH 2-D u'v' histogram (layout `[row*planeW + col]`,
+    /// v' up — the row flip is done in the kernel) → RGBA buffer (NO downsample). Per-frame max
+    /// + LUT fill, identical pattern to the vectorscope. The spectral-locus + gamut-triangle
+    /// overlays are drawn by the view's graticule Canvas, not baked here.
+    public static func ciePixels(histogram accum: [UInt32], planeW: Int, planeH: Int, gain: Float,
+                                 colorR: Float, colorG: Float, colorB: Float) -> [UInt8] {
+        let count = planeW * planeH
+        var maxCount: UInt32 = 1
+        for c in accum where c > maxCount { maxCount = c }
+        let lut = brightnessLUT(maxCount: maxCount, gain: gain)
+
+        var pixels = [UInt8](repeating: 0, count: count * 4)
+        for i in 0..<count {
+            let fv = Float(lut[Int(accum[i])])
+            let o = i * 4
+            pixels[o + 0] = UInt8(min(255, fv * colorR))
+            pixels[o + 1] = UInt8(min(255, fv * colorG))
+            pixels[o + 2] = UInt8(min(255, fv * colorB))
+            pixels[o + 3] = 255
+        }
+        return pixels
+    }
 }
