@@ -3,6 +3,65 @@ import ManifoldCore
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
+/// The four scopes any tray slot can display. `rawValue` (String) backs @AppStorage persistence
+/// of per-slot selections; `displayName` labels the slot picker menu.
+enum ScopeKind: String, CaseIterable, Identifiable {
+    case waveform, parade, vectorscope, cie
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .waveform:    return "Waveform"
+        case .parade:      return "Parade"
+        case .vectorscope: return "Vectorscope"
+        case .cie:         return "CIE"
+        }
+    }
+}
+
+/// A tray slot's leading header element: the scope's display label rendered as a Menu (pick which
+/// scope fills this slot) followed by the scope's own context suffix (e.g. "· luma (10-bit)"). The
+/// Menu always lists all four `ScopeKind`s. When `selection` is nil the label is plain text (the
+/// view isn't in a slot-picker context). Leading-edge only — the scope's trailing controls (e.g.
+/// intensity slider) are untouched.
+struct ScopeSlotHeader: View {
+    let name: String                        // shown on the button, e.g. "WAVEFORM"
+    let suffix: String                      // context suffix incl. its separator, e.g. " · luma (10-bit)"
+    let selection: Binding<ScopeKind>?      // nil → plain label (no picker)
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if let selection {
+                Menu {
+                    ForEach(ScopeKind.allCases) { kind in
+                        Button(kind.displayName) { selection.wrappedValue = kind }
+                    }
+                } label: {
+                    HStack(spacing: 2) {
+                        Text(name)
+                        Image(systemName: "chevron.down").font(.system(size: 6))
+                    }
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            } else {
+                Text(name)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            if !suffix.isEmpty {
+                Text(suffix)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var engine: FrameEngine
 
@@ -34,16 +93,24 @@ struct ContentView: View {
     // Persisted scope arrangement — same UserDefaults keys declared on Preferences
     // (the canonical owner); @AppStorage here gives SwiftUI reactivity + write-through.
     @AppStorage("showTray") private var showTray = false
-    // Per-scope presence WITHIN the tray (default on, so opening the tray shows all three).
-    @AppStorage("showWaveform") private var showWaveform = true
+    // Per-slot scope selection (3-up tray). Each slot can show ANY of the four scopes, chosen live
+    // and persisted. Defaults reproduce the prior layout exactly (waveform / parade / CIE) so the
+    // first launch after this build looks unchanged until the user picks. Variable slot count /
+    // arrangement / saved layouts are a later pass.
+    @AppStorage("manifold.scope.slot0") private var slot0: ScopeKind = .waveform
+    @AppStorage("manifold.scope.slot1") private var slot1: ScopeKind = .parade
+    @AppStorage("manifold.scope.slot2") private var slot2: ScopeKind = .cie
+    // Persisted CIE view state (written by the CIE shortcuts, read here + by CIEScopeView via the
+    // same keys). useUV also seeds the renderer's kernel copy so the scatter opens in the last mode.
+    @AppStorage("manifold.cie.useUV")    private var cieUseUV = true
+    @AppStorage("manifold.cie.show709")  private var cieShow709 = true
+    @AppStorage("manifold.cie.showP3")   private var cieShowP3 = true
+    @AppStorage("manifold.cie.show2020") private var cieShow2020 = true
+    // The four scope models (one each, rendered wherever its kind is selected — duplicates share
+    // the single model). A model samples/computes only while its kind is in the active set.
     @StateObject private var waveformModel = WaveformScopeModel()
-    @AppStorage("showParade") private var showParade = true
     @StateObject private var paradeModel = ParadeScopeModel()
-    @AppStorage("showVectorscope") private var showVectorscope = true
     @StateObject private var vectorscopeModel = VectorscopeScopeModel()
-    // Stage A: the CIE chromaticity scope temporarily occupies the vectorscope's tray slot for
-    // development/validation. vectorscopeModel is kept intact (not shown / not sampling) — the
-    // configurable layout that lets both coexist is a later stage.
     @StateObject private var cieModel = CIEScopeModel()
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
@@ -127,6 +194,11 @@ struct ContentView: View {
                 renderer.chromaConventionProvider = { engine.currentChromaConventionRaw() }
                 engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
                 engine.onFlush = { [weak renderer] in renderer?.flush() }
+                // Seed the kernel's CIE mode from the persisted value so the scatter opens in the
+                // last-left mode even if a source loaded before the CIE scope is shown. (The CIE
+                // view's header/graticule read the same @AppStorage directly, so they're already
+                // correct; this keeps the kernel-side plot in agreement.)
+                renderer.cieUseUV = cieUseUV
                 renderer.start()
             }
             // Apply persisted volume (mute is not persisted — starts unmuted).
@@ -144,6 +216,8 @@ struct ContentView: View {
             cieModel.stop()
         }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
+        // A slot's selection changed → start newly-active scopes, stop ones that left the tray.
+        .onChange(of: activeKinds) { _, _ in updateScopeSampling() }
         .onChange(of: engine.effectiveIsFullRange) { _, _ in
             // Range override changed: decode is unchanged (always 420v), so just
             // re-render the current frame with the new shader flag (covers paused).
@@ -301,68 +375,82 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
     }
 
-    /// The scopes tray: the three scopes side by side, each an equal third of the
-    /// tray width, scaling to fit. Reuses the existing scope views/models unchanged.
+    /// The scopes tray: three equal-width slots, each rendering the scope its @AppStorage selection
+    /// names (data-driven — no scope is special-cased to a fixed slot). The leading header label of
+    /// each slot is a live picker (see slotView / ScopeSlotHeader).
     private var scopesTray: some View {
         HStack(spacing: 1) {
-            if showWaveform {
-                WaveformScopeView(model: waveformModel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if showParade {
-                ParadeScopeView(model: paradeModel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if showVectorscope {
-                // Stage A: CIE scope in the vectorscope slot (temporary swap).
-                CIEScopeView(model: cieModel)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            slotView(kind: slot0, selection: $slot0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            slotView(kind: slot1, selection: $slot1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            slotView(kind: slot2, selection: $slot2)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
         .clipped()
     }
 
-    /// A scope samples only when the tray is open AND that scope is enabled.
-    /// Stops sampling otherwise (no wasted work when the tray is closed).
+    /// Render the scope view for a slot's kind, wired to that scope's shared model and given the
+    /// slot's selection binding so its header label acts as the per-slot picker.
+    @ViewBuilder
+    private func slotView(kind: ScopeKind, selection: Binding<ScopeKind>) -> some View {
+        switch kind {
+        case .waveform:    WaveformScopeView(model: waveformModel, slotSelection: selection)
+        case .parade:      ParadeScopeView(model: paradeModel, slotSelection: selection)
+        case .vectorscope: VectorscopeScopeView(model: vectorscopeModel, slotSelection: selection)
+        case .cie:         CIEScopeView(model: cieModel, slotSelection: selection)
+        }
+    }
+
+    /// The scopes currently occupying a slot — the single source of truth for which models do work.
+    private var activeKinds: Set<ScopeKind> { [slot0, slot1, slot2] }
+
+    /// A scope samples only while the tray is open AND its kind occupies a slot. Everything else is
+    /// stopped, so a scope not in any slot does ZERO GPU work. Driven purely by `activeKinds` (the
+    /// three slot selections) — call on tray toggle, on any slot change, and at startup/teardown.
+    /// start()/stop() are idempotent (all four models guard on an `active` flag + a nil-guarded
+    /// prefs observer), so repeated calls are safe.
     ///
-    /// Sampling is render-coupled: the renderer's onFrameRendered fires on every offscreen
-    /// update and fans out to each active scope (each no-ops if it isn't visible). We install
-    /// that callback only while at least one scope is active, and clear it otherwise, so a
-    /// closed tray adds ZERO per-frame overhead on the render thread.
+    /// Sampling is render-coupled: the renderer's onFrameRendered fans out to the active scopes.
+    /// The fan-out is GATED to the active set (captured booleans) — not merely relying on stopped
+    /// models no-oping — and is cleared entirely when nothing is active, so a closed/empty tray
+    /// adds zero per-frame overhead on the render thread.
     private func updateScopeSampling() {
-        if showTray && showWaveform {
-            waveformModel.renderer = metalRenderer; waveformModel.start()
-        } else { waveformModel.stop() }
+        let active = showTray ? activeKinds : []
 
-        if showTray && showParade {
-            paradeModel.renderer = metalRenderer; paradeModel.start()
-        } else { paradeModel.stop() }
-
-        // Stage A: the CIE scope occupies the vectorscope's slot — sample it (not the
-        // vectorscope) when that slot is shown. vectorscopeModel stays stopped but intact.
-        if showTray && showVectorscope {
+        // Waveform / parade / vectorscope: plain start/stop.
+        if active.contains(.waveform) { waveformModel.renderer = metalRenderer; waveformModel.start() }
+        else { waveformModel.stop() }
+        if active.contains(.parade) { paradeModel.renderer = metalRenderer; paradeModel.start() }
+        else { paradeModel.stop() }
+        if active.contains(.vectorscope) { vectorscopeModel.renderer = metalRenderer; vectorscopeModel.start() }
+        else { vectorscopeModel.stop() }
+        // CIE also refreshes its detected-space header on (re)start.
+        if active.contains(.cie) {
             cieModel.renderer = metalRenderer
             cieModel.spaceReadout = engine.metadata.map(Self.cieSpaceReadout) ?? ""
             cieModel.start()
         } else { cieModel.stop() }
-        vectorscopeModel.stop()
 
-        let anyActive = showTray && (showWaveform || showParade || showVectorscope)
-        metalRenderer?.onFrameRendered = anyActive
-            ? { [weak waveformModel, weak paradeModel, weak cieModel] in
-                waveformModel?.frameRendered()
-                paradeModel?.frameRendered()
-                cieModel?.frameRendered()
+        let wf = active.contains(.waveform), pd = active.contains(.parade)
+        let vs = active.contains(.vectorscope), cie = active.contains(.cie)
+        metalRenderer?.onFrameRendered = active.isEmpty
+            ? nil
+            : { [weak waveformModel, weak paradeModel, weak vectorscopeModel, weak cieModel] in
+                if wf { waveformModel?.frameRendered() }
+                if pd { paradeModel?.frameRendered() }
+                if vs { vectorscopeModel?.frameRendered() }
+                if cie { cieModel?.frameRendered() }
               }
-            : nil
     }
 
-    /// Hidden keyboard shortcuts for the scopes tray + per-scope + CIE live toggles. Grouped into
-    /// one view (instead of many chained `.background(Button…)`) to keep the main body's type-check
-    /// tractable.
-    ///   ⌃⌥T  scopes tray;  ⌃⌥W/P/V  waveform / parade / vectorscope(-slot) presence.
+    /// Hidden keyboard shortcuts for the scopes tray + CIE live toggles. Grouped into one view
+    /// (instead of many chained `.background(Button…)`) to keep the main body's type-check tractable.
+    /// Per-scope presence shortcuts (formerly ⌃⌥W/P/V) are gone — tray content is now the per-slot
+    /// picker. The CIE shortcuts act on the CIE model wherever it sits (no-op if it's in no slot).
+    ///   ⌃⌥T  scopes tray open/close.
     ///   ⌃⌥X  CIE u'v' ↔ xy — flips renderer (kernel) + model (graticule/header) together, then
     ///        setNeedsRefresh re-plots the current frame (covers paused).
     ///   ⌃⌥1/2/3  CIE per-triangle show/hide (overlay-only → SwiftUI re-renders immediately).
@@ -370,23 +458,19 @@ struct ContentView: View {
         Group {
             Button("") { showTray.toggle(); updateScopeSampling() }
                 .keyboardShortcut("t", modifiers: [.control, .option])
-            Button("") { showWaveform.toggle(); updateScopeSampling() }
-                .keyboardShortcut("w", modifiers: [.control, .option])
-            Button("") { showParade.toggle(); updateScopeSampling() }
-                .keyboardShortcut("p", modifiers: [.control, .option])
-            Button("") { showVectorscope.toggle(); updateScopeSampling() }
-                .keyboardShortcut("v", modifiers: [.control, .option])
             Button("") {
-                metalRenderer?.cieUseUV.toggle()
-                cieModel.useUV.toggle()
-                metalRenderer?.setNeedsRefresh()
+                // Shared path with the header options menu — writes the stored value, drives the
+                // kernel copy, and re-plots. Toggle = apply the negation of the current value.
+                CIEScopeModel.applyMode(useUV: !cieUseUV, storage: $cieUseUV, renderer: metalRenderer)
             }
             .keyboardShortcut("x", modifiers: [.control, .option])
-            Button("") { cieModel.show709.toggle() }
+            // Triangle visibility is overlay-only — write the stored flag; CIEScopeView's @AppStorage
+            // on the same key redraws immediately (no re-plot needed).
+            Button("") { cieShow709.toggle() }
                 .keyboardShortcut("1", modifiers: [.control, .option])
-            Button("") { cieModel.showP3.toggle() }
+            Button("") { cieShowP3.toggle() }
                 .keyboardShortcut("2", modifiers: [.control, .option])
-            Button("") { cieModel.show2020.toggle() }
+            Button("") { cieShow2020.toggle() }
                 .keyboardShortcut("3", modifiers: [.control, .option])
         }
         .opacity(0)
@@ -519,28 +603,13 @@ struct ContentView: View {
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
 
-                // Scopes + tray (VIEW STATE) cluster — separated from the actions.
+                // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is
+                // chosen per-slot via each slot's header picker, not from here.
                 Button { showTray.toggle(); updateScopeSampling() } label: {
                     Image(systemName: "chart.bar.xaxis")
                 }
                 .foregroundStyle(showTray ? Color.green : .white.opacity(0.9))
                 .help("Scopes tray (⌃⌥T)")
-
-                scopeToggle("WFM", on: showWaveform) {
-                    showWaveform.toggle()
-                    if showWaveform { showTray = true }
-                    updateScopeSampling()
-                }
-                scopeToggle("RGB", on: showParade) {
-                    showParade.toggle()
-                    if showParade { showTray = true }
-                    updateScopeSampling()
-                }
-                scopeToggle("VEC", on: showVectorscope) {
-                    showVectorscope.toggle()
-                    if showVectorscope { showTray = true }
-                    updateScopeSampling()
-                }
 
                 Spacer()
 
@@ -586,21 +655,6 @@ struct ContentView: View {
         } else {
             showGetFlipSheet = true
         }
-    }
-
-    /// A per-scope toggle pill: tinted/filled green when on, dimmed when off — so the
-    /// active scopes are visible at a glance. Drives the same @State the keys toggle.
-    private func scopeToggle(_ label: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(on ? Color.white.opacity(0.18) : .clear,
-                            in: RoundedRectangle(cornerRadius: 4))
-        }
-        .foregroundStyle(on ? Color.green : .white.opacity(0.35))
-        .help(label)
     }
 
     /// Speaker icon reflecting mute + volume level.

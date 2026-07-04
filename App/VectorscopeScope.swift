@@ -164,16 +164,16 @@ final class VectorscopeScopeModel: ObservableObject {
 /// derived target boxes. Header "VECTORSCOPE · 709".
 struct VectorscopeScopeView: View {
     @ObservedObject var model: VectorscopeScopeModel
+    /// When shown in a tray slot, the slot's selection binding — makes the header label a picker.
+    var slotSelection: Binding<ScopeKind>? = nil
 
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
-                    Text("VECTORSCOPE · 709")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    ScopeSlotHeader(name: "VECTORSCOPE",
+                                    suffix: " · 709",
+                                    selection: slotSelection)
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")
                         .font(.system(size: 8))

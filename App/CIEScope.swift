@@ -31,22 +31,25 @@ final class CIEScopeModel: ObservableObject {
     @Published var image: CGImage?
     weak var renderer: MetalVideoRenderer?
 
-    // MARK: - Live view state (flipped from ContentView keyboard shortcuts)
-
-    /// true = CIE 1976 u'v', false = CIE 1931 xy. Kept in sync with renderer.cieUseUV by the ⌃⌥X
-    /// handler — the renderer drives the kernel, this drives the graticule + header.
-    @Published var useUV: Bool = true
-    /// Per-gamut triangle visibility (default all ON). Overlay-only, so toggling re-renders the
-    /// Canvas immediately (no re-plot needed).
-    @Published var show709: Bool = true
-    @Published var showP3: Bool = true
-    @Published var show2020: Bool = true
     /// Detected source space, appended to the header (set from ContentView on metadata change).
     /// Honest about untagged sources (e.g. "untagged → 709 (assumed)").
     @Published var spaceReadout: String = ""
 
-    /// Header title for the active mode.
-    var modeLabel: String { useUV ? "CIE 1976 u′v′" : "CIE 1931 xy" }
+    // The CIE VIEW state — mode (u'v'/xy) and per-triangle visibility — is persisted @AppStorage
+    // read directly by CIEScopeView (single source of truth: keys "manifold.cie.*"). The kernel's
+    // copy lives on the renderer (cieUseUV), seeded/synced from the same stored value. Nothing in
+    // this model's sampling reads them, so they don't live here.
+
+    /// The ONE path a mode change (u'v' ↔ xy) takes, shared by the ⌃⌥X shortcut and the header
+    /// options menu so they can't drift: write the persisted @AppStorage value, push the derived
+    /// copy to the renderer's kernel, and request a re-plot (covers paused — the mode change drives
+    /// the SCATTER, not just the overlay). `storage` is the caller's own @AppStorage binding on
+    /// "manifold.cie.useUV"; both callers' bindings resolve to the same key.
+    static func applyMode(useUV: Bool, storage: Binding<Bool>, renderer: MetalVideoRenderer?) {
+        storage.wrappedValue = useUV
+        renderer?.cieUseUV = useUV
+        renderer?.setNeedsRefresh()
+    }
 
     // MARK: - Dedicated (hardcoded) trace tuning — Stage B; exposed in the prefs pass later.
 
@@ -146,15 +149,6 @@ final class CIEScopeModel: ObservableObject {
 
     /// D65 white point (xy).
     static let whiteXY: (x: CGFloat, y: CGFloat) = (0.3127, 0.3290)
-
-    /// Is a gamut currently visible? (drives both its triangle and its legend entry.)
-    func isVisible(_ gamut: Gamut) -> Bool {
-        switch gamut.name {
-        case "709":  return show709
-        case "P3":   return showP3
-        default:     return show2020
-        }
-    }
 
     // MARK: - Plane sizing
 
@@ -258,18 +252,77 @@ final class CIEScopeModel: ObservableObject {
 /// 709/P3/2020 gamut-triangle overlays. Header shows the active mode + detected source space.
 struct CIEScopeView: View {
     @ObservedObject var model: CIEScopeModel
+    /// When shown in a tray slot, the slot's selection binding — makes the header label a picker.
+    var slotSelection: Binding<ScopeKind>? = nil
+
+    // Persisted view state — the single source of truth for mode + triangle visibility. Written by
+    // the CIE keyboard shortcuts (ContentView, same keys), read here so the draw reflects the last
+    // state at launch. The renderer's kernel copy (cieUseUV) is seeded/synced from useUV.
+    @AppStorage("manifold.cie.useUV")   private var useUV = true
+    @AppStorage("manifold.cie.show709")  private var show709 = true
+    @AppStorage("manifold.cie.showP3")   private var showP3 = true
+    @AppStorage("manifold.cie.show2020") private var show2020 = true
+
+    /// Header title for the active mode.
+    private var modeLabel: String { useUV ? "CIE 1976 u′v′" : "CIE 1931 xy" }
+
+    /// Mode selection routed through the SHARED action (CIEScopeModel.applyMode) so a menu pick does
+    /// exactly what ⌃⌥X does — writes the stored value AND drives the kernel + re-plots. A plain
+    /// `$useUV` binding would only flip the overlay's @AppStorage, leaving the scatter in the old
+    /// mode; this must not.
+    private var modeBinding: Binding<Bool> {
+        Binding(get: { useUV },
+                set: { CIEScopeModel.applyMode(useUV: $0, storage: $useUV, renderer: model.renderer) })
+    }
+
+    /// CIE-specific options menu (gear): mode picker (drives the kernel) + per-triangle visibility
+    /// toggles (overlay-only). Distinct from the leading slot-picker menu. Shortcut hints teach the
+    /// accelerators. Same @AppStorage underneath — a click and the shortcut do the same thing.
+    private var cieOptionsMenu: some View {
+        Menu {
+            Section("Mode · ⌃⌥X") {
+                Picker("Mode", selection: modeBinding) {
+                    Text("u′v′ (1976)").tag(true)
+                    Text("xy (1931)").tag(false)
+                }
+                .pickerStyle(.inline)
+            }
+            Section("Gamut triangles") {
+                Toggle("709 · ⌃⌥1", isOn: $show709)
+                Toggle("P3 · ⌃⌥2", isOn: $showP3)
+                Toggle("2020 · ⌃⌥3", isOn: $show2020)
+            }
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("CIE options")
+    }
+
+    /// Is a gamut currently visible? (drives both its triangle and its legend entry.)
+    private func isVisible(_ gamut: CIEScopeModel.Gamut) -> Bool {
+        switch gamut.name {
+        case "709":  return show709
+        case "P3":   return showP3
+        default:     return show2020
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
-                    Text(model.spaceReadout.isEmpty
-                         ? model.modeLabel
-                         : "\(model.modeLabel)  ·  \(model.spaceReadout)")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    // Label = the active mode; suffix = the detected source space (may be empty).
+                    ScopeSlotHeader(name: modeLabel,
+                                    suffix: model.spaceReadout.isEmpty ? "" : "  ·  \(model.spaceReadout)",
+                                    selection: slotSelection)
+                    // CIE-specific options (mode + triangle visibility) — a gear menu right after
+                    // the suffix, distinct from the leading slot-picker chevron.
+                    cieOptionsMenu
                     Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 6)
@@ -302,9 +355,9 @@ struct CIEScopeView: View {
     /// scatter align in both u'v' and xy. In u'v' mode the stored xy is converted; in xy mode it's
     /// plotted directly.
     private func plot(x: CGFloat, y: CGFloat, in size: CGSize) -> CGPoint {
-        let bounds = CIEPlaneBounds.forMode(useUV: model.useUV)
+        let bounds = CIEPlaneBounds.forMode(useUV: useUV)
         let a: CGFloat, b: CGFloat
-        if model.useUV {
+        if useUV {
             let (u, v) = CIEScopeModel.uv(x: x, y: y)
             a = u; b = v
         } else {
@@ -328,7 +381,7 @@ struct CIEScopeView: View {
             ctx.stroke(locus, with: .color(.white.opacity(0.35)), lineWidth: 0.75)
 
             // Gamut triangles — vertices from xy primaries, only if their flag is set.
-            for gamut in CIEScopeModel.gamuts where model.isVisible(gamut) {
+            for gamut in CIEScopeModel.gamuts where isVisible(gamut) {
                 let rP = plot(x: gamut.r.x, y: gamut.r.y, in: size)
                 let gP = plot(x: gamut.g.x, y: gamut.g.y, in: size)
                 let bP = plot(x: gamut.b.x, y: gamut.b.y, in: size)
@@ -346,7 +399,7 @@ struct CIEScopeView: View {
 
             // Legend (top-left) — swatch + name for each VISIBLE gamut only.
             var ly: CGFloat = 8
-            for gamut in CIEScopeModel.gamuts where model.isVisible(gamut) {
+            for gamut in CIEScopeModel.gamuts where isVisible(gamut) {
                 var swatch = Path()
                 swatch.move(to: CGPoint(x: 8, y: ly + 4)); swatch.addLine(to: CGPoint(x: 20, y: ly + 4))
                 ctx.stroke(swatch, with: .color(gamut.color.opacity(0.9)), lineWidth: 1.5)

@@ -41,10 +41,9 @@ final class Preferences: ObservableObject {
     // ContentView binds the same keys via @AppStorage for SwiftUI reactivity.
     // NOTE: showReferenceLayer (⌃⌥R) is intentionally NOT persisted — it's a diagnostic
     // toggle that must always default OFF on launch, so it stays transient @State.
+    // Per-slot scope selection (manifold.scope.slot0/1/2) is owned by ContentView's @AppStorage —
+    // it superseded the old per-scope presence flags (showWaveform/showParade/showVectorscope).
     @AppStorage("showTray") var showTray: Bool = false
-    @AppStorage("showWaveform") var showWaveform: Bool = true
-    @AppStorage("showParade") var showParade: Bool = true
-    @AppStorage("showVectorscope") var showVectorscope: Bool = true
 
     // Scope trace intensity — multiplies the brightness-curve gain. 1.0 = current look.
     // Per-scope values combine MULTIPLICATIVELY with the global master.

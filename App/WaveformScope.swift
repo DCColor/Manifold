@@ -304,6 +304,8 @@ final class WaveformScopeModel: ObservableObject {
 /// 8-bit code-level graticule.
 struct WaveformScopeView: View {
     @ObservedObject var model: WaveformScopeModel
+    /// When shown in a tray slot, the slot's selection binding — makes the header label a picker.
+    var slotSelection: Binding<ScopeKind>? = nil
     // Same key as Preferences.scopeScale — @AppStorage here for live graticule updates.
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
@@ -312,11 +314,9 @@ struct WaveformScopeView: View {
             VStack(spacing: 0) {
                 // Header strip: name (left) + intensity slider (right). Own band.
                 HStack(spacing: 4) {
-                    Text("WAVEFORM · luma (\(scopeScale.headerTag))")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    ScopeSlotHeader(name: "WAVEFORM",
+                                    suffix: " · luma (\(scopeScale.headerTag))",
+                                    selection: slotSelection)
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")
                         .font(.system(size: 8))
