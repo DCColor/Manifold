@@ -129,6 +129,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var libavAudioSource: LibavAudioSource?
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
+    /// Scrub-preview thumbnail generator for libav (DNx/MXF) files — a DETACHED decoder with
+    /// its own AVFormatContext (AVAssetImageGenerator can't decode DNxHR). Opened at load for
+    /// libav files, nil for AVFoundation files (which use `imageGenerator`). See previewImage.
+    private var libavThumbnailSource: LibavThumbnailSource?
     /// Decoded video format requested at the decode-request site. A named property
     /// rather than a magic constant so the sources/decoders can vary it.
     /// M3b: 10-bit 420 biplanar (x420, raw video-range). 10-bit ProRes and DNxHR
@@ -368,6 +372,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavSource = nil
         libavAudioSource?.stop()
         libavAudioSource = nil
+        libavThumbnailSource?.close()   // retire the detached scrub-thumbnail decoder
+        libavThumbnailSource = nil
         audioRenderer.stopRequestingMediaData()
 
         let readerToCancel = reader
@@ -416,12 +422,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         seek(to: seconds)
     }
 
-    /// Generate a single preview frame (CGImage) at the given time, for scrub
-    /// preview. Tolerant and downscaled for speed; isolated from the playback
-    /// pump. Returns nil if generation fails.
+    /// Generate a single preview frame (CGImage) at the given time, for scrub preview.
+    /// Tolerant and downscaled for speed; isolated from the playback pump. Returns nil on
+    /// failure. Libav files (DNx/MXF) use the detached libav thumbnail decoder; AVFoundation
+    /// files (ProRes/H.264) use AVAssetImageGenerator — same published preview, same overlay.
     public func previewImage(at seconds: Double) async -> CGImage? {
+        let clamped = max(0, min(seconds, duration))
+        if useLibav {
+            return await libavThumbnailSource?.thumbnail(at: clamped)
+        }
         guard let generator = imageGenerator else { return nil }
-        let time = CMTime(seconds: max(0, min(seconds, duration)), preferredTimescale: 600)
+        let time = CMTime(seconds: clamped, preferredTimescale: 600)
         return await withCheckedContinuation { continuation in
             generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, image, _, _, _ in
                 continuation.resume(returning: image)
@@ -445,6 +456,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // per-file libav video+audio sources are created lazily in beginLibavReading.
         libavSource?.stop(); libavSource = nil
         libavAudioSource?.stop(); libavAudioSource = nil
+        libavThumbnailSource?.close(); libavThumbnailSource = nil
 
         // MXF: AVFoundation can't demux it — route straight to libav (container-based
         // detection; not a VT-failed fallback). Its metadata comes from libav.
@@ -504,6 +516,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         updateEffectiveRange()
 
+        // DNx-in-.mov decodes via libav → AVAssetImageGenerator can't make scrub thumbnails
+        // (VideoToolbox rejects DNxHR). Open the detached libav thumbnail decoder instead; the
+        // AVFoundation `imageGenerator` above stays for the non-libav (ProRes/H.264) files.
+        if useLibav {
+            let thumb = LibavThumbnailSource(url: url)
+            thumb.openAsync()
+            libavThumbnailSource = thumb
+        }
+
         installTimeObserverIfNeeded()
 
         print("FrameEngine: loaded — duration \(self.duration)s, audio: \(self.audioTrack != nil)")
@@ -542,11 +563,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func loadMXF(url: URL, autoplay: Bool) async {
         self.hasMedia = true
         self.tcInfo = MediaInspector.timecode(for: url)   // nil for MXF; harmless
-        self.imageGenerator = nil                          // no AVFoundation scrub preview for MXF
+        self.imageGenerator = nil                          // AVFoundation can't open MXF at all
         self.videoTrack = nil                              // AVFoundation blind → libav supplies metadata
         self.audioTrack = nil
         self.rangeOverride = .auto
         self.useLibav = true
+        // Scrub thumbnails come from the detached libav decoder (AVFoundation is blind to MXF).
+        let thumb = LibavThumbnailSource(url: url)
+        thumb.openAsync()
+        libavThumbnailSource = thumb
         installTimeObserverIfNeeded()
         await beginReading(from: 0, resumePlaying: autoplay)
     }
