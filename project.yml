@@ -9,12 +9,33 @@ packages:
   ManifoldCore:
     path: Packages/ManifoldCore
 
+# Shared scheme so `xcodebuild -scheme Manifold` (and Xcode) resolve the ManifoldCore package
+# and build correctly. Declared explicitly so it survives project regeneration.
+schemes:
+  Manifold:
+    build:
+      targets:
+        Manifold: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
 targets:
   Manifold:
     type: application
     platform: macOS
     sources:
       - App
+      # DeckLink SDK dispatch glue (the plain one — NOT the DeckLinkAPIDispatch_vXX legacy
+      # variants). Compiled directly into the target; provides CreateDeckLinkIteratorInstance +
+      # the IID constants. The installed Desktop Video driver is the runtime — no dylib to link.
+      - path: docs/BlackmagicDeckLinkSDK16.0/Mac/include/DeckLinkAPIDispatch.cpp
+        group: DeckLink/SDK
     dependencies:
       - package: ManifoldCore
     info:
@@ -41,6 +62,12 @@ targets:
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
+        # Obj-C++ DeckLink bridge (App/DeckLink). The bridging header exposes the pure Obj-C
+        # DeckLinkBridge.h to Swift; the .mm includes the C++ SDK header (resolved via the
+        # DeckLink include path added to HEADER_SEARCH_PATHS below). Target is NOT sandboxed,
+        # so no DeckLink entitlements are required (mach-lookup / prefs exceptions would only be
+        # needed under App Sandbox — see SignalGenerator sample if that changes).
+        SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/App/DeckLink/Manifold-Bridging-Header.h
         # Vendored static libav (ThirdParty/ffmpeg) — linked statically into the
         # app binary. Bundle-local only: no Homebrew/system ffmpeg, no rpath dylib.
         # The C bridge (CFFmpeg module) lives in ManifoldCore; these flags satisfy
@@ -53,6 +80,8 @@ targets:
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/ThirdParty/ffmpeg/include
+          # DeckLink SDK headers (DeckLinkAPI.h et al.) for the .mm bridge + dispatch.cpp.
+          - $(SRCROOT)/docs/BlackmagicDeckLinkSDK16.0/Mac/include
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/ThirdParty/ffmpeg/lib

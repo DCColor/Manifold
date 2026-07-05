@@ -5,6 +5,11 @@ import ManifoldCore
 struct ManifoldApp: App {
     @StateObject private var engine = FrameEngine()
 
+    init() {
+        // D1: prove the DeckLink SDK links and the card is reachable — enumerate + log at startup.
+        DeckLinkService.shared.logDevicesAtStartup()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(engine: engine)

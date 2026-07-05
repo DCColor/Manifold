@@ -155,6 +155,7 @@ struct ContentView: View {
         // Scope shortcuts (tray + per-scope toggles + CIE live toggles) consolidated into one
         // hidden group so the view body's modifier chain stays type-checkable.
         .background(scopeShortcuts)
+        .background(deckLinkShortcuts)
         // JKL shuttle transport (bare keys — pro NLE muscle memory).
         .background(
             Button("") { engine.shuttleBackward() }
@@ -472,6 +473,20 @@ struct ContentView: View {
                 .keyboardShortcut("2", modifiers: [.control, .option])
             Button("") { cieShow2020.toggle() }
                 .keyboardShortcut("3", modifiers: [.control, .option])
+        }
+        .opacity(0)
+    }
+
+    /// TEMPORARY DeckLink D2 "first light" triggers — fire a synthetic solid-color frame out the
+    /// card and hold it, or stop. Real output UI / device selection is a later stage.
+    ///   ⌃⌥O   push the test frame to device 0 (held on the monitor)
+    ///   ⌃⌥⇧O  stop output
+    @ViewBuilder private var deckLinkShortcuts: some View {
+        Group {
+            Button("") { DeckLinkService.shared.startTestFrameOutput() }
+                .keyboardShortcut("o", modifiers: [.control, .option])
+            Button("") { DeckLinkService.shared.stopTestOutput() }
+                .keyboardShortcut("o", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
     }

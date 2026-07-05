@@ -64,3 +64,7 @@ npm-debug.log
 # See ThirdParty/ffmpeg/README.md for provenance/rebuild. Keep the README tracked.
 ThirdParty/ffmpeg/lib/
 ThirdParty/ffmpeg/include/
+
+docs/BlackmagicDeckLinkSDK16.0/
+docs/Blackmagic Advanced Video Capture and Playback/
+.DS_Store
