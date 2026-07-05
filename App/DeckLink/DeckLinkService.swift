@@ -28,21 +28,22 @@ final class DeckLinkService {
         }
     }
 
-    /// D2 "first light": push one synthetic solid-color frame out device 0 and hold it on the
-    /// monitor. Logs each step so a failure is diagnosable at the exact point.
-    func startTestFrameOutput() {
+    /// D3 "scheduled playback": start CONTINUOUS free-running synthetic output on device 0 (a
+    /// per-frame hue walk) driven by the card's clock via the completion callback. Logs each setup
+    /// step; the callback thread then logs completion-result summaries until stopped.
+    func startScheduledOutput() {
         queue.async {
-            let result = self.bridge.startTestFrameOutputOnDevice0()
-            for line in result.log { print("DeckLink D2: \(line)") }
-            print("DeckLink D2: \(result.success ? "SUCCESS — synthetic frame held on device 0 output" : "FAILED")")
+            let result = self.bridge.startScheduledPlaybackOnDevice0()
+            for line in result.log { print("DeckLink D3: \(line)") }
+            print("DeckLink D3: \(result.success ? "SUCCESS — free-running scheduled playback on device 0" : "FAILED")")
         }
     }
 
-    /// Turn the D2 test output off (disable output, release the held frame).
-    func stopTestOutput() {
+    /// Stop D3 scheduled playback cleanly.
+    func stopScheduledOutput() {
         queue.async {
-            self.bridge.stopTestOutput()
-            print("DeckLink D2: output stopped")
+            self.bridge.stopScheduledPlayback()
+            print("DeckLink D3: output stopped")
         }
     }
 

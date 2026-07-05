@@ -37,6 +37,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Disable the output opened by -startTestFrameOutputOnDevice0 and release its held frame + output.
 - (void)stopTestOutput;
+
+/// D3 "scheduled playback": start CONTINUOUS free-running output on device 0 at 2160p23.98 /
+/// 8-bit YUV, driven by the frame-completion callback against the card's hardware clock. Frames
+/// are SYNTHETIC (a per-frame hue walk) via a pluggable fill source; the scheduling loop is
+/// source-agnostic (the Metal path slots in later without touching it). Enforces the Desktop Video
+/// >= 14.3 floor. Runs until -stopScheduledPlayback. Safe to call repeatedly. Returns a step log.
+- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0;
+
+/// Stop scheduled playback cleanly (StopScheduledPlayback → unset callback → DisableVideoOutput →
+/// release frame pool + callback). Safe to call when not playing; safe against an in-flight callback.
+- (void)stopScheduledPlayback;
 @end
 
 NS_ASSUME_NONNULL_END

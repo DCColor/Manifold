@@ -477,15 +477,15 @@ struct ContentView: View {
         .opacity(0)
     }
 
-    /// TEMPORARY DeckLink D2 "first light" triggers — fire a synthetic solid-color frame out the
-    /// card and hold it, or stop. Real output UI / device selection is a later stage.
-    ///   ⌃⌥O   push the test frame to device 0 (held on the monitor)
-    ///   ⌃⌥⇧O  stop output
+    /// TEMPORARY DeckLink D3 triggers — start/stop CONTINUOUS free-running scheduled playback
+    /// (synthetic hue-walk) on device 0. Real output UI / device selection is a later stage.
+    ///   ⌃⌥O   start continuous scheduled playback (steady color cycling on the monitor)
+    ///   ⌃⌥⇧O  stop
     @ViewBuilder private var deckLinkShortcuts: some View {
         Group {
-            Button("") { DeckLinkService.shared.startTestFrameOutput() }
+            Button("") { DeckLinkService.shared.startScheduledOutput() }
                 .keyboardShortcut("o", modifiers: [.control, .option])
-            Button("") { DeckLinkService.shared.stopTestOutput() }
+            Button("") { DeckLinkService.shared.stopScheduledOutput() }
                 .keyboardShortcut("o", modifiers: [.control, .option, .shift])
         }
         .opacity(0)

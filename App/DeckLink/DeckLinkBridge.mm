@@ -6,6 +6,13 @@
 // the installed Desktop Video driver provides the runtime. No dylib/framework to link.
 #include "DeckLinkAPI.h"
 
+#include <vector>
+#include <functional>
+#include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
 #pragma mark - Value object
 
 @implementation DeckLinkDeviceInfo {
@@ -48,6 +55,221 @@
 - (NSArray<NSString *> *)log { return _log; }
 @end
 
+#pragma mark - D3 scheduled player (synthetic, pluggable fill source)
+
+// Pluggable frame-fill: given a frame index + a target 2vuy buffer, fill it. Knows NOTHING about
+// DeckLink — the scheduling loop calls it blind. This is the seam where the synthetic hue-walk is
+// later swapped for the Metal/decoded-frame path WITHOUT touching the scheduler. Dimensions/rowBytes
+// come from the output mode (passed in), not hardcoded.
+typedef std::function<void(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height)> FrameFillFn;
+
+// --- Synthetic fill: a solid-color per-frame HUE WALK. Steady color change on the monitor == frames
+// advancing on the clock; a frozen color == a stall. No spatial pattern (a solid proves advance).
+static void HSVtoRGB(double h, double s, double v, double &r, double &g, double &b) {
+    double c = v * s;
+    double hp = h / 60.0;
+    double x = c * (1.0 - fabs(fmod(hp, 2.0) - 1.0));
+    double r1 = 0, g1 = 0, b1 = 0;
+    if      (hp < 1) { r1 = c; g1 = x; }
+    else if (hp < 2) { r1 = x; g1 = c; }
+    else if (hp < 3) { g1 = c; b1 = x; }
+    else if (hp < 4) { g1 = x; b1 = c; }
+    else if (hp < 5) { r1 = x; b1 = c; }
+    else             { r1 = c; b1 = x; }
+    double m = v - c;
+    r = r1 + m; g = g1 + m; b = b1 + m;
+}
+
+// BT.709 LIMITED-range 8-bit YCbCr (matches D2's convention).
+static void RGBtoYCbCr709Limited(double r, double g, double b, uint8_t &Y, uint8_t &Cb, uint8_t &Cr) {
+    double R = r * 255.0, G = g * 255.0, B = b * 255.0;
+    double y  =  0.1826 * R + 0.6142 * G + 0.0620 * B + 16.0;
+    double cb = -0.1006 * R - 0.3386 * G + 0.4392 * B + 128.0;
+    double cr =  0.4392 * R - 0.3989 * G - 0.0403 * B + 128.0;
+    auto clamp8 = [](double v, double lo, double hi) { return (uint8_t)std::lround(std::min(hi, std::max(lo, v))); };
+    Y  = clamp8(y,  16, 235);
+    Cb = clamp8(cb, 16, 240);
+    Cr = clamp8(cr, 16, 240);
+}
+
+static void SyntheticHueWalkFill(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height) {
+    const double hue = fmod((double)frameIndex * 2.0, 360.0);   // +2°/frame → full cycle ~7.5 s at 23.98
+    double r, g, b;  HSVtoRGB(hue, 0.65, 0.80, r, g, b);
+    uint8_t Y, Cb, Cr;  RGBtoYCbCr709Limited(r, g, b, Y, Cb, Cr);
+    // 2vuy 4:2:2, packed [Cb, Y0, Cr, Y1] per pixel pair; solid fill.
+    for (int32_t y = 0; y < height; y++) {
+        uint8_t *p = buffer + (size_t)y * (size_t)rowBytes;
+        for (int32_t x = 0; x < width; x += 2) { p[0] = Cb; p[1] = Y; p[2] = Cr; p[3] = Y; p += 4; }
+    }
+}
+
+// The scheduled-playback engine + the frame-completion callback in ONE ref-counted object (the SDK
+// requires an IDeckLinkVideoOutputCallback). Owns the IDeckLinkOutput, a small reusable frame POOL,
+// the running frame index, and the pluggable fill fn. All output access is encapsulated here so
+// start/stop ordering and cleanup live in one place.
+class DeckLinkScheduledPlayer : public IDeckLinkVideoOutputCallback {
+public:
+    DeckLinkScheduledPlayer(IDeckLinkOutput *output,
+                            int32_t width, int32_t height, int32_t rowBytes,
+                            BMDTimeValue frameDuration, BMDTimeScale timeScale,
+                            FrameFillFn fill)
+        : m_refCount(1), m_output(output),
+          m_width(width), m_height(height), m_rowBytes(rowBytes),
+          m_frameDuration(frameDuration), m_timeScale(timeScale),
+          m_fill(std::move(fill)), m_running(false), m_nextIndex(0),
+          m_completed(0), m_late(0), m_dropped(0), m_flushed(0) {
+        m_output->AddRef();
+    }
+
+    // --- Setup steps (called from the Obj-C bridge, each bool-returning so it can log per-step) ---
+
+    bool doesSupportMode() {
+        BMDDisplayMode actual = bmdModeUnknown; bool supported = false;
+        HRESULT hr = m_output->DoesSupportVideoMode(bmdVideoConnectionUnspecified, bmdMode4K2160p2398,
+                                                    bmdFormat8BitYUV, bmdNoVideoOutputConversion,
+                                                    bmdSupportedVideoModeDefault, &actual, &supported);
+        return (hr == S_OK && supported);
+    }
+
+    bool enableOutput() {
+        return m_output->EnableVideoOutput(bmdMode4K2160p2398, bmdVideoOutputFlagDefault) == S_OK;
+    }
+
+    bool createPool(int poolSize) {
+        for (int i = 0; i < poolSize; i++) {
+            IDeckLinkMutableVideoFrame *f = NULL;
+            if (m_output->CreateVideoFrame(m_width, m_height, m_rowBytes, bmdFormat8BitYUV,
+                                           bmdFrameFlagDefault, &f) != S_OK || f == NULL)
+                return false;
+            m_pool.push_back(f);
+        }
+        return true;
+    }
+
+    // Register self as the completion callback + arm the running flag.
+    void beginRunning() {
+        m_running = true;
+        m_output->SetScheduledFrameCompletionCallback(this);
+    }
+
+    // Pre-roll: fill + schedule one frame per pool slot (indices 0..pool-1).
+    bool preroll() {
+        for (size_t i = 0; i < m_pool.size(); i++) {
+            const int64_t idx = m_nextIndex.fetch_add(1);
+            if (!fillFrame(m_pool[i], idx)) return false;
+            if (m_output->ScheduleVideoFrame(m_pool[i], idx * m_frameDuration, m_frameDuration, m_timeScale) != S_OK)
+                return false;
+        }
+        return true;
+    }
+
+    bool startPlayback() {
+        return m_output->StartScheduledPlayback(0, m_timeScale, 1.0) == S_OK;
+    }
+
+    // Clean, idempotent stop. Safe even if never started, and safe against an in-flight callback:
+    // m_running is cleared FIRST (so any flush callback won't reschedule), then playback is stopped
+    // and the callback unset (SDK stops invoking us) BEFORE the pool/output are released.
+    void stop() {
+        m_running = false;
+        if (m_output) {
+            BMDTimeValue actualStop = 0;
+            m_output->StopScheduledPlayback(0, &actualStop, m_timeScale);
+            m_output->SetScheduledFrameCompletionCallback(NULL);
+            m_output->DisableVideoOutput();
+        }
+        for (auto *f : m_pool) { if (f) f->Release(); }
+        m_pool.clear();
+        if (m_output) { m_output->Release(); m_output = NULL; }
+    }
+
+    // Stats (read after stop for the run summary).
+    int64_t  framesScheduled() const { return m_nextIndex.load(); }
+    uint64_t completedCount()  const { return m_completed.load(); }
+    uint64_t lateCount()       const { return m_late.load(); }
+    uint64_t droppedCount()    const { return m_dropped.load(); }
+    uint64_t flushedCount()    const { return m_flushed.load(); }
+
+    // --- IUnknown ---
+    HRESULT QueryInterface(REFIID iid, LPVOID *ppv) override {
+        if (ppv == nullptr) return E_POINTER;
+        CFUUIDBytes iunknown = CFUUIDGetUUIDBytes(IUnknownUUID);
+        if (memcmp(&iid, &iunknown, sizeof(REFIID)) == 0) { *ppv = this; AddRef(); return S_OK; }
+        if (memcmp(&iid, &IID_IDeckLinkVideoOutputCallback, sizeof(REFIID)) == 0) {
+            *ppv = static_cast<IDeckLinkVideoOutputCallback *>(this); AddRef(); return S_OK;
+        }
+        *ppv = nullptr; return E_NOINTERFACE;
+    }
+    ULONG AddRef() override { return ++m_refCount; }
+    ULONG Release() override { ULONG r = --m_refCount; if (r == 0) delete this; return r; }
+
+    // --- IDeckLinkVideoOutputCallback (runs on the SDK's dedicated callback thread) ---
+    HRESULT ScheduledFrameCompleted(IDeckLinkVideoFrame *completedFrame, BMDOutputFrameCompletionResult result) override {
+        // Tally + immediately surface any non-Completed result (the "is scheduling keeping up?" signal).
+        switch (result) {
+            case bmdOutputFrameCompleted:     m_completed.fetch_add(1); break;
+            case bmdOutputFrameDisplayedLate: m_late.fetch_add(1);
+                fprintf(stdout, "DeckLink D3: !! DisplayedLate at frame %lld\n", (long long)m_nextIndex.load()); fflush(stdout); break;
+            case bmdOutputFrameDropped:       m_dropped.fetch_add(1);
+                fprintf(stdout, "DeckLink D3: !! Dropped at frame %lld\n", (long long)m_nextIndex.load()); fflush(stdout); break;
+            case bmdOutputFrameFlushed:       m_flushed.fetch_add(1); break;   // expected during stop
+            default: break;
+        }
+
+        // Stopping (or a flush during stop): do NOT reschedule / touch output.
+        if (!m_running.load() || result == bmdOutputFrameFlushed) return S_OK;
+
+        // Reuse the just-completed frame (guaranteed free): refill with the next color, reschedule.
+        IDeckLinkMutableVideoFrame *frame = static_cast<IDeckLinkMutableVideoFrame *>(completedFrame);
+        const int64_t idx = m_nextIndex.fetch_add(1);
+        fillFrame(frame, idx);
+        m_output->ScheduleVideoFrame(frame, idx * m_frameDuration, m_frameDuration, m_timeScale);
+
+        // Periodic queue-depth + completion summary (~every 48 frames ≈ 2 s).
+        if ((idx % 48) == 0) {
+            uint32_t buffered = 0; m_output->GetBufferedVideoFrameCount(&buffered);
+            fprintf(stdout, "DeckLink D3: frame %lld — completed=%llu late=%llu dropped=%llu buffered=%u\n",
+                    (long long)idx, (unsigned long long)m_completed.load(),
+                    (unsigned long long)m_late.load(), (unsigned long long)m_dropped.load(), buffered);
+            fflush(stdout);
+        }
+        return S_OK;
+    }
+
+    HRESULT ScheduledPlaybackHasStopped(void) override {
+        fprintf(stdout, "DeckLink D3: ScheduledPlaybackHasStopped\n"); fflush(stdout);
+        return S_OK;
+    }
+
+private:
+    ~DeckLinkScheduledPlayer() { }   // deleted via Release(); output/pool already freed by stop()
+
+    bool fillFrame(IDeckLinkMutableVideoFrame *frame, int64_t frameIndex) {
+        IDeckLinkVideoBuffer *buffer = NULL;
+        if (frame->QueryInterface(IID_IDeckLinkVideoBuffer, (void **)&buffer) != S_OK || buffer == NULL) return false;
+        if (buffer->StartAccess(bmdBufferAccessWrite) != S_OK) { buffer->Release(); return false; }
+        void *bytes = NULL;
+        if (buffer->GetBytes(&bytes) != S_OK || bytes == NULL) {
+            buffer->EndAccess(bmdBufferAccessWrite); buffer->Release(); return false;
+        }
+        m_fill(frameIndex, (uint8_t *)bytes, m_rowBytes, m_width, m_height);   // pluggable — no DeckLink knowledge
+        buffer->EndAccess(bmdBufferAccessWrite);
+        buffer->Release();
+        return true;
+    }
+
+    std::atomic<ULONG> m_refCount;
+    IDeckLinkOutput *m_output;
+    int32_t m_width, m_height, m_rowBytes;
+    BMDTimeValue m_frameDuration;
+    BMDTimeScale m_timeScale;
+    FrameFillFn m_fill;
+    std::vector<IDeckLinkMutableVideoFrame *> m_pool;
+    std::atomic<bool> m_running;
+    std::atomic<int64_t> m_nextIndex;
+    std::atomic<uint64_t> m_completed, m_late, m_dropped, m_flushed;
+};
+
 #pragma mark - Bridge
 
 // GetModelName / GetDisplayName return a NEWLY-CREATED CFStringRef via out-param on macOS (the
@@ -63,6 +285,8 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     // in the .mm — objcpp). Retained by -startTestFrameOutputOnDevice0, released by -stopTestOutput.
     IDeckLinkOutput *_heldOutput;
     IDeckLinkMutableVideoFrame *_heldFrame;
+    // D3 scheduled-playback engine (owns its own output + frame pool + callback). nil when stopped.
+    DeckLinkScheduledPlayer *_player;
 }
 
 + (NSArray<DeckLinkDeviceInfo *> *)enumerateOutputDevices {
@@ -277,8 +501,153 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     }
 }
 
+#pragma mark - D3: scheduled (continuous free-running) playback
+
+- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0 {
+    NSMutableArray<NSString *> *log = [NSMutableArray array];
+
+    // Re-fire cleanly.
+    [self stopScheduledPlayback];
+
+    // Version floor — Desktop Video >= 14.3 (same check as D2).
+    {
+        IDeckLinkAPIInformation *apiInfo = CreateDeckLinkAPIInformationInstance();
+        if (apiInfo == NULL) {
+            [log addObject:@"version: DeckLink API information unavailable — aborting"];
+            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        }
+        int64_t apiVersion = 0;
+        apiInfo->GetInt(BMDDeckLinkAPIVersion, &apiVersion);
+        apiInfo->Release();
+        const int major = (int)((apiVersion & 0xFF000000) >> 24);
+        const int minor = (int)((apiVersion & 0x00FF0000) >> 16);
+        const int point = (int)((apiVersion & 0x0000FF00) >> 8);
+        NSString *verStr = [NSString stringWithFormat:@"%d.%d.%d", major, minor, point];
+        if (major < 14 || (major == 14 && minor < 3)) {
+            [log addObject:[NSString stringWithFormat:
+                @"version floor: DeckLink output requires Desktop Video 14.3 or later; installed: %@ — aborting", verStr]];
+            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        }
+        [log addObject:[NSString stringWithFormat:@"version: Desktop Video %@ (>= 14.3 floor OK)", verStr]];
+    }
+
+    // Device index 0 + IDeckLinkOutput.
+    IDeckLinkIterator *iterator = CreateDeckLinkIteratorInstance();
+    if (iterator == NULL) {
+        [log addObject:@"device: iterator unavailable — aborting"];
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    IDeckLink *target = NULL;
+    {
+        IDeckLink *device = NULL; NSInteger idx = 0;
+        while (iterator->Next(&device) == S_OK) {
+            if (idx == 0) { target = device; break; }
+            device->Release(); idx++;
+        }
+    }
+    iterator->Release();
+    if (target == NULL) {
+        [log addObject:@"device: index 0 not found — aborting"];
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    IDeckLinkOutput *output = NULL;
+    HRESULT hr = target->QueryInterface(IID_IDeckLinkOutput, (void **)&output);
+    CFStringRef nameRef = NULL; target->GetDisplayName(&nameRef);
+    NSString *name = NSStringTakeDeckLink(nameRef);
+    target->Release();
+    if (hr != S_OK || output == NULL) {
+        [log addObject:@"device: index 0 has no IDeckLinkOutput — aborting"];
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    [log addObject:[NSString stringWithFormat:@"device: index 0 = \"%@\", IDeckLinkOutput acquired", name]];
+
+    // SEAM: dimensions + frame rate come from the OUTPUT MODE object, not hardcoded. (Resolution
+    // independence slots in here later — a different mode drives width/height/rowBytes/timescale.)
+    IDeckLinkDisplayMode *mode = NULL;
+    if (output->GetDisplayMode(bmdMode4K2160p2398, &mode) != S_OK || mode == NULL) {
+        [log addObject:@"mode: could not resolve 2160p23.98 display mode — aborting"];
+        output->Release();
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    const int32_t width  = (int32_t)mode->GetWidth();
+    const int32_t height = (int32_t)mode->GetHeight();
+    BMDTimeValue frameDuration = 0; BMDTimeScale timeScale = 0;
+    mode->GetFrameRate(&frameDuration, &timeScale);
+    mode->Release();
+    int32_t rowBytes = 0;
+    output->RowBytesForPixelFormat(bmdFormat8BitYUV, width, &rowBytes);
+    [log addObject:[NSString stringWithFormat:@"mode: %dx%d @ %lld/%lld (duration/timescale), 2vuy rowBytes=%d",
+                    width, height, (long long)timeScale, (long long)frameDuration, rowBytes]];
+
+    // Build the player (SEAM: fill source is pluggable — synthetic hue-walk for D3). The player
+    // AddRefs the output; drop our local ref.
+    DeckLinkScheduledPlayer *player =
+        new DeckLinkScheduledPlayer(output, width, height, rowBytes, frameDuration, timeScale,
+                                    &SyntheticHueWalkFill);
+    output->Release();
+
+    if (!player->doesSupportMode()) {
+        [log addObject:@"mode: 2160p23.98 / 8-bit YUV NOT supported — aborting"];
+        player->stop(); player->Release();
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    [log addObject:@"mode: 2160p23.98 / 8-bit YUV supported"];
+
+    if (!player->enableOutput()) {
+        [log addObject:@"enable: EnableVideoOutput failed — aborting"];
+        player->stop(); player->Release();
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    [log addObject:@"enable: video output enabled"];
+
+    const int poolSize = 4;
+    if (!player->createPool(poolSize)) {
+        [log addObject:@"pool: CreateVideoFrame failed — aborting"];
+        player->stop(); player->Release();
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    [log addObject:[NSString stringWithFormat:@"pool: %d reusable frames created", poolSize]];
+
+    player->beginRunning();   // set completion callback + arm
+    [log addObject:@"callback: SetScheduledFrameCompletionCallback installed"];
+
+    if (!player->preroll()) {
+        [log addObject:@"preroll: ScheduleVideoFrame failed — aborting"];
+        player->stop(); player->Release();
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    [log addObject:[NSString stringWithFormat:@"preroll: %d frames scheduled (indices 0..%d)", poolSize, poolSize - 1]];
+
+    if (!player->startPlayback()) {
+        [log addObject:@"start: StartScheduledPlayback failed — aborting"];
+        player->stop(); player->Release();
+        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    }
+    [log addObject:@"start: StartScheduledPlayback(0, timescale, 1.0) OK — free-running"];
+
+    _player = player;   // held; callback keeps the pipeline full until -stopScheduledPlayback
+    return [[DeckLinkOutputResult alloc] initWithSuccess:YES log:log];
+}
+
+- (void)stopScheduledPlayback {
+    if (_player != NULL) {
+        _player->stop();      // StopScheduledPlayback → unset callback → DisableVideoOutput → free pool/output
+        // Final run summary (post-stop, so counts are settled).
+        fprintf(stdout, "DeckLink D3: stopped — scheduled=%lld completed=%llu late=%llu dropped=%llu flushed=%llu\n",
+                (long long)_player->framesScheduled(),
+                (unsigned long long)_player->completedCount(),
+                (unsigned long long)_player->lateCount(),
+                (unsigned long long)_player->droppedCount(),
+                (unsigned long long)_player->flushedCount());
+        fflush(stdout);
+        _player->Release();   // drops the construction ref → delete
+        _player = NULL;
+    }
+}
+
 - (void)dealloc {
     [self stopTestOutput];
+    [self stopScheduledPlayback];
 }
 
 @end
