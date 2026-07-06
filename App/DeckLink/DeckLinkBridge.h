@@ -51,11 +51,12 @@ typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t r
 /// Safe to call repeatedly. Returns a step log. (Debug/fallback path — see the WithFill: variant.)
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0;
 
-/// D-real: same scheduled playback, but each frame is filled by the supplied block instead of the
-/// synthetic hue walk. The block receives the DeckLink v210 frame pointer (+ dims/rowBytes) and
-/// must fill it (returning YES if it wrote real data, NO if it fell back to neutral — advisory).
-/// Called on the SDK's callback thread, so the block MUST be cheap (a memcpy) — no blocking work.
-- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0WithFill:(DeckLinkFillBlock)fill;
+/// D-real: same scheduled playback on the device at `deviceIndex`, but each frame is filled by the
+/// supplied block instead of the synthetic hue walk. The block receives the DeckLink v210 frame
+/// pointer (+ dims/rowBytes) and must fill it (returning YES if it wrote real data, NO if it fell
+/// back to neutral — advisory). Called on the SDK's callback thread, so the block MUST be cheap (a
+/// memcpy) — no blocking work.
+- (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex fill:(DeckLinkFillBlock)fill;
 
 /// Stop scheduled playback cleanly (StopScheduledPlayback → unset callback → DisableVideoOutput →
 /// release frame pool + callback). Safe to call when not playing; safe against an in-flight callback.

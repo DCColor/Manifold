@@ -112,6 +112,9 @@ struct ContentView: View {
     @StateObject private var paradeModel = ParadeScopeModel()
     @StateObject private var vectorscopeModel = VectorscopeScopeModel()
     @StateObject private var cieModel = CIEScopeModel()
+    /// DeckLink output state (on/off + selected device) — shared singleton, observed so the toolbar
+    /// control and the ⌃⌥O/⌃⌥⇧O shortcuts always agree.
+    @ObservedObject private var deckLink = DeckLinkService.shared
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -201,8 +204,9 @@ struct ContentView: View {
                 // correct; this keeps the kernel-side plot in agreement.)
                 renderer.cieUseUV = cieUseUV
                 renderer.start()
-                // DeckLink output sources real video from this renderer (⌃⌥O).
+                // DeckLink output sources real video from this renderer (⌃⌥O / toolbar control).
                 DeckLinkService.shared.renderer = renderer
+                DeckLinkService.shared.refreshDevices()   // populate the device picker
             }
             // Apply persisted volume (mute is not persisted — starts unmuted).
             engine.setVolume(Float(Preferences.shared.playbackVolume))
@@ -479,10 +483,8 @@ struct ContentView: View {
         .opacity(0)
     }
 
-    /// TEMPORARY DeckLink D3 triggers — start/stop CONTINUOUS free-running scheduled playback
-    /// (synthetic hue-walk) on device 0. Real output UI / device selection is a later stage.
-    ///   ⌃⌥O   start continuous scheduled playback (steady color cycling on the monitor)
-    ///   ⌃⌥⇧O  stop
+    /// DeckLink output accelerators — route through the SAME start/stop path as the toolbar control,
+    /// so button and shortcut never disagree. ⌃⌥O = start, ⌃⌥⇧O = stop (both no-op if already there).
     @ViewBuilder private var deckLinkShortcuts: some View {
         Group {
             Button("") { DeckLinkService.shared.startScheduledOutput() }
@@ -491,6 +493,50 @@ struct ContentView: View {
                 .keyboardShortcut("o", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
+    }
+
+    /// Route the device picker through selectDevice (which cleanly stop/restarts if output is ON).
+    private var deckLinkDeviceBinding: Binding<Int> {
+        Binding(get: { deckLink.selectedDeviceIndex },
+                set: { DeckLinkService.shared.selectDevice($0) })
+    }
+
+    /// DeckLink output split-button: main button toggles output (green/filled when ON), chevron
+    /// opens a Menu (device picker + plain-speak status). Mirrors the CIE gear-menu interaction.
+    /// Button face = icon + on/off only; format text lives in the menu.
+    private var deckLinkOutputControl: some View {
+        HStack(spacing: 2) {
+            Button { deckLink.toggleOutput() } label: {
+                Image(systemName: deckLink.isOutputting ? "tv.fill" : "tv")
+            }
+            .foregroundStyle(deckLink.isOutputting ? Color.green : .white.opacity(0.9))
+            .help(deckLink.isOutputting ? "DeckLink output ON — click to stop (⌃⌥⇧O)"
+                                        : "DeckLink output — click to start (⌃⌥O)")
+
+            Menu {
+                Section("Output device") {
+                    if deckLink.devices.isEmpty {
+                        Button("No DeckLink device") {}.disabled(true)
+                    } else {
+                        Picker("Output device", selection: deckLinkDeviceBinding) {
+                            ForEach(deckLink.devices, id: \.index) { d in
+                                Text(d.displayName).tag(d.index)
+                            }
+                        }
+                        .pickerStyle(.inline)
+                    }
+                }
+                Section("Signal") {
+                    Button(DeckLinkService.statusLine) {}.disabled(true)
+                }
+            } label: {
+                Image(systemName: "chevron.down").font(.system(size: 8))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("DeckLink output options")
+        }
     }
 
     /// CIE header readout of the DETECTED source space (primaries · transfer). Honest about
@@ -627,6 +673,9 @@ struct ContentView: View {
                 }
                 .foregroundStyle(showTray ? Color.green : .white.opacity(0.9))
                 .help("Scopes tray (⌃⌥T)")
+
+                // DeckLink output: split-button — main toggles output, chevron picks device + status.
+                deckLinkOutputControl
 
                 Spacer()
 

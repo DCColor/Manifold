@@ -1,10 +1,11 @@
 import Foundation
+import Combine
 
 /// App-side service for Blackmagic DeckLink OUTPUT. Hardware I/O lives in the App layer, decoupled
-/// from ManifoldCore's engine logic. D1: enumerate output-capable devices via the Obj-C++ bridge
-/// and report them — no frame output yet (that's D2). First stage of the BMD output arc
-/// (D1 enumerate → D2 first frame → D3 scheduled playback → D4 A/V sync → D5 709 correctness).
-final class DeckLinkService {
+/// from ManifoldCore's engine logic. Owns the output on/off state + selected device as observable
+/// so the toolbar control and the ⌃⌥O/⌃⌥⇧O shortcuts share one source of truth.
+/// BMD output arc: D1 enumerate → D2 first frame → D3 scheduled playback → D-real real video → D5 709.
+final class DeckLinkService: ObservableObject {
 
     /// A Swift-native snapshot of an output-capable device (mirrors DeckLinkDeviceInfo from the bridge).
     struct Device {
@@ -15,6 +16,15 @@ final class DeckLinkService {
 
     static let shared = DeckLinkService()
 
+    /// Plain-speak output signal for the UI. NO codec/"v210" jargon; color space is deferred to D5
+    /// (showing Rec.709/2020 now would be inaccurate until primaries-correct output lands).
+    static let statusLine = "2160p23.98 · 10-bit 4:2:2"
+
+    // Observable UI state (mutated on main).
+    @Published private(set) var isOutputting = false     // reflects the ACTUAL scheduled-playback state
+    @Published private(set) var selectedDeviceIndex = 0  // which enumerated device output targets
+    @Published private(set) var devices: [Device] = []   // cached enumeration for the picker
+
     /// One bridge instance holds the output state across start/stop calls. Serial queue so
     /// start/stop can't race and never block the UI thread.
     private let bridge = DeckLinkBridge()
@@ -24,8 +34,8 @@ final class DeckLinkService {
     /// renderer owns its lifecycle; the fill block sources v210 frames from it.
     weak var renderer: MetalVideoRenderer?
 
-    /// D-real output frame size (matches the D3 fixed output mode, 2160p23.98). Real device/mode
-    /// selection is a later stage; hardcoded here to match the bridge's fixed 3840x2160 output.
+    /// D-real output frame size (matches the D3 fixed output mode, 2160p23.98). Real mode selection
+    /// is a later stage; hardcoded to match the bridge's fixed 3840x2160 output.
     private static let outputWidth = 3840
     private static let outputHeight = 2160
 
@@ -37,11 +47,41 @@ final class DeckLinkService {
         }
     }
 
-    /// D-real: start CONTINUOUS scheduled playback of REAL video — each output frame is filled from
-    /// the renderer's latest converted v210 staging buffer (push-on-render / pull-latest). Requires
-    /// a file loaded + rendering (offscreen populated); until the first frame is ready, the fill
-    /// falls back to neutral legal black. Logs each setup step + the callback completion summaries.
+    /// Refresh the cached device list for the picker (call at startup / when the menu opens). Clamps
+    /// the selection if the list shrank. Publishes on main.
+    func refreshDevices() {
+        let ds = outputDevices()
+        DispatchQueue.main.async {
+            self.devices = ds
+            if self.selectedDeviceIndex >= ds.count { self.selectedDeviceIndex = 0 }
+        }
+    }
+
+    // MARK: - Shared action path (button, chevron device-switch, and ⌃⌥O/⌃⌥⇧O all route here)
+
+    /// Toggle output on/off — the primary action shared by the toolbar button and ⌃⌥O.
+    func toggleOutput() {
+        if isOutputting { stopScheduledOutput() } else { startScheduledOutput() }
+    }
+
+    /// Pick the output device. If output is ON, cleanly stop and restart on the new device (the
+    /// serial queue guarantees stop completes before the restart). No-op if unchanged.
+    func selectDevice(_ index: Int) {
+        guard index != selectedDeviceIndex else { return }
+        let wasOn = isOutputting
+        if wasOn { stopScheduledOutput() }
+        selectedDeviceIndex = index
+        if wasOn { startScheduledOutput() }
+    }
+
+    /// Start CONTINUOUS scheduled playback of REAL video on the selected device — each output frame
+    /// is filled from the renderer's latest converted v210 staging buffer (push-on-render /
+    /// pull-latest). Requires a file rendering; until the first frame is ready the fill shows neutral
+    /// black. `isOutputting` flips true optimistically and reverts if the bridge start fails.
     func startScheduledOutput() {
+        guard !isOutputting else { return }
+        isOutputting = true
+        let deviceIndex = selectedDeviceIndex
         queue.async {
             // Arm the renderer's push convert (allocate v210 staging sized to the output frame).
             self.renderer?.beginDeckLinkOutput(width: Self.outputWidth, height: Self.outputHeight)
@@ -58,14 +98,20 @@ final class DeckLinkService {
                 return false
             }
 
-            let result = self.bridge.startScheduledPlaybackOnDevice0(fill: fill)
+            let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill)
             for line in result.log { print("DeckLink D-real: \(line)") }
-            print("DeckLink D-real: \(result.success ? "SUCCESS — real-video scheduled playback on device 0" : "FAILED")")
+            print("DeckLink D-real: \(result.success ? "SUCCESS — real-video scheduled playback on device \(deviceIndex)" : "FAILED")")
+            if !result.success {
+                self.renderer?.stopDeckLinkOutput()
+                DispatchQueue.main.async { self.isOutputting = false }   // keep the button honest
+            }
         }
     }
 
-    /// Stop scheduled playback cleanly + disarm the renderer's push convert.
+    /// Stop scheduled playback cleanly + disarm the renderer's push convert (D3 race-safe stop).
     func stopScheduledOutput() {
+        guard isOutputting else { return }
+        isOutputting = false
         queue.async {
             self.bridge.stopScheduledPlayback()
             self.renderer?.stopDeckLinkOutput()

@@ -293,7 +293,7 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 // Private: the shared start sequence parameterized by a C++ FrameFillFn (C++ type in the selector,
 // so it can only live in the .mm). Public entry points wrap their fill and forward here.
 @interface DeckLinkBridge ()
-- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill;
+- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill deviceIndex:(NSInteger)deviceIndex;
 @end
 
 @implementation DeckLinkBridge {
@@ -521,7 +521,7 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 
 // Shared start sequence — parameterized by the pluggable fill (C++ FrameFillFn). Private (C++ type
 // in the selector, so .mm-only). The public entry points wrap their fill and call this.
-- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill {
+- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill deviceIndex:(NSInteger)deviceIndex {
     NSMutableArray<NSString *> *log = [NSMutableArray array];
 
     // Re-fire cleanly.
@@ -549,7 +549,7 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
         [log addObject:[NSString stringWithFormat:@"version: Desktop Video %@ (>= 14.3 floor OK)", verStr]];
     }
 
-    // Device index 0 + IDeckLinkOutput.
+    // Device at `deviceIndex` + IDeckLinkOutput.
     IDeckLinkIterator *iterator = CreateDeckLinkIteratorInstance();
     if (iterator == NULL) {
         [log addObject:@"device: iterator unavailable — aborting"];
@@ -559,13 +559,13 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     {
         IDeckLink *device = NULL; NSInteger idx = 0;
         while (iterator->Next(&device) == S_OK) {
-            if (idx == 0) { target = device; break; }
+            if (idx == deviceIndex) { target = device; break; }
             device->Release(); idx++;
         }
     }
     iterator->Release();
     if (target == NULL) {
-        [log addObject:@"device: index 0 not found — aborting"];
+        [log addObject:[NSString stringWithFormat:@"device: index %ld not found — aborting", (long)deviceIndex]];
         return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
     }
     IDeckLinkOutput *output = NULL;
@@ -574,10 +574,10 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     NSString *name = NSStringTakeDeckLink(nameRef);
     target->Release();
     if (hr != S_OK || output == NULL) {
-        [log addObject:@"device: index 0 has no IDeckLinkOutput — aborting"];
+        [log addObject:[NSString stringWithFormat:@"device: index %ld has no IDeckLinkOutput — aborting", (long)deviceIndex]];
         return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
     }
-    [log addObject:[NSString stringWithFormat:@"device: index 0 = \"%@\", IDeckLinkOutput acquired", name]];
+    [log addObject:[NSString stringWithFormat:@"device: index %ld = \"%@\", IDeckLinkOutput acquired", (long)deviceIndex, name]];
 
     // SEAM: dimensions + frame rate come from the OUTPUT MODE object, not hardcoded. (Resolution
     // independence slots in here later — a different mode drives width/height/rowBytes/timescale.)
@@ -646,21 +646,21 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     return [[DeckLinkOutputResult alloc] initWithSuccess:YES log:log];
 }
 
-// Public: synthetic hue-walk (D3 — debug/fallback).
+// Public: synthetic hue-walk on device 0 (D3 — debug/fallback).
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0 {
-    return [self startScheduledPlaybackWithFillFn:FrameFillFn(&SyntheticHueWalkFill)];
+    return [self startScheduledPlaybackWithFillFn:FrameFillFn(&SyntheticHueWalkFill) deviceIndex:0];
 }
 
-// Public: REAL video (D-real). Wrap the Obj-C fill block into the C++ FrameFillFn the scheduler
-// expects; the std::function retains the (heap-copied) block for the player's lifetime. The block
-// itself sources pixels (renderer.copyLatest…) and handles the neutral fallback — the scheduler
-// stays source-agnostic. Return value is advisory; the block always fills the buffer.
-- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0WithFill:(DeckLinkFillBlock)fill {
+// Public: REAL video (D-real) on a chosen device. Wrap the Obj-C fill block into the C++ FrameFillFn
+// the scheduler expects; the std::function retains the (heap-copied) block for the player's lifetime.
+// The block itself sources pixels (renderer.copyLatest…) and handles the neutral fallback — the
+// scheduler stays source-agnostic. Return value is advisory; the block always fills the buffer.
+- (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex fill:(DeckLinkFillBlock)fill {
     DeckLinkFillBlock block = [fill copy];
     FrameFillFn fn = [block](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height) {
         (void)block(frameIndex, buffer, rowBytes, width, height);
     };
-    return [self startScheduledPlaybackWithFillFn:fn];
+    return [self startScheduledPlaybackWithFillFn:fn deviceIndex:deviceIndex];
 }
 
 - (void)stopScheduledPlayback {
