@@ -189,6 +189,10 @@ struct SettingsView: View {
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
+    // DeckLink output: explicit "start output on launch" opt-in (NOT last-session persistence).
+    // Shared key with DeckLinkService so it can't drift. Default off.
+    @AppStorage(DeckLinkService.enableOnLaunchKey) private var deckLinkEnableOnLaunch = false
+
     // Framing-guide styling (defaults reproduce Pass 1's look).
     @AppStorage("guideDarkenOpacity") private var guideDarkenOpacity = 0.85
     @AppStorage("guideDarkenColor") private var guideDarkenHex = "000000"
@@ -261,6 +265,13 @@ struct SettingsView: View {
                         Image(systemName: "sun.max").foregroundStyle(.secondary)
                     }
                 }
+            }
+
+            Section("DeckLink Output") {
+                Toggle("Enable output on launch", isOn: $deckLinkEnableOnLaunch)
+                Text("When on, Manifold starts DeckLink output at launch if a capable device is connected. Otherwise it does nothing. Turning output on or off during a session doesn't change this setting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Frame Export") {

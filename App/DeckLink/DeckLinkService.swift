@@ -16,6 +16,11 @@ final class DeckLinkService: ObservableObject {
 
     static let shared = DeckLinkService()
 
+    /// @AppStorage key for the "Enable output on launch" preference (Settings → DeckLink Output).
+    /// Explicit opt-in default behavior — NOT last-session persistence. Default false. Shared with
+    /// SettingsView so the key can't drift.
+    static let enableOnLaunchKey = "manifold.decklink.enableOnLaunch"
+
     /// Plain-speak output signal (format part). NO codec/"v210" jargon. The colorspace is appended
     /// separately via `signalLine` (it varies per source, unlike the fixed format).
     static let statusLine = "2160p23.98 · 10-bit 4:2:2"
@@ -72,6 +77,26 @@ final class DeckLinkService: ObservableObject {
             self.devices = ds
             if self.selectedDeviceIndex >= ds.count { self.selectedDeviceIndex = 0 }
         }
+    }
+
+    private var hasAutoStarted = false   // one-shot guard so launch auto-start fires at most once
+
+    /// Launch behavior for the "Enable output on launch" preference. Fires at most once per launch.
+    /// Guard sequence: pref TRUE → a capable device is PRESENT (enumeration non-empty) → start via
+    /// the normal path (device 0 by default, which does 2160p; a non-capable pick reverts on failure
+    /// via the existing revert-on-failure). NEVER auto-starts when the pref is off, and never into
+    /// absent hardware. No file required — if none is loaded yet, the neutral-black fallback shows
+    /// until frames arrive (the same behavior as a manual start before loading).
+    func autoStartOnLaunchIfEnabled() {
+        guard !hasAutoStarted else { return }
+        hasAutoStarted = true
+        guard UserDefaults.standard.bool(forKey: Self.enableOnLaunchKey) else { return }   // pref off → nothing
+        guard !outputDevices().isEmpty else {                                               // no hardware → skip
+            print("DeckLink: enable-on-launch is on but no output device is present — skipping")
+            return
+        }
+        print("DeckLink: enable-on-launch — starting output on device \(selectedDeviceIndex)")
+        startScheduledOutput()   // revert-on-failure handles a present-but-incapable device gracefully
     }
 
     // MARK: - Shared action path (button, chevron device-switch, and ⌃⌥O/⌃⌥⇧O all route here)

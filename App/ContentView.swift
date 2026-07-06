@@ -207,6 +207,9 @@ struct ContentView: View {
                 // DeckLink output sources real video from this renderer (⌃⌥O / toolbar control).
                 DeckLinkService.shared.renderer = renderer
                 DeckLinkService.shared.refreshDevices()   // populate the device picker
+                // Explicit "Enable output on launch" preference (Settings → DeckLink Output): start
+                // output now IF the pref is on AND a capable device is present (no-op otherwise).
+                DeckLinkService.shared.autoStartOnLaunchIfEnabled()
             }
             // Apply persisted volume (mute is not persisted — starts unmuted).
             engine.setVolume(Float(Preferences.shared.playbackVolume))
