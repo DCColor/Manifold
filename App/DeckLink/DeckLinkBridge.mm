@@ -122,14 +122,20 @@ public:
     DeckLinkScheduledPlayer(IDeckLinkOutput *output,
                             int32_t width, int32_t height, int32_t rowBytes,
                             BMDTimeValue frameDuration, BMDTimeScale timeScale,
-                            FrameFillFn fill)
+                            FrameFillFn fill, int64_t colorspace)
         : m_refCount(1), m_output(output),
           m_width(width), m_height(height), m_rowBytes(rowBytes),
           m_frameDuration(frameDuration), m_timeScale(timeScale),
           m_fill(std::move(fill)), m_running(false), m_nextIndex(0),
-          m_completed(0), m_late(0), m_dropped(0), m_flushed(0) {
+          m_completed(0), m_late(0), m_dropped(0), m_flushed(0),
+          m_colorspace(colorspace) {
         m_output->AddRef();
     }
+
+    // Output colorspace TAG (BMDColorspace) — set on each scheduled frame's metadata so the monitor
+    // knows what it's receiving. Chosen upstream by the source PRIMARIES code (never the matrix).
+    // Updated live via setColorspace so a mid-session source change is picked up on the next frame.
+    void setColorspace(int64_t colorspace) { m_colorspace = colorspace; }
 
     // --- Setup steps (called from the Obj-C bridge, each bool-returning so it can log per-step) ---
 
@@ -167,6 +173,7 @@ public:
         for (size_t i = 0; i < m_pool.size(); i++) {
             const int64_t idx = m_nextIndex.fetch_add(1);
             if (!fillFrame(m_pool[i], idx)) return false;
+            tagFrame(m_pool[i]);   // colorspace metadata (source primaries → BMDColorspace)
             if (m_output->ScheduleVideoFrame(m_pool[i], idx * m_frameDuration, m_frameDuration, m_timeScale) != S_OK)
                 return false;
         }
@@ -233,6 +240,7 @@ public:
         IDeckLinkMutableVideoFrame *frame = static_cast<IDeckLinkMutableVideoFrame *>(completedFrame);
         const int64_t idx = m_nextIndex.fetch_add(1);
         fillFrame(frame, idx);
+        tagFrame(frame);   // re-tag per-schedule so a mid-session colorspace change is picked up
         m_output->ScheduleVideoFrame(frame, idx * m_frameDuration, m_frameDuration, m_timeScale);
 
         // Periodic queue-depth + completion summary (~every 48 frames ≈ 2 s).
@@ -268,6 +276,16 @@ private:
         return true;
     }
 
+    // Tag the frame's colorspace metadata (BMDColorspace) so the monitor knows the signal. Set per
+    // schedule from the live m_colorspace atomic (handles source change + any per-output clearing).
+    void tagFrame(IDeckLinkMutableVideoFrame *frame) {
+        IDeckLinkVideoFrameMutableMetadataExtensions *meta = NULL;
+        if (frame->QueryInterface(IID_IDeckLinkVideoFrameMutableMetadataExtensions, (void **)&meta) == S_OK && meta != NULL) {
+            meta->SetInt(bmdDeckLinkFrameMetadataColorspace, m_colorspace.load());
+            meta->Release();
+        }
+    }
+
     std::atomic<ULONG> m_refCount;
     IDeckLinkOutput *m_output;
     int32_t m_width, m_height, m_rowBytes;
@@ -278,7 +296,19 @@ private:
     std::atomic<bool> m_running;
     std::atomic<int64_t> m_nextIndex;
     std::atomic<uint64_t> m_completed, m_late, m_dropped, m_flushed;
+    std::atomic<int64_t> m_colorspace;   // BMDColorspace tag (from source primaries), live-updatable
 };
+
+// Output colorspace TAG from the source CICP PRIMARIES code ONLY (never the matrix). P3 has no
+// native output tag, so P3-D65 / DCI-P3 are signalled as Rec.2020 (P3-in-2020 monitoring convention).
+static int64_t BMDColorspaceForPrimaries(NSInteger primariesCode) {
+    switch (primariesCode) {
+        case 9:            return bmdColorspaceRec2020;   // Rec.2020
+        case 11: case 12:  return bmdColorspaceRec2020;   // DCI-P3 / P3-D65 → P3-in-2020
+        case 1:            return bmdColorspaceRec709;    // Rec.709
+        default:           return bmdColorspaceRec709;    // nil / 2 (unspecified) / unknown → 709
+    }
+}
 
 #pragma mark - Bridge
 
@@ -293,7 +323,9 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 // Private: the shared start sequence parameterized by a C++ FrameFillFn (C++ type in the selector,
 // so it can only live in the .mm). Public entry points wrap their fill and forward here.
 @interface DeckLinkBridge ()
-- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill deviceIndex:(NSInteger)deviceIndex;
+- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill
+                                               deviceIndex:(NSInteger)deviceIndex
+                                                colorspace:(int64_t)colorspace;
 @end
 
 @implementation DeckLinkBridge {
@@ -521,7 +553,9 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 
 // Shared start sequence — parameterized by the pluggable fill (C++ FrameFillFn). Private (C++ type
 // in the selector, so .mm-only). The public entry points wrap their fill and call this.
-- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill deviceIndex:(NSInteger)deviceIndex {
+- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill
+                                               deviceIndex:(NSInteger)deviceIndex
+                                                colorspace:(int64_t)colorspace {
     NSMutableArray<NSString *> *log = [NSMutableArray array];
 
     // Re-fire cleanly.
@@ -598,10 +632,13 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
                     width, height, (long long)timeScale, (long long)frameDuration, rowBytes]];
 
     // Build the player (SEAM: fill source is pluggable — synthetic hue-walk for D3). The player
-    // AddRefs the output; drop our local ref.
+    // AddRefs the output; drop our local ref. `colorspace` is the output signal tag (from source
+    // primaries) applied to each scheduled frame's metadata.
     DeckLinkScheduledPlayer *player =
-        new DeckLinkScheduledPlayer(output, width, height, rowBytes, frameDuration, timeScale, fill);
+        new DeckLinkScheduledPlayer(output, width, height, rowBytes, frameDuration, timeScale, fill, colorspace);
     output->Release();
+    [log addObject:[NSString stringWithFormat:@"tag: output colorspace = %@",
+                    (colorspace == bmdColorspaceRec2020 ? @"Rec.2020" : @"Rec.709")]];
 
     if (!player->doesSupportMode()) {
         [log addObject:@"mode: 2160p23.98 / v210 10-bit YUV NOT supported — aborting"];
@@ -646,21 +683,34 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     return [[DeckLinkOutputResult alloc] initWithSuccess:YES log:log];
 }
 
-// Public: synthetic hue-walk on device 0 (D3 — debug/fallback).
+// Public: synthetic hue-walk on device 0 (D3 — debug/fallback). No source → tag Rec.709.
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0 {
-    return [self startScheduledPlaybackWithFillFn:FrameFillFn(&SyntheticHueWalkFill) deviceIndex:0];
+    return [self startScheduledPlaybackWithFillFn:FrameFillFn(&SyntheticHueWalkFill)
+                                      deviceIndex:0
+                                       colorspace:bmdColorspaceRec709];
 }
 
 // Public: REAL video (D-real) on a chosen device. Wrap the Obj-C fill block into the C++ FrameFillFn
 // the scheduler expects; the std::function retains the (heap-copied) block for the player's lifetime.
 // The block itself sources pixels (renderer.copyLatest…) and handles the neutral fallback — the
-// scheduler stays source-agnostic. Return value is advisory; the block always fills the buffer.
-- (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex fill:(DeckLinkFillBlock)fill {
+// scheduler stays source-agnostic. `primariesCode` → the output colorspace TAG (SEPARATE from the
+// kernel's encoding matrix, which the renderer selects from the matrix code).
+- (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex
+                                                          fill:(DeckLinkFillBlock)fill
+                                                 primariesCode:(NSInteger)primariesCode {
     DeckLinkFillBlock block = [fill copy];
     FrameFillFn fn = [block](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height) {
         (void)block(frameIndex, buffer, rowBytes, width, height);
     };
-    return [self startScheduledPlaybackWithFillFn:fn deviceIndex:deviceIndex];
+    return [self startScheduledPlaybackWithFillFn:fn
+                                      deviceIndex:deviceIndex
+                                       colorspace:BMDColorspaceForPrimaries(primariesCode)];
+}
+
+// Update the output colorspace tag mid-session (source colorspace changed while output is running).
+// Per-schedule tagging means the next scheduled frame picks this up — no in-flight re-tag race.
+- (void)setOutputColorspaceForPrimaries:(NSInteger)primariesCode {
+    if (_player != NULL) { _player->setColorspace(BMDColorspaceForPrimaries(primariesCode)); }
 }
 
 - (void)stopScheduledPlayback {

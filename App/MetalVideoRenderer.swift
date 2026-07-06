@@ -71,6 +71,21 @@ private struct RGBToV210Params {
     var dstWidth: UInt32
     var dstHeight: UInt32
     var dstRowWords: UInt32
+    var kr: Float          // YCbCr matrix luma coeff for R (from source colorMatrixCode)
+    var kb: Float          // YCbCr matrix luma coeff for B
+}
+
+/// BT YCbCr matrix (Kr, Kb) selected STRICTLY by the source CICP matrix-coefficient code (D5) —
+/// never inferred from primaries. nil / 2 (unspecified) / unknown → 709.
+///   matrixCode 1 (709)  → Kr 0.2126, Kb 0.0722
+///   matrixCode 9 (2020) → Kr 0.2627, Kb 0.0593
+///   matrixCode 6 (601)  → Kr 0.299,  Kb 0.114
+private func ycbcrKrKb(forMatrixCode code: Int?) -> (kr: Float, kb: Float) {
+    switch code {
+    case 9:  return (0.2627, 0.0593)   // Rec.2020
+    case 6:  return (0.299,  0.114)    // Rec.601
+    default: return (0.2126, 0.0722)   // Rec.709 (also 1 / nil / 2 / unknown)
+    }
 }
 
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
@@ -326,6 +341,9 @@ final class MetalVideoRenderer {
     /// colorspace guard — so they survive even if CGColorSpace construction fails. nil → 709.
     private(set) var sourcePrimariesCode: Int?
     private(set) var sourceTransferCode: Int?
+    /// Source CICP matrix-coefficient code — selects the DeckLink v210 YCbCr ENCODING matrix (D5),
+    /// STRICTLY from this field (never inferred from primaries). nil/2/unknown → 709.
+    private(set) var sourceMatrixCode: Int?
 
     /// Derive the layer's colorspace from the source's authoritative color tags
     /// (CICP codes from MediaInspector) and assign it ONCE. Re-call on each new
@@ -336,6 +354,7 @@ final class MetalVideoRenderer {
         // pick its RGB→XYZ matrix + EOTF even when CGColorSpace construction below fails.
         sourcePrimariesCode = primaries
         sourceTransferCode = transfer
+        sourceMatrixCode = matrix
         // Never assign nil — makeColorSpace guarantees non-nil, but guard anyway.
         guard let cs = Self.makeColorSpace(primaries: primaries, transfer: transfer, matrix: matrix) else { return }
         // Assign inside a synchronized transaction (actions disabled) so this
@@ -928,9 +947,13 @@ final class MetalVideoRenderer {
               let enc = cmd.makeComputeCommandEncoder() else {
             deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
         }
+        // Matrix selected by source colorMatrixCode ONLY (never from primaries) — read live so a
+        // mid-session source change is picked up on the next converted frame.
+        let m = ycbcrKrKb(forMatrixCode: sourceMatrixCode)
         var params = RGBToV210Params(srcWidth: UInt32(src.width), srcHeight: UInt32(src.height),
                                      dstWidth: UInt32(outSize.w), dstHeight: UInt32(outSize.h),
-                                     dstRowWords: UInt32(deckLinkRowBytes / 4))
+                                     dstRowWords: UInt32(deckLinkRowBytes / 4),
+                                     kr: m.kr, kb: m.kb)
         enc.setComputePipelineState(pipeline)
         enc.setTexture(src, index: 0)
         enc.setBuffer(back, offset: 0, index: 0)

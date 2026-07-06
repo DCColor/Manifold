@@ -82,6 +82,9 @@ final class DeckLinkService: ObservableObject {
         guard !isOutputting else { return }
         isOutputting = true
         let deviceIndex = selectedDeviceIndex
+        // D5 output-signal TAG ← source PRIMARIES code ONLY (never the matrix; the kernel picks the
+        // encoding matrix from the matrix code, independently). nil → 709.
+        let primariesCode = renderer?.sourcePrimariesCode ?? 1
         queue.async {
             // Arm the renderer's push convert (allocate v210 staging sized to the output frame).
             self.renderer?.beginDeckLinkOutput(width: Self.outputWidth, height: Self.outputHeight)
@@ -98,7 +101,8 @@ final class DeckLinkService: ObservableObject {
                 return false
             }
 
-            let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill)
+            let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill,
+                                                            primariesCode: primariesCode)
             for line in result.log { print("DeckLink D-real: \(line)") }
             print("DeckLink D-real: \(result.success ? "SUCCESS — real-video scheduled playback on device \(deviceIndex)" : "FAILED")")
             if !result.success {
@@ -117,6 +121,15 @@ final class DeckLinkService: ObservableObject {
             self.renderer?.stopDeckLinkOutput()
             print("DeckLink D-real: output stopped")
         }
+    }
+
+    /// The source color tags changed (new file / re-inspect). If output is running, re-apply the
+    /// colorspace TAG from the new primaries (the encoding matrix updates automatically — the
+    /// renderer reads the live matrix code each converted frame). Call after setSourceColorSpace.
+    func sourceColorChanged() {
+        guard isOutputting else { return }
+        let primariesCode = renderer?.sourcePrimariesCode ?? 1
+        queue.async { self.bridge.setOutputColorspaceForPrimaries(primariesCode) }
     }
 
     /// Neutral legal-black v210 fill (10-bit Y=64, Cb=Cr=512) — shown until the first real converted

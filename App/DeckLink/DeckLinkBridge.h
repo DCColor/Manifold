@@ -51,12 +51,18 @@ typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t r
 /// Safe to call repeatedly. Returns a step log. (Debug/fallback path — see the WithFill: variant.)
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0;
 
-/// D-real: same scheduled playback on the device at `deviceIndex`, but each frame is filled by the
-/// supplied block instead of the synthetic hue walk. The block receives the DeckLink v210 frame
-/// pointer (+ dims/rowBytes) and must fill it (returning YES if it wrote real data, NO if it fell
-/// back to neutral — advisory). Called on the SDK's callback thread, so the block MUST be cheap (a
-/// memcpy) — no blocking work.
-- (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex fill:(DeckLinkFillBlock)fill;
+/// D-real / D5: scheduled playback on the device at `deviceIndex`, each frame filled by `fill`. The
+/// block receives the DeckLink v210 frame pointer (+ dims/rowBytes) and must fill it (returning YES
+/// for real data, NO for the neutral fallback — advisory); it runs on the SDK callback thread so it
+/// MUST be cheap (a memcpy). `primariesCode` sets the output colorspace TAG (Rec.709 / Rec.2020;
+/// P3 → Rec.2020) — SEPARATE from the encoding matrix (the renderer picks that from the matrix code).
+- (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex
+                                                          fill:(DeckLinkFillBlock)fill
+                                                 primariesCode:(NSInteger)primariesCode;
+
+/// Re-tag the output colorspace mid-session (source primaries changed while output is running). The
+/// next scheduled frame picks it up. No-op if not currently playing.
+- (void)setOutputColorspaceForPrimaries:(NSInteger)primariesCode;
 
 /// Stop scheduled playback cleanly (StopScheduledPlayback → unset callback → DisableVideoOutput →
 /// release frame pool + callback). Safe to call when not playing; safe against an in-flight callback.

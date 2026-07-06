@@ -354,27 +354,27 @@ struct RGBToV210Params {
     uint dstWidth;      // DeckLink output width (e.g. 3840)
     uint dstHeight;     // DeckLink output height (e.g. 2160)
     uint dstRowWords;   // v210 row stride in 32-bit WORDS (= rowBytes/4; 4K = 10240/4 = 2560)
+    float kr;           // BT YCbCr matrix luma coeff for R (selected by source colorMatrixCode)
+    float kb;           // BT YCbCr matrix luma coeff for B
 };
 
-// 10-bit BT.709 LIMITED-range luma/chroma from normalized RGB [0,1]. Y' 64..940, Cb/Cr 64..960
-// (10-bit legal = 8-bit ×4). 1.8556 = 2*(1-Kb), 1.5748 = 2*(1-Kr).
+// 10-bit LIMITED-range luma (Y' 64..940). Same scale for every matrix; only the yf weights differ.
 static inline uint v210_Y(float yf) {
     return uint(clamp(round(64.0 + 876.0 * yf), 64.0, 940.0));
 }
-// Chroma from a subsampled PAIR (average the two pixels' (chan - yf) then scale).
-static inline uint v210_Cb(float b0, float yf0, float b1, float yf1) {
-    float cbn = 0.5 * ((b0 - yf0) + (b1 - yf1)) / 1.8556;   // normalized [-0.5, 0.5]
-    return uint(clamp(round(512.0 + 896.0 * cbn), 64.0, 960.0));
-}
-static inline uint v210_Cr(float r0, float yf0, float r1, float yf1) {
-    float crn = 0.5 * ((r0 - yf0) + (r1 - yf1)) / 1.5748;
-    return uint(clamp(round(512.0 + 896.0 * crn), 64.0, 960.0));
+// Chroma from a subsampled PAIR (average the two pixels' (chan - yf) then scale). `denom` is the
+// matrix-dependent excursion: 2*(1-Kb) for Cb, 2*(1-Kr) for Cr (709: 1.8556/1.5748, 2020: 1.8814/
+// 1.4746). Cb/Cr 64..960.
+static inline uint v210_C(float c0, float yf0, float c1, float yf1, float denom) {
+    float cn = 0.5 * ((c0 - yf0) + (c1 - yf1)) / denom;   // normalized [-0.5, 0.5]
+    return uint(clamp(round(512.0 + 896.0 * cn), 64.0, 960.0));
 }
 
 // Convert the display offscreen (rgb10a2 normalized RGB — transfer-ENCODED, SOURCE-primaries) to
-// v210 (10-bit YUV 4:2:2), BT.709 LIMITED range, for DeckLink output. Preserves the offscreen's
-// 10-bit precision the old 2vuy path discarded. 709-correct ONLY for 709 sources (offscreen is
-// source-primaries; 2020/P3 would need a different matrix — a D5 concern).
+// v210 (10-bit YUV 4:2:2), LIMITED range, for DeckLink output. The YCbCr matrix (Kr/Kb) is chosen
+// by the source's colorMatrixCode (D5) — 709 / 2020 / 601 — so wide-gamut sources encode correctly.
+// (The offscreen is source-primaries; the OUTPUT colorspace TAG is set separately on the frame by
+// the bridge, from the source primaries code.)
 //
 // v210 packs 6 pixels into 4 little-endian 32-bit words (16 bytes), 3 components per word, each 10
 // bits low→high, top 2 bits unused. Standard Apple/FFmpeg layout (kCMPixelFormat_422YpCbCr10):
@@ -396,23 +396,29 @@ kernel void rgbToV210(texture2d<float, access::read> offscreen [[texture(0)]],
     const uint x0 = groupX * 6u;
     const uint sy = min(y, p.srcHeight - 1u);
 
+    // Matrix (Kr/Kb) chosen upstream by the source colorMatrixCode. Kg + chroma denominators derive
+    // from Kr/Kb, so 709 / 2020 / 601 all fall out of these two coefficients.
+    const float kr = p.kr, kb = p.kb, kg = 1.0 - kr - kb;
+    const float denomB = 2.0 * (1.0 - kb);   // Cb excursion
+    const float denomR = 2.0 * (1.0 - kr);   // Cr excursion
+
     // Read 6 source pixels (clamped to src bounds — resolution guard).
     float3 c[6];
     float  yf[6];
     for (uint i = 0u; i < 6u; i++) {
         const uint sx = min(x0 + i, p.srcWidth - 1u);
         c[i]  = offscreen.read(uint2(sx, sy)).rgb;
-        yf[i] = 0.2126 * c[i].r + 0.7152 * c[i].g + 0.0722 * c[i].b;
+        yf[i] = kr * c[i].r + kg * c[i].g + kb * c[i].b;
     }
 
     const uint Y0 = v210_Y(yf[0]), Y1 = v210_Y(yf[1]), Y2 = v210_Y(yf[2]);
     const uint Y3 = v210_Y(yf[3]), Y4 = v210_Y(yf[4]), Y5 = v210_Y(yf[5]);
-    const uint Cb0 = v210_Cb(c[0].b, yf[0], c[1].b, yf[1]);
-    const uint Cr0 = v210_Cr(c[0].r, yf[0], c[1].r, yf[1]);
-    const uint Cb2 = v210_Cb(c[2].b, yf[2], c[3].b, yf[3]);
-    const uint Cr2 = v210_Cr(c[2].r, yf[2], c[3].r, yf[3]);
-    const uint Cb4 = v210_Cb(c[4].b, yf[4], c[5].b, yf[5]);
-    const uint Cr4 = v210_Cr(c[4].r, yf[4], c[5].r, yf[5]);
+    const uint Cb0 = v210_C(c[0].b, yf[0], c[1].b, yf[1], denomB);
+    const uint Cr0 = v210_C(c[0].r, yf[0], c[1].r, yf[1], denomR);
+    const uint Cb2 = v210_C(c[2].b, yf[2], c[3].b, yf[3], denomB);
+    const uint Cr2 = v210_C(c[2].r, yf[2], c[3].r, yf[3], denomR);
+    const uint Cb4 = v210_C(c[4].b, yf[4], c[5].b, yf[5], denomB);
+    const uint Cr4 = v210_C(c[4].r, yf[4], c[5].r, yf[5], denomR);
 
     const uint w0 = Cb0 | (Y0 << 10) | (Cr0 << 20);
     const uint w1 = Y1  | (Cb2 << 10) | (Y2 << 20);

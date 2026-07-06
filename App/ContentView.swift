@@ -239,6 +239,9 @@ struct ContentView: View {
                     transfer: meta.transferFunctionCode,
                     matrix: meta.colorMatrixCode
                 )
+                // D5: if DeckLink output is running, re-tag its colorspace from the new primaries
+                // (the encoding matrix follows the matrix code automatically, per converted frame).
+                DeckLinkService.shared.sourceColorChanged()
             }
             // Feed the CIE header the detected source space (honest about untagged → 709 assumed).
             cieModel.spaceReadout = meta.map(Self.cieSpaceReadout) ?? ""
