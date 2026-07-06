@@ -16,14 +16,31 @@ final class DeckLinkService: ObservableObject {
 
     static let shared = DeckLinkService()
 
-    /// Plain-speak output signal for the UI. NO codec/"v210" jargon; color space is deferred to D5
-    /// (showing Rec.709/2020 now would be inaccurate until primaries-correct output lands).
+    /// Plain-speak output signal (format part). NO codec/"v210" jargon. The colorspace is appended
+    /// separately via `signalLine` (it varies per source, unlike the fixed format).
     static let statusLine = "2160p23.98 · 10-bit 4:2:2"
 
     // Observable UI state (mutated on main).
     @Published private(set) var isOutputting = false     // reflects the ACTUAL scheduled-playback state
     @Published private(set) var selectedDeviceIndex = 0  // which enumerated device output targets
     @Published private(set) var devices: [Device] = []   // cached enumeration for the picker
+    /// Plain-speak colorspace label for the current source (DISPLAY ONLY — the actual output tag is
+    /// unchanged: D5 tags both 2020 and P3 as Rec.2020). Derived from the source colorPrimariesCode,
+    /// so it can distinguish genuine 2020 from P3-in-2020 (which the collapsed tag cannot). nil → 709.
+    @Published private(set) var colorspaceLabel = "Rec 709"
+
+    /// The full Signal line for the output menu: fixed format + the current-source colorspace label.
+    var signalLine: String { "\(Self.statusLine) · \(colorspaceLabel)" }
+
+    /// Map a source CICP primaries code → plain-speak label. "(P3 limited)" flags P3 content sitting
+    /// inside the Rec.2020 container (what's actually on the wire is Rec.2020, per D5's tag).
+    static func colorspaceLabel(forPrimaries code: Int?) -> String {
+        switch code {
+        case 9:       return "Rec 2020"              // genuine Rec.2020
+        case 11, 12:  return "Rec 2020 (P3 limited)" // DCI-P3 / P3-D65 → P3-in-2020
+        default:      return "Rec 709"               // 1 / nil / 2 (unspecified) / unknown
+        }
+    }
 
     /// One bridge instance holds the output state across start/stop calls. Serial queue so
     /// start/stop can't race and never block the UI thread.
@@ -123,13 +140,19 @@ final class DeckLinkService: ObservableObject {
         }
     }
 
-    /// The source color tags changed (new file / re-inspect). If output is running, re-apply the
-    /// colorspace TAG from the new primaries (the encoding matrix updates automatically — the
-    /// renderer reads the live matrix code each converted frame). Call after setSourceColorSpace.
+    /// The source color tags changed (new file / re-inspect). Updates the DISPLAY label always
+    /// (independent of output state), and — if output is running — re-applies the colorspace TAG
+    /// from the new primaries. Both read colorPrimariesCode ONLY (the encoding matrix follows the
+    /// matrix code, separately). Call after setSourceColorSpace.
     func sourceColorChanged() {
+        let primariesCode = renderer?.sourcePrimariesCode
+        // Display label tracks the current source whether or not output is on (it's the signal that
+        // output produces / would produce). DISPLAY ONLY — does not touch the actual tag.
+        let label = Self.colorspaceLabel(forPrimaries: primariesCode)
+        DispatchQueue.main.async { self.colorspaceLabel = label }
+        // Re-tag the live output signal only if currently playing.
         guard isOutputting else { return }
-        let primariesCode = renderer?.sourcePrimariesCode ?? 1
-        queue.async { self.bridge.setOutputColorspaceForPrimaries(primariesCode) }
+        queue.async { self.bridge.setOutputColorspaceForPrimaries(primariesCode ?? 1) }
     }
 
     /// Neutral legal-black v210 fill (10-bit Y=64, Cb=Cr=512) — shown until the first real converted

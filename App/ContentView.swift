@@ -530,7 +530,7 @@ struct ContentView: View {
                     }
                 }
                 Section("Signal") {
-                    Button(DeckLinkService.statusLine) {}.disabled(true)
+                    Button(deckLink.signalLine) {}.disabled(true)
                 }
             } label: {
                 Image(systemName: "chevron.down").font(.system(size: 8))
