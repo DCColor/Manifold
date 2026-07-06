@@ -57,7 +57,7 @@
 
 #pragma mark - D3 scheduled player (synthetic, pluggable fill source)
 
-// Pluggable frame-fill: given a frame index + a target 2vuy buffer, fill it. Knows NOTHING about
+// Pluggable frame-fill: given a frame index + a target v210 buffer, fill it. Knows NOTHING about
 // DeckLink — the scheduling loop calls it blind. This is the seam where the synthetic hue-walk is
 // later swapped for the Metal/decoded-frame path WITHOUT touching the scheduler. Dimensions/rowBytes
 // come from the output mode (passed in), not hardcoded.
@@ -80,26 +80,36 @@ static void HSVtoRGB(double h, double s, double v, double &r, double &g, double 
     r = r1 + m; g = g1 + m; b = b1 + m;
 }
 
-// BT.709 LIMITED-range 8-bit YCbCr (matches D2's convention).
-static void RGBtoYCbCr709Limited(double r, double g, double b, uint8_t &Y, uint8_t &Cb, uint8_t &Cr) {
-    double R = r * 255.0, G = g * 255.0, B = b * 255.0;
-    double y  =  0.1826 * R + 0.6142 * G + 0.0620 * B + 16.0;
-    double cb = -0.1006 * R - 0.3386 * G + 0.4392 * B + 128.0;
-    double cr =  0.4392 * R - 0.3989 * G - 0.0403 * B + 128.0;
-    auto clamp8 = [](double v, double lo, double hi) { return (uint8_t)std::lround(std::min(hi, std::max(lo, v))); };
-    Y  = clamp8(y,  16, 235);
-    Cb = clamp8(cb, 16, 240);
-    Cr = clamp8(cr, 16, 240);
+// BT.709 LIMITED-range 10-bit YCbCr (v210): Y' 64..940, Cb/Cr 64..960 (8-bit ×4).
+static void RGBtoYCbCr709Limited10(double r, double g, double b, uint32_t &Y, uint32_t &Cb, uint32_t &Cr) {
+    const double yf = 0.2126 * r + 0.7152 * g + 0.0722 * b;   // full-range luma [0,1]
+    const double y  = 64.0  + 876.0 * yf;
+    const double cb = 512.0 + 896.0 * (b - yf) / 1.8556;
+    const double cr = 512.0 + 896.0 * (r - yf) / 1.5748;
+    auto clamp10 = [](double v, double lo, double hi) { return (uint32_t)std::lround(std::min(hi, std::max(lo, v))); };
+    Y  = clamp10(y,  64, 940);
+    Cb = clamp10(cb, 64, 960);
+    Cr = clamp10(cr, 64, 960);
 }
 
+// Synthetic hue-walk (D3 debug/fallback) — now v210 10-bit so it stays valid against the v210 frame
+// format. Solid color per frame → all Y/Cb/Cr equal, so the four v210 words are a fixed pattern
+// repeated per 6-pixel group (respecting the 128-byte-aligned rowBytes).
 static void SyntheticHueWalkFill(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height) {
     const double hue = fmod((double)frameIndex * 2.0, 360.0);   // +2°/frame → full cycle ~7.5 s at 23.98
     double r, g, b;  HSVtoRGB(hue, 0.65, 0.80, r, g, b);
-    uint8_t Y, Cb, Cr;  RGBtoYCbCr709Limited(r, g, b, Y, Cb, Cr);
-    // 2vuy 4:2:2, packed [Cb, Y0, Cr, Y1] per pixel pair; solid fill.
+    uint32_t Y, Cb, Cr;  RGBtoYCbCr709Limited10(r, g, b, Y, Cb, Cr);
+    // Solid v210: Word0=Cb|Y|Cr, Word1=Y|Cb|Y, Word2=Cr|Y|Cb, Word3=Y|Cr|Y.
+    const uint32_t w0 = Cb | (Y  << 10) | (Cr << 20);
+    const uint32_t w1 = Y  | (Cb << 10) | (Y  << 20);
+    const uint32_t w2 = Cr | (Y  << 10) | (Cb << 20);
+    const uint32_t w3 = Y  | (Cr << 10) | (Y  << 20);
+    const int32_t groupsPerRow = rowBytes / 16;   // full padded row
     for (int32_t y = 0; y < height; y++) {
-        uint8_t *p = buffer + (size_t)y * (size_t)rowBytes;
-        for (int32_t x = 0; x < width; x += 2) { p[0] = Cb; p[1] = Y; p[2] = Cr; p[3] = Y; p += 4; }
+        uint32_t *p = (uint32_t *)(buffer + (size_t)y * (size_t)rowBytes);
+        for (int32_t g6 = 0; g6 < groupsPerRow; g6++) {
+            p[0] = w0; p[1] = w1; p[2] = w2; p[3] = w3; p += 4;
+        }
     }
 }
 
@@ -126,7 +136,7 @@ public:
     bool doesSupportMode() {
         BMDDisplayMode actual = bmdModeUnknown; bool supported = false;
         HRESULT hr = m_output->DoesSupportVideoMode(bmdVideoConnectionUnspecified, bmdMode4K2160p2398,
-                                                    bmdFormat8BitYUV, bmdNoVideoOutputConversion,
+                                                    bmdFormat10BitYUV, bmdNoVideoOutputConversion,
                                                     bmdSupportedVideoModeDefault, &actual, &supported);
         return (hr == S_OK && supported);
     }
@@ -138,7 +148,7 @@ public:
     bool createPool(int poolSize) {
         for (int i = 0; i < poolSize; i++) {
             IDeckLinkMutableVideoFrame *f = NULL;
-            if (m_output->CreateVideoFrame(m_width, m_height, m_rowBytes, bmdFormat8BitYUV,
+            if (m_output->CreateVideoFrame(m_width, m_height, m_rowBytes, bmdFormat10BitYUV,
                                            bmdFrameFlagDefault, &f) != S_OK || f == NULL)
                 return false;
             m_pool.push_back(f);
@@ -583,8 +593,8 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     mode->GetFrameRate(&frameDuration, &timeScale);
     mode->Release();
     int32_t rowBytes = 0;
-    output->RowBytesForPixelFormat(bmdFormat8BitYUV, width, &rowBytes);
-    [log addObject:[NSString stringWithFormat:@"mode: %dx%d @ %lld/%lld (duration/timescale), 2vuy rowBytes=%d",
+    output->RowBytesForPixelFormat(bmdFormat10BitYUV, width, &rowBytes);   // authoritative v210 stride (128-aligned)
+    [log addObject:[NSString stringWithFormat:@"mode: %dx%d @ %lld/%lld (duration/timescale), v210 rowBytes=%d",
                     width, height, (long long)timeScale, (long long)frameDuration, rowBytes]];
 
     // Build the player (SEAM: fill source is pluggable — synthetic hue-walk for D3). The player
@@ -594,11 +604,11 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     output->Release();
 
     if (!player->doesSupportMode()) {
-        [log addObject:@"mode: 2160p23.98 / 8-bit YUV NOT supported — aborting"];
+        [log addObject:@"mode: 2160p23.98 / v210 10-bit YUV NOT supported — aborting"];
         player->stop(); player->Release();
         return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
     }
-    [log addObject:@"mode: 2160p23.98 / 8-bit YUV supported"];
+    [log addObject:@"mode: 2160p23.98 / v210 10-bit YUV supported"];
 
     if (!player->enableOutput()) {
         [log addObject:@"enable: EnableVideoOutput failed — aborting"];

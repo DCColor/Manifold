@@ -343,70 +343,85 @@ kernel void cieKernel(texture2d<float, access::read> offscreen [[texture(0)]],
     }
 }
 
-// MARK: - DeckLink output (RGB offscreen -> 2vuy, BT.709 LIMITED range)
+// MARK: - DeckLink output (RGB offscreen -> v210 10-bit, BT.709 LIMITED range)
 
-// Uniforms for rgbToYUV422. Mirrors RGBToYUVParams in MetalVideoRenderer.swift (field order + type
+// Uniforms for rgbToV210. Mirrors RGBToV210Params in MetalVideoRenderer.swift (field order + type
 // must match exactly). Dimensions are decoupled: the kernel reads the SOURCE offscreen (clamped)
-// and writes the OUTPUT-sized 2vuy buffer, so a native-res mismatch never reads out of bounds.
-struct RGBToYUVParams {
+// and writes the OUTPUT-sized v210 buffer, so a native-res mismatch never reads out of bounds.
+struct RGBToV210Params {
     uint srcWidth;      // offscreen (source) width in pixels
     uint srcHeight;     // offscreen (source) height in pixels
     uint dstWidth;      // DeckLink output width (e.g. 3840)
     uint dstHeight;     // DeckLink output height (e.g. 2160)
-    uint dstRowBytes;   // DeckLink 2vuy row stride (dstWidth * 2, e.g. 7680)
+    uint dstRowWords;   // v210 row stride in 32-bit WORDS (= rowBytes/4; 4K = 10240/4 = 2560)
 };
 
+// 10-bit BT.709 LIMITED-range luma/chroma from normalized RGB [0,1]. Y' 64..940, Cb/Cr 64..960
+// (10-bit legal = 8-bit ×4). 1.8556 = 2*(1-Kb), 1.5748 = 2*(1-Kr).
+static inline uint v210_Y(float yf) {
+    return uint(clamp(round(64.0 + 876.0 * yf), 64.0, 940.0));
+}
+// Chroma from a subsampled PAIR (average the two pixels' (chan - yf) then scale).
+static inline uint v210_Cb(float b0, float yf0, float b1, float yf1) {
+    float cbn = 0.5 * ((b0 - yf0) + (b1 - yf1)) / 1.8556;   // normalized [-0.5, 0.5]
+    return uint(clamp(round(512.0 + 896.0 * cbn), 64.0, 960.0));
+}
+static inline uint v210_Cr(float r0, float yf0, float r1, float yf1) {
+    float crn = 0.5 * ((r0 - yf0) + (r1 - yf1)) / 1.5748;
+    return uint(clamp(round(512.0 + 896.0 * crn), 64.0, 960.0));
+}
+
 // Convert the display offscreen (rgb10a2 normalized RGB — transfer-ENCODED, SOURCE-primaries) to
-// 8-bit 2vuy (YUV 4:2:2), BT.709 LIMITED range, for DeckLink output. 709-correct ONLY for 709
-// sources (offscreen is source-primaries; 2020/P3 would need a different matrix — a D5 concern).
+// v210 (10-bit YUV 4:2:2), BT.709 LIMITED range, for DeckLink output. Preserves the offscreen's
+// 10-bit precision the old 2vuy path discarded. 709-correct ONLY for 709 sources (offscreen is
+// source-primaries; 2020/P3 would need a different matrix — a D5 concern).
 //
-// 2vuy packs [Cb Y0 Cr Y1] per HORIZONTAL PIXEL PAIR, so one thread handles one output pair.
-// Per pixel: Yf = 0.2126 R + 0.7152 G + 0.0722 B (full-range luma, RGB in [0,1]); then
-//   Y'  = 16  + 219 * Yf                          (limited-range luma, 16..235)
-//   Cb  = 128 + 224 * (B - Yf) / 1.8556           (1.8556 = 2*(1-Kb); limited chroma 16..240)
-//   Cr  = 128 + 224 * (R - Yf) / 1.5748           (1.5748 = 2*(1-Kr))
-// The two pixels' chroma are AVERAGED for the 4:2:2 subsample. (These reproduce D2/D3's exact
-// 709-limited values, e.g. orange RGB(230,120,40) -> Y=134 Cb=82 Cr=180.)
-kernel void rgbToYUV422(texture2d<float, access::read> offscreen [[texture(0)]],
-                        device uchar *dst              [[buffer(0)]],
-                        constant RGBToYUVParams &p     [[buffer(1)]],
-                        uint2 gid [[thread_position_in_grid]]) {
-    const uint pairX = gid.x;   // output pixel-pair column
-    const uint y     = gid.y;
-    if (pairX >= (p.dstWidth / 2u) || y >= p.dstHeight) return;
+// v210 packs 6 pixels into 4 little-endian 32-bit words (16 bytes), 3 components per word, each 10
+// bits low→high, top 2 bits unused. Standard Apple/FFmpeg layout (kCMPixelFormat_422YpCbCr10):
+//   Word0 = Cb0 | (Y0<<10) | (Cr0<<20)
+//   Word1 = Y1  | (Cb2<<10) | (Y2<<20)
+//   Word2 = Cr2 | (Y3<<10) | (Cb4<<20)
+//   Word3 = Y4  | (Cr4<<10) | (Y5<<20)
+// Chroma is 4:2:2: Cb0/Cr0 from px0&1, Cb2/Cr2 from px2&3, Cb4/Cr4 from px4&5 (averaged).
+// One thread per 6-pixel group; writes 4 words at row*dstRowWords + groupX*4.
+kernel void rgbToV210(texture2d<float, access::read> offscreen [[texture(0)]],
+                      device uint *dst               [[buffer(0)]],
+                      constant RGBToV210Params &p    [[buffer(1)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    const uint groupX = gid.x;   // output 6-pixel group column
+    const uint y      = gid.y;
+    const uint groups = (p.dstWidth + 5u) / 6u;
+    if (groupX >= groups || y >= p.dstHeight) return;
 
-    const uint x0 = pairX * 2u;
-    const uint x1 = x0 + 1u;
-    // Resolution guard: clamp source reads so we never sample out of bounds if src != dst dims.
-    const uint sx0 = min(x0, p.srcWidth  - 1u);
-    const uint sx1 = min(x1, p.srcWidth  - 1u);
-    const uint sy  = min(y,  p.srcHeight - 1u);
+    const uint x0 = groupX * 6u;
+    const uint sy = min(y, p.srcHeight - 1u);
 
-    const float3 c0 = offscreen.read(uint2(sx0, sy)).rgb;
-    const float3 c1 = offscreen.read(uint2(sx1, sy)).rgb;
+    // Read 6 source pixels (clamped to src bounds — resolution guard).
+    float3 c[6];
+    float  yf[6];
+    for (uint i = 0u; i < 6u; i++) {
+        const uint sx = min(x0 + i, p.srcWidth - 1u);
+        c[i]  = offscreen.read(uint2(sx, sy)).rgb;
+        yf[i] = 0.2126 * c[i].r + 0.7152 * c[i].g + 0.0722 * c[i].b;
+    }
 
-    const float yf0 = 0.2126 * c0.r + 0.7152 * c0.g + 0.0722 * c0.b;
-    const float yf1 = 0.2126 * c1.r + 0.7152 * c1.g + 0.0722 * c1.b;
+    const uint Y0 = v210_Y(yf[0]), Y1 = v210_Y(yf[1]), Y2 = v210_Y(yf[2]);
+    const uint Y3 = v210_Y(yf[3]), Y4 = v210_Y(yf[4]), Y5 = v210_Y(yf[5]);
+    const uint Cb0 = v210_Cb(c[0].b, yf[0], c[1].b, yf[1]);
+    const uint Cr0 = v210_Cr(c[0].r, yf[0], c[1].r, yf[1]);
+    const uint Cb2 = v210_Cb(c[2].b, yf[2], c[3].b, yf[3]);
+    const uint Cr2 = v210_Cr(c[2].r, yf[2], c[3].r, yf[3]);
+    const uint Cb4 = v210_Cb(c[4].b, yf[4], c[5].b, yf[5]);
+    const uint Cr4 = v210_Cr(c[4].r, yf[4], c[5].r, yf[5]);
 
-    const float Y0  = 16.0  + 219.0 * yf0;
-    const float Y1  = 16.0  + 219.0 * yf1;
-    const float Cb0 = 128.0 + 224.0 * (c0.b - yf0) / 1.8556;
-    const float Cb1 = 128.0 + 224.0 * (c1.b - yf1) / 1.8556;
-    const float Cr0 = 128.0 + 224.0 * (c0.r - yf0) / 1.5748;
-    const float Cr1 = 128.0 + 224.0 * (c1.r - yf1) / 1.5748;
-    // 4:2:2 subsample: one shared chroma sample per pair (averaged).
-    const float Cb = 0.5 * (Cb0 + Cb1);
-    const float Cr = 0.5 * (Cr0 + Cr1);
+    const uint w0 = Cb0 | (Y0 << 10) | (Cr0 << 20);
+    const uint w1 = Y1  | (Cb2 << 10) | (Y2 << 20);
+    const uint w2 = Cr2 | (Y3 << 10) | (Cb4 << 20);
+    const uint w3 = Y4  | (Cr4 << 10) | (Y5 << 20);
 
-    const uchar y0b = uchar(clamp(round(Y0), 16.0, 235.0));
-    const uchar y1b = uchar(clamp(round(Y1), 16.0, 235.0));
-    const uchar cbb = uchar(clamp(round(Cb), 16.0, 240.0));
-    const uchar crb = uchar(clamp(round(Cr), 16.0, 240.0));
-
-    // 2vuy byte order: [Cb, Y0, Cr, Y1].
-    const uint o = y * p.dstRowBytes + pairX * 4u;
-    dst[o + 0] = cbb;
-    dst[o + 1] = y0b;
-    dst[o + 2] = crb;
-    dst[o + 3] = y1b;
+    const uint base = y * p.dstRowWords + groupX * 4u;   // word index (Apple Silicon is LE)
+    dst[base + 0u] = w0;
+    dst[base + 1u] = w1;
+    dst[base + 2u] = w2;
+    dst[base + 3u] = w3;
 }

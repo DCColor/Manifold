@@ -21,7 +21,7 @@ final class DeckLinkService {
     private let queue = DispatchQueue(label: "com.graviton.manifold.decklink")
 
     /// The renderer that produces the real video frames (set by the App at startup). Weak — the
-    /// renderer owns its lifecycle; the fill block sources 2vuy frames from it.
+    /// renderer owns its lifecycle; the fill block sources v210 frames from it.
     weak var renderer: MetalVideoRenderer?
 
     /// D-real output frame size (matches the D3 fixed output mode, 2160p23.98). Real device/mode
@@ -38,12 +38,12 @@ final class DeckLinkService {
     }
 
     /// D-real: start CONTINUOUS scheduled playback of REAL video — each output frame is filled from
-    /// the renderer's latest converted 2vuy staging buffer (push-on-render / pull-latest). Requires
+    /// the renderer's latest converted v210 staging buffer (push-on-render / pull-latest). Requires
     /// a file loaded + rendering (offscreen populated); until the first frame is ready, the fill
     /// falls back to neutral legal black. Logs each setup step + the callback completion summaries.
     func startScheduledOutput() {
         queue.async {
-            // Arm the renderer's push convert (allocate 2vuy staging sized to the output frame).
+            // Arm the renderer's push convert (allocate v210 staging sized to the output frame).
             self.renderer?.beginDeckLinkOutput(width: Self.outputWidth, height: Self.outputHeight)
 
             // The fill block runs on the SDK callback thread → cheap: a memcpy from the renderer's
@@ -54,7 +54,7 @@ final class DeckLinkService {
                                              rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
                     return true
                 }
-                Self.fillNeutral2vuy(buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
+                Self.fillNeutralV210(buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
                 return false
             }
 
@@ -73,16 +73,21 @@ final class DeckLinkService {
         }
     }
 
-    /// Neutral legal-black 2vuy fill ([Cb=128, Y=16, Cr=128, Y=16] per pair) — shown until the first
-    /// real converted frame is ready, so the card never gets garbage.
-    private static func fillNeutral2vuy(_ buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int) {
-        for y in 0..<height {
-            let row = buffer.advanced(by: y * rowBytes)
-            var x = 0
-            while x < width {
-                let o = (x / 2) * 4
-                row[o + 0] = 128; row[o + 1] = 16; row[o + 2] = 128; row[o + 3] = 16
-                x += 2
+    /// Neutral legal-black v210 fill (10-bit Y=64, Cb=Cr=512) — shown until the first real converted
+    /// frame is ready, so the card never gets garbage. For solid black the four v210 words are a
+    /// fixed pattern: w0=w2=0x20010200 (Cb|Y|Cr = 512|64|512), w1=w3=0x04080040 (Y|Cb|Y = 64|512|64),
+    /// repeated per 6-pixel group (16 bytes), across the 128-byte-aligned rowBytes.
+    private static func fillNeutralV210(_ buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int) {
+        let w0: UInt32 = 0x2001_0200   // Cb0(512) | Y0(64)<<10 | Cr0(512)<<20
+        let w1: UInt32 = 0x0408_0040   // Y1(64)  | Cb2(512)<<10 | Y2(64)<<20
+        let groupsPerRow = rowBytes / 16
+        buffer.withMemoryRebound(to: UInt32.self, capacity: (rowBytes / 4) * height) { words in
+            for y in 0..<height {
+                var p = y * (rowBytes / 4)
+                for _ in 0..<groupsPerRow {
+                    words[p + 0] = w0; words[p + 1] = w1; words[p + 2] = w0; words[p + 3] = w1
+                    p += 4
+                }
             }
         }
     }

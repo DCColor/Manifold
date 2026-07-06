@@ -62,15 +62,15 @@ private struct CIEParams {
     var vMax: Float            // v' plane upper bound
 }
 
-/// Matches the shader's RGBToYUVParams struct (memory layout). DeckLink RGB→2vuy convert — src
-/// (offscreen) and dst (DeckLink output) dimensions are decoupled so a native-res mismatch clamps
-/// rather than reads out of bounds.
-private struct RGBToYUVParams {
+/// Matches the shader's RGBToV210Params struct (memory layout). DeckLink RGB→v210 (10-bit YUV
+/// 4:2:2) convert — src (offscreen) and dst (DeckLink output) dimensions are decoupled so a
+/// native-res mismatch clamps rather than reads out of bounds. `dstRowWords` = v210 rowBytes / 4.
+private struct RGBToV210Params {
     var srcWidth: UInt32
     var srcHeight: UInt32
     var dstWidth: UInt32
     var dstHeight: UInt32
-    var dstRowBytes: UInt32
+    var dstRowWords: UInt32
 }
 
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
@@ -151,10 +151,10 @@ final class MetalVideoRenderer {
     var cieUseUV: Bool = true
 
     // DeckLink output (D-real). A DEDICATED queue (like scopeCommandQueue) converts the readable
-    // offscreen (rgb10a2) → 8-bit 2vuy on each render completion (PUSH model), into a DOUBLE-
-    // BUFFERED pair of .shared staging buffers sized to the DeckLink OUTPUT frame. The DeckLink
-    // callback thread only memcpys the FRONT buffer — no GPU wait there. All fields guarded by
-    // deckLinkLock except the pipeline/queue (immutable after init).
+    // offscreen (rgb10a2) → 10-bit v210 on each render completion (PUSH model), into a DOUBLE-
+    // BUFFERED pair of .shared staging buffers sized to the DeckLink OUTPUT frame (rowBytes*height).
+    // The DeckLink callback thread only memcpys the FRONT buffer — no GPU wait there. All fields
+    // guarded by deckLinkLock except the pipeline/queue (immutable after init).
     private let deckLinkPipelineState: MTLComputePipelineState?
     private let deckLinkCommandQueue: MTLCommandQueue
     private let deckLinkLock = NSLock()
@@ -164,7 +164,12 @@ final class MetalVideoRenderer {
     private var deckLinkConverting = false             // one-in-flight gate (push path)
     private var deckLinkActive = false                 // only convert while DeckLink output is running
     private var deckLinkOutputSize: (w: Int, h: Int)?  // DeckLink output frame dims (e.g. 3840x2160)
+    private var deckLinkRowBytes = 0                   // v210 row stride (128-byte aligned), matches the frame
     private var deckLinkResMismatchLogged = false      // one-time native-res-mismatch log
+
+    /// v210 row stride: 128-byte aligned, 48 px per 128 bytes. Matches IDeckLinkOutput
+    /// RowBytesForPixelFormat(bmdFormat10BitYUV, width) (e.g. 3840 → 10240, no padding).
+    private static func v210RowBytes(width: Int) -> Int { ((width + 47) / 48) * 128 }
 
     // Offscreen render targets — the source of truth for display (1:1 blitted to the
     // drawable), frame export, and scopes. A RING (not a single texture): the render writes
@@ -271,9 +276,9 @@ final class MetalVideoRenderer {
         } else {
             self.ciePipelineState = nil
         }
-        // DeckLink RGB→2vuy convert pipeline (same default library). Non-fatal if it fails — DeckLink
+        // DeckLink RGB→v210 convert pipeline (same default library). Non-fatal if it fails — DeckLink
         // output just won't have real frames (the fill falls back to neutral black).
-        if let dfn = library.makeFunction(name: "rgbToYUV422") {
+        if let dfn = library.makeFunction(name: "rgbToV210") {
             self.deckLinkPipelineState = try? device.makeComputePipelineState(function: dfn)
         } else {
             self.deckLinkPipelineState = nil
@@ -645,7 +650,7 @@ final class MetalVideoRenderer {
             self.offscreenReadableIndex = writeIndex
             self.offscreenIndexLock.unlock()
             self.onFrameRendered?()
-            // PUSH: convert this freshly-completed frame → 2vuy for DeckLink (no-op if not active).
+            // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
             self.pushDeckLinkConvert()
         }
         cmdBuffer.commit()
@@ -858,17 +863,19 @@ final class MetalVideoRenderer {
             completion: { completion($0, planeW, planeH) })
     }
 
-    // MARK: - DeckLink output (D-real: RGB offscreen → 2vuy, push-on-render, pull-latest)
+    // MARK: - DeckLink output (D-real: RGB offscreen → v210 10-bit, push-on-render, pull-latest)
 
     /// Begin DeckLink output for a fixed output frame size. Allocates the double-buffered .shared
-    /// staging pair (dst 2vuy = w*h*2 bytes each) and arms the push convert. Called from the App
+    /// staging pair (dst v210 = rowBytes*height each) and arms the push convert. Called from the App
     /// (DeckLinkService) when scheduled playback starts. Idempotent.
     func beginDeckLinkOutput(width: Int, height: Int) {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        let rowBytes = Self.v210RowBytes(width: width)
         if deckLinkOutputSize?.w != width || deckLinkOutputSize?.h != height || deckLinkStaging.count != 2 {
-            let bytes = width * height * 2   // 2vuy = 2 bytes/pixel
+            let bytes = rowBytes * height   // v210: full padded rows
             deckLinkStaging = (0..<2).compactMap { _ in device.makeBuffer(length: bytes, options: .storageModeShared) }
             deckLinkOutputSize = (width, height)
+            deckLinkRowBytes = rowBytes
         }
         deckLinkFrontIndex = 0
         deckLinkFrameReady = false
@@ -884,9 +891,10 @@ final class MetalVideoRenderer {
         deckLinkFrameReady = false
         deckLinkStaging = []
         deckLinkOutputSize = nil
+        deckLinkRowBytes = 0
     }
 
-    /// PUSH: convert the just-completed offscreen → 2vuy into the BACK staging buffer, then (on GPU
+    /// PUSH: convert the just-completed offscreen → v210 into the BACK staging buffer, then (on GPU
     /// completion) swap it to FRONT. Driven from the render completion handler. One-in-flight gated
     /// so converts never pile up; no-op when DeckLink output isn't active. Native-res guard: if the
     /// offscreen dims ≠ output dims, skip (mark not-ready) + log once — scaling is a later stage.
@@ -920,16 +928,16 @@ final class MetalVideoRenderer {
               let enc = cmd.makeComputeCommandEncoder() else {
             deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
         }
-        var params = RGBToYUVParams(srcWidth: UInt32(src.width), srcHeight: UInt32(src.height),
-                                    dstWidth: UInt32(outSize.w), dstHeight: UInt32(outSize.h),
-                                    dstRowBytes: UInt32(outSize.w * 2))
+        var params = RGBToV210Params(srcWidth: UInt32(src.width), srcHeight: UInt32(src.height),
+                                     dstWidth: UInt32(outSize.w), dstHeight: UInt32(outSize.h),
+                                     dstRowWords: UInt32(deckLinkRowBytes / 4))
         enc.setComputePipelineState(pipeline)
         enc.setTexture(src, index: 0)
         enc.setBuffer(back, offset: 0, index: 0)
-        enc.setBytes(&params, length: MemoryLayout<RGBToYUVParams>.stride, index: 1)
-        // One thread per OUTPUT pixel PAIR: grid (dstWidth/2) × dstHeight.
+        enc.setBytes(&params, length: MemoryLayout<RGBToV210Params>.stride, index: 1)
+        // One thread per OUTPUT 6-pixel GROUP: grid ceil(dstWidth/6) × dstHeight.
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
-        let tgs = MTLSize(width: ((outSize.w / 2) + 15) / 16, height: (outSize.h + 15) / 16, depth: 1)
+        let tgs = MTLSize(width: (((outSize.w + 5) / 6) + 15) / 16, height: (outSize.h + 15) / 16, depth: 1)
         enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
         enc.endEncoding()
 
@@ -946,7 +954,7 @@ final class MetalVideoRenderer {
     }
 
     /// PULL (DeckLink callback thread): memcpy the current FRONT staging buffer into the DeckLink
-    /// 2vuy frame pointer, respecting rowBytes. Returns false if no converted frame is ready yet or
+    /// v210 frame pointer, respecting rowBytes. Returns false if no converted frame is ready yet or
     /// dims don't match (caller fills neutral). The ONLY work on the callback thread — NO GPU wait.
     /// The lock is held across the memcpy so the front index can't swap mid-copy (the convert's
     /// swap + the push dispatch both take the lock), guaranteeing a tear-free complete frame.
@@ -954,7 +962,7 @@ final class MetalVideoRenderer {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
         guard deckLinkFrameReady, deckLinkStaging.count == 2,
               let outSize = deckLinkOutputSize, outSize.w == width, outSize.h == height else { return false }
-        let srcRowBytes = width * 2
+        let srcRowBytes = deckLinkRowBytes   // v210 stride (matches the frame's; equal for 48-multiple widths)
         let srcPtr = deckLinkStaging[deckLinkFrontIndex].contents()
         if rowBytes == srcRowBytes {
             memcpy(dst, srcPtr, srcRowBytes * height)
