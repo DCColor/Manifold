@@ -201,6 +201,8 @@ struct ContentView: View {
                 // correct; this keeps the kernel-side plot in agreement.)
                 renderer.cieUseUV = cieUseUV
                 renderer.start()
+                // DeckLink output sources real video from this renderer (⌃⌥O).
+                DeckLinkService.shared.renderer = renderer
             }
             // Apply persisted volume (mute is not persisted — starts unmuted).
             engine.setVolume(Float(Preferences.shared.playbackVolume))

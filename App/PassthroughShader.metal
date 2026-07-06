@@ -342,3 +342,71 @@ kernel void cieKernel(texture2d<float, access::read> offscreen [[texture(0)]],
         atomic_fetch_add_explicit(&hist[uint(row) * p.planeW + uint(col)], 1u, memory_order_relaxed);
     }
 }
+
+// MARK: - DeckLink output (RGB offscreen -> 2vuy, BT.709 LIMITED range)
+
+// Uniforms for rgbToYUV422. Mirrors RGBToYUVParams in MetalVideoRenderer.swift (field order + type
+// must match exactly). Dimensions are decoupled: the kernel reads the SOURCE offscreen (clamped)
+// and writes the OUTPUT-sized 2vuy buffer, so a native-res mismatch never reads out of bounds.
+struct RGBToYUVParams {
+    uint srcWidth;      // offscreen (source) width in pixels
+    uint srcHeight;     // offscreen (source) height in pixels
+    uint dstWidth;      // DeckLink output width (e.g. 3840)
+    uint dstHeight;     // DeckLink output height (e.g. 2160)
+    uint dstRowBytes;   // DeckLink 2vuy row stride (dstWidth * 2, e.g. 7680)
+};
+
+// Convert the display offscreen (rgb10a2 normalized RGB — transfer-ENCODED, SOURCE-primaries) to
+// 8-bit 2vuy (YUV 4:2:2), BT.709 LIMITED range, for DeckLink output. 709-correct ONLY for 709
+// sources (offscreen is source-primaries; 2020/P3 would need a different matrix — a D5 concern).
+//
+// 2vuy packs [Cb Y0 Cr Y1] per HORIZONTAL PIXEL PAIR, so one thread handles one output pair.
+// Per pixel: Yf = 0.2126 R + 0.7152 G + 0.0722 B (full-range luma, RGB in [0,1]); then
+//   Y'  = 16  + 219 * Yf                          (limited-range luma, 16..235)
+//   Cb  = 128 + 224 * (B - Yf) / 1.8556           (1.8556 = 2*(1-Kb); limited chroma 16..240)
+//   Cr  = 128 + 224 * (R - Yf) / 1.5748           (1.5748 = 2*(1-Kr))
+// The two pixels' chroma are AVERAGED for the 4:2:2 subsample. (These reproduce D2/D3's exact
+// 709-limited values, e.g. orange RGB(230,120,40) -> Y=134 Cb=82 Cr=180.)
+kernel void rgbToYUV422(texture2d<float, access::read> offscreen [[texture(0)]],
+                        device uchar *dst              [[buffer(0)]],
+                        constant RGBToYUVParams &p     [[buffer(1)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    const uint pairX = gid.x;   // output pixel-pair column
+    const uint y     = gid.y;
+    if (pairX >= (p.dstWidth / 2u) || y >= p.dstHeight) return;
+
+    const uint x0 = pairX * 2u;
+    const uint x1 = x0 + 1u;
+    // Resolution guard: clamp source reads so we never sample out of bounds if src != dst dims.
+    const uint sx0 = min(x0, p.srcWidth  - 1u);
+    const uint sx1 = min(x1, p.srcWidth  - 1u);
+    const uint sy  = min(y,  p.srcHeight - 1u);
+
+    const float3 c0 = offscreen.read(uint2(sx0, sy)).rgb;
+    const float3 c1 = offscreen.read(uint2(sx1, sy)).rgb;
+
+    const float yf0 = 0.2126 * c0.r + 0.7152 * c0.g + 0.0722 * c0.b;
+    const float yf1 = 0.2126 * c1.r + 0.7152 * c1.g + 0.0722 * c1.b;
+
+    const float Y0  = 16.0  + 219.0 * yf0;
+    const float Y1  = 16.0  + 219.0 * yf1;
+    const float Cb0 = 128.0 + 224.0 * (c0.b - yf0) / 1.8556;
+    const float Cb1 = 128.0 + 224.0 * (c1.b - yf1) / 1.8556;
+    const float Cr0 = 128.0 + 224.0 * (c0.r - yf0) / 1.5748;
+    const float Cr1 = 128.0 + 224.0 * (c1.r - yf1) / 1.5748;
+    // 4:2:2 subsample: one shared chroma sample per pair (averaged).
+    const float Cb = 0.5 * (Cb0 + Cb1);
+    const float Cr = 0.5 * (Cr0 + Cr1);
+
+    const uchar y0b = uchar(clamp(round(Y0), 16.0, 235.0));
+    const uchar y1b = uchar(clamp(round(Y1), 16.0, 235.0));
+    const uchar cbb = uchar(clamp(round(Cb), 16.0, 240.0));
+    const uchar crb = uchar(clamp(round(Cr), 16.0, 240.0));
+
+    // 2vuy byte order: [Cb, Y0, Cr, Y1].
+    const uint o = y * p.dstRowBytes + pairX * 4u;
+    dst[o + 0] = cbb;
+    dst[o + 1] = y0b;
+    dst[o + 2] = crb;
+    dst[o + 3] = y1b;
+}

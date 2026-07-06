@@ -62,6 +62,17 @@ private struct CIEParams {
     var vMax: Float            // v' plane upper bound
 }
 
+/// Matches the shader's RGBToYUVParams struct (memory layout). DeckLink RGB→2vuy convert — src
+/// (offscreen) and dst (DeckLink output) dimensions are decoupled so a native-res mismatch clamps
+/// rather than reads out of bounds.
+private struct RGBToYUVParams {
+    var srcWidth: UInt32
+    var srcHeight: UInt32
+    var dstWidth: UInt32
+    var dstHeight: UInt32
+    var dstRowBytes: UInt32
+}
+
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
@@ -138,6 +149,22 @@ final class MetalVideoRenderer {
     /// read on main in computeCIEGPU. The CIE scope's graticule mirrors this (kept in sync by
     /// the toggle) so scatter + overlay agree on the mode.
     var cieUseUV: Bool = true
+
+    // DeckLink output (D-real). A DEDICATED queue (like scopeCommandQueue) converts the readable
+    // offscreen (rgb10a2) → 8-bit 2vuy on each render completion (PUSH model), into a DOUBLE-
+    // BUFFERED pair of .shared staging buffers sized to the DeckLink OUTPUT frame. The DeckLink
+    // callback thread only memcpys the FRONT buffer — no GPU wait there. All fields guarded by
+    // deckLinkLock except the pipeline/queue (immutable after init).
+    private let deckLinkPipelineState: MTLComputePipelineState?
+    private let deckLinkCommandQueue: MTLCommandQueue
+    private let deckLinkLock = NSLock()
+    private var deckLinkStaging: [MTLBuffer] = []      // 2 buffers; [frontIndex] is complete, [1-front] is written
+    private var deckLinkFrontIndex = 0
+    private var deckLinkFrameReady = false             // front holds a complete converted frame
+    private var deckLinkConverting = false             // one-in-flight gate (push path)
+    private var deckLinkActive = false                 // only convert while DeckLink output is running
+    private var deckLinkOutputSize: (w: Int, h: Int)?  // DeckLink output frame dims (e.g. 3840x2160)
+    private var deckLinkResMismatchLogged = false      // one-time native-res-mismatch log
 
     // Offscreen render targets — the source of truth for display (1:1 blitted to the
     // drawable), frame export, and scopes. A RING (not a single texture): the render writes
@@ -244,6 +271,13 @@ final class MetalVideoRenderer {
         } else {
             self.ciePipelineState = nil
         }
+        // DeckLink RGB→2vuy convert pipeline (same default library). Non-fatal if it fails — DeckLink
+        // output just won't have real frames (the fill falls back to neutral black).
+        if let dfn = library.makeFunction(name: "rgbToYUV422") {
+            self.deckLinkPipelineState = try? device.makeComputePipelineState(function: dfn)
+        } else {
+            self.deckLinkPipelineState = nil
+        }
 
         self.device = device
         self.commandQueue = queue
@@ -252,6 +286,10 @@ final class MetalVideoRenderer {
         let scopeQueue = device.makeCommandQueue() ?? queue
         scopeQueue.label = "com.graviton.manifold.scope"
         self.scopeCommandQueue = scopeQueue
+        // Dedicated DeckLink convert queue (separate from render + scope queues, same rationale).
+        let dlQueue = device.makeCommandQueue() ?? queue
+        dlQueue.label = "com.graviton.manifold.decklink"
+        self.deckLinkCommandQueue = dlQueue
         self.pipelineState = pipeline
 
         metalLayer.device = device
@@ -607,6 +645,8 @@ final class MetalVideoRenderer {
             self.offscreenReadableIndex = writeIndex
             self.offscreenIndexLock.unlock()
             self.onFrameRendered?()
+            // PUSH: convert this freshly-completed frame → 2vuy for DeckLink (no-op if not active).
+            self.pushDeckLinkConvert()
         }
         cmdBuffer.commit()
         // Advance so the NEXT render targets a different ring texture (write-during-read
@@ -816,6 +856,114 @@ final class MetalVideoRenderer {
             pipeline: ciePipelineState, buffer: &cieHistogramBuffer, count: planeW * planeH,
             setParams: { $0.setBytes(&params, length: MemoryLayout<CIEParams>.stride, index: 1) },
             completion: { completion($0, planeW, planeH) })
+    }
+
+    // MARK: - DeckLink output (D-real: RGB offscreen → 2vuy, push-on-render, pull-latest)
+
+    /// Begin DeckLink output for a fixed output frame size. Allocates the double-buffered .shared
+    /// staging pair (dst 2vuy = w*h*2 bytes each) and arms the push convert. Called from the App
+    /// (DeckLinkService) when scheduled playback starts. Idempotent.
+    func beginDeckLinkOutput(width: Int, height: Int) {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        if deckLinkOutputSize?.w != width || deckLinkOutputSize?.h != height || deckLinkStaging.count != 2 {
+            let bytes = width * height * 2   // 2vuy = 2 bytes/pixel
+            deckLinkStaging = (0..<2).compactMap { _ in device.makeBuffer(length: bytes, options: .storageModeShared) }
+            deckLinkOutputSize = (width, height)
+        }
+        deckLinkFrontIndex = 0
+        deckLinkFrameReady = false
+        deckLinkConverting = false
+        deckLinkResMismatchLogged = false
+        deckLinkActive = (deckLinkStaging.count == 2)
+    }
+
+    /// Stop DeckLink output: disarm the convert and release the staging buffers.
+    func stopDeckLinkOutput() {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        deckLinkActive = false
+        deckLinkFrameReady = false
+        deckLinkStaging = []
+        deckLinkOutputSize = nil
+    }
+
+    /// PUSH: convert the just-completed offscreen → 2vuy into the BACK staging buffer, then (on GPU
+    /// completion) swap it to FRONT. Driven from the render completion handler. One-in-flight gated
+    /// so converts never pile up; no-op when DeckLink output isn't active. Native-res guard: if the
+    /// offscreen dims ≠ output dims, skip (mark not-ready) + log once — scaling is a later stage.
+    private func pushDeckLinkConvert() {
+        deckLinkLock.lock()
+        guard deckLinkActive, !deckLinkConverting, deckLinkStaging.count == 2,
+              let outSize = deckLinkOutputSize else { deckLinkLock.unlock(); return }
+        let backIndex = 1 - deckLinkFrontIndex
+        let back = deckLinkStaging[backIndex]
+        deckLinkConverting = true
+        deckLinkLock.unlock()
+
+        guard let pipeline = deckLinkPipelineState, let src = offscreenTexture else {
+            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+        }
+        // Native-res-only guard: never convert a mismatched size (would misalign / need scaling).
+        if src.width != outSize.w || src.height != outSize.h {
+            deckLinkLock.lock()
+            deckLinkFrameReady = false
+            deckLinkConverting = false
+            let alreadyLogged = deckLinkResMismatchLogged
+            deckLinkResMismatchLogged = true
+            deckLinkLock.unlock()
+            if !alreadyLogged {
+                print("DeckLink D-real: source \(src.width)x\(src.height) != output \(outSize.w)x\(outSize.h) — native-res only, holding neutral (scaling is a later stage)")
+            }
+            return
+        }
+
+        guard let cmd = deckLinkCommandQueue.makeCommandBuffer(),
+              let enc = cmd.makeComputeCommandEncoder() else {
+            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+        }
+        var params = RGBToYUVParams(srcWidth: UInt32(src.width), srcHeight: UInt32(src.height),
+                                    dstWidth: UInt32(outSize.w), dstHeight: UInt32(outSize.h),
+                                    dstRowBytes: UInt32(outSize.w * 2))
+        enc.setComputePipelineState(pipeline)
+        enc.setTexture(src, index: 0)
+        enc.setBuffer(back, offset: 0, index: 0)
+        enc.setBytes(&params, length: MemoryLayout<RGBToYUVParams>.stride, index: 1)
+        // One thread per OUTPUT pixel PAIR: grid (dstWidth/2) × dstHeight.
+        let tpg = MTLSize(width: 16, height: 16, depth: 1)
+        let tgs = MTLSize(width: ((outSize.w / 2) + 15) / 16, height: (outSize.h + 15) / 16, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
+        enc.endEncoding()
+
+        cmd.addCompletedHandler { [weak self] _ in
+            guard let self else { return }
+            self.deckLinkLock.lock()
+            // The back buffer is now a COMPLETE frame → make it the front; clear the gate.
+            self.deckLinkFrontIndex = backIndex
+            self.deckLinkFrameReady = true
+            self.deckLinkConverting = false
+            self.deckLinkLock.unlock()
+        }
+        cmd.commit()
+    }
+
+    /// PULL (DeckLink callback thread): memcpy the current FRONT staging buffer into the DeckLink
+    /// 2vuy frame pointer, respecting rowBytes. Returns false if no converted frame is ready yet or
+    /// dims don't match (caller fills neutral). The ONLY work on the callback thread — NO GPU wait.
+    /// The lock is held across the memcpy so the front index can't swap mid-copy (the convert's
+    /// swap + the push dispatch both take the lock), guaranteeing a tear-free complete frame.
+    func copyLatestDeckLinkFrame(into dst: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int) -> Bool {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        guard deckLinkFrameReady, deckLinkStaging.count == 2,
+              let outSize = deckLinkOutputSize, outSize.w == width, outSize.h == height else { return false }
+        let srcRowBytes = width * 2
+        let srcPtr = deckLinkStaging[deckLinkFrontIndex].contents()
+        if rowBytes == srcRowBytes {
+            memcpy(dst, srcPtr, srcRowBytes * height)
+        } else {
+            for y in 0..<height {
+                memcpy(dst.advanced(by: y * rowBytes), srcPtr.advanced(by: y * srcRowBytes), srcRowBytes)
+            }
+        }
+        return true
     }
 
     /// Unpack an rgb10a2Unorm buffer to 16-bit RGBA (alpha skipped/opaque). Each

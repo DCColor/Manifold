@@ -20,6 +20,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSArray<NSString *> *log;
 @end
 
+/// Fill callback for D-real real-video output: fill the DeckLink 2vuy frame at `buffer` (row
+/// stride `rowBytes`, `width`×`height`) for output frame index `frameIndex`. Returns YES if it
+/// wrote real converted video, NO if it filled a neutral fallback (advisory). Runs on the SDK
+/// callback thread — must be cheap (a memcpy), never blocking.
+typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height);
+
 /// Objective-C++ bridge to the Blackmagic DeckLink SDK. The .mm side does all the C++/COM work
 /// (reference-counted interfaces, Release() on each) and hands back plain Obj-C value objects so
 /// Swift never sees a C++ type.
@@ -41,9 +47,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// D3 "scheduled playback": start CONTINUOUS free-running output on device 0 at 2160p23.98 /
 /// 8-bit YUV, driven by the frame-completion callback against the card's hardware clock. Frames
 /// are SYNTHETIC (a per-frame hue walk) via a pluggable fill source; the scheduling loop is
-/// source-agnostic (the Metal path slots in later without touching it). Enforces the Desktop Video
-/// >= 14.3 floor. Runs until -stopScheduledPlayback. Safe to call repeatedly. Returns a step log.
+/// source-agnostic. Enforces the Desktop Video >= 14.3 floor. Runs until -stopScheduledPlayback.
+/// Safe to call repeatedly. Returns a step log. (Debug/fallback path — see the WithFill: variant.)
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0;
+
+/// D-real: same scheduled playback, but each frame is filled by the supplied block instead of the
+/// synthetic hue walk. The block receives the DeckLink 2vuy frame pointer (+ dims/rowBytes) and
+/// must fill it (returning YES if it wrote real data, NO if it fell back to neutral — advisory).
+/// Called on the SDK's callback thread, so the block MUST be cheap (a memcpy) — no blocking work.
+- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0WithFill:(DeckLinkFillBlock)fill;
 
 /// Stop scheduled playback cleanly (StopScheduledPlayback → unset callback → DisableVideoOutput →
 /// release frame pool + callback). Safe to call when not playing; safe against an in-flight callback.

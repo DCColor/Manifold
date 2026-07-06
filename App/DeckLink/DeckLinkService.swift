@@ -15,10 +15,19 @@ final class DeckLinkService {
 
     static let shared = DeckLinkService()
 
-    /// One bridge instance holds the D2 output state (enabled output + displayed frame) across the
-    /// start/stop calls. Serial queue so start/stop can't race and never block the UI thread.
+    /// One bridge instance holds the output state across start/stop calls. Serial queue so
+    /// start/stop can't race and never block the UI thread.
     private let bridge = DeckLinkBridge()
     private let queue = DispatchQueue(label: "com.graviton.manifold.decklink")
+
+    /// The renderer that produces the real video frames (set by the App at startup). Weak — the
+    /// renderer owns its lifecycle; the fill block sources 2vuy frames from it.
+    weak var renderer: MetalVideoRenderer?
+
+    /// D-real output frame size (matches the D3 fixed output mode, 2160p23.98). Real device/mode
+    /// selection is a later stage; hardcoded here to match the bridge's fixed 3840x2160 output.
+    private static let outputWidth = 3840
+    private static let outputHeight = 2160
 
     /// Enumerate output-capable DeckLink devices. Synchronous SDK walk; returns [] if the driver
     /// isn't reachable or no card is present.
@@ -28,22 +37,53 @@ final class DeckLinkService {
         }
     }
 
-    /// D3 "scheduled playback": start CONTINUOUS free-running synthetic output on device 0 (a
-    /// per-frame hue walk) driven by the card's clock via the completion callback. Logs each setup
-    /// step; the callback thread then logs completion-result summaries until stopped.
+    /// D-real: start CONTINUOUS scheduled playback of REAL video — each output frame is filled from
+    /// the renderer's latest converted 2vuy staging buffer (push-on-render / pull-latest). Requires
+    /// a file loaded + rendering (offscreen populated); until the first frame is ready, the fill
+    /// falls back to neutral legal black. Logs each setup step + the callback completion summaries.
     func startScheduledOutput() {
         queue.async {
-            let result = self.bridge.startScheduledPlaybackOnDevice0()
-            for line in result.log { print("DeckLink D3: \(line)") }
-            print("DeckLink D3: \(result.success ? "SUCCESS — free-running scheduled playback on device 0" : "FAILED")")
+            // Arm the renderer's push convert (allocate 2vuy staging sized to the output frame).
+            self.renderer?.beginDeckLinkOutput(width: Self.outputWidth, height: Self.outputHeight)
+
+            // The fill block runs on the SDK callback thread → cheap: a memcpy from the renderer's
+            // front staging buffer, or a neutral fallback if no converted frame is ready yet.
+            let fill: DeckLinkFillBlock = { [weak self] _, buffer, rowBytes, width, height in
+                if let r = self?.renderer,
+                   r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
+                                             rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+                    return true
+                }
+                Self.fillNeutral2vuy(buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
+                return false
+            }
+
+            let result = self.bridge.startScheduledPlaybackOnDevice0(fill: fill)
+            for line in result.log { print("DeckLink D-real: \(line)") }
+            print("DeckLink D-real: \(result.success ? "SUCCESS — real-video scheduled playback on device 0" : "FAILED")")
         }
     }
 
-    /// Stop D3 scheduled playback cleanly.
+    /// Stop scheduled playback cleanly + disarm the renderer's push convert.
     func stopScheduledOutput() {
         queue.async {
             self.bridge.stopScheduledPlayback()
-            print("DeckLink D3: output stopped")
+            self.renderer?.stopDeckLinkOutput()
+            print("DeckLink D-real: output stopped")
+        }
+    }
+
+    /// Neutral legal-black 2vuy fill ([Cb=128, Y=16, Cr=128, Y=16] per pair) — shown until the first
+    /// real converted frame is ready, so the card never gets garbage.
+    private static func fillNeutral2vuy(_ buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int) {
+        for y in 0..<height {
+            let row = buffer.advanced(by: y * rowBytes)
+            var x = 0
+            while x < width {
+                let o = (x / 2) * 4
+                row[o + 0] = 128; row[o + 1] = 16; row[o + 2] = 128; row[o + 3] = 16
+                x += 2
+            }
         }
     }
 

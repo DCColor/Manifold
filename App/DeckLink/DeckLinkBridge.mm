@@ -280,6 +280,12 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     return (__bridge_transfer NSString *)s;
 }
 
+// Private: the shared start sequence parameterized by a C++ FrameFillFn (C++ type in the selector,
+// so it can only live in the .mm). Public entry points wrap their fill and forward here.
+@interface DeckLinkBridge ()
+- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill;
+@end
+
 @implementation DeckLinkBridge {
     // Held across start/stop so the displayed frame stays alive on the output (C++ ivars are fine
     // in the .mm — objcpp). Retained by -startTestFrameOutputOnDevice0, released by -stopTestOutput.
@@ -503,7 +509,9 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 
 #pragma mark - D3: scheduled (continuous free-running) playback
 
-- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0 {
+// Shared start sequence — parameterized by the pluggable fill (C++ FrameFillFn). Private (C++ type
+// in the selector, so .mm-only). The public entry points wrap their fill and call this.
+- (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill {
     NSMutableArray<NSString *> *log = [NSMutableArray array];
 
     // Re-fire cleanly.
@@ -582,8 +590,7 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     // Build the player (SEAM: fill source is pluggable — synthetic hue-walk for D3). The player
     // AddRefs the output; drop our local ref.
     DeckLinkScheduledPlayer *player =
-        new DeckLinkScheduledPlayer(output, width, height, rowBytes, frameDuration, timeScale,
-                                    &SyntheticHueWalkFill);
+        new DeckLinkScheduledPlayer(output, width, height, rowBytes, frameDuration, timeScale, fill);
     output->Release();
 
     if (!player->doesSupportMode()) {
@@ -627,6 +634,23 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 
     _player = player;   // held; callback keeps the pipeline full until -stopScheduledPlayback
     return [[DeckLinkOutputResult alloc] initWithSuccess:YES log:log];
+}
+
+// Public: synthetic hue-walk (D3 — debug/fallback).
+- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0 {
+    return [self startScheduledPlaybackWithFillFn:FrameFillFn(&SyntheticHueWalkFill)];
+}
+
+// Public: REAL video (D-real). Wrap the Obj-C fill block into the C++ FrameFillFn the scheduler
+// expects; the std::function retains the (heap-copied) block for the player's lifetime. The block
+// itself sources pixels (renderer.copyLatest…) and handles the neutral fallback — the scheduler
+// stays source-agnostic. Return value is advisory; the block always fills the buffer.
+- (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0WithFill:(DeckLinkFillBlock)fill {
+    DeckLinkFillBlock block = [fill copy];
+    FrameFillFn fn = [block](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height) {
+        (void)block(frameIndex, buffer, rowBytes, width, height);
+    };
+    return [self startScheduledPlaybackWithFillFn:fn];
 }
 
 - (void)stopScheduledPlayback {
