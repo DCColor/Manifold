@@ -93,6 +93,8 @@ struct WaveformParams {
     uint scopeW;     // horizontal column buckets (histogram width)
     uint bins;       // luma bins (histogram height) — 256 for the CPU-matching prototype
     uint rowStride;  // process every rowStride-th source row (match CPU rowStride=2)
+    float kr;        // YCbCr luma coeff for R (from source colorMatrixCode) — 2020 weights luma differently
+    float kb;        // YCbCr luma coeff for B
 };
 
 // Luma waveform histogram, computed directly on the GPU-resident offscreen texture
@@ -115,8 +117,11 @@ kernel void waveformKernel(texture2d<float, access::read> offscreen [[texture(0)
     if ((gid.y % p.rowStride) != 0u) return;
 
     float4 c = offscreen.read(gid);
-    // Rec.709 luma on the normalized display RGB (same coeffs as the CPU path).
-    float luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    // Luma on the normalized display RGB, weighted by the SOURCE YCbCr matrix (Kr/Kb chosen
+    // host-side from colorMatrixCode) — a 2020 source weights luma differently than 709. Kg
+    // derives from Kr/Kb, so 709 / 2020 / 601 all fall out of these two coefficients.
+    float kg = 1.0 - p.kr - p.kb;
+    float luma = p.kr * c.r + kg * c.g + p.kb * c.b;
     // Round-to-nearest into [0, bins-1] — mirrors the CPU's Int(luma*255 + 0.5).
     int bin = int(luma * float(p.bins - 1u) + 0.5);
     bin = clamp(bin, 0, int(p.bins) - 1);
@@ -177,10 +182,14 @@ struct VectorscopeParams {
     uint plane;        // square chroma-plane side (histogram is plane×plane)
     uint rowStride;    // process every rowStride-th source row (full-res: 1)
     float chromaScale; // chromaScaleFrac — chroma units → fraction of the plane
+    float kr;          // YCbCr luma coeff for R (from source colorMatrixCode) — drives WHERE chroma lands
+    float kb;          // YCbCr luma coeff for B
 };
 
 // Vectorscope: a 2-D chroma-plane scatter (Cb horizontal, Cr vertical) on the offscreen.
-// Per pixel: Rec.709 luma, then Cb=(B-Y)/1.8556, Cr=(R-Y)/1.5748 in the 0–255 domain
+// Per pixel: SOURCE-matrix luma (Kr/Kb from colorMatrixCode, host-side), then
+// Cb=(B-Y)/(2(1-Kb)), Cr=(R-Y)/(2(1-Kr)) in the 0–255 domain (709: 1.8556/1.5748, 2020:
+// 1.8814/1.4746) — so 2020 chroma lands where a 2020 scope expects, not the 709 position.
 // (channels ×255 to match the CPU path's 8-bit chroma magnitude), mapped to plane pixels
 // with center = plane/2 and s = chromaScale*plane. Cr is flipped (up) for display, exactly
 // like the CPU path. Out-of-plane chroma is skipped (matches the CPU's bounds guard).
@@ -195,9 +204,10 @@ kernel void vectorscopeKernel(texture2d<float, access::read> offscreen [[texture
     float4 c = offscreen.read(gid);
     // 0–255 domain to match the CPU chroma magnitude (identical formulas/coeffs).
     float r = c.r * 255.0, g = c.g * 255.0, b = c.b * 255.0;
-    float y  = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    float cb = (b - y) / 1.8556;
-    float cr = (r - y) / 1.5748;
+    float kg = 1.0 - p.kr - p.kb;
+    float y  = p.kr * r + kg * g + p.kb * b;
+    float cb = (b - y) / (2.0 * (1.0 - p.kb));
+    float cr = (r - y) / (2.0 * (1.0 - p.kr));
 
     float center = float(p.plane) * 0.5;
     float s = p.chromaScale * float(p.plane);       // chroma units -> plane pixels

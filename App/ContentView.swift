@@ -106,6 +106,12 @@ struct ContentView: View {
     @AppStorage("manifold.cie.show709")  private var cieShow709 = true
     @AppStorage("manifold.cie.showP3")   private var cieShowP3 = true
     @AppStorage("manifold.cie.show2020") private var cieShow2020 = true
+    // Persisted vectorscope graticule reference (written by ⌃⌥G, read here + by VectorscopeScopeView
+    // via the same key). Overlay-only — no kernel push, so a toggle just redraws the boxes.
+    @AppStorage("manifold.vectorscope.graticule") private var vectorscopeGraticule: VectorscopeGraticule = .fixed709
+    // Persisted vectorscope target-box amplitude (75%/100%/both), cycled by ⌃⌥B, read here + by
+    // VectorscopeScopeView via the same key. Overlay-only — a change just redraws the boxes.
+    @AppStorage("manifold.vectorscope.boxAmplitude") private var vectorscopeBoxAmplitude: VectorscopeBoxAmplitude = .percent75
     // The four scope models (one each, rendered wherever its kind is selected — duplicates share
     // the single model). A model samples/computes only while its kind is in the active set.
     @StateObject private var waveformModel = WaveformScopeModel()
@@ -248,6 +254,11 @@ struct ContentView: View {
             }
             // Feed the CIE header the detected source space (honest about untagged → 709 assumed).
             cieModel.spaceReadout = meta.map(Self.cieSpaceReadout) ?? ""
+            // Feed the matrix-aware scopes their source CICP codes (header labels + vectorscope
+            // graticule). The MATH reads the same codes off the renderer, so labels can't disagree.
+            waveformModel.sourceMatrixCode = meta?.colorMatrixCode
+            vectorscopeModel.sourceMatrixCode = meta?.colorMatrixCode
+            vectorscopeModel.sourcePrimariesCode = meta?.colorPrimariesCode
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -433,12 +444,23 @@ struct ContentView: View {
     private func updateScopeSampling() {
         let active = showTray ? activeKinds : []
 
-        // Waveform / parade / vectorscope: plain start/stop.
-        if active.contains(.waveform) { waveformModel.renderer = metalRenderer; waveformModel.start() }
+        // Waveform / parade / vectorscope: plain start/stop. The matrix-aware scopes also (re)seed
+        // their source CICP codes on (re)start, so a scope opened after the source loaded shows the
+        // right header/graticule (mirrors the CIE detected-space refresh below).
+        if active.contains(.waveform) {
+            waveformModel.renderer = metalRenderer
+            waveformModel.sourceMatrixCode = engine.metadata?.colorMatrixCode
+            waveformModel.start()
+        }
         else { waveformModel.stop() }
         if active.contains(.parade) { paradeModel.renderer = metalRenderer; paradeModel.start() }
         else { paradeModel.stop() }
-        if active.contains(.vectorscope) { vectorscopeModel.renderer = metalRenderer; vectorscopeModel.start() }
+        if active.contains(.vectorscope) {
+            vectorscopeModel.renderer = metalRenderer
+            vectorscopeModel.sourceMatrixCode = engine.metadata?.colorMatrixCode
+            vectorscopeModel.sourcePrimariesCode = engine.metadata?.colorPrimariesCode
+            vectorscopeModel.start()
+        }
         else { vectorscopeModel.stop() }
         // CIE also refreshes its detected-space header on (re)start.
         if active.contains(.cie) {
@@ -466,6 +488,8 @@ struct ContentView: View {
     ///   ⌃⌥T  scopes tray open/close.
     ///   ⌃⌥X  CIE u'v' ↔ xy — flips renderer (kernel) + model (graticule/header) together, then
     ///        setNeedsRefresh re-plots the current frame (covers paused).
+    ///   ⌃⌥G  Vectorscope graticule FIXED 709 ↔ SOURCE-PRIMARIES (overlay-only → redraws immediately).
+    ///   ⌃⌥B  Vectorscope target boxes cycle 75% → 100% → both (overlay-only → redraws immediately).
     ///   ⌃⌥1/2/3  CIE per-triangle show/hide (overlay-only → SwiftUI re-renders immediately).
     @ViewBuilder private var scopeShortcuts: some View {
         Group {
@@ -477,6 +501,22 @@ struct ContentView: View {
                 CIEScopeModel.applyMode(useUV: !cieUseUV, storage: $cieUseUV, renderer: metalRenderer)
             }
             .keyboardShortcut("x", modifiers: [.control, .option])
+            // ⌃⌥G  Vectorscope graticule: FIXED 709 ↔ SOURCE-PRIMARIES. Overlay-only — write the
+            // stored value; VectorscopeScopeView's @AppStorage on the same key redraws immediately
+            // (the trace math already tracks the source matrix, so no re-plot is needed).
+            Button("") {
+                vectorscopeGraticule = (vectorscopeGraticule == .fixed709) ? .sourcePrimaries : .fixed709
+            }
+            .keyboardShortcut("g", modifiers: [.control, .option])
+            // ⌃⌥B  Vectorscope target boxes: cycle 75% → 100% → both. Overlay-only (redraws the boxes).
+            Button("") {
+                switch vectorscopeBoxAmplitude {
+                case .percent75:  vectorscopeBoxAmplitude = .percent100
+                case .percent100: vectorscopeBoxAmplitude = .both
+                case .both:       vectorscopeBoxAmplitude = .percent75
+                }
+            }
+            .keyboardShortcut("b", modifiers: [.control, .option])
             // Triangle visibility is overlay-only — write the stored flag; CIEScopeView's @AppStorage
             // on the same key redraws immediately (no re-plot needed).
             Button("") { cieShow709.toggle() }

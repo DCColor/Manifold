@@ -39,6 +39,32 @@ func scopeBucketWidth(_ width: CGFloat, min lo: Int, max hi: Int) -> Int {
     return Swift.max(lo, Swift.min(hi, snapped))
 }
 
+// MARK: - Source-colorspace header labels (shared by the matrix-aware scopes)
+
+/// Short YCbCr-matrix label for scope headers, in the canonical "Rec." form (period + space) that the
+/// CIE scope + inspector already render (MediaInspector.matrixName / primariesName) — so every surface
+/// reads character-identically. Driven by the SAME colorMatrixCode that selects the luma/chroma Kr/Kb
+/// in the kernels (via ycbcrKrKb), so the header and the math can never disagree. nil / 2 (unspecified)
+/// / unknown → "Rec. 709" (the math's default; the scope always plots with a concrete matrix).
+func ycbcrMatrixLabel(_ code: Int?) -> String {
+    switch code {
+    case 9: return "Rec. 2020"
+    case 6: return "Rec. 601"
+    default: return "Rec. 709"   // also 1 / nil / 2 / unknown
+    }
+}
+
+/// Short gamut label for the SOURCE-PRIMARIES vectorscope graticule — driven by colorPrimariesCode
+/// (the gamut whose primaries place the boxes), INDEPENDENT of the matrix. Canonical "Rec." form to
+/// match the other surfaces; P3 has no "Rec." form and stays "P3". nil/2/unknown → "Rec. 709".
+func gamutPrimariesLabel(_ code: Int?) -> String {
+    switch code {
+    case 9:      return "Rec. 2020"
+    case 11, 12: return "P3"          // DCI-P3 / Display P3 — no "Rec." form
+    default:     return "Rec. 709"    // Rec.709 / sRGB (also 1 / nil / 2 / unknown)
+    }
+}
+
 // MARK: - Trace brightness mapping (shared by all scopes)
 
 // baseGain is the gain at intensity 1.0 — i.e. perScope=global=1.0 reproduces the
@@ -151,6 +177,11 @@ final class WaveformScopeModel: ObservableObject {
 
     /// Set by the owner when the scope is shown. Weak — the renderer outlives nothing here.
     weak var renderer: MetalVideoRenderer?
+
+    /// Source YCbCr matrix code (CICP), for the header label ONLY — the luma MATH reads the same
+    /// code off the renderer (computeWaveformGPU), so label and weighting stay in lock-step. Set
+    /// from ContentView on metadata change, mirroring cieModel.spaceReadout. nil/2/unknown → 709.
+    @Published var sourceMatrixCode: Int?
 
     // Column buckets (histogram width) — tracks the rendered slot width, clamped, so a wider
     // scope computes more horizontal detail instead of upscaling a fixed buffer.
@@ -314,8 +345,10 @@ struct WaveformScopeView: View {
             VStack(spacing: 0) {
                 // Header strip: name (left) + intensity slider (right). Own band.
                 HStack(spacing: 4) {
+                    // Luma is weighted by the SOURCE matrix (colorMatrixCode) — surface it so a
+                    // 2020-weighted trace can't silently read as 709. Same code that drives the math.
                     ScopeSlotHeader(name: "WAVEFORM",
-                                    suffix: " · luma (\(scopeScale.headerTag))",
+                                    suffix: " · luma \(ycbcrMatrixLabel(model.sourceMatrixCode)) (\(scopeScale.headerTag))",
                                     selection: slotSelection)
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")

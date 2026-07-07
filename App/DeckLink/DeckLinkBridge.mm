@@ -638,7 +638,7 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
         new DeckLinkScheduledPlayer(output, width, height, rowBytes, frameDuration, timeScale, fill, colorspace);
     output->Release();
     [log addObject:[NSString stringWithFormat:@"tag: output colorspace = %@",
-                    (colorspace == bmdColorspaceRec2020 ? @"Rec.2020" : @"Rec.709")]];
+                    (colorspace == bmdColorspaceRec2020 ? @"Rec. 2020" : @"Rec. 709")]];
 
     if (!player->doesSupportMode()) {
         [log addObject:@"mode: 2160p23.98 / v210 10-bit YUV NOT supported — aborting"];

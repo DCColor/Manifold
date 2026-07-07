@@ -32,7 +32,7 @@ final class DeckLinkService: ObservableObject {
     /// Plain-speak colorspace label for the current source (DISPLAY ONLY — the actual output tag is
     /// unchanged: D5 tags both 2020 and P3 as Rec.2020). Derived from the source colorPrimariesCode,
     /// so it can distinguish genuine 2020 from P3-in-2020 (which the collapsed tag cannot). nil → 709.
-    @Published private(set) var colorspaceLabel = "Rec 709"
+    @Published private(set) var colorspaceLabel = "Rec. 709"
 
     /// The full Signal line for the output menu: fixed format + the current-source colorspace label.
     var signalLine: String { "\(Self.statusLine) · \(colorspaceLabel)" }
@@ -41,9 +41,9 @@ final class DeckLinkService: ObservableObject {
     /// inside the Rec.2020 container (what's actually on the wire is Rec.2020, per D5's tag).
     static func colorspaceLabel(forPrimaries code: Int?) -> String {
         switch code {
-        case 9:       return "Rec 2020"              // genuine Rec.2020
-        case 11, 12:  return "Rec 2020 (P3 limited)" // DCI-P3 / P3-D65 → P3-in-2020
-        default:      return "Rec 709"               // 1 / nil / 2 (unspecified) / unknown
+        case 9:       return "Rec. 2020"              // genuine Rec.2020
+        case 11, 12:  return "Rec. 2020 (P3 limited)" // DCI-P3 / P3-D65 → P3-in-2020
+        default:      return "Rec. 709"               // 1 / nil / 2 (unspecified) / unknown
         }
     }
 

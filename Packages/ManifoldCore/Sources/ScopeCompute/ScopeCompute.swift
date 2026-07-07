@@ -131,25 +131,31 @@ public enum ScopeTrace {
         return pixels
     }
 
-    /// Vectorscope. Square `plane × plane` 2-D chroma histogram (layout `[py*plane + px]`) →
-    /// RGBA buffer (NO downsample — it isn't a value histogram). Per-frame max + LUT fill.
+    /// Dedicated vectorscope trace multiplier, applied on top of the caller's intensity-derived gain
+    /// (baseGain × perScope × global). The vectorscope is a SPARSE chroma scatter — a bars frame's
+    /// saturated primaries are lone outer bins dwarfed by the central neutral pile — so it uses the
+    /// same log-compressed + point-dilated build as CIE (see sparseScatterPixels), NOT the dense
+    /// value-scope curve. This factor lifts genuinely-sparse content (few-pixel saturated patches in
+    /// real footage) to clearly visible while keeping the central pile a small dot, not a white blob;
+    /// the intensity slider still scales on top. Tuning lever: raise for more lift, lower if the
+    /// center over-blooms. (CIE uses a flat 5.0; the vectorscope's bins are denser, so ~default·2 ≈
+    /// 3.2 reads well — a touch below CIE.)
+    public static let vectorscopeSparseGain: Float = 2.0
+    /// Point-dilation radius (1 → a 3×3 soft dot), so a single outer primary bin blooms into a
+    /// visible mark instead of a lone pixel. Vectorscope-only; CIE keeps its own radius (1) via its
+    /// own call. (Tried radius 2 / 5×5 for smoother lines — no meaningful continuity gain on sparse
+    /// bars content, so kept the tighter 3×3 dot.)
+    static let vectorscopeDilation: Int = 1
+
+    /// Vectorscope. Square `plane × plane` 2-D chroma histogram (layout `[py*plane + px]`) → RGBA
+    /// buffer (NO downsample — it isn't a value histogram). Routed through the SHARED sparse-scatter
+    /// build (log-compressed brightness + point-dilation), the SAME treatment CIE uses, so sparse
+    /// saturated primaries render visibly instead of being crushed by the dense value-scope curve.
     public static func vectorscopePixels(histogram accum: [UInt32], plane: Int, gain: Float,
                                          colorR: Float, colorG: Float, colorB: Float) -> [UInt8] {
-        let count = plane * plane
-        var maxCount: UInt32 = 1
-        for c in accum where c > maxCount { maxCount = c }
-        let lut = brightnessLUT(maxCount: maxCount, gain: gain)
-
-        var pixels = [UInt8](repeating: 0, count: count * 4)
-        for i in 0..<count {
-            let fv = Float(lut[Int(accum[i])])
-            let o = i * 4
-            pixels[o + 0] = UInt8(min(255, fv * colorR))
-            pixels[o + 1] = UInt8(min(255, fv * colorG))
-            pixels[o + 2] = UInt8(min(255, fv * colorB))
-            pixels[o + 3] = 255
-        }
-        return pixels
+        return sparseScatterPixels(histogram: accum, planeW: plane, planeH: plane,
+                                   gain: gain * vectorscopeSparseGain, dilation: vectorscopeDilation,
+                                   colorR: colorR, colorG: colorG, colorB: colorB)
     }
 
     /// CIE chromaticity scatter. planeW×planeH 2-D histogram (layout `[row*planeW + col]`, the
@@ -169,6 +175,20 @@ public enum ScopeTrace {
     public static func ciePixels(histogram accum: [UInt32], planeW: Int, planeH: Int,
                                  gain: Float, dilation: Int,
                                  colorR: Float, colorG: Float, colorB: Float) -> [UInt8] {
+        // CIE routes through the shared sparse-scatter build (its original body, now reusable).
+        return sparseScatterPixels(histogram: accum, planeW: planeW, planeH: planeH,
+                                   gain: gain, dilation: dilation,
+                                   colorR: colorR, colorG: colorG, colorB: colorB)
+    }
+
+    /// Shared sparse-scatter trace-build for the 2-D chromaticity/chroma scopes (CIE + vectorscope).
+    /// LOG-compressed brightness (log1p(count)/log1p(max)) so a lone outer bin isn't crushed by a
+    /// dominant central pile the way a linear count/maxCount map is, times `gain`, splatted through a
+    /// (2·`dilation`+1)² soft dot (MAX-blend) so single bins bloom into visible marks. Layout
+    /// `[row*planeW + col]`; the vertical axis is already oriented by the kernel. NO downsample.
+    static func sparseScatterPixels(histogram accum: [UInt32], planeW: Int, planeH: Int,
+                                    gain: Float, dilation: Int,
+                                    colorR: Float, colorG: Float, colorB: Float) -> [UInt8] {
         let count = planeW * planeH
         guard accum.count >= count, count > 0 else { return [UInt8](repeating: 0, count: max(0, count) * 4) }
 

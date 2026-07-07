@@ -23,6 +23,8 @@ private struct WaveformParams {
     var scopeW: UInt32     // histogram column buckets
     var bins: UInt32       // luma bins (histogram rows)
     var rowStride: UInt32  // process every rowStride-th source row
+    var kr: Float          // YCbCr luma coeff for R (from source colorMatrixCode)
+    var kb: Float          // YCbCr luma coeff for B
 }
 
 /// Matches the shader's ParadeParams struct (memory layout). GPU RGB parade. Same layout
@@ -43,6 +45,8 @@ private struct VectorscopeParams {
     var plane: UInt32       // square chroma-plane side
     var rowStride: UInt32   // process every rowStride-th source row
     var chromaScale: Float  // chromaScaleFrac — chroma units → fraction of the plane
+    var kr: Float           // YCbCr luma coeff for R (from source colorMatrixCode)
+    var kb: Float           // YCbCr luma coeff for B
 }
 
 /// Matches the shader's CIEParams struct (memory layout). GPU CIE chromaticity scope — a
@@ -812,9 +816,13 @@ final class MetalVideoRenderer {
         completion: @escaping (_ hist: [UInt32], _ scopeW: Int, _ bins: Int) -> Void
     ) -> Bool {
         guard let src = offscreenTexture else { return false }
+        // Luma weights from the source YCbCr matrix ONLY (never inferred from primaries) — read
+        // live so a mid-session source change re-weights on the next sample. nil/2/unknown → 709.
+        let m = ycbcrKrKb(forMatrixCode: sourceMatrixCode)
         var params = WaveformParams(width: UInt32(src.width), height: UInt32(src.height),
                                     scopeW: UInt32(scopeW), bins: UInt32(bins),
-                                    rowStride: UInt32(max(1, rowStride)))
+                                    rowStride: UInt32(max(1, rowStride)),
+                                    kr: m.kr, kb: m.kb)
         return dispatchScopeKernel(
             pipeline: waveformPipelineState, buffer: &histogramBuffer, count: scopeW * bins,
             setParams: { $0.setBytes(&params, length: MemoryLayout<WaveformParams>.stride, index: 1) },
@@ -848,9 +856,12 @@ final class MetalVideoRenderer {
         completion: @escaping (_ hist: [UInt32], _ plane: Int) -> Void
     ) -> Bool {
         guard let src = offscreenTexture else { return false }
+        // Chroma matrix (Kr/Kb) from the source colorMatrixCode ONLY (never from primaries — that
+        // drives the graticule, not the math). Read live; nil/2/unknown → 709.
+        let m = ycbcrKrKb(forMatrixCode: sourceMatrixCode)
         var params = VectorscopeParams(width: UInt32(src.width), height: UInt32(src.height),
                                        plane: UInt32(plane), rowStride: UInt32(max(1, rowStride)),
-                                       chromaScale: chromaScale)
+                                       chromaScale: chromaScale, kr: m.kr, kb: m.kb)
         return dispatchScopeKernel(
             pipeline: vectorscopePipelineState, buffer: &vectorscopeHistogramBuffer, count: plane * plane,
             setParams: { $0.setBytes(&params, length: MemoryLayout<VectorscopeParams>.stride, index: 1) },
