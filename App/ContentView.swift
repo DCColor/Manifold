@@ -259,6 +259,10 @@ struct ContentView: View {
             waveformModel.sourceMatrixCode = meta?.colorMatrixCode
             vectorscopeModel.sourceMatrixCode = meta?.colorMatrixCode
             vectorscopeModel.sourcePrimariesCode = meta?.colorPrimariesCode
+            // Transfer code drives the waveform/parade AUTO vertical scale (PQ nits / HLG %·nits),
+            // independent of the matrix/primaries. Graticule-only — the trace is unchanged.
+            waveformModel.sourceTransferCode = meta?.transferFunctionCode
+            paradeModel.sourceTransferCode = meta?.transferFunctionCode
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -450,10 +454,15 @@ struct ContentView: View {
         if active.contains(.waveform) {
             waveformModel.renderer = metalRenderer
             waveformModel.sourceMatrixCode = engine.metadata?.colorMatrixCode
+            waveformModel.sourceTransferCode = engine.metadata?.transferFunctionCode
             waveformModel.start()
         }
         else { waveformModel.stop() }
-        if active.contains(.parade) { paradeModel.renderer = metalRenderer; paradeModel.start() }
+        if active.contains(.parade) {
+            paradeModel.renderer = metalRenderer
+            paradeModel.sourceTransferCode = engine.metadata?.transferFunctionCode
+            paradeModel.start()
+        }
         else { paradeModel.stop() }
         if active.contains(.vectorscope) {
             vectorscopeModel.renderer = metalRenderer

@@ -166,6 +166,127 @@ enum ScopeScale: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Transfer-aware vertical scale (waveform + parade) — TRANSFER-ANNOTATION, not trace-transform
+//
+// PRINCIPLE: the trace NEVER changes — it stays 10-bit code values (0–1023), same positions,
+// same histogram. Only the GRATICULE (horizontal reference lines + labels) changes to annotate
+// what those code values MEAN under the source's transfer function. We relabel the ruler; the
+// signal is the signal.
+
+/// Transfer-aware vertical-scale OVERRIDE for the value-axis scopes (waveform + parade).
+/// SEPARATE from `scopeScale` (which only chooses the SDR sub-representation 8-bit/10-bit/IRE).
+/// This chooses WHICH RULER annotates the unchanged code-value trace:
+///   .auto → follows the source `transferFunctionCode` (16→PQ nits, 18→HLG %+nits, else SDR)
+///   .sdr / .pq / .hlg → forces that ruler regardless of the source (for A/B and untagged media).
+/// @AppStorage-persisted under one key, shared by BOTH scopes (one setting, one axis). Mirrors
+/// the vectorscope's gear-menu + @AppStorage override pattern. Overlay-only: the trace math is
+/// untouched — exactly like the vectorscope graticule toggles.
+enum ScopeVerticalScale: String, CaseIterable, Identifiable {
+    case auto, sdr, pq, hlg
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: return "Auto (follow source)"
+        case .sdr:  return "SDR (%/code)"
+        case .pq:   return "PQ (nits)"
+        case .hlg:  return "HLG (% + nits)"
+        }
+    }
+}
+
+/// The resolved ruler after applying the override to the source transfer — what actually draws.
+enum ActiveVerticalScale { case sdr, pq, hlg }
+
+/// Resolve the active ruler from the override + the source CICP `transferFunctionCode`.
+/// Read INDEPENDENTLY of the matrix/primaries codes (transfer is its own axis): 16 = PQ (ST2084),
+/// 18 = HLG; everything else (1/709, 13/sRGB, nil, 2/unspecified, unknown) = SDR default.
+func resolveVerticalScale(override: ScopeVerticalScale, transferCode: Int?) -> ActiveVerticalScale {
+    switch override {
+    case .sdr: return .sdr
+    case .pq:  return .pq
+    case .hlg: return .hlg
+    case .auto:
+        switch transferCode {
+        case 16: return .pq
+        case 18: return .hlg
+        default: return .sdr
+        }
+    }
+}
+
+/// Header suffix for a value-axis scope, transfer-aware. `lead` is the per-scope signal descriptor
+/// ("luma Rec. 709" for waveform, "RGB" for parade). A trailing `*` marks a FORCED (manual) ruler
+/// so it reads as an override, not an auto-detected one.
+func valueScopeHeaderSuffix(lead: String, active: ActiveVerticalScale,
+                            sdrScale: ScopeScale, forced: Bool) -> String {
+    let star = forced ? "*" : ""
+    switch active {
+    case .sdr: return " · \(lead) (\(sdrScale.headerTag))"
+    case .pq:  return " · \(lead) · PQ (nits)\(star)"
+    case .hlg: return " · \(lead) · HLG (%·nits)\(star)"
+    }
+}
+
+// MARK: - PQ / HLG graticule math (ITU-R BT.2100)
+
+/// ST 2084 (PQ) inverse-EOTF: absolute display luminance in NITS → normalized PQ code [0,1].
+/// L = nits / 10000 (PQ peak is 10000 nits); code = ((c1 + c2·L^m1) / (1 + c3·L^m1))^m2.
+/// For a FULL-RANGE 10-bit trace the normalized code IS the vertical height fraction (code/1023),
+/// so this value places the marker directly. (203 nits → ~0.581 → ~code 594; confirmed inline.)
+func pqCodeNormalized(nits: Double) -> Double {
+    let m1 = 0.1593017578125
+    let m2 = 78.84375
+    let c1 = 0.8359375
+    let c2 = 18.8515625
+    let c3 = 18.6875
+    let L = max(0.0, nits) / 10000.0
+    let Lm1 = pow(L, m1)
+    let num = c1 + c2 * Lm1
+    let den = 1.0 + c3 * Lm1
+    return pow(num / den, m2)
+}
+
+/// HLG OETF (scene-linear E [0,1] → signal E' [0,1]), ITU-R BT.2100.
+private func hlgSignal(sceneLinear e: Double) -> Double {
+    let a = 0.17883277, b = 0.28466892, c = 0.55991073
+    let x = max(0.0, min(1.0, e))
+    if x <= 1.0 / 12.0 { return (3.0 * x).squareRoot() }
+    return a * log(12.0 * x - b) + c
+}
+
+/// HLG display NITS (via the OOTF at a nominal peak) → HLG signal value E' [0,1].
+/// Display L ≈ peak · E^γ (scene-linear E, system gamma γ). Invert: E = (nits/peak)^(1/γ), then
+/// signal = OETF(E). γ = 1.2 is the nominal HLG system gamma at a 1000-nit peak display. For the
+/// full-range trace the signal value IS the height fraction. (203 nits → 75%; 1000 nits → 100%.)
+private func hlgSignalForNits(_ nits: Double, peak: Double = 1000.0, gamma: Double = 1.2) -> Double {
+    let e = pow(max(0.0, nits) / peak, 1.0 / gamma)   // scene-linear normalized
+    return hlgSignal(sceneLinear: e)
+}
+
+/// Line-emphasis tiers for the HDR graticules: normal, strong (SDR white 100 nits), key
+/// (BT.2408 HDR diffuse/graphics white 203 nits — the primary grading reference).
+enum GratEmphasis { case normal, strong, key }
+
+/// One PQ nits reference line: its nits value, label, and emphasis.
+struct PQNitsLevel { let nits: Double; let label: String; let emphasis: GratEmphasis }
+
+/// PQ nits ladder — non-linearly spaced (perceptual); each lands at its ST2084 code height.
+/// 203 nits (BT.2408 diffuse white) and 100 nits (SDR white) are the emphasized references.
+let pqNitsLevels: [PQNitsLevel] = [
+    .init(nits: 0.1,   label: "0.1",   emphasis: .normal),
+    .init(nits: 1,     label: "1",     emphasis: .normal),
+    .init(nits: 10,    label: "10",    emphasis: .normal),
+    .init(nits: 100,   label: "100",   emphasis: .strong),
+    .init(nits: 203,   label: "203",   emphasis: .key),
+    .init(nits: 1000,  label: "1000",  emphasis: .normal),
+    .init(nits: 4000,  label: "4000",  emphasis: .normal),
+    .init(nits: 10000, label: "10000", emphasis: .normal),
+]
+
+/// HLG secondary nits ladder (assuming a nominal 1000-nit peak display). Placed via the HLG
+/// OOTF/EOTF; labels are secondary to the primary % scale.
+let hlgNitsLevels: [Double] = [1, 10, 100, 203, 1000]
+
 /// Native luma waveform scope. Samples the GPU-resident PRE-DISPLAY offscreen texture (raw
 /// code values), never screen pixels, so it agrees with a Resolve waveform on the same frame:
 /// waveformKernel bins the 10-bit luma histogram on the GPU, only the tiny histogram is read
@@ -182,6 +303,11 @@ final class WaveformScopeModel: ObservableObject {
     /// code off the renderer (computeWaveformGPU), so label and weighting stay in lock-step. Set
     /// from ContentView on metadata change, mirroring cieModel.spaceReadout. nil/2/unknown → 709.
     @Published var sourceMatrixCode: Int?
+
+    /// Source transfer-function code (CICP) — drives the AUTO vertical-scale ruler (16=PQ, 18=HLG,
+    /// else SDR), INDEPENDENTLY of the matrix/primaries. Set from ContentView the same way as
+    /// sourceMatrixCode; the graticule is the only consumer (the TRACE is unaffected). nil/2 → SDR.
+    @Published var sourceTransferCode: Int?
 
     // Column buckets (histogram width) — tracks the rendered slot width, clamped, so a wider
     // scope computes more horizontal detail instead of upscaling a fixed buffer.
@@ -339,6 +465,13 @@ struct WaveformScopeView: View {
     var slotSelection: Binding<ScopeKind>? = nil
     // Same key as Preferences.scopeScale — @AppStorage here for live graticule updates.
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
+    // Transfer-aware ruler override, SHARED with parade (one key). Default .auto follows the source.
+    @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
+
+    /// Resolved ruler (auto follows the source transfer, else forced). Drives header + graticule.
+    private var activeScale: ActiveVerticalScale {
+        resolveVerticalScale(override: verticalScale, transferCode: model.sourceTransferCode)
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -347,9 +480,13 @@ struct WaveformScopeView: View {
                 HStack(spacing: 4) {
                     // Luma is weighted by the SOURCE matrix (colorMatrixCode) — surface it so a
                     // 2020-weighted trace can't silently read as 709. Same code that drives the math.
+                    // The transfer-aware suffix annotates the ruler (SDR code / PQ nits / HLG %·nits).
                     ScopeSlotHeader(name: "WAVEFORM",
-                                    suffix: " · luma \(ycbcrMatrixLabel(model.sourceMatrixCode)) (\(scopeScale.headerTag))",
+                                    suffix: valueScopeHeaderSuffix(lead: "luma \(ycbcrMatrixLabel(model.sourceMatrixCode))",
+                                                                   active: activeScale, sdrScale: scopeScale,
+                                                                   forced: verticalScale != .auto),
                                     selection: slotSelection)
+                    ScopeVerticalScaleMenu()
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")
                         .font(.system(size: 8))
@@ -405,7 +542,7 @@ struct WaveformScopeView: View {
 
     private var graticule: some View {
         Canvas { ctx, size in
-            drawValueGraticule(ctx, size: size, scale: scopeScale)
+            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale)
         }
     }
 }
@@ -434,24 +571,131 @@ func drawValueGraticule(_ ctx: GraphicsContext, size: CGSize, scale: ScopeScale)
         p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
         ctx.stroke(p, with: .color(.white.opacity(graticuleMajorOpacity)), lineWidth: 0.5)
 
-        // Plain integer, NO thousands separator: Text(verbatim:) avoids SwiftUI's
-        // LocalizedStringKey Int interpolation, which would render "1,023".
-        let resolved = ctx.resolve(
-            Text(verbatim: String(Int(v)))
-                .font(.system(size: graticuleLabelFontSize, design: .monospaced))
-                .foregroundColor(.white.opacity(graticuleLabelOpacity))
-        )
-        let ts = resolved.measure(in: CGSize(width: 200, height: 100))
-        // Clamp the label's vertical center so its full text box stays inside the
-        // plot area: the top (max) label nudges down, the bottom (0) label nudges
-        // up, interior labels stay centered on their line. Never clips, any font/inset.
-        let halfH = ts.height / 2
-        let ly = Swift.min(Swift.max(y, halfH), size.height - halfH)
+        // Value label on the LEFT edge (standard scope convention — Resolve/broadcast
+        // waveforms put the scale on the left). The line still spans full width; only the
+        // label anchors left. Plain integer, no thousands separator (see drawGraticuleLabel).
+        drawGraticuleLabel(ctx, size: size, y: y, text: String(Int(v)),
+                           trailing: false, opacity: graticuleLabelOpacity)
+    }
+}
+
+// MARK: - HDR (PQ / HLG) graticules — relabel the same code-value axis, trace unchanged
+
+/// Draw a graticule value label in a dark pill at vertical position `y`, anchored to an edge.
+/// `trailing == false` → LEFT edge (the primary scale, standard scope convention); true → right
+/// edge (used only for a secondary ruler that must stay distinct from the left-side primary).
+/// The vertical center is clamped so the full text box stays inside the plot (never clipped).
+private func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat,
+                                text: String, trailing: Bool, opacity: Double,
+                                fontSize: CGFloat = graticuleLabelFontSize) {
+    let resolved = ctx.resolve(
+        Text(verbatim: text)
+            .font(.system(size: fontSize, design: .monospaced))
+            .foregroundColor(.white.opacity(opacity))
+    )
+    let ts = resolved.measure(in: CGSize(width: 200, height: 100))
+    let halfH = ts.height / 2
+    let ly = Swift.min(Swift.max(y, halfH), size.height - halfH)
+    if trailing {
         let cx = size.width - 4
-        let bg = CGRect(x: cx - ts.width - 3, y: ly - halfH - 1,
-                        width: ts.width + 6, height: ts.height + 2)
-        ctx.fill(Path(roundedRect: bg, cornerRadius: 3),
-                 with: .color(.black.opacity(graticuleLabelBackingOpacity)))
+        let bg = CGRect(x: cx - ts.width - 3, y: ly - halfH - 1, width: ts.width + 6, height: ts.height + 2)
+        ctx.fill(Path(roundedRect: bg, cornerRadius: 3), with: .color(.black.opacity(graticuleLabelBackingOpacity)))
         ctx.draw(resolved, at: CGPoint(x: cx, y: ly), anchor: .trailing)
+    } else {
+        let cx: CGFloat = 4
+        let bg = CGRect(x: cx - 3, y: ly - halfH - 1, width: ts.width + 6, height: ts.height + 2)
+        ctx.fill(Path(roundedRect: bg, cornerRadius: 3), with: .color(.black.opacity(graticuleLabelBackingOpacity)))
+        ctx.draw(resolved, at: CGPoint(x: cx, y: ly), anchor: .leading)
+    }
+}
+
+/// PQ (ST 2084) NITS graticule. The TRACE is unchanged 10-bit code values; this ONLY relabels
+/// the ruler. Each nits level is placed at its ST2084 inverse-EOTF code height (non-linear /
+/// perceptual). 203 nits (BT.2408 HDR diffuse/graphics white — the key HDR grading reference)
+/// and 100 nits (SDR white) draw brighter/thicker so they stand out.
+func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize) {
+    for level in pqNitsLevels {
+        let norm = pqCodeNormalized(nits: level.nits)   // 0…1 == full-range code fraction == height
+        let y = size.height * (1.0 - norm)
+        let lineOp: Double
+        let lineW: CGFloat
+        let labelOp: Double
+        switch level.emphasis {
+        case .key:    lineOp = 0.60; lineW = 1.0; labelOp = 0.9
+        case .strong: lineOp = 0.42; lineW = 1.0; labelOp = 0.8
+        case .normal: lineOp = graticuleMajorOpacity; lineW = 0.5; labelOp = graticuleLabelOpacity
+        }
+        var p = Path()
+        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        ctx.stroke(p, with: .color(.white.opacity(lineOp)), lineWidth: lineW)
+        // Nits label on the LEFT edge (standard scope convention); line spans full width.
+        drawGraticuleLabel(ctx, size: size, y: y, text: level.label, trailing: false, opacity: labelOp)
+    }
+}
+
+/// HLG graticule. PRIMARY (dominant): HLG signal % (0–100%) at 0/25/50/75/100 — the signal axis
+/// maps ~directly to the code range, so % ≈ code fraction. SECONDARY: nits assuming a nominal
+/// 1000-nit peak display (via the HLG OOTF/EOTF), as a fainter reference. The dominant % labels
+/// anchor LEFT (standard scope convention); the nits secondary anchors RIGHT so the two rulers
+/// stay visually distinct and never collide. Trace unchanged — graticule only.
+func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize) {
+    // PRIMARY — HLG signal %: full-width lines, dominant labels on the LEFT edge.
+    for pct in [0.0, 25.0, 50.0, 75.0, 100.0] {
+        let y = size.height * (1.0 - pct / 100.0)
+        var p = Path()
+        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        ctx.stroke(p, with: .color(.white.opacity(graticuleMajorOpacity)), lineWidth: 0.5)
+        drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(pct))%", trailing: false, opacity: graticuleLabelOpacity)
+    }
+    // SECONDARY — nits @1000-nit peak: fainter short edge ticks, labels on the RIGHT edge
+    // (opposite the dominant % scale) so the practical nits reference reads clearly apart.
+    for nits in hlgNitsLevels {
+        let ep = hlgSignalForNits(nits)   // signal 0…1 == height fraction
+        let y = size.height * (1.0 - ep)
+        var p = Path()
+        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: 28, y: y))
+        p.move(to: CGPoint(x: size.width - 28, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        ctx.stroke(p, with: .color(.cyan.opacity(0.28)), lineWidth: 0.5)
+        drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(nits))", trailing: true, opacity: 0.5)
+    }
+}
+
+/// Draw the active transfer-aware graticule onto a value-axis scope. Dispatches on the RESOLVED
+/// ruler; SDR falls through to the existing (unchanged) %/code graticule. Shared by waveform +
+/// parade so both annotate the same axis identically.
+func drawActiveValueGraticule(_ ctx: GraphicsContext, size: CGSize,
+                              active: ActiveVerticalScale, sdrScale: ScopeScale) {
+    switch active {
+    case .sdr: drawValueGraticule(ctx, size: size, scale: sdrScale)
+    case .pq:  drawPQGraticule(ctx, size: size)
+    case .hlg: drawHLGGraticule(ctx, size: size)
+    }
+}
+
+// MARK: - Shared vertical-scale gear menu (waveform + parade)
+
+/// Gear menu for the shared transfer-aware vertical scale (Auto / SDR / PQ / HLG), placed in BOTH
+/// the waveform and parade headers. Reads/writes the single @AppStorage("manifold.scope.verticalScale")
+/// so the two scopes stay in lock-step (one setting, one axis). Mirrors the vectorscope's gear-menu
+/// pattern; overlay-only — picking a scale re-labels the ruler without touching the trace math.
+struct ScopeVerticalScaleMenu: View {
+    @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
+    var body: some View {
+        Menu {
+            Section("Vertical scale · transfer") {
+                Picker("Vertical scale", selection: $verticalScale) {
+                    ForEach(ScopeVerticalScale.allCases) { s in Text(s.label).tag(s) }
+                }
+                .pickerStyle(.inline)
+            }
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Vertical scale: Auto follows the source transfer (PQ→nits, HLG→%/nits); force a ruler to annotate untagged media or A/B. The trace never changes.")
     }
 }

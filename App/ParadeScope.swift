@@ -20,6 +20,11 @@ final class ParadeScopeModel: ObservableObject {
 
     weak var renderer: MetalVideoRenderer?
 
+    /// Source transfer-function code (CICP) — drives the AUTO vertical-scale ruler (16=PQ, 18=HLG,
+    /// else SDR), INDEPENDENTLY of the matrix/primaries. Set from ContentView; the graticule is the
+    /// only consumer (the R|G|B TRACE is unaffected). Shared axis with the waveform. nil/2 → SDR.
+    @Published var sourceTransferCode: Int?
+
     // Each channel column is columnWidth px; the full image is 3 columns wide.
     // columnWidth tracks the per-channel slot width (slot/3), clamped.
     private var columnWidth = 192
@@ -156,6 +161,13 @@ struct ParadeScopeView: View {
     var slotSelection: Binding<ScopeKind>? = nil
     // Same key as Preferences.scopeScale — @AppStorage here for live graticule updates.
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
+    // Transfer-aware ruler override, SHARED with the waveform (one key). Default .auto follows source.
+    @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
+
+    /// Resolved ruler (auto follows the source transfer, else forced). Drives header + graticule.
+    private var activeScale: ActiveVerticalScale {
+        resolveVerticalScale(override: verticalScale, transferCode: model.sourceTransferCode)
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -163,8 +175,10 @@ struct ParadeScopeView: View {
                 // Header strip: name (left) + intensity slider (right). Own band.
                 HStack(spacing: 4) {
                     ScopeSlotHeader(name: "PARADE",
-                                    suffix: " · RGB (\(scopeScale.headerTag))",
+                                    suffix: valueScopeHeaderSuffix(lead: "RGB", active: activeScale,
+                                                                   sdrScale: scopeScale, forced: verticalScale != .auto),
                                     selection: slotSelection)
+                    ScopeVerticalScaleMenu()
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")
                         .font(.system(size: 8))
@@ -213,8 +227,8 @@ struct ParadeScopeView: View {
 
     private var graticule: some View {
         Canvas { ctx, size in
-            // Two-tier value-axis graticule (same as waveform), spanning all 3 columns.
-            drawValueGraticule(ctx, size: size, scale: scopeScale)
+            // Transfer-aware value-axis graticule (same axis as waveform), spanning all 3 columns.
+            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale)
             // Thin R|G|B column separators at 1/3 and 2/3.
             for frac in [1.0 / 3.0, 2.0 / 3.0] {
                 let x = size.width * frac
