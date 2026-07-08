@@ -21,9 +21,10 @@ final class DeckLinkService: ObservableObject {
     /// SettingsView so the key can't drift.
     static let enableOnLaunchKey = "manifold.decklink.enableOnLaunch"
 
-    /// Plain-speak output signal (format part). NO codec/"v210" jargon. The colorspace is appended
-    /// separately via `signalLine` (it varies per source, unlike the fixed format).
-    static let statusLine = "2160p23.98 · 10-bit 4:2:2"
+    /// Fixed pixel-format part of the output signal (plain-speak, NO codec/"v210" jargon). The mode
+    /// (varies per file — D4a) and the colorspace (varies per source — D5) are composed around it in
+    /// `signalLine`.
+    static let formatDetail = "10-bit 4:2:2"
 
     // Observable UI state (mutated on main).
     @Published private(set) var isOutputting = false     // reflects the ACTUAL scheduled-playback state
@@ -33,9 +34,13 @@ final class DeckLinkService: ObservableObject {
     /// unchanged: D5 tags both 2020 and P3 as Rec.2020). Derived from the source colorPrimariesCode,
     /// so it can distinguish genuine 2020 from P3-in-2020 (which the collapsed tag cannot). nil → 709.
     @Published private(set) var colorspaceLabel = "Rec. 709"
+    /// Plain-speak display-mode label for the current source (D4a), e.g. "2160p23.98" / "1080p25" /
+    /// "2160p59.94". Tracks the resolved output mode whether or not output is running (the signal the
+    /// output produces / would produce), mirroring `colorspaceLabel`. Updated by `sourceFormatChanged`.
+    @Published private(set) var modeLabel = OutputMode.default2160p2398.label
 
-    /// The full Signal line for the output menu: fixed format + the current-source colorspace label.
-    var signalLine: String { "\(Self.statusLine) · \(colorspaceLabel)" }
+    /// The full Signal line for the output menu: active display mode · fixed format · source colorspace.
+    var signalLine: String { "\(modeLabel) · \(Self.formatDetail) · \(colorspaceLabel)" }
 
     /// Map a source CICP primaries code → plain-speak label. "(P3 limited)" flags P3 content sitting
     /// inside the Rec.2020 container (what's actually on the wire is Rec.2020, per D5's tag).
@@ -56,10 +61,70 @@ final class DeckLinkService: ObservableObject {
     /// renderer owns its lifecycle; the fill block sources v210 frames from it.
     weak var renderer: MetalVideoRenderer?
 
-    /// D-real output frame size (matches the D3 fixed output mode, 2160p23.98). Real mode selection
-    /// is a later stage; hardcoded to match the bridge's fixed 3840x2160 output.
-    private static let outputWidth = 3840
-    private static let outputHeight = 2160
+    /// D4a: the output DISPLAY MODE derived from the loaded file (video cadence). Resolution follows
+    /// the file's family (2160p or 1080p, native 1:1 — no scaling); rate follows the file's frame rate
+    /// snapped to a standard broadcast rate. `standardRate` + `width`/`height` drive the bridge's mode
+    /// selection and scheduling; `label` is the plain-speak status string.
+    struct OutputMode: Equatable {
+        let width: Int          // output-family width (3840 or 1920)
+        let height: Int         // output-family height (2160 or 1080)
+        let standardRate: Double // snapped standard rate (23.976 / 24 / 25 / 29.97 / 30 / 50 / 59.94 / 60)
+        let label: String       // "2160p23.98", "1080p25", …
+
+        /// Default when no file is loaded / rate can't be matched — matches the pre-D4a fixed output.
+        static let default2160p2398 = OutputMode(width: 3840, height: 2160, standardRate: 24000.0 / 1001.0, label: "2160p23.98")
+    }
+
+    /// The standard broadcast frame rates D4a targets, as EXACT fps (the fractional NTSC rates use
+    /// their true n/1001 value, NOT a rounded literal) paired with the status token. Nearest-match
+    /// against these exact values has no seam: 30000/1001 = 29.970 sits ~0 from the 29.97 entry and
+    /// ~0.03 from the 30 entry, so it can never be trapped on a boundary and fall through to a
+    /// fallback. The BMD mode is chosen from the same matched rate on the bridge side
+    /// (BMDModeForFamilyRate, exact-fraction rows), so the label and the mode always agree.
+    private static let standardRates: [(fps: Double, token: String)] = [
+        (24000.0 / 1001.0, "23.98"),   // 23.976…
+        (24.0,             "24"),
+        (25.0,             "25"),
+        (30000.0 / 1001.0, "29.97"),   // 29.970…
+        (30.0,             "30"),
+        (50.0,             "50"),
+        (60000.0 / 1001.0, "59.94"),   // 59.940…
+        (60.0,             "60"),
+    ]
+
+    /// The output mode resolved from the CURRENT source (or the default when none is loaded). Read on
+    /// the serial queue when (re)starting; written on `sourceFormatChanged`.
+    private var currentMode = OutputMode.default2160p2398
+
+    /// Map a file's (width, height, frameRate) → the output display mode.
+    /// - Resolution family: nearest of the two D4a families by height (≥1620 → 2160p, else 1080p). The
+    ///   output is NATIVE (1:1) for true 3840×2160 / 1920×1080 sources; a non-standard resolution (e.g.
+    ///   DCI 4096) maps to the nearest family and outputs a valid signal at the right rate (the render
+    ///   convert holds neutral for a genuine pixel-dim mismatch — true scaling is a later stage).
+    /// - Rate: NEAREST-MATCH to a standard broadcast rate by minimum absolute fps difference — no
+    ///   ranges, no boundaries, no seams. Every input maps to exactly one closest standard rate, so a
+    ///   30000/1001 = 29.970 source resolves to 29.97 (→ p2997), never trapped on a bucket edge and
+    ///   never falling through to a fallback. Weird rates (23.9, 26, …) also map to their nearest.
+    static func resolveOutputMode(width: Int, height: Int, frameRate: Double) -> OutputMode {
+        let is2160 = height >= 1620
+        let outW = is2160 ? 3840 : 1920
+        let outH = is2160 ? 2160 : 1080
+        let famToken = is2160 ? "2160p" : "1080p"
+
+        // Nearest standard rate by minimum |Δfps|. The matched entry supplies BOTH the canonical rate
+        // (passed to the bridge for mode selection) and the status token — one source of truth, so the
+        // label and the selected BMD mode can't disagree. frameRate ≤ 0 (no/unknown) → the 23.976 entry.
+        var best = standardRates[0]
+        if frameRate > 0 {
+            var bestDist = Double.greatestFiniteMagnitude
+            for cand in standardRates {
+                let d = abs(frameRate - cand.fps)
+                if d < bestDist { bestDist = d; best = cand }
+            }
+        }
+        return OutputMode(width: outW, height: outH, standardRate: best.fps,
+                          label: "\(famToken)\(best.token)")
+    }
 
     /// Enumerate output-capable DeckLink devices. Synchronous SDK walk; returns [] if the driver
     /// isn't reachable or no card is present.
@@ -127,30 +192,47 @@ final class DeckLinkService: ObservableObject {
         // D5 output-signal TAG ← source PRIMARIES code ONLY (never the matrix; the kernel picks the
         // encoding matrix from the matrix code, independently). nil → 709.
         let primariesCode = renderer?.sourcePrimariesCode ?? 1
+        let mode = currentMode   // D4a: display mode derived from the current source (or default)
         queue.async {
-            // Arm the renderer's push convert (allocate v210 staging sized to the output frame).
-            self.renderer?.beginDeckLinkOutput(width: Self.outputWidth, height: Self.outputHeight)
+            self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode, primariesCode: primariesCode)
+        }
+    }
 
-            // The fill block runs on the SDK callback thread → cheap: a memcpy from the renderer's
-            // front staging buffer, or a neutral fallback if no converted frame is ready yet.
-            let fill: DeckLinkFillBlock = { [weak self] _, buffer, rowBytes, width, height in
-                if let r = self?.renderer,
-                   r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
-                                             rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
-                    return true
-                }
-                Self.fillNeutralV210(buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
-                return false
-            }
+    /// Establish scheduled output at `mode` on the serial queue. Shared by the initial start and the
+    /// D4a mode-switch (which stops the old output on the same queue first, guaranteeing teardown
+    /// completes before this re-establishes). Arms the renderer's convert at the mode's resolution
+    /// (native 1:1) and drives the bridge's mode/scheduling from the mode's family + standard rate.
+    private func startOutputOnQueue(deviceIndex: Int, mode: OutputMode, primariesCode: Int) {
+        // Arm the renderer's push convert (allocate v210 staging sized to the OUTPUT frame = the mode's
+        // resolution; the source offscreen is the same size for a native file → 1:1, no scaling).
+        self.renderer?.beginDeckLinkOutput(width: mode.width, height: mode.height)
 
-            let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill,
-                                                            primariesCode: primariesCode)
-            for line in result.log { print("DeckLink D-real: \(line)") }
-            print("DeckLink D-real: \(result.success ? "SUCCESS — real-video scheduled playback on device \(deviceIndex)" : "FAILED")")
-            if !result.success {
-                self.renderer?.stopDeckLinkOutput()
-                DispatchQueue.main.async { self.isOutputting = false }   // keep the button honest
+        // The fill block runs on the SDK callback thread → cheap: a memcpy from the renderer's front
+        // staging buffer, or a neutral fallback if no converted frame is ready yet.
+        let fill: DeckLinkFillBlock = { [weak self] _, buffer, rowBytes, width, height in
+            if let r = self?.renderer,
+               r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
+                                         rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+                return true
             }
+            Self.fillNeutralV210(buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
+            return false
+        }
+
+        let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill,
+                                                        primariesCode: primariesCode,
+                                                        outputWidth: mode.width, outputHeight: mode.height,
+                                                        standardRate: mode.standardRate)
+        for line in result.log { print("DeckLink D-real: \(line)") }
+        print("DeckLink D-real: \(result.success ? "SUCCESS — real-video scheduled playback on device \(deviceIndex) @ \(result.activeModeName ?? mode.label)" : "FAILED")")
+        if result.success {
+            // Reflect the mode actually established (honors any bridge-side support fallback).
+            if let active = result.activeModeName {
+                DispatchQueue.main.async { self.modeLabel = active }
+            }
+        } else {
+            self.renderer?.stopDeckLinkOutput()
+            DispatchQueue.main.async { self.isOutputting = false }   // keep the button honest
         }
     }
 
@@ -178,6 +260,33 @@ final class DeckLinkService: ObservableObject {
         // Re-tag the live output signal only if currently playing.
         guard isOutputting else { return }
         queue.async { self.bridge.setOutputColorspaceForPrimaries(primariesCode ?? 1) }
+    }
+
+    /// D4a: the source video FORMAT changed (new file / re-inspect). Recompute the output display mode
+    /// from the file's resolution + frame rate. Always updates the status label (the mode output
+    /// produces / would produce, whether or not it's running). If output IS running and the mode
+    /// actually changed, cleanly SWITCH: stop the old scheduled playback then re-establish at the new
+    /// mode — both hops on the serial queue so teardown finishes before re-establish (no race). If
+    /// output is off, just remember the target so the next start uses it. Call after setSourceColorSpace.
+    func sourceFormatChanged(width: Int, height: Int, frameRate: Double) {
+        let mode = Self.resolveOutputMode(width: width, height: height, frameRate: frameRate)
+        let changed = (mode != currentMode)
+        currentMode = mode
+        DispatchQueue.main.async { self.modeLabel = mode.label }
+
+        // Only a running output needs a live switch; an off output just adopts `currentMode` on start.
+        guard isOutputting, changed else { return }
+        let deviceIndex = selectedDeviceIndex
+        let primariesCode = renderer?.sourcePrimariesCode ?? 1
+        print("DeckLink D4a: source mode → \(mode.label); switching live output")
+        queue.async {
+            // Race-safe stop (clear running → StopScheduledPlayback → unset callback → DisableVideoOutput
+            // → release pool), then re-establish at the new mode. isOutputting stays true across the
+            // switch (it's a re-mode, not a user stop).
+            self.bridge.stopScheduledPlayback()
+            self.renderer?.stopDeckLinkOutput()
+            self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode, primariesCode: primariesCode)
+        }
     }
 
     /// Neutral legal-black v210 fill (10-bit Y=64, Cb=Cr=512) — shown until the first real converted

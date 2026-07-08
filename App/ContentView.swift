@@ -251,6 +251,10 @@ struct ContentView: View {
                 // D5: if DeckLink output is running, re-tag its colorspace from the new primaries
                 // (the encoding matrix follows the matrix code automatically, per converted frame).
                 DeckLinkService.shared.sourceColorChanged()
+                // D4a: derive the output display mode (video cadence) from the file's resolution + rate.
+                // Updates the status label; live-switches the output mode if it's running and changed.
+                DeckLinkService.shared.sourceFormatChanged(width: meta.width, height: meta.height,
+                                                           frameRate: meta.frameRate)
             }
             // Feed the CIE header the detected source space (honest about untagged → 709 assumed).
             cieModel.spaceReadout = meta.map(Self.cieSpaceReadout) ?? ""

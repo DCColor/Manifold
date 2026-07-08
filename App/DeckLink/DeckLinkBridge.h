@@ -18,6 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 @interface DeckLinkOutputResult : NSObject
 @property (nonatomic, readonly) BOOL success;
 @property (nonatomic, copy, readonly) NSArray<NSString *> *log;
+/// D4a: the display mode actually established (e.g. "2160p23.98", "1080p25"), reflecting any
+/// support fallback. nil on failure / paths that don't resolve a mode. Lets the UI status line show
+/// the REAL active mode instead of a hardcoded string.
+@property (nonatomic, copy, readonly, nullable) NSString *activeModeName;
 @end
 
 /// Fill callback for D-real real-video output: fill the DeckLink v210 frame at `buffer` (row
@@ -56,9 +60,19 @@ typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t r
 /// for real data, NO for the neutral fallback — advisory); it runs on the SDK callback thread so it
 /// MUST be cheap (a memcpy). `primariesCode` sets the output colorspace TAG (Rec.709 / Rec.2020;
 /// P3 → Rec.2020) — SEPARATE from the encoding matrix (the renderer picks that from the matrix code).
+///
+/// D4a: `outputWidth`/`outputHeight`/`standardRate` select the DISPLAY MODE (video cadence). Pass the
+/// resolved output-family resolution (3840×2160 or 1920×1080) + a standard broadcast rate (23.976 /
+/// 24 / 25 / 29.97 / 30 / 50 / 59.94 / 60); the bridge maps them to the matching BMDDisplayMode,
+/// checks DoesSupportVideoMode(v210, output), and falls back to 2160p23.98 if unsupported. The
+/// scheduling timing (frameDuration/timeScale) follows the resolved mode. Result.activeModeName
+/// reports the mode actually established.
 - (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex
                                                           fill:(DeckLinkFillBlock)fill
-                                                 primariesCode:(NSInteger)primariesCode;
+                                                 primariesCode:(NSInteger)primariesCode
+                                                   outputWidth:(NSInteger)outputWidth
+                                                  outputHeight:(NSInteger)outputHeight
+                                                  standardRate:(double)standardRate;
 
 /// Re-tag the output colorspace mid-session (source primaries changed while output is running). The
 /// next scheduled frame picks it up. No-op if not currently playing.

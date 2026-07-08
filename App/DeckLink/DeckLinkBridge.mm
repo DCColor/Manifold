@@ -43,16 +43,24 @@
 @implementation DeckLinkOutputResult {
     BOOL _success;
     NSArray<NSString *> *_log;
+    NSString *_activeModeName;
 }
 - (instancetype)initWithSuccess:(BOOL)success log:(NSArray<NSString *> *)log {
+    return [self initWithSuccess:success log:log activeModeName:nil];
+}
+- (instancetype)initWithSuccess:(BOOL)success
+                            log:(NSArray<NSString *> *)log
+                 activeModeName:(NSString *)activeModeName {
     if ((self = [super init])) {
         _success = success;
         _log = [log copy];
+        _activeModeName = [activeModeName copy];
     }
     return self;
 }
 - (BOOL)success { return _success; }
 - (NSArray<NSString *> *)log { return _log; }
+- (NSString *)activeModeName { return _activeModeName; }
 @end
 
 #pragma mark - D3 scheduled player (synthetic, pluggable fill source)
@@ -120,10 +128,11 @@ static void SyntheticHueWalkFill(int64_t frameIndex, uint8_t *buffer, int32_t ro
 class DeckLinkScheduledPlayer : public IDeckLinkVideoOutputCallback {
 public:
     DeckLinkScheduledPlayer(IDeckLinkOutput *output,
+                            BMDDisplayMode displayMode,
                             int32_t width, int32_t height, int32_t rowBytes,
                             BMDTimeValue frameDuration, BMDTimeScale timeScale,
                             FrameFillFn fill, int64_t colorspace)
-        : m_refCount(1), m_output(output),
+        : m_refCount(1), m_output(output), m_displayMode(displayMode),
           m_width(width), m_height(height), m_rowBytes(rowBytes),
           m_frameDuration(frameDuration), m_timeScale(timeScale),
           m_fill(std::move(fill)), m_running(false), m_nextIndex(0),
@@ -141,14 +150,14 @@ public:
 
     bool doesSupportMode() {
         BMDDisplayMode actual = bmdModeUnknown; bool supported = false;
-        HRESULT hr = m_output->DoesSupportVideoMode(bmdVideoConnectionUnspecified, bmdMode4K2160p2398,
+        HRESULT hr = m_output->DoesSupportVideoMode(bmdVideoConnectionUnspecified, m_displayMode,
                                                     bmdFormat10BitYUV, bmdNoVideoOutputConversion,
                                                     bmdSupportedVideoModeDefault, &actual, &supported);
         return (hr == S_OK && supported);
     }
 
     bool enableOutput() {
-        return m_output->EnableVideoOutput(bmdMode4K2160p2398, bmdVideoOutputFlagDefault) == S_OK;
+        return m_output->EnableVideoOutput(m_displayMode, bmdVideoOutputFlagDefault) == S_OK;
     }
 
     bool createPool(int poolSize) {
@@ -288,6 +297,7 @@ private:
 
     std::atomic<ULONG> m_refCount;
     IDeckLinkOutput *m_output;
+    BMDDisplayMode m_displayMode;   // the display mode this player enables/schedules (D4a: from the file)
     int32_t m_width, m_height, m_rowBytes;
     BMDTimeValue m_frameDuration;
     BMDTimeScale m_timeScale;
@@ -310,6 +320,55 @@ static int64_t BMDColorspaceForPrimaries(NSInteger primariesCode) {
     }
 }
 
+#pragma mark - D4a: display-mode selection (video cadence from the file's resolution + rate)
+
+// Map a resolution family (2160p vs 1080p) + a broadcast rate to the matching PROGRESSIVE BMDDisplayMode.
+// `is2160` picks the family (true → 3840×2160, false → 1920×1080). The rate is matched by pure
+// NEAREST-MATCH (minimum |Δfps|) against the 8 standard rates — NO ranges, NO boundaries, NO seams, so
+// no input can be trapped on a bucket edge. The fractional NTSC rates use their EXACT n/1001 value
+// (24000/1001 = 23.976…, 30000/1001 = 29.970…, 60000/1001 = 59.940…), so a 29.970 source lands ~0 from
+// the 29.97 row and ~0.03 from the 30 row → p2997, never p30 and never a fallback. Every rate resolves
+// to a real, card-supported progressive mode (all 8 are supported on device 0); interlaced is never
+// selected (the decode path is progressive). Actual timing is read back off the resolved mode.
+static BMDDisplayMode BMDModeForFamilyRate(bool is2160, double rate) {
+    struct Row { double rate; BMDDisplayMode hd; BMDDisplayMode uhd; };
+    static const Row rows[] = {
+        {24000.0 / 1001.0, bmdModeHD1080p2398, bmdMode4K2160p2398},   // 23.976…
+        {24.0,             bmdModeHD1080p24,   bmdMode4K2160p24},
+        {25.0,             bmdModeHD1080p25,   bmdMode4K2160p25},
+        {30000.0 / 1001.0, bmdModeHD1080p2997, bmdMode4K2160p2997},   // 29.970…
+        {30.0,             bmdModeHD1080p30,   bmdMode4K2160p30},
+        {50.0,             bmdModeHD1080p50,   bmdMode4K2160p50},
+        {60000.0 / 1001.0, bmdModeHD1080p5994, bmdMode4K2160p5994},   // 59.940…
+        {60.0,             bmdModeHD1080p6000, bmdMode4K2160p60},      // N.B. 1080p60 is bmdModeHD1080p6000
+    };
+    double best = 1e9; BMDDisplayMode bestMode = bmdModeUnknown;
+    for (const Row &r : rows) {
+        const double d = fabs(rate - r.rate);
+        if (d < best) { best = d; bestMode = is2160 ? r.uhd : r.hd; }
+    }
+    return bestMode;   // pure nearest-match — always a real mode, never falls through on a seam
+}
+
+// Short human label for a resolved mode, e.g. "2160p23.98" / "1080p25" / "2160p59.94". The family
+// comes from the height; the rate token is snapped to the standard broadcast strings so 24000/1001
+// reads "23.98" (not "23.976") and 30000/1001 reads "29.97".
+static NSString *ModeNameForResolved(int32_t width, int32_t height, BMDTimeValue frameDuration, BMDTimeScale timeScale) {
+    const char *fam = (height >= 1620) ? "2160p" : "1080p";
+    const double r = (frameDuration > 0) ? (double)timeScale / (double)frameDuration : 0.0;
+    struct { double rate; const char *tok; } toks[] = {
+        {24000.0 / 1001.0,"23.98"}, {24,"24"}, {25,"25"}, {30000.0 / 1001.0,"29.97"},
+        {30,"30"}, {50,"50"}, {60000.0 / 1001.0,"59.94"}, {60,"60"}
+    };
+    // Nearest-match (same principle as the mode selector) against EXACT n/1001 rates: the resolved
+    // mode's true rate (e.g. 30000/1001 = 29.970) lands ~0 from its own token and ~0.03 from the
+    // integer neighbour, so 24000/1001 reads "23.98" and 24000/1000 reads "24" — no collision.
+    NSString *rateStr = [NSString stringWithFormat:@"%.2f", r];
+    double best = 1e9;
+    for (auto &t : toks) { double d = fabs(r - t.rate); if (d < best) { best = d; rateStr = @(t.tok); } }
+    return [NSString stringWithFormat:@"%s%@", fam, rateStr];
+}
+
 #pragma mark - Bridge
 
 // GetModelName / GetDisplayName return a NEWLY-CREATED CFStringRef via out-param on macOS (the
@@ -325,7 +384,8 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 @interface DeckLinkBridge ()
 - (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill
                                                deviceIndex:(NSInteger)deviceIndex
-                                                colorspace:(int64_t)colorspace;
+                                                colorspace:(int64_t)colorspace
+                                               displayMode:(BMDDisplayMode)displayMode;
 @end
 
 @implementation DeckLinkBridge {
@@ -555,7 +615,8 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 // in the selector, so .mm-only). The public entry points wrap their fill and call this.
 - (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill
                                                deviceIndex:(NSInteger)deviceIndex
-                                                colorspace:(int64_t)colorspace {
+                                                colorspace:(int64_t)colorspace
+                                               displayMode:(BMDDisplayMode)displayMode {
     NSMutableArray<NSString *> *log = [NSMutableArray array];
 
     // Re-fire cleanly.
@@ -613,39 +674,49 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     }
     [log addObject:[NSString stringWithFormat:@"device: index %ld = \"%@\", IDeckLinkOutput acquired", (long)deviceIndex, name]];
 
-    // SEAM: dimensions + frame rate come from the OUTPUT MODE object, not hardcoded. (Resolution
-    // independence slots in here later — a different mode drives width/height/rowBytes/timescale.)
+    // SEAM (D4a): dimensions + frame rate come from the OUTPUT MODE object, driven by the requested
+    // `displayMode` (derived from the file's resolution + rate). A different mode drives
+    // width/height/rowBytes/timescale — the scheduling timing follows the resolved mode. If the exact
+    // mode can't be resolved (unknown / not in this SDK), fall back to 2160p23.98 so output still runs.
+    BMDDisplayMode wantMode = displayMode;
     IDeckLinkDisplayMode *mode = NULL;
-    if (output->GetDisplayMode(bmdMode4K2160p2398, &mode) != S_OK || mode == NULL) {
-        [log addObject:@"mode: could not resolve 2160p23.98 display mode — aborting"];
-        output->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+    if (wantMode == bmdModeUnknown || output->GetDisplayMode(wantMode, &mode) != S_OK || mode == NULL) {
+        if (mode) { mode->Release(); mode = NULL; }
+        [log addObject:@"mode: requested display mode unresolved — falling back to 2160p23.98"];
+        wantMode = bmdMode4K2160p2398;
+        if (output->GetDisplayMode(wantMode, &mode) != S_OK || mode == NULL) {
+            [log addObject:@"mode: could not resolve fallback 2160p23.98 display mode — aborting"];
+            output->Release();
+            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        }
     }
     const int32_t width  = (int32_t)mode->GetWidth();
     const int32_t height = (int32_t)mode->GetHeight();
     BMDTimeValue frameDuration = 0; BMDTimeScale timeScale = 0;
     mode->GetFrameRate(&frameDuration, &timeScale);
     mode->Release();
+    NSString *modeName = ModeNameForResolved(width, height, frameDuration, timeScale);
     int32_t rowBytes = 0;
     output->RowBytesForPixelFormat(bmdFormat10BitYUV, width, &rowBytes);   // authoritative v210 stride (128-aligned)
-    [log addObject:[NSString stringWithFormat:@"mode: %dx%d @ %lld/%lld (duration/timescale), v210 rowBytes=%d",
-                    width, height, (long long)timeScale, (long long)frameDuration, rowBytes]];
+    [log addObject:[NSString stringWithFormat:@"mode: %@ (%dx%d @ %lld/%lld duration/timescale), v210 rowBytes=%d",
+                    modeName, width, height, (long long)timeScale, (long long)frameDuration, rowBytes]];
 
     // Build the player (SEAM: fill source is pluggable — synthetic hue-walk for D3). The player
     // AddRefs the output; drop our local ref. `colorspace` is the output signal tag (from source
-    // primaries) applied to each scheduled frame's metadata.
+    // primaries) applied to each scheduled frame's metadata. The resolved `wantMode` drives
+    // EnableVideoOutput + DoesSupportVideoMode.
     DeckLinkScheduledPlayer *player =
-        new DeckLinkScheduledPlayer(output, width, height, rowBytes, frameDuration, timeScale, fill, colorspace);
+        new DeckLinkScheduledPlayer(output, wantMode, width, height, rowBytes, frameDuration, timeScale, fill, colorspace);
     output->Release();
     [log addObject:[NSString stringWithFormat:@"tag: output colorspace = %@",
                     (colorspace == bmdColorspaceRec2020 ? @"Rec. 2020" : @"Rec. 709")]];
 
     if (!player->doesSupportMode()) {
-        [log addObject:@"mode: 2160p23.98 / v210 10-bit YUV NOT supported — aborting"];
+        [log addObject:[NSString stringWithFormat:@"mode: %@ / v210 10-bit YUV NOT supported — aborting", modeName]];
         player->stop(); player->Release();
         return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
     }
-    [log addObject:@"mode: 2160p23.98 / v210 10-bit YUV supported"];
+    [log addObject:[NSString stringWithFormat:@"mode: %@ / v210 10-bit YUV supported", modeName]];
 
     if (!player->enableOutput()) {
         [log addObject:@"enable: EnableVideoOutput failed — aborting"];
@@ -677,17 +748,19 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
         player->stop(); player->Release();
         return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
     }
-    [log addObject:@"start: StartScheduledPlayback(0, timescale, 1.0) OK — free-running"];
+    [log addObject:[NSString stringWithFormat:@"start: StartScheduledPlayback(0, %lld, 1.0) OK — free-running at %@",
+                    (long long)timeScale, modeName]];
 
     _player = player;   // held; callback keeps the pipeline full until -stopScheduledPlayback
-    return [[DeckLinkOutputResult alloc] initWithSuccess:YES log:log];
+    return [[DeckLinkOutputResult alloc] initWithSuccess:YES log:log activeModeName:modeName];
 }
 
-// Public: synthetic hue-walk on device 0 (D3 — debug/fallback). No source → tag Rec.709.
+// Public: synthetic hue-walk on device 0 (D3 — debug/fallback). No source → tag Rec.709, 2160p23.98.
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0 {
     return [self startScheduledPlaybackWithFillFn:FrameFillFn(&SyntheticHueWalkFill)
                                       deviceIndex:0
-                                       colorspace:bmdColorspaceRec709];
+                                       colorspace:bmdColorspaceRec709
+                                      displayMode:bmdMode4K2160p2398];
 }
 
 // Public: REAL video (D-real) on a chosen device. Wrap the Obj-C fill block into the C++ FrameFillFn
@@ -697,14 +770,22 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 // kernel's encoding matrix, which the renderer selects from the matrix code).
 - (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex
                                                           fill:(DeckLinkFillBlock)fill
-                                                 primariesCode:(NSInteger)primariesCode {
+                                                 primariesCode:(NSInteger)primariesCode
+                                                   outputWidth:(NSInteger)outputWidth
+                                                  outputHeight:(NSInteger)outputHeight
+                                                  standardRate:(double)standardRate {
     DeckLinkFillBlock block = [fill copy];
     FrameFillFn fn = [block](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height) {
         (void)block(frameIndex, buffer, rowBytes, width, height);
     };
+    // D4a: derive the DISPLAY MODE from the output-family resolution + standard rate. The private
+    // start path falls back to 2160p23.98 if this resolves unknown or the card doesn't support it.
+    const bool is2160 = (outputHeight >= 1620);
+    BMDDisplayMode displayMode = BMDModeForFamilyRate(is2160, standardRate);
     return [self startScheduledPlaybackWithFillFn:fn
                                       deviceIndex:deviceIndex
-                                       colorspace:BMDColorspaceForPrimaries(primariesCode)];
+                                       colorspace:BMDColorspaceForPrimaries(primariesCode)
+                                      displayMode:displayMode];
 }
 
 // Update the output colorspace tag mid-session (source colorspace changed while output is running).
