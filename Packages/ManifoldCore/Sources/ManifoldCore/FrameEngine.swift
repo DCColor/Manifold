@@ -86,6 +86,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var videoRenderer: AVSampleBufferVideoRenderer?
     private let audioRenderer = AVSampleBufferAudioRenderer()
 
+    /// D4b-1: PCM audio tap. Tees decoded audio at BOTH enqueue sites into a PTS-keyed, card-ready
+    /// (int32 interleaved) ring buffer, WITHOUT altering what the renderer receives. Read by D4b-2's
+    /// DeckLink audio callback; nothing is sent to the card yet. Captured as a local in the enqueue
+    /// closures (like the renderers) so it never crosses the main-actor boundary.
+    public let audioTap = AudioTapBuffer()
+
     private var asset: AVURLAsset?
     private var videoTrack: AVAssetTrack?
     /// The source's signaled range (from the format description), captured once
@@ -388,6 +394,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         videoRenderer?.flush()
         audioRenderer.flush()
+        audioTap.reset()   // D4b-1: drop buffered PCM so nothing survives a stop
         isPlaying = false
         currentTime = 0
         hasMedia = false
@@ -672,7 +679,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         currentSource?.stop(); currentSource = nil      // retire any AVFoundation pump
         audioRenderer.stopRequestingMediaData()
         videoRenderer.stopRequestingMediaData()          // stop the prior pump arm
-        videoRenderer.flush(); audioRenderer.flush(); onFlush?()
+        videoRenderer.flush(); audioRenderer.flush(); audioTap.reset(); onFlush?()   // D4b-1: PTS discontinuity → drop stale PCM
 
         // Create + open once per file. The libav-reported range is authoritative for
         // DNxHR (ACLR), where AVFoundation's FullRangeVideo extension is often absent.
@@ -714,7 +721,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             let audio = LibavAudioSource(url: url, pacingRenderer: audioRenderer, pumpQueue: audioPumpQueue)
             if let ainfo = try? audio.open() {
                 let aRenderer = audioRenderer
-                audio.onAudioFrame = { sb in aRenderer.enqueue(sb) }
+                let tap = audioTap   // local capture (thread-safe class) — no main-actor hop on the pump
+                audio.onAudioFrame = { sb in
+                    tap.ingest(sb, path: .libav)   // D4b-1 tee — does not alter the enqueued buffer
+                    aRenderer.enqueue(sb)
+                }
                 libavAudioSource = audio
                 print("FrameEngine: libav audio — \(ainfo.codecName) \(ainfo.sampleRate)Hz "
                     + "\(ainfo.channels)ch (\(ainfo.layoutName))")
@@ -755,6 +766,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         videoRenderer.flush()
         audioRenderer.flush()
+        audioTap.reset()   // D4b-1: PTS discontinuity on seek → drop stale PCM
         onFlush?()
 
         guard let newReader = try? AVAssetReader(asset: asset) else {
@@ -822,6 +834,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         if let aOut {
             let aRenderer = audioRenderer
             let aReader = newReader
+            let tap = audioTap   // local capture (thread-safe class) — no main-actor hop on the pump
             aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [token, weak self] in
                 guard let self, self.sessionToken.isCurrent(token) else {
                     aRenderer.stopRequestingMediaData(); return
@@ -833,6 +846,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     guard aReader.status == .reading, let next = aOut.copyNextSampleBuffer() else {
                         aRenderer.stopRequestingMediaData(); return
                     }
+                    tap.ingest(next, path: .avFoundation)   // D4b-1 tee — does not alter the enqueued buffer
                     aRenderer.enqueue(next)
                 }
             }
