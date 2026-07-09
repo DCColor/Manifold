@@ -798,10 +798,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         var aOut: AVAssetReaderTrackOutput?
         if let aTrack = audioTrack {
+            // 32-bit signed int (not 16): a reference tool must not downconvert. 24-bit sources reach
+            // the renderer + the D4b-1 audio tap at full precision; the tap reads the ASBD generically
+            // (int32 pass-through), and AVSampleBufferAudioRenderer accepts int32 interleaved LPCM, so
+            // the system-audio path is unaffected. This also matches the libav/MXF path's fidelity.
             let audioSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
                 AVLinearPCMIsFloatKey: false,
-                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMBitDepthKey: 32,
                 AVLinearPCMIsBigEndianKey: false,
                 AVLinearPCMIsNonInterleaved: false
             ]
