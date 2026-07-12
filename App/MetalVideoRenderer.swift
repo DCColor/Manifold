@@ -185,6 +185,15 @@ final class MetalVideoRenderer {
     private var deckLinkOutputSize: (w: Int, h: Int)?  // DeckLink output frame dims (e.g. 3840x2160)
     private var deckLinkRowBytes = 0                   // v210 row stride (128-byte aligned), matches the frame
     private var deckLinkResMismatchLogged = false      // one-time native-res-mismatch log
+    /// D4b-2: SOURCE PTS (seconds) of the frame sitting in the FRONT v210 staging buffer — i.e. the
+    /// frame the DeckLink fill block is handing to the card. NaN when no converted frame is ready.
+    /// This is the number the whole A/V alignment hangs on: displayTick chooses a frame by PTS, and
+    /// that PTS is carried through the convert and published HERE, alongside the pixels it belongs to,
+    /// when the convert's GPU work completes and the buffer becomes the front. So "what is on the wire"
+    /// and "what source time is on the wire" are published atomically under the same lock — the audio
+    /// callback can never read a source time that belongs to a different frame than the one it's paired
+    /// with. Guarded by deckLinkLock (written on a Metal completion thread, read on the SDK audio thread).
+    private var deckLinkFrontPts: Double = .nan
 
     /// v210 row stride: 128-byte aligned, 48 px per 128 bytes. Matches IDeckLinkOutput
     /// RowBytesForPixelFormat(bmdFormat10BitYUV, width) (e.g. 3840 → 10240, no padding).
@@ -232,6 +241,9 @@ final class MetalVideoRenderer {
     // lastPixelBuffer is touched only on the render thread; pendingRefresh is
     // guarded because setNeedsRefresh() is called from the main thread.
     private var lastPixelBuffer: CVPixelBuffer?
+    /// SOURCE PTS of `lastPixelBuffer`, so a paused re-render (shader-flag change) carries the same
+    /// source time forward instead of losing it. Render thread only, like lastPixelBuffer.
+    private var lastPixelBufferPts: Double = .nan
     private let refreshLock = NSLock()
     private var pendingRefresh = false
 
@@ -518,7 +530,13 @@ final class MetalVideoRenderer {
         queueLock.unlock()
 
         if let pb = chosen {
-            renderPixelBuffer(pb)
+            // D4b-2: chosenPts — the SOURCE time of the frame selected for display — is no longer
+            // discarded here. It rides with the pixels through the offscreen → v210 convert → staging,
+            // and the DeckLink audio callback keys the audio stream to it. Serving audio at the source
+            // timestamp the VIDEO carries is what makes A/V alignment structural instead of a guess:
+            // it compensates the whole video pipeline delay (offscreen → convert → staging → memcpy →
+            // card preroll) for free, because the delay is what the pipeline IS, not something we model.
+            renderPixelBuffer(pb, pts: chosenPts)
             tickPresentedFPS(chosenPts)
             // A frame satisfied the strict gate — the post-seek one-shot is moot. Clear it
             // so a seek that resolves normally (incl. seek-and-play) never touches the
@@ -533,8 +551,8 @@ final class MetalVideoRenderer {
 
             if refresh, let pb = lastPixelBuffer {
                 // Range/override change while paused: re-render the last frame so the
-                // shader-flag change shows.
-                renderPixelBuffer(pb)
+                // shader-flag change shows. Same frame → same source time.
+                renderPixelBuffer(pb, pts: lastPixelBufferPts)
             } else if seekRender, isPausedProvider?() ?? true {
                 // Post-seek + PAUSED: the decoder overshot the seek target (the only
                 // queued frame's pts is just past the pinned clock), so the strict gate
@@ -555,7 +573,7 @@ final class MetalVideoRenderer {
                         nearest.pts, now, nearest.pts - now).utf8))
                     #endif
                     refreshLock.lock(); pendingSeekRender = false; refreshLock.unlock()
-                    renderPixelBuffer(nearest.pixelBuffer)
+                    renderPixelBuffer(nearest.pixelBuffer, pts: nearest.pts)
                     tickPresentedFPS(nearest.pts)
                 }
             }
@@ -597,8 +615,13 @@ final class MetalVideoRenderer {
 
     // MARK: - Drawing
 
-    private func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer) {
+    /// `pts` is the frame's SOURCE presentation time (seconds). It is carried through the render so the
+    /// DeckLink v210 convert can publish it with the converted pixels (D4b-2) — the audio stream keys
+    /// off it. NaN is tolerated (means "unknown source time"): the audio path then holds silence rather
+    /// than guessing an alignment.
+    private func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer, pts: Double) {
         lastPixelBuffer = pixelBuffer   // retained for paused refresh (render thread only)
+        lastPixelBufferPts = pts
         let width  = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
@@ -674,7 +697,8 @@ final class MetalVideoRenderer {
             self.offscreenIndexLock.unlock()
             self.onFrameRendered?()
             // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
-            self.pushDeckLinkConvert()
+            // The frame's SOURCE pts rides along so it can be published with the converted pixels.
+            self.pushDeckLinkConvert(sourcePts: pts)
         }
         cmdBuffer.commit()
         // Advance so the NEXT render targets a different ring texture (write-during-read
@@ -911,6 +935,7 @@ final class MetalVideoRenderer {
         deckLinkFrameReady = false
         deckLinkConverting = false
         deckLinkResMismatchLogged = false
+        deckLinkFrontPts = .nan          // no frame on the wire yet → audio has nothing to align to
         deckLinkActive = (deckLinkStaging.count == 2)
     }
 
@@ -922,13 +947,14 @@ final class MetalVideoRenderer {
         deckLinkStaging = []
         deckLinkOutputSize = nil
         deckLinkRowBytes = 0
+        deckLinkFrontPts = .nan
     }
 
     /// PUSH: convert the just-completed offscreen → v210 into the BACK staging buffer, then (on GPU
     /// completion) swap it to FRONT. Driven from the render completion handler. One-in-flight gated
     /// so converts never pile up; no-op when DeckLink output isn't active. Native-res guard: if the
     /// offscreen dims ≠ output dims, skip (mark not-ready) + log once — scaling is a later stage.
-    private func pushDeckLinkConvert() {
+    private func pushDeckLinkConvert(sourcePts: Double) {
         deckLinkLock.lock()
         guard deckLinkActive, !deckLinkConverting, deckLinkStaging.count == 2,
               let outSize = deckLinkOutputSize else { deckLinkLock.unlock(); return }
@@ -978,13 +1004,26 @@ final class MetalVideoRenderer {
         cmd.addCompletedHandler { [weak self] _ in
             guard let self else { return }
             self.deckLinkLock.lock()
-            // The back buffer is now a COMPLETE frame → make it the front; clear the gate.
+            // The back buffer is now a COMPLETE frame → make it the front; clear the gate. The frame's
+            // SOURCE pts is published in the SAME critical section as the pixels it belongs to, so the
+            // audio callback can never pair a source time with the wrong frame (D4b-2).
             self.deckLinkFrontIndex = backIndex
+            self.deckLinkFrontPts = sourcePts
             self.deckLinkFrameReady = true
             self.deckLinkConverting = false
             self.deckLinkLock.unlock()
         }
         cmd.commit()
+    }
+
+    /// D4b-2 (SDK audio-callback thread): the SOURCE time of the frame currently in the FRONT v210
+    /// staging buffer — the frame the card is being fed. NaN when no converted frame is ready (output
+    /// just started, no file loaded, or a resolution mismatch is holding neutral), which the audio path
+    /// reads as "nothing to align to" and answers with silence. Same lock as the staging buffers, so
+    /// this time and those pixels are always the same frame.
+    func currentDeckLinkSourcePts() -> Double {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        return deckLinkFrameReady ? deckLinkFrontPts : .nan
     }
 
     /// PULL (DeckLink callback thread): memcpy the current FRONT staging buffer into the DeckLink

@@ -30,6 +30,55 @@ NS_ASSUME_NONNULL_BEGIN
 /// callback thread — must be cheap (a memcpy), never blocking.
 typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height);
 
+#pragma mark - D4b-2: SDI audio output
+
+/// The SOURCE TIME (seconds) of the video frame currently in the DeckLink staging buffer — i.e. the
+/// frame the fill block is about to hand (or has just handed) to the card. NaN when no converted
+/// frame is ready. This is the anchor the audio stream is keyed to: serving audio at the source time
+/// the VIDEO carries makes A/V alignment structural rather than a wall-clock guess. Called on the SDK
+/// audio-callback thread (~50 Hz) — must be a cheap lock-guarded read.
+typedef double (^DeckLinkAudioSourceTimeBlock)(void);
+
+/// YES → the SDI audio stream must carry SILENCE this callback (user mute, pause, or an off-speed
+/// JKL shuttle). The card is still fed (zeros), never starved. Called on the SDK audio-callback thread.
+typedef BOOL (^DeckLinkAudioSilentBlock)(void);
+
+/// Copy up to `frameCount` interleaved int32 frames of SOURCE-channel PCM starting at source time
+/// `startTime` (seconds) into `dst` (capacity `frameCount * sourceChannelCount` int32). Returns the
+/// number of frames actually available and copied — 0 when `startTime` is outside the ring's retained
+/// window (post-seek gap / decoder hasn't reached it). Never blocks beyond a lock; never returns stale
+/// or repeated samples. This is AudioTapBuffer.read (D4b-1). Called on the SDK audio-callback thread.
+typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, int32_t *dst);
+
+/// Everything the bridge needs to run the SDI audio stream. Passed at start; nil → video-only output
+/// (the D4b-1 arc's prior behavior, unchanged). All blocks run on the SDK audio-callback thread.
+@interface DeckLinkAudioConfig : NSObject
+/// Source sample rate (Hz). The SDK accepts 48000 and NOTHING else (BMDAudioSampleRate has exactly one
+/// member) — the caller must refuse/report a non-48k source rather than mis-signal it.
+@property (nonatomic, readonly) double sampleRate;
+/// Interleaved channel count the ring actually stores (what `read` writes).
+@property (nonatomic, readonly) NSInteger sourceChannelCount;
+/// SDK-legal embedded-channel count (2/8/16/32/64) the card is enabled with. Source channels are
+/// interleaved into this at SCHEDULE time; the extra channels carry silence.
+@property (nonatomic, readonly) NSInteger deckLinkChannelCount;
+/// Residual-latency trim (seconds) added to the target source time. The (audio-buffer − video-queue)
+/// depth difference is measured and compensated each callback; this knob only mops up what those two
+/// depths don't capture (the staging hop, the card's embedder/DAC latency). + → audio pulled EARLIER
+/// in the source (audio arrives sooner on the wire). Default 0.
+@property (nonatomic, readonly) double trimSeconds;
+@property (nonatomic, copy, readonly) DeckLinkAudioSourceTimeBlock sourceTime;
+@property (nonatomic, copy, readonly) DeckLinkAudioSilentBlock isSilent;
+@property (nonatomic, copy, readonly) DeckLinkAudioReadBlock read;
+
+- (instancetype)initWithSampleRate:(double)sampleRate
+                sourceChannelCount:(NSInteger)sourceChannelCount
+              deckLinkChannelCount:(NSInteger)deckLinkChannelCount
+                      trimSeconds:(double)trimSeconds
+                        sourceTime:(DeckLinkAudioSourceTimeBlock)sourceTime
+                          isSilent:(DeckLinkAudioSilentBlock)isSilent
+                              read:(DeckLinkAudioReadBlock)read;
+@end
+
 /// Objective-C++ bridge to the Blackmagic DeckLink SDK. The .mm side does all the C++/COM work
 /// (reference-counted interfaces, Release() on each) and hands back plain Obj-C value objects so
 /// Swift never sees a C++ type.
@@ -67,12 +116,17 @@ typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t r
 /// checks DoesSupportVideoMode(v210, output), and falls back to 2160p23.98 if unsupported. The
 /// scheduling timing (frameDuration/timeScale) follows the resolved mode. Result.activeModeName
 /// reports the mode actually established.
+///
+/// D4b-2: pass `audio` to embed SDI audio on the same output, clock-anchored to the video on the wire
+/// (the stream is enabled/prerolled/started inside this one call, in the SDK's required order). Pass
+/// nil for video-only.
 - (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex
                                                           fill:(DeckLinkFillBlock)fill
                                                  primariesCode:(NSInteger)primariesCode
                                                    outputWidth:(NSInteger)outputWidth
                                                   outputHeight:(NSInteger)outputHeight
-                                                  standardRate:(double)standardRate;
+                                                  standardRate:(double)standardRate
+                                                         audio:(nullable DeckLinkAudioConfig *)audio;
 
 /// Re-tag the output colorspace mid-session (source primaries changed while output is running). The
 /// next scheduled frame picks it up. No-op if not currently playing.

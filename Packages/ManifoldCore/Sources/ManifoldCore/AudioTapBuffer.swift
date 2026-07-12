@@ -65,6 +65,19 @@ public final class AudioTapBuffer: @unchecked Sendable {
     /// serve stale samples across the jump.
     private let discontinuityToleranceSeconds = 0.050
 
+    /// D4b-2: fired when the capture format is first established, or changes (rate/channels) — i.e.
+    /// exactly when the ring is (re)configured. NOT fired for a `reset()` (a seek keeps the format).
+    ///
+    /// This exists because the DeckLink audio stream is not like the system renderer: the card must be
+    /// ENABLED with a fixed sample rate + channel count BEFORE scheduled playback starts, so "the file
+    /// turned out to have 5.1 at 48k" is news the output has to act on — by re-establishing itself. The
+    /// alternative (reading the format at output-start time) loses the race whenever output is enabled
+    /// before a file is loaded, which is the common order.
+    ///
+    /// Called on the decode/enqueue thread, OUTSIDE the lock, so the handler may call back into the
+    /// audio stack without deadlocking.
+    public var onFormatChange: (@Sendable (Format) -> Void)?
+
     public init() {}
 
     // MARK: - Exposed format / presence
@@ -188,14 +201,17 @@ public final class AudioTapBuffer: @unchecked Sendable {
         // Append under the lock, keyed by PTS.
         lock.lock()
         // (Re)configure on first buffer or a format change (rate/channels): size the ring to the window.
+        var newFormat: Format?
         if currentFormat == nil || currentFormat?.sampleRate != rate || currentFormat?.channelCount != ch {
             channels = ch
             sampleRate = rate
             capacityFrames = max(1, Int((windowSeconds * rate).rounded()))
             ring = [Int32](repeating: 0, count: capacityFrames * ch)
             writeHead = 0; framesWritten = 0; basePTS = .nan
-            currentFormat = Format(sampleRate: rate, channelCount: ch,
-                                   deckLinkChannelCount: Self.deckLinkChannelCount(for: ch), path: path)
+            let fmt = Format(sampleRate: rate, channelCount: ch,
+                             deckLinkChannelCount: Self.deckLinkChannelCount(for: ch), path: path)
+            currentFormat = fmt
+            newFormat = fmt   // notified after the lock is dropped
         }
         // Anchor the session clock, or re-anchor on an unexpected PTS jump (seek/gap not routed
         // through reset()).
@@ -226,6 +242,14 @@ public final class AudioTapBuffer: @unchecked Sendable {
         if doLog { lastLoggedFrames = framesNow }
         let logRate = Int(sampleRate); let logCh = chan; let held = min(framesNow, cap)
         lock.unlock()
+
+        // Outside the lock: the handler re-establishes the DeckLink output (D4b-2), which must not
+        // re-enter the ring while we hold it.
+        if let newFormat {
+            print("AudioTap[\(path.rawValue)]: format → \(Int(newFormat.sampleRate))Hz · "
+                + "\(newFormat.channelCount)ch (→ \(newFormat.deckLinkChannelCount)ch on SDI)")
+            onFormatChange?(newFormat)
+        }
 
         if doLog {
             print("AudioTap[\(path.rawValue)]: int32 interleaved · \(logRate)Hz · \(logCh)ch · "

@@ -212,6 +212,19 @@ struct ContentView: View {
                 renderer.start()
                 // DeckLink output sources real video from this renderer (⌃⌥O / toolbar control).
                 DeckLinkService.shared.renderer = renderer
+                // D4b-2: …and SDI audio from the engine's PTS-keyed PCM ring, gated by the transport.
+                // The card's audio callback pulls from the ring at the SOURCE TIME of the frame the
+                // renderer currently has staged for the card, so A/V are aligned by construction.
+                DeckLinkService.shared.audioTap = engine.audioTap
+                DeckLinkService.shared.isCardAudioSilentProvider = { engine.isCardAudioSilent() }
+                // D4b-3: the SDI and computer paths are mutually exclusive. This is the service's ONLY
+                // authority over the system renderer — it passes (outputEnabled && destination == .sdi),
+                // and the engine folds that into its existing applyAudioMute rule.
+                DeckLinkService.shared.systemAudioRouting = { owns in engine.setDeckLinkOwnsAudio(owns) }
+                // The card must be ENABLED with a fixed rate/channel count before playback starts, so a
+                // file whose audio format differs re-establishes the output (this is also what lets you
+                // enable output BEFORE loading a file and still get audio).
+                engine.audioTap.onFormatChange = { fmt in DeckLinkService.shared.audioFormatChanged(fmt) }
                 DeckLinkService.shared.refreshDevices()   // populate the device picker
                 // Explicit "Enable output on launch" preference (Settings → DeckLink Output): start
                 // output now IF the pref is on AND a capable device is present (no-op otherwise).
@@ -560,6 +573,13 @@ struct ContentView: View {
                 set: { DeckLinkService.shared.selectDevice($0) })
     }
 
+    /// D4b-3: route the destination picker through setAudioDestination — routing only, so a mid-session
+    /// flip re-points the audio WITHOUT re-establishing the card (no video blip, no lost preroll depth).
+    private var deckLinkAudioDestinationBinding: Binding<DeckLinkService.AudioDestination> {
+        Binding(get: { deckLink.audioDestination },
+                set: { DeckLinkService.shared.setAudioDestination($0) })
+    }
+
     /// DeckLink output split-button: main button toggles output (green/filled when ON), chevron
     /// opens a Menu (device picker + plain-speak status). Mirrors the CIE gear-menu interaction.
     /// Button face = icon + on/off only; format text lives in the menu.
@@ -584,6 +604,18 @@ struct ContentView: View {
                         }
                         .pickerStyle(.inline)
                     }
+                }
+                // D4b-3: a live operational choice (a client may want the room speakers for a minute),
+                // so it lives in the toolbar menu, not Settings. Mutually exclusive — there is no
+                // "Both": the same program on two paths is never wanted. Only meaningful while output
+                // is ON; with DeckLink off, audio is plain desktop playback governed by the mute button.
+                Section("Audio") {
+                    Picker("Audio destination", selection: deckLinkAudioDestinationBinding) {
+                        Text("SDI (follows video)").tag(DeckLinkService.AudioDestination.sdi)
+                        Text("Computer").tag(DeckLinkService.AudioDestination.computer)
+                    }
+                    .pickerStyle(.inline)
+                    .disabled(!deckLink.isOutputting)
                 }
                 Section("Signal") {
                     Button(deckLink.signalLine) {}.disabled(true)

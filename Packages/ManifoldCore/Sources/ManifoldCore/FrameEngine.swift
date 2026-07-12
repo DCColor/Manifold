@@ -273,12 +273,57 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         applyAudioMute()
     }
 
-    /// Effective renderer mute = the user's mute OR an active non-1× shuttle.
+    /// D4b-3: TRUE while DeckLink output is enabled AND the audio destination is SDI — i.e. the card
+    /// owns the program audio, so the system (computer) renderer must be silent. The two paths are
+    /// mutually exclusive: the same program never plays twice.
+    ///
+    /// This is the ONLY authority the destination has over the system renderer, and it is gated on
+    /// DeckLink being enabled, not on the destination alone. When DeckLink output is disabled the App
+    /// sets this false and the term simply drops out of the mute rule below — desktop playback returns
+    /// to being governed by `isMuted` alone, no matter what the destination enum still says.
+    private var deckLinkOwnsAudio = false
+
+    /// Called by the App whenever the DeckLink enable state OR the audio destination changes. Routing
+    /// only: it re-evaluates the existing mute, and adds no second mechanism.
+    public func setDeckLinkOwnsAudio(_ owns: Bool) {
+        guard deckLinkOwnsAudio != owns else { return }
+        deckLinkOwnsAudio = owns
+        applyAudioMute()
+    }
+
+    /// Effective renderer mute = the user's mute OR an active non-1× shuttle OR the SDI destination
+    /// owning the program (D4b-3).
     /// Fast-forward replays audio at >1× (pitch/garble), so we mute off-speed and
     /// restore the user's choice when returning to 1× — standard NLE behavior.
     private func applyAudioMute() {
         let offSpeed = shuttleRate != 0 && shuttleRate != 1
-        audioRenderer.isMuted = isMuted || offSpeed
+        audioRenderer.isMuted = isMuted || offSpeed || deckLinkOwnsAudio
+        // D4b-2: mirror the same decision for the SDI audio stream, which pulls from a callback thread
+        // and cannot touch main-actor state. One addition the PULL model forces: PAUSE is silence too.
+        // The system renderer gets that for free (a stopped synchronizer clock simply stops pulling);
+        // the card asks for samples at ~50 Hz regardless, and the source time it asks at is frozen while
+        // paused — so serving PCM would re-send the same window forever (a drone). Silence is the honest
+        // answer. Net: real PCM only at exactly 1× forward, unmuted.
+        setCardAudioSilent(isMuted || shuttleRate != 1)
+    }
+
+    /// D4b-2: thread-safe mirror of the SDI audio gate, readable from the DeckLink audio-callback
+    /// thread (same rationale as `effectiveRangeMirror` for the render thread). TRUE → the SDI stream
+    /// must carry silence. Starts true: nothing is playing at init.
+    private nonisolated let cardAudioLock = NSLock()
+    private nonisolated(unsafe) var cardAudioSilentMirror = true
+
+    private nonisolated func setCardAudioSilent(_ silent: Bool) {
+        cardAudioLock.lock(); cardAudioSilentMirror = silent; cardAudioLock.unlock()
+    }
+
+    /// True when the SDI audio stream must carry SILENCE — the user muted, or the transport is not at
+    /// exactly 1× forward (paused, or an off-speed JKL shuttle whose audio the 1×-only decode pump
+    /// cannot supply). The card is still fed zeros, never starved. Real scrub audio is a separate DSP
+    /// feature, deliberately deferred.
+    public nonisolated func isCardAudioSilent() -> Bool {
+        cardAudioLock.lock(); defer { cardAudioLock.unlock() }
+        return cardAudioSilentMirror
     }
 
     public func play() { setShuttleRate(1) }
