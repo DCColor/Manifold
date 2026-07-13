@@ -42,6 +42,12 @@ public enum MediaInspector {
             }
         }
 
+        // HDR10 static metadata (MDCV + CLLI). AVFoundation surfaces no reliable API for
+        // the mastering-display / content-light boxes, so this one fact comes from libav
+        // even on the AVFoundation path — the same reader the libav/MXF path uses, so
+        // both paths report HDR10 identically.
+        meta.hdr10 = HDR10MetadataReader.read(url: url)
+
         meta.audioTracks = await audioTracks(for: asset)
         meta.textTracks = await textTracks(for: asset)
         let tc = TimecodeReader.readStartTimecode(url: url)

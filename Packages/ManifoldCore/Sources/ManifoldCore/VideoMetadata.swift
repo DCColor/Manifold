@@ -81,6 +81,19 @@ public struct VideoMetadata: Equatable, Sendable {
     /// (flag absent), or "—" (no video format description).
     public var colorRange: String = "—"
 
+    /// HDR10 static metadata (MDCV + CLLI) as DECLARED by the file, read via libav's
+    /// side-data. Default is all-absent, which is the honest state for a file that
+    /// declares none — the present flags live inside, so absence is never a defaulted
+    /// value pretending to be a declaration. Read-only: displayed, never rendered from.
+    public var hdr10 = HDR10StaticMetadata()
+
+    /// Whether the file's transfer function is an HDR one (PQ or HLG). Drives whether
+    /// the inspector shows the HDR10 section at all: on an SDR clip, "no HDR10 metadata"
+    /// is not news; on a PQ clip it is.
+    public var isHDRTransfer: Bool {
+        transferFunctionCode == 16 || transferFunctionCode == 18
+    }
+
     public var startTimecode: String?
     public var chapters: [ChapterMarker] = []
     public var audioTracks: [AudioTrackInfo] = []
