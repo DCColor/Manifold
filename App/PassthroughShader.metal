@@ -69,7 +69,25 @@ vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]]) {
     return out;
 }
 
-fragment float4 passthroughFragment(VertexOut in [[stage_in]],
+// E1: returns half4, matching the rgba16Float render target.
+//
+// This is NOT cosmetic and NOT a precision downgrade — it is REQUIRED for correctness.
+// Returning float4 into a half target makes the ROP do the float32→half conversion, and this
+// GPU's ROP TRUNCATES toward zero rather than rounding to nearest (measured: 2048/2048 samples
+// truncate, 951 disagree with round-to-nearest). Truncation is a SYSTEMATIC DARK BIAS of up to
+// one half-ULP — about 0.5 of a 10-bit code near white, always downward, never up.
+//
+// That bias is not academic: it reached the SDI output. With a float4 return, the v210 encoder
+// produced 1,176,120 components on the full-range ramp that were EVERY ONE of them one code
+// DARKER than the rgb10a2 path had produced. Converting to half here instead makes the shader
+// do the narrowing with correct round-to-nearest (measured: 4096/4096), leaving the ROP nothing
+// to truncate. The result is unbiased (mean ≈ 0) with max error ~0.25 of a 10-bit code — i.e.
+// strictly BETTER than the ±0.5-code rounding of the rgb10a2Unorm grid this replaced.
+//
+// The arithmetic below is unchanged and still runs in float32; only the final write narrows.
+// Keep the return type in step with renderPixelFormat: a float4 return into a half target
+// silently reintroduces the dark bias.
+fragment half4 passthroughFragment(VertexOut in [[stage_in]],
                                      texture2d<float> lumaTex   [[texture(0)]],
                                      texture2d<float> chromaTex [[texture(1)]],
                                      constant ColorParams &params [[buffer(0)]]) {
@@ -115,7 +133,10 @@ fragment float4 passthroughFragment(VertexOut in [[stage_in]],
     float g = y - params.b * cb - params.c * cr;
     float b = y + params.d * cb;
 
-    return float4(r, g, b, 1.0);
+    // Narrow to half HERE (round-to-nearest) rather than letting the ROP truncate — see the
+    // header comment. NOT clamped: the rgba16Float target carries >1.0 and negatives, which is
+    // the whole point of E1. (Superwhite already exists in SDR: the legal ramp peaks at 1.00098.)
+    return half4(half3(r, g, b), 1.0h);
 }
 
 // MARK: - GPU scopes (Phase 1 prototype: luma waveform)

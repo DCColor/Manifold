@@ -98,14 +98,52 @@ private func ycbcrKrKb(forMatrixCode code: Int?) -> (kr: Float, kb: Float) {
 /// nothing about FrameEngine, only a clock closure returning the current time.
 final class MetalVideoRenderer {
 
-    // M3b: 10-bit render target. rgb10a2Unorm — CAMetalLayer-compatible (the 1:1
-    // blit to the drawable stays same-format), 4 bytes/pixel packed 10-10-10-2.
-    // Display, export, DeckLink and the SCOPES all read this at full 10-bit precision:
-    // the scopes are GPU kernels sampling this very texture (dispatchScopeKernel — Metal
-    // decodes rgb10a2 to a normalized float on read), NOT a CPU readback, and nothing
-    // downconverts to 8-bit anywhere on that path.
+    // E1 (was M3b): float render target. rgba16Float — the EDR container Apple specifies for
+    // extended dynamic range. CAMetalLayer-compatible (the 1:1 blit to the drawable stays
+    // same-format), 8 bytes/pixel, half per channel.
+    //
+    // Why float, and why now: rgb10a2Unorm is UNSIGNED-NORMALIZED, so the render-target
+    // write HARDWARE-CLAMPS every channel to [0,1]. That clamp is exactly what an EDR path
+    // cannot live with — EDR *is* values above 1.0. half carries >1.0 and negatives, and its
+    // grid is FINER than the 10-bit one everywhere in (0,1] (2× near white, more below).
+    // The clamp was not hypothetical: the legal gray ramp already peaks at 1.000977, and
+    // rgb10a2 was destroying that superwhite on every frame.
+    //
+    // This is a CONTAINER change ONLY. No EDR opt-in (no wantsExtendedDynamicRangeContent —
+    // that is E2), no transfer math, no range/matrix change.
+    //
+    // KNOWN ACCEPTED RESIDUAL — read this before "fixing" a ±1-code scope/export diff.
+    // SDR is NOT bit-identical to the rgb10a2 path, and it CANNOT be made so: half's grid is
+    // finer than the 10-bit grid but NOT ALIGNED to it, so a value sitting near a 10-bit
+    // rounding boundary can round-trip through half and land one code the other side. That is a
+    // property of the two grids, not a bug, and no rounding mode removes it. Measured on the M3b
+    // ramp fixtures (E1 validation), one affected consumer per range:
+    //   legal ramp: SDI v210 output BIT-IDENTICAL (the legal round-trip is self-correcting);
+    //               export re-quantized to 10-bit differs by ±1 code on 8.8% of pixels.
+    //   full ramp:  export BIT-IDENTICAL (full-range codes sit exactly on the 10-bit grid);
+    //               SDI v210 differs by ±1 code on 2.2% of words.
+    // Every delta is exactly ±1 LSB at 10-bit and verified SYMMETRIC (unbiased), landing inside
+    // bins rgb10a2 was already rounding — sub-LSB, below the panel noise floor, NOT a behavioral
+    // regression. The symmetry is load-bearing: see the half4 note in PassthroughShader.metal for
+    // why the fragment return type must stay half4, and what biases dark if it doesn't.
+    //
+    // DELIBERATE: an rgba32Float offscreen (drawable stays half) would be exactly bit-identical,
+    // and was REJECTED — it doubles hot-path bandwidth and offscreen memory (133MB → 265MB at 4K)
+    // to erase noise the prior container was itself manufacturing.
+    //
+    // Display, export, DeckLink and the SCOPES all read this target. The scopes and the
+    // DeckLink v210 encoder are GPU kernels that sample it as a normalized float
+    // (`offscreen.read(gid)`) — half decodes to float exactly as unorm10 did, so they are
+    // format-agnostic and need no change. The CPU readback (export) is NOT format-agnostic:
+    // it must unpack half, not packed 10-10-10-2 — see renderBytesPerPixel / rgba16FloatToRGBA16.
     // Propagates to the layer + pipeline color attachment via the references below.
-    static let renderPixelFormat: MTLPixelFormat = .rgb10a2Unorm
+    static let renderPixelFormat: MTLPixelFormat = .rgba16Float
+
+    /// Bytes per pixel of `renderPixelFormat`. The CPU readback path (export) needs this to
+    /// size its rows: rgb10a2Unorm was 4 (packed 10-10-10-2), rgba16Float is 8 (4 × half).
+    /// It was previously an inline `width * 4` — which silently under-reads a float target
+    /// (half a row per row), so it lives next to the format constant now to stay in step.
+    static let renderBytesPerPixel: Int = 8
 
     let metalLayer = CAMetalLayer()
 
@@ -741,8 +779,8 @@ final class MetalVideoRenderer {
     /// read it back (BLOCKING — own command buffer + waitUntilCompleted on the render queue, so
     /// it can't tear against an in-flight render). Used by the ⌃⌥E frame export only; the scopes
     /// sample the offscreen on the GPU (dispatchScopeKernel) and never read the full frame back.
-    // M3b: the render target is rgb10a2Unorm — 4 bytes/pixel, PACKED 10-10-10-2 (not bgra8).
-    // exportCurrentFrame unpacks this raw form to a 16-bit PNG (rgb10a2ToRGBA16).
+    // E1: the render target is rgba16Float — 8 bytes/pixel, 4 × half (was 4 bytes/pixel packed
+    // 10-10-10-2). exportCurrentFrame unpacks this raw form to a 16-bit PNG (rgba16FloatToRGBA16).
     func readbackRenderedFrame() -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
         guard let src = offscreenTexture else { return nil }
         let width = src.width
@@ -766,7 +804,7 @@ final class MetalVideoRenderer {
         cmd.commit()
         cmd.waitUntilCompleted()
 
-        let bytesPerRow = width * 4
+        let bytesPerRow = width * Self.renderBytesPerPixel
         var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
         bytes.withUnsafeMutableBytes { raw in
             cpuTex.getBytes(raw.baseAddress!, bytesPerRow: bytesPerRow,
@@ -1054,24 +1092,48 @@ final class MetalVideoRenderer {
         return true
     }
 
-    /// Unpack an rgb10a2Unorm buffer to 16-bit RGBA (alpha skipped/opaque). Each
-    /// 10-bit channel is left-shifted into the 16-bit range (×64) so a 16-bit PNG
-    /// preserves the full 10-bit precision. Channel order R,G,B,A (byteOrder16Little).
-    private static func rgb10a2ToRGBA16(_ src: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> [UInt16] {
+    /// Unpack an rgba16Float (4 × half) buffer to 16-bit RGBA (alpha skipped/opaque).
+    /// Channel order R,G,B,A (byteOrder16Little).
+    ///
+    /// E1: this replaces rgb10a2ToRGBA16, which unpacked packed 10-10-10-2 by hand — a bit
+    /// layout the float target no longer has. The ENCODING it produced is preserved: each
+    /// channel is quantized to a 10-bit code and left-shifted ×64 into the 16-bit range, so
+    /// full white stays 1023<<6 = 65472 (not 65535) exactly as the old export wrote it. E1 is
+    /// a container migration, not an export-format change.
+    ///
+    /// This is NOT bit-identical to the old export, and cannot be — half's grid is not aligned
+    /// to the 10-bit grid, so re-quantizing here lands ±1 code away wherever the value sits
+    /// near a 10-bit rounding boundary. Measured: full-range ramp exports bit-identical (0 of
+    /// 8.29M px differ); legal-range ramp differs by ±1 code on 8.8% of pixels, symmetric and
+    /// unbiased. See the E1 note on renderPixelFormat.
+    ///
+    /// Two consequences worth naming, both deferred to E2 rather than silently "fixed" here:
+    ///   - The ×64 shift re-quantizes to 10 bits, discarding the extra precision half carries.
+    ///     Keeping the old encoding is the point; widening it is an export change.
+    ///   - Values >1.0 — the whole reason for the float target — are CLAMPED here. A 16-bit
+    ///     integer PNG cannot represent them at all, so an EDR export needs a different
+    ///     container (half-float TIFF/EXR): an E2+ decision, not something to fake now. This
+    ///     DOES bite today: the legal ramp's 1.000977 superwhite is clamped back to 1023.
+    ///
+    /// Rounding mode is measured to be irrelevant here (round-half-even and round-half-away
+    /// agree on every sample) — a half times 1023 essentially never lands on an exact .5.
+    private static func rgba16FloatToRGBA16(_ src: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> [UInt16] {
         var out = [UInt16](repeating: 0, count: width * 4 * height)
         src.withUnsafeBytes { inRaw in
+            let halfs = inRaw.bindMemory(to: Float16.self)
+            let rowHalfs = bytesPerRow / MemoryLayout<Float16>.stride
             out.withUnsafeMutableBufferPointer { outBuf in
                 for y in 0..<height {
-                    let inRow = y * bytesPerRow
+                    let inRow = y * rowHalfs
                     let outRow = y * width * 4
                     for x in 0..<width {
                         let p = inRow + x * 4
-                        let px = UInt32(inRaw[p]) | (UInt32(inRaw[p + 1]) << 8)
-                            | (UInt32(inRaw[p + 2]) << 16) | (UInt32(inRaw[p + 3]) << 24)
                         let o = outRow + x * 4
-                        outBuf[o + 0] = UInt16((px & 0x3FF) << 6)
-                        outBuf[o + 1] = UInt16(((px >> 10) & 0x3FF) << 6)
-                        outBuf[o + 2] = UInt16(((px >> 20) & 0x3FF) << 6)
+                        for ch in 0..<3 {
+                            let v = min(max(Float(halfs[p + ch]), 0.0), 1.0)   // E2: >1.0 clamped
+                            let code10 = UInt16((v * 1023.0).rounded(.toNearestOrEven))
+                            outBuf[o + ch] = code10 << 6
+                        }
                         outBuf[o + 3] = 0xFFFF
                     }
                 }
@@ -1095,10 +1157,11 @@ final class MetalVideoRenderer {
         // NOT deviceRGB/sRGB — so the consumer reads the raw code values under the
         // file's real colorspace. Fall back to 709 only if the layer has none.
         let cs = metalLayer.colorspace ?? CGColorSpace(name: CGColorSpace.itur_709)!
-        // M3b: the readback is now rgb10a2 (packed 10-10-10-2). Unpack to 16-bit RGBA
-        // (10-bit value placed in the high bits) so the export carries the full 10-bit
-        // precision — a 16-bit PNG rather than the old 8-bit one.
-        let rgba16 = Self.rgb10a2ToRGBA16(bytes, width: width, height: height, bytesPerRow: bytesPerRow)
+        // E1: the readback is now rgba16Float (4 × half). Unpack to 16-bit RGBA with the SAME
+        // ENCODING the rgb10a2 path used (10-bit code in the high bits) — same format, but not
+        // bit-identical values: legal-range content lands ±1 code off on ~8.8% of pixels (the
+        // accepted half-vs-10-bit grid residual). See rgba16FloatToRGBA16.
+        let rgba16 = Self.rgba16FloatToRGBA16(bytes, width: width, height: height, bytesPerRow: bytesPerRow)
         let outBytesPerRow = width * 8   // 4 channels × 16-bit
         let data = rgba16.withUnsafeBytes { Data($0) }
         let bitmapInfo = CGBitmapInfo(rawValue:
