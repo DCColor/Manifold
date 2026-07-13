@@ -380,12 +380,10 @@ final class MetalVideoRenderer {
         // file's CICP tags. wantsExtendedDynamicRangeContent is deliberately NOT set here — see
         // the E2 note there for why it is HDR-conditional rather than globally on.
 
-        // Once per process, not once per instance: ContentView holds the renderer in a @State
-        // default-value expression (ContentView.swift:87), and SwiftUI re-evaluates that
-        // expression on every re-creation of the View struct — keeping only the first result and
-        // discarding the rest. So this init runs repeatedly with throwaway instances. The LIVE
-        // renderer is the first one and keeps its layer config, so nothing is clobbered, but an
-        // unguarded log here spams the console once per SwiftUI update.
+        // Once per PROCESS, not once per renderer. Headroom is a property of the display, not of
+        // this object, so there is nothing to say a second time — and a renderer is constructed
+        // per window. (This guard also predates the ContentView fix, where a @State default-value
+        // expression was rebuilding the renderer on every SwiftUI update; see RendererStore.)
         Self.logStartupHeadroomOnce
 
         let cacheStatus = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)

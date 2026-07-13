@@ -62,6 +62,33 @@ struct ScopeSlotHeader: View {
     }
 }
 
+/// Owns the single MetalVideoRenderer for ContentView's lifetime.
+///
+/// WHY THIS EXISTS — it is not ceremony. The renderer used to be held as
+///     @State private var metalRenderer = MetalVideoRenderer()
+/// and Swift evaluates a @State default-value EXPRESSION on every re-creation of the View
+/// struct. SwiftUI re-creates View structs constantly (any parent re-render, any @State
+/// change), so that expression was building a COMPLETE renderer stack — Metal device, three
+/// command queues, every render/compute pipeline, the texture cache — and @State then threw
+/// all but the first away. Measured: 95 constructions in ~18 seconds of idle playback.
+///
+/// @StateObject is the purpose-built fix: its initializer is an @autoclosure that SwiftUI
+/// evaluates EXACTLY ONCE for the view's lifetime. MetalVideoRenderer can't be a @StateObject
+/// directly — its init is failable, so the property must stay Optional, and @StateObject cannot
+/// wrap an Optional — so this trivial ObservableObject holds it instead. MetalVideoRenderer
+/// itself is untouched, and the renderer stays Optional exactly as the call sites expect.
+///
+/// Constructing in .onAppear would also fix the count, but would leave the renderer nil for the
+/// first body evaluation (one frame with no Metal surface). This keeps it available immediately,
+/// so display timing is unchanged.
+///
+/// Scope: one store — and so one renderer — per ContentView, i.e. per WINDOW. That is correct:
+/// each window needs its own Metal layer. The bug was never "more than one window", it was the
+/// same window rebuilding its renderer on every SwiftUI update.
+private final class RendererStore: ObservableObject {
+    let renderer: MetalVideoRenderer? = MetalVideoRenderer()
+}
+
 struct ContentView: View {
     @ObservedObject var engine: FrameEngine
 
@@ -84,7 +111,10 @@ struct ContentView: View {
     @State private var showGetFlipSheet = false
     @State private var showGuidesPanel = false
     @State private var volumeHovering = false
-    @State private var metalRenderer: MetalVideoRenderer? = MetalVideoRenderer()
+    /// Constructed exactly once (see RendererStore). Same instance for display, scopes, DeckLink
+    /// and export — read-only here; nothing reassigns it.
+    @StateObject private var rendererStore = RendererStore()
+    private var metalRenderer: MetalVideoRenderer? { rendererStore.renderer }
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
 
     // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
