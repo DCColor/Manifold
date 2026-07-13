@@ -17,8 +17,38 @@ struct ColorParams {
     float c;  // Cr -> G
     float d;  // Cb -> B
     int isFullRange;       // 0 = video/legal range (expand), nonzero = full range (passthrough)
-    int chromaConvention;  // full-range chroma only: 0 = full-swing (÷255), 1 = Resolve (×219/224)
+    int chromaConvention;  // full-range chroma only: 0 = full-swing (no scale), 1 = Resolve (x219/224)
 };
+
+// MARK: - Sample domain (10-bit x420)
+//
+// The decode contract is ALWAYS x420 (kCVPixelFormatType_420YpCbCr10BiPlanar*, both the AVFoundation
+// and libav paths), whose 10-bit samples are MSB-ALIGNED in a 16-bit word and are sampled here as
+// .r16Unorm / .rg16Unorm. So Metal normalizes a 10-bit code C as:
+//
+//     (C << 6) / 65535  =  C / 1023.984375
+//
+// NOT C/1023, and emphatically not the 8-bit C/255 these constants used to assume. Expanding a 10-bit
+// sample with 8-bit constants left legal white at ~0.9932-0.9980 instead of 1.0, and — worse — put
+// NEUTRAL chroma (Cb=Cr=512) at -0.00195 instead of 0, which the YCbCr matrix turned into a ~5-code
+// R/G/B spread on grays (measured on the legal white/black fixtures). Working in the same domain the
+// sampler actually uses makes both exact: legal white 940 -> 1.0, neutral chroma 512 -> 0.0, no cast.
+//
+// (MetalVideoRenderer still has an .r8Unorm/.rg8Unorm branch for 8-bit buffers, but it is currently
+// UNREACHABLE — both decode paths request x420 — so no bit-depth uniform is needed here. If an 8-bit
+// decode path is ever reintroduced, these become per-depth and must be passed in.)
+constexpr constant float kCodeMax     = 1023.984375;      // 65535/64 — max normalized 10-bit MSB-aligned code
+constexpr constant float kLumaBlack   = 64.0 / kCodeMax;  // legal luma floor  (was 16/255)
+constexpr constant float kLumaSwing   = kCodeMax / 876.0; // luma 64..940      (was 255/219)
+constexpr constant float kChromaMid   = 512.0 / kCodeMax; // neutral chroma    (was 128/255)
+constexpr constant float kChromaSwing = kCodeMax / 896.0; // chroma 64..960    (was 255/224)
+// Full-range luma has a swing too — it is just a different one (0..1023, not 64..940). Without it,
+// full white (1023) normalizes to 1023/1023.984 = 0.99904 and lands ~1 code short of 1.0. Same family
+// as the legal-branch error above, ~4x smaller. Both branches now scale luma; only the factor differs.
+constexpr constant float kFullLumaSwing = kCodeMax / 1023.0;   // full-range luma 0..1023
+// Resolve's full-range chroma factor is a swing RATIO, so it is domain-independent: at 10-bit it is
+// 876/896, which is bit-for-bit the same number as the 8-bit 219/224. Left as-is deliberately.
+constexpr constant float kResolveChromaScale = 219.0 / 224.0;
 
 vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]]) {
     float2 positions[4] = {
@@ -48,31 +78,36 @@ fragment float4 passthroughFragment(VertexOut in [[stage_in]],
     float y  = lumaTex.sample(s, in.texCoord).r;
     float2 cbcr = chromaTex.sample(s, in.texCoord).rg;
 
-    // Range handling. Chroma is ALWAYS centered (subtract the neutral 128/255) —
+    // Range handling. Chroma is ALWAYS centered (subtract the neutral, code 512) —
     // that's a chroma offset, not range expansion, and applies to both ranges.
-    // What differs is the SCALE: video/legal data is encoded in 16–235 (luma) /
-    // 16–240 (chroma) and must be expanded to 0–1; full-range data already spans
-    // 0–1 and must NOT be expanded (expanding it is the double-expansion bug).
+    // What differs is the SCALE: video/legal data is encoded in 64–940 (luma) /
+    // 64–960 (chroma) at 10-bit and must be expanded to 0–1; full-range data already
+    // spans 0–1 and must NOT be expanded (expanding it is the double-expansion bug).
+    // All constants are in the 10-bit sample domain — see the kCodeMax block above.
     float cb, cr;
     if (params.isFullRange != 0) {
-        // Full range: luma passthrough. Chroma centered, then scaled per the
-        // selected convention (legal branch and luma are untouched by this).
+        // Full range: luma spans the WHOLE code range, so it is not expanded — but it still has
+        // to be taken out of the MSB-aligned sample domain (code/1023.984) into the display domain
+        // (code/1023), or full white lands ~1 code short of 1.0. This is a domain correction, NOT a
+        // range expansion — the black point stays at 0 and the transfer stays straight.
+        y *= kFullLumaSwing;
+        // Chroma centered, then scaled per the selected convention (luma is untouched by that).
         if (params.chromaConvention == 1) {
             // Resolve: chroma scaled by 219/224 — Resolve expands full-range
-            // chroma by the LUMA factor (255/219), so the matching inverse is
-            // (×255/255)·(219/224). Renders a Resolve full file (Cr≈226) correct.
-            cb = (cbcr.r - 128.0/255.0) * (219.0/224.0);
-            cr = (cbcr.g - 128.0/255.0) * (219.0/224.0);
+            // chroma by the LUMA factor, so the matching inverse is that swing
+            // ratio. Renders a Resolve full file (Cr≈226 @8-bit) correct.
+            cb = (cbcr.r - kChromaMid) * kResolveChromaScale;
+            cr = (cbcr.g - kChromaMid) * kResolveChromaScale;
         } else {
-            // Full-swing / spec: chroma centered only, scale 255 (no expansion).
-            cb = cbcr.r - 128.0/255.0;
-            cr = cbcr.g - 128.0/255.0;
+            // Full-swing / spec: chroma centered only, no expansion.
+            cb = cbcr.r - kChromaMid;
+            cr = cbcr.g - kChromaMid;
         }
     } else {
-        // Video/legal range: expand luma 16–235→0–1 and chroma 16–240→0–1.
-        y  = (y - 16.0/255.0) * (255.0/219.0);
-        cb = (cbcr.r - 128.0/255.0) * (255.0/224.0);
-        cr = (cbcr.g - 128.0/255.0) * (255.0/224.0);
+        // Video/legal range: expand luma 64–940→0–1 and chroma 64–960→0–1.
+        y  = (y - kLumaBlack) * kLumaSwing;
+        cb = (cbcr.r - kChromaMid) * kChromaSwing;
+        cr = (cbcr.g - kChromaMid) * kChromaSwing;
     }
 
     // YCbCr -> RGB using the matrix coefficients passed in.

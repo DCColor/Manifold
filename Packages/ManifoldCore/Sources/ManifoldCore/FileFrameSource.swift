@@ -27,10 +27,17 @@
 public final class FileFrameSource: FrameSource, @unchecked Sendable {
 
     /// The decoded video output format, parameterized rather than hardcoded so a
-    /// later 10-bit path (M3b) or a non-AVFoundation decoder (Stage 2) can vary it
-    /// without touching the pump. Today always 420v 8-bit (raw video-range): the
-    /// file's stored values, unclipped — range expansion happens in the shader.
-    public static let defaultPixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    /// non-AVFoundation decoder can vary it without touching the pump. Raw video-range
+    /// either way: the file's stored values, unclipped — range expansion happens in the
+    /// shader, never in the decode.
+    ///
+    /// x420 = 10-bit 4:2:0 biplanar (M3b). This is only a fallback default — FrameEngine
+    /// always passes `videoPixelFormat` explicitly and both decode paths (AVFoundation and
+    /// libav) request x420. It MUST stay 10-bit: the shader's range-expansion constants are
+    /// in the 10-bit sample domain (see kCodeMax in PassthroughShader.metal), so handing it
+    /// an 8-bit buffer would expand with the wrong constants. It previously defaulted to
+    /// 8-bit 420v, which was dead but would have been quietly wrong if ever exercised.
+    public static let defaultPixelFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
 
     /// Handed each decoded frame on the pump queue, in addition to nothing else —
     /// this is the only way frames leave the source. Set by the owner before

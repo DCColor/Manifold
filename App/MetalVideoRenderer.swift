@@ -100,8 +100,10 @@ final class MetalVideoRenderer {
 
     // M3b: 10-bit render target. rgb10a2Unorm — CAMetalLayer-compatible (the 1:1
     // blit to the drawable stays same-format), 4 bytes/pixel packed 10-10-10-2.
-    // Display + export get full 10-bit; the scope readback downconverts to 8-bit so
-    // the existing CPU scopes are untouched (true 10-bit scopes = the GPU project).
+    // Display, export, DeckLink and the SCOPES all read this at full 10-bit precision:
+    // the scopes are GPU kernels sampling this very texture (dispatchScopeKernel — Metal
+    // decodes rgb10a2 to a normalized float on read), NOT a CPU readback, and nothing
+    // downconverts to 8-bit anywhere on that path.
     // Propagates to the layer + pipeline color attachment via the references below.
     static let renderPixelFormat: MTLPixelFormat = .rgb10a2Unorm
 
@@ -629,10 +631,15 @@ final class MetalVideoRenderer {
         // MediaInspector's authoritative tags — NOT per-frame from the buffer.
 
         // M3b: pick texture sample formats from the buffer's bit depth. 10-bit x420
-        // planes are 16-bit (10 bits high-aligned), sampled as r16/rg16; 8-bit 420v
-        // as r8/rg8. The shader reads NORMALIZED values either way, so its YCbCr math
-        // is unchanged (r16Unorm of a high-aligned 10-bit sample ≈ code/1024, ~the
-        // same normalized level as r8Unorm's code/255, within ~0.3% — sub-code).
+        // planes are 16-bit (10 bits MSB-aligned), sampled as r16/rg16; 8-bit 420v
+        // as r8/rg8. The two normalize DIFFERENTLY — r16Unorm of an MSB-aligned 10-bit
+        // sample is code/1023.984 (= code<<6 / 65535), r8Unorm is code/255 — and the
+        // shader's range-expansion constants are in the 10-bit domain to match (see the
+        // kCodeMax block in PassthroughShader.metal). The gap is NOT negligible: the old
+        // 8-bit constants left legal white ~4 codes low and put neutral chroma off zero,
+        // casting grays. In practice both decode paths request x420, so the r8/rg8 branch
+        // below is currently unreachable; reviving it means making those constants
+        // per-bit-depth (a uniform), not just flipping the texture format.
         let is10Bit = Self.isTenBit(CVPixelBufferGetPixelFormatType(pixelBuffer))
         let lumaFormat: MTLPixelFormat = is10Bit ? .r16Unorm : .r8Unorm
         let chromaFormat: MTLPixelFormat = is10Bit ? .rg16Unorm : .rg8Unorm
