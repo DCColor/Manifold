@@ -1,4 +1,5 @@
 import Foundation
+import AppKit          // E2: NSScreen — EDR headroom query
 import Metal
 import CoreVideo
 import CoreMedia
@@ -375,8 +376,17 @@ final class MetalVideoRenderer {
         // effect on the normal display path.
         metalLayer.framebufferOnly = false
         metalLayer.isOpaque = true
-        // Colorspace is set per-frame in renderPixelBuffer, derived from the
-        // pixel buffer's own color attachments (matching the reference layer).
+        // Colorspace AND the EDR opt-in are set per SOURCE in setSourceColorSpace(...), from the
+        // file's CICP tags. wantsExtendedDynamicRangeContent is deliberately NOT set here — see
+        // the E2 note there for why it is HDR-conditional rather than globally on.
+
+        // Once per process, not once per instance: ContentView holds the renderer in a @State
+        // default-value expression (ContentView.swift:87), and SwiftUI re-evaluates that
+        // expression on every re-creation of the View struct — keeping only the first result and
+        // discarding the rest. So this init runs repeatedly with throwaway instances. The LIVE
+        // renderer is the first one and keeps its layer config, so nothing is clobbered, but an
+        // unguarded log here spams the console once per SwiftUI update.
+        Self.logStartupHeadroomOnce
 
         let cacheStatus = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
         guard cacheStatus == kCVReturnSuccess else {
@@ -413,13 +423,70 @@ final class MetalVideoRenderer {
         sourceMatrixCode = matrix
         // Never assign nil — makeColorSpace guarantees non-nil, but guard anyway.
         guard let cs = Self.makeColorSpace(primaries: primaries, transfer: transfer, matrix: matrix) else { return }
+
+        // E2 — EDR opt-in, DELEGATE-FIRST: we do NOT decode PQ/HLG ourselves. The buffer stays
+        // transfer-ENCODED (PQ code values), the layer carries the matching PQ/HLG colorspace
+        // (makeColorSpace above resolves (9,16) → kCGColorSpaceITUR_2100_PQ), and macOS applies
+        // the EOTF and tone-maps to the display's headroom. This flag is what lets it: without
+        // it the drawable is SDR-clamped and PQ diffuse white (0.58 in the buffer) shows as 58%
+        // grey instead of white.
+        //
+        // HDR-CONDITIONAL, not globally on. The flag is scoped to PQ (16) and HLG (18) sources
+        // and left OFF for everything else, so the SDR path's layer configuration is bit-for-bit
+        // what it was before E2 — SDR cannot regress, by construction rather than by test.
+        // That matters for two concrete reasons:
+        //   1. SDR is committed and validated; the E1 gate work showed how easily a "global,
+        //      surely-harmless" flag reaches the output.
+        //   2. Our SDR content is NOT confined to [0,1]: the legal ramp peaks at 1.000977, and
+        //      E1's float target now PRESERVES that superwhite instead of clamping it. Whether a
+        //      global EDR opt-in would lift those values above SDR white in a non-extended
+        //      CoreMedia709 space is exactly the kind of question we should not be guessing at.
+        //      Scoping the flag to HDR sources removes the question instead of betting on it.
+        let isHDRTransfer = (transfer == 16 || transfer == 18)   // PQ / HLG
+
         // Assign inside a synchronized transaction (actions disabled) so this
         // once-per-source mutation can't tear against an in-flight frame on the
         // CVDisplayLink render thread.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         metalLayer.colorspace = cs
+        metalLayer.wantsExtendedDynamicRangeContent = isHDRTransfer
         CATransaction.commit()
+
+        // NOTE: edrMetadata (CAEDRMetadata) is deliberately NOT set — E3. This stage tests
+        // whether colorspace + the opt-in alone lift the image. If PQ content does not display
+        // without it, edrMetadata is REQUIRED-to-display rather than a tonemapping refinement,
+        // and that is the finding this stage exists to produce.
+
+        let csName = cs.name.map { String($0) } ?? "<unnamed>"
+        print("[EDR] source tags: primaries=\(primaries.map(String.init) ?? "nil") "
+            + "transfer=\(transfer.map(String.init) ?? "nil") matrix=\(matrix.map(String.init) ?? "nil")")
+        print("[EDR] layer colorspace = \(csName)  (wideGamut=\(cs.isWideGamutRGB))")
+        print("[EDR] wantsExtendedDynamicRangeContent = \(isHDRTransfer)"
+            + (isHDRTransfer ? "  (HDR transfer \(transfer!) → EDR ON)" : "  (SDR source → EDR OFF, unchanged path)"))
+        Self.logEDRHeadroom(context: "source load")
+    }
+
+    /// Fires `logEDRHeadroom` exactly once per process (lazy static = dispatch_once).
+    private static let logStartupHeadroomOnce: Void = {
+        logEDRHeadroom(context: "startup")
+    }()
+
+    /// Log the display's EDR headroom. 1.0 means NO headroom — EDR is inert and PQ content
+    /// cannot lift above SDR white no matter how the layer is configured (check macOS
+    /// Settings ▸ Displays ▸ High Dynamic Range for the target display). Values >1.0 are the
+    /// multiple of SDR white the display can currently reach; this is the number a future
+    /// EDRMetadata / tone-mapping stage has to map into.
+    private static func logEDRHeadroom(context: String) {
+        // Prefer the screen actually hosting the app; fall back to main.
+        let screen = NSApp?.mainWindow?.screen ?? NSApp?.windows.first?.screen ?? NSScreen.main
+        guard let s = screen else { print("[EDR] headroom (\(context)): no screen"); return }
+        let cur = s.maximumExtendedDynamicRangeColorComponentValue
+        let pot = s.maximumPotentialExtendedDynamicRangeColorComponentValue
+        let ref = s.maximumReferenceExtendedDynamicRangeColorComponentValue
+        print(String(format: "[EDR] headroom (%@) on \"%@\": current=%.4f potential=%.4f reference=%.4f%@",
+                     context, s.localizedName, cur, pot, ref,
+                     cur <= 1.0001 ? "   <<< NO HEADROOM — EDR is inert on this display" : ""))
     }
 
     /// Build a CoreVideo nclc attachments dict from MediaInspector's authoritative
