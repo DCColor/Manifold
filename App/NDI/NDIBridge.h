@@ -18,14 +18,24 @@ NS_ASSUME_NONNULL_BEGIN
 /// out from under the pending free. Here the receiver simply outlives its last frame.
 @interface NDIVideoFrame : NSObject
 
-/// 8-bit packed 4:2:2 ('2vuy' / kCVPixelFormatType_422YpCbCr8), tagged Rec.709 video-range.
-/// Zero-copy over NDI memory — see the lifetime note above.
+/// 8-bit packed 4:2:2 ('2vuy' / kCVPixelFormatType_422YpCbCr8), video-range. Zero-copy over NDI
+/// memory — see the lifetime note above.
+///
+/// UNTAGGED on arrival: the colorimetry lives in `metadataXML`, and the CICP attachments are
+/// applied by the receive path (NDIColorInfo) from what the sender actually declared. This class
+/// deliberately does not tag it 709 — that hardcode was why every NDI source read Rec.709.
 @property (nonatomic, readonly) CVPixelBufferRef pixelBuffer;
 @property (nonatomic, readonly) int width;
 @property (nonatomic, readonly) int height;
 /// NDI's FourCC as text (e.g. "UYVY") — for logging / the "what did we actually get" check.
 @property (nonatomic, copy, readonly) NSString *fourCC;
 @property (nonatomic, readonly) int lineStrideInBytes;
+/// The frame's per-frame metadata XML (NDI's `p_metadata`), deep-copied at capture — nil when the
+/// sender sends none (it is OPTIONAL, and often absent). This is where NDI carries its color
+/// signaling: `<ndi_color_info transfer="…" matrix="…" primaries="…"/>`. Parsing and the mapping
+/// to CICP are Swift's job (NDIColorInfo); the bridge stays a transport and hands over the string
+/// verbatim.
+@property (nonatomic, copy, readonly, nullable) NSString *metadataXML;
 /// NDI's 100ns timestamp. Used only to skip re-converting a frame FrameSync is repeating;
 /// NOT used as a clock this step (real timestamp handling is the deferred clock step).
 @property (nonatomic, readonly) int64_t timestamp;

@@ -9,7 +9,16 @@ import QuartzCore
 /// tick, and the frames handed to the SAME MetalVideoRenderer.enqueue the file sources feed.
 ///
 /// Deliberately NOT here (all later steps): source picking/switching, file<->NDI coexistence,
-/// clock/drift correctness, audio, HDR/metadata, P216/10-bit, capability flags.
+/// clock/drift correctness, audio, P216/10-bit, capability flags.
+///
+/// COLORIMETRY (read-and-tag). NDI signals primaries / transfer / matrix per frame, in the
+/// `<ndi_color_info/>` element of the frame's metadata XML — three INDEPENDENT axes, all optional.
+/// The receive path parses them (NDIColorInfo), maps them to the same CICP codes the file path
+/// produces, and stamps them on the pixel buffer as standard CV attachments. The buffer is then
+/// indistinguishable from a file's downstream: the shader's matrix, the layer colorspace, the GPU
+/// scopes and the EDR gate all read the tags, and none of them knows or cares that NDI is upstream.
+/// A source that declares nothing is tagged with the 709 SDR default and RECORDED as assumed —
+/// tagged so it displays correctly, recorded so nothing presents the default as the sender's word.
 ///
 /// THE FORMAT PROBLEM, and why there is a conversion in a "zero-copy" path
 /// ----------------------------------------------------------------------
@@ -47,6 +56,28 @@ final class NDIService: ObservableObject {
     /// for SwiftUI to observe.
     @Published private(set) var isConnected = false
 
+    /// The live source's EFFECTIVE colorimetry — what the buffers are actually tagged with, after
+    /// resolving the user's override against what the sender declared (or didn't). Republished on
+    /// the main thread whenever it CHANGES: for a normal stream, once at the first frame, and again
+    /// each time the override moves.
+    ///
+    /// The pipeline does not read this: the buffer's CICP attachments carry the colorimetry
+    /// downstream, exactly as they do for a file. This is the DATA MODEL for the readouts — the
+    /// toolbar picker and scope headers today, the inspector's rows in a later step. Its `tier`
+    /// says which of Declared / Assumed / Overridden produced it, so nothing can present a default
+    /// or an assertion as a reading.
+    @Published private(set) var colorInfo: NDIColorInfo = .assumedRec709
+
+    /// What the SENDER said (or the assumed default when it said nothing), independent of the
+    /// override. Kept alongside the effective value so the UI can show what is being overridden —
+    /// "Declared 709 → Overridden 2020 PQ" is a different fact from "Assumed 709 → Overridden".
+    @Published private(set) var declaredColorInfo: NDIColorInfo = .assumedRec709
+
+    /// The user's colorimetry assertion. Transient per connection — reset to `.auto` on every
+    /// connect, exactly as `RangeOverride` resets per file, and for the same reason: the override
+    /// that rescues this stream would silently corrupt the next one.
+    @Published private(set) var colorimetryOverride: NDIColorimetryOverride = .auto
+
     /// The display path. Set once at startup (ContentView.onAppear), same instance DeckLink uses.
     weak var renderer: MetalVideoRenderer?
 
@@ -59,6 +90,50 @@ final class NDIService: ObservableObject {
     private var frameCount = 0
     private var lastRateLogTime: CFTimeInterval = 0
     private var lastRateLogCount = 0
+
+    // Colorimetry state — CVDisplayLink thread only (pullFrame). `activeColorInfo` is the EFFECTIVE
+    // (post-override) info the buffers are being tagged with and the layer is configured for;
+    // `parsedColorInfo` is what the stream itself said, kept separately so toggling the override
+    // back to Auto restores the declaration without needing another parse. `lastMetadataXML` is the
+    // raw string it was parsed from, so an unchanged metadata string — the overwhelmingly common
+    // case, byte-identical on every frame of a stable stream — costs one string compare and skips
+    // the parse.
+    private var activeColorInfo: NDIColorInfo = .assumedRec709
+    private var parsedColorInfo: NDIColorInfo = .assumedRec709
+    private var lastMetadataXML: String?
+    private var hasParsedColorInfo = false
+    /// One "here is what this source says it is" line per connection, then only on change.
+    private var reportedColorInfo = false
+    /// Armed at connect and on every colorimetry change; disarmed after one frame. The readback it
+    /// gates is cheap but this is a per-frame path, and the answer cannot change between frames.
+    private var verifyNextOutputTags = true
+
+    /// The override mirror — written on main (the picker), read on the CVDisplayLink thread (the
+    /// tagging path), guarded by a lock it never holds for more than a read. This is the rangeLock
+    /// pattern verbatim: the UI does not reach into the capture thread and the capture thread does
+    /// not touch main-actor state; they meet at one small guarded value, and the next pulled frame
+    /// picks the new value up and re-tags. No decode, no session, no pool is disturbed — an override
+    /// changes nothing but three attachments, exactly as a range override changes nothing but a
+    /// shader flag.
+    private let colorLock = NSLock()
+    private var overrideMirror: NDIColorimetryOverride = .auto
+
+    private func currentOverride() -> NDIColorimetryOverride {
+        colorLock.lock(); defer { colorLock.unlock() }
+        return overrideMirror
+    }
+
+    /// Apply a manual colorimetry override. Main thread (the picker). Nothing is re-created and no
+    /// frame is re-pulled: the mirror flips, and the next frame off the wire resolves against it,
+    /// re-tags its buffer and — if the transfer or primaries moved — re-points the layer colorspace
+    /// through the SAME mid-stream-change path a declared change already uses. An override is just
+    /// another colour-info change; the receive path cannot tell the difference, and shouldn't.
+    func setColorimetryOverride(_ override: NDIColorimetryOverride) {
+        guard override != colorimetryOverride else { return }
+        colorimetryOverride = override
+        colorLock.lock(); overrideMirror = override; colorLock.unlock()
+        NSLog("[NDI] colorimetry override → %@", override.label)
+    }
 
     /// The renderer's normal clock is the file transport's. NDI is not on that clock, so while NDI
     /// is driving we substitute a free-running monotonic one and stamp frames with it at pull time
@@ -116,10 +191,16 @@ final class NDIService: ObservableObject {
         lastRateLogTime = Self.monotonicNow()
         lastRateLogCount = 0
 
-        // NDI is Rec.709 video-range. Tag the layer for it, and pin the shader to legal-range
-        // expansion rather than letting it read the file transport's override (which describes a
-        // file that may not even be loaded).
+        // Start on the ASSUMED default (709 SDR) — a source that declares nothing keeps this, and a
+        // source that declares something replaces it on its first frame (applyColorInfo). The layer
+        // is never left carrying the PREVIOUS source's colorimetry, which is what a "set it once at
+        // connect" hardcode would do on a second connect.
+        resetColorimetry()
         renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1)
+
+        // Range is a SEPARATE axis from colorimetry and NDI does not signal it: UYVY is video-range
+        // by definition. Pin the shader to legal-range expansion rather than letting it read the
+        // file transport's override (which describes a file that may not even be loaded).
         renderer.isFullRangeProvider = { false }
         renderer.clock = { Self.monotonicNow() }
         renderer.isPausedProvider = { false }
@@ -139,7 +220,25 @@ final class NDIService: ObservableObject {
         transferSession = nil
         pixelBufferPool = nil
         poolSize = (0, 0)
+        resetColorimetry()
         NSLog("[NDI] disconnected")
+    }
+
+    /// Back to a clean slate: no parse, no assertion. The override reset is the load-bearing part —
+    /// a colorimetry assertion is about THIS stream, and carrying it into the next connection would
+    /// silently mis-tag a source the user never looked at. Same rule, same reason, as RangeOverride
+    /// resetting on every file load. Main thread (both callers are).
+    private func resetColorimetry() {
+        activeColorInfo = .assumedRec709
+        parsedColorInfo = .assumedRec709
+        lastMetadataXML = nil
+        hasParsedColorInfo = false
+        reportedColorInfo = false
+        verifyNextOutputTags = true
+        colorInfo = .assumedRec709
+        declaredColorInfo = .assumedRec709
+        colorimetryOverride = .auto
+        colorLock.lock(); overrideMirror = .auto; colorLock.unlock()
     }
 
     // MARK: - Per-tick pull (CVDisplayLink thread)
@@ -152,15 +251,113 @@ final class NDIService: ObservableObject {
         // nothing is correct: the renderer keeps displaying the frame it has.
         guard let frame = bridge.captureVideoFrame() else { return }
 
+        // What is this frame, actually? What the sender declared (re-read per frame — colorimetry
+        // can change under us), resolved against whatever the user has asserted in the picker.
+        let info = effectiveColorInfo(forFrameMetadata: frame.metadataXML)
+
+        // Tag the SOURCE buffer with what the sender declared. This is the line that replaces the
+        // unconditional Rec.709 the bridge used to stamp here — and that hardcode was the bug:
+        // VideoToolbox propagates the source's attachments to its output, so a lie told here was
+        // carried, intact and unquestioned, all the way to the display buffer and the scopes.
+        info.apply(to: frame.pixelBuffer)
+
         guard let converted = convertToDisplayFormat(frame.pixelBuffer,
                                                      width: Int(frame.width),
                                                      height: Int(frame.height)) else { return }
         // `frame` (and with it NDI's buffer) is released at the end of this scope — the transfer
         // above has already read every byte out of it.
 
+        // Tag the OUTPUT too, AFTER the transfer. Not redundant belt-and-braces: this is the buffer
+        // every downstream consumer actually reads (shader matrix, layer colorspace, scopes, EDR
+        // gate), a pooled buffer starts untagged, and VT's propagation is measured behavior rather
+        // than a documented contract. Tagging last is the ordering that holds whether VT
+        // propagates, stamps a default, or leaves the buffer bare — and tagOutput logs what the
+        // output really carried, so the claim stays checked instead of assumed.
+        tagOutput(converted, with: info)
+
         guard let sampleBuffer = makeSampleBuffer(converted, pts: Self.monotonicNow()) else { return }
         renderer.enqueue(sampleBuffer)
         logFrameRate()
+    }
+
+    // MARK: - Colorimetry (CVDisplayLink thread)
+
+    /// The EFFECTIVE colorimetry to tag this frame with: what the stream declared (or the assumed
+    /// default), resolved against the user's override.
+    ///
+    /// Two stages, and they are cached differently ON PURPOSE. The PARSE is cached on the raw
+    /// metadata string, so a stable stream parses once and every later frame costs one string
+    /// compare. The RESOLVE is not cached at all — it re-reads the override mirror every frame,
+    /// which is what lets a picker change on the main thread reach the tagging path without any
+    /// signalling between them: the very next frame off the wire simply resolves differently.
+    ///
+    /// Whatever the reason it moved — a genuine mid-stream re-declaration, or the user asserting a
+    /// preset — a change lands in the same place: re-tag the buffers, re-point the layer colorspace
+    /// and the EDR opt-in, republish the model. The receive path does not care which it was, and
+    /// that is exactly why the override needed no new machinery.
+    private func effectiveColorInfo(forFrameMetadata xml: String?) -> NDIColorInfo {
+        if !hasParsedColorInfo || xml != lastMetadataXML {
+            hasParsedColorInfo = true
+            lastMetadataXML = xml
+            parsedColorInfo = NDIColorInfo.parse(metadataXML: xml)
+        }
+        let declared = parsedColorInfo
+        let effective = NDIColorInfo.resolve(declared: declared, override: currentOverride())
+
+        let first = !reportedColorInfo
+        guard effective != activeColorInfo || first else { return activeColorInfo }
+        let previous = activeColorInfo
+        activeColorInfo = effective
+        reportedColorInfo = true
+        verifyNextOutputTags = true   // re-verify the tags the next converted frame actually carries
+
+        if first {
+            NSLog("[NDI] color signaling %@: %@",
+                  effective.isOverridden ? "(OVERRIDE — user assertion)"
+                      : effective.isDeclared ? "(declared by sender)"
+                                             : "(NOT declared — assuming SDR Rec.709)",
+                  effective.summary)
+        } else {
+            NSLog("[NDI] colorimetry CHANGED (%@ → %@): %@",
+                  previous.tier, effective.tier, effective.summary)
+            NSLog("[NDI]                previously:       %@", previous.summary)
+        }
+        // What the SENDER said stays visible even while overridden — "Assumed 709, overridden to
+        // 2020 PQ" and "Declared 709, overridden to 2020 PQ" are different facts about the stream,
+        // and collapsing them would hide a sender that is actively lying.
+        if effective.isOverridden {
+            NSLog("[NDI]                stream itself says: %@", declared.summary)
+        }
+
+        // The layer colorspace + the EDR opt-in follow the CICP codes, on the main thread
+        // (setSourceColorSpace runs a CATransaction). transfer 16/18 is what turns
+        // wantsExtendedDynamicRangeContent on — i.e. this is where PQ-over-NDI becomes HDR,
+        // whether the PQ came from the sender or from the user asserting it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.colorInfo = effective
+            self.declaredColorInfo = declared
+            self.renderer?.setSourceColorSpace(primaries: effective.primaries.code,
+                                               transfer: effective.transfer.code,
+                                               matrix: effective.matrix.code)
+        }
+        return effective
+    }
+
+    /// Apply the parsed CICP tags to the VideoToolbox OUTPUT buffer, and — on the first frame and
+    /// after every change — log what VT had left on that buffer next to what it carries afterwards.
+    /// That before/after pair IS the verification: a "before" reading Rec.709 on a PQ source is the
+    /// stamp this whole ordering exists to beat, and the "after" is what actually goes downstream.
+    private func tagOutput(_ buffer: CVPixelBuffer, with info: NDIColorInfo) {
+        guard verifyNextOutputTags else {
+            info.apply(to: buffer)
+            return
+        }
+        verifyNextOutputTags = false
+        let before = NDIColorInfo.attachmentSummary(of: buffer)
+        info.apply(to: buffer)
+        NSLog("[NDI] x422 output tags — VideoToolbox left: %@", before)
+        NSLog("[NDI] x422 output tags — after our tagging: %@", NDIColorInfo.attachmentSummary(of: buffer))
     }
 
     /// UYVY ('2vuy', 8-bit packed 4:2:2) → 'x422' (10-bit biplanar 4:2:2) — the format the

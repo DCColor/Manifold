@@ -163,6 +163,7 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
 @synthesize width = _width, height = _height, fourCC = _fourCC;
 @synthesize lineStrideInBytes = _lineStrideInBytes, timestamp = _timestamp;
+@synthesize metadataXML = _metadataXML;
 
 - (instancetype)initWithPixelBuffer:(CVPixelBufferRef)pb
                               frame:(const NDIlib_video_frame_v2_t *)frame
@@ -174,6 +175,12 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
         _lineStrideInBytes = frame->line_stride_in_bytes;
         _timestamp = frame->timestamp;
         _fourCC = [fourCC copy];
+        // DEEP-COPIED, like the source strings: p_metadata points into memory the SDK owns and
+        // reclaims at framesync_free_video, which happens the moment the pixel buffer's last
+        // reference drops — i.e. potentially before the string is read. NULL is normal and means
+        // exactly what it says: this sender declared no per-frame metadata. stringWithUTF8String
+        // returns nil on invalid UTF-8, which lands in the same "no metadata" branch downstream.
+        _metadataXML = frame->p_metadata ? [NSString stringWithUTF8String:frame->p_metadata] : nil;
     }
     return self;
 }
@@ -374,20 +381,19 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
         return nil;
     }
 
-    // Tag the buffer so the conversion downstream isn't guessing. NDI UYVY is Rec.709
-    // video-range 4:2:2. (Sources that say otherwise in metadata are a later step — we are not
-    // parsing p_metadata here.)
-    CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey,
-                          kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-    CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey,
-                          kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-    CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey,
-                          kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    // NO colorimetry tagging here. This buffer used to be stamped Rec.709 unconditionally, and that
+    // hardcode WAS the bug: the UYVY->x422 conversion downstream propagates whatever attachments it
+    // finds on its source, so the assumption was carried intact to the display buffer, the scopes
+    // and the EDR gate — a PQ source read 709 because we had told it to. The real signaling is in
+    // frame.p_metadata (copied into metadataXML above); the receive path parses it and applies the
+    // CICP attachments (NDIColorInfo), to this buffer and to the conversion's output.
 
     if (!_loggedFirstFrame) {
         _loggedFirstFrame = YES;
         NSLog(@"[NDI] first frame: %dx%d FourCC=%@ stride=%d (expected %d for packed UYVY)",
               frame.xres, frame.yres, fourCCString, frame.line_stride_in_bytes, frame.xres * 2);
+        NSLog(@"[NDI] first frame metadata: %@",
+              frame.p_metadata ? [NSString stringWithUTF8String:frame.p_metadata] : @"<none>");
     }
 
     NDIVideoFrame *result = [[NDIVideoFrame alloc] initWithPixelBuffer:pb frame:&frame fourCC:fourCCString];

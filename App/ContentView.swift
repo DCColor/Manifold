@@ -318,6 +318,20 @@ struct ContentView: View {
             waveformModel.sourceTransferCode = meta?.transferFunctionCode
             paradeModel.sourceTransferCode = meta?.transferFunctionCode
         }
+        // NDI's colorimetry reaches the shader, the layer and the scope KERNELS through the pixel
+        // buffer's CICP attachments, with no help from here. The scope HEADERS and the auto
+        // vertical scale do not read the buffer, though — they read these models, which the block
+        // above only ever fills from a FILE. So an NDI source needs the same wiring, from the same
+        // codes, or the scopes would do PQ math under a "Rec.709" label. Fires on connect and on a
+        // mid-stream colorimetry change (NDIService republishes on both).
+        .onChange(of: ndi.colorInfo) { _, info in
+            guard ndi.isConnected else { return }
+            applyNDIColorToScopes(info)
+        }
+        .onChange(of: ndi.isConnected) { _, connected in
+            guard connected else { return }
+            applyNDIColorToScopes(ndi.colorInfo)
+        }
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
@@ -622,8 +636,79 @@ struct ContentView: View {
                 .keyboardShortcut("n", modifiers: [.control, .option])
             Button("") { NDIService.shared.disconnect() }
                 .keyboardShortcut("n", modifiers: [.control, .option, .shift])
+            // ⌃⌥C cycles the colorimetry override. The toolbar picker is the real control; this is
+            // a keyboard path for driving it hands-off (and for A/B-ing a preset against the picture
+            // without moving the pointer, which is how you actually judge one).
+            Button("") { cycleNDIColorimetryOverride() }
+                .keyboardShortcut("c", modifiers: [.control, .option])
         }
         .opacity(0)
+    }
+
+    private func cycleNDIColorimetryOverride() {
+        guard ndi.isConnected else { return }
+        let all = NDIColorimetryOverride.allCases
+        let i = all.firstIndex(of: ndi.colorimetryOverride) ?? 0
+        NDIService.shared.setColorimetryOverride(all[(i + 1) % all.count])
+    }
+
+    /// NDI colorimetry: what the live stream is being read as, and the user's power to say
+    /// otherwise. The button face states the EFFECTIVE colorimetry and its tier, because the honest
+    /// thing and the useful thing are the same sentence here — "709 · Assumed" tells the user both
+    /// what the scopes are doing and that nobody actually verified it. An override turns the control
+    /// amber: something on screen is a human assertion, not a reading, and that should never look
+    /// like the neutral resting state.
+    ///
+    /// Most NDI senders declare nothing (OmniScope declares nothing at all), so for the common case
+    /// this picker is not a corner-case escape hatch — it is how the stream's colorimetry gets set.
+    private var ndiColorimetryControl: some View {
+        Menu {
+            Section("Colorimetry") {
+                Picker("Colorimetry", selection: ndiColorimetryBinding) {
+                    ForEach(NDIColorimetryOverride.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.inline)
+            }
+            // What the STREAM says, kept visible while overridden — so the user can see they are
+            // contradicting a declaration rather than filling a silence.
+            Section("Stream") {
+                Button(ndiStreamStatusLine) {}.disabled(true)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "paintpalette")
+                Text(ndiColorimetryFaceLabel)
+                    .font(.system(.caption, design: .monospaced))
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .foregroundStyle(ndi.colorInfo.isOverridden ? Color.orange : .white.opacity(0.9))
+        .help("NDI colorimetry — Auto trusts the stream; a preset asserts it (⌃⌥C cycles)")
+    }
+
+    /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "709 · Declared".
+    private var ndiColorimetryFaceLabel: String {
+        let info = ndi.colorInfo
+        return "\(NDIColorInfo.primariesName(info.primaries.code).replacingOccurrences(of: "Rec.", with: "")) "
+             + "\(NDIColorInfo.transferName(info.transfer.code).replacingOccurrences(of: "Rec.", with: "")) · \(info.tier)"
+    }
+
+    /// The stream's own claim, independent of the override — an absence stated as an absence.
+    private var ndiStreamStatusLine: String {
+        let d = ndi.declaredColorInfo
+        guard d.isDeclared else { return "Declares no colorimetry" }
+        return "Declares \(NDIColorInfo.primariesName(d.primaries.code)) · "
+             + "\(NDIColorInfo.transferName(d.transfer.code)) · "
+             + "\(NDIColorInfo.matrixName(d.matrix.code))"
+    }
+
+    private var ndiColorimetryBinding: Binding<NDIColorimetryOverride> {
+        Binding(get: { ndi.colorimetryOverride },
+                set: { NDIService.shared.setColorimetryOverride($0) })
     }
 
     /// Route the device picker through selectDevice (which cleanly stop/restarts if output is ON).
@@ -693,6 +778,34 @@ struct ContentView: View {
     /// untagged sources: CICP primaries nil / Unspecified (2) means the kernel assumes 709, so the
     /// header SAYS "untagged → 709 (assumed)" rather than laundering the default into a confident
     /// label. Same for an absent/unspecified transfer (assumed 709 gamma).
+    /// Point the matrix/transfer-aware scopes at the NDI source's colorimetry — the same fields the
+    /// file path fills from MediaInspector, from the same CICP codes, so the two sources cannot
+    /// disagree about what a code means. Provenance is preserved on the way through: an ASSUMED
+    /// axis reads "(assumed)" in the CIE header exactly as an untagged file does.
+    private func applyNDIColorToScopes(_ info: NDIColorInfo) {
+        waveformModel.sourceMatrixCode = info.matrix.code
+        vectorscopeModel.sourceMatrixCode = info.matrix.code
+        vectorscopeModel.sourcePrimariesCode = info.primaries.code
+        waveformModel.sourceTransferCode = info.transfer.code
+        paradeModel.sourceTransferCode = info.transfer.code
+        cieModel.spaceReadout = Self.cieSpaceReadout(info)
+    }
+
+    /// CIE header readout for an NDI source. Same honesty rule as the file version below, now over
+    /// three tiers — a value the sender never declared is labelled assumed, and one the USER
+    /// asserted is labelled an override. Neither is allowed to read like a fact off the wire.
+    private static func cieSpaceReadout(_ info: NDIColorInfo) -> String {
+        func axis(_ a: NDIColorAxis, _ name: String) -> String {
+            switch a.provenance {
+            case .declared:   return name
+            case .assumed:    return "\(name) (assumed)"
+            case .overridden: return "\(name) (override)"
+            }
+        }
+        return axis(info.primaries, NDIColorInfo.primariesName(info.primaries.code)) + " · "
+             + axis(info.transfer, NDIColorInfo.transferName(info.transfer.code))
+    }
+
     private static func cieSpaceReadout(_ meta: VideoMetadata) -> String {
         func known(_ s: String) -> Bool { !s.isEmpty && s != "—" }
         let primUntagged = (meta.colorPrimariesCode == nil) || (meta.colorPrimariesCode == 2)
@@ -826,6 +939,14 @@ struct ContentView: View {
 
                 // DeckLink output: split-button — main toggles output, chevron picks device + status.
                 deckLinkOutputControl
+
+                // NDI colorimetry override — an ASSERTION about the live source, so it lives with
+                // the actions, not in the inspector (which reports what things ARE). Only present
+                // while NDI is driving: it has nothing to say about a file, whose colorimetry comes
+                // from tags the user can fix in Flip.
+                if ndi.isConnected {
+                    ndiColorimetryControl
+                }
 
                 Spacer()
 
