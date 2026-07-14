@@ -174,6 +174,14 @@ final class MetalVideoRenderer {
     /// When nil, defaults to video/legal (expand).
     var isFullRangeProvider: (() -> Bool)?
 
+    /// Called at the TOP of every display tick, before a frame is selected — the hook a PULL
+    /// source needs to put a frame in the queue on our clock rather than pushing on its own.
+    /// (NDI's FrameSync works this way: it holds the jitter buffer and hands over whatever frame
+    /// is current when we ask.) Runs on the CVDisplayLink thread, so it must not block: an
+    /// implementation may only do the cheap capture + enqueue, never wait on the network.
+    /// Nil for push sources (file playback), which are unaffected by this.
+    var onDisplayTick: (() -> Void)?
+
     /// Returns the engine's full-range chroma convention rawValue (0 = full-swing,
     /// 1 = Resolve). Read per-frame on the render thread (thread-safe accessor).
     /// Only affects the full-range path. When nil, defaults to 1 (Resolve).
@@ -612,6 +620,11 @@ final class MetalVideoRenderer {
     /// Called each display refresh (on the CVDisplayLink thread). Picks the
     /// newest frame whose PTS <= current playback time and renders it.
     private func displayTick() {
+        // Pull sources first, so a frame captured this tick is eligible for selection THIS tick
+        // (and before the clock is read, so its PTS can't land in the future). No-op for push
+        // sources — this is nil during file playback.
+        onDisplayTick?()
+
         guard let now = clock?() else { return }
 
         queueLock.lock()
@@ -746,12 +759,34 @@ final class MetalVideoRenderer {
         let is10Bit = Self.isTenBit(CVPixelBufferGetPixelFormatType(pixelBuffer))
         let lumaFormat: MTLPixelFormat = is10Bit ? .r16Unorm : .r8Unorm
         let chromaFormat: MTLPixelFormat = is10Bit ? .rg16Unorm : .rg8Unorm
+
+        // The chroma plane's size is ASKED FOR, not assumed. It used to be hard-coded to
+        // (width/2, height/2) — true for the 4:2:0 formats the file paths decode to, but it
+        // silently mis-sizes any other subsampling. The NDI receive path arrives as 4:2:2 (x422,
+        // chroma = width/2 × FULL height), where the old constant would have sampled half the
+        // plane and stretched it over the frame. For every 4:2:0 buffer this is byte-for-byte the
+        // value it always computed, so the file paths are untouched.
+        //
+        // The shader needs no matching change: it samples chroma with NORMALIZED coordinates, so
+        // a correctly-sized chroma texture resolves to the right chroma regardless of subsampling.
+        //
+        // The planeCount guard is the other half of the fix. A single-plane (packed) buffer used
+        // to fall straight through to makeTexture(planeIndex: 1) and fail, which returns here and
+        // renders NOTHING — a black window with no error, the worst possible symptom. Now the
+        // unsupported case is stated once, out loud.
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) >= 2 else {
+            logUnsupportedPixelFormatOnce(CVPixelBufferGetPixelFormatType(pixelBuffer))
+            return
+        }
+        let chromaWidth = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1)
+        let chromaHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
+
         guard let lumaTexture = makeTexture(pixelBuffer, planeIndex: 0,
                                             pixelFormat: lumaFormat,
                                             width: width, height: height),
               let chromaTexture = makeTexture(pixelBuffer, planeIndex: 1,
                                               pixelFormat: chromaFormat,
-                                              width: width / 2, height: height / 2)
+                                              width: chromaWidth, height: chromaHeight)
         else { return }
 
         if metalLayer.drawableSize != CGSize(width: width, height: height) {
@@ -1309,11 +1344,30 @@ final class MetalVideoRenderer {
         }
     }
 
-    /// True for the 10-bit 420 biplanar CV formats (x420 / xf20) whose planes are
-    /// 16-bit-per-sample (10 bits high-aligned).
+    /// True for the 10-bit biplanar CV formats whose planes are 16-bit-per-sample (10 bits
+    /// high-aligned) — i.e. the ones the shader's 10-bit-domain constants are written for.
+    ///
+    /// The 4:2:2 pair (x422 / xf22) is here for the NDI receive path: NDI's 8-bit packed UYVY is
+    /// converted to x422 on arrival precisely BECAUSE it puts the samples in this domain, where
+    /// the existing shader math is already correct. The subsampling differs from x420 but the
+    /// SAMPLE ENCODING — which is all this predicate is about — is identical.
     static func isTenBit(_ pf: OSType) -> Bool {
         pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+            || pf == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+            || pf == kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
+    }
+
+    /// One-time complaint about a pixel format this renderer can't sample (a packed/single-plane
+    /// buffer). Render-thread only — a per-frame log here would be 60 lines a second.
+    private var loggedUnsupportedPixelFormat = false
+    private func logUnsupportedPixelFormatOnce(_ pf: OSType) {
+        guard !loggedUnsupportedPixelFormat else { return }
+        loggedUnsupportedPixelFormat = true
+        let fourCC = String(bytes: [UInt8((pf >> 24) & 0xFF), UInt8((pf >> 16) & 0xFF),
+                                    UInt8((pf >> 8) & 0xFF), UInt8(pf & 0xFF)], encoding: .ascii) ?? "????"
+        print("MetalVideoRenderer: unsupported pixel format '\(fourCC)' — needs a biplanar "
+            + "(2-plane) YCbCr buffer; nothing will be drawn for this source")
     }
 
     private func makeTexture(_ pixelBuffer: CVPixelBuffer, planeIndex: Int,

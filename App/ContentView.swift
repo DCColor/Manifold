@@ -115,6 +115,9 @@ struct ContentView: View {
     /// and export — read-only here; nothing reassigns it.
     @StateObject private var rendererStore = RendererStore()
     private var metalRenderer: MetalVideoRenderer? { rendererStore.renderer }
+    /// NDI connection state — the empty-state overlay has to know a stream is on screen even
+    /// though no file is loaded. Observed, so ⌃⌥N / ⌃⌥⇧N update the UI.
+    @ObservedObject private var ndi = NDIService.shared
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
 
     // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
@@ -195,6 +198,7 @@ struct ContentView: View {
         // hidden group so the view body's modifier chain stays type-checkable.
         .background(scopeShortcuts)
         .background(deckLinkShortcuts)
+        .background(ndiShortcuts)
         // JKL shuttle transport (bare keys — pro NLE muscle memory).
         .background(
             Button("") { engine.shuttleBackward() }
@@ -242,6 +246,9 @@ struct ContentView: View {
                 renderer.start()
                 // DeckLink output sources real video from this renderer (⌃⌥O / toolbar control).
                 DeckLinkService.shared.renderer = renderer
+                // NDI step A (throwaway trigger, ⌃⌥N) displays THROUGH this same renderer — it
+                // pulls frames on the display tick and feeds the same enqueue the file sources do.
+                NDIService.shared.renderer = renderer
                 // D4b-2: …and SDI audio from the engine's PTS-keyed PCM ring, gated by the transport.
                 // The card's audio callback pulls from the ring at the SOURCE TIME of the frame the
                 // renderer currently has staged for the card, so A/V are aligned by construction.
@@ -400,7 +407,15 @@ struct ContentView: View {
                 }
                 .opacity(controlsShown ? 1 : 0)
                 .animation(.easeInOut(duration: 0.30), value: controlsShown)
-            } else {
+            } else if !ndi.isConnected {
+                // "Open… to begin" means NOTHING is on screen — so it must key off any active
+                // source, not just a file. An NDI stream has no file behind it, so `hasMedia` is
+                // false while its frames are being displayed, and the overlay used to sit on top of
+                // live video. (STOPGAP: an explicit OR with the NDI flag. The unified "is any source
+                // active" concept belongs to the source-switching work, not here.)
+                //
+                // The NDI branch deliberately shows NEITHER controls nor the empty state: file
+                // transport over a live stream is meaningless, and that is a later step.
                 emptyState
             }
 
@@ -593,6 +608,20 @@ struct ContentView: View {
                 .keyboardShortcut("o", modifiers: [.control, .option])
             Button("") { DeckLinkService.shared.stopScheduledOutput() }
                 .keyboardShortcut("o", modifiers: [.control, .option, .shift])
+        }
+        .opacity(0)
+    }
+
+    /// THROWAWAY (NDI step A): ⌃⌥N connects to the first NDI source on the network and puts its
+    /// frames on screen; ⌃⌥⇧N disconnects. This is a test trigger, not a feature — the real source
+    /// picker arrives with source switching, and it replaces this outright. NDI takes over the
+    /// display while connected (see NDIService); file<->NDI handoff is a later step.
+    @ViewBuilder private var ndiShortcuts: some View {
+        Group {
+            Button("") { NDIService.shared.connectToFirstSource() }
+                .keyboardShortcut("n", modifiers: [.control, .option])
+            Button("") { NDIService.shared.disconnect() }
+                .keyboardShortcut("n", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
     }

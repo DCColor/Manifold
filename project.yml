@@ -82,6 +82,13 @@ targets:
           - $(SRCROOT)/ThirdParty/ffmpeg/include
           # DeckLink SDK headers (DeckLinkAPI.h et al.) for the .mm bridge + dispatch.cpp.
           - $(SRCROOT)/docs/BlackmagicDeckLinkSDK16.0/Mac/include
+          # NDI bridge header, so the bridging header can #import "NDIBridge.h" from App/DeckLink.
+          - $(SRCROOT)/App/NDI
+          # NDI SDK headers, referenced AT THEIR SYSTEM PATH — the SDK's license does not permit
+          # vendoring them, so nothing NDI-derived is copied into or committed to this repo. The
+          # runtime dylib is NOT linked either: NDIBridge.mm dlopens it, so the app still launches
+          # on a machine with no NDI installed. (Quoted: the path contains spaces.)
+          - '"/Library/NDI SDK for Apple/include"'
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/ThirdParty/ffmpeg/lib

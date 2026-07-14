@@ -16,7 +16,15 @@ struct WindowConfigurator: NSViewRepresentable {
             window.isMovableByWindowBackground = true
             window.backgroundColor = .black
             if !hasClip {
-                window.contentAspectRatio = .zero
+                // Clear any aspect constraint the RIGHT way. This used to assign
+                // `contentAspectRatio = .zero`, which is NOT "no constraint" — it marks the window
+                // as aspect-CONSTRAINED with a degenerate 0/0 ratio, and AppKit's resize math then
+                // trips over the resulting invalid geometry and hits an internal __builtin_trap
+                // (EXC_BREAKPOINT in -[NSWindow _adjustNeedsDisplayRegionForNewFrame:]) on the
+                // first resize. Aspect ratio and resize increments are mutually exclusive in
+                // AppKit, so setting increments to 1×1 is the documented way to drop the aspect
+                // lock and allow free resizing.
+                window.resizeIncrements = NSSize(width: 1, height: 1)
                 let defaultSize: NSSize
                 if let screen = window.screen ?? NSScreen.main {
                     let w = min(screen.visibleFrame.width * 0.6, 1280)

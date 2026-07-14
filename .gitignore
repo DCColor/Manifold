@@ -69,4 +69,13 @@ docs/BlackmagicDeckLinkSDK16.0/
 docs/Blackmagic Advanced Video Capture and Playback/
 .DS_Store
 
+# NDI SDK — licensed, NOT redistributable, and deliberately NOT vendored. The headers are
+# referenced at their system path (/Library/NDI SDK for Apple/include, see project.yml) and the
+# runtime dylib is dlopen'd, never linked or bundled. These patterns exist so a stray copy of the
+# SDK can't be committed by accident; there should be nothing NDI-derived in this repo to ignore.
+NDI SDK*/
+ThirdParty/NDI/
+**/libndi*.dylib
+**/Processing.NDI.*.h
+
 docs/Blackmagic Advanced Video Capture and Playback/
