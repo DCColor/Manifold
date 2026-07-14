@@ -3,6 +3,7 @@ import CoreVideo
 import CoreMedia
 import VideoToolbox
 import QuartzCore
+import ManifoldCore
 
 /// STEP A: minimal NDI receive — prove NDI integrates and that frames reach Manifold's Metal
 /// display path. Discovery, a receiver on the first source found, a FrameSync pull on the display
@@ -81,10 +82,29 @@ final class NDIService: ObservableObject {
     /// The display path. Set once at startup (ContentView.onAppear), same instance DeckLink uses.
     weak var renderer: MetalVideoRenderer?
 
+    /// The engine's PTS-keyed PCM ring. Set once at startup (ContentView.onAppear) — the SAME
+    /// instance the file paths tee into and the DeckLink SDI audio callback pulls from. NDI is just a
+    /// third producer: it converts its float-planar audio to Int32 interleaved and pushes here, and
+    /// everything downstream of the tap (clock-anchored SDI scheduling, SDI/Computer routing, mute)
+    /// applies to NDI audio for free. Weak, like `renderer`: the engine owns it.
+    weak var audioTap: AudioTapBuffer?
+
     private var bridge: NDIBridge?
     private var transferSession: VTPixelTransferSession?
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolSize: (width: Int, height: Int) = (0, 0)
+
+    // MARK: - Audio pump (dedicated thread — decoupled from the video display tick)
+    //
+    // Audio is drained on its OWN thread, NOT on the CVDisplayLink tick, and this decoupling is the
+    // whole point: when it shared the video tick, a slow tick let FrameSync's audio queue grow, so the
+    // next pull handed back a bigger chunk, whose conversion slowed the tick further — a compounding
+    // loop that collapsed fps to ~1. On a dedicated thread the audio cadence is independent of the
+    // render rate: it drains at real-time 48 kHz no matter how fast or slow video is drawing.
+    private var audioThread: Thread?
+    private let audioRunLock = NSLock()          // guards `audioShouldRun` (main writes, pump reads)
+    private var audioShouldRun = false
+    private var audioThreadFinished: DispatchSemaphore?   // pump signals on exit; stop() joins on it
 
     private var isConnecting = false
     private var frameCount = 0
@@ -205,15 +225,21 @@ final class NDIService: ObservableObject {
         renderer.clock = { Self.monotonicNow() }
         renderer.isPausedProvider = { false }
 
-        // Pull on the display tick: FrameSync hands us the current frame on OUR clock.
+        // Pull VIDEO on the display tick: FrameSync hands us the current frame on OUR clock.
         renderer.onDisplayTick = { [weak self] in self?.pullFrame() }
 
+        // Pull AUDIO on its OWN thread, at real-time cadence, independent of the video tick.
+        startAudioPump(connected)
+
         isConnected = true
-        NSLog("[NDI] receiving from \"\(connected.sourceName)\" — pulling on the display tick")
+        NSLog("[NDI] receiving from \"\(connected.sourceName)\" — video on the display tick, audio on a dedicated pump")
     }
 
     func disconnect() {
         isConnected = false
+        // Stop the audio pump and JOIN it BEFORE tearing down the receiver: the pump calls into the
+        // framesync instance, so it must be fully exited before the bridge destroys it (below).
+        stopAudioPump()
         renderer?.onDisplayTick = nil
         bridge?.disconnect()
         bridge = nil
@@ -247,6 +273,10 @@ final class NDIService: ObservableObject {
     /// pulled here is available to the very same tick.
     private func pullFrame() {
         guard let bridge, let renderer else { return }
+        // Audio is NOT pulled here any more — it runs on its own pump thread (startAudioPump). Keeping
+        // it off this tick is the fix: audio work no longer steals from video rendering, and the
+        // audio drain rate no longer follows the (possibly collapsing) video tick rate.
+
         // nil = no frame yet, or FrameSync is repeating one we already converted. Enqueuing
         // nothing is correct: the renderer keeps displaying the frame it has.
         guard let frame = bridge.captureVideoFrame() else { return }
@@ -278,6 +308,76 @@ final class NDIService: ObservableObject {
         guard let sampleBuffer = makeSampleBuffer(converted, pts: Self.monotonicNow()) else { return }
         renderer.enqueue(sampleBuffer)
         logFrameRate()
+    }
+
+    // MARK: - Audio pump (dedicated thread)
+
+    /// Spin up the audio pump thread. Started at connect, joined at disconnect. Runs whether or not
+    /// the source actually carries audio — `captureAudioFrame` returns nil (cheaply) until audio
+    /// arrives, so an audio-less source just polls an empty queue.
+    private func startAudioPump(_ bridge: NDIBridge) {
+        audioRunLock.lock(); audioShouldRun = true; audioRunLock.unlock()
+        let done = DispatchSemaphore(value: 0)
+        audioThreadFinished = done
+        let thread = Thread { [weak self] in self?.runAudioPump(bridge, finished: done) }
+        thread.name = "com.manifold.ndi.audio"
+        thread.qualityOfService = .userInteractive   // keep the audio drain off the low-priority pile
+        audioThread = thread
+        thread.start()
+    }
+
+    /// The pump loop. PACING — this is the load-bearing part, so it is explicit:
+    ///
+    /// Each wake we drain exactly what FrameSync has buffered SINCE THE LAST WAKE
+    /// (`framesync_audio_queue_depth`, inside `captureAudioFrame`), then sleep ~`pollInterval`. That
+    /// is drift-free real-time pacing WITHOUT a busy-spin, and it is the pattern the SDK documents:
+    ///   • No faster than real-time: the sleep bounds how often we pull; we never spin.
+    ///   • No slower / no drift: because we drain the *queue depth* (whatever accumulated during the
+    ///     sleep) rather than a fixed count, the average pull rate self-corrects to the true production
+    ///     rate — if a sleep runs long, the next pull is correspondingly bigger and we're back level.
+    /// The sleep interval therefore sets only the GRANULARITY (and thus how small `held` stays), not
+    /// the rate. At 10 ms, `held` sits around one–two NDI audio frames rather than climbing. The
+    /// 4800-sample cap passed to the bridge is a pure safety ceiling for a startup/stall backlog (it
+    /// bounds a single iteration's work); steady-state pulls are far below it, so it never paces.
+    ///
+    /// AUDIO PTS — stamped `monotonicNow()` at pull time, the SAME free-running clock the video tick
+    /// stamps frames with (NOT the NDI frame's sender-clock timestamp). The tap→DeckLink read aligns
+    /// audio to video by that source PTS, so both must live on one clock. The pump and the video tick
+    /// now read that clock at DIFFERENT moments, but both label "real-time-now" samples/frames with
+    /// "now", so the pair still lands together on the wire within the poll interval — a small constant
+    /// offset, not drift (FrameSync keeps the underlying A/V timing coherent).
+    private func runAudioPump(_ bridge: NDIBridge, finished: DispatchSemaphore) {
+        let pollInterval = 0.010   // 100 Hz poll — steady, well below any busy-spin, keeps `held` tiny
+        while true {
+            audioRunLock.lock(); let run = audioShouldRun; audioRunLock.unlock()
+            if !run { break }
+            autoreleasepool {
+                // Convert happens INSIDE the bridge, OUTSIDE the tap lock; only the finished Int32
+                // buffer is copied into the ring under the lock (see AudioTapBuffer.append).
+                if let tap = audioTap,
+                   let audio = bridge.captureAudioFrame(forMaxSamples: 4800) {
+                    tap.pushInterleavedInt32(audio.samples,
+                                             frameCount: Int(audio.frameCount),
+                                             channelCount: Int(audio.channelCount),
+                                             sampleRate: Double(audio.sampleRate),
+                                             pts: Self.monotonicNow(),
+                                             path: .ndi)
+                }
+            }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+        finished.signal()   // release the join in stopAudioPump()
+    }
+
+    /// Signal the pump to stop and BLOCK until it has actually exited — the join guarantees no pull is
+    /// in flight against the framesync instance when the caller (disconnect) destroys it. Idempotent:
+    /// a no-op if the pump was never started. Bounded wait (≤ one poll interval + one pull).
+    private func stopAudioPump() {
+        guard audioThread != nil else { return }
+        audioRunLock.lock(); audioShouldRun = false; audioRunLock.unlock()
+        audioThreadFinished?.wait()
+        audioThreadFinished = nil
+        audioThread = nil
     }
 
     // MARK: - Colorimetry (CVDisplayLink thread)

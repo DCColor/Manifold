@@ -193,6 +193,38 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
 @end
 
+// MARK: - Audio frame (owns its converted Int32 buffer)
+
+@implementation NDIAudioFrame {
+    int32_t *_samples;   // malloc'd, frameCount * channelCount interleaved Int32; owned here
+}
+
+@synthesize frameCount = _frameCount, channelCount = _channelCount;
+@synthesize sampleRate = _sampleRate, timestamp = _timestamp;
+
+- (instancetype)initWithSamples:(int32_t *)samples
+                     frameCount:(int)frameCount
+                   channelCount:(int)channelCount
+                     sampleRate:(int)sampleRate
+                      timestamp:(int64_t)timestamp {
+    if ((self = [super init])) {
+        _samples = samples;   // takes ownership
+        _frameCount = frameCount;
+        _channelCount = channelCount;
+        _sampleRate = sampleRate;
+        _timestamp = timestamp;
+    }
+    return self;
+}
+
+- (const int32_t *)samples { return _samples; }
+
+- (void)dealloc {
+    free(_samples);
+}
+
+@end
+
 // MARK: - Bridge
 
 @implementation NDIBridge {
@@ -200,6 +232,7 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     int64_t _lastTimestamp;
     BOOL _loggedFirstFrame;
     BOOL _loggedUnexpectedFourCC;
+    BOOL _loggedFirstAudio;
 }
 
 + (BOOL)loadRuntime {
@@ -399,6 +432,83 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     NDIVideoFrame *result = [[NDIVideoFrame alloc] initWithPixelBuffer:pb frame:&frame fourCC:fourCCString];
     CFRelease(pb);   // the NDIVideoFrame holds the only reference now
     return result;
+}
+
+- (NDIAudioFrame *)captureAudioFrameForMaxSamples:(int)maxSamples {
+    if (maxSamples <= 0) return nil;
+    NDIReceiver *receiver = _receiver;
+    if (!gNDI || !receiver || !receiver->_framesync) return nil;
+
+    // Ask FrameSync for the CURRENT incoming format without consuming any samples: a zero-parameter
+    // capture fills sample_rate / no_channels and pulls nothing (sample_rate == 0 ⇒ no audio yet).
+    // We need the native rate + channels to request the pull at NATIVE format (no resampling).
+    NDIlib_audio_frame_v2_t info;
+    memset(&info, 0, sizeof(info));
+    gNDI->framesync_capture_audio(receiver->_framesync, &info, 0, 0, 0);
+    const int rate = info.sample_rate;
+    const int channels = info.no_channels;
+    gNDI->framesync_free_audio(receiver->_framesync, &info);   // no-op on an empty query frame
+    if (rate <= 0 || channels <= 0) return nil;   // source has no audio (yet)
+
+    // Pull at the native rate/channels (native rate ⇒ FrameSync time-base corrects to our pull
+    // cadence but does NOT sample-rate convert). Pull at most `maxSamples` — ONE tick's real-time
+    // worth as computed by the caller — NEVER the whole backlog. Draining queue_depth exhaustively
+    // was the starvation bug: it coupled the per-tick pull SIZE to the tick INTERVAL, so any tick
+    // slowdown pulled more audio, which slowed the tick more, which pulled more… a runaway that
+    // collapsed fps (10→7→…→1). Capping decouples per-tick cost from the interval. Requesting no
+    // more than what's buffered means FrameSync never pads silence; the remainder stays queued (and
+    // FrameSync bounds/ages its own queue), and the >nominal cap gives headroom to catch up.
+    const int available = gNDI->framesync_audio_queue_depth(receiver->_framesync);
+    if (available <= 0) return nil;
+    const int want = maxSamples < available ? maxSamples : available;
+
+    NDIlib_audio_frame_v2_t frame;
+    memset(&frame, 0, sizeof(frame));
+    gNDI->framesync_capture_audio(receiver->_framesync, &frame, rate, channels, want);
+    if (!frame.p_data || frame.no_samples <= 0 || frame.no_channels <= 0) {
+        gNDI->framesync_free_audio(receiver->_framesync, &frame);
+        return nil;
+    }
+
+    const int frames = frame.no_samples;
+    const int ch = frame.no_channels;
+    // NDI audio is float32 PLANAR: channel c is a contiguous run of `frames` floats starting at
+    // p_data + c * channel_stride_in_bytes. Convert to Int32 INTERLEAVED, MANUALLY and at full scale
+    // — NOT NDIlib_util_audio_to_interleaved_32s_v2 (which applies a +4 dBu reference gain and clips).
+    // Honest full-scale: sample × 2147483647, clamp only at the true Int32 limits ±2147483647.
+    int32_t *out = (int32_t *)malloc((size_t)frames * (size_t)ch * sizeof(int32_t));
+    if (!out) {
+        gNDI->framesync_free_audio(receiver->_framesync, &frame);
+        return nil;
+    }
+    const uint8_t *base = (const uint8_t *)frame.p_data;
+    const int stride = frame.channel_stride_in_bytes > 0
+                     ? frame.channel_stride_in_bytes
+                     : (int)((size_t)frames * sizeof(float));   // defensive: tightly packed planes
+    for (int c = 0; c < ch; c++) {
+        const float *plane = (const float *)(base + (size_t)c * (size_t)stride);
+        for (int f = 0; f < frames; f++) {
+            double v = (double)plane[f] * 2147483647.0;
+            if (v > 2147483647.0) v = 2147483647.0;
+            else if (v < -2147483647.0) v = -2147483647.0;
+            out[(size_t)f * ch + c] = (int32_t)v;
+        }
+    }
+    const int64_t ts = frame.timestamp;
+    gNDI->framesync_free_audio(receiver->_framesync, &frame);   // samples are ours now; hand NDI's back
+
+    if (!_loggedFirstAudio) {
+        _loggedFirstAudio = YES;
+        NSLog(@"[NDI] first audio: %d Hz · %dch · %d samples "
+              @"(float planar → int32 interleaved, full-scale, no reference-level gain)",
+              rate, ch, frames);
+    }
+
+    return [[NDIAudioFrame alloc] initWithSamples:out
+                                       frameCount:frames
+                                     channelCount:ch
+                                       sampleRate:rate
+                                        timestamp:ts];
 }
 
 - (void)disconnect {

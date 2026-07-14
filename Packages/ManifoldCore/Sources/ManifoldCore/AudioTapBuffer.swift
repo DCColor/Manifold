@@ -20,7 +20,7 @@ import AudioToolbox
 public final class AudioTapBuffer: @unchecked Sendable {
 
     /// Which decode path produced a tapped buffer (for logging/validation only).
-    public enum SourcePath: String { case avFoundation = "AVF", libav = "libav" }
+    public enum SourcePath: String { case avFoundation = "AVF", libav = "libav", ndi = "NDI" }
 
     /// The normalized capture format. `channelCount` is the SOURCE interleaved channel count (what the
     /// ring stores); `deckLinkChannelCount` is that count padded UP to the nearest SDK-legal value
@@ -198,7 +198,37 @@ public final class AudioTapBuffer: @unchecked Sendable {
             return   // unsupported sample type
         }
 
-        // Append under the lock, keyed by PTS.
+        // Hand the converted Int32 scratch to the shared ring-append — the SAME path the raw NDI
+        // push funnels through, so the anchoring + windowing discipline has exactly one copy
+        // regardless of which producer supplied the samples.
+        scratch.withUnsafeBufferPointer { buf in
+            append(buf, frames: frames, channels: ch, sampleRate: rate, pts: pts, path: path)
+        }
+    }
+
+    /// Push raw interleaved Int32 PCM straight into the ring, keyed by source `pts` — the
+    /// source-agnostic seam for a producer that already holds card-ready samples and never built a
+    /// `CMSampleBuffer`. NDI is that producer: it converts its native float32-PLANAR frames to Int32
+    /// interleaved and calls this. Identical ring, anchoring, windowing and `onFormatChange` contract
+    /// as `ingest(_:path:)` — the two differ ONLY in how the Int32 samples are obtained. `samples`
+    /// holds `frameCount * channelCount` interleaved Int32; nothing is retained past the call.
+    ///
+    /// Called off the producer's pull thread (the NDI display-tick pull), OUTSIDE any lock the caller
+    /// holds, matching `ingest`'s threading contract.
+    public func pushInterleavedInt32(_ samples: UnsafePointer<Int32>, frameCount: Int,
+                                     channelCount ch: Int, sampleRate rate: Double,
+                                     pts: Double, path: SourcePath) {
+        guard frameCount > 0, ch > 0, rate > 0, pts.isFinite else { return }
+        let buf = UnsafeBufferPointer(start: samples, count: frameCount * ch)
+        append(buf, frames: frameCount, channels: ch, sampleRate: rate, pts: pts, path: path)
+    }
+
+    /// Shared ring-append (both `ingest` and `pushInterleavedInt32` funnel here): (re)configure the
+    /// ring on a first/changed format, anchor or re-anchor the PTS clock, copy `frames` interleaved
+    /// Int32 frames into the window, and fire `onFormatChange` after the lock is dropped. `src` holds
+    /// `frames * channels` interleaved Int32.
+    private func append(_ src: UnsafeBufferPointer<Int32>, frames: Int, channels ch: Int,
+                        sampleRate rate: Double, pts: Double, path: SourcePath) {
         lock.lock()
         // (Re)configure on first buffer or a format change (rate/channels): size the ring to the window.
         var newFormat: Format?
@@ -225,13 +255,11 @@ public final class AudioTapBuffer: @unchecked Sendable {
         }
         let chan = channels
         let cap = capacityFrames
-        scratch.withUnsafeBufferPointer { sp in
-            ring.withUnsafeMutableBufferPointer { rp in
-                for f in 0..<frames {
-                    let dstBase = ((writeHead + f) % cap) * chan
-                    let srcBase = f * chan
-                    for c in 0..<chan { rp[dstBase + c] = sp[srcBase + c] }
-                }
+        ring.withUnsafeMutableBufferPointer { rp in
+            for f in 0..<frames {
+                let dstBase = ((writeHead + f) % cap) * chan
+                let srcBase = f * chan
+                for c in 0..<chan { rp[dstBase + c] = src[srcBase + c] }
             }
         }
         writeHead = (writeHead + frames) % cap

@@ -249,6 +249,9 @@ struct ContentView: View {
                 // NDI step A (throwaway trigger, ⌃⌥N) displays THROUGH this same renderer — it
                 // pulls frames on the display tick and feeds the same enqueue the file sources do.
                 NDIService.shared.renderer = renderer
+                // …and tees NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the
+                // clock-anchored SDI output, SDI/Computer routing and mute apply to NDI for free.
+                NDIService.shared.audioTap = engine.audioTap
                 // D4b-2: …and SDI audio from the engine's PTS-keyed PCM ring, gated by the transport.
                 // The card's audio callback pulls from the ring at the SOURCE TIME of the frame the
                 // renderer currently has staged for the card, so A/V are aligned by construction.

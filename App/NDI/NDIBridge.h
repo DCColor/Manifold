@@ -42,6 +42,33 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+/// One pulled NDI audio frame, already converted to the tap's card-ready format: 32-bit signed
+/// integer, INTERLEAVED, at the SOURCE's native sample rate + channel count (no resampling).
+///
+/// NDI audio is natively float32 PLANAR. The planar→interleaved + float→Int32 conversion is done
+/// MANUALLY and at FULL SCALE (sample × 2147483647, clamped at ±2147483647) — deliberately NOT via
+/// NDIlib_util_audio_to_interleaved_32s_v2, which applies a +4 dBu reference-level GAIN and CLIPS,
+/// baking an opaque level change and ~16-bit-ish precision loss into the samples. This mirrors the
+/// libav path's direct float→Int32 conversion: honest, no reference-level scaling.
+///
+/// Unlike NDIVideoFrame there is no zero-copy lifetime dance: the conversion IS the copy, so the
+/// underlying NDI frame is freed inside `captureAudioFrame` and this object owns the `samples`
+/// allocation outright (freed on dealloc).
+@interface NDIAudioFrame : NSObject
+
+/// Interleaved Int32 PCM — `frameCount * channelCount` samples, channel-major within each frame.
+@property (nonatomic, readonly) const int32_t *samples NS_RETURNS_INNER_POINTER;
+/// Samples per channel in `samples`.
+@property (nonatomic, readonly) int frameCount;
+@property (nonatomic, readonly) int channelCount;
+@property (nonatomic, readonly) int sampleRate;
+/// NDI's 100ns submit timestamp (the SENDER's clock). Carried for logging / the deferred real-clock
+/// step — NOT used as the tap PTS (the receive path keys audio to the same free-running monotonic
+/// clock it stamps video with, so audio and video land together on the SDI wire).
+@property (nonatomic, readonly) int64_t timestamp;
+
+@end
+
 /// Minimal NDI receive bridge (STEP A: prove frames reach the Metal path).
 ///
 /// The runtime is loaded DYNAMICALLY (dlopen + dlsym), never hard-linked: Manifold launches
@@ -82,6 +109,22 @@ NS_ASSUME_NONNULL_BEGIN
 ///
 /// Safe to call from the CVDisplayLink thread.
 - (nullable NDIVideoFrame *)captureVideoFrame;
+
+/// Non-blocking pull of buffered audio, converted to Int32 interleaved for the tap. Returns nil when
+/// the source carries no audio yet or nothing is buffered this tick. Pulls at the source's NATIVE
+/// sample rate + channel count — NO resampling (a non-48k source is refused downstream at the
+/// tap→DeckLink seam, not resampled here). Uses the v2 (float, non-FourCC) FrameSync audio API,
+/// which sits inside the v5 struct slice this bridge is pinned to.
+///
+/// PACING lives in the caller: this drains `framesync_audio_queue_depth` (whatever accumulated since
+/// the last call) and returns it, so calling it steadily on a real-time-paced loop self-corrects to
+/// the true production rate with no drift. `maxSamples` is a SAFETY CEILING that bounds one call's
+/// work if a startup/stall backlog is large (the result is `min(maxSamples, queue_depth)`); it does
+/// NOT set the rate. The dedicated NDI audio pump thread (NDIService) calls this every ~10 ms with a
+/// generous ceiling — NOT the CVDisplayLink tick, whose rate must not gate the audio drain (that
+/// coupling was the fps-collapse bug). Requesting no more than what's buffered means FrameSync never
+/// pads silence. Non-blocking; safe to call from the audio pump thread.
+- (nullable NDIAudioFrame *)captureAudioFrameForMaxSamples:(int)maxSamples;
 
 /// Tear down the receiver. The underlying framesync/recv instances are destroyed once the last
 /// outstanding NDIVideoFrame is also released (see the lifetime note on NDIVideoFrame).
