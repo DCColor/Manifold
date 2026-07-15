@@ -54,6 +54,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.graviton.manifold
         PRODUCT_NAME: Manifold
+        # App icon: the "AppIcon" set in App/Assets.xcassets (globbed via `sources: [App]`).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES
