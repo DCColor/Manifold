@@ -145,6 +145,10 @@ final class VectorscopeScopeModel: ObservableObject {
     private var active = false
     private var sampling = false
     private var pendingSample = false
+    /// One-shot publish suppressor: set by clear() on a source teardown so a GPU sample already in
+    /// flight can't republish the old trace after the panel is blanked. Reset when a genuinely new
+    /// sample cycle begins (startSample), so a new source's frames draw normally.
+    private var cleared = false
     /// Live pref-coupling (paused re-sample on a scope-pref change) — see WaveformScopeModel.
     private var prefsObserver: AnyCancellable?
 
@@ -173,6 +177,16 @@ final class VectorscopeScopeModel: ObservableObject {
         image = nil
     }
 
+    /// Blank the published trace on a source teardown (NDI disconnect), WITHOUT deactivating: the
+    /// renderer invalidates the offscreen this scope reads, so nothing resamples the old frame, and
+    /// `cleared` suppresses any sample already in flight. When a new source renders, the render-
+    /// coupled frameRendered path resumes sampling and the trace returns — no restart needed.
+    func clear() {
+        pendingSample = false
+        cleared = true
+        image = nil
+    }
+
     /// Render-coupled trigger (CVDisplayLink render thread) — hops to main; the GPU compute
     /// self-commits on its own command buffer, so this never blocks the render.
     func frameRendered() {
@@ -195,6 +209,7 @@ final class VectorscopeScopeModel: ObservableObject {
         guard let renderer else { return }
         sampling = true
         pendingSample = false
+        cleared = false   // a real new cycle — allow its publish (supersedes any prior blank request)
         // Effective gain (Preferences read on main): baseGain × vectorscope × global master.
         let gain = baseGain
             * Float(Preferences.shared.vectorscopeIntensity)
@@ -213,7 +228,7 @@ final class VectorscopeScopeModel: ObservableObject {
             guard let self else { return }
             let img = self.buildVectorscopeTraceImage(histogram: hist, plane: p, gain: gain, color: color)
             DispatchQueue.main.async {
-                if self.active, let img { self.image = img }
+                if self.active, !self.cleared, let img { self.image = img }
                 self.finishSample()
             }
         }

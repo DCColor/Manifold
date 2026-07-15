@@ -304,6 +304,10 @@ final class MetalVideoRenderer {
     // on the render thread). Decoder-agnostic; does NOT touch the playing-state path.
     private var pendingSeekRender = false
 
+    // One-shot "wipe to black" armed by clearToBlack() (main) when a source is torn down with
+    // nothing to replace it — serviced on the render thread so nextDrawable() stays single-threaded.
+    private var pendingClear = false
+
     /// Request a one-shot re-render of the current frame (e.g. after a range
     /// override change while paused). Picked up on the next display refresh.
     func setNeedsRefresh() {
@@ -589,6 +593,28 @@ final class MetalVideoRenderer {
         refreshLock.lock(); pendingSeekRender = true; refreshLock.unlock()
     }
 
+    /// Wipe the screen to BLACK on the next display tick. Called when a source is torn down (NDI
+    /// disconnect) with nothing replacing it: the CAMetalLayer otherwise keeps its last presented
+    /// drawable, so the final streamed frame stays frozen behind the empty state. Drops the queued
+    /// frames so nothing stale is selected, and arms a one-shot black present that runs on the
+    /// RENDER thread (main never touches nextDrawable). If a source is still actively producing
+    /// frames — e.g. a file kept playing — its next frame simply repaints over the black.
+    func clearToBlack() {
+        flush()   // drop queued frames; nothing stale left to select
+        refreshLock.lock()
+        pendingClear = true
+        pendingRefresh = false     // don't let a pending refresh repaint the old frame after the wipe
+        pendingSeekRender = false  // flush() just armed this; the queue is empty, so it's moot
+        refreshLock.unlock()
+        // Invalidate the readable offscreen too: the GPU scopes sample it, so leaving the last
+        // streamed frame there would let a scope (re)sample and republish it after the source is
+        // gone. -1 makes computeXxxGPU find no frame → no sample → the panels stay blank until a
+        // new source renders. (The scope models also blank their published image; see clear().)
+        offscreenIndexLock.lock()
+        offscreenReadableIndex = -1
+        offscreenIndexLock.unlock()
+    }
+
     // MARK: - Display link lifecycle
 
     func start() {
@@ -620,6 +646,19 @@ final class MetalVideoRenderer {
     /// Called each display refresh (on the CVDisplayLink thread). Picks the
     /// newest frame whose PTS <= current playback time and renders it.
     private func displayTick() {
+        // One-shot screen wipe: a source was torn down with nothing to replace it. Present a black
+        // drawable and stop, dropping the retained last frame so no later tick can repaint it.
+        refreshLock.lock()
+        let doClear = pendingClear
+        if doClear { pendingClear = false }
+        refreshLock.unlock()
+        if doClear {
+            lastPixelBuffer = nil
+            lastPixelBufferPts = .nan
+            presentBlackFrame()
+            return
+        }
+
         // Pull sources first, so a frame captured this tick is eligible for selection THIS tick
         // (and before the clock is read, so its PTS can't land in the future). No-op for push
         // sources — this is nil during file playback.
@@ -850,6 +889,24 @@ final class MetalVideoRenderer {
         // safety: a scope reading this frame's buffer won't be overwritten until the ring
         // wraps ~offscreenRingCount frames later).
         offscreenWriteIndex = (writeIndex + 1) % Self.offscreenRingCount
+    }
+
+    /// Present ONE cleared (black) drawable, replacing whatever was last on screen. A clear-only
+    /// render pass straight to the drawable — no offscreen, no blit, no scope/DeckLink publish
+    /// (there is no frame to sample). Render thread only, so it is the sole nextDrawable() caller
+    /// exactly as renderPixelBuffer is.
+    private func presentBlackFrame() {
+        guard let drawable = metalLayer.nextDrawable() else { return }
+        let passDesc = MTLRenderPassDescriptor()
+        passDesc.colorAttachments[0].texture = drawable.texture
+        passDesc.colorAttachments[0].loadAction = .clear
+        passDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        passDesc.colorAttachments[0].storeAction = .store
+        guard let cmdBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = cmdBuffer.makeRenderCommandEncoder(descriptor: passDesc) else { return }
+        encoder.endEncoding()   // clear-only pass — the load action does the work
+        cmdBuffer.present(drawable)
+        cmdBuffer.commit()
     }
 
     /// (Re)create the persistent offscreen render target when missing or when the

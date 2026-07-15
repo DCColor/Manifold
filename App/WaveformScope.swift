@@ -335,6 +335,10 @@ final class WaveformScopeModel: ObservableObject {
     private var active = false
     private var sampling = false
     private var pendingSample = false
+    /// One-shot publish suppressor: set by clear() on a source teardown so a GPU sample already in
+    /// flight can't republish the old trace after the panel is blanked. Reset when a genuinely new
+    /// sample cycle begins (startSample), so a new source's frames draw normally.
+    private var cleared = false
 
     /// Live pref-coupling: re-sample the current frame when a scope-display preference
     /// changes (intensity/gain/trace color/scale…) so a paused colorist sees the trace
@@ -372,6 +376,16 @@ final class WaveformScopeModel: ObservableObject {
         image = nil
     }
 
+    /// Blank the published trace on a source teardown (NDI disconnect), WITHOUT deactivating: the
+    /// renderer invalidates the offscreen this scope reads, so nothing resamples the old frame, and
+    /// `cleared` suppresses any sample already in flight. When a new source renders, the render-
+    /// coupled frameRendered path resumes sampling and the trace returns — no restart needed.
+    func clear() {
+        pendingSample = false
+        cleared = true
+        image = nil
+    }
+
     /// Render-coupled trigger: called by MetalVideoRenderer on the CVDisplayLink render
     /// thread right after a new frame is written to the offscreen. Hops to main so the gate
     /// + Preferences reads stay on main; the GPU compute self-commits on its own command
@@ -394,6 +408,7 @@ final class WaveformScopeModel: ObservableObject {
         guard let renderer else { return }
         sampling = true
         pendingSample = false
+        cleared = false   // a real new cycle — allow its publish (supersedes any prior blank request)
 
         // Snapshot the effective gain on the main thread (Preferences read here):
         // baseGain × this scope's intensity × the global master.
@@ -413,7 +428,7 @@ final class WaveformScopeModel: ObservableObject {
             guard let self else { return }
             let img = self.buildTraceImage(histogram: hist, scopeW: sw, bins: b, gain: gain, color: color)
             DispatchQueue.main.async {
-                if self.active, let img { self.image = img }
+                if self.active, !self.cleared, let img { self.image = img }
                 self.finishSample()
             }
         }

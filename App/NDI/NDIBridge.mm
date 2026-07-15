@@ -36,6 +36,12 @@ static NSString *gLoaderSymbol = nil;
 static NSString *gRuntimeVersion = nil;
 static NSString *gRuntimePath = nil;
 
+/// The PICKER's persistent discovery finder (distinct from the throwaway finder the blocking
+/// first-source path creates and destroys per call). Created lazily by +refreshDiscoveredSources,
+/// destroyed by +stopDiscovery. Touched only from the main thread (both callers run there), so it
+/// needs no lock — the connect paths never read it.
+static NDIlib_find_instance_t gDiscoveryFinder = nullptr;
+
 /// Candidate dylib paths, in search order: the SDK's documented env override, the standard
 /// install location, then the bare name (let dyld's own search do the work).
 static NSArray<NSString *> *NDICandidatePaths(void) {
@@ -225,7 +231,33 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
 @end
 
+// MARK: - Discovered source (deep-copied name + url)
+
+@interface NDISource ()
+- (instancetype)initWithName:(NSString *)name url:(nullable NSString *)url;
+@end
+
+@implementation NDISource
+@synthesize name = _name, url = _url;
+- (instancetype)initWithName:(NSString *)name url:(nullable NSString *)url {
+    if ((self = [super init])) {
+        _name = [name copy];
+        _url = [url copy];
+    }
+    return self;
+}
+@end
+
 // MARK: - Bridge
+
+/// Private: the shared receiver builder, declared so callers earlier in the file see it. Takes
+/// C++ std::string by reference (this TU is ObjC++), so it lives on the class rather than as a
+/// free function — a free function cannot touch NDIBridge's @protected ivars.
+@interface NDIBridge ()
++ (nullable NDIBridge *)makeBridgeConnectingToName:(const std::string &)nameStorage
+                                               url:(const std::string &)urlStorage
+                                           display:(NSString *)displayName;
+@end
 
 @implementation NDIBridge {
     NDIReceiver *_receiver;
@@ -233,6 +265,56 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     BOOL _loggedFirstFrame;
     BOOL _loggedUnexpectedFourCC;
     BOOL _loggedFirstAudio;
+}
+
+/// Build a receiver + FrameSync for a source whose name/url bytes we already OWN (std::string, so
+/// they outlive recv_create_v3's read of connectTo). Factored out so the blocking first-source path
+/// and the picker's connect-to-specific-source path create the receiver identically — one place
+/// decides color format / bandwidth / FrameSync, and they cannot drift apart. `gNDI` must be loaded.
++ (NDIBridge *)makeBridgeConnectingToName:(const std::string &)nameStorage
+                                      url:(const std::string &)urlStorage
+                                  display:(NSString *)displayName {
+    NDIlib_source_t connectTo;
+    memset(&connectTo, 0, sizeof(connectTo));
+    connectTo.p_ndi_name = nameStorage.c_str();
+    connectTo.p_url_address = urlStorage.empty() ? NULL : urlStorage.c_str();
+
+    NDIlib_recv_create_v3_t recvSettings;
+    memset(&recvSettings, 0, sizeof(recvSettings));
+    recvSettings.source_to_connect_to = connectTo;
+    // Force the 8-bit UYVY path. NOT _best: _best would hand us P216 (10-bit) from a 10-bit
+    // sender, and the 10-bit/P216 path is a deferred step — this one proves the pipe.
+    recvSettings.color_format = NDIlib_recv_color_format_UYVY_BGRA;
+    recvSettings.bandwidth = NDIlib_recv_bandwidth_highest;
+    // Let NDI de-interlace rather than handing us fields to reassemble — field handling is not
+    // this step's problem.
+    recvSettings.allow_video_fields = false;
+    recvSettings.p_ndi_recv_name = NULL;
+
+    NDIlib_recv_instance_t recv = gNDI->recv_create_v3(&recvSettings);
+    if (!recv) {
+        NSLog(@"[NDI] recv_create_v3 failed for \"%@\"", displayName);
+        return nil;
+    }
+
+    // FrameSync, not raw capture: it owns the jitter buffer and gives us "the current frame" on
+    // OUR clock (the display tick), which is exactly the pull model the renderer wants.
+    NDIlib_framesync_instance_t framesync = gNDI->framesync_create(recv);
+    if (!framesync) {
+        NSLog(@"[NDI] framesync_create failed");
+        gNDI->recv_destroy(recv);
+        return nil;
+    }
+
+    NDIReceiver *receiver = [[NDIReceiver alloc] init];
+    receiver->_recv = recv;
+    receiver->_framesync = framesync;
+
+    NDIBridge *bridge = [[NDIBridge alloc] init];
+    bridge->_receiver = receiver;
+    bridge->_sourceName = [displayName copy];
+    NSLog(@"[NDI] connected to \"%@\" — UYVY, highest bandwidth, FrameSync", displayName);
+    return bridge;
 }
 
 + (BOOL)loadRuntime {
@@ -263,13 +345,10 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     }
 
     NSString *name = nil;
-    NSString *url = nil;
-    NDIlib_source_t connectTo;
-    memset(&connectTo, 0, sizeof(connectTo));
 
-    // Deep-copied source strings live here for the lifetime of the recv_create call — the SDK's
+    // Deep-copied source strings live here for the lifetime of the connect call — the SDK's
     // char* buffers are only valid until the next get_current_sources / find_destroy, so we must
-    // own the bytes we hand back to recv_create_v3.
+    // own the bytes we hand to recv_create_v3.
     std::string nameStorage;
     std::string urlStorage;
 
@@ -285,65 +364,80 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
                       sources[i].p_ndi_name ?: "<unnamed>",
                       sources[i].p_url_address ?: "<no url>");
             }
-            // STEP A: take the first. A real source picker arrives with source switching.
+            // Quick-connect takes the first; the toolbar picker lists them all (refreshDiscoveredSources).
             if (sources[0].p_ndi_name) {
                 nameStorage = sources[0].p_ndi_name;
                 name = [NSString stringWithUTF8String:nameStorage.c_str()];
             }
             if (sources[0].p_url_address) {
                 urlStorage = sources[0].p_url_address;
-                url = [NSString stringWithUTF8String:urlStorage.c_str()];
             }
         }
     }
 
+    // The finder's strings are dead after find_destroy, but nameStorage/urlStorage are our own
+    // copies — so it is safe to release the finder before building the receiver.
+    gNDI->find_destroy(finder);
+
     if (!name) {
         NSLog(@"[NDI] no sources found within %.0fs", timeout);
-        gNDI->find_destroy(finder);
         return nil;
     }
 
-    connectTo.p_ndi_name = nameStorage.c_str();
-    connectTo.p_url_address = urlStorage.empty() ? NULL : urlStorage.c_str();
+    return [self makeBridgeConnectingToName:nameStorage url:urlStorage display:name];
+}
 
-    NDIlib_recv_create_v3_t recvSettings;
-    memset(&recvSettings, 0, sizeof(recvSettings));
-    recvSettings.source_to_connect_to = connectTo;
-    // Force the 8-bit UYVY path. NOT _best: _best would hand us P216 (10-bit) from a 10-bit
-    // sender, and the 10-bit/P216 path is a deferred step — this one proves the pipe.
-    recvSettings.color_format = NDIlib_recv_color_format_UYVY_BGRA;
-    recvSettings.bandwidth = NDIlib_recv_bandwidth_highest;
-    // Let NDI de-interlace rather than handing us fields to reassemble — field handling is not
-    // this step's problem.
-    recvSettings.allow_video_fields = false;
-    recvSettings.p_ndi_recv_name = NULL;
++ (NSArray<NDISource *> *)refreshDiscoveredSources {
+    if (![self loadRuntime]) return @[];
 
-    NDIlib_recv_instance_t recv = gNDI->recv_create_v3(&recvSettings);
-    gNDI->find_destroy(finder);   // finder's strings are dead after this — we copied what we need
-
-    if (!recv) {
-        NSLog(@"[NDI] recv_create_v3 failed for \"%@\"", name);
-        return nil;
+    if (!gDiscoveryFinder) {
+        NDIlib_find_create_t findSettings;
+        memset(&findSettings, 0, sizeof(findSettings));
+        findSettings.show_local_sources = true;   // a sender on THIS machine is pickable too
+        findSettings.p_groups = NULL;
+        findSettings.p_extra_ips = NULL;
+        gDiscoveryFinder = gNDI->find_create_v2(&findSettings);
+        if (!gDiscoveryFinder) {
+            NSLog(@"[NDI] find_create_v2 failed (discovery)");
+            return @[];
+        }
     }
 
-    // FrameSync, not raw capture: it owns the jitter buffer and gives us "the current frame" on
-    // OUR clock (the display tick), which is exactly the pull model the renderer wants.
-    NDIlib_framesync_instance_t framesync = gNDI->framesync_create(recv);
-    if (!framesync) {
-        NSLog(@"[NDI] framesync_create failed");
-        gNDI->recv_destroy(recv);
-        return nil;
+    // Non-blocking snapshot of what the finder currently knows (it discovers on its own thread
+    // between our calls — no find_wait_for_sources here, which would block).
+    uint32_t count = 0;
+    const NDIlib_source_t *sources = gNDI->find_get_current_sources(gDiscoveryFinder, &count);
+    if (!sources || count == 0) return @[];
+
+    // DEEP-COPY every field immediately — these char* buffers die at the next get_current_sources
+    // / find_destroy, so nothing SDK-owned may escape into the NDISource array.
+    NSMutableArray<NDISource *> *out = [NSMutableArray arrayWithCapacity:count];
+    for (uint32_t i = 0; i < count; i++) {
+        const char *n = sources[i].p_ndi_name;
+        if (!n) continue;
+        NSString *name = [NSString stringWithUTF8String:n];
+        if (!name) continue;
+        const char *u = sources[i].p_url_address;
+        NSString *url = u ? [NSString stringWithUTF8String:u] : nil;
+        [out addObject:[[NDISource alloc] initWithName:name url:url]];
     }
+    return out;
+}
 
-    NDIReceiver *receiver = [[NDIReceiver alloc] init];
-    receiver->_recv = recv;
-    receiver->_framesync = framesync;
++ (void)stopDiscovery {
+    if (gNDI && gDiscoveryFinder) {
+        gNDI->find_destroy(gDiscoveryFinder);
+    }
+    gDiscoveryFinder = nullptr;
+}
 
-    NDIBridge *bridge = [[NDIBridge alloc] init];
-    bridge->_receiver = receiver;
-    bridge->_sourceName = [name copy];
-    NSLog(@"[NDI] connected to \"%@\" (%@) — UYVY, highest bandwidth, FrameSync", name, url ?: @"no url");
-    return bridge;
++ (NDIBridge *)connectToSource:(NDISource *)source {
+    if (![self loadRuntime]) return nil;
+    if (!source.name) return nil;
+    // Own the bytes for the lifetime of recv_create_v3 (same caveat as everywhere else).
+    std::string nameStorage = source.name.UTF8String;
+    std::string urlStorage = source.url ? std::string(source.url.UTF8String) : std::string();
+    return [self makeBridgeConnectingToName:nameStorage url:urlStorage display:source.name];
 }
 
 @synthesize sourceName = _sourceName;

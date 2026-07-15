@@ -69,6 +69,18 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+/// One discovered NDI source — name + url, BOTH deep-copied at discovery time. The SDK's
+/// `find_get_current_sources` hands back char* buffers that are only valid until the next
+/// get_current_sources / find_destroy (same lifetime caveat as step-A's connect path), so the
+/// discovery code copies every field the instant it reads it and never lets a raw SDK pointer
+/// escape into Swift.
+@interface NDISource : NSObject
+/// The NDI source name (e.g. "MACHINE (OmniScope)") — the picker's display + identity.
+@property (nonatomic, copy, readonly) NSString *name;
+/// The source URL/address, when the SDK provided one. Passed to recv_create_v3 alongside the name.
+@property (nonatomic, copy, readonly, nullable) NSString *url;
+@end
+
 /// Minimal NDI receive bridge (STEP A: prove frames reach the Metal path).
 ///
 /// The runtime is loaded DYNAMICALLY (dlopen + dlsym), never hard-linked: Manifold launches
@@ -92,12 +104,31 @@ NS_ASSUME_NONNULL_BEGIN
 @property (class, nonatomic, copy, readonly, nullable) NSString *runtimePath;
 
 /// BLOCKING discovery: wait up to `timeout` for at least one source, then connect a receiver to
-/// the FIRST one found (step A takes the first; the real picker comes with source switching).
+/// the FIRST one found. The keyboard quick-connect (⌃⌥N) uses this when the picker has not yet
+/// populated a source list; the toolbar picker uses the non-blocking discovery below instead.
 /// Call OFF the main thread. Returns nil when the runtime is unavailable or nothing appeared.
 ///
 /// Source name/URL strings are deep-copied immediately — the SDK's char* buffers are only valid
 /// until the next get_current_sources / find_destroy.
 + (nullable NDIBridge *)connectToFirstSourceWithTimeout:(NSTimeInterval)timeout;
+
+/// NON-BLOCKING discovery for the source PICKER. Creates a persistent finder on first call and
+/// reuses it after, then returns whatever sources are visible RIGHT NOW (deep-copied to NDISource,
+/// so nothing SDK-owned escapes). The finder learns the network on its own background thread
+/// between calls, so the first call is typically empty and later calls fill in — poll it lightly
+/// (e.g. once a second) while the picker is on screen to track sources coming and going. Returns
+/// an empty array when the runtime is unavailable. Main-thread friendly (returns immediately).
++ (NSArray<NDISource *> *)refreshDiscoveredSources;
+
+/// Tear down the persistent discovery finder (call when the picker is dismissed). Cheap to
+/// restart on the next refresh. Pair with -refreshDiscoveredSources on the SAME thread (main).
++ (void)stopDiscovery;
+
+/// Connect a receiver+FrameSync to a SPECIFIC discovered source — the picker's action. Identical
+/// receiver setup to the first-source path (UYVY, highest bandwidth, FrameSync); only the source
+/// differs. Call OFF the main thread (recv_create can block). Returns nil when the runtime is
+/// unavailable or the receiver could not be created.
++ (nullable NDIBridge *)connectToSource:(NDISource *)source;
 
 /// The connected source's NDI name (deep-copied at discovery).
 @property (nonatomic, copy, readonly) NSString *sourceName;

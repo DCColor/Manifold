@@ -57,6 +57,16 @@ final class NDIService: ObservableObject {
     /// for SwiftUI to observe.
     @Published private(set) var isConnected = false
 
+    /// The live source's NDI name while connected (nil when local). Drives the toolbar button's
+    /// tooltip and the checkmark on the active row in the picker. Main-thread only.
+    @Published private(set) var connectedSourceName: String?
+
+    /// NDI sources currently visible on the network, for the toolbar picker. Refreshed on a light
+    /// timer while the streaming control is on screen (startDiscovery/stopDiscovery). Empty is an
+    /// honest answer — the picker shows "No NDI sources found" rather than a silent empty menu.
+    /// Main-thread only (the refresh task hops to main to publish).
+    @Published private(set) var discoveredSources: [NDISource] = []
+
     /// The live source's EFFECTIVE colorimetry — what the buffers are actually tagged with, after
     /// resolving the user's override against what the sender declared (or didn't). Republished on
     /// the main thread whenever it CHANGES: for a normal stream, once at the first frame, and again
@@ -81,6 +91,13 @@ final class NDIService: ObservableObject {
 
     /// The display path. Set once at startup (ContentView.onAppear), same instance DeckLink uses.
     weak var renderer: MetalVideoRenderer?
+
+    /// Called on the main thread just before a stream becomes the active source, to retire whatever
+    /// else was driving the display (a loaded file). Set once by ContentView — NDIService has no
+    /// direct engine handle. This is the reverse of the file-open path disconnecting the stream:
+    /// together they enforce one active source, so a file's frame pump and NDI's push never both
+    /// feed the renderer (the double-source flashing). No-op-safe when nothing else is active.
+    var onWillActivateStream: (() -> Void)?
 
     /// The engine's PTS-keyed PCM ring. Set once at startup (ContentView.onAppear) — the SAME
     /// instance the file paths tee into and the DeckLink SDI audio callback pulls from. NDI is just a
@@ -107,6 +124,13 @@ final class NDIService: ObservableObject {
     private var audioThreadFinished: DispatchSemaphore?   // pump signals on exit; stop() joins on it
 
     private var isConnecting = false
+    /// Discovery loop state (main thread). REFERENCE-COUNTED: more than one view can want discovery
+    /// running (the toolbar streaming control and the empty-state "Connect Stream…"), and during the
+    /// connect transition both are briefly on screen at once. Counting means the finder keeps running
+    /// across that overlap instead of a departing view stopping it under an arriving one. All touched
+    /// on main, alongside the finder they drive (NDIBridge's persistent discovery finder).
+    private var discoveryClients = 0
+    private var discoveryTask: Task<Void, Never>?
     private var frameCount = 0
     private var lastRateLogTime: CFTimeInterval = 0
     private var lastRateLogCount = 0
@@ -162,14 +186,55 @@ final class NDIService: ObservableObject {
     /// is doing the actual sync, and real timestamp handling is the deferred clock step.
     private static func monotonicNow() -> Double { CACurrentMediaTime() }
 
-    // MARK: - Debug trigger (⌃⌥N)
+    // MARK: - Discovery (main thread)
 
-    /// Discover, connect to the first source, and start pulling frames onto the display.
-    /// Throwaway trigger — the real source picker comes with source switching.
+    /// Register a client that wants discovery running (toolbar streaming control or empty-state
+    /// "Connect Stream…"), starting the finder on the first one. Pairs with `stopDiscovery()`. Keeps
+    /// `discoveredSources` warm so a SwiftUI Menu — which captures its content at open time — is
+    /// already populated when opened. No-op (empty list) when the runtime is absent.
+    func startDiscovery() {
+        discoveryClients += 1
+        guard discoveryClients == 1 else { return }   // already running for an earlier client
+        guard NDIBridge.loadRuntime() else { discoveredSources = []; return }
+        discoveredSources = NDIBridge.refreshDiscoveredSources()   // immediate first pass (often empty)
+        discoveryTask = Task { @MainActor [weak self] in
+            // The finder learns the network between polls; a light 1 s cadence tracks sources coming
+            // and going without spinning. Ends when the last client leaves, the task is cancelled, or
+            // the service goes away.
+            while let self, self.discoveryClients > 0, !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1.0))
+                guard self.discoveryClients > 0, !Task.isCancelled else { break }
+                self.discoveredSources = NDIBridge.refreshDiscoveredSources()
+            }
+        }
+    }
+
+    /// Deregister a discovery client; the finder is released only when the LAST one leaves (e.g.
+    /// disconnecting with no file returns to the empty state, whose own client then keeps it alive).
+    func stopDiscovery() {
+        guard discoveryClients > 0 else { return }   // unbalanced call — ignore
+        discoveryClients -= 1
+        guard discoveryClients == 0 else { return }  // other clients still want it
+        discoveryTask?.cancel()
+        discoveryTask = nil
+        NDIBridge.stopDiscovery()
+        discoveredSources = []
+    }
+
+    // MARK: - Connect / disconnect (the toolbar control + ⌃⌥N/⌃⌥⇧N drive these)
+
+    /// Keyboard quick-connect (⌃⌥N). Prefers a source the picker has already discovered — the SAME
+    /// `connect(to:)` path the toolbar uses — so button and shortcut are one action. Falls back to a
+    /// blocking discovery only when nothing has been discovered yet (shortcut used before the picker
+    /// ran), so the shortcut still works cold.
     ///
     /// NDI TAKES OVER the display while active: it repoints the renderer's clock and range
     /// providers at itself. Clean file<->NDI handoff is explicitly out of scope for this step.
     func connectToFirstSource() {
+        if let first = discoveredSources.first {
+            connect(to: first)
+            return
+        }
         guard !isConnecting else { return }
         guard bridge == nil else {
             NSLog("[NDI] already connected to \"\(bridge?.sourceName ?? "?")\" — ignoring")
@@ -204,8 +269,49 @@ final class NDIService: ObservableObject {
         }
     }
 
+    /// Connect to a SPECIFIC discovered source — the picker's action. Picking a different source
+    /// while already connected SWITCHES (full-replacement model): the old receiver is torn down and
+    /// the new one started in the same main-thread turn as the swap, so `isConnected` never dips to
+    /// false in between and the control bar / empty state never flickers.
+    func connect(to source: NDISource) {
+        guard !isConnecting else { return }
+        // Already on this exact source — nothing to do (avoids a needless tear-down/rebuild).
+        if isConnected, connectedSourceName == source.name { return }
+        guard renderer != nil else {
+            NSLog("[NDI] no renderer wired — cannot display")
+            return
+        }
+        guard NDIBridge.loadRuntime() else {
+            NSLog("[NDI] runtime unavailable — cannot connect to \"\(source.name)\"")
+            return
+        }
+
+        isConnecting = true
+        NSLog("[NDI] connecting to \"\(source.name)\"…")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let connected = NDIBridge.connect(to: source)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isConnecting = false
+                guard let connected else {
+                    NSLog("[NDI] failed to connect to \"\(source.name)\"")
+                    return
+                }
+                // Switching sources: drop the old receiver WITHOUT flipping isConnected/empty state,
+                // then start the new one — one atomic swap from the UI's point of view.
+                if self.bridge != nil { self.tearDownReceiver() }
+                self.start(with: connected)
+            }
+        }
+    }
+
     private func start(with connected: NDIBridge) {
         guard let renderer else { return }
+        // One active source: retire a loaded file BEFORE the stream takes the renderer, so the
+        // file's frame pump and NDI's push don't both feed it (the double-source flashing). Runs
+        // before any renderer repointing below. Harmless when no file is loaded, and on an NDI→NDI
+        // switch (the old receiver is already gone; there is no file to retire).
+        onWillActivateStream?()
         bridge = connected
         frameCount = 0
         lastRateLogTime = Self.monotonicNow()
@@ -232,11 +338,15 @@ final class NDIService: ObservableObject {
         startAudioPump(connected)
 
         isConnected = true
+        connectedSourceName = connected.sourceName
         NSLog("[NDI] receiving from \"\(connected.sourceName)\" — video on the display tick, audio on a dedicated pump")
     }
 
-    func disconnect() {
-        isConnected = false
+    /// Tear down the receiver, audio pump and display hook WITHOUT touching the published mode state
+    /// (`isConnected` / `connectedSourceName`). Shared by disconnect() and the source-switch path:
+    /// the switch rebuilds immediately afterwards, so it must NOT flip isConnected to false (which
+    /// would drop the control bar to the empty state mid-switch).
+    private func tearDownReceiver() {
         // Stop the audio pump and JOIN it BEFORE tearing down the receiver: the pump calls into the
         // framesync instance, so it must be fully exited before the bridge destroys it (below).
         stopAudioPump()
@@ -246,6 +356,16 @@ final class NDIService: ObservableObject {
         transferSession = nil
         pixelBufferPool = nil
         poolSize = (0, 0)
+    }
+
+    func disconnect() {
+        isConnected = false
+        connectedSourceName = nil
+        tearDownReceiver()
+        // Wipe the last streamed frame off the display: with the source gone and (usually) no file
+        // behind it, the renderer would otherwise leave its final drawable frozen behind the empty
+        // state. A file still playing repaints over the black on its next frame.
+        renderer?.clearToBlack()
         resetColorimetry()
         NSLog("[NDI] disconnected")
     }

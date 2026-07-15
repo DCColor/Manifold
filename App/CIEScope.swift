@@ -167,6 +167,10 @@ final class CIEScopeModel: ObservableObject {
     private var active = false
     private var sampling = false
     private var pendingSample = false
+    /// One-shot publish suppressor: set by clear() on a source teardown so a GPU sample already in
+    /// flight can't republish the old plot after the panel is blanked. Reset when a genuinely new
+    /// sample cycle begins (startSample), so a new source's frames draw normally.
+    private var cleared = false
     private var prefsObserver: AnyCancellable?
 
     func start() {
@@ -185,6 +189,16 @@ final class CIEScopeModel: ObservableObject {
         pendingSample = false
         prefsObserver?.cancel()
         prefsObserver = nil
+        image = nil
+    }
+
+    /// Blank the published plot on a source teardown (NDI disconnect), WITHOUT deactivating: the
+    /// renderer invalidates the offscreen this scope reads, so nothing resamples the old frame, and
+    /// `cleared` suppresses any sample already in flight. When a new source renders, the render-
+    /// coupled frameRendered path resumes sampling and the plot returns — no restart needed.
+    func clear() {
+        pendingSample = false
+        cleared = true
         image = nil
     }
 
@@ -209,6 +223,7 @@ final class CIEScopeModel: ObservableObject {
         guard let renderer else { return }
         sampling = true
         pendingSample = false
+        cleared = false   // a real new cycle — allow its publish (supersedes any prior blank request)
 
         // cieKernel builds the planeW×planeH histogram over the GPU-resident offscreen (mode +
         // bounds come from renderer.cieUseUV — the single source of truth); only the small plane
@@ -220,7 +235,7 @@ final class CIEScopeModel: ObservableObject {
             let img = self.buildCIETraceImage(histogram: hist, planeW: w, planeH: h,
                                               gain: gain, dilation: dilation, color: color)
             DispatchQueue.main.async {
-                if self.active, let img { self.image = img }
+                if self.active, !self.cleared, let img { self.image = img }
                 self.finishSample()
             }
         }

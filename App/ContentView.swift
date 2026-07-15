@@ -160,6 +160,14 @@ struct ContentView: View {
     // In docked mode the controls are always shown; in overlay they auto-hide.
     private var controlsShown: Bool { isDocked ? true : hudVisible }
 
+    // A source is "active" whenever a file is loaded OR an NDI stream is on screen. The whole
+    // auto-hiding control surface (HUD / control bar, scopes, guides, overlay data, output toggle)
+    // is source-agnostic — it reveals for ANY active source. NDI drives frames straight into the
+    // shared renderer without ever setting `hasMedia`, so gating the reveal on `hasMedia` alone left
+    // streaming with no reachable controls. Every reveal gate keys off this instead. Only the
+    // "Open… to begin" prompt stays file-vs-nothing specific (it means NOTHING is on screen).
+    private var hasSource: Bool { engine.hasMedia || ndi.isConnected }
+
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
@@ -249,6 +257,10 @@ struct ContentView: View {
                 // NDI step A (throwaway trigger, ⌃⌥N) displays THROUGH this same renderer — it
                 // pulls frames on the display tick and feeds the same enqueue the file sources do.
                 NDIService.shared.renderer = renderer
+                // One active source (reverse of the file-open path disconnecting the stream): when a
+                // stream is about to take over, retire any loaded file first so both don't feed the
+                // renderer at once. NDIService has no engine handle, so it calls back through here.
+                NDIService.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
                 // …and tees NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the
                 // clock-anchored SDI output, SDI/Computer routing and mute apply to NDI for free.
                 NDIService.shared.audioTap = engine.audioTap
@@ -332,8 +344,18 @@ struct ContentView: View {
             applyNDIColorToScopes(info)
         }
         .onChange(of: ndi.isConnected) { _, connected in
-            guard connected else { return }
-            applyNDIColorToScopes(ndi.colorInfo)
+            if connected {
+                applyNDIColorToScopes(ndi.colorInfo)
+                // A connecting stream is a newly-active source — arm the auto-hide so the control
+                // surface reveals then settles exactly as it does when a file loads (line 295).
+                armIdleIfNeeded()
+            } else {
+                // Stream torn down → blank the scopes so they don't sit showing the last stream's
+                // trace over the now-black video (clearToBlack handled the picture). Together that
+                // is a fully clean empty state. A file taking over instead repaints both on its
+                // next frame. NOT called on an NDI→NDI switch (isConnected stays true throughout).
+                clearScopes()
+            }
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -341,6 +363,11 @@ struct ContentView: View {
             allowsMultipleSelection: false
         ) { result in
             if case .success(let urls) = result, let url = urls.first {
+                // One active source: a new file retires any live stream FIRST, so both don't feed
+                // the renderer at once (NDI pushing on its tick + the file's frame pump = the
+                // double-source flashing). Full-replacement, same teardown ⌃⌥⇧N / UI Disconnect use.
+                // No-op when not streaming.
+                if ndi.isConnected { NDIService.shared.disconnect() }
                 engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 wakeHUD()
             }
@@ -408,7 +435,11 @@ struct ContentView: View {
                     .aspectRatio(contentMode: .fit)
             }
 
-            if engine.hasMedia {
+            if hasSource {
+                // Full control surface for ANY active source (file OR NDI stream). Streaming is a
+                // monitoring mode — it needs the same reveal-on-hover HUD, scopes, guides and overlay
+                // as file playback. The transport row lives here too; its file-specific affordances
+                // simply no-op over a live stream, which is a separate (banked) concern.
                 VStack {
                     Spacer()
                     controls(showPin: !isDocked)
@@ -424,20 +455,14 @@ struct ContentView: View {
                 }
                 .opacity(controlsShown ? 1 : 0)
                 .animation(.easeInOut(duration: 0.30), value: controlsShown)
-            } else if !ndi.isConnected {
-                // "Open… to begin" means NOTHING is on screen — so it must key off any active
-                // source, not just a file. An NDI stream has no file behind it, so `hasMedia` is
-                // false while its frames are being displayed, and the overlay used to sit on top of
-                // live video. (STOPGAP: an explicit OR with the NDI flag. The unified "is any source
-                // active" concept belongs to the source-switching work, not here.)
-                //
-                // The NDI branch deliberately shows NEITHER controls nor the empty state: file
-                // transport over a live stream is meaningless, and that is a later step.
+            } else {
+                // "Open… to begin" means NOTHING is on screen — no file and no stream. `hasSource`
+                // already folds in the NDI flag, so this branch is reached only when truly idle.
                 emptyState
             }
 
             WindowConfigurator(
-                buttonsVisible: engine.hasMedia ? controlsShown : true,
+                buttonsVisible: hasSource ? controlsShown : true,
                 displaySize: engine.displaySize
             )
             .frame(width: 0, height: 0)
@@ -569,6 +594,18 @@ struct ContentView: View {
               }
     }
 
+    /// Blank every scope's published trace — called when a stream disconnects so the tray doesn't
+    /// keep showing the last stream's trace over the now-black video. The models stay ACTIVE (not
+    /// stopped): the renderer invalidated the offscreen they sample, so nothing resamples the old
+    /// frame, and when a new source renders they resume automatically. NOT called on an NDI→NDI
+    /// switch (isConnected never dips), so switching keeps the scopes live.
+    private func clearScopes() {
+        waveformModel.clear()
+        paradeModel.clear()
+        vectorscopeModel.clear()
+        cieModel.clear()
+    }
+
     /// Hidden keyboard shortcuts for the scopes tray + CIE live toggles. Grouped into one view
     /// (instead of many chained `.background(Button…)`) to keep the main body's type-check tractable.
     /// Per-scope presence shortcuts (formerly ⌃⌥W/P/V) are gone — tray content is now the per-slot
@@ -629,10 +666,11 @@ struct ContentView: View {
         .opacity(0)
     }
 
-    /// THROWAWAY (NDI step A): ⌃⌥N connects to the first NDI source on the network and puts its
-    /// frames on screen; ⌃⌥⇧N disconnects. This is a test trigger, not a feature — the real source
-    /// picker arrives with source switching, and it replaces this outright. NDI takes over the
-    /// display while connected (see NDIService); file<->NDI handoff is a later step.
+    /// NDI keyboard accelerators — the fast path for the SAME actions the toolbar streaming control
+    /// drives (one action, two triggers): ⌃⌥N quick-connects (the first discovered source, or a
+    /// blocking discovery when the picker hasn't run yet), ⌃⌥⇧N disconnects. The toolbar chevron is
+    /// the discoverable path (pick/switch a specific source); these are the muscle-memory path. NDI
+    /// takes over the display while connected (see NDIService); file<->NDI handoff is a later step.
     @ViewBuilder private var ndiShortcuts: some View {
         Group {
             Button("") { NDIService.shared.connectToFirstSource() }
@@ -774,6 +812,88 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("DeckLink output options")
+        }
+    }
+
+    /// Streaming source control — a split-button mirroring `deckLinkOutputControl` and sitting next
+    /// to it. The main button quick-connects to the first NDI source (or disconnects when already
+    /// streaming); the chevron opens the technology → source picker. Lit green while streaming,
+    /// full-brightness white when LOCAL — local is a legitimate resting mode, so it must read as
+    /// available, not as a disabled/off look. Discovery runs only while this control is on screen
+    /// (onAppear/onDisappear), so `discoveredSources` is already warm when the menu is opened.
+    private var streamingControl: some View {
+        HStack(spacing: 2) {
+            Button { toggleStreaming() } label: {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+            }
+            .foregroundStyle(ndi.isConnected ? Color.green : .white.opacity(0.9))
+            .help(ndi.isConnected
+                  ? "Streaming — \(ndi.connectedSourceName ?? "NDI") — click to stop (⌃⌥⇧N)"
+                  : "Streaming — local mode; click to connect the first NDI source, or use the menu to pick (⌃⌥N)")
+
+            Menu {
+                streamingMenuContent
+            } label: {
+                Image(systemName: "chevron.down").font(.system(size: 8))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Streaming sources")
+        }
+        .onAppear { ndi.startDiscovery() }
+        .onDisappear { ndi.stopDiscovery() }
+    }
+
+    /// The streaming menu: SUPPORTED TECHNOLOGIES, each a submenu of its sources. NDI is the only
+    /// real entry today; WHEP / SRT / HLS get sibling `Menu`s here when they land — the structure is
+    /// ready, but nothing is stubbed (an inert "coming soon" row would read as broken). "Disconnect"
+    /// appears at the top level whenever a source is live, so stopping streaming is always one reach.
+    @ViewBuilder private var streamingMenuContent: some View {
+        Menu {
+            ndiSourceListItems
+        } label: {
+            Label("NDI", systemImage: "antenna.radiowaves.left.and.right")
+        }
+        // Structural room for future streaming tech (WHEP / SRT / HLS) — sibling Menus go here.
+
+        if ndi.isConnected {
+            Divider()
+            Button(role: .destructive) {
+                NDIService.shared.disconnect()
+            } label: {
+                Label("Disconnect", systemImage: "stop.circle")
+            }
+        }
+    }
+
+    /// The live NDI source rows — the one place the discovered list becomes menu items, so every
+    /// entry point (toolbar chevron, empty-state "Connect Stream…") shows the SAME sources and
+    /// picks through the SAME `NDIService.connect(to:)`. Honest when empty (no silent menu). The
+    /// active source is checkmarked; picking it again is a no-op guarded in NDIService.
+    @ViewBuilder private var ndiSourceListItems: some View {
+        if ndi.discoveredSources.isEmpty {
+            Button("No NDI sources found") {}.disabled(true)
+        } else {
+            ForEach(ndi.discoveredSources, id: \.name) { source in
+                Button { NDIService.shared.connect(to: source) } label: {
+                    if source.name == ndi.connectedSourceName {
+                        Label(source.name, systemImage: "checkmark")   // the live source
+                    } else {
+                        Text(source.name)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The streaming button's main-click action (and the ⌃⌥N/⌃⌥⇧N shortcuts funnel through the same
+    /// NDIService calls): stop when streaming, quick-connect the first discovered source otherwise.
+    private func toggleStreaming() {
+        if ndi.isConnected {
+            NDIService.shared.disconnect()
+        } else {
+            NDIService.shared.connectToFirstSource()
         }
     }
 
@@ -943,6 +1063,10 @@ struct ContentView: View {
                 // DeckLink output: split-button — main toggles output, chevron picks device + status.
                 deckLinkOutputControl
 
+                // Streaming source: split-button next to DeckLink output — main quick-connects/stops,
+                // chevron opens the tech → source picker. Lit while streaming, dark (local) otherwise.
+                streamingControl
+
                 // NDI colorimetry override — an ASSERTION about the live source, so it lives with
                 // the actions, not in the inspector (which reports what things ARE). Only present
                 // while NDI is driving: it has nothing to say about a file, whose colorimetry comes
@@ -971,15 +1095,36 @@ struct ContentView: View {
             Image(systemName: "film")
                 .font(.system(size: 52, weight: .ultraLight))
                 .foregroundStyle(.white.opacity(0.45))
-            Text("Open a file to begin")
+            Text("Open a file — or connect a stream")
                 .font(.title3)
                 .foregroundStyle(.white.opacity(0.65))
-            Button { isImporterPresented = true } label: {
-                Label("Open…", systemImage: "folder")
+            HStack(spacing: 12) {
+                Button { isImporterPresented = true } label: {
+                    Label("Open…", systemImage: "folder")
+                }
+
+                // Cold-start streaming entry (Stage 3a-2): a sibling pill of the same weight as Open…,
+                // opening the SAME discovered-source list the toolbar chevron uses — one click to the
+                // network sources, picking connects via the SAME NDIService.connect(to:). Discovery
+                // runs while this view is on screen (see the ndi.startDiscovery/stopDiscovery below).
+                Menu {
+                    ndiSourceListItems
+                } label: {
+                    Label("Connect Stream…", systemImage: "antenna.radiowaves.left.and.right")
+                }
+                .menuStyle(.button)          // present as a button (pill), matching Open…'s weight
+                .buttonStyle(.bordered)
+                .fixedSize()
             }
             .controlSize(.large)
             .tint(.white)
         }
+        // The empty state is the ONLY streaming entry when no source is active (the toolbar control
+        // lives in the control bar, which isn't shown here), so it drives discovery for its lifetime.
+        // Discovery is reference-counted in NDIService, so the brief overlap with the toolbar control
+        // during the connect transition doesn't stop it out from under the newly-shown control bar.
+        .onAppear { ndi.startDiscovery() }
+        .onDisappear { ndi.stopDiscovery() }
     }
 
     /// Open the current file in Flip (tools.graviton.flip). If Flip isn't
@@ -1004,14 +1149,14 @@ struct ContentView: View {
     }
 
     private func togglePin() {
-        guard engine.hasMedia, !isDocked else { return }
+        guard hasSource, !isDocked else { return }
         pinned.toggle()
         idleTask?.cancel()
         hudVisible = pinned
     }
 
     private func wakeHUD() {
-        guard engine.hasMedia, !isDocked else { return }
+        guard hasSource, !isDocked else { return }
         hudVisible = true
         if !pinned { scheduleIdle() }
     }
@@ -1019,7 +1164,7 @@ struct ContentView: View {
     // Start the auto-hide countdown when appropriate (overlay mode, media loaded,
     // not pinned). Safe to call repeatedly — it cancels any prior pending task.
     private func armIdleIfNeeded() {
-        guard engine.hasMedia, !isDocked, !pinned else { return }
+        guard hasSource, !isDocked, !pinned else { return }
         hudVisible = true
         scheduleIdle()
     }
