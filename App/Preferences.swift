@@ -240,6 +240,9 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            // License state + key entry / deactivation (App-layer licensing subsystem).
+            LicenseSettingsSection()
+
             Section("Playback") {
                 Picker("Controls", selection: $controlModeRaw) {
                     ForEach(ControlDisplayMode.allCases) { mode in
