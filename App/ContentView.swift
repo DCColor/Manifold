@@ -693,42 +693,84 @@ struct ContentView: View {
         NDIService.shared.setColorimetryOverride(all[(i + 1) % all.count])
     }
 
-    /// NDI colorimetry: what the live stream is being read as, and the user's power to say
-    /// otherwise. The button face states the EFFECTIVE colorimetry and its tier, because the honest
-    /// thing and the useful thing are the same sentence here — "709 · Assumed" tells the user both
-    /// what the scopes are doing and that nobody actually verified it. An override turns the control
-    /// amber: something on screen is a human assertion, not a reading, and that should never look
-    /// like the neutral resting state.
+    /// Color — the color-interpretation control: how Manifold reads the incoming color, and the
+    /// user's power to override that reading. This is a source-AGNOSTIC control by design. Today it
+    /// hosts a single section — the live stream's colorimetry override — because stream content is
+    /// all there is to interpret right now. When files gain color-management modes (Bypass /
+    /// Embedded / Match-QuickTime) they become a SECOND section in this SAME menu, not a new control:
+    /// file and stream are two answers to one question ("what color is this, really?"), so they
+    /// belong under one "Color" roof. Build here, don't restructure later — the seam is marked below.
+    ///
+    /// The face states the EFFECTIVE interpretation and its tier, because the honest thing and the
+    /// useful thing are the same sentence here — "709 · Assumed" tells the user both what the scopes
+    /// are doing and that nobody actually verified it. The chevron (matching the streaming / DeckLink
+    /// split-buttons) makes it read as a menu you OPEN, not a passive readout. An override turns the
+    /// control amber: something on screen is a human assertion, not a reading, and that should never
+    /// look like the neutral resting state.
     ///
     /// Most NDI senders declare nothing (OmniScope declares nothing at all), so for the common case
-    /// this picker is not a corner-case escape hatch — it is how the stream's colorimetry gets set.
-    private var ndiColorimetryControl: some View {
-        Menu {
-            Section("Colorimetry") {
-                Picker("Colorimetry", selection: ndiColorimetryBinding) {
-                    ForEach(NDIColorimetryOverride.allCases) { option in
-                        Text(option.label).tag(option)
-                    }
+    /// the colorimetry section is not a corner-case escape hatch — it is how the stream's colorimetry
+    /// gets set.
+    private var colorControl: some View {
+        // Two-part split face mirroring the streaming / DeckLink controls: a readout element + a
+        // lone-chevron menu. The chevron MUST be its own borderlessButton Menu label, not the
+        // trailing item of a multi-element label — `.menuStyle(.borderlessButton)` reserves and
+        // clips a trailing region for its disclosure indicator, and `.menuIndicator(.hidden)` hides
+        // the drawn arrow but not the clip, so a chevron sitting at a rich label's trailing edge is
+        // swallowed (the 3b bug: palette + text showed, chevron didn't). A lone chevron sits at its
+        // label's leading edge with only empty, harmlessly-clipped space after it — which is exactly
+        // why the streaming / DeckLink chevrons render. Both halves open the SAME presets, so the
+        // whole face stays clickable; the readout half also reads the effective colorimetry + tier.
+        HStack(spacing: 2) {
+            Menu {
+                colorStreamColorimetrySection
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "paintpalette")
+                    Text(ndiColorimetryFaceLabel)
+                        .font(.system(.caption, design: .monospaced))
                 }
-                .pickerStyle(.inline)
             }
-            // What the STREAM says, kept visible while overridden — so the user can see they are
-            // contradicting a declaration rather than filling a silence.
-            Section("Stream") {
-                Button(ndiStreamStatusLine) {}.disabled(true)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+
+            // The interactive affordance — same size-8 chevron.down as the streaming / DeckLink
+            // controls, so the control reads as a menu you open, not a passive readout.
+            Menu {
+                colorStreamColorimetrySection
+                // SEAM: a future file color-management section (Bypass / Embedded / Match-QuickTime)
+                // drops into colorStreamColorimetrySection's peer set — same menu, same control —
+                // when files gain those modes. Nothing is stubbed today (an inert row would read as
+                // broken); the structure is simply ready.
+            } label: {
+                Image(systemName: "chevron.down").font(.system(size: 8))
             }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "paintpalette")
-                Text(ndiColorimetryFaceLabel)
-                    .font(.system(.caption, design: .monospaced))
-            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
         .foregroundStyle(ndi.colorInfo.isOverridden ? Color.orange : .white.opacity(0.9))
-        .help("NDI colorimetry — Auto trusts the stream; a preset asserts it (⌃⌥C cycles)")
+        .help("Color interpretation — Auto trusts the stream; a preset asserts it (⌃⌥C cycles)")
+    }
+
+    /// The live stream's colorimetry override — the one color-interpretation section with content
+    /// today. Presets assert a colorimetry; the "Stream" subsection keeps the sender's own claim
+    /// visible so an override reads as CONTRADICTING a declaration rather than filling a silence.
+    /// Same NDIColorimetryOverride path and tagging as before — relocated into the Color control,
+    /// logic untouched.
+    @ViewBuilder private var colorStreamColorimetrySection: some View {
+        Section("Colorimetry") {
+            Picker("Colorimetry", selection: ndiColorimetryBinding) {
+                ForEach(NDIColorimetryOverride.allCases) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+            .pickerStyle(.inline)
+        }
+        Section("Stream") {
+            Button(ndiStreamStatusLine) {}.disabled(true)
+        }
     }
 
     /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "709 · Declared".
@@ -1067,12 +1109,13 @@ struct ContentView: View {
                 // chevron opens the tech → source picker. Lit while streaming, dark (local) otherwise.
                 streamingControl
 
-                // NDI colorimetry override — an ASSERTION about the live source, so it lives with
-                // the actions, not in the inspector (which reports what things ARE). Only present
-                // while NDI is driving: it has nothing to say about a file, whose colorimetry comes
-                // from tags the user can fix in Flip.
+                // Color — the color-interpretation control (source-agnostic). It hosts an ASSERTION
+                // about the source, so it lives with the actions, not in the inspector (which reports
+                // what things ARE). Today its only section is the live stream's colorimetry override,
+                // so it's gated to NDI: it has nothing to say about a file yet (file color-management
+                // modes are the future second section). Same appearance rule as before.
                 if ndi.isConnected {
-                    ndiColorimetryControl
+                    colorControl
                 }
 
                 Spacer()

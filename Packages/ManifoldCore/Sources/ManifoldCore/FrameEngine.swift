@@ -442,6 +442,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         audioTap.reset()   // D4b-1: drop buffered PCM so nothing survives a stop
         isPlaying = false
         currentTime = 0
+        // A full teardown must leave NO transport readout from the departed source: the same
+        // incoherence we fixed for scopes (blank-on-disconnect). duration + tcInfo drive the
+        // scrubber range and the source/end-timecode readouts; without this a file→stream takeover
+        // (this runs via onWillActivateStream) or a disconnect leaves the old file's end timecode
+        // (e.g. 01:00:37:17) and scrubber length on screen behind the live source. A stream is not
+        // seekable, so zeroed readouts (00:00:00 / empty scrubber) are the correct resting state —
+        // no live-transport model is implied here. metadata is intentionally left alone: it drives
+        // the metadata-onChange scope wiring, which the connecting stream immediately repopulates.
+        duration = 0
+        tcInfo = nil
         hasMedia = false
         currentURL = nil
     }
