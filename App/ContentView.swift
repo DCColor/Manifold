@@ -1,5 +1,6 @@
 import SwiftUI
 import ManifoldCore
+import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -154,6 +155,13 @@ struct ContentView: View {
     /// DeckLink output state (on/off + selected device) — shared singleton, observed so the toolbar
     /// control and the ⌃⌥O/⌃⌥⇧O shortcuts always agree.
     @ObservedObject private var deckLink = DeckLinkService.shared
+    /// External .srt sidecar state (cues + on/off). Per-window like the scope models, not a
+    /// singleton: captions are view-level overlay state synced to the engine's clock, with no
+    /// device/stream lifecycle to share. The engine stays unaware of them.
+    @StateObject private var captions = CaptionController()
+    /// Caption position — same key CaptionOverlay reads; declared here for the Aa menu's Picker
+    /// binding (the guides panel binds its percentages the same way).
+    @AppStorage("manifold.caption.positionPreset") private var captionPosition: CaptionPosition = .titleSafe
     @State private var readoutMode: ReadoutMode = .source
     @State private var idleTask: Task<Void, Never>?
 
@@ -372,6 +380,12 @@ struct ContentView: View {
                 wakeHUD()
             }
         }
+        // An .srt is a sidecar to ONE file, so a new source retires it — otherwise the old cues
+        // would keep firing confidently against unrelated pictures. Keyed on currentURL rather than
+        // the load call sites because media also arrives via ManifoldApp's .onOpenURL (Finder
+        // double-click / drag-to-icon), which can't reach this view's state. Also covers the nil
+        // transition engine.stop() makes on NDI takeover.
+        .onChange(of: engine.currentURL) { _, _ in captions.clear() }
         .sheet(isPresented: $showGetFlipSheet) {
             VStack(spacing: 16) {
                 Image(systemName: "arrow.up.forward.app")
@@ -428,6 +442,15 @@ struct ContentView: View {
             // letterbox/pillarbox + scaling. Self-contained (reads guide prefs); draws
             // nothing when off. Above the video, below the controls.
             .overlay { GuideOverlay() }
+            // Captions ride the SAME layer as the guides — bounds == displayed video rect — so the
+            // text lands on the real title-safe line rather than a window-relative guess, and
+            // tracks letterbox/pillarbox + scaling for free. Gated out of the tree entirely when
+            // off: the overlay reads engine.currentTime (10 Hz), so it shouldn't exist when idle.
+            .overlay {
+                if captions.enabled, captions.isLoaded {
+                    CaptionOverlay(engine: engine, captions: captions)
+                }
+            }
 
             if isScrubbing, let preview = scrubPreviewImage {
                 Image(decorative: preview, scale: 1.0)
@@ -887,6 +910,86 @@ struct ContentView: View {
         .onDisappear { ndi.stopDiscovery() }
     }
 
+    /// Caption control — a split-button mirroring `streamingControl` / `deckLinkOutputControl`. The
+    /// main button toggles the caption overlay, or opens the picker on the first click when nothing
+    /// is loaded yet (an Aa that does nothing until you've found a hidden menu item reads as broken).
+    /// The chevron loads/replaces/clears the sidecar and picks the position preset. Lit green while
+    /// captions are showing, same on/off language as loop and the scopes tray.
+    ///
+    /// The chevron MUST stay the LONE element of the Menu's label — see the note on `colorControl`:
+    /// `.menuStyle(.borderlessButton)` clips a trailing region for its disclosure indicator, and
+    /// `.menuIndicator(.hidden)` hides the arrow but not the clip, so a chevron at a rich label's
+    /// trailing edge gets swallowed.
+    private var captionControl: some View {
+        HStack(spacing: 2) {
+            Button {
+                if captions.isLoaded { captions.enabled.toggle() } else { presentCaptionPicker() }
+            } label: {
+                Image(systemName: "textformat")
+            }
+            .foregroundStyle(captions.enabled ? Color.green : .white.opacity(0.9))
+            .help(captions.isLoaded
+                  ? (captions.enabled ? "Captions on — click to hide" : "Captions off — click to show")
+                  : "Load subtitles…")
+
+            Menu {
+                Button(captions.isLoaded ? "Load different subtitles…" : "Load subtitles…") {
+                    presentCaptionPicker()
+                }
+                if captions.isLoaded {
+                    Button("Clear subtitles") { captions.clear() }
+                    Divider()
+                    Section("Position") {
+                        Picker("Position", selection: $captionPosition) {
+                            ForEach(CaptionPosition.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.inline)
+                    }
+                    if let name = captions.sourceURL?.lastPathComponent {
+                        Divider()
+                        Button("\(name) — \(captions.cues.count) cues") {}.disabled(true)
+                    }
+                }
+            } label: {
+                Image(systemName: "chevron.down").font(.system(size: 8))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Subtitle options")
+        }
+        // File-only, same rule as loop: NDI takeover calls engine.stop(), which zeroes hasMedia,
+        // so this self-disables for live sources. Captions over no picture are meaningless.
+        .disabled(!engine.hasMedia)
+    }
+
+    /// Subtitle picker. NSOpenPanel directly, NOT SwiftUI's .fileImporter: .fileImporter silently
+    /// no-ops against this app's custom PlayerWindow — the binding flips and no panel is ever
+    /// constructed (confirmed by dumping NSApp.windows: no NSOpenPanel appears at all). The
+    /// export-folder picker in Preferences has always used NSOpenPanel for the same reason, so this
+    /// is the app's working idiom, not a workaround.
+    ///
+    /// `runModal()` is application-modal — no parent window to pick, so it's safe with several
+    /// Manifold windows open — and is the same presentation the working export-folder picker uses.
+    ///
+    /// The extension-derived type resolves to a DYNAMIC UTType (nothing on macOS declares .srt),
+    /// which matches real .srt files correctly. Do NOT "simplify" this to .plainText: .srt does not
+    /// conform to public.plain-text, so that would grey out every .srt file in the panel.
+    private func presentCaptionPicker() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Load"
+        panel.message = "Choose a subtitle file (.srt) for this clip"
+        panel.allowedContentTypes = [UTType(filenameExtension: "srt")].compactMap { $0 }
+        // A sidecar almost always sits beside its movie. nil (no file loaded) means "default
+        // location" to NSOpenPanel, so this needs no guard.
+        panel.directoryURL = engine.currentURL?.deletingLastPathComponent()
+        // load() logs its own parse failures; a cancel is a no-op, same as the media importer.
+        if panel.runModal() == .OK, let url = panel.url { captions.load(url) }
+    }
+
     /// The streaming menu: SUPPORTED TECHNOLOGIES, each a submenu of its sources. NDI is the only
     /// real entry today; WHEP / SRT / HLS get sibling `Menu`s here when they land — the structure is
     /// ready, but nothing is stubbed (an inert "coming soon" row would read as broken). "Disconnect"
@@ -1079,8 +1182,9 @@ struct ContentView: View {
                     .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {
                         GuidesPanel()
                     }
-                Button { } label: { Image(systemName: "textformat") }
-                    .help("Overlay data (coming soon)").disabled(true)
+                // Captions: split-button — main toggles the overlay (or opens the picker when
+                // nothing's loaded yet), chevron loads/clears the sidecar and picks position.
+                captionControl
                 Button { showInspector.toggle() } label: {
                     Image(systemName: "info.circle")
                 }
