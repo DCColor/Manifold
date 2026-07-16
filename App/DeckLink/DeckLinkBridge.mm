@@ -834,6 +834,17 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     return devices;
 }
 
++ (BOOL)isDriverInstalled {
+    // Additive, read-only — does NOT touch InitDeckLinkAPI or the enumeration path above.
+    // CreateDeckLinkIteratorInstance triggers the same pthread_once framework load the enumeration
+    // uses; a non-null iterator is equivalent to "Desktop Video framework present" (the iterator can
+    // only be created once the CFBundle loaded). We read it this way rather than IsDeckLinkAPIPresent()
+    // because that symbol isn't declared in any SDK header (only defined in DeckLinkAPIDispatch.cpp).
+    IDeckLinkIterator *it = CreateDeckLinkIteratorInstance();
+    if (it) { it->Release(); return YES; }
+    return NO;
+}
+
 #pragma mark - D2: first light (one synthetic frame, held on the output)
 
 - (DeckLinkOutputResult *)startTestFrameOutputOnDevice0 {

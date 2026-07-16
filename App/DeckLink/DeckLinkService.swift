@@ -17,6 +17,10 @@ final class DeckLinkService: ObservableObject {
 
     static let shared = DeckLinkService()
 
+    /// The Blackmagic Desktop Video download page — single source of truth for the Settings
+    /// "Download Desktop Video…" button (state (a), driver absent). Analogous to NDIService.runtimeInstallURL.
+    static let driverInstallURL = URL(string: "https://www.blackmagicdesign.com/support")!
+
     /// @AppStorage key for the "Enable output on launch" preference (Settings → DeckLink Output).
     /// Explicit opt-in default behavior — NOT last-session persistence. Default false. Shared with
     /// SettingsView so the key can't drift.
@@ -31,6 +35,11 @@ final class DeckLinkService: ObservableObject {
     @Published private(set) var isOutputting = false     // reflects the ACTUAL scheduled-playback state
     @Published private(set) var selectedDeviceIndex = 0  // which enumerated device output targets
     @Published private(set) var devices: [Device] = []   // cached enumeration for the picker
+    /// Whether the Desktop Video framework loaded (driver installed), independent of any card being
+    /// present. Distinguishes state (a) "driver absent" from (b) "driver present, no device" — which
+    /// `devices.isEmpty` alone cannot. Published by `refreshDevices()`. Relaunch-only for install/uninstall
+    /// (the framework load is pthread_once-cached); card plug/unplug is live via re-enumeration.
+    @Published private(set) var driverInstalled = false
     /// Plain-speak colorspace label for the current source (DISPLAY ONLY — the actual output tag is
     /// unchanged: D5 tags both 2020 and P3 as Rec.2020). Derived from the source colorPrimariesCode,
     /// so it can distinguish genuine 2020 from P3-in-2020 (which the collapsed tag cannot). nil → 709.
@@ -239,8 +248,12 @@ final class DeckLinkService: ObservableObject {
     /// the selection if the list shrank. Publishes on main.
     func refreshDevices() {
         let ds = outputDevices()
+        // Same enumeration also settles the pthread_once framework load, so the driver-present read is
+        // valid here — publish it alongside `devices` so state (a) vs (b) is distinguishable in the UI.
+        let installed = DeckLinkBridge.isDriverInstalled()
         DispatchQueue.main.async {
             self.devices = ds
+            self.driverInstalled = installed
             if self.selectedDeviceIndex >= ds.count { self.selectedDeviceIndex = 0 }
         }
     }

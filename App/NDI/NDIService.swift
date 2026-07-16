@@ -49,6 +49,21 @@ final class NDIService: ObservableObject {
     static let shared = NDIService()
     private init() {}
 
+    /// The single source of truth for the NDI runtime download page (Vizrt redistributable).
+    /// Referenced by BOTH the "Install NDI Runtime…" menu item (ManifoldApp) and the Settings
+    /// button (SettingsView) — no duplicated string literal.
+    static let runtimeInstallURL = URL(string: "https://ndi.link/NDIRedistV6")!
+
+    /// Whether the NDI runtime dylib is present and loadable. Published for the picker empty state
+    /// and the Settings status row. Detection is LAZY and RELAUNCH-ONLY by design: the underlying
+    /// `+[NDIBridge loadRuntime]` is `dispatch_once`, so a machine that gains the runtime mid-session
+    /// won't flip this until relaunch. Set from `refreshRuntimeStatus()` and the `startDiscovery()`
+    /// load. Main-thread only (SwiftUI observes it).
+    @Published private(set) var runtimeAvailable: Bool = false
+
+    /// The loaded runtime's version string, or nil when unavailable. Main-thread only.
+    @Published private(set) var runtimeVersion: String? = nil
+
     /// True while an NDI source is connected and feeding the display.
     ///
     /// STOPGAP: the UI needs to know "is something on screen" and, until the source-switching work
@@ -186,6 +201,27 @@ final class NDIService: ObservableObject {
     /// is doing the actual sync, and real timestamp handling is the deferred clock step.
     private static func monotonicNow() -> Double { CACurrentMediaTime() }
 
+    // MARK: - Runtime status (lazy, relaunch-only)
+
+    /// Read the bridge's one-time load result and publish it. Idempotent: `+[NDIBridge loadRuntime]`
+    /// is `dispatch_once`, so repeated calls are cheap and always return the same cached answer for
+    /// the process lifetime (install-then-relaunch is the detection model — never re-probed live).
+    /// Call it lazily (Settings opening, streaming UI appearing), NOT at app launch. Publishes on the
+    /// main thread; safe to call from any thread.
+    func refreshRuntimeStatus() {
+        let available = NDIBridge.loadRuntime()
+        let version = available ? NDIBridge.runtimeVersion : nil
+        if Thread.isMainThread {
+            self.runtimeAvailable = available
+            self.runtimeVersion = version
+        } else {
+            DispatchQueue.main.async {
+                self.runtimeAvailable = available
+                self.runtimeVersion = version
+            }
+        }
+    }
+
     // MARK: - Discovery (main thread)
 
     /// Register a client that wants discovery running (toolbar streaming control or empty-state
@@ -195,7 +231,11 @@ final class NDIService: ObservableObject {
     func startDiscovery() {
         discoveryClients += 1
         guard discoveryClients == 1 else { return }   // already running for an earlier client
-        guard NDIBridge.loadRuntime() else { discoveredSources = []; return }
+        // Reuse THIS load result to publish runtime status — no second load call (see runtimeAvailable).
+        let available = NDIBridge.loadRuntime()
+        runtimeAvailable = available
+        runtimeVersion = available ? NDIBridge.runtimeVersion : nil
+        guard available else { discoveredSources = []; return }
         discoveredSources = NDIBridge.refreshDiscoveredSources()   // immediate first pass (often empty)
         discoveryTask = Task { @MainActor [weak self] in
             // The finder learns the network between polls; a light 1 s cadence tracks sources coming

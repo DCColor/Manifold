@@ -915,7 +915,16 @@ struct ContentView: View {
     /// active source is checkmarked; picking it again is a no-op guarded in NDIService.
     @ViewBuilder private var ndiSourceListItems: some View {
         if ndi.discoveredSources.isEmpty {
-            Button("No NDI sources found") {}.disabled(true)
+            // Distinguish "runtime absent" from "runtime present but no sources" — the former must
+            // NOT read as "no sources found". startDiscovery() (this view's .onAppear) sets the
+            // flag; NDIBridge.loadRuntime() is the same idempotent probe, used as an ordering-safe
+            // fallback should the empty state render before the flag publishes.
+            if !(ndi.runtimeAvailable || NDIBridge.loadRuntime()) {
+                Button("NDI runtime not installed — install it in Settings (⌘,) and relaunch.") {}
+                    .disabled(true)
+            } else {
+                Button("No NDI sources found") {}.disabled(true)
+            }
         } else {
             ForEach(ndi.discoveredSources, id: \.name) { source in
                 Button { NDIService.shared.connect(to: source) } label: {

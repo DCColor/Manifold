@@ -182,6 +182,14 @@ final class Preferences: ObservableObject {
 
 /// The Settings window contents (opens with ⌘,).
 struct SettingsView: View {
+    // NDI runtime presence for the "NDI Runtime" status row. Observed so the row updates when
+    // refreshRuntimeStatus() publishes (called from that section's .onAppear).
+    @ObservedObject private var ndi = NDIService.shared
+
+    // DeckLink driver + device presence for the "DeckLink" status row. Observed so the tri-state row
+    // updates when refreshDevices() publishes (called from that section's .onAppear).
+    @ObservedObject private var dl = DeckLinkService.shared
+
     // @AppStorage here drives the picker and persists the choice. It reads/writes
     // the same "controlDisplayMode" key as Preferences above, so they stay in sync.
     @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
@@ -243,7 +251,74 @@ struct SettingsView: View {
             // License state + key entry / deactivation (App-layer licensing subsystem).
             LicenseSettingsSection()
 
-            Section("Playback") {
+            // Setup/readiness concerns grouped near the top. Broader than NDI alone — a DeckLink
+            // device-detection row is planned here too (hence "I/O and Runtimes").
+            Section("I/O and Runtimes") {
+                LabeledContent("NDI Runtime") {
+                    if ndi.runtimeAvailable {
+                        Text("Installed" + (ndi.runtimeVersion.map { " (\($0))" } ?? ""))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        // Attention-worthy but not alarming — orange, not red.
+                        Text("Not installed")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Button("Install NDI Runtime…") {
+                    NSWorkspace.shared.open(NDIService.runtimeInstallURL)
+                }
+                Text("After installing the NDI runtime, relaunch Manifold to enable NDI sources.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                // DeckLink — tri-state, driven by (driverInstalled, devices). Driver presence (a↔b) is
+                // relaunch-only (framework load is cached); card plug/unplug (b↔c) is picked up on the
+                // next refresh, so only state (a) carries a relaunch caption.
+                if !dl.driverInstalled {
+                    // (a) Desktop Video framework not loaded — driver absent.
+                    LabeledContent("DeckLink") {
+                        Text("Desktop Video not installed")
+                            .foregroundStyle(.orange)
+                    }
+                    Button("Download Desktop Video…") {
+                        NSWorkspace.shared.open(DeckLinkService.driverInstallURL)
+                    }
+                    Text("Install Blackmagic Desktop Video, then relaunch Manifold.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if dl.devices.isEmpty {
+                    // (b) Driver present, no card — plugging one is detected on the next refresh.
+                    LabeledContent("DeckLink") {
+                        Text("No device detected")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Connect a DeckLink or UltraStudio device.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    // (c) One or more devices — reassurance only, no action.
+                    LabeledContent("DeckLink") {
+                        Text(dl.devices.count == 1 ? dl.devices[0].displayName
+                                                   : "\(dl.devices.count) devices detected")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            // Detection is lazy; refresh when Settings opens so the rows are current. NDI is
+            // relaunch-only; DeckLink card presence updates live via this re-enumeration.
+            .onAppear {
+                NDIService.shared.refreshRuntimeStatus()
+                DeckLinkService.shared.refreshDevices()
+            }
+
+            Section("DeckLink Output") {
+                Toggle("Enable output on launch", isOn: $deckLinkEnableOnLaunch)
+                Text("When on, Manifold starts DeckLink output at launch if a capable device is connected. Otherwise it does nothing. Turning output on or off during a session doesn't change this setting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Interface Options") {
                 Picker("Controls", selection: $controlModeRaw) {
                     ForEach(ControlDisplayMode.allCases) { mode in
                         Text(mode.label).tag(mode.rawValue)
@@ -268,13 +343,6 @@ struct SettingsView: View {
                         Image(systemName: "sun.max").foregroundStyle(.secondary)
                     }
                 }
-            }
-
-            Section("DeckLink Output") {
-                Toggle("Enable output on launch", isOn: $deckLinkEnableOnLaunch)
-                Text("When on, Manifold starts DeckLink output at launch if a capable device is connected. Otherwise it does nothing. Turning output on or off during a session doesn't change this setting.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section("Frame Export") {

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ManifoldCore
 
 @main
@@ -29,6 +30,11 @@ struct ManifoldApp: App {
             // Discoverable path to the License state — opens Settings (⌘,), where the License section lives.
             CommandGroup(after: .appSettings) {
                 SettingsLink { Text("License…") }
+                // Always enabled — opens the Vizrt NDI runtime download page (also useful for
+                // reinstalling/updating). Single URL source of truth: NDIService.runtimeInstallURL.
+                Button("Install NDI Runtime…") {
+                    NSWorkspace.shared.open(NDIService.runtimeInstallURL)
+                }
             }
         }
 

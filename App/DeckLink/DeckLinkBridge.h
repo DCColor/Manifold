@@ -87,6 +87,12 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// IDeckLinkOutput. Returns an empty array if the driver isn't reachable or no card is present.
 + (NSArray<DeckLinkDeviceInfo *> *)enumerateOutputDevices;
 
+/// Whether the Blackmagic Desktop Video framework loaded — i.e. the driver is INSTALLED, independent
+/// of whether any card is connected. Lets the UI tell "driver absent" apart from "driver present, no
+/// device" (both of which `enumerateOutputDevices` collapses to an empty array). The framework load is
+/// pthread_once-cached, so this is effectively relaunch-only for driver install/uninstall.
++ (BOOL)isDriverInstalled;
+
 /// D2 "first light": push ONE synthetic solid-color frame out device index 0 at 2160p23.98 /
 /// 8-bit YUV via DisplayVideoFrameSync, and HOLD it on the output (output stays enabled, frame
 /// retained) so it stays on the monitor. Enforces the Desktop Video >= 14.3 floor first. Hardcoded
