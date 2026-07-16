@@ -64,6 +64,18 @@ targets:
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
+        # Developer ID team (Amigo Media LLC). Automatic signing resolves the
+        # "Developer ID Application" identity from this team for Release/notarization.
+        DEVELOPMENT_TEAM: 8UQ7MDM87B
+        # Hardened-runtime library-validation exception: Manifold dlopens the NDI runtime
+        # (/usr/local/lib/libndi.dylib) and CFBundle-loads the DeckLink system framework
+        # (/Library/Frameworks/DeckLinkAPI.framework), both signed by a different Team ID.
+        # Without this, hardened runtime rejects loading them. Committed file (see App/), not
+        # XcodeGen's inline `entitlements:`, so the entitlements are transparent & version-controlled.
+        CODE_SIGN_ENTITLEMENTS: App/Manifold.entitlements
+        # Manifold is an Apple Silicon–only app (native Metal, Float16 pixel paths).
+        # Building x86_64 fails on Float16 conversions and serves no tester (all Apple Silicon).
+        ARCHS: arm64
         # Obj-C++ DeckLink bridge (App/DeckLink). The bridging header exposes the pure Obj-C
         # DeckLinkBridge.h to Swift; the .mm includes the C++ SDK header (resolved via the
         # DeckLink include path added to HEADER_SEARCH_PATHS below). Target is NOT sandboxed,
