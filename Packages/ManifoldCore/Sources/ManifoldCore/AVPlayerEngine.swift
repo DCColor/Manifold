@@ -96,6 +96,11 @@ public final class AVPlayerEngine: ObservableObject, PlaybackEngine {
         isPlaying ? pause() : play()
     }
 
+    /// Protocol conformance only — the loop WRAP is implemented in FrameEngine (the live path),
+    /// which owns the end-of-media observer. This engine stores the flag but acts on nothing.
+    @Published public private(set) var isLooping: Bool = false
+    public func toggleLoop() { isLooping.toggle() }
+
     // JKL shuttle — AVPlayer drives rate natively (reverse only if the item's
     // canPlayReverse is true; otherwise the rate is clamped to 0 by AVPlayer).
     public func setShuttleRate(_ rate: Float) {

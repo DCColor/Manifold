@@ -64,6 +64,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
     // synchronizer directly; reverse is a best-effort jog (see setShuttleRate).
     @Published public private(set) var shuttleRate: Float = 0
+    /// Loop NORMAL FORWARD PLAYBACK back to the top at end-of-media. Deliberately narrow: it fires
+    /// only from 1x play (shuttleRate == 1), never while JKL-shuttling (2/4/8x), and there is no
+    /// loop-at-head for reverse. Transient session state — not persisted. See the end-of-media observer.
+    @Published public private(set) var isLooping: Bool = false
     public private(set) var tcInfo: TimecodeReader.Result?
 
     /// Maximum shuttle multiplier in either direction (1 → 2 → 4 → 8).
@@ -333,6 +337,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public func togglePlayPause() {
         isPlaying ? pause() : play()
     }
+
+    /// Arm/disarm looping. Takes effect at the next end-of-media during normal forward play.
+    public func toggleLoop() { isLooping.toggle() }
 
     // MARK: - JKL shuttle transport
 
@@ -605,7 +612,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 guard let self else { return }
                 if self.duration > 0 && t >= self.duration {
                     self.currentTime = self.duration
-                    if self.isPlaying {
+                    // LOOP fires only from NORMAL FORWARD PLAY, i.e. shuttleRate == 1 — the rate
+                    // play() establishes. NOT 0: setShuttleRate treats 0 as PAUSED (isPlaying = false),
+                    // so a `shuttleRate == 0` test here could never be true while playing. Hitting the
+                    // end while JKL-shuttling (2/4/8x) keeps the existing stop-and-hold, so a fast
+                    // shuttle never silently wraps. Loop-at-head (reverse) is out of scope: reverse has
+                    // its own head-stop in reverseStep and never reaches this observer.
+                    //
+                    // The wrap is a full beginReading re-seek, and this observer only ticks at ~0.1s,
+                    // so the wrap point is quantized and a small hitch is expected — accepted for v1.
+                    // beginReading also flushes the renderers, so DeckLink output may show its neutral
+                    // fallback for a beat at the wrap.
+                    if self.isPlaying && self.isLooping && self.shuttleRate == 1 {
+                        // resumePlaying: true re-establishes 1x play; beginReading resets currentTime.
+                        Task { await self.beginReading(from: 0, resumePlaying: true) }
+                    } else if self.isPlaying {
                         self.synchronizer.rate = 0
                         self.isPlaying = false
                         self.shuttleRate = 0

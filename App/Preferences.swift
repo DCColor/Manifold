@@ -76,6 +76,29 @@ final class Preferences: ObservableObject {
     @AppStorage("safeLineWidth") var safeLineWidth: Double = 1
     @AppStorage("safeLineOpacity") var safeLineOpacity: Double = 0.75
 
+    // Broadcast safe zones (SMPTE-style nested action/title boxes + centre cross).
+    // ORTHOGONAL to guideMode — these coexist with any aspect/social crop guide, so
+    // they're an independent flag, not a fourth GuideMode case. Percentages are stored
+    // as FRACTIONS of the video rect (0.90 = 90%), matching safeTop/safeBottom.
+    // Defaults are single-sourced below so the @AppStorage declarations at every
+    // binding site can't drift apart.
+    static let defaultBroadcastActionPct = 0.90
+    static let defaultBroadcastTitlePct = 0.80
+    static let defaultBroadcastSafeHex = "FFFFFF"
+    static let defaultBroadcastSafeWidth = 1.0
+    static let defaultBroadcastSafeOpacity = 0.75
+
+    /// Legal range for both safe-zone percentages (fractions). Shared by the popover's
+    /// entry clamp and the overlay's draw-time guard so they can't disagree.
+    static let broadcastPctRange: ClosedRange<Double> = 0.5...1.0
+
+    @AppStorage("broadcastSafeOn") var broadcastSafeOn: Bool = false
+    @AppStorage("broadcastActionPct") var broadcastActionPct: Double = Preferences.defaultBroadcastActionPct
+    @AppStorage("broadcastTitlePct") var broadcastTitlePct: Double = Preferences.defaultBroadcastTitlePct
+    @AppStorage("broadcastSafeColor") var broadcastSafeColorHex: String = Preferences.defaultBroadcastSafeHex
+    @AppStorage("broadcastSafeWidth") var broadcastSafeWidth: Double = Preferences.defaultBroadcastSafeWidth
+    @AppStorage("broadcastSafeOpacity") var broadcastSafeOpacity: Double = Preferences.defaultBroadcastSafeOpacity
+
     /// Slider range shared by every scope-intensity control (per-scope + master).
     /// 0.25 = quite dim, 3.0 = quite hot, 1.0 = current default look.
     static let scopeIntensityRange: ClosedRange<Double> = 0.25...3.0
@@ -209,6 +232,12 @@ struct SettingsView: View {
     @AppStorage("safeLineColor") private var safeLineHex = "FFFF00"
     @AppStorage("safeLineWidth") private var safeLineWidth = 1.0
     @AppStorage("safeLineOpacity") private var safeLineOpacity = 0.75
+
+    // Broadcast-safe styling only — the action/title percentages are framing decisions
+    // and live in the guides popover, not here.
+    @AppStorage("broadcastSafeColor") private var broadcastSafeHex = Preferences.defaultBroadcastSafeHex
+    @AppStorage("broadcastSafeWidth") private var broadcastSafeWidth = Preferences.defaultBroadcastSafeWidth
+    @AppStorage("broadcastSafeOpacity") private var broadcastSafeOpacity = Preferences.defaultBroadcastSafeOpacity
 
     // For reactive display of the chosen export folder (writes go via Preferences).
     @AppStorage("exportFolderBookmark") private var exportFolderBookmark = Data()
@@ -368,12 +397,23 @@ struct SettingsView: View {
                 ColorPicker("Guide line color", selection: colorBinding($guideLineHex))
                 Stepper("Guide line width: \(Int(guideLineWidth)) pt",
                         value: $guideLineWidth, in: 1...10, step: 1)
-                // Safe lines
-                ColorPicker("Safe line color", selection: colorBinding($safeLineHex))
-                Stepper("Safe line width: \(Int(safeLineWidth)) pt",
+                // Social safe zones (the top/bottom platform keep-out lines)
+                ColorPicker("Social safe zone color", selection: colorBinding($safeLineHex))
+                Stepper("Social safe zone width: \(Int(safeLineWidth)) pt",
                         value: $safeLineWidth, in: 1...8, step: 1)
-                sliderRow("Safe line opacity", $safeLineOpacity, in: 0.0...1.0,
+                sliderRow("Social safe zone opacity", $safeLineOpacity, in: 0.0...1.0,
                           readout: pct(safeLineOpacity))
+            }
+
+            Section("Broadcast safe zones") {
+                ColorPicker("Broadcast safe zone color", selection: colorBinding($broadcastSafeHex))
+                Stepper("Broadcast safe zone width: \(Int(broadcastSafeWidth)) pt",
+                        value: $broadcastSafeWidth, in: 1...8, step: 1)
+                sliderRow("Broadcast safe zone opacity", $broadcastSafeOpacity, in: 0.0...1.0,
+                          readout: pct(broadcastSafeOpacity))
+                Text("Action- and title-safe percentages are set in the framing guides popover.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

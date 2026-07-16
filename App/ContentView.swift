@@ -1068,8 +1068,12 @@ struct ContentView: View {
                 .onHover { h in
                     withAnimation(.easeInOut(duration: 0.15)) { volumeHovering = h }
                 }
-                Button { } label: { Image(systemName: "repeat") }
-                    .help("Loop (coming soon)").disabled(true)
+                Button { engine.toggleLoop() } label: { Image(systemName: "repeat") }
+                    .help("Loop playback")
+                    // File-only: NDI takeover calls engine.stop(), which zeroes hasMedia, so this
+                    // self-disables for live sources (loop is meaningless on an indefinite stream).
+                    .disabled(!engine.hasMedia)
+                    .foregroundStyle(engine.isLooping ? Color.green : .white.opacity(0.9))
                 Button { showGuidesPanel.toggle() } label: { Image(systemName: "grid") }
                     .help("Framing guides")
                     .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {

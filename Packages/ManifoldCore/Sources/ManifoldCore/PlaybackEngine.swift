@@ -43,6 +43,9 @@ public protocol PlaybackEngine: AnyObject {
     func play()
     func pause()
     func togglePlayPause()
+    /// Loop normal forward playback back to the top at end-of-media (never while shuttling).
+    var isLooping: Bool { get }
+    func toggleLoop()
     func scrubSeek(to seconds: Double)
     func exactSeek(to seconds: Double)
 

@@ -42,6 +42,11 @@ struct GuideOverlay: View {
     @AppStorage("safeLinesOn") private var safeLinesOn = false
     @AppStorage("safeTop") private var safeTop = 0.10
     @AppStorage("safeBottom") private var safeBottom = 0.90
+    // Broadcast safe zones — independent of guideMode, so they can show over a crop.
+    // Percentages are fractions of the video rect (0.90 = 90%).
+    @AppStorage("broadcastSafeOn") private var broadcastSafeOn = false
+    @AppStorage("broadcastActionPct") private var broadcastActionPct = Preferences.defaultBroadcastActionPct
+    @AppStorage("broadcastTitlePct") private var broadcastTitlePct = Preferences.defaultBroadcastTitlePct
     // Styling (set in Settings; defaults reproduce Pass 1's look)
     @AppStorage("guideDarkenOpacity") private var darkenOpacity = 0.85
     @AppStorage("guideDarkenColor") private var darkenHex = "000000"
@@ -50,6 +55,9 @@ struct GuideOverlay: View {
     @AppStorage("safeLineColor") private var safeHex = "FFFF00"
     @AppStorage("safeLineWidth") private var safeWidth = 1.0
     @AppStorage("safeLineOpacity") private var safeOpacity = 0.75
+    @AppStorage("broadcastSafeColor") private var broadcastHex = Preferences.defaultBroadcastSafeHex
+    @AppStorage("broadcastSafeWidth") private var broadcastWidth = Preferences.defaultBroadcastSafeWidth
+    @AppStorage("broadcastSafeOpacity") private var broadcastOpacity = Preferences.defaultBroadcastSafeOpacity
 
     /// The active crop aspect (W/H), or nil if no crop guide is shown.
     private var cropAspect: Double? {
@@ -105,6 +113,32 @@ struct GuideOverlay: View {
                 ctx.fill(Path(CGRect(x: vr.minX, y: yTop - sw / 2, width: vr.width, height: sw)), with: .color(sc))
                 ctx.fill(Path(CGRect(x: vr.minX, y: yBot - sw / 2, width: vr.width, height: sw)), with: .color(sc))
             }
+
+            // --- Broadcast safe zones (nested action + title boxes, centre cross) ---
+            // Independent of the crop guide: these measure the DELIVERED frame, so they
+            // inset vr (the video rect) and show alongside whatever crop is active.
+            if broadcastSafeOn {
+                let bc = ScopeColorCodec.color(fromHex: broadcastHex).opacity(broadcastOpacity)
+                let bw = CGFloat(broadcastWidth)
+
+                // Action-safe (outer) then title-safe (inner). Edges are CENTRED on the
+                // boundary — these are measurements, not crops, so the line straddles the
+                // true percentage rather than sitting outside it like the crop box does.
+                for pct in [broadcastActionPct, broadcastTitlePct] {
+                    let p = CGFloat(min(Preferences.broadcastPctRange.upperBound,
+                                        max(Preferences.broadcastPctRange.lowerBound, pct)))
+                    let r = vr.insetBy(dx: vr.width * (1 - p) / 2, dy: vr.height * (1 - p) / 2)
+                    ctx.fill(Path(CGRect(x: r.minX - bw / 2, y: r.minY - bw / 2, width: bw, height: r.height + bw)), with: .color(bc)) // left
+                    ctx.fill(Path(CGRect(x: r.maxX - bw / 2, y: r.minY - bw / 2, width: bw, height: r.height + bw)), with: .color(bc)) // right
+                    ctx.fill(Path(CGRect(x: r.minX - bw / 2, y: r.minY - bw / 2, width: r.width + bw, height: bw)), with: .color(bc)) // top
+                    ctx.fill(Path(CGRect(x: r.minX - bw / 2, y: r.maxY - bw / 2, width: r.width + bw, height: bw)), with: .color(bc)) // bottom
+                }
+
+                // Centre cross — two short segments crossing at frame centre (SMPTE).
+                let tick = min(vr.width, vr.height) * 0.025
+                ctx.fill(Path(CGRect(x: vr.midX - tick, y: vr.midY - bw / 2, width: tick * 2, height: bw)), with: .color(bc))
+                ctx.fill(Path(CGRect(x: vr.midX - bw / 2, y: vr.midY - tick, width: bw, height: tick * 2)), with: .color(bc))
+            }
         }
         .allowsHitTesting(false)   // never blocks clicks on video/controls
     }
@@ -120,6 +154,9 @@ struct GuidesPanel: View {
     @AppStorage("safeLinesOn") private var safeLinesOn = false
     @AppStorage("safeTop") private var safeTop = 0.10
     @AppStorage("safeBottom") private var safeBottom = 0.90
+    @AppStorage("broadcastSafeOn") private var broadcastSafeOn = false
+    @AppStorage("broadcastActionPct") private var broadcastActionPct = Preferences.defaultBroadcastActionPct
+    @AppStorage("broadcastTitlePct") private var broadcastTitlePct = Preferences.defaultBroadcastTitlePct
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -164,7 +201,7 @@ struct GuidesPanel: View {
             }
 
             Divider().padding(.vertical, 2)
-            Toggle("Safe Lines", isOn: $safeLinesOn)
+            Toggle("Social safe zones", isOn: $safeLinesOn)
                 .font(.caption)
             Menu("Platform preset") {
                 ForEach(safeLinePresets, id: \.label) { p in
@@ -182,6 +219,17 @@ struct GuidesPanel: View {
                 Text("Bot").font(.caption2).foregroundStyle(.secondary).frame(width: 34, alignment: .leading)
                 Slider(value: $safeBottom, in: 0.5...1.0)
             }.disabled(!safeLinesOn)
+
+            Divider().padding(.vertical, 2)
+            Toggle("Broadcast safe zones", isOn: $broadcastSafeOn)
+                .font(.caption)
+            HStack(spacing: 8) {
+                Text("Action").font(.caption2).foregroundStyle(.secondary)
+                percentField($broadcastActionPct)
+                Spacer()
+                Text("Title").font(.caption2).foregroundStyle(.secondary)
+                percentField($broadcastTitlePct)
+            }.disabled(!broadcastSafeOn)
         }
         .padding(12)
         .frame(width: 280)
@@ -215,5 +263,27 @@ struct GuidesPanel: View {
                 if clamped != value.wrappedValue { value.wrappedValue = clamped }
                 guideMode = .custom
             }
+    }
+
+    /// Compact whole-percent field (50–100) over a stored 0–1 fraction. Unlike
+    /// customField there's no mode to switch — broadcast safe is orthogonal to
+    /// guideMode — so the clamp lives in the binding's setter rather than an
+    /// onChange that would write back into the value it observes.
+    private func percentField(_ fraction: Binding<Double>) -> some View {
+        let percent = Binding<Double>(
+            get: { (fraction.wrappedValue * 100).rounded() },
+            set: { entered in
+                let f = (entered.rounded()) / 100
+                fraction.wrappedValue = min(Preferences.broadcastPctRange.upperBound,
+                                            max(Preferences.broadcastPctRange.lowerBound, f))
+            }
+        )
+        return HStack(spacing: 2) {
+            TextField("", value: percent, format: .number.precision(.fractionLength(0)))
+                .frame(width: 34)
+                .multilineTextAlignment(.center)
+                .textFieldStyle(.roundedBorder)
+            Text("%").font(.caption2).foregroundStyle(.secondary)
+        }
     }
 }
