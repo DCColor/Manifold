@@ -98,6 +98,41 @@ final class SyntheticLiveSource {
     private var lastQueueCount = 0
     #endif
 
+    #if DEBUG
+    // --- Auto-sweep (⌃⌥S). Automated 2D grid over (targetDepth × jitter): steps the grid itself, holds
+    // each cell 15s (3s settle EXCLUDED from the verdict + 12s measured), logs a one-line verdict per
+    // cell, prints a summary table at the end. Replaces manual ⌃⌥P cycling for mapping the near-live
+    // depth floor. Drift is pinned 1.0 (this maps depth-vs-jitter headroom, not drift recovery — drift
+    // is already validated). Reset-per-cell: each cell gets a fresh anchor + zeroed loop state via
+    // LiveClock.setDepths + reset(), so there's no cross-cell contamination. ---
+    private static let sweepTargets: [Double] = [0.250, 0.200, 0.150, 0.120, 0.100, 0.080]
+    private static let sweepJitters: [Double] = [0.000, 0.004, 0.010, 0.020]
+    private static let sweepCellSeconds = 15.0
+    private static let sweepSettleSeconds = 3.0        // per-cell settle transient, excluded from accumulators
+    private static let sweepMaxQueued = 30             // == start()'s maxQueuedOverride; the overflow line
+    private static var sweepCellCount: Int { sweepTargets.count * sweepJitters.count }
+
+    /// Serial queue the 15s per-cell advance timer runs on (separate from emitQueue so cell stepping
+    /// never contends with frame emission).
+    private let sweepQueue = DispatchQueue(label: "com.manifold.synthetic-sweep", qos: .utility)
+    private var sweepTimer: DispatchSourceTimer?
+    private(set) var sweepActive = false
+    private var sweepCell = 0
+
+    // Per-cell accumulators. WRITTEN on the display-tick thread (sweepAccumulate ← onDepthSample);
+    // snapshot + zeroed on sweepQueue at cell boundaries → all guarded by sweepLock, together with
+    // sweepCellStartHost (the settle-window origin the accumulator reads to gate itself).
+    private let sweepLock = NSLock()
+    private var sweepCellStartHost: Double = 0
+    private var accFpsMin = Double.infinity, accFpsSum = 0.0, accFpsN = 0
+    private var accCountMin = Int.max, accCountMax = 0
+    private var accDepthSum = 0.0, accDepthN = 0, accDepthMin = Double.infinity, accDepthMax = 0.0
+    private var accStarved = false, accOverflowed = false
+    // Results grid [targetIdx][jitterIdx] → (countMin, pass). Touched only on sweepQueue. A cell left at
+    // its default (cMin == Int.max) is one the sweep never reached (partial abort) → shown as "—".
+    private var sweepResults: [[(cMin: Int, pass: Bool)]] = []
+    #endif
+
     // --- Decode state (created on main, mutated/cleared on emitQueue) ---
     private var reader: AVAssetReader?
     private var output: AVAssetReaderTrackOutput?
@@ -165,6 +200,7 @@ final class SyntheticLiveSource {
             clock.updateDepth(spanSeconds: span, count: count)
             #if DEBUG
             self?.lastQueueCount = count   // stash for [SYNTH-PERF] (display-tick write; benign race)
+            self?.sweepAccumulate(span: span, count: count)   // no-op unless a ⌃⌥S sweep is active + past settle
             #endif
         }
         // Give the loop headroom above the shallow file-path bound (12) so a filling buffer has room
@@ -210,6 +246,14 @@ final class SyntheticLiveSource {
     func stop(clearScreen: Bool = true) {
         guard isRunning else { return }
         isRunning = false
+
+        #if DEBUG
+        // ⌃⌥⇧L (or a second ⌃⌥S routed here) during a sweep aborts it — cancel the advance timer and
+        // print whatever cells completed — BEFORE the harness teardown below. No-op if no sweep is
+        // active; on NORMAL sweep completion finishSweep() has already cleared sweepActive, so this
+        // won't double-print the summary.
+        if sweepActive { abortSweep() }
+        #endif
 
         emitTimer?.cancel()
         emitTimer = nil
@@ -422,6 +466,214 @@ final class SyntheticLiveSource {
         liveClock?.setForceUnityRate(forceUnityRate)   // lock-clean; live if the harness is running
         NSLog("[SyntheticLive] forceUnityRate → \(forceUnityRate) — control loop "
             + (forceUnityRate ? "DISABLED (rate≡1.0)" : "ENABLED"))
+    }
+
+    // MARK: - Auto-sweep (⌃⌥S) — 2D (targetDepth × jitter) grid, 15s/cell, verdict + summary table
+
+    /// ⌃⌥S: start the automated (targetDepth × jitter) sweep from the currently-loaded file. If a sweep
+    /// is ALREADY running, this routes through `stop()` instead — the second-⌃⌥S early-abort path
+    /// (stop() calls `abortSweep()` then tears the harness down). Otherwise it ensures the live harness
+    /// is up (start() is a no-op if already running — the SAME clock/emit path the sweep just steps),
+    /// forces the control loop ON, pins drift 1.0, sizes the results grid, arms cell 0, and starts the
+    /// 15s advance timer. Main-thread only (SwiftUI trigger).
+    @MainActor
+    func startSweep(url: URL, renderer: MetalVideoRenderer, retireCurrentSource: () -> Void) {
+        if sweepActive { stop(); return }   // second ⌃⌥S → abort (stop aborts the sweep + restores playback)
+
+        // The sweep validates the CURRENTLY-LOADED clip's rate, so frameInterval must be that clip's. If the
+        // harness is already running on a DIFFERENT file (e.g. ⌃⌥L on clip A, then clip B loaded), refuse
+        // rather than silently sweep clip A while labeling it clip B's rate — sourceFps is the gate's
+        // reference now, so a stale frameInterval would falsify every verdict. Stop, reload, ⌃⌥S. (We do NOT
+        // restart in place: a synchronous stop()+start() would race stop()'s async emitQueue teardown, which
+        // nils url/liveClock AFTER start() re-sets them.) Same file already running (⌃⌥L then ⌃⌥S) is fine —
+        // frameInterval already matches — and falls through.
+        if isRunning, self.url != url {
+            NSLog("[SWEEP] harness is running on \(self.url?.lastPathComponent ?? "?") — press ⌃⌥⇧L to stop, "
+                + "then ⌃⌥S to sweep \(url.lastPathComponent)")
+            return
+        }
+
+        // Sweep measures the P-loop's depth-vs-jitter headroom, so: loop ON (not ⌃⌥U-pinned) and drift
+        // pinned to true rate. Set BEFORE start() so start() carries the loop-ON state into the run.
+        forceUnityRate = false
+        driftRate = 1.0
+        jitterAmplitude = 0.0
+        if !isRunning {
+            // Not running → start() on the passed (currently-loaded) url reads ITS frameInterval → sourceFps.
+            start(url: url, renderer: renderer, retireCurrentSource: retireCurrentSource)
+        }
+        guard isRunning, liveClock != nil else {
+            NSLog("[SWEEP] cannot start — harness not running (load a file first)")
+            return
+        }
+        liveClock?.setForceUnityRate(false)   // in case the harness was already running under ⌃⌥U
+
+        // FRESH PER-SWEEP STATE (not just at init): rebuild the results grid + reset the cell index HERE,
+        // and beginCell(0) below zeroes every accumulator + sweepCellStartHost — so no state from a previous
+        // clip's sweep bleeds in. sweepActive/sweepTimer are (re)armed at the tail. Nothing sweep-scoped
+        // resets only at init.
+        sweepResults = Array(repeating: Array(repeating: (Int.max, false), count: Self.sweepJitters.count),
+                             count: Self.sweepTargets.count)
+        sweepCell = 0
+        FileHandle.standardError.write(Data(String(format:
+            "[SWEEP] starting — %d cells × %.0fs (%.0fs settle + %.0fs measured), rate=%.3f fps, maxQueued=%d\n",
+            Self.sweepCellCount, Self.sweepCellSeconds, Self.sweepSettleSeconds,
+            Self.sweepCellSeconds - Self.sweepSettleSeconds, 1.0 / frameInterval, Self.sweepMaxQueued).utf8))
+        beginCell(0)              // configure cell 0 (params + cellStartHost + zeroed accumulators) FIRST
+        sweepActive = true        // then arm accumulation — the render thread never folds into a half-set cell
+
+        let timer = DispatchSource.makeTimerSource(queue: sweepQueue)
+        timer.schedule(deadline: .now() + Self.sweepCellSeconds, repeating: Self.sweepCellSeconds)
+        timer.setEventHandler { [weak self] in self?.advanceCell() }
+        sweepTimer = timer
+        timer.resume()
+    }
+
+    /// Configure sweep cell `i`: set the clock's target + startup depth (EQUAL, so the startup FILL lands
+    /// at the setpoint — otherwise a deep startup draining to a shallow target at ±maxSlew takes many
+    /// seconds and swamps the 3s settle exclusion), reset the clock (clean anchor + zeroed loop state →
+    /// no cross-cell contamination), flush the renderer queue (drop the previous cell's frames), set the
+    /// cell's jitter, and zero the accumulators + stamp the settle-window origin. Runs on main (cell 0)
+    /// or sweepQueue (advance); the clock writes are lock-guarded, jitterAmplitude is a benign race with
+    /// nextInterval() on emitQueue (same as cyclePreset), and the accumulators are under sweepLock.
+    private func beginCell(_ i: Int) {
+        let tgt = Self.sweepTargets[i / Self.sweepJitters.count]
+        let jit = Self.sweepJitters[i % Self.sweepJitters.count]
+
+        liveClock?.setDepths(startup: tgt, target: tgt)   // DEBUG setter, under the clock's lock
+        liveClock?.reset()                                 // clean anchor + zeroed loop state; next frame re-anchors
+        renderer?.flush()                                  // drop the previous cell's queued frames
+        jitterAmplitude = jit
+        jitterAccum = 0.0
+
+        sweepLock.lock()
+        accFpsMin = .infinity; accFpsSum = 0; accFpsN = 0
+        accCountMin = .max; accCountMax = 0
+        accDepthSum = 0; accDepthN = 0; accDepthMin = .infinity; accDepthMax = 0
+        accStarved = false; accOverflowed = false
+        sweepCellStartHost = CACurrentMediaTime()          // settle window is measured from here
+        sweepLock.unlock()
+    }
+
+    /// Fold one depth sample into the CURRENT cell's accumulators. Runs on the display-tick thread (from
+    /// onDepthSample). No-op unless a sweep is active AND we're past the per-cell settle window (the first
+    /// sweepSettleSeconds after a reset — the re-anchor/re-fill transient, excluded so it can't pollute the
+    /// verdict). Reads presentedFPS off the renderer (a benign live read); all accumulator writes + the
+    /// sweepCellStartHost read are under sweepLock (shared with beginCell / finishCurrentCell).
+    private func sweepAccumulate(span: Double, count: Int) {
+        guard sweepActive else { return }
+        let fps = renderer?.presentedFPS ?? 0
+        sweepLock.lock(); defer { sweepLock.unlock() }
+        guard CACurrentMediaTime() - sweepCellStartHost >= Self.sweepSettleSeconds else { return }
+        if fps > 0 { accFpsMin = min(accFpsMin, fps); accFpsSum += fps; accFpsN += 1 }
+        accCountMin = min(accCountMin, count)
+        accCountMax = max(accCountMax, count)
+        accDepthSum += span; accDepthN += 1
+        accDepthMin = min(accDepthMin, span); accDepthMax = max(accDepthMax, span)
+        if count <= 0 { accStarved = true }
+        if count >= Self.sweepMaxQueued { accOverflowed = true }   // hit the cap → drop-oldest fired
+    }
+
+    /// Per-cell boundary (fires every sweepCellSeconds on sweepQueue): score + log the current cell, then
+    /// advance to the next — or finish + print the summary after the last cell.
+    private func advanceCell() {
+        guard sweepActive else { return }
+        finishCurrentCell()
+        let next = sweepCell + 1
+        if next >= Self.sweepCellCount {
+            finishSweep()
+            return
+        }
+        sweepCell = next
+        beginCell(next)
+    }
+
+    /// Snapshot the current cell's accumulators (under sweepLock, since the render thread is still
+    /// writing), compute PASS/FAIL, store the result, and log the one-line verdict. sweepQueue only.
+    private func finishCurrentCell() {
+        sweepLock.lock()
+        let fpsMin = accFpsN > 0 ? accFpsMin : 0
+        let fpsMean = accFpsN > 0 ? accFpsSum / Double(accFpsN) : 0
+        let countMin = accCountMin == .max ? 0 : accCountMin
+        let countMax = accCountMax
+        let depthMean = accDepthN > 0 ? accDepthSum / Double(accDepthN) : 0
+        let depthMin = accDepthN > 0 ? accDepthMin : 0
+        let depthMax = accDepthMax
+        let starved = accStarved
+        let overflowed = accOverflowed
+        sweepLock.unlock()
+
+        let i = sweepCell
+        let tIdx = i / Self.sweepJitters.count, jIdx = i % Self.sweepJitters.count
+        let tgt = Self.sweepTargets[tIdx], jit = Self.sweepJitters[jIdx]
+
+        // PASS = held the SOURCE rate within 2% AND never starved AND never overflowed. The fps gate is
+        // RATE-RELATIVE (sourceFps * 0.98), NOT a fixed 23.5: at 30 fps a sag to 24 is a genuine 6-fps
+        // drop that a fixed 23.5 gate would misread as PASS, silently corrupting the 25/30 tables — the
+        // very runs whose point is confirming the clock holds AT those rates. sourceFps = 1/frameInterval,
+        // recomputed here from THIS run's file (stable across the run).
+        let sourceFps = 1.0 / frameInterval
+        let pass = (fpsMin >= sourceFps * 0.98) && (countMin >= 1) && (countMax < Self.sweepMaxQueued)
+        sweepResults[tIdx][jIdx] = (countMin, pass)
+
+        let flags = (starved ? " STARVED" : "") + (overflowed ? " OVERFLOW" : "")
+        FileHandle.standardError.write(Data(String(format:
+            "[SWEEP] srcFps=%.3f tgt=%.3f jit=%.3f | fpsMin=%.1f fpsMean=%.1f countMin=%d countMax=%d "
+            + "depthMean=%.3f depthMin=%.3f depthMax=%.3f%@ | %@\n",
+            sourceFps, tgt, jit, fpsMin, fpsMean, countMin, countMax,
+            depthMean, depthMin, depthMax, flags, pass ? "PASS" : "FAIL").utf8))
+    }
+
+    /// Last-cell wrap-up: print the summary grid, clear sweep state, then hop to main to tear the harness
+    /// down (stop() is @MainActor). sweepActive is cleared BEFORE stop() so stop()'s abort hook is a no-op
+    /// (the summary is already printed here).
+    private func finishSweep() {
+        printSweepSummary()
+        sweepActive = false
+        sweepTimer?.cancel(); sweepTimer = nil
+        DispatchQueue.main.async { [weak self] in self?.stop() }
+    }
+
+    /// Early abort (second ⌃⌥S, or ⌃⌥⇧L): cancel the advance timer, clear the flag, and print whatever
+    /// cells completed (unreached cells show as "—"). Called from stop() BEFORE its teardown; leaves the
+    /// harness teardown to stop() itself.
+    private func abortSweep() {
+        guard sweepActive else { return }
+        // Serialize teardown onto sweepQueue so it can't race an in-flight advanceCell (which writes
+        // sweepResults / the accumulators). sync is deadlock-safe here: sweepQueue never blocks on the
+        // caller's thread (finishSweep hops to main via async), and abortSweep is only ever called from
+        // stop() on main — never from sweepQueue — so this is not a sync-on-self.
+        sweepQueue.sync {
+            guard sweepActive else { return }
+            sweepActive = false
+            sweepTimer?.cancel(); sweepTimer = nil
+            FileHandle.standardError.write(Data(String(format:
+                "[SWEEP] ABORTED at cell %d/%d\n", sweepCell + 1, Self.sweepCellCount).utf8))
+            printSweepSummary()
+        }
+    }
+
+    /// Print the compact summary grid: rows = targets, cols = jitter, each cell showing countMin and
+    /// PASS/FAIL. The FAIL boundary walking up the shallow / high-jitter corner IS the preset map — the
+    /// shallowest PASSING target at each jitter level. sweepQueue only.
+    private func printSweepSummary() {
+        // Fixed 11-char columns so the grid stays aligned in the log.
+        func col(_ s: String) -> String {
+            s.count >= 11 ? s + " " : s + String(repeating: " ", count: 11 - s.count)
+        }
+        var out = String(format: "[SWEEP-SUMMARY] srcFps=%.3f (PASS gate: fpsMin ≥ srcFps×0.98)\n", 1.0 / frameInterval)
+        out += col("")   // 11-space lead under the row labels
+        for jit in Self.sweepJitters { out += col(String(format: "jit=%.3f", jit)) }
+        out += "\n"
+        for (tIdx, tgt) in Self.sweepTargets.enumerated() {
+            out += col(String(format: "tgt=%.3f:", tgt))
+            for jIdx in Self.sweepJitters.indices {
+                let r = sweepResults[tIdx][jIdx]
+                out += col(r.cMin == .max ? "cMin=—/—" : "cMin=\(r.cMin)/\(r.pass ? "P" : "F")")
+            }
+            out += "\n"
+        }
+        FileHandle.standardError.write(Data(out.utf8))
     }
 
     // MARK: - Helpers
