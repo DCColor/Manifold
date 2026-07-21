@@ -721,6 +721,8 @@ struct ContentView: View {
     ///   ⌃⌥U   toggle control loop OFF (rate≡1.0) to read measured depth at unity — live + next start
     ///   ⌃⌥S   auto-sweep the (targetDepth × jitter) grid — 24 cells × 15s, per-cell verdict + summary
     ///         table to stderr; load a clip, hit ⌃⌥S, walk away. Second ⌃⌥S aborts early.
+    ///   ⌃⌥W   libdatachannel link smoke test (WHEP step 1) — logs version + PeerConnection
+    ///         create/delete. No networking; proves the static lib linked and runs. Temporary.
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
     /// only the triggers are `#if DEBUG`.
     @ViewBuilder private var syntheticLiveShortcuts: some View {
@@ -758,6 +760,18 @@ struct ContentView: View {
                                                       retireCurrentSource: { engine.stop() })
             }
             .keyboardShortcut("s", modifiers: [.control, .option])
+            // ⌃⌥W — libdatachannel LINK SMOKE TEST (WHEP step 1 of 4). Not a WHEP handshake and
+            // not networking: it only proves the vendored static libdatachannel is linked into
+            // this binary, initialized, and callable, alongside the DeckLink C++. Delete once a
+            // real WHEP session exists. Expect [WEBRTC] lines from the library's own logger too.
+            Button("") {
+                var message: NSString?
+                let ok = ManifoldWebRTCLinkSmokeTest(&message)
+                let version = String(cString: ManifoldWebRTCVersion())
+                NSLog("[WEBRTC-SMOKE] header version %@ | %@ | %@",
+                      version, ok ? "PASS" : "FAIL", message ?? "no detail")
+            }
+            .keyboardShortcut("w", modifiers: [.control, .option])
         }
         .opacity(0)
         #else

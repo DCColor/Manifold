@@ -65,6 +65,13 @@ npm-debug.log
 ThirdParty/ffmpeg/lib/
 ThirdParty/ffmpeg/include/
 
+# Vendored static libdatachannel (WHEP WebRTC transport) + its deps — build outputs, not source.
+# See ThirdParty/libdatachannel/README.md for provenance; scripts/build_mbedtls.sh then
+# scripts/build_libdatachannel.sh to rebuild.
+# Keep the README and the build script tracked.
+ThirdParty/libdatachannel/lib/
+ThirdParty/libdatachannel/include/
+
 docs/BlackmagicDeckLinkSDK16.0/
 docs/Blackmagic Advanced Video Capture and Playback/
 .DS_Store

@@ -87,6 +87,21 @@ targets:
         # Manifold is an Apple Silicon–only app (native Metal, Float16 pixel paths).
         # Building x86_64 fails on Float16 conversions and serves no tester (all Apple Silicon).
         ARCHS: arm64
+        # C++ dialect, PINNED — do not let this fall back to an XcodeGen/Xcode default again.
+        # It was previously unset, which silently resolved to gnu++14 while libdatachannel is
+        # C++17 — a real mismatch on both the version AND the GNU-extensions axis.
+        #
+        # `c++17` here emits `-std=c++17`. scripts/build_libdatachannel.sh
+        # passes CMAKE_CXX_STANDARD=17 + CMAKE_CXX_EXTENSIONS=OFF, which emits the IDENTICAL
+        # `-std=c++17` (confirmed by configuring a probe project — with EXTENSIONS=ON CMake emits
+        # `-std=gnu++17` instead, which would NOT match). One dialect, one libc++, one binary.
+        #
+        # Both app C++ TUs (DeckLinkBridge.mm, DeckLinkAPIDispatch.cpp) were compiled at strict
+        # `-std=c++17` with clang -fsyntax-only before this was changed: zero errors, so the
+        # DeckLink SDK 16.0 headers need no GNU extensions.
+        # If you ever change this, change CMAKE_CXX_STANDARD/CMAKE_CXX_EXTENSIONS to match.
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_CXX_LIBRARY: libc++
         # Obj-C++ DeckLink bridge (App/DeckLink). The bridging header exposes the pure Obj-C
         # DeckLinkBridge.h to Swift; the .mm includes the C++ SDK header (resolved via the
         # DeckLink include path added to HEADER_SEARCH_PATHS below). Target is NOT sandboxed,
@@ -105,6 +120,13 @@ targets:
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/ThirdParty/ffmpeg/include
+          # libdatachannel (WHEP WebRTC transport), vendored static like ffmpeg above. Exposes
+          # <rtc/rtc.h> to App/WebRTC/DataChannelBridge.m ONLY — that header is pure C, so nothing
+          # here reaches Swift or forces the target's C++ standard up. Project-local path; there is
+          # deliberately no /opt/homebrew or /usr/local entry anywhere in this list.
+          - $(SRCROOT)/ThirdParty/libdatachannel/include
+          # Bridge header, so the bridging header can #import "DataChannelBridge.h" from App/WebRTC.
+          - $(SRCROOT)/App/WebRTC
           # DeckLink SDK headers (DeckLinkAPI.h et al.) for the .mm bridge + dispatch.cpp.
           - $(SRCROOT)/docs/BlackmagicDeckLinkSDK16.0/Mac/include
           # NDI bridge header, so the bridging header can #import "NDIBridge.h" from App/DeckLink.
@@ -114,9 +136,23 @@ targets:
           # runtime dylib is NOT linked either: NDIBridge.mm dlopens it, so the app still launches
           # on a machine with no NDI installed. (Quoted: the path contains spaces.)
           - '"/Library/NDI SDK for Apple/include"'
+        # EXACT project-local static-lib directories, and NOTHING else. There is intentionally no
+        # /opt/homebrew/lib and no /usr/local/lib here: the linker must never be able to see a
+        # Homebrew OpenSSL, SRTP, or (critically) a Homebrew ffmpeg, which would silently displace
+        # the custom LGPL static libav in ThirdParty/ffmpeg. Verify after every link with the
+        # `otool -L` check in ThirdParty/libdatachannel/README.md.
+        # NOTE: libdatachannel deliberately adds NOTHING here. Its seven archives are named by
+        # EXACT ABSOLUTE PATH in OTHER_LDFLAGS below, so the linker is never given a search
+        # directory for them and cannot substitute a same-named library from anywhere else.
+        # Only the pre-existing ffmpeg entry remains.
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/ThirdParty/ffmpeg/lib
+        # rtc/rtc.h keys RTC_C_EXPORT off RTC_STATIC. A no-op on Darwin, but the static build sets
+        # it as a PUBLIC definition, so we match it rather than depend on the platform accident.
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - RTC_STATIC=1
         OTHER_LDFLAGS:
           - $(inherited)
           - -lavformat
@@ -124,6 +160,32 @@ targets:
           - -lavutil
           - -lswscale
           - -lswresample
+          # libdatachannel (WHEP transport) + its bundled deps + the Mbed TLS DTLS backend.
+          #
+          # Named by EXACT ABSOLUTE PATH, not `-L` + `-l`. This is the strongest available
+          # guarantee for the brew-isolation requirement: with no search directory involved,
+          # there is no lookup for a Homebrew or /usr/local copy to win. If an archive is
+          # missing the link fails loudly with that exact path, rather than silently resolving
+          # elsewhere. Each entry is single-quoted YAML wrapping double quotes because SRCROOT
+          # contains spaces ("Vibe Code Output") — verified to survive xcodebuild's OTHER_LDFLAGS
+          # splitting by building a probe target from a path with spaces.
+          #
+          # Order matters for static linking: datachannel depends on juice/srtp2/usrsctp, and
+          # srtp2 + mbedtls depend on mbedcrypto, so each provider follows its consumers.
+          #
+          # libdatachannel needs NO ffmpeg — it is transport + depacketize only
+          # (bring-your-own-decoder) — so nothing here touches the custom static libav archives.
+          - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libdatachannel.a"'
+          - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libjuice.a"'
+          - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libsrtp2.a"'
+          - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libusrsctp.a"'
+          - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libmbedtls.a"'
+          - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libmbedx509.a"'
+          - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libmbedcrypto.a"'
+          # C++ runtime for libdatachannel's C++17 objects. Already pulled in by the DeckLink
+          # C++ (DeckLinkBridge.mm / DeckLinkAPIDispatch.cpp) — stated explicitly so the app links
+          # ONE libc++, which is what keeps DeckLink C++ and libdatachannel C++ ABI-compatible.
+          - -lc++
           - -lz
           - -lbz2
           - -liconv
@@ -150,6 +212,11 @@ targets:
           GCC_PREPROCESSOR_DEFINITIONS:
             - $(inherited)
             - DEBUG=1
+            # NOTE: a per-config GCC_PREPROCESSOR_DEFINITIONS REPLACES the target-base list
+            # wholesale ($(inherited) resolves to the project level, not to `settings.base`), so
+            # every base definition must be restated here. RTC_STATIC comes from base — without
+            # this line Profile would build the libdatachannel bridge without it.
+            - RTC_STATIC=1
           # Dev-iteration niceties (this is a tuning config, not a shipping one): build only the
           # active arch and skip dSYM generation for faster turnaround.
           ONLY_ACTIVE_ARCH: YES

@@ -5,3 +5,9 @@
 // Same rule for NDI: NDIBridge.h is pure Obj-C and pulls in NO NDI SDK headers, so the SDK's C
 // API never reaches Swift (or the repo). The Obj-C++ side owns all of it.
 #import "NDIBridge.h"
+
+// Same rule again for libdatachannel (WHEP transport): DataChannelBridge.h is pure Obj-C and
+// pulls in NO <rtc/*> headers, so libdatachannel's C API never reaches Swift. The .m side owns
+// it — and because that seam is pure C, the app target's C++ standard (gnu++14) never has to
+// meet libdatachannel's C++17.
+#import "DataChannelBridge.h"
