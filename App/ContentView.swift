@@ -215,6 +215,7 @@ struct ContentView: View {
         .background(scopeShortcuts)
         .background(deckLinkShortcuts)
         .background(ndiShortcuts)
+        .background(syntheticLiveShortcuts)
         // JKL shuttle transport (bare keys — pro NLE muscle memory).
         .background(
             Button("") { engine.shuttleBackward() }
@@ -707,6 +708,47 @@ struct ContentView: View {
                 .keyboardShortcut("c", modifiers: [.control, .option])
         }
         .opacity(0)
+    }
+
+    /// DEBUG-only synthetic live-source probe — Step 1 of the live-streaming clock foundation.
+    /// Replays the CURRENTLY-LOADED file through the LIVE path (driven by `LiveClock`, not the
+    /// file-timeline synchronizer), with zero networking, to validate the anchor + presentation-
+    /// clock skeleton before any WHEP transport exists. Same keyboard-probe role the early NDI
+    /// ⌃⌥N trigger played — a test harness, NOT user-facing UI. Compiled out of Release.
+    ///   ⌃⌥L   start: re-feed the loaded file's decoded frames as if they were arriving live
+    ///   ⌃⌥⇧L  stop: restore normal file playback
+    ///   ⌃⌥P   cycle drift/jitter tuning preset (clean → drift → drift+jitter), live + next start
+    ///   ⌃⌥U   toggle control loop OFF (rate≡1.0) to read measured depth at unity — live + next start
+    /// The property is defined in all configs (the `.background` mounting it is unconditional);
+    /// only the triggers are `#if DEBUG`.
+    @ViewBuilder private var syntheticLiveShortcuts: some View {
+        #if DEBUG
+        Group {
+            Button("") {
+                guard let url = engine.currentURL, let renderer = metalRenderer else {
+                    NSLog("[SyntheticLive] load a file first — ⌃⌥L replays the loaded file through the live path")
+                    return
+                }
+                // Retire file playback first (one active source), exactly as an NDI takeover does.
+                SyntheticLiveSource.shared.start(url: url, renderer: renderer,
+                                                 retireCurrentSource: { engine.stop() })
+            }
+            .keyboardShortcut("l", modifiers: [.control, .option])
+            Button("") { SyntheticLiveSource.shared.stop() }
+                .keyboardShortcut("l", modifiers: [.control, .option, .shift])
+            // ⌃⌥P cycles the drift/jitter tuning preset — the injected sender-clock conditions the
+            // control loop is tuned against. Applies to a running harness immediately + to next start.
+            Button("") { SyntheticLiveSource.shared.cyclePreset() }
+                .keyboardShortcut("p", modifiers: [.control, .option])
+            // ⌃⌥U toggles the LiveClock control loop OFF (rate≡1.0) so [LIVECLOCK] reports the MEASURED
+            // depth at unity — the setpoint-reality check before tuning. Applies live + to next ⌃⌥L.
+            Button("") { SyntheticLiveSource.shared.toggleForceUnityRate() }
+                .keyboardShortcut("u", modifiers: [.control, .option])
+        }
+        .opacity(0)
+        #else
+        EmptyView()
+        #endif
     }
 
     private func cycleNDIColorimetryOverride() {

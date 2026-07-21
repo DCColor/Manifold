@@ -5,6 +5,17 @@ options:
     macOS: "15.0"
   createIntermediateGroups: true
 
+# Build configurations. Declaring `configs:` EXPLICITLY overrides XcodeGen's default Debug/Release
+# pair, so both must be listed. "Profile" is a RELEASE-type config (optimizer on, -O) that ALSO
+# defines DEBUG — a dedicated TUNING config for measuring the synthetic live harness at ship-config
+# performance while keeping the #if DEBUG triggers (⌃⌥L / ⌃⌥P) and [LIVECLOCK] telemetry. Its purpose
+# is to test whether the harness fps sag is a Debug -Onone artifact (cf. the ScopeCompute -Onone case)
+# vs. a real defect. Debug (-Onone) and Release (no DEBUG) are left exactly as they were.
+configs:
+  Debug: debug
+  Release: release
+  Profile: release
+
 packages:
   ManifoldCore:
     path: Packages/ManifoldCore
@@ -122,3 +133,24 @@ targets:
           - CoreServices
           - -framework
           - Security
+      # Per-config overrides. "Profile" = Release optimization + DEBUG defined, so the #if DEBUG
+      # harness triggers and [LIVECLOCK] telemetry survive at -O. Run the ⌃⌥L harness under this
+      # config to see whether the fps sag is a Debug -Onone artifact rather than a real defect.
+      # Debug and Release inherit their standard XcodeGen presets unchanged.
+      configs:
+        Profile:
+          # Optimize App-layer Swift (harness, renderer, scopes) AND the ManifoldCore package
+          # (LiveClock) whole-app at -O — broader than the SPM ScopeCompute per-target -O, which
+          # only covers that one numeric target.
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+          GCC_OPTIMIZATION_LEVEL: s
+          # Keep DEBUG defined for BOTH Swift (#if DEBUG) and C/ObjC (#ifdef DEBUG) so the harness
+          # triggers + telemetry compile in exactly as they do in Debug.
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          GCC_PREPROCESSOR_DEFINITIONS:
+            - $(inherited)
+            - DEBUG=1
+          # Dev-iteration niceties (this is a tuning config, not a shipping one): build only the
+          # active arch and skip dSYM generation for faster turnaround.
+          ONLY_ACTIVE_ARCH: YES
+          DEBUG_INFORMATION_FORMAT: dwarf
