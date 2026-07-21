@@ -66,11 +66,15 @@ public final class LiveClock: @unchecked Sendable {
     /// Seconds of buffer to fill before the FIRST frame is presented — the startup delay / initial
     /// cushion, applied once when the anchor is established (see `registerFrame`). DISTINCT from
     /// `targetDepth`: startup is a one-time fill, target is the steady-state hold point.
-    private let startupDepth: Double
+    /// `var` (was `let`) only so the DEBUG `setDepths` sweep hook can retarget it; production sets it
+    /// once at init and never writes it again. Read under `lock` in `registerFrame`.
+    private var startupDepth: Double
 
     /// The steady-state control SETPOINT: the buffer depth (seconds of lead ahead of `now()`) the
     /// loop holds once running. `error = smoothedDepth - targetDepth` drives the rate slew.
-    private let targetDepth: Double
+    /// `var` (was `let`) only for the DEBUG `setDepths` sweep hook (see `startupDepth`). Read under
+    /// `lock` in `updateDepth`.
+    private var targetDepth: Double
 
     // --- Control-loop tuning (public var so the debug/tuning pass can adjust them live) ---
 
@@ -102,6 +106,16 @@ public final class LiveClock: @unchecked Sendable {
     /// Lock-clean cross-thread write for `forceUnityRate` — same `lock` `updateDepth` reads it under,
     /// so the pin is applied with no window of ambiguity near the steady-state depth measurement.
     public func setForceUnityRate(_ on: Bool) { lock.lock(); forceUnityRate = on; lock.unlock() }
+
+    /// DEBUG sweep hook (⌃⌥S): retarget the control SETPOINT and the startup FILL at runtime — the only
+    /// reason `startupDepth`/`targetDepth` are `var`. Under `lock`, same discipline as `setForceUnityRate`,
+    /// so the change is consistent with `updateDepth`'s read of `targetDepth` and `registerFrame`'s read of
+    /// `startupDepth`. Callers MUST pair this with `reset()` so the next anchor re-fills to the new startup
+    /// depth (setting them equal makes the fill land at the setpoint — no long drain to swamp a settle
+    /// window). NOT for production paths — the setpoint is fixed there.
+    public func setDepths(startup: Double, target: Double) {
+        lock.lock(); startupDepth = startup; targetDepth = target; lock.unlock()
+    }
     #endif
 
     // --- Control-loop state (guarded by `lock`) ---

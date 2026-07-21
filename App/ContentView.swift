@@ -716,9 +716,11 @@ struct ContentView: View {
     /// clock skeleton before any WHEP transport exists. Same keyboard-probe role the early NDI
     /// ⌃⌥N trigger played — a test harness, NOT user-facing UI. Compiled out of Release.
     ///   ⌃⌥L   start: re-feed the loaded file's decoded frames as if they were arriving live
-    ///   ⌃⌥⇧L  stop: restore normal file playback
+    ///   ⌃⌥⇧L  stop: restore normal file playback (also ABORTS a running ⌃⌥S sweep, with a partial table)
     ///   ⌃⌥P   cycle drift/jitter tuning preset (clean → drift → drift+jitter), live + next start
     ///   ⌃⌥U   toggle control loop OFF (rate≡1.0) to read measured depth at unity — live + next start
+    ///   ⌃⌥S   auto-sweep the (targetDepth × jitter) grid — 24 cells × 15s, per-cell verdict + summary
+    ///         table to stderr; load a clip, hit ⌃⌥S, walk away. Second ⌃⌥S aborts early.
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
     /// only the triggers are `#if DEBUG`.
     @ViewBuilder private var syntheticLiveShortcuts: some View {
@@ -744,6 +746,18 @@ struct ContentView: View {
             // depth at unity — the setpoint-reality check before tuning. Applies live + to next ⌃⌥L.
             Button("") { SyntheticLiveSource.shared.toggleForceUnityRate() }
                 .keyboardShortcut("u", modifiers: [.control, .option])
+            // ⌃⌥S runs the automated (targetDepth × jitter) sweep from the loaded file: steps the grid,
+            // holds 15s/cell, logs a [SWEEP] verdict per cell + a [SWEEP-SUMMARY] table. Ensures the
+            // harness is up first (same start path as ⌃⌥L). Second ⌃⌥S (or ⌃⌥⇧L) aborts early.
+            Button("") {
+                guard let url = engine.currentURL, let renderer = metalRenderer else {
+                    NSLog("[SWEEP] load a file first — ⌃⌥S sweeps the loaded file through the live path")
+                    return
+                }
+                SyntheticLiveSource.shared.startSweep(url: url, renderer: renderer,
+                                                      retireCurrentSource: { engine.stop() })
+            }
+            .keyboardShortcut("s", modifiers: [.control, .option])
         }
         .opacity(0)
         #else
