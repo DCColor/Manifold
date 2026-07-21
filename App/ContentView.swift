@@ -723,6 +723,9 @@ struct ContentView: View {
     ///         table to stderr; load a clip, hit ⌃⌥S, walk away. Second ⌃⌥S aborts early.
     ///   ⌃⌥W   libdatachannel link smoke test (WHEP step 1) — logs version + PeerConnection
     ///         create/delete. No networking; proves the static lib linked and runs. Temporary.
+    ///   ⌃⌥H   WHEP handshake (WHEP step 2) — recvonly offer → POST → answer → ICE/DTLS connect.
+    ///         Transport only: no depacketize, no decode, no picture. Needs an endpoint in
+    ///         ~/.manifold-whep-config or $MANIFOLD_WHEP_URL (see WHEPClient). ⌃⌥⇧H tears down.
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
     /// only the triggers are `#if DEBUG`.
     @ViewBuilder private var syntheticLiveShortcuts: some View {
@@ -772,6 +775,15 @@ struct ContentView: View {
                       version, ok ? "PASS" : "FAIL", message ?? "no detail")
             }
             .keyboardShortcut("w", modifiers: [.control, .option])
+            // ⌃⌥H — WHEP HANDSHAKE (step 2 of 4). Builds a recvonly offer, waits for ICE
+            // gathering to complete, POSTs the offer SDP to the configured WHEP endpoint,
+            // applies the answer, and logs the transport coming up. A spec-compliant WHEP
+            // exchange — no server-specific behaviour. Success is "[WHEP] connected"; there is
+            // deliberately no picture yet. ⌃⌥⇧H tears the session down (and DELETEs it).
+            Button("") { WHEPClient.shared.connect() }
+                .keyboardShortcut("h", modifiers: [.control, .option])
+            Button("") { WHEPClient.shared.disconnect() }
+                .keyboardShortcut("h", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
         #else

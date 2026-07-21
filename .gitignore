@@ -85,4 +85,13 @@ ThirdParty/NDI/
 **/libndi*.dylib
 **/Processing.NDI.*.h
 
+# WHEP endpoint config — the URL embeds a stream key, so it is a SECRET. The file the app
+# actually reads is ~/.manifold-whep-config, deliberately OUTSIDE the working tree: a file
+# that isn't in the repo cannot be committed by accident, force-added, or swept into an
+# archive of the source directory. These patterns exist only so a stray copy dropped in the
+# repo can't be committed either. There should be nothing here to ignore.
+.whep-config
+.manifold-whep-config
+*.whep-url
+
 docs/Blackmagic Advanced Video Capture and Playback/

@@ -8,9 +8,14 @@
 //  Objective-C/C and pulls in NO libdatachannel headers, so `rtc/rtc.h` never
 //  reaches Swift or the bridging header's module scan. The .m file owns all of it.
 //
-//  STEP 1 OF 4 (WHEP): this is a LINK SMOKE TEST only — prove the static library
-//  is present, initialized, and callable, and that the app still launches with the
-//  DeckLink C++ in the same binary. There is no WHEP handshake, no RTP, no decode.
+//  STEP 1 OF 4 (WHEP): a LINK SMOKE TEST — prove the static library is present,
+//  initialized, and callable, and that the app still launches with the DeckLink C++
+//  in the same binary. (`ManifoldWebRTCLinkSmokeTest`, below.)
+//
+//  STEP 2 OF 4 (WHEP): the HANDSHAKE — `ManifoldWHEPSession`, below. A recvonly
+//  PeerConnection, a non-trickle SDP offer, a remote answer, and ICE/DTLS coming up.
+//  Still no RTP depacketization and no decode: step 2 succeeds when the transport
+//  connects. Signalling (the HTTP POST) is NOT here — it lives in Swift/URLSession.
 //
 
 #import <Foundation/Foundation.h>
@@ -45,5 +50,86 @@ const char *ManifoldWebRTCVersion(void);
 ///                   Optional; pass NULL to ignore.
 /// @return YES if every step succeeded.
 BOOL ManifoldWebRTCLinkSmokeTest(NSString *_Nullable *_Nullable outMessage);
+
+#pragma mark - WHEP session (step 2: the handshake)
+
+/// PeerConnection state. Values mirror libdatachannel's `rtcState` one-for-one, so the
+/// mapping is a cast — but Swift never sees an `rtc*` type.
+typedef NS_ENUM(int32_t, ManifoldWHEPConnectionState) {
+    ManifoldWHEPConnectionStateNew          = 0,
+    ManifoldWHEPConnectionStateConnecting   = 1,
+    ManifoldWHEPConnectionStateConnected    = 2,  ///< DTLS is up. Step 2's success condition.
+    ManifoldWHEPConnectionStateDisconnected = 3,
+    ManifoldWHEPConnectionStateFailed       = 4,
+    ManifoldWHEPConnectionStateClosed       = 5,
+};
+
+/// ICE transport state. Values mirror libdatachannel's `rtcIceState` one-for-one.
+typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
+    ManifoldWHEPIceStateNew          = 0,
+    ManifoldWHEPIceStateChecking     = 1,
+    ManifoldWHEPIceStateConnected    = 2,
+    ManifoldWHEPIceStateCompleted    = 3,
+    ManifoldWHEPIceStateFailed       = 4,
+    ManifoldWHEPIceStateDisconnected = 5,
+    ManifoldWHEPIceStateClosed       = 6,
+};
+
+/// One WHEP playback session's WebRTC half: a receive-only PeerConnection that produces an
+/// offer and consumes an answer. It does NO networking of its own beyond ICE/DTLS — the
+/// SDP exchange is plain HTTP and belongs to the caller (see WHEPClient.swift).
+///
+/// This is a spec-compliant WHEP *receiver*, not a client for any particular server: the
+/// offer it builds is standard recvonly SDP per draft-ietf-wish-whep.
+///
+/// THREADING. libdatachannel raises callbacks on its own internal Processor threads. This
+/// class absorbs that: every block it vends is invoked on the MAIN queue, already marshaled.
+/// In exchange, the caller must drive it from the main queue too — in particular `close`,
+/// which must never run on a libdatachannel callback thread (tearing a PeerConnection down
+/// from inside its own callback deadlocks against the Processor it is draining).
+@interface ManifoldWHEPSession : NSObject
+
+/// Creates the PeerConnection and immediately adds the recvonly video + audio m-sections,
+/// so the "transceivers before the offer" ordering is structural rather than a convention
+/// a future caller could get wrong.
+///
+/// @param stunServer A STUN URL (e.g. `stun:stun.example.org:19302`), or nil for none.
+///                   nil is a legitimate configuration, not a degraded one: a WHEP server
+///                   returns its own candidates in the answer, and on many networks host
+///                   candidates plus those are sufficient. Try nil first; add a STUN server
+///                   if ICE fails to find a working pair.
++ (nullable instancetype)sessionWithStunServer:(nullable NSString *)stunServer
+                                         error:(NSString *_Nullable *_Nullable)outError;
+
+/// Fires on the MAIN queue for every PeerConnection state transition.
+@property (nonatomic, copy, nullable) void (^onConnectionState)(ManifoldWHEPConnectionState state,
+                                                                NSString *name);
+
+/// Fires on the MAIN queue for every ICE transport state transition.
+@property (nonatomic, copy, nullable) void (^onIceState)(ManifoldWHEPIceState state, NSString *name);
+
+/// Generates the offer and gathers ICE candidates NON-TRICKLE: `completion` is not called
+/// until gathering reaches complete, so the SDP it hands back already carries every
+/// `a=candidate` line and is ready to POST as-is. Reading the description any earlier
+/// yields a candidate-less offer that negotiates and then never connects.
+///
+/// `completion` runs on the MAIN queue, exactly once — with an SDP, or with an error if
+/// gathering fails or `timeout` elapses first. Call once per session.
+- (void)generateRecvOnlyOfferWithTimeout:(NSTimeInterval)timeout
+                              completion:(void (^)(NSString *_Nullable offerSDP,
+                                                   NSString *_Nullable error))completion;
+
+/// Applies the WHEP server's SDP answer, which starts ICE connectivity checks and then DTLS.
+/// Progress arrives via `onIceState` / `onConnectionState`.
+- (BOOL)setRemoteAnswer:(NSString *)answerSDP error:(NSString *_Nullable *_Nullable)outError;
+
+/// The nominated ICE candidate pair, once connected — the "which path did it pick" line that
+/// webrtc-internals shows. nil before connection.
+- (nullable NSString *)selectedCandidatePair;
+
+/// Closes and destroys the PeerConnection. Main queue only; safe to call twice.
+- (void)close;
+
+@end
 
 NS_ASSUME_NONNULL_END
