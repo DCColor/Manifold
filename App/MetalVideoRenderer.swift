@@ -6,6 +6,37 @@ import CoreMedia
 import QuartzCore
 import ImageIO
 import UniformTypeIdentifiers
+import os                 // os_unfair_lock — priority-donating lock for the live frame queue
+
+/// Copy-safe wrapper around `os_unfair_lock`. The primitive is a struct that MUST NOT be copied —
+/// a by-value copy is a DISTINCT lock and fails silently — so we heap-allocate exactly one
+/// `os_unfair_lock` in init and only ever touch it through this class's stable pointer. Reference
+/// semantics mean assigning or capturing the lock can never duplicate the primitive.
+///
+/// Why not `NSLock` (what this replaces): `NSLock` is a `pthread_mutex`, which does NOT boost its
+/// holder's priority. On the live frame path the `.utility` emit thread holds the queue lock while
+/// enqueuing, and the real-time CVDisplayLink render thread blocks on it in `displayTick` right
+/// before the encode window → unbounded priority inversion. `os_unfair_lock` DONATES the waiting
+/// render thread's scheduling priority to whatever thread holds the lock, so the `.utility` holder
+/// is boosted only while holding and releases promptly — which is what dissolves the inversion.
+///
+/// Exposes the same `lock()`/`unlock()` surface as `NSLock`, so existing call sites are unchanged.
+private final class UnfairLock {
+    private let _lock: os_unfair_lock_t
+
+    init() {
+        _lock = .allocate(capacity: 1)
+        _lock.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        _lock.deinitialize(count: 1)
+        _lock.deallocate()
+    }
+
+    @inline(__always) func lock()   { os_unfair_lock_lock(_lock) }
+    @inline(__always) func unlock() { os_unfair_lock_unlock(_lock) }
+}
 
 /// Matches the shader's ColorParams struct (memory layout).
 private struct ColorParams {
@@ -182,6 +213,13 @@ final class MetalVideoRenderer {
     /// Nil for push sources (file playback), which are unaffected by this.
     var onDisplayTick: (() -> Void)?
 
+    /// Buffer-depth telemetry for LIVE sources: called once per display tick, AFTER the queue is
+    /// unlocked, with the seconds of buffered lead ahead of the clock (`newestQueuedPTS - now`) and
+    /// the queued frame count. The live source forwards this to its `LiveClock` control loop
+    /// (ManifoldCore can't read the renderer, so depth is PUSHED from here). Nil for file/NDI —
+    /// a pure no-op for them. Set on main by the live source's start(); cleared on stop().
+    var onDepthSample: ((_ spanSeconds: Double, _ count: Int) -> Void)?
+
     /// Returns the engine's full-range chroma convention rawValue (0 = full-swing,
     /// 1 = Resolve). Read per-frame on the render thread (thread-safe accessor).
     /// Only affects the full-range path. When nil, defaults to 1 (Resolve).
@@ -280,8 +318,27 @@ final class MetalVideoRenderer {
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
     private struct QueuedFrame { let pts: Double; let pixelBuffer: CVPixelBuffer }
     private var frameQueue: [QueuedFrame] = []
-    private let queueLock = NSLock()
-    private let maxQueued = 12   // bounded buffer
+    private let queueLock = UnfairLock()   // priority-donating; dissolves the live-path inversion
+    /// Recent inter-frame PTS deltas (presentation order) + their cached median Δ, for the depth
+    /// half-frame correction (see the depth read in performDisplayTick). Written in `enqueue`, read in
+    /// `performDisplayTick` — BOTH under `queueLock`. The median is recomputed in `enqueue` (emit
+    /// thread) so the render-thread depth read stays an O(1) load, honoring the priority-inversion
+    /// discipline. Median+clamp keeps Δ stable (it's structural / fps-only) so the correction adds no
+    /// jitter to the very signal it cleans.
+    private var ptsDeltaHistory: [Double] = []
+    private let ptsDeltaHistoryMax = 8
+    /// Last-good median inter-frame interval Δ. 0 until ≥2 valid deltas seen — while 0 the correction
+    /// is a no-op (+0), which is correct: with no cadence known yet, don't fabricate buffered lead.
+    /// Only ever set from a valid median, so it never holds a rejected/outlier value.
+    private var cachedFrameInterval: Double = 0
+    /// Default queue bound (file/NDI path). Shallow on purpose — a file rides the synchronizer, not
+    /// this buffer. A live source raises it via `maxQueuedOverride` for control-loop headroom.
+    private let defaultMaxQueued = 12   // bounded buffer
+    /// Live-path override for the queue bound. nil → `defaultMaxQueued`. Set on main by the live
+    /// source's start() (e.g. 30) to give the LiveClock control loop room above the shallow file
+    /// default; restored to nil on stop(). Evaluated inside `enqueue` under `queueLock`.
+    var maxQueuedOverride: Int?
+    private var maxQueued: Int { maxQueuedOverride ?? defaultMaxQueued }
 
     private var displayLink: CVDisplayLink?
 
@@ -572,9 +629,37 @@ final class MetalVideoRenderer {
         let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         guard pts.isFinite else { return }
 
+        let frame = QueuedFrame(pts: pts, pixelBuffer: pixelBuffer)
         queueLock.lock()
-        frameQueue.append(QueuedFrame(pts: pts, pixelBuffer: pixelBuffer))
-        frameQueue.sort { $0.pts < $1.pts }
+        // Ordered insert — keeps frameQueue sorted ascending by pts WITHOUT an O(n log n) sort under
+        // the lock. Frames arrive at or near the tail (NDI stamps monotonic PTS; WHEP/VideoToolbox
+        // emits in presentation order; the synth harness only reorders locally across B-frames), so
+        // scanning backward from the end lands the insertion point in O(1) amortized for in-order
+        // arrivals (O(n) worst case). The drop-oldest trim and the depth read (last?.pts, .count)
+        // below both depend on this ascending order, so the invariant they rely on is preserved.
+        var i = frameQueue.count
+        while i > 0, frameQueue[i - 1].pts > frame.pts { i -= 1 }
+        // Track the inter-frame PTS interval for the depth half-frame correction. Use the SORTED-order
+        // predecessor (frameQueue[i-1]), NOT the last-arrived frame, so a B-frame reorder can't produce a
+        // negative delta. Clamp out dup-PTS (≤0) and dropped-frame/absurd (>0.5s) gaps here; the MEDIAN
+        // below rejects the 2Δ dropped-frame outliers that survive the clamp. Recompute the median NOW
+        // (emit thread) so the render-thread depth read is just a cachedFrameInterval load.
+        if i > 0 {
+            let d = frame.pts - frameQueue[i - 1].pts
+            if d > 0, d <= 0.5 {
+                ptsDeltaHistory.append(d)
+                if ptsDeltaHistory.count > ptsDeltaHistoryMax {
+                    ptsDeltaHistory.removeFirst(ptsDeltaHistory.count - ptsDeltaHistoryMax)
+                }
+                if ptsDeltaHistory.count >= 2 {
+                    let sorted = ptsDeltaHistory.sorted()
+                    let mid = sorted.count / 2
+                    cachedFrameInterval = sorted.count.isMultiple(of: 2)
+                        ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+                }
+            }
+        }
+        frameQueue.insert(frame, at: i)
         // Bound the queue: drop the oldest if over capacity.
         if frameQueue.count > maxQueued {
             frameQueue.removeFirst(frameQueue.count - maxQueued)
@@ -586,6 +671,11 @@ final class MetalVideoRenderer {
     func flush() {
         queueLock.lock()
         frameQueue.removeAll()
+        // Source-switch boundary (seek, stop, WHEP reconnect — possibly at a different fps): drop the
+        // inter-frame Δ history so the depth correction no-ops (+0) until reseeded, rather than applying
+        // a stale Δ across the discontinuity / re-anchor transient.
+        ptsDeltaHistory.removeAll()
+        cachedFrameInterval = 0
         queueLock.unlock()
         // A seek just cleared the queue. Arm the one-shot: if we're paused and the next
         // delivered frame overshoots the pinned clock (pts > now), displayTick renders it
@@ -646,6 +736,46 @@ final class MetalVideoRenderer {
     /// Called each display refresh (on the CVDisplayLink thread). Picks the
     /// newest frame whose PTS <= current playback time and renders it.
     private func displayTick() {
+        #if DEBUG
+        // DISPLAY-LINK CADENCE: stamp the interval since the previous tick BEFORE any work, so it
+        // measures the callback's arrival cadence, not how long this tick takes. See rpLastTickWall.
+        let rpTickWall = CACurrentMediaTime()
+        if rpLastTickWall != 0 {
+            let dt = rpTickWall - rpLastTickWall
+            rpTickSum += dt
+            rpTickMax = max(rpTickMax, dt)
+            rpTickCount += 1
+        }
+        rpLastTickWall = rpTickWall
+        #endif
+
+        // Wrap the per-tick render in an autorelease pool. The CVDisplayLink callback runs on a
+        // dedicated CoreVideo thread that has NO run-loop-drained autorelease pool, so the
+        // autoreleased CAMetalDrawable returned by nextDrawable() (along with this tick's command
+        // buffer and the CVMetalTexture wrappers) would linger until the thread's top-level pool
+        // drains — which on this thread is effectively never. A lingering CAMetalDrawable keeps its
+        // drawable checked OUT of the CAMetalLayer's (default-3) pool even after it has been presented
+        // and scanned out, so the pool drains over a few seconds and nextDrawable() starts BLOCKING on
+        // a free drawable — the confirmed live-path stall (drawMs balloons, presented-fps sags, while
+        // the display-link interval stays flat). Draining a pool every tick returns each drawable
+        // promptly, so the pool never starves under sustained 24fps.
+        autoreleasepool { performDisplayTick() }
+    }
+
+    /// The body of one display-link tick, run inside `displayTick`'s per-tick autorelease pool.
+    /// Split out so the pool wraps the WHOLE tick — drawable, command buffer, and texture wrappers
+    /// all release at tick end — without the pool's closure swallowing this code's many early
+    /// `return`s (a bare `return` inside the pool closure would only exit the closure, not the tick).
+    private func performDisplayTick() {
+        // Release the PREVIOUS frame's CVMetalTextureCache entries whose backing IOSurfaces are no
+        // longer referenced (the in-flight command buffer still retains any it needs, so this can't
+        // free a texture that's in use). Without it, the cache accumulates one texture/IOSurface per
+        // DISTINCT incoming buffer — bounded for the recycled decode pool, but an unbounded leak for
+        // any source of distinct-per-frame surfaces — ballooning texture-creation time on this thread
+        // and throttling presentation. CVMetalTextureCacheFlush is the documented fix and is harmless
+        // for normal (already-bounded) playback. Same thread as makeTexture, so no extra locking.
+        CVMetalTextureCacheFlush(textureCache, 0)
+
         // One-shot screen wipe: a source was torn down with nothing to replace it. Present a black
         // drawable and stop, dropping the retained last frame so no later tick can repaint it.
         refreshLock.lock()
@@ -684,7 +814,29 @@ final class MetalVideoRenderer {
         if chosen != nil, dropCount < frameQueue.count {
             frameQueue.removeFirst(dropCount + 1)
         }
+        // Live-source depth signal, sampled under the lock right AFTER consumption so it reflects the
+        // buffer the control loop must hold: span = seconds of buffered lead ahead of the clock
+        // (newest queued PTS − now). Pushed to onDepthSample AFTER unlock so the sink never runs under
+        // queueLock. No-op for file/NDI (they don't install onDepthSample).
+        //
+        // HARDENING: report span 0 (truthful "buffer empty") when the queue is empty OR the clock is
+        // unanchored — a live clock's pre-anchor sentinel is -.infinity, so `now.isFinite == false`
+        // there. This prevents `newestPTS - (-inf) ≈ 1.7e308` poison reaching the control loop. Clamp
+        // negative spans to 0 too: a frame already past due is not "negative depth".
+        let newest = frameQueue.last?.pts
+        // STRUCTURAL-OFFSET CORRECTION (pre-controller): the raw lead (newest − now) is a sawtooth whose
+        // EMA-regulated MEAN rests Δ/2 (~half a frame) below the true per-frame fill. Add Δ/2 so the
+        // regulated mean equals the fill — making targetDepth ≡ startupDepth ≡ physical buffered lead, so
+        // a "0.100 target" means 100 ms of real fill. Δ is the source-agnostic median of recent queued
+        // PTS deltas (cachedFrameInterval); it is 0 until seeded → correction is a no-op then. The max(0,)
+        // floor is applied AFTER +Δ/2, so the corrected signal reaches 0 at genuine underrun (once the
+        // newest frame is ≥ Δ/2 past due) — truthful where it matters for the jitter/underrun tests, and
+        // identical to floor-before in the healthy sawtooth regime (raw span never near 0 there).
+        let depthSpan: Double = (newest != nil && now.isFinite) ? max(0, (newest! - now) + cachedFrameInterval / 2) : 0
+        let depthCount = frameQueue.count
         queueLock.unlock()
+
+        onDepthSample?(depthSpan, depthCount)
 
         if let pb = chosen {
             // D4b-2: chosenPts — the SOURCE time of the frame selected for display — is no longer
@@ -770,6 +922,47 @@ final class MetalVideoRenderer {
         }
     }
 
+    #if DEBUG
+    // [RENDER-PERF] — per-stage render timing on the CVDisplayLink thread, logged once/sec. Frame
+    // PRODUCTION is already ruled out (flat [SYNTH-PERF]); this measures the render side to find what
+    // degrades over a synthetic run. tex = CVMetalTextureCache texture creation, draw = nextDrawable()
+    // acquire (blocks if drawables/textures accumulate), enc = command encode, pres = present+commit.
+    // iosurface flags whether the incoming buffer is IOSurface-backed — a NON-IOSurface copy (the
+    // alwaysCopiesSampleData suspect) forces slow CPU uploads. texFail counts makeTexture bails.
+    // Shared by normal AND synthetic playback, so the two can be compared directly.
+    private var rpWindowStart: Double = 0
+    private var rpSamples = 0
+    private var rpTexSum = 0.0,  rpTexMax = 0.0
+    private var rpDrawSum = 0.0, rpDrawMax = 0.0
+    private var rpEncSum = 0.0,  rpEncMax = 0.0
+    private var rpPresSum = 0.0, rpPresMax = 0.0
+    private var rpCommitSum = 0.0, rpCommitMax = 0.0
+    private var rpTexFail = 0
+    private var rpLastIOSurface = false
+
+    // DISPLAY-LINK CADENCE — wall-clock interval between consecutive displayTick() invocations.
+    // Measured at the TOP of every tick (INCLUDING ticks that render nothing, e.g. paused), so it
+    // reflects the CVDisplayLink callback's true firing rate, independent of GPU work. Touched only
+    // on the CVDisplayLink thread (same as recordRenderPerf, which flushes these into the log line).
+    //   • interval STABLE (~41.7ms @24fps sel / ~16.7ms @60Hz) but presented-fps sags → callback is
+    //     on time, frames aren't ready/committed → a GPU-THROUGHPUT problem (look at drawMs/gpuMs).
+    //   • interval GROWS when the sag hits → the display-link thread is being starved/blocked →
+    //     a SCHEDULING problem, not throughput.
+    private var rpLastTickWall = 0.0
+    private var rpTickSum = 0.0, rpTickMax = 0.0
+    private var rpTickCount = 0
+
+    // ENCODE->PRESENT TAIL, GPU side — filled from the command buffer's addCompletedHandler, which
+    // runs on a Metal completion thread (NOT the render thread), so these are guarded. `gpu` is pure
+    // GPU execution (cb.gpuEndTime − cb.gpuStartTime); `lat` is end-to-end pipeline latency (commit →
+    // completion wall clock), which ABSORBS drawable-pool back-pressure and vsync/present wait — if
+    // lat balloons while gpu stays flat, frames are stalling behind present/drawables, not on the GPU.
+    private let rpGpuLock = NSLock()
+    private var rpGpuSum = 0.0, rpGpuMax = 0.0
+    private var rpLatSum = 0.0, rpLatMax = 0.0
+    private var rpGpuSamples = 0
+    #endif
+
     // MARK: - Drawing
 
     /// `pts` is the frame's SOURCE presentation time (seconds). It is carried through the render so the
@@ -820,13 +1013,25 @@ final class MetalVideoRenderer {
         let chromaWidth = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1)
         let chromaHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
 
+        #if DEBUG
+        let rpIOSurface = (CVPixelBufferGetIOSurface(pixelBuffer) != nil)
+        let rpTexStart = CACurrentMediaTime()
+        #endif
         guard let lumaTexture = makeTexture(pixelBuffer, planeIndex: 0,
                                             pixelFormat: lumaFormat,
                                             width: width, height: height),
               let chromaTexture = makeTexture(pixelBuffer, planeIndex: 1,
                                               pixelFormat: chromaFormat,
                                               width: chromaWidth, height: chromaHeight)
-        else { return }
+        else {
+            #if DEBUG
+            rpTexFail += 1
+            #endif
+            return
+        }
+        #if DEBUG
+        let rpTexEnd = CACurrentMediaTime()
+        #endif
 
         if metalLayer.drawableSize != CGSize(width: width, height: height) {
             metalLayer.drawableSize = CGSize(width: width, height: height)
@@ -839,7 +1044,6 @@ final class MetalVideoRenderer {
         let writeIndex = offscreenWriteIndex
         guard writeIndex < offscreenRing.count else { return }
         let offscreen = offscreenRing[writeIndex]
-        guard let drawable = metalLayer.nextDrawable() else { return }
 
         let passDesc = MTLRenderPassDescriptor()
         passDesc.colorAttachments[0].texture = offscreen
@@ -847,6 +1051,16 @@ final class MetalVideoRenderer {
         passDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         passDesc.colorAttachments[0].storeAction = .store
 
+        // Encode the offscreen render pass BEFORE acquiring a drawable. This pass targets the ring
+        // texture, not the drawable, so nothing here needs one — and acquiring later means a failure
+        // in makeCommandBuffer()/makeRenderCommandEncoder() can't leave us holding a drawable we then
+        // return from without presenting. A drawable acquired-but-never-presented is NEVER returned to
+        // the pool; each such strand permanently shrinks the (default-3) pool until nextDrawable()
+        // blocks forever. Acquire the drawable LAST — immediately before the blit that consumes it —
+        // so it is checked out for the minimum span and every acquisition is always presented.
+        #if DEBUG
+        let rpEncStart = CACurrentMediaTime()
+        #endif
         guard let cmdBuffer = commandQueue.makeCommandBuffer(),
               let encoder = cmdBuffer.makeRenderCommandEncoder(descriptor: passDesc) else { return }
 
@@ -857,6 +1071,21 @@ final class MetalVideoRenderer {
         encoder.setFragmentBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+        #if DEBUG
+        let rpEncEnd = CACurrentMediaTime()
+        #endif
+
+        // Acquire the drawable here and NOWHERE else in the render path. If it comes back nil (pool
+        // momentarily empty / the internal ~1s wait elapsed), drop this frame: nothing was checked
+        // out, so the pool is unaffected and the next tick retries. The offscreen work encoded above
+        // is simply discarded with the uncommitted command buffer.
+        #if DEBUG
+        let rpDrawStart = CACurrentMediaTime()
+        #endif
+        guard let drawable = metalLayer.nextDrawable() else { return }
+        #if DEBUG
+        let rpDrawEnd = CACurrentMediaTime()
+        #endif
 
         // 1:1 blit offscreen -> drawable (same size and format). Color-neutral.
         if let blit = cmdBuffer.makeBlitCommandEncoder() {
@@ -868,14 +1097,38 @@ final class MetalVideoRenderer {
             blit.endEncoding()
         }
 
+        // present() BEFORE commit() so Metal schedules the present with this frame's GPU work and the
+        // drawable is handed back to the pool as soon as the frame is scanned out (not deferred).
         cmdBuffer.present(drawable)
+        #if DEBUG
+        // present() is just an enqueue of the present request — cheap unless it internally blocks.
+        // Kept separate from commit so a stall shows up on the stage that actually owns it.
+        let rpPresEnd = CACurrentMediaTime()
+        // Wall clock at commit, captured so the completion handler can compute end-to-end latency
+        // (commit → GPU-done + present). A growing lat with flat gpu = drawable/present back-pressure.
+        let rpCommitWall = rpPresEnd
+        #endif
 
         // Publish this buffer as the readable frame + trigger scope sampling ONLY once the
         // render's GPU work has COMPLETED — so scopes (on their own queue) read a fully-written
         // frame, never a half-drawn one (read-after-write safety without a cross-queue event).
         // Runs on a Metal completion thread; onFrameRendered just enqueues (non-blocking).
-        cmdBuffer.addCompletedHandler { [weak self] _ in
+        cmdBuffer.addCompletedHandler { [weak self] cb in
             guard let self else { return }
+            #if DEBUG
+            // GPU-side tail (completion thread): pure GPU exec + end-to-end pipeline latency. Guarded
+            // because recordRenderPerf reads/resets these from the render thread. gpuStartTime/EndTime
+            // are 0 if the buffer never scheduled; only record a plausible (positive) sample.
+            let gpu = cb.gpuEndTime - cb.gpuStartTime
+            let lat = CACurrentMediaTime() - rpCommitWall
+            if gpu >= 0 {
+                self.rpGpuLock.lock()
+                self.rpGpuSum += gpu; self.rpGpuMax = max(self.rpGpuMax, gpu)
+                self.rpLatSum += lat; self.rpLatMax = max(self.rpLatMax, lat)
+                self.rpGpuSamples += 1
+                self.rpGpuLock.unlock()
+            }
+            #endif
             self.offscreenIndexLock.lock()
             self.offscreenReadableIndex = writeIndex
             self.offscreenIndexLock.unlock()
@@ -884,12 +1137,118 @@ final class MetalVideoRenderer {
             // The frame's SOURCE pts rides along so it can be published with the converted pixels.
             self.pushDeckLinkConvert(sourcePts: pts)
         }
+        #if DEBUG
+        let rpCommitStart = CACurrentMediaTime()
+        #endif
         cmdBuffer.commit()
+        #if DEBUG
+        let rpCommitEnd = CACurrentMediaTime()
+        recordRenderPerf(texture:  rpTexEnd    - rpTexStart,
+                         drawable: rpDrawEnd   - rpDrawStart,
+                         encode:   rpEncEnd    - rpEncStart,
+                         present:  rpPresEnd   - rpDrawEnd,   // blit + present() (drawable already acquired)
+                         commit:   rpCommitEnd - rpCommitStart,
+                         iosurface: rpIOSurface)
+        #endif
         // Advance so the NEXT render targets a different ring texture (write-during-read
         // safety: a scope reading this frame's buffer won't be overwritten until the ring
         // wraps ~offscreenRingCount frames later).
         offscreenWriteIndex = (writeIndex + 1) % Self.offscreenRingCount
     }
+
+    #if DEBUG
+    /// Accumulate per-stage render timings and log `[RENDER-PERF]` once/sec. On the CVDisplayLink
+    /// thread (renderPixelBuffer is its sole caller). Reading it, to split "callback slow" from "GPU
+    /// slow" when presented-fps sags:
+    ///   • tick  — display-link callback cadence (avg/max ms between ticks). STABLE while fps sags →
+    ///             callback is on time, the problem is downstream (throughput). GROWS with the sag →
+    ///             the CVDisplayLink thread is starved/blocked (scheduling), not a GPU limit.
+    ///   • tex   — CVMetalTextureCache texture creation (accumulation / non-IOSurface uploads).
+    ///   • draw  — nextDrawable() acquisition. CRITICAL: this BLOCKS when the CAMetalLayer drawable
+    ///             pool (maximumDrawableCount, default 3) is exhausted — the classic N-frames-then-stall.
+    ///   • enc   — command encode (encoder setup through endEncoding).
+    ///   • pres  — cmdBuffer.present(drawable) enqueue.
+    ///   • commit— cmdBuffer.commit().
+    ///   • gpu   — pure GPU execution (gpuEndTime − gpuStartTime), from the completion handler.
+    ///   • lat   — end-to-end pipeline latency (commit → completion). lat ballooning while gpu stays
+    ///             flat = frames stalling behind present/drawables, NOT GPU work.
+    /// (x…) suffixes are the sample counts (tick counts every callback; gpu/lat count completed frames).
+    /// `iosurface=N` → the alwaysCopiesSampleData copy stripped IOSurface backing (slow CPU path).
+    /// Compare normal vs synthetic runs side by side.
+    private func recordRenderPerf(texture: Double, drawable: Double, encode: Double, present: Double, commit: Double, iosurface: Bool) {
+        rpSamples += 1
+        rpTexSum += texture;   rpTexMax    = max(rpTexMax, texture)
+        rpDrawSum += drawable; rpDrawMax   = max(rpDrawMax, drawable)
+        rpEncSum += encode;    rpEncMax    = max(rpEncMax, encode)
+        rpPresSum += present;  rpPresMax   = max(rpPresMax, present)
+        rpCommitSum += commit; rpCommitMax = max(rpCommitMax, commit)
+        rpLastIOSurface = iosurface
+
+        let now = CACurrentMediaTime()
+        if rpWindowStart == 0 { rpWindowStart = now; return }
+        if now - rpWindowStart < 1.0 { return }
+
+        let n = Double(max(1, rpSamples)), ms = 1000.0
+        // Snapshot the GPU-side accumulators (written on the completion thread) under the lock.
+        rpGpuLock.lock()
+        let gN = Double(max(1, rpGpuSamples))
+        let gpuAvg = rpGpuSum / gN * ms, gpuMax = rpGpuMax * ms
+        let latAvg = rpLatSum / gN * ms, latMax = rpLatMax * ms
+        let gpuSamples = rpGpuSamples
+        rpGpuSum = 0; rpGpuMax = 0; rpLatSum = 0; rpLatMax = 0; rpGpuSamples = 0
+        rpGpuLock.unlock()
+
+        // tickMs = display-link callback cadence (avg/max wall interval between ticks). tN can differ
+        // from n: cadence counts EVERY tick (incl. non-rendering), the stage timings only rendered ones.
+        let tN = Double(max(1, rpTickCount))
+
+        // footprintMB = process phys_footprint (the number Instruments' "Memory" column tracks),
+        // sampled once per log. MONOTONIC CLIMB across a clean run = a buffer/texture accumulation
+        // leak on the intake path (the texMs+copyMs climb-and-recover shape predicts this branch);
+        // FLAT footprint points the diagnosis at scheduling (emitLateMs) or per-alloc bandwidth/lock
+        // contention instead. One task_info call/sec is negligible.
+        let footprintMB = Self.processFootprintMB()
+
+        FileHandle.standardError.write(Data(String(format:
+            "[RENDER-PERF] n=%d tickMs=%.2f/%.2f(x%d) texMs=%.2f/%.2f drawMs=%.2f/%.2f encMs=%.2f/%.2f presMs=%.2f/%.2f commitMs=%.2f/%.2f gpuMs=%.2f/%.2f latMs=%.2f/%.2f(x%d) footprintMB=%.1f texFail=%d iosurface=%@\n",
+            rpSamples,
+            rpTickSum / tN * ms,   rpTickMax * ms, rpTickCount,
+            rpTexSum / n * ms,     rpTexMax * ms,
+            rpDrawSum / n * ms,    rpDrawMax * ms,
+            rpEncSum / n * ms,     rpEncMax * ms,
+            rpPresSum / n * ms,    rpPresMax * ms,
+            rpCommitSum / n * ms,  rpCommitMax * ms,
+            gpuAvg, gpuMax,
+            latAvg, latMax, gpuSamples,
+            footprintMB,
+            rpTexFail,
+            rpLastIOSurface ? "Y" : "N").utf8))
+
+        rpWindowStart = now
+        rpSamples = 0
+        rpTexSum = 0; rpTexMax = 0
+        rpDrawSum = 0; rpDrawMax = 0
+        rpEncSum = 0; rpEncMax = 0
+        rpPresSum = 0; rpPresMax = 0
+        rpCommitSum = 0; rpCommitMax = 0
+        rpTickSum = 0; rpTickMax = 0; rpTickCount = 0
+    }
+
+    /// Process physical memory footprint in MB (task_vm_info.phys_footprint — the same figure
+    /// Instruments and `jetsam` account against). Returns -1 if the task_info call fails. Cheap
+    /// enough to call once per [RENDER-PERF] log; do NOT call it per frame.
+    private static func processFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return -1 }
+        return Double(info.phys_footprint) / (1024.0 * 1024.0)
+    }
+    #endif
 
     /// Present ONE cleared (black) drawable, replacing whatever was last on screen. A clear-only
     /// render pass straight to the drawable — no offscreen, no blit, no scope/DeckLink publish
