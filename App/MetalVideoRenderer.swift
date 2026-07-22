@@ -213,12 +213,43 @@ final class MetalVideoRenderer {
     /// Nil for push sources (file playback), which are unaffected by this.
     var onDisplayTick: (() -> Void)?
 
+    /// One display tick's view of the frame queue, as the live control loop needs to see it.
+    ///
+    /// Every field is captured in ONE `queueLock` critical section (the same one that performs
+    /// selection), so they are mutually consistent: `hadEligibleFrame` describes the very
+    /// selection that produced the `oldest`/`newest` edges reported alongside it. Sampling them
+    /// separately would let the queue change between reads and hand the clock a state that never
+    /// actually existed.
+    struct DepthSample {
+        /// Seconds of buffered lead ahead of the clock (`newestQueuedPTS − now`, half-frame
+        /// corrected). The control loop's regulated signal.
+        let spanSeconds: Double
+        /// Queued frame count AFTER this tick's consumption.
+        let count: Int
+        /// PTS of the oldest queued frame, or nil if the queue is empty. The freeze guard's
+        /// evidence: how far ahead of the clock the NEAREST reachable frame sits.
+        let oldestPTS: Double?
+        /// PTS of the newest queued frame, or nil if the queue is empty. What a coarse re-anchor
+        /// positions the clock relative to.
+        let newestPTS: Double?
+        /// Whether a frame satisfied `pts <= now` on this tick. False with a NON-EMPTY queue is
+        /// the freeze signature — normal for a tick or two between frames, pathological when sustained.
+        let hadEligibleFrame: Bool
+    }
+
     /// Buffer-depth telemetry for LIVE sources: called once per display tick, AFTER the queue is
-    /// unlocked, with the seconds of buffered lead ahead of the clock (`newestQueuedPTS - now`) and
-    /// the queued frame count. The live source forwards this to its `LiveClock` control loop
-    /// (ManifoldCore can't read the renderer, so depth is PUSHED from here). Nil for file/NDI —
-    /// a pure no-op for them. Set on main by the live source's start(); cleared on stop().
-    var onDepthSample: ((_ spanSeconds: Double, _ count: Int) -> Void)?
+    /// unlocked. The live source forwards this to its `LiveClock` control loop (ManifoldCore can't
+    /// read the renderer, so the queue state is PUSHED from here). Nil for file/NDI — a pure no-op
+    /// for them. Set on main by the live source's start(); cleared on stop().
+    var onDepthSample: ((DepthSample) -> Void)?
+
+    /// The queue hit `maxQueued` on enqueue — under a live source, by definition excess buffer.
+    /// Called on the SOURCE thread, AFTER `queueLock` is released, with the newest queued PTS and
+    /// the post-trim count. The live source forwards it to `LiveClock.overflowReanchor`, which
+    /// moves the CLOCK (the only thing that removes latency) instead of relying on the drop-oldest
+    /// trim (which removes none — see that method). Nil for file/NDI, where the shallow default
+    /// bound is a plain backstop and there is no clock to re-anchor.
+    var onQueueOverflow: ((_ newestPTS: Double, _ count: Int) -> Void)?
 
     /// Returns the engine's full-range chroma convention rawValue (0 = full-swing,
     /// 1 = Resolve). Read per-frame on the render thread (thread-safe accessor).
@@ -660,11 +691,23 @@ final class MetalVideoRenderer {
             }
         }
         frameQueue.insert(frame, at: i)
-        // Bound the queue: drop the oldest if over capacity.
+        // Bound the queue. The removeFirst trim is retained as the MECHANICAL BACKSTOP — the array
+        // must not grow without limit — but it is no longer the policy. Dropping the oldest frame
+        // removes no latency at all (depth is `newest − now`, which eviction does not move) while
+        // discarding exactly the frames about to become eligible; left as the only response, that
+        // slides the whole window into the future until nothing satisfies `pts <= now` and the
+        // renderer freezes. So: report the overflow to the live source, which re-anchors the CLOCK.
+        // Captured under the lock, fired after it (see below) — never call out under queueLock.
+        var overflow: (newestPTS: Double, count: Int)?
         if frameQueue.count > maxQueued {
             frameQueue.removeFirst(frameQueue.count - maxQueued)
+            if let newest = frameQueue.last?.pts { overflow = (newest, frameQueue.count) }
         }
         queueLock.unlock()
+
+        // Outside the lock: the sink takes LiveClock's lock, and holding two is how deadlocks are
+        // built. Same discipline as onDepthSample below.
+        if let overflow { onQueueOverflow?(overflow.newestPTS, overflow.count) }
     }
 
     /// Clear all queued frames (call on seek).
@@ -824,6 +867,11 @@ final class MetalVideoRenderer {
         // there. This prevents `newestPTS - (-inf) ≈ 1.7e308` poison reaching the control loop. Clamp
         // negative spans to 0 too: a frame already past due is not "negative depth".
         let newest = frameQueue.last?.pts
+        // Freeze-guard evidence, captured in the SAME critical section as the selection above so
+        // the two describe one consistent instant. `oldest` is read AFTER consumption, so it is
+        // the nearest frame the NEXT tick could reach — which is exactly what "the clock is behind
+        // the whole queue" has to be measured against.
+        let oldest = frameQueue.first?.pts
         // STRUCTURAL-OFFSET CORRECTION (pre-controller): the raw lead (newest − now) is a sawtooth whose
         // EMA-regulated MEAN rests Δ/2 (~half a frame) below the true per-frame fill. Add Δ/2 so the
         // regulated mean equals the fill — making targetDepth ≡ startupDepth ≡ physical buffered lead, so
@@ -836,7 +884,11 @@ final class MetalVideoRenderer {
         let depthCount = frameQueue.count
         queueLock.unlock()
 
-        onDepthSample?(depthSpan, depthCount)
+        onDepthSample?(DepthSample(spanSeconds: depthSpan,
+                                   count: depthCount,
+                                   oldestPTS: oldest,
+                                   newestPTS: newest,
+                                   hadEligibleFrame: chosen != nil))
 
         if let pb = chosen {
             // D4b-2: chosenPts — the SOURCE time of the frame selected for display — is no longer

@@ -2,7 +2,7 @@
 //  WHEPClient.swift
 //  Manifold
 //
-//  DEBUG-only WHEP client — step 2 of 4: THE HANDSHAKE.
+//  DEBUG-only WHEP client — step 4 of 4: PICTURE.
 //
 //  Standard WHEP (draft-ietf-wish-whep), not a client for any particular server: POST the
 //  recvonly SDP offer as `application/sdp`, read the SDP answer back from the response body,
@@ -13,7 +13,24 @@
 //  does its HTTP this way — see LicenseManager). WebRTC lives in ManifoldWHEPSession, on the
 //  far side of the pure-C bridge. This file never sees a libdatachannel type.
 //
-//  Step 2 succeeds when the transport connects. There is no depacketization and no decode.
+//  Step 2 succeeded when the transport connected. Step 3a adds the receive side, and it all
+//  lives on the far side of the bridge: ManifoldWHEPSession attaches an RTP handler to the
+//  recvonly video track and runs an RFC 6184 depacketizer over it, logging NAL counts under
+//  `[WHEP-RTP]`. This file only starts it, and prints the totals on the way out.
+//
+//  Step 3a succeeds when those counts look like real H.264 — SPS/PPS/IDR present, slices
+//  flowing, reassembly errors at zero.
+//
+//  Step 3b adds WHEPVideoDecoder: access units arrive on the session's decode queue and go
+//  through VideoToolbox to CVPixelBuffers, counted under `[WHEP-DECODE]`. Success is that
+//  counter tracking the stream rate at the right dimensions — plus ⌃⌥⇧E, which writes one
+//  decoded frame to a PNG so "decoding" can be checked against actual pixels.
+//
+//  Step 4 puts it on screen. WHEPFrameRouter takes each decoded frame, promotes it into the
+//  renderer's 10-bit domain, maps its RTP sender timestamp through LiveClock, and enqueues it
+//  on the same MetalVideoRenderer the file and NDI paths feed. This file's part is only the
+//  wiring and the lifecycle: install the route before the answer (RTP can arrive the instant
+//  DTLS completes), release it before the decoder is torn down. Success is live pixels.
 //
 
 #if DEBUG
@@ -92,6 +109,14 @@ final class WHEPClient {
     private var resourceURL: URL?      // WHEP resource from the Location header, for DELETE
     private var startedAt: Date?
 
+    /// Step 3b. Owned here, but touched ONLY on `session.decodeQueue` — see WHEPVideoDecoder's
+    /// threading note. The two exceptions (`snapshot`, `requestStillExport`) are locked.
+    private var decoder: WHEPVideoDecoder?
+    private var decodeStatsTimer: Timer?
+    private var previousDecodeStats = WHEPVideoDecoder.Stats()
+    private var decodeStatsTicks = 0
+    private var keyframeRequests = 0
+
     private func elapsed() -> String {
         guard let startedAt else { return "?" }
         return String(format: "%.2fs", Date().timeIntervalSince(startedAt))
@@ -117,7 +142,7 @@ final class WHEPClient {
         }
 
         startedAt = Date()
-        NSLog("[WHEP] ───── step 2: handshake ─────")
+        NSLog("[WHEP] ───── step 3a: receive RTP + depacketize to NALs ─────")
         // Host only. The path carries the stream key and must never reach a log.
         NSLog("[WHEP] endpoint host %@ (path withheld — it carries the stream key)",
               config.endpoint.host ?? "?")
@@ -130,6 +155,38 @@ final class WHEPClient {
             return
         }
         self.session = session
+
+        // ── Step 3b: the decoder, wired before the answer is applied ────────────────────
+        //
+        // Ordering is not incidental: `onVideoAccessUnit` must be in place before
+        // setRemoteAnswer, because RTP can start arriving the instant DTLS completes, and an
+        // access unit delivered with no handler installed is simply dropped on the floor.
+        let decoder = WHEPVideoDecoder()
+        self.decoder = decoder
+        // The block runs on session.decodeQueue — already off libdatachannel's thread. It
+        // captures the decoder strongly so a frame in flight at teardown still has one.
+        session.onVideoAccessUnit = { avcc, sps, pps, parameterSetsChanged, keyframe, rtpTimestamp in
+            decoder.decode(accessUnit: avcc,
+                           sps: sps,
+                           pps: pps,
+                           parameterSetsChanged: parameterSetsChanged,
+                           keyframe: keyframe,
+                           rtpTimestamp: rtpTimestamp)
+        }
+        // ── Step 4: decoded frames → the display ────────────────────────────────────────
+        //
+        // Also wired BEFORE the answer, and activated before it too (below), for the same
+        // reason the decoder is: with no clock installed, `deliver` counts the frame and
+        // drops it, so a frame racing the handshake would be lost rather than displayed.
+        // `pts` is the sender timeline — the unwrapped RTP 90 kHz clock (see deliver).
+        decoder.onDecodedFrame = { pixelBuffer, pts in
+            WHEPFrameRouter.shared.deliver(pixelBuffer, pts: pts)
+        }
+        // WHEP takes the display, retiring whatever else is driving it. Mirrors NDI's
+        // takeover; for this first-light there is no source-switching UI, so connecting
+        // WHEP simply shows WHEP.
+        WHEPFrameRouter.shared.activate()
+        startDecodeStatsTimer()
 
         session.onIceState = { [weak self] state, name in
             guard let self else { return }
@@ -149,9 +206,11 @@ final class WHEPClient {
             NSLog("[WHEP] pc state → %@  (+%@)", name, self.elapsed())
             switch state {
             case .connected:
-                // DTLS is up. This is step 2's success condition.
+                // DTLS is up — step 2's success condition, and step 3a's starting gun: RTP
+                // begins flowing into the depacketizer the moment SRTP keys are derived.
                 NSLog("[WHEP] connected — ICE + DTLS established in %@. Transport is up.", self.elapsed())
-                NSLog("[WHEP] (step 2 ends here: no depacketization, no decode, no picture yet)")
+                NSLog("[WHEP] watching for RTP — the [WHEP-RTP] lines below are step 3a's checkpoint")
+                NSLog("[WHEP] (still no decode and no picture: NALs are built and counted, then dropped)")
             case .failed:
                 NSLog("[WHEP] FAILED at DTLS/transport.")
             case .disconnected, .closed:
@@ -176,6 +235,78 @@ final class WHEPClient {
                 NSLog("[WHEP] WARNING: offer has zero candidates; the connection will not come up")
             }
             Task { await self.postOffer(offerSDP, to: config.endpoint) }
+        }
+    }
+
+    // MARK: - Decode instrumentation (step 3b's checkpoint)
+
+    /// Arms a one-shot PNG of the next decoded frame (⌃⌥⇧E). The counter proves NALs became
+    /// frames; this proves the frames are a picture.
+    func exportNextDecodedFrame() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let decoder else {
+            NSLog("[WHEP-DECODE] no session — ⌃⌥H to connect first")
+            return
+        }
+        decoder.requestStillExport()
+    }
+
+    private func startDecodeStatsTimer() {
+        decodeStatsTimer?.invalidate()
+        previousDecodeStats = WHEPVideoDecoder.Stats()
+        decodeStatsTicks = 0
+        keyframeRequests = 0
+        decodeStatsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.logDecodeStatsTick()
+        }
+    }
+
+    private func logDecodeStatsTick() {
+        guard let decoder else { return }
+        let now = decoder.snapshot()
+        let was = previousDecodeStats
+        previousDecodeStats = now
+        decodeStatsTicks += 1
+
+        // Nothing arriving is [WHEP-RTP]'s story to tell, not this one.
+        guard now.accessUnitsReceived > was.accessUnitsReceived else { return }
+
+        let decoded = now.framesDecoded - was.framesDecoded
+        let accessUnits = now.accessUnitsReceived - was.accessUnitsReceived
+
+        NSLog("""
+              [WHEP-DECODE] +%ds  decoded=%d/s (total=%d)  %dx%d %@  |  AUs=%d/s  \
+              dropped: preIDR=%d noFmt=%d sbFail=%d  |  errors=%d
+              """,
+              decodeStatsTicks, decoded, now.framesDecoded,
+              now.width, now.height, WHEPVideoDecoder.formatName(now.pixelFormat),
+              accessUnits,
+              now.droppedAwaitingKeyframe - was.droppedAwaitingKeyframe,
+              now.droppedNoFormatDescription - was.droppedNoFormatDescription,
+              now.sampleBufferFailures - was.sampleBufferFailures,
+              now.decodeErrors - was.decodeErrors)
+
+        if now.decodeErrors > was.decodeErrors {
+            NSLog("[WHEP-DECODE]   last decode error: %d", now.lastDecodeError)
+        }
+
+        // Access units are arriving but nothing decodes. Two distinct causes, worth telling
+        // apart in the log, and both fixed by the same thing: an IDR.
+        if decoded == 0 {
+            if !now.haveFormatDescription {
+                NSLog("[WHEP-DECODE]   waiting for SPS/PPS — no format description yet")
+            } else if now.awaitingKeyframe {
+                NSLog("[WHEP-DECODE]   waiting for keyframe — slices dropped until the next IDR")
+            }
+            // Every other second, up to five times. The bridge already PLIs when the
+            // DEPACKETIZER has seen no keyframe; this covers the other case — a keyframe the
+            // decoder rejected, or one that arrived before the format description did.
+            if (!now.haveFormatDescription || now.awaitingKeyframe),
+               decodeStatsTicks % 2 == 0, keyframeRequests < 5 {
+                keyframeRequests += 1
+                let sent = session?.requestKeyframe() ?? false
+                NSLog("[WHEP-DECODE]   PLI request %d %@", keyframeRequests, sent ? "sent" : "FAILED")
+            }
         }
     }
 
@@ -258,6 +389,29 @@ final class WHEPClient {
         guard let session else { return }
         NSLog("[WHEP] tearing down (+%@)", elapsed())
 
+        decodeStatsTimer?.invalidate()
+        decodeStatsTimer = nil
+
+        // Read the totals BEFORE close(), which frees the depacketizer they live in.
+        if let summary = session.rtpStatsSummary() {
+            NSLog("[WHEP-RTP] session totals: %@", summary)
+        } else {
+            NSLog("[WHEP-RTP] session totals: no RTP was ever received")
+        }
+        if let decoder {
+            let stats = decoder.snapshot()
+            NSLog("""
+                  [WHEP-DECODE] session totals: %d access units → %d frames decoded (%dx%d %@) | \
+                  dropped: preIDR=%d noFmt=%d sbFail=%d | errors=%d | \
+                  formatDescriptions=%d sessions=%d
+                  """,
+                  stats.accessUnitsReceived, stats.framesDecoded,
+                  stats.width, stats.height, WHEPVideoDecoder.formatName(stats.pixelFormat),
+                  stats.droppedAwaitingKeyframe, stats.droppedNoFormatDescription,
+                  stats.sampleBufferFailures, stats.decodeErrors,
+                  stats.formatDescriptionBuilds, stats.sessionBuilds)
+        }
+
         // WHEP teardown is DELETE on the resource. Fire-and-forget: the local side goes away
         // regardless, but a compliant client should not leave the session dangling server-side.
         if let resourceURL {
@@ -272,7 +426,30 @@ final class WHEPClient {
             }
         }
 
+        // Release the display FIRST (on main, where we already are): the renderer's clock and
+        // depth hook stop pointing at a LiveClock that is about to go away, and the screen is
+        // wiped. Frames still in flight on the decode queue then find no clock and are dropped
+        // by `deliver`, which is exactly the intended behaviour.
+        WHEPFrameRouter.shared.deactivate()
+
+        // ORDER MATTERS. close() clears onVideoAccessUnit, so nothing new reaches the decode
+        // queue; the decoder is then torn down ON that queue, which puts it behind every
+        // frame already in flight. Invalidating it from here instead would pull a
+        // VTDecompressionSession out from under a decode in progress. The router's promote
+        // session + pool are decode-queue-owned too, so they are released in the same block,
+        // behind the same in-flight frames.
+        let decodeQueue = session.decodeQueue
         session.close()
+        if let decoder {
+            decodeQueue.async {
+                decoder.invalidate()
+                WHEPFrameRouter.shared.releaseResources()
+            }
+        } else {
+            decodeQueue.async { WHEPFrameRouter.shared.releaseResources() }
+        }
+
+        self.decoder = nil
         self.session = nil
         self.resourceURL = nil
         self.startedAt = nil

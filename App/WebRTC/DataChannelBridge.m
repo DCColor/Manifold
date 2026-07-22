@@ -22,6 +22,10 @@
 //
 
 #import "DataChannelBridge.h"
+#import "H264Depacketizer.h"
+
+#import <os/lock.h>
+#include <stdatomic.h>
 
 // RTC_STATIC makes rtc.h's RTC_C_EXPORT expand to nothing (no dllimport). It is a
 // no-op on Darwin, but the static build also sets it as a PUBLIC compile
@@ -103,17 +107,38 @@ BOOL ManifoldWebRTCLinkSmokeTest(NSString *_Nullable *_Nullable outMessage) {
 @interface ManifoldWHEPSession ()
 @property (nonatomic, copy, nullable) void (^offerCompletion)(NSString *_Nullable, NSString *_Nullable);
 - (void)handleGatheringComplete;
+
+// Inbound video (step 3a). Declared here rather than left to same-@implementation lookup so
+// that -snapshotStats in particular has a visible prototype: it returns a struct by value.
+- (void)ingestRTP:(const uint8_t *)packet length:(size_t)length;
+- (void)enqueueAccessUnit:(const ManifoldH264AccessUnit *)accessUnit;
+- (void)configureDepacketizerFromNegotiatedDescription;
+- (void)startRTPStatsTimer;
+- (void)logRTPStatsTick;
+- (ManifoldH264DepacketizerStats)snapshotStats;
 @end
+
+static NSMapTable *ManifoldWHEPMakeWeakTable(void) {
+    return [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory |
+                                              NSPointerFunctionsObjectPersonality
+                                 valueOptions:NSPointerFunctionsWeakMemory |
+                                              NSPointerFunctionsObjectPersonality];
+}
 
 static NSMapTable<NSNumber *, ManifoldWHEPSession *> *ManifoldWHEPSessions(void) {
     static NSMapTable *sessions;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        sessions = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory |
-                                                      NSPointerFunctionsObjectPersonality
-                                         valueOptions:NSPointerFunctionsWeakMemory |
-                                                      NSPointerFunctionsObjectPersonality];
-    });
+    dispatch_once(&once, ^{ sessions = ManifoldWHEPMakeWeakTable(); });
+    return sessions;
+}
+
+/// The same weak-table discipline, keyed by TRACK id rather than PeerConnection id:
+/// track callbacks (in particular the per-RTP-packet message callback) are handed the
+/// track's id, not the connection's.
+static NSMapTable<NSNumber *, ManifoldWHEPSession *> *ManifoldWHEPTrackSessions(void) {
+    static NSMapTable *sessions;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sessions = ManifoldWHEPMakeWeakTable(); });
     return sessions;
 }
 
@@ -132,6 +157,44 @@ static ManifoldWHEPSession *ManifoldWHEPLookup(int pc) {
     ManifoldWHEPSession *session = [ManifoldWHEPSessions() objectForKey:@(pc)];
     [lock unlock];
     return session;
+}
+
+/// As above, for track callbacks. This one runs PER RTP PACKET — a few thousand times a
+/// second at 1080p — so it is worth knowing what it costs: an uncontended NSLock plus a
+/// weak read is tens of nanoseconds, against ~1200 bytes of memcpy in the depacketizer
+/// behind it. Using `rtcSetUserPointer` instead would save that and reintroduce the
+/// use-after-free this table exists to prevent. Not a trade worth making.
+static ManifoldWHEPSession *ManifoldWHEPTrackLookup(int tr) {
+    NSLock *lock = ManifoldWHEPSessionsLock();
+    [lock lock];
+    ManifoldWHEPSession *session = [ManifoldWHEPTrackSessions() objectForKey:@(tr)];
+    [lock unlock];
+    return session;
+}
+
+/// Pulls the negotiated H.264 payload type out of a media description.
+///
+/// It MUST come from the SDP rather than being hardcoded to the 96 we offered: the answer
+/// picks, and a server is free to answer with a different number. Feeding the depacketizer
+/// the wrong PT does not fail loudly — it silently discards every packet.
+static int ManifoldWHEPH264PayloadTypeFromSDP(NSString *sdp) {
+    for (NSString *rawLine in [sdp componentsSeparatedByString:@"\n"]) {
+        NSString *line = [rawLine stringByTrimmingCharactersInSet:
+                          NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (![line hasPrefix:@"a=rtpmap:"]) continue;
+
+        NSString *rest = [line substringFromIndex:@"a=rtpmap:".length];   // "<pt> <name>/<clock>"
+        NSRange space = [rest rangeOfString:@" "];
+        if (space.location == NSNotFound) continue;
+
+        NSString *encoding = [rest substringFromIndex:NSMaxRange(space)];
+        // Prefix match on "H264/" so the RTX line (`rtx/90000`, whose apt points AT the
+        // H.264 PT) cannot be mistaken for the codec itself.
+        if ([encoding rangeOfString:@"H264/" options:NSCaseInsensitiveSearch].location != 0) continue;
+
+        return [rest substringToIndex:space.location].intValue;
+    }
+    return -1;
 }
 
 static NSString *ManifoldWHEPStateName(rtcState state) {
@@ -248,10 +311,94 @@ static void ManifoldWHEPGatheringStateChanged(int pc, rtcGatheringState state, v
     dispatch_async(dispatch_get_main_queue(), ^{ [session handleGatheringComplete]; });
 }
 
-@implementation ManifoldWHEPSession {
-    int _pc;
-    BOOL _closed;
+// ── Inbound media callbacks (step 3a) ────────────────────────────────────────────────
+//
+// THE HOT PATH. ManifoldWHEPTrackMessage runs once per RTP packet on libdatachannel's
+// per-track thread, and unlike the state callbacks above it does NOT hop to main: a
+// dispatch_async per packet would be more expensive than the depacketization itself, and
+// would put frame reassembly behind the main run loop, which is where the UI lives.
+//
+// What runs here is bounded and allocation-free in the steady state: parse the 12-byte
+// header, memcpy the payload into a reused buffer, bump counters. Everything that could
+// block — logging, decode, the format description — happens elsewhere.
+
+static void ManifoldWHEPTrackMessage(int tr, const char *message, int size, void *ptr) {
+    (void)ptr;
+    // libdatachannel's C API signals a STRING message with a negative size (the payload is
+    // NUL-terminated). Media tracks only ever deliver binary, so a negative size here means
+    // something we do not understand — not RTP.
+    if (size <= 0 || !message) return;
+
+    ManifoldWHEPSession *session = ManifoldWHEPTrackLookup(tr);
+    if (!session) return;
+    [session ingestRTP:(const uint8_t *)message length:(size_t)size];
 }
+
+/// Drains a track we negotiated but do not consume.
+///
+/// This is NOT optional housekeeping. A libdatachannel Channel with no message callback
+/// QUEUES its incoming messages for a later `rtcReceiveMessage` that, for the audio track,
+/// never comes — so leaving it unhandled grows a buffer for the whole session. Discarding
+/// explicitly costs one function call per Opus packet (~50/s).
+static void ManifoldWHEPDiscardMessage(int id, const char *message, int size, void *ptr) {
+    (void)id; (void)message; (void)size; (void)ptr;
+}
+
+/// Fires INSIDE ManifoldH264DepacketizerSubmitRTP, on the network thread, with `_rtpLock`
+/// held — so `context` is safe to use unretained: -ingestRTP already holds a strong
+/// reference for the duration, and -close cannot free the depacketizer out from under it
+/// without first taking the same lock.
+static void ManifoldWHEPAccessUnitReady(const ManifoldH264AccessUnit *accessUnit, void *context) {
+    ManifoldWHEPSession *session = (__bridge ManifoldWHEPSession *)context;
+    [session enqueueAccessUnit:accessUnit];
+}
+
+static void ManifoldWHEPTrackOpen(int tr, void *ptr) {
+    (void)ptr;
+    NSLog(@"[WHEP-BRIDGE] video track %d open — RTP will start arriving", tr);
+}
+
+static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
+    (void)ptr;
+    NSLog(@"[WHEP-BRIDGE] video track %d closed", tr);
+}
+
+@implementation ManifoldWHEPSession {
+    int  _pc;
+    BOOL _closed;
+
+    // ── Inbound video (step 3a) ──────────────────────────────────────────────────────
+    int _videoTrack;
+
+    /// Owned by the session, mutated ONLY under `_rtpLock`. The depacketizer itself is
+    /// single-threaded by contract; the lock exists because the 1 Hz logger on main reads
+    /// its counters while the network thread is writing them, and because `close` frees it
+    /// while a callback may be in flight.
+    ManifoldH264Depacketizer *_depacketizer;
+    os_unfair_lock _rtpLock;
+
+    dispatch_queue_t _decodeQueue;
+
+    /// Access units in flight between the network thread and the decode queue. Incremented
+    /// on the network thread, decremented on the decode queue, so it must be atomic.
+    _Atomic(int) _pendingAccessUnits;
+    uint64_t _accessUnitsHandedOff;      // network thread, under _rtpLock
+    uint64_t _accessUnitsDroppedBusy;    // network thread, under _rtpLock
+
+    dispatch_source_t _statsTimer;
+    ManifoldH264DepacketizerStats _previousStats;
+    uint64_t _previousHandedOff;
+    uint64_t _previousDroppedBusy;
+    NSDate *_rtpStartedAt;
+    int _quietTicks;
+    int _pliRequests;
+    BOOL _loggedFirstPacket;
+    BOOL _loggedParameterSets;
+    BOOL _loggedFirstKeyframe;
+    BOOL _loggedPayloadTypeMismatch;
+}
+
+@synthesize decodeQueue = _decodeQueue;
 
 + (nullable instancetype)sessionWithStunServer:(nullable NSString *)stunServer
                                          error:(NSString *_Nullable *_Nullable)outError {
@@ -290,6 +437,7 @@ static void ManifoldWHEPGatheringStateChanged(int pc, rtcGatheringState state, v
 
     ManifoldWHEPSession *session = [[self alloc] init];
     session->_pc = pc;
+    session->_rtpLock = OS_UNFAIR_LOCK_INIT;
 
     NSLock *lock = ManifoldWHEPSessionsLock();
     [lock lock];
@@ -313,6 +461,58 @@ static void ManifoldWHEPGatheringStateChanged(int pc, rtcGatheringState state, v
         [session close];
         return nil;
     }
+
+    // ── Inbound video plumbing (step 3a) ─────────────────────────────────────────────
+    session->_videoTrack = videoTrack;
+
+    // RtcpReceivingSession is libdatachannel's INBOUND media handler. It is not a
+    // depacketizer — it does not touch the RTP payload at all — but it does two things we
+    // need. It absorbs the RTCP that rtcp-mux delivers on this same track (SR, so the
+    // sender's NTP↔RTP mapping is tracked for later A/V sync), and it is what
+    // `rtcRequestKeyframe` pushes a PLI through. Without it, RTCP compound packets would
+    // land in our RTP callback and every keyframe request would be a no-op.
+    int chained = rtcChainRtcpReceivingSession(videoTrack);
+    if (chained < 0) {
+        NSLog(@"[WHEP-BRIDGE] WARNING: rtcChainRtcpReceivingSession failed (%d) — expect RTCP "
+              @"in the RTP stream and no working keyframe requests", chained);
+    }
+
+    session->_depacketizer = ManifoldH264DepacketizerCreate();
+    if (!session->_depacketizer) {
+        if (outError) *outError = @"failed to allocate the H.264 depacketizer";
+        [session close];
+        return nil;
+    }
+    // ── The network-thread → decode-queue handoff (step 3b) ─────────────────────────
+    //
+    // SERIAL, and that is the whole design: H.264 without B-frames decodes strictly in
+    // order, so one queue both preserves order and gives the decoder a single thread it
+    // never has to lock against. WITH_AUTORELEASE_POOL because each frame creates a
+    // CMBlockBuffer + CMSampleBuffer, and a queue without a pool would hold every one of
+    // them until the thread happened to drain.
+    //
+    // USER_INITIATED, not USER_INTERACTIVE: decode must keep up with the stream but must
+    // not outrank the render thread it will eventually feed.
+    dispatch_queue_attr_t decodeAttr = dispatch_queue_attr_make_with_qos_class(
+        DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL, QOS_CLASS_USER_INITIATED, 0);
+    session->_decodeQueue = dispatch_queue_create("com.graviton.manifold.whep.decode", decodeAttr);
+
+    ManifoldH264DepacketizerSetAccessUnitHandler(session->_depacketizer,
+                                                 ManifoldWHEPAccessUnitReady,
+                                                 (__bridge void *)session);
+
+    [lock lock];
+    [ManifoldWHEPTrackSessions() setObject:session forKey:@(videoTrack)];
+    [lock unlock];
+
+    rtcSetOpenCallback(videoTrack, ManifoldWHEPTrackOpen);
+    rtcSetClosedCallback(videoTrack, ManifoldWHEPTrackClosed);
+    rtcSetMessageCallback(videoTrack, ManifoldWHEPTrackMessage);
+
+    // Audio is negotiated but not consumed yet. It still needs a callback — see
+    // ManifoldWHEPDiscardMessage — or its packets accumulate in libdatachannel's receive
+    // queue for the life of the session.
+    rtcSetMessageCallback(audioTrack, ManifoldWHEPDiscardMessage);
 
     NSLog(@"[WHEP-BRIDGE] pc %d created — recvonly video (tr %d) + audio (tr %d), stun: %@",
           pc, videoTrack, audioTrack, stunServer.length > 0 ? stunServer : @"none");
@@ -394,7 +594,225 @@ static void ManifoldWHEPGatheringStateChanged(int pc, rtcGatheringState state, v
         if (outError) *outError = [NSString stringWithFormat:@"rtcSetRemoteDescription failed (%d)", rc];
         return NO;
     }
+
+    // The answer is applied, so the video track's description is now the NEGOTIATED one and
+    // the payload type in it is the one that will actually be on the wire.
+    [self configureDepacketizerFromNegotiatedDescription];
+    [self startRTPStatsTimer];
     return YES;
+}
+
+#pragma mark - Inbound video (step 3a)
+
+- (void)configureDepacketizerFromNegotiatedDescription {
+    if (_videoTrack <= 0) return;
+
+    int needed = rtcGetTrackDescription(_videoTrack, NULL, 0);
+    NSString *description = nil;
+    if (needed > 0) {
+        char *buffer = malloc((size_t)needed);
+        if (buffer) {
+            if (rtcGetTrackDescription(_videoTrack, buffer, needed) > 0) {
+                description = [NSString stringWithUTF8String:buffer];
+            }
+            free(buffer);
+        }
+    }
+
+    int payloadType = description ? ManifoldWHEPH264PayloadTypeFromSDP(description) : -1;
+
+    os_unfair_lock_lock(&_rtpLock);
+    if (_depacketizer) ManifoldH264DepacketizerSetPayloadType(_depacketizer, payloadType);
+    os_unfair_lock_unlock(&_rtpLock);
+
+    if (payloadType >= 0) {
+        NSLog(@"[WHEP-RTP] negotiated H.264 payload type %d on track %d", payloadType, _videoTrack);
+    } else {
+        // Not fatal: the depacketizer falls back to latching the first payload type it sees.
+        // It IS worth shouting about, because that fallback will latch onto RTX if RTX
+        // happens to arrive first, and the symptom is "no NALs, no errors".
+        NSLog(@"[WHEP-RTP] WARNING: no H.264 rtpmap in the negotiated video description — "
+              @"falling back to latching the first payload type seen. Answer may have "
+              @"selected VP8/VP9, in which case nothing here will depacketize.");
+    }
+}
+
+- (void)ingestRTP:(const uint8_t *)packet length:(size_t)length {
+    // libdatachannel's track thread. See the callback comment above: no hop, no logging.
+    os_unfair_lock_lock(&_rtpLock);
+    if (_depacketizer) ManifoldH264DepacketizerSubmitRTP(_depacketizer, packet, length);
+    os_unfair_lock_unlock(&_rtpLock);
+}
+
+/// Network thread, `_rtpLock` held, called from inside the depacketizer. Everything here is
+/// a copy and a dispatch — no decode, no CoreMedia, no logging.
+- (void)enqueueAccessUnit:(const ManifoldH264AccessUnit *)accessUnit {
+    void (^handler)(NSData *, NSData *_Nullable, NSData *_Nullable, BOOL, BOOL, uint32_t) =
+        self.onVideoAccessUnit;   // atomic property: safe to read from this thread
+    if (!handler || accessUnit->size == 0) return;
+
+    // BACKPRESSURE. dispatch_async has no bound, so a decoder that falls behind would grow
+    // the queue until memory ran out. Shed non-keyframes instead — a dropped P-frame costs
+    // one glitch, a dropped IDR costs everything until the next one, so keyframes always go
+    // through however deep the backlog is.
+    static const int kMaxPendingAccessUnits = 8;
+    if (atomic_load_explicit(&_pendingAccessUnits, memory_order_relaxed) >= kMaxPendingAccessUnits &&
+        !accessUnit->keyframe) {
+        _accessUnitsDroppedBusy++;
+        return;
+    }
+
+    NSData *avcc = [NSData dataWithBytes:accessUnit->data length:accessUnit->size];
+    NSData *sps  = accessUnit->sps ? [NSData dataWithBytes:accessUnit->sps length:accessUnit->spsSize] : nil;
+    NSData *pps  = accessUnit->pps ? [NSData dataWithBytes:accessUnit->pps length:accessUnit->ppsSize] : nil;
+    const BOOL     changed   = accessUnit->parameterSetsChanged;
+    const BOOL     keyframe  = accessUnit->keyframe;
+    const uint32_t timestamp = accessUnit->rtpTimestamp;
+
+    _accessUnitsHandedOff++;
+    atomic_fetch_add_explicit(&_pendingAccessUnits, 1, memory_order_relaxed);
+
+    // The block retains `handler`, so a decoder torn down mid-flight stays alive until the
+    // last queued frame has run. That is deliberate: the alternative is a use-after-free.
+    dispatch_async(_decodeQueue, ^{
+        handler(avcc, sps, pps, changed, keyframe, timestamp);
+        atomic_fetch_sub_explicit(&self->_pendingAccessUnits, 1, memory_order_relaxed);
+    });
+}
+
+- (ManifoldH264DepacketizerStats)snapshotStats {
+    ManifoldH264DepacketizerStats stats;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerCopyStats(_depacketizer, &stats);
+    os_unfair_lock_unlock(&_rtpLock);
+    return stats;
+}
+
+- (void)startRTPStatsTimer {
+    NSAssert(NSThread.isMainThread, @"stats timer must be created on main");
+    if (_statsTimer || _closed) return;
+
+    _rtpStartedAt = [NSDate date];
+    _statsTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(_statsTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC),
+                              NSEC_PER_SEC, NSEC_PER_SEC / 10);
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_statsTimer, ^{ [weakSelf logRTPStatsTick]; });
+    dispatch_resume(_statsTimer);
+}
+
+/// The step-3a checkpoint, once a second on main. Counts are per-interval; the cumulative
+/// totals go out at teardown via -rtpStatsSummary.
+- (void)logRTPStatsTick {
+    NSAssert(NSThread.isMainThread, @"stats logging must run on main");
+    const ManifoldH264DepacketizerStats now = [self snapshotStats];
+    const ManifoldH264DepacketizerStats was = _previousStats;
+    _previousStats = now;
+
+    os_unfair_lock_lock(&_rtpLock);
+    const uint64_t handedOff = _accessUnitsHandedOff, droppedBusy = _accessUnitsDroppedBusy;
+    os_unfair_lock_unlock(&_rtpLock);
+    const uint64_t handedOffDelta = handedOff - _previousHandedOff;
+    const uint64_t droppedBusyDelta = droppedBusy - _previousDroppedBusy;
+    _previousHandedOff = handedOff;
+    _previousDroppedBusy = droppedBusy;
+
+#define MD_DELTA(field) (now.field - was.field)
+
+    if (MD_DELTA(packetsReceived) == 0) {
+        // Silence is a result too, but it does not need a line every second.
+        if (++_quietTicks % 5 == 0) {
+            NSLog(@"[WHEP-RTP] no RTP for %ds — transport is up but the server is not sending "
+                  @"(or the video m-line was rejected)", _quietTicks);
+        }
+        return;
+    }
+    _quietTicks = 0;
+
+    if (!_loggedFirstPacket) {
+        _loggedFirstPacket = YES;
+        NSLog(@"[WHEP-RTP] first RTP packet after %.2fs — ssrc 0x%08x, pt %d",
+              [NSDate.date timeIntervalSinceDate:_rtpStartedAt], now.ssrc, now.payloadType);
+    }
+    if (!_loggedParameterSets && now.spsSize > 0 && now.ppsSize > 0) {
+        _loggedParameterSets = YES;
+        NSLog(@"[WHEP-RTP] parameter sets captured — SPS %zu bytes, PPS %zu bytes "
+              @"(held out-of-band for the format description in step 3b)", now.spsSize, now.ppsSize);
+    }
+    if (!_loggedFirstKeyframe && now.keyframes > 0) {
+        _loggedFirstKeyframe = YES;
+        NSLog(@"[WHEP-RTP] first keyframe access unit assembled");
+    }
+    if (!_loggedPayloadTypeMismatch && MD_DELTA(packetsWrongPayloadType) > 0 && MD_DELTA(packetsAccepted) == 0) {
+        _loggedPayloadTypeMismatch = YES;
+        NSLog(@"[WHEP-RTP] WARNING: every packet this interval had an unexpected payload type. "
+              @"Expected %d. The answer probably selected a codec we are not depacketizing.",
+              now.payloadType);
+    }
+
+    NSLog(@"[WHEP-RTP] +%.0fs  frames=%llu (key=%llu)  NALs: SPS=%llu PPS=%llu IDR=%llu slice=%llu "
+          @"SEI=%llu  |  pkts=%llu seqGaps=%llu lost=%llu reorder=%llu  |  "
+          @"FU-A rx=%llu reassembled=%llu dropped=%llu  |  handoff=%llu shed=%llu",
+          [NSDate.date timeIntervalSinceDate:_rtpStartedAt],
+          MD_DELTA(accessUnits), MD_DELTA(keyframes),
+          MD_DELTA(nalSPS), MD_DELTA(nalPPS), MD_DELTA(nalIDR), MD_DELTA(nalSlice), MD_DELTA(nalSEI),
+          MD_DELTA(packetsReceived), MD_DELTA(seqGaps), MD_DELTA(packetsLost), MD_DELTA(packetsReordered),
+          MD_DELTA(fuaPackets), MD_DELTA(fuaReassembled), MD_DELTA(fuaDropped),
+          handedOffDelta, droppedBusyDelta);
+
+    if (droppedBusyDelta > 0) {
+        NSLog(@"[WHEP-RTP]   BACKPRESSURE: shed %llu access unit(s) — the decode queue is not "
+              @"keeping up with the stream", droppedBusyDelta);
+    }
+
+    // Anything below is an anomaly, not a rate, so it only prints when it happens.
+    if (MD_DELTA(packetsMalformed) || MD_DELTA(nalUnsupported) || MD_DELTA(packetsRTCP) ||
+        MD_DELTA(packetsWrongSSRC) || MD_DELTA(accessUnitsByTimestamp) || MD_DELTA(accessUnitsOversize)) {
+        NSLog(@"[WHEP-RTP]   anomalies: malformed=%llu unsupportedPacketType=%llu rtcpInRtp=%llu "
+              @"otherSsrc=%llu auClosedByTimestamp=%llu auOversize=%llu",
+              MD_DELTA(packetsMalformed), MD_DELTA(nalUnsupported), MD_DELTA(packetsRTCP),
+              MD_DELTA(packetsWrongSSRC), MD_DELTA(accessUnitsByTimestamp), MD_DELTA(accessUnitsOversize));
+    }
+
+    // Joining mid-GOP is the normal case for a live stream: slices decode into nothing until
+    // an IDR arrives. Ask for one, a few times, then stop nagging.
+    if (now.keyframes == 0 && now.nalSlice > 0 && _pliRequests < 3) {
+        _pliRequests++;
+        BOOL sent = [self requestKeyframe];
+        NSLog(@"[WHEP-RTP] slices but no keyframe yet — PLI request %d %@",
+              _pliRequests, sent ? @"sent" : @"FAILED");
+    }
+
+#undef MD_DELTA
+}
+
+- (BOOL)requestKeyframe {
+    if (_closed || _videoTrack <= 0) return NO;
+    return rtcRequestKeyframe(_videoTrack) >= 0;
+}
+
+- (nullable NSString *)rtpStatsSummary {
+    const ManifoldH264DepacketizerStats stats = [self snapshotStats];
+    if (stats.packetsReceived == 0) return nil;
+
+    os_unfair_lock_lock(&_rtpLock);
+    const uint64_t handedOff = _accessUnitsHandedOff, droppedBusy = _accessUnitsDroppedBusy;
+    os_unfair_lock_unlock(&_rtpLock);
+
+    return [NSString stringWithFormat:
+            @"%llu pkts (%llu accepted) → %llu frames (%llu key) | "
+            @"SPS=%llu PPS=%llu IDR=%llu slice=%llu SEI=%llu | "
+            @"seqGaps=%llu lost=%llu reorder=%llu malformed=%llu | "
+            @"FU-A rx=%llu reassembled=%llu dropped=%llu | "
+            @"auClosedByTimestamp=%llu wrongPt=%llu wrongSsrc=%llu rtcpInRtp=%llu | "
+            @"handedOffToDecoder=%llu shedForBackpressure=%llu",
+            stats.packetsReceived, stats.packetsAccepted, stats.accessUnits, stats.keyframes,
+            stats.nalSPS, stats.nalPPS, stats.nalIDR, stats.nalSlice, stats.nalSEI,
+            stats.seqGaps, stats.packetsLost, stats.packetsReordered, stats.packetsMalformed,
+            stats.fuaPackets, stats.fuaReassembled, stats.fuaDropped,
+            stats.accessUnitsByTimestamp, stats.packetsWrongPayloadType, stats.packetsWrongSSRC,
+            stats.packetsRTCP, handedOff, droppedBusy];
 }
 
 - (nullable NSString *)selectedCandidatePair {
@@ -414,6 +832,41 @@ static void ManifoldWHEPGatheringStateChanged(int pc, rtcGatheringState state, v
     self.offerCompletion = nil;
     self.onConnectionState = nil;
     self.onIceState = nil;
+
+    if (_statsTimer) {
+        dispatch_source_cancel(_statsTimer);
+        _statsTimer = nil;
+    }
+
+    if (_videoTrack > 0) {
+        // Unregister BEFORE freeing anything the callbacks touch.
+        rtcSetMessageCallback(_videoTrack, NULL);
+        rtcSetOpenCallback(_videoTrack, NULL);
+        rtcSetClosedCallback(_videoTrack, NULL);
+
+        NSLock *trackLock = ManifoldWHEPSessionsLock();
+        [trackLock lock];
+        [ManifoldWHEPTrackSessions() removeObjectForKey:@(_videoTrack)];
+        [trackLock unlock];
+        _videoTrack = 0;
+    }
+
+    // Stop new work reaching the decode queue. Frames ALREADY queued still run — their
+    // blocks hold the handler, and by extension the decoder — which is why the Swift side
+    // tears the decoder down with `decodeQueue.async`, behind them, rather than inline.
+    self.onVideoAccessUnit = nil;
+
+    // A message callback may be running RIGHT NOW on the track thread, already past the
+    // unregister above. Detach the depacketizer under the lock so that callback either
+    // completes first or finds NULL, then free it once no one can reach it.
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264Depacketizer *depacketizer = _depacketizer;
+    _depacketizer = NULL;
+    os_unfair_lock_unlock(&_rtpLock);
+    if (depacketizer) {
+        ManifoldH264DepacketizerFlush(depacketizer);
+        ManifoldH264DepacketizerDestroy(depacketizer);
+    }
 
     if (_pc > 0) {
         // Unregister callbacks first so nothing new is enqueued during teardown.
@@ -438,11 +891,14 @@ static void ManifoldWHEPGatheringStateChanged(int pc, rtcGatheringState state, v
     // than a warning, and the weak table means callbacks are already safe by this point.
     if (!_closed && _pc > 0) {
         NSLog(@"[WHEP-BRIDGE] WARNING: pc %d deallocated without -close", _pc);
+        if (_videoTrack > 0) rtcSetMessageCallback(_videoTrack, NULL);
         rtcSetStateChangeCallback(_pc, NULL);
         rtcSetIceStateChangeCallback(_pc, NULL);
         rtcSetGatheringStateChangeCallback(_pc, NULL);
         rtcDeletePeerConnection(_pc);
     }
+    if (_statsTimer) dispatch_source_cancel(_statsTimer);
+    if (_depacketizer) ManifoldH264DepacketizerDestroy(_depacketizer);
 }
 
 @end

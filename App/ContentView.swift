@@ -270,6 +270,13 @@ struct ContentView: View {
                 // stream is about to take over, retire any loaded file first so both don't feed the
                 // renderer at once. NDIService has no engine handle, so it calls back through here.
                 NDIService.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
+                #if DEBUG
+                // WHEP step 4 (⌃⌥H) displays through this SAME renderer, feeding the same enqueue
+                // NDI and the file sources feed — but paced by LiveClock rather than FrameSync or
+                // the file timebase. Same two hooks as NDI, for the same two reasons.
+                WHEPFrameRouter.shared.renderer = renderer
+                WHEPFrameRouter.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
+                #endif
                 // …and tees NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the
                 // clock-anchored SDI output, SDI/Computer routing and mute apply to NDI for free.
                 NDIService.shared.audioTap = engine.audioTap
@@ -723,9 +730,14 @@ struct ContentView: View {
     ///         table to stderr; load a clip, hit ⌃⌥S, walk away. Second ⌃⌥S aborts early.
     ///   ⌃⌥W   libdatachannel link smoke test (WHEP step 1) — logs version + PeerConnection
     ///         create/delete. No networking; proves the static lib linked and runs. Temporary.
-    ///   ⌃⌥H   WHEP handshake (WHEP step 2) — recvonly offer → POST → answer → ICE/DTLS connect.
-    ///         Transport only: no depacketize, no decode, no picture. Needs an endpoint in
-    ///         ~/.manifold-whep-config or $MANIFOLD_WHEP_URL (see WHEPClient). ⌃⌥⇧H tears down.
+    ///   ⌃⌥H   WHEP session (steps 2–4) — recvonly offer → POST → answer → ICE/DTLS, then RTP
+    ///         → RFC 6184 depacketize → VideoToolbox decode → promote → LiveClock → SCREEN.
+    ///         WHEP takes the display while connected (a loaded file is retired), so this is
+    ///         also the source-activation trigger. Watch [WHEP-RTP] for NAL counts,
+    ///         [WHEP-DECODE] for the decode rate, and [WHEP-FLOW] + [LIVECLOCK] for the
+    ///         producer/consumer pair. Needs an endpoint in ~/.manifold-whep-config or
+    ///         $MANIFOLD_WHEP_URL (see WHEPClient). ⌃⌥⇧H tears down and restores playback.
+    ///   ⌃⌥⇧E  export the next decoded WHEP frame to a PNG (pre-render, decoder-side check)
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
     /// only the triggers are `#if DEBUG`.
     @ViewBuilder private var syntheticLiveShortcuts: some View {
@@ -784,6 +796,13 @@ struct ContentView: View {
                 .keyboardShortcut("h", modifiers: [.control, .option])
             Button("") { WHEPClient.shared.disconnect() }
                 .keyboardShortcut("h", modifiers: [.control, .option, .shift])
+            // ⌃⌥⇧E — WHEP DECODED-FRAME STILL (step 3b). Writes the next decoded WHEP frame
+            // to a PNG in the export folder. Distinct from ⌃⌥E, which reads back the RENDERED
+            // frame: nothing is rendered from WHEP yet, so this goes straight from the
+            // decoder's CVPixelBuffer via VideoToolbox. A content/geometry check, not a
+            // colour-managed export — see WHEPVideoDecoder.exportStill.
+            Button("") { WHEPClient.shared.exportNextDecodedFrame() }
+                .keyboardShortcut("e", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
         #else

@@ -196,11 +196,22 @@ final class SyntheticLiveSource {
         renderer.onDisplayTick = nil
         // Push buffer depth into the control loop each tick (App→Core; ManifoldCore can't read the
         // renderer). Strong-captures the clock like renderer.clock above; both cleared on stop().
-        renderer.onDepthSample = { [clock, weak self] span, count in
-            clock.updateDepth(spanSeconds: span, count: count)
+        // Deliberately forwards ONLY (span, count) and NOT the queue edges the sample now also
+        // carries. Passing them would arm LiveClock's freeze guard, and this harness is the
+        // measurement baseline: docs/LIVECLOCK_PRESETS.md's depth grid was swept with no coarse
+        // intervention in the loop, so a hidden re-anchor would turn a saturated-buffer FAIL into
+        // a PASS and invalidate every cell of it. Same reason `snapEnabled` stays off here.
+        // This harness has no queue-full policy of its own (drop-oldest is the swept behaviour, and
+        // the presets grid depends on it). Explicitly clear the hook so a hook left by a previous
+        // WHEP session cannot re-anchor the clock installed just above — which is a DIFFERENT clock
+        // than the one that hook captured.
+        renderer.onQueueOverflow = nil
+        renderer.onDepthSample = { [clock, weak self] sample in
+            clock.updateDepth(spanSeconds: sample.spanSeconds, count: sample.count)
             #if DEBUG
-            self?.lastQueueCount = count   // stash for [SYNTH-PERF] (display-tick write; benign race)
-            self?.sweepAccumulate(span: span, count: count)   // no-op unless a ⌃⌥S sweep is active + past settle
+            self?.lastQueueCount = sample.count   // stash for [SYNTH-PERF] (display-tick write; benign race)
+            // no-op unless a ⌃⌥S sweep is active + past settle
+            self?.sweepAccumulate(span: sample.spanSeconds, count: sample.count)
             #endif
         }
         // Give the loop headroom above the shallow file-path bound (12) so a filling buffer has room

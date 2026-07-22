@@ -96,6 +96,215 @@ public final class LiveClock: @unchecked Sendable {
     public var controlHz: Double = 10
     private var controlInterval: Double { 1.0 / controlHz }
 
+    // MARK: - Snap-to-live (coarse outer loop)
+    //
+    // WHY THE P-LOOP IS NOT ENOUGH. `maxSlew` is ±0.5% BY DESIGN — that is what keeps a rate
+    // correction invisible on moving video. It is also, arithmetically, a drain rate of 0.005 s
+    // of buffer per second: recovering a 0.3 s overfill takes ~60 s at the rail, and a sender
+    // that pauses again inside that minute refills faster than the loop drains. The loop is a
+    // fine-settle mechanism and cannot be retuned into a coarse one without making every
+    // correction visible.
+    //
+    // WHERE THE OVERFILL COMES FROM. A paused/static sender stops producing (or drops to a
+    // trickle), then RESUMES with a burst whose RTP timestamps are continuous across the gap.
+    // The newest queued PTS jumps far ahead of `now` in a fraction of a second, and depth lands
+    // deep and STAYS deep, because the drain rail above cannot pull it back. Every sender pause
+    // in a review session leaves another permanent slab of latency.
+    //
+    // THE SNAP. When the SMOOTHED depth sits above `targetDepth + snapThreshold` continuously
+    // for `snapDebounce` seconds, re-anchor so `now()` jumps FORWARD by the excess. Depth is
+    // `newestQueuedPTS − now`, so advancing `now` is what removes the latency; the renderer's
+    // display tick then drops the frames that just went stale on its next pass, at a frame
+    // boundary, through the same selection path it always uses. There is no queue surgery here
+    // and none is needed — dropping the OLDEST frames would not move `newest`, and so would not
+    // remove one millisecond of latency.
+    //
+    // The debounce is the whole discrimination: a single IDR or jitter burst spikes depth and
+    // subsides (the buffer absorbing a spike is the buffer WORKING, and must not trigger a
+    // jump), while a sender-pause overfill is monotonic and permanent. Sustained-over-threshold
+    // is the signature of the second and not the first.
+
+    /// Master switch. DEFAULT OFF, and deliberately so: docs/LIVECLOCK_PRESETS.md's depth grid was
+    /// measured with no snap in the loop, and silently enabling one would invalidate every cell of
+    /// it (a FAIL from a saturated buffer would become a PASS with a hidden jump). The synthetic
+    /// harness therefore stays exactly as swept; live transports opt in.
+    public var snapEnabled = false
+
+    /// How far above target depth must sit to be considered a GROSS overfill rather than something
+    /// the P-loop should handle. 0.2 s over a 0.2 s target = snap above ~0.4 s. Conservative on
+    /// purpose: the cost of a missed snap is latency, the cost of a false snap is a visible jump.
+    public var snapThreshold: Double = 0.2
+
+    /// How long depth must stay above the threshold before snapping. This is the transient filter
+    /// — long enough that a burst has time to drain through the buffer, short enough that a real
+    /// overfill is not endured. Note this is also a floor on the latency a snap can leave behind:
+    /// we knowingly run deep for this long before correcting.
+    public var snapDebounce: Double = 0.75
+
+    /// Host time depth first went above the threshold in the CURRENT excursion, or nil when depth
+    /// is under it. Cleared on every dip back under, so the debounce measures CONTINUOUS time over
+    /// threshold rather than cumulative time — one 3 s overfill snaps; six flickering 0.5 s spikes
+    /// never do, which is the distinction the whole mechanism rests on. Guarded by `lock`.
+    private var overThresholdSince: Double?
+
+    // MARK: - Why there is NO repeated-snap safety valve here
+    //
+    // There was one, and it was DELETED. The reasoning it rested on is recorded here so it is not
+    // rebuilt from the same intuition.
+    //
+    // It counted snaps: more than N inside a window was read as "this connection cannot sustain
+    // low latency", so it stopped snapping and RAISED the effective target to the depth being
+    // held (0.200 → 0.540), calling that state DEGRADED.
+    //
+    // THE INVERSION. That logic assumed repeated snaps mean the buffer cannot be held at target.
+    // On a real WHEP connection they mean the opposite. An SFU delivers a BACKLOG on connect,
+    // faster than real time — measured on this path: 659 pictures in 25 s of wall time from a
+    // 23.98 fps sender, i.e. 27.48 s of content, a 2.48 s surplus — and the snaps that follow are
+    // the system DRAINING it. The valve therefore disabled the only mechanism that was working,
+    // at precisely the moment it was working, and the buffer ran away to a hard freeze.
+    //
+    // WHY A SUSTAINED DEFICIT IS NOT POSSIBLE. The valve's premise was a regime where in > out
+    // permanently. There is no such regime: the sender produces 23.98 pictures per second and the
+    // SFU cannot exceed that indefinitely. Every overfill is FINITE, so discarding always
+    // converges. Snapping as often as needed IS the correct posture, and holding `targetDepth`
+    // fixed is the correct default.
+    //
+    // IF ADAPTIVE DEPTH IS EVER WANTED AGAIN it must be gated on snaps that recur AFTER a
+    // sustained quiet period at target — evidence of genuine ongoing instability — and never on
+    // consecutive snaps inside a startup drain, which is what the deleted version keyed on.
+
+    // MARK: - Freeze guard (the unrecoverable-state safety net)
+    //
+    // THE FAILURE IT CATCHES. The renderer selects the newest frame with `pts <= now()`. If the
+    // clock falls behind the ENTIRE queue, nothing satisfies that predicate — and because the
+    // queue evicts its OLDEST entry when full, the frames that would have become eligible are
+    // exactly the ones discarded. The whole window then slides further into the future with every
+    // arrival: the renderer freezes on one frame while transport keeps running, and no amount of
+    // rate slew recovers it (±0.5% against a 1.4 s deficit is minutes of drain).
+    //
+    // THE GUARD. Queue NON-EMPTY and NO eligible frame, sustained, is not a transient — it is
+    // that unrecoverable state, and the only exit is to move the clock. Re-anchor forward so
+    // `now() == newest.pts − targetDepth`, which by construction makes most of the queue eligible
+    // again and drains it through the renderer's ordinary consume-up-to-newest-eligible path.
+    //
+    // This is a SAFETY NET, not a tuning knob, so it fires unconditionally — no snap state, no
+    // eligibility check, no debounce shared with anything else can suppress it.
+    //
+    // ── WHY IT IS NOT A BARE TICK COUNT ────────────────────────────────────────────────────────
+    //
+    // "No eligible frame for K ticks" alone is WRONG, by arithmetic. A 23.98 fps stream makes a
+    // frame due every 41.7 ms; the display ticks every 16.7 ms (60 Hz) or 8.3 ms (120 Hz). So
+    // HEALTHY playback spends 2–3 consecutive ticks at 60 Hz, and ~5 at 120 Hz, with a non-empty
+    // queue and nothing eligible — every single frame. A bare K=3 fires continuously on a 120 Hz
+    // panel. Hence two additional conditions, and both are load-bearing:
+    //
+    //   * a WALL-TIME hold (`freezeGuardHold`), so the trigger is display-rate independent. At
+    //     0.25 s ≈ 6 frame intervals it is unreachable in healthy playback (where the maximum gap
+    //     is ONE frame interval) and negligible as detection latency against a permanent freeze.
+    //   * ARMED ONLY AFTER THE FIRST PRESENTATION. The startup fill IS this state by
+    //     construction — the queue fills while `now()` is deliberately held `startupDepth` behind
+    //     it — so an unarmed guard would re-anchor away the very cushion it exists to establish,
+    //     on every connect. `hasPresentedOnce` is per-STREAM and cleared in `reset()`.
+
+    /// Consecutive display ticks with a NON-EMPTY queue and no frame satisfying `pts <= now()`.
+    /// Guarded by `lock`.
+    private var ineligibleTicks = 0
+    /// Host time the current ineligible run began; nil whenever a frame was presentable. Guarded
+    /// by `lock`. Paired with `ineligibleTicks` — the guard needs BOTH satisfied.
+    private var ineligibleSince: Double?
+    /// Whether ANY frame has been presented since the anchor was established. The guard is
+    /// DISARMED until this is true, which is what excludes the startup fill (see above).
+    /// Per-STREAM: cleared by `reset()`, so a reconnect re-disarms for its own fill.
+    private var hasPresentedOnce = false
+
+    /// Consecutive ineligible ticks required before the guard may fire. A floor against a
+    /// single-tick blip; the wall-time hold below is what actually discriminates.
+    public var freezeGuardTicks = 3
+    /// Wall-clock seconds the ineligible state must persist. See the arithmetic above for why
+    /// this exists and why 0.25 s is both safe and fast enough.
+    public var freezeGuardHold: Double = 0.25
+
+    /// Whether COARSE intervention is permitted at this instant. Only ⌃⌥U's measurement baseline
+    /// withholds it: pinning the rate to unity exists precisely to read the UNINTERVENED depth,
+    /// and a snap mid-measurement would corrupt the number being measured. Unconditionally true in
+    /// Release, where that diagnostic does not exist. Read under `lock`, like `forceUnityRate`.
+    private var snapEligible: Bool {
+        #if DEBUG
+        return !forceUnityRate
+        #else
+        return true
+        #endif
+    }
+
+    /// What `updateDepth` did that the CALLER should report. Returned rather than dispatched
+    /// through a callback because `updateDepth` runs under `lock`: handing it back through the
+    /// return value means the caller receives it with the lock already released (the `defer` runs
+    /// first), so a logging sink can never re-enter the clock or stall the render thread inside
+    /// the critical section. At most one of these can fire per call — the branches are exclusive.
+    public enum Event: Sendable {
+        /// A gross overfill was corrected by jumping the presentation clock forward.
+        case snapped(SnapEvent)
+        /// The clock had fallen behind the ENTIRE queue and was re-anchored to recover.
+        case freezeGuard(FreezeGuardEvent)
+        /// The queue hit its bound — by definition excess buffer — and the clock was re-anchored
+        /// to `newest − targetDepth` so the surplus drains through normal selection.
+        case overflowReanchor(OverflowEvent)
+
+        /// Seconds of presentation time the clock jumped FORWARD, for whichever action fired.
+        /// This is the quantity a surplus accountant must sum as "flushed": every one of these
+        /// events discards exactly this much buffered content.
+        public var jumped: Double {
+            switch self {
+            case .snapped(let e):          return e.excess
+            case .freezeGuard(let e):      return e.jumped
+            case .overflowReanchor(let e): return e.jumped
+            }
+        }
+    }
+
+    public struct SnapEvent: Sendable {
+        /// Smoothed depth immediately before the snap — the latency that was actually being carried.
+        public let depthBefore: Double
+        /// Where the snap puts it, by construction: `targetDepth`. The NEXT depth sample is the
+        /// measurement; this is the intent, and the two are worth comparing in a log.
+        public let depthAfter: Double
+        /// Seconds of latency removed (`depthBefore - depthAfter`).
+        public let excess: Double
+        /// How long depth had been continuously over threshold when it fired — the evidence that
+        /// this was a sustained overfill and not a burst.
+        public let sustainedFor: Double
+    }
+
+    public struct FreezeGuardEvent: Sendable {
+        /// Seconds the presentation clock was moved forward.
+        public let jumped: Double
+        /// Consecutive ineligible display ticks when it fired.
+        public let ticks: Int
+        /// Wall seconds the ineligible state had persisted — the display-rate-independent number.
+        public let heldFor: Double
+        /// Queue depth at the moment of the freeze. Non-zero by definition (that is the pathology:
+        /// frames present, none reachable).
+        public let queued: Int
+        /// How far AHEAD of the clock the OLDEST queued frame sat. Positive by definition; this is
+        /// the direct measure of how far behind the whole queue the clock had fallen.
+        public let oldestAhead: Double
+        /// Smoothed depth immediately before the re-anchor.
+        public let depthBefore: Double
+        /// The target it was re-anchored to.
+        public let target: Double
+    }
+
+    public struct OverflowEvent: Sendable {
+        /// Seconds the presentation clock was moved forward.
+        public let jumped: Double
+        /// Queue count at the moment the bound was hit.
+        public let queued: Int
+        /// Depth (`newest − now`) immediately before the re-anchor.
+        public let depthBefore: Double
+        /// The target it was re-anchored to.
+        public let target: Double
+    }
+
     #if DEBUG
     /// DIAGNOSTIC (⌃⌥U): force the control loop OFF — pin `rate` at unity (1.0) while leaving the
     /// depth EMA and `[LIVECLOCK]` logging running UNCHANGED, so the MEASURED depth can be read under
@@ -114,7 +323,10 @@ public final class LiveClock: @unchecked Sendable {
     /// depth (setting them equal makes the fill land at the setpoint — no long drain to swamp a settle
     /// window). NOT for production paths — the setpoint is fixed there.
     public func setDepths(startup: Double, target: Double) {
-        lock.lock(); startupDepth = startup; targetDepth = target; lock.unlock()
+        lock.lock()
+        startupDepth = startup
+        targetDepth = target
+        lock.unlock()
     }
     #endif
 
@@ -138,7 +350,9 @@ public final class LiveClock: @unchecked Sendable {
     ///   - startupDepth: seconds of buffer to fill before the FIRST frame is presented (the startup
     ///     delay / initial cushion — pushes the host anchor into the future).
     ///   - targetDepth: the steady-state control SETPOINT the loop holds the buffer at once running.
-    ///     Same default as `startupDepth`, independently tunable.
+    ///     Same default as `startupDepth`, independently tunable. FIXED for the life of the clock
+    ///     (outside the DEBUG sweep hook): nothing inflates it any more — see the deleted
+    ///     safety-valve note above for why the thing that used to is gone.
     public init(startupDepth: Double = 0.15, targetDepth: Double = 0.15) {
         self.startupDepth = startupDepth
         self.targetDepth = targetDepth
@@ -216,8 +430,35 @@ public final class LiveClock: @unchecked Sendable {
     /// means `now()` is trailing, so we slew `rate` slightly ABOVE 1.0 to advance the clock faster
     /// and drain back to target; too-shallow slews below. `maxSlew` keeps the move invisible.
     ///
+    /// ON TOP of that P-loop sits the coarse snap-to-live outer loop (see the snap section above):
+    /// the P-loop does the fine settle at target, the snap handles gross overfill the P-loop's
+    /// ±0.5% rail cannot drain. They do not interact — the snap re-anchors and hands the loop a
+    /// zero error, which is the state the loop is designed for.
+    ///
+    /// AND, ahead of both, the FREEZE GUARD (see its section above) — the safety net for the state
+    /// neither loop can leave, where the clock has fallen behind the entire queue.
+    ///
+    /// Returns a coarse-action report (snap / freeze-guard) when one fired, for the caller to log;
+    /// nil (the overwhelmingly common case) otherwise. `@discardableResult` because the synthetic
+    /// harness has no interest in it.
+    ///
+    /// - Parameters:
+    ///   - oldestPTS: presentation PTS of the OLDEST queued frame, or nil if the queue is empty.
+    ///   - newestPTS: presentation PTS of the NEWEST queued frame, or nil if the queue is empty.
+    ///   - presented: whether the renderer selected a frame on this tick (`pts <= now()` matched).
+    ///
+    /// The last three are DEFAULTED so existing callers are unchanged — and, deliberately, so the
+    /// freeze guard is INERT for them. The synthetic harness (`SyntheticLiveSource`) is exactly
+    /// such a caller: `docs/LIVECLOCK_PRESETS.md`'s depth grid was swept with no coarse
+    /// intervention in the loop, and silently arming one here would invalidate every cell of it.
+    /// Live transports opt in by passing the queue's edges, the same way they opt into `snapEnabled`.
+    ///
     /// Called on the render thread; writes `rate` under `lock` (the same lock `now()` reads it under).
-    public func updateDepth(spanSeconds: Double, count: Int) {
+    @discardableResult
+    public func updateDepth(spanSeconds: Double, count: Int,
+                            oldestPTS: Double? = nil,
+                            newestPTS: Double? = nil,
+                            presented: Bool = true) -> Event? {
         lock.lock()
         defer { lock.unlock() }
 
@@ -254,7 +495,15 @@ public final class LiveClock: @unchecked Sendable {
         // not `isAnchored`, because we already hold `lock` (NSLock is non-recursive).
         guard anchorSenderPTS != nil, spanSeconds.isFinite, abs(spanSeconds) < 10 else {
             smoothedDepth = nil
-            return
+            // Also drop the excursion timers: a gap in valid samples is not evidence of anything,
+            // and letting `overThresholdSince` survive it would let a pre-gap excursion and a
+            // post-gap one add up to a debounce that never actually happened continuously. The
+            // freeze-guard run is dropped for the same reason — but NOT `hasPresentedOnce`, which
+            // is a per-STREAM fact and is cleared only by `reset()`.
+            overThresholdSince = nil
+            ineligibleTicks = 0
+            ineligibleSince = nil
+            return nil
         }
 
         // Low-pass the raw span (reject per-tick jitter) — every call.
@@ -267,17 +516,76 @@ public final class LiveClock: @unchecked Sendable {
 
         let t = hostNow()
 
+        // ── FREEZE GUARD ────────────────────────────────────────────────────────────────────
+        //
+        // FIRST, and unconditionally. It is evaluated ahead of the snap block precisely so that no
+        // other coarse state can suppress it: an unrecoverable clock position must be escapable
+        // from every regime, not only from the regimes the snap logic considers healthy.
+        if let event = evaluateFreezeGuard(t: t, count: count,
+                                           oldestPTS: oldestPTS, newestPTS: newestPTS,
+                                           presented: presented) {
+            logIfDue(t)
+            return event
+        }
+
+        // ── COARSE OUTER LOOP: snap-to-live ─────────────────────────────────────────────────
+        //
+        // Evaluated at the FULL sample rate, before the controlHz gate, because the excursion
+        // timer below must measure real elapsed time rather than a decimated approximation of it.
+        // The cost is two comparisons per display tick.
+        //
+        // The predicate reads the SMOOTHED depth (a single-sample sawtooth peak is not an
+        // overfill; the trend is) against a FIXED `targetDepth` — nothing inflates it any more.
+        if let depth = smoothedDepth {
+            if depth > targetDepth + snapThreshold {
+                if overThresholdSince == nil { overThresholdSince = t }
+            } else {
+                // Back under: the excursion is OVER, whatever it was. Restarting the debounce from
+                // scratch is what makes the mechanism reject flicker — see `overThresholdSince`.
+                overThresholdSince = nil
+            }
+
+            if snapEnabled, snapEligible,
+               let since = overThresholdSince, t - since >= snapDebounce {
+                // THE SNAP. Re-anchor so now() jumps FORWARD by the excess — the same rebase the
+                // rate-change path below performs (evaluate the old mapping at `t`, restart the
+                // segment there), plus the deliberate jump. Depth is `newestQueuedPTS − now`, so
+                // this is what removes the latency; the renderer's next display tick drops the
+                // frames that just went stale, at a frame boundary, through its normal selection.
+                //
+                // Fires as often as the buffer needs it to. Repeated snaps during a backlog drain
+                // are the system WORKING — see the deleted-safety-valve note above.
+                let excess = depth - targetDepth
+                let sustained = t - since
+                let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate
+                anchorSenderPTS = mappedNow + excess
+                anchorHostTime  = t
+                // Hand the P-loop a clean slate at the setpoint: unity rate (not the drain rail it
+                // was pinned to while trying to fight this) and a seeded EMA, so it does not spend
+                // the next second unwinding a huge stale error it no longer has.
+                rate = 1.0
+                smoothedDepth = targetDepth
+                lastControlHost = nil
+                overThresholdSince = nil
+                logIfDue(t)
+                return .snapped(SnapEvent(depthBefore: depth,
+                                          depthAfter: targetDepth,
+                                          excess: excess,
+                                          sustainedFor: sustained))
+            }
+        }
+
         // Rate-limit the actual rate recompute to `controlHz` — don't chase refresh-rate noise.
         if let last = lastControlHost, t - last < controlInterval {
             logIfDue(t)
-            return
+            return nil
         }
         lastControlHost = t
 
         #if DEBUG
         // Loop OFF: `rate` is already pinned to 1.0 at entry. Log at the normal cadence and return
         // WITHOUT slewing — so [LIVECLOCK] shows depth/err measured at rate≡1.0, rate=1.0000.
-        if forceUnityRate { logIfDue(t); return }
+        if forceUnityRate { logIfDue(t); return nil }
         #endif
 
         let depth = smoothedDepth ?? spanSeconds
@@ -308,6 +616,159 @@ public final class LiveClock: @unchecked Sendable {
         }
 
         logIfDue(t)
+        return nil   // the fine loop reports nothing; only the coarse actions above do
+    }
+
+    /// The freeze guard's decision, split out of `updateDepth` only for readability.
+    ///
+    /// PRECONDITIONS — the caller has already established both, and this method depends on both:
+    /// `lock` is HELD (it is a direct extension of `updateDepth`'s critical section, not a new
+    /// one), and the anchor pair is NON-NIL (`updateDepth`'s guard returned otherwise). The anchor
+    /// is only ever set or cleared as a PAIR under this lock, so the force-unwraps cannot trap —
+    /// the same invariant the snap and rate-change rebases rely on a few lines below.
+    ///
+    /// Runs on the render thread, adding no lock acquisition to the hot path.
+    private func evaluateFreezeGuard(t: Double, count: Int,
+                                     oldestPTS: Double?, newestPTS: Double?,
+                                     presented: Bool) -> Event? {
+        // Queue edges not plumbed → the caller has not opted in (the synthetic harness). Inert,
+        // and deliberately so; see `updateDepth`'s parameter documentation.
+        guard let oldestPTS, let newestPTS else { return nil }
+
+        if presented {
+            // A frame reached the screen. That both ARMS the guard for the rest of the stream and
+            // clears any run in progress — this is the only place `hasPresentedOnce` is set.
+            hasPresentedOnce = true
+            ineligibleTicks = 0
+            ineligibleSince = nil
+            return nil
+        }
+
+        // An EMPTY queue is an underrun, not a freeze: there is simply nothing to select, and the
+        // clock is positioned correctly. Only a NON-EMPTY queue can be frozen behind.
+        guard count > 0 else {
+            ineligibleTicks = 0
+            ineligibleSince = nil
+            return nil
+        }
+
+        // Disarmed until the first presentation — this is what excludes the startup fill, which is
+        // this exact state by construction. See the section comment for the full argument.
+        guard hasPresentedOnce else { return nil }
+
+        ineligibleTicks += 1
+        if ineligibleSince == nil { ineligibleSince = t }
+        guard let since = ineligibleSince,
+              ineligibleTicks >= freezeGuardTicks,
+              t - since >= freezeGuardHold else { return nil }
+
+        // FIRE. The clock is behind the entire queue; re-anchor so now() == newest − targetDepth.
+        // Same rebase shape as the snap: evaluate the OLD mapping at `t` for the report, then
+        // restart the segment at `t` with the corrected position.
+        let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate
+        let target = targetDepth
+        let corrected = newestPTS - target
+        let jumped = corrected - mappedNow
+
+        // NEVER MOVE THE CLOCK BACKWARD. With the shipped tuning this cannot arise — for the
+        // ineligible state to survive `freezeGuardHold` (0.25 s) the newest frame must be at least
+        // that far ahead, which exceeds `targetDepth` (0.200 s), so `jumped` is positive. But
+        // `freezeGuardHold` and `targetDepth` are independent public knobs, and a target raised
+        // above the hold would make `newest − target` land BEHIND the current position — rewinding
+        // presentation time, re-showing frames already displayed, and handing the depth EMA a
+        // negative error. Bail instead, leaving the run counting: if the freeze is real the queue
+        // keeps filling and the condition re-fires once there is genuinely something to remove.
+        guard jumped > 0 else { return nil }
+        let heldFor = t - since
+        let ticks = ineligibleTicks
+        let depthBefore = smoothedDepth ?? (newestPTS - mappedNow)
+        let oldestAhead = oldestPTS - mappedNow
+
+        anchorSenderPTS = corrected
+        anchorHostTime  = t
+        // Same clean slate the snap hands the P-loop: unity rate and a seeded EMA at the setpoint,
+        // so it does not spend the next second unwinding an error it no longer has.
+        rate = 1.0
+        smoothedDepth = target
+        lastControlHost = nil
+        overThresholdSince = nil
+        ineligibleTicks = 0
+        ineligibleSince = nil
+
+        #if DEBUG
+        FileHandle.standardError.write(Data(String(
+            format: "[LIVECLOCK] freeze-guard: no eligible frame for %d ticks / %.3fs, queue=%d, "
+                  + "oldest=+%.3fs ahead — re-anchored (depth %.3f → target %.3f, jumped +%.3fs)\n",
+            ticks, heldFor, count, oldestAhead, depthBefore, target, jumped).utf8))
+        #endif
+
+        return .freezeGuard(FreezeGuardEvent(jumped: jumped, ticks: ticks, heldFor: heldFor,
+                                             queued: count, oldestAhead: oldestAhead,
+                                             depthBefore: depthBefore, target: target))
+    }
+
+    /// The queue hit its bound. Re-anchor to `newestPTS − targetDepth`.
+    ///
+    /// WHY THIS IS A CLOCK ACTION AND NOT A QUEUE ACTION. Reaching `maxQueued` under a LIVE source
+    /// is, by definition, excess buffer — the queue is sized with headroom above what the control
+    /// loop needs, so touching the bound means more content arrived than real time can carry.
+    /// Silently dropping the OLDEST frame is the worst available response: it does not remove one
+    /// millisecond of latency (depth is `newest − now`, and evicting the oldest does not move
+    /// `newest`), while it DOES discard precisely the frames that were about to become eligible —
+    /// which is how the whole window slides into the future and the renderer freezes.
+    ///
+    /// Moving the CLOCK is what removes the latency. The stale frames then drain naturally on the
+    /// next tick through the renderer's existing consume-up-to-newest-eligible path, at a frame
+    /// boundary, with no queue surgery. The caller's `removeFirst` trim stays as the mechanical
+    /// backstop, but should now be a rare consequence rather than the primary policy.
+    ///
+    /// NO DEBOUNCE, deliberately. During a backlog drain this may fire several times in quick
+    /// succession, and that is CORRECT — it is the backlog draining. Each firing logs its own jump
+    /// magnitude and resulting count so the sequence can be counted in the log and confirmed to
+    /// stop once surplus goes flat.
+    ///
+    /// THREADING: called on the SOURCE thread from the enqueue path, after the renderer's queue
+    /// lock is released. It takes `lock` — the same lock `registerFrame` already takes on that
+    /// thread for every frame — so this introduces no new contention class.
+    @discardableResult
+    public func overflowReanchor(newestPTS: Double, count: Int) -> Event? {
+        lock.lock()
+        defer { lock.unlock() }
+        // Unanchored (no frame has established the mapping yet): nothing to correct.
+        guard let aPTS = anchorSenderPTS, let aHost = anchorHostTime, newestPTS.isFinite else {
+            return nil
+        }
+        let t = hostNow()
+        let mappedNow = aPTS + (t - aHost) * rate
+        let depthBefore = newestPTS - mappedNow
+        // Already at or under target — the bound was reached without excess latency (a very deep
+        // burst of near-simultaneous PTS, say). Moving the clock BACKWARD is never correct, so the
+        // mechanical trim is the whole response.
+        guard depthBefore > targetDepth else { return nil }
+
+        let target = targetDepth
+        anchorSenderPTS = newestPTS - target
+        anchorHostTime  = t
+        rate = 1.0
+        smoothedDepth = target
+        lastControlHost = nil
+        overThresholdSince = nil
+        // The clock just moved forward over most of the queue, so any ineligible run in progress
+        // describes a position that no longer exists. `hasPresentedOnce` is untouched — the stream
+        // is continuing, not restarting.
+        ineligibleTicks = 0
+        ineligibleSince = nil
+
+        let jumped = depthBefore - target
+        #if DEBUG
+        FileHandle.standardError.write(Data(String(
+            format: "[LIVECLOCK] queue-full: over-buffered at count=%d — re-anchored "
+                  + "(depth %.3f → target %.3f, jumped +%.3fs)\n",
+            count, depthBefore, target, jumped).utf8))
+        #endif
+
+        return .overflowReanchor(OverflowEvent(jumped: jumped, queued: count,
+                                               depthBefore: depthBefore, target: target))
     }
 
     /// DEBUG-only ~1 Hz telemetry: watch `depth` settle to `target` and `rate` settle to the
@@ -317,6 +778,8 @@ public final class LiveClock: @unchecked Sendable {
         if let last = lastLogHost, t - last < 1.0 { return }
         lastLogHost = t
         let d = smoothedDepth ?? .nan
+        // `target` is now always the CONFIGURED one — nothing inflates it, so there is no longer a
+        // second regime to distinguish and the old DEGRADED marker has gone with the mechanism.
         FileHandle.standardError.write(Data(String(
             format: "[LIVECLOCK] depth=%.3fs target=%.3f rate=%.4f err=%+.4f count=%d\n",
             d, targetDepth, rate, d - targetDepth, lastCount).utf8))
@@ -337,6 +800,19 @@ public final class LiveClock: @unchecked Sendable {
         lastLogHost = nil
         lastCount = 0
         rate = 1.0
+        // Snap state is per-STREAM, so it clears with everything else: a reconnect starts from the
+        // aggressive low-latency posture with no excursion in progress.
+        overThresholdSince = nil
+        // FREEZE-GUARD STATE IS PER-STREAM TOO, AND `hasPresentedOnce` ESPECIALLY SO. A reconnect
+        // performs a fresh `startupDepth` fill, which is BY CONSTRUCTION the state the guard
+        // triggers on (queue filling, nothing eligible). Leaving the flag armed across a reconnect
+        // would re-anchor away the 0.200 s cushion on the second and every subsequent connect —
+        // the exact failure the arm-after-first-present rule exists to prevent, merely displaced
+        // from first connect to every later one. Same discipline as clearing the drift state on
+        // reconnect so a gap cannot manufacture phantom drift.
+        ineligibleTicks = 0
+        ineligibleSince = nil
+        hasPresentedOnce = false
         lock.unlock()
     }
 

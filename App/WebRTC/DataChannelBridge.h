@@ -17,6 +17,19 @@
 //  Still no RTP depacketization and no decode: step 2 succeeds when the transport
 //  connects. Signalling (the HTTP POST) is NOT here — it lives in Swift/URLSession.
 //
+//  STEP 3a OF 4 (WHEP): RECEIVE + DEPACKETIZE. libdatachannel does not depacketize
+//  inbound media — it hands us raw RTP on the recvonly track — so the session now
+//  attaches a message callback to the video track and drives an RFC 6184 H.264
+//  depacketizer (H264Depacketizer.h, pure C, no libdatachannel in it). Output is
+//  NAL units grouped into access units; nothing is decoded and nothing is drawn.
+//  The checkpoint is the 1 Hz `[WHEP-RTP]` line: correctly typed NAL counts.
+//
+//  STEP 3b OF 4 (WHEP): DECODE. Completed access units are handed OFF the network
+//  thread onto `decodeQueue` and delivered to `onVideoAccessUnit`. The decoder
+//  itself is Swift (WHEPVideoDecoder) — this file only owns the handoff, because
+//  "never block libdatachannel's thread" is a property of this seam, not of the
+//  decoder. Still nothing on screen: that is step 4.
+//
 
 #import <Foundation/Foundation.h>
 
@@ -126,6 +139,47 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
 /// The nominated ICE candidate pair, once connected — the "which path did it pick" line that
 /// webrtc-internals shows. nil before connection.
 - (nullable NSString *)selectedCandidatePair;
+
+#pragma mark - Inbound video (step 3a: RTP → NAL units)
+
+/// The serial queue every access unit is delivered on, and the ONLY queue the decoder may
+/// be touched from. Exposed so teardown can be ordered behind the work already queued:
+/// `session.decodeQueue.async { decoder.invalidate() }` runs after the last in-flight frame,
+/// which tearing the decoder down from main would not.
+///
+/// Created with an autorelease pool (a CMSampleBuffer per frame) at user-initiated QoS.
+@property (nonatomic, readonly) dispatch_queue_t decodeQueue;
+
+/// Fires on `decodeQueue`, once per complete access unit, in arrival order.
+///
+/// `avcc` is one frame's VCL NALs, each prefixed with its 4-byte big-endian length — the
+/// layout CMBlockBuffer/VTDecompressionSession want. Parameter sets are NOT in it: `sps`
+/// and `pps` carry the latest ones separately, which is what
+/// CMVideoFormatDescriptionCreateFromH264ParameterSets requires. They are supplied with
+/// EVERY access unit so a decoder attached mid-stream is never left without them;
+/// `parameterSetsChanged` is YES only when the bytes actually differ from the previous
+/// pair, so it can drive rebuild-on-change directly.
+///
+/// SET THIS BEFORE -setRemoteAnswer:. The property is atomic (unlike the others here)
+/// because it is read from libdatachannel's network thread.
+@property (copy, nullable) void (^onVideoAccessUnit)(NSData *avcc,
+                                                     NSData *_Nullable sps,
+                                                     NSData *_Nullable pps,
+                                                     BOOL parameterSetsChanged,
+                                                     BOOL keyframe,
+                                                     uint32_t rtpTimestamp);
+
+/// One cumulative, human-readable line of depacketizer counters — the same numbers the
+/// session logs each second under `[WHEP-RTP]`, totalled since the answer was applied.
+/// Intended for the teardown summary. nil if no video has been received.
+- (nullable NSString *)rtpStatsSummary;
+
+/// Sends a Picture Loss Indication, asking the sender for an IDR.
+///
+/// Called automatically (a few times, then it gives up) if slices are arriving but no
+/// keyframe has been seen — the normal cause is joining a stream mid-GOP. Exposed so a
+/// debug binding can force one. Main queue.
+- (BOOL)requestKeyframe;
 
 /// Closes and destroys the PeerConnection. Main queue only; safe to call twice.
 - (void)close;

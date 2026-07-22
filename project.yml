@@ -16,6 +16,35 @@ configs:
   Release: release
   Profile: release
 
+# PROJECT-LEVEL settings — the only place that reaches the ManifoldCore SPM package.
+#
+# WHY THIS BLOCK EXISTS. `#if DEBUG` is an API boundary here: LiveClock's tuning hooks
+# (forceUnityRate / setForceUnityRate / setDepths) are DEBUG-only, and the app's DEBUG-only
+# harness (SyntheticLiveSource) calls them. The two sides must agree on DEBUG or the call site
+# fails to compile with "LiveClock has no member 'setForceUnityRate'" — which is exactly what
+# Profile did.
+#
+# The app target's `settings.configs.Profile` below defines DEBUG for the APP TARGET ONLY.
+# ManifoldCore is not a target in this project — it is a package dependency, and Xcode's SwiftPM
+# integration synthesizes its build targets fresh, inheriting the PROJECT's build configuration
+# of the same name. Target-level settings are invisible to it. Profile is a `release`-type config,
+# so SwiftPM gave it the release defaults (no DEBUG) while the app had DEBUG: the mismatch.
+#
+# Setting it here fixes both sides at once, because the app target inherits the project level too.
+# Debug (SwiftPM defines DEBUG itself for debug-type configs) and Release (correctly no DEBUG on
+# either side) are untouched — this key is scoped to Profile only.
+#
+# Swift only, deliberately: nothing in the package uses `#ifdef DEBUG` from C/ObjC, and adding a
+# project-level GCC_PREPROCESSOR_DEFINITIONS would change what `$(inherited)` resolves to in the
+# app target's own per-config list (see the note there).
+#
+# If you add another `#if DEBUG` symbol that crosses the app↔ManifoldCore boundary, nothing new is
+# needed — but if you add a THIRD config, it must appear here too or it will break the same way.
+settings:
+  configs:
+    Profile:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+
 packages:
   ManifoldCore:
     path: Packages/ManifoldCore
@@ -201,13 +230,20 @@ targets:
       # Debug and Release inherit their standard XcodeGen presets unchanged.
       configs:
         Profile:
-          # Optimize App-layer Swift (harness, renderer, scopes) AND the ManifoldCore package
-          # (LiveClock) whole-app at -O — broader than the SPM ScopeCompute per-target -O, which
-          # only covers that one numeric target.
+          # Optimize App-layer Swift (harness, renderer, scopes) at -O — broader than the SPM
+          # ScopeCompute per-target -O, which only covers that one numeric target. ManifoldCore
+          # (LiveClock) is ALREADY -O here without this line: Profile is a `release`-type config,
+          # so SwiftPM's synthesized package targets get the release optimization default. This
+          # setting does not reach them — see the project-level `settings:` block at the top.
           SWIFT_OPTIMIZATION_LEVEL: "-O"
           GCC_OPTIMIZATION_LEVEL: s
           # Keep DEBUG defined for BOTH Swift (#if DEBUG) and C/ObjC (#ifdef DEBUG) so the harness
           # triggers + telemetry compile in exactly as they do in Debug.
+          #
+          # The Swift half is ALSO set project-level (top of file), which is what carries it into
+          # the ManifoldCore package — the app-side half is restated here so the app target's
+          # intent is readable on its own, and because a future project-level change must not be
+          # able to silently drop DEBUG from the app while the package keeps it.
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
           GCC_PREPROCESSOR_DEFINITIONS:
             - $(inherited)
