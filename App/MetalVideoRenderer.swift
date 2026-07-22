@@ -6,37 +6,12 @@ import CoreMedia
 import QuartzCore
 import ImageIO
 import UniformTypeIdentifiers
-import os                 // os_unfair_lock — priority-donating lock for the live frame queue
+import ManifoldCore      // UnfairLock — priority-donating lock for the live frame queue
 
-/// Copy-safe wrapper around `os_unfair_lock`. The primitive is a struct that MUST NOT be copied —
-/// a by-value copy is a DISTINCT lock and fails silently — so we heap-allocate exactly one
-/// `os_unfair_lock` in init and only ever touch it through this class's stable pointer. Reference
-/// semantics mean assigning or capturing the lock can never duplicate the primitive.
-///
-/// Why not `NSLock` (what this replaces): `NSLock` is a `pthread_mutex`, which does NOT boost its
-/// holder's priority. On the live frame path the `.utility` emit thread holds the queue lock while
-/// enqueuing, and the real-time CVDisplayLink render thread blocks on it in `displayTick` right
-/// before the encode window → unbounded priority inversion. `os_unfair_lock` DONATES the waiting
-/// render thread's scheduling priority to whatever thread holds the lock, so the `.utility` holder
-/// is boosted only while holding and releases promptly — which is what dissolves the inversion.
-///
-/// Exposes the same `lock()`/`unlock()` surface as `NSLock`, so existing call sites are unchanged.
-private final class UnfairLock {
-    private let _lock: os_unfair_lock_t
-
-    init() {
-        _lock = .allocate(capacity: 1)
-        _lock.initialize(to: os_unfair_lock())
-    }
-
-    deinit {
-        _lock.deinitialize(count: 1)
-        _lock.deallocate()
-    }
-
-    @inline(__always) func lock()   { os_unfair_lock_lock(_lock) }
-    @inline(__always) func unlock() { os_unfair_lock_unlock(_lock) }
-}
+// `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
+// UnfairLock.swift) because LiveClock needs the same primitive and ManifoldCore cannot depend on
+// the App layer. Hoisted rather than copied — see that file for the inversion argument and the
+// "nothing slow under this lock" rule that keeps donation from backfiring.
 
 /// Matches the shader's ColorParams struct (memory layout).
 private struct ColorParams {

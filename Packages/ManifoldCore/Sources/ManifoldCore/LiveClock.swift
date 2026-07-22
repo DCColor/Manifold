@@ -45,8 +45,10 @@ import QuartzCore
 ///
 /// THREADING: `registerFrame(senderPTS:)` is called from the SOURCE thread (a frame arrives
 /// off the network / decode), while `now()` is read on the `CVDisplayLink` render thread.
-/// The anchor state is therefore guarded by an `NSLock` (same discipline as `AudioTapBuffer`).
-/// Both entry points are cheap and never block beyond the lock.
+/// The anchor state is therefore guarded by an `UnfairLock` — priority-donating, because a
+/// real-time render thread blocking on a lock held by the decode thread is a textbook inversion.
+/// Both entry points are cheap and never block beyond the lock; see the `lock` declaration for why
+/// nothing may be formatted or written inside a critical section.
 public final class LiveClock: @unchecked Sendable {
 
     /// The presentation/host rate — the multiplier in `now()`. Starts at 1.0 (wall-clock speed);
@@ -131,7 +133,9 @@ public final class LiveClock: @unchecked Sendable {
     public var snapEnabled = false
 
     /// How far above target depth must sit to be considered a GROSS overfill rather than something
-    /// the P-loop should handle. 0.2 s over a 0.2 s target = snap above ~0.4 s. Conservative on
+    /// the P-loop should handle. It is an OFFSET above the target, not an absolute depth, so it
+    /// scales with whatever the caller sets: 0.2 over a 0.2 target snaps above ~0.4, over the live
+    /// path's measured 0.4 target it snaps above ~0.6. Conservative on
     /// purpose: the cost of a missed snap is latency, the cost of a false snap is a visible jump.
     public var snapThreshold: Double = 0.2
 
@@ -201,7 +205,11 @@ public final class LiveClock: @unchecked Sendable {
     //   * a WALL-TIME hold (`freezeGuardHold`), so the trigger is display-rate independent. At
     //     0.25 s ≈ 6 frame intervals it is unreachable in healthy playback (where the maximum gap
     //     is ONE frame interval) and negligible as detection latency against a permanent freeze.
-    //   * ARMED ONLY AFTER THE FIRST PRESENTATION. The startup fill IS this state by
+    //   * ARMED ONLY AFTER THE FIRST PRESENTATION — AND THIS IS NOW THE ONLY PROTECTION, NOT A
+    //     REDUNDANT ONE. While the live target was 0.200 s the fill was also shorter than
+    //     `freezeGuardHold` (0.25 s), so the hold alone would have rejected it; at the measured
+    //     0.400 s target the fill OUTLASTS the hold and arming is all that stands between a
+    //     connect and a spurious re-anchor. The startup fill IS this state by
     //     construction — the queue fills while `now()` is deliberately held `startupDepth` behind
     //     it — so an unarmed guard would re-anchor away the very cushion it exists to establish,
     //     on every connect. `hasPresentedOnce` is per-STREAM and cleared in `reset()`.
@@ -229,7 +237,7 @@ public final class LiveClock: @unchecked Sendable {
     /// and a snap mid-measurement would corrupt the number being measured. Unconditionally true in
     /// Release, where that diagnostic does not exist. Read under `lock`, like `forceUnityRate`.
     private var snapEligible: Bool {
-        #if DEBUG
+        #if DEBUG || MANIFOLD_TELEMETRY
         return !forceUnityRate
         #else
         return true
@@ -305,7 +313,7 @@ public final class LiveClock: @unchecked Sendable {
         public let target: Double
     }
 
-    #if DEBUG
+    #if DEBUG || MANIFOLD_TELEMETRY
     /// DIAGNOSTIC (⌃⌥U): force the control loop OFF — pin `rate` at unity (1.0) while leaving the
     /// depth EMA and `[LIVECLOCK]` logging running UNCHANGED, so the MEASURED depth can be read under
     /// rate≡1.0 to confirm the setpoint is real (not a sawtooth / tick-quantization offset the loop
@@ -343,8 +351,33 @@ public final class LiveClock: @unchecked Sendable {
 
     /// Guards the anchor state AND the control-loop state (`rate` / `smoothedDepth` / gates) across
     /// the source thread (writer, via `registerFrame`), the render thread (reader `now`, writer
-    /// `updateDepth`), and `reset`. Same discipline as `AudioTapBuffer`.
-    private let lock = NSLock()
+    /// `updateDepth`), and `reset`.
+    ///
+    /// UNFAIR LOCK, NOT NSLock — THE HIGHEST-TRAFFIC PRIORITY INVERSION IN THE CODEBASE. The
+    /// real-time `CVDisplayLink` render thread takes this TWICE PER DISPLAY TICK (`now()` at the top
+    /// of the tick, `updateDepth` after selection — 120–240 acquisitions/second at 120 Hz), while
+    /// the lower-priority decode/source thread holds it per frame in `registerFrame`,
+    /// `overflowReanchor` and the telemetry reads. `NSLock` is a `pthread_mutex` and does NOT boost
+    /// its holder, so a descheduled decode thread stalls the display tick for an unbounded interval.
+    /// `os_unfair_lock` DONATES the blocked render thread's priority to the holder, which dissolves
+    /// it. Same conversion, same reasoning, as the renderer's `queueLock` and the WHEP router's
+    /// `backlogLock`/`driftLock`.
+    ///
+    /// NOTHING SLOW UNDER THIS LOCK — and that is now STRUCTURAL, not a convention. A boosted holder
+    /// must release promptly, so the four `[LIVECLOCK]` telemetry lines are no longer written from
+    /// inside the critical section: each locked region returns a small value-type payload, the
+    /// caller unlocks, and only then is anything formatted or written to stderr. The `…Locked`
+    /// helpers below are the locked halves; the public methods are the lock/unlock/emit wrappers.
+    /// `String(format:)` allocates and `FileHandle.write` is a syscall — either one under a donating
+    /// lock is worse than the inversion it replaced.
+    ///
+    /// NO LOCK NESTING, IN EITHER DIRECTION. This class never calls out while holding the lock —
+    /// coarse actions are RETURNED to the caller as an `Event` rather than dispatched through a
+    /// callback (see `Event`), precisely so a logging sink can never re-enter the clock or take a
+    /// second lock inside this critical section. On the render side the renderer calls `clock?()`
+    /// BEFORE taking `queueLock` and `onDepthSample` AFTER releasing it, so the two donating locks
+    /// are strictly sequential and never held together.
+    private let lock = UnfairLock()
 
     /// - Parameters:
     ///   - startupDepth: seconds of buffer to fill before the FIRST frame is presented (the startup
@@ -411,6 +444,83 @@ public final class LiveClock: @unchecked Sendable {
         return anchorSenderPTS + (hostNow() - anchorHostTime) * rate
     }
 
+    // MARK: - Runtime target adjustment (measurement tool)
+
+    /// Floor/ceiling on a manually-stepped `targetDepth`. The floor is below any depth the presets
+    /// sweep found workable; the ceiling is well past the point where a "live" claim is honest.
+    /// Both exist only to keep a keypress from parking the buffer somewhere absurd.
+    public var minTargetDepth: Double = 0.10
+    public var maxTargetDepth: Double = 1.00
+
+    /// The EFFECTIVE setpoint, for callers that must reason in the same units the loop holds — the
+    /// underrun accountant derives "cushion that would have prevented this" from it, so it has to
+    /// read the CURRENT value rather than the one configured at init. Thread-safe.
+    public var currentTargetDepth: Double {
+        lock.lock(); defer { lock.unlock() }
+        return targetDepth
+    }
+
+    /// Step the setpoint by `delta`, clamped to `minTargetDepth...maxTargetDepth`, and re-anchor so
+    /// the change takes effect immediately instead of arriving as a step error the P-loop must
+    /// chase at its ±0.5% rail (0.05 s of cushion would take 10 s to acquire that way, which is
+    /// useless for A/B-ing setpoints inside one connection).
+    ///
+    /// DIRECTION. Depth is `newest − now`, so DEEPENING the buffer by Δ means moving `now()`
+    /// BACKWARD by Δ. That is safe here, and is the one place in this file where a backward jump
+    /// is correct: the renderer simply holds its current frame Δ longer while the queue fills past
+    /// it. Nothing is re-shown (consumed frames have already left the queue) and nothing is
+    /// corrupted — only presentation is briefly paused. Shrinking the target moves `now()` FORWARD
+    /// and discards Δ of buffer, identical in kind to a snap.
+    ///
+    /// The rebase is the usual shape (evaluate the old mapping at `t`, restart the segment there),
+    /// plus the deliberate offset. `smoothedDepth` is shifted by the same Δ, so the loop is handed
+    /// EXACTLY the error it already had rather than a fabricated one — the adjustment is invisible
+    /// to the controller, which is the point.
+    ///
+    /// Returns the before/after pair and the signed presentation-time jump (NEGATIVE when
+    /// deepening — the caller's ledger must account for it as a coarse clock action like any
+    /// other), or nil if the clamp made this a no-op. Safe to call from any thread.
+    @discardableResult
+    public func adjustTargetDepth(by delta: Double) -> (from: Double, to: Double, jumped: Double)? {
+        lock.lock()
+        let change = adjustTargetDepthLocked(by: delta)
+        lock.unlock()
+        if let change { emitTargetStep(from: change.from, to: change.to) }   // outside the lock
+        return change
+    }
+
+    /// The locked half of `adjustTargetDepth`. Calls out to nothing and formats nothing.
+    private func adjustTargetDepthLocked(by delta: Double)
+        -> (from: Double, to: Double, jumped: Double)? {
+        let from = targetDepth
+        let to = min(maxTargetDepth, max(minTargetDepth, from + delta))
+        let shift = to - from
+        guard shift != 0 else { return nil }
+
+        targetDepth = to
+        var jumped = 0.0
+        if let aPTS = anchorSenderPTS, let aHost = anchorHostTime {
+            let t = hostNow()
+            let mappedNow = aPTS + (t - aHost) * rate   // old now() evaluated at t
+            // Deeper target → now() moves BACK by the same amount, so measured depth lands on the
+            // new setpoint immediately. `jumped` is the signed presentation time crossed.
+            anchorSenderPTS = mappedNow - shift
+            anchorHostTime  = t
+            jumped = -shift
+            // Shift the smoothed depth with the clock so the loop's error is preserved, not reset.
+            if let s = smoothedDepth { smoothedDepth = s + shift }
+            lastControlHost = nil
+            // An excursion measured against the OLD threshold says nothing about the new one.
+            overThresholdSince = nil
+            ineligibleTicks = 0
+            ineligibleSince = nil
+        }
+        // Unanchored: nothing to rebase — the next `registerFrame` will anchor against the new
+        // setpoint on its own. (`startupDepth` is deliberately NOT stepped: it is the one-time fill
+        // applied at anchor time, and this is a steady-state control.)
+        return (from: from, to: to, jumped: jumped)
+    }
+
     /// Whether the first frame has anchored the clock. `false` before the first `registerFrame` and
     /// after `reset()` (until the next frame arrives). While `false`, `now()` returns the -.infinity
     /// sentinel and the control loop must not run. Thread-safe (takes `lock`) — do NOT call it from
@@ -460,9 +570,27 @@ public final class LiveClock: @unchecked Sendable {
                             newestPTS: Double? = nil,
                             presented: Bool = true) -> Event? {
         lock.lock()
-        defer { lock.unlock() }
+        let (event, periodic) = updateDepthLocked(spanSeconds: spanSeconds, count: count,
+                                                  oldestPTS: oldestPTS, newestPTS: newestPTS,
+                                                  presented: presented)
+        lock.unlock()
+        // OUTSIDE THE LOCK, ALWAYS. See the `lock` declaration: formatting allocates and writing to
+        // stderr is a syscall, and neither may happen while holding a priority-donating lock.
+        // Periodic line first, then the coarse action — the order the log had before the split, so
+        // a snap still reads as following the depth line whose value it just changed.
+        emit(periodic)
+        emit(event)
+        return event
+    }
 
-        #if DEBUG
+    /// The locked half of `updateDepth`. Runs entirely under `lock`, calls out to nothing, and
+    /// returns both the coarse action (if any) and the periodic telemetry payload (if due) for the
+    /// caller to emit after unlocking.
+    private func updateDepthLocked(spanSeconds: Double, count: Int,
+                                   oldestPTS: Double?, newestPTS: Double?,
+                                   presented: Bool) -> (Event?, PeriodicLog?) {
+
+        #if DEBUG || MANIFOLD_TELEMETRY
         // forceUnityRate: control loop DISABLED. Pin `rate` at unity here so it is EXACTLY 1.0 from
         // the first call after the toggle (not just from the next 10 Hz recompute). Everything below —
         // the anchor guard, the depth EMA, the [LIVECLOCK] log — runs identically to normal; only the
@@ -492,7 +620,8 @@ public final class LiveClock: @unchecked Sendable {
         // is 0…~1s; 10s is generous headroom). Drop the smoothed depth so the EMA re-primes cleanly
         // from the first real sample once anchored, and leave `rate` where it is — reset() pinned it
         // to 1.0 while unanchored, so a garbage sample can never slew it. Checks the RAW anchor field,
-        // not `isAnchored`, because we already hold `lock` (NSLock is non-recursive).
+        // not `isAnchored`, because we already hold `lock` (os_unfair_lock is non-recursive — it
+        // traps on re-entry rather than deadlocking, but either way it must not be re-taken).
         guard anchorSenderPTS != nil, spanSeconds.isFinite, abs(spanSeconds) < 10 else {
             smoothedDepth = nil
             // Also drop the excursion timers: a gap in valid samples is not evidence of anything,
@@ -503,7 +632,7 @@ public final class LiveClock: @unchecked Sendable {
             overThresholdSince = nil
             ineligibleTicks = 0
             ineligibleSince = nil
-            return nil
+            return (nil, nil)
         }
 
         // Low-pass the raw span (reject per-tick jitter) — every call.
@@ -524,8 +653,7 @@ public final class LiveClock: @unchecked Sendable {
         if let event = evaluateFreezeGuard(t: t, count: count,
                                            oldestPTS: oldestPTS, newestPTS: newestPTS,
                                            presented: presented) {
-            logIfDue(t)
-            return event
+            return (event, periodicLogIfDue(t))
         }
 
         // ── COARSE OUTER LOOP: snap-to-live ─────────────────────────────────────────────────
@@ -567,25 +695,24 @@ public final class LiveClock: @unchecked Sendable {
                 smoothedDepth = targetDepth
                 lastControlHost = nil
                 overThresholdSince = nil
-                logIfDue(t)
-                return .snapped(SnapEvent(depthBefore: depth,
-                                          depthAfter: targetDepth,
-                                          excess: excess,
-                                          sustainedFor: sustained))
+                return (.snapped(SnapEvent(depthBefore: depth,
+                                           depthAfter: targetDepth,
+                                           excess: excess,
+                                           sustainedFor: sustained)),
+                        periodicLogIfDue(t))
             }
         }
 
         // Rate-limit the actual rate recompute to `controlHz` — don't chase refresh-rate noise.
         if let last = lastControlHost, t - last < controlInterval {
-            logIfDue(t)
-            return nil
+            return (nil, periodicLogIfDue(t))
         }
         lastControlHost = t
 
-        #if DEBUG
+        #if DEBUG || MANIFOLD_TELEMETRY
         // Loop OFF: `rate` is already pinned to 1.0 at entry. Log at the normal cadence and return
         // WITHOUT slewing — so [LIVECLOCK] shows depth/err measured at rate≡1.0, rate=1.0000.
-        if forceUnityRate { logIfDue(t); return nil }
+        if forceUnityRate { return (nil, periodicLogIfDue(t)) }
         #endif
 
         let depth = smoothedDepth ?? spanSeconds
@@ -615,8 +742,7 @@ public final class LiveClock: @unchecked Sendable {
             rate            = newRate
         }
 
-        logIfDue(t)
-        return nil   // the fine loop reports nothing; only the coarse actions above do
+        return (nil, periodicLogIfDue(t))   // the fine loop reports nothing; only coarse actions do
     }
 
     /// The freeze guard's decision, split out of `updateDepth` only for readability.
@@ -670,14 +796,21 @@ public final class LiveClock: @unchecked Sendable {
         let corrected = newestPTS - target
         let jumped = corrected - mappedNow
 
-        // NEVER MOVE THE CLOCK BACKWARD. With the shipped tuning this cannot arise — for the
-        // ineligible state to survive `freezeGuardHold` (0.25 s) the newest frame must be at least
-        // that far ahead, which exceeds `targetDepth` (0.200 s), so `jumped` is positive. But
-        // `freezeGuardHold` and `targetDepth` are independent public knobs, and a target raised
-        // above the hold would make `newest − target` land BEHIND the current position — rewinding
-        // presentation time, re-showing frames already displayed, and handing the depth EMA a
-        // negative error. Bail instead, leaving the run counting: if the freeze is real the queue
-        // keeps filling and the condition re-fires once there is genuinely something to remove.
+        // NEVER MOVE THE CLOCK BACKWARD — AND THIS IS NOW A LIVE PATH, NOT A THEORETICAL ONE.
+        //
+        // This guard used to be defensive: with the WHEP target at 0.200 s and `freezeGuardHold` at
+        // 0.25 s, surviving the hold implied the newest frame was ≥0.25 s ahead, which exceeded the
+        // target, so `jumped` was always positive. THAT NO LONGER HOLDS: the measured WHEP target is
+        // now 0.400 s, ABOVE the hold, so a run can reach the firing threshold while the whole queue
+        // still sits nearer than `targetDepth`. `newest − target` would then land BEHIND the current
+        // position — rewinding presentation time, re-showing frames already displayed, and handing
+        // the depth EMA a negative error.
+        //
+        // Bailing is the CORRECT response, not merely a safe one: if the newest frame is closer than
+        // the target, the buffer is SHALLOW, which is a starvation transient rather than the runaway
+        // this guard exists to escape, and the right amount of clock movement is zero. The run is
+        // left counting (`ineligibleTicks`/`ineligibleSince` are untouched on this path), so a
+        // genuine freeze re-fires as soon as the queue has filled enough for the jump to be forward.
         guard jumped > 0 else { return nil }
         let heldFor = t - since
         let ticks = ineligibleTicks
@@ -695,13 +828,8 @@ public final class LiveClock: @unchecked Sendable {
         ineligibleTicks = 0
         ineligibleSince = nil
 
-        #if DEBUG
-        FileHandle.standardError.write(Data(String(
-            format: "[LIVECLOCK] freeze-guard: no eligible frame for %d ticks / %.3fs, queue=%d, "
-                  + "oldest=+%.3fs ahead — re-anchored (depth %.3f → target %.3f, jumped +%.3fs)\n",
-            ticks, heldFor, count, oldestAhead, depthBefore, target, jumped).utf8))
-        #endif
-
+        // No logging here — this runs under `lock`. The Event carries every field the line needs,
+        // and `updateDepth` emits it after unlocking. See the `lock` declaration.
         return .freezeGuard(FreezeGuardEvent(jumped: jumped, ticks: ticks, heldFor: heldFor,
                                              queued: count, oldestAhead: oldestAhead,
                                              depthBefore: depthBefore, target: target))
@@ -733,7 +861,14 @@ public final class LiveClock: @unchecked Sendable {
     @discardableResult
     public func overflowReanchor(newestPTS: Double, count: Int) -> Event? {
         lock.lock()
-        defer { lock.unlock() }
+        let event = overflowReanchorLocked(newestPTS: newestPTS, count: count)
+        lock.unlock()
+        emit(event)   // outside the lock — see the `lock` declaration
+        return event
+    }
+
+    /// The locked half of `overflowReanchor`. Calls out to nothing and formats nothing.
+    private func overflowReanchorLocked(newestPTS: Double, count: Int) -> Event? {
         // Unanchored (no frame has established the mapping yet): nothing to correct.
         guard let aPTS = anchorSenderPTS, let aHost = anchorHostTime, newestPTS.isFinite else {
             return nil
@@ -760,29 +895,79 @@ public final class LiveClock: @unchecked Sendable {
         ineligibleSince = nil
 
         let jumped = depthBefore - target
-        #if DEBUG
-        FileHandle.standardError.write(Data(String(
-            format: "[LIVECLOCK] queue-full: over-buffered at count=%d — re-anchored "
-                  + "(depth %.3f → target %.3f, jumped +%.3fs)\n",
-            count, depthBefore, target, jumped).utf8))
-        #endif
-
         return .overflowReanchor(OverflowEvent(jumped: jumped, queued: count,
                                                depthBefore: depthBefore, target: target))
     }
 
-    /// DEBUG-only ~1 Hz telemetry: watch `depth` settle to `target` and `rate` settle to the
-    /// sender's true ratio under injected drift. Called under `lock`; the write is tiny and once/sec.
-    private func logIfDue(_ t: Double) {
-        #if DEBUG
-        if let last = lastLogHost, t - last < 1.0 { return }
+    /// Snapshot of the ~1 Hz telemetry line, taken under `lock` and formatted after the unlock.
+    /// Plain scalars: capturing them costs four loads, where formatting them would allocate.
+    private struct PeriodicLog {
+        let depth: Double
+        let target: Double
+        let rate: Double
+        let count: Int
+    }
+
+    /// ~1 Hz telemetry gate: watch `depth` settle to `target` and `rate` settle to the sender's true
+    /// ratio under injected drift. Called UNDER `lock`; it only reads state and advances the cadence
+    /// gate, returning the payload for the caller to emit once unlocked. Returns nil when not due.
+    private func periodicLogIfDue(_ t: Double) -> PeriodicLog? {
+        #if DEBUG || MANIFOLD_TELEMETRY
+        if let last = lastLogHost, t - last < 1.0 { return nil }
         lastLogHost = t
-        let d = smoothedDepth ?? .nan
         // `target` is now always the CONFIGURED one — nothing inflates it, so there is no longer a
         // second regime to distinguish and the old DEGRADED marker has gone with the mechanism.
+        return PeriodicLog(depth: smoothedDepth ?? .nan, target: targetDepth,
+                           rate: rate, count: lastCount)
+        #else
+        return nil
+        #endif
+    }
+
+    // MARK: - Emit (NEVER under `lock`)
+    //
+    // Everything below formats and writes. `String(format:)` allocates and `FileHandle.write` is a
+    // syscall — either one inside a priority-donating critical section is worse than the inversion
+    // the lock was converted to fix, because a boosted holder that blocks on I/O burns real-time
+    // priority instead of yielding it. These take only value-type payloads snapshotted under the
+    // lock, so they CANNOT touch clock state even by accident.
+
+    private func emit(_ log: PeriodicLog?) {
+        #if DEBUG || MANIFOLD_TELEMETRY
+        guard let log else { return }
         FileHandle.standardError.write(Data(String(
             format: "[LIVECLOCK] depth=%.3fs target=%.3f rate=%.4f err=%+.4f count=%d\n",
-            d, targetDepth, rate, d - targetDepth, lastCount).utf8))
+            log.depth, log.target, log.rate, log.depth - log.target, log.count).utf8))
+        #endif
+    }
+
+    /// The coarse actions LiveClock reports itself. `.snapped` is deliberately absent: the transport
+    /// layer logs that one with its own context (see WHEPFrameRouter), and duplicating it here would
+    /// print every snap twice.
+    private func emit(_ event: Event?) {
+        #if DEBUG || MANIFOLD_TELEMETRY
+        switch event {
+        case .freezeGuard(let fg):
+            FileHandle.standardError.write(Data(String(
+                format: "[LIVECLOCK] freeze-guard: no eligible frame for %d ticks / %.3fs, queue=%d, "
+                      + "oldest=+%.3fs ahead — re-anchored (depth %.3f → target %.3f, jumped +%.3fs)\n",
+                fg.ticks, fg.heldFor, fg.queued, fg.oldestAhead,
+                fg.depthBefore, fg.target, fg.jumped).utf8))
+        case .overflowReanchor(let ov):
+            FileHandle.standardError.write(Data(String(
+                format: "[LIVECLOCK] queue-full: over-buffered at count=%d — re-anchored "
+                      + "(depth %.3f → target %.3f, jumped +%.3fs)\n",
+                ov.queued, ov.depthBefore, ov.target, ov.jumped).utf8))
+        case .snapped, .none:
+            break
+        }
+        #endif
+    }
+
+    private func emitTargetStep(from: Double, to: Double) {
+        #if DEBUG || MANIFOLD_TELEMETRY
+        FileHandle.standardError.write(Data(String(
+            format: "[LIVECLOCK] targetDepth %.3f -> %.3f (manual)\n", from, to).utf8))
         #endif
     }
 
@@ -806,7 +991,8 @@ public final class LiveClock: @unchecked Sendable {
         // FREEZE-GUARD STATE IS PER-STREAM TOO, AND `hasPresentedOnce` ESPECIALLY SO. A reconnect
         // performs a fresh `startupDepth` fill, which is BY CONSTRUCTION the state the guard
         // triggers on (queue filling, nothing eligible). Leaving the flag armed across a reconnect
-        // would re-anchor away the 0.200 s cushion on the second and every subsequent connect —
+        // would re-anchor away the whole `startupDepth` cushion on the second and every subsequent
+        // connect —
         // the exact failure the arm-after-first-present rule exists to prevent, merely displaced
         // from first connect to every later one. Same discipline as clearing the drift state on
         // reconnect so a gap cannot manufacture phantom drift.

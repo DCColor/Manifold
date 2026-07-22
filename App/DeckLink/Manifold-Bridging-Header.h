@@ -11,3 +11,10 @@
 // it — and because that seam is pure C, the app target's C++ standard (gnu++14) never has to
 // meet libdatachannel's C++17.
 #import "DataChannelBridge.h"
+
+// The C/ObjC optimization probe for the [BUILD] banner. Imported by RELATIVE PATH deliberately:
+// every other header here resolves through HEADER_SEARCH_PATHS, and adding $(SRCROOT)/App to that
+// list to reach one file would widen the search scope for all of them. In a change whose whole
+// subject is build-configuration fragility, the import that needs no build-setting edit is the
+// right one. See App/BuildInfoC.h for why this cannot be answered from Swift.
+#import "../BuildInfoC.h"

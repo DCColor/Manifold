@@ -9,6 +9,10 @@ struct ManifoldApp: App {
     @StateObject private var license = LicenseManager.shared
 
     init() {
+        // FIRST LINE OF EVERY LOG, before anything else can emit. A log that cannot state which
+        // build produced it is not evidence — see BuildInfo for why this is derived rather than
+        // assumed, and why the "not valid for measurement" warning keys on -Onone and not on DEBUG.
+        BuildInfo.logAtStartup()
         // D1: prove the DeckLink SDK links and the card is reachable — enumerate + log at startup.
         DeckLinkService.shared.logDevicesAtStartup()
     }

@@ -6,44 +6,80 @@ options:
   createIntermediateGroups: true
 
 # Build configurations. Declaring `configs:` EXPLICITLY overrides XcodeGen's default Debug/Release
-# pair, so both must be listed. "Profile" is a RELEASE-type config (optimizer on, -O) that ALSO
-# defines DEBUG — a dedicated TUNING config for measuring the synthetic live harness at ship-config
-# performance while keeping the #if DEBUG triggers (⌃⌥L / ⌃⌥P) and [LIVECLOCK] telemetry. Its purpose
-# is to test whether the harness fps sag is a Debug -Onone artifact (cf. the ScopeCompute -Onone case)
-# vs. a real defect. Debug (-Onone) and Release (no DEBUG) are left exactly as they were.
+# pair, so all three must be listed. "Profile" is the TUNING config: optimizer on (-O) but DEBUG
+# still defined, so the #if DEBUG triggers (⌃⌥L / ⌃⌥H / ⌃⌥P) and the [LIVECLOCK] / [WHEP-*]
+# telemetry survive at ship-config speed. It exists to tell a real defect apart from a Debug
+# -Onone artifact (cf. the ScopeCompute -Onone case).
+#
+# ── HOW DEBUG REACHES (AND DOES NOT REACH) THE ManifoldCore PACKAGE — TWO WRONG THEORIES FIRST ──
+#
+# THEORY 1, WRONG: "project-level `settings:` reaches the package." It does not. Xcode's SwiftPM
+# integration synthesizes the package's targets and derives their settings from the manifest plus
+# SwiftPM's own defaults; nothing in this file's `settings:` block reaches them at any level.
+#
+# THEORY 2, ALSO WRONG: "then set the config TYPE to `debug` and the package will follow." It does
+# not follow the type either. MEASURED: with `Profile: debug`, the generated project's Profile
+# configuration carried the complete debug preset (SWIFT_OPTIMIZATION_LEVEL = -Onone,
+# GCC_OPTIMIZATION_LEVEL = 0, ENABLE_TESTABILITY = YES, MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE) —
+# so the flip unambiguously landed — and the package STILL compiled without DEBUG, failing with the
+# same "LiveClock has no member 'setForceUnityRate'".
+#
+# WHAT IS ACTUALLY TRUE: Xcode maps a configuration to a SwiftPM build configuration by NAME. Only
+# a configuration literally named "Debug" is built as `.debug`; every other name is `.release`,
+# whatever its type. A configuration named "Profile" therefore CANNOT be given DEBUG from this file
+# by any route — not by inheritance, not by type. That is the root cause, and it is not fixable here.
+#
+# THE FIX LIVES IN THE PACKAGE. ManifoldCore defines its own `MANIFOLD_TELEMETRY` condition in
+# Packages/ManifoldCore/Package.swift, and LiveClock's guards read
+# `#if DEBUG || MANIFOLD_TELEMETRY`. The package no longer depends on this file for anything.
+#
+# SO Profile IS BACK TO `release`-TYPE. The type flip existed only to chase THEORY 2; with that
+# dead, release-type is strictly better — it gives the app -O + whole-module + -Os C for free
+# (the explicit settings below are then belt-and-braces rather than load-bearing), and it lets the
+# PACKAGE keep SwiftPM's own per-type optimization: -Onone under Debug (so ManifoldCore stays
+# steppable, which the type flip had cost us) and -O under Profile and Release.
+#
+# IF YOU ADD A FOURTH CONFIG: it will be `.release` to the package no matter what you do here.
+# Anything the package must know has to be expressed in Package.swift.
 configs:
   Debug: debug
   Release: release
   Profile: release
 
-# PROJECT-LEVEL settings — the only place that reaches the ManifoldCore SPM package.
+# PROJECT-LEVEL settings.
 #
-# WHY THIS BLOCK EXISTS. `#if DEBUG` is an API boundary here: LiveClock's tuning hooks
-# (forceUnityRate / setForceUnityRate / setDepths) are DEBUG-only, and the app's DEBUG-only
-# harness (SyntheticLiveSource) calls them. The two sides must agree on DEBUG or the call site
-# fails to compile with "LiveClock has no member 'setForceUnityRate'" — which is exactly what
-# Profile did.
+# CORRECTION TO WHAT THIS BLOCK USED TO CLAIM. It previously asserted that setting
+# SWIFT_ACTIVE_COMPILATION_CONDITIONS here "reaches the ManifoldCore SPM package", on the theory
+# that Xcode's synthesized package targets inherit the project's build configuration of the same
+# name. THAT IS NOT TRUE, and it was never verified — Profile had never actually been built. Xcode
+# derives package-target settings from the manifest plus SwiftPM's own defaults; this block does not
+# reach them at any level, and neither does the config type. The package gets its telemetry
+# capability from MANIFOLD_TELEMETRY, which it defines itself in Package.swift — see the `configs:`
+# block above for the measured evidence.
 #
-# The app target's `settings.configs.Profile` below defines DEBUG for the APP TARGET ONLY.
-# ManifoldCore is not a target in this project — it is a package dependency, and Xcode's SwiftPM
-# integration synthesizes its build targets fresh, inheriting the PROJECT's build configuration
-# of the same name. Target-level settings are invisible to it. Profile is a `release`-type config,
-# so SwiftPM gave it the release defaults (no DEBUG) while the app had DEBUG: the mismatch.
+# WHAT THIS BLOCK IS ACTUALLY FOR: the APP target's inherited base, and specifically the
+# `MANIFOLD_CONFIG_*` flags that let the running binary name its own configuration (BuildInfo.swift).
+# Debug and Release have no target-level override of this key and take these values as-is; Profile
+# restates them at target level and so must repeat both symbols (see the note there).
 #
-# Setting it here fixes both sides at once, because the app target inherits the project level too.
-# Debug (SwiftPM defines DEBUG itself for debug-type configs) and Release (correctly no DEBUG on
-# either side) are untouched — this key is scoped to Profile only.
+# CONFIG-NAME FLAGS. Each config also injects a `MANIFOLD_CONFIG_<NAME>` compilation condition, so
+# the running binary can NAME its own configuration instead of the log leaving it to be inferred.
+# Swift compilation conditions are booleans, not strings, so one flag per config is the only way to
+# carry the name into `#if`. BuildInfo.swift turns these into the startup `[BUILD]` line and
+# cross-checks them against a runtime optimization probe — see there.
 #
-# Swift only, deliberately: nothing in the package uses `#ifdef DEBUG` from C/ObjC, and adding a
-# project-level GCC_PREPROCESSOR_DEFINITIONS would change what `$(inherited)` resolves to in the
-# app target's own per-config list (see the note there).
-#
-# If you add another `#if DEBUG` symbol that crosses the app↔ManifoldCore boundary, nothing new is
-# needed — but if you add a THIRD config, it must appear here too or it will break the same way.
+# DEBUG MUST BE RESTATED in the Debug and Profile lists: assigning this key REPLACES the value the
+# config-type preset would have supplied, so omitting DEBUG here would silently strip it. That is
+# the same replace-not-append trap the GCC_PREPROCESSOR_DEFINITIONS note at the target level warns
+# about, and it is why Release's list deliberately has no DEBUG while the other two do.
 settings:
   configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG MANIFOLD_CONFIG_DEBUG
+    Release:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: MANIFOLD_CONFIG_RELEASE MANIFOLD_SWIFT_WMO
     Profile:
-      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG MANIFOLD_CONFIG_PROFILE
 
 packages:
   ManifoldCore:
@@ -51,15 +87,37 @@ packages:
 
 # Shared scheme so `xcodebuild -scheme Manifold` (and Xcode) resolve the ManifoldCore package
 # and build correctly. Declared explicitly so it survives project regeneration.
+#
+# ── EVERY ACTION'S CONFIG IS PINNED HERE, AND THIS FILE IS THE ONLY PLACE THAT DECIDES ────────
+#
+# The .xcodeproj is XcodeGen-generated and gitignored, so `xcodegen generate` REBUILDS the scheme
+# from this block every time. Changing the run configuration in Xcode's scheme editor is therefore
+# not a durable act — it is overwritten on the next regenerate with no warning and no diff, because
+# the file it was written to is not tracked. If a config should be the default, it has to be HERE.
+#
+# `run` was previously pinned to Debug, which is -Onone: every ⌘R build was unoptimized, and any
+# performance number taken from one is meaningless. It is now Profile — optimizer on (Swift -O +
+# whole-module, C -Os) with DEBUG still defined for the APP, and MANIFOLD_TELEMETRY carrying the
+# same capability into the ManifoldCore package, so the ⌃⌥L / ⌃⌥H triggers and the [LIVECLOCK] /
+# [WHEP-*] telemetry all survive at ship-config speed.
+#
+# `profile` (Instruments) was pinned to Release, which does NOT define DEBUG. Under Release the
+# WHEP stack does not merely go quiet — App/WebRTC/{WHEPClient,WHEPVideoDecoder,WHEPFrameRouter}.swift
+# and App/Live/SyntheticLiveSource.swift are each wrapped in `#if DEBUG` in their ENTIRETY, so the
+# code is not compiled in at all and ⌃⌥H / ⌃⌥L do nothing. Instruments could not have profiled the
+# live path under that config. Now Profile, for the same reason as `run`.
+#
+# `archive` stays Release: that is the shipping configuration and DEBUG must be absent from it.
+# `analyze` stays Debug: the analyzer wants the unoptimized IR, and it emits no timings.
 schemes:
   Manifold:
     build:
       targets:
         Manifold: all
     run:
-      config: Debug
+      config: Profile
     profile:
-      config: Release
+      config: Profile
     analyze:
       config: Debug
     archive:
@@ -230,21 +288,59 @@ targets:
       # Debug and Release inherit their standard XcodeGen presets unchanged.
       configs:
         Profile:
-          # Optimize App-layer Swift (harness, renderer, scopes) at -O — broader than the SPM
-          # ScopeCompute per-target -O, which only covers that one numeric target. ManifoldCore
-          # (LiveClock) is ALREADY -O here without this line: Profile is a `release`-type config,
-          # so SwiftPM's synthesized package targets get the release optimization default. This
-          # setting does not reach them — see the project-level `settings:` block at the top.
+          # ── MEASUREMENT CODEGEN, STATED EXPLICITLY ───────────────────────────────────────
+          #
+          # Profile is `release`-type, so each of these matches what the preset would supply anyway.
+          # They are kept EXPLICIT rather than inherited because this config's entire purpose is to
+          # produce trustworthy numbers, and "what optimization was that measured at" should be
+          # answerable from this file without knowing Xcode's preset table. If a measurement looks
+          # wrong, this is the list to check first.
+          #
+          # These do NOT reach ManifoldCore — no target-level setting reaches a package target. The
+          # package takes SwiftPM's own per-type optimization, which is -O for every configuration
+          # not named "Debug" (see the `configs:` note at the top).
           SWIFT_OPTIMIZATION_LEVEL: "-O"
+          # Whole-module, not the debug default of per-file. Without this, -O optimizes each file in
+          # isolation: no cross-file inlining or specialization, which is a large part of what -O
+          # buys and would make this config measure something that is neither Debug nor Release.
+          SWIFT_COMPILATION_MODE: wholemodule
+          # NOTE: the matching MANIFOLD_SWIFT_WMO flag lives in SWIFT_ACTIVE_COMPILATION_CONDITIONS
+          # below — it has to be a compilation CONDITION to be visible to `#if`, not a build setting.
+          # Change it on the same edit as the line above; it is the one field of the [BUILD] banner
+          # that is DECLARED rather than observed (Swift exposes no macro for the compilation mode,
+          # unlike -O via assert and the C level via __OPTIMIZE__).
+          # `-enable-testing` (the debug-type default) preserves internal symbols and suppresses
+          # some optimizations. Nothing here needs @testable, and a measurement config must not
+          # carry that penalty.
+          ENABLE_TESTABILITY: NO
+          # C/OBJC OPTIMIZATION — EXPLICIT, AND THE REASON IT MUST STAY THAT WAY. If this config is
+          # ever switched to debug-type again, the C-family default becomes GCC_OPTIMIZATION_LEVEL = 0
+          # and this line is the only thing standing between us and -O0 C. The hottest code in the
+          # WHEP path is C and ObjC:
+          # App/WebRTC/H264Depacketizer.c receives every RTP packet and App/WebRTC/DataChannelBridge.m
+          # produces the arrival timestamps the entire jitter/underrun measurement rests on. At -O0
+          # those numbers are not meaningful, and the Swift-side probe in BuildInfo.swift CANNOT see
+          # it — assert's autoclosure observes the Swift level only. Hence the separate C probe in
+          # App/BuildInfoC.c, which reads __OPTIMIZE__/__OPTIMIZE_SIZE__ from the real compilation.
+          #
+          # `s` (= -Os) is what Xcode's release-type preset gives, so Profile and Release compile
+          # the C sources identically. Also applies to the two .mm bridges
+          # (DeckLinkBridge.mm, NDIBridge.mm) and DeckLinkAPIDispatch.cpp.
           GCC_OPTIMIZATION_LEVEL: s
           # Keep DEBUG defined for BOTH Swift (#if DEBUG) and C/ObjC (#ifdef DEBUG) so the harness
           # triggers + telemetry compile in exactly as they do in Debug.
           #
-          # The Swift half is ALSO set project-level (top of file), which is what carries it into
-          # the ManifoldCore package — the app-side half is restated here so the app target's
-          # intent is readable on its own, and because a future project-level change must not be
-          # able to silently drop DEBUG from the app while the package keeps it.
-          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          # This is the APP's DEBUG only. Nothing here reaches the ManifoldCore package — not this
+          # key, not the project-level block, not the config type. The package defines its own
+          # MANIFOLD_TELEMETRY in Package.swift. See the correction at the top of this file.
+          #
+          # MANIFOLD_CONFIG_PROFILE MUST BE REPEATED HERE. A target-level value SHADOWS the
+          # project-level one for the same key — it does not merge — so listing only DEBUG here
+          # would strip the config-name flag from the app target while leaving it on the package,
+          # and BuildInfo would report configuration=Unknown in the one config we most need named.
+          # Debug and Release have no target-level override of this key and so inherit the
+          # project-level lists intact; Profile is the only config that has to restate them.
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG MANIFOLD_CONFIG_PROFILE MANIFOLD_SWIFT_WMO
           GCC_PREPROCESSOR_DEFINITIONS:
             - $(inherited)
             - DEBUG=1

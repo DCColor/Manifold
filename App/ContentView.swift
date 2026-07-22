@@ -803,6 +803,22 @@ struct ContentView: View {
             // colour-managed export — see WHEPVideoDecoder.exportStill.
             Button("") { WHEPClient.shared.exportNextDecodedFrame() }
                 .keyboardShortcut("e", modifiers: [.control, .option, .shift])
+            // ⌃⌥[ / ⌃⌥] — step the live WHEP buffer target by ∓/± 0.05 s (clamped 0.10…1.00).
+            //
+            // WHY THIS EXISTS: the cushion is being SIZED against measured jitter, and one
+            // connection has to test several values or the comparison is confounded by whatever
+            // the network was doing on each separate connect. Each press logs
+            // `[LIVECLOCK] targetDepth A -> B (manual)` and the ongoing [LIVECLOCK] line carries
+            // the current target, so the log is self-documenting about which value each stretch of
+            // [WHEP-UNDERRUN] / [WHEP-JITTER] output was measured at.
+            //
+            // The clock re-anchors on the step, so the new depth is acquired immediately instead of
+            // over ~10 s at the ±0.5% rail — see LiveClock.adjustTargetDepth for the direction
+            // argument (deepening moves now() BACKWARD, which only holds the current frame longer).
+            Button("") { WHEPFrameRouter.shared.adjustTargetDepth(by: -0.05) }
+                .keyboardShortcut("[", modifiers: [.control, .option])
+            Button("") { WHEPFrameRouter.shared.adjustTargetDepth(by: 0.05) }
+                .keyboardShortcut("]", modifiers: [.control, .option])
         }
         .opacity(0)
         #else
