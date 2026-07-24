@@ -358,6 +358,22 @@ final class WHEPVideoDecoder {
                                pts: CMTime) {
         guard status == noErr else {
             mutateStats { $0.decodeErrors += 1; $0.lastDecodeError = status }
+            // Surface 2: kVTVideoDecoderBadDataErr (-12909) from a corrupt reference picture
+            // arrives HERE, on the output callback, not on the submit return — so this is where
+            // a mid-stream decode failure must re-arm the gate. Reuse the SAME startup gate the
+            // submit-error path sets in `decode`: drop every following P-frame (each references
+            // the poisoned frame and would fail identically) until the next IDR, and ask for one.
+            //
+            // Guarded on the open→armed transition so a burst logs ONCE and requests ONE PLI:
+            // the first failure arms `awaitingKeyframe`, and `decode` then drops subsequent AUs
+            // at the keyframe gate before they can reach the decoder, so this branch is not
+            // re-entered until an IDR clears it. `decodeErrors` still counts every failure.
+            if !awaitingKeyframe {
+                awaitingKeyframe = true
+                mutateStats { $0.awaitingKeyframe = true }
+                NSLog("[WHEP-DECODE] decode failed (%d) — dropping to next keyframe, PLI requested", status)
+                onNeedsKeyframe?()
+            }
             return
         }
         if infoFlags.contains(.frameDropped) { return }

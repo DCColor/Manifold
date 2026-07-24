@@ -182,6 +182,21 @@ final class WHEPClient {
         decoder.onDecodedFrame = { pixelBuffer, pts in
             WHEPFrameRouter.shared.deliver(pixelBuffer, pts: pts)
         }
+        // The decoder fires this on session.decodeQueue when it needs an IDR it does not have:
+        // no format description yet, the startup keyframe gate still closed, or — the case this
+        // wiring is really for — a mid-stream decode failure that just re-armed that gate
+        // (WHEPVideoDecoder.handleDecoded, Surface 2). HOP TO MAIN: requestKeyframe and the
+        // bridge's _closed/_videoTrack lifecycle are main-thread state (see requestKeyframe's
+        // assert), and routing every PLI through main is what lets the shared throttle there
+        // stay lock-free. The gate means this fires about once per freeze, not once per frame,
+        // so the async hop is free; the throttle collapses any overlap with the two stats-timer
+        // triggers, so it never double-requests. Weak self: if the client is gone, so is the
+        // need for a keyframe.
+        decoder.onNeedsKeyframe = { [weak self] in
+            DispatchQueue.main.async {
+                _ = self?.session?.requestKeyframe()
+            }
+        }
         // WHEP takes the display, retiring whatever else is driving it. Mirrors NDI's
         // takeover; for this first-light there is no source-switching UI, so connecting
         // WHEP simply shows WHEP.
@@ -298,14 +313,20 @@ final class WHEPClient {
             } else if now.awaitingKeyframe {
                 NSLog("[WHEP-DECODE]   waiting for keyframe — slices dropped until the next IDR")
             }
-            // Every other second, up to five times. The bridge already PLIs when the
-            // DEPACKETIZER has seen no keyframe; this covers the other case — a keyframe the
-            // decoder rejected, or one that arrived before the format description did.
-            if (!now.haveFormatDescription || now.awaitingKeyframe),
-               decodeStatsTicks % 2 == 0, keyframeRequests < 5 {
-                keyframeRequests += 1
-                let sent = session?.requestKeyframe() ?? false
-                NSLog("[WHEP-DECODE]   PLI request %d %@", keyframeRequests, sent ? "sent" : "FAILED")
+            // Backstop only. The decoder now re-arms and requests a PLI itself on a mid-stream
+            // decode failure (onNeedsKeyframe), and the bridge requests one while the
+            // depacketizer has assembled no keyframe. This covers the remaining case — a
+            // keyframe the decoder rejected, or one that arrived before the format description —
+            // and routes through the SAME shared throttle in requestKeyframe, so within 250 ms
+            // of the decoder's own request it is simply suppressed and never double-requests.
+            // No lifetime cap now: the old `keyframeRequests < 5` went silent for the rest of the
+            // session after five tries, which is exactly wrong for a recurring fault. The count
+            // survives only to number the log line; the throttle does the gating.
+            if (!now.haveFormatDescription || now.awaitingKeyframe), decodeStatsTicks % 2 == 0 {
+                if session?.requestKeyframe() == true {
+                    keyframeRequests += 1
+                    NSLog("[WHEP-DECODE]   PLI request %d sent (backstop)", keyframeRequests)
+                }
             }
         }
     }

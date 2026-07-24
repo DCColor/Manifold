@@ -391,7 +391,9 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
     uint64_t _previousDroppedBusy;
     NSDate *_rtpStartedAt;
     int _quietTicks;
-    int _pliRequests;
+    int _pliRequests;                    // main thread only: log counter for PLIs actually sent
+    NSTimeInterval _lastPliRequestedAt;  // main thread only: shared PLI throttle, 0 until first send
+    BOOL _loggedOffMainPli;              // main thread only: one-shot guard for the off-main warning
     BOOL _loggedFirstPacket;
     BOOL _loggedParameterSets;
     BOOL _loggedFirstKeyframe;
@@ -776,20 +778,67 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
     }
 
     // Joining mid-GOP is the normal case for a live stream: slices decode into nothing until
-    // an IDR arrives. Ask for one, a few times, then stop nagging.
-    if (now.keyframes == 0 && now.nalSlice > 0 && _pliRequests < 3) {
-        _pliRequests++;
-        BOOL sent = [self requestKeyframe];
-        NSLog(@"[WHEP-RTP] slices but no keyframe yet — PLI request %d %@",
-              _pliRequests, sent ? @"sent" : @"FAILED");
+    // an IDR arrives. Ask for one. No lifetime cap now — the shared throttle in requestKeyframe
+    // bounds the rate, and a cap here would go silent for the rest of the session after an early
+    // burst. requestKeyframe owns the _pliRequests count and logs its own failures, so we only
+    // announce an actual send (a throttled request returns NO and stays quiet).
+    //
+    // BEHAVIOR CHANGE, DELIBERATE: dropping the old `_pliRequests < 3` cap means that on a
+    // connection where a keyframe NEVER arrives, this now retries indefinitely (once per 1 s
+    // tick, while slices keep coming) instead of giving up after three attempts. That is
+    // correct: a sender that starts its keyframe late, or an SFU slow to forward the PLI
+    // upstream, should still be served rather than left frozen forever. The 250 ms throttle in
+    // requestKeyframe bounds the worst case — combined with the client's ~0.5 Hz backstop the
+    // steady-state ask is ~1.5 PLI/s, and the throttle caps it at 4 PLI/s no matter how the
+    // triggers overlap.
+    if (now.keyframes == 0 && now.nalSlice > 0) {
+        if ([self requestKeyframe]) {
+            NSLog(@"[WHEP-RTP] slices but no keyframe yet — PLI request %d sent", _pliRequests);
+        }
     }
 
 #undef MD_DELTA
 }
 
 - (BOOL)requestKeyframe {
+    // INVARIANT: main thread only, and it is load-bearing. Every PLI trigger funnels here — the
+    // two 1 Hz stats-timer triggers already run on main, and the new decode-error trigger
+    // (WHEPVideoDecoder.onNeedsKeyframe, which fires on the decode queue) hops to main via
+    // DispatchQueue.main.async before calling. That single-thread invariant is what lets the
+    // throttle state below be a plain ivar with no lock, and lets the _closed / _videoTrack
+    // reads observe the same teardown state -close writes on main.
+    //
+    // NOT enforced with NSAssert: Profile and Release do NOT define NS_BLOCK_ASSERTIONS (see
+    // project.yml GCC_PREPROCESSOR_DEFINITIONS), so an assert would be live in both the build we
+    // measure on and the build testers run. The thing being guarded — a PLI request off main —
+    // is benign (at worst a torn read of the throttle timestamp or a redundant PLI), and
+    // trapping to prevent it would crash a live review session. So the check is non-fatal:
+    // warn once, then proceed.
+    if (!NSThread.isMainThread && !_loggedOffMainPli) {
+        _loggedOffMainPli = YES;
+        NSLog(@"[WHEP] WARNING: requestKeyframe called off the main thread — proceeding, but the "
+              @"PLI throttle expects main-only access (see the invariant in DataChannelBridge.m)");
+    }
     if (_closed || _videoTrack <= 0) return NO;
-    return rtcRequestKeyframe(_videoTrack) >= 0;
+
+    // ── ONE shared time-based throttle for ALL PLI paths ─────────────────────────────────
+    // A minimum interval between PLIs, NOT a lifetime cap. The old policy (_pliRequests < 3
+    // here, keyframeRequests < 5 in the client) reset only at connect, so after a couple of
+    // mid-session freezes it was permanently exhausted and no PLI could ever be sent again.
+    // Time-based instead: a burst of decode errors (23 were seen in one freeze) collapses to
+    // ONE PLI, and a freeze ten minutes later still gets one. _pliRequests now only counts
+    // sends for the log; it never gates.
+    static const NSTimeInterval kMinPliInterval = 0.250;
+    const NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;   // monotonic
+    if (_lastPliRequestedAt > 0 && (now - _lastPliRequestedAt) < kMinPliInterval) {
+        return NO;   // a recent PLI is still outstanding — suppress this one
+    }
+    _lastPliRequestedAt = now;
+    _pliRequests++;
+
+    if (rtcRequestKeyframe(_videoTrack) >= 0) return YES;
+    NSLog(@"[WHEP] PLI request %d FAILED — rtcRequestKeyframe rejected", _pliRequests);
+    return NO;
 }
 
 - (nullable NSString *)rtpStatsSummary {
