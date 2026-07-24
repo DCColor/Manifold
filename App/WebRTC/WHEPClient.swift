@@ -36,6 +36,7 @@
 #if DEBUG
 import Combine
 import Foundation
+import QuartzCore      // CACurrentMediaTime — the monotonic host clock the media watchdog measures on
 
 final class WHEPClient: ObservableObject {
 
@@ -135,6 +136,23 @@ final class WHEPClient: ObservableObject {
     /// it as failed ourselves. Main-thread only, cancelled on recovery and on any teardown.
     private static let disconnectRecoveryWindow: TimeInterval = 10
     private var disconnectBackstop: DispatchWorkItem?
+
+    /// Media-stall watchdog window — a DIFFERENT fault from the transport backstop above. Here the
+    /// link is healthy — ICE connected, DTLS up — but the publisher (OBS, a DC Color Live session)
+    /// stopped and Cloudflare's SFU holds the subscriber session open carrying no media. Nothing
+    /// fires (.closed/.failed/.disconnected all stay silent, so the 10s backstop never arms either),
+    /// so without this the picture freezes on its last frame with isConnected stuck true and ⌃⌥H
+    /// dead (connect() guards on session == nil). LONGER than disconnectRecoveryWindow (10s) on
+    /// purpose: it must tolerate what a healthy transport legitimately does — an encoder stall, a
+    /// long scene change, a brief source gap — none of which are a dead session. The transport
+    /// backstop grants no such tolerance because it does not need to: a link sitting .disconnected
+    /// for 10s is simply failed. Measured from the last DECODED frame — see logDecodeStatsTick.
+    private static let mediaStallWindow: TimeInterval = 15
+    /// Watchdog state, main-thread only (it runs on the decode-stats timer): the framesDecoded count
+    /// at, and the monotonic host time of, the last tick that saw the count advance. Armed lazily on
+    /// the first frame (framesDecoded > 0); reset in startDecodeStatsTimer for the next connection.
+    private var mediaWatchdogLastFrames = 0
+    private var mediaWatchdogSinceHost: CFTimeInterval = 0
 
     private func elapsed() -> String {
         guard let startedAt else { return "?" }
@@ -268,10 +286,14 @@ final class WHEPClient: ObservableObject {
                 self.scheduleDisconnectBackstop()
             case .closed:
                 // Far-side close (our own teardown nils these callbacks first, so this only arrives
-                // from the peer): the source is gone. Clear the flag and stand down the backstop
-                // (no re-entrant teardown needed — the flag is already false).
-                self.cancelDisconnectBackstop()
-                self.isConnected = false
+                // from the peer — the server ended the stream, the resource expired, and so on).
+                // Route it through the SAME teardown .failed uses, NOT a bare `isConnected = false`:
+                // that alone left the last decoded frame frozen on screen (clearToBlack, in
+                // deactivate(), never ran) AND leaked the session, so the next ⌃⌥H could not reconnect
+                // (connect() guards on session == nil). disconnect() clears the flag, wipes the
+                // picture, frees the session, and stands down the backstop — and is idempotent, so a
+                // teardown that has already run makes this a no-op.
+                self.disconnect()
             default:
                 break
             }
@@ -339,6 +361,10 @@ final class WHEPClient: ObservableObject {
         previousDecodeStats = WHEPVideoDecoder.Stats()
         decodeStatsTicks = 0
         keyframeRequests = 0
+        // Disarm the media watchdog for the fresh connection — it re-arms on this stream's first
+        // frame, not here (see logDecodeStatsTick).
+        mediaWatchdogLastFrames = 0
+        mediaWatchdogSinceHost = 0
         decodeStatsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.logDecodeStatsTick()
         }
@@ -350,6 +376,31 @@ final class WHEPClient: ObservableObject {
         let was = previousDecodeStats
         previousDecodeStats = now
         decodeStatsTicks += 1
+
+        // ── MEDIA-STALL WATCHDOG ─────────────────────────────────────────────────────────────
+        // Runs BEFORE the AU guard below on purpose: a media stall means NO access units are
+        // arriving, so that guard's early return would skip this exact case on every tick.
+        //
+        // Signal is framesDecoded — the single monotonic counter EVERY decoded frame increments
+        // (WHEPVideoDecoder.handleDecoded, 1:1 with the onDecodedFrame that reaches the screen),
+        // read here through the same locked snapshot the stats already take: no per-frame work, no
+        // new cross-thread field. ARMS ONLY once framesDecoded > 0 — the first frame — so a
+        // connection that never delivers one is left to the startup path (PLI retries, preIDR
+        // gating), not killed here. Stamped whenever the count advances; if it sits still for
+        // mediaStallWindow while armed, tear down through the SAME disconnect() every other path
+        // uses — which also invalidates THIS timer (safe from inside its own callback), so the
+        // watchdog cannot fire again or twice, and cancels the .disconnected backstop for free.
+        if now.framesDecoded > 0 {
+            if now.framesDecoded > mediaWatchdogLastFrames {
+                mediaWatchdogLastFrames = now.framesDecoded
+                mediaWatchdogSinceHost = CACurrentMediaTime()
+            } else if CACurrentMediaTime() - mediaWatchdogSinceHost >= Self.mediaStallWindow {
+                NSLog("[WHEP] no media for %.0fs on a healthy transport — publisher likely stopped; tearing down",
+                      Self.mediaStallWindow)
+                disconnect()
+                return
+            }
+        }
 
         // Nothing arriving is [WHEP-RTP]'s story to tell, not this one.
         guard now.accessUnitsReceived > was.accessUnitsReceived else { return }

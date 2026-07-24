@@ -389,6 +389,22 @@ struct ContentView: View {
                 clearScopes()
             }
         }
+        #if DEBUG
+        // WHEP teardown ends a source exactly as an NDI disconnect does. clearToBlack (in
+        // WHEPFrameRouter.deactivate) already wipes the PICTURE, but the SCOPES still show the last
+        // stream's trace — the identical stale-overlay NDI clears just above — so blank them here too
+        // for a fully clean empty state. A file taking over instead repaints both on its next frame.
+        // On connect, arm the auto-hide so the control surface reveals then settles, matching NDI;
+        // there is no color push, because WHEP colorimetry is assumed 709 and set in
+        // WHEPFrameRouter.activate rather than published as a source property.
+        .onChange(of: whep.isConnected) { _, connected in
+            if connected {
+                armIdleIfNeeded()
+            } else {
+                clearScopes()
+            }
+        }
+        #endif
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
