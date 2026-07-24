@@ -22,6 +22,14 @@ struct ManifoldApp: App {
             ContentView(engine: engine)
                 .frame(minWidth: 720, minHeight: 460)
                 .onOpenURL { url in
+                    // Finder double-click / drag-to-icon is a file-open too, and it bypasses
+                    // ContentView's fileImporter — so it must retire a live stream itself, or the
+                    // stream keeps pushing to the renderer alongside the new file (double source).
+                    // Closes the same gap for BOTH sources: NDI (previously missing here) and WHEP.
+                    if NDIService.shared.isConnected { NDIService.shared.disconnect() }
+                    #if DEBUG
+                    if WHEPClient.shared.isConnected { WHEPClient.shared.disconnect() }
+                    #endif
                     engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 }
                 // Gate the whole app behind the license/trial. Offline users with a valid

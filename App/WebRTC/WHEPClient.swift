@@ -34,12 +34,22 @@
 //
 
 #if DEBUG
+import Combine
 import Foundation
 
-final class WHEPClient {
+final class WHEPClient: ObservableObject {
 
     static let shared = WHEPClient()
     private init() {}
+
+    /// Published connection state — the WHEP analog of NDIService.isConnected, and the only
+    /// cross-module signal that WHEP is a live source. ContentView folds it into `hasSource`
+    /// (DEBUG-only, since this whole type is #if DEBUG) so the empty-state overlay hides while
+    /// WHEP drives the shared renderer, exactly as it does for NDI. Set true when WHEP takes the
+    /// display in connect(); cleared by disconnect() and by any spontaneous transport
+    /// failure/close, so it cannot stick true. Main-thread only — connect()/disconnect() assert
+    /// main and the pc-state callback is delivered on main, which is what @Published requires.
+    @Published private(set) var isConnected = false
 
     // MARK: - Configuration
 
@@ -116,6 +126,15 @@ final class WHEPClient {
     private var previousDecodeStats = WHEPVideoDecoder.Stats()
     private var decodeStatsTicks = 0
     private var keyframeRequests = 0
+
+    /// Bounded backstop for a stuck `.disconnected`. WebRTC treats `.disconnected` as transient and
+    /// normally recovers to `.connected` within a second or two, so we do NOT tear down on it. But
+    /// we have not observed that libdatachannel always escalates a genuinely dead link to `.failed`,
+    /// and if it doesn't, `isConnected` would stay true over a frozen picture with no way back to the
+    /// empty state. If the connection sits disconnected past this window without recovering, we treat
+    /// it as failed ourselves. Main-thread only, cancelled on recovery and on any teardown.
+    private static let disconnectRecoveryWindow: TimeInterval = 10
+    private var disconnectBackstop: DispatchWorkItem?
 
     private func elapsed() -> String {
         guard let startedAt else { return "?" }
@@ -201,6 +220,11 @@ final class WHEPClient {
         // takeover; for this first-light there is no source-switching UI, so connecting
         // WHEP simply shows WHEP.
         WHEPFrameRouter.shared.activate()
+        // WHEP now owns the renderer (activate() stopped any loaded file via onWillActivateStream):
+        // from here it IS the active source. Publish that BEFORE the async handshake below, or the
+        // empty state would flash over the black takeover screen until DTLS comes up. Cleared on
+        // every teardown/failure path — see disconnect() and onConnectionState.
+        isConnected = true
         startDecodeStatsTimer()
 
         session.onIceState = { [weak self] state, name in
@@ -223,13 +247,31 @@ final class WHEPClient {
             case .connected:
                 // DTLS is up — step 2's success condition, and step 3a's starting gun: RTP
                 // begins flowing into the depacketizer the moment SRTP keys are derived.
+                // Recovery (including .disconnected→.connected) — stand down the stuck-disconnect backstop.
+                self.cancelDisconnectBackstop()
                 NSLog("[WHEP] connected — ICE + DTLS established in %@. Transport is up.", self.elapsed())
                 NSLog("[WHEP] watching for RTP — the [WHEP-RTP] lines below are step 3a's checkpoint")
                 NSLog("[WHEP] (still no decode and no picture: NALs are built and counted, then dropped)")
             case .failed:
                 NSLog("[WHEP] FAILED at DTLS/transport.")
-            case .disconnected, .closed:
-                break
+                // A spontaneous transport failure does not route through disconnect() on its own,
+                // so the source flag would stick true. Tear down: clears isConnected, releases the
+                // display, and frees the session so ⌃⌥H can retry (connect() guards on session==nil).
+                // disconnect() also cancels the backstop below.
+                self.disconnect()
+            case .disconnected:
+                // Transient — may still recover to .connected, so we do NOT tear down here (that would
+                // kill sessions that recover) and leave the source live so a brief blip does not flash
+                // the empty state. But arm a BOUNDED backstop: if it never recovers and never escalates
+                // to .failed, treat it as failed after disconnectRecoveryWindow so isConnected cannot
+                // stay true over a dead picture.
+                self.scheduleDisconnectBackstop()
+            case .closed:
+                // Far-side close (our own teardown nils these callbacks first, so this only arrives
+                // from the peer): the source is gone. Clear the flag and stand down the backstop
+                // (no re-entrant teardown needed — the flag is already false).
+                self.cancelDisconnectBackstop()
+                self.isConnected = false
             default:
                 break
             }
@@ -264,6 +306,32 @@ final class WHEPClient {
             return
         }
         decoder.requestStillExport()
+    }
+
+    // MARK: - Stuck-disconnect backstop (main thread only)
+
+    /// Arm (or re-arm) the bounded `.disconnected` backstop. Cancels any prior one first, so the
+    /// window is measured from the most recent `.disconnected`. Fires at most once; the `guard`
+    /// makes it a no-op if it was cancelled out from under a firing that had already begun.
+    private func scheduleDisconnectBackstop() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        cancelDisconnectBackstop()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.disconnectBackstop != nil else { return }
+            self.disconnectBackstop = nil
+            NSLog("[WHEP] disconnected for %.0fs without recovery — treating as failed",
+                  Self.disconnectRecoveryWindow)
+            self.disconnect()   // same teardown .failed runs; clears isConnected, frees the session
+        }
+        disconnectBackstop = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.disconnectRecoveryWindow, execute: work)
+    }
+
+    /// Stand the backstop down. Safe to call when none is armed. Called on recovery to `.connected`,
+    /// on `.closed`, and from disconnect() — so a fire cannot happen after teardown has run.
+    private func cancelDisconnectBackstop() {
+        disconnectBackstop?.cancel()
+        disconnectBackstop = nil
     }
 
     private func startDecodeStatsTimer() {
@@ -407,6 +475,12 @@ final class WHEPClient {
 
     func disconnect() {
         dispatchPrecondition(condition: .onQueue(.main))
+        // Clear the source flag FIRST, before the no-session early-out below, so a redundant
+        // disconnect — or one after a connect that failed before a session existed — can never
+        // leave `isConnected` stuck true. Stand down the .disconnected backstop in the same breath,
+        // so it can never fire after teardown has already run (both are main-thread only).
+        isConnected = false
+        cancelDisconnectBackstop()
         guard let session else { return }
         NSLog("[WHEP] tearing down (+%@)", elapsed())
 

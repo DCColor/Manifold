@@ -119,6 +119,11 @@ struct ContentView: View {
     /// NDI connection state — the empty-state overlay has to know a stream is on screen even
     /// though no file is loaded. Observed, so ⌃⌥N / ⌃⌥⇧N update the UI.
     @ObservedObject private var ndi = NDIService.shared
+    #if DEBUG
+    // WHEP's published connection state. WHEPClient is #if DEBUG, so this observation is too; it
+    // feeds `hasSource` below so the empty-state overlay hides while WHEP drives the shared renderer.
+    @ObservedObject private var whep = WHEPClient.shared
+    #endif
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
 
     // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
@@ -174,7 +179,18 @@ struct ContentView: View {
     // shared renderer without ever setting `hasMedia`, so gating the reveal on `hasMedia` alone left
     // streaming with no reachable controls. Every reveal gate keys off this instead. Only the
     // "Open… to begin" prompt stays file-vs-nothing specific (it means NOTHING is on screen).
-    private var hasSource: Bool { engine.hasMedia || ndi.isConnected }
+    // The WHEP term is #if DEBUG because WHEPClient itself is: the whole WHEP path compiles only in
+    // DEBUG, so the Release build has no such symbol and must not reference it. WHEP pushes frames
+    // into the shared renderer exactly like NDI and never sets engine.hasMedia, so without this term
+    // the empty state would draw over live WHEP video. Collapses back to one expression when WHEP
+    // leaves DEBUG.
+    private var hasSource: Bool {
+        #if DEBUG
+        return engine.hasMedia || ndi.isConnected || whep.isConnected
+        #else
+        return engine.hasMedia || ndi.isConnected
+        #endif
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -384,6 +400,12 @@ struct ContentView: View {
                 // double-source flashing). Full-replacement, same teardown ⌃⌥⇧N / UI Disconnect use.
                 // No-op when not streaming.
                 if ndi.isConnected { NDIService.shared.disconnect() }
+                #if DEBUG
+                // Same rule for WHEP: a new file retires a live WHEP stream so both don't feed the
+                // renderer at once. WHEP→file was the missing half — file→stream already works via
+                // WHEPFrameRouter.activate()'s onWillActivateStream (ContentView.swift ~:278).
+                if WHEPClient.shared.isConnected { WHEPClient.shared.disconnect() }
+                #endif
                 engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 wakeHUD()
             }
