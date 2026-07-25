@@ -212,6 +212,12 @@ targets:
           # here reaches Swift or forces the target's C++ standard up. Project-local path; there is
           # deliberately no /opt/homebrew or /usr/local entry anywhere in this list.
           - $(SRCROOT)/ThirdParty/libdatachannel/include
+          # libsrt (SRT transport), vendored static like the two above. Exposes <srt/srt.h>, which
+          # is `extern "C"` and pulls in only version.h / platform_sys.h / logging_api.h / <string.h>
+          # / <stdlib.h> — so, like rtc/rtc.h, nothing here reaches Swift or forces the target's C++
+          # standard up. libsrt is TRANSPORT ONLY: the MPEG-TS demux stays in ThirdParty/ffmpeg,
+          # reached through a custom AVIOContext. See ThirdParty/libsrt/README.md.
+          - $(SRCROOT)/ThirdParty/libsrt/include
           # Bridge header, so the bridging header can #import "DataChannelBridge.h" from App/WebRTC.
           - $(SRCROOT)/App/WebRTC
           # DeckLink SDK headers (DeckLinkAPI.h et al.) for the .mm bridge + dispatch.cpp.
@@ -228,7 +234,7 @@ targets:
         # Homebrew OpenSSL, SRTP, or (critically) a Homebrew ffmpeg, which would silently displace
         # the custom LGPL static libav in ThirdParty/ffmpeg. Verify after every link with the
         # `otool -L` check in ThirdParty/libdatachannel/README.md.
-        # NOTE: libdatachannel deliberately adds NOTHING here. Its seven archives are named by
+        # NOTE: libdatachannel and libsrt deliberately add NOTHING here. Their archives are named by
         # EXACT ABSOLUTE PATH in OTHER_LDFLAGS below, so the linker is never given a search
         # directory for them and cannot substitute a same-named library from anywhere else.
         # Only the pre-existing ffmpeg entry remains.
@@ -266,6 +272,20 @@ targets:
           - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libjuice.a"'
           - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libsrtp2.a"'
           - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libusrsctp.a"'
+          # libsrt (SRT transport). It has NO archives of its own beyond this one: it is built
+          # against the SAME Mbed TLS staged under ThirdParty/libdatachannel/lib, so those three
+          # entries below serve BOTH consumers and a second copy is deliberately not vendored.
+          # scripts/build_libsrt.sh verifies that symbol-by-symbol — it diffs libsrt.a's undefined
+          # mbedtls_* set against everything the three archives define and fails on anything unmet.
+          #
+          # THIS LINE MUST STAY ABOVE THE THREE libmbed*.a ENTRIES. Provider follows consumer:
+          # libsrt consumes mbedcrypto (AES + PBKDF2 for SRTO_PASSPHRASE), so moving it below them
+          # breaks the link with undefined _mbedtls_* symbols.
+          #
+          # libsrt needs NO ffmpeg either — it is transport only, handing us an MPEG-TS byte
+          # stream that ThirdParty/ffmpeg demuxes through a custom AVIOContext. That seam is why
+          # that FFmpeg is built --disable-network; see ThirdParty/ffmpeg/README.md.
+          - '"$(SRCROOT)/ThirdParty/libsrt/lib/libsrt.a"'
           - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libmbedtls.a"'
           - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libmbedx509.a"'
           - '"$(SRCROOT)/ThirdParty/libdatachannel/lib/libmbedcrypto.a"'

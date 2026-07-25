@@ -72,6 +72,13 @@ ThirdParty/ffmpeg/include/
 ThirdParty/libdatachannel/lib/
 ThirdParty/libdatachannel/include/
 
+# Vendored static libsrt (SRT transport) — build outputs, not source. Only libsrt.a
+# lives there; it reuses the Mbed TLS staged under ThirdParty/libdatachannel/lib.
+# See ThirdParty/libsrt/README.md for provenance; scripts/build_libsrt.sh to rebuild.
+# Keep the README and the build script tracked.
+ThirdParty/libsrt/lib/
+ThirdParty/libsrt/include/
+
 docs/BlackmagicDeckLinkSDK16.0/
 docs/Blackmagic Advanced Video Capture and Playback/
 .DS_Store
