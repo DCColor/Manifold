@@ -104,21 +104,94 @@ final class WHEPFrameRouter {
     /// compute its residual bound (residual is the integrated slew, so |residual| ≤ maxSlew × elapsed).
     /// The VALUE IS UNCHANGED — 0.005, LiveClock's default — and the diagnosis explicitly settles
     /// that it stays there: slew is a ppm-scale trim for crystal drift, and DISCARD is the
-    /// instrument for backlog. See the block at the assignment site before touching it.
+    /// instrument for backlog. See the block in `routeConfig` before touching it.
     private static let maxSlew = 0.005
+
+    // MARK: - The route's per-source configuration
+    //
+    // Every value here was previously assigned inline in `activate()`. The NUMBERS and their
+    // reasoning stayed in this file deliberately: they are WHEP measurements against a Cloudflare
+    // feed, not properties of "a live source", and LiveDisplayRoute cannot know why any of them are
+    // what they are. SRT will pass its own Config with its own numbers — SRTO_LATENCY already does
+    // part of what `targetDepth` does here, so it will need its own measurement, not this one.
+    private static var routeConfig: LiveDisplayRoute.Config {
+        LiveDisplayRoute.Config(
+            targetDepth: targetDepth,
+
+            // ── SLEW RAIL — SETTLED. DO NOT RAISE. ─────────────────────────────────────────
+            //
+            // The measurement is IN, and it closes: 659 pictures in 25 s from a 23.98 fps sender is
+            // 27.48 s of content, a 2.48 s surplus, which landed as 0.93 s flushed plus 1.59 s left
+            // in the buffer = 2.52 s. The accounting balances. Transport is clean (seqGaps=0,
+            // lost=0, reorder=0, AUs assembled == pictures decoded), PTS is correctly RTP-derived,
+            // and the sender's clock is real-time locked (~90,100 tps) once the backlog drains.
+            // There is NO clock drift and NO measurement bias to chase.
+            //
+            // WHICH MEANS THE RAIL WAS NEVER THE PROBLEM. ±0.5% is a drain rate of 0.005 s of
+            // buffer per second — absorbing a 2.5 s connect backlog that way would take EIGHT
+            // MINUTES. Raising it would not fix that; it would only make the correction visible on
+            // moving video while still losing the race. Slew is a ppm-scale trim for CRYSTAL DRIFT.
+            // DISCARD is the instrument for BACKLOG, and that is what the snap, the queue-full
+            // re-anchor and the freeze guard provide. Since every overfill is finite (the sender
+            // makes 23.98/s and the SFU cannot exceed that indefinitely), discarding is guaranteed
+            // to converge.
+            //
+            // 0.005 is LiveClock's default, so this changes nothing — it is here to state the
+            // conclusion at the place someone would otherwise reach for the knob.
+            maxSlew: maxSlew,
+
+            // SNAP-TO-LIVE, on for this transport (LiveClock defaults it off — see `snapEnabled`).
+            // A WHEP sender that pauses and resumes leaves a slab of buffered latency the ±0.5%
+            // slew cannot drain, and it happens on every pause in a review session. The knobs are
+            // stated rather than left implicit because they are the two things worth tuning from
+            // real behaviour: threshold is how deep is "too deep", debounce is how long we tolerate
+            // it before jumping. Conservative starting values — a missed snap costs latency, a
+            // false snap costs a visible jump, and the second is the worse failure.
+            snapEnabled: true,
+            // UNCHANGED at 0.2, but note the arithmetic moved with targetDepth: the snap fires
+            // above ~0.6 s (0.400 target + 0.2 threshold) rather than ~0.4 s. That is still the
+            // right shape — the threshold is "how far above target is a GROSS overfill the P-loop
+            // cannot drain", which scales with the target rather than being an absolute depth — but
+            // it does mean the buffer tolerates more absolute latency before snapping than it used
+            // to. Revisit if [WHEP-BACKLOG] ever shows a connect backlog sitting between 0.4 s and
+            // 0.6 s.
+            snapThreshold: 0.2,      // snap above ~0.6 s with a 0.4 s target
+            snapDebounce: 0.75,      // sustained, not a burst
+
+            // Headroom above the shallow file-path bound (12) so the control loop can correct a
+            // filling buffer before it saturates and drop-oldest fires — the value the sweep was
+            // run against.
+            maxQueued: 30,
+
+            // ASSUMED, NOT READ — and this is a WHEP limitation, which is exactly why it is stated
+            // here rather than defaulted inside LiveDisplayRoute. H.264 signals colorimetry in the
+            // SPS VUI, and our RTP depacketizer does not parse it. 709 SDR video-range is the
+            // honest default for a Constrained Baseline WHEP stream, and it is the SAME default NDI
+            // starts on for a source that declares nothing (NDIService.start). Range is pinned
+            // rather than read from the file transport's override, which describes a file that may
+            // not even be loaded — again exactly as NDI does.
+            //
+            // AN SRT SOURCE MUST NOT COPY THIS. libavformat fills codecpar->color_primaries /
+            // color_trc / color_space from the same VUI, so SRT can state the truth instead.
+            colorimetry: .assumedRec709SDR)
+    }
 
     // MARK: - Live state (main thread, except where noted)
 
     private let stateLock = NSLock()
     /// The clock, published to the decode queue under `stateLock`. nil = not active, which is how
     /// `deliver` cheaply drops frames that arrive before activate or after deactivate.
+    ///
+    /// OWNED HERE, NOT BY `route`. LiveDisplayRoute builds and configures the clock and hands it
+    /// back; this lock and this field are unchanged, so `deliver`'s per-frame read is exactly the
+    /// single lock acquisition it always was. See the header note in LiveDisplayRoute.
     private var liveClock: LiveClock?
 
-    /// Renderer providers saved at activate, restored verbatim at deactivate — SyntheticLiveSource's
-    /// discipline rather than NDI's (NDI leaves its clock installed on disconnect). We restore
-    /// because a file may be sitting behind us and can resume the moment WHEP goes away.
-    private var savedClock: (() -> Double)?
-    private var savedIsPaused: (() -> Bool)?
+    /// The shared live-push display plumbing: renderer save/restore, the LiveClock's four seams,
+    /// queue bound, flush, colorimetry. Everything in it was written here first and moved out
+    /// verbatim so SRT can use the same path rather than cloning it. What stayed behind is what is
+    /// genuinely WHEP's: the measured `targetDepth`, the assumed colorimetry, and all telemetry.
+    private let route = LiveDisplayRoute()
 
     // MARK: - Promote state (decode queue only)
 
@@ -617,108 +690,42 @@ final class WHEPFrameRouter {
             NSLog("[WHEP] no renderer wired — decoded frames will be counted but not displayed")
             return
         }
-        // One active source: retire the loaded file before we take the renderer.
-        onWillActivateStream?()
-
-        let clock = LiveClock(startupDepth: Self.targetDepth, targetDepth: Self.targetDepth)
-
-        savedClock = renderer.clock
-        savedIsPaused = renderer.isPausedProvider
-
-        // The three live-path seams, in SyntheticLiveSource's order. now() is "never due" until the
-        // first frame anchors it, so nothing renders until WHEP pushes. onDisplayTick stays nil:
-        // this is a PUSH source (NDI is the pull case that sets it).
-        renderer.clock = { [clock] in clock.now() }
-        renderer.isPausedProvider = { false }
-        renderer.onDisplayTick = nil
-        // SNAP-TO-LIVE, on for this transport (LiveClock defaults it off — see `snapEnabled`).
-        // A WHEP sender that pauses and resumes leaves a slab of buffered latency the ±0.5% slew
-        // cannot drain, and it happens on every pause in a review session. The knobs are stated
-        // here rather than left implicit because they are the two things worth tuning from real
-        // behaviour: threshold is how deep is "too deep", debounce is how long we tolerate it
-        // before jumping. Conservative starting values — a missed snap costs latency, a false snap
-        // costs a visible jump, and the second is the worse failure.
-        clock.snapEnabled = true
-        // UNCHANGED at 0.2, but note the arithmetic moved with targetDepth: the snap now fires
-        // above ~0.6 s (0.400 target + 0.2 threshold) rather than ~0.4 s. That is still the right
-        // shape — the threshold is "how far above target is a GROSS overfill the P-loop cannot
-        // drain", which scales with the target rather than being an absolute depth — but it does
-        // mean the buffer tolerates more absolute latency before snapping than it used to. Revisit
-        // if [WHEP-BACKLOG] ever shows a connect backlog sitting between 0.4 s and 0.6 s.
-        clock.snapThreshold = 0.2    // snap above ~0.6 s with a 0.4 s target
-        clock.snapDebounce = 0.75    // sustained, not a burst
-
-        // ── SLEW RAIL — SETTLED. DO NOT RAISE. ─────────────────────────────────────────────
-        //
-        // The measurement is IN, and it closes: 659 pictures in 25 s from a 23.98 fps sender is
-        // 27.48 s of content, a 2.48 s surplus, which landed as 0.93 s flushed plus 1.59 s left in
-        // the buffer = 2.52 s. The accounting balances. Transport is clean (seqGaps=0, lost=0,
-        // reorder=0, AUs assembled == pictures decoded), PTS is correctly RTP-derived, and the
-        // sender's clock is real-time locked (~90,100 tps) once the backlog drains. There is NO
-        // clock drift and NO measurement bias to chase.
-        //
-        // WHICH MEANS THE RAIL WAS NEVER THE PROBLEM. ±0.5% is a drain rate of 0.005 s of buffer
-        // per second — absorbing a 2.5 s connect backlog that way would take EIGHT MINUTES. Raising
-        // it would not fix that; it would only make the correction visible on moving video while
-        // still losing the race. Slew is a ppm-scale trim for CRYSTAL DRIFT. DISCARD is the
-        // instrument for BACKLOG, and that is what the snap, the queue-full re-anchor and the
-        // freeze guard now provide. Since every overfill is finite (the sender makes 23.98/s and
-        // the SFU cannot exceed that indefinitely), discarding is guaranteed to converge.
-        //
-        // 0.005 is LiveClock's default, so this line changes nothing — it is here to state the
-        // conclusion at the place someone would otherwise reach for the knob.
-        clock.maxSlew = Self.maxSlew
-
-        // Forwards the FULL sample — including the queue edges and the eligibility flag — which is
-        // what ARMS LiveClock's freeze guard. This transport opts in; the synthetic harness
-        // deliberately does not (see SyntheticLiveSource's matching hook).
-        renderer.onDepthSample = { [clock, weak self] sample in
-            let event = clock.updateDepth(spanSeconds: sample.spanSeconds,
-                                          count: sample.count,
-                                          oldestPTS: sample.oldestPTS,
-                                          newestPTS: sample.newestPTS,
-                                          presented: sample.hadEligibleFrame)
-            self?.lastDepthSpan = sample.spanSeconds   // telemetry only (see the field comment)
-            self?.lastDepthCount = sample.count
-            // Underrun detection, on the selection path where count == 0 is already known.
-            self?.recordSelection(count: sample.count, presented: sample.hadEligibleFrame)
-            // Feed the creep side of the drift comparison. Averaged over the window rather than
-            // sampled at its edges: the raw span is a per-frame sawtooth, and the creep we are
-            // hunting (~0.003 s/s) is far smaller than one tooth.
-            self?.recordDepthForDrift(span: sample.spanSeconds, snapped: event != nil)
-            // Fires on the render thread, but only on a coarse action — a snap or a freeze-guard
-            // re-anchor — never per tick. The clock's lock is already released by the time this
-            // value is in hand (it is a return, not a callback, precisely so a log can't run
-            // inside the critical section).
-            if let event {
+        // Everything from the takeover through the colorimetry is LiveDisplayRoute's, in the exact
+        // order it was written here: retire the current source, build the clock, save the
+        // renderer's providers, install ours, wire the clock's four seams, bound the queue, flush,
+        // state the colour. The clock comes BACK rather than staying there — see `liveClock`.
+        let clock = route.activate(
+            renderer: renderer,
+            config: Self.routeConfig,
+            // One active source: retire the loaded file before we take the renderer.
+            retireCurrentSource: { self.onWillActivateStream?() },
+            // RENDER THREAD, once per display tick. The clock call already happened inside the
+            // route; `event` is non-nil only on a coarse action (snap / freeze-guard re-anchor).
+            // This is the WHEP-specific measurement the shared type has no business holding.
+            onDepth: { [weak self] sample, event in
+                self?.lastDepthSpan = sample.spanSeconds   // telemetry only (see the field comment)
+                self?.lastDepthCount = sample.count
+                // Underrun detection, on the selection path where count == 0 is already known.
+                self?.recordSelection(count: sample.count, presented: sample.hadEligibleFrame)
+                // Feed the creep side of the drift comparison. Averaged over the window rather than
+                // sampled at its edges: the raw span is a per-frame sawtooth, and the creep we are
+                // hunting (~0.003 s/s) is far smaller than one tooth.
+                self?.recordDepthForDrift(span: sample.spanSeconds, snapped: event != nil)
+                // Only on a coarse action, never per tick. The clock's lock is already released by
+                // the time this value is in hand (it is a return, not a callback, precisely so a
+                // log can't run inside the critical section).
+                if let event {
+                    self?.recordClockJump(event.jumped)
+                    Self.log(event)
+                }
+            },
+            // DECODE THREAD (renderer.enqueue's caller), after the renderer's queue lock is
+            // released. Each firing logs and is counted into `flushed` so the accountant can prove
+            // convergence.
+            onOverflow: { [weak self] event in
                 self?.recordClockJump(event.jumped)
                 Self.log(event)
-            }
-        }
-
-        // QUEUE-FULL → CLOCK RE-ANCHOR. Runs on the DECODE thread (renderer.enqueue's caller),
-        // after the renderer's queue lock is released; `overflowReanchor` takes LiveClock's lock,
-        // which registerFrame already takes on this same thread every frame. No debounce: during a
-        // backlog drain this fires repeatedly and that IS the drain working. Each firing logs and
-        // is counted into `flushed` so the accountant can prove convergence.
-        renderer.onQueueOverflow = { [clock, weak self] newestPTS, count in
-            if let event = clock.overflowReanchor(newestPTS: newestPTS, count: count) {
-                self?.recordClockJump(event.jumped)
-                Self.log(event)
-            }
-        }
-        // Headroom above the shallow file-path bound (12) so the control loop can correct a filling
-        // buffer before it saturates and drop-oldest fires — the value the sweep was run against.
-        renderer.maxQueuedOverride = 30
-        renderer.flush()   // drop any file frames still queued behind us
-
-        // Colorimetry is ASSUMED, not read: H.264 signals it in the SPS VUI, which the depacketizer
-        // does not parse. 709 SDR video-range is the honest default for a Constrained Baseline WHEP
-        // stream, and it is the SAME default NDI starts on for a source that declares nothing
-        // (NDIService.start). Range is pinned rather than read from the file transport's override,
-        // which describes a file that may not even be loaded — again exactly as NDI does.
-        renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1)
-        renderer.isFullRangeProvider = { false }
+            })
 
         // Clear every per-stream measurement before the first frame of this stream can arrive —
         // `underrunArmed` above all, so a reconnect's startup fill cannot be logged as one giant
@@ -747,16 +754,11 @@ final class WHEPFrameRouter {
         stateLock.unlock()
         guard wasActive else { return }
 
-        if let renderer {
-            renderer.clock = savedClock
-            renderer.isPausedProvider = savedIsPaused
-            renderer.onDepthSample = nil
-            renderer.onQueueOverflow = nil   // must not outlive the clock it re-anchors
-            renderer.maxQueuedOverride = nil
-            renderer.clearToBlack()
-        }
-        savedClock = nil
-        savedIsPaused = nil
+        // Restores savedClock / savedIsPaused verbatim, nils onDepthSample + onQueueOverflow (which
+        // must not outlive the clock they drive) and maxQueuedOverride, and wipes the last streamed
+        // frame. onDisplayTick is deliberately NOT touched — activate() nil'd it and a push source
+        // has nothing to restore.
+        route.deactivate(renderer: renderer)
 
         NSLog("[WHEP] display route released — file-playback clock restored")
     }
@@ -1163,8 +1165,19 @@ final class WHEPFrameRouter {
 
     // MARK: - Helpers
 
-    /// Wrap a pixel buffer in a ready CMSampleBuffer at `pts`. Same call, same arguments, as
-    /// NDIService.makeSampleBuffer and SyntheticLiveSource.makeSampleBuffer. Duration is .invalid:
+    /// Wrap a pixel buffer in a ready CMSampleBuffer at `pts`.
+    ///
+    /// NOT SHAREABLE WITH NDIService / SyntheticLiveSource, despite the same three CoreMedia calls
+    /// — this comment used to claim "same call, same arguments" and that was wrong. The ARGUMENTS
+    /// differ in ways that are not cosmetic:
+    ///   * NDIService takes `pts: Double` and builds `CMTime(seconds:preferredTimescale: 90_000)`
+    ///     internally; this one takes a CMTime the caller built at timescale 1_000_000.
+    ///   * SyntheticLiveSource passes a REAL duration (not .invalid) and `allocator: nil`.
+    /// Unifying them would re-quantise one path's PTS, and those PTS values feed the renderer's
+    /// ordered insert and its median inter-frame-Δ tracking — i.e. the depth signal LiveClock
+    /// regulates. Left as three, deliberately.
+    ///
+    /// Duration is .invalid:
     /// RTP does not carry one, the renderer selects on PTS alone, and a fabricated duration would be
     /// a guess nothing reads. DTS is .invalid too — CoreMedia reads that as decode order ==
     /// presentation order, which is exactly true for Cloudflare's B-frame-free H.264.

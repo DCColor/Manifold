@@ -25,9 +25,9 @@ struct ManifoldApp: App {
                     // Finder double-click / drag-to-icon is a file-open too, and it bypasses
                     // ContentView's fileImporter — so it must retire a live stream itself, or the
                     // stream keeps pushing to the renderer alongside the new file (double source).
-                    // Closes the same gap for BOTH sources: NDI (previously missing here) and WHEP.
-                    if NDIService.shared.isConnected { NDIService.shared.disconnect() }
-                    if WHEPClient.shared.isConnected { WHEPClient.shared.disconnect() }
+                    // Closes the gap for EVERY live source through the one entry point the file
+                    // importer also uses, so the two paths cannot drift as sources are added.
+                    LiveSource.retireActive()
                     engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 }
                 // Gate the whole app behind the license/trial. Offline users with a valid

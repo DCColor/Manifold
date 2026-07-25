@@ -185,7 +185,20 @@ struct ContentView: View {
     // WHEP pushes frames into the shared renderer exactly like NDI and never sets engine.hasMedia,
     // so without the whep term the empty state would draw over live web-stream video.
     private var hasSource: Bool {
-        return engine.hasMedia || ndi.isConnected || whep.isConnected
+        return engine.hasMedia || activeLiveSource != nil
+    }
+
+    /// The live (non-file) source currently on screen, or nil. THE single place this view asks
+    /// "what is streaming" — every gate below keys off it rather than restating a pairwise chain.
+    ///
+    /// Reads the `@ObservedObject` instances, which is what makes `body` re-render on connect and
+    /// disconnect. `LiveSource` deliberately exposes no equivalent accessor — it offers only the
+    /// `retireActive` ACTION — so there is no singleton-reading shortcut to reach for here by
+    /// mistake. Adding SRT is one more line here and one more case there.
+    private var activeLiveSource: LiveSource? {
+        if ndi.isConnected { return .ndi }
+        if whep.isConnected { return .web }
+        return nil
     }
 
     var body: some View {
@@ -403,15 +416,12 @@ struct ContentView: View {
             allowsMultipleSelection: false
         ) { result in
             if case .success(let urls) = result, let url = urls.first {
-                // One active source: a new file retires any live stream FIRST, so both don't feed
-                // the renderer at once (NDI pushing on its tick + the file's frame pump = the
-                // double-source flashing). Full-replacement, same teardown ⌃⌥⇧N / UI Disconnect use.
-                // No-op when not streaming.
-                if ndi.isConnected { NDIService.shared.disconnect() }
-                // Same rule for WHEP: a new file retires a live web stream so both don't feed the
-                // renderer at once. WHEP→file was the missing half — file→stream already works via
-                // WHEPFrameRouter.activate()'s onWillActivateStream.
-                if WHEPClient.shared.isConnected { WHEPClient.shared.disconnect() }
+                // One active source: a new file retires EVERY live stream FIRST, so both don't feed
+                // the renderer at once (a stream pushing + the file's frame pump = the
+                // double-source flashing). Full-replacement, same teardown ⌃⌥⇧N / UI Disconnect
+                // use. No-op when not streaming. One call rather than one line per source, so a
+                // source added later cannot be forgotten here.
+                LiveSource.retireActive()
                 engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 wakeHUD()
             }
@@ -1170,11 +1180,10 @@ struct ContentView: View {
         // exists, then a "Streams" section of flat rows + "Manage…". Shared with the empty-state pill.
         streamURLMenuItems
 
-        if ndi.isConnected || whep.isConnected {
+        if activeLiveSource != nil {
             Divider()
             Button(role: .destructive) {
-                if ndi.isConnected { NDIService.shared.disconnect() }
-                if whep.isConnected { WHEPClient.shared.disconnect() }
+                LiveSource.retireActive()
             } label: {
                 Label("Disconnect", systemImage: "stop.circle")
             }
@@ -1258,7 +1267,14 @@ struct ContentView: View {
     /// onWillActivateStream retires a loaded file). Shared by the menu rows and the sheet so the
     /// takeover rule can't diverge.
     private func connectToStreamURL(_ url: URL) {
-        if ndi.isConnected { NDIService.shared.disconnect() }
+        // `except: .web` — WHEP is the source we are about to hand to, and it retires the loaded
+        // FILE itself via WHEPFrameRouter.activate()'s onWillActivateStream. Note this preserves
+        // today's behaviour exactly, INCLUDING the case where a web stream is already live:
+        // WHEPClient.connect refuses a second concurrent session (`guard session == nil`), so
+        // picking a second bookmark logs and does nothing. That is a real gap, and a third source
+        // will force a decision about web→srt / srt→web handover — but changing it here would make
+        // this refactor no longer verifiable as "nothing changed".
+        LiveSource.retireActive(except: .web)
         WHEPClient.shared.connect(to: url)
     }
 
@@ -1302,7 +1318,7 @@ struct ContentView: View {
     /// The streaming button's main-click action (and the ⌃⌥N/⌃⌥⇧N shortcuts funnel through the same
     /// NDIService calls): stop when streaming, quick-connect the first discovered source otherwise.
     private func toggleStreaming() {
-        if ndi.isConnected {
+        if activeLiveSource == .ndi {
             NDIService.shared.disconnect()
         } else {
             NDIService.shared.connectToFirstSource()
@@ -1489,7 +1505,7 @@ struct ContentView: View {
                 // what things ARE). Today its only section is the live stream's colorimetry override,
                 // so it's gated to NDI: it has nothing to say about a file yet (file color-management
                 // modes are the future second section). Same appearance rule as before.
-                if ndi.isConnected {
+                if activeLiveSource == .ndi {
                     colorControl
                 }
 
