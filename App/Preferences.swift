@@ -203,6 +203,154 @@ final class Preferences: ObservableObject {
     private init() {}
 }
 
+// MARK: - Stream bookmarks
+//
+// Named endpoints for the streaming button's URL sources, persisted in UserDefaults (NOT Keychain).
+// The risk being mitigated is a raw endpoint URL — whose PATH carries the stream key — being read
+// off a client's screen during a share; a user-supplied NAME is what solves that, so the list shows
+// the name and the HOST only and never the path. Encryption at rest is the wrong tool for a
+// screen-visible-URL problem. Lives here with the rest of the preferences plumbing rather than as a
+// one-off; a Codable array does not fit @AppStorage, so it is a small store over one JSON key.
+
+/// The transport a bookmarked URL uses, detected from the URL on save and stored per entry so a
+/// later SRT/HLS implementation needs no migration. Only `.web` connects today; the others are
+/// saved, listed, and shown disabled with an honest reason.
+enum StreamType: String, Codable {
+    case web    // http(s) — the default; there is no reliable WHEP signature, it is just an https URL
+    case srt    // srt://
+    case hls    // a path containing .m3u8
+
+    /// Detect from a URL. srt:// wins first, then an .m3u8 path, then the http(s) default. A URL
+    /// matching none of the accepted schemes is rejected before this is reached (see `validate`).
+    static func detect(_ url: URL) -> StreamType {
+        if url.scheme?.lowercased() == "srt" { return .srt }
+        if url.path.lowercased().contains(".m3u8") { return .hls }
+        return .web
+    }
+
+    /// Row label — reads naturally, never a protocol acronym, EXCEPT SRT, which broadcast people
+    /// know by name and expect to see. Deliberately never "WHEP".
+    var label: String {
+        switch self {
+        case .web: return "Web Stream"
+        case .srt: return "SRT"
+        case .hls: return "HLS"
+        }
+    }
+
+    /// Only web connects today.
+    var isSupported: Bool { self == .web }
+
+    /// Honest greyed-row reason for an unsupported entry; nil when supported.
+    var unsupportedReason: String? {
+        switch self {
+        case .web: return nil
+        case .srt: return "SRT — not yet supported"
+        case .hls: return "HLS — not yet supported"
+        }
+    }
+}
+
+/// One saved stream endpoint. `id` is stable across launches so SwiftUI list identity and per-row
+/// delete are unambiguous. `urlString` is stored verbatim and only ever handed to WHEPClient.connect
+/// — the host is derived for display, the full string is never shown or logged.
+struct StreamBookmark: Codable, Identifiable {
+    let id: UUID
+    var name: String
+    var urlString: String
+    var type: StreamType
+
+    init(id: UUID = UUID(), name: String, urlString: String, type: StreamType) {
+        self.id = id; self.name = name; self.urlString = urlString; self.type = type
+    }
+
+    var url: URL? { URL(string: urlString) }
+
+    /// Host for secondary display. NEVER the path — it can carry the stream key.
+    var displayHost: String { url?.host ?? "—" }
+}
+
+/// Why a pasted URL was rejected — distinct cases so the sheet can give a specific message rather
+/// than saving an entry that fails mysteriously later.
+enum StreamValidationError: Error {
+    case empty
+    case notAURL
+    case unrecognisedScheme(String?)
+
+    var message: String {
+        switch self {
+        case .empty:    return "Enter a stream URL."
+        case .notAURL:  return "That doesn’t look like a URL."
+        case .unrecognisedScheme(let s):
+            return "Unsupported URL scheme\(s.map { " “\($0)”" } ?? ""). Use https://, srt://, or an .m3u8 link."
+        }
+    }
+}
+
+/// Persisted list of stream bookmarks — a small ObservableObject over one JSON-encoded UserDefaults
+/// key. Main-thread only (SwiftUI drives it).
+final class StreamBookmarkStore: ObservableObject {
+    static let shared = StreamBookmarkStore()
+
+    private static let key = "streamBookmarks"
+
+    @Published private(set) var bookmarks: [StreamBookmark]
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: Self.key),
+           let decoded = try? JSONDecoder().decode([StreamBookmark].self, from: data) {
+            bookmarks = decoded
+        } else {
+            bookmarks = []
+        }
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(bookmarks) {
+            UserDefaults.standard.set(data, forKey: Self.key)
+        }
+    }
+
+    /// The single gate every add/connect path runs through, so what can be SAVED and what can be
+    /// CONNECTED can never diverge: parses as a URL, has a host, and uses a scheme we recognise.
+    static func validate(_ raw: String) -> Result<(url: URL, type: StreamType), StreamValidationError> {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure(.empty) }
+        guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), url.host != nil else {
+            return .failure(.notAURL)
+        }
+        switch scheme {
+        case "http", "https", "srt": return .success((url, StreamType.detect(url)))
+        default:                     return .failure(.unrecognisedScheme(url.scheme))
+        }
+    }
+
+    /// Add a validated bookmark (name falls back to the host if blank). Returns the created entry —
+    /// even when its type is unsupported, so it is still saved and listed — or the validation error.
+    @discardableResult
+    func add(name: String, urlString: String) -> Result<StreamBookmark, StreamValidationError> {
+        switch Self.validate(urlString) {
+        case .failure(let e): return .failure(e)
+        case .success(let (url, type)):
+            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalName = trimmedName.isEmpty ? (url.host ?? "Stream") : trimmedName
+            let bookmark = StreamBookmark(name: finalName, urlString: url.absoluteString, type: type)
+            bookmarks.append(bookmark)
+            persist()
+            return .success(bookmark)
+        }
+    }
+
+    func delete(_ bookmark: StreamBookmark) {
+        bookmarks.removeAll { $0.id == bookmark.id }
+        persist()
+    }
+
+    /// First saved bookmark of a supported (connectable) type — what ⌃⌥H connects to. nil when
+    /// nothing connectable is saved.
+    var firstConnectable: StreamBookmark? { bookmarks.first { $0.type.isSupported } }
+}
+
 /// The Settings window contents (opens with ⌘,).
 struct SettingsView: View {
     // NDI runtime presence for the "NDI Runtime" status row. Observed so the row updates when

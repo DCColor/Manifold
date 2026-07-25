@@ -27,9 +27,7 @@ struct ManifoldApp: App {
                     // stream keeps pushing to the renderer alongside the new file (double source).
                     // Closes the same gap for BOTH sources: NDI (previously missing here) and WHEP.
                     if NDIService.shared.isConnected { NDIService.shared.disconnect() }
-                    #if DEBUG
                     if WHEPClient.shared.isConnected { WHEPClient.shared.disconnect() }
-                    #endif
                     engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 }
                 // Gate the whole app behind the license/trial. Offline users with a valid

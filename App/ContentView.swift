@@ -119,11 +119,14 @@ struct ContentView: View {
     /// NDI connection state — the empty-state overlay has to know a stream is on screen even
     /// though no file is loaded. Observed, so ⌃⌥N / ⌃⌥⇧N update the UI.
     @ObservedObject private var ndi = NDIService.shared
-    #if DEBUG
-    // WHEP's published connection state. WHEPClient is #if DEBUG, so this observation is too; it
-    // feeds `hasSource` below so the empty-state overlay hides while WHEP drives the shared renderer.
+    // WHEP's published connection state — feeds `hasSource` so the empty-state overlay hides while a
+    // web stream drives the shared renderer, and drives the teardown scope-clear below.
     @ObservedObject private var whep = WHEPClient.shared
-    #endif
+    // Saved stream bookmarks — observed so the chevron and empty-state menus rebuild when the set
+    // changes (empty ↔ non-empty flips the "Stream URL" item between a flat entry and a flyout).
+    @ObservedObject private var bookmarks = StreamBookmarkStore.shared
+    // Stream-bookmark manager sheet (chevron ▸ "Stream URL…" / "Manage…" and the empty-state menu).
+    @State private var showStreamBookmarks = false
     @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
 
     // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
@@ -179,17 +182,10 @@ struct ContentView: View {
     // shared renderer without ever setting `hasMedia`, so gating the reveal on `hasMedia` alone left
     // streaming with no reachable controls. Every reveal gate keys off this instead. Only the
     // "Open… to begin" prompt stays file-vs-nothing specific (it means NOTHING is on screen).
-    // The WHEP term is #if DEBUG because WHEPClient itself is: the whole WHEP path compiles only in
-    // DEBUG, so the Release build has no such symbol and must not reference it. WHEP pushes frames
-    // into the shared renderer exactly like NDI and never sets engine.hasMedia, so without this term
-    // the empty state would draw over live WHEP video. Collapses back to one expression when WHEP
-    // leaves DEBUG.
+    // WHEP pushes frames into the shared renderer exactly like NDI and never sets engine.hasMedia,
+    // so without the whep term the empty state would draw over live web-stream video.
     private var hasSource: Bool {
-        #if DEBUG
         return engine.hasMedia || ndi.isConnected || whep.isConnected
-        #else
-        return engine.hasMedia || ndi.isConnected
-        #endif
     }
 
     var body: some View {
@@ -286,13 +282,11 @@ struct ContentView: View {
                 // stream is about to take over, retire any loaded file first so both don't feed the
                 // renderer at once. NDIService has no engine handle, so it calls back through here.
                 NDIService.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
-                #if DEBUG
-                // WHEP step 4 (⌃⌥H) displays through this SAME renderer, feeding the same enqueue
-                // NDI and the file sources feed — but paced by LiveClock rather than FrameSync or
-                // the file timebase. Same two hooks as NDI, for the same two reasons.
+                // A web stream displays through this SAME renderer, feeding the same enqueue NDI and
+                // the file sources feed — but paced by LiveClock rather than FrameSync or the file
+                // timebase. Same two hooks as NDI, for the same two reasons.
                 WHEPFrameRouter.shared.renderer = renderer
                 WHEPFrameRouter.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
-                #endif
                 // …and tees NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the
                 // clock-anchored SDI output, SDI/Computer routing and mute apply to NDI for free.
                 NDIService.shared.audioTap = engine.audioTap
@@ -389,7 +383,6 @@ struct ContentView: View {
                 clearScopes()
             }
         }
-        #if DEBUG
         // WHEP teardown ends a source exactly as an NDI disconnect does. clearToBlack (in
         // WHEPFrameRouter.deactivate) already wipes the PICTURE, but the SCOPES still show the last
         // stream's trace — the identical stale-overlay NDI clears just above — so blank them here too
@@ -404,7 +397,6 @@ struct ContentView: View {
                 clearScopes()
             }
         }
-        #endif
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
@@ -416,12 +408,10 @@ struct ContentView: View {
                 // double-source flashing). Full-replacement, same teardown ⌃⌥⇧N / UI Disconnect use.
                 // No-op when not streaming.
                 if ndi.isConnected { NDIService.shared.disconnect() }
-                #if DEBUG
-                // Same rule for WHEP: a new file retires a live WHEP stream so both don't feed the
+                // Same rule for WHEP: a new file retires a live web stream so both don't feed the
                 // renderer at once. WHEP→file was the missing half — file→stream already works via
-                // WHEPFrameRouter.activate()'s onWillActivateStream (ContentView.swift ~:278).
+                // WHEPFrameRouter.activate()'s onWillActivateStream.
                 if WHEPClient.shared.isConnected { WHEPClient.shared.disconnect() }
-                #endif
                 engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
                 wakeHUD()
             }
@@ -432,6 +422,14 @@ struct ContentView: View {
         // double-click / drag-to-icon), which can't reach this view's state. Also covers the nil
         // transition engine.stop() makes on NDI takeover.
         .onChange(of: engine.currentURL) { _, _ in captions.clear() }
+        .sheet(isPresented: $showStreamBookmarks) {
+            StreamBookmarksSheet(store: .shared) { url in
+                // Same connect+takeover path the chevron rows use; then close the sheet so the async
+                // result — a connect-error banner or live video — is visible in the main window.
+                connectToStreamURL(url)
+                showStreamBookmarks = false
+            }
+        }
         .sheet(isPresented: $showGetFlipSheet) {
             VStack(spacing: 16) {
                 Image(systemName: "arrow.up.forward.app")
@@ -572,6 +570,10 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+        // Connection-error banner — visible over the empty state (menu path) or live video, above the
+        // other top overlays. Non-blocking; see connectErrorBanner.
+        .overlay(alignment: .top) { connectErrorBanner }
+        .animation(.easeInOut(duration: 0.25), value: whep.lastError)
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
     }
@@ -773,8 +775,8 @@ struct ContentView: View {
     ///         WHEP takes the display while connected (a loaded file is retired), so this is
     ///         also the source-activation trigger. Watch [WHEP-RTP] for NAL counts,
     ///         [WHEP-DECODE] for the decode rate, and [WHEP-FLOW] + [LIVECLOCK] for the
-    ///         producer/consumer pair. Needs an endpoint in ~/.manifold-whep-config or
-    ///         $MANIFOLD_WHEP_URL (see WHEPClient). ⌃⌥⇧H tears down and restores playback.
+    ///         producer/consumer pair. Connects the FIRST saved stream bookmark (a convenience over
+    ///         the shipping Stream Sources sheet); no-op with a log if none is saved. ⌃⌥⇧H tears down.
     ///   ⌃⌥⇧E  export the next decoded WHEP frame to a PNG (pre-render, decoder-side check)
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
     /// only the triggers are `#if DEBUG`.
@@ -830,8 +832,17 @@ struct ContentView: View {
             // applies the answer, and logs the transport coming up. A spec-compliant WHEP
             // exchange — no server-specific behaviour. Success is "[WHEP] connected"; there is
             // deliberately no picture yet. ⌃⌥⇧H tears the session down (and DELETEs it).
-            Button("") { WHEPClient.shared.connect() }
-                .keyboardShortcut("h", modifiers: [.control, .option])
+            Button("") {
+                // Convenience shortcut over the shipping Stream Sources sheet: connect the first
+                // saved bookmark of a supported type. With the dotfile backdoor gone there is no
+                // ambient URL, so ⌃⌥H is a speed path over saved state — never a URL-entry path.
+                if let bookmark = StreamBookmarkStore.shared.firstConnectable, let url = bookmark.url {
+                    WHEPClient.shared.connect(to: url)
+                } else {
+                    NSLog("[WHEP] no saved stream — add one via the streaming menu ▸ Stream URL…")
+                }
+            }
+            .keyboardShortcut("h", modifiers: [.control, .option])
             Button("") { WHEPClient.shared.disconnect() }
                 .keyboardShortcut("h", modifiers: [.control, .option, .shift])
             // ⌃⌥⇧E — WHEP DECODED-FRAME STILL (step 3b). Writes the next decoded WHEP frame
@@ -1155,12 +1166,15 @@ struct ContentView: View {
         } label: {
             Label("NDI", systemImage: "antenna.radiowaves.left.and.right")
         }
-        // Structural room for future streaming tech (WHEP / SRT / HLS) — sibling Menus go here.
+        // Sibling to NDI: saved URL streams. Flat "Stream URL…" (opens the sheet) until a bookmark
+        // exists, then a "Streams" section of flat rows + "Manage…". Shared with the empty-state pill.
+        streamURLMenuItems
 
-        if ndi.isConnected {
+        if ndi.isConnected || whep.isConnected {
             Divider()
             Button(role: .destructive) {
-                NDIService.shared.disconnect()
+                if ndi.isConnected { NDIService.shared.disconnect() }
+                if whep.isConnected { WHEPClient.shared.disconnect() }
             } label: {
                 Label("Disconnect", systemImage: "stop.circle")
             }
@@ -1192,6 +1206,95 @@ struct ContentView: View {
                         Text(source.name)
                     }
                 }
+            }
+        }
+    }
+
+    /// The saved stream-bookmark rows — the one place bookmarks become menu items, so the toolbar
+    /// chevron and the empty-state pill show the SAME entries and connect through the SAME path
+    /// (connectToStreamURL). Mirrors ndiSourceListItems. NEVER shows the URL — name only, because the
+    /// path can carry the stream key. Unsupported types (SRT/HLS today) appear DISABLED with the same
+    /// honest reason the sheet uses; they are never hidden.
+    @ViewBuilder private var streamBookmarkRows: some View {
+        ForEach(bookmarks.bookmarks) { bookmark in
+            if bookmark.type.isSupported {
+                Button(bookmark.name) {
+                    if let url = bookmark.url { connectToStreamURL(url) }
+                }
+            } else {
+                Button(bookmark.type.unsupportedReason ?? bookmark.name) {}
+                    .disabled(true)
+            }
+        }
+    }
+
+    /// The "Stream URL" entry, shared by BOTH menu entry points so their structure can't drift: a
+    /// FLAT item that opens the sheet when nothing is saved (never a submenu containing only
+    /// "Manage…"), promoted to a flyout of the saved rows + "Manage…" once a bookmark exists.
+    @ViewBuilder private var streamURLMenuItems: some View {
+        // Leads with the separator that divides the NDI entries above from the stream entries — in
+        // BOTH the chevron and the empty-state pill, so neither caller adds its own (which would
+        // double up). When bookmarks exist the rows sit FLAT at the top level, NOT in a nested Menu:
+        // an AppKit submenu dismisses on the micro-movements of the diagonal hover from parent row
+        // into flyout, which made it unusably twitchy. A Section header groups them without adding a
+        // hover target — the same reason NDI's discovered sources sit flat.
+        Divider()
+        if bookmarks.bookmarks.isEmpty {
+            Button {
+                showStreamBookmarks = true
+            } label: {
+                Label("Stream URL…", systemImage: "link")
+            }
+        } else {
+            Section("Streams") {
+                streamBookmarkRows
+            }
+            Divider()
+            Button("Manage…") { showStreamBookmarks = true }
+        }
+    }
+
+    /// Connect to a stream URL, retiring any live NDI source first (one active source — WHEP's own
+    /// onWillActivateStream retires a loaded file). Shared by the menu rows and the sheet so the
+    /// takeover rule can't diverge.
+    private func connectToStreamURL(_ url: URL) {
+        if ndi.isConnected { NDIService.shared.disconnect() }
+        WHEPClient.shared.connect(to: url)
+    }
+
+    /// Non-blocking error banner for a failed stream connect — the presentation for BOTH the menu
+    /// path (no modal open) and the sheet path (which closes on connect, so the async failure lands
+    /// here). Shows WHEPClient.lastError: the SERVER'S own message where there is one (e.g.
+    /// Cloudflare's "Live broadcast not started yet"), else a clear generic — and never a full URL.
+    /// Auto-dismisses; the close button or a new attempt clears it sooner. Never blocks: the user can
+    /// pick another bookmark or open a file immediately.
+    @ViewBuilder private var connectErrorBanner: some View {
+        if let message = whep.lastError {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button { whep.clearError() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.orange.opacity(0.55)))
+            .padding(.top, 16)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .task(id: message) {
+                // Auto-dismiss. A new attempt or the close button clears it sooner; the id change
+                // then cancels this sleep, so a stale timer can't wipe a fresh message.
+                try? await Task.sleep(nanoseconds: 9_000_000_000)
+                whep.clearError()
             }
         }
     }
@@ -1424,6 +1527,7 @@ struct ContentView: View {
                 // runs while this view is on screen (see the ndi.startDiscovery/stopDiscovery below).
                 Menu {
                     ndiSourceListItems
+                    streamURLMenuItems
                 } label: {
                     Label("Connect Stream…", systemImage: "antenna.radiowaves.left.and.right")
                 }

@@ -42,7 +42,6 @@
 //  would put a main-thread activate behind the render thread.
 //
 
-#if DEBUG
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -304,10 +303,12 @@ final class WHEPFrameRouter {
     /// thread (snap, freeze-guard), the DECODE thread (queue-full re-anchor) and MAIN (manual
     /// target step), hence the lock.
     private func recordClockJump(_ seconds: Double) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         guard seconds.isFinite, seconds != 0 else { return }
         backlogLock.lock()
         backlogNetJump += seconds
         backlogLock.unlock()
+        #endif
     }
 
     // MARK: - Underrun accounting (how much cushion is ACTUALLY required)
@@ -364,8 +365,26 @@ final class WHEPFrameRouter {
     private var underrunSince: CFTimeInterval?
     /// Display ticks observed with an empty queue in the current episode.
     private var underrunTicks = 0
-    /// Running max of `cushionNeeded` across the whole stream — the figure that sets `targetDepth`.
+    /// Running max of `cushionNeeded` across the whole stream — the figure a future adaptive-depth
+    /// controller will read to size `targetDepth`. DIAGNOSTIC-ONLY TODAY (written only inside the
+    /// telemetry gate), so it is exposed through `measuredCushionNeeded` below as an OPTIONAL: a
+    /// Release reader gets nil, never a plausible measured 0.0.
     private var underrunCushionNeededMax: Double = 0
+
+    /// The measured "cushion needed" a future adaptive-depth controller will consume — or nil when
+    /// telemetry is compiled out. FAIL-LOUD BY DESIGN: this figure is populated only under
+    /// `#if DEBUG || MANIFOLD_TELEMETRY`, so in a Release build this returns nil rather than the
+    /// field's plausible 0.0, and a caller CANNOT mistake "not measured" for "measured zero".
+    /// WHEN ADAPTIVE DEPTH SHIPS: move the underrun accounting OUT of the telemetry gate (onto the
+    /// functional path) so this is populated in Release too; until then, nil is the honest answer.
+    var measuredCushionNeeded: Double? {
+        #if DEBUG || MANIFOLD_TELEMETRY
+        backlogLock.lock(); defer { backlogLock.unlock() }
+        return underrunCushionNeededMax
+        #else
+        return nil
+        #endif
+    }
     /// Every positive lateness seen this stream, for the all-time shape. Bounded so a long session
     /// cannot grow it without limit; the running max above is unaffected by the bound.
     private var underrunAllLatenessValues: [Double] = []
@@ -387,6 +406,7 @@ final class WHEPFrameRouter {
     /// RENDER THREAD, from the selection path. One display tick's queue occupancy.
     /// `count == 0` opens or extends a starvation episode; anything else closes the run and arms.
     private func recordSelection(count: Int, presented: Bool) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         backlogLock.lock()
         if presented { underrunArmed = true }
         if count == 0, underrunArmed {
@@ -397,12 +417,14 @@ final class WHEPFrameRouter {
             underrunTicks += 1
         }
         backlogLock.unlock()
+        #endif
     }
 
     /// DECODE THREAD, on arrival. Closes an open starvation episode and emits its line.
     /// `senderPTS` is the presentation PTS (identity at this seam) and `clockNow` is `now()` read
     /// at the same instant — the pair the lateness is computed from.
     private func closeUnderrunIfOpen(senderPTS: Double, clockNow: Double, target: Double) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         backlogLock.lock()
         guard let since = underrunSince, clockNow.isFinite else {
             backlogLock.unlock()
@@ -431,10 +453,12 @@ final class WHEPFrameRouter {
               [WHEP-UNDERRUN] queue empty for %.3fs, %d ticks starved, recovered when frame \
               arrived %+.3fs late vs clock — would have needed cushion >= %.3fs (target now %.3fs)
               """, starved, ticks, lateness, cushionNeeded, target)
+        #endif
     }
 
     /// Fold one arrival into the 1 s arrival bins. Decode queue, called under `backlogLock`.
     private func foldArrivalBinLocked(host: CFTimeInterval) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         if arrivalBinStart == 0 { arrivalBinStart = host }
         // CLOSE ELAPSED BINS FIRST, THEN COUNT. Counting before advancing would attribute this
         // arrival to whichever bin happened to still be open — so a 3 s gap would dump the frames
@@ -449,6 +473,7 @@ final class WHEPFrameRouter {
             arrivalBinCount = 0
         }
         arrivalBinCount += 1
+        #endif
     }
 
     /// Fold one arriving picture into the ledger and emit the 5 s lines when due. Decode queue.
@@ -457,6 +482,7 @@ final class WHEPFrameRouter {
     /// discussion in the ledger block above for why it must be measured here rather than taken
     /// from the renderer's clamped span.
     private func recordBacklogSample(senderPTS: Double, clockNow: Double) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         let host = CACurrentMediaTime()
 
         backlogLock.lock()
@@ -540,12 +566,14 @@ final class WHEPFrameRouter {
               """,
               arrivalsMin, arrivalsMax, nominal, windowUnderruns, totalUnderruns,
               worst, windowShape, cushionNeededMax, allTime)
+        #endif
     }
 
     /// All-time p50/p90 of the positive latenesses, or "" while the sample is too small for a
     /// percentile to be more informative than the raw list already printed per window. 8 is the
     /// point below which p90 is just "the largest value" wearing a statistical hat.
     private static func percentileSummary(_ values: [Double]) -> String {
+        #if DEBUG || MANIFOLD_TELEMETRY
         guard values.count >= 8 else { return "" }
         let sorted = values.sorted()
         func percentile(_ p: Double) -> Double {
@@ -554,6 +582,9 @@ final class WHEPFrameRouter {
         }
         return String(format: " | all-time L p50=%.3fs p90=%.3fs (n=%d)",
                       percentile(0.5), percentile(0.9), sorted.count)
+        #else
+        return ""
+        #endif
     }
 
     // MARK: - Frame-flow telemetry (decode queue writes; depth fields written on the render thread)
@@ -778,6 +809,7 @@ final class WHEPFrameRouter {
     /// guarantee point, and it does not depend on teardown having run) and `releaseResources()`
     /// (teardown hygiene). Either alone would do; both means no connect path can miss it.
     private func resetStreamTelemetry() {
+        #if DEBUG || MANIFOLD_TELEMETRY
         backlogLock.lock()
         backlogFirstSenderPTS = nil
         backlogFirstHost = 0
@@ -798,6 +830,7 @@ final class WHEPFrameRouter {
         arrivalWindowMin = Int.max
         arrivalWindowMax = 0
         backlogLock.unlock()
+        #endif
     }
 
     // MARK: - Runtime target adjustment (⌃⌥[ / ⌃⌥], main thread)
@@ -992,6 +1025,7 @@ final class WHEPFrameRouter {
     /// Fold one frame's (senderPTS, arrival) pair into the current window, and close the window
     /// when it is due. Decode queue. See the field block above for the derivation.
     private func recordDriftSample(senderPTS: Double, clock: LiveClock) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         let host = CACurrentMediaTime()
         let offset = host - senderPTS
 
@@ -1080,16 +1114,19 @@ final class WHEPFrameRouter {
               senderTicksPerSecond, driftPercent,
               rate, (rate - 1.0) * 100.0, atRail ? ", RAIL" : "",
               creepText, verdict, abs(driftPercent))
+        #endif
     }
 
     /// Render thread. Accumulates the window's mean depth and latches whether a coarse clock
     /// action occurred inside it.
     private func recordDepthForDrift(span: Double, snapped: Bool) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         driftLock.lock()
         driftDepthSum += span
         driftDepthN += 1
         if snapped { driftWindowHadSnap = true }
         driftLock.unlock()
+        #endif
     }
 
     // MARK: - Latency-control reporting (render thread, coarse actions only)
@@ -1099,6 +1136,7 @@ final class WHEPFrameRouter {
     /// 1 Hz flow line — a snap that fires the moment the sender resumes should be visible at that
     /// moment, next to the [LIVECLOCK] line whose depth it just changed.
     private static func log(_ event: LiveClock.Event) {
+        #if DEBUG || MANIFOLD_TELEMETRY
         switch event {
         case .snapped(let snap):
             NSLog("[WHEP] snap-to-live: flushed %.3fs excess (depth %.3f → %.3f) after %.2fs sustained overfill",
@@ -1120,6 +1158,7 @@ final class WHEPFrameRouter {
             NSLog("[WHEP] queue-full re-anchor: over-buffered at count=%d — flushed %.3fs (depth %.3f → %.3f)",
                   ov.queued, ov.jumped, ov.depthBefore, ov.target)
         }
+        #endif
     }
 
     // MARK: - Helpers
@@ -1160,6 +1199,7 @@ final class WHEPFrameRouter {
     /// one deliberately repeats depth/count so the producer and consumer sides can be read as a pair
     /// without interleaving two logs. Decode queue only.
     private func logFlowIfDue() {
+        #if DEBUG || MANIFOLD_TELEMETRY
         let now = CACurrentMediaTime()
         if lastFlowLogHost == 0 { lastFlowLogHost = now; lastFlowLogEnqueued = framesEnqueued; return }
         let elapsed = now - lastFlowLogHost
@@ -1173,6 +1213,6 @@ final class WHEPFrameRouter {
               rate, framesEnqueued, framesDelivered, promoteFailures,
               lastDepthSpan, lastDepthCount,
               clockRate.map { String(format: "%.4f", $0) } ?? "inactive")
+        #endif
     }
 }
-#endif

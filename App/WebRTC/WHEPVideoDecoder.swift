@@ -30,7 +30,6 @@
 //  and wires it to LiveClock + the renderer.
 //
 
-#if DEBUG
 import CoreGraphics
 import CoreMedia
 import CoreVideo
@@ -521,4 +520,3 @@ final class WHEPVideoDecoder {
         return text.allSatisfy { $0.isASCII && !$0.isNewline } ? "'\(text)'" : "\(format)"
     }
 }
-#endif

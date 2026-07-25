@@ -2,7 +2,11 @@
 //  WHEPClient.swift
 //  Manifold
 //
-//  DEBUG-only WHEP client — step 4 of 4: PICTURE.
+//  WHEP client — the streaming-URL transport behind the Stream Sources UI.
+//
+//  SHIPS IN RELEASE. The functional path (connect/disconnect, signalling, the media-stall watchdog,
+//  the PLI backstop) is compiled in every configuration. Only the in-file [WHEP-*] diagnostics stay
+//  behind #if DEBUG || MANIFOLD_TELEMETRY — see logDecodeStatsTick and disconnect().
 //
 //  Standard WHEP (draft-ietf-wish-whep), not a client for any particular server: POST the
 //  recvonly SDP offer as `application/sdp`, read the SDP answer back from the response body,
@@ -33,7 +37,6 @@
 //  DTLS completes), release it before the decoder is torn down. Success is live pixels.
 //
 
-#if DEBUG
 import Combine
 import Foundation
 import QuartzCore      // CACurrentMediaTime — the monotonic host clock the media watchdog measures on
@@ -44,75 +47,25 @@ final class WHEPClient: ObservableObject {
     private init() {}
 
     /// Published connection state — the WHEP analog of NDIService.isConnected, and the only
-    /// cross-module signal that WHEP is a live source. ContentView folds it into `hasSource`
-    /// (DEBUG-only, since this whole type is #if DEBUG) so the empty-state overlay hides while
+    /// cross-module signal that WHEP is a live source. ContentView folds it into `hasSource` so the
+    /// empty-state overlay hides while
     /// WHEP drives the shared renderer, exactly as it does for NDI. Set true when WHEP takes the
     /// display in connect(); cleared by disconnect() and by any spontaneous transport
     /// failure/close, so it cannot stick true. Main-thread only — connect()/disconnect() assert
     /// main and the pc-state callback is delivered on main, which is what @Published requires.
     @Published private(set) var isConnected = false
 
-    // MARK: - Configuration
+    /// User-facing connection error, published so the UI can surface a failed connect without the
+    /// user reading the Xcode log. Carries the SERVER'S OWN message where there is one (e.g.
+    /// Cloudflare's "Live broadcast not started yet" on a 409 — it tells the user the fix), else a
+    /// clear generic. REDACTION HOLDS: it never contains the full URL (host at most), the same rule
+    /// the logs follow. Set at each failure site on the main thread BEFORE teardown; cleared at the
+    /// start of a fresh connect() and on a successful `.connected`. disconnect() does NOT touch it,
+    /// so a failure that ends in disconnect() leaves the message standing for the UI to show.
+    @Published private(set) var lastError: String?
 
-    /// The endpoint URL is a secret — it embeds the stream key — so it lives OUTSIDE the repo
-    /// entirely rather than in a gitignored file inside it. A file that is not in the working
-    /// tree cannot be committed by a stray `git add -f`, and cannot leak through an archive of
-    /// the source directory.
-    ///
-    /// Two sources, env wins:
-    ///   * `MANIFOLD_WHEP_URL` / `MANIFOLD_WHEP_STUN` — convenient in an Xcode scheme
-    ///   * `~/.manifold-whep-config`:
-    ///
-    ///         url  = https://example.org/whep/<id>
-    ///         stun = stun:stun.example.org:19302   # optional
-    ///
-    /// A bare line containing just the URL also works.
-    ///
-    /// (The target is not sandboxed — no app-sandbox entitlement — so NSHomeDirectory() is the
-    /// real home directory, not a container.)
-    struct Config {
-        var endpoint: URL
-        /// nil means no client-side STUN. This is the DEFAULT and is a legitimate setting, not
-        /// a degraded one: a WHEP server returns its own candidates in the answer, so host
-        /// candidates plus those are often enough. Only set `stun` if ICE fails to find a pair
-        /// — any public STUN server will do, e.g. stun:stun.l.google.com:19302.
-        var stunServer: String?
-    }
-
-    static let configPath = (NSHomeDirectory() as NSString)
-        .appendingPathComponent(".manifold-whep-config")
-
-    private static func loadConfig() -> Config? {
-        let env = ProcessInfo.processInfo.environment
-        var urlString = env["MANIFOLD_WHEP_URL"].flatMap { $0.isEmpty ? nil : $0 }
-        var stun = env["MANIFOLD_WHEP_STUN"].flatMap { $0.isEmpty ? nil : $0 }
-
-        if let text = try? String(contentsOfFile: configPath, encoding: .utf8) {
-            for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-                var line = String(rawLine)
-                if let hash = line.firstIndex(of: "#") { line = String(line[..<hash]) }
-                line = line.trimmingCharacters(in: .whitespaces)
-                if line.isEmpty { continue }
-
-                guard let equals = line.firstIndex(of: "=") else {
-                    // Tolerate a bare URL on its own line.
-                    if urlString == nil, line.lowercased().hasPrefix("http") { urlString = line }
-                    continue
-                }
-                let key = line[..<equals].trimmingCharacters(in: .whitespaces).lowercased()
-                let value = line[line.index(after: equals)...].trimmingCharacters(in: .whitespaces)
-                if value.isEmpty { continue }
-                switch key {
-                case "url":  if urlString == nil { urlString = value }
-                case "stun": if stun == nil { stun = value }
-                default:     NSLog("[WHEP] ignoring unknown config key '%@'", key)
-                }
-            }
-        }
-
-        guard let urlString, let endpoint = URL(string: urlString), endpoint.host != nil else { return nil }
-        return Config(endpoint: endpoint, stunServer: stun)
-    }
+    /// Dismiss a shown connection error (the banner's close button).
+    func clearError() { lastError = nil }
 
     // MARK: - State
 
@@ -161,34 +114,40 @@ final class WHEPClient: ObservableObject {
 
     // MARK: - Connect
 
-    func connect() {
+    /// Connect to a WHEP endpoint. The URL is supplied by the caller (a saved bookmark or the paste
+    /// field) — never sourced internally: the old ~/.manifold-whep-config dotfile and the
+    /// MANIFOLD_WHEP_URL/STUN environment variables are gone, so a shipping app reads no connection
+    /// backdoor from the user's home directory.
+    func connect(to url: URL) {
         dispatchPrecondition(condition: .onQueue(.main))
 
         guard session == nil else {
-            NSLog("[WHEP] a session is already running — ⌃⌥⇧H to tear it down first")
+            NSLog("[WHEP] a session is already running — disconnect it first")
             return
         }
-        guard let config = Self.loadConfig() else {
-            NSLog("""
-                  [WHEP] no endpoint configured — nothing to connect to.
-                  [WHEP]   Set MANIFOLD_WHEP_URL in the scheme's environment, or create %@ :
-                  [WHEP]       url  = https://<your-whep-server>/<path>
-                  [WHEP]       stun = stun:stun.l.google.com:19302   # optional; omit to try host-only first
-                  """, Self.configPath)
+        lastError = nil   // fresh attempt — clear any error banner from a previous try
+        // Defensive last gate before the network: the store already validated scheme + host, but
+        // connect must not trust that, and must never be handed an srt:// / .m3u8 URL to dial.
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host != nil else {
+            NSLog("[WHEP] refusing to connect — not an http(s) stream URL")
+            lastError = "That isn’t a web stream URL."
             return
         }
 
         startedAt = Date()
-        NSLog("[WHEP] ───── step 3a: receive RTP + depacketize to NALs ─────")
+        NSLog("[WHEP] ───── connecting: receive RTP + depacketize to NALs ─────")
         // Host only. The path carries the stream key and must never reach a log.
-        NSLog("[WHEP] endpoint host %@ (path withheld — it carries the stream key)",
-              config.endpoint.host ?? "?")
-        NSLog("[WHEP] client STUN: %@",
-              config.stunServer ?? "none — host candidates + whatever the answer supplies")
+        NSLog("[WHEP] endpoint host %@ (path withheld — it carries the stream key)", url.host ?? "?")
 
         var createError: NSString?
-        guard let session = ManifoldWHEPSession(stunServer: config.stunServer, error: &createError) else {
+        // No client STUN: a WHEP server returns its own candidates in the answer, and host
+        // candidates plus those are enough on the networks this targets. (The per-config STUN
+        // override went away with the dotfile; if ICE ever needs it, it becomes a per-bookmark
+        // field, not a home-directory backdoor.)
+        guard let session = ManifoldWHEPSession(stunServer: nil, error: &createError) else {
             NSLog("[WHEP] FAILED at PeerConnection create: %@", createError ?? "unknown")
+            lastError = "Couldn’t start the connection."
             return
         }
         self.session = session
@@ -253,8 +212,8 @@ final class WHEPClient: ObservableObject {
                 NSLog("[WHEP] ICE %@ — selected pair: %@", name, pair)
             } else if state == .failed {
                 NSLog("[WHEP] FAILED at ICE — no working candidate pair.")
-                NSLog("[WHEP]   If this is a NAT'd network, try adding a STUN server to %@",
-                      Self.configPath)
+                NSLog("[WHEP]   On a NAT'd network the host candidates plus the server's answer found no route.")
+                self.lastError = "Couldn’t find a network route to the stream (it may be behind a firewall)."
             }
         }
 
@@ -267,11 +226,15 @@ final class WHEPClient: ObservableObject {
                 // begins flowing into the depacketizer the moment SRTP keys are derived.
                 // Recovery (including .disconnected→.connected) — stand down the stuck-disconnect backstop.
                 self.cancelDisconnectBackstop()
+                self.lastError = nil   // success — clear any error from an earlier attempt
                 NSLog("[WHEP] connected — ICE + DTLS established in %@. Transport is up.", self.elapsed())
                 NSLog("[WHEP] watching for RTP — the [WHEP-RTP] lines below are step 3a's checkpoint")
                 NSLog("[WHEP] (still no decode and no picture: NALs are built and counted, then dropped)")
             case .failed:
                 NSLog("[WHEP] FAILED at DTLS/transport.")
+                // Keep a more specific ICE message if one was already set (ICE .failed fires first in
+                // that cascade); otherwise a clear generic.
+                self.lastError = self.lastError ?? "The connection to the stream failed."
                 // A spontaneous transport failure does not route through disconnect() on its own,
                 // so the source flag would stick true. Tear down: clears isConnected, releases the
                 // display, and frees the session so ⌃⌥H can retry (connect() guards on session==nil).
@@ -304,6 +267,7 @@ final class WHEPClient: ObservableObject {
             guard let self else { return }
             guard let offerSDP else {
                 NSLog("[WHEP] FAILED at offer/gathering: %@", error ?? "unknown")
+                self.lastError = "Couldn’t set up the connection (no network route)."
                 self.disconnect()
                 return
             }
@@ -313,7 +277,7 @@ final class WHEPClient: ObservableObject {
             if candidates == 0 {
                 NSLog("[WHEP] WARNING: offer has zero candidates; the connection will not come up")
             }
-            Task { await self.postOffer(offerSDP, to: config.endpoint) }
+            Task { await self.postOffer(offerSDP, to: url) }
         }
     }
 
@@ -397,17 +361,38 @@ final class WHEPClient: ObservableObject {
             } else if CACurrentMediaTime() - mediaWatchdogSinceHost >= Self.mediaStallWindow {
                 NSLog("[WHEP] no media for %.0fs on a healthy transport — publisher likely stopped; tearing down",
                       Self.mediaStallWindow)
+                lastError = "The stream stopped sending video (the broadcaster may have ended it)."
                 disconnect()
                 return
             }
         }
 
-        // Nothing arriving is [WHEP-RTP]'s story to tell, not this one.
+        // Nothing arriving at all: no PLI to send, and the diagnostics below have nothing to report.
+        // Total silence is the media watchdog's job (handled above). This guard ALSO gates the PLI
+        // backstop, which is correct — there is nothing to decode when no AUs are arriving. SHIPPING.
         guard now.accessUnitsReceived > was.accessUnitsReceived else { return }
 
         let decoded = now.framesDecoded - was.framesDecoded
-        let accessUnits = now.accessUnitsReceived - was.accessUnitsReceived
 
+        // ── STARTUP/RECOVERY PLI BACKSTOP (LOAD-BEARING — ships in Release) ──────────────────────
+        // Access units are arriving but nothing is decoding — no format description yet, or the
+        // keyframe gate is closed. Ask for an IDR, throttled to every other tick. Pulled OUT of the
+        // diagnostic logging below so it is unmistakably on the shipping path; only its log line is
+        // telemetry. The decoder/bridge request PLIs on their own too; this covers a keyframe that
+        // was rejected or arrived before the format description, via the SAME throttle in
+        // requestKeyframe (so within 250 ms of the decoder's own request it is simply suppressed).
+        if decoded == 0, (!now.haveFormatDescription || now.awaitingKeyframe), decodeStatsTicks % 2 == 0 {
+            if session?.requestKeyframe() == true {
+                #if DEBUG || MANIFOLD_TELEMETRY
+                keyframeRequests += 1
+                NSLog("[WHEP-DECODE]   PLI request %d sent (backstop)", keyframeRequests)
+                #endif
+            }
+        }
+
+        // ── DIAGNOSTIC DECODE STATS (telemetry-only) ─────────────────────────────────────────────
+        #if DEBUG || MANIFOLD_TELEMETRY
+        let accessUnits = now.accessUnitsReceived - was.accessUnitsReceived
         NSLog("""
               [WHEP-DECODE] +%ds  decoded=%d/s (total=%d)  %dx%d %@  |  AUs=%d/s  \
               dropped: preIDR=%d noFmt=%d sbFail=%d  |  errors=%d
@@ -424,33 +409,41 @@ final class WHEPClient: ObservableObject {
             NSLog("[WHEP-DECODE]   last decode error: %d", now.lastDecodeError)
         }
 
-        // Access units are arriving but nothing decodes. Two distinct causes, worth telling
-        // apart in the log, and both fixed by the same thing: an IDR.
+        // Access units arriving but nothing decoding — name the cause the PLI above is chasing.
         if decoded == 0 {
             if !now.haveFormatDescription {
                 NSLog("[WHEP-DECODE]   waiting for SPS/PPS — no format description yet")
             } else if now.awaitingKeyframe {
                 NSLog("[WHEP-DECODE]   waiting for keyframe — slices dropped until the next IDR")
             }
-            // Backstop only. The decoder now re-arms and requests a PLI itself on a mid-stream
-            // decode failure (onNeedsKeyframe), and the bridge requests one while the
-            // depacketizer has assembled no keyframe. This covers the remaining case — a
-            // keyframe the decoder rejected, or one that arrived before the format description —
-            // and routes through the SAME shared throttle in requestKeyframe, so within 250 ms
-            // of the decoder's own request it is simply suppressed and never double-requests.
-            // No lifetime cap now: the old `keyframeRequests < 5` went silent for the rest of the
-            // session after five tries, which is exactly wrong for a recurring fault. The count
-            // survives only to number the log line; the throttle does the gating.
-            if (!now.haveFormatDescription || now.awaitingKeyframe), decodeStatsTicks % 2 == 0 {
-                if session?.requestKeyframe() == true {
-                    keyframeRequests += 1
-                    NSLog("[WHEP-DECODE]   PLI request %d sent (backstop)", keyframeRequests)
-                }
-            }
         }
+        #endif
     }
 
     // MARK: - Signalling (WHEP: POST offer → 201 + answer)
+
+    /// Turn a server error-response BODY into a user-facing line, or nil if there is nothing usable.
+    /// Prefers a known human field from a JSON body, else the trimmed plain text (Cloudflare's 409 is
+    /// plain "Live broadcast not started yet"). Length-capped. The body is the SERVER's own text — it
+    /// does not carry our endpoint URL — and it is never concatenated with the URL.
+    private static func serverMessage(fromBody body: String) -> String? {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        func cap(_ s: String) -> String {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.count > 200 ? String(t.prefix(200)) + "…" : t
+        }
+        if trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in ["errorDescription", "error", "message", "detail", "reason"] {
+                if let s = obj[key] as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty {
+                    return cap(s)
+                }
+            }
+            return nil   // JSON with no known human field — don't dump raw JSON at the user
+        }
+        return cap(trimmed)
+    }
 
     private func postOffer(_ offer: String, to endpoint: URL) async {
         var request = URLRequest(url: endpoint)
@@ -467,13 +460,17 @@ final class WHEPClient: ObservableObject {
             (data, response) = try await URLSession.shared.data(for: request)
         } catch {
             NSLog("[WHEP] FAILED at POST — %@", error.localizedDescription)
-            await MainActor.run { self.disconnect() }
+            let host = endpoint.host ?? "the stream server"
+            await MainActor.run { self.lastError = "Couldn’t reach \(host)."; self.disconnect() }
             return
         }
 
         guard let http = response as? HTTPURLResponse else {
             NSLog("[WHEP] FAILED at POST — non-HTTP response")
-            await MainActor.run { self.disconnect() }
+            await MainActor.run {
+                self.lastError = "The stream server gave an unexpected response."
+                self.disconnect()
+            }
             return
         }
         NSLog("[WHEP] HTTP %d — %d bytes back (+%@)", http.statusCode, data.count, elapsed())
@@ -481,7 +478,11 @@ final class WHEPClient: ObservableObject {
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? "<binary>"
             NSLog("[WHEP] FAILED at POST — HTTP %d: %@", http.statusCode, String(body.prefix(500)))
-            await MainActor.run { self.disconnect() }
+            // Surface the SERVER'S message where it has one (e.g. Cloudflare's "Live broadcast not
+            // started yet" on 409 — it tells the user the fix); else a clear status-coded generic.
+            let message = Self.serverMessage(fromBody: body)
+                ?? "The stream server refused the connection (HTTP \(http.statusCode))."
+            await MainActor.run { self.lastError = message; self.disconnect() }
             return
         }
         // WHEP specifies 201 Created. Accept any 2xx carrying an SDP body rather than being
@@ -502,7 +503,10 @@ final class WHEPClient: ObservableObject {
 
         guard let answer = String(data: data, encoding: .utf8), answer.contains("v=0") else {
             NSLog("[WHEP] FAILED at answer — body is not SDP (%d bytes)", data.count)
-            await MainActor.run { self.disconnect() }
+            await MainActor.run {
+                self.lastError = "The stream server’s response wasn’t a valid stream."
+                self.disconnect()
+            }
             return
         }
         NSLog("[WHEP] answer SDP received — %d bytes", answer.utf8.count)
@@ -516,6 +520,7 @@ final class WHEPClient: ObservableObject {
         var error: NSString?
         guard session.setRemoteAnswer(answer, error: &error) else {
             NSLog("[WHEP] FAILED at setRemoteDescription: %@", error ?? "unknown")
+            lastError = "Couldn’t negotiate the stream with the server."
             disconnect()
             return
         }
@@ -538,7 +543,9 @@ final class WHEPClient: ObservableObject {
         decodeStatsTimer?.invalidate()
         decodeStatsTimer = nil
 
-        // Read the totals BEFORE close(), which frees the depacketizer they live in.
+        // Session totals — diagnostic-only. Read BEFORE close(), which frees the depacketizer they
+        // live in (so the read must stay inside this gate, not just the logging).
+        #if DEBUG || MANIFOLD_TELEMETRY
         if let summary = session.rtpStatsSummary() {
             NSLog("[WHEP-RTP] session totals: %@", summary)
         } else {
@@ -557,6 +564,7 @@ final class WHEPClient: ObservableObject {
                   stats.sampleBufferFailures, stats.decodeErrors,
                   stats.formatDescriptionBuilds, stats.sessionBuilds)
         }
+        #endif
 
         // WHEP teardown is DELETE on the resource. Fire-and-forget: the local side goes away
         // regardless, but a compliant client should not leave the session dangling server-side.
@@ -601,4 +609,3 @@ final class WHEPClient: ObservableObject {
         self.startedAt = nil
     }
 }
-#endif
