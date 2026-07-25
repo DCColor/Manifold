@@ -788,6 +788,9 @@ struct ContentView: View {
     ///         producer/consumer pair. Connects the FIRST saved stream bookmark (a convenience over
     ///         the shipping Stream Sources sheet); no-op with a log if none is saved. ⌃⌥⇧H tears down.
     ///   ⌃⌥⇧E  export the next decoded WHEP frame to a PNG (pre-render, decoder-side check)
+    ///   ⌃⌥D   SRT transport spike (stage 2) — libsrt caller → custom AVIOContext → mpegts
+    ///         demux → av_read_frame → LOG ONLY. No decode, no display, no source takeover.
+    ///         Watch [SRT-SPIKE]. Hardcoded target (kSRTSpikeURL). ⌃⌥⇧D stops it. TEMPORARY.
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
     /// only the triggers are `#if DEBUG`.
     @ViewBuilder private var syntheticLiveShortcuts: some View {
@@ -878,6 +881,21 @@ struct ContentView: View {
                 .keyboardShortcut("[", modifiers: [.control, .option])
             Button("") { WHEPFrameRouter.shared.adjustTargetDepth(by: 0.05) }
                 .keyboardShortcut("]", modifiers: [.control, .option])
+            // ⌃⌥D — SRT TRANSPORT SPIKE (stage 2). D for Demux: S, R and T are all taken
+            // (⌃⌥S sweep, ⌃⌥R, ⌃⌥T), and D is free in both plain and shifted form and is not
+            // adjacent to ⌃⌥L or ⌃⌥H, the two live-path triggers most likely to be pressed in
+            // the same session.
+            //
+            // libsrt caller socket → custom AVIOContext → mpegts demux → av_read_frame → LOG.
+            // Nothing is decoded, nothing is drawn, and NO source is retired — unlike ⌃⌥L and
+            // ⌃⌥H this does not take the display, because it produces no picture to take it
+            // with. Watch [SRT-SPIKE]: connect facts, then per-stream discovery, then the
+            // B-frame probe (the question this stage exists to answer), then a 1 Hz rollup.
+            // Target is hardcoded — see kSRTSpikeURL in App/SRT/SRTSpike.m. ⌃⌥⇧D stops it.
+            Button("") { ManifoldSRTSpikeStart() }
+                .keyboardShortcut("d", modifiers: [.control, .option])
+            Button("") { ManifoldSRTSpikeStop() }
+                .keyboardShortcut("d", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
         #else

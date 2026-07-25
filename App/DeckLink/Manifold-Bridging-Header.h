@@ -12,6 +12,14 @@
 // meet libdatachannel's C++17.
 #import "DataChannelBridge.h"
 
+// SRT STAGE 2 TRANSPORT SPIKE — TEMPORARY, DELETE WITH App/SRT/. Same pure-C rule as the three
+// above: SRTSpike.h pulls in NEITHER <srt/*> NOR <libav*/*>, so neither library's API reaches
+// Swift. Imported by RELATIVE PATH for the same reason BuildInfoC.h is (below) — App/SRT is not
+// on HEADER_SEARCH_PATHS and adding it to reach one file would widen the search scope for all of
+// them. The import is unconditional and safe in Release: the header's declarations, and the whole
+// of SRTSpike.m, are `#ifdef DEBUG`, so under Release this resolves to an empty header.
+#import "../SRT/SRTSpike.h"
+
 // The C/ObjC optimization probe for the [BUILD] banner. Imported by RELATIVE PATH deliberately:
 // every other header here resolves through HEADER_SEARCH_PATHS, and adding $(SRCROOT)/App to that
 // list to reach one file would widen the search scope for all of them. In a change whose whole
