@@ -220,6 +220,10 @@ targets:
           - $(SRCROOT)/ThirdParty/libsrt/include
           # Bridge header, so the bridging header can #import "DataChannelBridge.h" from App/WebRTC.
           - $(SRCROOT)/App/WebRTC
+          # Shared H.264 bitstream code (App/H264/H264AccessUnitBuilder.h), included by BOTH
+          # App/WebRTC/H264Depacketizer.h and — from Stage 3c — the SRT path in App/SRT. It is
+          # transport-agnostic by design, so it belongs in neither directory and needs a path.
+          - $(SRCROOT)/App/H264
           # DeckLink SDK headers (DeckLinkAPI.h et al.) for the .mm bridge + dispatch.cpp.
           - $(SRCROOT)/docs/BlackmagicDeckLinkSDK16.0/Mac/include
           # NDI bridge header, so the bridging header can #import "NDIBridge.h" from App/DeckLink.

@@ -4,30 +4,14 @@
 //
 //  RFC 6184 depacketization. See H264Depacketizer.h for the contract.
 //
-//  ── WHY AVCC (4-byte length prefix) AND NOT ANNEX-B ────────────────────────
+//  ── WHERE THE H.264 SEMANTICS WENT ─────────────────────────────────────────
 //
-//  The output format is chosen by whoever consumes it in step 3b, and on macOS
-//  that is VideoToolbox:
-//
-//    * VTDecompressionSession takes a CMSampleBuffer whose CMBlockBuffer holds
-//      LENGTH-PREFIXED NALs, with the prefix width declared in the
-//      CMVideoFormatDescription. Annex-B start codes are not accepted — Apple
-//      has no "annex b" input mode for VTDecompressionSession at all.
-//    * The format description itself is built by
-//      CMVideoFormatDescriptionCreateFromH264ParameterSets(), which takes SPS
-//      and PPS as SEPARATE raw buffers, NOT inline in the sample data. So
-//      parameter sets must be split out of the bitstream, which is exactly what
-//      this file does.
-//    * 4 bytes rather than 3 or 2 because it is what every AVCC muxer emits,
-//      it cannot be under-sized by a large slice, and it is the value we pass as
-//      nalUnitHeaderLength.
-//
-//  Manifold's OTHER decode path is libav (LibavFrameSource), and libav's H.264
-//  decoder wants Annex-B unless you hand it AVCC extradata. That does not change
-//  the choice: converting AVCC → Annex-B is overwriting each 4-byte length with
-//  00 00 00 01, in place, same size, no reallocation. Going the other way is the
-//  expensive direction (you must scan for start codes and undo emulation
-//  prevention), so producing AVCC keeps BOTH doors open at a cost of ~0.
+//  This file stops at "here is one complete NAL unit". What happens next — NAL
+//  type classification, SPS/PPS diversion out-of-band, AUD/filler dropping,
+//  keyframe marking, AVCC length prefixing, and the emit — is
+//  H264AccessUnitBuilder.c, which the SRT path shares. That includes the
+//  reasoning for AVCC over Annex-B and for leaving emulation prevention bytes
+//  alone; both live there now, next to the code they describe.
 //
 //  ── WHAT IS DELIBERATELY NOT IMPLEMENTED ───────────────────────────────────
 //
@@ -40,8 +24,6 @@
 //      reorder window ahead of this stage, plus NACK
 //      (rtcChainRtcpNackResponder is for the send side; inbound NACK generation
 //      would have to be added).
-//    * Emulation prevention byte removal. Correct — depacketization must NOT
-//      touch RBSP escaping; the decoder does that.
 //
 
 #include "H264Depacketizer.h"
@@ -49,59 +31,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Sanity caps. These exist to bound damage from a corrupt length field, not to
-// express a real limit — a 4K IDR is comfortably under 4 MB.
-#define MD_MAX_ACCESS_UNIT_BYTES  (8u * 1024u * 1024u)
+// Sanity cap. Exists to bound damage from a corrupt length field, not to express
+// a real limit — a 4K IDR is comfortably under 4 MB. (The access-unit cap lives
+// with the builder.)
 #define MD_MAX_FRAGMENT_BYTES     (4u * 1024u * 1024u)
-#define MD_MAX_PARAMETER_SET      512u
 
 // RTP header, RFC 3550 §5.1
 #define MD_RTP_HEADER_BYTES       12u
 
-// NAL unit types we care about (H.264 Table 7-1)
-#define MD_NAL_SLICE               1
-#define MD_NAL_IDR                 5
-#define MD_NAL_SEI                 6
-#define MD_NAL_SPS                 7
-#define MD_NAL_PPS                 8
-#define MD_NAL_AUD                 9
-#define MD_NAL_FILLER             12
 // RFC 6184 packet types
 #define MD_PKT_STAP_A             24
 #define MD_PKT_FU_A               28
-
-// ── A grow-once, reuse-forever byte buffer ────────────────────────────────────
-// Steady state does zero allocation: capacity settles at the largest frame seen.
-
-typedef struct {
-    uint8_t *data;
-    size_t   size;
-    size_t   capacity;
-} MDBuffer;
-
-static bool MDBufferReserve(MDBuffer *buffer, size_t needed) {
-    if (needed <= buffer->capacity) return true;
-    size_t capacity = buffer->capacity ? buffer->capacity : 64u * 1024u;
-    while (capacity < needed) capacity *= 2;
-    uint8_t *grown = realloc(buffer->data, capacity);
-    if (!grown) return false;
-    buffer->data = grown;
-    buffer->capacity = capacity;
-    return true;
-}
-
-static bool MDBufferAppend(MDBuffer *buffer, const uint8_t *bytes, size_t count) {
-    if (!MDBufferReserve(buffer, buffer->size + count)) return false;
-    memcpy(buffer->data + buffer->size, bytes, count);
-    buffer->size += count;
-    return true;
-}
-
-static void MDBufferFree(MDBuffer *buffer) {
-    free(buffer->data);
-    buffer->data = NULL;
-    buffer->size = buffer->capacity = 0;
-}
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -114,24 +54,12 @@ struct ManifoldH264Depacketizer {
     uint16_t highestSeq;           // highest sequence number seen (RFC 3550 s_max)
 
     // FU-A reassembly
-    MDBuffer fragment;
-    bool     fragmentActive;
+    ManifoldH264Buffer fragment;
+    bool               fragmentActive;
 
-    // Access unit under construction
-    MDBuffer accessUnit;
-    bool     accessUnitActive;
-    uint32_t accessUnitTimestamp;
-    bool     accessUnitKeyframe;
-    bool     accessUnitOverflowed;
-    bool     parameterSetsChanged; // sticky until the next AU is emitted
-
-    uint8_t  sps[MD_MAX_PARAMETER_SET];
-    size_t   spsSize;
-    uint8_t  pps[MD_MAX_PARAMETER_SET];
-    size_t   ppsSize;
-
-    ManifoldH264AccessUnitHandler handler;
-    void                         *handlerContext;
+    // Access-unit assembly and every piece of H.264 state it needs (AU buffer,
+    // keyframe flag, SPS/PPS slots, the handler) live here.
+    ManifoldH264AccessUnitBuilder *builder;
 
     ManifoldH264DepacketizerStats stats;
 };
@@ -144,102 +72,11 @@ static uint32_t MDReadBE32(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | (uint32_t)p[3];
 }
 
-// ── Access unit assembly ──────────────────────────────────────────────────────
-
-static void MDEmitAccessUnit(ManifoldH264Depacketizer *dp) {
-    if (!dp->accessUnitActive) return;
-
-    if (dp->accessUnitOverflowed) {
-        dp->stats.accessUnitsOversize++;
-    } else if (dp->accessUnit.size > 0) {
-        dp->stats.accessUnits++;
-        if (dp->accessUnitKeyframe) dp->stats.keyframes++;
-        if (dp->handler) {
-            ManifoldH264AccessUnit accessUnit = {
-                .data                 = dp->accessUnit.data,
-                .size                 = dp->accessUnit.size,
-                .rtpTimestamp         = dp->accessUnitTimestamp,
-                .keyframe             = dp->accessUnitKeyframe,
-                .parameterSetsChanged = dp->parameterSetsChanged,
-                .sps                  = dp->spsSize ? dp->sps : NULL,
-                .spsSize              = dp->spsSize,
-                .pps                  = dp->ppsSize ? dp->pps : NULL,
-                .ppsSize              = dp->ppsSize,
-            };
-            dp->handler(&accessUnit, dp->handlerContext);
-        }
-    }
-
-    dp->accessUnit.size        = 0;
-    dp->accessUnitActive       = false;
-    dp->accessUnitKeyframe     = false;
-    dp->accessUnitOverflowed   = false;
-    dp->parameterSetsChanged   = false;
-}
-
-/// Stores a parameter set, reporting whether it actually changed. Re-sent SPS/PPS
-/// on every keyframe is normal WebRTC behaviour and must NOT invalidate the
-/// format description each time — only a genuine change should.
-static bool MDStoreParameterSet(uint8_t *slot, size_t *slotSize,
-                                const uint8_t *nal, size_t size) {
-    if (size == 0 || size > MD_MAX_PARAMETER_SET) return false;
-    if (*slotSize == size && memcmp(slot, nal, size) == 0) return false;
-    memcpy(slot, nal, size);
-    *slotSize = size;
-    return true;
-}
-
-/// One complete NAL unit (header byte first, no start code, no length prefix).
+/// One complete NAL unit (header byte first, no start code, no length prefix)
+/// into the shared builder. The RTP layer's only remaining job for a NAL is to
+/// hand it over with the timestamp that would open an access unit.
 static void MDHandleNAL(ManifoldH264Depacketizer *dp, const uint8_t *nal, size_t size, uint32_t timestamp) {
-    if (size == 0) { dp->stats.packetsMalformed++; return; }
-
-    const uint8_t type = nal[0] & 0x1Fu;
-
-    switch (type) {
-        case MD_NAL_SPS:   dp->stats.nalSPS++;   break;
-        case MD_NAL_PPS:   dp->stats.nalPPS++;   break;
-        case MD_NAL_IDR:   dp->stats.nalIDR++;   break;
-        case MD_NAL_SLICE: dp->stats.nalSlice++; break;
-        case MD_NAL_SEI:   dp->stats.nalSEI++;   break;
-        case MD_NAL_AUD:   dp->stats.nalAUD++;   break;
-        default:           dp->stats.nalOther++; break;
-    }
-
-    // Parameter sets go out-of-band (VideoToolbox wants them in the format
-    // description, never in the sample data) and are NOT appended to the AU.
-    if (type == MD_NAL_SPS) {
-        if (MDStoreParameterSet(dp->sps, &dp->spsSize, nal, size)) dp->parameterSetsChanged = true;
-        return;
-    }
-    if (type == MD_NAL_PPS) {
-        if (MDStoreParameterSet(dp->pps, &dp->ppsSize, nal, size)) dp->parameterSetsChanged = true;
-        return;
-    }
-    // AUD carries no picture data and filler is padding; both are noise to the
-    // decoder and to the frame counting below.
-    if (type == MD_NAL_AUD || type == MD_NAL_FILLER) return;
-
-    if (!dp->accessUnitActive) {
-        dp->accessUnitActive     = true;
-        dp->accessUnitTimestamp  = timestamp;
-        dp->accessUnitKeyframe   = false;
-        dp->accessUnitOverflowed = false;
-    }
-    if (type == MD_NAL_IDR) dp->accessUnitKeyframe = true;
-
-    if (dp->accessUnitOverflowed) return;
-    if (dp->accessUnit.size + 4 + size > MD_MAX_ACCESS_UNIT_BYTES) {
-        dp->accessUnitOverflowed = true;
-        return;
-    }
-
-    const uint8_t lengthPrefix[4] = {
-        (uint8_t)(size >> 24), (uint8_t)(size >> 16), (uint8_t)(size >> 8), (uint8_t)size
-    };
-    if (!MDBufferAppend(&dp->accessUnit, lengthPrefix, sizeof(lengthPrefix)) ||
-        !MDBufferAppend(&dp->accessUnit, nal, size)) {
-        dp->accessUnitOverflowed = true;   // allocation failure — discard the frame, keep running
-    }
+    ManifoldH264AccessUnitBuilderAppendNAL(dp->builder, nal, size, timestamp);
 }
 
 // ── RFC 6184 packet forms ─────────────────────────────────────────────────────
@@ -275,7 +112,7 @@ static void MDHandleFUA(ManifoldH264Depacketizer *dp, const uint8_t *payload, si
         dp->fragment.size    = 0;
         dp->fragmentActive   = true;
         const uint8_t nalHeader = (uint8_t)((payload[0] & 0xE0u) | (fuHeader & 0x1Fu));
-        if (!MDBufferAppend(&dp->fragment, &nalHeader, 1)) {
+        if (!ManifoldH264BufferAppend(&dp->fragment, &nalHeader, 1)) {
             dp->fragmentActive = false;
             dp->stats.fuaDropped++;
             return;
@@ -287,7 +124,7 @@ static void MDHandleFUA(ManifoldH264Depacketizer *dp, const uint8_t *payload, si
     }
 
     if (dp->fragment.size + (size - 2) > MD_MAX_FRAGMENT_BYTES ||
-        !MDBufferAppend(&dp->fragment, payload + 2, size - 2)) {
+        !ManifoldH264BufferAppend(&dp->fragment, payload + 2, size - 2)) {
         dp->fragmentActive = false;
         dp->fragment.size  = 0;
         dp->stats.fuaDropped++;
@@ -314,6 +151,8 @@ static void MDAbandonFragment(ManifoldH264Depacketizer *dp) {
 ManifoldH264Depacketizer *ManifoldH264DepacketizerCreate(void) {
     ManifoldH264Depacketizer *dp = calloc(1, sizeof(*dp));
     if (!dp) return NULL;
+    dp->builder = ManifoldH264AccessUnitBuilderCreate();
+    if (!dp->builder) { free(dp); return NULL; }
     dp->payloadType       = -1;
     dp->stats.payloadType = -1;
     return dp;
@@ -321,8 +160,8 @@ ManifoldH264Depacketizer *ManifoldH264DepacketizerCreate(void) {
 
 void ManifoldH264DepacketizerDestroy(ManifoldH264Depacketizer *dp) {
     if (!dp) return;
-    MDBufferFree(&dp->fragment);
-    MDBufferFree(&dp->accessUnit);
+    ManifoldH264BufferFree(&dp->fragment);
+    ManifoldH264AccessUnitBuilderDestroy(dp->builder);
     free(dp);
 }
 
@@ -336,8 +175,7 @@ void ManifoldH264DepacketizerSetAccessUnitHandler(ManifoldH264Depacketizer *dp,
                                                   ManifoldH264AccessUnitHandler handler,
                                                   void *context) {
     if (!dp) return;
-    dp->handler        = handler;
-    dp->handlerContext = context;
+    ManifoldH264AccessUnitBuilderSetHandler(dp->builder, handler, context);
 }
 
 void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8_t *packet, size_t size) {
@@ -424,10 +262,13 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
     dp->stats.lastRTPTimestamp = timestamp;
 
     // A new timestamp means the previous access unit is over. This is the SAFETY
-    // NET for a lost marker bit; the marker below is the primary signal.
-    if (dp->accessUnitActive && timestamp != dp->accessUnitTimestamp) {
+    // NET for a lost marker bit; the marker below is the primary signal. Both
+    // boundaries stay here in the RTP layer — the builder only closes when told.
+    uint32_t openTimestamp = 0;
+    if (ManifoldH264AccessUnitBuilderIsAccessUnitOpen(dp->builder, &openTimestamp) &&
+        timestamp != openTimestamp) {
         dp->stats.accessUnitsByTimestamp++;
-        MDEmitAccessUnit(dp);
+        ManifoldH264AccessUnitBuilderFlush(dp->builder);
     }
 
     const uint8_t *payload     = packet + offset;
@@ -444,13 +285,13 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
         dp->stats.nalUnsupported++;   // STAP-B / MTAP / FU-B / reserved 0, 30, 31
     }
 
-    if (marker) MDEmitAccessUnit(dp);
+    if (marker) ManifoldH264AccessUnitBuilderFlush(dp->builder);
 }
 
 void ManifoldH264DepacketizerFlush(ManifoldH264Depacketizer *dp) {
     if (!dp) return;
     MDAbandonFragment(dp);
-    MDEmitAccessUnit(dp);
+    ManifoldH264AccessUnitBuilderFlush(dp->builder);
 }
 
 void ManifoldH264DepacketizerCopyStats(const ManifoldH264Depacketizer *dp,
@@ -458,6 +299,25 @@ void ManifoldH264DepacketizerCopyStats(const ManifoldH264Depacketizer *dp,
     if (!outStats) return;
     if (!dp) { memset(outStats, 0, sizeof(*outStats)); outStats->payloadType = -1; return; }
     *outStats = dp->stats;
-    outStats->spsSize = dp->spsSize;
-    outStats->ppsSize = dp->ppsSize;
+
+    // Fold the H.264 layer's counters into the transport's, so every existing
+    // reader (the 1 Hz [WHEP-RTP] line, -rtpStatsSummary) keeps seeing one
+    // struct with the same fields and the same values.
+    ManifoldH264AccessUnitBuilderStats au;
+    ManifoldH264AccessUnitBuilderCopyStats(dp->builder, &au);
+    outStats->nalSPS              = au.nalSPS;
+    outStats->nalPPS              = au.nalPPS;
+    outStats->nalIDR              = au.nalIDR;
+    outStats->nalSlice            = au.nalSlice;
+    outStats->nalSEI              = au.nalSEI;
+    outStats->nalAUD              = au.nalAUD;
+    outStats->nalOther            = au.nalOther;
+    outStats->accessUnits         = au.accessUnits;
+    outStats->keyframes           = au.keyframes;
+    outStats->accessUnitsOversize = au.accessUnitsOversize;
+    outStats->spsSize             = au.spsSize;
+    outStats->ppsSize             = au.ppsSize;
+    // A zero-length NAL used to be counted as packetsMalformed at the point the
+    // builder rejected it. Same number, added a layer later.
+    outStats->packetsMalformed   += au.nalEmpty;
 }

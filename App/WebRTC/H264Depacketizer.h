@@ -5,6 +5,14 @@
 //  RFC 6184 H.264 RTP depacketizer — RTP packets in, complete NAL units out,
 //  grouped into access units.
 //
+//  SCOPE. This file is the RTP half only: header geometry, PT/SSRC latching,
+//  sequence accounting, STAP-A and FU-A reassembly, and the two access-unit
+//  boundary signals (marker bit, and an RTP-timestamp change as the safety net
+//  for a lost one). Everything downstream of "here is one complete NAL unit" —
+//  type classification, SPS/PPS extraction, AVCC assembly — lives in
+//  H264AccessUnitBuilder.h, which the SRT path shares. ManifoldH264AccessUnit
+//  and its handler typedef are defined there and re-exported through this header.
+//
 //  WHY THIS EXISTS. libdatachannel does NOT depacketize INBOUND media. Its
 //  media handlers are packetizers (rtcSetH264Packetizer & co.) for the send
 //  direction; on a recvonly track the message callback hands us RAW RTP, one
@@ -32,6 +40,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// ManifoldH264AccessUnit + ManifoldH264AccessUnitHandler: the output contract,
+// shared with every other transport. Included rather than redeclared so existing
+// consumers (DataChannelBridge.m) need no change.
+#include "H264AccessUnitBuilder.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -57,6 +70,8 @@ typedef struct {
     uint64_t packetsReordered;         ///< Arrived with seq <= the highest seen: late or duplicate.
 
     // ── NAL units emitted, by nal_unit_type (RFC 6184 §1.3 / H.264 Table 7-1) ─
+    // Counted by the access-unit builder and folded in by CopyStats; the values
+    // and their meanings are unchanged.
     uint64_t nalSPS;                   ///< 7
     uint64_t nalPPS;                   ///< 8
     uint64_t nalIDR;                   ///< 5  — coded slice of an IDR picture
@@ -84,29 +99,6 @@ typedef struct {
     size_t   spsSize;                  ///< Bytes of SPS held (0 = none yet).
     size_t   ppsSize;                  ///< Bytes of PPS held (0 = none yet).
 } ManifoldH264DepacketizerStats;
-
-/// One complete access unit: every VCL NAL sharing an RTP timestamp, concatenated.
-///
-/// FORMAT IS AVCC (length-prefixed), NOT Annex-B: each NAL is preceded by its
-/// length as a 4-byte big-endian integer. See the header comment in the .c file
-/// for why. Parameter sets are NOT in here — they are carried out-of-band in
-/// `sps`/`pps`, which is what CMVideoFormatDescriptionCreateFromH264ParameterSets
-/// wants and what VTDecompressionSession requires.
-typedef struct {
-    const uint8_t *data;            ///< AVCC bytes. Valid ONLY for the duration of the callback.
-    size_t         size;
-    uint32_t       rtpTimestamp;    ///< 90 kHz sender clock.
-    bool           keyframe;        ///< Contains an IDR slice.
-    bool           parameterSetsChanged; ///< SPS or PPS differed from the last ones; rebuild the format description.
-    const uint8_t *sps;             ///< Latest SPS (no start code, no length prefix), or NULL.
-    size_t         spsSize;
-    const uint8_t *pps;
-    size_t         ppsSize;
-} ManifoldH264AccessUnit;
-
-/// Fires on the PRODUCER thread (libdatachannel's), inline, once per access unit.
-/// Copy anything you keep. Step 3a leaves this NULL — counting is the checkpoint.
-typedef void (*ManifoldH264AccessUnitHandler)(const ManifoldH264AccessUnit *accessUnit, void *context);
 
 /// Allocates a depacketizer. Returns NULL only on allocation failure.
 ManifoldH264Depacketizer *ManifoldH264DepacketizerCreate(void);
