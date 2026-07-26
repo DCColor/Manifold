@@ -1179,8 +1179,14 @@ final class WHEPFrameRouter {
     ///
     /// Duration is .invalid:
     /// RTP does not carry one, the renderer selects on PTS alone, and a fabricated duration would be
-    /// a guess nothing reads. DTS is .invalid too — CoreMedia reads that as decode order ==
-    /// presentation order, which is exactly true for Cloudflare's B-frame-free H.264.
+    /// a guess nothing reads.
+    ///
+    /// DTS is .invalid, and NOT because the sender has no B-frames — this comment used to say that,
+    /// which would make it wrong the moment a reordering stream arrived (SRT). The real reason is
+    /// that by this point there is no decode order left to describe: the input was a compressed
+    /// access unit whose DTS said when to DECODE it, and what is being wrapped here is the decoded
+    /// picture that came out. Its only remaining property is when to SHOW it, which is the PTS.
+    /// Nothing downstream reads the output DTS, and there is no honest value to put in it.
     private static func makeSampleBuffer(_ pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
         var formatDescription: CMVideoFormatDescription?
         guard CMVideoFormatDescriptionCreateForImageBuffer(

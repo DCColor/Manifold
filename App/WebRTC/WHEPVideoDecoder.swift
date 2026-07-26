@@ -21,10 +21,17 @@
 //  keyframe state. The only cross-thread entry points are `snapshot()` and
 //  `requestStillExport()`, both explicitly locked.
 //
-//  Decode is SYNCHRONOUS (no kVTDecodeFrame_EnableAsynchronousDecompression). Cloudflare
-//  sends Constrained Baseline with no B-frames, so decode order == display order and there
-//  is nothing for a reorder buffer to do; synchronous decode also means the serial queue
-//  itself is the backpressure signal, which is what the bridge's shed-on-backlog counts.
+//  Decode is SYNCHRONOUS (no kVTDecodeFrame_EnableAsynchronousDecompression), and the reasons
+//  are structural rather than a property of any one sender:
+//    * The serial queue is then itself the backpressure signal, which is what the bridge's
+//      shed-on-backlog counts.
+//    * The output callback's `self` travels as an UNRETAINED refcon, which is only safe
+//      because the callback cannot outlive the -decode call holding us alive.
+//    * `awaitingKeyframe` is read and written from both submit and callback with no lock,
+//      which is only sound while those are the same thread.
+//  It is NOT "because there are no B-frames". Display order is handled downstream by the
+//  renderer's PTS-sorted insert, so a reordering stream needs no change here — it needs
+//  honest timestamps, which is what `decode` now takes.
 //
 //  Step 3b ends at a decoded CVPixelBuffer and a counter. Step 4 takes `onDecodedFrame`
 //  and wires it to LiveClock + the renderer.
@@ -58,8 +65,9 @@ final class WHEPVideoDecoder {
         var lastDecodeError: OSStatus = noErr
     }
 
-    /// Fires on the decode queue with each decoded frame, carrying the SENDER-timeline PTS
-    /// (see `presentationTime`). Step 4 attaches WHEPFrameRouter.deliver here, which promotes
+    /// Fires on the decode queue with each decoded frame, carrying the SENDER-timeline PTS —
+    /// whatever the caller passed to `decode`, handed back by VideoToolbox untouched. Step 4
+    /// attaches WHEPFrameRouter.deliver here, which promotes
     /// the buffer, maps the PTS through LiveClock and enqueues it on the renderer. The decoder
     /// itself stays display-agnostic: it does not know a renderer exists.
     var onDecodedFrame: ((CVPixelBuffer, CMTime) -> Void)?
@@ -83,7 +91,6 @@ final class WHEPVideoDecoder {
     // than us doing it downstream. If the session refuses it, we fall back to VT's native
     // choice and say so loudly, because that fallback has the colour consequence above.
     private static let preferredPixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-    private static let rtpClockRate: Int32 = 90_000
 
     // MARK: - State (decode queue only)
 
@@ -92,14 +99,6 @@ final class WHEPVideoDecoder {
     private var currentSPS: Data?
     private var currentPPS: Data?
     private var awaitingKeyframe = true
-
-    /// RTP timestamps are 32-bit, start at a random value, and wrap every ~13 hours at
-    /// 90 kHz. Unwrapped into a monotonic 64-bit tick count and rebased to zero at the first
-    /// frame, so PTS is sane from the start. This IS the sender timeline step 4 anchors:
-    /// LiveClock pins its own origin to the first frame it sees, so the rebase costs nothing
-    /// and keeps the numbers readable in a log.
-    private var previousRTP: UInt32?
-    private var unwrappedRTP: Int64 = 0
 
     // MARK: - Cross-thread state
 
@@ -143,12 +142,22 @@ final class WHEPVideoDecoder {
 
     // MARK: - Decode entry point (decode queue only)
 
+    /// `pts` and `dts` are the caller's, in the caller's own timescale — CMTime carries it, so
+    /// this signature does not care whether the transport counts in RTP's 90 kHz or an MPEG-TS
+    /// time base, and there is no per-transport branch anywhere below.
+    ///
+    /// `dts` MAY BE `.invalid`, and WHEP passes exactly that: RTP carries no decode timestamp
+    /// for H.264 at all, and CoreMedia reads an invalid DTS as "decode order == presentation
+    /// order". That is the truth for a stream without B-frames and it is what this path has
+    /// always sent. A transport that HAS a real DTS passes it and gets correct display order
+    /// on a stream that reorders; that is the whole reason the argument exists.
     func decode(accessUnit: Data,
                 sps: Data?,
                 pps: Data?,
                 parameterSetsChanged: Bool,
                 keyframe: Bool,
-                rtpTimestamp: UInt32) {
+                pts: CMTime,
+                dts: CMTime) {
 
         mutateStats { $0.accessUnitsReceived += 1 }
 
@@ -180,13 +189,15 @@ final class WHEPVideoDecoder {
         // (2) Access unit → CMSampleBuffer → VTDecompressionSession.
         guard let sampleBuffer = makeSampleBuffer(accessUnit: accessUnit,
                                                   formatDescription: formatDescription,
-                                                  rtpTimestamp: rtpTimestamp) else {
+                                                  pts: pts,
+                                                  dts: dts) else {
             mutateStats { $0.sampleBufferFailures += 1 }
             return
         }
 
-        // No flags: synchronous, in decode order, which for a B-frame-free stream is also
-        // display order. The output callback runs before this call returns.
+        // No flags: synchronous, and submitted in the order the transport delivered — which is
+        // decode order. The output callback runs before this call returns. See the file header
+        // for why synchronous is structural here and not a bet on the sender's GOP structure.
         var infoFlags = VTDecodeInfoFlags()
         let status = VTDecompressionSessionDecodeFrame(session,
                                                        sampleBuffer: sampleBuffer,
@@ -437,7 +448,8 @@ final class WHEPVideoDecoder {
 
     private func makeSampleBuffer(accessUnit: Data,
                                   formatDescription: CMFormatDescription,
-                                  rtpTimestamp: UInt32) -> CMSampleBuffer? {
+                                  pts: CMTime,
+                                  dts: CMTime) -> CMSampleBuffer? {
         // The AVCC bytes are COPIED into a block buffer the sample buffer owns rather than
         // aliased. Synchronous decode would make aliasing safe today, but a sample buffer
         // that outlives its backing Data is the kind of bug that only shows up under load.
@@ -468,12 +480,14 @@ final class WHEPVideoDecoder {
             return nil
         }
 
-        // DTS is deliberately invalid: CoreMedia reads that as "decode order == presentation
-        // order", which is exactly true for a stream with no B-frames. Duration is unknown
-        // (RTP does not carry one); step 4 derives it from the frame rate.
+        // The caller's timestamps, passed through unexamined. An invalid DTS is a legitimate
+        // value here, not a placeholder: CoreMedia reads it as "decode order == presentation
+        // order", which is what a transport that carries no DTS is actually asserting.
+        // Duration is unknown — neither transport supplies one per access unit, and the
+        // renderer selects on PTS alone, so a fabricated one would be a guess nothing reads.
         var timing = CMSampleTimingInfo(duration: .invalid,
-                                        presentationTimeStamp: presentationTime(for: rtpTimestamp),
-                                        decodeTimeStamp: .invalid)
+                                        presentationTimeStamp: pts,
+                                        decodeTimeStamp: dts)
         var sampleSize = accessUnit.count
         var sampleBuffer: CMSampleBuffer?
         status = CMSampleBufferCreateReady(allocator: kCFAllocatorDefault,
@@ -490,19 +504,6 @@ final class WHEPVideoDecoder {
             return nil
         }
         return sampleBuffer
-    }
-
-    /// 32-bit 90 kHz RTP timestamp → monotonic CMTime, unwrapped across the ~13-hour wrap
-    /// and rebased so the first frame is zero.
-    private func presentationTime(for rtpTimestamp: UInt32) -> CMTime {
-        if let previous = previousRTP {
-            // Signed 32-bit difference handles the wrap in both directions.
-            unwrappedRTP += Int64(Int32(bitPattern: rtpTimestamp &- previous))
-        } else {
-            unwrappedRTP = 0
-        }
-        previousRTP = rtpTimestamp
-        return CMTime(value: unwrappedRTP, timescale: Self.rtpClockRate)
     }
 
     // MARK: - Helpers

@@ -76,6 +76,14 @@ final class WHEPClient: ObservableObject {
     /// Step 3b. Owned here, but touched ONLY on `session.decodeQueue` — see WHEPVideoDecoder's
     /// threading note. The two exceptions (`snapshot`, `requestStillExport`) are locked.
     private var decoder: WHEPVideoDecoder?
+
+    /// RTP-timestamp unwrapping, which is WHEP's problem and not the decoder's — see
+    /// RTPTimestampUnwrapper. Built fresh in `connect()` and released in `disconnect()`, so the
+    /// instance's lifetime IS the connection's and there is no separate reset to forget. Like
+    /// `decoder`, owned here but touched only on `session.decodeQueue`, from the
+    /// `onVideoAccessUnit` closure below.
+    private var rtpUnwrapper: RTPTimestampUnwrapper?
+
     private var decodeStatsTimer: Timer?
     private var previousDecodeStats = WHEPVideoDecoder.Stats()
     private var decodeStatsTicks = 0
@@ -159,15 +167,26 @@ final class WHEPClient: ObservableObject {
         // access unit delivered with no handler installed is simply dropped on the floor.
         let decoder = WHEPVideoDecoder()
         self.decoder = decoder
+        // Fresh per connection: the previous stream's wrap accumulator and origin must not
+        // carry over into this one.
+        let unwrapper = RTPTimestampUnwrapper()
+        self.rtpUnwrapper = unwrapper
         // The block runs on session.decodeQueue — already off libdatachannel's thread. It
-        // captures the decoder strongly so a frame in flight at teardown still has one.
+        // captures the decoder and the unwrapper strongly so a frame in flight at teardown
+        // still has both. This is also the only site that touches the unwrapper: once per
+        // access unit, in arrival order, on one thread, which is exactly what its state needs.
         session.onVideoAccessUnit = { avcc, sps, pps, parameterSetsChanged, keyframe, rtpTimestamp in
             decoder.decode(accessUnit: avcc,
                            sps: sps,
                            pps: pps,
                            parameterSetsChanged: parameterSetsChanged,
                            keyframe: keyframe,
-                           rtpTimestamp: rtpTimestamp)
+                           pts: unwrapper.unwrap(rtpTimestamp),
+                           // RTP carries no decode timestamp for H.264 — every access unit is
+                           // handed over in decode order with nothing to say about display
+                           // order. `.invalid` is CoreMedia's word for exactly that, and is
+                           // what this path has always sent.
+                           dts: .invalid)
         }
         // ── Step 4: decoded frames → the display ────────────────────────────────────────
         //
@@ -604,6 +623,9 @@ final class WHEPClient: ObservableObject {
         }
 
         self.decoder = nil
+        // Dropped here rather than reset: the closure holding the last reference dies with
+        // the session, so the next connect() starts from a genuinely new accumulator.
+        self.rtpUnwrapper = nil
         self.session = nil
         self.resourceURL = nil
         self.startedAt = nil
