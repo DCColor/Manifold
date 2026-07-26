@@ -120,25 +120,42 @@ struct ManifoldH264AccessUnitBuilder {
 
 // ── Access unit assembly ──────────────────────────────────────────────────────
 
+/// The ONE definition of "there is an access unit worth emitting", shared by the
+/// handler path (WHEP) and the accessor path (SRT) so the two can never drift.
+static bool MDAccessUnitContents(const ManifoldH264AccessUnitBuilder *ab,
+                                 ManifoldH264AccessUnitContents *out) {
+    if (!ab->accessUnitActive || ab->accessUnitOverflowed || ab->accessUnit.size == 0) return false;
+    out->data                 = ab->accessUnit.data;
+    out->size                 = ab->accessUnit.size;
+    out->keyframe             = ab->accessUnitKeyframe;
+    out->parameterSetsChanged = ab->parameterSetsChanged;
+    out->sps                  = ab->spsSize ? ab->sps : NULL;
+    out->spsSize              = ab->spsSize;
+    out->pps                  = ab->ppsSize ? ab->pps : NULL;
+    out->ppsSize              = ab->ppsSize;
+    return true;
+}
+
 static void MDEmitAccessUnit(ManifoldH264AccessUnitBuilder *ab) {
     if (!ab->accessUnitActive) return;
 
+    ManifoldH264AccessUnitContents contents;
     if (ab->accessUnitOverflowed) {
         ab->stats.accessUnitsOversize++;
-    } else if (ab->accessUnit.size > 0) {
+    } else if (MDAccessUnitContents(ab, &contents)) {
         ab->stats.accessUnits++;
         if (ab->accessUnitKeyframe) ab->stats.keyframes++;
         if (ab->handler) {
             ManifoldH264AccessUnit accessUnit = {
-                .data                 = ab->accessUnit.data,
-                .size                 = ab->accessUnit.size,
+                .data                 = contents.data,
+                .size                 = contents.size,
                 .rtpTimestamp         = ab->accessUnitTimestamp,
-                .keyframe             = ab->accessUnitKeyframe,
-                .parameterSetsChanged = ab->parameterSetsChanged,
-                .sps                  = ab->spsSize ? ab->sps : NULL,
-                .spsSize              = ab->spsSize,
-                .pps                  = ab->ppsSize ? ab->pps : NULL,
-                .ppsSize              = ab->ppsSize,
+                .keyframe             = contents.keyframe,
+                .parameterSetsChanged = contents.parameterSetsChanged,
+                .sps                  = contents.sps,
+                .spsSize              = contents.spsSize,
+                .pps                  = contents.pps,
+                .ppsSize              = contents.ppsSize,
             };
             ab->handler(&accessUnit, ab->handlerContext);
         }
@@ -262,6 +279,12 @@ bool ManifoldH264AccessUnitBuilderIsAccessUnitOpen(const ManifoldH264AccessUnitB
     if (!ab || !ab->accessUnitActive) return false;
     if (outTimestamp) *outTimestamp = ab->accessUnitTimestamp;
     return true;
+}
+
+bool ManifoldH264AccessUnitBuilderCopyAccessUnitContents(const ManifoldH264AccessUnitBuilder *ab,
+                                                         ManifoldH264AccessUnitContents *outContents) {
+    if (!ab || !outContents) return false;
+    return MDAccessUnitContents(ab, outContents);
 }
 
 void ManifoldH264AccessUnitBuilderCopyStats(const ManifoldH264AccessUnitBuilder *ab,

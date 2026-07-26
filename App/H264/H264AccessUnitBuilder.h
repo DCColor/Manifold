@@ -101,6 +101,25 @@ typedef struct {
 /// Fires on the PRODUCER thread, inline, once per access unit. Copy anything you keep.
 typedef void (*ManifoldH264AccessUnitHandler)(const ManifoldH264AccessUnit *accessUnit, void *context);
 
+/// A finished access unit MINUS any transport timestamp — everything the builder
+/// actually knows, and nothing it doesn't.
+///
+/// This is the seam promised in the `rtpTimestamp` note above: a transport reads
+/// the finished AU through `CopyAccessUnitContents` and dispatches its OWN type,
+/// so SRT can carry int64 pts/dts without RTP's uint32 field following it around
+/// and without a second copy of the H.264 logic. WHEP does not use it — it keeps
+/// the handler, which builds ManifoldH264AccessUnit from these same fields.
+typedef struct {
+    const uint8_t *data;            ///< AVCC bytes. Valid until the next Append or Flush.
+    size_t         size;
+    bool           keyframe;
+    bool           parameterSetsChanged;
+    const uint8_t *sps;
+    size_t         spsSize;
+    const uint8_t *pps;
+    size_t         ppsSize;
+} ManifoldH264AccessUnitContents;
+
 // ── Builder ───────────────────────────────────────────────────────────────────
 
 /// Opaque builder state. One per inbound video stream.
@@ -163,6 +182,18 @@ void ManifoldH264AccessUnitBuilderFlush(ManifoldH264AccessUnitBuilder *builder);
 /// track that state itself without duplicating the classification rules.
 bool ManifoldH264AccessUnitBuilderIsAccessUnitOpen(const ManifoldH264AccessUnitBuilder *builder,
                                                    uint32_t *outTimestamp);
+
+/// Reads the OPEN access unit without emitting or resetting it. True when there is
+/// one worth having; false when none is open, it is still empty, or it blew the
+/// size cap — i.e. exactly the cases the handler would not fire for either.
+///
+/// FOR TRANSPORTS THAT DISPATCH THEIR OWN AU TYPE. The sequence is: append every
+/// NAL, call this, build and dispatch your own struct, then Flush to advance the
+/// counters and reset. Flush is still what closes the AU, so the stats are the
+/// same whichever route a transport takes. The pointers alias builder-owned
+/// storage and die at the next Append or Flush — copy anything you keep.
+bool ManifoldH264AccessUnitBuilderCopyAccessUnitContents(const ManifoldH264AccessUnitBuilder *builder,
+                                                         ManifoldH264AccessUnitContents *outContents);
 
 /// Copies the counters out. Caller must serialize against the producer thread.
 void ManifoldH264AccessUnitBuilderCopyStats(const ManifoldH264AccessUnitBuilder *builder,
