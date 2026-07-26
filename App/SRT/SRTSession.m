@@ -861,6 +861,47 @@ cleanup:
 
     // The socket dies LAST, after the demuxer is finished with it, so the read callback
     // can never be entered against a closed socket.
+    //
+    // ── THE `CChannel … IPE` LOG LINE IS NOT THIS CLOSE RACING LIBSRT'S WORKER ──────
+    //
+    // An abrupt sender death produces, from libsrt's own logger:
+    //
+    //     [SRT-LIB] worker: !!FATAL!!:SRT.qr: CChannel reported ERROR DURING TRANSMISSION
+    //               - IPE. INTERRUPTING worker anyway.
+    //
+    // "IPE" is libsrt's Internal Programming Error — its label for a state it treats as
+    // unreachable — and `SRT.qr` is its RECEIVE-QUEUE worker, an internal thread of its
+    // own that we neither own nor join. The obvious suspicion is therefore that OUR
+    // srt_close below pulls the fd out from under that worker mid-recvfrom, and that the
+    // "fatal" is self-inflicted teardown noise.
+    //
+    // IT IS NOT, AND THE EVIDENCE IS BEHAVIOURAL RATHER THAN A READING OF LIBSRT'S
+    // SOURCE (which is not vendored — ThirdParty/libsrt ships headers and a static lib
+    // only). Across an afternoon of app-initiated teardowns — repeated SRT→SRT swaps,
+    // SRT→web, and the whole LiveSource arbitration matrix — NOT ONE produced this line.
+    // Every one of those runs this exact close, on a live socket, with the worker
+    // running. A close/worker race would fire there; it fires nowhere. The only
+    // occurrence followed a FORCE QUIT of the sender (OBS).
+    //
+    // What remains is the ordinary explanation: a connected UDP socket whose peer has
+    // vanished receives ICMP port-unreachable, and the next recvfrom returns
+    // ECONNREFUSED. libsrt has no defined recovery for a channel-level error, so it
+    // abandons the worker and says so loudly. It is libsrt correctly reporting an
+    // abnormal peer death, not a fault in this ordering.
+    //
+    // WHY THE APP SURVIVES IT EITHER WAY, since nothing notifies us when that worker
+    // dies (libsrt exposes no such callback): our read loop is driven by OUR thread with
+    // SRTO_RCVTIMEO bounding every wait. Either the socket is marked broken and
+    // srt_recvmsg2 returns SRT_ECONNLOST/ENOCONN/EINVSOCK — handled in srtReadPacket,
+    // AVERROR_EOF, onEnded(ConnectionLost), normal teardown — or it keeps returning
+    // SRT_ETIMEOUT with `recvTimeouts` climbing while `msgs` stays flat, and SRTClient's
+    // 15 s media-stall watchdog tears it down. Bounded both ways; no hang.
+    //
+    // ⚠️ STILL OPEN, and deliberately not assumed either way: whether an IPE leaves
+    // libsrt's PROCESS-GLOBAL state usable for the next srt_startup/connect in the same
+    // run. We srt_cleanup() below on every session end and srt_startup() on every begin,
+    // so a poisoned global would show up as a failing SECOND connect after an
+    // IPE-terminated first. Untested as of this writing.
     if (sock != SRT_INVALID_SOCK) srt_close(sock);
     s->sock = SRT_INVALID_SOCK;
     if (srtStarted) srt_cleanup();

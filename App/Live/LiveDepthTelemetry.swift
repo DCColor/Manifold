@@ -381,7 +381,16 @@ final class LiveDepthTelemetry {
             lock.unlock()
             return
         }
-        guard host - lastLogHost >= Self.window, let originPTS = firstSenderPTS else {
+        // `clockNow.isFinite` — the same guard `closeUnderrunIfOpen` already applies, for the same
+        // reason: an UNANCHORED LiveClock returns -.infinity, and `inBuffer = senderPTS - clockNow`
+        // below would be +inf, poisoning `residual` and tripping the OVER flag on a line that is
+        // supposed to be the bug detector. Unreachable on the WHEP path, where the first frame
+        // anchors and no window can elapse before it. Reachable in principle on SRT, whose startup
+        // anchor is deliberately withheld for up to `anchorDeferralMaxSeconds` — an order of
+        // magnitude under this window, so this defends an invariant rather than a live case, and
+        // does so structurally instead of by arithmetic coincidence.
+        guard host - lastLogHost >= Self.window, clockNow.isFinite,
+              let originPTS = firstSenderPTS else {
             lock.unlock()
             return
         }

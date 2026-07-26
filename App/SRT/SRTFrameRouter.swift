@@ -552,6 +552,22 @@ final class SRTFrameRouter {
         accessUnitsWithoutPTS = 0
         picturesDecoded = 0
 
+        // ── STARTUP ANCHOR: ARM THE DEFERRAL FOR THIS STREAM ────────────────────────────────
+        // Here rather than in `activate` because this is the session-thread half, it runs before
+        // the first access unit by contract, and the deferral state is session-thread-owned.
+        startupAnchored = false
+        lastArrivalHost = nil
+        deferredFrames = 0
+        deferralBeganHost = 0
+        deferralFirstPTS = 0
+        // `guessedFrameRate` is `av_guess_frame_rate`, which is 0 when libavformat could not work
+        // one out — common on a short probe. Anything outside a plausible range is treated the same
+        // way as absent: an implausible rate is a worse basis for a threshold than a known guess.
+        let guessed = format.guessedFrameRate
+        anchorRateWasDeclared = guessed.isFinite && Self.anchorPlausibleFrameRates.contains(guessed)
+        anchorNominalRate = anchorRateWasDeclared ? guessed : Self.anchorFallbackFrameRate
+        anchorGapThreshold = Self.anchorGapFraction / anchorNominalRate
+
         let decoder = WHEPVideoDecoder()
         decoder.onDecodedFrame = { [weak self] pixelBuffer, pts in
             self?.deliver(pixelBuffer, pts: pts)
@@ -580,6 +596,12 @@ final class SRTFrameRouter {
         framesDelivered = 0
         framesEnqueued = 0
         promoteFailures = 0
+        // Per-STREAM, like every counter around it. A reconnect must re-run the deferral rather
+        // than inherit a `startupAnchored` left true by the session that just ended — which would
+        // hand the next stream's first backlog frame straight to `registerFrame`.
+        startupAnchored = false
+        lastArrivalHost = nil
+        deferredFrames = 0
         lastFlowLogHost = 0
         lastFlowLogEnqueued = 0
         telemetry.reset()
@@ -724,6 +746,185 @@ final class SRTFrameRouter {
     }
     private var lastKeyframeWaitLog: CFTimeInterval = 0
 
+    // MARK: - Startup anchor (session thread)
+    //
+    // ── WHY THE FIRST FRAME IS THE WRONG ONE TO ANCHOR TO ON THIS TRANSPORT ─────────────────
+    //
+    // `LiveClock.registerFrame` anchors on the first PTS it is handed, and on every other source
+    // that is right, because the first frame to arrive IS live. Not here. `avformat_find_stream_info`
+    // spends up to ~2.5 s identifying the stream, buffering everything that arrives meanwhile, and
+    // hands the whole backlog over the instant it returns. The first frame the decoder produces is
+    // therefore the OLDEST frame of that backlog, and anchoring to it starts the clock ~2.4 s behind
+    // live.
+    //
+    // The system already recovered from that — via the queue-full re-anchor (seven times), then the
+    // debounced snap. Every one of those computes the same correction, `newest − targetDepth`. So
+    // the clock knew where live was; nothing asked it at anchor time. THIS IS NOT A NEW MECHANISM.
+    // It is that same answer, taken once and deliberately, before the first present rather than
+    // after seven visible jumps.
+    //
+    // ── WHAT "NEWEST" MEANS WHEN YOU CAN ONLY SEE ONE FRAME AT A TIME ───────────────────────
+    //
+    // `deliver` has no lookahead — one frame, then the next. So "the newest frame" is not a
+    // quantity that can be read at frame one; it can only be recognised AFTERWARDS, by how the
+    // frames arrive:
+    //
+    //   * BACKLOG frames arrive DECODE-BOUND — back to back, a millisecond or two apart, because
+    //     the bytes are already in libavformat's buffer;
+    //   * LIVE frames arrive NETWORK-BOUND — one frame interval apart, because the demuxer is
+    //     blocked on the wire waiting for them.
+    //
+    // So the newest frame is THE FIRST ONE WE HAD TO WAIT FOR, and the test is the inter-arrival
+    // gap. Until that test passes the anchor is withheld: frames are still decoded (they are
+    // reference frames, and the ones after them need them) and still enqueued, but `LiveClock` stays
+    // unanchored, `now()` returns -.infinity, and nothing reaches the screen.
+    //
+    // ── WHY THE ROUTER KEEPS NO "IS IT ANCHORED" STATE OF ITS OWN BEYOND THIS ───────────────
+    //
+    // `registerFrame` is idempotent after the first call — it only assigns when `anchorSenderPTS`
+    // is nil. So the rule is simply: WITHHOLD THE FIRST CALL until the gap test passes, then call it
+    // unconditionally forever. `startupAnchored` exists only to skip this block's arithmetic on the
+    // hot path, not to duplicate the clock's state.
+
+    /// A gap this fraction of a frame interval or longer means the frame was WAITED for.
+    /// Half an interval separates decode-bound (~1 ms) from network-bound (~42 ms at 24 fps) by
+    /// more than an order of magnitude, so the exact fraction is not delicate.
+    private static let anchorGapFraction = 0.5
+
+    /// ── THE CAPS, AND WHY THERE ARE TWO ─────────────────────────────────────────────────────
+    /// The gap test rests on a NOMINAL frame interval that the sender is not obliged to honour. If
+    /// the real cadence is faster than declared, every live gap looks like a burst and the deferral
+    /// would never end on its own. Both caps end it: elapsed time bounds the black, frame count
+    /// bounds it for a sender fast enough to make the time cap slow in frame terms. Hitting either
+    /// degrades to EXACTLY today's behaviour — anchor on the frame in hand — and says so distinctly
+    /// in the log, because "the cap fired" and "a gap was found" are different facts about the
+    /// stream and must never read the same.
+    private static let anchorDeferralMaxSeconds: CFTimeInterval = 0.5
+    private static let anchorDeferralMaxFrames = 300
+
+    /// Used when the demuxer's `guessedFrameRate` is absent or implausible. 60 fps is chosen as the
+    /// SAFE end: it makes the threshold small (8.3 ms), so a real live stream at any rate up to
+    /// 60 fps still clears it on its first inter-frame gap and anchors immediately — the assumption
+    /// degrades toward today's behaviour rather than toward indefinite deferral.
+    private static let anchorFallbackFrameRate = 60.0
+    private static let anchorPlausibleFrameRates = 1.0...240.0
+
+    private var startupAnchored = false
+    /// Half a nominal frame interval, in seconds. Set in `prepareDecoder`.
+    private var anchorGapThreshold: Double = 0.5 / anchorFallbackFrameRate
+    private var anchorRateWasDeclared = false
+    private var anchorNominalRate: Double = anchorFallbackFrameRate
+    /// Host time of the previous DELIVERED frame, or nil when none has been delivered yet.
+    private var lastArrivalHost: CFTimeInterval?
+    private var deferralBeganHost: CFTimeInterval = 0
+    private var deferralFirstPTS: Double = 0
+    private var deferredFrames = 0
+
+    /// Called from `deliver` for every frame until the anchor is taken. Returns the presentation PTS.
+    ///
+    /// SESSION THREAD, and every field it touches is session-thread-owned — the same ownership
+    /// `framesDelivered` and the promote state already have.
+    private func anchorOrDefer(senderPTS: Double, arrivalHost: CFTimeInterval,
+                               clock: LiveClock) -> Double {
+        // ── THE FIRST DELIVERED FRAME ALWAYS DEFERS, AND THE REASON IS NOT PEDANTRY ──────────
+        // A gap needs two arrivals. The tempting shortcut is to measure the first one against some
+        // earlier reference — `prepareDecoder` returning, say — but every such reference is a
+        // MAIN-THREAD-SCHEDULING measurement, not a network one: `activate` hops to main, and if
+        // main is busy standing the route up, the first frame appears to have been "waited for"
+        // and the anchor lands on the oldest backlog frame after all. Requiring a measured
+        // frame-to-frame gap is immune to that, at a cost of exactly one frame (~42 ms at 24 fps)
+        // on a stream that had no backlog. That frame shows in the log and in `netJump`; it is not
+        // hidden.
+        guard let previous = lastArrivalHost else {
+            lastArrivalHost = arrivalHost
+            deferralBeganHost = arrivalHost
+            deferralFirstPTS = senderPTS
+            deferredFrames = 1
+            return senderPTS      // identity — exactly what registerFrame returns at rate 1.0
+        }
+        lastArrivalHost = arrivalHost
+
+        let gap = arrivalHost - previous
+        let waited = gap >= anchorGapThreshold
+        let heldFor = arrivalHost - deferralBeganHost
+        let cappedByTime = heldFor >= Self.anchorDeferralMaxSeconds
+        let cappedByCount = deferredFrames >= Self.anchorDeferralMaxFrames
+
+        guard waited || cappedByTime || cappedByCount else {
+            deferredFrames += 1
+            return senderPTS
+        }
+
+        startupAnchored = true
+
+        // ── TWO DIFFERENT NUMBERS, AND THE LEDGER WANTS THE SECOND ONE ──────────────────────
+        //
+        // `discarded` is the CONTENT span we chose not to present — first delivered frame to this
+        // one, PTS to PTS. It is the honest answer to "how much of the stream did we skip", and it
+        // is what the log reports.
+        //
+        // IT IS NOT THE CLOCK JUMP. `netJump` is defined as presentation time crossed by an
+        // INSTANTANEOUS coarse clock action, and every other contributor is one: the snap and the
+        // queue-full re-anchor both evaluate before and after at the SAME instant `t`. THIS
+        // DEFERRAL IS NOT INSTANTANEOUS — it occupies `heldFor` of real time, during which a
+        // normally-running clock would have advanced by exactly that much on its own. Reporting
+        // the whole content span charges the ledger twice for the part that merely ELAPSED: once
+        // in `wall`, once again in `netJump`.
+        //
+        // The arithmetic, with P/H for PTS and host time at the first (₁), anchoring (A) and
+        // latest (L) frames, cushion c, rate 1:
+        //
+        //     surplus  = (P_L − P₁) − (H_L − H₁)
+        //     inBuffer = P_L − now(H_L) = P_L − P_A − H_L + H_A + c
+        //     residual = surplus + c − netJump − inBuffer
+        //
+        // With `netJump = P_A − P₁` everything cancels except `residual = −(H_A − H₁)` — a
+        // CONSTANT negative offset equal to the deferral's wall duration, on every window, for the
+        // life of the stream. That is what flagged OVER on every connect, on the one line whose
+        // whole job is to catch accounting bugs.
+        //
+        // The correct entry is what the anchor choice bought RELATIVE TO ANCHORING ON FRAME 1,
+        // which is the same quantity by a second route:
+        //
+        //     now_ours(t) − now_ifAnchoredOnFirstFrame(t) = (P_A − P₁) − (H_A − H₁)
+        //
+        // NOT CLAMPED. `netJump` is signed by design. A negative value needs PTS advancing slower
+        // than wall while inter-arrival gaps stay under threshold, which the gap test makes very
+        // nearly unreachable — but if it ever happens it is the truthful reading, and clamping it
+        // would hide precisely the kind of thing `residual` exists to surface. In the no-backlog
+        // case the two terms cancel to ~0 all by themselves, which is right: the clock started one
+        // frame later in real time and skipped no content at all.
+        let discarded = max(0, senderPTS - deferralFirstPTS)
+        let netJump = discarded - heldFor
+        let presentationPTS = clock.registerFrame(senderPTS: senderPTS)
+        telemetry.recordClockJump(netJump)
+
+        // All three numbers, so a future ledger dispute is settleable from the log alone rather
+        // than by re-deriving which of them `netJump` should have been.
+        let ledgerNote = String(format: "discarded %d frame(s) — %.3fs of content over %.3fs of "
+                                      + "wall time, net clock jump %+.3fs",
+                                deferredFrames, discarded, heldFor, netJump)
+
+        let rateNote = anchorRateWasDeclared
+            ? String(format: "%.3f fps declared", anchorNominalRate)
+            : String(format: "%.0f fps assumed — the stream declared none", anchorNominalRate)
+        if waited {
+            NSLog("""
+                  [SRT] startup anchor: GAP — waited %.3fs for this frame (≥ %.3fs, half a frame \
+                  at %@), so the clock starts at live instead of behind it. %@.
+                  """, gap, anchorGapThreshold, rateNote, ledgerNote)
+        } else {
+            NSLog("""
+                  [SRT] startup anchor: CAP — no gap ≥ %.3fs in %.3fs / %d frame(s), so the \
+                  deferral hit its %@ bound and anchored on the frame in hand (today's behaviour, \
+                  NOT a measured live edge). Nominal %@ — if the sender is genuinely faster than \
+                  that, this is why. %@.
+                  """, anchorGapThreshold, heldFor, deferredFrames,
+                  cappedByTime ? "time" : "frame-count", rateNote, ledgerNote)
+        }
+        return presentationPTS
+    }
+
     // MARK: - Per-frame (session thread)
 
     /// One decoded frame → the screen. Called from the decoder's output callback, inline on the
@@ -754,7 +955,19 @@ final class SRTFrameRouter {
 
         // Sender timeline → presentation timeline. Identity at rate 1.0; a genuine remap once the
         // control loop has slewed.
-        let presentationPTS = clock.registerFrame(senderPTS: senderPTS)
+        //
+        // STRAIGHT THROUGH ONCE ANCHORED. Before that, `anchorOrDefer` decides whether this frame
+        // is the one to anchor on — and while it defers it does NOT call `registerFrame`, because
+        // calling it IS anchoring. The frame is still promoted, tagged and enqueued below: it may
+        // be a reference frame, and the queue it lands in is the cushion the clock will present
+        // from the moment the anchor is taken.
+        let presentationPTS: Double
+        if startupAnchored {
+            presentationPTS = clock.registerFrame(senderPTS: senderPTS)
+        } else {
+            presentationPTS = anchorOrDefer(senderPTS: senderPTS,
+                                            arrivalHost: CACurrentMediaTime(), clock: clock)
+        }
 
         guard let promoted = promoteIfNeeded(decoded) else {
             promoteFailures += 1
