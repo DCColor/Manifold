@@ -81,6 +81,42 @@ typedef struct {
     /// link is encrypted without saying what with. Same redaction posture the WHEP
     /// endpoint path already has.
     const char *passphrase;
+
+    /// SRTO_STREAMID, or NULL/"" to leave it unset.
+    ///
+    /// HOW MOST HOSTED INGESTS ROUTE A PUBLISHER — it is the resource path, the channel key, or the
+    /// account token, depending on the service. Not setting one where the server expects it is not
+    /// a degraded connection: the server rejects the handshake, and the rejection says nothing
+    /// about the missing id. NOT A SECRET IN THE PASSPHRASE SENSE (it is an address, and it is
+    /// logged), but it is not shown in the UI either — see the note on the host in SRTClient.
+    ///
+    /// SRT's own ceiling is 512 bytes; a longer one is refused at Start rather than truncated,
+    /// because a truncated stream id addresses something other than what the user asked for.
+    const char *streamId;
+
+    /// ── WHICH SESSION THIS IS, FOR THE CONSUMER'S BENEFIT ──────────────────────────────────
+    ///
+    /// An opaque token, chosen by the caller, echoed back to every callback that HOPS TO ANOTHER
+    /// THREAD. This layer never interprets it; it only carries it.
+    ///
+    /// It exists because a session's last callback can outlive the session's usefulness. `onEnded`
+    /// fires on the session thread just before the join completes, and a consumer that hops it to
+    /// its own thread will receive it LATER — potentially after it has already started a
+    /// replacement session. Without a token, "did this callback come from the session I am
+    /// currently running?" is unanswerable, and the pointer cannot answer it either: Destroy frees
+    /// the struct and the next Create can be handed the same address.
+    ///
+    /// See SRTClient.sessionGeneration, which is the counter this carries.
+    uint64_t generation;
+
+    /// SRTO_RCVLATENCY in milliseconds, or 0 to leave libsrt's live default (120 ms) alone.
+    ///
+    /// THE RECEIVE side specifically. This is the de-jitter/retransmit window the TSBPD scheduler
+    /// works with, and it is the number `SRTClient.logLatencyBudget` weighs the render cushion
+    /// against. What is REQUESTED here is not what the link ends up using: the handshake takes the
+    /// MAXIMUM of the two sides' wishes, so a sender asking for more wins. Both numbers are
+    /// reported back — see `requestedLatencyMs` on ManifoldSRTConnectionInfo.
+    int32_t latencyMs;
 } ManifoldSRTSessionConfig;
 
 #pragma mark - What the handshake negotiated
@@ -90,6 +126,13 @@ typedef struct {
 /// value tells you nothing.
 typedef struct {
     int32_t negotiatedLatencyMs;   ///< SRTO_RCVLATENCY. The transport-level de-jitter buffer.
+
+    /// What we ASKED for, echoed back: the config's `latencyMs`, or 0 when the URL named no
+    /// latency and libsrt's default stands. Reported alongside the negotiated value because the
+    /// two differing is normal and informative — the peer raising it is the handshake working, not
+    /// a fault, and a user who typed `?latency=80` and got 400 needs to see both numbers to
+    /// understand that the sender is the one holding the buffer open.
+    int32_t requestedLatencyMs;
     int32_t payloadSize;           ///< SRTO_PAYLOADSIZE, bytes.
     int32_t mss;                   ///< SRTO_MSS, bytes.
     int32_t kmState;               ///< SRTO_KMSTATE — see ManifoldSRTKeyMaterialStateName.
@@ -158,23 +201,37 @@ enum {
 /// ALL of these fire on the session thread, inline. Do not block them for long: the
 /// same thread is the one performing srt_recvmsg2, so time spent here is time the
 /// receive buffer is not being drained.
+///
+/// ── WHY THREE OF THE FOUR CARRY `generation` AND ONE DOES NOT ──────────────────
+///
+/// The three that a consumer typically HOPS to another thread carry the config's
+/// `generation` back, so the far side can ask "is this mine?" before acting on it.
+/// A hopped callback can arrive after its session is gone and a replacement has
+/// started; acting on it then configures or tears down the WRONG session.
+///
+/// `onAccessUnit` does NOT carry one, because it is consumed INLINE on this thread
+/// and cannot outlive it: Stop joins, so by the time a caller can start a
+/// replacement, this thread is already dead and no access unit is in flight. That
+/// is a property of the JOIN, not of the callback — see the note on
+/// ManifoldSRTSessionStop.
 typedef struct {
     void *context;
 
     /// The handshake completed. Fires at most once, before any other callback.
-    void (*onConnected)(void *context, const ManifoldSRTConnectionInfo *info);
+    void (*onConnected)(void *context, uint64_t generation, const ManifoldSRTConnectionInfo *info);
 
     /// avformat_find_stream_info succeeded and a video stream was chosen. Fires at
     /// most once, after onConnected and before the first access unit.
-    void (*onVideoFormat)(void *context, const ManifoldSRTVideoFormat *format);
+    void (*onVideoFormat)(void *context, uint64_t generation, const ManifoldSRTVideoFormat *format);
 
     /// One access unit from the chosen video stream. Pointers inside are valid ONLY
-    /// for the duration of the call.
+    /// for the duration of the call. NO generation — see above.
     void (*onAccessUnit)(void *context, const ManifoldSRTAccessUnit *accessUnit);
 
     /// The last callback, always. `message` is a human-readable line safe to show a
     /// user — it never contains the passphrase and never the full URL.
-    void (*onEnded)(void *context, ManifoldSRTEndReason reason, const char *message);
+    void (*onEnded)(void *context, uint64_t generation,
+                    ManifoldSRTEndReason reason, const char *message);
 } ManifoldSRTSessionCallbacks;
 
 #pragma mark - Lifecycle (main thread only)
@@ -195,11 +252,26 @@ bool ManifoldSRTSessionStart(ManifoldSRTSession *session, const ManifoldSRTSessi
 
 /// Clears the run flag and BLOCKS until the session thread has exited.
 ///
-/// BOUND: one SRTO_RCVTIMEO period plus one demux iteration. The receive already in
-/// flight returns within the timeout; every callback entry after that sees the
-/// cleared flag and returns AVERROR_EXIT without blocking, and the interrupt
-/// callback closes off libavformat's own retry loops. `onEnded` has fired by the
-/// time this returns. A no-op if nothing is running.
+/// BOUND: one SRTO_RCVTIMEO period plus one demux iteration, ONCE THE SESSION IS
+/// RECEIVING. The receive already in flight returns within the timeout; every
+/// callback entry after that sees the cleared flag and returns AVERROR_EXIT without
+/// blocking, and the interrupt callback closes off libavformat's own retry loops.
+/// `onEnded` has fired by the time this returns. A no-op if nothing is running.
+///
+/// ⚠️ A SESSION STILL IN `srt_connect` IS BOUND BY SRTO_CONNTIMEO INSTEAD — 3 s, not
+/// 200 ms. srt_connect does not consult the run flag, so stopping a session that has
+/// not finished its handshake blocks the caller for the remainder of the connect
+/// timeout. Swapping streams mid-connect therefore costs the caller up to 3 s.
+///
+/// ⚠️ THE JOIN IS LOAD-BEARING FOR MORE THAN RESOURCE SAFETY. It is also the entire
+/// reason `onAccessUnit` needs no generation token: because this blocks until the
+/// session thread has exited, a caller cannot possibly have started a replacement
+/// session while a frame from this one is still in flight. IF THIS IS EVER MADE
+/// ASYNCHRONOUS — the obvious fix for the 3 s stall above is to break `srt_connect`
+/// by closing the socket and stop waiting — that guarantee disappears SILENTLY, with
+/// no compiler error and no crash, and the frame path would start delivering a dead
+/// stream's pictures into a live session's renderer. Generation-check the frame path
+/// in the same change, or do not make this async.
 void ManifoldSRTSessionStop(ManifoldSRTSession *session);
 
 /// Stops if needed, then frees. The session pointer is dead after this.

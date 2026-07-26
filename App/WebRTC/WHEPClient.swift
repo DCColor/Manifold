@@ -126,11 +126,30 @@ final class WHEPClient: ObservableObject {
     /// field) — never sourced internally: the old ~/.manifold-whep-config dotfile and the
     /// MANIFOLD_WHEP_URL/STUN environment variables are gone, so a shipping app reads no connection
     /// backdoor from the user's home directory.
-    func connect(to url: URL) {
+    /// ⚠️ REACHABLE ONLY THROUGH `LiveSource.connectWeb` — the `Arbitration` argument cannot be
+    /// constructed outside LiveSource.swift, so no other call site compiles. Any live NDI or SRT
+    /// source has been retired by the time this runs.
+    func connect(to url: URL, arbitratedBy _: LiveSource.Arbitration) {
         dispatchPrecondition(condition: .onQueue(.main))
 
+        // WEB→WEB IS STILL A REFUSAL, and deliberately unchanged by the arbitration pass:
+        // `connectWeb` passes `except: .web`, so a live WHEP session reaches this guard intact and
+        // a second connect refuses. SRT's equivalent refusal was removed because its teardown can be
+        // JOINED (see SRTClient.disconnect's ORDER note) and a swap is therefore definable; WHEP's
+        // cannot be, so making this a swap is a change to WHEP's own lifecycle and belongs with that
+        // work, not with this one. Named here so the asymmetry is visible rather than looking like
+        // an oversight.
+        //
+        // BUT IT REFUSES VISIBLY. It used to return after an NSLog, so from the user's side picking
+        // a second bookmark did nothing whatsoever: no picture change, no message, no sign the click
+        // had registered — indistinguishable from a bug, and unlike SRT's old refusal this pair is
+        // reachable in RELEASE, from the shipping bookmark menu. The banner stands until the user
+        // dismisses it or starts another attempt: nothing clears `lastError` on the strength of the
+        // EXISTING stream continuing to play, because that stream is the reason for the message,
+        // not evidence against it.
         guard session == nil else {
             NSLog("[WHEP] a session is already running — disconnect it first")
+            lastError = "A web stream is already connected — disconnect it before connecting another."
             return
         }
         lastError = nil   // fresh attempt — clear any error banner from a previous try

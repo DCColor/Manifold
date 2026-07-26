@@ -27,59 +27,6 @@ import Security
 import CryptoKit
 import SwiftUI
 
-// MARK: - Keychain (small generic-password wrapper)
-
-/// Minimal Keychain access for the licensing subsystem. Used for values that must resist casual
-/// tampering or survive app deletion: the trial timestamps and the stored license key. `machineId`
-/// deliberately does NOT live here — it is not security-sensitive (see LicenseManager).
-enum LicenseKeychain {
-    private static let service = "tools.graviton.manifold.license"
-
-    @discardableResult
-    static func set(_ value: String, for account: String) -> Bool {
-        let data = Data(value.utf8)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        // Upsert: try update first, add if absent.
-        let update: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if status == errSecSuccess { return true }
-        if status == errSecItemNotFound {
-            var add = query
-            add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
-        }
-        return false
-    }
-
-    static func get(_ account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var out: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data, let s = String(data: data, encoding: .utf8) else { return nil }
-        return s
-    }
-
-    static func delete(_ account: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
-}
-
 // MARK: - Trial (7-day, Keychain-backed, tamper-resistant)
 
 struct TrialStatus {
@@ -108,25 +55,25 @@ enum TrialManager {
 
         // First ever launch: stamp the trial start. Keychain persistence means a reinstall lands here
         // only if the item was truly removed (Keychain items outlive the app bundle).
-        guard let firstStr = LicenseKeychain.get(kFirstLaunch), let firstT = Double(firstStr) else {
-            LicenseKeychain.set(String(nowT), for: kFirstLaunch)
-            LicenseKeychain.set(String(nowT), for: kLastSeen)
+        guard let firstStr = KeychainStore.license.get(kFirstLaunch), let firstT = Double(firstStr) else {
+            KeychainStore.license.set(String(nowT), for: kFirstLaunch)
+            KeychainStore.license.set(String(nowT), for: kLastSeen)
             return TrialStatus(active: true, daysRemaining: trialDays(elapsed: 0), expired: false)
         }
 
-        var voided = (LicenseKeychain.get(kVoided) == "1")
+        var voided = (KeychainStore.license.get(kVoided) == "1")
 
         // Rollback check: the wall clock reading BEFORE last-seen (beyond tolerance) means someone
         // set the clock back to stretch the trial. Void it rather than reward the rollback.
-        if let lastStr = LicenseKeychain.get(kLastSeen), let lastT = Double(lastStr) {
+        if let lastStr = KeychainStore.license.get(kLastSeen), let lastT = Double(lastStr) {
             if nowT < lastT - rollbackTolerance {
                 voided = true
-                LicenseKeychain.set("1", for: kVoided)
+                KeychainStore.license.set("1", for: kVoided)
             }
             // Advance last-seen monotonically: never let it move backward.
-            LicenseKeychain.set(String(max(nowT, lastT)), for: kLastSeen)
+            KeychainStore.license.set(String(max(nowT, lastT)), for: kLastSeen)
         } else {
-            LicenseKeychain.set(String(nowT), for: kLastSeen)
+            KeychainStore.license.set(String(nowT), for: kLastSeen)
         }
 
         let elapsed = max(0, nowT - firstT)
@@ -143,9 +90,9 @@ enum TrialManager {
 
     /// Test/support hook — not wired to any UI. Clears trial state (a fresh install simulation).
     static func resetForTesting() {
-        LicenseKeychain.delete(kFirstLaunch)
-        LicenseKeychain.delete(kLastSeen)
-        LicenseKeychain.delete(kVoided)
+        KeychainStore.license.delete(kFirstLaunch)
+        KeychainStore.license.delete(kLastSeen)
+        KeychainStore.license.delete(kVoided)
     }
 }
 
@@ -433,7 +380,7 @@ final class LicenseManager: ObservableObject {
         trial = TrialManager.recordLaunchAndEvaluate()
 
         // Offline path: a stored key that still verifies keeps the user licensed with NO network.
-        if licenseActivated, let key = LicenseKeychain.get(kStoredKey) {
+        if licenseActivated, let key = KeychainStore.license.get(kStoredKey) {
             if case .success(let payload) = LicenseCrypto.verify(licenseKey: key) {
                 email = payload.email; emailStore = payload.email
                 licenseType = payload.licenseType; typeStore = payload.licenseType.rawValue
@@ -467,7 +414,7 @@ final class LicenseManager: ObservableObject {
 
         switch await LicenseService.activate(key: key, machineId: machineId) {
         case .success(let s):
-            LicenseKeychain.set(key, for: kStoredKey)
+            KeychainStore.license.set(key, for: kStoredKey)
             email = s.email; emailStore = s.email
             licenseType = s.licenseType; typeStore = s.licenseType.rawValue
             setActivated(true)
@@ -492,7 +439,7 @@ final class LicenseManager: ObservableObject {
     /// Periodic/at-launch revocation check. Network/ambiguous → leave state ALONE (offline users must
     /// not be punished). A definite `revoked` clears validation → the app gates on next usability read.
     func refreshValidation() async {
-        guard licenseActivated, let key = LicenseKeychain.get(kStoredKey) else { return }
+        guard licenseActivated, let key = KeychainStore.license.get(kStoredKey) else { return }
         switch await LicenseService.validate(key: key, machineId: machineId) {
         case .valid:
             setValidated(true)
@@ -510,7 +457,7 @@ final class LicenseManager: ObservableObject {
     /// Clears LOCAL activation only. Per the Graviton docs the server still counts this machine until
     /// an admin deregisters it — so we surface that, and we do NOT touch the trial.
     func deactivate() {
-        LicenseKeychain.delete(kStoredKey)
+        KeychainStore.license.delete(kStoredKey)
         setActivated(false)
         setValidated(false)
         email = ""; emailStore = ""

@@ -796,7 +796,7 @@ struct ContentView: View {
     /// takes over the display while connected (see NDIService); file<->NDI handoff is a later step.
     @ViewBuilder private var ndiShortcuts: some View {
         Group {
-            Button("") { NDIService.shared.connectToFirstSource() }
+            Button("") { LiveSource.connectNDIFirstSource() }
                 .keyboardShortcut("n", modifiers: [.control, .option])
             Button("") { NDIService.shared.disconnect() }
                 .keyboardShortcut("n", modifiers: [.control, .option, .shift])
@@ -895,10 +895,18 @@ struct ContentView: View {
             // deliberately no picture yet. ⌃⌥⇧H tears the session down (and DELETEs it).
             Button("") {
                 // Convenience shortcut over the shipping Stream Sources sheet: connect the first
-                // saved bookmark of a supported type. With the dotfile backdoor gone there is no
-                // ambient URL, so ⌃⌥H is a speed path over saved state — never a URL-entry path.
-                if let bookmark = StreamBookmarkStore.shared.firstConnectable, let url = bookmark.url {
-                    WHEPClient.shared.connect(to: url)
+                // saved WEB bookmark. With the dotfile backdoor gone there is no ambient URL, so
+                // ⌃⌥H is a speed path over saved state — never a URL-entry path.
+                //
+                // `ofType: .web`, not `firstConnectable` — SRT bookmarks became connectable in 3e,
+                // so the general form can now return one, and ⌃⌥⇧H (which tears down WHEP and only
+                // WHEP) would then have no way to undo what ⌃⌥H did. ⌃⌥D is SRT's trigger.
+                if let bookmark = StreamBookmarkStore.shared.firstConnectable(ofType: .web),
+                   let url = StreamBookmarkStore.connectURL(for: bookmark) {
+                    // Through the arbitration funnel, exactly like the shipping menu path. This
+                    // used to call WHEPClient.connect directly and so retired nothing — a live SRT
+                    // session stayed up and both pushed to the renderer.
+                    LiveSource.connectWeb(to: url)
                 } else {
                     NSLog("[WHEP] no saved stream — add one via the streaming menu ▸ Stream URL…")
                 }
@@ -942,17 +950,23 @@ struct ContentView: View {
             //
             // ⚠️ THE SHORTCUT IS THE TEMPORARY PART, NOT WHAT IT DRIVES. Everything below the
             // button — SRTClient, SRTFrameRouter, ManifoldSRTSession — ships in Release. Only
-            // this trigger and its hardcoded URL are #if DEBUG, because the shipping entry point
-            // is the stream-bookmark UI and wiring that is stage 3e's job. Until it lands,
-            // StreamType.srt stays marked unsupported in Preferences.swift, so a saved srt://
-            // bookmark is still a greyed row with an honest reason rather than a live path that
-            // only some entry points can reach.
+            // this trigger is #if DEBUG.
+            //
+            // THE SHIPPING ENTRY POINT NOW EXISTS: stage 3e un-gated StreamType.srt, so a saved
+            // srt:// bookmark connects from the menu and the sheet like any other. This shortcut
+            // therefore prefers the first saved SRT bookmark — passphrase and all, through the same
+            // connectURL path the UI uses — and falls back to the loopback probe only when nothing
+            // is saved, which is what makes it still useful on a fresh machine.
             //
             // UNLIKE the spike, this DOES take the display: the file is retired and the screen
             // blacked at connect, and the route is configured once the demuxer has reported the
             // stream's colorimetry.
-            Button("") { SRTClient.shared.connect(to: Self.srtDebugTarget) }
-                .keyboardShortcut("d", modifiers: [.control, .option])
+            Button("") {
+                let saved = StreamBookmarkStore.shared.firstConnectable(ofType: .srt)
+                    .flatMap { StreamBookmarkStore.connectURL(for: $0) }
+                LiveSource.connectSRT(to: saved ?? Self.srtDebugTarget)
+            }
+            .keyboardShortcut("d", modifiers: [.control, .option])
             Button("") { SRTClient.shared.disconnect() }
                 .keyboardShortcut("d", modifiers: [.control, .option, .shift])
         }
@@ -1305,7 +1319,7 @@ struct ContentView: View {
             }
         } else {
             ForEach(ndi.discoveredSources, id: \.name) { source in
-                Button { NDIService.shared.connect(to: source) } label: {
+                Button { LiveSource.connectNDI(to: source) } label: {
                     if source.name == ndi.connectedSourceName {
                         Label(source.name, systemImage: "checkmark")   // the live source
                     } else {
@@ -1325,7 +1339,10 @@ struct ContentView: View {
         ForEach(bookmarks.bookmarks) { bookmark in
             if bookmark.type.isSupported {
                 Button(bookmark.name) {
-                    if let url = bookmark.url { connectToStreamURL(url) }
+                    // connectURL rejoins the Keychain passphrase; bookmark.url is display-only.
+                    if let url = StreamBookmarkStore.connectURL(for: bookmark) {
+                        connectToStreamURL(url)
+                    }
                 }
             } else {
                 Button(bookmark.type.unsupportedReason ?? bookmark.name) {}
@@ -1360,19 +1377,26 @@ struct ContentView: View {
         }
     }
 
-    /// Connect to a stream URL, retiring any live NDI source first (one active source — WHEP's own
-    /// onWillActivateStream retires a loaded file). Shared by the menu rows and the sheet so the
+    /// Connect to a bookmarked or pasted stream URL. Shared by the menu rows and the sheet so the
     /// takeover rule can't diverge.
+    ///
+    /// THIS IS A TRANSPORT DECISION, NOT AN ARBITRATION ONE — the retire-then-stand-up rule lives
+    /// in `LiveSource`, which is the only thing that can call a client's `connect`. What stays here
+    /// is the question only a URL can answer: which transport dials it.
+    ///
+    /// ONE SWITCH, FROM THE SAME `StreamType.detect` THAT DECIDED THE SAVED TYPE, so a bookmark
+    /// listed as SRT cannot be dialled by WHEP. Every caller — menu row, sheet row, paste, ⌃⌥H —
+    /// arrives here, which is what makes that guarantee worth anything.
     private func connectToStreamURL(_ url: URL) {
-        // `except: .web` — WHEP is the source we are about to hand to, and it retires the loaded
-        // FILE itself via WHEPFrameRouter.activate()'s onWillActivateStream. Note this preserves
-        // today's behaviour exactly, INCLUDING the case where a web stream is already live:
-        // WHEPClient.connect refuses a second concurrent session (`guard session == nil`), so
-        // picking a second bookmark logs and does nothing. That is a real gap, and a third source
-        // will force a decision about web→srt / srt→web handover — but changing it here would make
-        // this refactor no longer verifiable as "nothing changed".
-        LiveSource.retireActive(except: .web)
-        WHEPClient.shared.connect(to: url)
+        switch StreamType.detect(url) {
+        case .web: LiveSource.connectWeb(to: url)
+        case .srt: LiveSource.connectSRT(to: url)
+        case .hls:
+            // Unreachable through the UI: every entry point gates on `type.isSupported`, which
+            // still excludes HLS. Handled rather than ignored so a future caller that forgets the
+            // gate gets a message instead of a silent no-op.
+            NSLog("[STREAM] refusing to connect — HLS is not supported in this build")
+        }
     }
 
     /// Non-blocking error banner for a failed stream connect — the presentation for BOTH the menu
@@ -1382,10 +1406,16 @@ struct ContentView: View {
     /// and never a full URL, never a passphrase. Auto-dismisses; the close button or a new attempt
     /// clears it sooner. Never blocks: the user can pick another bookmark or open a file immediately.
     ///
-    /// ONE BANNER FOR BOTH TRANSPORTS. They cannot both be connecting — `LiveSource.retireActive`
-    /// guarantees at most one live source — so there is at most one message to show, and WHEP is
-    /// checked first only because it is the older path. Both are cleared on dismissal so a stale
-    /// message from the other transport cannot re-appear behind this one.
+    /// ONE BANNER FOR BOTH TRANSPORTS. They cannot both be connecting, so there is at most one
+    /// message to show, and WHEP is checked first only because it is the older path. Both are
+    /// cleared on dismissal so a stale message from the other transport cannot re-appear behind
+    /// this one.
+    ///
+    /// THAT PREMISE IS NOW ENFORCED RATHER THAN ASSERTED. It was written when `retireActive` was
+    /// merely the convention, and two call sites (⌃⌥D, ⌃⌥H) went around it — so a live WHEP
+    /// session and a connecting SRT one could both hold a `lastError` and this `??` would silently
+    /// show one and hide the other. Standing a source up now requires a `LiveSource.Arbitration`,
+    /// which only LiveSource.swift can mint, and every funnel there retires first.
     @ViewBuilder private var connectErrorBanner: some View {
         if let message = whep.lastError ?? srt.lastError {
             HStack(alignment: .top, spacing: 10) {
@@ -1424,7 +1454,7 @@ struct ContentView: View {
         if activeLiveSource == .ndi {
             NDIService.shared.disconnect()
         } else {
-            NDIService.shared.connectToFirstSource()
+            LiveSource.connectNDIFirstSource()
         }
     }
 

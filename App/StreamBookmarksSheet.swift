@@ -25,8 +25,23 @@ struct StreamBookmarksSheet: View {
     // Add form
     @State private var newName = ""
     @State private var newURL = ""
+    @State private var newPassphrase = ""
     @State private var addError: String?
     @State private var savedNotice: String?
+
+    /// ── THE REVEAL IS MOMENTARY, AND THAT IS A DESIGN DECISION, NOT A DEFAULT ───────────────
+    ///
+    /// A sticky show/hide toggle is the common pattern and it is the wrong one here. The state it
+    /// creates is invisible from across a room and outlives the glance that wanted it: a passphrase
+    /// revealed to check a typo stays revealed through the save, through the next screen share, and
+    /// until someone notices. Manifold's whole reason for showing hosts and never paths is that a
+    /// monitoring app is READ OVER SHOULDERS AND SHARED ON CALLS.
+    ///
+    /// So the plaintext is bound to a press: it appears while the eye is held down and is gone the
+    /// instant it is released, and `newPassphrase` is never rendered unmasked without a finger on
+    /// the control. There is no state to forget to undo.
+    @State private var revealPassphrase = false
+    @FocusState private var passphraseFocused: Bool
 
     // Bare paste-and-connect (session only)
     @State private var pasteURL = ""
@@ -38,6 +53,9 @@ struct StreamBookmarksSheet: View {
                 Text("Stream Sources").font(.headline)
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                    // Nothing typed into the passphrase field outlives the sheet. A bare paste is
+                    // session-only by design and a half-finished add is not worth keeping in memory.
+                    .onDisappear { clearPassphraseEntry() }
             }
             .padding(16)
             Divider()
@@ -96,7 +114,10 @@ struct StreamBookmarksSheet: View {
     }
 
     private func connect(_ bookmark: StreamBookmark) {
-        guard bookmark.type.isSupported, let url = bookmark.url else { return }
+        // connectURL, NOT bookmark.url — the stored URL has had its passphrase stripped out of it,
+        // and this is the call that puts the Keychain's copy back for the duration of the dial.
+        guard bookmark.type.isSupported,
+              let url = StreamBookmarkStore.connectURL(for: bookmark) else { return }
         onConnect(url)
     }
 
@@ -106,6 +127,10 @@ struct StreamBookmarksSheet: View {
         Section("Add a stream") {
             TextField("Name", text: $newName)
             TextField("Stream URL (https://… or srt://…)", text: $newURL)
+            // SHOWN ONLY FOR AN SRT URL, decided from what is typed as it is typed. A passphrase
+            // field on an https bookmark would be a control that does nothing — WHEP has no such
+            // concept — and an unexplained empty box invites someone to paste a stream key into it.
+            if isEnteringSRT { passphraseField }
             if let addError { Text(addError).font(.caption).foregroundStyle(.red) }
             if let savedNotice { Text(savedNotice).font(.caption).foregroundStyle(.orange) }
             Button("Save") { save() }
@@ -113,15 +138,66 @@ struct StreamBookmarksSheet: View {
         }
     }
 
+    /// True once what has been typed parses as an srt:// URL. Uses the SAME `StreamType.detect` the
+    /// save path uses, so the field cannot appear for a URL that would then be saved as `.web`.
+    private var isEnteringSRT: Bool {
+        let trimmed = newURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), url.scheme != nil else { return false }
+        return StreamType.detect(url) == .srt
+    }
+
+    @ViewBuilder private var passphraseField: some View {
+        HStack(spacing: 6) {
+            // Two fields, one binding. SecureField is what a password manager and the window server
+            // both understand; swapping to a plain TextField for the duration of a press is the
+            // only way to show the text at all, since SecureField cannot be asked to unmask.
+            if revealPassphrase {
+                TextField("Passphrase (optional)", text: $newPassphrase)
+                    .focused($passphraseFocused)
+            } else {
+                SecureField("Passphrase (optional)", text: $newPassphrase)
+                    .focused($passphraseFocused)
+            }
+            Image(systemName: revealPassphrase ? "eye.slash" : "eye")
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+                // `pressing:` IS the whole mechanism: true on press-down, false on release, with no
+                // tap-to-latch path. `perform:` is deliberately empty — a completed long press must
+                // not leave anything switched on.
+                .onLongPressGesture(minimumDuration: .infinity,
+                                    pressing: { revealPassphrase = $0 },
+                                    perform: {})
+                .help("Hold to show the passphrase")
+                .accessibilityLabel("Hold to show the passphrase")
+        }
+        // BELT AND BRACES FOR THE PRESS. If focus leaves the row while a press is somehow still
+        // registered — a drag off the control, a window deactivation mid-press — the plaintext is
+        // re-masked rather than left standing.
+        .onChange(of: passphraseFocused) { _, focused in
+            if !focused { revealPassphrase = false }
+        }
+    }
+
     private func save() {
-        switch store.add(name: newName, urlString: newURL) {
+        switch store.add(name: newName, urlString: newURL,
+                         passphrase: isEnteringSRT ? newPassphrase : nil) {
         case .success(let b):
             addError = nil; newName = ""; newURL = ""
+            clearPassphraseEntry()
             // Saved, but say plainly if it cannot connect yet — it is still listed.
             savedNotice = b.type.isSupported ? nil : (b.type.unsupportedReason.map { "Saved. \($0)." })
         case .failure(let e):
             savedNotice = nil; addError = e.message
+            // The typed passphrase SURVIVES a failed save — the likeliest failure is the 10–79
+            // length rule, and clearing the field would make the user retype a long secret to fix a
+            // URL typo. It is cleared on success and on dismissal, not on a message.
         }
+    }
+
+    /// Wipe the entry state and the reveal with it, so no later render can show a stale value.
+    private func clearPassphraseEntry() {
+        newPassphrase = ""
+        revealPassphrase = false
     }
 
     // MARK: Paste & connect (session only, not saved)

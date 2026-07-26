@@ -270,9 +270,12 @@ final class NDIService: ObservableObject {
     ///
     /// NDI TAKES OVER the display while active: it repoints the renderer's clock and range
     /// providers at itself. Clean file<->NDI handoff is explicitly out of scope for this step.
-    func connectToFirstSource() {
+    /// ⚠️ REACHABLE ONLY THROUGH `LiveSource.connectNDIFirstSource` — the `Arbitration` argument
+    /// cannot be constructed outside LiveSource.swift, so no other call site compiles. Any live
+    /// WHEP or SRT source has been retired by the time this runs.
+    func connectToFirstSource(arbitratedBy arbitration: LiveSource.Arbitration) {
         if let first = discoveredSources.first {
-            connect(to: first)
+            connect(to: first, arbitratedBy: arbitration)
             return
         }
         guard !isConnecting else { return }
@@ -313,7 +316,10 @@ final class NDIService: ObservableObject {
     /// while already connected SWITCHES (full-replacement model): the old receiver is torn down and
     /// the new one started in the same main-thread turn as the swap, so `isConnected` never dips to
     /// false in between and the control bar / empty state never flickers.
-    func connect(to source: NDISource) {
+    /// ⚠️ REACHABLE ONLY THROUGH `LiveSource.connectNDI(to:)` — the `Arbitration` argument cannot be
+    /// constructed outside LiveSource.swift, so no other call site compiles. Note the funnel passes
+    /// `except: .ndi` precisely so the in-place switch described above still happens here.
+    func connect(to source: NDISource, arbitratedBy _: LiveSource.Arbitration) {
         guard !isConnecting else { return }
         // Already on this exact source — nothing to do (avoids a needless tear-down/rebuild).
         if isConnected, connectedSourceName == source.name { return }

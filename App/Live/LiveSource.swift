@@ -98,23 +98,128 @@ enum LiveSource: CaseIterable {
         }
     }
 
-    /// Retire whatever live source owns the renderer. THE single "one active source" entry point,
-    /// and the ONLY member of this type visible outside this file.
+    /// Retire whatever live source owns the renderer. The teardown half of the "one active source"
+    /// invariant; `connectNDI` / `connectWeb` / `connectSRT` below are the standing-up half, and
+    /// between them they are the only members of this type visible outside this file.
     ///
     /// Iterates `allCases`, so the teardown order is declaration order — NDI, then web, then SRT —
     /// which is the order every hand-written chain this replaces already used, extended. The `isConnected` guard is
     /// load-bearing; see the warning on `disconnect()` before touching it.
     ///
     /// `except` keeps one source running: for a caller that is about to hand over to that same
-    /// source and whose own connect path performs the handover. `connectToStreamURL` passes
-    /// `.web` because WHEP retires the loaded FILE itself, via
-    /// `WHEPFrameRouter.activate()`'s `onWillActivateStream`, and refuses a second concurrent
-    /// session in `WHEPClient.connect`. Passing nil retires everything.
+    /// source and whose own connect path performs the handover. The three `connect*` funnels below
+    /// are the callers that pass it, and each documents WHY it excepts what it does. Passing nil
+    /// retires everything.
     ///
     /// A no-op when nothing is live.
     static func retireActive(except keep: LiveSource? = nil) {
         for source in allCases where source != keep && source.isConnected {
             source.disconnect()
         }
+    }
+
+    /// Retire this source's error BANNER. Distinct from `disconnect()`, and NOT gated on
+    /// `isConnected` — which is the whole reason it exists: the source holding a stale message is
+    /// usually one that already tore itself down when it failed.
+    private func clearBanner() {
+        switch self {
+        // NDI publishes no `lastError` — its failures are log-only, so it has no banner to retire.
+        // If that changes, this switch stops compiling, which is the point.
+        case .ndi: break
+        case .web: WHEPClient.shared.clearError()
+        case .srt: SRTClient.shared.clearError()
+        }
+    }
+
+    /// ── WHY STANDING A SOURCE UP MUST RETIRE THE OTHERS' BANNERS ────────────────────────────
+    ///
+    /// `connectErrorBanner` shows `whep.lastError ?? srt.lastError` — ONE slot, first non-nil wins.
+    /// Neither client clears its message on teardown, and that is deliberate: SRT's unsupported
+    /// -codec refusal sets the message and then calls `disconnect()`, relying on the message
+    /// outliving its own teardown to be read at all.
+    ///
+    /// Correct within one source, wrong across two. A WHEP connect that failed an hour ago leaves
+    /// `whep.lastError` set forever; the user then connects SRT, SRT fails, and the `??` shows the
+    /// STALE WEB message while the live SRT one sits behind it — a banner describing a transport
+    /// the user has moved on from, blaming the wrong thing.
+    ///
+    /// Each client already clears its OWN banner on a fresh attempt (`retireError`, `lastError =
+    /// nil`). Nobody cleared anyone else's, because until arbitration existed there was no single
+    /// place that knew a DIFFERENT source was taking over. There is now, so this is that place.
+    ///
+    /// Runs AFTER `retireActive` in every funnel, so a message a teardown might itself raise is
+    /// cleared too rather than being reinstated a line later.
+    private static func clearBanners(except keep: LiveSource) {
+        for source in allCases where source != keep { source.clearBanner() }
+    }
+
+    // MARK: - Arbitration: the one way a live source is stood up
+
+    /// PROOF THAT ARBITRATION RAN. Every client's `connect` demands one of these, and its only
+    /// initializer is `fileprivate` — so this file is the only place one can be made, and a call
+    /// site in the view layer cannot construct the argument. `WHEPClient.shared.connect(to:)` and
+    /// its siblings are therefore not merely *discouraged* outside this funnel: from anywhere else
+    /// they DO NOT COMPILE.
+    ///
+    /// THAT IS WHAT THIS BUYS OVER A COMMENT, and the bug it closes was real and invisible. ⌃⌥D
+    /// called `SRTClient.connect` directly, so a live WHEP session was never retired and both push
+    /// sources fed `MetalVideoRenderer.enqueue` — the exact double-source flashing this file
+    /// exists to prevent. ⌃⌥H had the same shape. Nothing about either call site looked wrong; it
+    /// just skipped a step, and skipping a step was spelled the same as not needing one.
+    ///
+    /// It is a token, not a lock: it proves the caller came through this file, not that any
+    /// particular teardown happened. The teardown is `retireActive`, three lines above.
+    struct Arbitration {
+        fileprivate init() {}
+    }
+
+    /// NDI, to a specific discovered source — the picker's action.
+    ///
+    /// `except: .ndi`, because NDI ALREADY SWAPS ITSELF and does it better than a retire-then-
+    /// connect would: `NDIService.connect(to:)` tears the old receiver down and starts the new one
+    /// in the SAME main-thread turn, so `isConnected` never dips to false and the control bar and
+    /// empty state never flicker. Retiring it here first would throw that property away and buy
+    /// nothing.
+    static func connectNDI(to source: NDISource) {
+        retireActive(except: .ndi)
+        clearBanners(except: .ndi)
+        NDIService.shared.connect(to: source, arbitratedBy: Arbitration())
+    }
+
+    /// NDI, first discovered source — ⌃⌥N and the streaming button's main click. `except: .ndi`
+    /// for the reason above; the guards inside `connectToFirstSource` handle "already connected".
+    static func connectNDIFirstSource() {
+        retireActive(except: .ndi)
+        clearBanners(except: .ndi)
+        NDIService.shared.connectToFirstSource(arbitratedBy: Arbitration())
+    }
+
+    /// WHEP / WebRTC.
+    ///
+    /// `except: .web` PRESERVES TODAY'S WEB→WEB BEHAVIOUR EXACTLY, which is a refusal:
+    /// `WHEPClient.connect` early-outs on `guard session == nil`, logs, and shows nothing. That is
+    /// a known gap and it is deliberately NOT closed here — SRT's equivalent refusal was removed in
+    /// the same pass because a bounded, joinable teardown makes an SRT swap safe to define, and
+    /// WHEP's teardown is the one that cannot be joined (see the ORDER note in `SRTClient.disconnect`).
+    /// Making web→web a swap is a real change to WHEP's lifecycle, not a side effect of arbitration.
+    static func connectWeb(to url: URL) {
+        retireActive(except: .web)
+        clearBanners(except: .web)
+        WHEPClient.shared.connect(to: url, arbitratedBy: Arbitration())
+    }
+
+    /// SRT.
+    ///
+    /// NOTHING IS EXCEPTED — not even `.srt`, and that is the whole point. A second SRT connect is a
+    /// SWAP, on the same full-replacement rule a stream-over-file takeover already follows: the old
+    /// session is torn down completely and the new one stood up fresh, with no state carried across.
+    /// `SRTClient.connect` used to refuse this case; the refusal is gone, and what makes its removal
+    /// safe is the line below rather than anything inside the client. `SRTClient.disconnect()` joins
+    /// the session thread, so by the time `connect` runs the old session is provably finished — not
+    /// merely asked to stop.
+    static func connectSRT(to url: URL) {
+        retireActive()
+        clearBanners(except: .srt)   // SRT clears its own via `retireError` on the next line but one
+        SRTClient.shared.connect(to: url, arbitratedBy: Arbitration())
     }
 }

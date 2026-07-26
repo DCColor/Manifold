@@ -87,6 +87,9 @@ typedef struct ManifoldSRTSession {
     char host[256];
     char port[16];
     char passphrase[80];        // SRT's ceiling is 79 chars + NUL.
+    char streamId[513];         // SRT's ceiling is 512 bytes + NUL.
+    uint64_t generation;        // Opaque caller token, echoed to the hopping callbacks.
+    int32_t latencyMs;          // 0 = leave libsrt's live default alone.
 
     // ── transport (written by the read callback, on the session thread) ──
     SRTSOCKET sock;
@@ -427,7 +430,8 @@ static void logStreamDiscovery(AVFormatContext *fmt, int videoIndex) {
 
 #pragma mark - Negotiated options
 
-static void readConnectionInfo(SRTSOCKET sock, double connectSeconds, ManifoldSRTConnectionInfo *out) {
+static void readConnectionInfo(SRTSOCKET sock, double connectSeconds, int32_t requestedLatencyMs,
+                               ManifoldSRTConnectionInfo *out) {
     int32_t rcvLatency = -1, mss = -1, payload = -1, kmState = -1, peerVersion = 0;
     int len;
     len = sizeof(rcvLatency);  srt_getsockflag(sock, SRTO_RCVLATENCY,  &rcvLatency,  &len);
@@ -437,6 +441,7 @@ static void readConnectionInfo(SRTSOCKET sock, double connectSeconds, ManifoldSR
     len = sizeof(peerVersion); srt_getsockflag(sock, SRTO_PEERVERSION, &peerVersion, &len);
 
     out->negotiatedLatencyMs = rcvLatency;
+    out->requestedLatencyMs  = requestedLatencyMs;
     out->mss                 = mss;
     out->payloadSize         = payload;
     out->kmState             = kmState;
@@ -528,6 +533,49 @@ static void runSession(ManifoldSRTSession *s) {
         srt_setsockflag(sock, SRTO_CONNTIMEO,     &connTimeout, sizeof(connTimeout));
         srt_setsockflag(sock, SRTO_PEERIDLETIMEO, &peerIdle,    sizeof(peerIdle));
 
+        // ── REQUESTED LATENCY ─────────────────────────────────────────────────
+        // AFTER SRTO_TRANSTYPE, and it has to be: TRANSTYPE rewrites the latency
+        // group wholesale, so setting this above would be silently undone. Only
+        // when the URL named one — otherwise libsrt's live default (120 ms) stands,
+        // which is also what OBS ships, and writing 120 explicitly would look like a
+        // decision we had made rather than one we had inherited.
+        if (s->latencyMs > 0) {
+            const int latency = (int)s->latencyMs;
+            if (srt_setsockflag(sock, SRTO_RCVLATENCY, &latency, sizeof(latency)) == SRT_ERROR) {
+                int sysErr = 0; const int err = srt_getlasterror(&sysErr);
+                NSLog(@"[SRT] SRTO_RCVLATENCY %d ms rejected: %s (srt errno %d)",
+                      latency, srt_strerror(err, sysErr), err);
+                strlcpy(message, "That stream latency isn’t a value SRT will accept.",
+                        sizeof(message));
+                goto cleanup;
+            }
+            NSLog(@"[SRT] requested receive latency %d ms (the peer may raise it)", latency);
+        }
+
+        // ── STREAM ID ─────────────────────────────────────────────────────────
+        // ⚠️ THE VALUE IS NOT PRINTED HERE. A streamid can carry a credential — SRT's
+        // `#!::…,s=…` access-control syntax defines `s` as a session token, and many
+        // hosted ingests use the raw publish key as the whole id — so the one place it
+        // reaches a log is SRTClient, which runs it through `redactedStreamId` first.
+        // Duplicating that parser in C to print it twice would be two chances to get
+        // the redaction wrong; this line proves the option was ACCEPTED, which is the
+        // part the Swift-side log cannot know.
+        //
+        // Unlike the passphrase it is NOT wiped after use: libsrt keeps no copy we can
+        // rely on for reconnection diagnostics, and the value is needed for the
+        // lifetime of the config rather than just the setsockflag call.
+        if (s->streamId[0] != '\0') {
+            if (srt_setsockflag(sock, SRTO_STREAMID,
+                                s->streamId, (int)strlen(s->streamId)) == SRT_ERROR) {
+                int sysErr = 0; const int err = srt_getlasterror(&sysErr);
+                NSLog(@"[SRT] SRTO_STREAMID rejected: %s (srt errno %d)",
+                      srt_strerror(err, sysErr), err);
+                strlcpy(message, "That stream ID isn’t a value SRT will accept.", sizeof(message));
+                goto cleanup;
+            }
+            NSLog(@"[SRT] SRTO_STREAMID accepted (value logged, redacted, by SRTClient)");
+        }
+
         // ── PASSPHRASE ────────────────────────────────────────────────────────
         // Set, then WIPED FROM OUR COPY immediately. libsrt has derived its key
         // material by the time setsockflag returns, so there is no reason for the
@@ -599,13 +647,15 @@ static void runSession(ManifoldSRTSession *s) {
         s->connectedAt = srtNow();
 
         ManifoldSRTConnectionInfo info;
-        readConnectionInfo(sock, connectSeconds, &info);
+        readConnectionInfo(sock, connectSeconds, s->latencyMs, &info);
         NSLog(@"[SRT] CONNECTED in %.3fs — negotiated rcv latency %d ms | payload %d bytes | "
               @"mtu %d | %s | peer %d.%d.%d",
               info.connectSeconds, info.negotiatedLatencyMs, info.payloadSize, info.mss,
               ManifoldSRTKeyMaterialStateName(info.kmState),
               (info.peerVersion >> 16) & 0xff, (info.peerVersion >> 8) & 0xff, info.peerVersion & 0xff);
-        if (s->callbacks.onConnected) s->callbacks.onConnected(s->callbacks.context, &info);
+        if (s->callbacks.onConnected) {
+            s->callbacks.onConnected(s->callbacks.context, s->generation, &info);
+        }
     }
 
     // ── 4. the custom AVIOContext ──────────────────────────────────────────────
@@ -718,7 +768,9 @@ static void runSession(ManifoldSRTSession *s) {
     {
         ManifoldSRTVideoFormat format;
         fillVideoFormat(fmt, s->videoIndex, &format);
-        if (s->callbacks.onVideoFormat) s->callbacks.onVideoFormat(s->callbacks.context, &format);
+        if (s->callbacks.onVideoFormat) {
+            s->callbacks.onVideoFormat(s->callbacks.context, s->generation, &format);
+        }
     }
 
     s->reader = ManifoldSRTAccessUnitReaderCreate();
@@ -825,7 +877,8 @@ cleanup:
     // use-after-free window against a 1 Hz diagnostic poll. A torn read of a counter is
     // acceptable; a dangling pointer is not.
     if (s->callbacks.onEnded) {
-        s->callbacks.onEnded(s->callbacks.context, reason, message[0] ? message : NULL);
+        s->callbacks.onEnded(s->callbacks.context, s->generation,
+                             reason, message[0] ? message : NULL);
     }
 
     NSLog(@"[SRT] ══ stopped ══");
@@ -862,11 +915,21 @@ bool ManifoldSRTSessionStart(ManifoldSRTSession *s, const ManifoldSRTSessionConf
         NSLog(@"[SRT] passphrase too long (SRT allows at most 79 characters)");
         return false;
     }
+    if (config->streamId && strlen(config->streamId) >= sizeof(s->streamId)) {
+        // REFUSED, NOT TRUNCATED. A shortened stream id is a valid string addressing something
+        // other than what the user asked for, and the server's rejection would not say so.
+        NSLog(@"[SRT] stream id too long (SRT allows at most 512 bytes)");
+        return false;
+    }
 
     strlcpy(s->host, config->host, sizeof(s->host));
     strlcpy(s->port, config->port, sizeof(s->port));
     memset(s->passphrase, 0, sizeof(s->passphrase));
     if (config->passphrase) strlcpy(s->passphrase, config->passphrase, sizeof(s->passphrase));
+    memset(s->streamId, 0, sizeof(s->streamId));
+    if (config->streamId) strlcpy(s->streamId, config->streamId, sizeof(s->streamId));
+    s->latencyMs = config->latencyMs;
+    s->generation = config->generation;
 
     s->msgLen = s->msgOff = 0;
     s->messagesIn = s->bytesIn = s->recvTimeouts = 0;

@@ -205,12 +205,24 @@ final class Preferences: ObservableObject {
 
 // MARK: - Stream bookmarks
 //
-// Named endpoints for the streaming button's URL sources, persisted in UserDefaults (NOT Keychain).
-// The risk being mitigated is a raw endpoint URL — whose PATH carries the stream key — being read
-// off a client's screen during a share; a user-supplied NAME is what solves that, so the list shows
-// the name and the HOST only and never the path. Encryption at rest is the wrong tool for a
-// screen-visible-URL problem. Lives here with the rest of the preferences plumbing rather than as a
-// one-off; a Codable array does not fit @AppStorage, so it is a small store over one JSON key.
+// Named endpoints for the streaming button's URL sources. Lives here with the rest of the
+// preferences plumbing rather than as a one-off; a Codable array does not fit @AppStorage, so it is
+// a small store over one JSON key.
+//
+// ── TWO STORES, BECAUSE THERE ARE TWO DIFFERENT RISKS ──────────────────────────────────────
+//
+// THE URL STAYS IN USERDEFAULTS. The risk it carries is a raw endpoint — whose PATH can be a
+// Cloudflare stream key — being read off a client's screen during a share. A user-supplied NAME is
+// what solves that, so the list shows the name and the HOST only, never the path. Encryption at
+// rest is the wrong tool for a screen-visible-URL problem, and it would not have helped: the app
+// must dial the URL, so it must be able to read it.
+//
+// THE SRT PASSPHRASE DOES NOT. It is a credential in its own right rather than an address — the
+// thing that decrypts the stream, typed once and reusable by anyone who reads it back out. Nothing
+// about it needs to be legible to a person, so nothing is served by leaving it in a plist that any
+// process running as the user can read with `defaults read`. It goes to the Keychain, keyed by the
+// bookmark's UUID (`KeychainStore.streams`), and the persisted `urlString` is stripped of it before
+// it is ever written — see `add` and `strippingPassphrase`.
 
 /// The transport a bookmarked URL uses, detected from the URL on save and stored per entry so a
 /// later SRT/HLS implementation needs no migration. Only `.web` connects today; the others are
@@ -238,15 +250,16 @@ enum StreamType: String, Codable {
         }
     }
 
-    /// Only web connects today.
-    var isSupported: Bool { self == .web }
+    /// Web and SRT connect; HLS does not. SRT joined in stage 3e — `type` has been stored per entry
+    /// since the beginning precisely so this line could change without a migration, and an srt://
+    /// bookmark saved months ago becomes connectable the moment this admits it.
+    var isSupported: Bool { self == .web || self == .srt }
 
     /// Honest greyed-row reason for an unsupported entry; nil when supported.
     var unsupportedReason: String? {
         switch self {
-        case .web: return nil
-        case .srt: return "SRT — not yet supported"
-        case .hls: return "HLS — not yet supported"
+        case .web, .srt: return nil
+        case .hls:       return "HLS — not yet supported"
         }
     }
 }
@@ -264,6 +277,10 @@ struct StreamBookmark: Codable, Identifiable {
         self.id = id; self.name = name; self.urlString = urlString; self.type = type
     }
 
+    /// The URL AS PERSISTED — no passphrase, by construction (see `StreamBookmarkStore.add`). This
+    /// is the right URL to display, to inspect, and to detect a type from; it is NOT the one to
+    /// dial. `StreamBookmarkStore.connectURL(for:)` is, and it is the only thing that reassembles
+    /// the secret.
     var url: URL? { URL(string: urlString) }
 
     /// Host for secondary display. NEVER the path — it can carry the stream key.
@@ -276,6 +293,13 @@ enum StreamValidationError: Error {
     case empty
     case notAURL
     case unrecognisedScheme(String?)
+    /// SRT's own 10–79 rule, checked at save so the failure names the rule while the user is
+    /// looking at the field — not three layers down as a libsrt errno at connect time.
+    case passphraseLength
+    /// The Keychain refused the write. The bookmark is NOT saved when this happens: a saved entry
+    /// silently missing its passphrase would fail at connect with a wrong-secret rejection and no
+    /// hint as to why, which is worse than not saving at all.
+    case passphraseNotStored
 
     var message: String {
         switch self {
@@ -283,6 +307,13 @@ enum StreamValidationError: Error {
         case .notAURL:  return "That doesn’t look like a URL."
         case .unrecognisedScheme(let s):
             return "Unsupported URL scheme\(s.map { " “\($0)”" } ?? ""). Use https://, srt://, or an .m3u8 link."
+        // ⚠️ THE RULE, NEVER A MEASUREMENT OF WHAT WAS TYPED — the same sentence, for the same
+        // reason, as SRTClient.ParseError.passphraseLength, which is where that reasoning is
+        // written out in full. Sourced from there rather than restated, so the two can never
+        // drift into disagreeing about what SRT requires.
+        case .passphraseLength:    return SRTClient.ParseError.passphraseLength.message
+        case .passphraseNotStored:
+            return "Couldn’t store the stream passphrase in your keychain, so this stream wasn’t saved."
         }
     }
 }
@@ -303,6 +334,70 @@ final class StreamBookmarkStore: ObservableObject {
         } else {
             bookmarks = []
         }
+        migratePassphrasesToKeychain()
+    }
+
+    /// ── ONE-SHOT MIGRATION: PASSPHRASES OUT OF THE PLIST ────────────────────────────────────
+    ///
+    /// Before the passphrase moved to the Keychain, nothing stopped a user pasting
+    /// `srt://host:9000?passphrase=…` into the Add field: `validate` accepted the scheme, `add`
+    /// stored `absoluteString` verbatim, and the row sat greyed as an unsupported type with the
+    /// secret sitting in cleartext in the preferences plist. Those bookmarks exist in the wild —
+    /// SRT being unconnectable never stopped anyone SAVING one — and shipping the Keychain path
+    /// without this would leave them exactly where they are, forever, while the new code looks
+    /// correct.
+    ///
+    /// So: move the value, rewrite the entry without it, persist once. Idempotent — a second run
+    /// finds nothing to strip. It writes to the Keychain but never reads it, so it cannot
+    /// clobber a value already migrated: `strippingPassphrase` only yields one when the URL still
+    /// carries it, which is the case this exists for.
+    ///
+    /// ⚠️ THE STRIP IS GATED ON A CONFIRMED WRITE. `KeychainStore.set` returns whether the value is
+    /// actually stored, and it can fail for reasons that have nothing to do with us — a locked
+    /// keychain, a denied ACL, a full disk. Stripping anyway would destroy the only copy of a
+    /// credential the user may not have written down, to fix an exposure. So a failed write leaves
+    /// the entry BYTE-FOR-BYTE ALONE, still carrying its passphrase, still working, and the next
+    /// launch tries again.
+    ///
+    /// ── WHAT THIS DOES NOT DO ───────────────────────────────────────────────────────────────
+    ///
+    /// IT DOES NOT RECALL A SECRET ALREADY WRITTEN. Rewriting the preferences plist removes the
+    /// value from the CURRENT file and nothing more. Copies plausibly persist in Time Machine
+    /// snapshots and local APFS snapshots, in whatever backup or sync service holds the user's
+    /// Library, and in unallocated disk blocks the old file occupied — none of which this code can
+    /// reach, and none of which it should pretend to. What migration buys is that the exposure
+    /// stops GROWING: no new plist write carries the value, and every future read comes from the
+    /// Keychain. A passphrase that was already sitting in a synced preferences file should still be
+    /// rotated at the sender; moving it here is not a substitute for that.
+    ///
+    /// ⚠️ Logs COUNTS and nothing else. Not the value, not its length, not the host it belongs to.
+    private func migratePassphrasesToKeychain() {
+        var migrated = 0
+        var failed = 0
+        bookmarks = bookmarks.map { bookmark in
+            guard let url = bookmark.url,
+                  let split = Self.strippingPassphrase(from: url),
+                  let passphrase = split.passphrase else { return bookmark }
+            guard KeychainStore.streams.set(passphrase, for: bookmark.id.uuidString) else {
+                failed += 1
+                return bookmark   // untouched — the URL keeps the only copy there is
+            }
+            migrated += 1
+            var moved = bookmark
+            moved.urlString = split.url.absoluteString
+            return moved
+        }
+        if failed > 0 {
+            NSLog("""
+                  [STREAMS] ⚠️ could not write %d stream passphrase(s) to the Keychain — those \
+                  bookmarks were left untouched and still carry the value in preferences. Will \
+                  retry on the next launch.
+                  """, failed)
+        }
+        guard migrated > 0 else { return }
+        NSLog("[STREAMS] moved %d saved stream passphrase(s) out of preferences and into the Keychain",
+              migrated)
+        persist()
     }
 
     private func persist() {
@@ -327,28 +422,147 @@ final class StreamBookmarkStore: ObservableObject {
 
     /// Add a validated bookmark (name falls back to the host if blank). Returns the created entry —
     /// even when its type is unsupported, so it is still saved and listed — or the validation error.
+    ///
+    /// `passphrase` is the editor's dedicated field. It WINS over one embedded in the URL's query,
+    /// because it is the one the user just typed into a control labelled for the purpose; a
+    /// leftover `?passphrase=` in a pasted URL is the older, likelier-stale value. Either way the
+    /// URL is stripped, so exactly one of them survives and it is never the plist's copy.
     @discardableResult
-    func add(name: String, urlString: String) -> Result<StreamBookmark, StreamValidationError> {
+    func add(name: String, urlString: String,
+             passphrase: String? = nil) -> Result<StreamBookmark, StreamValidationError> {
         switch Self.validate(urlString) {
         case .failure(let e): return .failure(e)
         case .success(let (url, type)):
             let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalName = trimmedName.isEmpty ? (url.host ?? "Stream") : trimmedName
-            let bookmark = StreamBookmark(name: finalName, urlString: url.absoluteString, type: type)
+
+            // STRIP BEFORE THE STRING IS EVER BUILT, not after it is stored. `sanitized` is what
+            // becomes `urlString`, so there is no window — not even a transient plist write — in
+            // which the persisted entry carries the secret.
+            let split = Self.strippingPassphrase(from: url)
+            let sanitized = split?.url ?? url
+            let typed = passphrase?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let secret = (typed?.isEmpty == false ? typed : nil) ?? split?.passphrase
+
+            // Same rule the URL path enforces, applied to whichever value survived above, so a
+            // typed field and a pasted `?passphrase=` cannot be held to different standards.
+            if let secret, !SRTClient.Endpoint.passphraseLengthRange.contains(secret.count) {
+                return .failure(.passphraseLength)
+            }
+
+            let bookmark = StreamBookmark(name: finalName, urlString: sanitized.absoluteString,
+                                          type: type)
+            if let secret {
+                // Keyed by the bookmark's own UUID, which is why the write happens here rather
+                // than in the sheet: this is where the id exists and where `delete` can match it.
+                //
+                // WRITE FIRST, APPEND SECOND, and fail the whole save if the write fails — same
+                // reasoning as the migration's gate. A listed bookmark whose secret silently went
+                // nowhere would fail at connect as a wrong-passphrase rejection from the server,
+                // which is the least debuggable outcome available.
+                guard KeychainStore.streams.set(secret, for: bookmark.id.uuidString) else {
+                    NSLog("[STREAMS] ⚠️ keychain write failed — stream not saved")
+                    return .failure(.passphraseNotStored)
+                }
+            }
             bookmarks.append(bookmark)
             persist()
             return .success(bookmark)
         }
     }
 
+    /// Delete the entry AND its passphrase. Both, always, in that order — a Keychain item whose
+    /// bookmark is gone is unreachable by every code path in the app (the account name is the
+    /// bookmark's UUID and nothing else can produce it), so it would be an orphaned secret that
+    /// outlives the app, survives reinstalls, and is invisible in the UI that created it.
+    /// `KeychainStore.delete` is a no-op when there is nothing stored, so this is safe for the
+    /// common case of a bookmark that never had one.
     func delete(_ bookmark: StreamBookmark) {
         bookmarks.removeAll { $0.id == bookmark.id }
+        KeychainStore.streams.delete(bookmark.id.uuidString)
         persist()
     }
 
-    /// First saved bookmark of a supported (connectable) type — what ⌃⌥H connects to. nil when
-    /// nothing connectable is saved.
+    /// First saved bookmark of a supported (connectable) type. NOW POSSIBLY SRT — it meant "the
+    /// first web one" only because web was the only supported type, and every caller must be able
+    /// to dial whatever comes back. nil when nothing connectable is saved.
     var firstConnectable: StreamBookmark? { bookmarks.first { $0.type.isSupported } }
+
+    /// First saved bookmark of ONE transport. The per-transport debug shortcuts use this so ⌃⌥H
+    /// stays WHEP and ⌃⌥D stays SRT no matter which type happens to sit first in the list — each is
+    /// paired with a disconnect shortcut for the same client, and a trigger that sometimes drove
+    /// the other transport would leave its partner unable to tear it down.
+    func firstConnectable(ofType type: StreamType) -> StreamBookmark? {
+        bookmarks.first { $0.type == type && $0.type.isSupported }
+    }
+
+    // MARK: - Passphrase: the split at save, the join at connect
+
+    /// The query key, spelled once. SRT URLs use `passphrase`, matching libsrt's own option name and
+    /// what OBS/ffmpeg write, and the comparison below is case-insensitive because a hand-typed URL
+    /// is not reliably lowercase.
+    private static let passphraseQueryKey = "passphrase"
+
+    /// Split a URL into (URL without any passphrase, the passphrase). Returns nil only when the URL
+    /// cannot be decomposed at all — a caller treats that as "nothing to strip" and keeps the
+    /// original, which is correct: an un-parseable URL has no query items to leak through.
+    ///
+    /// An EMPTY value (`?passphrase=`) yields a nil secret but still strips the key, so a pointless
+    /// empty parameter never reaches the wire or the Keychain.
+    ///
+    /// ⚠️ RETURNS THE URL UNTOUCHED WHEN THERE IS NO PASSPHRASE KEY, and that early-out is
+    /// load-bearing rather than an optimisation. Rebuilding `queryItems` RE-ENCODES every remaining
+    /// parameter: `?streamid=live%2Fabc` comes back as `?streamid=live/abc`. Both decode to the
+    /// same value through any query parser — ours included, since `SRTClient.parse` reads
+    /// `queryItems` the same way — so it is safe where we must rebuild. But it is not something to
+    /// do to a URL we have no business rewriting. Every web bookmark falls in that category, and
+    /// their query strings can carry a token the server may compare literally; saving one must not
+    /// silently normalise it. So the rebuild happens only when a secret is actually being removed.
+    static func strippingPassphrase(from url: URL) -> (url: URL, passphrase: String?)? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        guard let items = components.queryItems, !items.isEmpty else { return (url, nil) }
+        guard items.contains(where: { $0.name.lowercased() == passphraseQueryKey }) else {
+            return (url, nil)   // nothing to remove — hand back the original bytes, not a rebuild
+        }
+        let found = items.first { $0.name.lowercased() == passphraseQueryKey }?.value
+        let kept = items.filter { $0.name.lowercased() != passphraseQueryKey }
+        // nil, not [], or `absoluteString` keeps a trailing "?" on a URL whose only parameter was
+        // the one we removed — which then round-trips into the stored string and looks like damage.
+        components.queryItems = kept.isEmpty ? nil : kept
+        guard let stripped = components.url else { return nil }
+        return (stripped, (found?.isEmpty == false) ? found : nil)
+    }
+
+    /// The URL TO DIAL — the stored one with its Keychain passphrase put back. The only place the
+    /// two halves are rejoined, and the reason `StreamBookmark.url` is documented as display-only.
+    ///
+    /// ⚠️ THE RETURN VALUE IS A SECRET-BEARING URL. It goes to `LiveSource.connect*` and no further:
+    /// never to a log, never to `lastError`, never into a bookmark. `SRTClient.parse` lifts the
+    /// passphrase straight back out of the query and the rest of that path is already disciplined
+    /// about it (see the ⚠️ notes there) — this function's job is to keep the value in memory
+    /// between the Keychain and that parse, and nowhere else.
+    ///
+    /// Falls back to the stored URL unchanged when there is no stored passphrase, which is every
+    /// web bookmark and any SRT one that does not need encryption.
+    static func connectURL(for bookmark: StreamBookmark) -> URL? {
+        guard let url = bookmark.url else { return nil }
+        guard let secret = KeychainStore.streams.get(bookmark.id.uuidString), !secret.isEmpty else {
+            return url
+        }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        var items = components.queryItems ?? []
+        // Defensive: the stored URL should never carry one (add + the migration both strip it), so
+        // drop any duplicate rather than appending a second `passphrase=` the parser would have to
+        // choose between.
+        items.removeAll { $0.name.lowercased() == passphraseQueryKey }
+        items.append(URLQueryItem(name: passphraseQueryKey, value: secret))
+        components.queryItems = items
+        return components.url ?? url
+    }
 }
 
 /// The Settings window contents (opens with ⌘,).

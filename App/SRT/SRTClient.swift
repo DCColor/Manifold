@@ -76,13 +76,15 @@ final class SRTClient: ObservableObject {
     ///
     /// The 1 Hz tick treats "a picture arrived" as the definitive success signal and retires the
     /// banner — correct for every message ABOUT NOT HAVING A PICTURE (still probing, waiting for a
-    /// keyframe, nothing arriving). It is WRONG for the two messages that are true precisely WHILE
-    /// pictures flow:
+    /// keyframe, nothing arriving). It is WRONG for a message that is true precisely WHILE pictures
+    /// flow, and today exactly one is: THE REORDER SHORTFALL. Frames are arriving AND some are
+    /// being discarded, so an arriving picture is not evidence against it — it is the thing the
+    /// message is about.
     ///
-    ///   * the reorder shortfall — frames are arriving AND some are being discarded;
-    ///   * the already-connected refusal — the refusal happened BECAUSE a stream is running, so a
-    ///     picture is not evidence against it. Without this the second ⌃⌥D would flash a banner for
-    ///     under a second and vanish, which reads as a glitch rather than as an answer.
+    /// There was a second such message, the already-connected refusal, and it is gone: a second SRT
+    /// connect is now a swap arbitrated by `LiveSource.connectSRT`, not an error to explain. The
+    /// flag stays because the reorder case is unchanged and the distinction is real; a one-member
+    /// category is still a category.
     ///
     /// So every message says which kind it is. Set through `showError`; never assigned directly,
     /// or the flag and the message drift apart.
@@ -100,8 +102,22 @@ final class SRTClient: ObservableObject {
     /// picture arriving. No-op when nothing is showing, so it is safe on a 1 Hz path: `@Published`
     /// fires objectWillChange on every write, nil-to-nil included, and an unguarded assignment
     /// would re-render the view once a second for the life of the session.
-    private func retireError() {
+    ///
+    /// ── PROGRESS DOES NOT RETIRE A MESSAGE THAT PROGRESS DOESN'T DISPROVE ───────────────────
+    ///
+    /// The unguarded call honours `lastErrorSurvivesPictures`, and every phase-progress caller uses
+    /// it. The transport coming up and the stream being identified are the same KIND of evidence a
+    /// picture is — "it is working" — and they refute exactly the same messages: the ones about not
+    /// having a picture yet. They say nothing about the ignored-parameter notice or the reorder
+    /// shortfall, both of which stay true through a perfectly healthy session. Without this, an
+    /// ignored `?foo=` banner raised at connect vanished a second later when the transport came up,
+    /// which is indistinguishable from a UI glitch.
+    ///
+    /// `force: true` is for a FRESH ATTEMPT, which invalidates every message including those —
+    /// they described a URL we are no longer dialling.
+    private func retireError(force: Bool = false) {
         guard lastError != nil else { return }
+        guard force || !lastErrorSurvivesPictures else { return }
         lastError = nil
         lastErrorSurvivesPictures = false
     }
@@ -119,6 +135,39 @@ final class SRTClient: ObservableObject {
     // MARK: - State (main thread)
 
     private var session: OpaquePointer?
+
+    /// ── WHICH SESSION A LATE CALLBACK BELONGS TO ────────────────────────────────────────────
+    ///
+    /// Incremented once per `connect`, handed to the C layer in the config, and echoed back by
+    /// every callback that hops to main. A handler compares it against this value and drops
+    /// anything from an older session.
+    ///
+    /// THE BUG THIS EXISTS FOR, because it is not hypothetical and it was not obvious. `onEnded`
+    /// fires on the session thread INSIDE `ManifoldSRTSessionStop`, before the join completes — so
+    /// during `disconnect()`, while main is blocked in the join. Its `DispatchQueue.main.async`
+    /// hop therefore cannot run until main is free, which on a SWAP is after `connectSRT` has
+    /// already stood the replacement up. The old session's "I have stopped" then arrived at a
+    /// `handleSessionEnded` whose only staleness check was `session != nil` — true, but of the NEW
+    /// session — and tore down a stream that was 20 ms old. `LiveSource.connectSRT` making SRT→SRT
+    /// a swap is what put a new session inside that window; before it, the sequence was refused.
+    ///
+    /// A COUNTER AND NOT THE SESSION POINTER. `Destroy` frees the struct and the next `Create` can
+    /// be handed the same address, so a stale pointer can compare EQUAL to a live one — the swap
+    /// path, where free and malloc are microseconds apart, is exactly where that is most likely.
+    /// A monotonic counter has no such failure.
+    ///
+    /// ⚠️ MAIN THREAD ONLY, read and write. Every access is inside a method that opens with
+    /// `dispatchPrecondition(condition: .onQueue(.main))`: the write in `connect`, the reads in
+    /// `handleConnected`, `handleVideoFormat` and `handleSessionEnded`. That is the whole set — no
+    /// session-thread code path touches it, and the C callbacks receive their copy as an argument
+    /// rather than reading this. `connect` is reachable only through `LiveSource`, which is
+    /// UI-driven and main-only, and the assertion holds it to that rather than trusting it. No
+    /// lock, because a lock would suggest the invariant is doubted.
+    ///
+    /// Starts at 0 and is incremented BEFORE any session is created, so 0 is never a live
+    /// generation — it means "no session has ever run".
+    private var sessionGeneration: UInt64 = 0
+
     private var startedAt: Date?
     private var statsTimer: Timer?
     private var statsTicks = 0
@@ -200,13 +249,46 @@ final class SRTClient: ObservableObject {
         let port: Int
         /// SRTO_PASSPHRASE, or nil. ⚠️ Never log, never interpolate into a user-visible string.
         let passphrase: String?
-        /// Query keys present that we do NOT act on. Reported, never ignored silently — a
-        /// `streamid` that quietly went nowhere would surface as an unexplained server rejection.
+
+        /// SRTO_STREAMID, or nil.
+        ///
+        /// ⚠️ MAY CARRY A CREDENTIAL. An earlier version of this comment called it "an address, not
+        /// a credential", which is true for a plain resource name and false in two common cases:
+        ///
+        ///   * SRT's access-control convention, `#!::u=…,r=…,s=…`, defines `s` as a SESSION
+        ///     IDENTIFIER used for server-side verification — a bearer token in a query parameter;
+        ///   * a great many hosted ingests expect the raw publish key AS the entire streamid, with
+        ///     no syntax around it to tell you that is what it is.
+        ///
+        /// It is still logged, because a stream id you cannot see is exactly how a routing mistake
+        /// becomes an unexplained server rejection — but through `redactedStreamId`, and see what
+        /// that can and cannot promise.
+        let streamId: String?
+
+        /// Requested SRTO_RCVLATENCY in milliseconds, or nil to leave libsrt's default.
+        let latencyMs: Int?
+
+        /// Query keys present that we do NOT act on. Reported, never ignored silently.
         let unhandledParameters: [String]
 
         /// SRT's own limits on a passphrase: 10–79 characters. Checked here so the failure names
         /// the rule at the moment the user's input is read, instead of arriving as a libsrt errno.
         static let passphraseLengthRange = 10...79
+
+        /// SRT's own ceiling on a stream id: 512 BYTES, not characters — the option is a byte
+        /// buffer, so a multi-byte id hits it sooner than its character count suggests.
+        static let streamIdMaxBytes = 512
+
+        /// ── WHY LATENCY IS RANGE-CHECKED AT ALL ─────────────────────────────────────────────
+        ///
+        /// libsrt accepts a far wider range than is ever meaningful here, and both ends of the
+        /// useful one fail in ways that do not look like a bad number. Below ~20 ms TSBPD has no
+        /// window to retransmit in, so the link degrades to something worse than plain UDP while
+        /// reporting itself healthy. Above 8 s the buffer holds more than any live monitoring
+        /// workflow can use, and the picture arrives seconds after the thing it shows — which reads
+        /// as a frozen stream, not as a latency setting. A typo (`?latency=25000`, or a value
+        /// someone meant as microseconds) lands squarely in that second case.
+        static let latencyMsRange = 20...8000
     }
 
     /// Why a `srt://` URL was refused — distinct cases with the text ON THE TYPE, which is the
@@ -219,6 +301,12 @@ final class SRTClient: ObservableObject {
         case notAnSRTURL
         case noHost
         case noPort
+        /// A `mode=` we cannot honour. Carries the value because it is the user's own text and
+        /// naming it back is what makes the message actionable — see the discussion on listener
+        /// mode in `message`.
+        case unsupportedMode(String)
+        case badLatency
+        case streamIdTooLong
         /// ⚠️ NO ASSOCIATED VALUE, DELIBERATELY — see the check in `parse`. Nothing derived from
         /// the passphrase, its length above all, may ride out of that scope, and a case that
         /// cannot carry anything enforces that better than a rule about what to interpolate.
@@ -231,6 +319,25 @@ final class SRTClient: ObservableObject {
             case .notAnSRTURL: return "That isn’t an SRT stream URL."
             case .noHost:      return "That SRT address has no host."
             case .noPort:      return "An SRT address needs a port — srt://host:port."
+
+            // ── LISTENER MODE IS THE ONE THAT MUST BE REFUSED BY NAME ───────────────────────
+            // It used to fall through to the ignored-parameter path, which meant Manifold dialled
+            // as a caller anyway — at an address that, in listener mode, is by definition NOT
+            // listening. The result was a connect timeout against a peer waiting for US to be the
+            // server: a silent 3 s failure whose message ("nobody answered") was true and
+            // completely misleading. Naming the mode is the whole fix.
+            case .unsupportedMode(let mode) where mode == "listener":
+                return "Listener mode isn’t supported yet — Manifold connects to a sender, "
+                     + "not the reverse."
+            case .unsupportedMode(let mode):
+                return "This build dials SRT as a caller; it can’t use mode “\(mode)”."
+
+            case .badLatency:
+                return "That stream latency isn’t usable — give a value in milliseconds between "
+                     + "\(Endpoint.latencyMsRange.lowerBound) and \(Endpoint.latencyMsRange.upperBound)."
+            case .streamIdTooLong:
+                return "That stream ID is too long — SRT allows at most "
+                     + "\(Endpoint.streamIdMaxBytes) bytes."
             case .passphraseLength:
                 // STATES THE RULE, AND THE SECRET IS NOT IN SCOPE HERE TO MEASURE. The rule is
                 // also the part that tells the user what to do about it.
@@ -258,9 +365,31 @@ final class SRTClient: ObservableObject {
 
         let items = components.queryItems ?? []
         var passphrase: String?
+        var streamId: String?
+        var latencyMs: Int?
         var unhandled: [String] = []
         for item in items {
             switch item.name.lowercased() {
+            case "streamid":
+                let value = item.value ?? ""
+                guard !value.isEmpty else { continue }
+                // BYTES, not `count` — the option is a byte buffer and a multi-byte id hits SRT's
+                // ceiling sooner than its character count suggests.
+                guard value.utf8.count <= Endpoint.streamIdMaxBytes else {
+                    return .failure(.streamIdTooLong)
+                }
+                streamId = value
+
+            case "latency":
+                let value = item.value ?? ""
+                // MILLISECONDS, integer, no unit suffix — which is what OBS, ffmpeg and every
+                // hosted ingest's copy-paste URL write. A float or a "250ms" is a typo we should
+                // name rather than silently round or ignore.
+                guard let ms = Int(value), Endpoint.latencyMsRange.contains(ms) else {
+                    return .failure(.badLatency)
+                }
+                latencyMs = ms
+
             case "passphrase":
                 let value = item.value ?? ""
                 guard !value.isEmpty else { continue }
@@ -277,40 +406,68 @@ final class SRTClient: ObservableObject {
                     return .failure(.passphraseLength)
                 }
                 passphrase = value
-            case "mode" where (item.value ?? "").lowercased() == "caller":
-                break   // what we already are; nothing to do
+            case "mode":
+                let mode = (item.value ?? "").lowercased()
+                // Caller is what we already are; anything else is refused HERE, at the door, where
+                // it can be named. Falling through to `unhandled` would dial as a caller regardless
+                // and fail as a timeout — see the note on `.unsupportedMode`.
+                guard mode == "caller" else { return .failure(.unsupportedMode(mode)) }
+
             default:
                 unhandled.append(item.name)
             }
         }
         return .success(Endpoint(host: host, port: port, passphrase: passphrase,
+                                 streamId: streamId, latencyMs: latencyMs,
                                  unhandledParameters: unhandled))
     }
 
     // MARK: - Connect
 
-    func connect(to url: URL) {
+    /// ⚠️ REACHABLE ONLY THROUGH `LiveSource.connectSRT`, and not by convention — the `Arbitration`
+    /// argument cannot be constructed outside LiveSource.swift, so no other call site compiles.
+    /// That is what lets everything below assume arbitration has already run.
+    ///
+    /// ── WHY THERE IS NO LONGER A `guard session == nil` HERE ────────────────────────────────
+    ///
+    /// There was one, and it refused a second connect with a banner ("disconnect it before
+    /// connecting another"). It is gone, because the question it was deferring has been answered:
+    /// a second SRT connect is a SWAP, on the same full-replacement rule stream-over-file follows.
+    ///
+    /// The refusal's own argument was that swapping means tearing down a live session — a
+    /// main-thread join of up to one SRTO_RCVTIMEO period — on the strength of a second click.
+    /// That cost is real and it is still paid; what changed is WHERE. `LiveSource.connectSRT`
+    /// retires every live source, `.srt` included, BEFORE this runs, so the join happens in the
+    /// arbitration step rather than inside a connect that is also trying to stand a session up.
+    /// By the time this line executes, `session` is nil because the funnel made it nil.
+    ///
+    /// ── WHY THE CHECK BELOW IS DEFENSIVE AND NOT `assert` OR `precondition` ─────────────────
+    ///
+    /// The token proves the caller came through `LiveSource`; it does NOT prove `retireActive`
+    /// retired anything. A `LiveSource` case added later with no arm in `disconnect()` would satisfy
+    /// the type system and still arrive here with a live session — the double-source bug again, in
+    /// the one form the token cannot catch.
+    ///
+    /// `assert` is the wrong instrument for that because it COMPILES OUT OF RELEASE, which is
+    /// exactly where the surviving hole would live. `precondition` would cover Release by crashing —
+    /// and that is worse than the fault it guards. This condition is recoverable, by the same single
+    /// teardown path arbitration itself would have used, and killing a monitoring tool mid-session
+    /// is not a proportionate answer to a state we know how to fix in one call.
+    ///
+    /// So: tear the old session down and carry on, unconditionally in every configuration, with a
+    /// log line that names it as a BUG rather than a condition. THE LOG IS THE POINT — it fires in
+    /// Release, which is more than an assertion would ever have done.
+    func connect(to url: URL, arbitratedBy _: LiveSource.Arbitration) {
         dispatchPrecondition(condition: .onQueue(.main))
 
-        guard session == nil else {
-            // VISIBLE, not just logged. This used to return after an NSLog, so from the user's
-            // side the second connect did nothing at all: no picture change, no message, no
-            // indication the request had even been received. A refusal the user cannot see is
-            // indistinguishable from a bug.
-            //
-            // A REFUSAL, NOT A QUEUE AND NOT A SWAP. Auto-swapping would mean tearing down a live
-            // session — including a main-thread join of up to one SRTO_RCVTIMEO period — on the
-            // strength of a second click, and deciding what happens if the new URL then fails to
-            // connect (the user has lost the stream they had). That is a real design question and
-            // it belongs with 3e, where the bookmark UI makes stream-to-stream switching a first
-            // -class action. WHEPClient.connect has the identical guard and the identical gap; both
-            // should be answered in the same pass.
-            NSLog("[SRT] a session is already running — disconnect it first")
-            showError("An SRT stream is already connected — disconnect it before connecting another.",
-                      survivesPictures: true)
-            return
+        if session != nil {
+            NSLog("[SRT] BUG: connect reached with a live session — arbitration did not retire it. "
+                  + "Tearing it down here; the swap still happens, but a LiveSource case is missing "
+                  + "a disconnect arm.")
+            disconnect()   // the single teardown path, join included — see its ORDER note
         }
-        retireError()   // fresh attempt — clear any banner from a previous try
+
+        retireError(force: true)   // fresh attempt — clear any banner from a previous try
 
         let endpoint: Endpoint
         switch Self.parse(url) {
@@ -327,16 +484,26 @@ final class SRTClient: ObservableObject {
             // Presence only. Never the value, never its length in a log line.
             NSLog("[SRT] a passphrase was supplied (value withheld)")
         }
+        if let streamId = endpoint.streamId {
+            NSLog("[SRT] stream id: %@", Self.redactedStreamId(streamId))
+        }
         if !endpoint.unhandledParameters.isEmpty {
-            // LOUD, because the failure mode of ignoring these is a server rejection with no
-            // obvious cause. `streamid` in particular is how most hosted SRT ingests route a
-            // publisher, and it is NOT implemented in this stage — see the stage note in
-            // SRTSession.h. Named so the gap is visible rather than mysterious.
-            NSLog("""
-                  [SRT] ⚠️ ignoring URL parameter(s): %@. Only `passphrase` is acted on in this \
-                  build — a stream that needs `streamid` or a non-default `latency` will not \
-                  connect, and the server's rejection will not say why.
-                  """, endpoint.unhandledParameters.joined(separator: ", "))
+            let named = endpoint.unhandledParameters.joined(separator: ", ")
+            NSLog("[SRT] ⚠️ ignoring URL parameter(s): %@", named)
+            // ── AND IN THE UI, NOT ONLY THE LOG ────────────────────────────────────────────
+            // `passphrase`, `streamid`, `latency` and `mode` are all acted on now, so anything
+            // still landing here is genuinely being dropped. With bookmarks these parameters are
+            // USER-TYPED — someone pasted a URL from their ingest provider — and the failure mode
+            // of dropping one silently is a connection that either fails for no stated reason or,
+            // worse, succeeds while quietly ignoring something the user asked for.
+            //
+            // NON-FATAL: the connect proceeds. It may well work.
+            //
+            // `survivesPictures: true` because this is true WHILE the stream plays — it is a
+            // statement about what we did with the URL, and a picture arriving is not evidence
+            // against it. Same category as the reorder shortfall.
+            showError("Ignoring URL parameter(s) this build doesn’t use: \(named).",
+                      survivesPictures: true)
         }
 
         // TAKE THE DISPLAY NOW, not when the first picture arrives. The route itself cannot be
@@ -359,11 +526,18 @@ final class SRTClient: ObservableObject {
         var callbacks = ManifoldSRTSessionCallbacks(
             context: context,
             // ── SESSION THREAD ──────────────────────────────────────────────────────────
-            onConnected: { ctx, info in
+            // EVERY HOP CARRIES ITS GENERATION ACROSS. The C function pointers capture nothing, so
+            // the token cannot be closed over — it arrives as an argument and is forwarded into the
+            // async block, which is the only way the far side can know whose callback this is.
+            onConnected: { ctx, generation, info in
                 guard let ctx, let info else { return }
                 let client = Unmanaged<SRTClient>.fromOpaque(ctx).takeUnretainedValue()
                 let latency = info.pointee.negotiatedLatencyMs
-                DispatchQueue.main.async { client.handleConnected(negotiatedLatencyMs: latency) }
+                let requested = info.pointee.requestedLatencyMs
+                DispatchQueue.main.async {
+                    client.handleConnected(generation: generation,
+                                           negotiatedLatencyMs: latency, requestedLatencyMs: requested)
+                }
             },
             // ── SESSION THREAD. Two halves, and the split is load-bearing. ──────────────
             // The DECODER must be built on this thread (it is single-thread-owned, and this is
@@ -373,13 +547,18 @@ final class SRTClient: ObservableObject {
             // arrive before this returns — the C layer emits onVideoFormat before the first
             // one — so the decoder is always ready in time. The route may be a few milliseconds
             // behind, which `deliver` already tolerates by dropping frames with no clock.
-            onVideoFormat: { ctx, format in
+            onVideoFormat: { ctx, generation, format in
                 guard let ctx, let format else { return }
                 let client = Unmanaged<SRTClient>.fromOpaque(ctx).takeUnretainedValue()
                 let f = format.pointee
                 let colorimetry = SRTFrameRouter.StreamColorimetry(f)
+                // The decode-side preparation is NOT generation-gated, and does not need to be: it
+                // runs INLINE on this session's own thread, so it cannot be reached after the join
+                // that proves this thread is gone. Only the hop below can outlive the session.
                 SRTFrameRouter.shared.prepareDecoder(format: f, colorimetry: colorimetry)
-                DispatchQueue.main.async { client.handleVideoFormat(f, colorimetry: colorimetry) }
+                DispatchQueue.main.async {
+                    client.handleVideoFormat(generation: generation, f, colorimetry: colorimetry)
+                }
             },
             // ── SESSION THREAD, inline, per access unit. No hop: this is the hot path. ──
             onAccessUnit: { _, accessUnit in
@@ -387,7 +566,7 @@ final class SRTClient: ObservableObject {
                 SRTFrameRouter.shared.handleAccessUnit(accessUnit.pointee)
             },
             // ── SESSION THREAD, last callback, exactly once. ────────────────────────────
-            onEnded: { ctx, reason, message in
+            onEnded: { ctx, generation, reason, message in
                 guard let ctx else { return }
                 let client = Unmanaged<SRTClient>.fromOpaque(ctx).takeUnretainedValue()
                 // DECODE-SIDE TEARDOWN HAPPENS HERE, ON THIS THREAD, BEFORE THE HOP. The
@@ -397,8 +576,19 @@ final class SRTClient: ObservableObject {
                 // would mean tearing down a session from a thread that never owned it.
                 SRTFrameRouter.shared.releaseSessionResources()
                 let text = message.map { String(cString: $0) }
-                DispatchQueue.main.async { client.handleSessionEnded(reason: reason, message: text) }
+                DispatchQueue.main.async {
+                    client.handleSessionEnded(generation: generation, reason: reason, message: text)
+                }
             })
+
+        // ── THE GENERATION IS CLAIMED HERE, AS LATE AS POSSIBLE ──────────────────────────────
+        // Immediately before the session exists, so the window in which a generation is live with
+        // no session behind it is as small as it can be made. It cannot be closed: `Create` or
+        // `Start` can still fail below, and both leave `session` nil with this already bumped.
+        // That is precisely why the handlers check BOTH this and `session != nil` — see them.
+        // Main-thread only; the precondition at the top of this method is what enforces it.
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
 
         guard let created = ManifoldSRTSessionCreate(&callbacks) else {
             NSLog("[SRT] session create failed")
@@ -415,17 +605,34 @@ final class SRTClient: ObservableObject {
         // is no captured `var` under simultaneous inout access.
         func start(_ host: UnsafePointer<CChar>,
                    _ port: UnsafePointer<CChar>,
-                   _ passphrase: UnsafePointer<CChar>?) -> Bool {
-            var config = ManifoldSRTSessionConfig(host: host, port: port, passphrase: passphrase)
+                   _ passphrase: UnsafePointer<CChar>?,
+                   _ streamId: UnsafePointer<CChar>?) -> Bool {
+            var config = ManifoldSRTSessionConfig(host: host, port: port, passphrase: passphrase,
+                                                  streamId: streamId,
+                                                  generation: generation,
+                                                  latencyMs: Int32(endpoint.latencyMs ?? 0))
             return ManifoldSRTSessionStart(created, &config)
         }
+        // NESTED SCOPES, NOT AN ARRAY OF POINTERS. Each `withCString` guarantees its buffer only
+        // for the duration of its own closure, so the Start call has to happen at the innermost
+        // point where every pointer is still valid — which is also what keeps the passphrase's
+        // Swift lifetime as short as one call. The stream id gets the same treatment for
+        // uniformity, though it is not a secret.
         let portText = String(endpoint.port)
+        func withStreamId(_ host: UnsafePointer<CChar>,
+                          _ port: UnsafePointer<CChar>,
+                          _ passphrase: UnsafePointer<CChar>?) -> Bool {
+            if let streamId = endpoint.streamId {
+                return streamId.withCString { start(host, port, passphrase, $0) }
+            }
+            return start(host, port, passphrase, nil)
+        }
         let started = endpoint.host.withCString { hostPtr -> Bool in
             portText.withCString { portPtr -> Bool in
                 if let passphrase = endpoint.passphrase {
-                    return passphrase.withCString { start(hostPtr, portPtr, $0) }
+                    return passphrase.withCString { withStreamId(hostPtr, portPtr, $0) }
                 }
-                return start(hostPtr, portPtr, nil)
+                return withStreamId(hostPtr, portPtr, nil)
             }
         }
         guard started else {
@@ -441,14 +648,35 @@ final class SRTClient: ObservableObject {
 
     // MARK: - Session callbacks, main-thread half
 
-    private func handleConnected(negotiatedLatencyMs: Int32) {
+    /// Does this callback belong to the session we are currently running?
+    ///
+    /// A `false` is NOT a fault and is not logged as one: it is the expected outcome for the last
+    /// callback of a session that has just been swapped out, which is a normal thing for a user to
+    /// cause by picking a second stream. The line is gated to the measuring configurations because
+    /// its value is confirming the drop happened, not warning about it.
+    private func isCurrent(_ generation: UInt64, _ what: String) -> Bool {
         dispatchPrecondition(condition: .onQueue(.main))
+        guard generation == sessionGeneration else {
+            #if DEBUG || MANIFOLD_TELEMETRY
+            NSLog("[SRT] ignoring '%@' from session %llu — session %llu is current",
+                  what, generation, sessionGeneration)
+            #endif
+            return false
+        }
+        return true
+    }
+
+    private func handleConnected(generation: UInt64,
+                                 negotiatedLatencyMs: Int32, requestedLatencyMs: Int32) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isCurrent(generation, "connected") else { return }
         guard session != nil else { return }   // raced a disconnect
         haveConnected = true
         connectedAtHost = CACurrentMediaTime()
         retireError()
         NSLog("[SRT] transport up in %@. Waiting for the demuxer to identify the stream…", elapsed())
-        logLatencyBudget(negotiatedLatencyMs: negotiatedLatencyMs)
+        logLatencyBudget(negotiatedLatencyMs: negotiatedLatencyMs,
+                         requestedLatencyMs: requestedLatencyMs)
     }
 
     /// ── THE ONE LINE THAT MAKES `targetDepth` ARGUABLE FROM A LOG ─────────────────────────
@@ -470,8 +698,23 @@ final class SRTClient: ObservableObject {
     ///
     /// Not a warning and not an error — it changes nothing and adjusts nothing. It is the context
     /// [SRT-UNDERRUN] and [SRT-JITTER] have to be read against.
-    private func logLatencyBudget(negotiatedLatencyMs: Int32) {
+    private func logLatencyBudget(negotiatedLatencyMs: Int32, requestedLatencyMs: Int32) {
         #if DEBUG || MANIFOLD_TELEMETRY
+        // ── WHAT WE ASKED FOR, WHERE IT DIFFERS ─────────────────────────────────────────────
+        // The handshake takes the MAXIMUM of the two sides' wishes, so a `?latency=` the user
+        // typed is a FLOOR, not a setting — the sender can and often does raise it. Printing only
+        // the negotiated number makes that look like the parameter was ignored, which is the one
+        // conclusion this line must not invite. Silent when nothing was requested (libsrt's own
+        // 120 ms default), because "requested 0" would be a fiction.
+        let requestedNote: String
+        if requestedLatencyMs <= 0 {
+            requestedNote = ""
+        } else if requestedLatencyMs == negotiatedLatencyMs {
+            requestedNote = " (as requested)"
+        } else {
+            requestedNote = " (we asked for \(requestedLatencyMs) ms; the handshake takes the "
+                          + "MAXIMUM of both sides, so the sender's is what stands)"
+        }
         let transport = Double(negotiatedLatencyMs) / 1000.0
         let cushion = SRTFrameRouter.configuredTargetDepth
         let verdict: String
@@ -485,14 +728,23 @@ final class SRTClient: ObservableObject {
         } else {
             verdict = "nominal — the transport is absorbing burstiness roughly as the target assumes"
         }
-        NSLog("[SRT] latency budget: transport %d ms (negotiated) + cushion %.0f ms (targetDepth) = %.0f ms deliberate. %@",
-              negotiatedLatencyMs, cushion * 1000, Double(negotiatedLatencyMs) + cushion * 1000, verdict)
+        NSLog("[SRT] latency budget: transport %d ms (negotiated)%@ + cushion %.0f ms (targetDepth) = %.0f ms deliberate. %@",
+              negotiatedLatencyMs, requestedNote, cushion * 1000,
+              Double(negotiatedLatencyMs) + cushion * 1000, verdict)
         #endif
     }
 
-    private func handleVideoFormat(_ format: ManifoldSRTVideoFormat,
+    /// ⚠️ THE MOST DANGEROUS OF THE THREE TO RUN STALE, which is why the generation check leads.
+    /// Everything below configures the DISPLAY: `self.colorimetry` drives the scope headers and
+    /// `SRTFrameRouter.activate` repoints the render route. A hop from a retired session that got
+    /// here would set the live stream up with the DEAD one's format and colorimetry — PQ maths on
+    /// a 709 stream, a route configured for dimensions nothing is sending — and it would not fail
+    /// visibly. It would just be quietly, confidently wrong about the picture on screen.
+    private func handleVideoFormat(generation: UInt64,
+                                   _ format: ManifoldSRTVideoFormat,
                                    colorimetry: SRTFrameRouter.StreamColorimetry) {
         dispatchPrecondition(condition: .onQueue(.main))
+        guard isCurrent(generation, "video format") else { return }
         guard session != nil else { return }
 
         // ── CODEC GATE. H.264 ONLY, AND IT FAILS LOUDLY RATHER THAN SHOWING BLACK ─────────
@@ -536,10 +788,24 @@ final class SRTClient: ObservableObject {
 
     /// The session thread has finished. Called on main, always after the decode side has already
     /// been released on that thread.
-    private func handleSessionEnded(reason: ManifoldSRTEndReason, message: String?) {
+    private func handleSessionEnded(generation: UInt64,
+                                    reason: ManifoldSRTEndReason, message: String?) {
         dispatchPrecondition(condition: .onQueue(.main))
-        // A MANUAL disconnect() got here first: it joined the thread and tore everything down
-        // synchronously, so this is the queued tail of the same event. Nothing to do.
+
+        // ── TWO DIFFERENT QUESTIONS, AND BOTH HAVE TO BE ASKED ─────────────────────────────
+        //
+        // "IS THIS MINE?" — the generation. This callback was queued from the session thread
+        // during that session's Stop, and a swap can install a REPLACEMENT before the queued block
+        // gets to run. The old comment here claimed a manual disconnect meant "the queued tail of
+        // the same event, nothing to do", inferring that from `session == nil`. That inference died
+        // when `LiveSource.connectSRT` made SRT→SRT a swap: after a swap `session` is non-nil, but
+        // it is the NEW session, and acting on it tore down a stream 20 ms into its life.
+        //
+        // "DOES A SESSION STILL EXIST?" — the nil check below. Still needed and NOT implied by the
+        // generation: `connect` bumps the generation before `Create`, so a create or start failure
+        // leaves the current generation live with no session behind it. `disconnect()` would then
+        // run against nothing.
+        guard isCurrent(generation, "session ended") else { return }
         guard session != nil else { return }
 
         if reason == ManifoldSRTEndReasonStopped {
@@ -606,6 +872,20 @@ final class SRTClient: ObservableObject {
         // progress, nothing racing `route.deactivate`. WHEP deactivates first precisely BECAUSE it
         // cannot join libdatachannel's threads and has to rely on `deliver` dropping frames that
         // find no clock.
+        //
+        // ── THE JOIN IS ALSO WHY THE FRAME PATH NEEDS NO GENERATION TOKEN ────────────────
+        // `onAccessUnit` is consumed inline on the session thread and is NOT generation-checked.
+        // What makes that safe is exactly this line: it blocks until that thread has exited, so by
+        // the time anything can stand a REPLACEMENT session up, no frame from this one is in
+        // flight. The hopping callbacks needed tokens precisely because they escape that ordering;
+        // the frame path does not escape it.
+        //
+        // ⚠️ IF THIS JOIN IS EVER MADE ASYNCHRONOUS — and there is a real reason to want that, since
+        // stopping a session still inside `srt_connect` blocks main for up to SRTO_CONNTIMEO (3 s,
+        // not the 200 ms RCVTIMEO bound that applies once receiving) — THAT PROTECTION VANISHES
+        // WITH NO COMPILER ERROR AND NO CRASH. A retired stream's pictures would simply start
+        // arriving in a live session's renderer. Generation-check `handleAccessUnit` in the same
+        // change, or leave this synchronous.
         ManifoldSRTSessionStop(session)
         ManifoldSRTSessionDestroy(session)
 
@@ -662,8 +942,9 @@ final class SRTClient: ObservableObject {
         if pictures > 0 {
             // A picture is the definitive success signal — it retires any banner a picture
             // DISPROVES. Not the ones a picture is compatible with (the reorder shortfall, the
-            // already-connected refusal); see `lastErrorSurvivesPictures`.
-            if !lastErrorSurvivesPictures { retireError() }
+            // ignored-parameter notice); `retireError` itself honours that distinction now, so the
+            // condition that used to sit here would only be a second copy of it.
+            retireError()
             announcedFirstPictureWait = false
             announcedProbeWait = false
             if pictures > watchdogLastPictures {
@@ -789,6 +1070,38 @@ final class SRTClient: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// ── A STREAM ID, MADE AS SAFE TO LOG AS IT CAN HONESTLY BE MADE ─────────────────────────
+    ///
+    /// SRT defines an access-control syntax for streamid — `#!::` followed by comma-separated
+    /// `key=value` pairs (`u` user, `r` resource, `h` host, `m` mode, `t` type, `s` session). `s`
+    /// IS A BEARER TOKEN: the server verifies the session against it, so anyone who reads it out of
+    /// a log can present it. Its value is replaced here; every other key is kept, because the whole
+    /// diagnostic point of logging a stream id is seeing which resource and user were addressed.
+    ///
+    /// ⚠️ WHAT THIS CANNOT PROMISE. A FREEFORM STREAM ID IS RETURNED UNCHANGED, AND MANY HOSTED
+    /// INGESTS USE THE PUBLISH KEY ITSELF AS THE WHOLE STREAM ID. There is no syntax to detect that
+    /// — `abc123` is indistinguishable from a channel name — so this function cannot make the
+    /// freeform case safe, and does not pretend to. The log line is therefore NOT guaranteed to be
+    /// credential-free; it is guaranteed only that the one place SRT explicitly says "this is a
+    /// token" is not printed. A user pasting a key-shaped streamid is trusting the log the way they
+    /// would trust a URL in a screen share.
+    ///
+    /// The value handed to `SRTO_STREAMID` is always the original — redaction is for the log only,
+    /// and never touches what is dialled.
+    static func redactedStreamId(_ streamId: String) -> String {
+        let prefix = "#!::"
+        guard streamId.hasPrefix(prefix) else { return streamId }
+        let body = String(streamId.dropFirst(prefix.count))
+        let redacted = body.split(separator: ",", omittingEmptySubsequences: false).map { pair -> String in
+            // Split on the FIRST "=" only: a value may legitimately contain one.
+            guard let eq = pair.firstIndex(of: "=") else { return String(pair) }
+            let key = pair[pair.startIndex..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+            guard key == "s" else { return String(pair) }
+            return "\(pair[pair.startIndex..<eq])=(redacted)"
+        }
+        return prefix + redacted.joined(separator: ",")
+    }
 
     /// libavformat's short codec name → something worth showing a user. Falls back to the raw name
     /// uppercased, so an unlisted codec still names itself rather than reading "unknown".
