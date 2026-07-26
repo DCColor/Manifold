@@ -122,6 +122,9 @@ struct ContentView: View {
     // WHEP's published connection state — feeds `hasSource` so the empty-state overlay hides while a
     // web stream drives the shared renderer, and drives the teardown scope-clear below.
     @ObservedObject private var whep = WHEPClient.shared
+    // SRT's published connection state — same role as `whep` above: it feeds `hasSource`, drives
+    // `activeLiveSource`, and surfaces a failed connect through the shared error banner.
+    @ObservedObject private var srt = SRTClient.shared
     // Saved stream bookmarks — observed so the chevron and empty-state menus rebuild when the set
     // changes (empty ↔ non-empty flips the "Stream URL" item between a flat entry and a flyout).
     @ObservedObject private var bookmarks = StreamBookmarkStore.shared
@@ -176,14 +179,20 @@ struct ContentView: View {
     // In docked mode the controls are always shown; in overlay they auto-hide.
     private var controlsShown: Bool { isDocked ? true : hudVisible }
 
-    // A source is "active" whenever a file is loaded OR an NDI stream is on screen. The whole
+    // A source is "active" whenever a file is loaded OR ANY live source is on screen. The whole
     // auto-hiding control surface (HUD / control bar, scopes, guides, overlay data, output toggle)
-    // is source-agnostic — it reveals for ANY active source. NDI drives frames straight into the
-    // shared renderer without ever setting `hasMedia`, so gating the reveal on `hasMedia` alone left
-    // streaming with no reachable controls. Every reveal gate keys off this instead. Only the
-    // "Open… to begin" prompt stays file-vs-nothing specific (it means NOTHING is on screen).
-    // WHEP pushes frames into the shared renderer exactly like NDI and never sets engine.hasMedia,
-    // so without the whep term the empty state would draw over live web-stream video.
+    // is source-agnostic — it reveals for ANY active source. Every live source drives frames
+    // straight into the shared renderer without ever setting `hasMedia`, so gating the reveal on
+    // `hasMedia` alone left streaming with no reachable controls. Every reveal gate keys off this
+    // instead, and the "Open… to begin" empty state is the `else` of the same expression — it means
+    // NOTHING is on screen, no file and no stream.
+    //
+    // THE LIVE TERM IS `activeLiveSource != nil`, NOT A PAIRWISE CHAIN, and that is the whole point
+    // of LiveSource: an SRT stream pushes into the renderer exactly as NDI and WHEP do and never
+    // sets `engine.hasMedia`, so a hand-written `ndi || whep` here would have drawn the empty state
+    // over live SRT video. Adding `.srt` to `activeLiveSource` below fixed this site, the control
+    // reveal, the WindowConfigurator and the Disconnect menu item in one edit, which is exactly what
+    // a single enumeration buys over four restatements.
     private var hasSource: Bool {
         return engine.hasMedia || activeLiveSource != nil
     }
@@ -198,6 +207,7 @@ struct ContentView: View {
     private var activeLiveSource: LiveSource? {
         if ndi.isConnected { return .ndi }
         if whep.isConnected { return .web }
+        if srt.isConnected { return .srt }
         return nil
     }
 
@@ -300,6 +310,12 @@ struct ContentView: View {
                 // timebase. Same two hooks as NDI, for the same two reasons.
                 WHEPFrameRouter.shared.renderer = renderer
                 WHEPFrameRouter.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
+                // An SRT stream is a push source exactly like WHEP — same renderer, same enqueue,
+                // same LiveClock pacing through the same LiveDisplayRoute. Same two hooks, and the
+                // retire hook is called TWICE on this path (once at connect to black the display
+                // immediately, once inside the route's activate) — see SRTFrameRouter.beginTakeover.
+                SRTFrameRouter.shared.renderer = renderer
+                SRTFrameRouter.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
                 // …and tees NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the
                 // clock-anchored SDI output, SDI/Computer routing and mute apply to NDI for free.
                 NDIService.shared.audioTap = engine.audioTap
@@ -404,6 +420,32 @@ struct ContentView: View {
         // there is no color push, because WHEP colorimetry is assumed 709 and set in
         // WHEPFrameRouter.activate rather than published as a source property.
         .onChange(of: whep.isConnected) { _, connected in
+            if connected {
+                armIdleIfNeeded()
+            } else {
+                clearScopes()
+            }
+        }
+        // SRT is the first PUSH source that can state its own colour, so it gets the wiring NDI
+        // has and WHEP could not: the scope HEADERS and the auto vertical scale read these models,
+        // not the pixel buffer, so without this an SRT stream that declared PQ would be scoped with
+        // PQ math under a "Rec.709" label. `bufferTags` is an NDIColorInfo carrying the SAME
+        // declared/assumed provenance, so `applyNDIColorToScopes` and `cieSpaceReadout` label an
+        // undeclared axis "(assumed)" for free — which is the common case, since the measured
+        // OBS→SRT feed declares nothing at all. (That helper's NDI-prefixed name is now wrong; the
+        // type it takes has been the shared CICP vocabulary since WHEP started using it.)
+        //
+        // Keyed on the colorimetry rather than on `isConnected`, because `isConnected` is published
+        // at connect() — seconds before the demuxer has identified the stream — and would fire with
+        // nothing to read.
+        .onChange(of: srt.colorimetry) { _, colorimetry in
+            guard srt.isConnected, let colorimetry else { return }
+            applyNDIColorToScopes(colorimetry.bufferTags)
+        }
+        // Teardown ends a source exactly as WHEP's does, and needs the same scope wipe for the same
+        // reason: clearToBlack wipes the PICTURE, but the scopes would sit showing the last
+        // stream's trace over it.
+        .onChange(of: srt.isConnected) { _, connected in
             if connected {
                 armIdleIfNeeded()
             } else {
@@ -788,9 +830,15 @@ struct ContentView: View {
     ///         producer/consumer pair. Connects the FIRST saved stream bookmark (a convenience over
     ///         the shipping Stream Sources sheet); no-op with a log if none is saved. ⌃⌥⇧H tears down.
     ///   ⌃⌥⇧E  export the next decoded WHEP frame to a PNG (pre-render, decoder-side check)
-    ///   ⌃⌥D   SRT transport spike (stage 2) — libsrt caller → custom AVIOContext → mpegts
-    ///         demux → av_read_frame → LOG ONLY. No decode, no display, no source takeover.
-    ///         Watch [SRT-SPIKE]. Hardcoded target (kSRTSpikeURL). ⌃⌥⇧D stops it. TEMPORARY.
+    ///   ⌃⌥D   SRT session (stage 3d) — libsrt caller → AVIOContext → mpegts demux → access
+    ///         units → VideoToolbox decode → promote → LiveClock → SCREEN. SRT takes the display
+    ///         while connected (a loaded file is retired), so this is a source-activation trigger
+    ///         like ⌃⌥H. Watch [SRT] for the connect facts and colorimetry, [SRT-AU] for the
+    ///         demux/reader counters and the reorder measurement, and [SRT-FLOW] + [LIVECLOCK] for
+    ///         the producer/consumer pair. ⌃⌥⇧D tears it down.
+    ///         TARGET IS HARDCODED to srt://127.0.0.1:9000 — the SHORTCUT is the temporary part,
+    ///         not the path it drives. Stage 3e wires the stream-bookmark UI (StreamType.srt is
+    ///         still marked unsupported there, deliberately, until it does).
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
     /// only the triggers are `#if DEBUG`.
     @ViewBuilder private var syntheticLiveShortcuts: some View {
@@ -877,30 +925,61 @@ struct ContentView: View {
             // The clock re-anchors on the step, so the new depth is acquired immediately instead of
             // over ~10 s at the ±0.5% rail — see LiveClock.adjustTargetDepth for the direction
             // argument (deepening moves now() BACKWARD, which only holds the current frame longer).
-            Button("") { WHEPFrameRouter.shared.adjustTargetDepth(by: -0.05) }
-                .keyboardShortcut("[", modifiers: [.control, .option])
-            Button("") { WHEPFrameRouter.shared.adjustTargetDepth(by: 0.05) }
-                .keyboardShortcut("]", modifiers: [.control, .option])
-            // ⌃⌥D — SRT TRANSPORT SPIKE (stage 2). D for Demux: S, R and T are all taken
-            // (⌃⌥S sweep, ⌃⌥R, ⌃⌥T), and D is free in both plain and shifted form and is not
-            // adjacent to ⌃⌥L or ⌃⌥H, the two live-path triggers most likely to be pressed in
-            // the same session.
             //
-            // libsrt caller socket → custom AVIOContext → mpegts demux → av_read_frame → LOG.
-            // Nothing is decoded, nothing is drawn, and NO source is retired — unlike ⌃⌥L and
-            // ⌃⌥H this does not take the display, because it produces no picture to take it
-            // with. Watch [SRT-SPIKE]: connect facts, then per-stream discovery, then the
-            // B-frame probe (the question this stage exists to answer), then a 1 Hz rollup.
-            // Target is hardcoded — see kSRTSpikeURL in App/SRT/SRTSpike.m. ⌃⌥⇧D stops it.
-            Button("") { ManifoldSRTSpikeStart() }
+            // ROUTED TO WHICHEVER PUSH SOURCE IS LIVE, not hardwired to WHEP. SRT's 0.250 target
+            // is an ARGUED starting value rather than a measured one, so it needs this stepper
+            // more than WHEP does — a stepper that only moved WHEP's clock would have left the
+            // newer number the harder one to measure. The switch is exhaustive over LiveSource on
+            // purpose: a fourth push source cannot be added without deciding what this does.
+            Button("") { stepLiveTargetDepth(by: -0.05) }
+                .keyboardShortcut("[", modifiers: [.control, .option])
+            Button("") { stepLiveTargetDepth(by: 0.05) }
+                .keyboardShortcut("]", modifiers: [.control, .option])
+            // ⌃⌥D — SRT SESSION (stage 3d). D for Demux, kept from the stage-2 spike this
+            // replaces: S, R and T are all taken (⌃⌥S sweep, ⌃⌥R, ⌃⌥T), and D is free in both
+            // plain and shifted form and is not adjacent to ⌃⌥L or ⌃⌥H, the two other live-path
+            // triggers most likely to be pressed in the same session.
+            //
+            // ⚠️ THE SHORTCUT IS THE TEMPORARY PART, NOT WHAT IT DRIVES. Everything below the
+            // button — SRTClient, SRTFrameRouter, ManifoldSRTSession — ships in Release. Only
+            // this trigger and its hardcoded URL are #if DEBUG, because the shipping entry point
+            // is the stream-bookmark UI and wiring that is stage 3e's job. Until it lands,
+            // StreamType.srt stays marked unsupported in Preferences.swift, so a saved srt://
+            // bookmark is still a greyed row with an honest reason rather than a live path that
+            // only some entry points can reach.
+            //
+            // UNLIKE the spike, this DOES take the display: the file is retired and the screen
+            // blacked at connect, and the route is configured once the demuxer has reported the
+            // stream's colorimetry.
+            Button("") { SRTClient.shared.connect(to: Self.srtDebugTarget) }
                 .keyboardShortcut("d", modifiers: [.control, .option])
-            Button("") { ManifoldSRTSpikeStop() }
+            Button("") { SRTClient.shared.disconnect() }
                 .keyboardShortcut("d", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
         #else
         EmptyView()
         #endif
+    }
+
+    /// ⌃⌥D's target. HARDCODED ON PURPOSE for this stage, exactly as the stage-2 spike's was: a
+    /// URL-entry path here would be a second, parallel way to name a stream that then has to be
+    /// kept in step with the shipping one (the bookmark sheet), and stage 3e is what makes the
+    /// shipping one reach SRT. 127.0.0.1:9000 is what an `obs → SRT output` on this machine
+    /// listens on by default.
+    private static let srtDebugTarget = URL(string: "srt://127.0.0.1:9000")!
+
+    /// Step the LIVE push source's LiveClock target. The two push transports keep their own
+    /// routers (and their own measured cushions), so this asks which one owns the display rather
+    /// than assuming. NDI is a PULL source with no LiveClock at all — there is nothing to step,
+    /// and saying so beats silently doing nothing.
+    private func stepLiveTargetDepth(by delta: Double) {
+        switch activeLiveSource {
+        case .web: WHEPFrameRouter.shared.adjustTargetDepth(by: delta)
+        case .srt: SRTFrameRouter.shared.adjustTargetDepth(by: delta)
+        case .ndi: NSLog("[LIVECLOCK] NDI is a pull source with no depth loop — ⌃⌥[ / ⌃⌥] do nothing")
+        case nil:  NSLog("[LIVECLOCK] no live push source — ⌃⌥[ / ⌃⌥] adjust WHEP or SRT while connected")
+        }
     }
 
     private func cycleNDIColorimetryOverride() {
@@ -1298,12 +1377,17 @@ struct ContentView: View {
 
     /// Non-blocking error banner for a failed stream connect — the presentation for BOTH the menu
     /// path (no modal open) and the sheet path (which closes on connect, so the async failure lands
-    /// here). Shows WHEPClient.lastError: the SERVER'S own message where there is one (e.g.
-    /// Cloudflare's "Live broadcast not started yet"), else a clear generic — and never a full URL.
-    /// Auto-dismisses; the close button or a new attempt clears it sooner. Never blocks: the user can
-    /// pick another bookmark or open a file immediately.
+    /// here). Shows the TRANSPORT'S own message where there is one (Cloudflare's "Live broadcast not
+    /// started yet" on a 409; libsrt's reject reason on a bad passphrase), else a clear generic —
+    /// and never a full URL, never a passphrase. Auto-dismisses; the close button or a new attempt
+    /// clears it sooner. Never blocks: the user can pick another bookmark or open a file immediately.
+    ///
+    /// ONE BANNER FOR BOTH TRANSPORTS. They cannot both be connecting — `LiveSource.retireActive`
+    /// guarantees at most one live source — so there is at most one message to show, and WHEP is
+    /// checked first only because it is the older path. Both are cleared on dismissal so a stale
+    /// message from the other transport cannot re-appear behind this one.
     @ViewBuilder private var connectErrorBanner: some View {
-        if let message = whep.lastError {
+        if let message = whep.lastError ?? srt.lastError {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -1312,7 +1396,7 @@ struct ContentView: View {
                     .foregroundStyle(.white)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Button { whep.clearError() } label: {
+                Button { whep.clearError(); srt.clearError() } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
                 .buttonStyle(.plain)
@@ -1329,6 +1413,7 @@ struct ContentView: View {
                 // then cancels this sleep, so a stale timer can't wipe a fresh message.
                 try? await Task.sleep(nanoseconds: 9_000_000_000)
                 whep.clearError()
+                srt.clearError()
             }
         }
     }

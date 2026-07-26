@@ -42,10 +42,10 @@ enum LiveSource: CaseIterable {
     /// WHEP / WebRTC. PUSH: LiveClock + the depth control loop (see LiveDisplayRoute).
     case web
 
-    // STAGE 2 ADDS `case srt` HERE. It is a PUSH source like `.web`, so it uses
-    // LiveDisplayRoute the same way. Adding the case makes every switch below fail to compile
-    // until it is handled — that is the point of the switches being exhaustive rather than
-    // defaulted.
+    /// SRT. PUSH, like `.web`: LiveClock + the depth control loop, through the same
+    /// LiveDisplayRoute. Added in stage 3d, and adding it broke every switch below until each was
+    /// handled — which is exactly what this type exists to guarantee.
+    case srt
 
     /// PRIVATE, AND IT MUST STAY PRIVATE — this is the whole safety property of the type.
     ///
@@ -66,6 +66,7 @@ enum LiveSource: CaseIterable {
         switch self {
         case .ndi: return NDIService.shared.isConnected
         case .web: return WHEPClient.shared.isConnected
+        case .srt: return SRTClient.shared.isConnected
         }
     }
 
@@ -83,18 +84,25 @@ enum LiveSource: CaseIterable {
     ///   * `WHEPClient.disconnect()` is genuinely safe — it clears its flag and then
     ///     `guard let session else { return }`. Only the NDI path has the sharp edge, which is
     ///     precisely why a per-source guard beats trusting "they're all idempotent".
+    ///   * `SRTClient.disconnect()` is safe in the same way WHEP's is — flag first, then
+    ///     `guard let session else { return }` — but it also BLOCKS: it joins the session thread
+    ///     (bounded by one SRTO_RCVTIMEO period, 200 ms) before releasing the display, which is
+    ///     what lets it tear down in the strict order WHEP cannot. Called on main, so that join is
+    ///     a main-thread block of up to ~200 ms. That is the deliberate trade: a bounded pause at
+    ///     teardown in exchange for no window in which a producer and `route.deactivate` overlap.
     private func disconnect() {
         switch self {
         case .ndi: NDIService.shared.disconnect()
         case .web: WHEPClient.shared.disconnect()
+        case .srt: SRTClient.shared.disconnect()
         }
     }
 
     /// Retire whatever live source owns the renderer. THE single "one active source" entry point,
     /// and the ONLY member of this type visible outside this file.
     ///
-    /// Iterates `allCases`, so the teardown order is declaration order — NDI, then web — which is
-    /// the order every hand-written chain this replaces already used. The `isConnected` guard is
+    /// Iterates `allCases`, so the teardown order is declaration order — NDI, then web, then SRT —
+    /// which is the order every hand-written chain this replaces already used, extended. The `isConnected` guard is
     /// load-bearing; see the warning on `disconnect()` before touching it.
     ///
     /// `except` keeps one source running: for a caller that is about to hand over to that same

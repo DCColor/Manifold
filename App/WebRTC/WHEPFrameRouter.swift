@@ -190,7 +190,9 @@ final class WHEPFrameRouter {
     /// The shared live-push display plumbing: renderer save/restore, the LiveClock's four seams,
     /// queue bound, flush, colorimetry. Everything in it was written here first and moved out
     /// verbatim so SRT can use the same path rather than cloning it. What stayed behind is what is
-    /// genuinely WHEP's: the measured `targetDepth`, the assumed colorimetry, and all telemetry.
+    /// genuinely WHEP's: the measured `targetDepth`, the assumed colorimetry, and the RTP-specific
+    /// drift accountant. The surplus ledger and the underrun accountant moved out too, into
+    /// LiveDepthTelemetry — see the note at `telemetry`.
     private let route = LiveDisplayRoute()
 
     // MARK: - Promote state (decode queue only)
@@ -244,13 +246,14 @@ final class WHEPFrameRouter {
     // decode queue supplies sender timestamps, the render thread supplies depth), and this is
     // diagnostic bookkeeping that has no business sharing a lock with the activation state.
     //
-    // UNFAIR LOCK, NOT NSLock — TEXTBOOK PRIORITY INVERSION, IDENTICAL TO `backlogLock`. The
+    // UNFAIR LOCK, NOT NSLock — TEXTBOOK PRIORITY INVERSION, IDENTICAL TO THE ONE INSIDE
+    // LiveDepthTelemetry. The
     // real-time CVDisplayLink render thread takes this EVERY DISPLAY TICK in `recordDepthForDrift`,
     // while the lower-priority USER_INITIATED decode queue holds it per frame in
     // `recordDriftSample`. `NSLock` is a pthread_mutex and does NOT boost its holder, so the decode
     // thread can be descheduled while holding it and stall the display tick for an unbounded
     // interval — the same shape as the live-path inversion `queueLock` was converted to fix, and
-    // the same one `backlogLock` carries. `os_unfair_lock` DONATES the blocked render thread's
+    // the same one the depth accountant carries. `os_unfair_lock` DONATES the blocked render thread's
     // priority to the holder, which is what dissolves it.
     //
     // The usage rule that makes this safe, and which all three critical sections already obeyed:
@@ -278,387 +281,30 @@ final class WHEPFrameRouter {
     /// declines to report creep, rather than printing a number that means nothing.
     private var driftWindowHadSnap = false
 
-    // MARK: - Surplus accountant (the convergence proof)
+    // MARK: - Depth telemetry (the surplus ledger + the underrun accountant)
     //
-    // WHAT IT PROVES. Cloudflare's SFU delivers a BACKLOG on connect, faster than real time, and
-    // every fix here rests on that surplus being FINITE — the sender makes 23.98 pictures/s and the
-    // SFU cannot exceed that indefinitely, so discarding is guaranteed to converge. This ledger is
-    // what turns that argument into an observation: SURPLUS MUST GO FLAT once the backlog drains.
-    // A surplus that keeps climbing after the first few seconds would falsify the whole diagnosis.
+    // MOVED OUT, NOT DELETED. All of it — the ledger's residual derivation, the underrun
+    // accountant's "cushion needed", the 1 s arrival bins, the all-time percentile summary — now
+    // lives in LiveDepthTelemetry, unchanged, so SRT gets the same instrument on day one instead
+    // of a second copy that drifts from this one. The log lines are byte-identical: the prefix is
+    // a parameter and this instance passes "WHEP".
     //
-    // THE LEDGER. Content is measured from the RTP sender timeline (`lastSenderPTS − firstSenderPTS`)
-    // rather than an assumed fps — it is the sender's own statement of how much media it produced,
-    // and it is the same quantity LiveClock is anchored to.
+    // WHAT STAYED BEHIND, deliberately: the DRIFT accountant below. It reports the sender's rate
+    // in RTP 90 kHz ticks per second and answers a question about a WebRTC sender's crystal that
+    // SRT's TSBPD scheduling reframes rather than inherits. Sharing it would have exported a
+    // derivation that is only correct for this transport.
     //
-    //     surplus  = content − wall            (media produced beyond real time)
-    //     netJump  = Σ every coarse clock jump, SIGNED (see below)
-    //     inBuffer = lastSenderPTS − now()     (media sitting AHEAD of the presentation clock)
-    //
-    // WHY THERE IS A CUSHION TERM. At rate 1.0 with no jump the anchor gives, identically,
-    //
-    //     depth(T) = lastPTS − now(T) = (content − wall) + startupDepth = surplus + startupDepth
-    //
-    // because `now()` is anchored `startupDepth` BEHIND the first frame on purpose. That cushion
-    // (0.400 s — see the `targetDepth` constant) is deliberately-injected latency, not surplus, so a
-    // ledger reading `surplus − netJump − inBuffer` rests at a constant −startupDepth and never
-    // closes. Carrying the cushion explicitly makes it close:
-    //
-    //     residual = surplus + cushion − netJump − inBuffer
-    //
-    // ── WHY inBuffer IS MEASURED HERE AND NOT TAKEN FROM THE RENDERER ──────────────────────────
-    //
-    // It used to be `lastDepthSpan`, the renderer's depth sample. That made the residual a LIE, and
-    // the arithmetic of why is worth keeping: with no backlog `surplus ≈ 0`, so the printed residual
-    // collapsed to `cushion − inBuffer` — measured at the then-current 0.200 target it sat at ~+0.2
-    // whenever the buffer was empty and ~0.0
-    // whenever it was at target, faithfully re-reporting the current depth while claiming to be a
-    // convergence proof. The renderer's span is the wrong quantity for this ledger three times over:
-    // it is `max(0, …)`-CLAMPED (so an empty queue reads 0 when the true lead is strongly NEGATIVE —
-    // exactly the case worth seeing), it carries a `+Δ/2` half-frame correction the ledger never
-    // asked for, and it is sampled on a different thread at a different instant.
-    //
-    // Measuring `lastSenderPTS − clock.now()` right here — same PTS timeline as `content`, same
-    // instant, UNCLAMPED — makes every other term cancel identically. With
-    // `now(h) = firstPTS − cushion + ∫rate·dt + Σjumps`:
-    //
-    //     inBuffer = content + cushion − ∫rate·dt − netJump
-    //     residual = (content − wall) + cushion − netJump − inBuffer  =  ∫rate·dt − wall
-    //
-    // WHICH IS THE INTEGRATED SLEW, EXACTLY — and nothing else. `rate` is hard-clamped to
-    // 1 ± maxSlew, so |residual| ≤ maxSlew × wall is a REAL bound, not a fitted one, and OVER can
-    // only mean a clock jump happened that is not in `netJump`. That is a bug, and it is the only
-    // thing the flag should ever fire on. A small epsilon covers read-skew between `senderPTS` and
-    // `now()` plus float error; it is stated, not tuned to keep the flag quiet.
-    //
-    // Unclamped `inBuffer` also goes NEGATIVE during an underrun — the newest frame is already
-    // overdue — which is the truthful reading and directly useful next to [WHEP-UNDERRUN].
-    //
-    // WHY netJump IS SIGNED. A manual `targetDepth` RAISE (⌃⌥]) re-anchors the clock BACKWARD to
-    // acquire the extra cushion immediately. That is a coarse clock action like any other, but a
-    // negative one. Accumulating only positive discards would put every keypress outside the ledger
-    // and trip OVER on a deliberate action. Discards are positive, added cushion is negative, and
-    // the label says `netJump` so a negative total reads correctly rather than as a nonsensical
-    // negative "flushed".
-    //
-    // Guarded by `backlogLock` — its own lock rather than `driftLock`, which answers a different
-    // question (is the SENDER's clock drifting) and is read on a different cadence. Written from
-    // BOTH threads: the decode queue supplies sender timestamps and queue-full jumps, the render
-    // thread supplies snap/freeze-guard jumps and (every display tick) the underrun accounting.
-    //
-    // UNFAIR LOCK, NOT NSLock — THE SAME INVERSION THE ENQUEUE PATH ALREADY HIT. The real-time
-    // CVDisplayLink render thread takes this every tick in `recordSelection`, while the
-    // USER_INITIATED decode queue holds it to fold arrivals into the ledger. `NSLock` is a
-    // pthread_mutex and does NOT boost its holder, so the decode thread can be descheduled holding
-    // it and stall the display tick for an unbounded interval — the exact shape of the live-path
-    // inversion `queueLock` was converted to fix. `os_unfair_lock` DONATES the blocked render
-    // thread's priority to the holder, which dissolves it.
-    //
-    // The usage rule that makes this safe: NOTHING SLOW UNDER THIS LOCK. Every site snapshots the
-    // state it needs, unlocks, and only then formats and emits its NSLog — a boosted holder must
-    // release promptly, and an `NSLog` inside the critical section would defeat the whole point.
-    private let backlogLock = UnfairLock()
-    private static let backlogWindow = 5.0
-    /// Read-skew + float slop allowed on top of the slew bound before the residual is flagged OVER.
-    private static let residualEpsilon = 0.002
-    /// First frame's sender PTS + the host time it arrived — the two origins the ledger measures from.
-    private var backlogFirstSenderPTS: Double?
-    private var backlogFirstHost: Double = 0
-    /// Newest sender PTS seen. `content = backlogLastSenderPTS − backlogFirstSenderPTS`.
-    private var backlogLastSenderPTS: Double = 0
-    /// Pictures decoded since the stream began (the headline count).
-    private var backlogPictures = 0
-    /// Cumulative SIGNED presentation time crossed by coarse clock actions: positive = discarded
-    /// (snap / freeze-guard / queue-full), negative = deliberately added cushion (manual target raise).
-    private var backlogNetJump: Double = 0
-    private var backlogLastLogHost: CFTimeInterval = 0
-
-    /// Accumulate one coarse clock jump. SIGNED — see `backlogNetJump`. Called from the RENDER
-    /// thread (snap, freeze-guard), the DECODE thread (queue-full re-anchor) and MAIN (manual
-    /// target step), hence the lock.
-    private func recordClockJump(_ seconds: Double) {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        guard seconds.isFinite, seconds != 0 else { return }
-        backlogLock.lock()
-        backlogNetJump += seconds
-        backlogLock.unlock()
-        #endif
-    }
-
-    // MARK: - Underrun accounting (how much cushion is ACTUALLY required)
-    //
-    // THE MISSING MEASUREMENT. The renderer's depth signal is `max(0, …)`-clamped, so a 50 ms
-    // shortfall and a 400 ms shortfall both read `depth=0.000 count=0`. That makes every underrun
-    // look identical and gives no basis whatever for choosing `targetDepth` — the number gets
-    // guessed instead of measured. This measures the TRUE deficit.
-    //
-    // WHY IT SPANS TWO THREADS. The two halves of the measurement only exist in different places
-    // and neither alone gives the deficit:
-    //
-    //   * RENDER THREAD (the selection path, via onDepthSample ← performDisplayTick): `count == 0`
-    //     at a display tick is already known there, captured in the same `queueLock` critical
-    //     section as selection. Opens the episode and counts starved ticks.
-    //   * DECODE THREAD (`deliver`, on arrival): only here do the arriving frame's PTS and the
-    //     clock's current position coexist. Closes the episode and computes the lateness.
-    //
-    // THE DERIVATION — "cushion needed". At the arrival instant the clock reads N = now() and the
-    // frame carries PTS P:
-    //
-    //     lateness  L = N − P        (positive ⇒ the frame was already overdue when it landed)
-    //
-    // The cushion IS the clock's backward offset: a `targetDepth` larger by Δ means `now()` reads
-    // N − Δ at that same instant, so the frame would have been on time iff N − Δ ≤ P, i.e. iff
-    // Δ ≥ L. Therefore
-    //
-    //     cushionNeeded(event) = currentTargetDepth + max(0, L)
-    //
-    // read from the LIVE target (⌃⌥[ / ⌃⌥] steps it), not the value configured at init.
-    //
-    // L ≤ 0 IMPLIES NO INCREASE IS REQUIRED: the queue reached zero margin but nothing was actually
-    // missed. Real, worth counting, but not a reason to add latency — only genuine misses move the
-    // number.
-    //
-    // SELF-CHECK. The queue empties when `now` crosses the last frame's PTS, so
-    // `starvedDuration ≈ L + Δframe`. An underrun SHORTER than one frame interval (41.7 ms at
-    // 23.98) must therefore have L ≤ 0. A sub-frame-interval starvation reporting a large positive
-    // L would mean this measurement is broken, and the log carries both numbers so that is visible
-    // rather than assumed.
-    //
-    // ARMING. `underrunArmed` gates everything, and is set on the first tick that actually presents
-    // a frame. Before that the queue is empty at EVERY tick by construction (the startup fill), so
-    // an unarmed detector would log one enormous bogus episode on every connect. Per-STREAM, for
-    // the same reason as LiveClock's `hasPresentedOnce`: on a RECONNECT a still-armed detector does
-    // exactly that again across the new stream's fill. Cleared in `resetStreamTelemetry()`.
-    //
-    // Shares `backlogLock` with the ledger: same 5 s window boundary, same two writer threads, and
-    // the [WHEP-JITTER] rollup is emitted alongside [WHEP-BACKLOG] from one consistent snapshot.
-
-    /// False until a frame has actually been presented on this stream. See ARMING above.
-    private var underrunArmed = false
-    /// Host time the current starvation episode began; nil when the queue is not empty.
-    private var underrunSince: CFTimeInterval?
-    /// Display ticks observed with an empty queue in the current episode.
-    private var underrunTicks = 0
-    /// Running max of `cushionNeeded` across the whole stream — the figure a future adaptive-depth
-    /// controller will read to size `targetDepth`. DIAGNOSTIC-ONLY TODAY (written only inside the
-    /// telemetry gate), so it is exposed through `measuredCushionNeeded` below as an OPTIONAL: a
-    /// Release reader gets nil, never a plausible measured 0.0.
-    private var underrunCushionNeededMax: Double = 0
+    // `cushion` is the ANCHOR offset — the value `targetDepth` had at activate(), which is what
+    // the ledger's algebra is written against. A runtime step of the live target is accounted for
+    // separately, as a signed clock jump (see adjustTargetDepth).
+    private let telemetry = LiveDepthTelemetry(prefix: "WHEP",
+                                               cushion: WHEPFrameRouter.targetDepth,
+                                               maxSlew: WHEPFrameRouter.maxSlew)
 
     /// The measured "cushion needed" a future adaptive-depth controller will consume — or nil when
-    /// telemetry is compiled out. FAIL-LOUD BY DESIGN: this figure is populated only under
-    /// `#if DEBUG || MANIFOLD_TELEMETRY`, so in a Release build this returns nil rather than the
-    /// field's plausible 0.0, and a caller CANNOT mistake "not measured" for "measured zero".
-    /// WHEN ADAPTIVE DEPTH SHIPS: move the underrun accounting OUT of the telemetry gate (onto the
-    /// functional path) so this is populated in Release too; until then, nil is the honest answer.
-    var measuredCushionNeeded: Double? {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        backlogLock.lock(); defer { backlogLock.unlock() }
-        return underrunCushionNeededMax
-        #else
-        return nil
-        #endif
-    }
-    /// Every positive lateness seen this stream, for the all-time shape. Bounded so a long session
-    /// cannot grow it without limit; the running max above is unaffected by the bound.
-    private var underrunAllLatenessValues: [Double] = []
-    private static let underrunLatenessCap = 512
-    /// Positive latenesses observed in the CURRENT 5 s window, listed verbatim in the rollup.
-    private var underrunWindowLateness: [Double] = []
-    /// Episodes (including L ≤ 0 ones) in the current window and across the stream.
-    private var underrunWindowCount = 0
-    private var underrunTotalCount = 0
-
-    /// Arrival-rate bins: pictures decoded per 1 s sub-window, so the rollup can report the min/max
-    /// arrival rate WITHIN the 5 s window. A window mean would hide exactly the burstiness at issue
-    /// — 15 in one second and 32 in the next averages to a healthy-looking 23.5.
-    private var arrivalBinStart: CFTimeInterval = 0
-    private var arrivalBinCount = 0
-    private var arrivalWindowMin = Int.max
-    private var arrivalWindowMax = 0
-
-    /// RENDER THREAD, from the selection path. One display tick's queue occupancy.
-    /// `count == 0` opens or extends a starvation episode; anything else closes the run and arms.
-    private func recordSelection(count: Int, presented: Bool) {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        backlogLock.lock()
-        if presented { underrunArmed = true }
-        if count == 0, underrunArmed {
-            if underrunSince == nil {
-                underrunSince = CACurrentMediaTime()
-                underrunTicks = 0
-            }
-            underrunTicks += 1
-        }
-        backlogLock.unlock()
-        #endif
-    }
-
-    /// DECODE THREAD, on arrival. Closes an open starvation episode and emits its line.
-    /// `senderPTS` is the presentation PTS (identity at this seam) and `clockNow` is `now()` read
-    /// at the same instant — the pair the lateness is computed from.
-    private func closeUnderrunIfOpen(senderPTS: Double, clockNow: Double, target: Double) {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        backlogLock.lock()
-        guard let since = underrunSince, clockNow.isFinite else {
-            backlogLock.unlock()
-            return
-        }
-        let host = CACurrentMediaTime()
-        let starved = host - since
-        let ticks = underrunTicks
-        underrunSince = nil
-        underrunTicks = 0
-
-        let lateness = clockNow - senderPTS
-        let cushionNeeded = target + max(0, lateness)
-        underrunWindowCount += 1
-        underrunTotalCount += 1
-        underrunCushionNeededMax = max(underrunCushionNeededMax, cushionNeeded)
-        if lateness > 0 {
-            underrunWindowLateness.append(lateness)
-            if underrunAllLatenessValues.count < Self.underrunLatenessCap {
-                underrunAllLatenessValues.append(lateness)
-            }
-        }
-        backlogLock.unlock()
-
-        NSLog("""
-              [WHEP-UNDERRUN] queue empty for %.3fs, %d ticks starved, recovered when frame \
-              arrived %+.3fs late vs clock — would have needed cushion >= %.3fs (target now %.3fs)
-              """, starved, ticks, lateness, cushionNeeded, target)
-        #endif
-    }
-
-    /// Fold one arrival into the 1 s arrival bins. Decode queue, called under `backlogLock`.
-    private func foldArrivalBinLocked(host: CFTimeInterval) {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        if arrivalBinStart == 0 { arrivalBinStart = host }
-        // CLOSE ELAPSED BINS FIRST, THEN COUNT. Counting before advancing would attribute this
-        // arrival to whichever bin happened to still be open — so a 3 s gap would dump the frames
-        // from BEFORE the gap plus this one into the first bin and record the gap's seconds as
-        // separate zeros afterwards. Advancing first puts the arrival in the bin its timestamp
-        // actually falls in, and the intervening zero-count bins are then truthful: no frames
-        // arrived in those seconds, which is precisely the starvation the min is meant to expose.
-        while host - arrivalBinStart >= 1.0 {
-            arrivalWindowMin = min(arrivalWindowMin, arrivalBinCount)
-            arrivalWindowMax = max(arrivalWindowMax, arrivalBinCount)
-            arrivalBinStart += 1.0
-            arrivalBinCount = 0
-        }
-        arrivalBinCount += 1
-        #endif
-    }
-
-    /// Fold one arriving picture into the ledger and emit the 5 s lines when due. Decode queue.
-    ///
-    /// `clockNow` is `now()` read at this same instant on this same thread — see the inBuffer
-    /// discussion in the ledger block above for why it must be measured here rather than taken
-    /// from the renderer's clamped span.
-    private func recordBacklogSample(senderPTS: Double, clockNow: Double) {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        let host = CACurrentMediaTime()
-
-        backlogLock.lock()
-        backlogPictures += 1
-        backlogLastSenderPTS = senderPTS
-        foldArrivalBinLocked(host: host)
-        if backlogFirstSenderPTS == nil {
-            backlogFirstSenderPTS = senderPTS
-            backlogFirstHost = host
-            backlogLastLogHost = host
-            backlogLock.unlock()
-            return
-        }
-        guard host - backlogLastLogHost >= Self.backlogWindow, let firstPTS = backlogFirstSenderPTS else {
-            backlogLock.unlock()
-            return
-        }
-        backlogLastLogHost = host
-        let pictures = backlogPictures
-        let content = senderPTS - firstPTS
-        let wall = host - backlogFirstHost
-        let netJump = backlogNetJump
-
-        // Snapshot + re-arm the per-window jitter/underrun state in the SAME critical section, so
-        // the two lines below describe one consistent window with no arrivals lost between them.
-        let windowLateness = underrunWindowLateness
-        let windowUnderruns = underrunWindowCount
-        let cushionNeededMax = underrunCushionNeededMax
-        let totalUnderruns = underrunTotalCount
-        let allLateness = underrunAllLatenessValues
-        // A window with no closed bin yet (fewer than 1 s of arrivals) leaves min at Int.max.
-        let arrivalsMin = arrivalWindowMin == Int.max ? arrivalBinCount : arrivalWindowMin
-        let arrivalsMax = max(arrivalWindowMax, 0)
-        underrunWindowLateness.removeAll(keepingCapacity: true)
-        underrunWindowCount = 0
-        arrivalWindowMin = Int.max
-        arrivalWindowMax = 0
-        backlogLock.unlock()
-
-        // ── THE LEDGER ──────────────────────────────────────────────────────────────────────
-        // inBuffer on the SAME timeline as content, at the SAME instant, UNCLAMPED. Negative
-        // during an underrun, which is the truthful reading.
-        let inBuffer = senderPTS - clockNow
-        let cushion = Self.targetDepth      // the one-time ANCHOR offset, fixed at activate()
-        let surplus = content - wall
-        let residual = surplus + cushion - netJump - inBuffer
-        // residual IS the integrated rate slew and nothing else (see the derivation above), so it
-        // cannot exceed maxSlew × elapsed. Beyond that bound, a clock jump happened that is not in
-        // netJump — a bug, and the only thing this flag should ever fire on.
-        let bound = Self.maxSlew * wall + Self.residualEpsilon
-        let flag = abs(residual) > bound ? " OVER" : ""
-
-        NSLog("""
-              [WHEP-BACKLOG] pictures=%d over %.1fs (=%.2fs content) vs wall %.1fs → \
-              surplus %+.2fs cumulative | netJump %+.2fs | inBuffer %+.2fs | cushion %.3fs | \
-              residual %+.3fs (bound ±%.3fs)%@
-              """,
-              pictures, wall, content, wall,
-              surplus, netJump, inBuffer, cushion, residual, bound, flag)
-
-        // ── THE DISTRIBUTION ────────────────────────────────────────────────────────────────
-        // Running max alone is pinned forever by one outlier, which makes it a poor basis for
-        // choosing a target and a worse one for any later adaptive control. The SHAPE is what
-        // distinguishes "many small misses" (a modestly deeper cushion fixes it) from "a few large
-        // ones" (it does not, and something smarter is needed).
-        //
-        // With a handful of events per window a computed percentile is noise dressed as a
-        // statistic, so the window's individual latenesses are listed VERBATIM. The all-time
-        // p50/p90 appears only once there are enough samples to mean something.
-        let nominal = content > 0 ? Double(pictures - 1) / content : 0
-        let windowShape = windowLateness.isEmpty
-            ? "none"
-            : windowLateness.map { String(format: "%.3f", $0) }.joined(separator: ", ")
-        let worst = windowLateness.max() ?? 0
-        let allTime = Self.percentileSummary(allLateness)
-
-        NSLog("""
-              [WHEP-JITTER] window arrivals min=%d max=%d (nominal %.2f) | underruns=%d \
-              (stream %d) | worst deficit %.3fs | window L: [%@] | cushion needed >= %.3fs \
-              (running max)%@
-              """,
-              arrivalsMin, arrivalsMax, nominal, windowUnderruns, totalUnderruns,
-              worst, windowShape, cushionNeededMax, allTime)
-        #endif
-    }
-
-    /// All-time p50/p90 of the positive latenesses, or "" while the sample is too small for a
-    /// percentile to be more informative than the raw list already printed per window. 8 is the
-    /// point below which p90 is just "the largest value" wearing a statistical hat.
-    private static func percentileSummary(_ values: [Double]) -> String {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        guard values.count >= 8 else { return "" }
-        let sorted = values.sorted()
-        func percentile(_ p: Double) -> Double {
-            let idx = min(sorted.count - 1, max(0, Int((p * Double(sorted.count - 1)).rounded())))
-            return sorted[idx]
-        }
-        return String(format: " | all-time L p50=%.3fs p90=%.3fs (n=%d)",
-                      percentile(0.5), percentile(0.9), sorted.count)
-        #else
-        return ""
-        #endif
-    }
+    /// telemetry is compiled out. Forwarded rather than removed: this is the seam that work will
+    /// read, and it should stay findable on the router rather than only on the accountant.
+    var measuredCushionNeeded: Double? { telemetry.measuredCushionNeeded }
 
     // MARK: - Frame-flow telemetry (decode queue writes; depth fields written on the render thread)
 
@@ -706,7 +352,7 @@ final class WHEPFrameRouter {
                 self?.lastDepthSpan = sample.spanSeconds   // telemetry only (see the field comment)
                 self?.lastDepthCount = sample.count
                 // Underrun detection, on the selection path where count == 0 is already known.
-                self?.recordSelection(count: sample.count, presented: sample.hadEligibleFrame)
+                self?.telemetry.recordSelection(count: sample.count, presented: sample.hadEligibleFrame)
                 // Feed the creep side of the drift comparison. Averaged over the window rather than
                 // sampled at its edges: the raw span is a per-frame sawtooth, and the creep we are
                 // hunting (~0.003 s/s) is far smaller than one tooth.
@@ -715,7 +361,7 @@ final class WHEPFrameRouter {
                 // the time this value is in hand (it is a return, not a callback, precisely so a
                 // log can't run inside the critical section).
                 if let event {
-                    self?.recordClockJump(event.jumped)
+                    self?.telemetry.recordClockJump(event.jumped)
                     Self.log(event)
                 }
             },
@@ -723,14 +369,14 @@ final class WHEPFrameRouter {
             // released. Each firing logs and is counted into `flushed` so the accountant can prove
             // convergence.
             onOverflow: { [weak self] event in
-                self?.recordClockJump(event.jumped)
+                self?.telemetry.recordClockJump(event.jumped)
                 Self.log(event)
             })
 
         // Clear every per-stream measurement before the first frame of this stream can arrive —
-        // `underrunArmed` above all, so a reconnect's startup fill cannot be logged as one giant
-        // bogus underrun. See resetStreamTelemetry().
-        resetStreamTelemetry()
+        // the underrun detector's arming flag above all, so a reconnect's startup fill cannot be
+        // logged as one giant bogus underrun. See LiveDepthTelemetry.reset().
+        telemetry.reset()
 
         stateLock.lock(); liveClock = clock; stateLock.unlock()
 
@@ -790,49 +436,7 @@ final class WHEPFrameRouter {
         driftWindowHadSnap = false
         driftLock.unlock()
 
-        resetStreamTelemetry()
-    }
-
-    /// Clear ALL per-stream measurement state: the surplus ledger, the underrun detector and its
-    /// arming flag, and the arrival bins.
-    ///
-    /// PER-STREAM FOR THE SAME REASON THE DRIFT STATE IS. A reconnect is a different sender and a
-    /// different backlog; carrying the previous stream's content origin across the gap would
-    /// manufacture an enormous phantom surplus from the discontinuity alone.
-    ///
-    /// `underrunArmed` ESPECIALLY. A reconnect performs a fresh startup fill, during which the queue
-    /// is empty at every display tick by construction. A still-armed detector would open an episode
-    /// on the first of those ticks and hold it open across the whole fill, logging one enormous
-    /// bogus underrun on the second and every subsequent connect — the exact failure the
-    /// arm-after-first-present rule exists to prevent, merely displaced from first connect to every
-    /// later one. Identical reasoning to LiveClock's `hasPresentedOnce`, which its `reset()` clears.
-    ///
-    /// Called from BOTH `activate()` (before any frame of the new stream can arrive — the strongest
-    /// guarantee point, and it does not depend on teardown having run) and `releaseResources()`
-    /// (teardown hygiene). Either alone would do; both means no connect path can miss it.
-    private func resetStreamTelemetry() {
-        #if DEBUG || MANIFOLD_TELEMETRY
-        backlogLock.lock()
-        backlogFirstSenderPTS = nil
-        backlogFirstHost = 0
-        backlogLastSenderPTS = 0
-        backlogPictures = 0
-        backlogNetJump = 0
-        backlogLastLogHost = 0
-        underrunArmed = false
-        underrunSince = nil
-        underrunTicks = 0
-        underrunCushionNeededMax = 0
-        underrunAllLatenessValues.removeAll()
-        underrunWindowLateness.removeAll()
-        underrunWindowCount = 0
-        underrunTotalCount = 0
-        arrivalBinStart = 0
-        arrivalBinCount = 0
-        arrivalWindowMin = Int.max
-        arrivalWindowMax = 0
-        backlogLock.unlock()
-        #endif
+        telemetry.reset()
     }
 
     // MARK: - Runtime target adjustment (⌃⌥[ / ⌃⌥], main thread)
@@ -843,7 +447,7 @@ final class WHEPFrameRouter {
     ///
     /// The resulting clock jump is fed into the ledger: a target RAISE re-anchors backward, which is
     /// a negative coarse clock action, and leaving it out would trip the residual's OVER flag on a
-    /// deliberate keypress. See `backlogNetJump`.
+    /// deliberate keypress. See `LiveDepthTelemetry.recordClockJump`.
     func adjustTargetDepth(by delta: Double) {
         dispatchPrecondition(condition: .onQueue(.main))
         stateLock.lock()
@@ -858,7 +462,7 @@ final class WHEPFrameRouter {
                   delta > 0 ? "ceiling" : "floor", clock.currentTargetDepth)
             return
         }
-        recordClockJump(change.jumped)
+        telemetry.recordClockJump(change.jumped)
     }
 
     // MARK: - Per-frame (decode queue)
@@ -904,10 +508,10 @@ final class WHEPFrameRouter {
         // `registerFrame` takes immediately below.
         let clockNow = clock.now()
         let target = clock.currentTargetDepth
-        recordBacklogSample(senderPTS: senderPTS, clockNow: clockNow)
+        telemetry.recordArrival(senderPTS: senderPTS, clockNow: clockNow)
         // Closes a starvation episode the render thread opened, if one is open. No-op otherwise,
         // which is the overwhelmingly common case.
-        closeUnderrunIfOpen(senderPTS: senderPTS, clockNow: clockNow, target: target)
+        telemetry.closeUnderrunIfOpen(senderPTS: senderPTS, clockNow: clockNow, target: target)
 
         // Sender timeline → presentation timeline. Identity at rate 1.0; a genuine remap once the
         // control loop has slewed. Register BEFORE the promote so the anchor is established from

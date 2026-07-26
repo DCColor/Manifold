@@ -118,9 +118,9 @@ void ManifoldSRTAccessUnitReaderSubmitPacket(ManifoldSRTAccessUnitReader *reader
     //
     // BOTH ABSENT → emitted anyway, with both absent, and counted. This file
     // will not invent a timeline; but it will not silently swallow a decodable
-    // picture either. The caller decides, and Stage 3d must: an AU with no PTS
-    // cannot be scheduled against LiveClock, so it should be dropped there — or
-    // held until a timed frame arrives — with the count above as the evidence.
+    // picture either. The caller decides, and Stage 3d did: an AU with no PTS
+    // cannot be scheduled against LiveClock, so SRTFrameRouter.handleAccessUnit
+    // DROPS it and reports the count as [SRT-FLOW]'s `noPTS`.
     int64_t effectivePTS = pts;
     if (effectivePTS == MANIFOLD_SRT_NO_TIMESTAMP && dts != MANIFOLD_SRT_NO_TIMESTAMP) {
         effectivePTS = dts;

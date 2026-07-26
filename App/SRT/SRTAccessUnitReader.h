@@ -32,10 +32,10 @@
 //  ManifoldH264AccessUnitBuilderCopyAccessUnitContents and dispatches its own.
 //
 //  PURE C, NO DEPENDENCIES. This header pulls in NEITHER <srt/*> NOR <libav*/*>,
-//  the same discipline DataChannelBridge.h / NDIBridge.h / SRTSpike.h follow, and
+//  the same discipline DataChannelBridge.h / NDIBridge.h / SRTSession.h follow, and
 //  neither does the implementation: timestamps arrive as plain int64_t, so the
-//  caller does the one-line AVPacket unpacking. Unlike SRTSpike.[hm] this is NOT
-//  DEBUG-gated — it is shipping code with no libsrt or libav symbol in it.
+//  caller does the one-line AVPacket unpacking (ManifoldSRTSession does it, in
+//  SRTSession.m). Shipping code, with no libsrt or libav symbol in it.
 //
 //  THREADING. NOT thread-safe. One reader per stream, owned by the demux thread.
 //
