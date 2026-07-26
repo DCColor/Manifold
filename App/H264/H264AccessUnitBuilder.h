@@ -62,18 +62,32 @@ typedef struct {
     const uint8_t *data;            ///< AVCC bytes. Valid ONLY for the duration of the callback.
     size_t         size;
 
-    /// Presentation time, in the PRODUCING TRANSPORT's units — for WHEP, the
-    /// 90 kHz RTP timestamp of the packets that carried this AU.
+    /// The RTP timestamp of the packets that carried this access unit: 32-bit,
+    /// random origin, wraps every ~13.25 hours at 90 kHz. Raw — unwrapping is
+    /// RTPTimestampUnwrapper's job, on the Swift side.
     ///
-    /// STAGE 3b MUST WIDEN THIS, and deliberately has not yet. SRT gets PTS and
-    /// DTS from libavformat as int64_t in the stream's own time base: 32 bits is
-    /// too narrow (an AV_TIME_BASE PTS overflows it in ~71 minutes), unsigned is
-    /// wrong (AV_NOPTS_VALUE is negative, and B-frames make DTS < PTS), and ONE
-    /// field cannot carry both. The replacement is an int64_t pts + int64_t dts
-    /// pair plus the time base, which changes the decoder's handler signature and
-    /// every call site — six files. That is its own reviewable step; folding it
-    /// into the builder extraction would have made a pure refactor unverifiable.
-    /// Until then this stays exactly what WHEP has always emitted.
+    /// STAGE 3b CONSIDERED WIDENING THIS TO int64 pts + dts AND DECIDED NOT TO.
+    /// The transports converge at the DECODER, whose signature is now
+    /// `decode(… pts: CMTime, dts: CMTime)` — CMTime because it carries its own
+    /// timescale and its own validity, so one signature serves both with no
+    /// branch. They do NOT converge here: this struct is produced by RTP
+    /// reassembly and consumed by WHEP's bridge, and SRT reaches the same
+    /// decoder through libavformat and its own bridge without passing through
+    /// this type at all.
+    ///
+    /// Widening it would have made things worse, not better. The unwrap lives
+    /// downstream in Swift, so an int64 field here would hold a still-wrapped
+    /// 32-bit value while its type promised a monotonic one — and the next
+    /// person to read it would reasonably stop unwrapping. A `dts` field would
+    /// be permanently invalid, because RTP carries no decode timestamp for
+    /// H.264. `uint32_t` is load-bearing documentation: it says "this wraps".
+    ///
+    /// WHAT IT COSTS SRT: its own access-unit struct and handler typedef, and a
+    /// builder that can emit through both. The cheap version is an accessor on
+    /// the builder that hands back the finished AU (bytes, keyframe,
+    /// parameterSetsChanged, parameter sets) and lets each transport dispatch
+    /// its own type — the builder's H.264 logic, which is the part worth
+    /// sharing, stays single-copy either way.
     uint32_t       rtpTimestamp;    ///< 90 kHz sender clock.
 
     bool           keyframe;        ///< Contains an IDR slice.
