@@ -300,6 +300,9 @@ enum StreamValidationError: Error {
     /// silently missing its passphrase would fail at connect with a wrong-secret rejection and no
     /// hint as to why, which is worse than not saving at all.
     case passphraseNotStored
+    /// `update` was handed a bookmark that is no longer in the list — it was deleted while its edit
+    /// form was open. Distinct from every other case because nothing the user can retype fixes it.
+    case noLongerSaved
 
     var message: String {
         switch self {
@@ -314,6 +317,8 @@ enum StreamValidationError: Error {
         case .passphraseLength:    return SRTClient.ParseError.passphraseLength.message
         case .passphraseNotStored:
             return "Couldn’t store the stream passphrase in your keychain, so this stream wasn’t saved."
+        case .noLongerSaved:
+            return "That stream was deleted, so there was nothing to update."
         }
     }
 }
@@ -468,6 +473,121 @@ final class StreamBookmarkStore: ObservableObject {
             bookmarks.append(bookmark)
             persist()
             return .success(bookmark)
+        }
+    }
+
+    // MARK: - Edit in place
+
+    /// What an edit does to the stored passphrase. THREE-WAY ON PURPOSE, because the two-way version
+    /// (a string that is either empty or not) cannot express the case the edit form is actually in
+    /// most of the time: the field is blank because the passphrase was never loaded into it, not
+    /// because the user wants it gone. Collapsing those two would delete a working credential every
+    /// time someone edited a stream's name.
+    enum PassphraseEdit {
+        /// Leave whatever is stored exactly as it is. THE DEFAULT, and what a blank field means.
+        case unchanged
+        /// Replace the stored value with this one (subject to the same 10–79 rule as `add`).
+        case set(String)
+        /// Delete the stored item. Only ever reached from an explicit control the user pressed.
+        case remove
+    }
+
+    /// Edit a saved bookmark IN PLACE. The name, the URL, the derived type, and — per `passphrase` —
+    /// the Keychain item, all under the entry's EXISTING id.
+    ///
+    /// ── WHY THIS EXISTS AT ALL RATHER THAN delete() + add() ─────────────────────────────────────
+    ///
+    /// `add` mints a fresh `UUID`, and the Keychain account name is that UUID's string and nothing
+    /// else. So a delete-then-add "edit" would file the passphrase under a NEW account while the old
+    /// account keeps its value — except `delete` would have removed it, so the honest failure mode is
+    /// worse than orphaning: the user edits a stream's name and the passphrase silently vanishes, or
+    /// (if the delete were skipped to avoid that) a secret is stranded under an id no code path in
+    /// the app can ever produce again. Neither is recoverable from the UI that created it. Editing
+    /// therefore mutates the element in place; `id` is `let` and this function never constructs a
+    /// `StreamBookmark`, so there is no expression here that could produce a different UUID.
+    ///
+    /// ── THE TYPE IS RECOMPUTED, NOT CARRIED OVER ────────────────────────────────────────────────
+    ///
+    /// `type` is a STORED field derived from the URL at save time, so an edit that changes the scheme
+    /// must re-derive it — `validate` does, through the same `StreamType.detect` the add path uses.
+    /// And when the result is not `.srt`, THE KEYCHAIN ITEM GOES, whatever `passphrase` asked for.
+    /// A passphrase on a `.web` entry is not merely useless, it is unreachable: nothing in the UI
+    /// would offer to edit or remove it (the field is SRT-only), and `connectURL` would splice a
+    /// `passphrase=` query onto an https URL. srt:// → https:// is exactly the edit that would leave
+    /// one behind, so it is the one case handled explicitly.
+    ///
+    /// Ordering matches `add`'s: the Keychain WRITE happens first and aborts the whole update on
+    /// failure, leaving the bookmark byte-for-byte alone. The Keychain DELETE happens last, after the
+    /// list has been mutated and persisted, so no early return can destroy a secret whose bookmark
+    /// was never actually changed.
+    @discardableResult
+    func update(_ bookmark: StreamBookmark, name: String, urlString: String,
+                passphrase: PassphraseEdit) -> Result<StreamBookmark, StreamValidationError> {
+        guard let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else {
+            return .failure(.noLongerSaved)
+        }
+        switch Self.validate(urlString) {
+        case .failure(let e): return .failure(e)
+        case .success(let (url, type)):
+            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalName = trimmedName.isEmpty ? (url.host ?? "Stream") : trimmedName
+
+            // Same strip-before-the-string-is-built discipline as `add`: `sanitized` is what becomes
+            // `urlString`, so an edit that pastes a `?passphrase=` URL never persists it either.
+            let split = Self.strippingPassphrase(from: url)
+            let sanitized = split?.url ?? url
+
+            // Resolve the three-way against the recomputed type. `write` and `clear` are mutually
+            // exclusive by construction — every branch below sets at most one of them.
+            var write: String?
+            var clear = false
+            if type != .srt {
+                // Non-SRT wins over the requested edit. See the note above.
+                clear = true
+            } else {
+                switch passphrase {
+                case .remove:
+                    clear = true
+                case .set(let typed):
+                    let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // A `.set` that trims to nothing is not a removal — removal has its own case, and
+                    // treating whitespace as one would be the two-way collapse this enum exists to
+                    // avoid. It falls through to the same rule as `.unchanged`.
+                    write = trimmed.isEmpty ? split?.passphrase : trimmed
+                case .unchanged:
+                    // "Unchanged" is about the FIELD, not the URL. A `?passphrase=` in a URL the user
+                    // just pasted is a value they explicitly supplied, so it is adopted here for the
+                    // same reason `add` honours one — and stripped from the stored string either way.
+                    write = split?.passphrase
+                }
+            }
+
+            if let write, !SRTClient.Endpoint.passphraseLengthRange.contains(write.count) {
+                return .failure(.passphraseLength)
+            }
+
+            let account = bookmark.id.uuidString
+            if let write {
+                guard KeychainStore.streams.set(write, for: account) else {
+                    NSLog("[STREAMS] ⚠️ keychain write failed — stream not updated")
+                    return .failure(.passphraseNotStored)
+                }
+            }
+
+            // MUTATE, never re-create. `bookmarks[index]` already carries the id, and `id` is `let`,
+            // so the copy below cannot acquire a different one.
+            var updated = bookmarks[index]
+            updated.name = finalName
+            updated.urlString = sanitized.absoluteString
+            updated.type = type
+            bookmarks[index] = updated
+            persist()
+
+            // Last, and only now. Harmless when there was never an item — `SecItemDelete` on a
+            // missing account is a no-op — which is the common case for a `.web` entry that has
+            // simply been renamed.
+            if clear { KeychainStore.streams.delete(account) }
+            return .success(updated)
         }
     }
 
