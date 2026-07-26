@@ -538,6 +538,10 @@ final class MetalVideoRenderer {
         print("[EDR] wantsExtendedDynamicRangeContent = \(isHDRTransfer)"
             + (isHDRTransfer ? "  (HDR transfer \(transfer!) → EDR ON)" : "  (SDR source → EDR OFF, unchanged path)"))
         Self.logEDRHeadroom(context: "source load")
+
+        #if DEBUG   // ⚠️ TEMPORARY — delete these 3 lines with the dumpColorSpaceDiagnostic block.
+        Self.dumpColorSpaceDiagnostic(cs, primaries: primaries, transfer: transfer, matrix: matrix)
+        #endif
     }
 
     /// Fires `logEDRHeadroom` exactly once per process (lazy static = dispatch_once).
@@ -626,6 +630,180 @@ final class MetalVideoRenderer {
         default: return nil
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // ⚠️⚠️  TEMPORARY DIAGNOSTIC — DELETE WHOLESALE.  ⚠️⚠️
+    //
+    // Answers one question: what transfer function does the CGColorSpace from makeColorSpace
+    // actually carry? Reads the ICC bytes rather than trusting the name. Nothing in the app depends
+    // on this; it only prints.
+    //
+    // TO REMOVE: delete this entire `#if DEBUG … #endif` block, and the 3-line `#if DEBUG` call to
+    // `dumpColorSpaceDiagnostic` in `setSourceColorSpace`. Those two edits are the whole footprint —
+    // no other file, no project.yml entry, no state.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    #if DEBUG
+    private static func dumpColorSpaceDiagnostic(_ cs: CGColorSpace,
+                                                 primaries: Int?, transfer: Int?, matrix: Int?) {
+        func p(_ s: String) { print("[CSPROBE] " + s) }
+        p("──────────────────────────────────────────────────────────────────")
+        p("CICP in: primaries=\(primaries.map(String.init) ?? "nil") "
+          + "transfer=\(transfer.map(String.init) ?? "nil") matrix=\(matrix.map(String.init) ?? "nil")")
+        p("CGColorSpaceCopyName    : \(cs.name.map { String($0) } ?? "<nil / UNNAMED>")")
+        p("isWideGamutRGB=\(cs.isWideGamutRGB)  usesITUR_2100TF=\(CGColorSpaceUsesITUR_2100TF(cs))")
+
+        // IDENTITY comparison — CFEqual against the actual constants, never inferred from the name.
+        let candidates: [(String, CFString)] = [
+            ("ITUR_709", CGColorSpace.itur_709),
+            ("CoreMedia709", "kCGColorSpaceCoreMedia709" as CFString),
+            ("DisplayP3", CGColorSpace.displayP3),
+            ("ITUR_2020", CGColorSpace.itur_2020),
+            ("ITUR_2100_PQ", CGColorSpace.itur_2100_PQ),
+            ("ITUR_2100_HLG", CGColorSpace.itur_2100_HLG),
+            ("SRGB", CGColorSpace.sRGB),
+        ]
+        let hits = candidates.compactMap { label, c -> String? in
+            guard let ref = CGColorSpace(name: c) else { return nil }
+            return CFEqual(cs, ref) ? label : nil
+        }
+        p("identity (CFEqual)      : \(hits.isEmpty ? "matches NONE of the tested constants" : hits.joined(separator: ", "))")
+
+        guard let icc = cs.copyICCData() as Data? else {
+            p("CGColorSpaceCopyICCData : nil — no ICC representation"); return
+        }
+        let b = [UInt8](icc)
+        func u16(_ o: Int) -> Int { o + 2 <= b.count ? Int(b[o]) << 8 | Int(b[o + 1]) : 0 }
+        func u32(_ o: Int) -> UInt32 {
+            guard o + 4 <= b.count else { return 0 }
+            return UInt32(b[o]) << 24 | UInt32(b[o + 1]) << 16 | UInt32(b[o + 2]) << 8 | UInt32(b[o + 3])
+        }
+        func s15(_ o: Int) -> Double { Double(Int32(bitPattern: u32(o))) / 65536.0 }
+        func sig(_ o: Int) -> String {
+            guard o + 4 <= b.count else { return "????" }
+            return String(bytes: b[o..<(o + 4)], encoding: .isoLatin1) ?? "????"
+        }
+
+        p("ICC: \(b.count) bytes  version \(b.count > 9 ? "\(b[8]).\(b[9] >> 4)" : "?")  "
+          + "class=\(sig(12)) space=\(sig(16)) pcs=\(sig(20))")
+
+        var tags: [String: (Int, Int)] = [:]
+        let n = Int(u32(128))
+        for i in 0..<min(n, 64) {
+            let o = 132 + 12 * i
+            tags[sig(o)] = (Int(u32(o + 4)), Int(u32(o + 8)))
+        }
+        p("tags (\(n)): \(tags.keys.sorted().joined(separator: ", "))")
+
+        if let (o, sz) = tags["desc"] {
+            // Two encodings to handle: v2 'desc' is ASCII at +12 after a count; v4 'mluc' is a
+            // record table whose strings are UTF-16BE. Decoding the latter as Latin-1 yields
+            // space-separated mojibake, which is how this was first written.
+            let type = sig(o)
+            var txt = ""
+            if type == "mluc", Int(u32(o + 8)) > 0 {
+                let len = Int(u32(o + 20)), off = Int(u32(o + 24))
+                if off > 0, o + off + len <= b.count {
+                    txt = String(bytes: b[(o + off)..<(o + off + len)], encoding: .utf16BigEndian) ?? ""
+                }
+            } else if type == "desc" {
+                let count = Int(u32(o + 8))
+                let end = min(o + 12 + max(count - 1, 0), o + sz, b.count)
+                if o + 12 <= end { txt = String(bytes: b[(o + 12)..<end], encoding: .isoLatin1) ?? "" }
+            }
+            p("desc ('\(type)')           : \(txt.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))")
+        }
+        // Primaries / white point.
+        for t in ["rXYZ", "gXYZ", "bXYZ", "wtpt"] {
+            guard let (o, _) = tags[t] else { continue }
+            let x = s15(o + 8), y = s15(o + 12), z = s15(o + 16)
+            let sum = x + y + z
+            let xy = sum != 0 ? String(format: "  xy=(%.4f, %.4f)", x / sum, y / sum) : ""
+            p(String(format: "%@                    : X=%.6f Y=%.6f Z=%.6f%@", t, x, y, z, xy))
+        }
+        // CICP tag, if this is one of the modern v4 profiles.
+        if let (o, _) = tags["cicp"] {
+            p("cicp                    : primaries=\(b[o + 8]) TRANSFER=\(b[o + 9]) "
+              + "matrix=\(b[o + 10]) fullRange=\(b[o + 11])   ← declared, not approximated")
+        }
+        if tags["A2B0"] != nil {
+            p("A2B0                    : present — transfer carried as a LUT, not a TRC curve")
+        }
+
+        // ── THE QUESTION: what are the TRC tags? ──────────────────────────────────────────────
+        var evalR: ((Double) -> Double)?
+        for t in ["rTRC", "gTRC", "bTRC"] {
+            guard let (o, _) = tags[t] else { p("\(t)                    : ABSENT"); continue }
+            let type = sig(o)
+            var ev: ((Double) -> Double)?
+            switch type {
+            case "curv":
+                let count = Int(u32(o + 8))
+                if count == 0 {
+                    p("\(t)                    : curveType count=0 → IDENTITY (linear)")
+                    ev = { $0 }
+                } else if count == 1 {
+                    // u8Fixed8Number — ICC's single-gamma encoding. A PURE POWER LAW.
+                    let g = Double(u16(o + 12)) / 256.0
+                    p(String(format: "%@                    : curveType count=1 → PURE POWER LAW, gamma=%.6f", t, g))
+                    ev = { pow($0, g) }
+                } else {
+                    let v = (0..<count).map { Double(u16(o + 12 + 2 * $0)) / 65535.0 }
+                    let idx = [0, 1, 2, 4, count / 8, count / 4, count / 2, count - 1].filter { $0 < count }
+                    p("\(t)                    : curveType count=\(count) (table) samples "
+                      + Set(idx).sorted().map { String(format: "%d:%.6f", $0, v[$0]) }.joined(separator: " "))
+                    ev = { x in
+                        let pos = x * Double(count - 1)
+                        let i = min(Int(pos), count - 2), f = pos - Double(i)
+                        return v[i] * (1 - f) + v[i + 1] * f
+                    }
+                }
+            case "para":
+                let ft = u16(o + 8)
+                let np = [0: 1, 1: 3, 2: 4, 3: 5, 4: 7][ft] ?? 0
+                let q = (0..<np).map { s15(o + 12 + 4 * $0) }
+                let shape = ft == 0 ? "Y=X^g  PURE POWER LAW"
+                          : (ft == 3 || ft == 4) ? "PIECEWISE (the BT.709/sRGB shape)"
+                          : "Y=(aX+b)^g form"
+                p("\(t)                    : parametricCurveType functionType=\(ft) — \(shape)")
+                p("                          params: " + q.map { String(format: "%.6f", $0) }.joined(separator: " "))
+                if ft == 0, let g = q.first { ev = { pow($0, g) } }
+                if ft == 3, q.count == 5 {
+                    ev = { x in x >= q[4] ? pow(q[1] * x + q[2], q[0]) : q[3] * x }
+                }
+            default:
+                p("\(t)                    : type '\(type)' — not a TRC curve type")
+            }
+            if t == "rTRC" { evalR = ev }
+        }
+
+        // Numerical verdict — compare the actual curve against the candidates.
+        guard let f = evalR else { p("──────────────────────────────────────────────────────────────────"); return }
+        func bt709(_ x: Double) -> Double { x < 0.081 ? x / 4.5 : pow((x + 0.099) / 1.099, 1 / 0.45) }
+        let xs = (0...256).map { Double($0) / 256.0 }
+        let tests: [(String, (Double) -> Double)] = [
+            ("x^1.961", { pow($0, 1.961) }),
+            ("x^2.2", { pow($0, 2.2) }),
+            ("x^2.4 (BT.1886)", { pow($0, 2.4) }),
+            ("piecewise BT.709", bt709),
+            ("sRGB", { $0 <= 0.04045 ? $0 / 12.92 : pow(($0 + 0.055) / 1.055, 2.4) }),
+        ]
+        p("rTRC vs candidates (max abs deviation over [0,1]):")
+        for (label, fn) in tests.sorted(by: { a, b in
+            xs.map { abs(f($0) - a.1($0)) }.max()! < xs.map { abs(f($0) - b.1($0)) }.max()!
+        }) {
+            let err = xs.map { abs(f($0) - fn($0)) }.max()!
+            // Padded in Swift, not by the format string: "%-18@" does NOT pad a bridged String.
+            let name = label.padding(toLength: 18, withPad: " ", startingAt: 0)
+            p(String(format: "   %@ max err = %.3e%@", name, err, err < 1e-4 ? "   ← MATCH" : ""))
+        }
+        p("shadow detail (where a piecewise toe would show):")
+        for x in [0.01, 0.02, 0.04, 0.081, 0.2] {
+            p(String(format: "   f(%.3f) = %.6f   piecewise709 = %.6f   ratio = %.2fx",
+                     x, f(x), bt709(x), bt709(x) / max(f(x), 1e-9)))
+        }
+        p("──────────────────────────────────────────────────────────────────")
+    }
+    #endif
 
     // MARK: - Frame intake (called from the engine's tap, background queue)
 
