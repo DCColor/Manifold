@@ -130,7 +130,14 @@ struct ContentView: View {
     @ObservedObject private var bookmarks = StreamBookmarkStore.shared
     // Stream-bookmark manager sheet (chevron ▸ "Stream URL…" / "Manage…" and the empty-state menu).
     @State private var showStreamBookmarks = false
-    @State private var showReferenceLayer = false   // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer
+    // Diagnostics export prompt. Observed rather than @State because the menu item that raises it
+    // lives in the App scene — see DiagnosticsExporter.
+    @ObservedObject private var diagnostics = DiagnosticsExporter.shared
+    // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer, toggled by ⌃⌥R. KEPT — this is the A/B
+    // switch itself (it selects the surface at the `metalRenderer` branch below), not the removed
+    // on-screen METAL/REFERENCE badge that used to read it. With the badge gone the switch is
+    // silent, which is correct for a shipped build: nothing announces the render path unasked.
+    @State private var showReferenceLayer = false
 
     // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
     // so video + tray both scale with the window. trayHeightFraction is the tunable ratio.
@@ -491,6 +498,11 @@ struct ContentView: View {
                 showStreamBookmarks = false
             }
         }
+        // Manifold ▸ Export Diagnostics…. Hosted here because the menu command lives in the App
+        // scene, which has no window to present on; the exporter singleton is the seam between them.
+        .sheet(isPresented: $diagnostics.isPresenting) {
+            DiagnosticsPromptSheet()
+        }
         .sheet(isPresented: $showGetFlipSheet) {
             VStack(spacing: 16) {
                 Image(systemName: "arrow.up.forward.app")
@@ -525,8 +537,8 @@ struct ContentView: View {
     }
 
     /// The video region: aspect-fit picture (never cropped/stretched), transport
-    /// controls, empty state, and the picture-only overlays (inspector, filename,
-    /// METAL indicator). Fills whatever height the split gives it.
+    /// controls, empty state, and the picture-only overlays (inspector, filename).
+    /// Fills whatever height the split gives it.
     private var videoRegion: some View {
         ZStack {
             Color.black
@@ -605,17 +617,6 @@ struct ContentView: View {
                 InspectorPanel(metadata: engine.metadata, engine: engine)
                     .padding(16)
                     .transition(.opacity)
-            }
-        }
-        .overlay(alignment: .topLeading) {
-            if engine.hasMedia {
-                Text(showReferenceLayer ? "REFERENCE (AVSampleBufferDisplayLayer)" : "METAL")
-                    .font(.caption2.monospaced())
-                    .padding(4)
-                    .background(.black.opacity(0.6))
-                    .foregroundStyle(showReferenceLayer ? .yellow : .green)
-                    .padding(8)
-                    .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .top) {
