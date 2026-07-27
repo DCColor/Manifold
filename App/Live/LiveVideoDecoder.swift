@@ -1,8 +1,24 @@
 //
-//  WHEPVideoDecoder.swift
+//  LiveVideoDecoder.swift
 //  Manifold
 //
-//  WHEP step 3b of 4: H.264 access units → decoded CVPixelBuffers, via VideoToolbox.
+//  H.264 access units → decoded CVPixelBuffers, via VideoToolbox. SHARED BY EVERY LIVE
+//  TRANSPORT: WHEP drives it from RTP, SRT from MPEG-TS, and there is no per-transport branch
+//  anywhere below.
+//
+//  ── IT WAS `WHEPVideoDecoder`, IN App/WebRTC, AND BOTH WERE WRONG ──────────────────────
+//
+//  Written for WHEP step 3b, then adopted verbatim by SRT stage 3d because it was already
+//  transport-agnostic — `decode` takes `pts`/`dts` as CMTime precisely so one signature serves
+//  both. What stayed WHEP-shaped was the LABELLING: the type name, the folder, and a hardcoded
+//  `[WHEP-DECODE]` prefix on every line it logged. An SRT session's log therefore carried
+//  WHEP-labelled decode lines, which is a real problem rather than an untidiness — the
+//  diagnostics testers export are triaged by grepping the prefix, and a prefix naming the wrong
+//  transport sends that triage to the wrong subsystem.
+//
+//  So: the type is `LiveVideoDecoder`, it sits alongside the other transport-neutral live
+//  pieces (LiveClock's route, LiveDepthTelemetry, LiveSource), and the prefix is an init
+//  parameter — see `logTag`. NOTHING ELSE CHANGED; this was a labelling fix, not a rewrite.
 //
 //  ── WHY THIS IS NEW CODE AND NOT A REUSED DECODER ──────────────────────────────────────
 //
@@ -45,9 +61,9 @@ import ImageIO
 import UniformTypeIdentifiers
 import VideoToolbox
 
-final class WHEPVideoDecoder {
+final class LiveVideoDecoder {
 
-    /// Counters for the 1 Hz `[WHEP-DECODE]` line. Value type: copied out under the lock.
+    /// Counters for the client's 1 Hz decode line. Value type: copied out under the lock.
     struct Stats {
         var accessUnitsReceived = 0
         var framesDecoded = 0
@@ -106,9 +122,29 @@ final class WHEPVideoDecoder {
     private var stats = Stats()
     private var exportRequested = false
 
+    // MARK: - Log identity
+
+    /// The bracketed prefix on EVERY line this decoder emits — `WHEP-DECODE` on the WHEP path,
+    /// `SRT-DECODE` on the SRT one. Supplied by the owner, with no default, on purpose.
+    ///
+    /// ── WHY THIS IS A PARAMETER AND NOT A CONSTANT ─────────────────────────────────────────
+    /// This type is transport-agnostic (it takes `pts`/`dts` as CMTime and has no RTP in it), so
+    /// both transports use it as-is. It was born on the WHEP path and its prefix was hardcoded
+    /// `[WHEP-DECODE]`, which meant an SRT session's log carried WHEP-labelled decode lines —
+    /// wrong on its face, and worse than cosmetic once diagnostics exports from testers became
+    /// the way faults get reported: a log is only triageable if the prefix names the transport
+    /// that produced the line. Splitting the file in two would have duplicated a
+    /// VTDecompressionSession to fix a string; this is the whole of the fix.
+    ///
+    /// NO DEFAULT VALUE. A default is how one transport silently inherits the other's label
+    /// again the next time a call site is added.
+    private let logTag: String
+
     // MARK: - Lifecycle
 
-    init() {}
+    init(logTag: String) {
+        self.logTag = logTag
+    }
 
     deinit {
         // Belt and braces — the client invalidates explicitly on the decode queue.
@@ -131,7 +167,7 @@ final class WHEPVideoDecoder {
     /// Main thread. The next decoded frame is written to a PNG.
     func requestStillExport() {
         lock.lock(); exportRequested = true; lock.unlock()
-        NSLog("[WHEP-DECODE] still export armed — the next decoded frame will be written to disk")
+        NSLog("[\(logTag)] still export armed — the next decoded frame will be written to disk")
     }
 
     /// Any thread.
@@ -183,7 +219,7 @@ final class WHEPVideoDecoder {
             }
             awaitingKeyframe = false
             mutateStats { $0.awaitingKeyframe = false }
-            NSLog("[WHEP-DECODE] keyframe acquired — decoding from here")
+            NSLog("[\(logTag)] keyframe acquired — decoding from here")
         }
 
         // (2) Access unit → CMSampleBuffer → VTDecompressionSession.
@@ -228,7 +264,7 @@ final class WHEPVideoDecoder {
         let haveCurrent = formatDescription != nil && session != nil
         if haveCurrent, !changed, currentSPS == sps, currentPPS == pps { return }
 
-        guard let newFormat = Self.makeFormatDescription(sps: sps, pps: pps) else { return }
+        guard let newFormat = makeFormatDescription(sps: sps, pps: pps) else { return }
 
         currentSPS = sps
         currentPPS = pps
@@ -236,18 +272,18 @@ final class WHEPVideoDecoder {
         mutateStats { $0.formatDescriptionBuilds += 1; $0.haveFormatDescription = true }
 
         let dimensions = CMVideoFormatDescriptionGetDimensions(newFormat)
-        NSLog("[WHEP-DECODE] format description built — %dx%d, SPS %d bytes, PPS %d bytes",
+        NSLog("[\(logTag)] format description built — %dx%d, SPS %d bytes, PPS %d bytes",
               dimensions.width, dimensions.height, sps.count, pps.count)
 
         // An existing session can often absorb a new format description (same resolution,
         // trivially different SPS). Asking is cheaper and less disruptive than tearing down.
         if let session, VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: newFormat) {
-            NSLog("[WHEP-DECODE] existing session accepts the new format description — kept")
+            NSLog("[\(logTag)] existing session accepts the new format description — kept")
             return
         }
 
         if session != nil {
-            NSLog("[WHEP-DECODE] format changed incompatibly — rebuilding the session")
+            NSLog("[\(logTag)] format changed incompatibly — rebuilding the session")
             invalidateSessionOnly()
         }
         makeSession(for: newFormat)
@@ -257,7 +293,11 @@ final class WHEPVideoDecoder {
         mutateStats { $0.awaitingKeyframe = true }
     }
 
-    private static func makeFormatDescription(sps: Data, pps: Data) -> CMFormatDescription? {
+    /// AN INSTANCE METHOD ONLY BECAUSE IT LOGS. It touches no state but `logTag`, which is
+    /// per-instance by design; a `static` version would have to be handed the tag to say whose
+    /// failure it was reporting, and a decode failure with no transport on it is the thing this
+    /// whole change exists to stop producing.
+    private func makeFormatDescription(sps: Data, pps: Data) -> CMFormatDescription? {
         var format: CMFormatDescription?
         let status: OSStatus = sps.withUnsafeBytes { spsRaw in
             pps.withUnsafeBytes { ppsRaw in
@@ -283,7 +323,7 @@ final class WHEPVideoDecoder {
             }
         }
         guard status == noErr, let format else {
-            NSLog("[WHEP-DECODE] CMVideoFormatDescriptionCreateFromH264ParameterSets failed (%d)", status)
+            NSLog("[\(logTag)] CMVideoFormatDescriptionCreateFromH264ParameterSets failed (%d)", status)
             return nil
         }
         return format
@@ -311,7 +351,7 @@ final class WHEPVideoDecoder {
         var callback = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: { refCon, _, status, infoFlags, imageBuffer, pts, _ in
                 guard let refCon else { return }
-                Unmanaged<WHEPVideoDecoder>.fromOpaque(refCon)
+                Unmanaged<LiveVideoDecoder>.fromOpaque(refCon)
                     .takeUnretainedValue()
                     .handleDecoded(status: status, infoFlags: infoFlags, imageBuffer: imageBuffer, pts: pts)
             },
@@ -346,16 +386,16 @@ final class WHEPVideoDecoder {
                                      value: kCFBooleanTrue)
                 if requested == nil {
                     NSLog("""
-                          [WHEP-DECODE] WARNING: VT would not output x420 — using its native format. \
+                          [\(logTag)] WARNING: VT would not output x420 — using its native format. \
                           Step 4 will need MetalVideoRenderer's 8-bit branch, whose range-expansion \
                           constants are still 10-bit-domain (see MetalVideoRenderer.swift ~L981).
                           """)
                 } else {
-                    NSLog("[WHEP-DECODE] session created — requesting x420 output (10-bit 4:2:0), hardware preferred")
+                    NSLog("[\(logTag)] session created — requesting x420 output (10-bit 4:2:0), hardware preferred")
                 }
                 return
             }
-            NSLog("[WHEP-DECODE] VTDecompressionSessionCreate failed (%d)%@", status,
+            NSLog("[\(logTag)] VTDecompressionSessionCreate failed (%d)%@", status,
                   requested != nil ? " for x420 — retrying with VT's native format" : "")
         }
     }
@@ -381,7 +421,7 @@ final class WHEPVideoDecoder {
             if !awaitingKeyframe {
                 awaitingKeyframe = true
                 mutateStats { $0.awaitingKeyframe = true }
-                NSLog("[WHEP-DECODE] decode failed (%d) — dropping to next keyframe, PLI requested", status)
+                NSLog("[\(logTag)] decode failed (%d) — dropping to next keyframe, PLI requested", status)
                 onNeedsKeyframe?()
             }
             return
@@ -419,26 +459,31 @@ final class WHEPVideoDecoder {
         var image: CGImage?
         let status = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image)
         guard status == noErr, let image else {
-            NSLog("[WHEP-DECODE] still export failed — VTCreateCGImageFromCVPixelBuffer (%d)", status)
+            NSLog("[\(logTag)] still export failed — VTCreateCGImageFromCVPixelBuffer (%d)", status)
             return
         }
 
-        let filename = "Manifold_WHEP_\(width)x\(height)_\(Int(Date().timeIntervalSince1970)).png"
-        // Preferences (and its security-scoped bookmark) is main-thread state.
+        // The transport is in the FILENAME as well as the log lines: a tester exporting stills
+        // from two sessions in one sitting otherwise gets two files distinguishable only by
+        // their timestamp.
+        let tag = logTag
+        let filename = "Manifold_\(tag)_\(width)x\(height)_\(Int(Date().timeIntervalSince1970)).png"
+        // Preferences (and its security-scoped bookmark) is main-thread state. `tag` is copied
+        // into the closure rather than read through `self`, so this hop retains nothing of ours.
         DispatchQueue.main.async {
             Preferences.shared.withExportDirectory { directory in
                 let url = directory.appendingPathComponent(filename)
                 guard let destination = CGImageDestinationCreateWithURL(
                     url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-                    NSLog("[WHEP-DECODE] still export failed — destination create")
+                    NSLog("[\(tag)] still export failed — destination create")
                     return
                 }
                 CGImageDestinationAddImage(destination, image, nil)
                 if CGImageDestinationFinalize(destination) {
-                    NSLog("[WHEP-DECODE] still exported → %@ (%dx%d, decoded as %@)",
+                    NSLog("[\(tag)] still exported → %@ (%dx%d, decoded as %@)",
                           url.path, width, height, Self.formatName(format))
                 } else {
-                    NSLog("[WHEP-DECODE] still export failed — PNG finalize")
+                    NSLog("[\(tag)] still export failed — PNG finalize")
                 }
             }
         }
@@ -464,7 +509,7 @@ final class WHEPVideoDecoder {
                                                         flags: 0,
                                                         blockBufferOut: &blockBuffer)
         guard status == kCMBlockBufferNoErr, let blockBuffer else {
-            NSLog("[WHEP-DECODE] CMBlockBufferCreateWithMemoryBlock failed (%d)", status)
+            NSLog("[\(logTag)] CMBlockBufferCreateWithMemoryBlock failed (%d)", status)
             return nil
         }
 
@@ -476,7 +521,7 @@ final class WHEPVideoDecoder {
                                                  dataLength: accessUnit.count)
         }
         guard status == kCMBlockBufferNoErr else {
-            NSLog("[WHEP-DECODE] CMBlockBufferReplaceDataBytes failed (%d)", status)
+            NSLog("[\(logTag)] CMBlockBufferReplaceDataBytes failed (%d)", status)
             return nil
         }
 
@@ -500,7 +545,7 @@ final class WHEPVideoDecoder {
                                            sampleSizeArray: &sampleSize,
                                            sampleBufferOut: &sampleBuffer)
         guard status == noErr, let sampleBuffer else {
-            NSLog("[WHEP-DECODE] CMSampleBufferCreateReady failed (%d)", status)
+            NSLog("[\(logTag)] CMSampleBufferCreateReady failed (%d)", status)
             return nil
         }
         return sampleBuffer

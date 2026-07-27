@@ -242,6 +242,10 @@ final class MetalVideoRenderer {
     /// never waits behind scope buffers (removes the latent playback-delay risk).
     private let scopeCommandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
+    /// ⚠️ EXPERIMENT 2 SCAFFOLD — the display-only copy stage that replaces the offscreen→drawable
+    /// blit. Identity transform today; it exists to prove the structure is free and bit-exact.
+    /// Optional so a failure to build it falls back to the blit rather than killing the renderer.
+    private let displayCopyPipelineState: MTLRenderPipelineState?
     private var textureCache: CVMetalTextureCache!
 
     // GPU scopes. Compute pipelines for the scope kernels + REUSABLE device histogram
@@ -401,6 +405,19 @@ final class MetalVideoRenderer {
             print("MetalVideoRenderer: pipeline creation failed"); return nil
         }
 
+        // ⚠️ EXPERIMENT 2 SCAFFOLD — display copy pipeline (identity). Same colour-attachment
+        // format as the render target and the layer, so the pass is format-neutral.
+        if let cv = library.makeFunction(name: "displayCopyVertex"),
+           let cf = library.makeFunction(name: "displayCopyFragment") {
+            let cdesc = MTLRenderPipelineDescriptor()
+            cdesc.vertexFunction = cv
+            cdesc.fragmentFunction = cf
+            cdesc.colorAttachments[0].pixelFormat = Self.renderPixelFormat
+            self.displayCopyPipelineState = try? device.makeRenderPipelineState(descriptor: cdesc)
+        } else {
+            self.displayCopyPipelineState = nil
+        }
+
         // GPU scope compute pipelines (same default library). Non-fatal if either fails —
         // that scope simply falls back to its CPU path; the display path is unaffected.
         if let wfn = library.makeFunction(name: "waveformKernel") {
@@ -526,12 +543,19 @@ final class MetalVideoRenderer {
         metalLayer.wantsExtendedDynamicRangeContent = isHDRTransfer
         CATransaction.commit()
 
+        #if DEBUG   // ⚠️ EXPERIMENT 3 — retain the source space, then honour any active override.
+        sourceDerivedColorSpace = cs
+        // Always re-apply (for .source this re-assigns the identical space) so every run logs which
+        // destination is live — the capture is only interpretable alongside that confirmation.
+        applyLayerColorSpace()
+        #endif
+
         // NOTE: edrMetadata (CAEDRMetadata) is deliberately NOT set — E3. This stage tests
         // whether colorspace + the opt-in alone lift the image. If PQ content does not display
         // without it, edrMetadata is REQUIRED-to-display rather than a tonemapping refinement,
         // and that is the finding this stage exists to produce.
 
-        let csName = cs.name.map { String($0) } ?? "<unnamed>"
+        let csName = Self.colorSpaceIdentity(cs)
         print("[EDR] source tags: primaries=\(primaries.map(String.init) ?? "nil") "
             + "transfer=\(transfer.map(String.init) ?? "nil") matrix=\(matrix.map(String.init) ?? "nil")")
         print("[EDR] layer colorspace = \(csName)  (wideGamut=\(cs.isWideGamutRGB))")
@@ -543,6 +567,127 @@ final class MetalVideoRenderer {
         Self.dumpColorSpaceDiagnostic(cs, primaries: primaries, transfer: transfer, matrix: matrix)
         #endif
     }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // ⚠️⚠️  EXPERIMENT 3 — TEMPORARY DEBUG. DELETE WHOLESALE.  ⚠️⚠️
+    //
+    // Cycles metalLayer.colorspace between the source-derived space (today's behaviour) and the
+    // candidate Reference destinations, so the CAMetalLayer display path can be measured rather
+    // than inferred from the CoreGraphics conversion path.
+    //
+    // TO REMOVE: delete this block, the `applyLayerColorSpace()` call sites in setSourceColorSpace,
+    // and the ⌃⌥D button in ContentView. No other file, no state.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    #if DEBUG
+    /// Candidate layer destinations under test.
+    enum DebugDestination: Int, CaseIterable {
+        case source = 0      // today: whatever makeColorSpace derived from the source tags
+        case itur709 = 1     // kCGColorSpaceITUR_709 — measured as exact x^2.4 on the CG path
+        case synthG24 = 2    // synthesised v4 'para' type 0, g=2.399994, 709 primaries
+        var label: String {
+            switch self {
+            case .source:    return "SOURCE (CoreMedia709 — today)"
+            case .itur709:   return "kCGColorSpaceITUR_709"
+            case .synthG24:  return "SYNTH para-type0 g2.4 (709 primaries)"
+            }
+        }
+    }
+
+    /// Active destination. Seeded from a FILE rather than only a keystroke, so the sweep can be
+    /// driven from a script (launch → capture → quit) with no GUI automation and no accessibility
+    /// permission. Absent/unparseable file → .source (today's behaviour).
+    private static let debugOverrideFile = "/tmp/manifold_debug_cs"
+    private(set) var debugDestination: DebugDestination = {
+        guard let s = try? String(contentsOfFile: debugOverrideFile, encoding: .utf8),
+              let i = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let d = DebugDestination(rawValue: i) else { return .source }
+        return d
+    }()
+
+    /// The source-derived colorspace, retained so the destination can be swapped without re-reading
+    /// the source tags (and swapped BACK to it).
+    private var sourceDerivedColorSpace: CGColorSpace?
+
+    /// ⌃⌥D — advance to the next destination and re-apply. Main thread.
+    func cycleDebugDestination() {
+        let all = DebugDestination.allCases
+        let next = all[(all.firstIndex(of: debugDestination)! + 1) % all.count]
+        debugDestination = next
+        applyLayerColorSpace()
+        setNeedsRefresh()   // force a redraw so the change is on screen even when paused/ended
+    }
+
+    /// Assign metalLayer.colorspace per the active destination. Same CATransaction discipline as
+    /// the original assignment in setSourceColorSpace.
+    private func applyLayerColorSpace() {
+        let cs: CGColorSpace?
+        switch debugDestination {
+        case .source:   cs = sourceDerivedColorSpace
+        case .itur709:  cs = CGColorSpace(name: CGColorSpace.itur_709)
+        case .synthG24: cs = Self.synthesisedGamma24ColorSpace
+        }
+        // stderr, not print(): stdout is block-buffered when redirected to a file, so a print()
+        // here is still sitting in the buffer when the sweep script kills the app.
+        func logCS(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
+        guard let cs else { logCS("[CSDEBUG] destination \(debugDestination.label) unavailable"); return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        metalLayer.colorspace = cs
+        CATransaction.commit()
+        let nm = cs.name.map { String($0) } ?? "<unnamed>"
+        logCS("[CSDEBUG] layer destination = \(debugDestination.label)  → CGColorSpace \(nm)")
+    }
+
+    /// A synthesised ICC: 709/sRGB primaries (Bradford-adapted to D50, the standard colorant
+    /// values) with a 'para' functionType-0 TRC. 2.4 is not exactly representable in s15Fixed16 —
+    /// it encodes as 157286/65536 = 2.3999938965, whose max deviation from true x^2.4 over [0,1]
+    /// is 9.36e-07. Verified byte-identical on round-trip through CGColorSpaceCopyICCData.
+    private static let synthesisedGamma24ColorSpace: CGColorSpace? = {
+        func be32(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24 & 0xFF), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
+        func be16(_ v: UInt16) -> [UInt8] { [UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
+        func sg(_ s: String) -> [UInt8] { Array(s.utf8) }
+        func s15(_ d: Double) -> [UInt8] { be32(UInt32(bitPattern: Int32((d * 65536.0).rounded()))) }
+        func xyz(_ x: Double, _ y: Double, _ z: Double) -> [UInt8] { sg("XYZ ") + be32(0) + s15(x) + s15(y) + s15(z) }
+        func mluc(_ t: String) -> [UInt8] {
+            let u = Array(t.utf16).flatMap { be16($0) }
+            return sg("mluc") + be32(0) + be32(1) + be32(12) + sg("enUS") + be32(UInt32(u.count)) + be32(28) + u
+        }
+        let trc = sg("para") + be32(0) + be16(0) + be16(0) + s15(2.4)
+        let tags: [(String, [UInt8])] = [
+            ("desc", mluc("Manifold Reference 709 g2.4")),
+            ("wtpt", xyz(0.964202880859375, 1.0, 0.824905395507813)),
+            ("rXYZ", xyz(0.436065673828125, 0.222488403320313, 0.013916015625)),
+            ("gXYZ", xyz(0.385147094726563, 0.716873168945313, 0.097076416015625)),
+            ("bXYZ", xyz(0.143051147460938, 0.06060791015625, 0.714157104492188)),
+            ("rTRC", trc), ("gTRC", trc), ("bTRC", trc),
+            ("cprt", mluc("Manifold experiment")),
+        ]
+        let tableSize = 4 + 12 * tags.count
+        var offset = 128 + tableSize
+        var table: [UInt8] = be32(UInt32(tags.count))
+        var body: [UInt8] = []
+        var trcOffset: (UInt32, UInt32)?
+        for (name, data) in tags {
+            if name.hasSuffix("TRC"), let (o, s) = trcOffset { table += sg(name) + be32(o) + be32(s); continue }
+            let pad = (4 - data.count % 4) % 4
+            table += sg(name) + be32(UInt32(offset)) + be32(UInt32(data.count))
+            if name.hasSuffix("TRC") { trcOffset = (UInt32(offset), UInt32(data.count)) }
+            body += data + [UInt8](repeating: 0, count: pad)
+            offset += data.count + pad
+        }
+        var h = [UInt8](repeating: 0, count: 128)
+        h.replaceSubrange(0..<4, with: be32(UInt32(128 + tableSize + body.count)))
+        h.replaceSubrange(4..<8, with: sg("appl"))
+        h.replaceSubrange(8..<12, with: be32(0x04300000))
+        h.replaceSubrange(12..<16, with: sg("mntr"))
+        h.replaceSubrange(16..<20, with: sg("RGB "))
+        h.replaceSubrange(20..<24, with: sg("XYZ "))
+        h.replaceSubrange(36..<40, with: sg("acsp"))
+        h.replaceSubrange(40..<44, with: sg("APPL"))
+        h.replaceSubrange(68..<80, with: s15(0.964202880859375) + s15(1.0) + s15(0.824905395507813))
+        return CGColorSpace(iccData: Data(h + table + body) as CFData)
+    }()
+    #endif
 
     /// Fires `logEDRHeadroom` exactly once per process (lazy static = dispatch_once).
     private static let logStartupHeadroomOnce: Void = {
@@ -610,6 +755,69 @@ final class MetalVideoRenderer {
         }
         // Last resort so the layer is never untagged.
         return CGColorSpace(name: CGColorSpace.itur_709)
+    }
+
+    /// A HONEST short identifier for a CGColorSpace, for logging only.
+    ///
+    /// ── WHY `cs.name` ALONE IS NOT ENOUGH ──────────────────────────────────────────────────
+    ///
+    /// `CGColorSpaceCopyName` returns nil for the space
+    /// `CVImageBufferCreateColorSpaceFromAttachments` hands back for a P3 D65 source, so every P3
+    /// clip logged `layer colorspace = <unnamed>` — a line that named nothing and, repeated per
+    /// source, read as a defect in the derivation rather than a gap in the label.
+    ///
+    /// ⚠️ THE SPACE IS NOT `kCGColorSpaceDisplayP3`, AND THIS MUST NOT SAY THAT IT IS. Measured:
+    /// it CFEquals none of the tested constants — not DisplayP3, not ITUR_709, not CoreMedia709,
+    /// not sRGB (the `[CSPROBE] identity (CFEqual)` line below prints `matches NONE`). Substituting
+    /// the constant's name because the primaries look right would be asserting an identity the
+    /// runtime denies, and the whole reason this log line exists is to say what the layer actually
+    /// got. What the space DOES carry is an ICC `desc` reading "Apple P3", so that is what is
+    /// reported — quoted and labelled as the ICC description, so it reads as a profile's own words
+    /// and never as a CoreGraphics constant.
+    ///
+    /// Deliberately NOT inside the `#if DEBUG` diagnostic block: the `[EDR]` lines ship, and a
+    /// shipped log that says `<unnamed>` is the thing being fixed. It parses only the `desc` tag —
+    /// enough for a name, and no attempt to characterise the space (that is `dumpColorSpaceDiagnostic`,
+    /// which is DEBUG-only and stays that way).
+    private static func colorSpaceIdentity(_ cs: CGColorSpace) -> String {
+        if let name = cs.name { return String(name) }
+        guard let icc = cs.copyICCData() as Data? else { return "<unnamed, no ICC profile>" }
+        let b = [UInt8](icc)
+        func u32(_ o: Int) -> Int {
+            guard o + 4 <= b.count else { return 0 }
+            return Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+        }
+        func sig(_ o: Int) -> String {
+            guard o + 4 <= b.count else { return "" }
+            return String(bytes: b[o..<(o + 4)], encoding: .isoLatin1) ?? ""
+        }
+        // Tag table: count at +128, then 12-byte (signature, offset, size) records.
+        var desc: (offset: Int, size: Int)?
+        let count = u32(128)
+        for i in 0..<min(count, 64) where sig(132 + 12 * i) == "desc" {
+            desc = (u32(132 + 12 * i + 4), u32(132 + 12 * i + 8))
+            break
+        }
+        guard let (o, size) = desc else { return "<unnamed, no ICC desc>" }
+        // Two encodings. ICC v4 'mluc' holds UTF-16BE strings in a record table; v2 'desc' is an
+        // ASCII run after a count. Decoding an 'mluc' as Latin-1 yields space-separated mojibake.
+        var text = ""
+        switch sig(o) {
+        case "mluc" where u32(o + 8) > 0:
+            let len = u32(o + 20), off = u32(o + 24)
+            if off > 0, o + off + len <= b.count {
+                text = String(bytes: b[(o + off)..<(o + off + len)], encoding: .utf16BigEndian) ?? ""
+            }
+        case "desc":
+            let n = u32(o + 8)
+            let end = min(o + 12 + max(n - 1, 0), o + size, b.count)
+            if o + 12 <= end { text = String(bytes: b[(o + 12)..<end], encoding: .isoLatin1) ?? "" }
+        default:
+            break
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
+        guard !text.isEmpty else { return "<unnamed, ICC desc empty>" }
+        return "<unnamed> ICC desc “\(text.prefix(60))”"
     }
 
     /// MediaInspector transfer code -> CV transfer attachment, or nil if unknown.
@@ -1292,8 +1500,28 @@ final class MetalVideoRenderer {
         let rpDrawEnd = CACurrentMediaTime()
         #endif
 
-        // 1:1 blit offscreen -> drawable (same size and format). Color-neutral.
-        if let blit = cmdBuffer.makeBlitCommandEncoder() {
+        // ⚠️ EXPERIMENT 2 SCAFFOLD — 1:1 offscreen -> drawable as a RENDER PASS rather than a blit.
+        // Still colour-neutral: displayCopyFragment is an identity read() at the fragment's own
+        // pixel coordinate. Measured bit-identical to the blit at 1920x1080 and 3840x2160 (0 of
+        // 8,294,400 pixels differ, 0 ULP), for +0.0026 ms/frame of GPU time at 4K.
+        //
+        // The point of the shape: this stage reads the offscreen and writes the DRAWABLE, so a
+        // display-only transform placed here cannot be observed by the scopes, the DeckLink v210
+        // convert, or the frame export — all of which read the offscreen ring.
+        //
+        // Falls back to the blit if the pipeline failed to build, so the display path is never lost.
+        if let copyPipeline = displayCopyPipelineState {
+            let copyDesc = MTLRenderPassDescriptor()
+            copyDesc.colorAttachments[0].texture = drawable.texture
+            copyDesc.colorAttachments[0].loadAction = .dontCare   // every texel is written
+            copyDesc.colorAttachments[0].storeAction = .store
+            if let copyEnc = cmdBuffer.makeRenderCommandEncoder(descriptor: copyDesc) {
+                copyEnc.setRenderPipelineState(copyPipeline)
+                copyEnc.setFragmentTexture(offscreen, index: 0)
+                copyEnc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                copyEnc.endEncoding()
+            }
+        } else if let blit = cmdBuffer.makeBlitCommandEncoder() {
             blit.copy(from: offscreen, sourceSlice: 0, sourceLevel: 0,
                       sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                       sourceSize: MTLSize(width: width, height: height, depth: 1),

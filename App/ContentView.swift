@@ -245,6 +245,15 @@ struct ContentView: View {
                 .keyboardShortcut("e", modifiers: [.control, .option])
                 .opacity(0)
         )
+        #if DEBUG
+        // ⚠️ EXPERIMENT 3 — TEMPORARY. ⌃⌥D cycles the layer's destination colorspace so the
+        // CAMetalLayer display path can be measured. Delete with the block in MetalVideoRenderer.
+        .background(
+            Button("") { metalRenderer?.cycleDebugDestination() }
+                .keyboardShortcut("d", modifiers: [.control, .option])
+                .opacity(0)
+        )
+        #endif
         // Scope shortcuts (tray + per-scope toggles + CIE live toggles) consolidated into one
         // hidden group so the view body's modifier chain stays type-checkable.
         .background(scopeShortcuts)
@@ -918,7 +927,7 @@ struct ContentView: View {
             // to a PNG in the export folder. Distinct from ⌃⌥E, which reads back the RENDERED
             // frame: nothing is rendered from WHEP yet, so this goes straight from the
             // decoder's CVPixelBuffer via VideoToolbox. A content/geometry check, not a
-            // colour-managed export — see WHEPVideoDecoder.exportStill.
+            // colour-managed export — see LiveVideoDecoder.exportStill.
             Button("") { WHEPClient.shared.exportNextDecodedFrame() }
                 .keyboardShortcut("e", modifiers: [.control, .option, .shift])
             // ⌃⌥[ / ⌃⌥] — step the live WHEP buffer target by ∓/± 0.05 s (clamped 0.10…1.00).

@@ -101,9 +101,28 @@ struct StreamBookmarksSheet: View {
 
     // MARK: Saved list
 
+    /// ⚠️ THREE STATES, NOT TWO. The empty list used to be one branch, and that was the defect:
+    /// "you have never saved a stream" and "your saved streams are on disk and this build cannot
+    /// read them" both rendered as `No saved streams. Add one below.` — an invitation to perform
+    /// the exact action that would overwrite them. The undecodable state must therefore look
+    /// NOTHING like a fresh install: it says data exists, says it is intact, and does not invite
+    /// an add (Save also refuses, with `.storeUnreadable`, so the two agree).
     @ViewBuilder private var savedSection: some View {
         Section("Saved") {
-            if store.bookmarks.isEmpty {
+            if store.storedDataUnreadable {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Your saved streams couldn’t be read", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("""
+                         They’re still saved and haven’t been changed — this version just can’t \
+                         decode them, so the list is showing empty and nothing new can be saved \
+                         over them. Saving is disabled until a version that can read them runs.
+                         """)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .wrapsInsteadOfClipping()
+                }
+            } else if store.bookmarks.isEmpty {
                 Text("No saved streams. Add one below.")
                     .foregroundStyle(.secondary)
             } else {

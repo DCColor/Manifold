@@ -97,6 +97,27 @@ typedef struct ManifoldSRTSession {
     int msgLen, msgOff;         // the staged message and how much of it libavformat has taken
     uint64_t messagesIn, bytesIn, recvTimeouts;
 
+    /// STICKY TERMINAL RESULT for the read callback. 0 = none latched yet.
+    ///
+    /// ── WHY THIS EXISTS: THE SAME END-OF-SESSION LINE, FOUR TIMES ──────────────────
+    /// A single peer death printed `[SRT] connection lost` FOUR times. Not four events —
+    /// one. libavformat re-enters the read callback after it has already been told
+    /// AVERROR_EOF (its own retry layers: the packet loop, the parser flush, the
+    /// AVIOContext's own re-read), and with the staged message drained
+    /// (`msgOff == msgLen == 0`) each re-entry fell into the recv loop, got the same
+    /// SRT_ECONNLOST, and logged it again.
+    ///
+    /// MEASURED, not inferred: replicating srtReadPacket + the av_read_frame loop against
+    /// this exact libavformat, with the socket replaced by a buffer that starts erroring at
+    /// a fixed offset, prints the line 4× without this latch and 1× with it — same video
+    /// packet count, same terminal AVERROR_EOF, both ways.
+    ///
+    /// ⚠️ TEARDOWN IS UNCHANGED BY CONSTRUCTION. Every re-entry already returned this same
+    /// value (the socket keeps reporting the same error); the latch returns it from memory
+    /// instead of re-deriving it. What is removed is the duplicate NSLog and a redundant
+    /// srt_recvmsg2 against a socket already known dead — not a state transition.
+    int terminalResult;
+
     // ── run flag. The ONLY field touched by two threads. ──
     os_unfair_lock runLock;
     bool shouldRun;
@@ -293,8 +314,17 @@ static int srtReadPacket(void *opaque, uint8_t *buf, int bufSize) {
     if (bufSize <= 0) return AVERROR(EINVAL);
 
     if (s->msgOff >= s->msgLen) {
+        // ONE SESSION END, ONE LINE. Once a terminal condition has been latched and logged,
+        // every subsequent re-entry gets the same answer in silence. See `terminalResult`.
+        // Checked here rather than at the top of the function so a staged message is still
+        // drained to libavformat first — a latch can only be set with the stage empty, so
+        // this ordering costs nothing, but it makes that independent of how it got set.
+        if (s->terminalResult != 0) return s->terminalResult;
+
         s->msgOff = s->msgLen = 0;
         for (;;) {
+            // NOT LATCHED. A stop can be asked for at any moment and is re-evaluated every
+            // entry; it is the run flag that is authoritative, not a cached copy of it.
             if (!srtShouldRun(s)) return AVERROR_EXIT;
 
             SRT_MSGCTRL ctrl;
@@ -311,6 +341,7 @@ static int srtReadPacket(void *opaque, uint8_t *buf, int bufSize) {
             if (n == 0) {
                 NSLog(@"[SRT] peer closed the connection (zero-length message) — end of stream");
                 s->eofReason = ManifoldSRTEndReasonPeerClosed;
+                s->terminalResult = AVERROR_EOF;
                 return AVERROR_EOF;
             }
 
@@ -337,10 +368,12 @@ static int srtReadPacket(void *opaque, uint8_t *buf, int bufSize) {
                 NSLog(@"[SRT] connection lost: %s (srt errno %d, sys errno %d) — end of stream",
                       srt_strerror(err, sysErr), err, sysErr);
                 s->eofReason = ManifoldSRTEndReasonConnectionLost;
+                s->terminalResult = AVERROR_EOF;
                 return AVERROR_EOF;
             }
             NSLog(@"[SRT] srt_recvmsg2 failed: %s (srt errno %d, sys errno %d)",
                   srt_strerror(err, sysErr), err, sysErr);
+            s->terminalResult = AVERROR_EXTERNAL;
             return AVERROR_EXTERNAL;
         }
     }
@@ -973,6 +1006,7 @@ bool ManifoldSRTSessionStart(ManifoldSRTSession *s, const ManifoldSRTSessionConf
     s->generation = config->generation;
 
     s->msgLen = s->msgOff = 0;
+    s->terminalResult = 0;   // per-session, like every counter beside it
     s->messagesIn = s->bytesIn = s->recvTimeouts = 0;
     s->sawFirstPacket = s->warnedSilent = false;
     s->eofReason = ManifoldSRTEndReasonStopped;

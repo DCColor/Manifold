@@ -139,6 +139,36 @@ fragment half4 passthroughFragment(VertexOut in [[stage_in]],
     return half4(half3(r, g, b), 1.0h);
 }
 
+// MARK: - Display copy stage (EXPERIMENT — structural prototype, IDENTITY transform)
+//
+// ⚠️ EXPERIMENT 2 SCAFFOLD — not a feature. Replaces the 1:1 blit from the offscreen ring to the
+// drawable with a 1:1 RENDER PASS, so a display-only transform has somewhere to live that is
+// DOWNSTREAM of the offscreen. Applies NO colour math: it is an identity copy, and is here purely
+// to establish that the structural change is free and bit-exact before any transform is written.
+//
+// The offscreen is NOT modified by this stage, which is the whole point: the scopes, the DeckLink
+// v210 convert and the frame export all read the offscreen ring and cannot observe this pass.
+//
+// `read()` at the fragment's own pixel coordinate rather than a sampler: fragment (x,y) reads texel
+// (x,y), so the 1:1 mapping is a property of the addressing, not of a filter mode that a later edit
+// could change. (Measured: sampler with filter::nearest is also bit-identical at 1920x1080 and
+// 3840x2160 — but only the read() form is 1:1 BY CONSTRUCTION.)
+struct DisplayCopyVertexOut {
+    float4 position [[position]];
+};
+
+vertex DisplayCopyVertexOut displayCopyVertex(uint vertexID [[vertex_id]]) {
+    float2 positions[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };
+    DisplayCopyVertexOut out;
+    out.position = float4(positions[vertexID], 0.0, 1.0);
+    return out;
+}
+
+fragment half4 displayCopyFragment(DisplayCopyVertexOut in [[stage_in]],
+                                   texture2d<half, access::read> src [[texture(0)]]) {
+    return src.read(uint2(in.position.xy));
+}
+
 // MARK: - GPU scopes (Phase 1 prototype: luma waveform)
 
 // Uniforms for waveformKernel. Mirrors WaveformParams in MetalVideoRenderer.swift

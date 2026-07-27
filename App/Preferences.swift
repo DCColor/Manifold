@@ -267,6 +267,15 @@ enum StreamType: String, Codable {
 /// One saved stream endpoint. `id` is stable across launches so SwiftUI list identity and per-row
 /// delete are unambiguous. `urlString` is stored verbatim and only ever handed to WHEPClient.connect
 /// — the host is derived for display, the full string is never shown or logged.
+///
+/// ⚠️ ADDING A FIELD HERE IS THE ONE MIGRATION HAZARD IN THIS FILE, AND IT IS OURS, NOT THE DISK'S.
+/// A new REQUIRED field — no default value, not Optional — makes every already-persisted entry
+/// undecodable (`DecodingError.keyNotFound`), for EVERY USER AT ONCE, on the first launch after
+/// that ship. Nothing about the failure is local to one bad install. So: new fields are Optional
+/// or defaulted, or they arrive with an explicit migration that reads the old shape first.
+/// `StreamBookmarkStore.storedDataUnreadable` is the backstop that stops the damage compounding
+/// when this rule is broken; it is not permission to break it, because it cannot recover the data
+/// — it can only decline to overwrite it.
 struct StreamBookmark: Codable, Identifiable {
     let id: UUID
     var name: String
@@ -303,6 +312,11 @@ enum StreamValidationError: Error {
     /// `update` was handed a bookmark that is no longer in the list — it was deleted while its edit
     /// form was open. Distinct from every other case because nothing the user can retype fixes it.
     case noLongerSaved
+    /// Saved streams exist on disk and this build cannot decode them, so saving anything would
+    /// overwrite them. See `StreamBookmarkStore.storedDataUnreadable`. Like `.noLongerSaved`,
+    /// nothing typed into the form fixes it — but unlike every other case, refusing is what
+    /// PROTECTS the user's data rather than merely declining to store theirs.
+    case storeUnreadable
 
     var message: String {
         switch self {
@@ -319,6 +333,11 @@ enum StreamValidationError: Error {
             return "Couldn’t store the stream passphrase in your keychain, so this stream wasn’t saved."
         case .noLongerSaved:
             return "That stream was deleted, so there was nothing to update."
+        case .storeUnreadable:
+            return """
+                   Your saved streams can’t be read by this version, so nothing can be saved right \
+                   now — saving would overwrite them. They’re still on disk and untouched.
+                   """
         }
     }
 }
@@ -332,12 +351,50 @@ final class StreamBookmarkStore: ObservableObject {
 
     @Published private(set) var bookmarks: [StreamBookmark]
 
+    /// ── THERE IS SAVED DATA AND WE CANNOT READ IT ───────────────────────────────────────────
+    ///
+    /// TRUE only for the one case worth separating: the key EXISTS and `JSONDecoder` threw. A
+    /// fresh install (no key) leaves this false, and so does an empty saved list.
+    ///
+    /// ⚠️ WHY THIS FLAG EXISTS AT ALL. `init` used to be `try?` over the decode with `bookmarks = []`
+    /// on any failure — no log, no flag — which made "you have never saved a stream" and "you have
+    /// saved streams and this build cannot read them" the SAME observable state. The launch itself
+    /// was non-destructive, so this looked harmless. It was not, because of what happens next: the
+    /// UI says "No saved streams. Add one below.", the user does exactly that, and `add` →
+    /// `persist()` writes the new one-element array OVER the original bytes. The user's own list
+    /// destroys itself, on the first action the app invited.
+    ///
+    /// ⚠️ THE TRIGGER IS OURS, NOT THE DISK'S. This does not need corruption. ADDING A REQUIRED
+    /// FIELD TO `StreamBookmark` — a `var latencyMs: Int` with no default and not Optional — makes
+    /// every previously-persisted entry undecodable (`DecodingError.keyNotFound`), and it does so
+    /// for EVERY USER AT ONCE, on the first launch after that ship. Any new field must therefore be
+    /// Optional or defaulted, or arrive with an explicit migration; this flag is the backstop for
+    /// the day someone forgets, not a substitute for remembering.
+    ///
+    /// While it is true: `persist()` refuses to write, and `add` refuses outright with
+    /// `.storeUnreadable` rather than accepting an entry it cannot save. There is no in-app repair
+    /// — the fix is a build that can read the data — so the state is REPORTED, never worked around.
+    @Published private(set) var storedDataUnreadable = false
+
     private init() {
-        if let data = UserDefaults.standard.data(forKey: Self.key),
-           let decoded = try? JSONDecoder().decode([StreamBookmark].self, from: data) {
-            bookmarks = decoded
+        let data = UserDefaults.standard.data(forKey: Self.key)
+        if let data {
+            do {
+                bookmarks = try JSONDecoder().decode([StreamBookmark].self, from: data)
+            } catch {
+                // The one case the old `try?` erased. Logged with the byte count and the decoder's
+                // own error, because "which field" is the whole diagnosis and the error names it.
+                bookmarks = []
+                storedDataUnreadable = true
+                NSLog("""
+                      [STREAMS] ⚠️ %d bytes of saved streams are present and CANNOT BE DECODED by \
+                      this build — the list is being shown as empty, and NOTHING WILL BE WRITTEN \
+                      OVER IT. The original bytes are intact under UserDefaults key "%@". \
+                      Decoder said: %@
+                      """, data.count, Self.key, String(describing: error))
+            }
         } else {
-            bookmarks = []
+            bookmarks = []   // fresh install: no key. Distinct from the case above.
         }
         migratePassphrasesToKeychain()
     }
@@ -405,9 +462,32 @@ final class StreamBookmarkStore: ObservableObject {
         persist()
     }
 
+    /// The single write. Two things it will NOT do silently.
+    ///
+    /// 1. IT WILL NOT WRITE OVER DATA IT COULD NOT READ. See `storedDataUnreadable`. Every caller
+    ///    is gated ahead of this too (`add` returns `.storeUnreadable`; `update` and `delete` are
+    ///    unreachable with an empty list), so reaching this guard means a new call site was added
+    ///    without one — which is exactly when a backstop earns its keep. Logged, not just skipped.
+    ///
+    /// 2. IT WILL NOT SWALLOW AN ENCODE FAILURE. This was `if let data = try? …`, so a throwing
+    ///    encode skipped the `set` and returned as if it had saved: `add` answered `.success`, the
+    ///    row appeared in the list, and the entry was gone at the next launch with nothing in the
+    ///    log to connect the two. `JSONEncoder` on this type should not throw — every field is
+    ///    trivially Codable — which is the reason to log it rather than to assume it away, since
+    ///    an occurrence would mean the type had changed into something that can.
     private func persist() {
-        if let data = try? JSONEncoder().encode(bookmarks) {
-            UserDefaults.standard.set(data, forKey: Self.key)
+        guard !storedDataUnreadable else {
+            NSLog("""
+                  [STREAMS] ⚠️ refusing to persist: saved data is present but undecodable by this \
+                  build, and writing now would destroy it. %d in-memory bookmark(s) NOT saved.
+                  """, bookmarks.count)
+            return
+        }
+        do {
+            UserDefaults.standard.set(try JSONEncoder().encode(bookmarks), forKey: Self.key)
+        } catch {
+            NSLog("[STREAMS] ⚠️ could not encode %d stream bookmark(s) — NOTHING WAS SAVED: %@",
+                  bookmarks.count, String(describing: error))
         }
     }
 
@@ -435,6 +515,13 @@ final class StreamBookmarkStore: ObservableObject {
     @discardableResult
     func add(name: String, urlString: String,
              passphrase: String? = nil) -> Result<StreamBookmark, StreamValidationError> {
+        // ⚠️ BEFORE VALIDATION, AND BEFORE ANY KEYCHAIN WRITE. This is the one path that can reach
+        // `persist()` while the list is empty, so it is the path on which the user's undecodable
+        // saved streams actually get destroyed — see `storedDataUnreadable`. Refusing here (rather
+        // than only inside `persist`) is what keeps the answer honest: appending to the in-memory
+        // list and returning `.success` while nothing is written would put the row on screen and
+        // lose it at the next launch, which is a second silent failure stacked on the first.
+        guard !storedDataUnreadable else { return .failure(.storeUnreadable) }
         switch Self.validate(urlString) {
         case .failure(let e): return .failure(e)
         case .success(let (url, type)):

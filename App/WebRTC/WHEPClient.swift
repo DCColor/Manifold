@@ -25,7 +25,7 @@
 //  Step 3a succeeds when those counts look like real H.264 — SPS/PPS/IDR present, slices
 //  flowing, reassembly errors at zero.
 //
-//  Step 3b adds WHEPVideoDecoder: access units arrive on the session's decode queue and go
+//  Step 3b adds LiveVideoDecoder: access units arrive on the session's decode queue and go
 //  through VideoToolbox to CVPixelBuffers, counted under `[WHEP-DECODE]`. Success is that
 //  counter tracking the stream rate at the right dimensions — plus ⌃⌥⇧E, which writes one
 //  decoded frame to a PNG so "decoding" can be checked against actual pixels.
@@ -73,9 +73,9 @@ final class WHEPClient: ObservableObject {
     private var resourceURL: URL?      // WHEP resource from the Location header, for DELETE
     private var startedAt: Date?
 
-    /// Step 3b. Owned here, but touched ONLY on `session.decodeQueue` — see WHEPVideoDecoder's
+    /// Step 3b. Owned here, but touched ONLY on `session.decodeQueue` — see LiveVideoDecoder's
     /// threading note. The two exceptions (`snapshot`, `requestStillExport`) are locked.
-    private var decoder: WHEPVideoDecoder?
+    private var decoder: LiveVideoDecoder?
 
     /// RTP-timestamp unwrapping, which is WHEP's problem and not the decoder's — see
     /// RTPTimestampUnwrapper. Built fresh in `connect()` and released in `disconnect()`, so the
@@ -85,7 +85,7 @@ final class WHEPClient: ObservableObject {
     private var rtpUnwrapper: RTPTimestampUnwrapper?
 
     private var decodeStatsTimer: Timer?
-    private var previousDecodeStats = WHEPVideoDecoder.Stats()
+    private var previousDecodeStats = LiveVideoDecoder.Stats()
     private var decodeStatsTicks = 0
     private var keyframeRequests = 0
 
@@ -184,7 +184,9 @@ final class WHEPClient: ObservableObject {
         // Ordering is not incidental: `onVideoAccessUnit` must be in place before
         // setRemoteAnswer, because RTP can start arriving the instant DTLS completes, and an
         // access unit delivered with no handler installed is simply dropped on the floor.
-        let decoder = WHEPVideoDecoder()
+        // `[WHEP-DECODE]`, matching the prefix this file's own 1 Hz stats line already uses —
+        // the decoder's lines and the client's must sort together under one grep.
+        let decoder = LiveVideoDecoder(logTag: "WHEP-DECODE")
         self.decoder = decoder
         // Fresh per connection: the previous stream's wrap accumulator and origin must not
         // carry over into this one.
@@ -219,7 +221,7 @@ final class WHEPClient: ObservableObject {
         // The decoder fires this on session.decodeQueue when it needs an IDR it does not have:
         // no format description yet, the startup keyframe gate still closed, or — the case this
         // wiring is really for — a mid-stream decode failure that just re-armed that gate
-        // (WHEPVideoDecoder.handleDecoded, Surface 2). HOP TO MAIN: requestKeyframe and the
+        // (LiveVideoDecoder.handleDecoded, Surface 2). HOP TO MAIN: requestKeyframe and the
         // bridge's _closed/_videoTrack lifecycle are main-thread state (see requestKeyframe's
         // assert), and routing every PLI through main is what lets the shared throttle there
         // stay lock-free. The gate means this fires about once per freeze, not once per frame,
@@ -360,7 +362,7 @@ final class WHEPClient: ObservableObject {
 
     private func startDecodeStatsTimer() {
         decodeStatsTimer?.invalidate()
-        previousDecodeStats = WHEPVideoDecoder.Stats()
+        previousDecodeStats = LiveVideoDecoder.Stats()
         decodeStatsTicks = 0
         keyframeRequests = 0
         // Disarm the media watchdog for the fresh connection — it re-arms on this stream's first
@@ -384,7 +386,7 @@ final class WHEPClient: ObservableObject {
         // arriving, so that guard's early return would skip this exact case on every tick.
         //
         // Signal is framesDecoded — the single monotonic counter EVERY decoded frame increments
-        // (WHEPVideoDecoder.handleDecoded, 1:1 with the onDecodedFrame that reaches the screen),
+        // (LiveVideoDecoder.handleDecoded, 1:1 with the onDecodedFrame that reaches the screen),
         // read here through the same locked snapshot the stats already take: no per-frame work, no
         // new cross-thread field. ARMS ONLY once framesDecoded > 0 — the first frame — so a
         // connection that never delivers one is left to the startup path (PLI retries, preIDR
@@ -436,7 +438,7 @@ final class WHEPClient: ObservableObject {
               dropped: preIDR=%d noFmt=%d sbFail=%d  |  errors=%d
               """,
               decodeStatsTicks, decoded, now.framesDecoded,
-              now.width, now.height, WHEPVideoDecoder.formatName(now.pixelFormat),
+              now.width, now.height, LiveVideoDecoder.formatName(now.pixelFormat),
               accessUnits,
               now.droppedAwaitingKeyframe - was.droppedAwaitingKeyframe,
               now.droppedNoFormatDescription - was.droppedNoFormatDescription,
@@ -597,7 +599,7 @@ final class WHEPClient: ObservableObject {
                   formatDescriptions=%d sessions=%d
                   """,
                   stats.accessUnitsReceived, stats.framesDecoded,
-                  stats.width, stats.height, WHEPVideoDecoder.formatName(stats.pixelFormat),
+                  stats.width, stats.height, LiveVideoDecoder.formatName(stats.pixelFormat),
                   stats.droppedAwaitingKeyframe, stats.droppedNoFormatDescription,
                   stats.sampleBufferFailures, stats.decodeErrors,
                   stats.formatDescriptionBuilds, stats.sessionBuilds)

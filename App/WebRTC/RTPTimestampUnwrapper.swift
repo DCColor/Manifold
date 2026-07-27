@@ -23,7 +23,7 @@
 //  Constructed on main in `connect()`, before the closure can run.
 //
 //  ONE INSTANCE PER CONNECTION, and that is the reset. This state used to live
-//  in WHEPVideoDecoder, where `invalidate()` did NOT clear it — harmless only
+//  in LiveVideoDecoder, where `invalidate()` did NOT clear it — harmless only
 //  because `connect()` always built a fresh decoder, i.e. the correctness came
 //  from a lifetime accident somewhere else. Here the object's lifetime IS the
 //  connection's, so there is no reset to forget.

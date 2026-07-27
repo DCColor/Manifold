@@ -179,10 +179,16 @@ final class SRTClient: ObservableObject {
     ///
     /// 15 s, matching WHEP, and the margin matters here for a reason WHEP did not have: a decode
     /// error on this transport is recovered by WAITING OUT THE SENDER'S GOP, because SRT has no
-    /// PLI. That wait is ~2 s on OBS defaults and can be 10 s on a long keyframe interval, and it
+    /// PLI. That wait is ~1 s on OBS defaults and can be 10 s on a long keyframe interval, and it
     /// must NOT be mistaken for a dead stream. 15 s clears the common cases with room; a sender
     /// running a keyframe interval longer than that would need this raised, and the
     /// `[SRT-AU] waiting for an IDR` line is what would say so.
+    ///
+    /// ⚠️ THE "~1 s" IS MEASURED, AND IT USED TO SAY "~2 s". OBS's shipped keyframe interval is
+    /// 1 s, counted from the `[WHEP-RTP]` per-second key-NAL totals — one IDR per second, not one
+    /// per two. THE 15 s IS UNCHANGED AND NEEDS NO CHANGE: it was sized against the 10 s
+    /// long-interval worst case above, never against the OBS figure, so correcting the OBS figure
+    /// moves the reasoning and not the number. Same for the 12 s first-picture grace below.
     private static let mediaStallWindow: TimeInterval = 15
     private var watchdogLastPictures = 0
     private var watchdogSinceHost: CFTimeInterval = 0
@@ -200,7 +206,8 @@ final class SRTClient: ObservableObject {
     //
     //   PHASE 2 — IDENTIFIED, NO PICTURE YET. The video stream is known and access units may be
     //     arriving, but a decoder cannot start on a P-frame and there is no PLI to hurry an IDR
-    //     along. ~2 s on OBS defaults; up to 10 s on a long keyframe interval.
+    //     along. ~1 s on OBS defaults (measured — see the watchdog note above); up to 10 s on a
+    //     long keyframe interval.
     //
     // THE PHASE-2 GRACE ARMS AT IDENTIFICATION, NOT AT CONNECT, and that is the whole reason there
     // are two. Armed at connect, a slow probe would spend its own seconds on phase 2's clock and
@@ -210,7 +217,9 @@ final class SRTClient: ObservableObject {
     /// PHASE 1. Shorter than the phase-2 grace because there is less to legitimately wait for:
     /// identification needs bytes, and bytes either flow or they do not.
     private static let probeGrace: TimeInterval = 8
-    /// PHASE 2. LONGER THAN THE COMMON GOP ON PURPOSE — 12 s clears a 10 s keyframe interval.
+    /// PHASE 2. LONGER THAN THE COMMON GOP ON PURPOSE — 12 s clears a 10 s keyframe interval, which
+    /// is the worst case it was sized against and still is. (The OBS default it also has to clear
+    /// is 1 s, not the ~2 s this file used to assert; the correction moves neither bound.)
     private static let firstPictureGrace: TimeInterval = 12
 
     /// Neither grace is a teardown. Nothing is stopped, the session keeps running, and the message
@@ -519,7 +528,7 @@ final class SRTClient: ObservableObject {
         haveVideoStream = false
         startStatsTimer()   // also clears every per-stream announce latch — see there
 
-        // UNRETAINED CONTEXT, and safe for the same reason WHEPVideoDecoder's output-callback
+        // UNRETAINED CONTEXT, and safe for the same reason LiveVideoDecoder's output-callback
         // refcon is: this is a process-lifetime singleton, and the C session is joined in
         // disconnect() before anything is released, so no callback can outlive its target.
         let context = Unmanaged.passUnretained(self).toOpaque()
@@ -783,7 +792,7 @@ final class SRTClient: ObservableObject {
         retireError()   // phase 1 is over; retire its banner if it showed
 
         NSLog("[SRT] a decoder cannot start on a P-frame and SRT has no PLI, so the picture stays "
-              + "BLACK until the sender's next keyframe (≈2s on OBS defaults). This is not a hang.")
+              + "BLACK until the sender's next keyframe (≈1s on OBS defaults). This is not a hang.")
     }
 
     /// The session thread has finished. Called on main, always after the decode side has already

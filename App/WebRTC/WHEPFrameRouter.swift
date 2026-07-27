@@ -23,7 +23,7 @@
 //                           mirroring NDIService.start() / SyntheticLiveSource.start().
 //
 //  The genuinely WHEP-specific part is one line: the sender timeline is the RTP 90 kHz clock,
-//  which WHEPVideoDecoder has already unwrapped past the ~13-hour 32-bit wrap and handed over
+//  which LiveVideoDecoder has already unwrapped past the ~13-hour 32-bit wrap and handed over
 //  as a CMTime. See `deliver`.
 //
 //  ── THREADING ──────────────────────────────────────────────────────────────────────────
@@ -467,10 +467,10 @@ final class WHEPFrameRouter {
 
     // MARK: - Per-frame (decode queue)
 
-    /// One decoded frame → the screen. Called from WHEPVideoDecoder.onDecodedFrame, on the decode
+    /// One decoded frame → the screen. Called from LiveVideoDecoder.onDecodedFrame, on the decode
     /// queue, with the buffer VideoToolbox produced and the sender-timeline PTS it carried.
     ///
-    /// `pts` IS the sender clock: WHEPVideoDecoder built it from the RTP 90 kHz timestamp, unwrapped
+    /// `pts` IS the sender clock: LiveVideoDecoder built it from the RTP 90 kHz timestamp, unwrapped
     /// across the 32-bit wrap by summing signed deltas (`Int32(bitPattern: new &- previous)`, which
     /// is wrap-correct in both directions) and rebased to zero at the first frame. Seconds of that
     /// is exactly what LiveClock.registerFrame wants — the same role the file PTS plays in
@@ -549,7 +549,7 @@ final class WHEPFrameRouter {
     /// shift, not a filter. That is the format the file path already produces and the format
     /// PassthroughShader.metal's range-expansion constants (kCodeMax = 1023.984375) assume.
     ///
-    /// A NO-OP when VideoToolbox already gave us 10-bit: WHEPVideoDecoder REQUESTS x420 output and
+    /// A NO-OP when VideoToolbox already gave us 10-bit: LiveVideoDecoder REQUESTS x420 output and
     /// only falls back to VT's native 8-bit choice if the session refuses it. When the request
     /// succeeds there is nothing to promote and the decoded buffer goes straight through, which is
     /// why this is `promoteIfNeeded` and not an unconditional conversion.
@@ -560,7 +560,7 @@ final class WHEPFrameRouter {
             if !reportedPromote {
                 reportedPromote = true
                 NSLog("[WHEP] decoded as %@ — already in the renderer's 10-bit domain, no promote needed",
-                      WHEPVideoDecoder.formatName(sourceFormat))
+                      LiveVideoDecoder.formatName(sourceFormat))
             }
             return source
         }
@@ -621,7 +621,7 @@ final class WHEPFrameRouter {
         if !reportedPromote {
             reportedPromote = true
             NSLog("[WHEP] promoting %@ → 'x420' (10-bit 4:2:0) at %dx%d — the shader's sample domain",
-                  WHEPVideoDecoder.formatName(sourceFormat), width, height)
+                  LiveVideoDecoder.formatName(sourceFormat), width, height)
         }
         return destination
     }

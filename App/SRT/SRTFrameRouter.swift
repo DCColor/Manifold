@@ -16,11 +16,10 @@
 //                           WHEPFrameRouter. `targetDepth` below is a STARTING VALUE to be
 //                           measured, exactly as WHEP's 0.400 was, and this is the instrument
 //                           that measures it.
-//    * WHEPVideoDecoder   — used AS-IS. It already takes `pts`/`dts` as CMTime (stage 3b) and is
-//                           documented as transport-agnostic; it has no RTP in it.
-//                           ⚠️ ITS NAME AND ITS `[WHEP-DECODE]` LOG PREFIX ARE NOW WRONG on this
-//                           path. Renaming it is deliberately NOT part of this stage — see the
-//                           note above `decoder` below.
+//    * LiveVideoDecoder   — used AS-IS. It already takes `pts`/`dts` as CMTime (stage 3b) and is
+//                           documented as transport-agnostic; it has no RTP in it. Its WHEP-shaped
+//                           NAME and log prefix, deferred out of this stage, have since been fixed:
+//                           it is `LiveVideoDecoder` and it logs under `[SRT-DECODE]` here.
 //    * the promote        — VTPixelTransferSession into a pooled x420 buffer, the shape NDIService
 //                           and WHEPFrameRouter both use to reach the shader's 10-bit domain.
 //
@@ -36,7 +35,7 @@
 //      everything downstream of the socket: demux, access-unit assembly, VideoToolbox decode,
 //      promote, enqueue. It is ONE thread by construction — the read callback is invoked
 //      synchronously from inside av_read_frame — which is exactly the "one thread owns the
-//      decoder" rule WHEPVideoDecoder requires, satisfied without a queue or a handoff.
+//      decoder" rule LiveVideoDecoder requires, satisfied without a queue or a handoff.
 //    * `activate` / `deactivate` / `adjustTargetDepth` run on MAIN.
 //
 //  `stateLock` guards ONLY the (clock, renderer) pair those two exchange, and is never held
@@ -330,19 +329,15 @@ final class SRTFrameRouter {
 
     // MARK: - Decode + promote state (SESSION THREAD only)
 
-    /// ⚠️ NAME AND LOG PREFIX ARE WRONG ON THIS PATH, AND DELIBERATELY LEFT THAT WAY.
+    /// The shared VideoToolbox decoder, logging under `[SRT-DECODE]` on this path.
     ///
-    /// WHEPVideoDecoder is transport-agnostic — stage 3b gave it `pts`/`dts` as CMTime specifically
-    /// so one signature would serve both, and there is no RTP in it. What is still WHEP-shaped is
-    /// its NAME and its `[WHEP-DECODE]` log prefix, which means an SRT session's log carries
-    /// `[WHEP-DECODE]` lines. That is confusing and it is the one visible wart in this stage.
-    ///
-    /// NOT FIXED HERE ON PURPOSE: the fix is a rename plus a `logTag` init parameter, it touches
-    /// WHEPClient and every `[WHEP-DECODE]` line, and doing it inside a stage whose job is "first
-    /// picture on screen" would make this diff unreviewable. This file's own `[SRT-FLOW]` and
-    /// `[SRT-AU]` lines carry enough for the SRT path to be diagnosed without reading the
-    /// mislabelled ones.
-    private var decoder: WHEPVideoDecoder?
+    /// It used to be `WHEPVideoDecoder` with a hardcoded `[WHEP-DECODE]` prefix, so an SRT
+    /// session's log carried WHEP-labelled decode lines — noted here as the one visible wart of
+    /// stage 3d and deferred out of it. Since fixed as it was described: the type is
+    /// transport-neutral (`LiveVideoDecoder`, in App/Live) and takes its prefix as an init
+    /// parameter, so the SRT path's decode lines now sort with its `[SRT-AU]` and `[SRT-FLOW]`
+    /// ones instead of against WHEP's.
+    private var decoder: LiveVideoDecoder?
 
     private var transferSession: VTPixelTransferSession?
     private var pixelBufferPool: CVPixelBufferPool?
@@ -535,7 +530,7 @@ final class SRTFrameRouter {
     // MARK: - Session-thread lifecycle
 
     /// Build the decoder and wire it to `deliver`. SESSION THREAD, from onVideoFormat — the same
-    /// thread that will call `decode`, which is what WHEPVideoDecoder's "one thread owns the
+    /// thread that will call `decode`, which is what LiveVideoDecoder's "one thread owns the
     /// session" rule requires.
     func prepareDecoder(format: ManifoldSRTVideoFormat, colorimetry: StreamColorimetry) {
         self.colorimetry = colorimetry
@@ -568,14 +563,15 @@ final class SRTFrameRouter {
         anchorNominalRate = anchorRateWasDeclared ? guessed : Self.anchorFallbackFrameRate
         anchorGapThreshold = Self.anchorGapFraction / anchorNominalRate
 
-        let decoder = WHEPVideoDecoder()
+        let decoder = LiveVideoDecoder(logTag: "SRT-DECODE")
         decoder.onDecodedFrame = { [weak self] pixelBuffer, pts in
             self?.deliver(pixelBuffer, pts: pts)
         }
         // ── NO PLI, AND NOTHING TO PUT IN ITS PLACE ─────────────────────────────────────────
         // WHEP wires this to `session.requestKeyframe()`. SRT has no back-channel: it is a
         // one-way media transport with no RTCP and no picture-loss indication, so there is
-        // nobody to ask. Recovery means WAITING OUT THE SENDER'S GOP — ~2 s on OBS defaults,
+        // nobody to ask. Recovery means WAITING OUT THE SENDER'S GOP — ~1 s on OBS defaults
+        // (measured from the `[WHEP-RTP]` per-second key-NAL counts; this used to say ~2 s),
         // longer on a 5 s or 10 s keyframe interval. Counted and logged so a freeze has a stated
         // cause and an expected duration, rather than being wired to a no-op that reads as if a
         // request went out.
@@ -740,7 +736,7 @@ final class SRTFrameRouter {
         lastKeyframeWaitLog = now
         NSLog("""
               [SRT-AU] waiting for an IDR — SRT has no back-channel, so there is no PLI to send. \
-              The picture holds until the sender's next keyframe (≈2s on OBS defaults, longer on a \
+              The picture holds until the sender's next keyframe (≈1s on OBS defaults, longer on a \
               5s or 10s interval).
               """)
     }
@@ -1015,7 +1011,7 @@ final class SRTFrameRouter {
             if !reportedPromote {
                 reportedPromote = true
                 NSLog("[SRT] decoded as %@ — already in the renderer's 10-bit domain, no promote needed",
-                      WHEPVideoDecoder.formatName(sourceFormat))
+                      LiveVideoDecoder.formatName(sourceFormat))
             }
             return source
         }
@@ -1076,7 +1072,7 @@ final class SRTFrameRouter {
         if !reportedPromote {
             reportedPromote = true
             NSLog("[SRT] promoting %@ → 'x420' (10-bit 4:2:0) at %dx%d — the shader's sample domain",
-                  WHEPVideoDecoder.formatName(sourceFormat), width, height)
+                  LiveVideoDecoder.formatName(sourceFormat), width, height)
         }
         return destination
     }
