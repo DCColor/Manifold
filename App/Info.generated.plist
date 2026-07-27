@@ -36,5 +36,7 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Manifold uses your local network to find NDI video sources to play.</string>
 </dict>
 </plist>

@@ -120,8 +120,18 @@ schemes:
       config: Profile
     analyze:
       config: Debug
+    # ⚠️ PROFILE, NOT RELEASE, AND DELIBERATELY SO. This was pinned to Release, which meant
+    # Product ▸ Archive in Xcode silently produced the PUBLIC build — the one whose per-second
+    # telemetry ([SRT-FLOW], [WHEP-FLOW], the decode tick, depth/jitter/underrun) is compiled
+    # out, so a tester's Export Diagnostics… file carries the connection lifecycle and nothing
+    # else. The GUI default now matches the build we actually hand to testers.
+    #
+    # Cutting the PUBLIC build is scripts/release-mac.sh's job: it passes `-configuration
+    # Release`, which overrides this, and then ASSERTS the result by checking the binary for
+    # [SRT-FLOW] — present required for Profile, absent required for Release. So neither
+    # direction can be got wrong silently, whichever way this line is set.
     archive:
-      config: Release
+      config: Profile
 
 targets:
   Manifold:
@@ -139,6 +149,21 @@ targets:
     info:
       path: App/Info.generated.plist
       properties:
+        # ── LOCAL NETWORK CONSENT (macOS 15+) ──────────────────────────────────────────────
+        # NDI source discovery is mDNS — NDIlib_find_create_v2, see App/NDI/NDIBridge.mm — and
+        # from macOS 15 that is gated behind a TCC prompt. Without this string the prompt is
+        # generic, so a tester is asked to grant local-network access to a video player with no
+        # stated reason; declining makes NDI discovery return an empty source list with NO ERROR
+        # anywhere, which is indistinguishable from "no NDI sources are running".
+        #
+        # ⚠️ THIS BELONGS IN info.properties AND NOT IN AN INFOPLIST_KEY_ BUILD SETTING. Both
+        # reach the built plist — verified: CFBundleDocumentTypes below is set only here and is
+        # present in the built Info.plist. The version keys are the exception to that rule, not
+        # the rule: a build setting BEATS a same-named key in the source plist, which is why
+        # MARKETING_VERSION lives in settings and why editing the generated plist for a version
+        # does nothing. No build setting is named NSLocalNetworkUsageDescription, so nothing
+        # overrides this one.
+        NSLocalNetworkUsageDescription: "Manifold uses your local network to find NDI video sources to play."
         CFBundleDocumentTypes:
           - CFBundleTypeName: Movie
             LSItemContentTypes:
@@ -162,7 +187,7 @@ targets:
         # Info.plist, not assumed. A release script must edit THIS line; editing the generated
         # plist would appear to work and change nothing.
         MARKETING_VERSION: "0.5.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "3"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Graviton Tools"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.video"
