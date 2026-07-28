@@ -296,11 +296,14 @@ fail() { bad "$*"; FAIL=1; }
 
 MODE="build"
 RELOC_APP=""
+TARBALL_OUT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --provenance-only)     MODE="provenance" ;;
         --verify-only)         MODE="verify" ;;
         --verify-relocatable)  MODE="reloc"; RELOC_APP="${2:-}"; shift ;;
+        --source-info)         MODE="sourceinfo" ;;
+        --source-tarball)      MODE="tarball"; TARBALL_OUT="${2:-}"; shift ;;
         -h|--help)             sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *)                     die "unknown argument: $1" ;;
     esac
@@ -357,6 +360,179 @@ assert_config_line() {
     FAIL=1
     return 1
 }
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# THE CORRESPONDING-SOURCE TARBALL (LGPL 2.1 §6)
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# §6 requires the Library's complete corresponding source to accompany the work (or a §6(c)
+# written offer). The About panel makes the offer and names a URL; this is what that URL serves.
+#
+# ── IT IS BUILT FROM THE PINNED GIT CHECKOUT, NOT FROM THE OLD BY-HAND TREE ──
+# The two were proven byte-identical for every git-tracked file (--provenance-only), so either
+# would be *correct*. The checkout is more DEFENSIBLE, for four reasons:
+#
+#   1. `git archive <SHA>` is a pure function of the commit. Anyone holding the SHA we publish
+#      can regenerate the same tree and check ours against it. The offer names a commit, so the
+#      tarball should be derivable from that commit and nothing else.
+#   2. The by-hand tree carries BUILD OUTPUTS mixed into the source — config.h,
+#      config_components.h, ffbuild/, *.o, *.d. Producing a clean source tarball from it means
+#      hand-curating exclusions, which is exactly the kind of judgement that silently goes wrong.
+#   3. The byte-identity we proved covers git-TRACKED files only. It says nothing about extra
+#      files in that tree. Building from the checkout means that proof carries no weight here at
+#      all — nothing rests on it.
+#   4. The legacy tree is untracked, disposable, and lives in one person's home directory; the
+#      commit is permanent. A provenance chain whose root is a local folder is not a chain.
+#
+# ── AND IT CARRIES BUILD.txt ──
+# "Corresponding source" means the source AS BUILT. Upstream source alone does not tell you which
+# decoders were compiled in or that the network layer was disabled, so the configure line ships
+# inside the tarball rather than only in the About panel.
+
+FFMPEG_SHORT="${FFMPEG_COMMIT:0:12}"
+SOURCE_FILENAME="ffmpeg-${FFMPEG_TAG}-${FFMPEG_SHORT}.tar.xz"
+# wrangler's objectPath form: the FIRST component is the bucket, the rest is the key. The Worker
+# then serves it at /manifold/source/<file> (env.GRAVITON.get("manifold/source/<file>")).
+SOURCE_OBJECT="graviton/manifold/source/${SOURCE_FILENAME}"
+SOURCE_URL="https://releases.graviton.tools/manifold/source/${SOURCE_FILENAME}"
+# The tree prefix inside the tarball.
+SOURCE_PREFIX="ffmpeg-${FFMPEG_TAG}"
+
+# The configure line as it belongs in BUILD.txt: every flag EXCEPT --prefix, which is a local
+# install path that has no effect on the code produced and would leak a home directory.
+configure_line_public() {
+    local a
+    for a in "${CONFIGURE_ARGS[@]}"; do
+        case "$a" in --prefix=*) continue ;; esac
+        printf '%s\n' "  $a"
+    done
+}
+
+write_build_txt() {   # write_build_txt <dest-file>
+    cat > "$1" <<BUILDTXT
+FFmpeg ${FFMPEG_TAG} — complete corresponding source for Manifold
+=================================================================
+
+This archive is the source for the FFmpeg shared libraries distributed inside
+Manifold.app/Contents/Frameworks:
+
+    libavcodec.62.dylib   libavformat.62.dylib   libavutil.60.dylib
+    libswscale.9.dylib    libswresample.6.dylib
+
+It is provided to satisfy GNU LGPL 2.1 section 6. Those libraries are LGPL-2.1-or-later.
+Manifold itself is proprietary and is NOT covered by the LGPL; it merely links these
+libraries, which is what section 6 permits and regulates.
+
+WHAT THIS IS
+------------
+Unmodified upstream FFmpeg. No patch of ours is applied to any file.
+
+    Release tag : ${FFMPEG_TAG}
+    Commit      : ${FFMPEG_COMMIT}
+    Upstream    : https://git.ffmpeg.org/ffmpeg.git
+                  https://github.com/FFmpeg/FFmpeg.git   (official mirror)
+
+Everything here except this BUILD.txt is the exact content of that commit. You can verify
+that yourself, without trusting us:
+
+    git clone https://github.com/FFmpeg/FFmpeg.git && cd FFmpeg
+    git archive --format=tar --prefix=${SOURCE_PREFIX}/ ${FFMPEG_COMMIT} | tar -tvf - | sort
+
+and compare against the listing of this archive (BUILD.txt aside).
+
+HOW IT WAS BUILT
+----------------
+"Corresponding source" means the source AS BUILT, so here is the configure line. The
+--prefix argument is omitted: it is a local install path and does not affect the code.
+
+  ./configure \\
+$(configure_line_public | sed 's/$/ \\/' | sed '$ s/ \\$//')
+
+Built on macOS for arm64 with the clang from Xcode. Note in particular:
+
+  --disable-network   There is no network layer in these libraries at all. The only
+                      protocol compiled in is "file". Manifold feeds libavformat through
+                      its own AVIOContext; the SRT and WebRTC transports are separate
+                      libraries and are not part of FFmpeg.
+  --disable-everything plus the explicit --enable-decoder/--enable-demuxer flags: only the
+                      listed components are present. This is a deliberately small build.
+
+Neither --enable-gpl nor --enable-nonfree nor --enable-version3 was used, so the LGPL —
+not the GPL — applies. config.h in a configured tree will show CONFIG_GPL 0,
+CONFIG_NONFREE 0, CONFIG_VERSION3 0.
+
+RELINKING MANIFOLD AGAINST YOUR OWN BUILD
+-----------------------------------------
+LGPL 2.1 section 6 exists so that you can replace these libraries. Manifold is shipped with
+that in mind: the libraries are dynamically linked, embedded as separate dylibs, and loaded
+via @rpath. Step-by-step instructions are in Manifold under
+Manifold > About Manifold > Licences > FFmpeg.
+
+The short version: build this source with the configure line above, give each dylib an
+@rpath install name, copy it into Manifold.app/Contents/Frameworks/, ad-hoc sign the
+replacement, then re-sign the app bundle.
+BUILDTXT
+}
+
+make_source_tarball() {   # make_source_tarball <out.tar.xz>
+    local out="$1"
+    [ -n "$out" ] || die "--source-tarball needs an output path"
+    case "$out" in /*) ;; *) out="$(pwd)/${out}" ;; esac
+
+    head2 "SOURCE TARBALL — ${SOURCE_FILENAME}"
+
+    local stage="${WORK}/tarball-stage"
+    rm -rf "$stage"; mkdir -p "$stage"
+
+    # `git archive` rather than a copy of the working tree: the output is exactly the commit's
+    # tree, with no build outputs, no .git, and nothing the working directory happens to contain.
+    git -C "$SRC" archive --format=tar --prefix="${SOURCE_PREFIX}/" "$FFMPEG_COMMIT" \
+        | ( cd "$stage" && tar -xf - )
+    ok "extracted the commit's tree ($(find "${stage}/${SOURCE_PREFIX}" -type f | wc -l | tr -d ' ') files)"
+
+    write_build_txt "${stage}/${SOURCE_PREFIX}/BUILD.txt"
+    ok "BUILD.txt written (tag, commit, configure line, relink pointer)"
+
+    # System tar, which on macOS is libarchive and compresses xz natively (-J). Deliberately NOT
+    # the Homebrew `xz` binary: this needs no dependency that a fresh machine lacks.
+    rm -f "$out"
+    ( cd "$stage" && tar -cJf "$out" "${SOURCE_PREFIX}" )
+    [ -f "$out" ] || die "tar produced no archive at ${out}"
+    ok "compressed → ${out} ($(awk -v b="$(stat -f%z "$out")" 'BEGIN{printf "%.2f MB", b/1048576}'))"
+
+    # ── CONTENT ASSERTION. Byte-for-byte reproducibility is not the goal (tar records mtimes and
+    #    ownership); PROVING THE CONTENTS ARE THE COMMIT is. So the archive's file list is diffed
+    #    against the commit's file list, and only BUILD.txt may differ.
+    local in_tar in_commit unexpected missing
+    in_tar="$(tar -tf "$out" | sed "s|^${SOURCE_PREFIX}/||" | grep -v '/$' | grep -v '^$' | sort)"
+    in_commit="$( (git -C "$SRC" ls-tree -r --name-only "$FFMPEG_COMMIT"; echo "BUILD.txt") | sort)"
+    unexpected="$(comm -23 <(printf '%s\n' "$in_tar") <(printf '%s\n' "$in_commit") || true)"
+    missing="$(comm -13 <(printf '%s\n' "$in_tar") <(printf '%s\n' "$in_commit") || true)"
+    if [ -n "$unexpected" ] || [ -n "$missing" ]; then
+        [ -n "$unexpected" ] && { bad "files in the tarball that are NOT in the commit:"; sed 's/^/      /' <<<"$unexpected"; }
+        [ -n "$missing" ]    && { bad "files in the commit that are MISSING from the tarball:"; sed 's/^/      /' <<<"$missing"; }
+        die "the source tarball does not match the pinned commit"
+    fi
+    ok "contents == commit ${FFMPEG_SHORT} exactly, plus BUILD.txt ($(printf '%s\n' "$in_tar" | wc -l | tr -d ' ') files)"
+
+    rm -rf "$stage"
+}
+
+# ── --source-info is dispatched HERE, ahead of everything that prints ──────────────────────
+# Its stdout is consumed by `eval` in release-mac.sh, so it must emit the six assignments and
+# NOTHING else. GATE 0 below prints a banner, which would be eval'd as commands — hence this
+# runs first and carries its own pin check.
+# (--source-tarball is dispatched further down: it calls fetch_source(), defined after GATE 0.)
+if [ "$MODE" = "sourceinfo" ]; then
+    [ -n "$FFMPEG_COMMIT" ] || die "FFMPEG_COMMIT is empty — bootstrap the pin first"
+    printf 'FFMPEG_TAG=%s\n'      "$FFMPEG_TAG"
+    printf 'FFMPEG_COMMIT=%s\n'   "$FFMPEG_COMMIT"
+    printf 'FFMPEG_SHORT=%s\n'    "$FFMPEG_SHORT"
+    printf 'SOURCE_FILENAME=%s\n' "$SOURCE_FILENAME"
+    printf 'SOURCE_OBJECT=%s\n'   "$SOURCE_OBJECT"
+    printf 'SOURCE_URL=%s\n'      "$SOURCE_URL"
+    exit 0
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # MODE: bootstrap — resolve the tag to a commit SHA and stop
@@ -686,6 +862,16 @@ if [ "$MODE" = "provenance" ]; then
     provenance_diff
     say ""
     ok "provenance check complete — nothing was built"
+    exit 0
+fi
+
+if [ "$MODE" = "tarball" ]; then
+    fetch_source
+    make_source_tarball "$TARBALL_OUT"
+    say ""
+    ok "source tarball ready"
+    say "  object : ${SOURCE_OBJECT}"
+    say "  url    : ${SOURCE_URL}"
     exit 0
 fi
 

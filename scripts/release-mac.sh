@@ -242,6 +242,42 @@ if compgen -G "${REPO_ROOT}/ThirdParty/ffmpeg/lib/*.a" >/dev/null; then
 fi
 ok "gitignored build inputs present (DeckLink SDK, NDI headers, 3 vendored lib trees)"
 
+# ── LGPL §6: THE ABOUT PANEL MAKES A WRITTEN OFFER, AND AN OFFER MUST BE ACTIONABLE ──────
+#
+# App/AboutWindow.swift offers, in the shipped binary, to supply FFmpeg's corresponding source
+# and names both a URL and a contact address. Neither can be checked by the compiler, and both
+# fail in the same silent way: the app ships, the notice looks complete, and the offer is void.
+# So both are asserted here, before anything is built.
+ABOUT_SWIFT="${REPO_ROOT}/App/AboutWindow.swift"
+[[ -f "$ABOUT_SWIFT" ]] || die "App/AboutWindow.swift not found — the §6 notice lives there"
+
+# (1) The contact address must have been filled in. The placeholder uses the RFC 2606 .invalid
+#     TLD precisely so this check cannot be fooled by something that merely looks like an email.
+if grep -q 'SET-BEFORE-RELEASE' "$ABOUT_SWIFT"; then
+    die "the LGPL §6 written offer still carries a PLACEHOLDER contact address.
+       App/AboutWindow.swift → Attributions.licensingContact
+       A written offer that names an address nobody reads is not an offer, and this build would
+       ship that claim to every user. Set a monitored mailbox — one that will still be monitored
+       in three years, which is how long §6(c) binds us — and re-run."
+fi
+ok "LGPL §6 contact address is set"
+
+# (2) The published-source URL in the app must match the one derived from the FFmpeg pin.
+#     build_ffmpeg.sh owns the pin; AboutWindow.swift holds a copy for display. A stale copy
+#     would have the app offer source at a URL that was never uploaded.
+PIN_INFO=$( "${REPO_ROOT}/scripts/build_ffmpeg.sh" --source-info ) \
+    || die "could not read the FFmpeg source pin from scripts/build_ffmpeg.sh"
+eval "$PIN_INFO"
+if ! contains "$SOURCE_URL" "$(cat "$ABOUT_SWIFT")"; then
+    ABOUT_URL=$(grep -oE 'https://releases\.graviton\.tools/manifold/source/[^"]*' "$ABOUT_SWIFT" | head -1)
+    die "the source URL in the About panel does not match the FFmpeg pin.
+       AboutWindow.swift says : ${ABOUT_URL:-<none found>}
+       the pin derives        : ${SOURCE_URL}
+       The pin moved and Attributions.ffmpegSourceURL was not updated with it. Fix the literal
+       in App/AboutWindow.swift — build_ffmpeg.sh is the source of truth, not this copy."
+fi
+ok "About panel source URL matches the pin (${SOURCE_FILENAME})"
+
 mkdir -p "$DIST_DIR" "${REPO_ROOT}/build"
 case "$DIST_DIR" in
     *Nextcloud*) warn "MANIFOLD_DIST_DIR is inside Nextcloud — exclude it from sync or the DMG may corrupt" ;;
@@ -829,6 +865,84 @@ if [[ $DO_UPLOAD -eq 0 ]]; then
     ok "not published; the verified DMG is at ${DMG}"
     record "published:               no (--no-upload)"
 else
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    # 12b. Corresponding source (LGPL 2.1 §6) — published BEFORE the binary
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    #
+    # The About panel makes a written offer under §6 and NAMES A URL. If that URL does not
+    # resolve, the offer is not an offer. So the source goes up first: at no point is a binary
+    # downloadable whose licence notice points at a 404.
+    #
+    # ⚠️ THIS IS KEYED BY THE FFmpeg PIN, NOT BY THE MANIFOLD VERSION. The tarball is FFmpeg's
+    # source; it changes only when the pinned commit changes. Re-uploading 11 MB of identical
+    # bytes on every release would be waste, so a normal release costs ONE HTTP request and
+    # uploads nothing. Bumping the pin changes the filename, the HEAD misses, and exactly one
+    # upload happens automatically.
+    #
+    # The filename carries the short SHA, so the URL the About panel prints and the object in
+    # the bucket cannot name different versions — there is one string, derived from one pin.
+    step "Corresponding source (LGPL §6)"
+
+    # Read the pin and the key format from build_ffmpeg.sh rather than restating them. That
+    # script owns the pin; a second copy here is a second thing to forget to update.
+    SOURCE_INFO=$( "${REPO_ROOT}/scripts/build_ffmpeg.sh" --source-info ) \
+        || die "could not read the FFmpeg source pin from scripts/build_ffmpeg.sh"
+    eval "$SOURCE_INFO"
+    [[ -n "${SOURCE_URL:-}" && -n "${SOURCE_OBJECT:-}" ]] \
+        || die "scripts/build_ffmpeg.sh --source-info did not yield SOURCE_URL/SOURCE_OBJECT"
+    ok "pin ${FFMPEG_TAG} @ ${FFMPEG_SHORT}"
+    ok "expects ${SOURCE_FILENAME}"
+
+    # ── Is it already published? One request against the very URL the app will print, which
+    #    is a stronger check than asking R2 directly: it also proves the Worker serves it.
+    set +e
+    SRC_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -I -L --max-time 30 "$SOURCE_URL" 2>/dev/null)
+    src_curl_status=$?
+    set -e
+
+    if [[ $src_curl_status -eq 0 && "$SRC_HTTP" == "200" ]]; then
+        ok "already published (HTTP 200) — nothing to upload"
+        record "corresponding source:    already live, ${SOURCE_FILENAME}"
+    else
+        warn "not published yet (HTTP ${SRC_HTTP:-?}) — building and uploading it now"
+
+        SOURCE_TARBALL="${RUN_DIR}/${SOURCE_FILENAME}"
+        "${REPO_ROOT}/scripts/build_ffmpeg.sh" --source-tarball "$SOURCE_TARBALL" \
+            > "${LOG_DIR}/source-tarball.log" 2>&1 \
+            || { tail -30 "${LOG_DIR}/source-tarball.log" >&2
+                 die "could not build the corresponding-source tarball — log: ${LOG_DIR}/source-tarball.log"; }
+        [[ -f "$SOURCE_TARBALL" ]] || die "the tarball step reported success but produced no file"
+        ok "built $(du -h "$SOURCE_TARBALL" | awk '{print $1}') from the pinned checkout"
+
+        # Same invocation shape the shared uploader uses: the first path component is the
+        # bucket, the rest is the key, and --remote means the real bucket rather than a local
+        # simulation. Run from REPO_ROOT so wrangler resolves the same account cache.
+        ( cd "$REPO_ROOT" && wrangler r2 object put "$SOURCE_OBJECT" --file "$SOURCE_TARBALL" --remote ) \
+            > "${LOG_DIR}/source-upload.log" 2>&1 \
+            || { tail -20 "${LOG_DIR}/source-upload.log" >&2
+                 die "uploading the corresponding source failed — log: ${LOG_DIR}/source-upload.log"; }
+        ok "uploaded to ${SOURCE_OBJECT}"
+
+        # ── VERIFY IT IS ACTUALLY SERVED. The upload can succeed while the URL still 404s,
+        #    because the Worker only passes through endpoints it knows about.
+        set +e
+        SRC_HTTP2=$(curl -sS -o /dev/null -w '%{http_code}' -I -L --max-time 30 "$SOURCE_URL" 2>/dev/null)
+        set -e
+        if [[ "$SRC_HTTP2" != "200" ]]; then
+            die "the source uploaded to R2 but ${SOURCE_URL} returns HTTP ${SRC_HTTP2:-?}.
+       THIS IS A WORKER ROUTING GAP, NOT A FAILED UPLOAD — and it would ship an app whose
+       LGPL §6 offer points at a dead URL.
+       The release Worker passes through only 'binaries', 'current' and 'archive'. Add
+       'source' in Graviton-Releases/src/index.js:
+           if (endpoint === 'current' || endpoint === 'archive' || endpoint === 'source') {
+       then redeploy:
+           cd $(dirname "$UPLOAD_SCRIPT") && wrangler deploy
+       and re-run this release."
+        fi
+        ok "served at ${SOURCE_URL} (HTTP 200)"
+        record "corresponding source:    UPLOADED + verified, ${SOURCE_FILENAME}"
+    fi
+
     step "Publish to R2"
 
     # The uploader is invoked from the repo root so its default RELEASE_NOTES.md lookup and any

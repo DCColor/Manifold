@@ -71,11 +71,23 @@
 //
 //  ── LGPL: THIS WINDOW IS NOT THE WHOLE OBLIGATION ──────────────────────────────────────
 //
-//  FFmpeg is LGPL-2.1-or-later and is STATICALLY linked. Attribution plus licence text is
-//  necessary and not sufficient — LGPL §6 also requires that the end user be able to
-//  relink the application against a modified FFmpeg. See docs/THIRD_PARTY_NOTICES.md for
-//  what that costs and the options for satisfying it; it is an unresolved shipping
-//  question, not something this file can answer.
+//  FFmpeg is LGPL-2.1-or-later and is DYNAMICALLY linked — five dylibs in
+//  Contents/Frameworks, loaded via @rpath. That is not an implementation detail, it is the
+//  §6(b) compliance mechanism: §6 requires the user be able to RELINK the application
+//  against a modified FFmpeg, which static linking makes impossible.
+//
+//  ⚠️ THIS FILE IS NOW PART OF THE COMPLIANCE, NOT JUST A CREDIT LIST. The FFmpeg entry
+//  carries the §6(c) WRITTEN OFFER and the step-by-step relink instructions, and it is the
+//  only place an end user — who has the .app and not this repo — can find either. Do not
+//  trim it for length. Two of its facts cannot be checked by the compiler and are asserted
+//  instead by scripts/release-mac.sh at preflight:
+//
+//    * `licensingContact` must not still be the placeholder (an offer naming an unread
+//      address is not an offer);
+//    * `ffmpegSourceURL` must equal the URL derived from the FFmpeg pin in
+//      scripts/build_ffmpeg.sh, so the app cannot offer source at a URL nobody uploaded.
+//
+//  See docs/THIRD_PARTY_NOTICES.md for the full obligation and how each half is discharged.
 //
 
 import AppKit
@@ -126,6 +138,33 @@ struct Attribution {
 }
 
 enum Attributions {
+
+    // MARK: LGPL §6 — the two facts the FFmpeg offer depends on
+
+    /// Where the complete corresponding source for the shipped FFmpeg libraries is published.
+    ///
+    /// ⚠️ THIS STRING AND `scripts/build_ffmpeg.sh` MUST AGREE, and nothing at compile time can
+    /// check that. The filename carries the short commit SHA of the FFmpeg pin, so bumping the
+    /// pin changes the URL — and a stale copy here would leave the app making a written offer
+    /// that points at a URL nobody ever uploaded.
+    ///
+    /// `scripts/release-mac.sh` therefore asserts, at preflight, that this literal equals the
+    /// `SOURCE_URL` that `build_ffmpeg.sh --source-info` derives from the pin. The pin is the
+    /// single source of truth; this is a copy that is CHECKED rather than trusted.
+    static let ffmpegSourceURL =
+        "https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4.tar.xz"
+
+    /// Where a §6(c) request is sent.
+    ///
+    /// ⚠️ A WRITTEN OFFER NAMING AN ADDRESS NOBODY READS IS NOT AN OFFER. This deliberately
+    /// holds an unusable placeholder — `.invalid` is reserved by RFC 2606 and can never be a
+    /// real domain — so that it cannot be mistaken for a working address, and
+    /// `scripts/release-mac.sh` refuses to build a release while it is still here.
+    ///
+    /// Replace with a monitored mailbox that will still be monitored in three years. A personal
+    /// address is a poor choice for a commitment with that lifetime; an alias is better.
+    static let licensingContact = "SET-BEFORE-RELEASE@example.invalid"
+
     /// ⚠️ EVERY VERSION BELOW WAS READ OUT OF THE BUILD TREE, not off a website. libsrt from
     /// its CMakeLists `SRT_VERSION`, libdatachannel/libjuice/libsrtp2 likewise, Mbed TLS from
     /// `MBEDTLS_VERSION_STRING`, FFmpeg from the source tarball name, NDI from the SDK's own
@@ -143,15 +182,118 @@ enum Attributions {
             role: "Demuxes and decodes files and SRT streams",
             tier: .primary,
             license: "LGPL-2.1-or-later",
-            provenance: "~/manifold-ffmpeg-srt/FFmpeg-n8.1.1/LICENSE.md and COPYING.LGPLv2.1",
+            provenance: "git.ffmpeg.org/ffmpeg.git @ n8.1.1 "
+                + "(239f2c733de417201d7ad3b3b8b0d9b63285b2b1); LICENSE.md and COPYING.LGPLv2.1",
             note: """
-                  STATICALLY LINKED. Built with neither --enable-gpl nor --enable-nonfree nor \
-                  --enable-version3 (config.h: CONFIG_GPL 0, CONFIG_NONFREE 0, CONFIG_VERSION3 0), \
-                  so the LGPL — not the GPL — applies to this build. The GPL filters and tools \
-                  enumerated in LICENSE.md below are NOT enabled here; that file is reproduced \
-                  unedited rather than trimmed to the parts that apply. Static linking carries \
-                  relinking obligations under LGPL §6 that attribution alone does not satisfy; \
-                  see docs/THIRD_PARTY_NOTICES.md.
+                  DYNAMICALLY LINKED, and deliberately so. The five libraries ship as separate \
+                  dylibs in Manifold.app/Contents/Frameworks, loaded at run time through @rpath, \
+                  precisely so that you can replace them — see RELINKING below. This is what \
+                  LGPL 2.1 §6(b) asks for, and it is why they are not compiled into the \
+                  application binary.
+
+                  Built with neither --enable-gpl nor --enable-nonfree nor --enable-version3 \
+                  (config.h: CONFIG_GPL 0, CONFIG_NONFREE 0, CONFIG_VERSION3 0), so the LGPL — \
+                  not the GPL — applies to this build. The GPL filters and tools enumerated in \
+                  LICENSE.md below are NOT enabled here; that file is reproduced unedited rather \
+                  than trimmed to the parts that apply.
+
+                  ─────────────────────────────────────────────────────────────────────────
+                  COMPLETE CORRESPONDING SOURCE (LGPL 2.1 §6)
+                  ─────────────────────────────────────────────────────────────────────────
+
+                  These libraries are UNMODIFIED upstream FFmpeg — no patch of ours is applied \
+                  to any file. That was verified by comparing every file tracked at the commit \
+                  below against the tree the shipped libraries were built from.
+
+                      Release tag : n8.1.1
+                      Commit      : 239f2c733de417201d7ad3b3b8b0d9b63285b2b1
+                      Upstream    : https://git.ffmpeg.org/ffmpeg.git
+                                    https://github.com/FFmpeg/FFmpeg.git  (official mirror)
+
+                  The exact source these libraries were built from, including a BUILD.txt \
+                  recording the configure line, is published at:
+
+                      \(Attributions.ffmpegSourceURL)
+
+                  Configured exactly as follows. ("Corresponding source" means the source AS \
+                  BUILT, so the configuration is part of what is being disclosed. The --prefix \
+                  argument is omitted: it is a local install path and does not affect the code \
+                  produced.)
+
+                      ./configure \\
+                        --enable-shared \\
+                        --disable-static \\
+                        --install-name-dir=@rpath \\
+                        --disable-programs \\
+                        --disable-doc \\
+                        --disable-autodetect \\
+                        --disable-network \\
+                        --disable-everything \\
+                        --enable-decoder=dnxhd \\
+                        --enable-decoder=prores \\
+                        --enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be,pcm_f32le,aac,aac_latm \\
+                        --enable-demuxer=mov \\
+                        --enable-demuxer=mxf \\
+                        --enable-demuxer=mpegts \\
+                        --enable-parser=h264 \\
+                        --enable-protocol=file \\
+                        --enable-swscale \\
+                        --disable-x86asm \\
+                        --extra-cflags=-mmacosx-version-min=15.0 \\
+                        --extra-ldflags=-mmacosx-version-min=15.0
+
+                  WRITTEN OFFER. For three years from the date this build was published, we \
+                  will supply the complete corresponding source for these libraries to any \
+                  third party, on request, for no more than the cost of physically performing \
+                  the distribution. Write to \(Attributions.licensingContact).
+
+                  ─────────────────────────────────────────────────────────────────────────
+                  RELINKING MANIFOLD AGAINST YOUR OWN FFmpeg (LGPL 2.1 §6b)
+                  ─────────────────────────────────────────────────────────────────────────
+
+                  You may replace the FFmpeg libraries in this application with your own build, \
+                  modified or not. These steps are tested and work on a signed, notarized copy.
+
+                  1. Build FFmpeg as shared libraries. The configure line above reproduces ours; \
+                     any configuration producing the same library major versions will link. The \
+                     bundle expects exactly these names:
+
+                         libavcodec.62.dylib    libavformat.62.dylib   libavutil.60.dylib
+                         libswscale.9.dylib     libswresample.6.dylib
+
+                  2. Give each one an @rpath install name, so the app can find it. Building with \
+                     --install-name-dir=@rpath does this for you; otherwise:
+
+                         install_name_tool -id @rpath/libavcodec.62.dylib libavcodec.62.dylib
+
+                  3. Copy it into the bundle, replacing ours:
+
+                         cp libavcodec.62.dylib \\
+                            /Applications/Manifold.app/Contents/Frameworks/
+
+                  4. Sign the replacement. macOS will not load unsigned code on Apple Silicon, \
+                     so an ad-hoc signature is required even for a local build:
+
+                         codesign --force --sign - \\
+                            /Applications/Manifold.app/Contents/Frameworks/libavcodec.62.dylib
+
+                  5. Re-sign the application. Your replacement has broken the bundle's signature \
+                     seal — codesign will report "nested code is modified or invalid" until you \
+                     do this:
+
+                         codesign --force --sign - /Applications/Manifold.app
+
+                  6. Clear the quarantine flag if the copy has one, and launch:
+
+                         xattr -dr com.apple.quarantine /Applications/Manifold.app
+                         open /Applications/Manifold.app
+
+                  Step 5 leaves the app ad-hoc signed rather than signed by us, which is \
+                  expected and correct for a locally-relinked build: it is no longer the binary \
+                  we notarized, and it should not claim to be. Loading a library signed by \
+                  someone other than us is permitted because this application is built with the \
+                  com.apple.security.cs.disable-library-validation entitlement — that \
+                  entitlement is part of what makes this right exercisable, not an oversight.
                   """,
             documents: [
                 LicenseDoc(title: "FFmpeg LICENSE.md, as shipped upstream",

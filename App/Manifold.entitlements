@@ -1,5 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Manifold entitlements. Committed and version-controlled rather than XcodeGen's inline
+    `entitlements:` key, so what the app is granted is reviewable in a diff.
+
+    ═══════════════════════════════════════════════════════════════════════════════════════
+    com.apple.security.cs.disable-library-validation
+
+    Hardened runtime normally requires every library a process loads to be signed by the SAME
+    Team ID as the main executable (or by Apple). This entitlement lifts that requirement.
+    THERE ARE THREE DISTINCT REASONS IT IS HERE, and losing track of any one of them would
+    make removing it look safe when it is not:
+
+      1. THE NDI RUNTIME IS dlopen'd.
+         App/NDI/NDIBridge.mm loads /usr/local/lib/libndi.dylib at run time from the user's
+         own NDI installation — the SDK's licence does not permit us to vendor it, so it is
+         never linked and never bundled. It is signed by Vizrt NDI AB, not by us. Without
+         this entitlement the dlopen fails in the SIGNED build only, and NDI discovery
+         returns an empty source list with no error anywhere.
+
+      2. THE DECKLINK API IS CFBundle-LOADED.
+         /Library/Frameworks/DeckLinkAPI.framework is installed by Blackmagic's Desktop Video
+         driver and signed by Blackmagic Design. Same failure shape: SDI output silently
+         unavailable in a signed build.
+
+      3. IT IS WHAT MAKES THE LGPL §6 RELINKING RIGHT EXERCISABLE.  <- added with the shared
+         FFmpeg migration; the newest reason and the least obvious.
+         Manifold ships FFmpeg as five dylibs in Contents/Frameworks specifically so a user
+         can replace them with their own build (LGPL 2.1 section 6(b) — see
+         ThirdParty/ffmpeg/README.md, and the FFmpeg entry in App/AboutWindow.swift which
+         carries the instructions). A user's replacement dylib is, by definition, not signed
+         by us: it will be ad-hoc signed at best. Without this entitlement hardened runtime
+         would refuse to load it, and the right we are obliged to grant would exist on paper
+         only — the app would ship in a section-6-shaped configuration that cannot actually
+         be relinked.
+
+    CONSEQUENCE, AND THE REASON ALL THREE ARE WRITTEN DOWN: REASONS 1 AND 2 COULD BOTH GO
+    AWAY — NDI could be dropped, DeckLink could move to a linked framework — AND THIS
+    ENTITLEMENT WOULD STILL BE REQUIRED, for reason 3, for as long as FFmpeg is linked at
+    all. Do not remove it on the grounds that the dlopen/CFBundle cases no longer apply.
+
+    scripts/release-mac.sh asserts this entitlement is present on the signed app and fails
+    the release if it is missing.
+    ═══════════════════════════════════════════════════════════════════════════════════════
+-->
 <plist version="1.0">
 <dict>
 	<key>com.apple.security.cs.disable-library-validation</key>

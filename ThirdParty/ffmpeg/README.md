@@ -1,24 +1,5 @@
 # FFmpeg (shared libav) — vendored, project-local
 
-> ## ⚠️ OUTSTANDING — LGPL 2.1 §6 is not finished
->
-> Shipping the dylibs (below) satisfies **§6(b)** — the user can relink. Two obligations are
-> deliberately **NOT yet done**, split out to keep the shared-library change reviewable:
->
-> 1. **The source obligation.** §6 requires the Library's complete corresponding source to
->    accompany the work, or a §6(c) written offer valid for three years. We now have an exact
->    pin (`n8.1.1` @ `239f2c733de417201d7ad3b3b8b0d9b63285b2b1`, see below), so the cheapest
->    compliant form is a written offer plus that tag/commit published with the release.
->    `App/Licenses/` already carries `LGPL-2.1.txt` and `FFmpeg-LICENSE.md.txt`, and
->    `App/AboutWindow.swift` already surfaces attributions — that is where it goes.
-> 2. **Relink instructions.** §6(b) is about a user *being able* to relink. Replacing a dylib in
->    `Contents/Frameworks` breaks the app bundle's signature seal, so the practical recipe is
->    "replace the dylib, ad-hoc sign it (`codesign -s - libavcodec.62.dylib`), re-sign the
->    bundle". That works because `com.apple.security.cs.disable-library-validation` is set —
->    see below. Without written instructions the mechanism exists but is undiscoverable.
->
-> Until both land, the app ships a §6-capable binary without the paperwork that makes §6 real.
-
 These are **shared** libav dylibs + headers, vendored into the repo and **gitignored**. They are
 embedded in `Manifold.app/Contents/Frameworks` and resolved via `@rpath` — **no Homebrew, no
 `/usr/local`, no system ffmpeg, no PATH lookup, and no absolute path into anyone's build tree.**
@@ -151,14 +132,59 @@ asserts `CONFIG_PIC 1` instead, which is a stronger statement than passing the f
 **Not added: `--arch=arm64`** — redundant; configure already detects aarch64. arm64-only is
 asserted with `lipo` on each staged dylib instead.
 
+## The corresponding-source tarball (LGPL §6)
+
+The App panel's written offer names a URL, and this is what serves it:
+
+```
+https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4.tar.xz
+```
+
+- **Keyed by the pin, not the Manifold version.** The filename carries the short commit SHA, so
+  the URL the About panel prints and the object in the bucket cannot name different versions —
+  one string, derived from one pin.
+- **Uploaded once per pin.** `release-mac.sh` HEADs the URL; already there → nothing uploaded, at
+  a cost of one HTTP request. Bump the pin → the filename changes, the HEAD misses, and exactly
+  one upload happens automatically. It goes up *before* the DMG, so no binary is ever
+  downloadable whose licence notice points at a 404.
+- **Built from the pinned git checkout** (`git archive` at the SHA), never from a working tree —
+  see the reasoning block in `scripts/build_ffmpeg.sh`. The script then diffs the archive's file
+  list against `git ls-tree` at the commit and fails on any difference, so "this tarball is that
+  commit" is asserted rather than assumed.
+- **Carries `BUILD.txt`** with the tag, commit and configure line, because corresponding source
+  means the source *as built*.
+
+⚠️ **The release Worker must route `source/`.** It passes through `binaries`, `current` and
+`archive` only; an unrouted path returns `Unknown endpoint: "source"`. One line in
+`Graviton-Releases/src/index.js`:
+
+```js
+if (endpoint === 'current' || endpoint === 'archive' || endpoint === 'source') {
+```
+
+then `wrangler deploy`. Until that ships, `release-mac.sh` uploads the tarball successfully and
+then **fails the release** on the verification step, naming this fix — which is the correct
+outcome, because the alternative is shipping an app whose §6 offer points at a dead URL.
+
 ## Rebuilding
 
 ```sh
 ./scripts/build_ffmpeg.sh                 # clone at the pin, configure, build, stage, verify
 ./scripts/build_ffmpeg.sh --verify-only   # re-run every assertion against what is staged
 ./scripts/build_ffmpeg.sh --provenance-only
+./scripts/build_ffmpeg.sh --source-tarball out.tar.xz   # the §6 tarball, built + content-asserted
+./scripts/build_ffmpeg.sh --source-info   # the pin and the derived key/URL, shell-evalable
 FFMPEG_PIN_BOOTSTRAP=1 ./scripts/build_ffmpeg.sh   # rotate the pin
 ```
+
+### ⚠️ Bumping the pin is a three-file change
+
+The pin drives the dylibs, the tarball name, and a string displayed in the app. Change
+`FFMPEG_COMMIT` in `scripts/build_ffmpeg.sh` and you must also update
+`Attributions.ffmpegSourceURL` in `App/AboutWindow.swift` — and the commit and configure line in
+that entry's `note`. `release-mac.sh` asserts the URL matches the pin at preflight, so a missed
+update fails the release rather than shipping a broken offer; the `note` text is prose and is
+**not** checked, so re-read it.
 
 Never link a Homebrew or system ffmpeg, and **keep `--disable-network`**.
 
