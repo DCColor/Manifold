@@ -102,3 +102,4 @@ ThirdParty/NDI/
 *.whep-url
 
 docs/Blackmagic Advanced Video Capture and Playback/
+.wrangler/
