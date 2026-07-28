@@ -71,6 +71,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// True once this file has fallen back to video-only, so the notice is raised ONCE per file
     /// rather than re-firing on every seek (beginReading runs per seek, and the fallback with it).
     private var audioFallbackAnnounced = false
+
+    /// Monotonic load generation. `loadAsset` spawns detached inspection Tasks (metadata, display
+    /// size) that outlive the function, so a load which BAILS — or which a newer load supersedes —
+    /// must not have their results land on the engine afterwards. Each Task captures the generation
+    /// it was started for and publishes only if it is still current.
+    private var loadGeneration = 0
     // JKL shuttle transport rate (transient session state — not persisted).
     // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
     // synchronizer directly; reverse is a best-effort jog (see setShuttleRate).
@@ -551,11 +557,40 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         currentSourceTimecode(at: duration)
     }
 
+    /// Abandon a load that cannot produce a picture, returning the engine to its NO-MEDIA state and
+    /// raising `notice` in the UI's banner.
+    ///
+    /// The point of the full reset is that `hasMedia` is what the UI keys its empty state off
+    /// (`hasSource = engine.hasMedia || activeLiveSource != nil`), so leaving any of this populated
+    /// would show a has-media surface for a file that will never draw a frame. Bumping the
+    /// generation also retires the inspection Tasks already in flight, so a late metadata result
+    /// cannot repopulate the inspector for a file we just refused.
+    private func abandonLoad(notice: String) {
+        loadGeneration &+= 1
+        hasMedia = false
+        asset = nil
+        videoTrack = nil
+        audioTrack = nil
+        imageGenerator = nil
+        libavThumbnailSource?.close(); libavThumbnailSource = nil
+        metadata = nil
+        displaySize = nil
+        duration = 0
+        currentTime = 0
+        tcInfo = nil
+        currentURL = nil
+        playbackNotice = notice
+    }
+
     private func loadAsset(url: URL, autoplay: Bool) async {
         // A new file gets a clean slate for the degraded-playback notice: the previous file's
         // "video only" banner must not persist onto one whose audio reads fine.
         playbackNotice = nil
         audioFallbackAnnounced = false
+
+        // Retire any inspection Tasks still in flight from a previous load before starting this one.
+        loadGeneration &+= 1
+        let generation = loadGeneration
 
         // New file: retire any prior libav sources (bound to the old file). The
         // per-file libav video+audio sources are created lazily in beginLibavReading.
@@ -574,29 +609,56 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         let asset = AVURLAsset(url: url)
         self.asset = asset
-        self.hasMedia = true
+        // hasMedia is DELIBERATELY NOT SET HERE — see the no-video-track guard below.
 
         self.imageGenerator = Self.makeScrubPreviewGenerator(for: asset)
 
-        // Same inspection as AVPlayerEngine, via the shared inspector.
+        // Same inspection as AVPlayerEngine, via the shared inspector. Both publish only if this
+        // load is still the current one (see `loadGeneration`).
         self.tcInfo = MediaInspector.timecode(for: url)
         Task { [weak self] in
             let meta = await MediaInspector.metadata(for: asset, url: url)
-            await MainActor.run { self?.metadata = meta }
+            await MainActor.run {
+                guard let self, self.loadGeneration == generation else { return }
+                self.metadata = meta
+            }
         }
         Task { [weak self] in
             let size = await MediaInspector.displaySize(for: asset)
-            await MainActor.run { self?.displaySize = size }
+            await MainActor.run {
+                guard let self, self.loadGeneration == generation else { return }
+                self.displaySize = size
+            }
         }
 
         if let dur = try? await asset.load(.duration) {
             let seconds = CMTimeGetSeconds(dur)
             if seconds.isFinite { self.duration = seconds }
         }
+
+        // ── AVFOUNDATION OPENED THE CONTAINER BUT EXPOSES NO VIDEO TRACK ──────────────────────
+        // Not "the codec is unsupported" — the track is absent from the asset entirely, so there
+        // is nothing to decode and nothing we can configure our way out of. MEASURED cause on the
+        // file that prompted this: a QuickTime whose video `stsd` carries 8 trailing zero bytes
+        // that parse as a box with SIZE 0 ("extends to end of file"). AVFoundation rejects the
+        // sample description and drops the track; libav ignores the padding and reads the file
+        // fine, which is why other applications open it and Quick Look — also AVFoundation — does
+        // not. Removing exactly those 8 bytes makes the track appear, and injecting them into a
+        // working file makes it vanish, so the mechanism is established rather than inferred.
+        //
+        // We report and stop. `abandonLoad` is what makes this honest: the engine previously set
+        // hasMedia BEFORE this point, so a file it could not play still drove the has-media UI —
+        // transport controls over a black window with nothing to say for itself.
         guard let vTrack = try? await asset.loadTracks(withMediaType: .video).first else {
-            print("FrameEngine: no video track"); return
+            NSLog("[PLAYBACK] no video track — AVFoundation exposes no readable video track for %@; "
+                + "the container may declare a malformed sample description. Not loading.",
+                  url.lastPathComponent)
+            abandonLoad(notice: "This file couldn’t be opened — its video track is unreadable.")
+            return
         }
         self.videoTrack = vTrack
+        // Only NOW does the engine genuinely have playable media.
+        self.hasMedia = true
         self.audioTrack = try? await asset.loadTracks(withMediaType: .audio).first
 
         // Range (8-bit): capture the SOURCE's signaled range (same format-

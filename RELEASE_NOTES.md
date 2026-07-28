@@ -8,6 +8,7 @@ changelog page. Format notes are at the bottom.
 ## 0.5.1
 
 - Fixed: some files played as a black screen, depending on how their audio track was recorded.
+- Files that can't be opened now say so, instead of loading into an empty player.
 - Scope value labels now sit clear of the trace, so they stay readable on a bright picture.
 - Scope traces are brighter by default.
 - Check for Updates… in the Manifold menu, and Manifold now tells you when a new build is out.

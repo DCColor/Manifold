@@ -218,11 +218,28 @@ fi
 [[ -d "/Library/NDI SDK for Apple/include" ]] \
     || die "NDI SDK headers missing: /Library/NDI SDK for Apple/include
        Install the NDI SDK for Apple (headers only are needed; the runtime is dlopen'd)."
-for lib in ffmpeg libsrt libdatachannel; do
-    compgen -G "${REPO_ROOT}/ThirdParty/${lib}/lib/*.a" >/dev/null \
-        || die "vendored static libs missing: ThirdParty/${lib}/lib/*.a
+# ⚠️ THE PATTERN IS PER-LIBRARY, AND ffmpeg IS THE ODD ONE OUT. It ships as SHARED libraries
+# (*.dylib) for LGPL 2.1 §6 — a user must be able to relink Manifold against a modified FFmpeg,
+# which static archives make impossible. libsrt and libdatachannel are still static (*.a).
+# A single "*.a" loop here would now fail on ffmpeg and kill every release at preflight, with a
+# message telling you to rebuild static libs that must not exist. See ThirdParty/ffmpeg/README.md.
+for spec in "ffmpeg:*.dylib" "libsrt:*.a" "libdatachannel:*.a"; do
+    lib="${spec%%:*}"; pat="${spec##*:}"
+    compgen -G "${REPO_ROOT}/ThirdParty/${lib}/lib/${pat}" >/dev/null \
+        || die "vendored libs missing: ThirdParty/${lib}/lib/${pat}
        They are gitignored — rebuild with scripts/build_${lib}.sh (see ThirdParty/${lib}/README.md)."
 done
+# And the inverse, for ffmpeg only: a leftover archive from before the shared migration would
+# be picked up by neither check above, while `-lavcodec` silently prefers the .dylib beside it.
+# The danger is not a broken build — it is a build that looks fine and is not §6-compliant.
+# (Written as an `if` rather than `compgen … && die`. That form does survive `set -e` here —
+# a failure inside a && list is exempt — but this script is written not to depend on shell
+# subtleties, and a negative assertion is the last place to start.)
+if compgen -G "${REPO_ROOT}/ThirdParty/ffmpeg/lib/*.a" >/dev/null; then
+    die "STALE STATIC ARCHIVES in ThirdParty/ffmpeg/lib — these predate the LGPL §6 shared
+       migration and must not be shipped. Re-stage with scripts/build_ffmpeg.sh, which purges
+       the directory before installing."
+fi
 ok "gitignored build inputs present (DeckLink SDK, NDI headers, 3 vendored lib trees)"
 
 mkdir -p "$DIST_DIR" "${REPO_ROOT}/build"
@@ -454,6 +471,117 @@ if grep -q 'com.apple.security.get-task-allow' "${LOG_DIR}/entitlements.plist"; 
 fi
 ok "get-task-allow absent (would be an automatic notarization rejection)"
 record "get-task-allow:          absent (correct)"
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# 6b. The embedded libav dylibs
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# ⚠️ WHY THIS BLOCK EXISTS. Manifold ships FFmpeg as SHARED libraries so a user can relink the
+# app against a modified FFmpeg (LGPL 2.1 §6 — see ThirdParty/ffmpeg/README.md). That moved five
+# Mach-Os out of the app binary and into Contents/Frameworks, and every one of them is now
+# separately signed code that Apple inspects.
+#
+# Two failure modes, both invisible on this machine:
+#   * An UNSIGNED or wrongly-signed nested dylib notarizes as Invalid. The app runs fine locally.
+#   * A dylib whose install_name is an ABSOLUTE build-tree path resolves here (the path exists)
+#     and fails to launch on every other machine. Neither codesign nor notarization catches it.
+# So both are asserted on the exported bundle, before the DMG is built.
+
+step "Verify the embedded libav dylibs"
+
+FRAMEWORKS_DIR="${APP}/Contents/Frameworks"
+[[ -d "$FRAMEWORKS_DIR" ]] || die "no ${FRAMEWORKS_DIR}.
+       The libav dylibs are not embedded. Check the dependencies: block in project.yml
+       (embed: true / codeSign: true) and that xcodegen ran."
+
+# The exact five, by their major-suffixed names — the names baked into their install_names.
+EXPECTED_DYLIBS=(libavcodec.62.dylib libavformat.62.dylib libavutil.60.dylib
+                 libswscale.9.dylib libswresample.6.dylib)
+
+for dylib in "${EXPECTED_DYLIBS[@]}"; do
+    [[ -f "${FRAMEWORKS_DIR}/${dylib}" ]] \
+        || die "missing from the bundle: Contents/Frameworks/${dylib}"
+done
+
+# Nothing MORE than the five, either. An unexpected dylib here is either a second copy of the
+# same image under a different name (the unsuffixed link-time symlink is a standing candidate)
+# or something that has no business shipping.
+FOUND_DYLIBS=$(cd "$FRAMEWORKS_DIR" && ls -1 | sort)
+WANT_DYLIBS=$(printf '%s\n' "${EXPECTED_DYLIBS[@]}" | sort)
+if [[ "$FOUND_DYLIBS" != "$WANT_DYLIBS" ]]; then
+    die "Contents/Frameworks does not hold exactly the five expected dylibs.
+       found:
+$(printf '%s\n' "$FOUND_DYLIBS" | sed 's/^/         /')
+       expected:
+$(printf '%s\n' "$WANT_DYLIBS" | sed 's/^/         /')"
+fi
+ok "exactly the 5 expected libav dylibs are embedded"
+
+for dylib in "${EXPECTED_DYLIBS[@]}"; do
+    DYLIB_PATH="${FRAMEWORKS_DIR}/${dylib}"
+
+    # ── install_name must be @rpath-relative. `otool -D` prints the path on line 2.
+    DYLIB_ID=$(otool -D "$DYLIB_PATH" | awk 'NR==2')
+    [[ "$DYLIB_ID" == "@rpath/${dylib}" ]] \
+        || die "${dylib} has install_name '${DYLIB_ID}', expected '@rpath/${dylib}'.
+       An absolute install_name WORKS ON THIS MACHINE and on no other. Rebuild with
+       scripts/build_ffmpeg.sh (--install-name-dir=@rpath)."
+
+    # ── No dependency may name a build tree or a Homebrew prefix.
+    DYLIB_DEPS=$(otool -L "$DYLIB_PATH" | tail -n +2)
+    if [[ "$DYLIB_DEPS" =~ (/Users/|/opt/homebrew|/usr/local/lib) ]]; then
+        die "${dylib} depends on a path outside the bundle and the system:
+$(printf '%s\n' "$DYLIB_DEPS" | grep -E '/Users/|/opt/homebrew|/usr/local/lib' | sed 's/^/         /')"
+    fi
+
+    # ── Signed, with Developer ID, hardened runtime, and a secure timestamp. Captured then
+    #    asserted — never `codesign … | grep -q`, for the SIGPIPE reason documented at `contains`.
+    DYLIB_CS=$(codesign -dvv "$DYLIB_PATH" 2>&1)
+    contains "Authority=${IDENTITY}" "$DYLIB_CS" \
+        || die "${dylib} is NOT signed with '${IDENTITY}'.
+       Notarization would return Invalid for unsigned nested code, while the app runs fine here.
+       Authorities found:
+$(printf '%s\n' "$DYLIB_CS" | grep '^Authority=' | sed 's/^/         /')
+       (if that list is empty, the dylib is unsigned — check codeSign: true in project.yml)"
+    [[ "$DYLIB_CS" =~ flags=[^[:space:]]*runtime ]] \
+        || die "${dylib} is signed WITHOUT hardened runtime — notarization would reject it."
+    contains "Timestamp=" "$DYLIB_CS" \
+        || die "${dylib} is signed without a secure timestamp — notarization requires one."
+
+    ok "${dylib}: @rpath id, Developer ID, hardened runtime, timestamped"
+done
+record "embedded libav dylibs:   5, all @rpath + signed + hardened + timestamped"
+
+# ── The main binary must reference them the same way ────────────────────────────────────
+MAIN_DEPS=$(otool -L "${APP}/Contents/MacOS/${APP_NAME}")
+MAIN_LIBAV=$(printf '%s\n' "$MAIN_DEPS" | grep -E 'lib(avcodec|avformat|avutil|swscale|swresample)' || true)
+[[ -n "$MAIN_LIBAV" ]] \
+    || die "the app binary references NO libav dylib. It was linked statically — which is the
+       state LGPL §6 compliance requires us NOT to ship. Check OTHER_LDFLAGS and that
+       ThirdParty/ffmpeg/lib holds dylibs, not archives."
+# Here-string, NOT a pipe into `grep -q`. See the note on `contains`: grep -q exits at the first
+# match and SIGPIPEs its producer, which pipefail then reports as the pipeline's status — so the
+# check fails precisely because it found something. A here-string is not a pipeline.
+MAIN_NON_RPATH=$(grep -vF '@rpath/' <<<"$MAIN_LIBAV" || true)
+[[ -z "$MAIN_NON_RPATH" ]] \
+    || die "the app binary has a non-@rpath libav reference:
+$(printf '%s\n' "$MAIN_NON_RPATH" | sed 's/^/         /')"
+ok "app binary references all libav via @rpath ($(printf '%s\n' "$MAIN_LIBAV" | wc -l | tr -d ' ') entries)"
+
+# ── …and carry the rpath that resolves them.
+# `otool -l` on this binary emits thousands of lines, so it is CAPTURED ONCE and then matched.
+# `otool -l … | grep -A2 LC_RPATH | grep -q …` is the textbook form of the SIGPIPE bug above:
+# the second grep exits on the first hit, otool dies of SIGPIPE mid-write, and a correct app is
+# reported as missing its rpath. awk reads to EOF, so the capture itself is safe.
+MAIN_LOAD_CMDS=$(otool -l "${APP}/Contents/MacOS/${APP_NAME}")
+MAIN_RPATHS=$(awk '/LC_RPATH/{f=1} f && / path /{print $2; f=0}' <<<"$MAIN_LOAD_CMDS")
+contains '@executable_path/../Frameworks' "$MAIN_RPATHS" \
+    || die "LC_RPATH @executable_path/../Frameworks is MISSING — the embedded dylibs cannot be
+       found at launch. Check LD_RUNPATH_SEARCH_PATHS in project.yml.
+       LC_RPATHs found:
+$(printf '%s\n' "${MAIN_RPATHS:-<none>}" | sed 's/^/         /')"
+ok "LC_RPATH @executable_path/../Frameworks present"
+record "libav linkage:           @rpath + LC_RPATH ../Frameworks (relocatable)"
 
 # ── ASSERT THE CONFIGURATION ACTUALLY TOOK ──────────────────────────────────────────────
 # The scheme pins its archive action to Release and we override with -configuration. Rather

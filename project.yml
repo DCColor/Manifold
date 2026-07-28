@@ -146,6 +146,56 @@ targets:
         group: DeckLink/SDK
     dependencies:
       - package: ManifoldCore
+      # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
+      #
+      # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,
+      # which under LGPL 2.1 §5 makes the app a work that uses the Library. §6 then requires that
+      # a user be able to RELINK the app against a MODIFIED FFmpeg. Static .a linking makes that
+      # impossible — the libav code is fused into the app binary and there is nothing left to
+      # replace. Shipping the dylibs in Contents/Frameworks, where a user can swap them, is what
+      # satisfies §6(b). Reverting these to static archives would put the shipping app out of
+      # compliance while changing nothing observable. See ThirdParty/ffmpeg/README.md.
+      #
+      # `link: false` IS DELIBERATE AND LOAD-BEARING. Linking still happens through the
+      # -lavformat/-lavcodec/… flags in OTHER_LDFLAGS below, exactly as it did in the static era;
+      # these entries do embedding and signing ONLY. Setting link: true would put each dylib in
+      # the Frameworks build phase as well and link it twice.
+      #
+      # `codeSign: true` is Code Sign On Copy. Each dylib is signed as it is copied into the
+      # bundle, and `xcodebuild -exportArchive` re-signs the nested code with Developer ID.
+      # WITHOUT IT, notarization rejects the submission for unsigned nested code — and the app
+      # still runs perfectly on this machine, which is the failure mode release-mac.sh's
+      # per-dylib assertions exist to catch before Apple does.
+      #
+      # The MAJOR-suffixed name is the real file and is what dyld looks for, because it is the
+      # string baked into each dylib's install_name (@rpath/libavcodec.62.dylib — set by
+      # --install-name-dir=@rpath in scripts/build_ffmpeg.sh). The unsuffixed libavcodec.dylib
+      # beside it in ThirdParty/ffmpeg/lib is a LINK-TIME-ONLY symlink for `-lavcodec` to find,
+      # and is deliberately NOT listed here: embedding it would put a second name for the same
+      # image in the bundle.
+      #
+      # These files are GITIGNORED. On a fresh clone they do not exist until
+      # scripts/build_ffmpeg.sh has run; release-mac.sh checks for them in preflight.
+      - framework: ThirdParty/ffmpeg/lib/libavcodec.62.dylib
+        embed: true
+        link: false
+        codeSign: true
+      - framework: ThirdParty/ffmpeg/lib/libavformat.62.dylib
+        embed: true
+        link: false
+        codeSign: true
+      - framework: ThirdParty/ffmpeg/lib/libavutil.60.dylib
+        embed: true
+        link: false
+        codeSign: true
+      - framework: ThirdParty/ffmpeg/lib/libswscale.9.dylib
+        embed: true
+        link: false
+        codeSign: true
+      - framework: ThirdParty/ffmpeg/lib/libswresample.6.dylib
+        embed: true
+        link: false
+        codeSign: true
     info:
       path: App/Info.generated.plist
       properties:
@@ -227,15 +277,27 @@ targets:
         # so no DeckLink entitlements are required (mach-lookup / prefs exceptions would only be
         # needed under App Sandbox — see SignalGenerator sample if that changes).
         SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/App/DeckLink/Manifold-Bridging-Header.h
-        # Vendored static libav (ThirdParty/ffmpeg) — linked statically into the
-        # app binary. Bundle-local only: no Homebrew/system ffmpeg, no rpath dylib.
-        # The C bridge (CFFmpeg module) lives in ManifoldCore; these flags satisfy
-        # the libav symbols at the final app link. The static archives bake into the
-        # binary, so there's nothing extra to sign (no disable-library-validation
-        # needed — that's only for separately-bundled dylibs).
-        # The CFFmpeg clang module (in ManifoldCore) is re-scanned in the app's
-        # compilation context, so the app target also needs the libav header path
-        # for <libavcodec/...> to resolve when that module is (re)built here.
+        # Vendored libav (ThirdParty/ffmpeg) — SHARED libraries, embedded in
+        # Contents/Frameworks and resolved via @rpath. Bundle-local only: no
+        # Homebrew/system ffmpeg, no absolute path to anyone's build tree.
+        #
+        # ⚠️ THIS WAS STATIC UNTIL THE LGPL §6 CHANGE. The archives are gone; do not
+        # reintroduce them. See the dependencies: block above for why, and
+        # ThirdParty/ffmpeg/README.md for the whole picture. The old comment here
+        # claimed "the static archives bake into the binary, so there's nothing extra
+        # to sign" — both halves of that are now false: there are five dylibs in the
+        # bundle and every one of them must be signed (Code Sign On Copy, above).
+        #
+        # disable-library-validation in App/Manifold.entitlements ALSO changes meaning.
+        # It was there for the NDI dlopen and the DeckLink CFBundle load; it is now
+        # additionally what lets a user's REPLACEMENT libav dylib load at all under
+        # hardened runtime, which is the runtime half of the §6 relinking right.
+        #
+        # The C bridge (CFFmpeg module) lives in ManifoldCore; the flags below satisfy
+        # the libav symbols at the final app link. The CFFmpeg clang module is
+        # re-scanned in the app's compilation context, so the app target also needs the
+        # libav header path for <libavcodec/...> to resolve when that module is
+        # (re)built here.
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/ThirdParty/ffmpeg/include
@@ -265,7 +327,7 @@ targets:
           # runtime dylib is NOT linked either: NDIBridge.mm dlopens it, so the app still launches
           # on a machine with no NDI installed. (Quoted: the path contains spaces.)
           - '"/Library/NDI SDK for Apple/include"'
-        # EXACT project-local static-lib directories, and NOTHING else. There is intentionally no
+        # EXACT project-local vendored-lib directories, and NOTHING else. There is intentionally no
         # /opt/homebrew/lib and no /usr/local/lib here: the linker must never be able to see a
         # Homebrew OpenSSL, SRTP, or (critically) a Homebrew ffmpeg, which would silently displace
         # the custom LGPL static libav in ThirdParty/ffmpeg. Verify after every link with the
@@ -282,8 +344,31 @@ targets:
         GCC_PREPROCESSOR_DEFINITIONS:
           - $(inherited)
           - RTC_STATIC=1
+        # rpath for the embedded libav dylibs. Their install_names are @rpath-relative
+        # (@rpath/libavcodec.62.dylib), so this is the search path that resolves them —
+        # Contents/Frameworks, where the embed phase in dependencies: puts them.
+        #
+        # Xcode supplies this value by default for a macOS app target and the shipping 0.5.1
+        # binary already carried it (verified with otool -l, LC_RPATH). It is stated explicitly
+        # anyway, for the same reason CLANG_CXX_LANGUAGE_STANDARD is: the dylibs do not load
+        # without it, and "the default happened to be right" is not something to depend on
+        # silently. scripts/build_ffmpeg.sh --verify-relocatable asserts it on the built app.
+        LD_RUNPATH_SEARCH_PATHS:
+          - $(inherited)
+          - '@executable_path/../Frameworks'
         OTHER_LDFLAGS:
           - $(inherited)
+          # libav. These five resolve to ThirdParty/ffmpeg/lib/libav*.dylib (via the
+          # unsuffixed link-time symlinks staged there) rather than to .a archives — the
+          # LGPL §6 change. The flags themselves are UNCHANGED from the static era: `-lavcodec`
+          # finds libavcodec.dylib, follows it, and records that dylib's install_name
+          # (@rpath/libavcodec.62.dylib) as the dependency. Embedding and signing are handled
+          # by the dependencies: block above, not here.
+          #
+          # If ThirdParty/ffmpeg/lib ever contains BOTH a .dylib and a .a for the same library,
+          # the linker silently prefers the .dylib — so a stale archive would not announce
+          # itself here. scripts/build_ffmpeg.sh purges the directory before staging and fails
+          # if any .a survives.
           - -lavformat
           - -lavcodec
           - -lavutil
