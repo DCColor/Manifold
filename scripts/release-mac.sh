@@ -251,16 +251,34 @@ ok "gitignored build inputs present (DeckLink SDK, NDI headers, 3 vendored lib t
 ABOUT_SWIFT="${REPO_ROOT}/App/AboutWindow.swift"
 [[ -f "$ABOUT_SWIFT" ]] || die "App/AboutWindow.swift not found — the §6 notice lives there"
 
-# (1) The contact address must have been filled in. The placeholder uses the RFC 2606 .invalid
-#     TLD precisely so this check cannot be fooled by something that merely looks like an email.
-if grep -q 'SET-BEFORE-RELEASE' "$ABOUT_SWIFT"; then
-    die "the LGPL §6 written offer still carries a PLACEHOLDER contact address.
+# (1) The contact address must be a real one.
+#
+# ⚠️ THIS PARSES THE ASSIGNED VALUE, NOT THE FILE. An earlier version grepped the whole file for
+# the placeholder marker and consequently failed on the DOC COMMENT that explains the placeholder
+# — a check that forbids describing itself. Worse, the obvious "fix" for that is to delete the
+# comment, which trades a real explanation for a green check. So: extract the string literal and
+# assert about the VALUE.
+LICENSING_CONTACT=$(sed -nE 's/^[[:space:]]*static let licensingContact[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$ABOUT_SWIFT")
+[[ -n "$LICENSING_CONTACT" ]] \
+    || die "could not read Attributions.licensingContact from App/AboutWindow.swift.
+       The declaration moved or changed shape — this check greps for
+         static let licensingContact = \"…\"
+       Fix the check rather than removing it: it is the only thing standing between a typo and
+       a shipped LGPL §6 offer that nobody can act on."
+
+# .invalid and .example are RFC 2606 reserved and can never be real domains, so an address using
+# either is unusable by construction — which is exactly why the placeholder uses one.
+case "$LICENSING_CONTACT" in
+    *SET-BEFORE-RELEASE*|*.invalid|*.example|*example.com)
+        die "the LGPL §6 written offer carries a PLACEHOLDER contact address: ${LICENSING_CONTACT}
        App/AboutWindow.swift → Attributions.licensingContact
-       A written offer that names an address nobody reads is not an offer, and this build would
-       ship that claim to every user. Set a monitored mailbox — one that will still be monitored
-       in three years, which is how long §6(c) binds us — and re-run."
-fi
-ok "LGPL §6 contact address is set"
+       An offer naming an address nobody reads is not an offer, and this build would ship that
+       claim to every user, permanently. Set a monitored mailbox — one that will still be
+       monitored in three years, which is how long §6(c) binds us — and re-run." ;;
+esac
+[[ "$LICENSING_CONTACT" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] \
+    || die "Attributions.licensingContact is not a valid email address: ${LICENSING_CONTACT}"
+ok "LGPL §6 contact address is set (${LICENSING_CONTACT})"
 
 # (2) The published-source URL in the app must match the one derived from the FFmpeg pin.
 #     build_ffmpeg.sh owns the pin; AboutWindow.swift holds a copy for display. A stale copy

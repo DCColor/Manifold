@@ -156,14 +156,20 @@ enum Attributions {
 
     /// Where a §6(c) request is sent.
     ///
-    /// ⚠️ A WRITTEN OFFER NAMING AN ADDRESS NOBODY READS IS NOT AN OFFER. This deliberately
-    /// holds an unusable placeholder — `.invalid` is reserved by RFC 2606 and can never be a
-    /// real domain — so that it cannot be mistaken for a working address, and
-    /// `scripts/release-mac.sh` refuses to build a release while it is still here.
+    /// ⚠️ THIS IS A THREE-YEAR COMMITMENT, NOT A CONTACT DETAIL. The written offer in the FFmpeg
+    /// entry below binds us to supply corresponding source, on request, for three years from the
+    /// date each build is published. A shipped binary cannot be recalled and cannot be edited, so
+    /// every copy of every release carries this address for its whole life. An offer naming a
+    /// mailbox nobody reads is not an offer.
     ///
-    /// Replace with a monitored mailbox that will still be monitored in three years. A personal
-    /// address is a poor choice for a commitment with that lifetime; an alias is better.
-    static let licensingContact = "SET-BEFORE-RELEASE@example.invalid"
+    /// It is a role alias rather than a person's address deliberately: the obligation outlives
+    /// any individual's involvement, and the mailbox has to survive that. Whoever holds it must
+    /// be able to produce the tarball named by `ffmpegSourceURL` — or rebuild it from the pin in
+    /// `scripts/build_ffmpeg.sh` — on request.
+    ///
+    /// `scripts/release-mac.sh` refuses to build a release if this is ever reverted to a
+    /// `SET-BEFORE-RELEASE` placeholder.
+    static let licensingContact = "licensing@graviton.tools"
 
     /// ⚠️ EVERY VERSION BELOW WAS READ OUT OF THE BUILD TREE, not off a website. libsrt from
     /// its CMakeLists `SRT_VERSION`, libdatachannel/libjuice/libsrtp2 likewise, Mbed TLS from
