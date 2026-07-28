@@ -5,6 +5,13 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.5.1
+
+- Fixed: some files played as a black screen, depending on how their audio track was recorded.
+- Scope value labels now sit clear of the trace, so they stay readable on a bright picture.
+- Scope traces are brighter by default.
+- Check for Updates… in the Manifold menu, and Manifold now tells you when a new build is out.
+
 ## 0.5.0
 
 - First tester release.

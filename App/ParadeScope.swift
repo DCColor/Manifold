@@ -184,6 +184,12 @@ struct ParadeScopeView: View {
         resolveVerticalScale(override: verticalScale, transferCode: model.sourceTransferCode)
     }
 
+    /// Label-column insets for the active ruler — the R|G|B trace starts past them so the value
+    /// labels stay on clean background instead of on top of a bright trace.
+    private var gutters: ScopePlotGutters {
+        scopePlotGutters(active: activeScale, sdrScale: scopeScale)
+    }
+
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
@@ -226,6 +232,10 @@ struct ParadeScopeView: View {
                             .resizable()
                             .interpolation(.none)
                             .padding(.vertical, scopePlotInset)
+                            // Start the R|G|B trace to the RIGHT of the label column (and left of
+                            // the right-hand one, when a ruler uses it) — see ScopePlotGutters.
+                            .padding(.leading, gutters.leading)
+                            .padding(.trailing, gutters.trailing)
                     }
                     graticule
                         .padding(.vertical, scopePlotInset)
@@ -241,12 +251,18 @@ struct ParadeScopeView: View {
     }
 
     private var graticule: some View {
-        Canvas { ctx, size in
+        // The Canvas spans the FULL panel width (no leading padding): lines and separators are
+        // inset by the gutters, but the labels anchor to the panel edge so they land in the gutter.
+        let g = gutters
+        return Canvas { ctx, size in
             // Transfer-aware value-axis graticule (same axis as waveform), spanning all 3 columns.
-            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale)
-            // Thin R|G|B column separators at 1/3 and 2/3.
+            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale,
+                                     gutters: g)
+            // Thin R|G|B column separators at 1/3 and 2/3 OF THE PLOT REGION — must track the
+            // same inset as the trace image, or they'd drift off the channel boundaries.
+            let x0 = g.leading, x1 = size.width - g.trailing
             for frac in [1.0 / 3.0, 2.0 / 3.0] {
-                let x = size.width * frac
+                let x = x0 + (x1 - x0) * frac
                 var sep = Path()
                 sep.move(to: CGPoint(x: x, y: 0))
                 sep.addLine(to: CGPoint(x: x, y: size.height))

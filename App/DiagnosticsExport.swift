@@ -408,7 +408,7 @@ enum LogPartitioner {
         "ABOUT", "BUILD", "CAPTIONS", "CSDEBUG", "CSPROBE", "DIAG", "EDR", "EXPORT", "LICENSE",
         "LIVECLOCK", "NDI", "Play", "RENDER-PERF", "SRT", "SRT-AU", "SRT-BACKLOG", "SRT-DECODE",
         "SRT-FLOW", "SRT-JITTER", "SRT-LIB", "SRT-UNDERRUN", "STREAM", "STREAMS", "SWEEP",
-        "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "WEBRTC", "WEBRTC-SMOKE",
+        "PLAYBACK", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE", "WEBRTC", "WEBRTC-SMOKE",
         "WHEP", "WHEP-BRIDGE", "WHEP-DECODE", "WHEP-FLOW", "WHEP-RTP",
     ]
 

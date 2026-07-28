@@ -71,7 +71,7 @@ func gamutPrimariesLabel(_ code: Int?) -> String {
 // current look. The user-facing intensities multiply this (see each scope's tick).
 // The gamma/floor curve constants live in ScopeTrace (ManifoldCore); baseGain stays here
 // because it feeds the gain the models compute on the main thread.
-let baseGain: Float = 1.6      // dense bins reach full white a bit before the very max
+let baseGain: Float = 2.0      // dense bins reach full white a bit before the very max (was 1.6, +25%)
 
 /// Trace-image pixel height (rows) for the waveform. The GPU 1024-bin histogram is
 /// mapped down to this many rows in the trace-build; the image is then scaled to fill
@@ -96,6 +96,55 @@ let graticuleLabelBackingOpacity: Double = 0.45  // dark pill behind each label
 // so the max- and min-value labels stay fully visible and clear of the slider.
 let scopeHeaderHeight: CGFloat = 22
 let scopePlotInset: CGFloat = 10
+
+// MARK: - Label gutter (waveform + parade) — keep the value labels off the trace
+//
+// The trace used to run edge-to-edge, so the value labels (0 / 128 / … / 1023) sat ON TOP of it
+// and were unreadable wherever the signal was bright. The plot region now starts to the right of
+// a narrow label column: the trace image is inset by `leading`, the graticule LINES start there
+// too, and the labels stay anchored to the panel edge — on clean background. Only the value-axis
+// scopes need this; the vectorscope and CIE scopes have no edge label column (their labels ride
+// the plotted features), so their geometry is untouched.
+
+/// Horizontal insets of the plot region inside a value-axis scope panel.
+struct ScopePlotGutters {
+    /// Left label column (the primary ruler — every ruler labels the left edge).
+    let leading: CGFloat
+    /// Right label column — only HLG, whose secondary nits ruler labels the right edge.
+    let trailing: CGFloat
+}
+
+/// Rendered width of a graticule label. The labels draw in SF Mono (`.monospaced` design), whose
+/// advance is exactly 0.6 em, so character-count × 0.6 × size IS the advance width — no text
+/// layout pass on the draw path, and the value is stable frame to frame.
+private func graticuleLabelWidth(_ text: String, fontSize: CGFloat = graticuleLabelFontSize) -> CGFloat {
+    CGFloat(text.count) * fontSize * 0.6
+}
+
+/// Gutter wide enough for the widest of `labels`: the label pill (4pt edge offset + text + 3pt
+/// pad — see drawGraticuleLabel) plus 3pt of clearance before the plot starts. Sized to the
+/// ACTUAL strings the active ruler draws, so a 3-digit ruler (8-bit / IRE) costs less plot area
+/// than PQ's 5-digit "10000" — plot area is precious on a monitoring tool.
+private func scopeLabelGutter(widest labels: [String]) -> CGFloat {
+    guard let w = labels.map({ graticuleLabelWidth($0) }).max(), w > 0 else { return 0 }
+    return ceil(w) + 10
+}
+
+/// Plot-region gutters for the active value-axis ruler (waveform + parade share this).
+func scopePlotGutters(active: ActiveVerticalScale, sdrScale: ScopeScale) -> ScopePlotGutters {
+    switch active {
+    case .sdr:
+        return ScopePlotGutters(leading: scopeLabelGutter(widest: sdrScale.majors.map { String(Int($0)) }),
+                                trailing: 0)
+    case .pq:
+        return ScopePlotGutters(leading: scopeLabelGutter(widest: pqNitsLevels.map(\.label)),
+                                trailing: 0)
+    case .hlg:
+        // Primary % ruler on the left, secondary nits ruler on the right — both get a gutter.
+        return ScopePlotGutters(leading: scopeLabelGutter(widest: hlgPercentLevels.map { "\(Int($0))%" }),
+                                trailing: scopeLabelGutter(widest: hlgNitsLevels.map { String(Int($0)) }))
+    }
+}
 
 /// The user-selectable vertical scale for the value-axis scopes (waveform, parade).
 /// PURELY a display remap: the trace data is the same normalized 0–1 buffer; each
@@ -282,6 +331,11 @@ let pqNitsLevels: [PQNitsLevel] = [
     .init(nits: 4000,  label: "4000",  emphasis: .normal),
     .init(nits: 10000, label: "10000", emphasis: .normal),
 ]
+
+/// HLG PRIMARY signal-% ladder (left-edge ruler) — the signal axis maps ~directly to the code
+/// range, so % ≈ code fraction. Named (not inlined in the draw) so the label gutter can be sized
+/// from the same strings the draw renders.
+let hlgPercentLevels: [Double] = [0, 25, 50, 75, 100]
 
 /// HLG secondary nits ladder (assuming a nominal 1000-nit peak display). Placed via the HLG
 /// OOTF/EOTF; labels are secondary to the primary % scale.
@@ -488,6 +542,12 @@ struct WaveformScopeView: View {
         resolveVerticalScale(override: verticalScale, transferCode: model.sourceTransferCode)
     }
 
+    /// Label-column insets for the active ruler — the trace starts past them so the value labels
+    /// stay on clean background instead of on top of a bright trace.
+    private var gutters: ScopePlotGutters {
+        scopePlotGutters(active: activeScale, sdrScale: scopeScale)
+    }
+
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
@@ -541,6 +601,10 @@ struct WaveformScopeView: View {
                             .resizable()
                             .interpolation(.none)
                             .padding(.vertical, scopePlotInset)
+                            // Start the trace to the RIGHT of the label column (and left of the
+                            // right-hand one, when a ruler uses it) so the labels stay readable.
+                            .padding(.leading, gutters.leading)
+                            .padding(.trailing, gutters.trailing)
                     }
                     graticule
                         .padding(.vertical, scopePlotInset)
@@ -556,39 +620,45 @@ struct WaveformScopeView: View {
     }
 
     private var graticule: some View {
-        Canvas { ctx, size in
-            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale)
+        // The Canvas spans the FULL panel width (no leading padding): the lines are inset by the
+        // gutters, but the labels anchor to the panel edge so they land in the gutter.
+        let g = gutters
+        return Canvas { ctx, size in
+            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale,
+                                     gutters: g)
         }
     }
 }
 
-/// Two-tier value-axis graticule shared by waveform + parade: full-width labeled
-/// MAJOR lines (brighter) + short unlabeled MINOR edge ticks (fainter). Positions
-/// come from the selected scale, mapped value/rangeMax -> normalized height.
-func drawValueGraticule(_ ctx: GraphicsContext, size: CGSize, scale: ScopeScale) {
+/// Two-tier value-axis graticule shared by waveform + parade: labeled MAJOR lines (brighter)
+/// spanning the plot region + short unlabeled MINOR edge ticks (fainter). Positions come from
+/// the selected scale, mapped value/rangeMax -> normalized height. Lines span the PLOT region
+/// (inside `gutters`), never the label column — the labels sit in the gutter on clean background.
+func drawValueGraticule(_ ctx: GraphicsContext, size: CGSize, scale: ScopeScale,
+                        gutters: ScopePlotGutters) {
     let maxV = scale.rangeMax
     guard maxV > 0 else { return }
+    let x0 = gutters.leading
+    let x1 = size.width - gutters.trailing
 
-    // Minor ticks: short marks at both edges (reduces clutter vs full-width lines).
+    // Minor ticks: short marks at both plot edges (reduces clutter vs full-width lines).
     for v in scale.minors {
         let y = size.height * (1.0 - v / maxV)
         var p = Path()
-        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: 6, y: y))
-        p.move(to: CGPoint(x: size.width - 6, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x0 + 6, y: y))
+        p.move(to: CGPoint(x: x1 - 6, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
         ctx.stroke(p, with: .color(.white.opacity(graticuleMinorOpacity)), lineWidth: 0.5)
     }
 
-    // Major lines: full width + value label (larger, brighter, on a dark backing
-    // so it stays legible over a bright trace).
+    // Major lines: full plot width + value label (larger, brighter, on a dark backing).
     for v in scale.majors {
         let y = size.height * (1.0 - v / maxV)
         var p = Path()
-        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
         ctx.stroke(p, with: .color(.white.opacity(graticuleMajorOpacity)), lineWidth: 0.5)
 
-        // Value label on the LEFT edge (standard scope convention — Resolve/broadcast
-        // waveforms put the scale on the left). The line still spans full width; only the
-        // label anchors left. Plain integer, no thousands separator (see drawGraticuleLabel).
+        // Value label in the LEFT gutter (standard scope convention — Resolve/broadcast
+        // waveforms put the scale on the left). Plain integer, no thousands separator.
         drawGraticuleLabel(ctx, size: size, y: y, text: String(Int(v)),
                            trailing: false, opacity: graticuleLabelOpacity)
     }
@@ -600,6 +670,9 @@ func drawValueGraticule(_ ctx: GraphicsContext, size: CGSize, scale: ScopeScale)
 /// `trailing == false` → LEFT edge (the primary scale, standard scope convention); true → right
 /// edge (used only for a secondary ruler that must stay distinct from the left-side primary).
 /// The vertical center is clamped so the full text box stays inside the plot (never clipped).
+/// Labels anchor to the PANEL edge and therefore land inside the label gutter (see
+/// ScopePlotGutters / scopeLabelGutter, which is sized from these same strings + this pill's
+/// 4pt edge offset and 3pt padding) — clear of the trace, which starts past the gutter.
 private func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat,
                                 text: String, trailing: Bool, opacity: Double,
                                 fontSize: CGFloat = graticuleLabelFontSize) {
@@ -628,7 +701,9 @@ private func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat
 /// the ruler. Each nits level is placed at its ST2084 inverse-EOTF code height (non-linear /
 /// perceptual). 203 nits (BT.2408 HDR diffuse/graphics white — the key HDR grading reference)
 /// and 100 nits (SDR white) draw brighter/thicker so they stand out.
-func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize) {
+func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGutters) {
+    let x0 = gutters.leading
+    let x1 = size.width - gutters.trailing
     for level in pqNitsLevels {
         let norm = pqCodeNormalized(nits: level.nits)   // 0…1 == full-range code fraction == height
         let y = size.height * (1.0 - norm)
@@ -641,9 +716,9 @@ func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize) {
         case .normal: lineOp = graticuleMajorOpacity; lineW = 0.5; labelOp = graticuleLabelOpacity
         }
         var p = Path()
-        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
         ctx.stroke(p, with: .color(.white.opacity(lineOp)), lineWidth: lineW)
-        // Nits label on the LEFT edge (standard scope convention); line spans full width.
+        // Nits label in the LEFT gutter (standard scope convention); line spans the plot region.
         drawGraticuleLabel(ctx, size: size, y: y, text: level.label, trailing: false, opacity: labelOp)
     }
 }
@@ -653,23 +728,25 @@ func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize) {
 /// 1000-nit peak display (via the HLG OOTF/EOTF), as a fainter reference. The dominant % labels
 /// anchor LEFT (standard scope convention); the nits secondary anchors RIGHT so the two rulers
 /// stay visually distinct and never collide. Trace unchanged — graticule only.
-func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize) {
-    // PRIMARY — HLG signal %: full-width lines, dominant labels on the LEFT edge.
-    for pct in [0.0, 25.0, 50.0, 75.0, 100.0] {
+func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGutters) {
+    let x0 = gutters.leading
+    let x1 = size.width - gutters.trailing
+    // PRIMARY — HLG signal %: plot-width lines, dominant labels in the LEFT gutter.
+    for pct in hlgPercentLevels {
         let y = size.height * (1.0 - pct / 100.0)
         var p = Path()
-        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
         ctx.stroke(p, with: .color(.white.opacity(graticuleMajorOpacity)), lineWidth: 0.5)
         drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(pct))%", trailing: false, opacity: graticuleLabelOpacity)
     }
-    // SECONDARY — nits @1000-nit peak: fainter short edge ticks, labels on the RIGHT edge
-    // (opposite the dominant % scale) so the practical nits reference reads clearly apart.
+    // SECONDARY — nits @1000-nit peak: fainter short ticks at the plot edges, labels in the RIGHT
+    // gutter (opposite the dominant % scale) so the practical nits reference reads clearly apart.
     for nits in hlgNitsLevels {
         let ep = hlgSignalForNits(nits)   // signal 0…1 == height fraction
         let y = size.height * (1.0 - ep)
         var p = Path()
-        p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: 28, y: y))
-        p.move(to: CGPoint(x: size.width - 28, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x0 + 28, y: y))
+        p.move(to: CGPoint(x: x1 - 28, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
         ctx.stroke(p, with: .color(.cyan.opacity(0.28)), lineWidth: 0.5)
         drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(nits))", trailing: true, opacity: 0.5)
     }
@@ -679,11 +756,12 @@ func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize) {
 /// ruler; SDR falls through to the existing (unchanged) %/code graticule. Shared by waveform +
 /// parade so both annotate the same axis identically.
 func drawActiveValueGraticule(_ ctx: GraphicsContext, size: CGSize,
-                              active: ActiveVerticalScale, sdrScale: ScopeScale) {
+                              active: ActiveVerticalScale, sdrScale: ScopeScale,
+                              gutters: ScopePlotGutters) {
     switch active {
-    case .sdr: drawValueGraticule(ctx, size: size, scale: sdrScale)
-    case .pq:  drawPQGraticule(ctx, size: size)
-    case .hlg: drawHLGGraticule(ctx, size: size)
+    case .sdr: drawValueGraticule(ctx, size: size, scale: sdrScale, gutters: gutters)
+    case .pq:  drawPQGraticule(ctx, size: size, gutters: gutters)
+    case .hlg: drawHLGGraticule(ctx, size: size, gutters: gutters)
     }
 }
 

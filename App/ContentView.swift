@@ -570,9 +570,17 @@ struct ContentView: View {
             }
 
             if isScrubbing, let preview = scrubPreviewImage {
+                // SAME aspect authority as the video rect above — deliberately NOT the preview
+                // image's own pixel aspect. The two preview producers disagree about pixel aspect
+                // ratio: AVAssetImageGenerator applies PAR (its default aperture mode is clean-
+                // aperture), while LibavThumbnailSource — the DNxHR path — builds from the raw
+                // frame.width/height and ignores sample_aspect_ratio entirely. A ratio-less
+                // .aspectRatio(.fit) sizes from the image, so on anamorphic DNx the scrub preview
+                // changed shape the moment it appeared. Pinning it to videoAspect lands the preview
+                // exactly on the video rect for BOTH producers, whatever the PAR.
                 Image(decorative: preview, scale: 1.0)
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .aspectRatio(videoAspect, contentMode: .fit)
             }
 
             if hasSource {
@@ -1426,8 +1434,13 @@ struct ContentView: View {
     /// session and a connecting SRT one could both hold a `lastError` and this `??` would silently
     /// show one and hide the other. Standing a source up now requires a `LiveSource.Arbitration`,
     /// which only LiveSource.swift can mint, and every funnel there retires first.
+    /// ALSO CARRIES NON-FATAL PLAYBACK NOTICES, not just connect errors — `engine.playbackNotice`
+    /// is the third source. Today's producer is the video-only fallback: when a file's audio track
+    /// can't be added to the reader, playback continues without it, and a file that plays silently
+    /// with no explanation is its own confusing bug. Checked last so a live connect error, which is
+    /// the more urgent condition, still wins.
     @ViewBuilder private var connectErrorBanner: some View {
-        if let message = whep.lastError ?? srt.lastError {
+        if let message = whep.lastError ?? srt.lastError ?? engine.playbackNotice {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -1436,7 +1449,7 @@ struct ContentView: View {
                     .foregroundStyle(.white)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Button { whep.clearError(); srt.clearError() } label: {
+                Button { whep.clearError(); srt.clearError(); engine.playbackNotice = nil } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
                 .buttonStyle(.plain)
@@ -1454,6 +1467,7 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: 9_000_000_000)
                 whep.clearError()
                 srt.clearError()
+                engine.playbackNotice = nil
             }
         }
     }

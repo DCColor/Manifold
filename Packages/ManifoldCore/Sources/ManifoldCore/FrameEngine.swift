@@ -60,6 +60,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     // Audio output gain/mute (passthrough to the persistent audioRenderer).
     @Published public private(set) var volume: Float = 1.0
     @Published public private(set) var isMuted: Bool = false
+
+    /// Non-fatal playback notice for the UI's banner: playback is running, but in a degraded mode
+    /// the user needs to be told about. Currently one producer — the audio track could not be
+    /// added to the reader, so the file is playing VIDEO ONLY. A file that silently plays without
+    /// sound and without explanation is its own confusing bug, which is why this is published to
+    /// the UI and not merely logged. Cleared by the UI when dismissed, and on the next load.
+    @Published public var playbackNotice: String?
+
+    /// True once this file has fallen back to video-only, so the notice is raised ONCE per file
+    /// rather than re-firing on every seek (beginReading runs per seek, and the fallback with it).
+    private var audioFallbackAnnounced = false
     // JKL shuttle transport rate (transient session state — not persisted).
     // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
     // synchronizer directly; reverse is a best-effort jog (see setShuttleRate).
@@ -232,12 +243,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.asset = freshAsset
 
         // Rebuild the scrub-preview generator on the fresh asset.
-        let generator = AVAssetImageGenerator(asset: freshAsset)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
-        generator.maximumSize = CGSize(width: 960, height: 540)
-        self.imageGenerator = generator
+        self.imageGenerator = Self.makeScrubPreviewGenerator(for: freshAsset)
 
         guard let vTrack = try? await freshAsset.loadTracks(withMediaType: .video).first else { return }
         self.videoTrack = vTrack
@@ -491,6 +497,31 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         seek(to: seconds)
     }
 
+    /// The scrub-preview generator, built the SAME way at both construction sites (initial load and
+    /// the colour-tag rewrite path) so the two cannot drift.
+    ///
+    /// `apertureMode = .encodedPixels` IS THE LOAD-BEARING LINE. The property defaults to nil, which
+    /// behaves as clean-aperture: AVAssetImageGenerator then applies BOTH the pixel aspect ratio and
+    /// the clean-aperture crop, and hands back an image at the file's DISPLAY geometry. The Metal
+    /// playback path does neither — it renders the full encoded buffer and lets the layer scale it
+    /// into the aspect-fit video rect — so the preview and the playing picture were produced under
+    /// two different geometry rules and disagreed the moment a file carried either tag.
+    ///
+    /// MEASURED on ARRI open-gate ProRes 4444 XQ (encoded 2944×2160, clean aperture 2880×2160,
+    /// pasp 1:1): default mode returned 720×540 (clean-aperture cropped, 32px lost each side),
+    /// .encodedPixels returns 736×540 — the full encoded frame, exactly what playback draws. Paired
+    /// with ContentView's `.aspectRatio(videoAspect)` pin, which squashes it into the same rect the
+    /// layer squashes the decoded buffer into, the two paths land pixel-for-pixel on each other.
+    private static func makeScrubPreviewGenerator(for asset: AVAsset) -> AVAssetImageGenerator {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.apertureMode = .encodedPixels
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.maximumSize = CGSize(width: 960, height: 540)
+        return generator
+    }
+
     /// Generate a single preview frame (CGImage) at the given time, for scrub preview.
     /// Tolerant and downscaled for speed; isolated from the playback pump. Returns nil on
     /// failure. Libav files (DNx/MXF) use the detached libav thumbnail decoder; AVFoundation
@@ -521,6 +552,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     private func loadAsset(url: URL, autoplay: Bool) async {
+        // A new file gets a clean slate for the degraded-playback notice: the previous file's
+        // "video only" banner must not persist onto one whose audio reads fine.
+        playbackNotice = nil
+        audioFallbackAnnounced = false
+
         // New file: retire any prior libav sources (bound to the old file). The
         // per-file libav video+audio sources are created lazily in beginLibavReading.
         libavSource?.stop(); libavSource = nil
@@ -540,12 +576,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.asset = asset
         self.hasMedia = true
 
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
-        generator.maximumSize = CGSize(width: 960, height: 540)
-        self.imageGenerator = generator
+        self.imageGenerator = Self.makeScrubPreviewGenerator(for: asset)
 
         // Same inspection as AVPlayerEngine, via the shared inspector.
         self.tcInfo = MediaInspector.timecode(for: url)
@@ -822,6 +853,77 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         if resumePlaying { play() }
     }
 
+    /// LPCM output settings for an audio track, with the channel count taken from the track's OWN
+    /// ASBD rather than left for AVFoundation to infer.
+    ///
+    /// 32-bit signed int (not 16): a reference tool must not downconvert. 24-bit sources reach the
+    /// renderer + the D4b-1 audio tap at full precision; the tap reads the ASBD generically (int32
+    /// pass-through), and AVSampleBufferAudioRenderer accepts int32 interleaved LPCM, so the
+    /// system-audio path is unaffected. This also matches the libav/MXF path's fidelity. Nothing
+    /// here downmixes — the channel COUNT is preserved exactly as the source carries it.
+    ///
+    /// WHY THE CHANNEL COUNT IS EXPLICIT. Omitting `AVNumberOfChannelsKey` makes AVFoundation
+    /// derive the output channel count from the source's channel layout. MEASURED: on an ARRI
+    /// ALEXA Mini ProRes whose 5-channel track advertises layout tag 0xFFFF0000 — Unknown ORed
+    /// with a channel count of ZERO, contradicting its own 5-channel ASBD — that derivation
+    /// produces an invalid output format and startReading fails with paramErr (-50). Supplying the
+    /// count removes the derivation entirely. Bit depth is irrelevant to that failure: int16,
+    /// int24, int32 and float32 all failed identically without the count, and all succeeded with it.
+    ///
+    /// Returns nil when the channel count cannot be established. Callers then add NO audio output
+    /// and fall back to video-only — deliberately NOT "emit the settings without a channel count",
+    /// which is precisely the configuration that fails. There is no code path left that can build
+    /// LPCM settings with no channel count.
+    private static func audioOutputSettings(for track: AVAssetTrack) async -> [String: Any]? {
+        guard let formats = try? await track.load(.formatDescriptions),
+              let fmt = formats.first,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee else {
+            NSLog("[PLAYBACK] audio track has no readable stream description — omitting audio output")
+            return nil
+        }
+        let channels = Int(asbd.mChannelsPerFrame)
+        guard channels > 0 else {
+            NSLog("[PLAYBACK] audio track reports 0 channels — omitting audio output")
+            return nil
+        }
+
+        var settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+            AVNumberOfChannelsKey: channels
+        ]
+
+        // Above stereo, AVFoundation wants an explicit layout alongside the count. PREFER THE
+        // SOURCE'S OWN — a well-formed 5.1 tag must survive, or a legitimate surround file would
+        // lose its speaker assignment to a flat discrete mapping. Only when the source's layout is
+        // the Unknown family (high 16 bits == 0xFFFF — the ARRI case) is one synthesised, and then
+        // as DiscreteInOrder: it preserves count and channel ORDER while claiming nothing about
+        // speaker roles, which is the honest answer when the file itself doesn't know.
+        if channels > 2 {
+            var sourceLayout: Data?
+            var layoutSize = 0
+            if let layoutPtr = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &layoutSize),
+               layoutSize > 0,
+               (layoutPtr.pointee.mChannelLayoutTag >> 16) != 0xFFFF {
+                sourceLayout = Data(bytes: layoutPtr, count: layoutSize)
+            }
+            if let sourceLayout {
+                settings[AVChannelLayoutKey] = sourceLayout
+            } else {
+                var synthesized = AudioChannelLayout()
+                synthesized.mChannelLayoutTag = kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)
+                settings[AVChannelLayoutKey] = Data(bytes: &synthesized,
+                                                    count: MemoryLayout<AudioChannelLayout>.size)
+                NSLog("[PLAYBACK] audio track advertises an unknown channel layout — "
+                    + "using DiscreteInOrder for its %d channels", channels)
+            }
+        }
+        return settings
+    }
+
     private func beginReading(from time: Double, resumePlaying: Bool) async {
         if useLibav {
             await beginLibavReading(from: time, resumePlaying: resumePlaying)
@@ -876,28 +978,72 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
 
         var aOut: AVAssetReaderTrackOutput?
-        if let aTrack = audioTrack {
-            // 32-bit signed int (not 16): a reference tool must not downconvert. 24-bit sources reach
-            // the renderer + the D4b-1 audio tap at full precision; the tap reads the ASBD generically
-            // (int32 pass-through), and AVSampleBufferAudioRenderer accepts int32 interleaved LPCM, so
-            // the system-audio path is unaffected. This also matches the libav/MXF path's fidelity.
-            let audioSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMBitDepthKey: 32,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
-            ]
+        if let aTrack = audioTrack, let audioSettings = await Self.audioOutputSettings(for: aTrack) {
             let out = AVAssetReaderTrackOutput(track: aTrack, outputSettings: audioSettings)
             out.alwaysCopiesSampleData = false
             if newReader.canAdd(out) { newReader.add(out); aOut = out }
         }
 
-        guard newReader.startReading() else {
-            print("FrameEngine: startReading failed: \(String(describing: newReader.error))"); return
+        // ── AUDIO MUST NOT BE ABLE TO BLACK OUT THE PICTURE ───────────────────────────────────
+        // Both outputs share ONE AVAssetReader, and startReading() is all-or-nothing: an audio
+        // track the reader refuses takes the video down with it. MEASURED in the wild — an ARRI
+        // ALEXA Mini ProRes 4444 XQ whose 5-channel LPCM track advertises channel layout tag
+        // 0xFFFF0000 (kAudioChannelLayoutTag_Unknown ORed with a channel count of ZERO, while its
+        // own ASBD says 5 channels). startReading failed -11800 / paramErr -50 on every attempt,
+        // seven times in one session, and the tester saw a black screen.
+        //
+        // RETRY ORDER IS DELIBERATE: try WITH audio, and only on failure retry without. Probing
+        // first and pre-emptively dropping audio would silently mute files that would have worked.
+        // A failed AVAssetReader cannot be reconfigured or restarted, so the retry rebuilds the
+        // reader and the video source from scratch.
+        var reader = newReader
+        var activeSource = source
+        var degradedToVideoOnly = false
+        if !reader.startReading() {
+            let firstError = reader.error
+            guard aOut != nil else {
+                // Nothing to drop — the failure is not the audio track's doing.
+                NSLog("[PLAYBACK] startReading failed (video-only session): %@",
+                      String(describing: firstError))
+                return
+            }
+            NSLog("[PLAYBACK] startReading failed WITH audio attached: %@", String(describing: firstError))
+            reader.cancelReading()
+
+            guard let retryReader = try? AVAssetReader(asset: asset) else {
+                NSLog("[PLAYBACK] video-only retry failed: could not create a second reader"); return
+            }
+            retryReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
+            guard let retrySource = FileFrameSource(reader: retryReader,
+                                                    track: vTrack,
+                                                    pixelFormat: videoPixelFormat,
+                                                    pacingRenderer: videoRenderer,
+                                                    pumpQueue: videoPumpQueue,
+                                                    isCurrent: { session.isCurrent(token) }) else {
+                NSLog("[PLAYBACK] video-only retry failed: cannot add video output"); return
+            }
+            guard retryReader.startReading() else {
+                NSLog("[PLAYBACK] video-only retry ALSO failed: %@", String(describing: retryReader.error))
+                return
+            }
+            NSLog("[PLAYBACK] recovered — playing VIDEO ONLY; this file's audio track could not be read")
+            reader = retryReader
+            activeSource = retrySource
+            aOut = nil
+            degradedToVideoOnly = true
         }
 
-        self.reader = newReader
+        // Tell the USER, not just the log — once per file, so a seek doesn't re-raise it.
+        if degradedToVideoOnly {
+            if !audioFallbackAnnounced {
+                audioFallbackAnnounced = true
+                playbackNotice = "This file’s audio track couldn’t be read — playing video only."
+            }
+        } else if aOut != nil {
+            audioFallbackAnnounced = false
+        }
+
+        self.reader = reader
         synchronizer.setRate(0, time: start)
 
         // Route the FrameSource's frames to the SAME two consumers as before:
@@ -907,16 +1053,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // the old pump's behavior, just routed through the protocol.
         let vRenderer = videoRenderer
         let frameTap = onVideoFrame
-        source.onVideoFrame = { sb in
+        activeSource.onVideoFrame = { sb in
             vRenderer.enqueue(sb)
             frameTap?(sb)
         }
-        self.currentSource = source
-        try? source.start()
+        self.currentSource = activeSource
+        try? activeSource.start()
 
         if let aOut {
             let aRenderer = audioRenderer
-            let aReader = newReader
+            let aReader = reader   // the reader that actually started (never the retired first try)
             let tap = audioTap   // local capture (thread-safe class) — no main-actor hop on the pump
             aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [token, weak self] in
                 guard let self, self.sessionToken.isCurrent(token) else {

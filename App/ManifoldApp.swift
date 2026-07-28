@@ -42,6 +42,11 @@ struct ManifoldApp: App {
                 // embedded-verified key are usable and never see the gate — network is never the gate.
                 .licenseGate(license)
                 .task { await license.bootstrap() }
+                // Update NOTIFIER (see UpdateChecker). A `.task` and not `init()`: this must run
+                // after the window is up and must never delay startup. Silent unless there is
+                // genuinely something newer — and silent on every failure, so a tester with no
+                // network sees nothing at all. Guarded to one check per process.
+                .task { await UpdateChecker.shared.checkAtLaunch() }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -51,6 +56,10 @@ struct ManifoldApp: App {
             // by taking the slot — what is gained is the attributions the stock panel cannot show.
             CommandGroup(replacing: .appInfo) {
                 Button("About Manifold") { openWindow(id: AboutScene.windowID) }
+                // Directly under About, where macOS apps conventionally put it. Runs the SAME check
+                // the launch path runs, but reports "up to date" as well — the one path where
+                // silence would be wrong, because the user asked.
+                Button("Check for Updates…") { UpdateChecker.shared.checkFromMenu() }
             }
             // Discoverable path to the License state — opens Settings (⌘,), where the License section lives.
             CommandGroup(after: .appSettings) {

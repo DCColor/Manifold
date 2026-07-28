@@ -55,7 +55,11 @@ final class CIEScopeModel: ObservableObject {
 
     /// Log-compressed brightness gain. The CIE scatter's most-saturated corners are its SPARSEST
     /// bins (few fully-saturated pixels), so it's boosted hard to make the gamut extent read.
-    private static let cieGain: Float = 5.0
+    /// Raised 5.0 → 6.25 (+25%) IN STEP WITH `baseGain` (WaveformScope.swift), which the other
+    /// three scopes multiply into their gain. This scope is not on that constant — it has no
+    /// per-scope pref and does not read the global master — so a default-brightness change has to
+    /// be made here too or the CIE trace drifts dimmer relative to the rest of the tray.
+    private static let cieGain: Float = 6.25
     /// Point-dilation radius (1 → a 3px soft dot) so sparse single-pixel bins are visible.
     private static let cieDilation: Int = 1
     /// Hardcoded white trace (the gamut triangles carry the color; the scatter is neutral).
