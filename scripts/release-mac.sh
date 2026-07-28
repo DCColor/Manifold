@@ -47,7 +47,31 @@ set -euo pipefail
 # Configuration
 # ══════════════════════════════════════════════════════════════════════════════════════════
 
-CONFIG="${1:-Profile}"
+CONFIG=""
+DO_UPLOAD=1
+
+usage() {
+    cat <<'USAGE'
+Usage: scripts/release-mac.sh [Profile|Release] [--no-upload]
+
+  Profile      tester build — telemetry compiled in (DEFAULT)
+  Release      public build — per-second telemetry compiled out
+  --no-upload  build, sign, notarize, staple and verify, but do NOT publish
+
+Environment:
+  MANIFOLD_DIST_DIR   where artefacts are written (default: ~/Builds/Manifold)
+USAGE
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        Profile|Release) CONFIG="$arg" ;;
+        --no-upload)     DO_UPLOAD=0 ;;
+        -h|--help)       usage; exit 0 ;;
+        *)               usage >&2; echo >&2; echo "unknown argument: ${arg}" >&2; exit 2 ;;
+    esac
+done
+CONFIG="${CONFIG:-Profile}"
 
 TEAM_ID="8UQ7MDM87B"
 IDENTITY="Developer ID Application: Amigo Media LLC (${TEAM_ID})"
@@ -63,6 +87,14 @@ XCODEPROJ="${REPO_ROOT}/${SCHEME}.xcodeproj"
 DIST_DIR="${MANIFOLD_DIST_DIR:-${HOME}/Builds/Manifold}"
 # The export options plist is tiny and belongs with the project, per spec. build/ is gitignored.
 EXPORT_PLIST="${REPO_ROOT}/build/ExportOptions.plist"
+
+# ── Publishing ─────────────────────────────────────────────────────────────────────────────
+# The uploader is SHARED across Graviton products and lives in a sibling repo, so the R2 layout,
+# archive paths and manifest shape have one definition rather than one per product.
+PRODUCT_SLUG="manifold"
+RELEASES_BASE="https://releases.graviton.tools"
+UPLOAD_SCRIPT="$(cd "${REPO_ROOT}/../.." 2>/dev/null && pwd)/Graviton-Releases/upload-release.sh"
+NOTES_FILE="${REPO_ROOT}/RELEASE_NOTES.md"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # Output helpers
@@ -155,6 +187,28 @@ xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
          xcrun notarytool store-credentials ${NOTARY_PROFILE} \\
            --apple-id <apple-id> --team-id ${TEAM_ID} --password <app-specific-password>"
 ok "notarytool profile '${NOTARY_PROFILE}' authenticates"
+
+# ── PUBLISHING PREREQUISITES, checked now rather than after notarization ────────────────
+# Everything below is only reachable at step 13, several minutes and one Apple round trip
+# later. Finding out then that the uploader is missing wastes the whole run.
+if [[ $DO_UPLOAD -eq 1 ]]; then
+    [[ -f "$UPLOAD_SCRIPT" ]] \
+        || die "shared uploader not found: ${UPLOAD_SCRIPT}
+       Expected the Graviton-Releases repo as a sibling of this one.
+       Build without publishing with:  $0 ${CONFIG} --no-upload"
+    for tool in wrangler curl; do
+        command -v "$tool" >/dev/null 2>&1 || die "required for publishing but not on PATH: ${tool}"
+    done
+    ok "publishing enabled — uploader at ${UPLOAD_SCRIPT}"
+
+    # Notes are optional by design (the uploader warns rather than failing), but saying so HERE
+    # rather than at step 13 gives a chance to write them before the build runs.
+    if [[ ! -f "$NOTES_FILE" ]]; then
+        warn "no RELEASE_NOTES.md — the release will publish with an empty notes array"
+    fi
+else
+    ok "publishing DISABLED (--no-upload)"
+fi
 
 # ── BUILD INPUTS THAT ARE GITIGNORED, and therefore absent on a fresh clone. Each of these
 #    fails deep inside xcodebuild with an error that does not name the real cause.
@@ -630,14 +684,159 @@ ok "spctl assessment accepted"
 record "spctl --assess:          accepted (source: Notarized Developer ID)"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
-# 12. Report
+# 13. Publish
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# ⚠️ LAST, AND ONLY AFTER EVERY VERIFICATION ABOVE HAS PASSED. Signing, notarization, stapling
+# and the Gatekeeper assessment all gate this step, so an artefact that failed any of them
+# cannot reach a public URL — the script dies before it gets here. Publishing earlier would be
+# convenient and would mean a rejected DMG could be downloadable for as long as it took someone
+# to notice.
+
+DOWNLOAD_URL="${RELEASES_BASE}/${PRODUCT_SLUG}/mac-arm64"
+MANIFEST_URL="${RELEASES_BASE}/${PRODUCT_SLUG}/manifest"
+
+if [[ $DO_UPLOAD -eq 0 ]]; then
+    step "Publish — SKIPPED (--no-upload)"
+    ok "not published; the verified DMG is at ${DMG}"
+    record "published:               no (--no-upload)"
+else
+    step "Publish to R2"
+
+    # The uploader is invoked from the repo root so its default RELEASE_NOTES.md lookup and any
+    # relative path it forms resolve where they should. Everything Manifold-specific travels as
+    # environment, because the DMG is built outside the repo and has no path the shared script
+    # could predict.
+    (
+        cd "$REPO_ROOT"
+        RELEASE_MAC_ARM="$DMG" \
+        RELEASE_BUILD="$NEW_BUILD" \
+        RELEASE_NOTES_FILE="$NOTES_FILE" \
+        bash "$UPLOAD_SCRIPT" "$PRODUCT_SLUG" "$VERSION"
+    ) || die "upload failed — nothing was published, or the upload is incomplete.
+       The verified DMG is still at:
+         ${DMG}
+       Re-run publishing alone once the cause is fixed:
+         cd ${REPO_ROOT} && RELEASE_MAC_ARM='${DMG}' RELEASE_BUILD='${NEW_BUILD}' \\
+           RELEASE_NOTES_FILE='${NOTES_FILE}' bash '${UPLOAD_SCRIPT}' ${PRODUCT_SLUG} ${VERSION}"
+    ok "upload reported success"
+
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    # 14. Verify what is actually live
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    #
+    # ⚠️ THE UPLOADER'S EXIT CODE IS NOT EVIDENCE THAT ANYTHING CHANGED. The failure this guards
+    # against is an upload that reports success while the OLD manifest stays live — testers then
+    # download yesterday's build and report bugs that were fixed. So the published manifest is
+    # fetched back and required to name the version AND build just produced.
+    #
+    # --fail (or --fail-with-body) IS NOT OPTIONAL. Without it curl writes the error page into
+    # the output and exits 0, which on the sibling products meant a 404 page was saved into a
+    # file that looked like a binary. --fail-with-body keeps the body for diagnosis while still
+    # failing on an HTTP error.
+    step "Verify the published manifest"
+
+    LIVE_MANIFEST="${LOG_DIR}/live-manifest.json"
+    MANIFEST_OK=0
+    LAST_HTTP=""
+    for attempt in 1 2 3 4 5; do
+        # Cache-buster: the Worker sends no-cache for the manifest, but the edge is entitled to
+        # hold a 404 from before this product existed, and a distinct query string is a
+        # different cache key.
+        set +e
+        LAST_HTTP=$(curl -sS --fail-with-body --max-time 30 \
+            -o "$LIVE_MANIFEST" -w '%{http_code}' \
+            "${MANIFEST_URL}?cachebust=$(date +%s)-${attempt}" 2>"${LOG_DIR}/curl.err")
+        curl_status=$?
+        set -e
+        if [[ $curl_status -eq 0 ]]; then MANIFEST_OK=1; break; fi
+        [[ $attempt -lt 5 ]] && { warn "manifest not live yet (HTTP ${LAST_HTTP:-?}), retrying…"; sleep 3; }
+    done
+
+    if [[ $MANIFEST_OK -eq 0 ]]; then
+        # One failure mode deserves its own message because the fix is not in this repo: the
+        # Worker keeps its own product allowlist and rejects anything missing from it BEFORE it
+        # consults R2, so the upload can be perfect and every URL still 404.
+        if [[ -s "$LIVE_MANIFEST" ]] && contains "Unknown product" "$(cat "$LIVE_MANIFEST")"; then
+            die "the release Worker does not know the product '${PRODUCT_SLUG}'.
+       The upload to R2 succeeded — this is a Worker configuration gap, not a failed release.
+       Add '${PRODUCT_SLUG}' to PRODUCTS in Graviton-Releases/src/index.js and redeploy:
+         cd $(dirname "$UPLOAD_SCRIPT") && wrangler deploy
+       Then re-run just this verification:
+         curl --fail-with-body ${MANIFEST_URL}"
+        fi
+        die "could not fetch the published manifest after 5 attempts (last HTTP ${LAST_HTTP:-?}).
+       URL: ${MANIFEST_URL}
+$( [[ -s "$LIVE_MANIFEST" ]] && printf '       body: %s\n' "$(head -c 300 "$LIVE_MANIFEST")" )"
+    fi
+
+    read -r LIVE_VERSION LIVE_BUILD LIVE_ASSET LIVE_NOTES <<<"$(python3 - "$LIVE_MANIFEST" <<'PY'
+import json, sys
+try:
+    m = json.load(open(sys.argv[1]))
+except Exception:
+    print("<unparseable> <unparseable> <unparseable> 0"); raise SystemExit
+print(m.get("version", "<none>"),
+      m.get("build", "<none>"),
+      (m.get("assets") or {}).get("mac-arm64", "<none>"),
+      len(m.get("notes") or []))
+PY
+)"
+
+    [[ "$LIVE_VERSION" == "$VERSION" ]] \
+        || die "the live manifest reports version '${LIVE_VERSION}', expected '${VERSION}'.
+       The upload did not replace the previous manifest — testers would download the old build.
+       URL: ${MANIFEST_URL}"
+    [[ "$LIVE_BUILD" == "$NEW_BUILD" ]] \
+        || die "the live manifest reports build '${LIVE_BUILD}', expected '${NEW_BUILD}'.
+       The version matches but the build does not, so this is a STALE manifest from an earlier
+       release of the same version. URL: ${MANIFEST_URL}"
+    [[ "$LIVE_ASSET" == "$(basename "$DMG")" ]] \
+        || die "the live manifest points at asset '${LIVE_ASSET}', expected '$(basename "$DMG")'."
+
+    ok "live manifest reports ${LIVE_VERSION} build ${LIVE_BUILD}"
+    ok "live asset: ${LIVE_ASSET}"
+    record "published manifest:      ${LIVE_VERSION} build ${LIVE_BUILD} (verified live)"
+
+    if [[ "$LIVE_NOTES" == "0" ]]; then
+        warn "the published manifest carries NO release notes — add a '## ${VERSION}' section to"
+        warn "${NOTES_FILE} and re-run the uploader if the update dialog should show them"
+        record "release notes:           none published"
+    else
+        ok "${LIVE_NOTES} release note(s) published"
+        record "release notes:           ${LIVE_NOTES} entries"
+    fi
+
+    # The download endpoint is a 302 to the versioned file in current/. Checked with -I so the
+    # 4 MB body is not fetched just to prove the redirect resolves.
+    set +e
+    DL_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -L -I --max-time 60 "$DOWNLOAD_URL")
+    dl_status=$?
+    set -e
+    if [[ $dl_status -eq 0 && "$DL_HTTP" == "200" ]]; then
+        ok "download URL resolves (HTTP ${DL_HTTP})"
+        record "download URL:            reachable (HTTP ${DL_HTTP})"
+    else
+        warn "download URL did not resolve cleanly (HTTP ${DL_HTTP:-?}) — the manifest is live,"
+        warn "so this is probably edge propagation; re-check ${DOWNLOAD_URL}"
+        record "download URL:            UNVERIFIED (HTTP ${DL_HTTP:-?})"
+    fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# 15. Report
 # ══════════════════════════════════════════════════════════════════════════════════════════
 
 printf '\n%s══════════════════════════════════════════════════════════════════════%s\n' "$BOLD" "$RESET"
 printf '%s  RELEASE COMPLETE — %s %s (build %s)%s\n' "$BOLD" "$CONFIG" "$VERSION" "$NEW_BUILD" "$RESET"
 printf '%s══════════════════════════════════════════════════════════════════════%s\n\n' "$BOLD" "$RESET"
 
-printf '  %sDMG%s  %s\n\n' "$BOLD" "$RESET" "$DMG"
+printf '  %sDMG%s       %s\n' "$BOLD" "$RESET" "$DMG"
+if [[ $DO_UPLOAD -eq 1 ]]; then
+    printf '  %sDOWNLOAD%s  %s\n' "$BOLD" "$RESET" "$DOWNLOAD_URL"
+    printf '  %sMANIFEST%s  %s\n' "$BOLD" "$RESET" "$MANIFEST_URL"
+fi
+printf '\n'
 
 printf '  Verification results\n'
 printf '  --------------------\n'
@@ -652,6 +851,12 @@ printf '    logs:     %s\n' "$LOG_DIR"
 printf '\n  Next\n'
 printf '  ----\n'
 printf '    - commit the CURRENT_PROJECT_VERSION bump in project.yml (now %s)\n' "$NEW_BUILD"
+if [[ $DO_UPLOAD -eq 0 ]]; then
+    printf '    - NOT PUBLISHED (--no-upload). To publish this exact DMG later:\n'
+    printf '        cd %s && RELEASE_MAC_ARM=%q RELEASE_BUILD=%q \\\n' "$REPO_ROOT" "$DMG" "$NEW_BUILD"
+    printf '          RELEASE_NOTES_FILE=%q bash %q %s %s\n' \
+        "$NOTES_FILE" "$UPLOAD_SCRIPT" "$PRODUCT_SLUG" "$VERSION"
+fi
 if [[ "$CONFIG" == "Profile" ]]; then
     printf '    - this is the TESTER build: telemetry is compiled in, diagnostics export is complete\n'
 else

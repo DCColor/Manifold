@@ -1,0 +1,41 @@
+# Manifold — Release Notes
+
+Published with each release. `scripts/release-mac.sh` hands this file to the shared uploader,
+which parses the section matching the version being released and puts the entries into the R2
+manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
+changelog page. Format notes are at the bottom.
+
+## 0.5.0
+
+- First tester release.
+- Play files, and live streams over SRT, WHEP and NDI.
+- SDI output via Blackmagic DeckLink.
+- Scopes: waveform, vectorscope, parade and CIE.
+- Export Diagnostics… in the Manifold menu, for sending us logs when something goes wrong.
+- Saved streams can be edited in place, and passphrases are kept in your keychain.
+
+---
+
+# Format
+
+A release section is a level-2 heading whose text is the version, followed by bullets:
+
+> `## 0.5.0`
+> `- One short line per entry.`
+> `- Another entry.`
+
+Rules the parser enforces:
+
+- The heading must match `MARKETING_VERSION` from project.yml exactly. A `v` prefix is accepted.
+- Entries are `-` or `*` bullets, collected until the next level-2 heading.
+- Anything in the section that is not a bullet — prose, sub-headings — is ignored.
+- Fenced code blocks are stripped before parsing, so an example section inside one cannot be
+  mistaken for a real release. This section deliberately uses blockquotes rather than a fence
+  anyway, so the real notes above are the first `## 0.5.0` in the file under either rule.
+
+**Newest version first.** The parser takes the first matching heading, so ordering is a second
+line of defence against a duplicated section.
+
+If there is no section for the version being released, the release still goes out: the uploader
+warns and publishes an empty notes array. It will not fail a build that is already signed,
+notarized and verified.
