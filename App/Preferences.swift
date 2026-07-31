@@ -869,37 +869,34 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                // DeckLink — tri-state, driven by (driverInstalled, devices). Driver presence (a↔b) is
-                // relaunch-only (framework load is cached); card plug/unplug (b↔c) is picked up on the
-                // next refresh, so only state (a) carries a relaunch caption.
-                if !dl.driverInstalled {
-                    // (a) Desktop Video framework not loaded — driver absent.
-                    LabeledContent("DeckLink") {
-                        Text("Desktop Video not installed")
-                            .foregroundStyle(.orange)
-                    }
-                    Button("Download Desktop Video…") {
+                // DeckLink — the full readiness state (driver present / version vs the output floor /
+                // devices), one row per distinguishable case. The version is included in every case
+                // where we have it: a driver below the floor used to show here as a bare "No device
+                // detected", which is both wrong and unactionable. Driver presence and version are
+                // relaunch-only (the framework load is cached); card plug/unplug is picked up on the
+                // next refresh, which is why only the driver-side states carry a relaunch caption.
+                let dlStatus = dl.driverStatus
+                LabeledContent("DeckLink") {
+                    Text(dlStatus.headline)
+                        // Orange = the user can fix it by installing/updating a driver; grey = nothing
+                        // is wrong with the software, there's just no card.
+                        .foregroundStyle(dlStatus == .notInstalled || dlStatus.isBelowFloor
+                                         || dlStatus == .versionUnreadable ? .orange : .secondary)
+                }
+                if dlStatus == .notInstalled || dlStatus.isBelowFloor {
+                    Button(dlStatus.isBelowFloor ? "Update Desktop Video…" : "Download Desktop Video…") {
                         NSWorkspace.shared.open(DeckLinkService.driverInstallURL)
                     }
-                    Text("Install Blackmagic Desktop Video, then relaunch Manifold.")
+                }
+                if let detail = dlStatus.detail {
+                    Text(detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if dl.devices.isEmpty {
-                    // (b) Driver present, no card — plugging one is detected on the next refresh.
-                    LabeledContent("DeckLink") {
-                        Text("No device detected")
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("Connect a DeckLink or UltraStudio device.")
+                } else if !dl.devices.isEmpty {
+                    // Ready — name the hardware (what the old single-device row showed).
+                    Text(dl.devices.map(\.displayName).joined(separator: ", "))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else {
-                    // (c) One or more devices — reassurance only, no action.
-                    LabeledContent("DeckLink") {
-                        Text(dl.devices.count == 1 ? dl.devices[0].displayName
-                                                   : "\(dl.devices.count) devices detected")
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
             // Detection is lazy; refresh when Settings opens so the rows are current. NDI is

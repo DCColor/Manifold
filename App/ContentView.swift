@@ -1139,18 +1139,31 @@ struct ContentView: View {
     /// opens a Menu (device picker + plain-speak status). Mirrors the CIE gear-menu interaction.
     /// Button face = icon + on/off only; format text lives in the menu.
     private var deckLinkOutputControl: some View {
-        HStack(spacing: 2) {
+        // Driver readiness is known at startup, so a driver-side blocker greys the button out INSTEAD
+        // of accepting the click and failing at the moment of use. The tooltip carries the specific
+        // reason — including the installed Desktop Video version when it's below our floor, which used
+        // to surface only in the output log after a failed attempt.
+        //
+        // Only DRIVER-side states disable (see isDriverBlocked): they can't change without a relaunch.
+        // "No device" stays clickable — a card can appear at any moment, and the start path re-probes.
+        let status = deckLink.driverStatus
+        let blocked = status.isDriverBlocked && !deckLink.isOutputting
+        return HStack(spacing: 2) {
             Button { deckLink.toggleOutput() } label: {
                 Image(systemName: deckLink.isOutputting ? "tv.fill" : "tv")
             }
-            .foregroundStyle(deckLink.isOutputting ? Color.green : .white.opacity(0.9))
-            .help(deckLink.isOutputting ? "DeckLink output ON — click to stop (⌃⌥⇧O)"
-                                        : "DeckLink output — click to start (⌃⌥O)")
+            .disabled(blocked)
+            .foregroundStyle(deckLink.isOutputting ? Color.green
+                             : .white.opacity(blocked ? 0.35 : 0.9))
+            .help((blocked ? status.blockedReason : nil)
+                  ?? (deckLink.isOutputting ? "DeckLink output ON — click to stop (⌃⌥⇧O)"
+                                            : "DeckLink output — click to start (⌃⌥O)"))
 
             Menu {
                 Section("Output device") {
                     if deckLink.devices.isEmpty {
-                        Button("No DeckLink device") {}.disabled(true)
+                        // Say WHICH absence this is — an old driver is not a missing card.
+                        Button(status.headline) {}.disabled(true)
                     } else {
                         Picker("Output device", selection: deckLinkDeviceBinding) {
                             ForEach(deckLink.devices, id: \.index) { d in
@@ -1174,6 +1187,13 @@ struct ContentView: View {
                 }
                 Section("Signal") {
                     Button(deckLink.signalLine) {}.disabled(true)
+                }
+                // A below-floor driver enumerates devices perfectly well, so the picker above can look
+                // healthy while output is impossible. State the reason where the picker is.
+                if let reason = status.blockedReason, !deckLink.devices.isEmpty {
+                    Section("Unavailable") {
+                        Button(reason) {}.disabled(true)
+                    }
                 }
             } label: {
                 Image(systemName: "chevron.down").font(.system(size: 8))

@@ -298,13 +298,18 @@ final class NDIService: ObservableObject {
               + "runtime=\(NDIBridge.runtimeVersion ?? "?"))…")
 
         // Discovery blocks — keep it off the main thread.
+        let discoveryTimeout = 5.0
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let connected = NDIBridge.connectToFirstSource(withTimeout: 5.0)
+            let connected = NDIBridge.connectToFirstSource(withTimeout: discoveryTimeout)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isConnecting = false
                 guard let connected else {
-                    NSLog("[NDI] no source found — is OmniScope sending on this network?")
+                    // Name the CONDITION, not one sender. This read "is OmniScope sending on this
+                    // network?" — a development leftover that told every tester using a different NDI
+                    // source that Manifold was looking for one specific product.
+                    NSLog("[NDI] no source found on this network within \(Int(discoveryTimeout))s — "
+                          + "check that an NDI sender is running and on the same subnet")
                     return
                 }
                 self.start(with: connected)

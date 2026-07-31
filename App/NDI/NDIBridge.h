@@ -75,7 +75,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// discovery code copies every field the instant it reads it and never lets a raw SDK pointer
 /// escape into Swift.
 @interface NDISource : NSObject
-/// The NDI source name (e.g. "MACHINE (OmniScope)") — the picker's display + identity.
+/// The NDI source name, in the SDK's "MACHINE (Sender Name)" form — the picker's display + identity.
 @property (nonatomic, copy, readonly) NSString *name;
 /// The source URL/address, when the SDK provided one. Passed to recv_create_v3 alongside the name.
 @property (nonatomic, copy, readonly, nullable) NSString *url;

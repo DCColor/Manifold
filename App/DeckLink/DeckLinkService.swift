@@ -40,6 +40,14 @@ final class DeckLinkService: ObservableObject {
     /// `devices.isEmpty` alone cannot. Published by `refreshDevices()`. Relaunch-only for install/uninstall
     /// (the framework load is pthread_once-cached); card plug/unplug is live via re-enumeration.
     @Published private(set) var driverInstalled = false
+    /// The INSTALLED Desktop Video version ("12.8.1"), or nil when the driver is absent or the
+    /// version couldn't be read. Read at startup and on every `refreshDevices()` — the query needs no
+    /// card and no output attempt, so there is no reason to withhold it until the user clicks Output.
+    /// nil is reported as "unknown", never as "old".
+    @Published private(set) var driverVersion: String?
+    /// Whether the installed driver satisfies the output floor. False when the driver is absent OR
+    /// when the version couldn't be read (fail closed — the bridge would abort anyway).
+    @Published private(set) var driverMeetsFloor = false
     /// Plain-speak colorspace label for the current source (DISPLAY ONLY — the actual output tag is
     /// unchanged: D5 tags both 2020 and P3 as Rec.2020). Derived from the source colorPrimariesCode,
     /// so it can distinguish genuine 2020 from P3-in-2020 (which the collapsed tag cannot). nil → 709.
@@ -51,6 +59,113 @@ final class DeckLinkService: ObservableObject {
 
     /// The full Signal line for the output menu: active display mode · fixed format · source colorspace.
     var signalLine: String { "\(modeLabel) · \(Self.formatDetail) · \(colorspaceLabel)" }
+
+    // MARK: - Driver readiness (the honest tri-state, plus the two "we don't know" cases)
+
+    /// The minimum Desktop Video version output requires, as text ("14.3"). Comes from the bridge, which
+    /// owns the constant — the number is never typed out in Swift.
+    static var requiredDriverVersion: String { DeckLinkBridge.requiredDriverVersion() }
+
+    /// Every distinguishable state of the DeckLink stack, kept apart instead of collapsed. The three
+    /// the tester's report asked for are `.notInstalled`, `.belowFloor` and `.noDevice`; the two extra
+    /// cases exist because collapsing them would be the same dishonesty in a new place:
+    ///   • `.versionUnreadable` — the framework loaded but BMDDeckLinkAPIVersion didn't answer. We do
+    ///     not know the version, so we say that rather than guessing "old" or waving it through.
+    ///   • `.ready` — driver current AND at least one output-capable device.
+    /// All five are decided from data we hold at STARTUP (framework load + API version + enumeration).
+    /// None of it waits for an output attempt.
+    enum DriverStatus: Equatable {
+        case notInstalled
+        case versionUnreadable
+        case belowFloor(installed: String)
+        case noDevice(installed: String)
+        case ready(installed: String, deviceCount: Int)
+
+        /// Only `.ready` can drive a signal. Everything else fails, and now fails BEFORE the click.
+        var canOutput: Bool { if case .ready = self { return true }; return false }
+
+        /// Driver present but too old — the one state that gets an "Update…" affordance rather than
+        /// "Download…", and the one the tester's 12.8.1 machine was actually in.
+        var isBelowFloor: Bool { if case .belowFloor = self { return true }; return false }
+
+        /// A DRIVER-side blocker: absent, unreadable, or below the floor. These are the states that
+        /// cannot change under a running app — the framework load (and therefore the version it
+        /// reports) is pthread_once-cached, so installing or updating Desktop Video needs a relaunch
+        /// to take effect. That is what makes them safe to GREY THE BUTTON OUT on: a cached "no" can
+        /// never go stale within the session.
+        ///
+        /// `.noDevice` is deliberately NOT in here. A card can be plugged in at any second, and the
+        /// device cache behind it is only as fresh as the last refresh — disabling on it would leave
+        /// the button dead after a mid-session plug. That case stays clickable and is caught by the
+        /// fresh probe in `startScheduledOutput()`.
+        var isDriverBlocked: Bool {
+            switch self {
+            case .notInstalled, .versionUnreadable, .belowFloor: return true
+            case .noDevice, .ready:                              return false
+            }
+        }
+
+        /// Short value text for the Settings row.
+        var headline: String {
+            switch self {
+            case .notInstalled:            return "Desktop Video not installed"
+            case .versionUnreadable:       return "Desktop Video installed (version unknown)"
+            case .belowFloor(let v):       return "Desktop Video \(v) — too old"
+            case .noDevice(let v):         return "No device detected (Desktop Video \(v))"
+            case .ready(let v, let n):     return n == 1 ? "1 device (Desktop Video \(v))"
+                                                         : "\(n) devices (Desktop Video \(v))"
+            }
+        }
+
+        /// The explanatory caption — what the user can DO about this state.
+        var detail: String? {
+            switch self {
+            case .notInstalled:
+                return "Install Blackmagic Desktop Video \(DeckLinkService.requiredDriverVersion) or later, then relaunch Manifold."
+            case .versionUnreadable:
+                return "The Desktop Video driver loaded but did not report its version. Output requires "
+                     + "\(DeckLinkService.requiredDriverVersion) or later; Manifold can't confirm the installed version, so output is disabled."
+            case .belowFloor(let v):
+                return "DeckLink output requires Desktop Video \(DeckLinkService.requiredDriverVersion) or later; you have \(v). "
+                     + "Update Desktop Video, then relaunch Manifold."
+            case .noDevice:
+                return "Connect a DeckLink or UltraStudio device."
+            case .ready:
+                return nil
+            }
+        }
+
+        /// One-line reason output is unavailable — used for the disabled button's tooltip. nil when
+        /// output IS available.
+        var blockedReason: String? {
+            switch self {
+            case .notInstalled:      return "DeckLink output — requires Blackmagic Desktop Video \(DeckLinkService.requiredDriverVersion) or later (not installed)"
+            case .versionUnreadable: return "DeckLink output — Desktop Video version could not be read; \(DeckLinkService.requiredDriverVersion) or later is required"
+            case .belowFloor(let v): return "DeckLink output — requires Desktop Video \(DeckLinkService.requiredDriverVersion) or later (you have \(v))"
+            case .noDevice:          return "DeckLink output — no DeckLink or UltraStudio device connected"
+            case .ready:             return nil
+            }
+        }
+    }
+
+    /// The current readiness state, composed from the three facts refreshDevices() gathers. Order
+    /// matters: driver absence outranks version, version outranks device presence — reporting "no
+    /// device" to someone whose driver is too old (the exact bug this replaces) would be a fresh lie.
+    var driverStatus: DriverStatus {
+        Self.status(driverInstalled: driverInstalled, version: driverVersion,
+                    meetsFloor: driverMeetsFloor, deviceCount: devices.count)
+    }
+
+    /// The composition rule itself, as a pure function so the startup log (which probes the bridge
+    /// off-main, before anything is published) reaches the same verdict by the same path.
+    static func status(driverInstalled: Bool, version: String?,
+                       meetsFloor: Bool, deviceCount: Int) -> DriverStatus {
+        guard driverInstalled else { return .notInstalled }
+        guard let version else { return .versionUnreadable }
+        guard meetsFloor else { return .belowFloor(installed: version) }
+        guard deviceCount > 0 else { return .noDevice(installed: version) }
+        return .ready(installed: version, deviceCount: deviceCount)
+    }
 
     /// Map a source CICP primaries code → plain-speak label. "(P3 limited)" flags P3 content sitting
     /// inside the Rec.2020 container (what's actually on the wire is Rec.2020, per D5's tag).
@@ -251,11 +366,36 @@ final class DeckLinkService: ObservableObject {
         // Same enumeration also settles the pthread_once framework load, so the driver-present read is
         // valid here — publish it alongside `devices` so state (a) vs (b) is distinguishable in the UI.
         let installed = DeckLinkBridge.isDriverInstalled()
+        // The version comes from the same loaded framework — no card, no output attempt, so it is
+        // available here and belongs here. Gathering it with the enumeration keeps the three facts
+        // (framework loaded / version / devices) a single consistent snapshot.
+        let version = DeckLinkBridge.installedDriverVersion()
+        let meetsFloor = DeckLinkBridge.installedDriverMeetsOutputFloor()
         DispatchQueue.main.async {
             self.devices = ds
             self.driverInstalled = installed
+            self.driverVersion = version
+            self.driverMeetsFloor = meetsFloor
             if self.selectedDeviceIndex >= ds.count { self.selectedDeviceIndex = 0 }
         }
+    }
+
+    /// A fresh, SYNCHRONOUS readiness probe — the same three bridge reads `refreshDevices()` publishes,
+    /// taken now rather than trusted from published state. Used by the start paths, which must not act
+    /// on a snapshot that predates a driver update or a card being unplugged. All three calls are cheap
+    /// (the framework load is pthread_once-cached; the version is a struct read; only the enumeration
+    /// walks the bus), and the pre-existing auto-start path already did the enumeration on this thread.
+    func probeDriverStatus() -> DriverStatus { probeDriverStatusAndDevices().status }
+
+    /// The same probe, also handing back the enumeration it walked — so a caller that needs both (the
+    /// diagnostics machine section) gets one consistent snapshot from one bus walk instead of two.
+    func probeDriverStatusAndDevices() -> (status: DriverStatus, devices: [Device]) {
+        let ds = outputDevices()
+        let status = Self.status(driverInstalled: DeckLinkBridge.isDriverInstalled(),
+                                 version: DeckLinkBridge.installedDriverVersion(),
+                                 meetsFloor: DeckLinkBridge.installedDriverMeetsOutputFloor(),
+                                 deviceCount: ds.count)
+        return (status, ds)
     }
 
     private var hasAutoStarted = false   // one-shot guard so launch auto-start fires at most once
@@ -270,8 +410,12 @@ final class DeckLinkService: ObservableObject {
         guard !hasAutoStarted else { return }
         hasAutoStarted = true
         guard UserDefaults.standard.bool(forKey: Self.enableOnLaunchKey) else { return }   // pref off → nothing
-        guard !outputDevices().isEmpty else {                                               // no hardware → skip
-            print("DeckLink: enable-on-launch is on but no output device is present — skipping")
+        // Not just "is a card present" — the full readiness verdict, so a below-floor driver is named
+        // as such at launch instead of being reported as absent hardware.
+        let status = probeDriverStatus()
+        guard status.canOutput else {
+            print("DeckLink: enable-on-launch is on but output is unavailable — "
+                + (status.blockedReason ?? status.headline) + "; skipping")
             return
         }
         print("DeckLink: enable-on-launch — starting output on device \(selectedDeviceIndex)")
@@ -301,6 +445,16 @@ final class DeckLinkService: ObservableObject {
     /// black. `isOutputting` flips true optimistically and reverts if the bridge start fails.
     func startScheduledOutput() {
         guard !isOutputting else { return }
+        // Refuse BEFORE flipping any state, and say why. The toolbar button is already disabled in
+        // every non-ready state, but ⌃⌥O and the auto-start path reach here directly — and the probe
+        // is fresh, so a driver updated or a card unplugged mid-session is caught here too. Publishing
+        // the refreshed facts keeps the Settings row and diagnostics in step with what just happened.
+        let status = probeDriverStatus()
+        guard status.canOutput else {
+            print("DeckLink: output not started — " + (status.blockedReason ?? status.headline))
+            refreshDevices()
+            return
+        }
         isOutputting = true
         applyAudioRouting()   // D4b-3: ENABLE transition — with .sdi (the default), the Mac goes silent
         let deviceIndex = selectedDeviceIndex
@@ -525,18 +679,40 @@ final class DeckLinkService: ObservableObject {
         }
     }
 
-    /// D1 probe: log the connected output devices once at startup. Runs off the main thread so a
+    /// D1 probe: log the DeckLink stack's real state once at startup. Runs off the main thread so a
     /// slow driver query never delays launch.
+    ///
+    /// This used to print "found 0 output device(s) (no card / driver not reachable)" for every
+    /// non-working case, including a driver that was installed, reachable, and cheerfully reporting a
+    /// version we simply hadn't asked for yet. Each distinguishable state now gets its own line, and
+    /// the version is named wherever we have it.
     func logDevicesAtStartup() {
         DispatchQueue.global(qos: .utility).async {
             let devices = self.outputDevices()
-            if devices.isEmpty {
-                print("DeckLink: found 0 output device(s) (no card / driver not reachable)")
-            } else {
-                let list = devices
-                    .map { "\($0.modelName) (\($0.displayName))" }
-                    .joined(separator: ", ")
-                print("DeckLink: found \(devices.count) output device(s): \(list)")
+            let installed = DeckLinkBridge.isDriverInstalled()
+            let version = DeckLinkBridge.installedDriverVersion()
+            let meetsFloor = DeckLinkBridge.installedDriverMeetsOutputFloor()
+            let status = Self.status(driverInstalled: installed, version: version,
+                                     meetsFloor: meetsFloor, deviceCount: devices.count)
+            switch status {
+            case .notInstalled:
+                print("DeckLink: Desktop Video driver not installed — output unavailable "
+                    + "(requires \(Self.requiredDriverVersion) or later)")
+            case .versionUnreadable:
+                print("DeckLink: Desktop Video driver is installed but did not report a version; "
+                    + "output requires \(Self.requiredDriverVersion) or later — output disabled")
+            case .belowFloor(let v):
+                // The case the tester hit. The driver was never unreachable; it was too old, and it
+                // said so the whole time.
+                print("DeckLink: Desktop Video \(v) installed — below the \(Self.requiredDriverVersion) "
+                    + "floor DeckLink output requires; output disabled "
+                    + "(\(devices.count) device(s) enumerated)")
+            case .noDevice(let v):
+                print("DeckLink: Desktop Video \(v) installed (meets the \(Self.requiredDriverVersion) floor) — "
+                    + "no output-capable device connected")
+            case .ready(let v, _):
+                let list = devices.map { "\($0.modelName) (\($0.displayName))" }.joined(separator: ", ")
+                print("DeckLink: Desktop Video \(v) — found \(devices.count) output device(s): \(list)")
             }
         }
     }

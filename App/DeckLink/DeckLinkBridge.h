@@ -93,6 +93,25 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// pthread_once-cached, so this is effectively relaunch-only for driver install/uninstall.
 + (BOOL)isDriverInstalled;
 
+/// The INSTALLED Desktop Video driver's runtime version as "major.minor.point" (e.g. "12.8.1"), or
+/// nil when the driver isn't installed / the query fails — i.e. nil means "we genuinely don't know",
+/// never "old".
+///
+/// This is the SAME query the output path runs (CreateDeckLinkAPIInformationInstance +
+/// BMDDeckLinkAPIVersion) and it requires NEITHER a card NOR an output attempt — the API-information
+/// object comes from the loaded framework itself. So the version reported at startup, in
+/// diagnostics, and in the output log is one fact read one way, not an estimate.
++ (nullable NSString *)installedDriverVersion;
+
+/// Whether the installed driver satisfies the output floor. NO when the driver is absent or the
+/// version can't be read (fail closed). The comparison lives with the floor constants in the .mm so
+/// no caller re-implements it.
++ (BOOL)installedDriverMeetsOutputFloor;
+
+/// The floor as a display string ("14.3") — for UI/diagnostics text, so the number is never typed
+/// out a second time anywhere in the app.
++ (NSString *)requiredDriverVersion;
+
 /// D2 "first light": push ONE synthetic solid-color frame out device index 0 at 2160p23.98 /
 /// 8-bit YUV via DisplayVideoFrameSync, and HOLD it on the output (output stays enabled, frame
 /// retained) so it stays on the monitor. Enforces the Desktop Video >= 14.3 floor first. Hardcoded

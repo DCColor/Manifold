@@ -621,15 +621,33 @@ enum MachineContext {
         }
 
         out.append("")
+        // DeckLink — probed fresh at export time, not read from whatever the UI last cached. The
+        // version line exists because "driver: installed / devices: none enumerated" was reported to a
+        // tester running Desktop Video 12.8.1: true on both counts, and useless. The driver's version
+        // is readable without a card and without an output attempt, so it is reported unconditionally
+        // and the floor verdict is stated next to it.
         let deckLink = DeckLinkService.shared
-        out.append("DeckLink driver  : \(deckLink.driverInstalled ? "installed" : "NOT installed")")
-        let devices = deckLink.devices
-        if devices.isEmpty {
-            out.append("DeckLink devices : none enumerated")
-        } else {
-            out.append("DeckLink devices : \(devices.count)")
-            out.append("DeckLink output  : \(deckLink.isOutputting ? "active" : "idle") — \(deckLink.signalLine)")
+        let (dlStatus, dlDevices) = deckLink.probeDriverStatusAndDevices()
+        let floor = DeckLinkService.requiredDriverVersion
+        out.append("DeckLink driver  : \(dlStatus == .notInstalled ? "NOT installed" : "installed")")
+        switch dlStatus {
+        case .notInstalled:
+            out.append("DeckLink version : n/a — driver not installed [output floor: \(floor)]")
+        case .versionUnreadable:
+            out.append("DeckLink version : UNKNOWN — driver loaded but reported no version "
+                     + "[output floor: \(floor), cannot verify]")
+        case .belowFloor(let v):
+            out.append("DeckLink version : \(v) [output floor: \(floor) — NOT met, output disabled]")
+        case .noDevice(let v), .ready(let v, _):
+            out.append("DeckLink version : \(v) [output floor: \(floor) — met]")
         }
+        out.append("DeckLink devices : \(dlDevices.isEmpty ? "none enumerated" : "\(dlDevices.count)")")
+        for d in dlDevices {
+            out.append("  [\(d.index)] \(d.modelName) — \(d.displayName)")
+        }
+        out.append("DeckLink output  : " + (dlStatus.canOutput
+            ? "\(deckLink.isOutputting ? "active" : "idle") — \(deckLink.signalLine)"
+            : "unavailable — \(dlStatus.headline)"))
 
         let ndi = NDIService.shared
         out.append("NDI runtime      : \(ndi.runtimeAvailable ? "installed" : "NOT installed")"

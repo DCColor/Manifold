@@ -776,6 +776,41 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     return (__bridge_transfer NSString *)s;
 }
 
+#pragma mark - Desktop Video version floor (ONE definition, every caller reads it from here)
+
+// The output floor: Desktop Video >= 14.3 (the IOSurface/zero-copy floor). Defined once so the
+// number cannot drift between the startup report, the Settings row, the toolbar gate and the
+// output path's own abort — before this existed, only the output path knew it, which is why a
+// below-floor driver read as "not reachable" everywhere else.
+static const int kDeckLinkFloorMajor = 14;
+static const int kDeckLinkFloorMinor = 3;
+
+// Read the INSTALLED driver's runtime API version (not the SDK header we compiled against).
+// Encoding is 0xMMmmpp00 (see the SDK's DeviceList sample).
+//
+// HONESTY NOTE — this is the SAME call the output path makes, and it needs NEITHER a card NOR an
+// output attempt: CreateDeckLinkAPIInformationInstance() is vended by the loaded Desktop Video
+// framework itself, so it answers at startup exactly as it answers at output time. Nothing here is
+// inferred or probed indirectly. Returns NO only when the framework isn't loaded (driver absent) or
+// the query itself fails — i.e. when we genuinely do not know the version.
+static BOOL DeckLinkReadInstalledVersion(int *outMajor, int *outMinor, int *outPoint) {
+    IDeckLinkAPIInformation *apiInfo = CreateDeckLinkAPIInformationInstance();
+    if (apiInfo == NULL) { return NO; }
+    int64_t apiVersion = 0;
+    HRESULT hr = apiInfo->GetInt(BMDDeckLinkAPIVersion, &apiVersion);
+    apiInfo->Release();
+    if (hr != S_OK) { return NO; }
+    if (outMajor) { *outMajor = (int)((apiVersion & 0xFF000000) >> 24); }
+    if (outMinor) { *outMinor = (int)((apiVersion & 0x00FF0000) >> 16); }
+    if (outPoint) { *outPoint = (int)((apiVersion & 0x0000FF00) >> 8);  }
+    return YES;
+}
+
+static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
+    if (major != kDeckLinkFloorMajor) { return major > kDeckLinkFloorMajor; }
+    return minor >= kDeckLinkFloorMinor;
+}
+
 // Private: the shared start sequence parameterized by a C++ FrameFillFn (C++ type in the selector,
 // so it can only live in the .mm). Public entry points wrap their fill and forward here.
 @interface DeckLinkBridge ()
@@ -845,6 +880,22 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     return NO;
 }
 
++ (NSString *)installedDriverVersion {
+    int major = 0, minor = 0, point = 0;
+    if (!DeckLinkReadInstalledVersion(&major, &minor, &point)) { return nil; }
+    return [NSString stringWithFormat:@"%d.%d.%d", major, minor, point];
+}
+
++ (BOOL)installedDriverMeetsOutputFloor {
+    int major = 0, minor = 0, point = 0;
+    if (!DeckLinkReadInstalledVersion(&major, &minor, &point)) { return NO; }
+    return DeckLinkVersionMeetsFloor(major, minor);
+}
+
++ (NSString *)requiredDriverVersion {
+    return [NSString stringWithFormat:@"%d.%d", kDeckLinkFloorMajor, kDeckLinkFloorMinor];
+}
+
 #pragma mark - D2: first light (one synthetic frame, held on the output)
 
 - (DeckLinkOutputResult *)startTestFrameOutputOnDevice0 {
@@ -853,28 +904,24 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     // Re-fire cleanly: tear down any previously-held output first.
     [self stopTestOutput];
 
-    // (b) Version floor — Desktop Video >= 14.3 (the IOSurface/zero-copy floor). Read the INSTALLED
-    // driver's runtime API version (not the SDK header). Encoding is 0xMMmmpp00 (see DeviceList sample).
+    // (b) Version floor — the shared check (see DeckLinkReadInstalledVersion). The UI gates on the
+    // same answer BEFORE the button is clickable, so reaching an abort here means the driver changed
+    // under a running app; it stays as the last line of defence.
     {
-        IDeckLinkAPIInformation *apiInfo = CreateDeckLinkAPIInformationInstance();
-        if (apiInfo == NULL) {
+        int major = 0, minor = 0, point = 0;
+        if (!DeckLinkReadInstalledVersion(&major, &minor, &point)) {
             [log addObject:@"version: DeckLink API information unavailable (driver not reachable) — aborting"];
             return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
         }
-        int64_t apiVersion = 0;
-        apiInfo->GetInt(BMDDeckLinkAPIVersion, &apiVersion);
-        apiInfo->Release();
-
-        const int major = (int)((apiVersion & 0xFF000000) >> 24);
-        const int minor = (int)((apiVersion & 0x00FF0000) >> 16);
-        const int point = (int)((apiVersion & 0x0000FF00) >> 8);
         NSString *verStr = [NSString stringWithFormat:@"%d.%d.%d", major, minor, point];
-        if (major < 14 || (major == 14 && minor < 3)) {
+        if (!DeckLinkVersionMeetsFloor(major, minor)) {
             [log addObject:[NSString stringWithFormat:
-                @"version floor: DeckLink output requires Desktop Video 14.3 or later; installed: %@ — aborting", verStr]];
+                @"version floor: DeckLink output requires Desktop Video %@ or later; installed: %@ — aborting",
+                [DeckLinkBridge requiredDriverVersion], verStr]];
             return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
         }
-        [log addObject:[NSString stringWithFormat:@"version: Desktop Video %@ (>= 14.3 floor OK)", verStr]];
+        [log addObject:[NSString stringWithFormat:@"version: Desktop Video %@ (>= %@ floor OK)",
+                        verStr, [DeckLinkBridge requiredDriverVersion]]];
     }
 
     // (a) Device index 0 + IDeckLinkOutput.
@@ -1032,26 +1079,22 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
     // Re-fire cleanly.
     [self stopScheduledPlayback];
 
-    // Version floor — Desktop Video >= 14.3 (same check as D2).
+    // Version floor — same shared check as D2.
     {
-        IDeckLinkAPIInformation *apiInfo = CreateDeckLinkAPIInformationInstance();
-        if (apiInfo == NULL) {
+        int major = 0, minor = 0, point = 0;
+        if (!DeckLinkReadInstalledVersion(&major, &minor, &point)) {
             [log addObject:@"version: DeckLink API information unavailable — aborting"];
             return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
         }
-        int64_t apiVersion = 0;
-        apiInfo->GetInt(BMDDeckLinkAPIVersion, &apiVersion);
-        apiInfo->Release();
-        const int major = (int)((apiVersion & 0xFF000000) >> 24);
-        const int minor = (int)((apiVersion & 0x00FF0000) >> 16);
-        const int point = (int)((apiVersion & 0x0000FF00) >> 8);
         NSString *verStr = [NSString stringWithFormat:@"%d.%d.%d", major, minor, point];
-        if (major < 14 || (major == 14 && minor < 3)) {
+        if (!DeckLinkVersionMeetsFloor(major, minor)) {
             [log addObject:[NSString stringWithFormat:
-                @"version floor: DeckLink output requires Desktop Video 14.3 or later; installed: %@ — aborting", verStr]];
+                @"version floor: DeckLink output requires Desktop Video %@ or later; installed: %@ — aborting",
+                [DeckLinkBridge requiredDriverVersion], verStr]];
             return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
         }
-        [log addObject:[NSString stringWithFormat:@"version: Desktop Video %@ (>= 14.3 floor OK)", verStr]];
+        [log addObject:[NSString stringWithFormat:@"version: Desktop Video %@ (>= %@ floor OK)",
+                        verStr, [DeckLinkBridge requiredDriverVersion]]];
     }
 
     // Device at `deviceIndex` + IDeckLinkOutput.
