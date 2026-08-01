@@ -1,0 +1,1488 @@
+Manifold diagnostics
+Generated        : 2026-07-30T23:44:12Z
+App version      : 0.5.1 (build 6)
+
+==============================================================================
+WHAT THE TESTER REPORTED
+==============================================================================
+Connection       : Wired (ethernet)
+Location         : (not given)
+What they were doing:
+
+~3m from SDI -> OBS -> WHIP/DCCOLOR LIVE- > down to manifold
+
+==============================================================================
+BUILD
+==============================================================================
+configuration    : Profile
+swift            : -O +WMO
+c/objc           : -Os
+DEBUG defined    : true
+app telemetry    : ON
+core telemetry   : ON (via MANIFOLD_TELEMETRY)
+
+==============================================================================
+MACHINE
+==============================================================================
+macOS            : Version 26.4 (Build 25E246)
+Hardware model   : Mac13,1
+CPU              : Apple M1 Max
+Cores            : 10 (10 active)
+Physical memory  : 64.0 GB
+Uptime           : 520306 s
+
+Displays:
+  [0] BenQ PV270 — 2560x1440 @1x
+      colour profile: BenQ PV270
+      EDR headroom: current=1.000 potential=1.000 reference=0.000
+  [1] LG ULTRAWIDE — 2560x1080 @1x
+      colour profile: LG ULTRAWIDE
+      EDR headroom: current=1.000 potential=1.000 reference=0.000
+  [2] Elgato Prom. — 1024x600 @1x
+      colour profile: Elgato Prom.
+      EDR headroom: current=1.000 potential=1.000 reference=0.000
+
+DeckLink driver  : installed
+DeckLink devices : none enumerated
+NDI runtime      : installed (NDI SDK APPLE 09:05:57 May  6 2024 6.0.1)
+NDI sources seen : 0
+
+==============================================================================
+ACTIVE ERROR STATE
+==============================================================================
+(no error state active at export time)
+
+==============================================================================
+CAPTURED LOG
+==============================================================================
+Manifold's own output. Times are local; a blank time column means the line came
+from print() or a C library and carried no timestamp of its own.
+
+19:39:45.109  [BUILD] configuration=Profile  swift=-O +WMO  c=-Os  (DEBUG=1)
+19:39:45.110          telemetry: app=ON core=ON (core via MANIFOLD_TELEMETRY)
+              DeckLink: found 0 output device(s) (no card / driver not reachable)
+              [EDR] headroom (startup) on "BenQ PV270": current=1.0000 potential=1.0000 reference=0.0000   <<< NO HEADROOM — EDR is inert on this display
+19:39:45.600  [NDI] runtime loaded: /usr/local/lib/libndi.dylib
+19:39:45.600  [NDI] loader symbol resolved: NDIlib_v5_load
+19:39:45.600  [NDI] runtime version: NDI SDK APPLE 09:05:57 May  6 2024 6.0.1
+              [LICENSE] public-key self-check: OK (embedded key round-trips)
+19:39:45.754  [UPDATE] checking — running 0.5.1 (build 6)
+19:39:45.937  [UPDATE] up to date — server has 0.5.1 (build 6)
+19:39:53.913  [WHEP] ───── connecting: receive RTP + depacketize to NALs ─────
+19:39:53.913  [WHEP] endpoint host customer-nm8nevs4vhwnkl65.cloudflarestream.com (path withheld — it carries the stream key)
+19:39:53.919  [WHEP-BRIDGE] pc 1 created — recvonly video (tr 2) + audio (tr 3), stun: none
+              [CSDEBUG] layer destination = SOURCE (CoreMedia709 — today)  → CGColorSpace kCGColorSpaceCoreMedia709
+              [EDR] source tags: primaries=1 transfer=1 matrix=1
+              [EDR] layer colorspace = kCGColorSpaceCoreMedia709  (wideGamut=false)
+              [EDR] wantsExtendedDynamicRangeContent = false  (SDR source → EDR OFF, unchanged path)
+              [EDR] headroom (source load) on "BenQ PV270": current=1.0000 potential=1.0000 reference=0.0000   <<< NO HEADROOM — EDR is inert on this display
+              [CSPROBE] ──────────────────────────────────────────────────────────────────
+              [CSPROBE] CICP in: primaries=1 transfer=1 matrix=1
+              [CSPROBE] CGColorSpaceCopyName    : kCGColorSpaceCoreMedia709
+              [CSPROBE] isWideGamutRGB=false  usesITUR_2100TF=false
+              [CSPROBE] identity (CFEqual)      : CoreMedia709
+              [CSPROBE] ICC: 660 bytes  version 2.1  class=mntr space=RGB  pcs=XYZ 
+              [CSPROBE] tags (12): bTRC, bXYZ, chad, cprt, desc, gTRC, gXYZ, ndin, rTRC, rXYZ, vcgt, wtpt
+              [CSPROBE] desc ('desc')           : HDTV
+              [CSPROBE] rXYZ                    : X=0.436066 Y=0.222488 Z=0.013916  xy=(0.6485, 0.3309)
+              [CSPROBE] gXYZ                    : X=0.385147 Y=0.716873 Z=0.097076  xy=(0.3212, 0.5978)
+              [CSPROBE] bXYZ                    : X=0.143066 Y=0.060608 Z=0.714096  xy=(0.1559, 0.0660)
+              [CSPROBE] wtpt                    : X=0.950455 Y=1.000000 Z=1.089050  xy=(0.3127, 0.3290)
+              [CSPROBE] rTRC                    : curveType count=1 → PURE POWER LAW, gamma=1.960938
+              [CSPROBE] gTRC                    : curveType count=1 → PURE POWER LAW, gamma=1.960938
+              [CSPROBE] bTRC                    : curveType count=1 → PURE POWER LAW, gamma=1.960938
+              [CSPROBE] rTRC vs candidates (max abs deviation over [0,1]):
+              [CSPROBE]    x^1.961            max err = 1.172e-05   ← MATCH
+              [CSPROBE]    piecewise BT.709   max err = 1.288e-02
+              [CSPROBE]    x^2.2              max err = 4.230e-02
+              [CSPROBE]    sRGB               max err = 4.962e-02
+              [CSPROBE]    x^2.4 (BT.1886)    max err = 7.420e-02
+              [CSPROBE] shadow detail (where a piecewise toe would show):
+              [CSPROBE]    f(0.010) = 0.000120   piecewise709 = 0.002222   ratio = 18.56x
+              [CSPROBE]    f(0.020) = 0.000466   piecewise709 = 0.004444   ratio = 9.54x
+              [CSPROBE]    f(0.040) = 0.001814   piecewise709 = 0.008889   ratio = 4.90x
+              [CSPROBE]    f(0.081) = 0.007238   piecewise709 = 0.017945   ratio = 2.48x
+              [CSPROBE]    f(0.200) = 0.042595   piecewise709 = 0.055427   ratio = 1.30x
+              [CSPROBE] ──────────────────────────────────────────────────────────────────
+19:39:53.922  [WHEP] display route ACTIVE — LiveClock target=0.400s, maxQueued=30, colorimetry assumed 709 SDR
+19:39:53.922  [WHEP] building recvonly offer, gathering ICE candidates (non-trickle)…
+19:39:53.923  [WEBRTC] (4) rtc::impl::PeerConnection::changeSignalingState@1395: Changed signaling state to have-local-offer
+19:39:53.923  [WEBRTC] (4) rtc::impl::PeerConnection::changeGatheringState@1382: Changed gathering state to in-progress
+19:39:53.923  [WEBRTC] (4) rtc::impl::IceTransport::LogCallback@391: juice: Changing state to gathering
+19:39:53.923  [WHEP-BRIDGE] gathering state 1
+19:39:53.923  [WEBRTC] (4) rtc::impl::IceTransport::LogCallback@391: juice: Changing state to connecting
+19:39:53.923  [WEBRTC] (4) rtc::impl::PeerConnection::changeIceState@1364: Changed ICE state to checking
+19:39:53.923  [WEBRTC] (4) rtc::impl::PeerConnection::changeState@1346: Changed state to connecting
+19:39:53.923  [WEBRTC] (4) rtc::impl::IceTransport::LogCallback@391: juice: Candidate gathering done
+19:39:53.923  [WEBRTC] (4) rtc::impl::PeerConnection::changeGatheringState@1382: Changed gathering state to complete
+19:39:54.021  [WHEP] ICE state → checking  (+0.11s)
+19:39:54.021  [WHEP] pc state → connecting  (+0.11s)
+19:39:54.021  [WHEP] offer ready — 1134 bytes, 2 candidate line(s), gathering took 0.11s
+19:39:54.022  [WHEP] POSTing offer (1134 bytes)…
+19:39:54.951  [WHEP] HTTP 201 — 1689 bytes back (+1.04s)
+19:39:54.951  [WHEP] resource Location received (will DELETE on teardown)
+19:39:54.951  [WHEP] answer SDP received — 1689 bytes
+19:39:54.951  [WEBRTC] (4) rtc::impl::IceTransport::LogCallback@391: juice: Connectivity timer started
+19:39:54.951  [WEBRTC] (4) rtc::impl::PeerConnection::changeSignalingState@1395: Changed signaling state to stable
+19:39:54.952  [WHEP-RTP] negotiated H.264 payload type 96 on track 2
+19:39:54.952  [WHEP] answer applied — ICE checks + DTLS handshake now in flight…
+19:39:55.459  [WEBRTC] (4) rtc::impl::IceTransport::LogCallback@391: juice: Changing state to connected
+19:39:55.459  [WEBRTC] (4) rtc::impl::PeerConnection::changeIceState@1364: Changed ICE state to connected
+19:39:55.459  [WEBRTC] (4) rtc::impl::PeerConnection::initDtlsTransport@276: This connection requires media support
+19:39:55.459  [WHEP] ICE state → connected  (+1.55s)
+19:39:55.460  [WHEP] ICE connected — selected pair: a=candidate:3 1 UDP 1846541823 100.36.75.248 61801 typ prflx  ->  a=candidate:513273236 1 UDP 2130706431 141.101.90.0 1473 typ host
+19:39:55.464  [WEBRTC] (4) rtc::impl::IceTransport::LogCallback@391: juice: Changing state to completed
+19:39:55.464  [WEBRTC] (4) rtc::impl::PeerConnection::changeIceState@1364: Changed ICE state to completed
+19:39:55.464  [WHEP] ICE state → completed  (+1.55s)
+19:39:55.464  [WHEP] ICE completed — selected pair: a=candidate:3 1 UDP 1846541823 100.36.75.248 61801 typ prflx  ->  a=candidate:513273236 1 UDP 2130706431 141.101.90.0 1473 typ host
+19:39:55.479  [WEBRTC] (4) rtc::impl::DtlsTransport::doRecv@562: DTLS handshake finished
+19:39:55.479  [WEBRTC] (4) rtc::impl::PeerConnection::changeState@1346: Changed state to connected
+19:39:55.479  [WEBRTC] (4) rtc::impl::DtlsSrtpTransport::postHandshake@265: Deriving SRTP keying material (Mbed TLS)
+19:39:55.479  [WHEP-BRIDGE] video track 2 open — RTP will start arriving
+19:39:55.497  [WHEP] pc state → connected  (+1.58s)
+19:39:55.497  [WHEP] connected — ICE + DTLS established in 1.58s. Transport is up.
+19:39:55.497  [WHEP] watching for RTP — the [WHEP-RTP] lines below are step 3a's checkpoint
+19:39:55.497  [WHEP] (still no decode and no picture: NALs are built and counted, then dropped)
+19:39:55.800  [WHEP-DECODE] format description built — 1920x1080, SPS 16 bytes, PPS 4 bytes
+19:39:55.884  [WHEP-DECODE] session created — requesting x420 output (10-bit 4:2:0), hardware preferred
+19:39:55.884  [WHEP-DECODE] keyframe acquired — decoding from here
+19:39:55.904  [WHEP] decoded as 'x420' — already in the renderer's 10-bit domain, no promote needed
+              [LIVECLOCK] depth=0.497s target=0.400 rate=1.0050 err=+0.0971 count=3
+19:39:55.922  [WHEP-DECODE] +2s  decoded=4/s (total=4)  1920x1080 'x420'  |  AUs=10/s  dropped: preIDR=0 noFmt=6 sbFail=0  |  errors=0
+19:39:56.049  [WHEP-RTP] first RTP packet after 1.10s — ssrc 0xe6ba66fb, pt 96
+19:39:56.049  [WHEP-RTP] parameter sets captured — SPS 16 bytes, PPS 4 bytes (held out-of-band for the format description in step 3b)
+19:39:56.049  [WHEP-RTP] first keyframe access unit assembled
+19:39:56.049  [WHEP-RTP] +1s  frames=13 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=13 SEI=1  |  pkts=250 seqGaps=0 lost=0 reorder=0  |  FU-A rx=235 reassembled=14 dropped=0  |  handoff=13 shed=0
+              [LIVECLOCK] depth=0.502s target=0.400 rate=1.0050 err=+0.1020 count=12
+19:39:56.913  [WHEP-FLOW] enqueued=26.8/s (total=28, delivered=28, promoteFail=0) | depth=0.492s count=12 rate=1.0050
+19:39:56.923  [WHEP-DECODE] +3s  decoded=24/s (total=28)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:39:56.955  [WHEP-RTP] +2s  frames=21 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=21 SEI=0  |  pkts=378 seqGaps=0 lost=0 reorder=0  |  FU-A rx=357 reassembled=21 dropped=0  |  handoff=21 shed=0
+              [RENDER-PERF] n=26 tickMs=16.68/17.92(x694) texMs=0.08/0.22 drawMs=0.08/0.81 encMs=0.08/0.26 presMs=0.07/1.08 commitMs=0.01/0.04 gpuMs=0.28/1.24 latMs=1.05/4.12(x25) footprintMB=128.5 texFail=0 iosurface=Y
+              [Play] presented 25.2 fps
+              [LIVECLOCK] depth=0.505s target=0.400 rate=1.0050 err=+0.1045 count=12
+19:39:57.921  [WHEP-FLOW] enqueued=23.8/s (total=52, delivered=52, promoteFail=0) | depth=0.487s count=12 rate=1.0050
+19:39:57.922  [WHEP-DECODE] +4s  decoded=24/s (total=52)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:39:58.049  [WHEP-RTP] +3s  frames=27 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=26 SEI=1  |  pkts=483 seqGaps=0 lost=0 reorder=0  |  FU-A rx=455 reassembled=28 dropped=0  |  handoff=27 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.70(x60) texMs=0.03/0.10 drawMs=0.05/0.11 encMs=0.08/0.18 presMs=0.04/0.10 commitMs=0.01/0.04 gpuMs=0.20/0.64 latMs=0.86/1.36(x24) footprintMB=128.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.497s target=0.400 rate=1.0050 err=+0.0974 count=12
+19:39:58.923  [WHEP-DECODE] +5s  decoded=23/s (total=75)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:39:58.927  [WHEP-FLOW] enqueued=23.9/s (total=76, delivered=76, promoteFail=0) | depth=0.483s count=12 rate=1.0050
+19:39:58.971  [WHEP-RTP] +4s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=399 seqGaps=0 lost=0 reorder=0  |  FU-A rx=377 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.55(x60) texMs=0.02/0.15 drawMs=0.04/0.08 encMs=0.09/0.25 presMs=0.03/0.10 commitMs=0.01/0.03 gpuMs=0.18/0.25 latMs=0.90/1.46(x24) footprintMB=128.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.494s target=0.400 rate=1.0050 err=+0.0941 count=12
+19:39:59.924  [WHEP-DECODE] +6s  decoded=25/s (total=100)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:39:59.972  [WHEP-FLOW] enqueued=23.9/s (total=101, delivered=101, promoteFail=0) | depth=0.470s count=11 rate=1.0050
+19:40:00.049  [WHEP-RTP] +5s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=453 seqGaps=0 lost=0 reorder=0  |  FU-A rx=426 reassembled=27 dropped=0  |  handoff=26 shed=0
+              [RENDER-PERF] n=25 tickMs=16.68/17.68(x62) texMs=0.02/0.20 drawMs=0.06/0.30 encMs=0.08/0.17 presMs=0.03/0.08 commitMs=0.02/0.22 gpuMs=0.19/0.23 latMs=0.89/2.11(x25) footprintMB=128.6 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.484s target=0.400 rate=1.0050 err=+0.0835 count=11
+19:40:00.924  [WHEP-DECODE] +7s  decoded=23/s (total=123)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:00.931  [WHEP-BACKLOG] pictures=124 over 5.0s (=5.13s content) vs wall 5.0s → surplus +0.10s cumulative | netJump +0.00s | inBuffer +0.48s | cushion 0.400s | residual +0.025s (bound ±0.027s)
+19:40:00.931  [WHEP-JITTER] window arrivals min=23 max=27 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:01.011  [WHEP-FLOW] enqueued=24.1/s (total=126, delivered=126, promoteFail=0) | depth=0.472s count=11 rate=1.0050
+19:40:01.051  [WHEP-RTP] +6s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=429 seqGaps=0 lost=0 reorder=0  |  FU-A rx=406 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=25 tickMs=16.69/17.67(x62) texMs=0.02/0.05 drawMs=0.05/0.24 encMs=0.10/0.27 presMs=0.03/0.07 commitMs=0.01/0.05 gpuMs=0.20/0.35 latMs=0.76/1.61(x25) footprintMB=133.1 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.484s target=0.400 rate=1.0050 err=+0.0836 count=11
+19:40:01.923  [WHEP-DECODE] +8s  decoded=25/s (total=148)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:02.049  [WHEP-RTP] +7s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=416 seqGaps=0 lost=0 reorder=0  |  FU-A rx=392 reassembled=25 dropped=0  |  handoff=24 shed=0
+19:40:02.055  [WHEP-FLOW] enqueued=23.9/s (total=151, delivered=151, promoteFail=0) | depth=0.460s count=11 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.69/17.65(x60) texMs=0.03/0.11 drawMs=0.05/0.06 encMs=0.13/0.53 presMs=0.05/0.26 commitMs=0.02/0.04 gpuMs=0.19/0.30 latMs=1.02/4.37(x24) footprintMB=128.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.484s target=0.400 rate=1.0050 err=+0.0838 count=11
+19:40:02.923  [WHEP-DECODE] +9s  decoded=23/s (total=171)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:03.050  [WHEP-RTP] +8s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=442 seqGaps=0 lost=0 reorder=0  |  FU-A rx=417 reassembled=24 dropped=0  |  handoff=24 shed=0
+19:40:03.059  [WHEP-FLOW] enqueued=23.9/s (total=175, delivered=175, promoteFail=0) | depth=0.454s count=11 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.67/17.68(x62) texMs=0.05/0.41 drawMs=0.09/0.57 encMs=0.13/0.33 presMs=0.07/0.55 commitMs=0.02/0.06 gpuMs=0.20/0.31 latMs=1.03/2.12(x25) footprintMB=128.7 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.470s target=0.400 rate=1.0050 err=+0.0702 count=11
+19:40:03.923  [WHEP-DECODE] +10s  decoded=24/s (total=195)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:04.051  [WHEP-RTP] +9s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=440 seqGaps=0 lost=0 reorder=0  |  FU-A rx=415 reassembled=26 dropped=0  |  handoff=25 shed=0
+19:40:04.106  [WHEP-FLOW] enqueued=23.9/s (total=200, delivered=200, promoteFail=0) | depth=0.441s count=11 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.69/17.70(x60) texMs=0.03/0.10 drawMs=0.05/0.09 encMs=0.12/0.40 presMs=0.04/0.13 commitMs=0.01/0.03 gpuMs=0.19/0.30 latMs=1.24/7.89(x24) footprintMB=128.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.475s target=0.400 rate=1.0050 err=+0.0746 count=12
+19:40:04.923  [WHEP-DECODE] +11s  decoded=25/s (total=220)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:05.052  [WHEP-RTP] +10s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=421 seqGaps=0 lost=0 reorder=0  |  FU-A rx=397 reassembled=23 dropped=0  |  handoff=23 shed=0
+19:40:05.133  [WHEP-FLOW] enqueued=24.3/s (total=225, delivered=225, promoteFail=0) | depth=0.461s count=11 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.66/17.65(x62) texMs=0.04/0.25 drawMs=0.06/0.12 encMs=0.10/0.15 presMs=0.06/0.36 commitMs=0.01/0.03 gpuMs=0.22/1.17 latMs=1.45/6.02(x25) footprintMB=128.7 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.459s target=0.400 rate=1.0050 err=+0.0589 count=11
+19:40:05.923  [WHEP-DECODE] +12s  decoded=23/s (total=243)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:05.936  [WHEP-DRIFT] senderRate=90045 tps (+0.050% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=+0.0237 s/s observed vs -0.0045 predicted (residual +0.0282) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.050% + margin
+19:40:05.936  [WHEP-BACKLOG] pictures=244 over 10.0s (=10.14s content) vs wall 10.0s → surplus +0.10s cumulative | netJump +0.00s | inBuffer +0.45s | cushion 0.400s | residual +0.050s (bound ±0.052s)
+19:40:05.936  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:06.051  [WHEP-RTP] +11s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=461 seqGaps=0 lost=0 reorder=0  |  FU-A rx=435 reassembled=27 dropped=0  |  handoff=26 shed=0
+19:40:06.134  [WHEP-FLOW] enqueued=24.0/s (total=249, delivered=249, promoteFail=0) | depth=0.456s count=11 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.70/17.67(x60) texMs=0.03/0.14 drawMs=0.05/0.08 encMs=0.11/0.36 presMs=0.04/0.07 commitMs=0.01/0.04 gpuMs=0.19/0.23 latMs=1.27/5.43(x24) footprintMB=128.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.455s target=0.400 rate=1.0050 err=+0.0549 count=11
+19:40:06.923  [WHEP-DECODE] +13s  decoded=24/s (total=267)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:07.048  [WHEP-RTP] +12s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=414 seqGaps=0 lost=0 reorder=0  |  FU-A rx=391 reassembled=23 dropped=0  |  handoff=23 shed=0
+19:40:07.177  [WHEP-FLOW] enqueued=24.0/s (total=274, delivered=274, promoteFail=0) | depth=0.444s count=11 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.68/17.81(x62) texMs=0.02/0.04 drawMs=0.07/0.19 encMs=0.11/0.20 presMs=0.05/0.11 commitMs=0.04/0.43 gpuMs=0.20/0.30 latMs=1.03/2.62(x25) footprintMB=128.7 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.453s target=0.400 rate=1.0050 err=+0.0534 count=11
+19:40:07.923  [WHEP-DECODE] +14s  decoded=24/s (total=291)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:07.971  [WHEP-RTP] +13s  frames=22 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=21 SEI=1  |  pkts=396 seqGaps=0 lost=0 reorder=0  |  FU-A rx=373 reassembled=23 dropped=0  |  handoff=22 shed=0
+19:40:08.224  [WHEP-FLOW] enqueued=23.9/s (total=299, delivered=299, promoteFail=0) | depth=0.430s count=10 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.67/17.62(x62) texMs=0.02/0.08 drawMs=0.04/0.24 encMs=0.08/0.26 presMs=0.03/0.07 commitMs=0.01/0.03 gpuMs=0.19/0.21 latMs=0.76/1.30(x25) footprintMB=132.4 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.445s target=0.400 rate=1.0050 err=+0.0449 count=10
+19:40:08.923  [WHEP-DECODE] +15s  decoded=24/s (total=315)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:09.047  [WHEP-RTP] +14s  frames=26 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=26 SEI=0  |  pkts=468 seqGaps=0 lost=0 reorder=0  |  FU-A rx=442 reassembled=26 dropped=0  |  handoff=26 shed=0
+19:40:09.225  [WHEP-FLOW] enqueued=24.0/s (total=323, delivered=323, promoteFail=0) | depth=0.425s count=10 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.69/17.68(x60) texMs=0.01/0.08 drawMs=0.03/0.06 encMs=0.06/0.14 presMs=0.02/0.06 commitMs=0.01/0.02 gpuMs=0.19/0.21 latMs=0.67/0.83(x24) footprintMB=132.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.450s target=0.400 rate=1.0050 err=+0.0503 count=11
+19:40:09.923  [WHEP-DECODE] +16s  decoded=25/s (total=340)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:09.971  [WHEP-RTP] +15s  frames=22 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=400 seqGaps=0 lost=0 reorder=0  |  FU-A rx=376 reassembled=23 dropped=0  |  handoff=22 shed=0
+19:40:10.274  [WHEP-FLOW] enqueued=23.8/s (total=348, delivered=348, promoteFail=0) | depth=0.411s count=10 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.66/17.60(x62) texMs=0.03/0.07 drawMs=0.05/0.08 encMs=0.14/0.57 presMs=0.04/0.10 commitMs=0.01/0.03 gpuMs=0.25/1.15 latMs=1.07/4.78(x25) footprintMB=129.0 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:40:10.923  [WHEP-DECODE] +17s  decoded=23/s (total=363)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.440s target=0.400 rate=1.0050 err=+0.0403 count=10
+19:40:10.972  [WHEP-DRIFT] senderRate=90050 tps (+0.056% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=-0.0048 s/s observed vs -0.0044 predicted (residual -0.0003) | REAL DRIFT — creep matches the measured sender rate | need maxSlew ≥ 0.056% + margin
+19:40:10.973  [WHEP-BACKLOG] pictures=365 over 15.1s (=15.18s content) vs wall 15.1s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.44s | cushion 0.400s | residual +0.075s (bound ±0.077s)
+19:40:10.973  [WHEP-JITTER] window arrivals min=23 max=26 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:11.051  [WHEP-RTP] +16s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=462 seqGaps=0 lost=0 reorder=0  |  FU-A rx=437 reassembled=25 dropped=0  |  handoff=25 shed=0
+19:40:11.277  [WHEP-FLOW] enqueued=23.9/s (total=372, delivered=372, promoteFail=0) | depth=0.407s count=10 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.70/17.64(x60) texMs=0.03/0.08 drawMs=0.05/0.10 encMs=0.12/0.41 presMs=0.04/0.08 commitMs=0.01/0.03 gpuMs=0.19/0.30 latMs=1.09/4.99(x24) footprintMB=129.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:11.923  [WHEP-DECODE] +18s  decoded=25/s (total=388)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.437s target=0.400 rate=1.0050 err=+0.0372 count=11
+19:40:12.051  [WHEP-RTP] +17s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=427 seqGaps=0 lost=0 reorder=0  |  FU-A rx=415 reassembled=37 dropped=0  |  handoff=24 shed=0
+19:40:12.321  [WHEP-FLOW] enqueued=23.9/s (total=397, delivered=397, promoteFail=0) | depth=0.410s count=10 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.67/17.58(x62) texMs=0.02/0.12 drawMs=0.07/0.67 encMs=0.09/0.19 presMs=0.04/0.09 commitMs=0.01/0.02 gpuMs=0.18/0.25 latMs=1.01/5.66(x25) footprintMB=129.1 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:40:12.923  [WHEP-DECODE] +19s  decoded=23/s (total=411)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.430s target=0.400 rate=1.0050 err=+0.0299 count=10
+19:40:13.050  [WHEP-RTP] +18s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=451 seqGaps=0 lost=0 reorder=0  |  FU-A rx=451 reassembled=49 dropped=0  |  handoff=25 shed=0
+19:40:13.322  [WHEP-FLOW] enqueued=25.0/s (total=422, delivered=422, promoteFail=0) | depth=0.406s count=10 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.69/17.73(x62) texMs=0.03/0.08 drawMs=0.06/0.11 encMs=0.11/0.27 presMs=0.05/0.07 commitMs=0.02/0.05 gpuMs=0.19/0.31 latMs=1.35/4.44(x25) footprintMB=129.1 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:40:13.923  [WHEP-DECODE] +20s  decoded=24/s (total=435)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.430s target=0.400 rate=1.0050 err=+0.0295 count=10
+19:40:14.051  [WHEP-RTP] +19s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=427 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=44 dropped=0  |  handoff=23 shed=0
+19:40:14.326  [WHEP-FLOW] enqueued=22.9/s (total=445, delivered=445, promoteFail=0) | depth=0.401s count=10 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.67/17.67(x60) texMs=0.02/0.04 drawMs=0.05/0.11 encMs=0.11/0.17 presMs=0.06/0.25 commitMs=0.02/0.05 gpuMs=0.19/0.26 latMs=0.87/1.93(x24) footprintMB=129.2 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:14.923  [WHEP-DECODE] +21s  decoded=24/s (total=459)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.418s target=0.400 rate=1.0050 err=+0.0175 count=10
+19:40:15.051  [WHEP-RTP] +20s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=441 seqGaps=0 lost=0 reorder=0  |  FU-A rx=441 reassembled=49 dropped=0  |  handoff=25 shed=0
+19:40:15.328  [WHEP-FLOW] enqueued=25.0/s (total=470, delivered=470, promoteFail=0) | depth=0.421s count=10 rate=1.0050
+              [RENDER-PERF] n=25 tickMs=16.68/17.67(x62) texMs=0.03/0.13 drawMs=0.04/0.07 encMs=0.09/0.14 presMs=0.04/0.13 commitMs=0.01/0.04 gpuMs=0.20/0.29 latMs=0.97/6.71(x25) footprintMB=129.3 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:40:15.924  [WHEP-DECODE] +22s  decoded=24/s (total=483)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.418s target=0.400 rate=1.0050 err=+0.0176 count=10
+19:40:15.971  [WHEP-RTP] +21s  frames=21 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=20 SEI=1  |  pkts=383 seqGaps=0 lost=0 reorder=0  |  FU-A rx=380 reassembled=39 dropped=0  |  handoff=21 shed=0
+19:40:15.977  [WHEP-DRIFT] senderRate=89974 tps (-0.029% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=-0.0051 s/s observed vs -0.0053 predicted (residual +0.0002) | REAL DRIFT — creep matches the measured sender rate | need maxSlew ≥ 0.029% + margin
+19:40:15.977  [WHEP-BACKLOG] pictures=485 over 20.1s (=20.19s content) vs wall 20.1s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.42s | cushion 0.400s | residual +0.100s (bound ±0.102s)
+19:40:15.977  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:16.353  [WHEP-FLOW] enqueued=23.4/s (total=494, delivered=494, promoteFail=0) | depth=0.400s count=10 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.69/17.64(x60) texMs=0.03/0.10 drawMs=0.05/0.11 encMs=0.09/0.14 presMs=0.04/0.11 commitMs=0.03/0.37 gpuMs=0.20/0.54 latMs=1.31/5.10(x24) footprintMB=129.3 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:16.923  [WHEP-DECODE] +23s  decoded=24/s (total=507)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.407s target=0.400 rate=1.0050 err=+0.0066 count=10
+19:40:17.034  [WHEP-RTP] +22s  frames=26 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=26 SEI=0  |  pkts=469 seqGaps=0 lost=0 reorder=0  |  FU-A rx=469 reassembled=52 dropped=0  |  handoff=26 shed=0
+19:40:17.401  [WHEP-FLOW] enqueued=22.9/s (total=518, delivered=518, promoteFail=0) | depth=0.345s count=8 rate=0.9974
+              [RENDER-PERF] n=25 tickMs=16.69/17.67(x62) texMs=0.03/0.16 drawMs=0.05/0.08 encMs=0.11/0.30 presMs=0.04/0.07 commitMs=0.01/0.03 gpuMs=0.21/0.42 latMs=0.98/4.29(x25) footprintMB=129.3 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:40:17.923  [WHEP-DECODE] +24s  decoded=24/s (total=531)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.408s target=0.400 rate=1.0050 err=+0.0076 count=9
+19:40:18.049  [WHEP-RTP] +23s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=450 seqGaps=0 lost=0 reorder=0  |  FU-A rx=447 reassembled=46 dropped=0  |  handoff=24 shed=0
+19:40:18.488  [WHEP-FLOW] enqueued=24.8/s (total=545, delivered=545, promoteFail=0) | depth=0.384s count=9 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.68/17.62(x60) texMs=0.02/0.04 drawMs=0.05/0.09 encMs=0.11/0.36 presMs=0.04/0.16 commitMs=0.01/0.02 gpuMs=0.21/0.30 latMs=1.39/4.84(x24) footprintMB=129.3 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:18.923  [WHEP-DECODE] +25s  decoded=24/s (total=555)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.401s target=0.400 rate=1.0023 err=+0.0007 count=9
+19:40:19.049  [WHEP-RTP] +24s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=47 dropped=0  |  handoff=24 shed=0
+19:40:19.494  [WHEP-FLOW] enqueued=24.9/s (total=570, delivered=570, promoteFail=0) | depth=0.384s count=9 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.68/17.54(x60) texMs=0.03/0.18 drawMs=0.06/0.12 encMs=0.11/0.22 presMs=0.05/0.08 commitMs=0.02/0.07 gpuMs=0.20/0.37 latMs=0.88/2.14(x24) footprintMB=129.3 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:19.927  [WHEP-DECODE] +26s  decoded=24/s (total=579)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0035 err=+0.0058 count=9
+19:40:20.052  [WHEP-RTP] +25s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=433 seqGaps=0 lost=0 reorder=0  |  FU-A rx=430 reassembled=44 dropped=0  |  handoff=24 shed=0
+19:40:20.529  [WHEP-FLOW] enqueued=23.2/s (total=594, delivered=594, promoteFail=0) | depth=0.389s count=9 rate=1.0020
+              [RENDER-PERF] n=24 tickMs=16.67/17.55(x60) texMs=0.02/0.08 drawMs=0.05/0.11 encMs=0.11/0.38 presMs=0.04/0.07 commitMs=0.02/0.04 gpuMs=0.19/0.24 latMs=0.81/1.28(x24) footprintMB=129.4 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:20.923  [WHEP-DECODE] +27s  decoded=24/s (total=603)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0040 err=+0.0035 count=9
+19:40:21.002  [WHEP-DRIFT] senderRate=90000 tps (+0.000% vs receiver) | clockRate=1.0040 (+0.404%) | depthCreep=-0.0041 s/s observed vs -0.0040 predicted (residual -0.0000) | REAL DRIFT — creep matches the measured sender rate | need maxSlew ≥ 0.000% + margin
+19:40:21.002  [WHEP-BACKLOG] pictures=605 over 25.1s (=25.19s content) vs wall 25.1s → surplus +0.10s cumulative | netJump +0.00s | inBuffer +0.38s | cushion 0.400s | residual +0.114s (bound ±0.127s)
+19:40:21.002  [WHEP-JITTER] window arrivals min=24 max=24 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:21.048  [WHEP-RTP] +26s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=445 seqGaps=0 lost=0 reorder=0  |  FU-A rx=443 reassembled=44 dropped=0  |  handoff=24 shed=0
+19:40:21.532  [WHEP-FLOW] enqueued=23.9/s (total=618, delivered=618, promoteFail=0) | depth=0.389s count=9 rate=1.0019
+              [RENDER-PERF] n=24 tickMs=16.69/17.76(x60) texMs=0.03/0.13 drawMs=0.05/0.11 encMs=0.14/0.88 presMs=0.04/0.10 commitMs=0.01/0.02 gpuMs=0.19/0.30 latMs=0.93/2.90(x24) footprintMB=129.6 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:21.923  [WHEP-DECODE] +28s  decoded=24/s (total=627)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9991 err=-0.0026 count=9
+19:40:21.958  [WHEP-RTP] +27s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=21 SEI=1  |  pkts=403 seqGaps=0 lost=0 reorder=0  |  FU-A rx=400 reassembled=44 dropped=0  |  handoff=23 shed=0
+19:40:22.534  [WHEP-FLOW] enqueued=23.9/s (total=642, delivered=642, promoteFail=0) | depth=0.374s count=9 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.69/17.67(x60) texMs=0.03/0.14 drawMs=0.05/0.10 encMs=0.11/0.36 presMs=0.05/0.28 commitMs=0.02/0.07 gpuMs=0.19/0.29 latMs=0.82/1.57(x24) footprintMB=129.6 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:22.922  [WHEP-DECODE] +29s  decoded=24/s (total=651)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.405s target=0.400 rate=1.0033 err=+0.0051 count=9
+19:40:23.005  [WHEP-RTP] +28s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=440 seqGaps=0 lost=0 reorder=0  |  FU-A rx=439 reassembled=44 dropped=0  |  handoff=24 shed=0
+19:40:23.537  [WHEP-FLOW] enqueued=23.9/s (total=666, delivered=666, promoteFail=0) | depth=0.374s count=9 rate=1.0042
+              [RENDER-PERF] n=24 tickMs=16.67/17.62(x60) texMs=0.02/0.06 drawMs=0.05/0.16 encMs=0.10/0.15 presMs=0.05/0.17 commitMs=0.01/0.02 gpuMs=0.18/0.21 latMs=0.77/1.76(x24) footprintMB=129.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:23.923  [WHEP-DECODE] +30s  decoded=24/s (total=675)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.395s target=0.400 rate=0.9965 err=-0.0049 count=9
+19:40:24.051  [WHEP-RTP] +29s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=444 seqGaps=0 lost=0 reorder=0  |  FU-A rx=441 reassembled=48 dropped=0  |  handoff=25 shed=0
+19:40:24.541  [WHEP-FLOW] enqueued=23.9/s (total=690, delivered=690, promoteFail=0) | depth=0.373s count=9 rate=0.9969
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.08 drawMs=0.05/0.08 encMs=0.09/0.17 presMs=0.04/0.12 commitMs=0.01/0.02 gpuMs=0.20/0.33 latMs=0.92/2.79(x24) footprintMB=129.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:24.923  [WHEP-DECODE] +31s  decoded=24/s (total=699)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.408s target=0.400 rate=1.0031 err=+0.0084 count=10
+19:40:25.052  [WHEP-RTP] +30s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=447 seqGaps=0 lost=0 reorder=0  |  FU-A rx=447 reassembled=48 dropped=0  |  handoff=24 shed=0
+19:40:25.550  [WHEP-FLOW] enqueued=23.8/s (total=714, delivered=714, promoteFail=0) | depth=0.374s count=9 rate=1.0019
+              [RENDER-PERF] n=24 tickMs=16.68/17.76(x60) texMs=0.02/0.07 drawMs=0.05/0.08 encMs=0.12/0.51 presMs=0.05/0.20 commitMs=0.01/0.02 gpuMs=0.20/0.30 latMs=1.15/10.05(x24) footprintMB=129.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:25.923  [WHEP-DECODE] +32s  decoded=24/s (total=723)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.399s target=0.400 rate=0.9980 err=-0.0007 count=10
+19:40:26.033  [WHEP-DRIFT] senderRate=89969 tps (-0.035% vs receiver) | clockRate=0.9980 (-0.196%) | depthCreep=-0.0010 s/s observed vs +0.0016 predicted (residual -0.0026) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.035% + margin
+19:40:26.033  [WHEP-BACKLOG] pictures=726 over 30.1s (=30.24s content) vs wall 30.1s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.114s (bound ±0.153s)
+19:40:26.033  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:26.049  [WHEP-RTP] +31s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=444 seqGaps=0 lost=0 reorder=0  |  FU-A rx=441 reassembled=47 dropped=0  |  handoff=25 shed=0
+19:40:26.577  [WHEP-FLOW] enqueued=24.3/s (total=739, delivered=739, promoteFail=0) | depth=0.382s count=9 rate=0.9955
+              [RENDER-PERF] n=24 tickMs=16.69/17.74(x60) texMs=0.03/0.06 drawMs=0.05/0.07 encMs=0.09/0.13 presMs=0.05/0.24 commitMs=0.01/0.02 gpuMs=0.18/0.21 latMs=0.84/1.99(x24) footprintMB=129.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:26.923  [WHEP-DECODE] +33s  decoded=24/s (total=747)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.401s target=0.400 rate=0.9966 err=+0.0009 count=10
+19:40:27.048  [WHEP-RTP] +32s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=431 seqGaps=0 lost=0 reorder=0  |  FU-A rx=431 reassembled=47 dropped=0  |  handoff=23 shed=0
+19:40:27.615  [WHEP-FLOW] enqueued=24.1/s (total=764, delivered=764, promoteFail=0) | depth=0.391s count=9 rate=0.9955
+              [RENDER-PERF] n=24 tickMs=16.67/17.89(x60) texMs=0.02/0.05 drawMs=0.05/0.10 encMs=0.11/0.32 presMs=0.04/0.07 commitMs=0.02/0.11 gpuMs=0.18/0.20 latMs=0.89/1.59(x24) footprintMB=129.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:27.923  [WHEP-DECODE] +34s  decoded=24/s (total=771)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.396s target=0.400 rate=0.9999 err=-0.0038 count=9
+19:40:28.049  [WHEP-RTP] +33s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=428 seqGaps=0 lost=0 reorder=0  |  FU-A rx=425 reassembled=46 dropped=0  |  handoff=24 shed=0
+19:40:28.661  [WHEP-FLOW] enqueued=23.9/s (total=789, delivered=789, promoteFail=0) | depth=0.384s count=9 rate=1.0046
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.05 drawMs=0.05/0.19 encMs=0.09/0.18 presMs=0.05/0.24 commitMs=0.02/0.10 gpuMs=0.19/0.40 latMs=0.82/1.84(x24) footprintMB=129.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:28.923  [WHEP-DECODE] +35s  decoded=24/s (total=795)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9998 err=-0.0003 count=9
+19:40:29.047  [WHEP-RTP] +34s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=442 seqGaps=0 lost=0 reorder=0  |  FU-A rx=442 reassembled=47 dropped=0  |  handoff=24 shed=0
+19:40:29.662  [WHEP-FLOW] enqueued=24.0/s (total=813, delivered=813, promoteFail=0) | depth=0.384s count=9 rate=1.0021
+              [RENDER-PERF] n=24 tickMs=16.69/18.04(x60) texMs=0.03/0.06 drawMs=0.05/0.08 encMs=0.10/0.14 presMs=0.04/0.06 commitMs=0.01/0.03 gpuMs=0.20/0.29 latMs=0.79/1.73(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:29.923  [WHEP-DECODE] +36s  decoded=24/s (total=819)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9996 err=-0.0028 count=9
+19:40:30.052  [WHEP-RTP] +35s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=425 seqGaps=0 lost=0 reorder=0  |  FU-A rx=422 reassembled=44 dropped=0  |  handoff=23 shed=0
+19:40:30.705  [WHEP-FLOW] enqueued=24.0/s (total=838, delivered=838, promoteFail=0) | depth=0.392s count=9 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.02/0.05 drawMs=0.05/0.15 encMs=0.09/0.13 presMs=0.04/0.09 commitMs=0.01/0.02 gpuMs=0.19/0.22 latMs=0.85/3.05(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:30.923  [WHEP-DECODE] +37s  decoded=24/s (total=843)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.402s target=0.400 rate=0.9999 err=+0.0021 count=9
+19:40:31.034  [WHEP-DRIFT] senderRate=90012 tps (+0.013% vs receiver) | clockRate=1.0015 (+0.154%) | depthCreep=-0.0000 s/s observed vs -0.0014 predicted (residual +0.0014) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.013% + margin
+19:40:31.034  [WHEP-BACKLOG] pictures=846 over 35.1s (=35.25s content) vs wall 35.1s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.113s (bound ±0.178s)
+19:40:31.034  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:31.051  [WHEP-RTP] +36s  frames=25 (key=0)  NALs: SPS=1 PPS=1 IDR=0 slice=24 SEI=1  |  pkts=447 seqGaps=0 lost=0 reorder=0  |  FU-A rx=444 reassembled=49 dropped=0  |  handoff=25 shed=0
+19:40:31.705  [WHEP-FLOW] enqueued=24.0/s (total=862, delivered=862, promoteFail=0) | depth=0.391s count=9 rate=1.0032
+              [RENDER-PERF] n=25 tickMs=16.68/17.67(x62) texMs=0.03/0.26 drawMs=0.05/0.09 encMs=0.09/0.22 presMs=0.03/0.06 commitMs=0.01/0.04 gpuMs=0.19/0.35 latMs=0.88/3.05(x25) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:40:31.923  [WHEP-DECODE] +38s  decoded=24/s (total=867)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.396s target=0.400 rate=0.9965 err=-0.0044 count=9
+19:40:32.049  [WHEP-RTP] +37s  frames=25 (key=1)  NALs: SPS=0 PPS=0 IDR=1 slice=24 SEI=0  |  pkts=423 seqGaps=0 lost=0 reorder=0  |  FU-A rx=422 reassembled=31 dropped=0  |  handoff=25 shed=0
+19:40:32.717  [WHEP-FLOW] enqueued=23.7/s (total=886, delivered=886, promoteFail=0) | depth=0.373s count=9 rate=0.9995
+              [RENDER-PERF] n=24 tickMs=16.68/17.68(x60) texMs=0.06/0.75 drawMs=0.05/0.10 encMs=0.13/0.51 presMs=0.04/0.08 commitMs=0.02/0.07 gpuMs=0.21/0.65 latMs=0.97/4.94(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:32.924  [WHEP-DECODE] +39s  decoded=23/s (total=890)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.394s target=0.400 rate=0.9950 err=-0.0065 count=10
+19:40:33.050  [WHEP-RTP] +38s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=414 seqGaps=0 lost=0 reorder=0  |  FU-A rx=411 reassembled=35 dropped=0  |  handoff=23 shed=0
+19:40:33.725  [WHEP-FLOW] enqueued=23.8/s (total=910, delivered=910, promoteFail=0) | depth=0.376s count=9 rate=1.0027
+              [RENDER-PERF] n=24 tickMs=16.69/17.60(x60) texMs=0.02/0.04 drawMs=0.04/0.08 encMs=0.09/0.14 presMs=0.03/0.05 commitMs=0.02/0.21 gpuMs=0.19/0.40 latMs=0.77/1.51(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:33.923  [WHEP-DECODE] +40s  decoded=25/s (total=915)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.402s target=0.400 rate=1.0017 err=+0.0020 count=10
+19:40:34.051  [WHEP-RTP] +39s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=416 seqGaps=0 lost=0 reorder=0  |  FU-A rx=413 reassembled=37 dropped=0  |  handoff=24 shed=0
+19:40:34.761  [WHEP-FLOW] enqueued=24.1/s (total=935, delivered=935, promoteFail=0) | depth=0.368s count=9 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.02/0.04 drawMs=0.05/0.07 encMs=0.10/0.18 presMs=0.04/0.10 commitMs=0.01/0.04 gpuMs=0.18/0.21 latMs=0.76/1.46(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:34.923  [WHEP-DECODE] +41s  decoded=24/s (total=939)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9977 err=-0.0002 count=10
+19:40:35.051  [WHEP-RTP] +40s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=444 seqGaps=0 lost=0 reorder=0  |  FU-A rx=440 reassembled=48 dropped=0  |  handoff=25 shed=0
+19:40:35.768  [WHEP-FLOW] enqueued=23.8/s (total=959, delivered=959, promoteFail=0) | depth=0.367s count=9 rate=0.9950
+              [RENDER-PERF] n=25 tickMs=16.68/17.64(x63) texMs=0.02/0.07 drawMs=0.05/0.31 encMs=0.09/0.13 presMs=0.04/0.09 commitMs=0.01/0.03 gpuMs=0.18/0.21 latMs=0.90/4.80(x25) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 23.8 fps
+19:40:35.925  [WHEP-DECODE] +42s  decoded=25/s (total=964)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.405s target=0.400 rate=1.0043 err=+0.0049 count=10
+19:40:36.043  [WHEP-DRIFT] senderRate=90017 tps (+0.018% vs receiver) | clockRate=1.0043 (+0.430%) | depthCreep=+0.0001 s/s observed vs -0.0041 predicted (residual +0.0042) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.018% + margin
+19:40:36.043  [WHEP-BACKLOG] pictures=966 over 40.1s (=40.25s content) vs wall 40.1s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.114s (bound ±0.203s)
+19:40:36.043  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:36.049  [WHEP-RTP] +41s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=46 dropped=0  |  handoff=23 shed=0
+19:40:36.775  [WHEP-FLOW] enqueued=23.8/s (total=983, delivered=983, promoteFail=0) | depth=0.366s count=9 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.68/17.97(x60) texMs=0.02/0.07 drawMs=0.05/0.10 encMs=0.10/0.21 presMs=0.04/0.14 commitMs=0.01/0.03 gpuMs=0.18/0.24 latMs=0.78/1.50(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:36.923  [WHEP-DECODE] +43s  decoded=23/s (total=987)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.396s target=0.400 rate=0.9990 err=-0.0042 count=9
+19:40:37.051  [WHEP-RTP] +42s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=447 seqGaps=0 lost=0 reorder=0  |  FU-A rx=444 reassembled=48 dropped=0  |  handoff=24 shed=0
+19:40:37.800  [WHEP-FLOW] enqueued=24.4/s (total=1008, delivered=1008, promoteFail=0) | depth=0.376s count=9 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.68/17.59(x60) texMs=0.04/0.33 drawMs=0.05/0.17 encMs=0.11/0.32 presMs=0.04/0.20 commitMs=0.02/0.11 gpuMs=0.18/0.24 latMs=0.79/2.54(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:37.923  [WHEP-DECODE] +44s  decoded=24/s (total=1011)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=0.9965 err=+0.0060 count=10
+19:40:38.050  [WHEP-RTP] +43s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=426 seqGaps=0 lost=0 reorder=0  |  FU-A rx=426 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.71(x60) texMs=0.02/0.10 drawMs=0.05/0.10 encMs=0.09/0.14 presMs=0.03/0.04 commitMs=0.01/0.04 gpuMs=0.21/0.36 latMs=0.91/1.86(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:38.876  [WHEP-FLOW] enqueued=24.2/s (total=1034, delivered=1034, promoteFail=0) | depth=0.393s count=9 rate=0.9987
+19:40:38.925  [WHEP-DECODE] +45s  decoded=24/s (total=1035)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.402s target=0.400 rate=1.0027 err=+0.0024 count=9
+19:40:39.048  [WHEP-RTP] +44s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=456 seqGaps=0 lost=0 reorder=0  |  FU-A rx=453 reassembled=48 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.56(x60) texMs=0.03/0.23 drawMs=0.06/0.28 encMs=0.10/0.18 presMs=0.04/0.07 commitMs=0.01/0.04 gpuMs=0.19/0.26 latMs=0.97/2.37(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:39.881  [WHEP-FLOW] enqueued=23.9/s (total=1058, delivered=1058, promoteFail=0) | depth=0.393s count=9 rate=0.9999
+19:40:39.922  [WHEP-DECODE] +46s  decoded=24/s (total=1059)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.407s target=0.400 rate=0.9993 err=+0.0074 count=10
+19:40:40.050  [WHEP-RTP] +45s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.64(x60) texMs=0.02/0.03 drawMs=0.05/0.08 encMs=0.10/0.31 presMs=0.04/0.08 commitMs=0.01/0.02 gpuMs=0.23/0.97 latMs=0.92/2.65(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:40.883  [WHEP-FLOW] enqueued=23.9/s (total=1082, delivered=1082, promoteFail=0) | depth=0.376s count=9 rate=1.0006
+19:40:40.923  [WHEP-DECODE] +47s  decoded=24/s (total=1083)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.402s target=0.400 rate=1.0032 err=+0.0023 count=9
+19:40:41.049  [WHEP-RTP] +46s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=418 seqGaps=0 lost=0 reorder=0  |  FU-A rx=414 reassembled=43 dropped=0  |  handoff=23 shed=0
+19:40:41.052  [WHEP-DRIFT] senderRate=90028 tps (+0.031% vs receiver) | clockRate=1.0016 (+0.155%) | depthCreep=-0.0001 s/s observed vs -0.0012 predicted (residual +0.0011) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.031% + margin
+19:40:41.052  [WHEP-BACKLOG] pictures=1086 over 45.1s (=45.26s content) vs wall 45.1s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.39s | cushion 0.400s | residual +0.115s (bound ±0.228s)
+19:40:41.052  [WHEP-JITTER] window arrivals min=24 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+              [RENDER-PERF] n=24 tickMs=16.68/17.68(x60) texMs=0.02/0.06 drawMs=0.05/0.18 encMs=0.10/0.21 presMs=0.04/0.10 commitMs=0.02/0.06 gpuMs=0.19/0.30 latMs=0.74/2.05(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:41.896  [WHEP-FLOW] enqueued=23.7/s (total=1106, delivered=1106, promoteFail=0) | depth=0.376s count=9 rate=0.9976
+19:40:41.922  [WHEP-DECODE] +48s  decoded=24/s (total=1107)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9983 err=-0.0022 count=9
+19:40:42.049  [WHEP-RTP] +47s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=450 seqGaps=0 lost=0 reorder=0  |  FU-A rx=450 reassembled=50 dropped=0  |  handoff=25 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.02/0.05 drawMs=0.05/0.10 encMs=0.09/0.14 presMs=0.04/0.13 commitMs=0.01/0.04 gpuMs=0.21/0.69 latMs=0.78/1.45(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:42.923  [WHEP-DECODE] +49s  decoded=23/s (total=1130)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:42.930  [WHEP-FLOW] enqueued=24.2/s (total=1131, delivered=1131, promoteFail=0) | depth=0.387s count=9 rate=1.0007
+              [LIVECLOCK] depth=0.399s target=0.400 rate=1.0027 err=-0.0005 count=9
+19:40:43.050  [WHEP-RTP] +48s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=427 seqGaps=0 lost=0 reorder=0  |  FU-A rx=421 reassembled=44 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.05 drawMs=0.05/0.21 encMs=0.09/0.14 presMs=0.04/0.28 commitMs=0.01/0.05 gpuMs=0.19/0.32 latMs=0.78/1.35(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:43.923  [WHEP-DECODE] +50s  decoded=24/s (total=1154)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:43.933  [WHEP-FLOW] enqueued=23.9/s (total=1155, delivered=1155, promoteFail=0) | depth=0.387s count=9 rate=0.9995
+19:40:43.964  [WHEP-RTP] +49s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=404 seqGaps=0 lost=0 reorder=0  |  FU-A rx=404 reassembled=44 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=1.0011 err=-0.0016 count=9
+              [RENDER-PERF] n=24 tickMs=16.67/17.66(x60) texMs=0.02/0.05 drawMs=0.05/0.13 encMs=0.10/0.15 presMs=0.04/0.05 commitMs=0.02/0.05 gpuMs=0.17/0.20 latMs=0.82/1.69(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:44.923  [WHEP-DECODE] +51s  decoded=25/s (total=1179)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:44.970  [WHEP-RTP] +50s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=421 reassembled=47 dropped=0  |  handoff=24 shed=0
+19:40:44.980  [WHEP-FLOW] enqueued=23.9/s (total=1180, delivered=1180, promoteFail=0) | depth=0.377s count=9 rate=1.0050
+              [LIVECLOCK] depth=0.402s target=0.400 rate=1.0050 err=+0.0019 count=9
+              [RENDER-PERF] n=24 tickMs=16.67/17.67(x60) texMs=0.02/0.06 drawMs=0.07/0.61 encMs=0.09/0.24 presMs=0.03/0.05 commitMs=0.01/0.02 gpuMs=0.19/0.38 latMs=0.71/1.50(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:45.923  [WHEP-DECODE] +52s  decoded=23/s (total=1202)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:45.984  [WHEP-FLOW] enqueued=23.9/s (total=1204, delivered=1204, promoteFail=0) | depth=0.377s count=9 rate=0.9960
+              [LIVECLOCK] depth=0.395s target=0.400 rate=0.9960 err=-0.0052 count=9
+19:40:46.029  [WHEP-RTP] +51s  frames=26 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=27 SEI=0  |  pkts=491 seqGaps=0 lost=0 reorder=0  |  FU-A rx=491 reassembled=53 dropped=0  |  handoff=26 shed=0
+19:40:46.133  [WHEP-DRIFT] senderRate=90027 tps (+0.030% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=+0.0001 s/s observed vs -0.0047 predicted (residual +0.0048) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.030% + margin
+19:40:46.133  [WHEP-BACKLOG] pictures=1208 over 50.2s (=50.35s content) vs wall 50.2s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.114s (bound ±0.253s)
+19:40:46.133  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+              [RENDER-PERF] n=24 tickMs=16.68/17.61(x60) texMs=0.02/0.05 drawMs=0.05/0.20 encMs=0.08/0.14 presMs=0.03/0.12 commitMs=0.01/0.02 gpuMs=0.18/0.20 latMs=0.78/1.81(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:46.923  [WHEP-DECODE] +53s  decoded=24/s (total=1226)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.399s target=0.400 rate=0.9958 err=-0.0009 count=9
+19:40:47.009  [WHEP-FLOW] enqueued=24.4/s (total=1229, delivered=1229, promoteFail=0) | depth=0.385s count=9 rate=0.9958
+19:40:47.050  [WHEP-RTP] +52s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=421 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.68(x60) texMs=0.02/0.05 drawMs=0.06/0.28 encMs=0.13/0.69 presMs=0.04/0.07 commitMs=0.02/0.04 gpuMs=0.20/0.35 latMs=0.82/1.63(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:47.923  [WHEP-DECODE] +54s  decoded=24/s (total=1250)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.393s target=0.400 rate=0.9989 err=-0.0066 count=9
+19:40:48.016  [WHEP-FLOW] enqueued=23.8/s (total=1253, delivered=1253, promoteFail=0) | depth=0.385s count=9 rate=0.9989
+19:40:48.051  [WHEP-RTP] +53s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=453 seqGaps=1 lost=1 reorder=0  |  FU-A rx=453 reassembled=49 dropped=1  |  handoff=25 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.81(x60) texMs=0.02/0.07 drawMs=0.05/0.16 encMs=0.10/0.16 presMs=0.04/0.07 commitMs=0.01/0.02 gpuMs=0.19/0.32 latMs=0.76/1.99(x24) footprintMB=129.7 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:48.924  [WHEP-DECODE] +55s  decoded=24/s (total=1274)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.401s target=0.400 rate=1.0009 err=+0.0012 count=10
+19:40:49.050  [WHEP-RTP] +54s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=445 seqGaps=0 lost=0 reorder=0  |  FU-A rx=441 reassembled=47 dropped=0  |  handoff=24 shed=0
+19:40:49.053  [WHEP-FLOW] enqueued=24.1/s (total=1278, delivered=1278, promoteFail=0) | depth=0.395s count=9 rate=1.0009
+              [RENDER-PERF] n=24 tickMs=16.68/18.20(x60) texMs=0.02/0.06 drawMs=0.05/0.07 encMs=0.09/0.14 presMs=0.03/0.06 commitMs=0.01/0.02 gpuMs=0.18/0.21 latMs=0.79/2.30(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:49.923  [WHEP-DECODE] +56s  decoded=24/s (total=1298)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.399s target=0.400 rate=0.9999 err=-0.0012 count=9
+19:40:50.053  [WHEP-RTP] +55s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=425 seqGaps=0 lost=0 reorder=0  |  FU-A rx=425 reassembled=43 dropped=0  |  handoff=23 shed=0
+19:40:50.058  [WHEP-FLOW] enqueued=23.9/s (total=1302, delivered=1302, promoteFail=0) | depth=0.377s count=9 rate=0.9999
+              [RENDER-PERF] n=24 tickMs=16.68/17.91(x60) texMs=0.02/0.06 drawMs=0.04/0.06 encMs=0.10/0.28 presMs=0.03/0.07 commitMs=0.01/0.05 gpuMs=0.20/0.33 latMs=0.75/1.32(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:50.923  [WHEP-DECODE] +57s  decoded=24/s (total=1322)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0033 err=+0.0061 count=9
+19:40:51.051  [WHEP-RTP] +56s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=423 seqGaps=0 lost=0 reorder=0  |  FU-A rx=420 reassembled=44 dropped=0  |  handoff=24 shed=0
+19:40:51.059  [WHEP-FLOW] enqueued=24.0/s (total=1326, delivered=1326, promoteFail=0) | depth=0.379s count=9 rate=1.0014
+19:40:51.141  [WHEP-DRIFT] senderRate=89998 tps (-0.002% vs receiver) | clockRate=1.0014 (+0.142%) | depthCreep=-0.0001 s/s observed vs -0.0014 predicted (residual +0.0014) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.002% + margin
+19:40:51.141  [WHEP-BACKLOG] pictures=1328 over 55.2s (=55.35s content) vs wall 55.2s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.115s (bound ±0.278s)
+19:40:51.141  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+              [RENDER-PERF] n=24 tickMs=16.69/17.68(x60) texMs=0.02/0.04 drawMs=0.05/0.09 encMs=0.10/0.14 presMs=0.05/0.22 commitMs=0.01/0.02 gpuMs=0.21/0.54 latMs=0.72/1.18(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:51.922  [WHEP-DECODE] +58s  decoded=24/s (total=1346)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9991 err=+0.0001 count=10
+19:40:52.049  [WHEP-RTP] +57s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=445 seqGaps=0 lost=0 reorder=0  |  FU-A rx=445 reassembled=47 dropped=0  |  handoff=24 shed=0
+19:40:52.061  [WHEP-FLOW] enqueued=24.0/s (total=1350, delivered=1350, promoteFail=0) | depth=0.379s count=9 rate=0.9991
+              [RENDER-PERF] n=24 tickMs=16.67/17.70(x60) texMs=0.02/0.05 drawMs=0.05/0.22 encMs=0.11/0.42 presMs=0.04/0.11 commitMs=0.01/0.02 gpuMs=0.18/0.24 latMs=1.02/4.51(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:52.923  [WHEP-DECODE] +59s  decoded=24/s (total=1370)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0048 err=+0.0063 count=10
+19:40:53.050  [WHEP-RTP] +58s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=423 seqGaps=0 lost=0 reorder=0  |  FU-A rx=420 reassembled=45 dropped=0  |  handoff=24 shed=0
+19:40:53.066  [WHEP-FLOW] enqueued=23.9/s (total=1374, delivered=1374, promoteFail=0) | depth=0.377s count=9 rate=1.0048
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.03/0.04 drawMs=0.06/0.17 encMs=0.14/0.47 presMs=0.05/0.19 commitMs=0.01/0.03 gpuMs=0.19/0.38 latMs=1.01/4.77(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:53.922  [WHEP-DECODE] +60s  decoded=24/s (total=1394)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.396s target=0.400 rate=0.9992 err=-0.0043 count=9
+19:40:54.051  [WHEP-RTP] +59s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=430 seqGaps=0 lost=0 reorder=0  |  FU-A rx=426 reassembled=34 dropped=0  |  handoff=24 shed=0
+19:40:54.102  [WHEP-FLOW] enqueued=24.1/s (total=1399, delivered=1399, promoteFail=0) | depth=0.385s count=9 rate=0.9992
+              [RENDER-PERF] n=24 tickMs=16.70/17.73(x60) texMs=0.02/0.04 drawMs=0.05/0.07 encMs=0.10/0.20 presMs=0.04/0.09 commitMs=0.01/0.05 gpuMs=0.19/0.27 latMs=0.76/2.38(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 23.9 fps
+19:40:54.923  [WHEP-DECODE] +61s  decoded=21/s (total=1415)  1920x1080 'x420'  |  AUs=21/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [LIVECLOCK] depth=0.277s target=0.400 rate=0.9950 err=-0.1235 count=7
+19:40:55.052  [WHEP-RTP] +60s  frames=21 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=20 SEI=1  |  pkts=462 seqGaps=0 lost=0 reorder=0  |  FU-A rx=459 reassembled=24 dropped=0  |  handoff=21 shed=0
+19:40:55.144  [WHEP-FLOW] enqueued=21.1/s (total=1421, delivered=1421, promoteFail=0) | depth=0.256s count=6 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.68/17.90(x60) texMs=0.03/0.14 drawMs=0.10/0.85 encMs=0.12/0.47 presMs=0.04/0.11 commitMs=0.02/0.07 gpuMs=0.19/0.30 latMs=1.27/3.98(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:55.928  [WHEP-DECODE] +62s  decoded=27/s (total=1442)  1920x1080 'x420'  |  AUs=27/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:56.050  [WHEP-RTP] +61s  frames=27 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=27 SEI=0  |  pkts=462 seqGaps=0 lost=0 reorder=0  |  FU-A rx=462 reassembled=27 dropped=0  |  handoff=27 shed=0
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9997 err=+0.0003 count=9
+19:40:56.172  [WHEP-DRIFT] senderRate=90010 tps (+0.011% vs receiver) | clockRate=1.0005 (+0.048%) | depthCreep=-0.0045 s/s observed vs -0.0004 predicted (residual -0.0041) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.011% + margin
+19:40:56.172  [WHEP-BACKLOG] pictures=1448 over 60.3s (=60.36s content) vs wall 60.3s → surplus +0.09s cumulative | netJump +0.00s | inBuffer +0.38s | cushion 0.400s | residual +0.109s (bound ±0.303s)
+19:40:56.172  [WHEP-JITTER] window arrivals min=20 max=28 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:40:56.172  [WHEP-FLOW] enqueued=26.3/s (total=1448, delivered=1448, promoteFail=0) | depth=0.369s count=9 rate=1.0005
+              [RENDER-PERF] n=24 tickMs=16.67/17.70(x60) texMs=0.03/0.21 drawMs=0.05/0.11 encMs=0.11/0.64 presMs=0.04/0.17 commitMs=0.01/0.04 gpuMs=0.20/0.34 latMs=1.10/4.33(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:56.923  [WHEP-DECODE] +63s  decoded=25/s (total=1467)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:57.051  [WHEP-RTP] +62s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=292 seqGaps=0 lost=0 reorder=0  |  FU-A rx=288 reassembled=28 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0050 err=+0.0058 count=9
+19:40:57.208  [WHEP-FLOW] enqueued=24.1/s (total=1473, delivered=1473, promoteFail=0) | depth=0.374s count=9 rate=0.9997
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.04 drawMs=0.05/0.26 encMs=0.10/0.26 presMs=0.04/0.17 commitMs=0.01/0.03 gpuMs=0.19/0.23 latMs=1.00/2.75(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:57.922  [WHEP-DECODE] +64s  decoded=23/s (total=1490)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:58.050  [WHEP-RTP] +63s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=445 seqGaps=0 lost=0 reorder=0  |  FU-A rx=445 reassembled=48 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0025 err=+0.0057 count=10
+19:40:58.232  [WHEP-FLOW] enqueued=24.4/s (total=1498, delivered=1498, promoteFail=0) | depth=0.381s count=9 rate=0.9954
+              [RENDER-PERF] n=24 tickMs=16.68/17.68(x60) texMs=0.03/0.12 drawMs=0.08/0.82 encMs=0.11/0.76 presMs=0.09/1.17 commitMs=0.02/0.19 gpuMs=0.18/0.23 latMs=0.96/3.34(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:58.926  [WHEP-DECODE] +65s  decoded=24/s (total=1514)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:40:59.048  [WHEP-RTP] +64s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=422 seqGaps=0 lost=0 reorder=0  |  FU-A rx=419 reassembled=46 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.404s target=0.400 rate=1.0050 err=+0.0040 count=9
+19:40:59.236  [WHEP-FLOW] enqueued=23.9/s (total=1522, delivered=1522, promoteFail=0) | depth=0.381s count=9 rate=0.9989
+              [RENDER-PERF] n=24 tickMs=16.69/17.66(x60) texMs=0.02/0.05 drawMs=0.05/0.07 encMs=0.11/0.23 presMs=0.06/0.32 commitMs=0.02/0.26 gpuMs=0.18/0.24 latMs=0.98/2.56(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:40:59.923  [WHEP-DECODE] +66s  decoded=24/s (total=1538)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:00.050  [WHEP-RTP] +65s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=430 seqGaps=0 lost=0 reorder=0  |  FU-A rx=430 reassembled=35 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.404s target=0.400 rate=1.0050 err=+0.0038 count=9
+19:41:00.274  [WHEP-FLOW] enqueued=24.1/s (total=1547, delivered=1547, promoteFail=0) | depth=0.388s count=9 rate=1.0028
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.07 drawMs=0.04/0.10 encMs=0.11/0.53 presMs=0.04/0.09 commitMs=0.01/0.02 gpuMs=0.20/0.31 latMs=0.98/5.74(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:00.925  [WHEP-DECODE] +67s  decoded=24/s (total=1562)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:01.048  [WHEP-RTP] +66s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=409 seqGaps=0 lost=0 reorder=0  |  FU-A rx=406 reassembled=31 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=1.0023 err=-0.0024 count=9
+19:41:01.239  [WHEP-DRIFT] senderRate=89959 tps (-0.045% vs receiver) | clockRate=1.0026 (+0.262%) | depthCreep=+0.0049 s/s observed vs -0.0031 predicted (residual +0.0080) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.045% + margin
+19:41:01.239  [WHEP-BACKLOG] pictures=1570 over 65.3s (=65.44s content) vs wall 65.3s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.39s | cushion 0.400s | residual +0.115s (bound ±0.329s)
+19:41:01.239  [WHEP-JITTER] window arrivals min=24 max=24 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:01.277  [WHEP-FLOW] enqueued=23.9/s (total=1571, delivered=1571, promoteFail=0) | depth=0.389s count=9 rate=1.0026
+              [RENDER-PERF] n=24 tickMs=16.69/17.75(x60) texMs=0.02/0.07 drawMs=0.05/0.10 encMs=0.11/0.28 presMs=0.04/0.06 commitMs=0.02/0.04 gpuMs=0.22/0.60 latMs=1.32/3.74(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:01.923  [WHEP-DECODE] +68s  decoded=24/s (total=1586)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:02.049  [WHEP-RTP] +67s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=422 reassembled=44 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.403s target=0.400 rate=0.9977 err=+0.0028 count=9
+19:41:02.324  [WHEP-FLOW] enqueued=23.9/s (total=1596, delivered=1596, promoteFail=0) | depth=0.382s count=9 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.67/17.69(x60) texMs=0.02/0.04 drawMs=0.05/0.08 encMs=0.10/0.20 presMs=0.04/0.11 commitMs=0.02/0.05 gpuMs=0.19/0.28 latMs=1.33/12.64(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:02.924  [WHEP-DECODE] +69s  decoded=24/s (total=1610)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:03.050  [WHEP-RTP] +68s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=455 seqGaps=0 lost=0 reorder=0  |  FU-A rx=452 reassembled=48 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9981 err=-0.0024 count=9
+19:41:03.358  [WHEP-FLOW] enqueued=24.2/s (total=1621, delivered=1621, promoteFail=0) | depth=0.388s count=9 rate=1.0029
+              [RENDER-PERF] n=24 tickMs=16.67/17.66(x60) texMs=0.03/0.16 drawMs=0.04/0.08 encMs=0.10/0.31 presMs=0.03/0.07 commitMs=0.01/0.04 gpuMs=0.18/0.20 latMs=0.96/3.73(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:03.922  [WHEP-DECODE] +70s  decoded=24/s (total=1634)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:04.050  [WHEP-RTP] +69s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.394s target=0.400 rate=0.9962 err=-0.0063 count=9
+19:41:04.366  [WHEP-FLOW] enqueued=23.8/s (total=1645, delivered=1645, promoteFail=0) | depth=0.389s count=9 rate=1.0004
+              [RENDER-PERF] n=24 tickMs=16.69/17.67(x60) texMs=0.02/0.06 drawMs=0.05/0.08 encMs=0.10/0.31 presMs=0.03/0.06 commitMs=0.01/0.02 gpuMs=0.21/0.68 latMs=0.84/2.20(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:04.923  [WHEP-DECODE] +71s  decoded=24/s (total=1658)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:05.051  [WHEP-RTP] +70s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=452 seqGaps=0 lost=0 reorder=0  |  FU-A rx=449 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.399s target=0.400 rate=1.0013 err=-0.0007 count=9
+19:41:05.413  [WHEP-FLOW] enqueued=23.9/s (total=1670, delivered=1670, promoteFail=0) | depth=0.381s count=9 rate=1.0015
+              [RENDER-PERF] n=25 tickMs=16.66/17.77(x63) texMs=0.03/0.13 drawMs=0.04/0.08 encMs=0.09/0.15 presMs=0.03/0.07 commitMs=0.01/0.03 gpuMs=0.18/0.20 latMs=0.78/1.46(x25) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 23.8 fps
+19:41:05.923  [WHEP-DECODE] +72s  decoded=24/s (total=1682)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:06.049  [WHEP-RTP] +71s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=422 seqGaps=0 lost=0 reorder=0  |  FU-A rx=422 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.402s target=0.400 rate=1.0032 err=+0.0023 count=9
+19:41:06.323  [WHEP-DRIFT] senderRate=90010 tps (+0.011% vs receiver) | clockRate=0.9963 (-0.372%) | depthCreep=-0.0005 s/s observed vs +0.0038 predicted (residual -0.0044) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.011% + margin
+19:41:06.323  [WHEP-BACKLOG] pictures=1692 over 70.4s (=70.53s content) vs wall 70.4s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.115s (bound ±0.354s)
+19:41:06.323  [WHEP-JITTER] window arrivals min=23 max=24 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:06.430  [WHEP-FLOW] enqueued=23.6/s (total=1694, delivered=1694, promoteFail=0) | depth=0.366s count=9 rate=1.0035
+              [RENDER-PERF] n=24 tickMs=16.68/17.73(x60) texMs=0.02/0.10 drawMs=0.04/0.07 encMs=0.09/0.17 presMs=0.03/0.07 commitMs=0.01/0.03 gpuMs=0.18/0.27 latMs=0.91/3.20(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:06.923  [WHEP-DECODE] +73s  decoded=24/s (total=1706)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:07.048  [WHEP-RTP] +72s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=455 seqGaps=0 lost=0 reorder=0  |  FU-A rx=452 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.395s target=0.400 rate=0.9989 err=-0.0050 count=9
+19:41:07.488  [WHEP-FLOW] enqueued=24.6/s (total=1720, delivered=1720, promoteFail=0) | depth=0.383s count=9 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.68/17.87(x60) texMs=0.02/0.03 drawMs=0.04/0.06 encMs=0.10/0.17 presMs=0.04/0.06 commitMs=0.01/0.04 gpuMs=0.19/0.27 latMs=1.00/3.06(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:07.923  [WHEP-DECODE] +74s  decoded=24/s (total=1730)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:08.050  [WHEP-RTP] +73s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.405s target=0.400 rate=1.0036 err=+0.0045 count=9
+19:41:08.489  [WHEP-FLOW] enqueued=24.0/s (total=1744, delivered=1744, promoteFail=0) | depth=0.383s count=9 rate=1.0009
+              [RENDER-PERF] n=24 tickMs=16.69/17.70(x60) texMs=0.03/0.19 drawMs=0.06/0.30 encMs=0.11/0.30 presMs=0.05/0.26 commitMs=0.01/0.04 gpuMs=0.19/0.31 latMs=1.02/5.58(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:08.923  [WHEP-DECODE] +75s  decoded=24/s (total=1754)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:09.052  [WHEP-RTP] +74s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=450 seqGaps=0 lost=0 reorder=0  |  FU-A rx=447 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.393s target=0.400 rate=0.9950 err=-0.0075 count=9
+19:41:09.537  [WHEP-FLOW] enqueued=23.8/s (total=1769, delivered=1769, promoteFail=0) | depth=0.391s count=9 rate=1.0050
+              [RENDER-PERF] n=24 tickMs=16.67/17.73(x60) texMs=0.03/0.13 drawMs=0.05/0.12 encMs=0.10/0.28 presMs=0.04/0.13 commitMs=0.02/0.20 gpuMs=0.22/0.58 latMs=1.05/4.19(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:09.923  [WHEP-DECODE] +76s  decoded=24/s (total=1778)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:09.970  [WHEP-RTP] +75s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=406 seqGaps=0 lost=0 reorder=0  |  FU-A rx=406 reassembled=44 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.396s target=0.400 rate=0.9961 err=-0.0036 count=10
+19:41:10.538  [WHEP-FLOW] enqueued=24.0/s (total=1793, delivered=1793, promoteFail=0) | depth=0.392s count=9 rate=1.0007
+              [RENDER-PERF] n=24 tickMs=16.69/17.68(x60) texMs=0.02/0.04 drawMs=0.05/0.09 encMs=0.10/0.29 presMs=0.04/0.22 commitMs=0.01/0.04 gpuMs=0.19/0.25 latMs=1.06/7.34(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:10.923  [WHEP-DECODE] +77s  decoded=24/s (total=1802)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:10.973  [WHEP-RTP] +76s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=422 seqGaps=0 lost=0 reorder=0  |  FU-A rx=419 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.394s target=0.400 rate=1.0013 err=-0.0060 count=9
+19:41:11.323  [WHEP-DRIFT] senderRate=90000 tps (-0.000% vs receiver) | clockRate=1.0039 (+0.389%) | depthCreep=+0.0002 s/s observed vs -0.0039 predicted (residual +0.0040) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.000% + margin
+19:41:11.323  [WHEP-BACKLOG] pictures=1812 over 75.4s (=75.54s content) vs wall 75.4s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.116s (bound ±0.379s)
+19:41:11.323  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:11.582  [WHEP-FLOW] enqueued=23.9/s (total=1818, delivered=1818, promoteFail=0) | depth=0.382s count=9 rate=1.0035
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.02/0.14 drawMs=0.05/0.11 encMs=0.10/0.53 presMs=0.05/0.33 commitMs=0.01/0.02 gpuMs=0.19/0.26 latMs=0.99/5.01(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:11.923  [WHEP-DECODE] +78s  decoded=23/s (total=1825)  1920x1080 'x420'  |  AUs=22/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:12.041  [WHEP-RTP] +77s  frames=26 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=27 SEI=0  |  pkts=487 seqGaps=0 lost=0 reorder=0  |  FU-A rx=487 reassembled=53 dropped=0  |  handoff=26 shed=0
+              [LIVECLOCK] depth=0.395s target=0.400 rate=0.9950 err=-0.0049 count=10
+19:41:12.584  [WHEP-FLOW] enqueued=24.0/s (total=1842, delivered=1842, promoteFail=0) | depth=0.381s count=9 rate=0.9975
+              [RENDER-PERF] n=24 tickMs=16.67/17.64(x60) texMs=0.02/0.03 drawMs=0.04/0.07 encMs=0.10/0.40 presMs=0.03/0.06 commitMs=0.01/0.02 gpuMs=0.18/0.20 latMs=0.89/2.73(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:12.923  [WHEP-DECODE] +79s  decoded=24/s (total=1849)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:13.053  [WHEP-RTP] +78s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=431 seqGaps=0 lost=0 reorder=0  |  FU-A rx=428 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.402s target=0.400 rate=1.0034 err=+0.0021 count=9
+19:41:13.623  [WHEP-FLOW] enqueued=24.1/s (total=1867, delivered=1867, promoteFail=0) | depth=0.391s count=9 rate=0.9981
+              [RENDER-PERF] n=24 tickMs=16.69/17.67(x60) texMs=0.02/0.04 drawMs=0.05/0.10 encMs=0.10/0.20 presMs=0.04/0.05 commitMs=0.02/0.04 gpuMs=0.19/0.24 latMs=1.09/5.62(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:13.923  [WHEP-DECODE] +80s  decoded=25/s (total=1874)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:14.051  [WHEP-RTP] +79s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=448 seqGaps=0 lost=0 reorder=0  |  FU-A rx=448 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9996 err=-0.0022 count=9
+19:41:14.658  [WHEP-FLOW] enqueued=24.1/s (total=1892, delivered=1892, promoteFail=0) | depth=0.399s count=10 rate=1.0003
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.04 drawMs=0.04/0.07 encMs=0.09/0.15 presMs=0.03/0.07 commitMs=0.01/0.03 gpuMs=0.18/0.26 latMs=0.77/2.00(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:14.923  [WHEP-DECODE] +81s  decoded=24/s (total=1898)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:15.052  [WHEP-RTP] +80s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=421 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0038 err=+0.0027 count=9
+19:41:15.683  [WHEP-FLOW] enqueued=23.4/s (total=1916, delivered=1916, promoteFail=0) | depth=0.366s count=9 rate=1.0017
+19:41:15.923  [WHEP-DECODE] +82s  decoded=24/s (total=1922)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=25 tickMs=16.68/17.63(x62) texMs=0.02/0.04 drawMs=0.04/0.08 encMs=0.09/0.14 presMs=0.03/0.08 commitMs=0.02/0.18 gpuMs=0.19/0.31 latMs=0.74/1.21(x25) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:41:16.050  [WHEP-RTP] +81s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=449 seqGaps=0 lost=0 reorder=0  |  FU-A rx=449 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.401s target=0.400 rate=1.0019 err=+0.0009 count=10
+19:41:16.344  [WHEP-DRIFT] senderRate=89995 tps (-0.005% vs receiver) | clockRate=0.9985 (-0.150%) | depthCreep=-0.0001 s/s observed vs +0.0014 predicted (residual -0.0015) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.005% + margin
+19:41:16.344  [WHEP-BACKLOG] pictures=1932 over 80.4s (=80.54s content) vs wall 80.4s → surplus +0.10s cumulative | netJump +0.00s | inBuffer +0.39s | cushion 0.400s | residual +0.118s (bound ±0.404s)
+19:41:16.344  [WHEP-JITTER] window arrivals min=24 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:16.699  [WHEP-FLOW] enqueued=23.6/s (total=1940, delivered=1940, promoteFail=0) | depth=0.348s count=8 rate=1.0024
+19:41:16.924  [WHEP-DECODE] +83s  decoded=24/s (total=1946)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.47(x60) texMs=0.02/0.05 drawMs=0.05/0.07 encMs=0.09/0.15 presMs=0.04/0.07 commitMs=0.01/0.02 gpuMs=0.19/0.20 latMs=0.98/5.44(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:17.048  [WHEP-RTP] +82s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=434 seqGaps=0 lost=0 reorder=0  |  FU-A rx=431 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0050 err=+0.0059 count=10
+19:41:17.727  [WHEP-FLOW] enqueued=24.3/s (total=1965, delivered=1965, promoteFail=0) | depth=0.374s count=9 rate=0.9950
+19:41:17.923  [WHEP-DECODE] +84s  decoded=24/s (total=1970)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.02/0.04 drawMs=0.06/0.27 encMs=0.10/0.26 presMs=0.04/0.06 commitMs=0.01/0.03 gpuMs=0.18/0.21 latMs=0.85/3.64(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:18.049  [WHEP-RTP] +83s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=441 seqGaps=0 lost=0 reorder=0  |  FU-A rx=435 reassembled=43 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9971 err=-0.0021 count=10
+19:41:18.747  [WHEP-FLOW] enqueued=24.5/s (total=1990, delivered=1990, promoteFail=0) | depth=0.384s count=9 rate=0.9958
+19:41:18.922  [WHEP-DECODE] +85s  decoded=24/s (total=1994)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.65(x60) texMs=0.02/0.06 drawMs=0.04/0.08 encMs=0.09/0.16 presMs=0.04/0.20 commitMs=0.01/0.04 gpuMs=0.19/0.34 latMs=0.83/1.88(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:19.048  [WHEP-RTP] +84s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=432 seqGaps=0 lost=0 reorder=0  |  FU-A rx=416 reassembled=36 dropped=0  |  handoff=25 shed=0
+              [LIVECLOCK] depth=0.409s target=0.400 rate=0.9989 err=+0.0094 count=10
+19:41:19.750  [WHEP-FLOW] enqueued=23.9/s (total=2014, delivered=2014, promoteFail=0) | depth=0.383s count=9 rate=1.0008
+19:41:19.922  [WHEP-DECODE] +86s  decoded=25/s (total=2019)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.03 drawMs=0.04/0.08 encMs=0.08/0.16 presMs=0.03/0.07 commitMs=0.01/0.02 gpuMs=0.21/0.68 latMs=1.07/6.01(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:20.050  [WHEP-RTP] +85s  frames=23 (key=0)  NALs: SPS=1 PPS=1 IDR=0 slice=23 SEI=1  |  pkts=425 seqGaps=0 lost=0 reorder=0  |  FU-A rx=416 reassembled=40 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.399s target=0.400 rate=1.0027 err=-0.0011 count=10
+19:41:20.759  [WHEP-FLOW] enqueued=23.8/s (total=2038, delivered=2038, promoteFail=0) | depth=0.383s count=9 rate=0.9995
+19:41:20.926  [WHEP-DECODE] +87s  decoded=22/s (total=2041)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.65(x60) texMs=0.02/0.03 drawMs=0.04/0.09 encMs=0.09/0.16 presMs=0.03/0.06 commitMs=0.01/0.02 gpuMs=0.19/0.32 latMs=0.79/1.56(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:21.049  [WHEP-RTP] +86s  frames=23 (key=1)  NALs: SPS=0 PPS=0 IDR=1 slice=23 SEI=0  |  pkts=426 seqGaps=0 lost=0 reorder=0  |  FU-A rx=426 reassembled=47 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.401s target=0.400 rate=0.9978 err=+0.0011 count=11
+19:41:21.346  [WHEP-DRIFT] senderRate=90093 tps (+0.103% vs receiver) | clockRate=0.9966 (-0.343%) | depthCreep=-0.0000 s/s observed vs +0.0045 predicted (residual -0.0045) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.103% + margin
+19:41:21.346  [WHEP-BACKLOG] pictures=2052 over 85.4s (=85.55s content) vs wall 85.4s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.39s | cushion 0.400s | residual +0.118s (bound ±0.429s)
+19:41:21.346  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:21.767  [WHEP-FLOW] enqueued=23.8/s (total=2062, delivered=2062, promoteFail=0) | depth=0.366s count=9 rate=0.9987
+19:41:21.923  [WHEP-DECODE] +88s  decoded=25/s (total=2066)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.60(x60) texMs=0.02/0.06 drawMs=0.05/0.08 encMs=0.10/0.21 presMs=0.04/0.06 commitMs=0.01/0.02 gpuMs=0.18/0.20 latMs=0.98/5.01(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:22.049  [WHEP-RTP] +87s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=420 seqGaps=0 lost=0 reorder=0  |  FU-A rx=420 reassembled=47 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.397s target=0.400 rate=1.0050 err=-0.0029 count=9
+19:41:22.803  [WHEP-FLOW] enqueued=24.1/s (total=2087, delivered=2087, promoteFail=0) | depth=0.376s count=9 rate=0.9983
+19:41:22.923  [WHEP-DECODE] +89s  decoded=24/s (total=2090)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.64(x60) texMs=0.03/0.22 drawMs=0.05/0.10 encMs=0.09/0.15 presMs=0.05/0.23 commitMs=0.01/0.02 gpuMs=0.19/0.30 latMs=0.83/1.60(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:23.050  [WHEP-RTP] +88s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=451 seqGaps=0 lost=0 reorder=0  |  FU-A rx=448 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.392s target=0.400 rate=0.9950 err=-0.0081 count=9
+19:41:23.808  [WHEP-FLOW] enqueued=23.9/s (total=2111, delivered=2111, promoteFail=0) | depth=0.375s count=9 rate=1.0050
+19:41:23.923  [WHEP-DECODE] +90s  decoded=24/s (total=2114)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.65(x60) texMs=0.02/0.10 drawMs=0.05/0.11 encMs=0.12/0.57 presMs=0.03/0.07 commitMs=0.01/0.02 gpuMs=0.19/0.39 latMs=0.96/5.58(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:24.050  [WHEP-RTP] +89s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=445 seqGaps=0 lost=0 reorder=0  |  FU-A rx=442 reassembled=49 dropped=0  |  handoff=25 shed=0
+              [LIVECLOCK] depth=0.395s target=0.400 rate=0.9957 err=-0.0054 count=9
+19:41:24.840  [WHEP-FLOW] enqueued=24.2/s (total=2136, delivered=2136, promoteFail=0) | depth=0.383s count=9 rate=0.9986
+19:41:24.923  [WHEP-DECODE] +91s  decoded=24/s (total=2138)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.69(x60) texMs=0.03/0.17 drawMs=0.04/0.08 encMs=0.09/0.15 presMs=0.03/0.06 commitMs=0.01/0.04 gpuMs=0.19/0.35 latMs=0.79/1.28(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:25.051  [WHEP-RTP] +90s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=46 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.395s target=0.400 rate=0.9964 err=-0.0045 count=10
+19:41:25.882  [WHEP-FLOW] enqueued=24.0/s (total=2161, delivered=2161, promoteFail=0) | depth=0.393s count=9 rate=0.9993
+19:41:25.923  [WHEP-DECODE] +92s  decoded=23/s (total=2161)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.03/0.21 drawMs=0.06/0.36 encMs=0.09/0.15 presMs=0.04/0.07 commitMs=0.01/0.03 gpuMs=0.19/0.27 latMs=0.81/1.93(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:26.050  [WHEP-RTP] +91s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=470 seqGaps=0 lost=0 reorder=0  |  FU-A rx=467 reassembled=52 dropped=0  |  handoff=26 shed=0
+              [LIVECLOCK] depth=0.405s target=0.400 rate=0.9982 err=+0.0051 count=10
+19:41:26.435  [WHEP-DRIFT] senderRate=89960 tps (-0.044% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=+0.0001 s/s observed vs -0.0054 predicted (residual +0.0055) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.044% + margin
+19:41:26.435  [WHEP-BACKLOG] pictures=2174 over 90.5s (=90.64s content) vs wall 90.5s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.39s | cushion 0.400s | residual +0.118s (bound ±0.455s)
+19:41:26.435  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:26.922  [WHEP-DECODE] +93s  decoded=24/s (total=2185)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:26.944  [WHEP-FLOW] enqueued=23.5/s (total=2186, delivered=2186, promoteFail=0) | depth=0.368s count=9 rate=0.9977
+              [RENDER-PERF] n=24 tickMs=16.68/17.64(x60) texMs=0.02/0.05 drawMs=0.07/0.48 encMs=0.09/0.15 presMs=0.04/0.20 commitMs=0.01/0.02 gpuMs=0.20/0.33 latMs=0.73/0.98(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:27.048  [WHEP-RTP] +92s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=403 seqGaps=0 lost=0 reorder=0  |  FU-A rx=403 reassembled=44 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9983 err=-0.0032 count=10
+19:41:27.922  [WHEP-DECODE] +94s  decoded=24/s (total=2209)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:27.946  [WHEP-FLOW] enqueued=24.0/s (total=2210, delivered=2210, promoteFail=0) | depth=0.370s count=9 rate=1.0043
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.03/0.10 drawMs=0.05/0.08 encMs=0.10/0.29 presMs=0.04/0.07 commitMs=0.03/0.31 gpuMs=0.19/0.34 latMs=1.21/8.92(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:28.049  [WHEP-RTP] +93s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=454 seqGaps=0 lost=0 reorder=0  |  FU-A rx=451 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.404s target=0.400 rate=0.9985 err=+0.0036 count=11
+19:41:28.923  [WHEP-DECODE] +95s  decoded=24/s (total=2233)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.71(x60) texMs=0.02/0.04 drawMs=0.05/0.10 encMs=0.11/0.22 presMs=0.04/0.08 commitMs=0.01/0.03 gpuMs=0.18/0.21 latMs=1.02/4.32(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:28.971  [WHEP-FLOW] enqueued=24.4/s (total=2235, delivered=2235, promoteFail=0) | depth=0.395s count=9 rate=0.9967
+19:41:29.053  [WHEP-RTP] +94s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=426 seqGaps=0 lost=0 reorder=0  |  FU-A rx=426 reassembled=48 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.402s target=0.400 rate=1.0021 err=+0.0021 count=10
+19:41:29.922  [WHEP-DECODE] +96s  decoded=24/s (total=2257)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.66(x60) texMs=0.03/0.07 drawMs=0.05/0.12 encMs=0.12/0.54 presMs=0.05/0.11 commitMs=0.02/0.03 gpuMs=0.22/0.71 latMs=1.08/6.23(x24) footprintMB=129.8 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:29.974  [WHEP-FLOW] enqueued=23.9/s (total=2259, delivered=2259, promoteFail=0) | depth=0.379s count=9 rate=1.0017
+19:41:30.050  [WHEP-RTP] +95s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=448 seqGaps=0 lost=0 reorder=0  |  FU-A rx=445 reassembled=46 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.399s target=0.400 rate=1.0000 err=-0.0011 count=10
+19:41:30.922  [WHEP-DECODE] +97s  decoded=22/s (total=2279)  1920x1080 'x420'  |  AUs=22/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x61) texMs=0.02/0.04 drawMs=0.05/0.11 encMs=0.11/0.18 presMs=0.04/0.11 commitMs=0.01/0.03 gpuMs=0.18/0.21 latMs=0.88/2.26(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [Play] presented 23.6 fps
+19:41:30.984  [WHEP-FLOW] enqueued=21.8/s (total=2281, delivered=2281, promoteFail=0) | depth=0.299s count=7 rate=0.9950
+19:41:31.051  [WHEP-RTP] +96s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=477 seqGaps=0 lost=0 reorder=0  |  FU-A rx=477 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.339s target=0.400 rate=0.9950 err=-0.0607 count=9
+19:41:31.445  [WHEP-DRIFT] senderRate=89913 tps (-0.097% vs receiver) | clockRate=0.9950 (-0.500%, RAIL) | depthCreep=-0.0024 s/s observed vs +0.0040 predicted (residual -0.0064) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.097% + margin
+19:41:31.445  [WHEP-BACKLOG] pictures=2294 over 95.5s (=95.64s content) vs wall 95.5s → surplus +0.10s cumulative | netJump +0.00s | inBuffer +0.39s | cushion 0.400s | residual +0.109s (bound ±0.480s)
+19:41:31.445  [WHEP-JITTER] window arrivals min=22 max=24 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:31.923  [WHEP-DECODE] +98s  decoded=25/s (total=2304)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=25 tickMs=16.67/17.64(x62) texMs=0.04/0.14 drawMs=0.05/0.09 encMs=0.11/0.19 presMs=0.05/0.10 commitMs=0.01/0.03 gpuMs=0.21/0.57 latMs=0.90/1.65(x25) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:41:32.022  [WHEP-FLOW] enqueued=26.0/s (total=2308, delivered=2308, promoteFail=0) | depth=0.394s count=9 rate=0.9950
+19:41:32.050  [WHEP-RTP] +97s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=420 seqGaps=0 lost=0 reorder=0  |  FU-A rx=417 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9965 err=-0.0020 count=10
+19:41:32.923  [WHEP-DECODE] +99s  decoded=25/s (total=2329)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.70/17.75(x60) texMs=0.03/0.22 drawMs=0.04/0.06 encMs=0.09/0.17 presMs=0.03/0.06 commitMs=0.01/0.04 gpuMs=0.18/0.22 latMs=0.97/2.14(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:33.050  [WHEP-RTP] +98s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=394 seqGaps=0 lost=0 reorder=0  |  FU-A rx=394 reassembled=23 dropped=0  |  handoff=23 shed=0
+19:41:33.065  [WHEP-FLOW] enqueued=23.0/s (total=2332, delivered=2332, promoteFail=0) | depth=0.341s count=8 rate=1.0050
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9960 err=-0.0031 count=10
+19:41:33.923  [WHEP-DECODE] +100s  decoded=24/s (total=2353)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.89(x60) texMs=0.02/0.05 drawMs=0.05/0.11 encMs=0.09/0.15 presMs=0.04/0.07 commitMs=0.01/0.03 gpuMs=0.19/0.27 latMs=0.88/2.18(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:34.050  [WHEP-RTP] +99s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=461 seqGaps=0 lost=0 reorder=0  |  FU-A rx=458 reassembled=26 dropped=0  |  handoff=26 shed=0
+19:41:34.102  [WHEP-FLOW] enqueued=25.1/s (total=2358, delivered=2358, promoteFail=0) | depth=0.391s count=9 rate=1.0050
+              [LIVECLOCK] depth=0.410s target=0.400 rate=1.0050 err=+0.0099 count=10
+19:41:34.923  [WHEP-DECODE] +101s  decoded=24/s (total=2377)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.76(x60) texMs=0.02/0.10 drawMs=0.05/0.08 encMs=0.09/0.16 presMs=0.04/0.10 commitMs=0.01/0.04 gpuMs=0.19/0.31 latMs=1.17/3.97(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:35.051  [WHEP-RTP] +100s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=439 seqGaps=0 lost=0 reorder=0  |  FU-A rx=439 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.403s target=0.400 rate=0.9987 err=+0.0030 count=10
+19:41:35.144  [WHEP-FLOW] enqueued=24.0/s (total=2383, delivered=2383, promoteFail=0) | depth=0.385s count=9 rate=1.0023
+19:41:35.923  [WHEP-DECODE] +102s  decoded=24/s (total=2401)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:35.967  [WHEP-RTP] +101s  frames=22 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=21 SEI=1  |  pkts=374 seqGaps=0 lost=0 reorder=0  |  FU-A rx=371 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.68(x60) texMs=0.02/0.03 drawMs=0.05/0.16 encMs=0.12/0.82 presMs=0.04/0.09 commitMs=0.01/0.05 gpuMs=0.19/0.24 latMs=0.94/1.88(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.401s target=0.400 rate=1.0000 err=+0.0009 count=10
+19:41:36.210  [WHEP-FLOW] enqueued=23.5/s (total=2408, delivered=2408, promoteFail=0) | depth=0.376s count=9 rate=1.0020
+19:41:36.486  [WHEP-DRIFT] senderRate=90084 tps (+0.093% vs receiver) | clockRate=0.9950 (-0.500%, RAIL) | depthCreep=+0.0022 s/s observed vs +0.0059 predicted (residual -0.0037) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.093% + margin
+19:41:36.486  [WHEP-BACKLOG] pictures=2415 over 100.6s (=100.69s content) vs wall 100.6s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.112s (bound ±0.505s)
+19:41:36.486  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:36.922  [WHEP-DECODE] +103s  decoded=24/s (total=2425)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.03/0.15 drawMs=0.07/0.46 encMs=0.10/0.15 presMs=0.06/0.45 commitMs=0.01/0.02 gpuMs=0.19/0.26 latMs=1.12/4.43(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:37.047  [WHEP-RTP] +102s  frames=26 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=26 SEI=0  |  pkts=416 seqGaps=0 lost=0 reorder=0  |  FU-A rx=416 reassembled=26 dropped=0  |  handoff=26 shed=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0050 err=+0.0059 count=10
+19:41:37.274  [WHEP-FLOW] enqueued=24.4/s (total=2434, delivered=2434, promoteFail=0) | depth=0.391s count=9 rate=1.0029
+19:41:37.923  [WHEP-DECODE] +104s  decoded=24/s (total=2449)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.69/18.16(x60) texMs=0.03/0.08 drawMs=0.05/0.07 encMs=0.12/0.36 presMs=0.04/0.10 commitMs=0.01/0.02 gpuMs=0.19/0.33 latMs=1.05/3.36(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:38.049  [WHEP-RTP] +103s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=394 seqGaps=0 lost=0 reorder=0  |  FU-A rx=391 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.409s target=0.400 rate=1.0050 err=+0.0088 count=11
+19:41:38.313  [WHEP-FLOW] enqueued=24.0/s (total=2459, delivered=2459, promoteFail=0) | depth=0.381s count=9 rate=1.0050
+19:41:38.925  [WHEP-DECODE] +105s  decoded=24/s (total=2473)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/18.43(x60) texMs=0.03/0.09 drawMs=0.05/0.08 encMs=0.11/0.38 presMs=0.04/0.12 commitMs=0.02/0.23 gpuMs=0.18/0.19 latMs=1.07/5.43(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:41:39.047  [WHEP-RTP] +104s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=391 seqGaps=0 lost=0 reorder=0  |  FU-A rx=391 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9986 err=-0.0017 count=9
+19:41:39.316  [WHEP-FLOW] enqueued=23.9/s (total=2483, delivered=2483, promoteFail=0) | depth=0.382s count=9 rate=0.9988
+19:41:39.923  [WHEP-DECODE] +106s  decoded=23/s (total=2496)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.62(x60) texMs=0.03/0.16 drawMs=0.06/0.30 encMs=0.17/1.60 presMs=0.05/0.24 commitMs=0.01/0.03 gpuMs=0.20/0.30 latMs=0.99/2.19(x24) footprintMB=130.2 texFail=0 iosurface=Y
+19:41:40.049  [WHEP-RTP] +105s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=464 seqGaps=0 lost=0 reorder=0  |  FU-A rx=461 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 23.8 fps
+              [LIVECLOCK] depth=0.394s target=0.400 rate=0.9951 err=-0.0061 count=10
+19:41:40.323  [WHEP-FLOW] enqueued=23.8/s (total=2507, delivered=2507, promoteFail=0) | depth=0.385s count=9 rate=0.9980
+19:41:40.925  [WHEP-DECODE] +107s  decoded=25/s (total=2521)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.60(x60) texMs=0.02/0.05 drawMs=0.07/0.67 encMs=0.11/0.39 presMs=0.04/0.09 commitMs=0.01/0.05 gpuMs=0.19/0.31 latMs=1.04/2.16(x24) footprintMB=130.1 texFail=0 iosurface=Y
+19:41:41.049  [WHEP-RTP] +106s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=377 seqGaps=0 lost=0 reorder=0  |  FU-A rx=377 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.404s target=0.400 rate=1.0030 err=+0.0038 count=10
+19:41:41.362  [WHEP-FLOW] enqueued=24.1/s (total=2532, delivered=2532, promoteFail=0) | depth=0.391s count=9 rate=0.9998
+19:41:41.523  [WHEP-DRIFT] senderRate=89977 tps (-0.025% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=-0.0001 s/s observed vs -0.0053 predicted (residual +0.0052) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.025% + margin
+19:41:41.523  [WHEP-BACKLOG] pictures=2536 over 105.6s (=105.74s content) vs wall 105.6s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.116s (bound ±0.530s)
+19:41:41.523  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:41.923  [WHEP-DECODE] +108s  decoded=24/s (total=2545)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.64(x60) texMs=0.02/0.05 drawMs=0.05/0.21 encMs=0.09/0.13 presMs=0.03/0.05 commitMs=0.01/0.02 gpuMs=0.18/0.20 latMs=0.92/2.32(x24) footprintMB=130.1 texFail=0 iosurface=Y
+19:41:42.051  [WHEP-RTP] +107s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=322 seqGaps=0 lost=0 reorder=0  |  FU-A rx=319 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.418s target=0.400 rate=1.0050 err=+0.0179 count=11
+19:41:42.365  [WHEP-FLOW] enqueued=23.9/s (total=2556, delivered=2556, promoteFail=0) | depth=0.387s count=9 rate=1.0050
+19:41:42.923  [WHEP-DECODE] +109s  decoded=24/s (total=2569)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/18.08(x60) texMs=0.02/0.03 drawMs=0.04/0.07 encMs=0.14/1.27 presMs=0.03/0.06 commitMs=0.01/0.02 gpuMs=0.19/0.27 latMs=1.07/4.25(x24) footprintMB=130.0 texFail=0 iosurface=Y
+19:41:43.051  [WHEP-RTP] +108s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=315 seqGaps=0 lost=0 reorder=0  |  FU-A rx=313 reassembled=35 dropped=0  |  handoff=23 shed=0
+              [Play] presented 24.1 fps
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0044 err=+0.0025 count=10
+19:41:43.485  [WHEP-FLOW] enqueued=22.3/s (total=2581, delivered=2581, promoteFail=0) | depth=0.296s count=7 rate=0.9950
+19:41:43.923  [WHEP-DECODE] +110s  decoded=19/s (total=2588)  1920x1080 'x420'  |  AUs=19/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.02/0.18 drawMs=0.04/0.06 encMs=0.09/0.22 presMs=0.04/0.12 commitMs=0.01/0.03 gpuMs=0.27/2.22 latMs=0.93/3.26(x24) footprintMB=130.1 texFail=0 iosurface=Y
+19:41:44.051  [WHEP-RTP] +109s  frames=19 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=18 SEI=1  |  pkts=460 seqGaps=0 lost=0 reorder=0  |  FU-A rx=455 reassembled=24 dropped=0  |  handoff=19 shed=0
+              [LIVECLOCK] depth=0.205s target=0.400 rate=0.9950 err=-0.1951 count=5
+              [Play] presented 23.8 fps
+19:41:44.503  [WHEP-FLOW] enqueued=19.6/s (total=2601, delivered=2601, promoteFail=0) | depth=0.117s count=3 rate=0.9950
+19:41:44.922  [WHEP-DECODE] +111s  decoded=23/s (total=2611)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:45.051  [WHEP-RTP] +110s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=478 seqGaps=0 lost=0 reorder=0  |  FU-A rx=478 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=25 tickMs=16.67/17.63(x63) texMs=0.03/0.21 drawMs=0.06/0.44 encMs=0.11/0.37 presMs=0.04/0.08 commitMs=0.02/0.14 gpuMs=0.24/1.38 latMs=1.06/4.03(x25) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.171s target=0.400 rate=0.9950 err=-0.2286 count=6
+              [Play] presented 23.8 fps
+19:41:45.504  [WHEP-FLOW] enqueued=28.0/s (total=2629, delivered=2629, promoteFail=0) | depth=0.290s count=7 rate=0.9950
+19:41:45.922  [WHEP-DECODE] +112s  decoded=29/s (total=2640)  1920x1080 'x420'  |  AUs=29/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:46.050  [WHEP-RTP] +111s  frames=30 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=29 SEI=1  |  pkts=465 seqGaps=0 lost=0 reorder=0  |  FU-A rx=462 reassembled=30 dropped=0  |  handoff=30 shed=0
+              [RENDER-PERF] n=24 tickMs=16.70/17.63(x60) texMs=0.03/0.16 drawMs=0.05/0.08 encMs=0.10/0.15 presMs=0.04/0.07 commitMs=0.02/0.03 gpuMs=0.18/0.22 latMs=0.98/3.00(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.391s target=0.400 rate=0.9950 err=-0.0091 count=10
+              [Play] presented 24.2 fps
+19:41:46.537  [WHEP-DRIFT] senderRate=89999 tps (-0.002% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=-0.0166 s/s observed vs -0.0050 predicted (residual -0.0116) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.002% + margin
+19:41:46.537  [WHEP-BACKLOG] pictures=2656 over 110.6s (=110.74s content) vs wall 110.6s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.106s (bound ±0.555s)
+19:41:46.537  [WHEP-JITTER] window arrivals min=17 max=30 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:46.537  [WHEP-FLOW] enqueued=26.1/s (total=2656, delivered=2656, promoteFail=0) | depth=0.385s count=9 rate=1.0050
+19:41:46.923  [WHEP-DECODE] +113s  decoded=25/s (total=2665)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:47.051  [WHEP-RTP] +112s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=321 seqGaps=0 lost=0 reorder=0  |  FU-A rx=321 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/18.93(x60) texMs=0.03/0.18 drawMs=0.04/0.07 encMs=0.09/0.16 presMs=0.04/0.11 commitMs=0.01/0.03 gpuMs=0.20/0.78 latMs=0.93/2.04(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0050 err=+0.0056 count=9
+              [Play] presented 24.0 fps
+19:41:47.581  [WHEP-FLOW] enqueued=23.0/s (total=2680, delivered=2680, promoteFail=0) | depth=0.346s count=8 rate=0.9950
+19:41:47.923  [WHEP-DECODE] +114s  decoded=24/s (total=2689)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:48.051  [WHEP-RTP] +113s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=443 seqGaps=0 lost=0 reorder=0  |  FU-A rx=440 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.62(x60) texMs=0.02/0.11 drawMs=0.05/0.08 encMs=0.09/0.16 presMs=0.04/0.09 commitMs=0.01/0.03 gpuMs=0.19/0.31 latMs=1.01/3.52(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9980 err=-0.0034 count=9
+              [Play] presented 24.0 fps
+19:41:48.664  [WHEP-FLOW] enqueued=24.0/s (total=2706, delivered=2706, promoteFail=0) | depth=0.346s count=8 rate=1.0050
+19:41:48.923  [WHEP-DECODE] +115s  decoded=23/s (total=2712)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:49.051  [WHEP-RTP] +114s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=432 seqGaps=0 lost=0 reorder=0  |  FU-A rx=432 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.69(x60) texMs=0.03/0.17 drawMs=0.05/0.08 encMs=0.09/0.15 presMs=0.04/0.18 commitMs=0.01/0.02 gpuMs=0.18/0.25 latMs=0.85/1.85(x24) footprintMB=130.2 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.344s target=0.400 rate=0.9950 err=-0.0555 count=7
+              [Play] presented 24.0 fps
+19:41:49.666  [WHEP-FLOW] enqueued=25.0/s (total=2731, delivered=2731, promoteFail=0) | depth=0.391s count=9 rate=0.9950
+19:41:49.922  [WHEP-DECODE] +116s  decoded=26/s (total=2738)  1920x1080 'x420'  |  AUs=26/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:50.050  [WHEP-RTP] +115s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=423 seqGaps=0 lost=0 reorder=0  |  FU-A rx=420 reassembled=26 dropped=0  |  handoff=26 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.68(x60) texMs=0.03/0.18 drawMs=0.06/0.29 encMs=0.11/0.16 presMs=0.04/0.10 commitMs=0.02/0.22 gpuMs=0.18/0.21 latMs=1.06/3.06(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.417s target=0.400 rate=1.0050 err=+0.0168 count=10
+              [Play] presented 23.8 fps
+19:41:50.666  [WHEP-FLOW] enqueued=25.0/s (total=2756, delivered=2756, promoteFail=0) | depth=0.388s count=9 rate=1.0050
+19:41:50.922  [WHEP-DECODE] +117s  decoded=24/s (total=2762)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:50.975  [WHEP-RTP] +116s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=296 seqGaps=0 lost=0 reorder=0  |  FU-A rx=296 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.67(x60) texMs=0.03/0.15 drawMs=0.05/0.07 encMs=0.09/0.16 presMs=0.06/0.44 commitMs=0.02/0.03 gpuMs=0.19/0.30 latMs=1.05/5.93(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.410s target=0.400 rate=1.0050 err=+0.0097 count=10
+              [Play] presented 24.1 fps
+19:41:51.539  [WHEP-DRIFT] senderRate=90028 tps (+0.031% vs receiver) | clockRate=1.0029 (+0.292%) | depthCreep=+0.0163 s/s observed vs -0.0026 predicted (residual +0.0189) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.031% + margin
+19:41:51.540  [WHEP-BACKLOG] pictures=2776 over 115.6s (=115.75s content) vs wall 115.6s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.116s (bound ±0.580s)
+19:41:51.540  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:51.698  [WHEP-FLOW] enqueued=23.3/s (total=2780, delivered=2780, promoteFail=0) | depth=0.393s count=9 rate=0.9978
+19:41:51.923  [WHEP-DECODE] +118s  decoded=22/s (total=2784)  1920x1080 'x420'  |  AUs=22/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:52.051  [WHEP-RTP] +117s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=455 seqGaps=0 lost=0 reorder=0  |  FU-A rx=452 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/18.13(x60) texMs=0.03/0.15 drawMs=0.05/0.09 encMs=0.11/0.15 presMs=0.05/0.07 commitMs=0.02/0.16 gpuMs=0.21/0.40 latMs=1.17/5.48(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.346s target=0.400 rate=0.9950 err=-0.0543 count=8
+              [Play] presented 24.2 fps
+19:41:52.704  [WHEP-FLOW] enqueued=23.9/s (total=2804, delivered=2804, promoteFail=0) | depth=0.395s count=9 rate=0.9981
+19:41:52.923  [WHEP-DECODE] +119s  decoded=24/s (total=2808)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:52.970  [WHEP-RTP] +118s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=395 seqGaps=0 lost=0 reorder=0  |  FU-A rx=395 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.64(x60) texMs=0.03/0.09 drawMs=0.05/0.09 encMs=0.10/0.17 presMs=0.04/0.12 commitMs=0.02/0.04 gpuMs=0.19/0.27 latMs=0.91/1.90(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.410s target=0.400 rate=1.0050 err=+0.0098 count=10
+              [Play] presented 24.0 fps
+19:41:53.742  [WHEP-FLOW] enqueued=24.1/s (total=2829, delivered=2829, promoteFail=0) | depth=0.402s count=10 rate=0.9950
+19:41:53.922  [WHEP-DECODE] +120s  decoded=26/s (total=2834)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:54.050  [WHEP-RTP] +119s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=457 seqGaps=0 lost=0 reorder=0  |  FU-A rx=454 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.63(x60) texMs=0.04/0.19 drawMs=0.05/0.11 encMs=0.13/0.48 presMs=0.05/0.27 commitMs=0.02/0.05 gpuMs=0.18/0.27 latMs=1.00/1.85(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.407s target=0.400 rate=1.0050 err=+0.0068 count=11
+              [Play] presented 24.0 fps
+19:41:54.764  [WHEP-FLOW] enqueued=23.5/s (total=2853, delivered=2853, promoteFail=0) | depth=0.367s count=9 rate=1.0001
+19:41:54.924  [WHEP-DECODE] +121s  decoded=23/s (total=2857)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:55.051  [WHEP-RTP] +120s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=391 seqGaps=0 lost=0 reorder=0  |  FU-A rx=391 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.68(x60) texMs=0.03/0.06 drawMs=0.05/0.11 encMs=0.10/0.15 presMs=0.04/0.09 commitMs=0.02/0.05 gpuMs=0.19/0.29 latMs=0.99/1.99(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0050 err=+0.0034 count=9
+              [Play] presented 24.0 fps
+19:41:55.781  [WHEP-FLOW] enqueued=23.6/s (total=2877, delivered=2877, promoteFail=0) | depth=0.354s count=8 rate=0.9950
+19:41:55.929  [WHEP-DECODE] +122s  decoded=24/s (total=2881)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:56.051  [WHEP-RTP] +121s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=399 seqGaps=0 lost=0 reorder=0  |  FU-A rx=396 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=24 tickMs=16.70/17.89(x60) texMs=0.02/0.05 drawMs=0.05/0.07 encMs=0.09/0.13 presMs=0.04/0.09 commitMs=0.01/0.02 gpuMs=0.20/0.31 latMs=0.81/1.87(x24) footprintMB=130.2 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.414s target=0.400 rate=1.0050 err=+0.0137 count=11
+              [Play] presented 24.0 fps
+19:41:56.577  [WHEP-DRIFT] senderRate=89998 tps (-0.002% vs receiver) | clockRate=0.9950 (-0.500%, RAIL) | depthCreep=-0.0010 s/s observed vs +0.0050 predicted (residual -0.0060) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.002% + margin
+19:41:56.577  [WHEP-BACKLOG] pictures=2895 over 120.7s (=120.71s content) vs wall 120.7s → surplus +0.04s cumulative | netJump +0.00s | inBuffer +0.32s | cushion 0.400s | residual +0.116s (bound ±0.605s)
+19:41:56.577  [WHEP-JITTER] window arrivals min=23 max=26 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:41:56.786  [WHEP-FLOW] enqueued=21.9/s (total=2899, delivered=2899, promoteFail=0) | depth=0.269s count=6 rate=0.9950
+19:41:56.923  [WHEP-DECODE] +123s  decoded=22/s (total=2903)  1920x1080 'x420'  |  AUs=22/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:57.049  [WHEP-RTP] +122s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=405 seqGaps=0 lost=0 reorder=0  |  FU-A rx=405 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.03/0.17 drawMs=0.05/0.10 encMs=0.11/0.27 presMs=0.04/0.06 commitMs=0.01/0.04 gpuMs=0.18/0.26 latMs=1.26/5.90(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.328s target=0.400 rate=0.9950 err=-0.0718 count=9
+              [Play] presented 23.6 fps
+19:41:57.788  [WHEP-FLOW] enqueued=26.9/s (total=2926, delivered=2926, promoteFail=0) | depth=0.399s count=10 rate=1.0034
+19:41:57.924  [WHEP-DECODE] +124s  decoded=26/s (total=2929)  1920x1080 'x420'  |  AUs=26/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:58.049  [WHEP-RTP] +123s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=416 seqGaps=0 lost=0 reorder=0  |  FU-A rx=413 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.04/0.20 drawMs=0.05/0.12 encMs=0.09/0.17 presMs=0.04/0.11 commitMs=0.02/0.19 gpuMs=0.18/0.26 latMs=0.81/2.28(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.408s target=0.400 rate=1.0050 err=+0.0084 count=10
+              [Play] presented 24.2 fps
+19:41:58.791  [WHEP-FLOW] enqueued=23.9/s (total=2950, delivered=2950, promoteFail=0) | depth=0.395s count=9 rate=1.0050
+19:41:58.928  [WHEP-DECODE] +125s  decoded=23/s (total=2952)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:41:59.047  [WHEP-RTP] +124s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=390 seqGaps=0 lost=0 reorder=0  |  FU-A rx=390 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.03/0.06 drawMs=0.05/0.10 encMs=0.10/0.17 presMs=0.04/0.08 commitMs=0.02/0.06 gpuMs=0.18/0.25 latMs=1.16/4.08(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0050 err=+0.0057 count=10
+              [Play] presented 24.0 fps
+19:41:59.842  [WHEP-FLOW] enqueued=23.8/s (total=2975, delivered=2975, promoteFail=0) | depth=0.386s count=9 rate=0.9957
+19:41:59.922  [WHEP-DECODE] +126s  decoded=25/s (total=2977)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:00.049  [WHEP-RTP] +125s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=387 seqGaps=0 lost=0 reorder=0  |  FU-A rx=384 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.59(x60) texMs=0.02/0.04 drawMs=0.05/0.12 encMs=0.12/0.56 presMs=0.04/0.09 commitMs=0.02/0.04 gpuMs=0.19/0.24 latMs=0.89/2.05(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.408s target=0.400 rate=1.0050 err=+0.0076 count=10
+              [Play] presented 24.0 fps
+19:42:00.847  [WHEP-FLOW] enqueued=23.9/s (total=2999, delivered=2999, promoteFail=0) | depth=0.385s count=9 rate=1.0003
+19:42:00.923  [WHEP-DECODE] +127s  decoded=23/s (total=3000)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:01.048  [WHEP-RTP] +126s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=398 seqGaps=0 lost=0 reorder=0  |  FU-A rx=398 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.68(x60) texMs=0.02/0.06 drawMs=0.06/0.25 encMs=0.10/0.22 presMs=0.04/0.07 commitMs=0.01/0.03 gpuMs=0.22/0.63 latMs=0.96/1.63(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0014 err=+0.0026 count=10
+              [Play] presented 24.0 fps
+19:42:01.592  [WHEP-DRIFT] senderRate=90018 tps (+0.020% vs receiver) | clockRate=1.0049 (+0.490%) | depthCreep=-0.0005 s/s observed vs -0.0047 predicted (residual +0.0042) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.020% + margin
+19:42:01.592  [WHEP-BACKLOG] pictures=3017 over 125.7s (=125.80s content) vs wall 125.7s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.116s (bound ±0.630s)
+19:42:01.592  [WHEP-JITTER] window arrivals min=20 max=27 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:01.849  [WHEP-FLOW] enqueued=24.0/s (total=3023, delivered=3023, promoteFail=0) | depth=0.384s count=9 rate=1.0050
+19:42:01.923  [WHEP-DECODE] +128s  decoded=26/s (total=3026)  1920x1080 'x420'  |  AUs=26/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:02.051  [WHEP-RTP] +127s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=283 seqGaps=0 lost=0 reorder=0  |  FU-A rx=280 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.88(x60) texMs=0.02/0.03 drawMs=0.05/0.09 encMs=0.11/0.56 presMs=0.04/0.20 commitMs=0.01/0.02 gpuMs=0.27/1.91 latMs=1.07/4.86(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.407s target=0.400 rate=1.0050 err=+0.0072 count=9
+              [Play] presented 24.0 fps
+19:42:02.850  [WHEP-FLOW] enqueued=24.0/s (total=3047, delivered=3047, promoteFail=0) | depth=0.366s count=9 rate=1.0009
+19:42:02.922  [WHEP-DECODE] +129s  decoded=23/s (total=3049)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:02.966  [WHEP-RTP] +128s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=366 seqGaps=0 lost=0 reorder=0  |  FU-A rx=366 reassembled=42 dropped=0  |  handoff=22 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.93(x60) texMs=0.02/0.08 drawMs=0.05/0.09 encMs=0.11/0.27 presMs=0.04/0.09 commitMs=0.01/0.05 gpuMs=0.18/0.27 latMs=1.06/4.75(x24) footprintMB=129.9 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9992 err=-0.0029 count=9
+              [Play] presented 24.0 fps
+19:42:03.923  [WHEP-DECODE] +130s  decoded=22/s (total=3071)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:03.930  [WHEP-FLOW] enqueued=23.1/s (total=3072, delivered=3072, promoteFail=0) | depth=0.341s count=8 rate=0.9950
+19:42:03.970  [WHEP-RTP] +129s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=21 SEI=1  |  pkts=435 seqGaps=0 lost=0 reorder=0  |  FU-A rx=432 reassembled=39 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.66(x60) texMs=0.02/0.03 drawMs=0.04/0.08 encMs=0.09/0.37 presMs=0.03/0.07 commitMs=0.01/0.04 gpuMs=0.19/0.29 latMs=0.83/2.02(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.335s target=0.400 rate=0.9950 err=-0.0648 count=7
+              [Play] presented 24.0 fps
+19:42:04.923  [WHEP-DECODE] +131s  decoded=23/s (total=3094)  1920x1080 'x420'  |  AUs=22/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:04.965  [WHEP-FLOW] enqueued=22.2/s (total=3095, delivered=3095, promoteFail=0) | depth=0.313s count=8 rate=0.9950
+19:42:05.036  [WHEP-RTP] +130s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=498 seqGaps=1 lost=1 reorder=1  |  FU-A rx=498 reassembled=24 dropped=1  |  handoff=24 shed=0
+              [RENDER-PERF] n=23 tickMs=16.68/17.62(x60) texMs=0.02/0.04 drawMs=0.05/0.29 encMs=0.09/0.14 presMs=0.03/0.06 commitMs=0.01/0.02 gpuMs=0.18/0.20 latMs=0.79/1.77(x23) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.329s target=0.400 rate=0.9950 err=-0.0707 count=7
+              [Play] presented 22.8 fps
+19:42:05.922  [WHEP-DECODE] +132s  decoded=26/s (total=3120)  1920x1080 'x420'  |  AUs=26/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:05.980  [WHEP-FLOW] enqueued=25.6/s (total=3121, delivered=3121, promoteFail=0) | depth=0.385s count=9 rate=0.9950
+19:42:06.051  [WHEP-RTP] +131s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=480 seqGaps=0 lost=0 reorder=0  |  FU-A rx=477 reassembled=26 dropped=0  |  handoff=26 shed=0
+              [RENDER-PERF] n=24 tickMs=16.68/17.64(x60) texMs=0.02/0.08 drawMs=0.05/0.07 encMs=0.10/0.19 presMs=0.04/0.08 commitMs=0.01/0.03 gpuMs=0.19/0.30 latMs=0.88/2.12(x24) footprintMB=130.2 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.410s target=0.400 rate=1.0011 err=+0.0095 count=10
+              [Play] presented 24.0 fps
+19:42:06.601  [WHEP-DRIFT] senderRate=89937 tps (-0.070% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=-0.0036 s/s observed vs -0.0057 predicted (residual +0.0021) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.070% + margin
+19:42:06.601  [WHEP-BACKLOG] pictures=3136 over 130.7s (=130.81s content) vs wall 130.7s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.110s (bound ±0.655s)
+19:42:06.601  [WHEP-JITTER] window arrivals min=22 max=26 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:06.923  [WHEP-DECODE] +133s  decoded=23/s (total=3143)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:06.997  [WHEP-FLOW] enqueued=23.6/s (total=3145, delivered=3145, promoteFail=0) | depth=0.366s count=9 rate=1.0050
+19:42:07.047  [WHEP-RTP] +132s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=295 seqGaps=0 lost=0 reorder=0  |  FU-A rx=295 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [RENDER-PERF] n=24 tickMs=16.69/17.63(x60) texMs=0.04/0.16 drawMs=0.05/0.08 encMs=0.09/0.14 presMs=0.04/0.10 commitMs=0.01/0.02 gpuMs=0.18/0.22 latMs=0.98/1.83(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.410s target=0.400 rate=1.0050 err=+0.0101 count=10
+              [Play] presented 24.0 fps
+19:42:07.924  [WHEP-DECODE] +134s  decoded=25/s (total=3168)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:08.011  [WHEP-FLOW] enqueued=24.7/s (total=3170, delivered=3170, promoteFail=0) | depth=0.386s count=9 rate=1.0050
+19:42:08.049  [WHEP-RTP] +133s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=345 seqGaps=0 lost=0 reorder=0  |  FU-A rx=342 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.66/17.92(x60) texMs=0.04/0.25 drawMs=0.05/0.21 encMs=0.10/0.20 presMs=0.04/0.08 commitMs=0.02/0.04 gpuMs=0.19/0.26 latMs=0.77/1.23(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.409s target=0.400 rate=1.0048 err=+0.0088 count=9
+              [Play] presented 24.2 fps
+19:42:08.923  [WHEP-DECODE] +135s  decoded=23/s (total=3191)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:09.053  [WHEP-RTP] +134s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=436 seqGaps=0 lost=0 reorder=0  |  FU-A rx=436 reassembled=48 dropped=0  |  handoff=24 shed=0
+19:42:09.057  [WHEP-FLOW] enqueued=23.9/s (total=3195, delivered=3195, promoteFail=0) | depth=0.376s count=9 rate=0.9965
+              [RENDER-PERF] n=24 tickMs=16.70/17.58(x60) texMs=0.02/0.08 drawMs=0.06/0.30 encMs=0.11/0.32 presMs=0.04/0.12 commitMs=0.01/0.02 gpuMs=0.20/0.39 latMs=0.89/2.22(x24) footprintMB=130.0 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.381s target=0.400 rate=0.9950 err=-0.0192 count=8
+              [Play] presented 24.0 fps
+19:42:09.922  [WHEP-DECODE] +136s  decoded=24/s (total=3215)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:10.049  [WHEP-RTP] +135s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=427 seqGaps=0 lost=0 reorder=0  |  FU-A rx=424 reassembled=40 dropped=0  |  handoff=24 shed=0
+19:42:10.098  [WHEP-FLOW] enqueued=23.1/s (total=3219, delivered=3219, promoteFail=0) | depth=0.345s count=8 rate=1.0012
+              [RENDER-PERF] n=25 tickMs=16.68/17.65(x62) texMs=0.02/0.03 drawMs=0.06/0.37 encMs=0.09/0.28 presMs=0.04/0.14 commitMs=0.01/0.03 gpuMs=0.19/0.28 latMs=0.90/3.05(x25) footprintMB=130.0 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.376s target=0.400 rate=0.9950 err=-0.0241 count=8
+              [Play] presented 24.0 fps
+19:42:10.922  [WHEP-DECODE] +137s  decoded=25/s (total=3240)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:11.051  [WHEP-RTP] +136s  frames=24 (key=0)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=404 seqGaps=0 lost=0 reorder=0  |  FU-A rx=398 reassembled=25 dropped=0  |  handoff=24 shed=0
+19:42:11.098  [WHEP-FLOW] enqueued=25.0/s (total=3244, delivered=3244, promoteFail=0) | depth=0.391s count=9 rate=0.9998
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x61) texMs=0.03/0.29 drawMs=0.05/0.24 encMs=0.09/0.27 presMs=0.05/0.51 commitMs=0.02/0.05 gpuMs=0.18/0.20 latMs=0.90/4.71(x24) footprintMB=130.1 texFail=0 iosurface=Y
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9984 err=-0.0019 count=9
+              [Play] presented 24.0 fps
+19:42:11.635  [WHEP-DRIFT] senderRate=90072 tps (+0.080% vs receiver) | clockRate=1.0049 (+0.494%) | depthCreep=+0.0046 s/s observed vs -0.0041 predicted (residual +0.0088) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.080% + margin
+19:42:11.635  [WHEP-BACKLOG] pictures=3257 over 135.7s (=135.85s content) vs wall 135.7s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.41s | cushion 0.400s | residual +0.114s (bound ±0.681s)
+19:42:11.635  [WHEP-JITTER] window arrivals min=22 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:11.923  [WHEP-DECODE] +138s  decoded=23/s (total=3263)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:12.051  [WHEP-RTP] +137s  frames=24 (key=1)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=450 seqGaps=0 lost=0 reorder=0  |  FU-A rx=450 reassembled=48 dropped=0  |  handoff=24 shed=0
+              [RENDER-PERF] n=24 tickMs=16.67/17.59(x60) texMs=0.03/0.15 drawMs=0.04/0.08 encMs=0.10/0.47 presMs=0.03/0.11 commitMs=0.01/0.03 gpuMs=0.18/0.26 latMs=0.87/1.92(x24) footprintMB=130.1 texFail=0 iosurface=Y
+19:42:12.144  [WHEP-FLOW] enqueued=23.9/s (total=3269, delivered=3269, promoteFail=0) | depth=0.380s count=9 rate=1.0050
+              [LIVECLOCK] depth=0.404s target=0.400 rate=1.0050 err=+0.0037 count=9
+              [Play] presented 23.9 fps
+19:42:12.923  [WHEP-DECODE] +139s  decoded=24/s (total=3287)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:12.953  [WHEP-RTP] +138s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=400 seqGaps=0 lost=0 reorder=0  |  FU-A rx=400 reassembled=45 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.396s target=0.400 rate=0.9974 err=-0.0041 count=9
+              [RENDER-PERF] n=25 tickMs=16.67/17.65(x62) texMs=0.03/0.13 drawMs=0.05/0.11 encMs=0.11/0.28 presMs=0.09/1.34 commitMs=0.02/0.03 gpuMs=0.18/0.27 latMs=1.10/4.16(x25) footprintMB=130.0 texFail=0 iosurface=Y
+19:42:13.174  [WHEP-FLOW] enqueued=24.3/s (total=3294, delivered=3294, promoteFail=0) | depth=0.388s count=9 rate=0.9974
+              [Play] presented 24.2 fps
+19:42:13.923  [WHEP-DECODE] +140s  decoded=24/s (total=3311)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:14.050  [WHEP-RTP] +139s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=477 seqGaps=0 lost=0 reorder=0  |  FU-A rx=474 reassembled=40 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.343s target=0.400 rate=0.9950 err=-0.0565 count=7
+              [RENDER-PERF] n=24 tickMs=16.70/17.70(x60) texMs=0.02/0.03 drawMs=0.05/0.25 encMs=0.10/0.19 presMs=0.04/0.08 commitMs=0.01/0.02 gpuMs=0.20/0.47 latMs=1.03/3.11(x24) footprintMB=130.1 texFail=0 iosurface=Y
+19:42:14.184  [WHEP-FLOW] enqueued=21.8/s (total=3316, delivered=3316, promoteFail=0) | depth=0.304s count=7 rate=0.9950
+              [Play] presented 23.6 fps
+19:42:14.923  [WHEP-DECODE] +141s  decoded=24/s (total=3335)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:14.971  [WHEP-RTP] +140s  frames=23 (key=0)  NALs: SPS=1 PPS=1 IDR=0 slice=23 SEI=1  |  pkts=402 seqGaps=0 lost=0 reorder=0  |  FU-A rx=399 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9987 err=-0.0016 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.03/0.16 drawMs=0.05/0.13 encMs=0.09/0.15 presMs=0.04/0.09 commitMs=0.01/0.04 gpuMs=0.19/0.49 latMs=1.17/4.12(x24) footprintMB=130.4 texFail=0 iosurface=Y
+19:42:15.289  [WHEP-FLOW] enqueued=25.3/s (total=3344, delivered=3344, promoteFail=0) | depth=0.376s count=9 rate=0.9987
+              [Play] presented 24.0 fps
+19:42:15.923  [WHEP-DECODE] +142s  decoded=21/s (total=3356)  1920x1080 'x420'  |  AUs=21/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:15.997  [WHEP-RTP] +141s  frames=22 (key=1)  NALs: SPS=0 PPS=0 IDR=1 slice=21 SEI=0  |  pkts=473 seqGaps=0 lost=0 reorder=0  |  FU-A rx=473 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.312s target=0.400 rate=0.9950 err=-0.0877 count=7
+              [RENDER-PERF] n=24 tickMs=16.67/17.66(x60) texMs=0.02/0.10 drawMs=0.04/0.07 encMs=0.10/0.45 presMs=0.03/0.05 commitMs=0.01/0.04 gpuMs=0.18/0.26 latMs=0.89/1.65(x24) footprintMB=130.3 texFail=0 iosurface=Y
+19:42:16.306  [WHEP-FLOW] enqueued=23.6/s (total=3368, delivered=3368, promoteFail=0) | depth=0.364s count=9 rate=0.9950
+              [Play] presented 24.0 fps
+19:42:16.645  [WHEP-DRIFT] senderRate=90039 tps (+0.044% vs receiver) | clockRate=1.0021 (+0.214%) | depthCreep=-0.0040 s/s observed vs -0.0017 predicted (residual -0.0023) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.044% + margin
+19:42:16.645  [WHEP-BACKLOG] pictures=3377 over 140.7s (=140.86s content) vs wall 140.7s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.41s | cushion 0.400s | residual +0.108s (bound ±0.706s)
+19:42:16.645  [WHEP-JITTER] window arrivals min=21 max=24 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:16.923  [WHEP-DECODE] +143s  decoded=27/s (total=3383)  1920x1080 'x420'  |  AUs=27/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:17.048  [WHEP-RTP] +142s  frames=28 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=27 SEI=1  |  pkts=438 seqGaps=0 lost=0 reorder=0  |  FU-A rx=435 reassembled=28 dropped=0  |  handoff=28 shed=0
+              [LIVECLOCK] depth=0.410s target=0.400 rate=1.0050 err=+0.0103 count=9
+              [RENDER-PERF] n=24 tickMs=16.69/17.65(x60) texMs=0.04/0.15 drawMs=0.05/0.13 encMs=0.10/0.15 presMs=0.04/0.07 commitMs=0.02/0.06 gpuMs=0.18/0.21 latMs=0.81/1.33(x24) footprintMB=130.4 texFail=0 iosurface=Y
+19:42:17.353  [WHEP-FLOW] enqueued=23.9/s (total=3393, delivered=3393, promoteFail=0) | depth=0.354s count=8 rate=0.9950
+              [Play] presented 24.0 fps
+19:42:17.922  [WHEP-DECODE] +144s  decoded=25/s (total=3408)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:17.969  [WHEP-RTP] +143s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=332 seqGaps=0 lost=0 reorder=0  |  FU-A rx=332 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.431s target=0.400 rate=1.0050 err=+0.0314 count=10
+              [RENDER-PERF] n=24 tickMs=16.68/17.59(x60) texMs=0.02/0.07 drawMs=0.04/0.08 encMs=0.09/0.14 presMs=0.03/0.06 commitMs=0.01/0.03 gpuMs=0.19/0.28 latMs=1.09/5.13(x24) footprintMB=130.3 texFail=0 iosurface=Y
+19:42:18.397  [WHEP-FLOW] enqueued=24.9/s (total=3419, delivered=3419, promoteFail=0) | depth=0.386s count=9 rate=1.0050
+              [Play] presented 24.0 fps
+19:42:18.925  [WHEP-DECODE] +145s  decoded=23/s (total=3431)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:18.971  [WHEP-RTP] +144s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=346 seqGaps=0 lost=0 reorder=0  |  FU-A rx=342 reassembled=29 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.412s target=0.400 rate=1.0050 err=+0.0121 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.60(x60) texMs=0.02/0.04 drawMs=0.04/0.08 encMs=0.09/0.20 presMs=0.05/0.29 commitMs=0.01/0.03 gpuMs=0.18/0.26 latMs=0.85/2.22(x24) footprintMB=130.3 texFail=0 iosurface=Y
+19:42:19.402  [WHEP-FLOW] enqueued=23.9/s (total=3443, delivered=3443, promoteFail=0) | depth=0.381s count=9 rate=1.0040
+              [Play] presented 24.0 fps
+19:42:19.927  [WHEP-DECODE] +146s  decoded=24/s (total=3455)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:20.050  [WHEP-RTP] +145s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=448 seqGaps=0 lost=0 reorder=0  |  FU-A rx=447 reassembled=41 dropped=0  |  handoff=25 shed=0
+              [LIVECLOCK] depth=0.340s target=0.400 rate=0.9950 err=-0.0595 count=6
+              [RENDER-PERF] n=24 tickMs=16.67/17.65(x60) texMs=0.03/0.06 drawMs=0.04/0.08 encMs=0.09/0.13 presMs=0.07/0.74 commitMs=0.02/0.15 gpuMs=0.19/0.25 latMs=0.90/1.74(x24) footprintMB=130.3 texFail=0 iosurface=Y
+19:42:20.441  [WHEP-FLOW] enqueued=18.3/s (total=3462, delivered=3462, promoteFail=0) | depth=0.140s count=3 rate=0.9950
+              [Play] presented 24.0 fps
+19:42:20.923  [WHEP-DECODE] +147s  decoded=19/s (total=3474)  1920x1080 'x420'  |  AUs=19/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:21.048  [WHEP-RTP] +146s  frames=20 (key=0)  NALs: SPS=1 PPS=1 IDR=0 slice=20 SEI=1  |  pkts=475 seqGaps=0 lost=0 reorder=0  |  FU-A rx=472 reassembled=20 dropped=0  |  handoff=20 shed=0
+              [LIVECLOCK] depth=0.170s target=0.400 rate=0.9950 err=-0.2298 count=3
+              [RENDER-PERF] n=24 tickMs=16.68/17.78(x60) texMs=0.02/0.05 drawMs=0.04/0.05 encMs=0.09/0.16 presMs=0.03/0.06 commitMs=0.01/0.02 gpuMs=0.19/0.40 latMs=0.87/1.59(x24) footprintMB=130.3 texFail=0 iosurface=Y
+19:42:21.477  [WHEP-FLOW] enqueued=26.1/s (total=3489, delivered=3489, promoteFail=0) | depth=0.238s count=6 rate=0.9950
+              [Play] presented 24.0 fps
+19:42:21.659  [WHEP-DRIFT] senderRate=89991 tps (-0.010% vs receiver) | clockRate=0.9950 (-0.500%, RAIL) | depthCreep=-0.0061 s/s observed vs +0.0049 predicted (residual -0.0110) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.010% + margin
+19:42:21.659  [WHEP-BACKLOG] pictures=3497 over 145.8s (=145.86s content) vs wall 145.8s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.110s (bound ±0.731s)
+19:42:21.659  [WHEP-JITTER] window arrivals min=19 max=27 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:21.923  [WHEP-DECODE] +148s  decoded=30/s (total=3504)  1920x1080 'x420'  |  AUs=30/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:22.050  [WHEP-RTP] +147s  frames=29 (key=1)  NALs: SPS=0 PPS=0 IDR=1 slice=28 SEI=0  |  pkts=394 seqGaps=0 lost=0 reorder=0  |  FU-A rx=394 reassembled=29 dropped=0  |  handoff=29 shed=0
+              [LIVECLOCK] depth=0.412s target=0.400 rate=1.0050 err=+0.0124 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.69(x61) texMs=0.05/0.21 drawMs=0.04/0.06 encMs=0.09/0.14 presMs=0.03/0.07 commitMs=0.01/0.02 gpuMs=0.19/0.24 latMs=1.15/7.08(x24) footprintMB=130.1 texFail=0 iosurface=Y
+19:42:22.489  [WHEP-FLOW] enqueued=28.7/s (total=3518, delivered=3518, promoteFail=0) | depth=0.428s count=10 rate=1.0050
+              [Play] presented 24.2 fps
+19:42:22.923  [WHEP-DECODE] +149s  decoded=23/s (total=3527)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:23.049  [WHEP-RTP] +148s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=418 seqGaps=0 lost=0 reorder=0  |  FU-A rx=415 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.405s target=0.400 rate=1.0050 err=+0.0048 count=9
+              [RENDER-PERF] n=25 tickMs=16.68/18.80(x62) texMs=0.03/0.31 drawMs=0.07/0.57 encMs=0.12/0.69 presMs=0.04/0.07 commitMs=0.01/0.04 gpuMs=0.17/0.21 latMs=1.24/3.93(x25) footprintMB=130.4 texFail=0 iosurface=Y
+19:42:23.582  [WHEP-FLOW] enqueued=22.9/s (total=3543, delivered=3543, promoteFail=0) | depth=0.386s count=9 rate=1.0050
+              [Play] presented 24.0 fps
+19:42:23.923  [WHEP-DECODE] +150s  decoded=23/s (total=3550)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:23.964  [WHEP-RTP] +149s  frames=21 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=21 SEI=0  |  pkts=300 seqGaps=0 lost=0 reorder=0  |  FU-A rx=300 reassembled=21 dropped=0  |  handoff=21 shed=0
+              [LIVECLOCK] depth=0.297s target=0.400 rate=0.9950 err=-0.1027 count=5
+              [RENDER-PERF] n=24 tickMs=16.67/17.64(x60) texMs=0.03/0.17 drawMs=0.05/0.07 encMs=0.12/0.62 presMs=0.04/0.08 commitMs=0.01/0.02 gpuMs=0.22/1.10 latMs=1.31/5.80(x24) footprintMB=130.4 texFail=0 iosurface=Y
+19:42:24.586  [WHEP-FLOW] enqueued=16.9/s (total=3560, delivered=3560, promoteFail=0) | depth=0.077s count=2 rate=0.9950
+              [Play] presented 24.0 fps
+19:42:24.923  [WHEP-DECODE] +151s  decoded=21/s (total=3571)  1920x1080 'x420'  |  AUs=21/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:25.053  [WHEP-RTP] +150s  frames=22 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=21 SEI=1  |  pkts=515 seqGaps=0 lost=0 reorder=0  |  FU-A rx=512 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.206s target=0.400 rate=0.9950 err=-0.1939 count=6
+              [RENDER-PERF] n=24 tickMs=16.68/17.61(x60) texMs=0.03/0.22 drawMs=0.06/0.17 encMs=0.16/1.08 presMs=0.04/0.07 commitMs=0.01/0.02 gpuMs=0.18/0.27 latMs=1.06/4.18(x24) footprintMB=130.5 texFail=0 iosurface=Y
+19:42:25.606  [WHEP-FLOW] enqueued=27.4/s (total=3588, delivered=3588, promoteFail=0) | depth=0.233s count=6 rate=0.9950
+              [Play] presented 23.6 fps
+19:42:25.923  [WHEP-DECODE] +152s  decoded=28/s (total=3599)  1920x1080 'x420'  |  AUs=28/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:25.969  [WHEP-RTP] +151s  frames=28 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=28 SEI=0  |  pkts=399 seqGaps=0 lost=0 reorder=0  |  FU-A rx=399 reassembled=28 dropped=0  |  handoff=28 shed=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0050 err=+0.0062 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.58(x60) texMs=0.05/0.24 drawMs=0.08/0.53 encMs=0.20/1.56 presMs=0.07/0.59 commitMs=0.05/0.81 gpuMs=0.18/0.21 latMs=1.12/3.02(x24) footprintMB=130.3 texFail=0 iosurface=Y
+19:42:26.611  [WHEP-FLOW] enqueued=27.9/s (total=3616, delivered=3616, promoteFail=0) | depth=0.401s count=10 rate=0.9950
+              [Play] presented 24.0 fps
+19:42:26.660  [WHEP-DRIFT] senderRate=90031 tps (+0.034% vs receiver) | clockRate=0.9950 (-0.500%, RAIL) | depthCreep=-0.0010 s/s observed vs +0.0053 predicted (residual -0.0063) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.034% + margin
+19:42:26.661  [WHEP-BACKLOG] pictures=3617 over 150.8s (=150.87s content) vs wall 150.8s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.41s | cushion 0.400s | residual +0.107s (bound ±0.756s)
+19:42:26.661  [WHEP-JITTER] window arrivals min=21 max=28 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:26.923  [WHEP-DECODE] +153s  decoded=24/s (total=3623)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:27.051  [WHEP-RTP] +152s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=463 seqGaps=0 lost=0 reorder=0  |  FU-A rx=460 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0021 err=+0.0027 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.61(x60) texMs=0.03/0.10 drawMs=0.05/0.14 encMs=0.10/0.22 presMs=0.12/0.86 commitMs=0.01/0.02 gpuMs=0.19/0.28 latMs=1.16/3.10(x24) footprintMB=130.5 texFail=0 iosurface=Y
+19:42:27.614  [WHEP-FLOW] enqueued=23.9/s (total=3640, delivered=3640, promoteFail=0) | depth=0.400s count=10 rate=1.0050
+              [Play] presented 24.0 fps
+19:42:27.923  [WHEP-DECODE] +154s  decoded=24/s (total=3647)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:27.963  [WHEP-RTP] +153s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=375 seqGaps=0 lost=0 reorder=0  |  FU-A rx=375 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.412s target=0.400 rate=1.0050 err=+0.0120 count=10
+              [RENDER-PERF] n=25 tickMs=16.67/17.96(x63) texMs=0.03/0.30 drawMs=0.05/0.12 encMs=0.10/0.26 presMs=0.04/0.08 commitMs=0.01/0.03 gpuMs=0.19/0.37 latMs=1.38/6.79(x25) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:28.666  [WHEP-FLOW] enqueued=23.8/s (total=3665, delivered=3665, promoteFail=0) | depth=0.388s count=9 rate=1.0050
+19:42:28.922  [WHEP-DECODE] +155s  decoded=24/s (total=3671)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:29.051  [WHEP-RTP] +154s  frames=27 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=26 SEI=1  |  pkts=456 seqGaps=0 lost=0 reorder=0  |  FU-A rx=453 reassembled=27 dropped=0  |  handoff=27 shed=0
+              [LIVECLOCK] depth=0.410s target=0.400 rate=1.0050 err=+0.0105 count=11
+              [RENDER-PERF] n=24 tickMs=16.67/17.65(x60) texMs=0.05/0.53 drawMs=0.05/0.09 encMs=0.15/0.64 presMs=0.05/0.17 commitMs=0.02/0.06 gpuMs=0.19/0.20 latMs=1.10/4.16(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:42:29.666  [WHEP-FLOW] enqueued=25.0/s (total=3690, delivered=3690, promoteFail=0) | depth=0.387s count=9 rate=1.0050
+19:42:29.922  [WHEP-DECODE] +156s  decoded=24/s (total=3695)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:29.969  [WHEP-RTP] +155s  frames=21 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=21 SEI=0  |  pkts=354 seqGaps=0 lost=0 reorder=0  |  FU-A rx=354 reassembled=21 dropped=0  |  handoff=21 shed=0
+              [LIVECLOCK] depth=0.404s target=0.400 rate=1.0005 err=+0.0042 count=10
+              [RENDER-PERF] n=25 tickMs=16.69/17.67(x62) texMs=0.02/0.03 drawMs=0.05/0.09 encMs=0.11/0.50 presMs=0.04/0.21 commitMs=0.01/0.04 gpuMs=0.20/0.30 latMs=0.85/1.84(x25) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:30.739  [WHEP-FLOW] enqueued=21.4/s (total=3713, delivered=3713, promoteFail=0) | depth=0.300s count=7 rate=1.0016
+19:42:30.922  [WHEP-DECODE] +157s  decoded=24/s (total=3719)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:31.043  [WHEP-RTP] +156s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=441 seqGaps=0 lost=0 reorder=0  |  FU-A rx=438 reassembled=26 dropped=0  |  handoff=26 shed=0
+              [LIVECLOCK] depth=0.408s target=0.400 rate=1.0050 err=+0.0084 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.58(x60) texMs=0.02/0.05 drawMs=0.04/0.07 encMs=0.10/0.22 presMs=0.04/0.09 commitMs=0.01/0.03 gpuMs=0.19/0.20 latMs=0.89/2.24(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:31.706  [WHEP-DRIFT] senderRate=89937 tps (-0.070% vs receiver) | clockRate=1.0035 (+0.354%) | depthCreep=+0.0129 s/s observed vs -0.0042 predicted (residual +0.0172) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.070% + margin
+19:42:31.706  [WHEP-BACKLOG] pictures=3738 over 155.8s (=155.92s content) vs wall 155.8s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.118s (bound ±0.781s)
+19:42:31.706  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:31.801  [WHEP-FLOW] enqueued=25.4/s (total=3740, delivered=3740, promoteFail=0) | depth=0.374s count=9 rate=1.0035
+19:42:31.923  [WHEP-DECODE] +158s  decoded=24/s (total=3743)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:32.051  [WHEP-RTP] +157s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=393 seqGaps=0 lost=0 reorder=0  |  FU-A rx=393 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.409s target=0.400 rate=1.0050 err=+0.0089 count=10
+              [RENDER-PERF] n=24 tickMs=16.67/17.63(x60) texMs=0.02/0.04 drawMs=0.05/0.10 encMs=0.12/0.55 presMs=0.04/0.19 commitMs=0.01/0.04 gpuMs=0.20/0.66 latMs=1.18/4.60(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:32.883  [WHEP-FLOW] enqueued=24.0/s (total=3766, delivered=3766, promoteFail=0) | depth=0.371s count=9 rate=1.0050
+19:42:32.923  [WHEP-DECODE] +159s  decoded=24/s (total=3767)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:33.049  [WHEP-RTP] +158s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=262 seqGaps=0 lost=0 reorder=0  |  FU-A rx=259 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [LIVECLOCK] depth=0.411s target=0.400 rate=1.0050 err=+0.0108 count=9
+              [RENDER-PERF] n=25 tickMs=16.68/17.65(x62) texMs=0.03/0.08 drawMs=0.05/0.08 encMs=0.11/0.18 presMs=0.05/0.09 commitMs=0.01/0.02 gpuMs=0.19/0.36 latMs=0.93/3.73(x25) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:42:33.886  [WHEP-FLOW] enqueued=23.9/s (total=3790, delivered=3790, promoteFail=0) | depth=0.370s count=9 rate=0.9950
+19:42:33.922  [WHEP-DECODE] +160s  decoded=24/s (total=3791)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:34.051  [WHEP-RTP] +159s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=398 seqGaps=0 lost=0 reorder=0  |  FU-A rx=398 reassembled=45 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9984 err=-0.0005 count=10
+              [RENDER-PERF] n=24 tickMs=16.68/17.69(x60) texMs=0.03/0.16 drawMs=0.06/0.23 encMs=0.10/0.16 presMs=0.04/0.09 commitMs=0.01/0.02 gpuMs=0.18/0.21 latMs=0.85/3.30(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:34.913  [WHEP-FLOW] enqueued=24.4/s (total=3815, delivered=3815, promoteFail=0) | depth=0.380s count=9 rate=1.0016
+19:42:34.923  [WHEP-DECODE] +161s  decoded=24/s (total=3815)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:35.055  [WHEP-RTP] +160s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=452 seqGaps=0 lost=0 reorder=0  |  FU-A rx=449 reassembled=49 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.399s target=0.400 rate=1.0028 err=-0.0012 count=9
+              [RENDER-PERF] n=24 tickMs=16.69/17.64(x60) texMs=0.02/0.06 drawMs=0.05/0.08 encMs=0.11/0.18 presMs=0.04/0.07 commitMs=0.02/0.07 gpuMs=0.19/0.32 latMs=1.16/3.37(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:35.913  [WHEP-FLOW] enqueued=24.0/s (total=3839, delivered=3839, promoteFail=0) | depth=0.380s count=9 rate=0.9963
+19:42:35.922  [WHEP-DECODE] +162s  decoded=24/s (total=3839)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:35.966  [WHEP-RTP] +161s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=407 seqGaps=0 lost=0 reorder=0  |  FU-A rx=407 reassembled=45 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.400s target=0.400 rate=1.0017 err=+0.0003 count=10
+              [RENDER-PERF] n=24 tickMs=16.67/17.60(x60) texMs=0.02/0.07 drawMs=0.05/0.24 encMs=0.08/0.14 presMs=0.04/0.37 commitMs=0.01/0.02 gpuMs=0.19/0.24 latMs=0.96/3.45(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:36.778  [WHEP-DRIFT] senderRate=90027 tps (+0.030% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=-0.0004 s/s observed vs -0.0047 predicted (residual +0.0043) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.030% + margin
+19:42:36.778  [WHEP-BACKLOG] pictures=3859 over 160.9s (=160.96s content) vs wall 160.9s → surplus +0.09s cumulative | netJump +0.00s | inBuffer +0.37s | cushion 0.400s | residual +0.123s (bound ±0.806s)
+19:42:36.778  [WHEP-JITTER] window arrivals min=23 max=24 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:36.920  [WHEP-FLOW] enqueued=23.8/s (total=3863, delivered=3863, promoteFail=0) | depth=0.379s count=9 rate=1.0018
+19:42:36.922  [WHEP-DECODE] +163s  decoded=24/s (total=3863)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:36.967  [WHEP-RTP] +162s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=431 seqGaps=0 lost=0 reorder=0  |  FU-A rx=428 reassembled=47 dropped=0  |  handoff=23 shed=0
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9988 err=-0.0017 count=10
+              [RENDER-PERF] n=24 tickMs=16.67/17.63(x60) texMs=0.02/0.03 drawMs=0.05/0.09 encMs=0.11/0.31 presMs=0.04/0.09 commitMs=0.01/0.02 gpuMs=0.19/0.26 latMs=0.92/2.74(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:37.921  [WHEP-FLOW] enqueued=24.0/s (total=3887, delivered=3887, promoteFail=0) | depth=0.382s count=9 rate=0.9950
+19:42:37.925  [WHEP-DECODE] +164s  decoded=24/s (total=3887)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:38.030  [WHEP-RTP] +163s  frames=26 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=467 seqGaps=0 lost=0 reorder=0  |  FU-A rx=467 reassembled=51 dropped=0  |  handoff=26 shed=0
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9999 err=-0.0032 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.68(x60) texMs=0.02/0.08 drawMs=0.05/0.10 encMs=0.11/0.35 presMs=0.04/0.15 commitMs=0.01/0.03 gpuMs=0.18/0.28 latMs=0.98/3.59(x24) footprintMB=130.6 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:38.923  [WHEP-DECODE] +165s  decoded=22/s (total=3909)  1920x1080 'x420'  |  AUs=22/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:38.929  [WHEP-FLOW] enqueued=22.8/s (total=3910, delivered=3910, promoteFail=0) | depth=0.324s count=8 rate=0.9996
+19:42:39.051  [WHEP-RTP] +164s  frames=22 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=21 SEI=1  |  pkts=456 seqGaps=0 lost=0 reorder=0  |  FU-A rx=453 reassembled=36 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.283s target=0.400 rate=0.9950 err=-0.1171 count=5
+              [RENDER-PERF] n=24 tickMs=16.67/17.67(x60) texMs=0.02/0.04 drawMs=0.06/0.27 encMs=0.11/0.46 presMs=0.05/0.17 commitMs=0.02/0.04 gpuMs=0.20/0.46 latMs=1.05/4.05(x24) footprintMB=130.6 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:39.923  [WHEP-DECODE] +166s  decoded=21/s (total=3930)  1920x1080 'x420'  |  AUs=21/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:39.974  [WHEP-FLOW] enqueued=20.1/s (total=3931, delivered=3931, promoteFail=0) | depth=0.171s count=4 rate=0.9950
+19:42:40.050  [WHEP-RTP] +165s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=476 seqGaps=0 lost=0 reorder=0  |  FU-A rx=476 reassembled=22 dropped=0  |  handoff=22 shed=0
+              [LIVECLOCK] depth=0.220s target=0.400 rate=0.9950 err=-0.1805 count=7
+              [RENDER-PERF] n=24 tickMs=16.70/18.61(x61) texMs=0.03/0.08 drawMs=0.06/0.20 encMs=0.11/0.28 presMs=0.05/0.12 commitMs=0.02/0.04 gpuMs=0.23/0.63 latMs=1.11/3.47(x24) footprintMB=130.7 texFail=0 iosurface=Y
+              [Play] presented 23.6 fps
+19:42:40.923  [WHEP-DECODE] +167s  decoded=28/s (total=3958)  1920x1080 'x420'  |  AUs=28/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:40.998  [WHEP-FLOW] enqueued=29.3/s (total=3961, delivered=3961, promoteFail=0) | depth=0.392s count=9 rate=1.0050
+19:42:41.048  [WHEP-RTP] +166s  frames=28 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=27 SEI=1  |  pkts=401 seqGaps=0 lost=0 reorder=0  |  FU-A rx=398 reassembled=28 dropped=0  |  handoff=28 shed=0
+              [LIVECLOCK] depth=0.407s target=0.400 rate=1.0050 err=+0.0066 count=9
+              [RENDER-PERF] n=25 tickMs=16.68/17.59(x62) texMs=0.06/0.34 drawMs=0.05/0.10 encMs=0.11/0.38 presMs=0.04/0.09 commitMs=0.02/0.10 gpuMs=0.19/0.29 latMs=1.02/2.76(x25) footprintMB=130.4 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:41.847  [WHEP-DRIFT] senderRate=90029 tps (+0.032% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=-0.0112 s/s observed vs -0.0047 predicted (residual -0.0066) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.032% + margin
+19:42:41.847  [WHEP-BACKLOG] pictures=3981 over 165.9s (=166.05s content) vs wall 165.9s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.39s | cushion 0.400s | residual +0.115s (bound ±0.832s)
+19:42:41.847  [WHEP-JITTER] window arrivals min=20 max=29 (nominal 23.97) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:41.923  [WHEP-DECODE] +168s  decoded=25/s (total=3983)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:41.999  [WHEP-FLOW] enqueued=24.0/s (total=3985, delivered=3985, promoteFail=0) | depth=0.388s count=9 rate=1.0050
+19:42:42.049  [WHEP-RTP] +167s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=323 seqGaps=0 lost=0 reorder=0  |  FU-A rx=323 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.386s target=0.400 rate=1.0048 err=-0.0138 count=8
+              [RENDER-PERF] n=24 tickMs=16.68/17.69(x60) texMs=0.05/0.42 drawMs=0.08/0.36 encMs=0.12/0.35 presMs=0.06/0.35 commitMs=0.02/0.08 gpuMs=0.19/0.33 latMs=1.30/4.46(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 23.9 fps
+19:42:42.923  [WHEP-DECODE] +169s  decoded=18/s (total=4001)  1920x1080 'x420'  |  AUs=18/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:43.000  [WHEP-FLOW] enqueued=19.0/s (total=4004, delivered=4004, promoteFail=0) | depth=0.223s count=4 rate=0.9950
+19:42:43.051  [WHEP-RTP] +168s  frames=19 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=18 SEI=1  |  pkts=476 seqGaps=1 lost=1 reorder=0  |  FU-A rx=473 reassembled=19 dropped=1  |  handoff=19 shed=0
+              [LIVECLOCK] depth=0.247s target=0.400 rate=0.9950 err=-0.1526 count=6
+              [RENDER-PERF] n=23 tickMs=16.69/17.66(x60) texMs=0.02/0.04 drawMs=0.07/0.55 encMs=0.17/0.84 presMs=0.05/0.19 commitMs=0.02/0.06 gpuMs=0.21/0.69 latMs=1.03/2.53(x23) footprintMB=130.6 texFail=0 iosurface=Y
+              [Play] presented 23.2 fps
+19:42:43.923  [WHEP-DECODE] +170s  decoded=28/s (total=4029)  1920x1080 'x420'  |  AUs=29/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:44.002  [WHEP-FLOW] enqueued=27.9/s (total=4032, delivered=4032, promoteFail=0) | depth=0.395s count=9 rate=0.9950
+19:42:44.053  [WHEP-RTP] +169s  frames=27 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=27 SEI=0  |  pkts=463 seqGaps=0 lost=0 reorder=0  |  FU-A rx=463 reassembled=27 dropped=0  |  handoff=27 shed=0
+              [LIVECLOCK] depth=0.406s target=0.400 rate=1.0033 err=+0.0060 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.05/0.30 drawMs=0.07/0.34 encMs=0.11/0.20 presMs=0.04/0.08 commitMs=0.02/0.12 gpuMs=0.22/0.63 latMs=1.47/5.23(x24) footprintMB=130.6 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:44.923  [WHEP-DECODE] +171s  decoded=25/s (total=4054)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:45.010  [WHEP-FLOW] enqueued=23.8/s (total=4056, delivered=4056, promoteFail=0) | depth=0.397s count=10 rate=1.0022
+19:42:45.050  [WHEP-RTP] +170s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=394 seqGaps=0 lost=0 reorder=0  |  FU-A rx=391 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.405s target=0.400 rate=1.0039 err=+0.0049 count=8
+              [RENDER-PERF] n=24 tickMs=16.68/17.65(x60) texMs=0.03/0.16 drawMs=0.05/0.11 encMs=0.11/0.20 presMs=0.04/0.07 commitMs=0.01/0.02 gpuMs=0.19/0.30 latMs=1.17/5.77(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 23.6 fps
+19:42:45.922  [WHEP-DECODE] +172s  decoded=25/s (total=4079)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:46.027  [WHEP-FLOW] enqueued=23.6/s (total=4080, delivered=4080, promoteFail=0) | depth=0.380s count=9 rate=1.0050
+19:42:46.051  [WHEP-RTP] +171s  frames=25 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=400 seqGaps=0 lost=0 reorder=0  |  FU-A rx=400 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [LIVECLOCK] depth=0.422s target=0.400 rate=1.0050 err=+0.0219 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.70(x60) texMs=0.03/0.17 drawMs=0.05/0.08 encMs=0.11/0.44 presMs=0.04/0.06 commitMs=0.01/0.03 gpuMs=0.18/0.20 latMs=1.00/3.57(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:42:46.922  [WHEP-DECODE] +173s  decoded=22/s (total=4101)  1920x1080 'x420'  |  AUs=22/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:46.926  [WHEP-DRIFT] senderRate=90030 tps (+0.034% vs receiver) | clockRate=1.0050 (+0.500%, RAIL) | depthCreep=+0.0050 s/s observed vs -0.0047 predicted (residual +0.0097) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.034% + margin
+19:42:46.926  [WHEP-BACKLOG] pictures=4102 over 171.0s (=171.14s content) vs wall 171.0s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.41s | cushion 0.400s | residual +0.113s (bound ±0.857s)
+19:42:46.926  [WHEP-JITTER] window arrivals min=18 max=27 (nominal 23.96) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:47.048  [WHEP-FLOW] enqueued=24.5/s (total=4105, delivered=4105, promoteFail=0) | depth=0.400s count=10 rate=1.0050
+19:42:47.049  [WHEP-RTP] +172s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=24 SEI=1  |  pkts=274 seqGaps=0 lost=0 reorder=0  |  FU-A rx=271 reassembled=31 dropped=0  |  handoff=24 shed=0
+              [LIVECLOCK] depth=0.415s target=0.400 rate=1.0050 err=+0.0145 count=9
+              [RENDER-PERF] n=24 tickMs=16.67/17.64(x60) texMs=0.02/0.05 drawMs=0.04/0.11 encMs=0.09/0.33 presMs=0.03/0.08 commitMs=0.01/0.03 gpuMs=0.18/0.26 latMs=1.05/4.04(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:42:47.923  [WHEP-DECODE] +174s  decoded=25/s (total=4126)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:48.049  [WHEP-RTP] +173s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=23 SEI=0  |  pkts=428 seqGaps=0 lost=0 reorder=0  |  FU-A rx=428 reassembled=47 dropped=0  |  handoff=24 shed=0
+19:42:48.051  [WHEP-FLOW] enqueued=23.9/s (total=4129, delivered=4129, promoteFail=0) | depth=0.394s count=9 rate=1.0050
+              [LIVECLOCK] depth=0.412s target=0.400 rate=1.0050 err=+0.0125 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.58(x60) texMs=0.02/0.05 drawMs=0.08/0.90 encMs=0.10/0.16 presMs=0.04/0.08 commitMs=0.01/0.03 gpuMs=0.20/0.51 latMs=0.95/2.56(x24) footprintMB=130.4 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:48.923  [WHEP-DECODE] +175s  decoded=23/s (total=4149)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:49.048  [WHEP-RTP] +174s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=428 seqGaps=0 lost=0 reorder=0  |  FU-A rx=423 reassembled=43 dropped=0  |  handoff=23 shed=0
+19:42:49.053  [WHEP-FLOW] enqueued=24.0/s (total=4153, delivered=4153, promoteFail=0) | depth=0.393s count=9 rate=1.0035
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9985 err=-0.0033 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.03/0.12 drawMs=0.05/0.08 encMs=0.10/0.16 presMs=0.04/0.10 commitMs=0.02/0.08 gpuMs=0.18/0.24 latMs=0.87/2.26(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.2 fps
+19:42:49.923  [WHEP-DECODE] +176s  decoded=24/s (total=4173)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:50.049  [WHEP-RTP] +175s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=426 seqGaps=0 lost=0 reorder=0  |  FU-A rx=426 reassembled=48 dropped=0  |  handoff=24 shed=0
+19:42:50.056  [WHEP-FLOW] enqueued=23.9/s (total=4177, delivered=4177, promoteFail=0) | depth=0.376s count=9 rate=1.0050
+              [LIVECLOCK] depth=0.399s target=0.400 rate=0.9987 err=-0.0015 count=9
+              [RENDER-PERF] n=24 tickMs=16.67/18.50(x60) texMs=0.02/0.05 drawMs=0.05/0.07 encMs=0.12/0.59 presMs=0.04/0.06 commitMs=0.01/0.02 gpuMs=0.18/0.20 latMs=0.90/2.83(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:50.924  [WHEP-DECODE] +177s  decoded=24/s (total=4197)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:51.056  [WHEP-RTP] +176s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=470 seqGaps=0 lost=0 reorder=0  |  FU-A rx=467 reassembled=48 dropped=0  |  handoff=26 shed=0
+19:42:51.057  [WHEP-FLOW] enqueued=25.0/s (total=4202, delivered=4202, promoteFail=0) | depth=0.416s count=10 rate=0.9985
+              [LIVECLOCK] depth=0.399s target=0.400 rate=1.0012 err=-0.0008 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.67(x60) texMs=0.03/0.11 drawMs=0.07/0.29 encMs=0.12/0.33 presMs=0.10/1.23 commitMs=0.02/0.04 gpuMs=0.19/0.30 latMs=1.14/2.78(x24) footprintMB=130.5 texFail=0 iosurface=Y
+              [Play] presented 24.0 fps
+19:42:51.922  [WHEP-DECODE] +178s  decoded=24/s (total=4221)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:51.929  [WHEP-DRIFT] senderRate=90003 tps (+0.003% vs receiver) | clockRate=1.0021 (+0.206%) | depthCreep=+0.0066 s/s observed vs -0.0020 predicted (residual +0.0087) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.003% + margin
+19:42:51.929  [WHEP-BACKLOG] pictures=4222 over 176.0s (=176.15s content) vs wall 176.0s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.124s (bound ±0.882s)
+19:42:51.929  [WHEP-JITTER] window arrivals min=24 max=24 (nominal 23.96) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:51.965  [WHEP-RTP] +177s  frames=21 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=21 SEI=0  |  pkts=387 seqGaps=0 lost=0 reorder=0  |  FU-A rx=387 reassembled=42 dropped=0  |  handoff=21 shed=0
+19:42:52.062  [WHEP-FLOW] enqueued=22.9/s (total=4225, delivered=4225, promoteFail=0) | depth=0.373s count=9 rate=1.0050
+              [LIVECLOCK] depth=0.401s target=0.400 rate=0.9987 err=+0.0014 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.62(x60) texMs=0.02/0.03 drawMs=0.05/0.09 encMs=0.09/0.16 presMs=0.04/0.30 commitMs=0.01/0.03 gpuMs=0.19/0.27 latMs=1.10/3.49(x24) footprintMB=130.6 texFail=0 iosurface=Y
+19:42:52.922  [WHEP-DECODE] +179s  decoded=24/s (total=4245)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [Play] presented 23.8 fps
+19:42:53.049  [WHEP-RTP] +178s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=462 seqGaps=0 lost=0 reorder=0  |  FU-A rx=458 reassembled=44 dropped=0  |  handoff=25 shed=0
+19:42:53.064  [WHEP-FLOW] enqueued=24.0/s (total=4249, delivered=4249, promoteFail=0) | depth=0.372s count=9 rate=0.9950
+              [LIVECLOCK] depth=0.396s target=0.400 rate=0.9986 err=-0.0035 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.63(x60) texMs=0.02/0.07 drawMs=0.05/0.12 encMs=0.14/1.31 presMs=0.04/0.08 commitMs=0.01/0.03 gpuMs=0.19/0.28 latMs=1.18/6.79(x24) footprintMB=130.5 texFail=0 iosurface=Y
+19:42:53.923  [WHEP-DECODE] +180s  decoded=24/s (total=4269)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [Play] presented 24.0 fps
+19:42:53.971  [WHEP-RTP] +179s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=402 seqGaps=0 lost=0 reorder=0  |  FU-A rx=402 reassembled=45 dropped=0  |  handoff=23 shed=0
+19:42:54.093  [WHEP-FLOW] enqueued=24.3/s (total=4274, delivered=4274, promoteFail=0) | depth=0.382s count=9 rate=0.9975
+              [LIVECLOCK] depth=0.405s target=0.400 rate=0.9984 err=+0.0052 count=10
+              [RENDER-PERF] n=24 tickMs=16.68/17.65(x60) texMs=0.02/0.05 drawMs=0.05/0.09 encMs=0.10/0.18 presMs=0.04/0.07 commitMs=0.01/0.04 gpuMs=0.22/0.66 latMs=0.86/1.33(x24) footprintMB=130.5 texFail=0 iosurface=Y
+19:42:54.923  [WHEP-DECODE] +181s  decoded=24/s (total=4293)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [Play] presented 24.0 fps
+19:42:55.051  [WHEP-RTP] +180s  frames=26 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=25 SEI=1  |  pkts=483 seqGaps=0 lost=0 reorder=0  |  FU-A rx=479 reassembled=48 dropped=0  |  handoff=26 shed=0
+19:42:55.140  [WHEP-FLOW] enqueued=23.9/s (total=4299, delivered=4299, promoteFail=0) | depth=0.392s count=9 rate=0.9950
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0024 err=+0.0030 count=9
+              [RENDER-PERF] n=24 tickMs=16.68/17.69(x60) texMs=0.02/0.04 drawMs=0.08/0.57 encMs=0.12/0.33 presMs=0.04/0.15 commitMs=0.02/0.04 gpuMs=0.19/0.27 latMs=1.07/3.31(x24) footprintMB=130.5 texFail=0 iosurface=Y
+19:42:55.923  [WHEP-DECODE] +182s  decoded=24/s (total=4317)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [Play] presented 24.0 fps
+19:42:55.952  [WHEP-RTP] +181s  frames=22 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=22 SEI=0  |  pkts=388 seqGaps=0 lost=0 reorder=0  |  FU-A rx=388 reassembled=44 dropped=0  |  handoff=22 shed=0
+19:42:56.178  [WHEP-FLOW] enqueued=23.1/s (total=4323, delivered=4323, promoteFail=0) | depth=0.341s count=8 rate=0.9983
+              [LIVECLOCK] depth=0.403s target=0.400 rate=0.9964 err=+0.0030 count=10
+              [RENDER-PERF] n=24 tickMs=16.68/18.50(x60) texMs=0.03/0.08 drawMs=0.06/0.25 encMs=0.10/0.18 presMs=0.04/0.14 commitMs=0.02/0.04 gpuMs=0.19/0.24 latMs=1.16/6.64(x24) footprintMB=130.5 texFail=0 iosurface=Y
+19:42:56.922  [WHEP-DECODE] +183s  decoded=24/s (total=4341)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [Play] presented 24.0 fps
+19:42:56.953  [WHEP-RTP] +182s  frames=23 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=424 seqGaps=0 lost=0 reorder=0  |  FU-A rx=420 reassembled=43 dropped=0  |  handoff=23 shed=0
+19:42:56.971  [WHEP-DRIFT] senderRate=89994 tps (-0.007% vs receiver) | clockRate=1.0013 (+0.129%) | depthCreep=-0.0009 s/s observed vs -0.0014 predicted (residual +0.0005) | REAL DRIFT — creep matches the measured sender rate | need maxSlew ≥ 0.007% + margin
+19:42:56.971  [WHEP-BACKLOG] pictures=4343 over 181.1s (=181.19s content) vs wall 181.1s → surplus +0.13s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.125s (bound ±0.907s)
+19:42:56.971  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.96) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:42:57.182  [WHEP-FLOW] enqueued=24.9/s (total=4348, delivered=4348, promoteFail=0) | depth=0.382s count=9 rate=0.9993
+              [LIVECLOCK] depth=0.396s target=0.400 rate=1.0037 err=-0.0044 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.74(x60) texMs=0.02/0.04 drawMs=0.05/0.15 encMs=0.09/0.16 presMs=0.03/0.07 commitMs=0.01/0.02 gpuMs=0.18/0.32 latMs=1.05/4.59(x24) footprintMB=130.5 texFail=0 iosurface=Y
+19:42:57.922  [WHEP-DECODE] +184s  decoded=24/s (total=4365)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+              [Play] presented 24.0 fps
+19:42:57.964  [WHEP-RTP] +183s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=445 seqGaps=0 lost=0 reorder=0  |  FU-A rx=445 reassembled=49 dropped=0  |  handoff=24 shed=0
+19:42:58.187  [WHEP-FLOW] enqueued=23.9/s (total=4372, delivered=4372, promoteFail=0) | depth=0.383s count=9 rate=0.9950
+              [LIVECLOCK] depth=0.398s target=0.400 rate=0.9950 err=-0.0023 count=11
+              [RENDER-PERF] n=24 tickMs=16.68/17.57(x60) texMs=0.02/0.04 drawMs=0.05/0.08 encMs=0.11/0.28 presMs=0.04/0.07 commitMs=0.01/0.03 gpuMs=0.21/0.81 latMs=1.19/3.29(x24) footprintMB=130.6 texFail=0 iosurface=Y
+19:42:58.923  [WHEP-DECODE] +185s  decoded=24/s (total=4389)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:58.958  [WHEP-RTP] +184s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=428 seqGaps=0 lost=0 reorder=0  |  FU-A rx=423 reassembled=44 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.2 fps
+19:42:59.233  [WHEP-FLOW] enqueued=23.9/s (total=4397, delivered=4397, promoteFail=0) | depth=0.376s count=9 rate=0.9980
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9992 err=+0.0001 count=10
+              [RENDER-PERF] n=25 tickMs=16.67/17.67(x62) texMs=0.03/0.07 drawMs=0.06/0.10 encMs=0.11/0.22 presMs=0.05/0.14 commitMs=0.03/0.23 gpuMs=0.18/0.27 latMs=1.19/3.10(x25) footprintMB=130.6 texFail=0 iosurface=Y
+19:42:59.925  [WHEP-DECODE] +186s  decoded=24/s (total=4413)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:42:59.959  [WHEP-RTP] +185s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=441 seqGaps=0 lost=0 reorder=0  |  FU-A rx=417 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+19:43:00.274  [WHEP-FLOW] enqueued=24.0/s (total=4422, delivered=4422, promoteFail=0) | depth=0.384s count=9 rate=0.9990
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9990 err=-0.0002 count=10
+              [RENDER-PERF] n=24 tickMs=16.68/17.65(x60) texMs=0.02/0.03 drawMs=0.04/0.14 encMs=0.08/0.14 presMs=0.03/0.12 commitMs=0.01/0.02 gpuMs=0.19/0.31 latMs=0.71/1.31(x24) footprintMB=131.7 texFail=0 iosurface=Y
+19:43:00.927  [WHEP-DECODE] +187s  decoded=25/s (total=4438)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:00.956  [WHEP-RTP] +186s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=421 seqGaps=0 lost=0 reorder=0  |  FU-A rx=395 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+19:43:01.278  [WHEP-FLOW] enqueued=23.9/s (total=4446, delivered=4446, promoteFail=0) | depth=0.385s count=9 rate=1.0042
+              [LIVECLOCK] depth=0.404s target=0.400 rate=1.0042 err=+0.0045 count=10
+              [RENDER-PERF] n=24 tickMs=16.70/17.66(x60) texMs=0.02/0.04 drawMs=0.04/0.09 encMs=0.07/0.13 presMs=0.03/0.07 commitMs=0.01/0.03 gpuMs=0.18/0.26 latMs=0.76/1.46(x24) footprintMB=130.6 texFail=0 iosurface=Y
+19:43:01.925  [WHEP-DECODE] +188s  decoded=23/s (total=4461)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:01.957  [WHEP-RTP] +187s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=442 seqGaps=0 lost=0 reorder=0  |  FU-A rx=417 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+19:43:01.983  [WHEP-DRIFT] senderRate=90027 tps (+0.030% vs receiver) | clockRate=1.0003 (+0.032%) | depthCreep=-0.0000 s/s observed vs -0.0000 predicted (residual +0.0000) | REAL DRIFT — creep matches the measured sender rate | need maxSlew ≥ 0.030% + margin
+19:43:01.983  [WHEP-BACKLOG] pictures=4463 over 186.1s (=186.20s content) vs wall 186.1s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.124s (bound ±0.932s)
+19:43:01.983  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.96) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+19:43:02.279  [WHEP-FLOW] enqueued=24.0/s (total=4470, delivered=4470, promoteFail=0) | depth=0.386s count=9 rate=0.9952
+              [LIVECLOCK] depth=0.393s target=0.400 rate=0.9952 err=-0.0072 count=10
+              [RENDER-PERF] n=24 tickMs=16.67/17.63(x60) texMs=0.02/0.05 drawMs=0.04/0.08 encMs=0.08/0.15 presMs=0.03/0.05 commitMs=0.01/0.02 gpuMs=0.22/1.10 latMs=0.80/1.96(x24) footprintMB=130.7 texFail=0 iosurface=Y
+19:43:02.923  [WHEP-DECODE] +189s  decoded=24/s (total=4485)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:02.958  [WHEP-RTP] +188s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=442 seqGaps=0 lost=0 reorder=0  |  FU-A rx=415 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [Play] presented 23.6 fps
+              [LIVECLOCK] depth=0.404s target=0.400 rate=1.0033 err=+0.0041 count=10
+19:43:03.330  [WHEP-FLOW] enqueued=23.8/s (total=4495, delivered=4495, promoteFail=0) | depth=0.379s count=9 rate=1.0033
+              [RENDER-PERF] n=24 tickMs=16.68/17.59(x60) texMs=0.02/0.04 drawMs=0.04/0.07 encMs=0.07/0.15 presMs=0.03/0.06 commitMs=0.01/0.05 gpuMs=0.19/0.27 latMs=0.89/4.17(x24) footprintMB=131.9 texFail=0 iosurface=Y
+19:43:03.922  [WHEP-DECODE] +190s  decoded=24/s (total=4509)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:03.959  [WHEP-RTP] +189s  frames=23 (key=0)  NALs: SPS=1 PPS=1 IDR=0 slice=23 SEI=1  |  pkts=423 seqGaps=0 lost=0 reorder=0  |  FU-A rx=397 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.392s target=0.400 rate=0.9954 err=-0.0083 count=9
+19:43:04.355  [WHEP-FLOW] enqueued=24.4/s (total=4520, delivered=4520, promoteFail=0) | depth=0.386s count=9 rate=0.9954
+              [RENDER-PERF] n=24 tickMs=16.68/17.61(x60) texMs=0.02/0.15 drawMs=0.04/0.10 encMs=0.08/0.13 presMs=0.03/0.08 commitMs=0.01/0.06 gpuMs=0.19/0.26 latMs=0.76/1.32(x24) footprintMB=130.9 texFail=0 iosurface=Y
+19:43:04.923  [WHEP-DECODE] +191s  decoded=24/s (total=4533)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:04.960  [WHEP-RTP] +190s  frames=24 (key=1)  NALs: SPS=0 PPS=0 IDR=1 slice=24 SEI=0  |  pkts=441 seqGaps=0 lost=0 reorder=0  |  FU-A rx=416 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9950 err=-0.0030 count=11
+19:43:05.366  [WHEP-FLOW] enqueued=23.7/s (total=4544, delivered=4544, promoteFail=0) | depth=0.387s count=9 rate=0.9950
+              [RENDER-PERF] n=24 tickMs=16.67/17.65(x60) texMs=0.02/0.07 drawMs=0.04/0.11 encMs=0.08/0.14 presMs=0.06/0.74 commitMs=0.01/0.04 gpuMs=0.18/0.20 latMs=0.75/1.47(x24) footprintMB=130.9 texFail=0 iosurface=Y
+19:43:05.923  [WHEP-DECODE] +192s  decoded=24/s (total=4557)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:05.960  [WHEP-RTP] +191s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=422 seqGaps=0 lost=0 reorder=0  |  FU-A rx=395 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.399s target=0.400 rate=1.0007 err=-0.0009 count=10
+19:43:06.398  [WHEP-FLOW] enqueued=24.2/s (total=4569, delivered=4569, promoteFail=0) | depth=0.395s count=9 rate=1.0006
+              [RENDER-PERF] n=24 tickMs=16.69/17.58(x60) texMs=0.02/0.06 drawMs=0.05/0.08 encMs=0.09/0.14 presMs=0.03/0.06 commitMs=0.01/0.03 gpuMs=0.24/1.49 latMs=0.81/2.22(x24) footprintMB=130.9 texFail=0 iosurface=Y
+19:43:06.923  [WHEP-DECODE] +193s  decoded=24/s (total=4581)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:06.954  [WHEP-RTP] +192s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=441 seqGaps=0 lost=0 reorder=0  |  FU-A rx=417 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+19:43:07.042  [WHEP-DRIFT] senderRate=89977 tps (-0.026% vs receiver) | clockRate=0.9999 (-0.012%) | depthCreep=+0.0000 s/s observed vs -0.0001 predicted (residual +0.0002) | REAL DRIFT — creep matches the measured sender rate | need maxSlew ≥ 0.026% + margin
+19:43:07.042  [WHEP-BACKLOG] pictures=4584 over 191.1s (=191.25s content) vs wall 191.1s → surplus +0.11s cumulative | netJump +0.00s | inBuffer +0.38s | cushion 0.400s | residual +0.125s (bound ±0.958s)
+19:43:07.042  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.96) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+              [LIVECLOCK] depth=0.393s target=0.400 rate=0.9950 err=-0.0072 count=10
+19:43:07.403  [WHEP-FLOW] enqueued=23.9/s (total=4593, delivered=4593, promoteFail=0) | depth=0.377s count=9 rate=1.0021
+              [RENDER-PERF] n=24 tickMs=16.68/17.66(x60) texMs=0.02/0.09 drawMs=0.04/0.09 encMs=0.08/0.18 presMs=0.03/0.07 commitMs=0.01/0.03 gpuMs=0.19/0.25 latMs=0.73/1.43(x24) footprintMB=131.0 texFail=0 iosurface=Y
+19:43:07.923  [WHEP-DECODE] +194s  decoded=25/s (total=4606)  1920x1080 'x420'  |  AUs=25/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:07.963  [WHEP-RTP] +193s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=22 SEI=1  |  pkts=420 seqGaps=1 lost=1 reorder=0  |  FU-A rx=394 reassembled=23 dropped=1  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0024 err=+0.0030 count=9
+19:43:08.405  [WHEP-FLOW] enqueued=23.9/s (total=4617, delivered=4617, promoteFail=0) | depth=0.377s count=9 rate=1.0000
+              [RENDER-PERF] n=24 tickMs=16.67/17.65(x60) texMs=0.03/0.29 drawMs=0.04/0.09 encMs=0.09/0.27 presMs=0.04/0.16 commitMs=0.01/0.03 gpuMs=0.18/0.21 latMs=0.77/1.99(x24) footprintMB=131.0 texFail=0 iosurface=Y
+19:43:08.922  [WHEP-DECODE] +195s  decoded=23/s (total=4629)  1920x1080 'x420'  |  AUs=23/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:08.963  [WHEP-RTP] +194s  frames=24 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=25 SEI=0  |  pkts=442 seqGaps=0 lost=0 reorder=0  |  FU-A rx=417 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.397s target=0.400 rate=0.9963 err=-0.0033 count=9
+19:43:09.454  [WHEP-FLOW] enqueued=23.8/s (total=4642, delivered=4642, promoteFail=0) | depth=0.370s count=9 rate=1.0004
+              [RENDER-PERF] n=24 tickMs=16.67/17.41(x60) texMs=0.02/0.06 drawMs=0.04/0.10 encMs=0.08/0.17 presMs=0.03/0.07 commitMs=0.02/0.12 gpuMs=0.22/0.91 latMs=0.74/1.97(x24) footprintMB=131.0 texFail=0 iosurface=Y
+19:43:09.923  [WHEP-DECODE] +196s  decoded=24/s (total=4653)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:09.967  [WHEP-RTP] +195s  frames=25 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=442 seqGaps=0 lost=0 reorder=0  |  FU-A rx=415 reassembled=25 dropped=0  |  handoff=25 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.412s target=0.400 rate=1.0050 err=+0.0117 count=9
+              [RENDER-PERF] n=24 tickMs=16.69/17.66(x60) texMs=0.02/0.05 drawMs=0.04/0.08 encMs=0.08/0.17 presMs=0.03/0.07 commitMs=0.01/0.06 gpuMs=0.19/0.26 latMs=0.71/1.49(x24) footprintMB=132.1 texFail=0 iosurface=Y
+19:43:10.493  [WHEP-FLOW] enqueued=24.1/s (total=4667, delivered=4667, promoteFail=0) | depth=0.378s count=9 rate=1.0014
+19:43:10.925  [WHEP-DECODE] +197s  decoded=24/s (total=4677)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:10.963  [WHEP-RTP] +196s  frames=23 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=24 SEI=0  |  pkts=421 seqGaps=0 lost=0 reorder=0  |  FU-A rx=397 reassembled=23 dropped=0  |  handoff=23 shed=0
+              [Play] presented 24.0 fps
+              [LIVECLOCK] depth=0.400s target=0.400 rate=1.0031 err=-0.0003 count=9
+              [RENDER-PERF] n=24 tickMs=16.67/17.58(x60) texMs=0.02/0.03 drawMs=0.04/0.09 encMs=0.19/2.18 presMs=0.03/0.08 commitMs=0.01/0.03 gpuMs=0.19/0.32 latMs=0.79/1.54(x24) footprintMB=131.1 texFail=0 iosurface=Y
+19:43:11.553  [WHEP-FLOW] enqueued=23.6/s (total=4692, delivered=4692, promoteFail=0) | depth=0.370s count=9 rate=1.0042
+19:43:11.922  [WHEP-DECODE] +198s  decoded=24/s (total=4701)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:11.965  [WHEP-RTP] +197s  frames=24 (key=1)  NALs: SPS=1 PPS=1 IDR=1 slice=23 SEI=1  |  pkts=443 seqGaps=0 lost=0 reorder=0  |  FU-A rx=416 reassembled=24 dropped=0  |  handoff=24 shed=0
+              [Play] presented 24.0 fps
+19:43:12.075  [WHEP-DRIFT] senderRate=90037 tps (+0.041% vs receiver) | clockRate=0.9950 (-0.500%, RAIL) | depthCreep=+0.0000 s/s observed vs +0.0054 predicted (residual -0.0054) | MISMATCH — creep does not follow the sender rate; suspect measurement bias | need maxSlew ≥ 0.041% + margin
+19:43:12.075  [WHEP-BACKLOG] pictures=4705 over 196.2s (=196.29s content) vs wall 196.2s → surplus +0.12s cumulative | netJump +0.00s | inBuffer +0.40s | cushion 0.400s | residual +0.124s (bound ±0.983s)
+19:43:12.075  [WHEP-JITTER] window arrivals min=23 max=25 (nominal 23.96) | underruns=0 (stream 0) | worst deficit 0.000s | window L: [none] | cushion needed >= 0.000s (running max)
+              [LIVECLOCK] depth=0.403s target=0.400 rate=1.0026 err=+0.0033 count=10
+              [RENDER-PERF] n=24 tickMs=16.69/17.63(x61) texMs=0.02/0.08 drawMs=0.04/0.12 encMs=0.08/0.21 presMs=0.03/0.08 commitMs=0.01/0.04 gpuMs=0.18/0.20 latMs=0.66/1.15(x24) footprintMB=131.1 texFail=0 iosurface=Y
+19:43:12.584  [WHEP-FLOW] enqueued=24.2/s (total=4717, delivered=4717, promoteFail=0) | depth=0.379s count=9 rate=0.9991
+              DeckLink D-real: version floor: DeckLink output requires Desktop Video 14.3 or later; installed: 12.8.1 — aborting
+              DeckLink D-real: FAILED
+19:43:12.922  [WHEP-DECODE] +199s  decoded=24/s (total=4725)  1920x1080 'x420'  |  AUs=24/s  dropped: preIDR=0 noFmt=0 sbFail=0  |  errors=0
+19:43:13.051  [WHEP-RTP] +198s  frames=26 (key=0)  NALs: SPS=0 PPS=0 IDR=0 slice=26 SEI=0  |  pkts=462 seqGaps=0 lost=0 reorder=0  |  FU-A rx=436 reassembled=26 dropped=0  |  handoff=26 shed=0
+              [Play] presented 24.2 fps
+              [LIVECLOCK] depth=0.400s target=0.400 rate=0.9985 err=+0.0001 count=10
+              [RENDER-PERF] n=25 tickMs=16.68/18.30(x62) texMs=0.03/0.28 drawMs=0.04/0.07 encMs=0.07/0.15 presMs=0.03/0.07 commitMs=0.01/0.02 gpuMs=0.18/0.27 latMs=0.69/1.43(x25) footprintMB=131.4 texFail=0 iosurface=Y
+19:43:13.634  [WHEP-FLOW] enqueued=23.8/s (total=4742, delivered=4742, promoteFail=0) | depth=0.371s count=9 rate=0.9950
+19:43:13.642  [WHEP] tearing down (+199.73s)
+19:43:13.642  [WHEP-RTP] session totals: 83942 pkts (83942 accepted) → 4748 frames (101 key) | SPS=101 PPS=101 IDR=101 slice=4648 SEI=101 | seqGaps=4 lost=4 reorder=1 malformed=0 | FU-A rx=82860 reassembled=6974 dropped=4 | auClosedByTimestamp=0 wrongPt=0 wrongSsrc=0 rtcpInRtp=0 | handedOffToDecoder=4748 shedForBackpressure=0
+19:43:13.642  [WHEP-DECODE] session totals: 4748 access units → 4742 frames decoded (1920x1080 'x420') | dropped: preIDR=0 noFmt=6 sbFail=0 | errors=0 | formatDescriptions=1 sessions=1
+19:43:13.642  [WHEP] display route released — file-playback clock restored
+19:43:13.642  [WEBRTC] (4) rtc::impl::PeerConnection::changeIceState@1364: Changed ICE state to closed
+19:43:13.642  [WEBRTC] (4) rtc::impl::PeerConnection::changeState@1346: Changed state to closed
+19:43:13.642  [WHEP-BRIDGE] pc 1 closed and deleted
+19:43:13.643  [NDI] discovering sources (loader=NDIlib_v5_load, runtime=NDI SDK APPLE 09:05:57 May  6 2024 6.0.1)…
+19:43:14.179  [WHEP] DELETE resource → HTTP 200
+19:43:18.667  [NDI] no sources found within 5s
+19:43:18.667  [NDI] no source found — is OmniScope sending on this network?
+
+
+==============================================================================
+SYSTEM MESSAGES
+==============================================================================
+Framework chatter from inside our process (CoreFoundation, libsqlite3,
+ViewBridge, audio and Network framework). Separated because it is almost never
+relevant — but kept, because occasionally it is.
+
+(none)
+
+==============================================================================
+REDACTION
+==============================================================================
+Every line above was pattern-scrubbed before this file was written.
+Removed: passphrases, stream IDs, tokens, URL paths and query strings, and
+home-directory user names. Replacements are fixed-width, so no length of any
+removed value can be inferred from this file.
+
+  passphrase= 0 occurrence(s) removed
+  streamid= 0 occurrence(s) removed
+  SRT #!:: streamid 0 occurrence(s) removed
+  stream_key= 0 occurrence(s) removed
+  Authorization header 0 occurrence(s) removed
+  Bearer token 0 occurrence(s) removed
+  token/secret/password/api key 0 occurrence(s) removed
+  URL paths 0 occurrence(s) removed
+  URL query strings 0 occurrence(s) removed
+  home directory paths 0 occurrence(s) removed
