@@ -8,8 +8,11 @@ Product slug: `manifold`
 ## Process documentation lives elsewhere
 
 Build, signing, release, and distribution **procedure is not documented here.** It lives in
-the Graviton-Releases repo, checked out as a sibling at `../../Graviton-Releases`
-(github.com/DCColor/Graviton-Releases, private):
+the Graviton-Releases repo (github.com/DCColor/Graviton-Releases, private), checked out in
+some directory ABOVE this repo — `release-mac.sh` locates it by walking up the tree, so no
+fixed depth is assumed. On the current build Mac it sits at
+`~/Nextcloud/Vibe Code Output/Graviton-Releases`, with this repo at
+`~/Nextcloud/Vibe Code Output/Manifold/Manifold`:
 
 | Document | Covers |
 |---|---|
@@ -41,6 +44,8 @@ scripts/release-mac.sh [Profile|Release] [--no-upload]
 - `--no-upload` — build, sign, notarize, staple, and verify, but do not publish
 
 `MANIFOLD_DIST_DIR` overrides the output directory (default `~/Builds/Manifold/`).
+`GRAVITON_RELEASES_DIR` overrides where the shared uploader is found (default: searched
+for by walking up from the repo root — see **Fragilities**).
 
 The script runs: preflight → version read → build-number bump → `xcodegen generate` →
 `xcodebuild archive` → `-exportArchive` → verify app and nested dylibs → build DMG → sign
@@ -237,9 +242,13 @@ the repo path contains spaces. Brittle if quoting behaviour changes.
 `/usr/local/lib/libndi.dylib`, `/Library/Frameworks/DeckLinkAPI.framework`, and
 `docs/BlackmagicDeckLinkSDK16.0/Mac/include`.
 
-**`UPLOAD_SCRIPT` is derived as `${REPO_ROOT}/../../Graviton-Releases/upload-release.sh`**,
-so it depends on the repo sitting exactly two directories below the sibling. Preflight
-fails with a clear message if it does not resolve, and `--no-upload` still works.
+**`UPLOAD_SCRIPT` is resolved, not hardcoded.** `GRAVITON_RELEASES_DIR` wins if set;
+otherwise `release-mac.sh` walks up from the repo root looking for
+`<dir>/Graviton-Releases/upload-release.sh` and stops at the first hit. It used to be a
+fixed `${REPO_ROOT}/../..`, which encoded how deep the repo happened to sit and broke
+silently on any move. A wrong `GRAVITON_RELEASES_DIR` does NOT fall back to the search —
+it fails, rather than publishing through an unintended checkout. Preflight fails before
+any compilation and prints every path it tried; `--no-upload` skips the check entirely.
 
 **`|| true`-style guarded greps appear throughout** and the reason is documented at length:
 `producer | grep -q` SIGPIPEs its producer under `set -o pipefail` and reports a successful

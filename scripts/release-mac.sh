@@ -59,7 +59,9 @@ Usage: scripts/release-mac.sh [Profile|Release] [--no-upload]
   --no-upload  build, sign, notarize, staple and verify, but do NOT publish
 
 Environment:
-  MANIFOLD_DIST_DIR   where artefacts are written (default: ~/Builds/Manifold)
+  MANIFOLD_DIST_DIR       where artefacts are written (default: ~/Builds/Manifold)
+  GRAVITON_RELEASES_DIR   the Graviton-Releases checkout holding the shared uploader.
+                          Default: searched for by walking up from the repo root.
 USAGE
 }
 
@@ -89,12 +91,54 @@ DIST_DIR="${MANIFOLD_DIST_DIR:-${HOME}/Builds/Manifold}"
 EXPORT_PLIST="${REPO_ROOT}/build/ExportOptions.plist"
 
 # ── Publishing ─────────────────────────────────────────────────────────────────────────────
-# The uploader is SHARED across Graviton products and lives in a sibling repo, so the R2 layout,
+# The uploader is SHARED across Graviton products and lives in its own repo, so the R2 layout,
 # archive paths and manifest shape have one definition rather than one per product.
 PRODUCT_SLUG="manifold"
 RELEASES_BASE="https://releases.graviton.tools"
-UPLOAD_SCRIPT="$(cd "${REPO_ROOT}/../.." 2>/dev/null && pwd)/Graviton-Releases/upload-release.sh"
 NOTES_FILE="${REPO_ROOT}/RELEASE_NOTES.md"
+
+# ── LOCATING THE SHARED UPLOADER ────────────────────────────────────────────────────────
+# This was once a fixed `${REPO_ROOT}/../..`, which silently encoded how deep this repo
+# happened to sit under the directory holding Graviton-Releases. Moving the repo one level
+# in either direction breaks that with no warning until publish time. So: an explicit env
+# override first, then a walk UP the tree looking for the checkout. Every path considered is
+# recorded, because the only useful failure message here is the list of places we looked.
+UPLOAD_SCRIPT=""
+UPLOAD_SCRIPT_SOURCE=""
+UPLOAD_SEARCH_TRAIL=()
+
+if [[ -n "${GRAVITON_RELEASES_DIR:-}" ]]; then
+    # Explicit override wins outright and is NOT backfilled by the search — if it is set and
+    # wrong, saying so beats quietly publishing through a different checkout than intended.
+    _cand="${GRAVITON_RELEASES_DIR%/}/upload-release.sh"
+    UPLOAD_SEARCH_TRAIL+=("${_cand}   (GRAVITON_RELEASES_DIR)")
+    if [[ -f "$_cand" ]]; then
+        UPLOAD_SCRIPT="$_cand"
+        UPLOAD_SCRIPT_SOURCE="GRAVITON_RELEASES_DIR"
+    fi
+    unset _cand
+else
+    # Walk up from the repo root. Terminates at / — `dirname /` is /, so the explicit break
+    # is what ends the loop, not the path shrinking.
+    _dir="$REPO_ROOT"
+    while : ; do
+        # %/ so the final iteration reads /Graviton-Releases and not //Graviton-Releases.
+        _cand="${_dir%/}/Graviton-Releases/upload-release.sh"
+        UPLOAD_SEARCH_TRAIL+=("$_cand")
+        if [[ -f "$_cand" ]]; then
+            UPLOAD_SCRIPT="$_cand"
+            UPLOAD_SCRIPT_SOURCE="found by upward search from the repo root"
+            break
+        fi
+        [[ "$_dir" == "/" ]] && break
+        _dir="$(dirname "$_dir")"
+    done
+    unset _dir _cand
+fi
+
+# Left non-empty even on failure so the preflight message below can name a concrete path
+# rather than an empty string. Nothing reads it unless the -f test at preflight passes.
+UPLOAD_SCRIPT="${UPLOAD_SCRIPT:-<not found>}"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # Output helpers
@@ -193,13 +237,18 @@ ok "notarytool profile '${NOTARY_PROFILE}' authenticates"
 # later. Finding out then that the uploader is missing wastes the whole run.
 if [[ $DO_UPLOAD -eq 1 ]]; then
     [[ -f "$UPLOAD_SCRIPT" ]] \
-        || die "shared uploader not found: ${UPLOAD_SCRIPT}
-       Expected the Graviton-Releases repo as a sibling of this one.
+        || die "shared uploader (upload-release.sh) not found.
+       Looked for a Graviton-Releases checkout at, in order:
+$(printf '%s\n' "${UPLOAD_SEARCH_TRAIL[@]}" | sed 's/^/         /')
+       Fix by either:
+         - cloning github.com/DCColor/Graviton-Releases somewhere above this repo, or
+         - pointing at an existing checkout:
+             GRAVITON_RELEASES_DIR=/path/to/Graviton-Releases $0 ${CONFIG}
        Build without publishing with:  $0 ${CONFIG} --no-upload"
     for tool in wrangler curl; do
         command -v "$tool" >/dev/null 2>&1 || die "required for publishing but not on PATH: ${tool}"
     done
-    ok "publishing enabled — uploader at ${UPLOAD_SCRIPT}"
+    ok "publishing enabled — uploader at ${UPLOAD_SCRIPT} (${UPLOAD_SCRIPT_SOURCE})"
 
     # Notes are optional by design (the uploader warns rather than failing), but saying so HERE
     # rather than at step 13 gives a chance to write them before the build runs.
@@ -954,7 +1003,7 @@ else
        'source' in Graviton-Releases/src/index.js:
            if (endpoint === 'current' || endpoint === 'archive' || endpoint === 'source') {
        then redeploy:
-           cd $(dirname "$UPLOAD_SCRIPT") && wrangler deploy
+           cd '$(dirname "$UPLOAD_SCRIPT")' && wrangler deploy
        and re-run this release."
         fi
         ok "served at ${SOURCE_URL} (HTTP 200)"
@@ -1021,7 +1070,7 @@ else
             die "the release Worker does not know the product '${PRODUCT_SLUG}'.
        The upload to R2 succeeded — this is a Worker configuration gap, not a failed release.
        Add '${PRODUCT_SLUG}' to PRODUCTS in Graviton-Releases/src/index.js and redeploy:
-         cd $(dirname "$UPLOAD_SCRIPT") && wrangler deploy
+         cd '$(dirname "$UPLOAD_SCRIPT")' && wrangler deploy
        Then re-run just this verification:
          curl --fail-with-body ${MANIFEST_URL}"
         fi
