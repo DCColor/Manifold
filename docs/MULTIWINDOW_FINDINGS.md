@@ -168,11 +168,25 @@ Repeated on the final build with the same result.
 **Conclusion:** SwiftUI `.keyboardShortcut` on zero-opacity `Button`s in `.background` chains
 resolves against the key window's hierarchy. Stage 2 can gate per window.
 
-**NOT tested:** whether `.disabled(true)` on those hidden buttons suppresses the shortcut. There is
-no existing disabled-plus-shortcut pair in the app to exercise, and adding one purely to test it
-would have been shipping test scaffolding. It is standard SwiftUI behaviour (a disabled Button does
-not perform its action), but stage 2 should confirm it on the first control it gates rather than
-building the whole disable layer on it.
+**NOW TESTED — `.disabled(true)` DOES suppress the shortcut.** Stage 1 flagged this as assumed and
+said stage 2 must confirm it before building the disable layer on it. Measured, in a throwaway
+SwiftUI harness rather than in Manifold (the reason stage 1 gave for not testing it — adding a
+disabled-plus-shortcut pair purely to measure would be shipping test scaffolding — still holds; a
+scratchpad app has the same SwiftUI and none of that cost). Six constructs, all the shapes stage 2
+actually uses:
+
+| Construct | ⌃⌥-modified key | bare Space | bare ← |
+|---|---|---|---|
+| hidden `.background` Button, enabled | **fired** | **fired** | **fired** |
+| hidden `.background` Button, `.disabled(true)` | silent | silent | silent |
+| hidden Button inside a `Group` with `.disabled(true)` on the GROUP | silent | — | — |
+| visible Button, `.disabled(true)` | silent | — | — |
+
+The enabled row is the load-bearing part: it is the same build with only `.disabled` removed, so the
+silence in the disabled rows is the gate working rather than the keystroke going astray — which is
+precisely the test artifact the methodology warning below describes. Bare Space and the arrow keys
+were tested separately from the modified keys because they are the two the transport actually
+depends on and AppKit routes them through the key-view loop.
 
 **One methodology warning for whoever repeats this.** An earlier run of this test using the arrow
 keys produced *zero* log lines in both windows and briefly looked like a regression in the frame

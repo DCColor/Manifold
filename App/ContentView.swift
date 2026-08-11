@@ -223,14 +223,24 @@ struct ContentView: View {
         return engine.hasMedia || activeLiveSource != nil
     }
 
-    /// The live (non-file) source currently on screen, or nil. THE single place this view asks
-    /// "what is streaming" — every gate below keys off it rather than restating a pairwise chain.
+    /// The live (non-file) source currently on screen IN THIS WINDOW, or nil. THE single place this
+    /// view asks "what is streaming" — every gate below keys off it rather than restating a
+    /// pairwise chain.
     ///
     /// Reads the `@ObservedObject` instances, which is what makes `body` re-render on connect and
-    /// disconnect. `LiveSource` deliberately exposes no equivalent accessor — it offers only the
-    /// `retireActive` ACTION — so there is no singleton-reading shortcut to reach for here by
+    /// disconnect. `LiveSource.isLive` exists but is deliberately not for views (reading a
+    /// singleton does not subscribe a `body` to it), so there is no shortcut to reach for here by
     /// mistake. Adding SRT is one more line here and one more case there.
+    ///
+    /// ⚠️ THE OWNERSHIP TERM IS NOT DECORATION. The three clients are singletons, so before stage 2
+    /// EVERY window answered "yes, NDI is connected" for a stream that was displaying in ONE of
+    /// them — which drew a full control bar over a black picture in windows that had nothing, wiped
+    /// THEIR scopes when the stream disconnected, and offered a Disconnect the model says belongs
+    /// only to the owner. `drivesDevices` is the arbiter's answer to "do the singleton routers
+    /// point at MY renderer", i.e. "is that stream mine". Gating here fixes `hasSource`, the empty
+    /// state, the colour control, the Disconnect item and the depth stepper in one edit.
     private var activeLiveSource: LiveSource? {
+        guard deck.gate.drivesDevices else { return nil }
         if ndi.isConnected { return .ndi }
         if whep.isConnected { return .web }
         if srt.isConnected { return .srt }
@@ -283,35 +293,44 @@ struct ContentView: View {
         // Scope shortcuts (tray + per-scope toggles + CIE live toggles) consolidated into one
         // hidden group so the view body's modifier chain stays type-checkable.
         .background(scopeShortcuts)
-        .background(deckLinkShortcuts)
-        .background(ndiShortcuts)
-        .background(syntheticLiveShortcuts)
-        // JKL shuttle transport (bare keys — pro NLE muscle memory).
+        // Device-CLAIM accelerators. Gated together, because they all reach a singleton that
+        // another window may be holding, and silently stealing a broadcast output is the worst
+        // outcome available here. Non-owning windows keep every INSPECTION shortcut (⌃⌥E, I, ⌃⌥T,
+        // the scope shortcuts, ⌃⌥R, N, Tab) — it is the device, not the window, that is claimed.
+        .background(deckLinkShortcuts.disabled(!deck.gate.deviceControlsEnabled))
+        .background(ndiShortcuts.disabled(!deck.gate.deviceControlsEnabled))
+        .background(syntheticLiveShortcuts.disabled(!deck.gate.deviceControlsEnabled))
+        // JKL shuttle + frame jog (bare keys — pro NLE muscle memory). Mounted UNCONDITIONALLY,
+        // outside the `if hasSource` branch, so before stage 2 they were live even in a window
+        // with no media (they no-oped on the engine) and in a window arbitration had gated. They
+        // need the explicit transport gate below.
+        //
+        // ⚠️ `.disabled` ON A HIDDEN BUTTON REALLY DOES SUPPRESS ITS SHORTCUT — MEASURED, not
+        // assumed, because the whole disable layer rests on it and the audit flagged it untested.
+        // A probe harness mounted the exact constructs used here (hidden `.background` Button,
+        // hidden Button inside a disabled `Group`, and a visible Button) with `⌃⌥`-modified keys,
+        // bare Space and a bare arrow key. Disabled: none fired. The SAME build with the Space and
+        // arrow cases re-enabled: both fired. So the null result is the gate working, not the
+        // keystroke going astray — the failure mode docs/MULTIWINDOW_FINDINGS.md §3.1 warns about.
+        //
+        // K is "pause" and a gated deck is already paused, so disabling it changes nothing —
+        // it is in the set to keep the set COHERENT, because a transport row where one key still
+        // responds reads as broken rather than as gated.
         .background(
-            Button("") { engine.shuttleBackward() }
-                .keyboardShortcut("j", modifiers: [])
-                .opacity(0)
-        )
-        .background(
-            Button("") { engine.shuttlePause() }
-                .keyboardShortcut("k", modifiers: [])
-                .opacity(0)
-        )
-        .background(
-            Button("") { engine.shuttleForward() }
-                .keyboardShortcut("l", modifiers: [])
-                .opacity(0)
-        )
-        // Frame jog (arrow keys — back/forward one frame, pauses).
-        .background(
-            Button("") { engine.stepFrame(by: -1) }
-                .keyboardShortcut(.leftArrow, modifiers: [])
-                .opacity(0)
-        )
-        .background(
-            Button("") { engine.stepFrame(by: 1) }
-                .keyboardShortcut(.rightArrow, modifiers: [])
-                .opacity(0)
+            Group {
+                Button("") { engine.shuttleBackward() }
+                    .keyboardShortcut("j", modifiers: [])
+                Button("") { engine.shuttlePause() }
+                    .keyboardShortcut("k", modifiers: [])
+                Button("") { engine.shuttleForward() }
+                    .keyboardShortcut("l", modifiers: [])
+                Button("") { engine.stepFrame(by: -1) }
+                    .keyboardShortcut(.leftArrow, modifiers: [])
+                Button("") { engine.stepFrame(by: 1) }
+                    .keyboardShortcut(.rightArrow, modifiers: [])
+            }
+            .opacity(0)
+            .disabled(!deck.gate.transportEnabled)
         )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
@@ -325,7 +344,9 @@ struct ContentView: View {
         // MOVED HERE FROM ManifoldApp, which no longer has an engine to load into. SwiftUI routes
         // an opened URL to a window in the group, so it lands in THAT window's deck.
         .onOpenURL { url in
-            LiveSource.retireActive()
+            // Retire this deck's stream, through the arbiter so a stream another window owns is
+            // left alone (and so the record of who owns what is updated, not just the transport).
+            DeckRegistry.shared.retireLiveIfOwned(by: deck)
             // ⚠️ THE HOP IS MEASURED, NOT DEFENSIVE. SwiftUI creates (or targets) a window for an
             // opened URL and delivers this callback BEFORE that window becomes key — so testing
             // frontmost-ness synchronously asks "is the window the user just asked for in front?"
@@ -336,6 +357,32 @@ struct ContentView: View {
             // first, which is what makes `deck.shouldAutoplayOnLoad` answer the question that was
             // actually being asked.
             Task { @MainActor in
+                // ── RE-USE AN EMPTY WINDOW RATHER THAN LEAVING A STRAY ONE ─────────────────
+                //
+                // MEASURED (docs/MULTIWINDOW_FINDINGS.md §3.2): SwiftUI creates a NEW window for
+                // an opened URL and delivers this callback there, without reusing an existing
+                // empty one — so the common "launch, then double-click a file" path left the
+                // launch window sitting empty behind the file. The file lands in the window that
+                // was ALREADY on screen, at the position and size the user left it, and the window
+                // SwiftUI just made for us — which the user never asked for and has never seen
+                // content in — closes. Net effect: one file, one window, no stray.
+                //
+                // Only ever an EMPTY deck is targeted (no media, no stream of its own), and never
+                // this one, so nothing loaded is ever displaced and we cannot close the window we
+                // just loaded into.
+                // `deck.window != nil` is the proof that THIS deck is registered and therefore
+                // closable. Without it a callback arriving before registration would load into the
+                // other window and then fail to close this one — leaving the stray window the
+                // re-use exists to prevent, and a log line claiming otherwise.
+                if deck.window != nil,
+                   let target = DeckRegistry.shared.emptyDeckToReuse(excluding: deck) {
+                    target.load(url: url)
+                    target.window?.makeKeyAndOrderFront(nil)
+                    NSLog("%@", "[OPEN] loaded into an existing empty window; closing the one this "
+                        + "open created")
+                    deck.window?.close()
+                    return
+                }
                 engine.load(url: url, autoplay: deck.shouldAutoplayOnLoad)
                 wakeHUD()
             }
@@ -385,11 +432,23 @@ struct ContentView: View {
                 )
                 // D5: if DeckLink output is running, re-tag its colorspace from the new primaries
                 // (the encoding matrix follows the matrix code automatically, per converted frame).
-                DeckLinkService.shared.sourceColorChanged()
-                // D4a: derive the output display mode (video cadence) from the file's resolution + rate.
-                // Updates the status label; live-switches the output mode if it's running and changed.
-                DeckLinkService.shared.sourceFormatChanged(width: meta.width, height: meta.height,
-                                                           frameRate: meta.frameRate)
+                //
+                // ⚠️ GATED ON OWNERSHIP, AND NOT AS A TIDINESS MEASURE. `sourceFormatChanged` does
+                // not merely update a label: if output is RUNNING and the mode changed, it stops
+                // and re-establishes the card at the new mode. Ungated, a background window
+                // loading a 1080p25 file would live-switch a 2160p23.98 broadcast output that
+                // another window is feeding. `drivesDevices` is the arbiter's "the card is talking
+                // to MY renderer", which is exactly the deck whose source the card's mode should
+                // follow — with output off it is simply the active deck, so the natural
+                // "enable output, then load a file" order still works.
+                if deck.gate.drivesDevices {
+                    DeckLinkService.shared.sourceColorChanged()
+                    // D4a: derive the output display mode (video cadence) from the file's
+                    // resolution + rate. Updates the status label; live-switches the output mode if
+                    // it's running and changed.
+                    DeckLinkService.shared.sourceFormatChanged(width: meta.width, height: meta.height,
+                                                               frameRate: meta.frameRate)
+                }
             }
             // Feed the CIE header the detected source space (honest about untagged → 709 assumed).
             cieModel.spaceReadout = meta.map(Self.cieSpaceReadout) ?? ""
@@ -409,11 +468,18 @@ struct ContentView: View {
         // above only ever fills from a FILE. So an NDI source needs the same wiring, from the same
         // codes, or the scopes would do PQ math under a "Rec.709" label. Fires on connect and on a
         // mid-stream colorimetry change (NDIService republishes on both).
+        //
+        // ⚠️ EVERY ONE OF THE FOUR STREAM OBSERVERS BELOW IS GATED ON `drivesDevices`, because they
+        // observe SINGLETONS and therefore fire in EVERY open window. Ungated, a stream connecting
+        // or disconnecting in window A would repoint window B's scope colorimetry and — on
+        // disconnect — call `clearScopes()` on window B, blanking the scopes of a window that is
+        // quietly showing a paused file and has nothing to do with the stream.
         .onChange(of: ndi.colorInfo) { _, info in
-            guard ndi.isConnected else { return }
+            guard deck.gate.drivesDevices, ndi.isConnected else { return }
             applyNDIColorToScopes(info)
         }
         .onChange(of: ndi.isConnected) { _, connected in
+            guard deck.gate.drivesDevices else { return }
             if connected {
                 applyNDIColorToScopes(ndi.colorInfo)
                 // A connecting stream is a newly-active source — arm the auto-hide so the control
@@ -435,6 +501,7 @@ struct ContentView: View {
         // there is no color push, because WHEP colorimetry is assumed 709 and set in
         // WHEPFrameRouter.activate rather than published as a source property.
         .onChange(of: whep.isConnected) { _, connected in
+            guard deck.gate.drivesDevices else { return }
             if connected {
                 armIdleIfNeeded()
             } else {
@@ -454,13 +521,14 @@ struct ContentView: View {
         // at connect() — seconds before the demuxer has identified the stream — and would fire with
         // nothing to read.
         .onChange(of: srt.colorimetry) { _, colorimetry in
-            guard srt.isConnected, let colorimetry else { return }
+            guard deck.gate.drivesDevices, srt.isConnected, let colorimetry else { return }
             applyNDIColorToScopes(colorimetry.bufferTags)
         }
         // Teardown ends a source exactly as WHEP's does, and needs the same scope wipe for the same
         // reason: clearToBlack wipes the PICTURE, but the scopes would sit showing the last
         // stream's trace over it.
         .onChange(of: srt.isConnected) { _, connected in
+            guard deck.gate.drivesDevices else { return }
             if connected {
                 armIdleIfNeeded()
             } else {
@@ -473,12 +541,13 @@ struct ContentView: View {
             allowsMultipleSelection: false
         ) { result in
             if case .success(let urls) = result, let url = urls.first {
-                // One active source: a new file retires EVERY live stream FIRST, so both don't feed
-                // the renderer at once (a stream pushing + the file's frame pump = the
+                // One active source: a new file retires THIS DECK'S live stream FIRST, so both
+                // don't feed the renderer at once (a stream pushing + the file's frame pump = the
                 // double-source flashing). Full-replacement, same teardown ⌃⌥⇧N / UI Disconnect
-                // use. No-op when not streaming. One call rather than one line per source, so a
-                // source added later cannot be forgotten here.
-                LiveSource.retireActive()
+                // use. No-op when this deck is not streaming — and specifically a no-op when the
+                // stream belongs to ANOTHER window, which the blanket `LiveSource.retireActive()`
+                // this replaces would have torn down from here.
+                DeckRegistry.shared.retireLiveIfOwned(by: deck)
                 // `deck.shouldAutoplayOnLoad`, not the bare preference: a background window must
                 // not start playing on its own. (Reached via the importer this is almost always
                 // the front window anyway — the gate matters for the .onOpenURL path above.)
@@ -649,9 +718,15 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
-        // Connection-error banner — visible over the empty state (menu path) or live video, above the
-        // other top overlays. Non-blocking; see connectErrorBanner.
-        .overlay(alignment: .top) { connectErrorBanner }
+        // The two top-edge notices, stacked so they can never overlap: the STANDING arbitration
+        // message (a condition that persists until the user acts, in another window) above the
+        // TRANSIENT connect-error banner (a thing that just happened, here). Both non-blocking.
+        .overlay(alignment: .top) {
+            VStack(spacing: 8) {
+                arbitrationNotice
+                connectErrorBanner
+            }
+        }
         .animation(.easeInOut(duration: 0.25), value: whep.lastError)
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
@@ -808,9 +883,9 @@ struct ContentView: View {
     /// so button and shortcut never disagree. ⌃⌥O = start, ⌃⌥⇧O = stop (both no-op if already there).
     @ViewBuilder private var deckLinkShortcuts: some View {
         Group {
-            Button("") { DeckLinkService.shared.startScheduledOutput() }
+            Button("") { DeckRegistry.shared.startDeckLinkOutput(from: deck) }
                 .keyboardShortcut("o", modifiers: [.control, .option])
-            Button("") { DeckLinkService.shared.stopScheduledOutput() }
+            Button("") { DeckRegistry.shared.stopDeckLinkOutput(from: deck) }
                 .keyboardShortcut("o", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
@@ -823,9 +898,13 @@ struct ContentView: View {
     /// takes over the display while connected (see NDIService); file<->NDI handoff is a later step.
     @ViewBuilder private var ndiShortcuts: some View {
         Group {
-            Button("") { LiveSource.connectNDIFirstSource() }
-                .keyboardShortcut("n", modifiers: [.control, .option])
-            Button("") { NDIService.shared.disconnect() }
+            Button("") {
+                DeckRegistry.shared.connectLive(.ndi, from: deck) {
+                    LiveSource.connectNDIFirstSource()
+                }
+            }
+            .keyboardShortcut("n", modifiers: [.control, .option])
+            Button("") { DeckRegistry.shared.retireLiveIfOwned(by: deck) }
                 .keyboardShortcut("n", modifiers: [.control, .option, .shift])
             // ⌃⌥C cycles the colorimetry override. The toolbar picker is the real control; this is
             // a keyboard path for driving it hands-off (and for A/B-ing a preset against the picture
@@ -878,7 +957,13 @@ struct ContentView: View {
                 }
                 // Retire file playback first (one active source), exactly as an NDI takeover does.
                 SyntheticLiveSource.shared.start(url: url, renderer: renderer,
-                                                 retireCurrentSource: { engine.stop() })
+                                                 // Through the arbiter, not `engine.stop()`: the
+                                                 // deck the harness is taking the display FROM is
+                                                 // fully unloaded, every other deck merely yields
+                                                 // its transport and keeps its picture.
+                                                 retireCurrentSource: {
+                                                     DeckRegistry.shared.liveStreamWillActivate()
+                                                 })
             }
             .keyboardShortcut("l", modifiers: [.control, .option])
             Button("") { SyntheticLiveSource.shared.stop() }
@@ -900,7 +985,13 @@ struct ContentView: View {
                     return
                 }
                 SyntheticLiveSource.shared.startSweep(url: url, renderer: renderer,
-                                                      retireCurrentSource: { engine.stop() })
+                                                      // Through the arbiter, not `engine.stop()`: the
+                                                 // deck the harness is taking the display FROM is
+                                                 // fully unloaded, every other deck merely yields
+                                                 // its transport and keeps its picture.
+                                                 retireCurrentSource: {
+                                                     DeckRegistry.shared.liveStreamWillActivate()
+                                                 })
             }
             .keyboardShortcut("s", modifiers: [.control, .option])
             // ⌃⌥W — libdatachannel LINK SMOKE TEST (WHEP step 1 of 4). Not a WHEP handshake and
@@ -933,13 +1024,15 @@ struct ContentView: View {
                     // Through the arbitration funnel, exactly like the shipping menu path. This
                     // used to call WHEPClient.connect directly and so retired nothing — a live SRT
                     // session stayed up and both pushed to the renderer.
-                    LiveSource.connectWeb(to: url)
+                    DeckRegistry.shared.connectLive(.web, from: deck, label: bookmark.name) {
+                        LiveSource.connectWeb(to: url)
+                    }
                 } else {
                     NSLog("[WHEP] no saved stream — add one via the streaming menu ▸ Stream URL…")
                 }
             }
             .keyboardShortcut("h", modifiers: [.control, .option])
-            Button("") { WHEPClient.shared.disconnect() }
+            Button("") { DeckRegistry.shared.retireLiveIfOwned(by: deck) }
                 .keyboardShortcut("h", modifiers: [.control, .option, .shift])
             // ⌃⌥⇧E — WHEP DECODED-FRAME STILL (step 3b). Writes the next decoded WHEP frame
             // to a PNG in the export folder. Distinct from ⌃⌥E, which reads back the RENDERED
@@ -989,12 +1082,16 @@ struct ContentView: View {
             // blacked at connect, and the route is configured once the demuxer has reported the
             // stream's colorimetry.
             Button("") {
-                let saved = StreamBookmarkStore.shared.firstConnectable(ofType: .srt)
-                    .flatMap { StreamBookmarkStore.connectURL(for: $0) }
-                LiveSource.connectSRT(to: saved ?? Self.srtDebugTarget)
+                let bookmark = StreamBookmarkStore.shared.firstConnectable(ofType: .srt)
+                let saved = bookmark.flatMap { StreamBookmarkStore.connectURL(for: $0) }
+                // One lookup, used for BOTH the URL and the name another window would be shown —
+                // two lookups could disagree if the store changed between them.
+                DeckRegistry.shared.connectLive(.srt, from: deck, label: bookmark?.name) {
+                    LiveSource.connectSRT(to: saved ?? Self.srtDebugTarget)
+                }
             }
             .keyboardShortcut("d", modifiers: [.control, .option])
-            Button("") { SRTClient.shared.disconnect() }
+            Button("") { DeckRegistry.shared.retireLiveIfOwned(by: deck) }
                 .keyboardShortcut("d", modifiers: [.control, .option, .shift])
         }
         .opacity(0)
@@ -1156,15 +1253,21 @@ struct ContentView: View {
         // Only DRIVER-side states disable (see isDriverBlocked): they can't change without a relaunch.
         // "No device" stays clickable — a card can appear at any moment, and the start path re-probes.
         let status = deckLink.driverStatus
-        let blocked = status.isDriverBlocked && !deckLink.isOutputting
+        // A deck that does not own the devices may not claim the card — the SAME greying the
+        // below-floor driver already uses, with the arbitration reason in the tooltip in place of
+        // the driver one. Silent theft of a broadcast output is the worst outcome available here,
+        // so the refusal is visible before the click rather than a surprise after it.
+        let arbitrated = !deck.gate.deviceControlsEnabled
+        let blocked = (status.isDriverBlocked && !deckLink.isOutputting) || arbitrated
         return HStack(spacing: 2) {
-            Button { deckLink.toggleOutput() } label: {
+            Button { DeckRegistry.shared.toggleDeckLinkOutput(from: deck) } label: {
                 Image(systemName: deckLink.isOutputting ? "tv.fill" : "tv")
             }
             .disabled(blocked)
-            .foregroundStyle(deckLink.isOutputting ? Color.green
+            .foregroundStyle(deckLink.isOutputting && !arbitrated ? Color.green
                              : .white.opacity(blocked ? 0.35 : 0.9))
-            .help((blocked ? status.blockedReason : nil)
+            .help((arbitrated ? deck.gate.reason : nil)
+                  ?? (blocked ? status.blockedReason : nil)
                   ?? (deckLink.isOutputting ? "DeckLink output ON — click to stop (⌃⌥⇧O)"
                                             : "DeckLink output — click to start (⌃⌥O)"))
 
@@ -1211,6 +1314,10 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("DeckLink output options")
+            // The device picker and the audio destination are DEVICE controls too: switching the
+            // output device stops and restarts the card, and the destination decides which window's
+            // engine is muted. Neither belongs to a window that does not own the card.
+            .disabled(arbitrated)
         }
     }
 
@@ -1221,12 +1328,18 @@ struct ContentView: View {
     /// available, not as a disabled/off look. Discovery runs only while this control is on screen
     /// (onAppear/onDisappear), so `discoveredSources` is already warm when the menu is opened.
     private var streamingControl: some View {
-        HStack(spacing: 2) {
+        // Same rule as the DeckLink control: a non-owning deck may neither connect a stream nor
+        // disconnect somebody else's. `activeLiveSource` is ownership-scoped, so the lit-green
+        // state and the "click to stop" copy describe THIS window's stream, never another's.
+        let arbitrated = !deck.gate.deviceControlsEnabled
+        let mine = (activeLiveSource == .ndi)
+        return HStack(spacing: 2) {
             Button { toggleStreaming() } label: {
                 Image(systemName: "antenna.radiowaves.left.and.right")
             }
-            .foregroundStyle(ndi.isConnected ? Color.green : .white.opacity(0.9))
-            .help(ndi.isConnected
+            .foregroundStyle(mine ? Color.green : .white.opacity(arbitrated ? 0.35 : 0.9))
+            .help(arbitrated ? (deck.gate.reason ?? "Streaming is in another window")
+                  : mine
                   ? "Streaming — \(ndi.connectedSourceName ?? "NDI") — click to stop (⌃⌥⇧N)"
                   : "Streaming — local mode; click to connect the first NDI source, or use the menu to pick (⌃⌥N)")
 
@@ -1240,6 +1353,7 @@ struct ContentView: View {
             .fixedSize()
             .help("Streaming sources")
         }
+        .disabled(arbitrated)
         .onAppear { ndi.startDiscovery() }
         .onDisappear { ndi.stopDiscovery() }
     }
@@ -1338,10 +1452,13 @@ struct ContentView: View {
         // exists, then a "Streams" section of flat rows + "Manage…". Shared with the empty-state pill.
         streamURLMenuItems
 
+        // Ownership-scoped: `activeLiveSource` is nil in a window that does not own the stream,
+        // so Disconnect appears ONLY in the owning window. That is the copy the standing message
+        // promises every other window — "turn it off there".
         if activeLiveSource != nil {
             Divider()
             Button(role: .destructive) {
-                LiveSource.retireActive()
+                DeckRegistry.shared.retireLiveIfOwned(by: deck)
             } label: {
                 Label("Disconnect", systemImage: "stop.circle")
             }
@@ -1366,7 +1483,11 @@ struct ContentView: View {
             }
         } else {
             ForEach(ndi.discoveredSources, id: \.name) { source in
-                Button { LiveSource.connectNDI(to: source) } label: {
+                Button {
+                    DeckRegistry.shared.connectLive(.ndi, from: deck, label: source.name) {
+                        LiveSource.connectNDI(to: source)
+                    }
+                } label: {
                     if source.name == ndi.connectedSourceName {
                         Label(source.name, systemImage: "checkmark")   // the live source
                     } else {
@@ -1388,7 +1509,9 @@ struct ContentView: View {
                 Button(bookmark.name) {
                     // connectURL rejoins the Keychain passphrase; bookmark.url is display-only.
                     if let url = StreamBookmarkStore.connectURL(for: bookmark) {
-                        connectToStreamURL(url)
+                        // The NAME, never the URL — a stream path can carry the stream key, and
+                        // this is the label another window will show in its standing message.
+                        connectToStreamURL(url, name: bookmark.name)
                     }
                 }
             } else {
@@ -1434,10 +1557,16 @@ struct ContentView: View {
     /// ONE SWITCH, FROM THE SAME `StreamType.detect` THAT DECIDED THE SAVED TYPE, so a bookmark
     /// listed as SRT cannot be dialled by WHEP. Every caller — menu row, sheet row, paste, ⌃⌥H —
     /// arrives here, which is what makes that guarantee worth anything.
-    private func connectToStreamURL(_ url: URL) {
+    private func connectToStreamURL(_ url: URL, name: String? = nil) {
         switch StreamType.detect(url) {
-        case .web: LiveSource.connectWeb(to: url)
-        case .srt: LiveSource.connectSRT(to: url)
+        case .web:
+            DeckRegistry.shared.connectLive(.web, from: deck, label: name) {
+                LiveSource.connectWeb(to: url)
+            }
+        case .srt:
+            DeckRegistry.shared.connectLive(.srt, from: deck, label: name) {
+                LiveSource.connectSRT(to: url)
+            }
         case .hls:
             // Unreachable through the UI: every entry point gates on `type.isSupported`, which
             // still excludes HLS. Handled rather than ignored so a future caller that forgets the
@@ -1468,6 +1597,38 @@ struct ContentView: View {
     /// can't be added to the reader, playback continues without it, and a file that plays silently
     /// with no explanation is its own confusing bug. Checked last so a live connect error, which is
     /// the more urgent condition, still wins.
+    /// THE STANDING ARBITRATION NOTICE — another window owns an exclusive device, so this window's
+    /// transport is gated. Names the owning file (or stream) and says to turn it off there.
+    ///
+    /// ⚠️ DELIBERATELY NOT A FOURTH `??` TERM ON `connectErrorBanner`, AND NOT A COPY OF IT. That
+    /// banner's own doc comment explains that its single `whep.lastError ?? srt.lastError ??
+    /// engine.playbackNotice` slot works ONLY because those three are mutually exclusive — an
+    /// arbitration message is not, and a window can perfectly well be gated AND have just failed a
+    /// connect. It also auto-dismisses after 9 s, which is exactly wrong here: this is a STANDING
+    /// CONDITION, true until someone acts in another window, and a message that quietly vanishes
+    /// while the thing it describes is still true is worse than no message.
+    ///
+    /// So: no timer, no close button, and a neutral (not alarm-orange) treatment — nothing is
+    /// broken, the app is telling the user where the controls went.
+    @ViewBuilder private var arbitrationNotice: some View {
+        if deck.gate.isStanding, let message = deck.gate.reason {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "lock.display")
+                    .foregroundStyle(.white.opacity(0.75))
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.22)))
+            .padding(.top, 16)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
     @ViewBuilder private var connectErrorBanner: some View {
         if let message = whep.lastError ?? srt.lastError ?? engine.playbackNotice {
             HStack(alignment: .top, spacing: 10) {
@@ -1505,9 +1666,11 @@ struct ContentView: View {
     /// NDIService calls): stop when streaming, quick-connect the first discovered source otherwise.
     private func toggleStreaming() {
         if activeLiveSource == .ndi {
-            NDIService.shared.disconnect()
+            DeckRegistry.shared.retireLiveIfOwned(by: deck)
         } else {
-            LiveSource.connectNDIFirstSource()
+            DeckRegistry.shared.connectLive(.ndi, from: deck) {
+                LiveSource.connectNDIFirstSource()
+            }
         }
     }
 
@@ -1555,7 +1718,19 @@ struct ContentView: View {
     }
 
     private func controls(showPin: Bool) -> some View {
-        VStack(spacing: 10) {
+        // ONE DECK PLAYS AT A TIME, so everything that moves the transport is gated on this deck
+        // being the active one. The set is the scrubber, play/pause + Space, mute, the volume
+        // fader and loop; J/K/L and the arrow jog are gated at their hidden buttons in `body`.
+        //
+        // MUTE AND VOLUME ARE DISABLED, NOT HIDDEN, and for two reasons. A paused engine is silent
+        // by construction, so the fader has nothing to act on; and leaving it live lets a window
+        // that cannot play mutate the app-wide stored default (the slider writes
+        // `Preferences.shared.playbackVolume`, which seeds every window opened afterwards). That
+        // second reason is why the gate — not a removal of the write — is the right fix: the pref
+        // is still the seed a user sets by moving the fader, and only the deck that may actually
+        // play can move it now.
+        let transport = deck.gate.transportEnabled
+        return VStack(spacing: 10) {
             HStack(spacing: 12) {
                 Text(leadingReadout)
                     .font(.system(.caption, design: .monospaced))
@@ -1588,6 +1763,7 @@ struct ContentView: View {
                         }
                     }
                 )
+                .disabled(!transport)
 
                 Text(trailingReadout)
                     .font(.system(.caption, design: .monospaced))
@@ -1604,6 +1780,9 @@ struct ContentView: View {
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill").frame(width: 24)
                 }
                 .keyboardShortcut(.space, modifiers: [])
+                .disabled(!transport)
+                .help(transport ? (engine.isPlaying ? "Pause (Space)" : "Play (Space)")
+                                : (deck.gate.reason ?? "Playback is in another window"))
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
 
@@ -1631,11 +1810,12 @@ struct ContentView: View {
                 .onHover { h in
                     withAnimation(.easeInOut(duration: 0.15)) { volumeHovering = h }
                 }
+                .disabled(!transport)
                 Button { engine.toggleLoop() } label: { Image(systemName: "repeat") }
                     .help("Loop playback")
                     // File-only: NDI takeover calls engine.stop(), which zeroes hasMedia, so this
                     // self-disables for live sources (loop is meaningless on an indefinite stream).
-                    .disabled(!engine.hasMedia)
+                    .disabled(!engine.hasMedia || !transport)
                     .foregroundStyle(engine.isLooping ? Color.green : .white.opacity(0.9))
                 Button { showGuidesPanel.toggle() } label: { Image(systemName: "grid") }
                     .help("Framing guides")
@@ -1736,6 +1916,10 @@ struct ContentView: View {
                 .menuStyle(.button)          // present as a button (pill), matching Open…'s weight
                 .buttonStyle(.bordered)
                 .fixedSize()
+                // The cold-start streaming entry is a device-CLAIM control like the toolbar one,
+                // and gets the same gate. Open… stays live beside it: loading a file into a gated
+                // deck to inspect it is legitimate, and the autoplay gate covers the rest.
+                .disabled(!deck.gate.deviceControlsEnabled)
             }
             .controlSize(.large)
             .tint(.white)

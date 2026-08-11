@@ -250,13 +250,25 @@ final class DeckLinkService: ObservableObject {
     /// entirely, and Mac audio returns to being governed by the user's mute alone — regardless of what
     /// `audioDestination` still holds.
     private func applyAudioRouting() {
-        let owns = isOutputting && audioDestination == .sdi
+        let owns = ownsSystemAudio
         if Thread.isMainThread {
             systemAudioRouting?(owns)
         } else {
             DispatchQueue.main.async { self.systemAudioRouting?(owns) }
         }
     }
+
+    /// THE RULE `applyAudioRouting` APPLIES, as a value: the card owns the program audio only when
+    /// output is running AND the destination is SDI. Exposed (rather than left inline above)
+    /// because an OWNERSHIP TRANSFER has to re-evaluate it for the INCOMING engine, and the answer
+    /// must come from this one expression rather than from a second copy of the rule at the
+    /// registry. See `DeckRegistry.attachDeviceHooks`.
+    ///
+    /// The transfer's other half is the outgoing engine, which is told `false` unconditionally: it
+    /// is no longer wired to the card, so whatever the card is doing is none of its business, and
+    /// leaving it holding `deckLinkOwnsAudio == true` would mute that window's desktop audio for
+    /// the rest of the session.
+    var ownsSystemAudio: Bool { isOutputting && audioDestination == .sdi }
 
     /// The ONE residual-latency knob (seconds). The audio callback already measures and compensates the
     /// two pipelines' queue depths every callback (card audio buffer vs card video queue), so this only

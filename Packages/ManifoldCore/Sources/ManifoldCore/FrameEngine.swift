@@ -447,7 +447,37 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         reverseTimer = nil
     }
 
+    /// SOFT RETIREMENT — yield the transport, KEEP the media. The counterpart to `stop()` below,
+    /// and the verb arbitration wants almost everywhere `stop()` used to be called.
+    ///
+    /// ── WHY THIS EXISTS ────────────────────────────────────────────────────────────────────
+    ///
+    /// `stop()` is a full UNLOAD: it zeroes `hasMedia`, `currentURL`, `duration` and `tcInfo` and
+    /// cancels the reader. That is the right verb for the ONE deck a live stream is taking the
+    /// display away from — its renderer is about to show something else, so its file has genuinely
+    /// gone. It is the wrong verb for every OTHER deck, which under the multi-window model must
+    /// keep its paused frame, scopes, inspector and frame export while merely giving up the right
+    /// to play. Every "retire the other source" path in the app used to be built on `stop()`, so
+    /// every one of them destroyed all four.
+    ///
+    /// ── WHY THIS IS RATE 0 AND NOT A MUTE ──────────────────────────────────────────────────
+    ///
+    /// A paused synchronizer is ALREADY silent — `synchronizer.rate = 0` stops the audio renderer
+    /// pulling, and `applyAudioMute` (via `setShuttleRate`) also silences the SDI stream. Muting
+    /// instead would leave the clock running and the decoder pumping, and would add a SECOND
+    /// silence mechanism to keep in step with the first. There is exactly one mechanism, and this
+    /// is it.
+    ///
+    /// Idempotent, and cheap when already parked: the guard keeps a repeated arbitration pass from
+    /// republishing `shuttleRate` / `isPlaying` and re-rendering a window for no reason.
+    public func yieldTransport() {
+        guard isPlaying || shuttleRate != 0 else { return }
+        setShuttleRate(0)
+    }
+
     /// Fully stop playback and tear down the current reading session.
+    ///
+    /// ⚠️ THIS UNLOADS THE FILE. For "stop playing but keep the media", use `yieldTransport()`.
     public func stop() {
         _ = sessionToken.next()
         stopReverseJog()

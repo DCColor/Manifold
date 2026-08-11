@@ -70,6 +70,31 @@ enum LiveSource: CaseIterable {
         }
     }
 
+    /// Is this source live? THE DELIBERATE RE-ADDITION the note above invites, and stage 2 is the
+    /// stage that genuinely needs it: `DeckRegistry` reconciles its record of who claimed a device
+    /// against what the device actually reports, so it has to be able to ask.
+    ///
+    /// ⚠️ NOT FOR VIEWS, AND THE REASON IS THE ONE ABOVE. This reads the singletons, which does NOT
+    /// subscribe a SwiftUI `View` to their `@Published` changes: a `body` gated on it renders
+    /// correctly once and then never updates again, silently. The registry is not a View — it is an
+    /// AppKit-driven arbiter that recomputes on explicit triggers — which is what makes reading it
+    /// there safe. Views ask `ContentView.activeLiveSource`, which observes and therefore
+    /// invalidates correctly.
+    var isLive: Bool { isConnected }
+
+    /// The live source, or nil. Same non-view warning as `isLive`.
+    static var connected: LiveSource? { allCases.first { $0.isConnected } }
+
+    /// Plain-speak name for the arbitration message and tooltips ("NDI stream is running in …").
+    /// Exhaustive, so a fourth transport cannot be added without naming itself to the user.
+    var displayLabel: String {
+        switch self {
+        case .ndi: return "NDI stream"
+        case .web: return "WHEP stream"
+        case .srt: return "SRT stream"
+        }
+    }
+
     /// Retire this source. PRIVATE for the same reason as `isConnected`: `retireActive` is the
     /// entry point, and it is the thing that knows a disconnect must be guarded.
     ///
