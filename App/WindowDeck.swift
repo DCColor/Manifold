@@ -393,6 +393,30 @@ final class DeckRegistry {
         NDIService.shared.onWillActivateStream = willActivate
         WHEPFrameRouter.shared.onWillActivateStream = willActivate
         SRTFrameRouter.shared.onWillActivateStream = willActivate
+
+        // ── AND THE SAME SEAM FOR THE PICTURE'S SHAPE ─────────────────────────────────────
+        //
+        // ONE hook, not three, because `LiveSource` guarantees one live source at a time and the
+        // hooks above guarantee one deck it displays in — so there is exactly one live frame size
+        // in existence. `LiveDisplaySize` holds the latch and the thread discipline (it is called
+        // from the render thread, a decode queue and a session thread); this end knows which deck
+        // it belongs to, which is the half no transport can answer.
+        LiveDisplaySize.shared.onChange = { [weak self] size in
+            MainActor.assumeIsolated { self?.liveDisplaySizeChanged(size) }
+        }
+    }
+
+    /// A live source stated its frame size (or lost it). Goes to the HOST deck — the one whose
+    /// renderer the routers point at, i.e. the window the stream is actually in — for the same
+    /// reason `liveStreamWillActivate` picks that deck to `stop()`. Every other deck's engine
+    /// describes its own file and must not be told about somebody else's stream.
+    ///
+    /// A no-op when there is no host deck — there is no window for the size to be about. The latch
+    /// does NOT re-publish an unchanged size, so a deck adopting the hooks mid-stream is seeded
+    /// from `LiveDisplaySize.current` in `attachDeviceHooks` rather than waiting for a change that
+    /// may never come.
+    private func liveDisplaySizeChanged(_ size: CGSize?) {
+        hostDeck?.engine?.setLiveDisplaySize(size)
     }
 
     // MARK: Frontmost
@@ -809,6 +833,21 @@ final class DeckRegistry {
         // An SRT stream is a push source exactly like WHEP — same renderer, same enqueue, same
         // LiveClock pacing through the same LiveDisplayRoute.
         SRTFrameRouter.shared.renderer = renderer
+
+        // SEED THE INCOMING DECK WITH WHATEVER SHAPE IS ALREADY ON SCREEN. `LiveDisplaySize` only
+        // fires on a CHANGE, so a deck that becomes host while a source is running would otherwise
+        // hold a nil size until the stream's dimensions happened to change — i.e. usually forever,
+        // and the window would sit on the 16:9 fallback over a picture that is not 16:9. Normally
+        // unreachable (a live device pins its owner, and `retargetDeviceHooks` refuses to move the
+        // hooks while one is live), but the synthetic harness is not an `ExclusiveDevice` and can
+        // reach it, and "normally unreachable" is not a reason to be wrong when it is reached.
+        //
+        // ONLY WHEN THERE IS ONE. Passing nil here would run on EVERY ordinary host adoption — a
+        // key-window change with no stream anywhere near it — and wipe the incoming deck's own
+        // FILE size. `nil` from this seam means "nothing to say", not "no picture".
+        if let liveSize = LiveDisplaySize.shared.current {
+            engine.setLiveDisplaySize(liveSize)
+        }
 
         DeckLinkService.shared.refreshDevices()   // populate the device picker
     }

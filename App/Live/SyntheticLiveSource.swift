@@ -283,6 +283,10 @@ final class SyntheticLiveSource {
         savedIsPaused = nil
         renderer = nil
 
+        // No picture, so no shape — the same clear every real transport does on release. Already on
+        // main (@MainActor), which is what LiveDisplaySize.clear requires.
+        LiveDisplaySize.shared.clear()
+
         // Tear the decode state down on the emit queue, serialized AFTER any in-flight tick, so
         // a running emitNextFrame() never races the teardown.
         emitQueue.async { [self] in
@@ -348,6 +352,13 @@ final class SyntheticLiveSource {
         #if DEBUG
         let tAfterCopy2 = CACurrentMediaTime()
         #endif
+
+        // The harness's takeover calls `engine.stop()` like every other live source, which now
+        // clears `displaySize` — so without this line the file it is replaying would be framed
+        // 16:9 whatever its real shape, which is precisely the bug this seam exists to close. The
+        // pooled buffer carries the reader's decoded geometry.
+        LiveDisplaySize.shared.publish(width: CVPixelBufferGetWidth(pooled),
+                                       height: CVPixelBufferGetHeight(pooled))
 
         renderer.enqueue(outSample)
 

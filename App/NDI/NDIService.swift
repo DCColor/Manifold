@@ -417,6 +417,12 @@ final class NDIService: ObservableObject {
         // behind it, the renderer would otherwise leave its final drawable frozen behind the empty
         // state. A file still playing repaints over the black on its next frame.
         renderer?.clearToBlack()
+        // No picture, so no shape: the window must not stay locked to the departed source's aspect.
+        // HERE AND NOT IN `tearDownReceiver`, deliberately — the source-SWITCH path goes through
+        // that one, and clearing there would drop the window to the 16:9 fallback for the few
+        // frames between receivers rather than holding the old shape until the new one states its
+        // own. Same reasoning as `isConnected` not dipping across a switch.
+        LiveDisplaySize.shared.clear()
         resetColorimetry()
         NSLog("[NDI] disconnected")
     }
@@ -451,6 +457,19 @@ final class NDIService: ObservableObject {
         // nil = no frame yet, or FrameSync is repeating one we already converted. Enqueuing
         // nothing is correct: the renderer keeps displaying the frame it has.
         guard let frame = bridge.captureVideoFrame() else { return }
+
+        // THE FRAME'S SHAPE, RE-READ PER FRAME FOR THE SAME REASON THE COLORIMETRY IS. NDI has no
+        // connect-time format description to read this from — `xres`/`yres` live on each frame —
+        // and it genuinely changes under us: switching source rebuilds the receiver without a
+        // disconnect (`tearDownReceiver`, which is why `isConnected` never dips), and a sender is
+        // free to change resolution mid-stream. Latched inside `LiveDisplaySize`, so a steady
+        // stream costs one comparison per tick and no main-thread hop.
+        //
+        // ⚠️ SQUARE PIXELS ASSUMED. NDI's `NDIlib_video_frame_v2_t` carries `picture_aspect_ratio`
+        // (0 meaning "derive it from xres/yres"), which is the one honest PAR signal any of the
+        // three transports has — and `NDIBridge` does not currently expose it. Until it does, this
+        // is the decoded geometry and nothing more, which is exactly what the renderer draws.
+        LiveDisplaySize.shared.publish(width: Int(frame.width), height: Int(frame.height))
 
         // What is this frame, actually? What the sender declared (re-read per frame — colorimetry
         // can change under us), resolved against whatever the user has asserted in the picker.

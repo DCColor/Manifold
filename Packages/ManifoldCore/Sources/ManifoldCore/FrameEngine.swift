@@ -521,6 +521,44 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         tcInfo = nil
         hasMedia = false
         currentURL = nil
+        // …AND THE SHAPE IS A TRANSPORT READOUT TOO, for exactly the reason the block above gives.
+        // It was missed when that reasoning was applied to duration and tcInfo, and the omission
+        // only became visible once live sources started publishing a size of their own: a stream
+        // taking a deck over (this runs via onWillActivateStream) would otherwise inherit the
+        // departed FILE's aspect and hold it until its own first frame arrived — a 4:3 file's lock
+        // on a 16:9 stream, which is worse than the no-lock state because it looks deliberate.
+        // `abandonLoad` already cleared it for the same reason; this is the same rule at the other
+        // teardown. Note `load()` deliberately does NOT clear it — a file→file open holds the
+        // previous shape for the few ms until inspection returns, rather than flashing the 16:9
+        // fallback.
+        displaySize = nil
+    }
+
+    /// Publish the frame size of a LIVE (non-file) source into this deck.
+    ///
+    /// ── WHY LIVE SOURCES NEED A SETTER AT ALL ──────────────────────────────────────────────
+    ///
+    /// The file paths learn their shape by INSPECTING an asset — `MediaInspector.displaySize`, or
+    /// libav's stream info on the MXF path — and publish it once, from inside this class. A stream
+    /// has no asset to inspect: its shape is a property of the decoded pictures arriving on a
+    /// transport thread, and the transports do not (and must not) know a `FrameEngine` exists. So
+    /// the value arrives from outside, through `LiveDisplaySize` → `DeckRegistry` → here.
+    ///
+    /// ── WHAT IT IS AND IS NOT ──────────────────────────────────────────────────────────────
+    ///
+    /// The file value is `naturalSize × preferredTransform` — rotation-corrected, NOT PAR-corrected.
+    /// The honest live equivalent is the DECODED BUFFER's dimensions, which is what the callers
+    /// pass: no rotation exists to correct (no transport carries one), and no PAR is applied
+    /// because none of the three currently gives us one to apply. That makes the two paths agree
+    /// on the one thing that matters — both describe the geometry the renderer actually draws into
+    /// the video rect — and it means a live value is a SQUARE-PIXEL assumption, stated here rather
+    /// than implied.
+    ///
+    /// nil means "no live picture". Idempotent, and guarded so a per-frame publish that has not
+    /// changed cannot republish `@Published` state and re-render the window. MAIN ACTOR.
+    public func setLiveDisplaySize(_ size: CGSize?) {
+        guard displaySize != size else { return }
+        displaySize = size
     }
 
     public func seek(to seconds: Double) {

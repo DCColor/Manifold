@@ -55,7 +55,26 @@ struct WindowConfigurator: NSViewRepresentable {
 
         guard let size = displaySize, size.width > 0, size.height > 0 else { return }
         let aspect = NSSize(width: size.width, height: size.height)
-        if window.contentAspectRatio != aspect {
+        // ── COMPARED AS A RATIO, NOT AS A SIZE, AND THAT DISTINCTION IS NOW LOAD-BEARING ──────
+        //
+        // `contentAspectRatio` is a RATIO: 1920×1080 and 1280×720 are the same constraint, and
+        // AppKit treats them as such. The old `!=` on the raw NSSize did not — so any change of
+        // RESOLUTION re-locked the window and, with it, ran the resize-and-centre below.
+        //
+        // That was harmless while only files wrote `displaySize` (one value per open). It is not
+        // harmless now that live sources publish theirs per frame: a WHEP sender switching spatial
+        // layer, or an SRT encoder changing resolution, changes the numbers without changing the
+        // shape, and the window would jump and re-centre itself under the user mid-stream — while
+        // they are grading, on a stream whose picture did not change shape at all.
+        //
+        // The visible consequence for FILES is deliberate and small: opening a 4K file after a
+        // 1080p one no longer resizes and re-centres the window, because nothing about the frame
+        // it must be drawn in has changed. The window stays where the user put it. Absolute sizing
+        // is the window-sizing arc's subject, not this guard's.
+        let current = window.contentAspectRatio
+        let sameShape = current.width > 0 && current.height > 0
+            && abs(current.width / current.height - aspect.width / aspect.height) < 0.0001
+        if !sameShape {
             window.contentAspectRatio = aspect
             if let screen = window.screen ?? NSScreen.main {
                 let maxW = screen.visibleFrame.width * 0.8

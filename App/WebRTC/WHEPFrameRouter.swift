@@ -405,6 +405,10 @@ final class WHEPFrameRouter {
         // frame. onDisplayTick is deliberately NOT touched — activate() nil'd it and a push source
         // has nothing to restore.
         route.deactivate(renderer: renderer)
+        // No picture, so no shape. Ordered AFTER the route teardown and on main, where it cannot be
+        // overtaken by a size still hopping in from the decode queue — see LiveDisplaySize's
+        // generation counter.
+        LiveDisplaySize.shared.clear()
 
         NSLog("[WHEP] display route released — file-playback clock restored")
     }
@@ -491,6 +495,19 @@ final class WHEPFrameRouter {
         // Not active (a frame racing activate, or arriving after deactivate). Counting it and
         // dropping it is correct — step 3b's counters keep working with no display route at all.
         guard let clock, let renderer else { logFlowIfDue(); return }
+
+        // THE PICTURE'S SHAPE. From the DECODED buffer rather than the format description, and
+        // per frame rather than at connect, for two reasons: the format description is built from
+        // in-band SPS/PPS that CAN CHANGE MID-STREAM (an SFU switching spatial layer does exactly
+        // this, and `updateFormatDescriptionIfNeeded` rebuilds the session for it), and the buffer
+        // is what the renderer will actually draw. Placed AFTER the active guard so a frame racing
+        // teardown cannot publish a shape for a stream that has already released the display.
+        //
+        // ⚠️ SQUARE PIXELS ASSUMED, and on this transport that is not merely a default — H.264
+        // signals sample aspect ratio in the SPS VUI and our RTP depacketizer does not parse the
+        // VUI at all, which is the same limitation that makes the colorimetry assumed here.
+        LiveDisplaySize.shared.publish(width: CVPixelBufferGetWidth(decoded),
+                                       height: CVPixelBufferGetHeight(decoded))
 
         let senderPTS = CMTimeGetSeconds(pts)
         guard senderPTS.isFinite else { logFlowIfDue(); return }

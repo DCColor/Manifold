@@ -524,6 +524,9 @@ final class SRTFrameRouter {
         guard wasActive else { return }
 
         route.deactivate(renderer: renderer)
+        // No picture, so no shape. On main, after the route teardown, where a size still hopping in
+        // from the session thread cannot overtake it — see LiveDisplaySize's generation counter.
+        LiveDisplaySize.shared.clear()
         NSLog("[SRT] display route released — file-playback clock restored")
     }
 
@@ -936,6 +939,22 @@ final class SRTFrameRouter {
         // Not active (a frame racing activate, or arriving after deactivate). Counting it and
         // dropping it is correct.
         guard let clock, let renderer else { logFlowIfDue(); return }
+
+        // THE PICTURE'S SHAPE, from the DECODED buffer and not from `format.width/height`. The
+        // codecpar dimensions are read once, at `avformat_find_stream_info` time, and describe what
+        // the demuxer believed then; the decoded buffer is what the renderer will draw, and it
+        // follows an in-band SPS change (which this transport gets too — `parameterSetsChanged`
+        // exists for it). Placed AFTER the active guard so a frame racing teardown cannot publish a
+        // shape for a stream that has already released the display.
+        //
+        // ⚠️ SQUARE PIXELS ASSUMED — AND THIS IS THE ONE TRANSPORT THAT COULD DO BETTER TODAY.
+        // libavformat fills `codecpar->sample_aspect_ratio` from the same SPS VUI it fills the
+        // colorimetry from, exactly as described in the colorimetry block above. It is not in
+        // `ManifoldSRTVideoFormat` yet, so there is nothing to apply; when it is, this is the call
+        // site that would apply it (and `FrameEngine.setLiveDisplaySize` documents what the file
+        // path's equivalent value does and does not include).
+        LiveDisplaySize.shared.publish(width: CVPixelBufferGetWidth(decoded),
+                                       height: CVPixelBufferGetHeight(decoded))
 
         let senderPTS = CMTimeGetSeconds(pts)
         guard senderPTS.isFinite else { logFlowIfDue(); return }
