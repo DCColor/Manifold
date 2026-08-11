@@ -302,6 +302,70 @@ final class WindowSizer: NSObject, NSWindowDelegate {
 
     // MARK: - Driving it from the view layer
 
+    /// ── WHERE THE SCOPE DIVIDER STOPS (Arc C) ───────────────────────────────────────────────
+    ///
+    /// The tallest total chrome this window can carry while the window is still ALLOWED TO GROW to
+    /// hold it — i.e. the last value at which `constrainedContentSize` does not have to take the
+    /// screen cap and start charging the difference to the picture.
+    ///
+    /// This is the whole of the divider's upper limit, and it is expressed HERE rather than in the
+    /// view because the three quantities it needs are all this file's: the screen's usable content
+    /// height, the picture's aspect, and the window's current width. Returning a number the view
+    /// clamps to is what makes the divider STOP at the cap instead of pushing through it and
+    /// silently shrinking the video — the rejected design in docs/ARC-C-SCOPE-DIVIDER.md.
+    ///
+    /// Derived from the window's CURRENT WIDTH, deliberately: the picture's height is
+    /// `width / aspect` and a divider drag does not change the width, so `maxContentH − videoH` is
+    /// exactly the room left underneath. Re-read on every drag event, so widening the window (or
+    /// moving it to a larger display) immediately gives the divider more travel.
+    ///
+    /// `.greatestFiniteMagnitude` when there is no window yet — "not limited by anything I know
+    /// about", which the view's own floor still bounds from below.
+    ///
+    /// ⚠️ `sourceSize` IS NOT DECORATION — IT CLOSES THE COLD-LAUNCH CASE, and the failure it fixes
+    /// is one a self-consistent answer cannot recover from. Before the first source has sized this
+    /// window, the current width is the placeholder default (1280), which understates the picture's
+    /// height and so OVERSTATES the room left for chrome. `sizeToSource` then spends the
+    /// overstatement in the same pass, the screen cap shrinks the picture to make it fit, and every
+    /// subsequent pass agrees with the shrunken result — because a smaller picture really does leave
+    /// more room for chrome. The state is stable and wrong.
+    ///
+    /// MEASURED: launching docked with a 1050-pt tray opened a 1920×1080 file into a 1787-wide
+    /// picture. Taking the width the source is ABOUT to open at makes the tray yield the 75 points
+    /// instead, which is what the divider's contract says should happen.
+    ///
+    /// Only consulted until `hasSizedToSource`; after that the window's real width is authoritative,
+    /// so deliberately narrowing a window still buys tray room.
+    func maxChromeHeight(openingFor sourceSize: CGSize?) -> CGFloat {
+        guard let window else { return .greatestFiniteMagnitude }
+        let maxContentHeight = maximumContentSize(for: window).height
+        var width = window.contentRect(forFrameRect: window.frame).size.width
+        if !hasSizedToSource, let sourceSize,
+           let opening = openingContentWidth(for: sourceSize, in: window) {
+            width = max(width, opening)
+        }
+        // The source's own aspect when it is known: on the pass that first carries a source,
+        // `videoAspect` has not been updated yet (this is read while the view is computing the
+        // chrome height it is about to hand to `setGeometry`).
+        let aspect: CGFloat = {
+            guard let s = sourceSize, s.width > 0, s.height > 0 else { return videoAspect }
+            return s.width / s.height
+        }()
+        return max(maxContentHeight - VideoBox.height(width: width, aspect: aspect), 0)
+    }
+
+    /// The content width a source opens at: fitted into 80% of the visible frame, never magnified
+    /// past 1:1. Shared by `sizeToSource` (which applies it) and `maxChromeHeight` (which has to
+    /// predict it one pass early) so the two cannot drift — the whole cold-launch bug above was the
+    /// two disagreeing about how wide the picture was going to be.
+    private func openingContentWidth(for source: CGSize, in window: NSWindow) -> CGFloat? {
+        guard source.width > 0, source.height > 0,
+              let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { return nil }
+        let scale = min(visible.width * 0.8 / source.width,
+                        visible.height * 0.8 / source.height, 1.0)
+        return source.width * scale
+    }
+
     /// The picture's shape and the chrome below it, as SwiftUI currently has them. Called from
     /// `WindowConfigurator.updateNSView`, i.e. on every body pass, and a no-op when nothing moved.
     ///
@@ -359,18 +423,29 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     // MARK: - Geometry
 
     /// A source's first appearance in this window: fit it into 80% of the visible frame at up to
-    /// 1:1, then centre. Chrome is charged against the SAME 80% budget, so a window with the tray
-    /// open opens smaller rather than overflowing the screen.
+    /// 1:1, then centre.
+    ///
+    /// ⚠️ THE 80% BUDGET IS THE PICTURE'S, AND CHROME IS NOT CHARGED AGAINST IT. This used to read
+    /// `visible.height * 0.8 - chromeHeight`, on the reasoning that a window with the tray open
+    /// should open smaller rather than overflow the screen. That is the invariant inverted: it makes
+    /// the PICTURE pay for the tray, at the one moment the user cannot see it happen.
+    ///
+    /// MEASURED, and this is why it changed: with a tray dragged to 1050 pt (Arc C's divider makes
+    /// that reachable), a 1920×1080 file opened into a 1163×654 picture — the source scaled to 60%
+    /// for no reason the user could see, because 1704 − 1050 left the picture 654 points of budget.
+    /// Charging only the picture opens it at 1920×1080 with the window 2130 tall, which is exactly
+    /// the visible frame.
+    ///
+    /// So a window with tall chrome now opens TALLER than 80% of the screen — up to the screen cap,
+    /// which `constrainedContentSize` still enforces and which remains the sole place the picture is
+    /// allowed to shrink. The 80% is a rule about how much of the display the PICTURE claims, not
+    /// about the window.
     private func sizeToSource(_ source: CGSize, in window: NSWindow) {
-        guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else {
+        guard let width = openingContentWidth(for: source, in: window) else {
             applyConstraint(to: window)
             return
         }
-        let budgetW = visible.width * 0.8
-        let budgetH = max(visible.height * 0.8 - chromeHeight, 1)
-        let scale = min(budgetW / source.width, budgetH / source.height, 1.0)
-        window.setContentSize(constrainedContentSize(for: window,
-                                                     contentWidth: source.width * scale))
+        window.setContentSize(constrainedContentSize(for: window, contentWidth: width))
         window.center()
     }
 

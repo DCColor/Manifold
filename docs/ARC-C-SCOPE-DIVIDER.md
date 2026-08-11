@@ -1,8 +1,28 @@
 # Arc C — the draggable scope divider
 
-Design record. **Not implemented.** Arc B ships a single app-wide constant
-(`WindowChrome.trayHeight`); this replaces it with a per-window, user-set height. Written down at
-the point the decision was made so the rejected option cannot come back as a fresh idea.
+**IMPLEMENTED.** Built as recorded below (the second option; the first stays rejected). The design
+notes are kept because the rejected option is the one someone will re-propose.
+
+Where it lives: `WindowChrome.trayHeight` (per-window state + persistence),
+`ContentView.effectiveTrayHeight` / `clampedTrayHeight` / `scopeTrayDivider` / `DividerHandle` (the
+control), `WindowSizer.maxChromeHeight(openingFor:)` (where it stops).
+
+Three things the build learned that this document did not predict — each is commented at its site:
+
+1. **The line you grab does not move.** The picture's size is fixed by the window's WIDTH, so the
+   video/tray boundary is pinned at `videoHeight` below the window's top edge. What moves is the
+   window's BOTTOM. The usual split-pane sign is therefore unavailable, and dragging DOWN grows the
+   tray so that the only moving edge travels with the pointer.
+2. **A SwiftUI `DragGesture` cannot own this drag.** `isMovableByWindowBackground = true` makes
+   AppKit start a window drag on mouse-down first — measured: the divider moved the window from
+   y=242 to y=30 and never touched the tray. `DividerHandle` overrides `mouseDownCanMoveWindow`.
+3. **Clamping only during the drag is not enough.** A stored height that no longer fits (mode
+   switch, smaller display) has to be clamped on USE, and `sizeToSource` had to stop charging chrome
+   against the picture's opening budget — it was shrinking a 1920×1080 source to 1163×654 at launch.
+
+Not done in this pass: **no Settings control for the default.** The last-writer-wins seeding means
+the default is simply the last height any window was left at, which needs no separate UI; add one
+only if a discoverable reset turns out to be wanted.
 
 ## The invariant this must not break
 

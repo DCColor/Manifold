@@ -45,21 +45,45 @@ final class WindowChrome: ObservableObject {
     /// affine in its width (`contentH = contentW / videoAspect + chromeH`), which is exactly the
     /// relationship `WindowSizer` enforces and the one `contentAspectRatio` could not express.
     ///
-    /// ── WHERE 204 COMES FROM, AND WHY THE PREVIOUS 240 WAS DERIVED WRONG ─────────────────
+    /// ── WHERE 204 COMES FROM, AND WHY THE 240 BEFORE IT WAS DERIVED WRONG ────────────────
     ///
     /// 204 is what the old proportional layout gave at the window size actually in use when the
     /// fixed tray was reported as too short. It is a MEASUREMENT of what was lost, not a taste
-    /// judgement, and it restores that rather than inventing a new number.
+    /// judgement, and it restores that rather than inventing a number.
     ///
-    /// The 240 it replaces was 33% of the app's EMPTY-window default (1280×720 → 238). That is the
+    /// The 240 it replaced was 33% of the app's EMPTY-window default (1280×720 → 238). That is the
     /// wrong window to have measured: a window with a source in it is never that size, because
     /// `WindowSizer.sizeToSource` fits the source into 80% of the visible frame at up to 1:1. The
     /// constant was calibrated against a window nobody grades in.
     ///
-    /// ⚠️ INTERIM. This is a single app-wide number for a quantity that wants to be per-window and
-    /// user-set. Arc C replaces it with a draggable divider that seeds from this constant — see
-    /// docs/ARC-C-SCOPE-DIVIDER.md. Do not tune this further; move it to the divider instead.
-    static let trayHeight: CGFloat = 204
+    /// This is now the SEED for `trayHeight` (the per-window value the divider drags), not the tray
+    /// height itself — a fresh install, and any window opened before anyone has dragged a divider,
+    /// gets exactly what Arc B shipped.
+    static let defaultTrayHeight: CGFloat = 204
+
+    /// ── THE FLOOR THE DIVIDER STOPS AT, AND WHAT IT IS MEASURED FROM ─────────────────────
+    ///
+    /// Below this the value-axis ruler stops being readable, and that is a measurable event rather
+    /// than a matter of taste. The derivation, all of it from constants in this app:
+    ///
+    ///   * A graticule label renders in `.system(size: 11, design: .monospaced)`
+    ///     (`graticuleLabelFontSize`). MEASURED height of that font's layout box: **14.000 pt**.
+    ///   * `drawGraticuleLabel` draws each label on a backing pill of `height + 2` → **16 pt** per
+    ///     labelled major, and that pill is what has to not collide with its neighbour.
+    ///   * The default scale is `.bit10`, whose `majors` are
+    ///     0/128/256/384/512/640/768/896/1023 — **9 labelled lines**. (8-bit also has 9. IRE has 11
+    ///     and is the outlier; see the note below.)
+    ///   * So the plot needs 9 × 16 = **144 pt** before the ruler's own labels start overlapping.
+    ///   * A slot is not all plot: `scopeHeaderHeight` (22) is the name/slider band, and
+    ///     `scopePlotInset` (10) is applied top AND bottom → 20.
+    ///
+    ///     144 + 22 + 20 = **186**
+    ///
+    /// ⚠️ IRE (11 majors) NEEDS 176 pt OF PLOT, i.e. a 218-pt tray, and is therefore already tight
+    /// at the 204 default. It degrades by touching rather than by becoming illegible — the labels
+    /// keep their backing pills and `drawGraticuleLabel` clamps the end ones inside the plot — so it
+    /// is not what the floor is set by. If IRE ever becomes the default, this number moves to 218.
+    static let minTrayHeight: CGFloat = 186
 
     /// Opening estimate for the docked control bar's height, in points. The bar MEASURES itself and
     /// reports the real value (see `ContentView.dockedControlBar`), so this is a seed and not an
@@ -75,10 +99,26 @@ final class WindowChrome: ObservableObject {
         static let slot1       = "manifold.scope.slot1"
         static let slot2       = "manifold.scope.slot2"
         static let controlMode = "controlDisplayMode"
+        static let trayHeight  = "manifold.scope.trayHeight"
     }
 
     /// Scopes tray open/close for THIS window. Toggled by ⌃⌥T and the control-bar scopes button.
     @Published var showTray: Bool { didSet { defaults.set(showTray, forKey: Key.showTray) } }
+
+    /// Height of the scopes tray in THIS window, in points — what the divider drags (Arc C).
+    ///
+    /// Seeded and written back exactly like `showTray` above: last writer wins, so the height a
+    /// window is left at becomes the height the next window opens with, and there is no separate
+    /// "default" record to keep in step. Two open windows are independent, which is the whole
+    /// reason this class exists.
+    ///
+    /// ⚠️ CLAMPED BY THE VIEW, NOT HERE, and the asymmetry is deliberate. The FLOOR
+    /// (`minTrayHeight`) is a constant and could live here; the CEILING cannot — it is "the point
+    /// at which the window can no longer grow", which depends on the window's current width, the
+    /// docked bar, and which screen the window is on. `ContentView.clampedTrayHeight` is where all
+    /// four are in scope. A stored value from a bigger screen is therefore re-clamped on use rather
+    /// than on load, so moving a window between displays does not permanently shrink its tray.
+    @Published var trayHeight: CGFloat { didSet { defaults.set(trayHeight, forKey: Key.trayHeight) } }
 
     /// Which scope fills each of the three tray slots, for THIS window. Chosen live from each
     /// slot's header picker.
@@ -104,6 +144,15 @@ final class WindowChrome: ObservableObject {
         // fresh install is byte-identical to the old behaviour. (`bool(forKey:)` returns false for
         // a missing key, which is what `@AppStorage("showTray") = false` did.)
         showTray = defaults.bool(forKey: Key.showTray)
+        // ⚠️ `double(forKey:)` RETURNS 0 FOR A MISSING KEY, and 0 is a legal-looking tray height that
+        // would collapse the tray on every fresh install. The `bool(forKey:)` line above gets away
+        // with it because `false` IS the intended default; this one cannot, so the absence of the
+        // key is tested directly rather than inferred from the value. Values below the floor are
+        // also rejected here, so a defaults file hand-edited to 12 does not produce an unusable
+        // window that the user then has to discover the divider to fix.
+        let storedTrayHeight = defaults.object(forKey: Key.trayHeight) as? Double
+        trayHeight = max(CGFloat(storedTrayHeight ?? Double(Self.defaultTrayHeight)),
+                         Self.minTrayHeight)
         slot0 = ScopeKind(rawValue: defaults.string(forKey: Key.slot0) ?? "") ?? .waveform
         slot1 = ScopeKind(rawValue: defaults.string(forKey: Key.slot1) ?? "") ?? .parade
         slot2 = ScopeKind(rawValue: defaults.string(forKey: Key.slot2) ?? "") ?? .cie

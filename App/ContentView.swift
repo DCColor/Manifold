@@ -174,6 +174,10 @@ struct ContentView: View {
     // Changes at most once per window (the bar's content is fixed-height and width-independent), and
     // `WindowSizer` ignores sub-point differences, so this cannot oscillate against the resize.
     @State private var dockedBarHeight: CGFloat = WindowChrome.dockedControlBarHeight
+    // Scope-tray divider (Arc C). `dividerDragBaseline` is the tray height at mouse-down and is
+    // non-nil ONLY for the duration of a drag, so it doubles as the "is dragging" flag.
+    @State private var dividerHovered = false
+    @State private var dividerDragBaseline: CGFloat?
     // Tray open/close and the three per-slot scope selections now live on `chrome` (per window).
     // They were @AppStorage here, which shared them across every open window; the keys and their
     // defaults are unchanged, so an existing install's arrangement carries over. Each slot can show
@@ -298,7 +302,12 @@ struct ContentView: View {
             }
             if chrome.showTray {
                 scopesTray
-                    .frame(height: WindowChrome.trayHeight)
+                    .frame(height: effectiveTrayHeight)
+                    // THE DIVIDER ADDS NO HEIGHT. It is an overlay on the tray's own top edge, not
+                    // a VStack child, so `chromeHeight` stays `bar + tray` and the window arithmetic
+                    // is unchanged by its existence. A 10-pt grab band straddles the boundary; only
+                    // the hairline is drawn.
+                    .overlay(alignment: .top) { scopeTrayDivider }
             }
         }
         .ignoresSafeArea()
@@ -669,8 +678,55 @@ struct ContentView: View {
     private var chromeHeight: CGFloat {
         var height: CGFloat = 0
         if isDocked && hasSource { height += dockedBarHeight }
-        if chrome.showTray { height += WindowChrome.trayHeight }
+        if chrome.showTray { height += effectiveTrayHeight }
         return height
+    }
+
+    /// ── THE TRAY HEIGHT ACTUALLY LAID OUT, AS OPPOSED TO THE ONE STORED ─────────────────────
+    ///
+    /// `chrome.trayHeight` is the user's INTENT and is not clamped in storage. This is that intent
+    /// reduced to what this window can hold right now, and it is what both the layout
+    /// (`.frame(height:)`) and the window arithmetic (`chromeHeight`) use — the two MUST be the same
+    /// number or the window is sized for a tray of one height around a tray of another.
+    ///
+    /// ⚠️ CLAMPING ONLY DURING THE DRAG IS NOT ENOUGH, and the case that proves it is ordinary:
+    /// drag the tray to its maximum in OVERLAY mode (1050 pt on this display), then switch to DOCKED.
+    /// The bar adds 75, total chrome becomes 1125 against a 1050 ceiling, `constrainedContentSize`
+    /// takes the screen cap and THE PICTURE SHRINKS — the exact outcome the divider exists to
+    /// prevent, arrived at without touching the divider. Same story for a window dragged onto a
+    /// shorter display, or a source whose aspect makes the picture taller.
+    ///
+    /// Clamping on USE rather than on LOAD is what makes it recoverable: the stored 1050 survives, so
+    /// switching back to overlay — or back to the big display — restores the tray the user set
+    /// instead of leaving it permanently truncated by a trip through a smaller configuration.
+    private var effectiveTrayHeight: CGFloat { clampedTrayHeight(chrome.trayHeight) }
+
+    /// Everything below the picture that the DIVIDER does not size — today just the docked control
+    /// bar. Split out from `chromeHeight` because the divider's ceiling is "how much room is left
+    /// under the picture, minus what isn't mine to spend", and conflating the two is how a divider
+    /// silently starts eating the bar's height.
+    private var nonTrayChromeHeight: CGFloat {
+        (isDocked && hasSource) ? dockedBarHeight : 0
+    }
+
+    /// The tray height the divider is allowed to land on. Floor and ceiling come from different
+    /// places on purpose — see `WindowChrome.trayHeight`.
+    ///
+    /// THE CEILING IS THE WHOLE INVARIANT. `sizer.maxChromeHeight()` is the last total chrome the
+    /// window can GROW to hold; subtract the docked bar and what remains is the tray's travel. Past
+    /// it the window would hit the screen cap and `constrainedContentSize` would start shrinking the
+    /// picture — so the divider stops here instead. It does not push through and let the video pay,
+    /// which is the rejected design (docs/ARC-C-SCOPE-DIVIDER.md).
+    ///
+    /// The `max(…, floor)` guard matters on a small display: if the screen cannot fit even the
+    /// minimum tray, the ceiling would come out BELOW the floor and `min(max())` would invert. The
+    /// floor wins there, and the screen cap then does what it always does — shrinks the picture on
+    /// shape — because at that point there is no arrangement that satisfies both.
+    private func clampedTrayHeight(_ proposed: CGFloat) -> CGFloat {
+        let floor = WindowChrome.minTrayHeight
+        let ceiling = max(deck.sizer.maxChromeHeight(openingFor: engine.displaySize)
+                          - nonTrayChromeHeight, floor)
+        return min(max(proposed, floor), ceiling)
     }
 
     /// The video region: aspect-fit picture (never cropped/stretched), transport
@@ -832,6 +888,77 @@ struct ContentView: View {
                 dockedBarHeight = height
             }
     }
+
+    /// ── THE SCOPE TRAY DIVIDER (Arc C) ──────────────────────────────────────────────────────
+    ///
+    /// Drag it to set the TRAY's height; the WINDOW grows or shrinks to match and the picture is
+    /// never touched. That is the Arc B invariant applied to a control instead of to a constant —
+    /// see the `VideoBox` header in WindowSizer.swift for why the alternative (re-apportioning a
+    /// fixed window) is not on the table: it changes the video region's aspect and pillarboxes the
+    /// picture, continuously, under the user's finger.
+    ///
+    /// ⚠️ THE LINE YOU GRAB DOES NOT MOVE, AND THE SIGN BELOW IS INVERTED BECAUSE OF IT.
+    ///
+    /// This is NOT a split-pane divider and it cannot behave like one. A split-pane divider moves
+    /// because both panes are negotiable; here the picture is fixed by the window's WIDTH, so the
+    /// video/tray boundary is always exactly `videoHeight` below the window's top edge and is
+    /// therefore PINNED. What actually moves when the tray resizes is the window's BOTTOM edge —
+    /// `applyConstraint` anchors the top.
+    ///
+    /// So the usual divider convention ("drag down → the lower pane shrinks") would put the only
+    /// moving edge in the window OPPOSITE to the drag, with nothing under the pointer confirming
+    /// anything. Dragging DOWN therefore makes the tray TALLER: the window's bottom edge travels the
+    /// same way the pointer does, which is the only co-directional reading available. Grabbing the
+    /// boundary and pulling downward opens the tray, like a drawer.
+    ///
+    /// (Near the screen cap the picture DOES shift up a little: once the window can no longer grow
+    /// downward inside the visible frame, `applyConstraint` nudges it back on screen. The picture
+    /// never changes SIZE, which is the invariant; it can change position.)
+    ///
+    /// Drawn as a hairline on the tray's top edge inside a 10-pt grab band that straddles the
+    /// boundary — five points of it over the picture, five over the tray. The band is an OVERLAY, so
+    /// it contributes nothing to `chromeHeight` and the window arithmetic does not know it exists.
+    private var scopeTrayDivider: some View {
+        Rectangle()
+            .fill(.white.opacity(isDividerActive ? 0.45 : 0.12))
+            .frame(height: 1)
+            .frame(height: Self.dividerGrabHeight)      // hairline centred in a taller hit box
+            .overlay {
+                // ⚠️ AN AppKit HANDLE, NOT A SwiftUI `DragGesture`, AND THAT IS NOT A STYLE CHOICE.
+                //
+                // MEASURED: with a `DragGesture` here, dragging the divider MOVED THE WINDOW —
+                // 960,242 → 960,30 — and never changed the tray at all. The window sets
+                // `isMovableByWindowBackground = true` (WindowConfigurator), so AppKit begins a
+                // window drag on mouse-down over any view that reports `mouseDownCanMoveWindow`, and
+                // it wins that race before SwiftUI's gesture recogniser ever sees the event.
+                // `DividerHandle` overrides that property to false, which is the only way to decline
+                // it, and once it owns mouse-down it may as well own the whole drag.
+                DividerHandle(
+                    onHoverChange: { dividerHovered = $0 },
+                    // Baseline is the EFFECTIVE height, not the stored one: a drag that starts
+                    // from a clamped state must start where the user can see the boundary.
+                    onBegin: { dividerDragBaseline = effectiveTrayHeight },
+                    onDragDown: { deltaDown in
+                        // Baseline captured at mouse-down, never re-read: applying an absolute
+                        // pointer delta to a live-updating height would integrate the same movement
+                        // every event and run away.
+                        guard let base = dividerDragBaseline else { return }
+                        let next = clampedTrayHeight(base + deltaDown)   // DOWN = taller; see above
+                        if abs(next - chrome.trayHeight) > 0.01 { chrome.trayHeight = next }
+                    },
+                    onEnd: { dividerDragBaseline = nil }
+                )
+            }
+            .offset(y: -Self.dividerGrabHeight / 2)     // straddle the tray's top edge
+    }
+
+    /// Hairline is lit while hovered OR mid-drag — the drag half matters because the pointer leaves
+    /// the 10-pt band immediately (the band is pinned; the pointer is not).
+    private var isDividerActive: Bool { dividerHovered || dividerDragBaseline != nil }
+
+    /// Grab-band height. Wider than the 1-pt hairline it draws, so the target is hittable; narrow
+    /// enough that it does not swallow clicks meant for the top row of the scope slots.
+    private static let dividerGrabHeight: CGFloat = 10
 
     /// The scopes tray: three equal-width slots, each rendering the scope its @AppStorage selection
     /// names (data-driven — no scope is special-cased to a fixed slot). The leading header label of
@@ -2150,5 +2277,111 @@ struct ContentView: View {
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s)
                      : String(format: "%d:%02d", m, s)
+    }
+}
+
+/// ── THE SCOPE-TRAY DIVIDER'S HANDLE ─────────────────────────────────────────────────────────
+///
+/// An AppKit view rather than a SwiftUI `DragGesture`, for one measured reason and one consequence
+/// of it.
+///
+/// THE REASON: the window sets `isMovableByWindowBackground = true`, so AppKit starts a WINDOW DRAG
+/// on mouse-down over any view that reports `mouseDownCanMoveWindow == true` — and it decides that
+/// before SwiftUI's gesture recogniser is consulted. Measured with a `DragGesture` in this position:
+/// dragging the divider moved the window from y=242 to y=30 and left the tray height untouched.
+/// Overriding `mouseDownCanMoveWindow` is the only way to decline, and it has to be an NSView.
+///
+/// THE CONSEQUENCE: since this view must already own mouse-down, it owns the whole drag, which also
+/// gets the cursor right. The cursor is a TRACKING AREA (`.cursorUpdate`) plus a re-`set()` on every
+/// drag event — not `NSCursor.push()/pop()`. Push/pop unbalances the moment the pointer leaves the
+/// band, which here is immediately: the band is pinned to the video's bottom edge and the pointer is
+/// not, so it exits within a few points of the start of every drag. An unbalanced `pop` corrupts the
+/// app-wide cursor stack; a tracking area owns no global state and cannot.
+private struct DividerHandle: NSViewRepresentable {
+    var onHoverChange: (Bool) -> Void
+    var onBegin: () -> Void
+    /// Points dragged DOWN from mouse-down. Positive = downward. See the sign note on
+    /// `ContentView.scopeTrayDivider` for why down means a TALLER tray.
+    var onDragDown: (CGFloat) -> Void
+    var onEnd: () -> Void
+
+    func makeNSView(context: Context) -> HandleView {
+        let view = HandleView()
+        apply(to: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: HandleView, context: Context) { apply(to: nsView) }
+
+    private func apply(to view: HandleView) {
+        view.onHoverChange = onHoverChange
+        view.onBegin = onBegin
+        view.onDragDown = onDragDown
+        view.onEnd = onEnd
+    }
+
+    final class HandleView: NSView {
+        var onHoverChange: ((Bool) -> Void)?
+        var onBegin: (() -> Void)?
+        var onDragDown: ((CGFloat) -> Void)?
+        var onEnd: (() -> Void)?
+
+        private var trackingArea: NSTrackingArea?
+        /// Non-nil only while a drag is live. SCREEN y at mouse-down — see `mouseDragged`.
+        private var dragOriginScreenY: CGFloat?
+
+        /// ⚠️ THE LINE THAT MAKES THE DIVIDER WORK AT ALL. Without it AppKit moves the window
+        /// instead — see the type's header, where the measurement is.
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        /// Adjusting the scopes in a window that is not yet key should not cost a click.
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let trackingArea { removeTrackingArea(trackingArea) }
+            let area = NSTrackingArea(rect: .zero,
+                                      options: [.cursorUpdate, .mouseEnteredAndExited,
+                                                .activeInKeyWindow, .inVisibleRect],
+                                      owner: self, userInfo: nil)
+            addTrackingArea(area)
+            trackingArea = area
+        }
+
+        override func cursorUpdate(with event: NSEvent) { NSCursor.resizeUpDown.set() }
+
+        override func mouseEntered(with event: NSEvent) { onHoverChange?(true) }
+
+        override func mouseExited(with event: NSEvent) {
+            // Mid-drag exits are expected and must NOT unlight the handle — the band is pinned to
+            // the video's bottom edge and the pointer leaves it almost immediately.
+            if dragOriginScreenY == nil { onHoverChange?(false) }
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            dragOriginScreenY = NSEvent.mouseLocation.y
+            onHoverChange?(true)
+            onBegin?()
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let origin = dragOriginScreenY else { return }
+            // ⚠️ SCREEN COORDINATES, NOT `locationInWindow`. The window is being RESIZED by this very
+            // drag, and AppKit window coordinates are measured from its bottom-left — the corner that
+            // moves. A window-relative delta would therefore feed the resize back into its own input
+            // and diverge. Screen space is the only frame of reference this drag does not perturb.
+            // (Same class of bug as `windowWillResize` comparing a mouse-derived size against a
+            // self-derived one; see the notes in WindowSizer.swift.)
+            NSCursor.resizeUpDown.set()   // transient — re-asserted per event so it survives the drag
+            onDragDown?(origin - NSEvent.mouseLocation.y)   // screen y is UP, so down is positive
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            dragOriginScreenY = nil
+            onEnd?()
+            // The pointer has usually left the band by now; re-test so the hairline unlights unless
+            // it genuinely finished over the handle.
+            onHoverChange?(bounds.contains(convert(event.locationInWindow, from: nil)))
+        }
     }
 }
