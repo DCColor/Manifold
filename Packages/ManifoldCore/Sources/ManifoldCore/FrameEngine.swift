@@ -180,7 +180,25 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.addRenderer(audioRenderer)
     }
 
+    /// Adopt a display renderer as this engine's video output.
+    ///
+    /// THE REMOVE IS LOAD-BEARING, not tidiness. `addRenderer` accumulates: the synchronizer keeps
+    /// every renderer ever added and drives them all, while `videoRenderer` — which the decode
+    /// pumps enqueue into — only ever points at the LAST one. So a second attach left the previous
+    /// renderer permanently on the synchronizer's clock, being timed but never fed, and nothing
+    /// released it.
+    ///
+    /// This was invisible before per-window engines because one engine saw exactly one attach.
+    /// It stops being invisible the moment a `SampleBufferNSView` is rebuilt (a re-hosted view, a
+    /// surface recreated by SwiftUI) — each rebuild would add another orphan. Removing first makes
+    /// attach IDEMPOTENT and the renderer set exactly one element, which is what every other line
+    /// in this class already assumes.
+    ///
+    /// Re-attaching the SAME renderer is a no-op remove followed by a re-add, which is harmless.
     public func attach(renderer: AVSampleBufferVideoRenderer) {
+        if let previous = videoRenderer {
+            synchronizer.removeRenderer(previous, at: synchronizer.currentTime())
+        }
         self.videoRenderer = renderer
         synchronizer.addRenderer(renderer)
     }

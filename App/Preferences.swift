@@ -22,14 +22,11 @@ enum ControlDisplayMode: String, CaseIterable, Identifiable {
 final class Preferences: ObservableObject {
     static let shared = Preferences()
 
-    /// Backing raw value that actually persists.
-    @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
-
-    /// Typed accessor used by the rest of the app.
-    var controlMode: ControlDisplayMode {
-        get { ControlDisplayMode(rawValue: controlModeRaw) ?? .overlay }
-        set { controlModeRaw = newValue.rawValue }
-    }
+    // NOTE: `controlDisplayMode` is no longer declared here. It is PER-WINDOW state now — owned by
+    // WindowChrome, which seeds from and writes back to the same key. This class used to expose a
+    // `controlMode` accessor over it that nothing ever read; leaving it would have offered a
+    // process-wide writer that could silently disagree with the windows. SettingsView still binds
+    // the key directly for its picker (see the comment there).
 
     @AppStorage("autoplayOnLoad") var autoplayOnLoad: Bool = true
 
@@ -37,13 +34,14 @@ final class Preferences: ObservableObject {
     // has no Float). Mute is intentionally NOT persisted — always start unmuted.
     @AppStorage("playbackVolume") var playbackVolume: Double = 1.0
 
-    // Scope arrangement (persisted across launches). Canonical declaration lives here;
-    // ContentView binds the same keys via @AppStorage for SwiftUI reactivity.
+    // Scope ARRANGEMENT is no longer declared here either. Tray open/close ("showTray") and the
+    // per-slot selections ("manifold.scope.slot0/1/2") are PER-WINDOW state owned by WindowChrome,
+    // which seeds from and writes back to the same keys. The `showTray` property this class used to
+    // expose had no readers; it is gone for the same reason `controlMode` is (see above).
+    // Scope STYLING below (intensities, colours, scales) stays app-wide and stays here.
+    //
     // NOTE: showReferenceLayer (⌃⌥R) is intentionally NOT persisted — it's a diagnostic
     // toggle that must always default OFF on launch, so it stays transient @State.
-    // Per-slot scope selection (manifold.scope.slot0/1/2) is owned by ContentView's @AppStorage —
-    // it superseded the old per-scope presence flags (showWaveform/showParade/showVectorscope).
-    @AppStorage("showTray") var showTray: Bool = false
 
     // Scope trace intensity — multiplies the brightness-curve gain. 1.0 = current look.
     // Per-scope values combine MULTIPLICATIVELY with the global master.
@@ -782,8 +780,11 @@ struct SettingsView: View {
     // updates when refreshDevices() publishes (called from that section's .onAppear).
     @ObservedObject private var dl = DeckLinkService.shared
 
-    // @AppStorage here drives the picker and persists the choice. It reads/writes
-    // the same "controlDisplayMode" key as Preferences above, so they stay in sync.
+    // @AppStorage here drives the picker and persists the choice, writing the SAME
+    // "controlDisplayMode" key WindowChrome seeds each window from. This is currently the only
+    // control surface for overlay-vs-docked, which is why WindowChrome adopts external writes to
+    // that key — without that, flipping this picker would change nothing until the next window was
+    // opened. See the observer comment in WindowChrome.
     @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
     @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = true
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0

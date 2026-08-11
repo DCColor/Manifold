@@ -91,11 +91,35 @@ private final class RendererStore: ObservableObject {
 }
 
 struct ContentView: View {
-    @ObservedObject var engine: FrameEngine
 
-    @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
-    private var mode: ControlDisplayMode { ControlDisplayMode(rawValue: controlModeRaw) ?? .overlay }
-    private var isDocked: Bool { mode == .docked }
+    /// THIS WINDOW'S playback engine. `@StateObject`, not `@ObservedObject` on a parameter: each
+    /// window OWNS one, and SwiftUI evaluates the initializer exactly once per window, which is
+    /// precisely the lifetime a deck should have.
+    ///
+    /// It used to be `@StateObject` on ManifoldApp and passed in, so every window was a second
+    /// view onto ONE transport — and worse than merely shared, because the engine's consumer hooks
+    /// are single-assignment: opening a second window repointed `engine.onVideoFrame` at the new
+    /// window's Metal renderer and FROZE the first window's picture, and closing either window ran
+    /// `engine.stop()` on the file the other one was playing.
+    ///
+    /// The app-wide hooks that one engine used to own are now brokered by DeckRegistry — read
+    /// WindowDeck.swift before adding anything to `.onAppear` below.
+    @StateObject private var engine = FrameEngine()
+
+    /// This window's identity in `DeckRegistry` — the seam that replaced the old `.onAppear` hook
+    /// block. Populated with the NSWindow by `WindowDeckRegistrar` (mounted in `videoRegion`).
+    @StateObject private var deck = WindowDeck()
+
+    /// PER-WINDOW chrome state: tray open/close, the three slot selections, and overlay-vs-docked.
+    /// Was five `@AppStorage` declarations here, which made all five app-wide — see WindowChrome for
+    /// the seeding/write-back semantics and for why the split matters. `@StateObject` (not
+    /// `@ObservedObject`) because each window must OWN one: SwiftUI evaluates the initializer
+    /// exactly once per window, which is precisely the lifetime this state should have.
+    @StateObject private var chrome = WindowChrome()
+
+    /// Unchanged in shape from the @AppStorage era — a computed read of the stored mode. Only the
+    /// backing store moved, so every `isDocked` call site below is untouched.
+    private var isDocked: Bool { chrome.isDocked }
 
     @State private var isImporterPresented = false
     @State private var isScrubbing = false
@@ -142,16 +166,11 @@ struct ContentView: View {
     // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
     // so video + tray both scale with the window. trayHeightFraction is the tunable ratio.
     static let trayHeightFraction: CGFloat = 0.33   // bottom third
-    // Persisted scope arrangement — same UserDefaults keys declared on Preferences
-    // (the canonical owner); @AppStorage here gives SwiftUI reactivity + write-through.
-    @AppStorage("showTray") private var showTray = false
-    // Per-slot scope selection (3-up tray). Each slot can show ANY of the four scopes, chosen live
-    // and persisted. Defaults reproduce the prior layout exactly (waveform / parade / CIE) so the
-    // first launch after this build looks unchanged until the user picks. Variable slot count /
-    // arrangement / saved layouts are a later pass.
-    @AppStorage("manifold.scope.slot0") private var slot0: ScopeKind = .waveform
-    @AppStorage("manifold.scope.slot1") private var slot1: ScopeKind = .parade
-    @AppStorage("manifold.scope.slot2") private var slot2: ScopeKind = .cie
+    // Tray open/close and the three per-slot scope selections now live on `chrome` (per window).
+    // They were @AppStorage here, which shared them across every open window; the keys and their
+    // defaults are unchanged, so an existing install's arrangement carries over. Each slot can show
+    // ANY of the four scopes, chosen live from its header picker. Variable slot count / arrangement
+    // / saved layouts are still a later pass.
     // Persisted CIE view state (written by the CIE shortcuts, read here + by CIEScopeView via the
     // same keys). useUV also seeds the renderer's kernel copy so the scatter opens in the last mode.
     @AppStorage("manifold.cie.useUV")    private var cieUseUV = true
@@ -222,10 +241,10 @@ struct ContentView: View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 videoRegion
-                    .frame(height: showTray
+                    .frame(height: chrome.showTray
                            ? geo.size.height * (1 - Self.trayHeightFraction)
                            : geo.size.height)
-                if showTray {
+                if chrome.showTray {
                     scopesTray
                         .frame(height: geo.size.height * Self.trayHeightFraction)
                 }
@@ -297,64 +316,44 @@ struct ContentView: View {
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
+        // Finder double-click / drag-to-icon is a file-open too, and it bypasses this view's
+        // fileImporter — so it must retire a live stream itself, or the stream keeps pushing to the
+        // renderer alongside the new file (double source). Closes the gap for EVERY live source
+        // through the one entry point the file importer also uses, so the two paths cannot drift as
+        // sources are added.
+        //
+        // MOVED HERE FROM ManifoldApp, which no longer has an engine to load into. SwiftUI routes
+        // an opened URL to a window in the group, so it lands in THAT window's deck.
+        .onOpenURL { url in
+            LiveSource.retireActive()
+            // ⚠️ THE HOP IS MEASURED, NOT DEFENSIVE. SwiftUI creates (or targets) a window for an
+            // opened URL and delivers this callback BEFORE that window becomes key — so testing
+            // frontmost-ness synchronously asks "is the window the user just asked for in front?"
+            // at the one instant the answer is still no. MEASURED with autoplayOnLoad = YES and
+            // the launch window still open: the file loaded and sat at frame 0, i.e. the gate
+            // refused to autoplay the very window it had just been opened into. Deferring the
+            // TEST (not the load's meaning) by one main-actor turn lets the window become key
+            // first, which is what makes `deck.shouldAutoplayOnLoad` answer the question that was
+            // actually being asked.
+            Task { @MainActor in
+                engine.load(url: url, autoplay: deck.shouldAutoplayOnLoad)
+                wakeHUD()
+            }
+        }
+        // ⚠️ WHAT USED TO BE HERE IS NOW IN WindowDeck.swift — READ THAT FILE BEFORE ADDING TO THIS
+        // BLOCK. Sixty lines of engine↔renderer wiring plus five singletons' worth of app-wide
+        // hooks (the four `*.shared.renderer` assignments, the three `onWillActivateStream`
+        // closures, both audio taps, the SDI silence gate, the system-audio routing) lived in this
+        // `.onAppear`. With ONE shared engine every window wrote the same values and the block was
+        // idempotent; with one engine PER window it became N conflicting writers of app-wide state.
+        //
+        // `DeckRegistry` now owns all of it, keyed on `viewDidMoveToWindow` (which knows WHICH
+        // window it is firing for — `.onAppear` does not, and cannot deregister). The stage-1
+        // policy is unchanged: most recently registered deck wins.
+        //
+        // WHAT LEGITIMATELY REMAINS: work that needs THIS VIEW'S state and touches nothing app-wide.
         .onAppear {
             armIdleIfNeeded()
-            if let renderer = metalRenderer {
-                renderer.clock = { engine.currentSyncTime().seconds }
-                renderer.isPausedProvider = { engine.isPausedNow() }
-                renderer.isFullRangeProvider = { engine.currentEffectiveIsFullRange() }
-                renderer.chromaConventionProvider = { engine.currentChromaConventionRaw() }
-                engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
-                engine.onFlush = { [weak renderer] in renderer?.flush() }
-                // Seed the kernel's CIE mode from the persisted value so the scatter opens in the
-                // last-left mode even if a source loaded before the CIE scope is shown. (The CIE
-                // view's header/graticule read the same @AppStorage directly, so they're already
-                // correct; this keeps the kernel-side plot in agreement.)
-                renderer.cieUseUV = cieUseUV
-                renderer.start()
-                // DeckLink output sources real video from this renderer (⌃⌥O / toolbar control).
-                DeckLinkService.shared.renderer = renderer
-                // NDI step A (throwaway trigger, ⌃⌥N) displays THROUGH this same renderer — it
-                // pulls frames on the display tick and feeds the same enqueue the file sources do.
-                NDIService.shared.renderer = renderer
-                // One active source (reverse of the file-open path disconnecting the stream): when a
-                // stream is about to take over, retire any loaded file first so both don't feed the
-                // renderer at once. NDIService has no engine handle, so it calls back through here.
-                NDIService.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
-                // A web stream displays through this SAME renderer, feeding the same enqueue NDI and
-                // the file sources feed — but paced by LiveClock rather than FrameSync or the file
-                // timebase. Same two hooks as NDI, for the same two reasons.
-                WHEPFrameRouter.shared.renderer = renderer
-                WHEPFrameRouter.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
-                // An SRT stream is a push source exactly like WHEP — same renderer, same enqueue,
-                // same LiveClock pacing through the same LiveDisplayRoute. Same two hooks, and the
-                // retire hook is called TWICE on this path (once at connect to black the display
-                // immediately, once inside the route's activate) — see SRTFrameRouter.beginTakeover.
-                SRTFrameRouter.shared.renderer = renderer
-                SRTFrameRouter.shared.onWillActivateStream = { [weak engine] in engine?.stop() }
-                // …and tees NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the
-                // clock-anchored SDI output, SDI/Computer routing and mute apply to NDI for free.
-                NDIService.shared.audioTap = engine.audioTap
-                // D4b-2: …and SDI audio from the engine's PTS-keyed PCM ring, gated by the transport.
-                // The card's audio callback pulls from the ring at the SOURCE TIME of the frame the
-                // renderer currently has staged for the card, so A/V are aligned by construction.
-                DeckLinkService.shared.audioTap = engine.audioTap
-                DeckLinkService.shared.isCardAudioSilentProvider = { engine.isCardAudioSilent() }
-                // D4b-3: the SDI and computer paths are mutually exclusive. This is the service's ONLY
-                // authority over the system renderer — it passes (outputEnabled && destination == .sdi),
-                // and the engine folds that into its existing applyAudioMute rule.
-                DeckLinkService.shared.systemAudioRouting = { owns in engine.setDeckLinkOwnsAudio(owns) }
-                // The card must be ENABLED with a fixed rate/channel count before playback starts, so a
-                // file whose audio format differs re-establishes the output (this is also what lets you
-                // enable output BEFORE loading a file and still get audio).
-                engine.audioTap.onFormatChange = { fmt in DeckLinkService.shared.audioFormatChanged(fmt) }
-                DeckLinkService.shared.refreshDevices()   // populate the device picker
-                // Explicit "Enable output on launch" preference (Settings → DeckLink Output): start
-                // output now IF the pref is on AND a capable device is present (no-op otherwise).
-                DeckLinkService.shared.autoStartOnLaunchIfEnabled()
-            }
-            // Apply persisted volume (mute is not persisted — starts unmuted).
-            engine.setVolume(Float(Preferences.shared.playbackVolume))
             // Persisted arrangement may reopen the tray with scopes already on —
             // start their sampling to match the restored visibility.
             updateScopeSampling()
@@ -480,7 +479,10 @@ struct ContentView: View {
                 // use. No-op when not streaming. One call rather than one line per source, so a
                 // source added later cannot be forgotten here.
                 LiveSource.retireActive()
-                engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
+                // `deck.shouldAutoplayOnLoad`, not the bare preference: a background window must
+                // not start playing on its own. (Reached via the importer this is almost always
+                // the front window anyway — the gate matters for the .onOpenURL path above.)
+                engine.load(url: url, autoplay: deck.shouldAutoplayOnLoad)
                 wakeHUD()
             }
         }
@@ -615,6 +617,13 @@ struct ContentView: View {
             )
             .frame(width: 0, height: 0)
 
+            // THE REGISTRATION SEAM. Hands this window's NSWindow (and with it this deck's engine
+            // and renderer) to DeckRegistry via `viewDidMoveToWindow`. A sibling of the
+            // WindowConfigurator above, which reaches for the same window to lock the aspect —
+            // this is the app's established way to get at the NSWindow from SwiftUI.
+            WindowDeckRegistrar(deck: deck, engine: engine, renderer: metalRenderer)
+                .frame(width: 0, height: 0)
+
             Button("") { togglePin() }
                 .keyboardShortcut(.tab, modifiers: [])
                 .opacity(0)
@@ -653,11 +662,11 @@ struct ContentView: View {
     /// each slot is a live picker (see slotView / ScopeSlotHeader).
     private var scopesTray: some View {
         HStack(spacing: 1) {
-            slotView(kind: slot0, selection: $slot0)
+            slotView(kind: chrome.slot0, selection: $chrome.slot0)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            slotView(kind: slot1, selection: $slot1)
+            slotView(kind: chrome.slot1, selection: $chrome.slot1)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            slotView(kind: slot2, selection: $slot2)
+            slotView(kind: chrome.slot2, selection: $chrome.slot2)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -678,7 +687,7 @@ struct ContentView: View {
     }
 
     /// The scopes currently occupying a slot — the single source of truth for which models do work.
-    private var activeKinds: Set<ScopeKind> { [slot0, slot1, slot2] }
+    private var activeKinds: Set<ScopeKind> { [chrome.slot0, chrome.slot1, chrome.slot2] }
 
     /// A scope samples only while the tray is open AND its kind occupies a slot. Everything else is
     /// stopped, so a scope not in any slot does ZERO GPU work. Driven purely by `activeKinds` (the
@@ -691,7 +700,7 @@ struct ContentView: View {
     /// models no-oping — and is cleared entirely when nothing is active, so a closed/empty tray
     /// adds zero per-frame overhead on the render thread.
     private func updateScopeSampling() {
-        let active = showTray ? activeKinds : []
+        let active = chrome.showTray ? activeKinds : []
 
         // Waveform / parade / vectorscope: plain start/stop. The matrix-aware scopes also (re)seed
         // their source CICP codes on (re)start, so a scope opened after the source loaded shows the
@@ -759,7 +768,7 @@ struct ContentView: View {
     ///   ⌃⌥1/2/3  CIE per-triangle show/hide (overlay-only → SwiftUI re-renders immediately).
     @ViewBuilder private var scopeShortcuts: some View {
         Group {
-            Button("") { showTray.toggle(); updateScopeSampling() }
+            Button("") { chrome.showTray.toggle(); updateScopeSampling() }
                 .keyboardShortcut("t", modifiers: [.control, .option])
             Button("") {
                 // Shared path with the header options menu — writes the stored value, drives the
@@ -1664,10 +1673,10 @@ struct ContentView: View {
 
                 // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is
                 // chosen per-slot via each slot's header picker, not from here.
-                Button { showTray.toggle(); updateScopeSampling() } label: {
+                Button { chrome.showTray.toggle(); updateScopeSampling() } label: {
                     Image(systemName: "chart.bar.xaxis")
                 }
-                .foregroundStyle(showTray ? Color.green : .white.opacity(0.9))
+                .foregroundStyle(chrome.showTray ? Color.green : .white.opacity(0.9))
                 .help("Scopes tray (⌃⌥T)")
 
                 // DeckLink output: split-button — main toggles output, chevron picks device + status.

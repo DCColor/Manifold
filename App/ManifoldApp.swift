@@ -4,7 +4,12 @@ import ManifoldCore
 
 @main
 struct ManifoldApp: App {
-    @StateObject private var engine = FrameEngine()
+    // ⚠️ THERE IS NO ENGINE HERE ANY MORE, AND THAT IS THE POINT. `@StateObject private var engine
+    // = FrameEngine()` used to live on this line, giving the whole app ONE playback engine that
+    // every window shared. Windows are independent decks now: ContentView owns its own engine, so
+    // a second window is a second deck rather than a second view onto the first one's transport.
+    // See WindowDeck.swift for the registration seam that keeps the app-wide hooks coherent.
+    //
     // App-layer licensing (see LicenseManager.swift). Owns the trial + license state and the gate.
     @StateObject private var license = LicenseManager.shared
     // Opens the About scene below. `openWindow` and not `orderFrontStandardAboutPanel`, because the
@@ -27,17 +32,14 @@ struct ManifoldApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(engine: engine)
+            ContentView()
                 .frame(minWidth: 720, minHeight: 460)
-                .onOpenURL { url in
-                    // Finder double-click / drag-to-icon is a file-open too, and it bypasses
-                    // ContentView's fileImporter — so it must retire a live stream itself, or the
-                    // stream keeps pushing to the renderer alongside the new file (double source).
-                    // Closes the gap for EVERY live source through the one entry point the file
-                    // importer also uses, so the two paths cannot drift as sources are added.
-                    LiveSource.retireActive()
-                    engine.load(url: url, autoplay: Preferences.shared.autoplayOnLoad)
-                }
+                // `.onOpenURL` MOVED DOWN INTO ContentView, because it needs an engine and this
+                // scope no longer has one. SwiftUI delivers an opened URL to a window in the
+                // group, and the modifier now sits on the view that owns that window's deck — so
+                // the file lands in the engine belonging to the window that received it. See the
+                // measured multi-window behaviour in docs/MULTIWINDOW_FINDINGS.md.
+                //
                 // Gate the whole app behind the license/trial. Offline users with a valid
                 // embedded-verified key are usable and never see the gate — network is never the gate.
                 .licenseGate(license)
