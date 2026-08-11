@@ -163,6 +163,27 @@ public enum MediaInspector {
         }
     }
 
+    /// The source's CICP colour codes alone, from a format description that is ALREADY IN HAND.
+    ///
+    /// ── WHY THIS EXISTS SEPARATELY FROM `metadata(for:url:)` ───────────────────────────────
+    ///
+    /// `metadata` is the full inspection — its own track load, frame rate, data rate, a second
+    /// open of the file through libav for HDR10, audio tracks, text tracks, timecode, chapters,
+    /// common metadata — and it is `await`ed by nobody on the load path. The three numbers the
+    /// DISPLAY needs are a pure read of one format description the loader has already loaded for
+    /// its range determination, and they must be available BEFORE the first frame is presented,
+    /// not whenever that inspection happens to finish. See `FrameEngine.onSourceColorTags`.
+    ///
+    /// ⚠️ IT DELEGATES TO `colorTags` RATHER THAN RE-READING THE EXTENSIONS. Two derivations of
+    /// the same three codes is exactly how the early value and the inspector's value drift apart,
+    /// and a display that disagrees with its own inspector panel is a worse bug than the one this
+    /// closes. One function, two callers.
+    public static func colorCodes(for fmt: CMFormatDescription)
+        -> (primaries: Int?, transfer: Int?, matrix: Int?) {
+        let c = colorTags(for: fmt)
+        return (c.primCode, c.transCode, c.matrixCode)
+    }
+
     private static func colorTags(for fmt: CMFormatDescription)
         -> (primName: String, primCode: Int?,
             transName: String, transCode: Int?,

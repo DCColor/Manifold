@@ -501,11 +501,97 @@ final class MetalVideoRenderer {
     /// STRICTLY from this field (never inferred from primaries). nil/2/unknown → 709.
     private(set) var sourceMatrixCode: Int?
 
+    /// The colour state waiting to be installed on the layer, handed from MAIN to the RENDER
+    /// THREAD. Guarded by `refreshLock`, like every other main→render one-shot on this type.
+    ///
+    /// See the threading note on `setSourceColorSpace` for why the layer is not written on main.
+    private struct PendingColorState {
+        let colorSpace: CGColorSpace
+        let wantsEDR: Bool
+    }
+    private var pendingColorState: PendingColorState?
+
+    /// True once a colour state has been queued at least once. MAIN THREAD ONLY — it exists purely
+    /// to stop the "same codes, do nothing" early-out from swallowing the very FIRST call, whose
+    /// codes (nil, nil, nil) match the initial values of the three stored codes. Deliberately not
+    /// set from the render thread: a flag read on main should be written on main.
+    private var hasQueuedColorState = false
+
+    /// Presents since the last `flush()`, i.e. since the current source began.
+    ///
+    /// ⚠️ SINCE THE FLUSH, NOT SINCE LAUNCH, AND THE DIFFERENCE IS THE WHOLE POINT. A cumulative
+    /// count answers the wrong question the moment a deck opens a SECOND file: frames of the
+    /// previous file were legitimately presented, so any non-zero total would read as a fault.
+    /// A flush is the source boundary (every load and every seek goes through one), so counting
+    /// from there is what makes "did this source's colour state land before this source's first
+    /// frame?" a question with a true answer. Written on the render thread; reset under
+    /// `refreshLock` in `flush()`.
+    private var presentsSinceFlush: UInt64 = 0
+
+    /// The space that actually goes on the layer: the source-derived one, unless the Experiment 3
+    /// destination override is active. Resolved on MAIN so the render thread installs a value and
+    /// makes no decisions — in a Release build the override does not exist and this is identity.
+    private func resolvedDestinationColorSpace(_ sourceDerived: CGColorSpace) -> CGColorSpace {
+        #if DEBUG
+        switch debugDestination {
+        case .source:   return sourceDerived
+        case .itur709:  return CGColorSpace(name: CGColorSpace.itur_709) ?? sourceDerived
+        case .synthG24: return Self.synthesisedGamma24ColorSpace ?? sourceDerived
+        }
+        #else
+        return sourceDerived
+        #endif
+    }
+
     /// Derive the layer's colorspace from the source's authoritative color tags
-    /// (CICP codes from MediaInspector) and assign it ONCE. Re-call on each new
-    /// source. This replaces the per-frame buffer-attachment derivation, which
-    /// could flip to an unspecified-primaries space on some frames.
+    /// (CICP codes from MediaInspector) and hand it to the render thread to install.
+    ///
+    /// ── CALLED BEFORE THE FIRST FRAME EXISTS, NOT WHENEVER INSPECTION FINISHES ──────────────
+    ///
+    /// The load path calls this through `FrameEngine.onSourceColorTags` at the point the video
+    /// track's format description is in hand and BEFORE `beginReading` — the only thing that can
+    /// produce a frame. It used to be driven solely by `.onChange(of: engine.metadata)`, i.e. by
+    /// a detached inspection Task plus a SwiftUI update pass, which lost the race to the first
+    /// present. That observer still calls this with the same three codes; the equality check
+    /// below turns it into a no-op re-assert.
+    ///
+    /// ── THREADING: THE LAYER IS WRITTEN ON THE RENDER THREAD, AND ONLY THERE ────────────────
+    ///
+    /// `CAMetalLayer` is not safe to mutate concurrently with drawable acquisition, and the
+    /// render thread calls `nextDrawable()` / `present()` / sets `drawableSize` on this same
+    /// layer every tick. The old code wrote `colorspace` and `wantsExtendedDynamicRangeContent`
+    /// from MAIN inside a `CATransaction`, and its comment claimed the transaction made that
+    /// safe. It does not: a transaction orders the mutation with respect to the layer tree's
+    /// commit, not with respect to another thread inside `nextDrawable`. It was only ever
+    /// ACCIDENTALLY safe, because it fired once per source at a moment when — as it turns out —
+    /// the race with the first frame was usually being lost anyway.
+    ///
+    /// Two things make that no longer good enough, and they arrive together: this fix makes the
+    /// call land in the middle of a load rather than after it, and mid-stream colorimetry changes
+    /// (an NDI source switch, an in-band SPS change on WHEP/SRT) make a SECOND call during live
+    /// playback ordinary rather than hypothetical.
+    ///
+    /// So the discipline is the one the rest of this file already uses for `pendingClear`,
+    /// `pendingRefresh` and `pendingSeekRender`: MAIN COMPUTES, THE RENDER THREAD INSTALLS.
+    /// The CGColorSpace is built here (pure CoreGraphics, no layer involved), parked under
+    /// `refreshLock`, and applied at the TOP of `performDisplayTick` — before that tick can touch
+    /// a drawable. There is then exactly one writer of the layer's colour properties, on one
+    /// thread, and it can never interleave with a present.
+    ///
+    /// `pendingRefresh` is set with it so the state also reaches a frame that is ALREADY on
+    /// screen: a colorspace applies at present time, so a change with nothing new to draw would
+    /// otherwise sit installed and invisible until the next frame — which, paused, means until
+    /// the user hits play. That is precisely the bug this whole change exists to remove, and the
+    /// re-render is what closes it for the mid-session case as well as the load case.
     func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?) {
+        // A RE-ASSERT OF THE SAME CODES IS A NO-OP. The metadata observer now arrives second with
+        // the values the load path already published; without this it would re-post the state,
+        // re-render a frame and print the [EDR] block a second time per source.
+        if hasQueuedColorState, sourcePrimariesCode == primaries,
+           sourceTransferCode == transfer, sourceMatrixCode == matrix {
+            return
+        }
+        hasQueuedColorState = true
         // Store the raw CICP codes FIRST (before the colorspace guard) so the CIE scope can
         // pick its RGB→XYZ matrix + EOTF even when CGColorSpace construction below fails.
         sourcePrimariesCode = primaries
@@ -534,21 +620,30 @@ final class MetalVideoRenderer {
         //      Scoping the flag to HDR sources removes the question instead of betting on it.
         let isHDRTransfer = (transfer == 16 || transfer == 18)   // PQ / HLG
 
-        // Assign inside a synchronized transaction (actions disabled) so this
-        // once-per-source mutation can't tear against an in-flight frame on the
-        // CVDisplayLink render thread.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        metalLayer.colorspace = cs
-        metalLayer.wantsExtendedDynamicRangeContent = isHDRTransfer
-        CATransaction.commit()
-
         #if DEBUG   // ⚠️ EXPERIMENT 3 — retain the source space, then honour any active override.
+        // Retained BEFORE the hand-off so `cycleDebugDestination` (⌃⌥D) has something to swap back
+        // to. The destination override is resolved here, on main, and what reaches the layer is
+        // the resolved space — the render thread installs one value and makes no decisions.
         sourceDerivedColorSpace = cs
-        // Always re-apply (for .source this re-assigns the identical space) so every run logs which
-        // destination is live — the capture is only interpretable alongside that confirmation.
-        applyLayerColorSpace()
         #endif
+        let resolved = resolvedDestinationColorSpace(cs)
+        #if DEBUG
+        // ONE [CSDEBUG] LINE PER SOURCE LOAD, and it is not decoration: `sweep.sh` greps exactly
+        // this line out of each run's log to confirm WHICH destination the capture it just took was
+        // made under — "the capture is only interpretable alongside that confirmation". The old
+        // code emitted it as a side effect of re-applying the layer space on every load; this path
+        // no longer writes the layer from main, so the line is stated deliberately instead.
+        logCSDebug("[CSDEBUG] layer destination = \(debugDestination.label)  → CGColorSpace "
+                   + (resolved.name.map { String($0) } ?? "<unnamed>"))
+        #endif
+
+        // HAND OFF; DO NOT ASSIGN. The layer's colour properties are written on the render thread
+        // only — see the threading note above. `pendingRefresh` rides along so a frame already on
+        // screen is re-presented under the new state rather than waiting for the next one.
+        refreshLock.lock()
+        pendingColorState = PendingColorState(colorSpace: resolved, wantsEDR: isHDRTransfer)
+        pendingRefresh = true
+        refreshLock.unlock()
 
         // NOTE: edrMetadata (CAEDRMetadata) is deliberately NOT set — E3. This stage tests
         // whether colorspace + the opt-in alone lift the image. If PQ content does not display
@@ -609,34 +704,32 @@ final class MetalVideoRenderer {
     private var sourceDerivedColorSpace: CGColorSpace?
 
     /// ⌃⌥D — advance to the next destination and re-apply. Main thread.
+    ///
+    /// Goes through the SAME hand-off as a source change (`queueColorState`), so the sweep is
+    /// still measuring the real display path and not a second, differently-threaded one.
     func cycleDebugDestination() {
         let all = DebugDestination.allCases
         let next = all[(all.firstIndex(of: debugDestination)! + 1) % all.count]
         debugDestination = next
-        applyLayerColorSpace()
-        setNeedsRefresh()   // force a redraw so the change is on screen even when paused/ended
+        guard let cs = sourceDerivedColorSpace else {
+            logCSDebug("[CSDEBUG] destination \(debugDestination.label) unavailable — no source space yet")
+            return
+        }
+        let resolved = resolvedDestinationColorSpace(cs)
+        // EDR is a property of the SOURCE, not of the destination under test, so it is carried
+        // through unchanged rather than recomputed here.
+        refreshLock.lock()
+        let wantsEDR = pendingColorState?.wantsEDR ?? metalLayer.wantsExtendedDynamicRangeContent
+        pendingColorState = PendingColorState(colorSpace: resolved, wantsEDR: wantsEDR)
+        pendingRefresh = true      // redraw so the change is on screen even when paused/ended
+        refreshLock.unlock()
+        let nm = resolved.name.map { String($0) } ?? "<unnamed>"
+        logCSDebug("[CSDEBUG] layer destination = \(debugDestination.label)  → CGColorSpace \(nm)")
     }
 
-    /// Assign metalLayer.colorspace per the active destination. Same CATransaction discipline as
-    /// the original assignment in setSourceColorSpace.
-    private func applyLayerColorSpace() {
-        let cs: CGColorSpace?
-        switch debugDestination {
-        case .source:   cs = sourceDerivedColorSpace
-        case .itur709:  cs = CGColorSpace(name: CGColorSpace.itur_709)
-        case .synthG24: cs = Self.synthesisedGamma24ColorSpace
-        }
-        // stderr, not print(): stdout is block-buffered when redirected to a file, so a print()
-        // here is still sitting in the buffer when the sweep script kills the app.
-        func logCS(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
-        guard let cs else { logCS("[CSDEBUG] destination \(debugDestination.label) unavailable"); return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        metalLayer.colorspace = cs
-        CATransaction.commit()
-        let nm = cs.name.map { String($0) } ?? "<unnamed>"
-        logCS("[CSDEBUG] layer destination = \(debugDestination.label)  → CGColorSpace \(nm)")
-    }
+    /// stderr, not print(): stdout is block-buffered when redirected to a file, so a print() here
+    /// is still sitting in the buffer when the sweep script kills the app.
+    private func logCSDebug(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
 
     /// A synthesised ICC: 709/sRGB primaries (Bradford-adapted to D50, the standard colorant
     /// values) with a 'para' functionType-0 TRC. 2.4 is not exactly representable in s15Fixed16 —
@@ -1084,7 +1177,13 @@ final class MetalVideoRenderer {
         // A seek just cleared the queue. Arm the one-shot: if we're paused and the next
         // delivered frame overshoots the pinned clock (pts > now), displayTick renders it
         // anyway so the paused offscreen isn't left on the previous frame.
-        refreshLock.lock(); pendingSeekRender = true; refreshLock.unlock()
+        // `presentsSinceFlush` is reset with it: a flush IS the source boundary, which is what
+        // makes "was the colour state installed before this source's first frame?" answerable at
+        // all — see where it is reported, in the tick.
+        refreshLock.lock()
+        pendingSeekRender = true
+        presentsSinceFlush = 0
+        refreshLock.unlock()
     }
 
     /// Wipe the screen to BLACK on the next display tick. Called when a source is torn down (NDI
@@ -1179,6 +1278,52 @@ final class MetalVideoRenderer {
         // and throttling presentation. CVMetalTextureCacheFlush is the documented fix and is harmless
         // for normal (already-bounded) playback. Same thread as makeTexture, so no extra locking.
         CVMetalTextureCacheFlush(textureCache, 0)
+
+        // ── COLOUR STATE, INSTALLED HERE AND NOWHERE ELSE ─────────────────────────────────────
+        //
+        // FIRST THING IN THE TICK, before the clear branch, before a frame is selected, and above
+        // all before anything acquires or presents a drawable. Two properties come from that
+        // placement and neither is incidental:
+        //
+        //   1. THREAD SAFETY. This is the only writer of the layer's colour properties, and it
+        //      runs on the same thread as `nextDrawable`/`present`/`drawableSize`, so a mutation
+        //      can never interleave with a present. Main hands over a computed value under
+        //      `refreshLock` (see setSourceColorSpace) and touches the layer not at all.
+        //   2. ORDERING. A CAMetalLayer applies its colorspace AT PRESENT TIME, so whatever is
+        //      installed when a drawable is presented is what that frame is drawn through — and
+        //      it stays that way until the NEXT present. Installing at the top of the tick means
+        //      any frame this tick presents already carries the current state.
+        //
+        // The CATransaction is kept: these are still layer-tree mutations and should land as one.
+        refreshLock.lock()
+        let colorState = pendingColorState
+        pendingColorState = nil
+        refreshLock.unlock()
+        if let colorState {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            metalLayer.colorspace = colorState.colorSpace
+            metalLayer.wantsExtendedDynamicRangeContent = colorState.wantsEDR
+            CATransaction.commit()
+            // ORDERING, STATED WHERE IT CAN BE CHECKED — the line the first-frame bug is read off.
+            //
+            // `presents=0` means this source's colour state reached the layer before any of its
+            // frames reached the screen, which is the property the load path is arranged to
+            // guarantee and the one that would regress silently. Non-zero means the old race is
+            // back: a frame was presented first and, because a CAMetalLayer applies its colorspace
+            // AT PRESENT TIME, was drawn through whatever the layer held before — the `pendingRefresh`
+            // queued alongside this is then what repairs it, one tick later, instead of the user
+            // pressing play.
+            //
+            // Ungated, like the rest of the [EDR] family (see the note on `colorSpaceIdentity`):
+            // these lines ship, and a tester's diagnostics export is where this gets noticed.
+            print("[EDR] colour state installed on the layer after \(presentsSinceFlush) present(s) "
+                + "of this source"
+                + (presentsSinceFlush == 0
+                   ? " — BEFORE its first frame, as intended"
+                   : " — ⚠️ AFTER a frame was already on screen; that frame was drawn through the"
+                     + " previous colour state. Re-rendering to repair it."))
+        }
 
         // One-shot screen wipe: a source was torn down with nothing to replace it. Present a black
         // drawable and stop, dropping the retained last frame so no later tick can repaint it.
@@ -1533,6 +1678,7 @@ final class MetalVideoRenderer {
         // present() BEFORE commit() so Metal schedules the present with this frame's GPU work and the
         // drawable is handed back to the pool as soon as the frame is scanned out (not deferred).
         cmdBuffer.present(drawable)
+        presentsSinceFlush &+= 1
         #if DEBUG
         // present() is just an enqueue of the present request — cheap unless it internally blocks.
         // Kept separate from commit so a stall shows up on the stage that actually owns it.

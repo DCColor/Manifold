@@ -103,6 +103,30 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// renderer can clear its frame queue. Called on the main actor.
     public var onFlush: (() -> Void)?
 
+    /// THE SOURCE'S CICP COLOUR CODES, PUBLISHED BEFORE THE FIRST FRAME CAN BE ENQUEUED.
+    ///
+    /// ── WHY THIS IS A CALLBACK AND NOT A `@Published` PROPERTY ─────────────────────────────
+    ///
+    /// The layer colorspace used to be derived from `metadata`, through SwiftUI's
+    /// `.onChange(of: engine.metadata)`. That is late twice over: `metadata` is produced by a
+    /// detached inspection Task that the load path never awaits (it re-opens the file through
+    /// libav for HDR10, and reads audio tracks, text tracks, timecode, chapters and common
+    /// metadata), and even once it lands, `.onChange` runs a SwiftUI update pass later. Frames
+    /// meanwhile flow from `beginReading`. MEASURED: on a 24-track master the first frame was
+    /// presented with NO colorspace on the layer, 5 launches out of 5 — and because a
+    /// CAMetalLayer applies its colorspace at PRESENT time, the wrong picture then persisted
+    /// until the next present. Not a flash: a stuck frame that survived a 15 s wait and a window
+    /// move, and corrected only on play.
+    ///
+    /// A `@Published` property would have kept the SwiftUI hop and therefore kept the race. This
+    /// is a direct call, on the main actor, in the same turn as the load — the same shape as
+    /// `onVideoFrame` and `onFlush`, and wired in the same place (`DeckRegistry.configure`).
+    ///
+    /// nil codes mean "no source, or nothing declared" — the renderer resolves that to its 709
+    /// default. Publishing nils on unload is what stops a failed open, or an emptied deck, from
+    /// leaving the PREVIOUS file's colour space on the layer.
+    public var onSourceColorTags: ((Int?, Int?, Int?) -> Void)?
+
     nonisolated(unsafe) private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
     private let audioRenderer = AVSampleBufferAudioRenderer()
@@ -532,6 +556,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // previous shape for the few ms until inspection returns, rather than flashing the 16:9
         // fallback.
         displaySize = nil
+        // …AND THE COLOUR STATE WITH IT, same class of bug, one degree nastier. A deck emptied by
+        // an unload — including the deck a live stream is taking the display from — must not hand
+        // the next source the departed file's colorspace. Unlike `displaySize`, holding the old
+        // value across the gap is not a harmless brief inaccuracy: the layer applies its
+        // colorspace at PRESENT time, so the next source's FIRST frame would be drawn through the
+        // dead file's space and would stay that way until something presented again.
+        onSourceColorTags?(nil, nil, nil)
     }
 
     /// Publish the frame size of a LIVE (non-file) source into this deck.
@@ -666,6 +697,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         tcInfo = nil
         currentURL = nil
         playbackNotice = notice
+        // A WINDOW THAT FAILED TO OPEN A FILE MUST NOT KEEP THE PREVIOUS FILE'S COLOUR SPACE.
+        // Same class as `displaySize` above: state that describes a source which is no longer
+        // there. It is worse than a stale size, because nothing on screen looks wrong — the deck
+        // is empty — right up until the next source arrives and is drawn through it.
+        onSourceColorTags?(nil, nil, nil)
     }
 
     private func loadAsset(url: URL, autoplay: Bool) async {
@@ -755,12 +791,32 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         useLibav = false
         if let formats = try? await vTrack.load(.formatDescriptions), let fmt = formats.first {
             sourceRange = MediaInspector.sourceColorRange(for: fmt)
+            // ── THE DISPLAY'S COLOUR STATE, ESTABLISHED HERE AND NOT FROM `metadata` ─────────
+            //
+            // THIS POINT, AND NOT ONE LINE LATER, IS THE WHOLE FIX. It is the same format
+            // description the range determination above already has in hand, so the codes cost
+            // nothing to read; it is on the main actor, in the same turn; and it is BEFORE
+            // `beginReading` at the bottom of this function, which is the ONLY thing that
+            // creates a reader and therefore the only thing that can enqueue a frame. Nothing
+            // between here and there produces a picture, so no frame can reach the renderer
+            // before the layer has been told what it is looking at.
+            //
+            // The `metadata` observer still calls the same renderer method later with the same
+            // three codes; that call is now a no-op re-assert (the renderer compares before
+            // acting). It stays because it is also where the DeckLink output and the scope
+            // headers are re-derived, which genuinely do belong to the full inspection.
+            let codes = MediaInspector.colorCodes(for: fmt)
+            onSourceColorTags?(codes.primaries, codes.transfer, codes.matrix)
             // DNxHR can't decode through VideoToolbox; route it to libav. Its real
             // range (DNxHR/MXF ACLR) comes from libav's color_range, applied in
             // beginLibavReading — overriding the often-untagged AVFoundation read.
             useLibav = MediaInspector.requiresLibavDecode(fmt)
         } else {
             sourceRange = .untagged
+            // NO FORMAT DESCRIPTION IS ALSO AN ANSWER, and it must be published rather than
+            // skipped: leaving the previous file's codes standing is the stale-colour bug in its
+            // purest form. nils resolve to the renderer's 709 default.
+            onSourceColorTags?(nil, nil, nil)
         }
         updateEffectiveRange()
 
@@ -952,6 +1008,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 let info = try source.open()
                 sourceRange = info.isFullRange ? .full : .videoLegal
                 updateEffectiveRange()
+                // Same rule as the AVFoundation path, at this path's equivalent point: libav has
+                // just told us what the stream declares, and the decode pump is armed BELOW this
+                // block, so this precedes the first frame. On the MXF path AVFoundation supplies
+                // nothing at all, so without this the layer would keep the previous file's space
+                // for the whole of the load — and `applyLibavMetadata` (which does carry these
+                // codes) is both later and behind a SwiftUI update pass.
+                onSourceColorTags?(info.primariesCode, info.transferCode, info.matrixCode)
                 // MXF: AVFoundation is blind to the container, so the UI facts
                 // (duration/size/fps/color/codec) come from libav. .mov-DNx already
                 // has them from AVFoundation (videoTrack set) — leave those untouched.
