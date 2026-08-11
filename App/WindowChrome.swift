@@ -36,6 +36,38 @@ import SwiftUI
 @MainActor
 final class WindowChrome: ObservableObject {
 
+    /// Height of the scopes tray, in points. **FIXED, NOT A PROPORTION**, and that is a deliberate
+    /// reversal of the `trayHeightFraction = 0.33` this replaces.
+    ///
+    /// A proportional tray meant resizing the window rescaled the scopes along with the picture,
+    /// which is backwards: a waveform does not get more useful when it is taller, and a colourist
+    /// dragging a window bigger is asking for more PICTURE. Fixed height makes the window's height
+    /// affine in its width (`contentH = contentW / videoAspect + chromeH`), which is exactly the
+    /// relationship `WindowSizer` enforces and the one `contentAspectRatio` could not express.
+    ///
+    /// ── WHERE 204 COMES FROM, AND WHY THE PREVIOUS 240 WAS DERIVED WRONG ─────────────────
+    ///
+    /// 204 is what the old proportional layout gave at the window size actually in use when the
+    /// fixed tray was reported as too short. It is a MEASUREMENT of what was lost, not a taste
+    /// judgement, and it restores that rather than inventing a new number.
+    ///
+    /// The 240 it replaces was 33% of the app's EMPTY-window default (1280×720 → 238). That is the
+    /// wrong window to have measured: a window with a source in it is never that size, because
+    /// `WindowSizer.sizeToSource` fits the source into 80% of the visible frame at up to 1:1. The
+    /// constant was calibrated against a window nobody grades in.
+    ///
+    /// ⚠️ INTERIM. This is a single app-wide number for a quantity that wants to be per-window and
+    /// user-set. Arc C replaces it with a draggable divider that seeds from this constant — see
+    /// docs/ARC-C-SCOPE-DIVIDER.md. Do not tune this further; move it to the divider instead.
+    static let trayHeight: CGFloat = 204
+
+    /// Opening estimate for the docked control bar's height, in points. The bar MEASURES itself and
+    /// reports the real value (see `ContentView.dockedControlBar`), so this is a seed and not an
+    /// authority: it only decides the window's height for the one layout pass before the measurement
+    /// lands. It is here rather than inlined so the number that would produce a visible first-frame
+    /// jump if it were wrong is at least written down next to the thing it estimates.
+    static let dockedControlBarHeight: CGFloat = 76
+
     /// The persisted keys. Same strings the `@AppStorage` declarations used — see above.
     enum Key {
         static let showTray    = "showTray"

@@ -468,6 +468,33 @@ final class MetalVideoRenderer {
         // effect on the normal display path.
         metalLayer.framebufferOnly = false
         metalLayer.isOpaque = true
+
+        // ── THE PRESENT IS OURS TO TIME ─────────────────────────────────────────────────
+        //
+        // presentsWithTransaction = TRUE: the present is committed as part of a CATransaction on the
+        // render thread rather than being scheduled by the GPU out of band. Without it the layer's
+        // BOUNDS (changed by AppKit on main, ~72/s during a drag) and the layer's CONTENTS (presented
+        // by us at the source frame rate) land in different transactions, so the compositor can show
+        // a frame produced for one geometry inside another. The cost is a `waitUntilScheduled()` on
+        // the render thread before each present — see `presentDrawable`, which is the single place
+        // that protocol is implemented, and the presMs column of [RENDER-PERF], which is where its
+        // price is visible.
+        metalLayer.presentsWithTransaction = true
+
+        // ── AND THE DRAWABLE IS OURS TO SIZE ────────────────────────────────────────────
+        //
+        // ⚠️ THERE IS NO `autoResizeDrawable` TO TURN OFF HERE. That property is on MTKView, not on
+        // CAMetalLayer; a raw layer has only `drawableSize`, which starts out as bounds ×
+        // contentsScale. So "we size it explicitly" is not a flag, it is a discipline: `setLayoutSize`
+        // (main) → the top of `performDisplayTick` (render thread) is the one writer, and it writes
+        // the LAYOUT-derived size.
+        //
+        // That is what removes the old conflict, and the conflict was real: the render thread used to
+        // write `drawableSize = SOURCE size` on every frame while the layer's own default tracked
+        // bounds × contentsScale, so the drawable's size during a resize was whichever of the two
+        // moved last. Both now compute the same number from the same input, so there is nothing left
+        // to disagree about — and the value they agree on is the display raster, not the source.
+        metalLayer.drawableSize = .zero   // "no layout reported yet" — see the fallback in renderPixelBuffer
         // Colorspace AND the EDR opt-in are set per SOURCE in setSourceColorSpace(...), from the
         // file's CICP tags. wantsExtendedDynamicRangeContent is deliberately NOT set here — see
         // the E2 note there for why it is HDR-conditional rather than globally on.
@@ -486,6 +513,57 @@ final class MetalVideoRenderer {
 
     deinit {
         stop()
+    }
+
+    // MARK: - The display raster
+
+    /// The view's laid-out size, in POINTS, plus its backing scale. Called from
+    /// `MetalHostView.layout()` — i.e. on main, once per AppKit layout pass, ~72/s during a live
+    /// resize.
+    ///
+    /// ── WHY THE DRAWABLE IS SIZED FROM THE LAYOUT AND NOT FROM THE SOURCE ────────────────
+    ///
+    /// It used to be `drawableSize = source size`, with `autoResizeDrawable` left at its default of
+    /// TRUE. Those two are in direct conflict: Core Animation resized the drawable from the layer's
+    /// bounds on every layout pass and the render thread wrote the source size back on every frame,
+    /// so during a resize the drawable's size was whichever of the two wrote last. Both writers also
+    /// touched the same CAMetalLayer from different threads.
+    ///
+    /// Now `autoResizeDrawable` is FALSE and this is the only input: the drawable is the DISPLAY
+    /// RASTER, at the resolution the picture is actually shown at. The consequences are worth being
+    /// explicit about, because two of them are improvements and one is a real cost:
+    ///
+    ///   * The offscreen→drawable stage becomes a RESAMPLE instead of a 1:1 copy. That resample was
+    ///     always happening — Core Animation did it, at a filter we did not choose, after present.
+    ///     It now happens in our render pass, under a filter we state.
+    ///   * A 1080p source in a 4K window is now rendered AT 4K rather than presented at 1080p and
+    ///     upscaled by the compositor.
+    ///   * COST: the drawable is reallocated when the layout size changes. During a live resize that
+    ///     is once per layout pass. Measured as acceptable — see the RENDER-PERF note in
+    ///     `recordRenderPerf` — but it is the reason this is coalesced below rather than written per
+    ///     call.
+    ///
+    /// ⚠️ THE OFFSCREEN IS UNAFFECTED AND MUST STAY THAT WAY. It remains at SOURCE resolution
+    /// (`ensureOffscreenTexture`), because the scopes, the DeckLink v210 convert and the frame
+    /// export all read it and all of them mean SOURCE pixels. A waveform must not change because the
+    /// window was resized. Sizing the offscreen from the layout would be a measurement bug wearing a
+    /// performance optimisation's clothes.
+    func setLayoutSize(points: CGSize, scale: CGFloat) {
+        let pixels = CGSize(width: (points.width * scale).rounded(),
+                            height: (points.height * scale).rounded())
+        guard pixels.width >= 1, pixels.height >= 1 else { return }
+        // Coalesce on main. A live resize reports ~72/s and most passes are the same size (AppKit
+        // lays out for reasons other than a size change); only a genuine change is worth a lock.
+        guard pixels != lastReportedLayoutPixels else { return }
+        lastReportedLayoutPixels = pixels
+
+        refreshLock.lock()
+        pendingDrawableSize = pixels
+        // A PAUSED window must re-render, or the resized drawable keeps whatever was in the
+        // recycled buffer. `pendingRefresh` is the file's existing "re-present the last frame"
+        // one-shot and is exactly the right signal — the same one a colour-state change uses.
+        pendingRefresh = true
+        refreshLock.unlock()
     }
 
     // MARK: - Source colorspace (set once per source)
@@ -510,6 +588,22 @@ final class MetalVideoRenderer {
         let wantsEDR: Bool
     }
     private var pendingColorState: PendingColorState?
+
+    /// ── THE DISPLAY RASTER, HANDED FROM MAIN TO THE RENDER THREAD ────────────────────────
+    ///
+    /// The drawable is sized from the LAYOUT, in device pixels, and no longer from the source. See
+    /// `setLayoutSize` for why, and `installPendingDrawableSize` for where it lands.
+    ///
+    /// Under `refreshLock` and installed at the top of `performDisplayTick`, for exactly the reason
+    /// `pendingColorState` is: `drawableSize` is a CAMetalLayer property, the render thread is
+    /// inside `nextDrawable()` on that same layer, and writing it from main is the concurrent
+    /// mutation this file's threading note already forbids. One writer, one thread.
+    private var pendingDrawableSize: CGSize?
+
+    /// The layout size most recently reported by the view, in device pixels. MAIN THREAD ONLY —
+    /// it exists so `setLayoutSize` can drop the ~72/s of identical reports a live resize produces
+    /// without taking `refreshLock` for each one.
+    private var lastReportedLayoutPixels: CGSize = .zero
 
     /// True once a colour state has been queued at least once. MAIN THREAD ONLY — it exists purely
     /// to stop the "same codes, do nothing" early-out from swallowing the very FIRST call, whose
@@ -1298,7 +1392,18 @@ final class MetalVideoRenderer {
         refreshLock.lock()
         let colorState = pendingColorState
         pendingColorState = nil
+        let drawableSize = pendingDrawableSize
+        pendingDrawableSize = nil
         refreshLock.unlock()
+
+        // THE DISPLAY RASTER, INSTALLED HERE AND NOWHERE ELSE — same placement and the same reason
+        // as the colour state above: this is the one thread that touches the layer, and it must
+        // land before anything acquires a drawable, because `nextDrawable()` vends a texture of
+        // whatever size is current when it is called.
+        if let drawableSize, metalLayer.drawableSize != drawableSize {
+            metalLayer.drawableSize = drawableSize
+        }
+
         if let colorState {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -1591,13 +1696,29 @@ final class MetalVideoRenderer {
         let rpTexEnd = CACurrentMediaTime()
         #endif
 
-        if metalLayer.drawableSize != CGSize(width: width, height: height) {
-            metalLayer.drawableSize = CGSize(width: width, height: height)
+        // ⚠️ THE DRAWABLE IS NO LONGER SIZED FROM THE SOURCE. It is the DISPLAY raster and is
+        // installed at the top of `performDisplayTick` from the layout — see `setLayoutSize`. Two
+        // fallbacks to the source size remain, and both are degradations rather than policy:
+        //
+        //   1. PRE-LAYOUT. `autoResizeDrawable` is false, so if the first frame beats the first
+        //      layout pass nothing has ever sized the drawable and `nextDrawable()` vends nothing.
+        //      The source size makes that frame correct rather than absent; the next layout pass
+        //      supersedes it.
+        //   2. NO SCALING PIPELINE. The offscreen→drawable stage resamples, and the blit fallback
+        //      below cannot scale (`MTLBlitCommandEncoder.copy` requires equal extents). If the
+        //      pipeline failed to build we pin the drawable to the source so the blit is valid and
+        //      Core Animation scales it, exactly as it did before this change — a worse picture,
+        //      never a black one.
+        if metalLayer.drawableSize.width < 1 || metalLayer.drawableSize.height < 1
+            || displayCopyPipelineState == nil {
+            let sourceSize = CGSize(width: width, height: height)
+            if metalLayer.drawableSize != sourceSize { metalLayer.drawableSize = sourceSize }
         }
 
-        // Render into this frame's ring texture (1:1 with the drawable), then blit it to the
-        // drawable for display. We write the WRITE-index buffer (not the readable one); it's
-        // published as readable in the completion handler below, once its GPU write is done.
+        // Render into this frame's ring texture (SOURCE resolution — see ensureOffscreenTexture),
+        // then resample it to the drawable for display. We write the WRITE-index buffer (not the
+        // readable one); it's published as readable in the completion handler below, once its GPU
+        // write is done.
         ensureOffscreenTexture(width: width, height: height)
         let writeIndex = offscreenWriteIndex
         guard writeIndex < offscreenRing.count else { return }
@@ -1675,17 +1796,13 @@ final class MetalVideoRenderer {
             blit.endEncoding()
         }
 
-        // present() BEFORE commit() so Metal schedules the present with this frame's GPU work and the
-        // drawable is handed back to the pool as soon as the frame is scanned out (not deferred).
-        cmdBuffer.present(drawable)
-        presentsSinceFlush &+= 1
+        // ⚠️ NO `cmdBuffer.present(drawable)` HERE. With `presentsWithTransaction` the present has to
+        // happen AFTER the command buffer is scheduled, inside a CATransaction — see
+        // `presentDrawable`, below the commit. The completion handler and the commit are unchanged.
         #if DEBUG
-        // present() is just an enqueue of the present request — cheap unless it internally blocks.
-        // Kept separate from commit so a stall shows up on the stage that actually owns it.
-        let rpPresEnd = CACurrentMediaTime()
         // Wall clock at commit, captured so the completion handler can compute end-to-end latency
         // (commit → GPU-done + present). A growing lat with flat gpu = drawable/present back-pressure.
-        let rpCommitWall = rpPresEnd
+        let rpCommitWall = CACurrentMediaTime()
         #endif
 
         // Publish this buffer as the readable frame + trigger scope sampling ONLY once the
@@ -1722,10 +1839,26 @@ final class MetalVideoRenderer {
         cmdBuffer.commit()
         #if DEBUG
         let rpCommitEnd = CACurrentMediaTime()
+        #endif
+
+        presentDrawable(drawable, on: cmdBuffer)
+        // Counted HERE and not in `presentDrawable`, deliberately: this counter answers "did the
+        // colour state reach the layer before this SOURCE's first frame?", and a black-frame present
+        // (presentBlackFrame, on teardown) is not one of this source's frames. Counting it there
+        // would report 1 where the teardown→new-source path must report 0.
+        presentsSinceFlush &+= 1
+
+        #if DEBUG
+        let rpPresEnd = CACurrentMediaTime()
         recordRenderPerf(texture:  rpTexEnd    - rpTexStart,
                          drawable: rpDrawEnd   - rpDrawStart,
                          encode:   rpEncEnd    - rpEncStart,
-                         present:  rpPresEnd   - rpDrawEnd,   // blit + present() (drawable already acquired)
+                         // presMs NOW MEANS THE TRANSACTIONAL PRESENT — waitUntilScheduled() plus the
+                         // CATransaction — which is the price of `presentsWithTransaction` and the
+                         // one number that says whether it is costing us. It used to mean the blit
+                         // plus an enqueue-only present(), which was always ~0.02 ms; do not compare
+                         // the two across that change.
+                         present:  rpPresEnd   - rpCommitEnd,
                          commit:   rpCommitEnd - rpCommitStart,
                          iosurface: rpIOSurface)
         #endif
@@ -1829,6 +1962,29 @@ final class MetalVideoRenderer {
     }
     #endif
 
+    /// ── THE PRESENT PROTOCOL, IMPLEMENTED ONCE ──────────────────────────────────────────────
+    ///
+    /// `metalLayer.presentsWithTransaction` is TRUE, which changes how a drawable is presented and
+    /// the change is not optional: `cmdBuffer.present(drawable)` DOES NOTHING USEFUL under it. The
+    /// drawable must be presented directly, after the command buffer has been SCHEDULED, from
+    /// inside a CATransaction — that is what puts the new contents and the layer's current geometry
+    /// into the same commit, which is the entire point (see the layer configuration in `init`).
+    ///
+    /// ⚠️ `waitUntilScheduled()` BLOCKS THIS THREAD. That is the cost, it is real, and it is paid on
+    /// every presented frame in steady state — not only during a resize. It waits for the GPU driver
+    /// to SCHEDULE the buffer, not to execute it, so it is short; `presMs` in [RENDER-PERF] is the
+    /// measurement, and `tickMs` is where it would show up if it ever grew enough to push the
+    /// display-link callback off cadence.
+    ///
+    /// Every present in this file goes through here. If you add a second one, add it here too.
+    private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer) {
+        cmdBuffer.waitUntilScheduled()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        drawable.present()
+        CATransaction.commit()
+    }
+
     /// Present ONE cleared (black) drawable, replacing whatever was last on screen. A clear-only
     /// render pass straight to the drawable — no offscreen, no blit, no scope/DeckLink publish
     /// (there is no frame to sample). Render thread only, so it is the sole nextDrawable() caller
@@ -1843,12 +1999,17 @@ final class MetalVideoRenderer {
         guard let cmdBuffer = commandQueue.makeCommandBuffer(),
               let encoder = cmdBuffer.makeRenderCommandEncoder(descriptor: passDesc) else { return }
         encoder.endEncoding()   // clear-only pass — the load action does the work
-        cmdBuffer.present(drawable)
         cmdBuffer.commit()
+        presentDrawable(drawable, on: cmdBuffer)
     }
 
-    /// (Re)create the persistent offscreen render target when missing or when the
-    /// size changes. Kept 1:1 with the current drawable size — resolution-neutral.
+    /// (Re)create the persistent offscreen render target when missing or when the size changes.
+    ///
+    /// ⚠️ SIZED FROM THE SOURCE, AND NOT FROM THE DRAWABLE. It used to be the same thing; since the
+    /// drawable became the DISPLAY raster (`setLayoutSize`) it is not. The offscreen must stay at
+    /// source resolution because the scopes, the DeckLink v210 convert and the frame export all read
+    /// this ring and all of them mean source pixels — a waveform that changed when the window was
+    /// resized would be a measurement bug. The window's size reaches the drawable and stops there.
     private func ensureOffscreenTexture(width: Int, height: Int) {
         if !offscreenRing.isEmpty, let size = offscreenSize, size.w == width, size.h == height {
             return

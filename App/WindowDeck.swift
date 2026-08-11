@@ -188,6 +188,16 @@ final class WindowDeck: ObservableObject {
     fileprivate weak var engine: FrameEngine?
     fileprivate weak var renderer: MetalVideoRenderer?
 
+    /// THIS WINDOW'S SIZE CONSTRAINT — the forwarding `NSWindowDelegate` that replaced the static
+    /// `contentAspectRatio`. Owned here, and not by a view, because it must be exactly as long-lived
+    /// as the window: it holds SwiftUI's own delegate for the duration and has to hand it back at
+    /// close. `DeckRegistry` attaches it at registration and detaches it at deregistration;
+    /// `WindowConfigurator` feeds it the picture's shape and the chrome height on every update pass.
+    ///
+    /// Per window like everything else on a deck, which is what makes two windows with different
+    /// chrome states size independently — the constraint reads THIS deck's `WindowChrome`.
+    let sizer = WindowSizer()
+
     /// What this deck is allowed to do. THE ARBITER OWNS THIS — see `DeckRegistry`.
     @Published fileprivate(set) var gate = DeckGate()
 
@@ -241,6 +251,7 @@ final class WindowDeck: ObservableObject {
     func load(url: URL) {
         engine?.load(url: url, autoplay: shouldAutoplayOnLoad)
     }
+
 }
 
 // MARK: - The registry / arbiter
@@ -345,6 +356,20 @@ final class DeckRegistry {
                 let registry = DeckRegistry.shared
                 guard registry.entries[ObjectIdentifier(window)] != nil else { return }
                 registry.keyDeckWindow = window
+                // ── WHERE THE SIZE CONSTRAINT IS INSTALLED, AND WHY HERE ──────────────────
+                //
+                // Taking `window.delegate` during SwiftUI's scene setup makes SwiftUI TEAR THE SCENE
+                // DOWN — measured on the document-launch path, where the window then never comes on
+                // screen at all (the isolation test is written up in the WindowSizer header).
+                // Becoming key is the earliest moment that is demonstrably past setup, and the hop
+                // gives AppKit's own key-window handling the turn it is in the middle of. Idempotent,
+                // so every later activation is a no-op.
+                if let keyDeck = registry.entries[ObjectIdentifier(window)]?.deck {
+                    Task { @MainActor in
+                        guard keyDeck.window === window else { return }
+                        keyDeck.sizer.installConstraint()
+                    }
+                }
                 registry.applyArbitration("key window")
             }
         })
@@ -451,6 +476,11 @@ final class DeckRegistry {
         prune()
         deck.window = window
         entries[ObjectIdentifier(window)] = Entry(deck: deck, window: window)
+        // BEFORE `configure`: the sizer learns which window it governs here, so every PROGRAMMATIC
+        // resize works from the moment the deck exists. It deliberately does NOT take the window's
+        // delegate here — doing so during scene setup tears the scene down (MEASURED; see the
+        // WindowSizer header). That happens on the first key notification below.
+        deck.sizer.bind(to: window)
         configure(deck)
         // DEFERRED, NOT INLINE: this runs inside `viewDidMoveToWindow`, which can land in a SwiftUI
         // update pass, and the pass publishes `gate`. One main-actor turn also lets the new window
@@ -469,6 +499,14 @@ final class DeckRegistry {
     fileprivate func deregister(window: NSWindow) {
         guard let entry = entries.removeValue(forKey: ObjectIdentifier(window)) else { return }
         entry.deck?.window = nil
+
+        // Hand the window delegate back to SwiftUI and drop our reference to it — symmetric with the
+        // `bind` in `register` and the `installConstraint` on first key. It belongs here rather than
+        // only in the sizer's deinit, because the deck outlives this call by however long SwiftUI
+        // holds its `@StateObject`, and a proxy left in the chain is a delegate message going to an
+        // object that no longer speaks for any window. (The deinit is still needed as well: this
+        // reference to the deck is WEAK, so a deck that dies before deregistering never gets here.)
+        entry.deck?.sizer.detach()
 
         if let deck = entry.deck {
             let id = ObjectIdentifier(deck)

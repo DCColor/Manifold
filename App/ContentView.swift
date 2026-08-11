@@ -163,9 +163,17 @@ struct ContentView: View {
     // silent, which is correct for a shipped build: nothing announces the render path unasked.
     @State private var showReferenceLayer = false
 
-    // Scopes tray: a proportional bottom share of the content area (NOT fixed pixels),
-    // so video + tray both scale with the window. trayHeightFraction is the tunable ratio.
-    static let trayHeightFraction: CGFloat = 0.33   // bottom third
+    // Scopes tray: a FIXED bottom strip (`WindowChrome.trayHeight`), not the proportional share it
+    // used to be — resizing the window scales the video and leaves the scopes alone. See the note on
+    // that constant for why, and WindowSizer.swift for the window-height consequence.
+    //
+    // MEASURED height of the docked control bar, seeded from `WindowChrome.dockedControlBarHeight`.
+    // Measured rather than asserted because this number is an input to the WINDOW's height: a
+    // hard-coded constant that drifted from the bar's real intrinsic height would show as a sliver
+    // of the picture cropped, or a sliver of black under the bar, with nothing on screen saying why.
+    // Changes at most once per window (the bar's content is fixed-height and width-independent), and
+    // `WindowSizer` ignores sub-point differences, so this cannot oscillate against the resize.
+    @State private var dockedBarHeight: CGFloat = WindowChrome.dockedControlBarHeight
     // Tray open/close and the three per-slot scope selections now live on `chrome` (per window).
     // They were @AppStorage here, which shared them across every open window; the keys and their
     // defaults are unchanged, so an existing install's arrangement carries over. Each slot can show
@@ -248,16 +256,49 @@ struct ContentView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            VStack(spacing: 0) {
-                videoRegion
-                    .frame(height: chrome.showTray
-                           ? geo.size.height * (1 - Self.trayHeightFraction)
-                           : geo.size.height)
-                if chrome.showTray {
-                    scopesTray
-                        .frame(height: geo.size.height * Self.trayHeightFraction)
-                }
+        // ══════════════════════════════════════════════════════════════════════════════════
+        //  THE INVARIANT — CHROME NEVER REDUCES THE VIDEO'S SIZE.
+        //
+        //  This is the LAYOUT half of the rule; `WindowSizer` holds the sizing half and states it
+        //  in full (see the `VideoBox` header there, which makes the violation a compile error
+        //  rather than something to remember). The two halves must agree or the window is a
+        //  correctly-sized box around a wrongly-sized picture.
+        //
+        //  What this VStack must keep true:
+        //
+        //    * Every child BELOW `videoRegion` states a FIXED height and declares it in
+        //      `chromeHeight`. `WindowSizer` then makes the window taller by exactly that much, so
+        //      the remainder handed to `videoRegion` is still the picture's own shape.
+        //    * `videoRegion` takes the REMAINDER (`maxHeight: .infinity`). It is never given a
+        //      computed height, and nothing below it is proportional to the window.
+        //    * THE SOLE EXCEPTION is the SCREEN CAP — a window the display cannot show. It is
+        //      handled once, in `WindowSizer.constrainedContentSize`, by shrinking the picture
+        //      ON-SHAPE. Nothing in this file may create a second exception.
+        //
+        //  ⚠️ ADDING CHROME IS A TWO-LINE CHANGE AND BOTH LINES ARE REQUIRED: put the view here
+        //  with a fixed height, and add that height to `chromeHeight`. A view added here WITHOUT
+        //  the second line takes its height out of the picture and silently pillarboxes it — which
+        //  is exactly the bug this arc removed and is invisible unless you go looking.
+        //
+        //  For the record of what that looks like: the GeometryReader this replaced divided a FIXED
+        //  window between the video and a proportional tray, so opening the tray took a third of the
+        //  height from the picture and `.aspectRatio(.fit)` pillarboxed a 16:9 image into a 2.65:1
+        //  box — 16.5% of the window black down each side.
+        // ══════════════════════════════════════════════════════════════════════════════════
+        VStack(spacing: 0) {
+            videoRegion
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // DOCKED CONTROLS ARE CHROME, NOT AN OVERLAY. They used to be drawn inside
+            // `videoRegion`'s ZStack pinned to its bottom edge, i.e. ON TOP OF the picture — which
+            // is what "docked" was hiding: there was no room made for the bar, so it covered the
+            // frame it was meant to sit under. Overlay mode still draws inside the picture, which is
+            // what an auto-hiding floating HUD is for.
+            if isDocked && hasSource {
+                dockedControlBar
+            }
+            if chrome.showTray {
+                scopesTray
+                    .frame(height: WindowChrome.trayHeight)
             }
         }
         .ignoresSafeArea()
@@ -602,9 +643,34 @@ struct ContentView: View {
     }
 
     /// Source aspect ratio (falls back to 16:9 before metadata loads).
+    ///
+    /// ⚠️ `WindowSizer` APPLIES THE SAME FALLBACK TO THE SAME INPUT (`engine.displaySize`), and the
+    /// two must agree: the window is shaped so that the video region is exactly this ratio, so a
+    /// window computed for 16:9 around a region laid out for something else is black bars by
+    /// construction. That is why the sizer takes the SIZE and does its own fallback rather than
+    /// taking this already-resolved ratio — nil ("no source") and 16:9 ("a 16:9 source") are
+    /// different statements to the sizer, which sizes to a source the first time it sees one.
     private var videoAspect: CGFloat {
         if let s = engine.displaySize, s.width > 0, s.height > 0 { return s.width / s.height }
         return 16.0 / 9.0
+    }
+
+    /// Total height of everything drawn BELOW the picture in THIS window, in points — the `chromeH`
+    /// term in `WindowSizer`'s constraint, and the reason the window grows instead of the video
+    /// shrinking.
+    ///
+    /// PER WINDOW, because every term is: `chrome` is this window's `WindowChrome` (Arc A) and
+    /// `hasSource` is this window's engine. Two windows with different chrome states therefore size
+    /// independently, with no coordination anywhere — each one's `WindowConfigurator` feeds its own
+    /// deck's sizer.
+    ///
+    /// The docked bar counts only while `hasSource`, because that is exactly when it is in the view
+    /// tree; the empty state has no transport to dock.
+    private var chromeHeight: CGFloat {
+        var height: CGFloat = 0
+        if isDocked && hasSource { height += dockedBarHeight }
+        if chrome.showTray { height += WindowChrome.trayHeight }
+        return height
     }
 
     /// The video region: aspect-fit picture (never cropped/stretched), transport
@@ -659,21 +725,24 @@ struct ContentView: View {
                 // monitoring mode — it needs the same reveal-on-hover HUD, scopes, guides and overlay
                 // as file playback. The transport row lives here too; its file-specific affordances
                 // simply no-op over a live stream, which is a separate (banked) concern.
-                VStack {
-                    Spacer()
-                    controls(showPin: !isDocked)
-                        .padding(isDocked ? 14 : 12)
-                        .background(
-                            isDocked
-                                ? AnyShapeStyle(.black.opacity(0.85))
-                                : AnyShapeStyle(.black.opacity(0.55)),
-                            in: RoundedRectangle(cornerRadius: isDocked ? 0 : 12)
-                        )
-                        .frame(maxWidth: isDocked ? .infinity : 760)
-                        .padding(isDocked ? 0 : 16)
+                //
+                // OVERLAY MODE ONLY. The docked bar left this ZStack: it is chrome, laid out BELOW
+                // the picture by `body`, and it used to be drawn here — pinned to the bottom of the
+                // video region, i.e. over the frame it was meant to sit under. A floating HUD that
+                // auto-hides is the one control surface that belongs on top of the picture.
+                if !isDocked {
+                    VStack {
+                        Spacer()
+                        controls(showPin: true)
+                            .padding(12)
+                            .background(.black.opacity(0.55),
+                                        in: RoundedRectangle(cornerRadius: 12))
+                            .frame(maxWidth: 760)
+                            .padding(16)
+                    }
+                    .opacity(controlsShown ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.30), value: controlsShown)
                 }
-                .opacity(controlsShown ? 1 : 0)
-                .animation(.easeInOut(duration: 0.30), value: controlsShown)
             } else {
                 // "Open… to begin" means NOTHING is on screen — no file and no stream. `hasSource`
                 // already folds in the NDI flag, so this branch is reached only when truly idle.
@@ -682,7 +751,9 @@ struct ContentView: View {
 
             WindowConfigurator(
                 buttonsVisible: hasSource ? controlsShown : true,
-                displaySize: engine.displaySize
+                deck: deck,
+                displaySize: engine.displaySize,
+                chromeHeight: chromeHeight
             )
             .frame(width: 0, height: 0)
 
@@ -730,6 +801,36 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.25), value: whep.lastError)
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
+    }
+
+    /// The DOCKED control bar: the same transport row the overlay HUD shows, laid out as a real bar
+    /// BELOW the picture instead of on top of it. Always visible (docking is the mode that opts out
+    /// of auto-hide), no pin button (there is nothing to pin), full window width.
+    ///
+    /// IT MEASURES ITSELF, and that is load-bearing rather than tidy. Its height is an input to the
+    /// WINDOW's height — `WindowSizer` grows the window by exactly `chromeHeight` — so a constant
+    /// that drifted from the bar's real intrinsic height would silently crop the bottom of the
+    /// picture or leave a black sliver under the bar, and the only symptom would be "the framing
+    /// looks slightly off". Reporting the laid-out height closes that by construction, and keeps
+    /// doing so when the row gains a control.
+    ///
+    /// The measurement cannot oscillate against the resize it feeds: the row's height is set by its
+    /// fixed-size content, not by the width (both readouts are `lineLimit(1)` and the slider absorbs
+    /// horizontal squeeze), so a wider or narrower window reports the same number back.
+    private var dockedControlBar: some View {
+        controls(showPin: false)
+            .padding(14)
+            .frame(maxWidth: .infinity)
+            .background(Color.black.opacity(0.85))
+            .overlay(alignment: .top) {
+                // Hairline against the picture, so the bar reads as chrome rather than as a
+                // letterbox bar the video happens to stop above.
+                Rectangle().fill(.white.opacity(0.10)).frame(height: 0.5)
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                guard height > 0, abs(height - dockedBarHeight) > 0.5 else { return }
+                dockedBarHeight = height
+            }
     }
 
     /// The scopes tray: three equal-width slots, each rendering the scope its @AppStorage selection
@@ -1735,6 +1836,11 @@ struct ContentView: View {
                 Text(leadingReadout)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.85))
+                    // ONE LINE, ALWAYS. In the docked bar this row's height is measured and fed to
+                    // the WINDOW's height; a readout that wrapped at a narrow width would make the
+                    // bar taller, which would resize the window, which would change the width. One
+                    // line breaks that loop at the only place it could start.
+                    .lineLimit(1)
                     .frame(minWidth: 86, alignment: .leading)
                     .onTapGesture { cycleReadout() }
 
@@ -1768,6 +1874,7 @@ struct ContentView: View {
                 Text(trailingReadout)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)                       // see the leading readout
                     .frame(minWidth: 86, alignment: .trailing)
                     .onTapGesture { cycleReadout() }
             }

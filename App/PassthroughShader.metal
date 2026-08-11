@@ -153,20 +153,48 @@ fragment half4 passthroughFragment(VertexOut in [[stage_in]],
 // (x,y), so the 1:1 mapping is a property of the addressing, not of a filter mode that a later edit
 // could change. (Measured: sampler with filter::nearest is also bit-identical at 1920x1080 and
 // 3840x2160 — but only the read() form is 1:1 BY CONSTRUCTION.)
+// ⚠️ THIS STAGE IS NOW A RESAMPLE, NOT A 1:1 COPY, AND THAT IS DELIBERATE.
+//
+// The drawable is sized from the LAYOUT (the display raster), not from the source — see
+// `MetalVideoRenderer.setLayoutSize`. So the offscreen (SOURCE resolution) and the drawable
+// (DISPLAY resolution) differ in general, and `read()` at the fragment's own pixel coordinate —
+// which is what this used to do — would crop the top-left corner of the source into the drawable
+// instead of scaling it.
+//
+// THE RESAMPLE IS NOT NEW WORK. Core Animation was already scaling the presented drawable into the
+// layer's bounds; this stage does the same arithmetic one step earlier, at a filter we choose, and
+// before the present rather than after it. What IS new is that a 1080p source in a 4K window is now
+// resampled ONCE, to the display raster, instead of being presented at 1080p and upscaled by the
+// compositor.
+//
+// `filter::linear` — bilinear. Correct for the scale-up case (the common one: a 1080p source in a
+// window larger than 1080p on a 2x display). It is deliberately NOT the `.none` interpolation the
+// SCOPES use: a scope trace is a measurement and must stay crisp, but a picture being scaled to a
+// monitor wants a smooth filter. Note this stage reads the offscreen and writes the DRAWABLE, so it
+// cannot be observed by the scopes, the DeckLink v210 convert or the frame export — all of which
+// read the offscreen ring at source resolution.
 struct DisplayCopyVertexOut {
     float4 position [[position]];
+    float2 uv;
 };
 
 vertex DisplayCopyVertexOut displayCopyVertex(uint vertexID [[vertex_id]]) {
     float2 positions[4] = { float2(-1,-1), float2(1,-1), float2(-1,1), float2(1,1) };
+    float2 p = positions[vertexID];
     DisplayCopyVertexOut out;
-    out.position = float4(positions[vertexID], 0.0, 1.0);
+    out.position = float4(p, 0.0, 1.0);
+    // Clip space has y UP; texture coordinates have y DOWN and origin at the top-left. Flipping y
+    // here is what keeps the picture the right way up — the previous read() form got this for free
+    // because [[position]] is already a top-left-origin framebuffer coordinate.
+    out.uv = float2((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5);
     return out;
 }
 
 fragment half4 displayCopyFragment(DisplayCopyVertexOut in [[stage_in]],
-                                   texture2d<half, access::read> src [[texture(0)]]) {
-    return src.read(uint2(in.position.xy));
+                                   texture2d<half, access::sample> src [[texture(0)]]) {
+    constexpr sampler s(coord::normalized, address::clamp_to_edge,
+                        filter::linear, mip_filter::none);
+    return src.sample(s, in.uv);
 }
 
 // MARK: - GPU scopes (Phase 1 prototype: luma waveform)
