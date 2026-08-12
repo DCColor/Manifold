@@ -33,10 +33,21 @@ final class UpdateChecker {
     /// failing fast keeps a dead network from holding a URLSession task open behind the user's back.
     private static let timeout: TimeInterval = 5
 
-    /// Cap on release notes shown in the dialog. The current manifest carries 6 and all 6 fit; the
-    /// cap exists so a future 30-note release can't produce an alert taller than the screen. When it
-    /// bites, the dialog says so rather than silently truncating.
+    /// How many release notes the dialog shows BEFORE the user asks for the rest.
+    ///
+    /// ⚠️ THIS IS NOW A FOLD, NOT A TRUNCATION, and the difference is the whole point. It used to be
+    /// a hard cap: the dialog printed six bullets and "…and 4 more." — text that told the user
+    /// something existed and gave them no way to reach it, which is worse than showing nothing at
+    /// all. The remainder is now behind a button that expands the alert in place.
+    ///
+    /// The number still exists for the reason the cap did: a thirty-note release must not open a
+    /// dialog taller than the screen. Six is what the 0.5.x releases carried and it is a
+    /// comfortable opening height — see `ReleaseNotesAccessory` for the measured geometry.
     private static let maxNotesShown = 6
+
+    /// Above this many notes the expanded list scrolls instead of growing the alert. Derived, not
+    /// guessed: see the height table in `ReleaseNotesAccessory`.
+    private static let scrollThreshold = 14
 
     // MARK: - State
 
@@ -221,18 +232,29 @@ final class UpdateChecker {
             ? "Manifold \(manifest.version) (build \(manifest.build)) is available"
             : "Manifold \(manifest.version) is available"
 
-        var body = "You have \(local.version) (build \(local.build))."
-        if !manifest.notes.isEmpty {
-            let shown = manifest.notes.prefix(maxNotesShown)
-            body += "\n\n" + shown.map { "•  \($0)" }.joined(separator: "\n")
-            let hidden = manifest.notes.count - shown.count
-            if hidden > 0 { body += "\n\n…and \(hidden) more." }
-        }
-        alert.informativeText = body
+        alert.informativeText = "You have \(local.version) (build \(local.build))."
         alert.alertStyle = .informational
+
+        // THE NOTES MOVED OUT OF `informativeText` AND INTO AN ACCESSORY VIEW. `informativeText` is
+        // a flat string on a label — nothing in it can be clicked, which is exactly why the old
+        // "…and 4 more." was dead. An accessory view is real AppKit and can hold a button.
+        var accessory: ReleaseNotesAccessory?
+        if !manifest.notes.isEmpty {
+            let view = ReleaseNotesAccessory(notes: manifest.notes,
+                                             collapsedCount: maxNotesShown,
+                                             scrollThreshold: scrollThreshold)
+            // Re-laying out the alert is the host's job, not the view's: `layout()` lives on NSAlert
+            // and the view has no business knowing what it is embedded in.
+            view.onToggle = { [weak alert] in alert?.layout() }
+            alert.accessoryView = view
+            accessory = view
+        }
 
         alert.addButton(withTitle: "Download")   // default — first button
         alert.addButton(withTitle: "Not now")
+        // Keyboard focus must not land on the disclosure button — ⏎ has to mean Download. Asked for
+        // after the buttons exist, because that is when the alert has a window to ask about.
+        accessory?.declineFirstResponder(in: alert)
 
         if alert.runModal() == .alertFirstButtonReturn {
             NSLog("[UPDATE] opening download page")
@@ -261,4 +283,159 @@ final class UpdateChecker {
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
+}
+
+// MARK: - The expandable release-notes list
+
+/// The release-notes list inside the update alert: a few bullets, and a button that reveals the
+/// rest by growing the dialog in place.
+///
+/// ── WHY THIS IS A VIEW AND NOT MORE `informativeText` ─────────────────────────────────────
+///
+/// `NSAlert.informativeText` is a plain `String` rendered into a label the alert owns. Nothing in
+/// it is addressable, so "…and 4 more." could never have been made clickable — it was a sentence
+/// describing an absence. `NSAlert.accessoryView` is the supported seam for putting real controls
+/// into an alert, and `NSAlert.layout()` is the supported way to tell the alert its accessory
+/// changed size. Together they give expand-in-place without leaving the NSAlert idiom, which
+/// matters here: this dialog is raised at LAUNCH from a static context, and NSAlert is the only
+/// presentation in the app that needs no window to attach to.
+///
+/// ── MEASURED GEOMETRY — system font, 380 pt column, the real 0.6.0 notes ──────────────────
+///
+/// Measured by building this exact view inside a real `NSAlert` and reading `alert.window.frame`
+/// after `layout()`. Re-measure if the font, the column width or the threshold changes:
+///
+///     case                                  accessory   alert window
+///     ───────────────────────────────────   ─────────   ────────────
+///     6-note release (nothing folded)          176 pt        394 pt
+///     0.6.0 as it opens — 10 notes, 6 shown    200 pt        418 pt
+///     0.6.0 expanded — all 10                  296 pt        514 pt
+///     14 notes expanded (last size that grows) 424 pt        642 pt
+///     15+ notes expanded (scrolls, capped)     448 pt        666 pt
+///     30 notes as it opens (still 6 shown)     200 pt        418 pt
+///
+/// (The 24 pt step at the threshold is the scroller appearing, not a jump in the text.)
+///
+/// **Expanding the current release costs 96 pt** — 418 → 514. The bullets are long enough that most
+/// wrap to two lines, so a note costs ~24 pt rather than the ~18 pt a single line would.
+///
+/// ⚠️ ABOVE `scrollThreshold` NOTES THE EXPANDED LIST SCROLLS instead of growing the window, and the
+/// cap is set so crossing the threshold does not change the dialog's size (see `maxScrollHeight`).
+/// The ceiling is 642 pt against ~870 pt of usable height on the shortest display this app supports
+/// (1440×900, less menu bar and Dock). Without the cap a thirty-note release would open an alert
+/// roughly 1,100 pt tall with its buttons off the bottom of the screen — unclickable, and
+/// unreachable by keyboard for anyone who does not already know that ⏎ is Download.
+///
+/// Note the folded height is CONSTANT at 418 pt whatever the release carries, because the fold is
+/// what the dialog opens at. Only someone who asks for the rest pays for it.
+final class ReleaseNotesAccessory: NSView {
+
+    /// Called after the fold state changes, so the host can re-lay-out the alert. The view resizes
+    /// ITSELF; making the alert catch up is the host's job (`NSAlert.layout()`).
+    var onToggle: (() -> Void)?
+
+    /// The text column. 380 pt is a touch wider than NSAlert's natural text width, so the alert
+    /// grows to fit the accessory rather than the accessory being squeezed — which keeps the bullets
+    /// on the same measure as the message above them instead of wrapping earlier.
+    private static let width: CGFloat = 380
+    /// Gap between the last bullet and the disclosure button.
+    private static let buttonGap: CGFloat = 8
+
+    private let notes: [String]
+    private let collapsedCount: Int
+    private let scrolls: Bool
+    private var expanded = false
+
+    private let label = NSTextField(wrappingLabelWithString: "")
+    private let button = NSButton(title: "", target: nil, action: nil)
+    private let scrollView = NSScrollView()
+
+    init(notes: [String], collapsedCount: Int, scrollThreshold: Int) {
+        self.notes = notes
+        self.collapsedCount = collapsedCount
+        self.scrolls = notes.count > scrollThreshold
+        super.init(frame: .zero)
+
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
+        label.textColor = .labelColor
+        label.preferredMaxLayoutWidth = Self.width
+        // Selectable so a tester can copy a line out of the dialog, editable false. Costs nothing
+        // and is the difference between "I'll retype this" and ⌘C.
+        label.isSelectable = true
+
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.target = self
+        button.action = #selector(toggle)
+        button.contentTintColor = .controlAccentColor
+
+        if scrolls {
+            scrollView.hasVerticalScroller = true
+            scrollView.drawsBackground = false
+            scrollView.borderType = .noBorder
+            scrollView.documentView = label
+            addSubview(scrollView)
+        } else {
+            addSubview(label)
+        }
+        addSubview(button)
+
+        applyState()
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    /// ⏎ MUST MEAN DOWNLOAD. An accessory view's controls join the alert's key loop, and a button
+    /// that took first responder would swallow Return — turning the primary action into "expand the
+    /// list", which is the opposite of what someone pressing Return in an update dialog wants.
+    func declineFirstResponder(in alert: NSAlert) {
+        alert.window.initialFirstResponder = alert.buttons.first
+    }
+
+    @objc private func toggle() {
+        expanded.toggle()
+        applyState()
+        onToggle?()
+    }
+
+    /// Rebuild the text and resize self to fit. Called on construction and on every toggle.
+    private func applyState() {
+        let visible = expanded ? notes : Array(notes.prefix(collapsedCount))
+        label.stringValue = visible.map { "•  \($0)" }.joined(separator: "\n")
+
+        let hidden = notes.count - collapsedCount
+        if hidden > 0 {
+            // A disclosure triangle plus a sentence, rather than a bare "…and 4 more.": the triangle
+            // is the part that says "this opens", which is precisely what the old text lacked.
+            button.title = expanded ? "▾  Show fewer" : "▸  Show \(hidden) more"
+            button.isHidden = false
+        } else {
+            button.isHidden = true
+        }
+
+        // Lay out bottom-up: the button sits under the text, and `self` is exactly as tall as both.
+        let textHeight = label.sizeThatFits(NSSize(width: Self.width,
+                                                  height: .greatestFiniteMagnitude)).height
+        // The scrolling case is the only one that CAPS the height; the growing case is whatever the
+        // text needs. `maxScrollHeight` is the same budget the threshold was derived from.
+        let visibleTextHeight = scrolls && expanded ? min(textHeight, Self.maxScrollHeight) : textHeight
+        button.sizeToFit()
+        let buttonHeight = button.isHidden ? 0 : button.frame.height + Self.buttonGap
+
+        let container = scrolls ? scrollView : label
+        container.frame = NSRect(x: 0, y: buttonHeight,
+                                 width: Self.width, height: visibleTextHeight)
+        if scrolls { label.frame = NSRect(x: 0, y: 0, width: Self.width, height: textHeight) }
+        button.frame = NSRect(x: 0, y: 0, width: button.frame.width, height: button.frame.height)
+        frame = NSRect(x: 0, y: 0, width: Self.width, height: visibleTextHeight + buttonHeight)
+    }
+
+    /// The tallest the notes list is allowed to get once it scrolls.
+    ///
+    /// CHOSEN TO MATCH THE GROWING CASE AT THE THRESHOLD, not picked for roundness: 14 notes is the
+    /// last count that grows, and it needs 424 pt of text. Setting the scroll cap to the same figure
+    /// means crossing the threshold does not change the dialog's size — without it, a 15-note
+    /// release opened a SHORTER dialog than a 14-note one (502 pt vs 642 pt), which is a visible
+    /// discontinuity with no meaning behind it. Re-measure both if the threshold moves.
+    private static let maxScrollHeight: CGFloat = 424
 }

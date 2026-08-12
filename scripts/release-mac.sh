@@ -726,6 +726,62 @@ cp -R "$APP" "${STAGE_DIR}/"
 DMG="${RUN_DIR}/${APP_NAME}-${VERSION}-${NEW_BUILD}-${CONFIG}.dmg"
 rm -f "$DMG"
 
+# ── THE VOLUME ICON ────────────────────────────────────────────────────────────────────
+#
+# Without this the mounted volume, and the .dmg file itself, carry the generic white disk
+# icon: the one thing a user sees before they have installed anything looks like it came
+# from nobody. `--volicon` writes the image to `.VolumeIcon.icns` at the volume root and
+# sets the volume's custom-icon bit.
+#
+# SOURCED FROM THE BUILT APP, NOT A COPY IN THE REPO. `Contents/Resources/AppIcon.icns` is
+# what Xcode compiled from App/Assets.xcassets/AppIcon.appiconset for THIS build, so the
+# volume icon cannot drift from the app icon — there is no second asset to forget to
+# update. Format is `.icns`; create-dmg takes nothing else.
+#
+# ASSERTED, NOT ASSUMED. If Xcode ever renames the output or the asset catalog loses its
+# AppIcon set, a missing file would otherwise mean silently shipping the generic icon again
+# — the exact defect this removes, and invisible in a log nobody reads.
+VOLICON="${STAGE_DIR}/${APP_NAME}.app/Contents/Resources/AppIcon.icns"
+[[ -f "$VOLICON" ]] || die "volume icon not found at ${VOLICON}
+       The DMG would ship with the generic disk icon. Check that the AppIcon set is still
+       present in App/Assets.xcassets and that Xcode emitted AppIcon.icns."
+ok "volume icon: $(basename "$VOLICON") ($(stat -f%z "$VOLICON") bytes)"
+
+# ── THE WINDOW'S COORDINATE SYSTEM, MEASURED ───────────────────────────────────────────
+#
+# create-dmg's own help says only "set position of the file's icon", which leaves the two
+# questions that actually matter unanswered. Both were settled by cutting an image, mounting
+# it, and measuring the rendered window rather than by reading the flag names:
+#
+#   * `--window-size 540 380` is the CONTENT rect, not the outer frame. Finder reports the
+#     mounted window's bounds as 200,120 → 740,500 — exactly 540 × 380 — so the title bar is
+#     additional and nothing has to be subtracted from these numbers.
+#
+#   * `--icon <name> <x> <y>` and `--app-drop-link <x> <y>` position the icon's CENTRE, NOT
+#     its top-left corner, in points, in that content rect, with y measured DOWNWARD from the
+#     top. Measured on the built image: the app glyph's horizontal centre lands at x = 140 for
+#     a specified 140, and the Applications alias at 399 for a specified 400. Vertically the
+#     glyph centre sits at ~194 for a specified 190; the ~4 pt is transparent padding in the
+#     icon art, not an offset in the coordinate system.
+#
+# WHICH IS WHY THESE PARTICULAR NUMBERS ARE RIGHT, and they are not arbitrary:
+#     y = 190  is the vertical centre of a 380-tall window.
+#     x = 140 and x = 400 are symmetric about the 270 centre line, so the pair is balanced
+#              and the drag from app to alias is horizontal.
+# Change `--window-size` and all three of those have to move with it.
+#
+# ── IF A BACKGROUND IS EVER ADDED, IT GOES HERE ────────────────────────────────────────
+#
+# `--background <pic.png>` (png/gif/jpg, per create-dmg --help) would slot in immediately
+# after `--volicon` below. There is deliberately none today: the window is plain, and correct
+# icon positions plus a real volume icon are the substance of it.
+#
+# The one thing to know before adding one: the artwork has to be authored against the CONTENT
+# rect above (540 × 380 at 1x), because the icon coordinates are in that same space — so a
+# background drawn for a different window size will put any "drag me" arrow somewhere other
+# than between the two icons. Retina handling is create-dmg's business and is NOT covered by
+# the measurements above; check what this version does with a 2x asset before assuming.
+#
 # ⚠️ create-dmg CAN EXIT NON-ZERO AND STILL PRODUCE A VALID IMAGE — its Finder window-styling
 # AppleScript fails on a locked screen, over SSH, or when Finder has no Automation permission.
 # Blanket `|| true` would hide a genuine failure, so the exit code is inspected and a non-zero
@@ -733,6 +789,7 @@ rm -f "$DMG"
 set +e
 create-dmg \
     --volname "${APP_NAME} ${VERSION}" \
+    --volicon "$VOLICON" \
     --window-pos 200 120 \
     --window-size 540 380 \
     --icon-size 96 \

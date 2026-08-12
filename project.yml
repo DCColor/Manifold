@@ -237,7 +237,7 @@ targets:
         # Info.plist, not assumed. A release script must edit THIS line; editing the generated
         # plist would appear to work and change nothing.
         MARKETING_VERSION: "0.6.0"
-        CURRENT_PROJECT_VERSION: "8"
+        CURRENT_PROJECT_VERSION: "9"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Graviton Tools"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.video"
