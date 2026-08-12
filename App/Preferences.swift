@@ -28,7 +28,20 @@ final class Preferences: ObservableObject {
     // process-wide writer that could silently disagree with the windows. SettingsView still binds
     // the key directly for its picker (see the comment there).
 
-    @AppStorage("autoplayOnLoad") var autoplayOnLoad: Bool = true
+    /// ⚠️ DEFAULTS OFF, AND THE DEFAULT IS THE ONLY THING THAT CHANGED — the preference stays.
+    ///
+    /// Opening a file should show you a frame, not start running it: this is a monitoring and
+    /// inspection tool, and a clip that begins playing the instant it lands has already moved off
+    /// the frame the user opened it to look at. Reported by testers.
+    ///
+    /// WHO THIS CHANGES IT FOR, exactly. `@AppStorage`'s default applies only when the key is
+    /// ABSENT, so:
+    ///   * a user who has NEVER touched the toggle has no stored value and gets the new `false`;
+    ///   * a user who has EVER flipped it — including flipping it off and back on — has a stored
+    ///     value and keeps it, autoplay included.
+    /// Nothing else in the app writes this key (it is read by `WindowDeck.shouldAutoplayOnLoad` and
+    /// written only by the Settings toggle), so "never touched it" really does mean "no key".
+    @AppStorage("autoplayOnLoad") var autoplayOnLoad: Bool = false
 
     // Output volume (0–1), persisted across launches. Stored as Double (@AppStorage
     // has no Float). Mute is intentionally NOT persisted — always start unmuted.
@@ -800,7 +813,10 @@ struct SettingsView: View {
     // spells out the consequence: adopting a global write would stomp a window's local choice. Two
     // windows deliberately set to different sizes must survive a visit to Settings.
     @AppStorage(RasterSize.defaultsKey) private var rasterDefault: RasterSize = .automatic
-    @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = true
+    // Default OFF — see the declaration in `Preferences`, which also states exactly who inherits the
+    // new default and who keeps their own value. Both declarations must agree: the one that renders
+    // the toggle decides what an untouched key shows.
+    @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = false
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
