@@ -656,7 +656,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showGetFlipSheet) {
             VStack(spacing: 16) {
-                Image(systemName: "arrow.up.forward.app")
+                // Same mark as the control bar's Edit-in-Flip button, for the same reason — see
+                // there. One glyph for one app, at both sizes.
+                Image(systemName: "f.square")
                     .font(.system(size: 40))
                     .foregroundStyle(.secondary)
                 Text("Edit in Flip")
@@ -2261,7 +2263,19 @@ struct ContentView: View {
                 .help("Inspector (I)")
 
                 Button(action: editInFlip) {
-                    Image(systemName: "arrow.up.forward.app")
+                    // AN F IN A ROUNDED SQUARE — the silhouette of an app icon, so it reads as
+                    // "the app Flip" rather than as a letter badge. A SQUARE and not `f.circle`
+                    // because the neighbours here are square-ish (`square.and.arrow.down`, `tv`,
+                    // `viewfinder.rectangular`) while the circles in this row mean something else —
+                    // `info.circle` is a status affordance — so the square keeps the row's geometry
+                    // consistent AND keeps the two apart at a glance.
+                    //
+                    // UNFILLED, and that is a weight decision made by looking at the built bar.
+                    // `f.square.fill` was the first cut: it is a solid tile with the letter knocked
+                    // out, and next to a row drawn entirely in thin strokes it was the heaviest mark
+                    // present — it read as selected, or as a badge, rather than as one control among
+                    // twelve. `f.square` carries the same silhouette at the row's own weight.
+                    Image(systemName: "f.square")
                 }
                 .help("Edit in Flip")
                 .disabled(engine.currentURL == nil)
