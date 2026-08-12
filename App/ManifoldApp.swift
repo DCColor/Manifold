@@ -75,6 +75,18 @@ struct ManifoldApp: App {
                 // testers, and they are on whichever configuration we shipped them.
                 Button("Export Diagnostics…") { DiagnosticsExporter.shared.begin() }
             }
+            // ⌘O, in the File menu directly under New Window (`.newItem` is that group), where a
+            // Mac user looks for it. The app had no Open item at all: opening a file meant finding
+            // the folder button on the auto-hiding control bar, or the pill on the empty state.
+            //
+            // Where the file LANDS is `DeckRegistry.openFromUserAction`'s decision, not this
+            // button's — an empty window is re-used, otherwise the Settings preference chooses this
+            // window or a new one. `from: nil` means "the key window", which is what a menu command
+            // acts on.
+            CommandGroup(after: .newItem) {
+                Button("Open…") { DeckRegistry.shared.presentOpenPanel(from: nil) }
+                    .keyboardShortcut("o", modifiers: .command)
+            }
             // The View menu: raster size (⌘1–⌘4, ⌘0) — how large the picture is drawn, as a
             // percentage of the source raster. The app's first real menu of window commands; see
             // RasterSize.swift for why it is a menu and not another item on the control bar.

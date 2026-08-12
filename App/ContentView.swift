@@ -121,7 +121,6 @@ struct ContentView: View {
     /// backing store moved, so every `isDocked` call site below is untouched.
     private var isDocked: Bool { chrome.isDocked }
 
-    @State private var isImporterPresented = false
     @State private var isScrubbing = false
     @State private var scrubValue: Double = 0
     @State private var scrubPreviewImage: CGImage?
@@ -625,26 +624,14 @@ struct ContentView: View {
                 clearScopes()
             }
         }
-        .fileImporter(
-            isPresented: $isImporterPresented,
-            allowedContentTypes: [.movie, .video, .quickTimeMovie, .mpeg4Movie],
-            allowsMultipleSelection: false
-        ) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                // One active source: a new file retires THIS DECK'S live stream FIRST, so both
-                // don't feed the renderer at once (a stream pushing + the file's frame pump = the
-                // double-source flashing). Full-replacement, same teardown ⌃⌥⇧N / UI Disconnect
-                // use. No-op when this deck is not streaming — and specifically a no-op when the
-                // stream belongs to ANOTHER window, which the blanket `LiveSource.retireActive()`
-                // this replaces would have torn down from here.
-                DeckRegistry.shared.retireLiveIfOwned(by: deck)
-                // `deck.shouldAutoplayOnLoad`, not the bare preference: a background window must
-                // not start playing on its own. (Reached via the importer this is almost always
-                // the front window anyway — the gate matters for the .onOpenURL path above.)
-                engine.load(url: url, autoplay: deck.shouldAutoplayOnLoad)
-                wakeHUD()
-            }
-        }
+        // ⚠️ WHAT WAS HERE — A `.fileImporter` THAT LOADED STRAIGHT INTO THIS DECK — IS NOW
+        // `DeckRegistry.presentOpenPanel(from:)`, and the move is not cosmetic. Opening a file now
+        // has a POLICY (re-use an empty window; otherwise this window or a new one, per the
+        // preference), there are three places it can be invoked from, and one of them is a menu
+        // command in the App scene that has no view state to bind an `isPresented` to. A policy
+        // stated once and called from three places beats three call sites agreeing by hand. The
+        // retire-the-live-source step the importer did moved into `DeckRegistry.load(_:into:)`
+        // with it, so every path still retires before it loads.
         // An .srt is a sidecar to ONE file, so a new source retires it — otherwise the old cues
         // would keep firing confidently against unrelated pictures. Keyed on currentURL rather than
         // the load call sites because media also arrives via ManifoldApp's .onOpenURL (Finder
@@ -2146,8 +2133,10 @@ struct ContentView: View {
             }
 
             HStack(spacing: 16) {
-                Button { isImporterPresented = true } label: { Image(systemName: "folder") }
-                    .help("Open…")
+                Button { DeckRegistry.shared.presentOpenPanel(from: deck) } label: {
+                    Image(systemName: "folder")
+                }
+                .help("Open… (⌘O)")
 
                 Button { engine.togglePlayPause() } label: {
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill").frame(width: 24)
@@ -2293,7 +2282,7 @@ struct ContentView: View {
                 .font(.title3)
                 .foregroundStyle(.white.opacity(0.65))
             HStack(spacing: 12) {
-                Button { isImporterPresented = true } label: {
+                Button { DeckRegistry.shared.presentOpenPanel(from: deck) } label: {
                     Label("Open…", systemImage: "folder")
                 }
 

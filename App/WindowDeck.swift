@@ -70,6 +70,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 import ManifoldCore
 
 // MARK: - Exclusive devices
@@ -504,6 +505,100 @@ final class DeckRegistry {
     func setRasterSize(_ size: RasterSize) {
         guard let chrome = keyDeck?.chrome else { return }
         chrome.rasterSize = size
+    }
+
+    // MARK: - Opening a file
+
+    /// ── THE ONE PLACE A USER-INITIATED OPEN DECIDES WHICH WINDOW GETS THE FILE ──────────────
+    ///
+    /// Present the open panel and act on the result. Called from the control bar's folder button,
+    /// the empty state's Open… pill, and File ▸ Open… (⌘O) — `deck` is the window the user invoked
+    /// it from, or nil from the menu, where the key deck is the answer.
+    ///
+    /// `NSOpenPanel` and not SwiftUI's `.fileImporter`, now that there are three call sites and one
+    /// of them is a menu command in the App scene with no view state to bind a `isPresented` to.
+    /// It is also the app's established idiom for a picker that must work from anywhere — the
+    /// export-folder picker and the caption picker both use it, and the caption picker's comment
+    /// records why. Application-modal, so it is safe with several windows open.
+    func presentOpenPanel(from deck: WindowDeck?) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        panel.message = "Choose a video file"
+        // `.movie` and not `.audiovisualContent`: the latter also admits audio-only files (a
+        // .wav conforms to it), which this app has nothing to do with. Measured conformance —
+        // .mov/.mp4/.mxf/.mkv/.avi/.m4v/.r3d all conform to `public.movie`.
+        panel.allowedContentTypes = [.movie]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openFromUserAction(url, preferring: deck)
+    }
+
+    /// Route a chosen file to a window. THE ORDER OF THE TWO RULES IS THE WHOLE POLICY:
+    ///
+    ///   1. **AN EMPTY WINDOW IS ALWAYS RE-USED, whatever the preference says.** "A new window"
+    ///      cannot mean "leave this blank one sitting behind a new blank one" — nobody has ever
+    ///      wanted the stray, and a preference that produced one would read as a bug rather than as
+    ///      a setting. This is the same rule `.onOpenURL` applies to a Finder double-click.
+    ///   2. Otherwise the preference decides: replace this window's content, or stand up a second
+    ///      deck beside it.
+    ///
+    /// A DROP DOES NOT COME THROUGH HERE — see `load(_:into:)`. A drop names its own target and must
+    /// not be second-guessed by a preference about menus.
+    func openFromUserAction(_ url: URL, preferring deck: WindowDeck?) {
+        let target = deck ?? keyDeck
+
+        // RULE 1.
+        if let target, target.isEmptyDeck {
+            load(url, into: target)
+            return
+        }
+
+        // RULE 2.
+        let destination = OpenDestination(
+            rawValue: UserDefaults.standard.string(forKey: OpenDestination.defaultsKey) ?? ""
+        ) ?? .thisWindow
+
+        switch destination {
+        case .thisWindow:
+            guard let target else { openInNewWindow(url); return }   // no window at all to load into
+            load(url, into: target)
+        case .newWindow:
+            openInNewWindow(url)
+        }
+    }
+
+    /// Load a file into ONE NAMED DECK. The explicit path: a drop onto a window's picture, and the
+    /// destination every branch above eventually reaches.
+    ///
+    /// Retires that deck's live source first, for the reason the file importer always has: a stream
+    /// still pushing into the renderer while a file's frame pump starts is the double-source flash.
+    /// `retireLiveIfOwned` is a no-op for a deck that owns nothing, and specifically leaves ANOTHER
+    /// window's stream alone.
+    func load(_ url: URL, into deck: WindowDeck) {
+        retireLiveIfOwned(by: deck)
+        deck.load(url: url)                       // honours that deck's own autoplay gate
+        deck.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Stand the file up in a NEW window, through LaunchServices.
+    ///
+    /// ⚠️ THE ROUND TRIP IS DELIBERATE, NOT LAZINESS. Opening the URL against this app's own bundle
+    /// delivers it to `ContentView.onOpenURL` — which is where SwiftUI creates the window, and where
+    /// the empty-window re-use already lives. Doing it any other way (a second `openWindow` scene id
+    /// plus a hand-off of the pending URL) would be a SECOND way to open a file into a new window,
+    /// with its own copy of the re-use rule to keep in step.
+    ///
+    /// `withApplicationAt: Bundle.main.bundleURL` and NOT the one-argument `open(_:)`, which would
+    /// hand the file to whatever app the SYSTEM prefers for it — usually QuickTime Player.
+    private func openInNewWindow(_ url: URL) {
+        NSWorkspace.shared.open([url], withApplicationAt: Bundle.main.bundleURL,
+                                configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            if let error {
+                NSLog("%@", "[OPEN] new-window open failed — \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: Registration

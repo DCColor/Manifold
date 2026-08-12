@@ -2,6 +2,31 @@ import SwiftUI
 import AppKit
 
 /// How the transport controls are presented.
+/// Where **Open…** puts a file: into the window you invoked it from, or into a new one.
+///
+/// ⚠️ IT IS A PREFERENCE ABOUT `Open…` AND NOTHING ELSE. A drop onto a window's picture always
+/// targets THAT window (the drop names its own target, which is the whole point of dropping), and an
+/// empty window is always re-used whatever this says — see `DeckRegistry.openFromUserAction`.
+enum OpenDestination: String, CaseIterable, Identifiable {
+    /// Replace what is in the current window. The app's behaviour before this preference existed,
+    /// and therefore the default — a preference should not change what anyone already has.
+    case thisWindow
+    /// Leave the current window alone and open a second deck.
+    case newWindow
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .thisWindow: return "This window"
+        case .newWindow:  return "A new window"
+        }
+    }
+
+    /// One spelling of the key, read by Settings and by the registry that acts on it.
+    static let defaultsKey = "manifold.open.destination"
+}
+
 enum ControlDisplayMode: String, CaseIterable, Identifiable {
     case overlay   // floating auto-hide HUD over the video (default)
     case docked    // fixed control bar below the video
@@ -817,6 +842,7 @@ struct SettingsView: View {
     // new default and who keeps their own value. Both declarations must agree: the one that renders
     // the toggle decides what an untouched key shows.
     @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = false
+    @AppStorage(OpenDestination.defaultsKey) private var openDestination: OpenDestination = .thisWindow
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
@@ -953,6 +979,15 @@ struct SettingsView: View {
                 .pickerStyle(.inline)
 
                 Toggle("Autoplay on open", isOn: $autoplayOnLoad)
+
+                Picker("Open files in", selection: $openDestination) {
+                    ForEach(OpenDestination.allCases) { destination in
+                        Text(destination.label).tag(destination)
+                    }
+                }
+                Text("Applies to Open… (⌘O) and the Open button. Dragging a file onto a window's picture always replaces that window, and an empty window is always re-used rather than left behind.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Picker("Raster size for new windows", selection: $rasterDefault) {
                     ForEach(RasterSize.settingsChoices) { size in
