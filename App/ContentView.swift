@@ -2190,7 +2190,28 @@ struct ContentView: View {
                     // self-disables for live sources (loop is meaningless on an indefinite stream).
                     .disabled(!engine.hasMedia || !transport)
                     .foregroundStyle(engine.isLooping ? Color.green : .white.opacity(0.9))
-                Button { showGuidesPanel.toggle() } label: { Image(systemName: "grid") }
+                Button { showGuidesPanel.toggle() } label: {
+                    // `viewfinder.rectangular` — an outer frame with corner brackets and OPEN space
+                    // inside it, which is what a framing guide is: marks over a picture you can
+                    // still see through.
+                    //
+                    // It replaces `rectangle.inset.filled`, whose inner rectangle is SOLID. At the
+                    // size this row draws (`.imageScale(.large)`, ~16 pt) that fill reads as a block
+                    // — a filled tile, or a slide — rather than as an inset. The distinction the
+                    // glyph exists to carry is exactly the one the fill destroys: guides are LINES
+                    // at an inset, not a filled area. `rectangle.inset.filled` was itself a
+                    // replacement for `grid`, which rendered as a bare `#` with no outer frame at
+                    // all and read as a table.
+                    //
+                    // AVAILABILITY CHECKED, NOT ASSUMED — an SF Symbol that postdates the
+                    // deployment target renders BLANK at run time and raises no build error, so
+                    // compiling proves nothing. The OS's own catalog
+                    // (CoreGlyphs.bundle/Contents/Resources/name_availability.plist) lists this
+                    // symbol under release year 2023, which that file's `year_to_release` table maps
+                    // to macOS 14.0. This target's floor is macOS 15.0, so it is present on every OS
+                    // the app can launch on.
+                    Image(systemName: "viewfinder.rectangular")
+                }
                     .help("Framing guides")
                     .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {
                         GuidesPanel()
