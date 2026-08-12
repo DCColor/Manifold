@@ -100,6 +100,9 @@ final class WindowChrome: ObservableObject {
         static let slot2       = "manifold.scope.slot2"
         static let controlMode = "controlDisplayMode"
         static let trayHeight  = "manifold.scope.trayHeight"
+        /// Owned by `RasterSize` rather than spelled out here: the Settings picker binds the same
+        /// key through `@AppStorage`, and two literals that must match is one literal too many.
+        static let rasterSize  = RasterSize.defaultsKey
     }
 
     /// Scopes tray open/close for THIS window. Toggled by ⌃⌥T and the control-bar scopes button.
@@ -119,6 +122,25 @@ final class WindowChrome: ObservableObject {
     /// four are in scope. A stored value from a bigger screen is therefore re-clamped on use rather
     /// than on load, so moving a window between displays does not permanently shrink its tray.
     @Published var trayHeight: CGFloat { didSet { defaults.set(trayHeight, forKey: Key.trayHeight) } }
+
+    /// HOW LARGE THE PICTURE IS DRAWN in THIS window, as a percentage of the source raster. See
+    /// RasterSize.swift for what the percentage means (and the two things it deliberately does not
+    /// mean); `WindowSizer` is what turns it into a window size.
+    ///
+    /// Seeded and written back like everything else here — last writer wins, so the size a window
+    /// was set to is the size the next window opens at — with ONE exception, which is the `guard`:
+    ///
+    /// ⚠️ `.custom` IS NEVER PERSISTED. It is not a size, it is the ABSENCE of a policy ("the user
+    /// dragged this window's edge; leave it alone"), and seeding a new window with it would mean a
+    /// window that opens at no particular size and reports `Custom` before anyone has touched it.
+    /// Skipping the write leaves the stored value at the last size actually CHOSEN, which is both
+    /// the useful seed and the honest answer for the Settings picker that reads the same key.
+    @Published var rasterSize: RasterSize {
+        didSet {
+            guard rasterSize != .custom else { return }
+            defaults.set(rasterSize.rawValue, forKey: Key.rasterSize)
+        }
+    }
 
     /// Which scope fills each of the three tray slots, for THIS window. Chosen live from each
     /// slot's header picker.
@@ -153,6 +175,13 @@ final class WindowChrome: ObservableObject {
         let storedTrayHeight = defaults.object(forKey: Key.trayHeight) as? Double
         trayHeight = max(CGFloat(storedTrayHeight ?? Double(Self.defaultTrayHeight)),
                          Self.minTrayHeight)
+        // ⚠️ A STORED `custom` IS TREATED AS "NO CHOICE MADE". The `didSet` above cannot write one,
+        // so the only way the key holds it is a hand-edited defaults file — and `.custom` as a SEED
+        // would open a window with no sizing policy and a readout claiming the user had dragged it.
+        // `.automatic` is the honest reading of "nothing has been chosen here": the app's original
+        // opening rule, which is also what a fresh install gets from the `??`.
+        let storedRaster = RasterSize(rawValue: defaults.string(forKey: Key.rasterSize) ?? "")
+        rasterSize = (storedRaster == .custom ? nil : storedRaster) ?? .automatic
         slot0 = ScopeKind(rawValue: defaults.string(forKey: Key.slot0) ?? "") ?? .waveform
         slot1 = ScopeKind(rawValue: defaults.string(forKey: Key.slot1) ?? "") ?? .parade
         slot2 = ScopeKind(rawValue: defaults.string(forKey: Key.slot2) ?? "") ?? .cie

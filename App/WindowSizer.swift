@@ -110,6 +110,29 @@ import Foundation
 //  Do not teach this file about it.
 // ══════════════════════════════════════════════════════════════════════════════════════════
 
+/// WHAT THE RASTER CONTROL ASKS THE WINDOW TO BE. The view layer's `RasterSize` reduced to the only
+/// three things this file can act on, so the geometry never has to know what a menu item is called.
+///
+/// Declared here rather than in RasterSize.swift because the conversion from a fraction to a width
+/// is a GEOMETRY question — it needs the display's backing scale — and this is the file that owns
+/// window geometry. See `rasterContentWidth`.
+enum RasterRequest: Equatable {
+
+    /// No policy. The window keeps the width it has, and a chrome change re-derives from it exactly
+    /// as it did before this control existed. Both `.automatic` (nothing chosen yet) and `.custom`
+    /// (the user dragged an edge) arrive here.
+    case unconstrained
+
+    /// A fraction of the source's DISPLAY width, in SOURCE PIXELS. 1.0 is one source pixel per
+    /// source pixel.
+    case sourceFraction(CGFloat)
+
+    /// The largest picture the visible frame can show WITH the chrome. Expressed as an unbounded
+    /// width request, because `constrainedContentSize`'s screen cap already computes exactly that —
+    /// there is no second fitting routine, and so no second answer to keep in step with the first.
+    case fitToScreen
+}
+
 /// The picture's geometry. **No member of this type can see `chromeHeight`** — see the header above;
 /// that is the enforcement, not a convention.
 private enum VideoBox {
@@ -146,6 +169,28 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// two can happen in either order: `WindowConfigurator.makeNSView` hops to the main queue to
     /// install the default, and a window re-used by an `.onOpenURL` can have taken a source first.
     private var hasInstalledDefault = false
+
+    /// The content width the raster policy last asked for, in points, or nil for "no policy". Held
+    /// so `setGeometry` can tell a raster CHANGE from the many passes that carry the same one — the
+    /// same job `videoAspect` and `chromeHeight` do for their own inputs.
+    private var lastRasterWidth: CGFloat?
+
+    /// THE USER PUT THEIR HAND ON A WINDOW EDGE. Fired from `windowWillResize` during a live resize
+    /// and from the zoom button, and wired by `WindowConfigurator` to set this window's raster state
+    /// to `.custom`.
+    ///
+    /// A callback and not a direct write, because the state it changes is a `WindowChrome` — a
+    /// SwiftUI `@StateObject` owned by `ContentView` — and this file's whole discipline is that it
+    /// knows about NSWindows and nothing about views.
+    var onUserResize: (() -> Void)?
+
+    /// ⚠️ SET AROUND EVERY RESIZE THIS FILE ITSELF PERFORMS, AND IT IS NOT BELT-AND-BRACES.
+    /// `windowWillResize(_:to:)` is delivered for programmatic `setFrame`/`setContentSize` calls as
+    /// well as for user drags. Without this flag, applying a raster preset would resize the window,
+    /// be told about its own resize, and immediately declare the result `.custom` — the control
+    /// would cancel itself on every use. `inLiveResize` alone is not enough to separate the two:
+    /// a programmatic resize DURING a live resize is exactly what the divider does.
+    private var isApplyingProgrammaticResize = false
 
     // MARK: - Delegate identity
 
@@ -269,6 +314,13 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         // letterboxes inside it, which is the right answer there.
         guard !sender.styleMask.contains(.fullScreen) else { return proposed }
 
+        // A HAND ON THE EDGE ENDS THE RASTER POLICY. The drag is honoured as it always was — this
+        // does NOT snap to the nearest preset, and the constraint below still keeps the picture on
+        // shape — but the window is no longer at a size anything can claim to have chosen, so the
+        // state becomes `.custom` and the readout says so. Gated on `inLiveResize` so this file's
+        // own resizes (which arrive here too) cannot mistake themselves for the user.
+        if sender.inLiveResize && !isApplyingProgrammaticResize { onUserResize?() }
+
         let content = sender.contentRect(forFrameRect: NSRect(origin: sender.frame.origin,
                                                               size: proposed)).size
         let current = sender.contentRect(forFrameRect: sender.frame).size
@@ -292,6 +344,13 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
         let proposed = inner?.windowWillUseStandardFrame?(window, defaultFrame: newFrame) ?? newFrame
         guard !window.styleMask.contains(.fullScreen) else { return proposed }
+
+        // Zoom is a user gesture that sets a size, so it ends the raster policy exactly as an edge
+        // drag does. It is deliberately NOT routed to `.fitToScreen` even though the two land in
+        // almost the same place: Fit is a MODE that re-fits when the chrome changes, and silently
+        // putting a window into a mode because the green button was pressed would then move the
+        // window again later, for a reason the user could not connect to anything they did.
+        if !isApplyingProgrammaticResize { onUserResize?() }
 
         let content = window.contentRect(forFrameRect: proposed).size
         let fitted = constrainedContentSize(for: window, contentWidth: content.width)
@@ -336,14 +395,9 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     ///
     /// Only consulted until `hasSizedToSource`; after that the window's real width is authoritative,
     /// so deliberately narrowing a window still buys tray room.
-    func maxChromeHeight(openingFor sourceSize: CGSize?) -> CGFloat {
+    func maxChromeHeight(openingFor sourceSize: CGSize?, raster: RasterRequest) -> CGFloat {
         guard let window else { return .greatestFiniteMagnitude }
         let maxContentHeight = maximumContentSize(for: window).height
-        var width = window.contentRect(forFrameRect: window.frame).size.width
-        if !hasSizedToSource, let sourceSize,
-           let opening = openingContentWidth(for: sourceSize, in: window) {
-            width = max(width, opening)
-        }
         // The source's own aspect when it is known: on the pass that first carries a source,
         // `videoAspect` has not been updated yet (this is read while the view is computing the
         // chrome height it is about to hand to `setGeometry`).
@@ -351,7 +405,94 @@ final class WindowSizer: NSObject, NSWindowDelegate {
             guard let s = sourceSize, s.width > 0, s.height > 0 else { return videoAspect }
             return s.width / s.height
         }()
+
+        // ── FIT TO SCREEN MEASURES AGAINST THE SMALLEST LEGAL PICTURE, NOT THE CURRENT ONE ────
+        //
+        // Under every other state the picture's size is FIXED and the divider's ceiling is the room
+        // left under it. Under Fit the picture is DEFINED as "whatever is left after the chrome", so
+        // measuring against the current picture is circular and the answer it produces is a stuck
+        // control: a fitted window is already at the screen cap, so `maxContentHeight − videoHeight`
+        // comes out as exactly the chrome that is already there. The divider could shrink and never
+        // grow, and dragging down would do nothing.
+        //
+        // So under Fit the tray's travel is bounded by the smallest window this app allows
+        // (`contentMinSize`), and the picture pays for the tray as it grows — through the SCREEN CAP
+        // in `constrainedContentSize`, which is route 2, the one documented exception. That is not a
+        // new exception and not a violation of the invariant: it is what the user asked for when
+        // they chose a size defined as "as large as fits, chrome included".
+        // `sourceSize != nil` for the same reason `rasterContentWidth` insists on it: with no
+        // picture there is no policy in force, so the ordinary answer below is the right one.
+        if case .fitToScreen = raster, sourceSize != nil {
+            let smallestPicture = VideoBox.height(width: window.contentMinSize.width, aspect: aspect)
+            return max(maxContentHeight - smallestPicture, 0)
+        }
+
+        var width = window.contentRect(forFrameRect: window.frame).size.width
+        if !hasSizedToSource, let sourceSize {
+            // A RASTER POLICY STATES THE OPENING WIDTH EXACTLY, so it replaces the prediction rather
+            // than being max()'d with it. `max` is right for the classic rule (which only ever
+            // ENLARGES on the placeholder width) and wrong here: a 25% preset opens a window
+            // NARROWER than the 1280-pt placeholder, and keeping the placeholder would understate
+            // the tray's room instead of overstating it — a different wrong answer, not a safe one.
+            if let rasterWidth = rasterContentWidth(raster, sourceSize: sourceSize),
+               !Self.isUnbounded(rasterWidth) {
+                width = rasterWidth
+            } else if let opening = openingContentWidth(for: sourceSize, in: window) {
+                width = max(width, opening)
+            }
+        }
         return max(maxContentHeight - VideoBox.height(width: width, aspect: aspect), 0)
+    }
+
+    /// ── THE PERCENTAGE, TURNED INTO A WIDTH — AND THE ONE DIVISION THAT DEFINES "100%" ──────
+    ///
+    /// The content width, IN POINTS, that a raster request asks for. nil means "no policy, leave the
+    /// width alone"; `.greatestFiniteMagnitude` means "as large as allowed", which
+    /// `constrainedContentSize` resolves against the screen cap and nothing else has to.
+    ///
+    /// ⚠️ THE DIVISION BY `backingScaleFactor` IS THE WHOLE DEFINITION OF 100%, and it is here
+    /// exactly once. A 3840-pixel-wide source at 100% is 1920 POINTS wide on a 2× display, because
+    /// 1920 points ARE 3840 pixels there — one source pixel per source pixel, which is what a
+    /// colourist means by 100% and the only reading under which the control is worth having.
+    /// Removing the division would draw each source pixel across a 2×2 block and label it 100%.
+    ///
+    /// The scale is read from the WINDOW, so a window living on a 1× display gets 1× and the
+    /// promise holds there too.
+    /// "AS LARGE AS THE DISPLAY ALLOWS" — a width REQUEST, not a number to compute with.
+    /// `constrainedContentSize` resolves it against the screen cap, and no other code should do
+    /// arithmetic on it.
+    ///
+    /// ⚠️ IT IS FINITE. `.greatestFiniteMagnitude` is by definition the largest finite Double, so
+    /// `isFinite` returns TRUE for it and is NOT a guard — a `Int(_:)` conversion behind an
+    /// `isFinite` test traps at runtime, which is exactly how it crashed the first build of the
+    /// diagnostic line below. `isUnbounded` is the test; use it.
+    static let unboundedWidth = CGFloat.greatestFiniteMagnitude
+
+    static func isUnbounded(_ width: CGFloat) -> Bool { width >= 1_000_000 }
+
+    func rasterContentWidth(_ raster: RasterRequest, sourceSize: CGSize?) -> CGFloat? {
+        // ⚠️ NO SOURCE, NO POLICY — INCLUDING FIT, WHICH DOES NOT NEED THE SOURCE TO COMPUTE A WIDTH
+        // AND MUST STILL DECLINE. Raster size is a statement about the PICTURE, and an empty window
+        // has none. MEASURED: without this, relaunching with Fit stored opened the empty launch
+        // window at the full 3135×2130 visible frame — a window with nothing in it claiming the whole
+        // display — while a stored PERCENTAGE (which cannot be computed without a source) correctly
+        // left it at the 1280-pt default. Two states, two different opening sizes, for a window in
+        // the same condition. Declining here makes every state agree: no source, `installDefaultSize`
+        // decides, exactly as before this arc.
+        guard let source = sourceSize, source.width > 0, source.height > 0 else { return nil }
+
+        switch raster {
+        case .unconstrained:
+            return nil
+        case .fitToScreen:
+            return Self.unboundedWidth
+        case .sourceFraction(let fraction):
+            guard fraction > 0 else { return nil }
+            let scale = window?.backingScaleFactor
+                ?? NSScreen.main?.backingScaleFactor
+                ?? 2
+            return (source.width * fraction / max(scale, 1)).rounded()
+        }
     }
 
     /// The content width a source opens at: fitted into 80% of the visible frame, never magnified
@@ -371,33 +512,79 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     ///
     /// `sourceSize` is `FrameEngine.displaySize` verbatim — nil means "no source", which is a
     /// different statement from "16:9". The fallback is applied HERE and nowhere else.
-    func setGeometry(sourceSize: CGSize?, chromeHeight: CGFloat) {
+    func setGeometry(sourceSize: CGSize?, chromeHeight: CGFloat, raster: RasterRequest) {
         let aspect: CGFloat = {
             guard let s = sourceSize, s.width > 0, s.height > 0 else { return 16.0 / 9.0 }
             return s.width / s.height
         }()
         let chrome = max(0, chromeHeight)
+        let rasterWidth = rasterContentWidth(raster, sourceSize: sourceSize)
 
         let aspectChanged = abs(aspect - videoAspect) > 0.0001
         let chromeChanged = abs(chrome - self.chromeHeight) > 0.5
         let gainedSource = (sourceSize != nil && !hasSizedToSource)
+        let rasterChanged: Bool = {
+            switch (rasterWidth, lastRasterWidth) {
+            case (nil, nil):               return false
+            case let (new?, old?):         return abs(new - old) > 0.5
+            default:                       return true   // a policy appeared, or went away
+            }
+        }()
 
         videoAspect = aspect
         self.chromeHeight = chrome
+        lastRasterWidth = rasterWidth
 
-        guard aspectChanged || chromeChanged || gainedSource else { return }
+        guard aspectChanged || chromeChanged || gainedSource || rasterChanged else { return }
         guard let window, isResizable(window) else { return }
+
+        // ONE LINE PER RASTER CHANGE, and only on a change — this is the record that says whether a
+        // window ended up the size it was ASKED to be or the size the display ALLOWED, which is the
+        // one question a "my picture is smaller than 100%" report cannot answer from a screenshot.
+        // It carries the backing scale explicitly because that term IS the definition of 100%, and
+        // it is the first thing to doubt when the numbers come out twice or half what they should.
+        defer {
+            if rasterChanged, let rasterWidth {
+                let content = window.contentRect(forFrameRect: window.frame).size
+                // See `isUnbounded` — `isFinite` is not the test, and using it here is what SIGTRAPed
+                // on the first click of Fit to Screen.
+                let asked = Self.isUnbounded(rasterWidth) ? "unbounded" : "\(Int(rasterWidth))"
+                NSLog("%@", "[RASTER] \(raster)"
+                    + " source=\(Int(sourceSize?.width ?? 0))×\(Int(sourceSize?.height ?? 0))"
+                    + " scale=\(window.backingScaleFactor)"
+                    + " asked=\(asked)"
+                    + " → content=\(Int(content.width))×\(Int(content.height))"
+                    + " video=\(Int(content.width))×\(Int((content.height - chrome).rounded()))"
+                    + " chrome=\(Int(chrome))")
+            }
+        }
 
         if gainedSource, let sourceSize {
             hasSizedToSource = true
             hasInstalledDefault = true
-            sizeToSource(sourceSize, in: window)
+            // A raster policy OVERRIDES the classic opening rule, which is the point of persisting
+            // one: a user who has chosen 50% has said what "open this file" should look like. With
+            // no policy (`.automatic`, and therefore every fresh install) `sizeToSource` runs
+            // exactly as it always has, so this arc changes nothing until someone asks it to.
+            if let rasterWidth {
+                setContentSize(constrainedContentSize(for: window, contentWidth: rasterWidth),
+                               of: window)
+                window.center()
+            } else {
+                sizeToSource(sourceSize, in: window)
+            }
         } else {
-            // ⚠️ RE-DERIVED FROM THE CURRENT WIDTH, WHICH IS WHAT MAKES THE VIDEO HOLD STILL. The
-            // width is the video's width; re-solving the affine constraint at that width changes
-            // ONLY the height, by exactly the chrome delta. Opening the tray therefore grows the
-            // window and leaves the picture the size it was, which is the whole point of the arc.
-            applyConstraint(to: window)
+            // ⚠️ RE-DERIVED FROM THE CURRENT WIDTH WHEN THERE IS NO RASTER POLICY, WHICH IS WHAT
+            // MAKES THE VIDEO HOLD STILL. The width is the video's width; re-solving the affine
+            // constraint at that width changes ONLY the height, by exactly the chrome delta. Opening
+            // the tray therefore grows the window and leaves the picture the size it was, which is
+            // the whole point of the arc before this one.
+            //
+            // With a policy, the requested width is passed instead — and for a PRESET that is the
+            // same statement, because a preset's width does not depend on the chrome either. The
+            // one state where the two genuinely differ is `.fitToScreen`, which is defined in terms
+            // of the chrome and therefore MUST re-solve when it changes.
+            applyConstraint(to: window, contentWidth: rasterWidth)
         }
     }
 
@@ -416,7 +603,7 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         } else {
             width = 960
         }
-        window.setContentSize(constrainedContentSize(for: window, contentWidth: width))
+        setContentSize(constrainedContentSize(for: window, contentWidth: width), of: window)
         window.center()
     }
 
@@ -445,15 +632,19 @@ final class WindowSizer: NSObject, NSWindowDelegate {
             applyConstraint(to: window)
             return
         }
-        window.setContentSize(constrainedContentSize(for: window, contentWidth: width))
+        setContentSize(constrainedContentSize(for: window, contentWidth: width), of: window)
         window.center()
     }
 
-    /// Re-solve the constraint at the window's CURRENT content width and apply it, anchored to the
-    /// top-left so the window grows downward from where the user put it rather than jumping.
-    private func applyConstraint(to window: NSWindow) {
+    /// Re-solve the constraint and apply it, anchored to the top-left so the window grows downward
+    /// from where the user put it rather than jumping.
+    ///
+    /// `contentWidth` is the raster policy's requested width, or nil to re-solve at the window's
+    /// CURRENT width — the two callers this file has always had (a chrome change, a shape change)
+    /// pass nil and are unchanged by the raster arc.
+    private func applyConstraint(to window: NSWindow, contentWidth: CGFloat? = nil) {
         let current = window.contentRect(forFrameRect: window.frame).size
-        let fitted = constrainedContentSize(for: window, contentWidth: current.width)
+        let fitted = constrainedContentSize(for: window, contentWidth: contentWidth ?? current.width)
         guard abs(fitted.width - current.width) > 0.5 || abs(fitted.height - current.height) > 0.5
         else { return }
 
@@ -470,7 +661,24 @@ final class WindowSizer: NSObject, NSWindowDelegate {
             if frame.maxX > visible.maxX { frame.origin.x = visible.maxX - frame.width }
             if frame.minX < visible.minX { frame.origin.x = visible.minX }
         }
+        setFrame(frame, of: window)
+    }
+
+    // MARK: - Resizing under our own name
+
+    /// The two window-resizing calls this file makes, wrapped so `windowWillResize` can tell them
+    /// apart from the user's hand. See `isApplyingProgrammaticResize` — without this, applying a
+    /// preset would be reported back to us as a manual drag and would immediately undo itself.
+    private func setFrame(_ frame: NSRect, of window: NSWindow) {
+        isApplyingProgrammaticResize = true
         window.setFrame(frame, display: true)
+        isApplyingProgrammaticResize = false
+    }
+
+    private func setContentSize(_ size: NSSize, of window: NSWindow) {
+        isApplyingProgrammaticResize = true
+        window.setContentSize(size)
+        isApplyingProgrammaticResize = false
     }
 
     /// THE CONSTRAINT ITSELF: the content size that satisfies

@@ -786,6 +786,20 @@ struct SettingsView: View {
     // that key — without that, flipping this picker would change nothing until the next window was
     // opened. See the observer comment in WindowChrome.
     @AppStorage("controlDisplayMode") private var controlModeRaw: String = ControlDisplayMode.overlay.rawValue
+
+    // ── RASTER SIZE: THE SEED, NOT A REMOTE CONTROL ─────────────────────────────────────────
+    //
+    // The SAME key each window's `WindowChrome` seeds its raster state from, with the app's usual
+    // last-writer-wins semantics — so this picker shows the last size any window was set to, and
+    // sets what the NEXT window opens at.
+    //
+    // ⚠️ IT DELIBERATELY DOES NOT REACH OPEN WINDOWS, and that is the opposite of the "Controls"
+    // picker above. That one flips every open window because it is the ONLY control surface
+    // overlay-vs-docked has, and `WindowChrome` adopts external writes to its key to stop it reading
+    // as dead. Raster size has a per-window control (the View menu), and `WindowChrome`'s own note
+    // spells out the consequence: adopting a global write would stomp a window's local choice. Two
+    // windows deliberately set to different sizes must survive a visit to Settings.
+    @AppStorage(RasterSize.defaultsKey) private var rasterDefault: RasterSize = .automatic
     @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = true
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
@@ -923,6 +937,15 @@ struct SettingsView: View {
                 .pickerStyle(.inline)
 
                 Toggle("Autoplay on open", isOn: $autoplayOnLoad)
+
+                Picker("Raster size for new windows", selection: $rasterDefault) {
+                    ForEach(RasterSize.settingsChoices) { size in
+                        Text(size.menuTitle).tag(size)
+                    }
+                }
+                Text("How large the picture is drawn, as a percentage of the source raster — 100% is one source pixel per source pixel, so a 3840×2160 file fills 1920×1080 points on a Retina display. Set it per window in the View menu (⌘1–⌘4, ⌘0); this is what a new window starts at, and it follows the last window you set.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Scopes") {

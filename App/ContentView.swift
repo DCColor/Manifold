@@ -178,6 +178,15 @@ struct ContentView: View {
     // non-nil ONLY for the duration of a drag, so it doubles as the "is dragging" flag.
     @State private var dividerHovered = false
     @State private var dividerDragBaseline: CGFloat?
+    // ── RASTER SIZE (see RasterSize.swift) ──────────────────────────────────────────────────
+    // The picture's MEASURED size in points — the laid-out video rect, not a derived one. Feeds the
+    // readout's dimensions, which is what makes them true for the two cases a derivation would get
+    // wrong: an anamorphic source (whose display shape is not its encoded shape) and a window the
+    // screen cap has bound. Written by `.onGeometryChange` on the aspect-fitted surface.
+    @State private var drawnVideoSize: CGSize = .zero
+    // The transient readout's text, or nil when nothing is showing. Auto-hides on its own `.task`
+    // timer, keyed on the text — see `rasterReadout`.
+    @State private var rasterNotice: String?
     // Tray open/close and the three per-slot scope selections now live on `chrome` (per window).
     // They were @AppStorage here, which shared them across every open window; the keys and their
     // defaults are unchanged, so an existing install's arrangement carries over. Each slot can show
@@ -454,6 +463,19 @@ struct ContentView: View {
             // Persisted arrangement may reopen the tray with scopes already on —
             // start their sampling to match the restored visibility.
             updateScopeSampling()
+            // A WINDOW-EDGE DRAG (or the zoom button) ENDS THE RASTER POLICY. The sizer detects it —
+            // it is the window's delegate and nothing else sees a live resize — and this is the wire
+            // back to the state that owns the answer. `[weak chrome]` because the closure is held by
+            // the sizer, which is held by the deck, for as long as the window lives.
+            //
+            // Assigned here rather than in `WindowConfigurator.updateNSView` deliberately: that runs
+            // on every body pass and would rebuild the closure each time for no reason. The sizer is
+            // a plain `let` on the deck, so it exists whether or not the window does yet.
+            deck.sizer.onUserResize = { [weak chrome] in
+                guard let chrome, chrome.rasterSize != .custom else { return }
+                chrome.rasterSize = .custom
+            }
+            RasterMenuState.shared.refresh()
         }
         .onDisappear {
             engine.stop()
@@ -464,6 +486,24 @@ struct ContentView: View {
             cieModel.stop()
         }
         .onChange(of: engine.hasMedia) { _, _ in armIdleIfNeeded() }
+        // ── THE THREE RASTER TRIGGERS ───────────────────────────────────────────────────────
+        //
+        // 1. THE SIZE CHANGED. A menu choice, or the sizer flipping this window to `.custom`. The
+        //    readout is shown from the size ALREADY DRAWN, so it is a frame behind — trigger 2 then
+        //    corrects it the moment the resize lands, which is imperceptible and always true.
+        .onChange(of: chrome.rasterSize) { _, _ in
+            showRasterNotice()
+            RasterMenuState.shared.refresh()
+        }
+        // 2. THE PICTURE CHANGED SIZE. Refresh the text while the readout is up (so the numbers
+        //    track a live drag), and RAISE it during a live resize even when the state did not
+        //    change — a second drag of an already-`custom` window still deserves its dimensions.
+        .onChange(of: drawnVideoSize) { _, _ in
+            if rasterNotice != nil || (deck.window?.inLiveResize ?? false) { showRasterNotice() }
+        }
+        // 3. THE SOURCE CHANGED. A percentage is a percentage OF something; the View menu is dead
+        //    until this window has a raster to take one of.
+        .onChange(of: engine.displaySize) { _, _ in RasterMenuState.shared.refresh() }
         // A slot's selection changed → start newly-active scopes, stop ones that left the tray.
         .onChange(of: activeKinds) { _, _ in updateScopeSampling() }
         .onChange(of: engine.effectiveIsFullRange) { _, _ in
@@ -724,9 +764,90 @@ struct ContentView: View {
     /// shape — because at that point there is no arrangement that satisfies both.
     private func clampedTrayHeight(_ proposed: CGFloat) -> CGFloat {
         let floor = WindowChrome.minTrayHeight
-        let ceiling = max(deck.sizer.maxChromeHeight(openingFor: engine.displaySize)
+        let ceiling = max(deck.sizer.maxChromeHeight(openingFor: engine.displaySize,
+                                                     raster: rasterRequest)
                           - nonTrayChromeHeight, floor)
         return min(max(proposed, floor), ceiling)
+    }
+
+    /// THIS WINDOW'S RASTER POLICY, as the geometry layer takes it. The view holds the user-facing
+    /// state (`RasterSize`, which knows about menu titles and readouts); `WindowSizer` takes the
+    /// three-case `RasterRequest`, which knows about widths. See RasterSize.swift.
+    ///
+    /// `.automatic` and `.custom` both mean "no policy" here, from opposite directions — nothing has
+    /// been chosen yet, or the user has chosen with their hands — and the window keeps its width in
+    /// both cases.
+    private var rasterRequest: RasterRequest {
+        if chrome.rasterSize == .fitToScreen { return .fitToScreen }
+        guard let fraction = chrome.rasterSize.fraction else { return .unconstrained }
+        return .sourceFraction(fraction)
+    }
+
+    /// The picture's measured size in DEVICE PIXELS — points × this window's backing scale. The
+    /// quantity the readout reports, and the one that makes "100% — 3840×2160" a statement about
+    /// source pixels rather than about points. nil until the surface has been laid out.
+    private var drawnVideoPixels: CGSize? {
+        guard drawnVideoSize.width > 0, drawnVideoSize.height > 0 else { return nil }
+        let scale = deck.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        return CGSize(width: drawnVideoSize.width * scale, height: drawnVideoSize.height * scale)
+    }
+
+    /// ── THE TRANSIENT RASTER READOUT ────────────────────────────────────────────────────────
+    ///
+    /// "100% — 3840×2160", top-left, on change, then gone. The DIMENSIONS are the load-bearing half:
+    /// they are what makes a 100% picture occupying 1920×1080 points legible as "every source pixel
+    /// is on screen" without a word of explanation anywhere in the app.
+    ///
+    /// ⚠️ PLACED BELOW THE TRAFFIC LIGHTS, NOT BESIDE THEM. The window is `.hiddenTitleBar`, so the
+    /// close/minimise/zoom buttons float in the picture's top-left corner and fade with the control
+    /// surface. 44 points of top padding clears them; putting the readout at the corner itself would
+    /// have it appear underneath three buttons that are usually visible at exactly the moment it is.
+    ///
+    /// The auto-hide is `.task(id:)` — the same idiom `connectErrorBanner` uses, for the same
+    /// reason: the id is the TEXT, so a new value restarts the timer. That is also what keeps the
+    /// readout up for the whole of a window drag, where the dimensions change continuously and each
+    /// change re-arms it. What makes "a stale timer cannot wipe a fresh message" actually TRUE is
+    /// the cancellation guard inside the task — see the note there, and note that the same guard was
+    /// missing from `connectErrorBanner` until this arc.
+    @ViewBuilder private var rasterReadout: some View {
+        if let text = rasterNotice {
+            Text(text)
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.95))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.6), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                .padding(.top, 44)
+                .padding(.leading, 16)
+                .transition(.opacity)
+                .task(id: text) {
+                    try? await Task.sleep(nanoseconds: 1_600_000_000)
+                    // ⚠️ THE CANCELLATION TEST IS WHY THIS READOUT IS VISIBLE AT ALL, and leaving it
+                    // out is a silent failure rather than a flicker. Changing the id CANCELS the
+                    // running task, `Task.sleep` throws `CancellationError`, `try?` swallows it —
+                    // and execution falls straight through to the line below, clearing the notice
+                    // the OUTGOING task was never meant to touch.
+                    //
+                    // MEASURED: a raster change publishes twice within ~10 ms (once when the state
+                    // changes, once when the resize lands and the measured dimensions update), so
+                    // the first task was always cancelled by the second and always wiped it. The
+                    // readout set its text, logged it, and never appeared on screen — three
+                    // consecutive screenshots at 0.35 s, 0.5 s and 0.8 s after a menu click caught
+                    // nothing. Guarding here fixes it; the incoming task owns the timer.
+                    guard !Task.isCancelled else { return }
+                    rasterNotice = nil
+                }
+        }
+    }
+
+    /// Show (or refresh) the readout from CURRENT facts. Never takes the text from its caller — the
+    /// three triggers below know that something moved, not what it moved to.
+    private func showRasterNotice() {
+        guard let text = RasterReadout.text(for: chrome.rasterSize,
+                                            displaySize: engine.displaySize,
+                                            drawnPixels: drawnVideoPixels) else { return }
+        rasterNotice = text
     }
 
     /// The video region: aspect-fit picture (never cropped/stretched), transport
@@ -748,6 +869,14 @@ struct ContentView: View {
                 }
             }
             .aspectRatio(videoAspect, contentMode: .fit)   // full image, aspect preserved
+            // THE PICTURE, MEASURED. Attached to the aspect-fitted surface itself, so this is the
+            // video rect and not the region around it — the same distinction the guides overlay
+            // relies on. Feeds the raster readout's dimensions; see `drawnVideoPixels`.
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                guard abs(size.width - drawnVideoSize.width) > 0.5
+                        || abs(size.height - drawnVideoSize.height) > 0.5 else { return }
+                drawnVideoSize = size
+            }
             // Framing guide overlay — bounds == displayed video rect, so it tracks
             // letterbox/pillarbox + scaling. Self-contained (reads guide prefs); draws
             // nothing when off. Above the video, below the controls.
@@ -809,7 +938,8 @@ struct ContentView: View {
                 buttonsVisible: hasSource ? controlsShown : true,
                 deck: deck,
                 displaySize: engine.displaySize,
-                chromeHeight: chromeHeight
+                chromeHeight: chromeHeight,
+                raster: rasterRequest
             )
             .frame(width: 0, height: 0)
 
@@ -817,7 +947,7 @@ struct ContentView: View {
             // and renderer) to DeckRegistry via `viewDidMoveToWindow`. A sibling of the
             // WindowConfigurator above, which reaches for the same window to lock the aspect —
             // this is the app's established way to get at the NSWindow from SwiftUI.
-            WindowDeckRegistrar(deck: deck, engine: engine, renderer: metalRenderer)
+            WindowDeckRegistrar(deck: deck, engine: engine, renderer: metalRenderer, chrome: chrome)
                 .frame(width: 0, height: 0)
 
             Button("") { togglePin() }
@@ -845,6 +975,7 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .topLeading) { rasterReadout }
         // The two top-edge notices, stacked so they can never overlap: the STANDING arbitration
         // message (a condition that persists until the user acts, in another window) above the
         // TRANSIENT connect-error banner (a thing that just happened, here). Both non-blocking.
@@ -1882,7 +2013,15 @@ struct ContentView: View {
             .task(id: message) {
                 // Auto-dismiss. A new attempt or the close button clears it sooner; the id change
                 // then cancels this sleep, so a stale timer can't wipe a fresh message.
+                //
+                // ⚠️ THE GUARD IS WHAT MAKES THAT SENTENCE TRUE, and it was missing. A cancelled
+                // `Task.sleep` THROWS, `try?` swallows the throw, and the three `clearError()` calls
+                // below then ran IMMEDIATELY — so a second failure arriving inside the 9 s window
+                // wiped itself on the way in. Found while building the raster readout, which shows
+                // twice within ~10 ms and therefore hit it every single time; this banner only hits
+                // it when two connect errors land close together, which is why it survived.
                 try? await Task.sleep(nanoseconds: 9_000_000_000)
+                guard !Task.isCancelled else { return }
                 whep.clearError()
                 srt.clearError()
                 engine.playbackNotice = nil

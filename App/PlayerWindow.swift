@@ -22,6 +22,10 @@ struct WindowConfigurator: NSViewRepresentable {
     var displaySize: CGSize?
     /// Total height of everything drawn BELOW the picture in THIS window, in points.
     var chromeHeight: CGFloat
+    /// How large the picture is to be drawn — `WindowChrome.rasterSize` reduced to what the geometry
+    /// can act on. Travels with the chrome height because it is the same kind of input: a per-window
+    /// statement about the window's size that only `WindowSizer` may act on. See RasterSize.swift.
+    var raster: RasterRequest
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -41,7 +45,7 @@ struct WindowConfigurator: NSViewRepresentable {
             // through the same constraint as everything else, and it is a no-op if a source has
             // already sized the window (the `.onOpenURL` re-use path can get there first).
             deck.sizer.bind(to: window)
-            deck.sizer.setGeometry(sourceSize: displaySize, chromeHeight: chromeHeight)
+            deck.sizer.setGeometry(sourceSize: displaySize, chromeHeight: chromeHeight, raster: raster)
             deck.sizer.installDefaultSize()
         }
         return view
@@ -80,6 +84,6 @@ struct WindowConfigurator: NSViewRepresentable {
         deck.sizer.reassertConstraintIfInstalled()
         // THE ONLY WRITER OF THE CONSTRAINT'S INPUTS. A no-op when neither the picture's shape nor
         // the chrome height moved, which is the overwhelming majority of update passes.
-        deck.sizer.setGeometry(sourceSize: displaySize, chromeHeight: chromeHeight)
+        deck.sizer.setGeometry(sourceSize: displaySize, chromeHeight: chromeHeight, raster: raster)
     }
 }

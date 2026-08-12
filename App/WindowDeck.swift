@@ -185,8 +185,26 @@ final class WindowDeck: ObservableObject {
 
     /// This window's engine and renderer. Populated by `WindowDeckRegistrar` before the window
     /// callback can run, so `DeckRegistry.register` always sees a complete deck.
-    fileprivate weak var engine: FrameEngine?
+    ///
+    /// `fileprivate(set)` on `engine` rather than `fileprivate`: the View menu's mirror
+    /// (`RasterMenuState`) has to ask the key deck whether it has a source, and that is a read.
+    fileprivate(set) weak var engine: FrameEngine?
     fileprivate weak var renderer: MetalVideoRenderer?
+
+    /// THIS WINDOW'S CHROME STATE, reachable from outside the view that owns it.
+    ///
+    /// Weak, like `engine` and `renderer` and for the same reason: `ContentView` owns it as a
+    /// `@StateObject` and this class is a directory, not an owner.
+    ///
+    /// ⚠️ IT EXISTS FOR THE MENU BAR, AND ONLY FOR IT. A `CommandMenu` is built in the App scene,
+    /// which has no window's state in scope — so "set the key window's raster size" needs a route
+    /// from an app-level menu item to one window's `WindowChrome`, and this registry is already the
+    /// app's one seam for exactly that shape of question ("which deck does this app-wide thing
+    /// apply to"). See `DeckRegistry.setRasterSize`.
+    ///
+    /// NOT `@Published`, for the reason the class header gives about `engine`/`renderer`: it is
+    /// written from `updateNSView`, which can land inside a SwiftUI update pass.
+    fileprivate(set) weak var chrome: WindowChrome?
 
     /// THIS WINDOW'S SIZE CONSTRAINT — the forwarding `NSWindowDelegate` that replaced the static
     /// `contentAspectRatio`. Owned here, and not by a view, because it must be exactly as long-lived
@@ -467,6 +485,27 @@ final class DeckRegistry {
         return nil
     }
 
+    /// THE DECK A MENU COMMAND APPLIES TO — the key window's, by the same four-fallback lookup the
+    /// arbiter uses to decide which deck may play (`keyDeckID`, whose doc comment explains why each
+    /// fallback exists). Deliberately the same lookup and not a private `NSApp.keyWindow` test: a
+    /// menu item that acted on a different window from the one the transport belongs to would be a
+    /// second, quieter answer to "which window is the user in".
+    var keyDeck: WindowDeck? {
+        prune()
+        return deck(for: keyDeckID())
+    }
+
+    /// Set the KEY window's raster size — the View menu's action.
+    ///
+    /// The write goes to that window's own `WindowChrome`, which is the single owner of the value;
+    /// everything downstream (the window's geometry, the readout, the menu's checkmark) follows from
+    /// the publish, exactly as it does when the state changes for any other reason. Nothing is
+    /// duplicated here and no geometry is computed here.
+    func setRasterSize(_ size: RasterSize) {
+        guard let chrome = keyDeck?.chrome else { return }
+        chrome.rasterSize = size
+    }
+
     // MARK: Registration
 
     /// Register a deck's window and configure it. Idempotent for a window already registered to
@@ -717,6 +756,13 @@ final class DeckRegistry {
                 setNeedsArbitration()
             }
         }
+
+        // THE VIEW MENU DESCRIBES THE KEY DECK, so it is re-derived by every pass that could have
+        // changed which deck that is — a key-window change, a registration, a close. The two
+        // triggers this pass cannot see (the raster state changing, a source arriving) call the same
+        // function from ContentView. It reads current facts and writes no state back; see
+        // `RasterMenuState`.
+        RasterMenuState.shared.refresh()
 
         // ONLY WHEN THE PICTURE ACTUALLY CHANGED. Passes are cheap and frequent — the four service
         // subscriptions mean NDI's ~1 Hz discovery republish alone triggers one — and a line per
@@ -1058,6 +1104,8 @@ struct WindowDeckRegistrar: NSViewRepresentable {
     let deck: WindowDeck
     let engine: FrameEngine
     let renderer: MetalVideoRenderer?
+    /// This window's chrome state, so the menu bar can reach it — see `WindowDeck.chrome`.
+    let chrome: WindowChrome
 
     func makeNSView(context: Context) -> NSView {
         // Populate BEFORE the view can be added to a window, so `viewDidMoveToWindow` — and
@@ -1065,12 +1113,14 @@ struct WindowDeckRegistrar: NSViewRepresentable {
         // properties on a non-@Published class, so this cannot invalidate a view mid-update.
         deck.engine = engine
         deck.renderer = renderer
+        deck.chrome = chrome
         return DeckHostView(deck: deck)
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         deck.engine = engine
         deck.renderer = renderer
+        deck.chrome = chrome
     }
 }
 

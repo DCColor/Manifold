@@ -75,6 +75,10 @@ struct ManifoldApp: App {
                 // testers, and they are on whichever configuration we shipped them.
                 Button("Export Diagnostics…") { DiagnosticsExporter.shared.begin() }
             }
+            // The View menu: raster size (⌘1–⌘4, ⌘0) — how large the picture is drawn, as a
+            // percentage of the source raster. The app's first real menu of window commands; see
+            // RasterSize.swift for why it is a menu and not another item on the control bar.
+            RasterSizeCommands()
         }
 
         // The standard macOS Settings window (⌘,).
