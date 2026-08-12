@@ -356,7 +356,14 @@ struct VectorscopeScopeView: View {
                     .help("Reset trace color")
                 }
                 .padding(.horizontal, 6)
-                .padding(.vertical, 4)
+                // ── THE HEADER IS A CONTROL STRIP AND PINS TO THE TOP OF THE SLOT ───────────
+                //
+                // `scopeHeaderHeight`, the same fixed band the waveform and parade use, and NOT the
+                // `.padding(.vertical, 4)` that used to be here. Two things were wrong with the
+                // padding: it made this header a few points taller than the value scopes', so the
+                // four header bars did not line up across a tray; and being intrinsically sized it
+                // gave the VStack nothing to pin, which is half of the bug below.
+                .frame(height: scopeHeaderHeight)
 
                 ZStack {
                     Color.black
@@ -368,6 +375,40 @@ struct VectorscopeScopeView: View {
                     graticuleView
                 }
                 .aspectRatio(1, contentMode: .fit)   // stay square, fit available space
+                // ⚠️ THE GREEDY FRAME IS WHAT SEPARATES THE HEADER FROM THE PLOT, and without it the
+                // two were laid out as ONE CENTRED UNIT. `.aspectRatio(.fit)` makes this ZStack
+                // exactly `min(width, height)` tall, so in a TALL slot the VStack's content
+                // (header + square) is SHORTER than the slot — and the enclosing
+                // `.frame(maxHeight: .infinity)` then centres the whole stack, header and all.
+                //
+                // MEASURED before the fix, in a 640×907 slot: content was 27 + 640 = 667, leaving
+                // 240 points of slack, and the header sat 120 points BELOW the top of the slot,
+                // floating in black, while WAVEFORM and PARADE beside it were pinned at 0. The
+                // header is a control strip, not part of the measurement, and it belongs at the top
+                // in all four scopes.
+                //
+                // Taking the remaining height here makes the VStack fill the slot, which is what
+                // pins the header. The square is then CENTRED in what is left.
+                //
+                // Top-aligned was tried first, on the reasoning that it levels this plot with the
+                // value scopes' traces and that a centred plot drifts downward while the divider is
+                // dragged. Both are true and neither survives looking at it: top-aligning banks the
+                // whole slack into one block of black beneath the plot, which reads as an unfinished
+                // slot rather than as unused tray. The drift objection is also much weaker here than
+                // it was for the header — a header is a control you reach for and must hold still,
+                // whereas centred content moving as its container resizes is what centred content
+                // does everywhere else.
+                //
+                // ⚠️ THE ALIGNMENT APPLIES TO THE PLOT ONLY, AND THAT IS THE WHOLE POINT OF THE
+                // SPLIT. The header is pinned by the line above; this centres the measurement inside
+                // the space below it. Do not move the alignment onto the VStack — that is exactly
+                // the bug this replaced, where header and plot were centred together as one unit.
+                //
+                // NO EFFECT IN THE ORDINARY CASE: at the default tray height the square is
+                // HEIGHT-bound (a 640×182 plot area gives a 182-pt square), so there is no slack and
+                // the alignment never comes into play. `.center` is also `frame`'s default; it is
+                // written out because it is a decision, not an omission.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)

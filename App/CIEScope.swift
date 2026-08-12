@@ -345,7 +345,9 @@ struct CIEScopeView: View {
                     Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 6)
-                .padding(.vertical, 4)
+                // Same fixed band as the other three scopes — see the note in VectorscopeScope,
+                // which is where the layout bug this shares is written up in full.
+                .frame(height: scopeHeaderHeight)
 
                 ZStack {
                     Color.black
@@ -357,6 +359,11 @@ struct CIEScopeView: View {
                     graticule
                 }
                 .aspectRatio(1, contentMode: .fit)   // stay square, fit available space
+                // Takes the height the square does not, so the VStack fills the slot and the header
+                // above it PINS TO THE TOP. The square is CENTRED in what is left. See
+                // VectorscopeScope for the measurement and for why centred beat top-aligned. Only
+                // the PLOT is square-constrained; the header never was part of the measurement.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
