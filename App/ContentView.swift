@@ -117,6 +117,12 @@ struct ContentView: View {
     /// exactly once per window, which is precisely the lifetime this state should have.
     @StateObject private var chrome = WindowChrome()
 
+    /// PER-WINDOW watch on this deck's file: has it changed on disk since the engine last read it?
+    /// Owned like `chrome` and for the same reason — two windows hold two different files and each
+    /// watches its own. Read only by the reload button, which tints itself from it. See
+    /// SourceFileWatcher for why this polls, and for why it never reloads on its own.
+    @StateObject private var fileWatch = SourceFileWatcher()
+
     /// Unchanged in shape from the @AppStorage era — a computed read of the stored mode. Only the
     /// backing store moved, so every `isDocked` call site below is untouched.
     private var isDocked: Bool { chrome.isDocked }
@@ -514,6 +520,15 @@ struct ContentView: View {
             metalRenderer?.setNeedsRefresh()
         }
         .onChange(of: engine.metadata) { _, meta in
+            // ⚠️ FIRST, AND UNRELATED TO THE COLORSPACE WORK BELOW — it is here because publishing
+            // metadata is the honest "the engine has just READ the file" edge, and this chain
+            // cannot afford another `.onChange` (see the currentURL observer further down for what
+            // happens when it gets one). Re-baselining the changed-on-disk watch here is what makes
+            // re-opening the file the deck ALREADY has clear the reload button's highlight: that
+            // path assigns `currentURL` the value it already held, so the URL observer never fires.
+            // It cannot defeat the feature — nothing but a read publishes metadata, so an external
+            // rewrite still lights the button.
+            fileWatch.rebaseline()
             // Derive the Metal layer colorspace once per source from the
             // inspector's authoritative color tags (not per-frame from buffers).
             if let meta {
@@ -640,7 +655,22 @@ struct ContentView: View {
         // the load call sites because media also arrives via ManifoldApp's .onOpenURL (Finder
         // double-click / drag-to-icon), which can't reach this view's state. Also covers the nil
         // transition engine.stop() makes on NDI takeover.
-        .onChange(of: engine.currentURL) { _, _ in captions.clear() }
+        //
+        // ⚠️ THE CHANGED-ON-DISK WATCH RIDES ALONG IN THIS SAME CLOSURE rather than taking an
+        // `.onChange` of its own, and that is not tidiness: this `body` is one long modifier chain,
+        // and a second observer on the same value pushed it past the Swift type-checker's
+        // "unable to type-check this expression in reasonable time" threshold. Two statements in
+        // one closure cost the checker nothing. The two hooks want the identical edge anyway — a
+        // new file means new captions AND a new file to watch — and nil (empty deck, or a live
+        // source) correctly stops the watch. Keyed on currentURL for the reason stated above:
+        // media also arrives via ManifoldApp's .onOpenURL, which cannot reach this view's state.
+        .onChange(of: engine.currentURL) { _, url in
+            captions.clear()
+            fileWatch.watch(url)
+        }
+        // The watch's OTHER re-baseline — the one that covers re-opening the file this deck already
+        // has — rides in the `engine.metadata` observer further up, for the same type-checker
+        // reason. See the note there.
         .sheet(isPresented: $showStreamBookmarks) {
             StreamBookmarksSheet(store: .shared) { url in
                 // Same connect+takeover path the chevron rows use; then close the sheet so the async
@@ -2294,10 +2324,36 @@ struct ContentView: View {
                 .help("Edit in Flip")
                 .disabled(engine.currentURL == nil)
 
-                Button(action: { Task { await engine.reinspect() } }) {
+                // Refresh metadata — ALWAYS PRESSABLE, and lit when there is a reason to press it.
+                //
+                // The press always re-reads, whether or not anything changed; pressing it on an
+                // unchanged file is never wrong, it just re-reads. The alternative design — enable
+                // it only when the file has changed — was rejected: it makes the common case a dead
+                // control, and it is the DEAD-CONTROL reading that produced the bug report this
+                // fixes (a tester pressed it on an unchanged file, saw nothing happen, and
+                // concluded it was broken). `.disabled` here is only the same no-file gate its
+                // neighbours in this row carry; it never tracks the changed state.
+                //
+                // ⚠️ THE GREEN MEANS SOMETHING DIFFERENT HERE THAN IT DOES THREE BUTTONS ALONG.
+                // On the DeckLink and scopes-tray buttons this tint means "this is ON" — a mode the
+                // user turned on and can turn off. Here it means "there is something waiting" — a
+                // notification, cleared by acting on it, not by pressing it again. Same treatment,
+                // different meaning, deliberately: a second highlight colour in a twelve-button row
+                // would be read as a third state of the first meaning rather than as a new one, and
+                // "this control has something for you" is exactly what green already says at a
+                // glance. If it ever reads oddly, that is why.
+                Button(action: {
+                    // The press IS the acknowledgement — adopt what is on disk now as the truth
+                    // before the read, so the highlight clears immediately rather than on the next
+                    // poll. See SourceFileWatcher.rebaseline for the during-the-read race.
+                    fileWatch.rebaseline()
+                    Task { await engine.reinspect() }
+                }) {
                     Image(systemName: "arrow.clockwise")
                 }
-                .help("Refresh metadata")
+                .foregroundStyle(fileWatch.changedOnDisk ? Color.green : .white.opacity(0.9))
+                .help(fileWatch.changedOnDisk ? "This file changed on disk — click to reload"
+                                              : "Refresh metadata")
                 .disabled(engine.currentURL == nil)
 
                 // Export the current frame (ACTION) — sits with the file/action controls.
