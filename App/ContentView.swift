@@ -161,6 +161,9 @@ struct ContentView: View {
     // on-screen METAL/REFERENCE badge that used to read it. With the badge gone the switch is
     // silent, which is correct for a shipped build: nothing announces the render path unasked.
     @State private var showReferenceLayer = false
+    // A droppable file is hovering over this window's picture — see the drop destination on
+    // `videoRegion`. Purely the highlight's state; the drop itself carries no view state.
+    @State private var dropTargeted = false
 
     // Scopes tray: a FIXED bottom strip (`WindowChrome.trayHeight`), not the proportional share it
     // used to be — resizing the window scales the video and leaves the scopes alone. See the note on
@@ -828,6 +831,18 @@ struct ContentView: View {
         }
     }
 
+    /// Is this something this app can show? Guards the drop, so dragging a PDF onto the picture is
+    /// refused by the drop itself rather than accepted and then failed at load.
+    ///
+    /// `public.movie` conformance, which is the same filter the open panel uses. MEASURED against
+    /// the formats that matter here: .mov/.mp4/.mxf/.mkv/.avi/.m4v/.r3d all conform; .txt/.pdf/.srt
+    /// do not. Deliberately NOT `.audiovisualContent` — a .wav conforms to that, and this app has
+    /// nothing to show for an audio-only file.
+    private static func isPlayableMedia(_ url: URL) -> Bool {
+        guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+        return type.conforms(to: .movie)
+    }
+
     /// Show (or refresh) the readout from CURRENT facts. Never takes the text from its caller — the
     /// three triggers below know that something moved, not what it moved to.
     private func showRasterNotice() {
@@ -962,6 +977,38 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+        // ── DROP A FILE ON THE PICTURE TO REPLACE WHAT THIS WINDOW IS SHOWING ───────────────
+        //
+        // Requested by testers, and with one engine per window it is the natural reading of the
+        // gesture rather than a special case: the drop NAMES ITS TARGET — this window's picture —
+        // so it loads here, whatever this window is currently showing and whatever the Open…
+        // preference says about menus. `DeckRegistry.load(_:into:)` is the explicit path; it retires
+        // this deck's live source first and never touches another window's.
+        //
+        // ⚠️ ON THE VIDEO REGION AND NOT ON `body`. The scopes tray is a sibling of this view, not a
+        // child, so it is NOT a drop target — dropping a file on a waveform means nothing. Dragging
+        // to the Dock icon or onto an empty area of the app still opens a NEW window, because that
+        // path is LaunchServices → `.onOpenURL`, which this does not touch.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first(where: Self.isPlayableMedia) else { return false }
+            DeckRegistry.shared.load(url, into: deck)
+            wakeHUD()
+            return true
+        } isTargeted: { targeted in
+            dropTargeted = targeted
+        }
+        // The only affordance a drop gets: the picture's edge lights while a droppable file is over
+        // it. Inside the region, so it cannot disturb the window's geometry.
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(.white.opacity(0.65), lineWidth: 3)
+                    .padding(2)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.12), value: dropTargeted)
         .overlay(alignment: .topLeading) { rasterReadout }
         // The two top-edge notices, stacked so they can never overlap: the STANDING arbitration
         // message (a condition that persists until the user acts, in another window) above the
