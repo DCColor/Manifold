@@ -80,6 +80,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// must not have their results land on the engine afterwards. Each Task captures the generation
     /// it was started for and publishes only if it is still current.
     private var loadGeneration = 0
+
+    /// The newest position a frame step has asked for, or nil when none is outstanding, plus
+    /// whether the drain loop that services it is running. See `stepFrame` for why holding an arrow
+    /// key needs these at all.
+    private var pendingStepTarget: Double?
+    private var stepDrainRunning = false
     // JKL shuttle transport rate (transient session state — not persisted).
     // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
     // synchronizer directly; reverse is a best-effort jog (see setShuttleRate).
@@ -443,12 +449,70 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// Step exactly one frame and pause (arrow-key jog). Re-seeks to the target
     /// frame via the reader and holds it at rate 0.
+    /// Step by whole frames. Bound to ← / → (one frame) and ⇧← / ⇧→ (one second).
+    ///
+    /// ── THE SEEKS COALESCE. ⚠️ AND THE BACKLOG THIS GUARDS AGAINST WAS NOT OBSERVED ─────────
+    ///
+    /// This was `Task { await beginReading(...) }` — one unbounded Task per call, each doing a full
+    /// reader teardown and rebuild (cancel the AVAssetReader, flush both renderers, construct a new
+    /// reader and FrameSource). The worry was that key repeat (~30/s) would outrun the rebuild and
+    /// leave a queue draining after the key came up, with the picture still travelling.
+    ///
+    /// ⚠️ MEASURED, AND IT DID NOT. Instrumented build, 60 programmatic steps at 200 Hz — six times
+    /// real key repeat — on 1080p ProRes 422 HQ from local disk:
+    ///
+    ///     per-press Task : 60 steps → 60 rebuilds, 1 rebuild after the last step, 9 ms tail
+    ///     coalesced      : 60 steps → 46 rebuilds, 1 rebuild after the last step, 8 ms tail
+    ///
+    /// A rebuild finishes in well under 5 ms on that file, so nothing accumulated either way. Do not
+    /// read the coalescer as a fix for a bug anyone has seen.
+    ///
+    /// IT IS KEPT AS A BOUND, NOT A REPAIR. The measurement holds for ONE file on ONE machine, and
+    /// the quantity it depends on — how long a reader rebuild takes — is exactly what grows with
+    /// raster, codec and storage: 8K ProRes off a network volume is the case where a 33 ms budget
+    /// stops being comfortable, and it is not a case that can be tested here. `pendingStepTarget`
+    /// holds the newest destination; the first call starts a drain loop and every call while that
+    /// loop runs merely overwrites the target. So the outstanding work is one rebuild in flight plus
+    /// at most one queued behind it, WHATEVER the repeat rate and however slow the media, and the
+    /// last rebuild always lands on the final position. Intermediate frames are skipped rather than
+    /// decoded, which is the right reading of a held key: the user is asking to travel, not to see
+    /// every frame on the way. On fast media it is a 23% reduction in rebuilds and nothing else.
+    ///
+    /// ⚠️ THE ACCUMULATOR READS `pendingStepTarget` FIRST, NOT `currentTime`. The pump writes
+    /// `currentTime` from decoded PTS, so during a drain it lags behind the steps already accepted;
+    /// accumulating from it would make a held key fight its own decoder and advance erratically.
     public func stepFrame(by frames: Int) {
         let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
         setShuttleRate(0)
-        let target = max(0, min(currentTime + Double(frames) / fps, duration))
+        let base = pendingStepTarget ?? currentTime
+        // ⚠️ THE CEILING IS THE LAST FRAME, NOT `duration`, and the two are not the same instant.
+        // `duration` is the end of the last frame's interval — one frame TIME past the last frame's
+        // presentation time — so clamping there parked the playhead on a frame index that does not
+        // exist: stepping to the end of a 96-frame file read `01:00:04:00`, i.e. frame 96 of 0…95.
+        // Harmless-looking until timecode entry arrived and clamped to `totalFrames` (95,
+        // `01:00:03:23`), at which point ← / → and a typed timecode disagreed about where the end is
+        // and one of them was quoting a frame you cannot see.
+        let lastFrameTime = Double(totalFrames) / fps
+        let target = max(0, min(base + Double(frames) / fps, lastFrameTime))
         currentTime = target
-        Task { await beginReading(from: target, resumePlaying: false) }
+        pendingStepTarget = target
+        guard !stepDrainRunning else { return }   // the running drain will pick this target up
+        stepDrainRunning = true
+        Task { await drainPendingSteps() }
+    }
+
+    /// Rebuild to the newest requested position until no newer one has arrived. See `stepFrame`.
+    private func drainPendingSteps() async {
+        defer { stepDrainRunning = false }
+        let generation = loadGeneration
+        while let target = pendingStepTarget {
+            pendingStepTarget = nil
+            // A load (or a stop) during the drain retires it: the targets belong to the file that
+            // was open when they were typed, and seeking the NEW file to them would be nonsense.
+            // Same generation authority the inspection Tasks use.
+            guard loadGeneration == generation, hasMedia else { return }
+            await beginReading(from: target, resumePlaying: false)
+        }
     }
 
     private func startReverseJog() {
@@ -540,6 +604,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         audioTap.reset()   // D4b-1: drop buffered PCM so nothing survives a stop
         isPlaying = false
         currentTime = 0
+        // An outstanding frame-step destination belongs to the file that just left. Left set, it
+        // would become the accumulator's base for the first step of the NEXT source (see
+        // `stepFrame`), so a step in a freshly loaded file would start from the old one's position.
+        pendingStepTarget = nil
         // A full teardown must leave NO transport readout from the departed source: the same
         // incoherence we fixed for scopes (blank-on-disconnect). duration + tcInfo drive the
         // scrubber range and the source/end-timecode readouts; without this a file→stream takeover
@@ -671,9 +739,36 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
     }
 
+    /// The source timecode at a time on the file's timeline: the file's start TC plus however many
+    /// frames have elapsed.
+    ///
+    /// ── ⚠️ SECONDS→FRAMES USES THE EXACT RATE, NOT `nfr`, AND THAT IS A CORRECTION ───────────
+    ///
+    /// This line read `seconds * Double(tc.nfr)` — the INTEGER rate — and for every NTSC-family rate
+    /// that is the wrong conversion by exactly the 1000/1001 pulldown factor:
+    ///
+    ///   * `nfr` is 24 for a 23.976 file, and it is CORRECT for splitting a frame count into
+    ///     HH:MM:SS:FF — SMPTE labels count 24 frames per timecode second, which is the whole point
+    ///     of the rate. `format(...)` below still takes it, unchanged.
+    ///   * But the frame INDEX at time t is `round(t × 23.976)`, not `round(t × 24)`. Using 24
+    ///     over-counted by 0.1% — one frame per ~1000, so the readout ran a frame ahead of the
+    ///     picture after ~42 s and about fourteen frames ahead by the ten-minute mark.
+    ///
+    /// It was invisible while the readout was the only consumer: a display that drifts against
+    /// itself consistently still looks like a timecode. It stopped being invisible when timecode
+    /// ENTRY arrived, because entry closes the loop — type a timecode, seek to it, read it back —
+    /// and the loop did not close. Every other frame-index site in this engine (`currentFrame`,
+    /// `totalFrames`, `stepFrame`) already used the exact rate; this was the odd one out.
+    ///
+    /// Rate precedence matches `TimecodeContext` in the app layer, deliberately: the metadata rate is
+    /// authoritative and the timecode track's own rate is the fallback, so the readout and the entry
+    /// that has to land on it can never derive a frame from two different numbers.
     public func currentSourceTimecode(at seconds: Double) -> String? {
         guard let tc = tcInfo, tc.nfr > 0 else { return nil }
-        let elapsedFrames = Int((seconds * Double(tc.nfr)).rounded())
+        let declared = metadata?.frameRate ?? 0
+        let rate = declared > 0 ? declared : tc.fps
+        guard rate > 0 else { return nil }
+        let elapsedFrames = Int((seconds * rate).rounded())
         return TimecodeReader.format(frameCount: tc.startFrame + elapsedFrames,
                                      nfr: tc.nfr, fps: tc.fps, dropFrame: tc.dropFrame)
     }
@@ -839,6 +934,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // Retire any inspection Tasks still in flight from a previous load before starting this one.
         loadGeneration &+= 1
         let generation = loadGeneration
+        // …and any frame step the PREVIOUS file had outstanding, for the reason given in `stop()`.
+        // The bump above is what makes a drain loop already running notice and retire itself.
+        pendingStepTarget = nil
 
         // New file: retire any prior libav sources (bound to the old file). The
         // per-file libav video+audio sources are created lazily in beginLibavReading.

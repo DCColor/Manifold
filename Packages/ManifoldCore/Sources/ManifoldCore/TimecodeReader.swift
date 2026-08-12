@@ -18,6 +18,19 @@ public enum TimecodeReader {
         public var fps: Double         // exact rate (e.g. 23.976)
     }
 
+    /// HOW MANY FRAME LABELS DROP-FRAME SKIPS AT EACH MINUTE — 2 at 29.97, 4 at 59.94.
+    ///
+    /// Was the literal `Int((fps * 0.066666).rounded())` written out at both ends of this file's
+    /// drop-frame arithmetic (`parse` and `format`), and timecode ENTRY needs the same number a
+    /// third time to reject the labels drop-frame does not have (`00:01:00;00` and `;01` are not
+    /// times). Three copies of a magic constant that must agree is one copy.
+    ///
+    /// The 0.066666 is 2/30 — the ratio the SMPTE rule fixes — so multiplying by the rate and
+    /// rounding generalizes it to the 59.94 case without a table.
+    public static func droppedFramesPerMinute(fps: Double) -> Int {
+        Int((fps * 0.066666).rounded())
+    }
+
     /// Parse a formatted SMPTE timecode string ("HH:MM:SS:FF", or ";FF" for
     /// drop-frame — as libav/MXF provides it) plus the exact `fps` into a `Result`
     /// with the same {startFrame, nfr, fps, dropFrame} the MOV tmcd path yields.
@@ -36,7 +49,7 @@ public enum TimecodeReader {
         var startFrame = (hh * 3600 + mm * 60 + ss) * nfr + ff
         if dropFrame {
             // Inverse of format()'s drop-frame adjustment: real continuous frame count.
-            let dropFrames = Int((fps * 0.066666).rounded())   // 2 @29.97, 4 @59.94
+            let dropFrames = droppedFramesPerMinute(fps: fps)
             let totalMinutes = 60 * hh + mm
             startFrame -= dropFrames * (totalMinutes - totalMinutes / 10)
         }
@@ -198,7 +211,7 @@ public enum TimecodeReader {
         let hh: Int, mm: Int, ss: Int, ff: Int
 
         if dropFrame {
-            let dropFrames = Int((fps * 0.066666).rounded())   // 2 for 29.97, 4 for 59.94
+            let dropFrames = droppedFramesPerMinute(fps: fps)
             let framesPer10Min = 10 * 60 * nfrI - 9 * dropFrames
             let framesPerMin = 60 * nfrI - dropFrames
             let d = fc / framesPer10Min

@@ -117,6 +117,13 @@ struct ContentView: View {
     /// exactly once per window, which is precisely the lifetime this state should have.
     @StateObject private var chrome = WindowChrome()
 
+    /// PER-WINDOW KEYBOARD TRANSPORT: the app's only `NSEvent` monitor. It owns timecode entry (the
+    /// modal "type a position and land on it" state, and the type-to-enter capture that opens it)
+    /// AND the ← / → / ⇧← / ⇧→ frame stepping — the two things in this app that must READ a
+    /// keystroke rather than declare one. Owned here like `chrome`: an entry in one window must not
+    /// seek another. See TimecodeEntry.swift for both reasons a key equivalent could not do it.
+    @StateObject private var transportKeys = TransportKeyMonitor()
+
     /// PER-WINDOW watch on this deck's file: has it changed on disk since the engine last read it?
     /// Owned like `chrome` and for the same reason — two windows hold two different files and each
     /// watches its own. Read only by the reload button, which tints itself from it. See
@@ -391,10 +398,36 @@ struct ContentView: View {
                     .keyboardShortcut("k", modifiers: [])
                 Button("") { engine.shuttleForward() }
                     .keyboardShortcut("l", modifiers: [])
-                Button("") { engine.stepFrame(by: -1) }
-                    .keyboardShortcut(.leftArrow, modifiers: [])
-                Button("") { engine.stepFrame(by: 1) }
-                    .keyboardShortcut(.rightArrow, modifiers: [])
+                // ══════════════════════════════════════════════════════════════════════════════
+                // ⚠️ ← / → / ⇧← / ⇧→ ARE NOT HERE, AND THE REASON IS A SwiftUI/AppKit GOTCHA
+                //    THAT WILL COST YOU AN AFTERNOON IF YOU MEET IT COLD.
+                //
+                // **AppKit's key-equivalent matcher does not discriminate `.shift` on the arrow
+                // keys.** A `.keyboardShortcut` IS a key equivalent, so ⇧+arrow cannot be expressed
+                // as one: if you need shift on an arrow, you have to read `modifierFlags` off the
+                // NSEvent yourself.
+                //
+                // HOW IT PRESENTED, because the failure does not look like a dispatch problem.
+                // These four were hidden buttons here like everything else — ←(1 frame), →(1
+                // frame), ⇧←(1 second), ⇧→(1 second), all four declarations correct. Each arrow
+                // therefore had TWO claimants differing only by the modifier the matcher ignores,
+                // and one of each pair won for BOTH presses. Measured on the built app:
+                //
+                //      →   1 frame        ⇧→  1 frame     ← both bindings collapsed onto the
+                //      ←   1 second       ⇧←  1 second      unshifted one, → onto the shifted one
+                //
+                // It reads exactly like two transposed literals, and it is not — transposing them
+                // would have "fixed" two of the four cases and broken the other two.
+                //
+                // All four now live in `TransportKeyMonitor` (TimecodeEntry.swift), which already
+                // runs the app's only `NSEvent` local monitor for type-to-enter and so has the
+                // event — and its exact modifier flags — in hand. Nothing else about them changed:
+                // same transport gate, same one-second-from-the-file's-rate rule.
+                //
+                // Everything ABOVE this comment is a plain unmodified key with a single claimant,
+                // which the matcher handles correctly. The trap is specifically two bindings on one
+                // arrow key distinguished only by shift.
+                // ══════════════════════════════════════════════════════════════════════════════
             }
             .opacity(0)
             .disabled(!deck.gate.transportEnabled)
@@ -471,6 +504,10 @@ struct ContentView: View {
             // Persisted arrangement may reopen the tray with scopes already on —
             // start their sampling to match the restored visibility.
             updateScopeSampling()
+            // Timecode entry's key monitor. Installed here rather than as its own `.onAppear`
+            // because this view's modifier chain is at the type-checker's limit — see the note on
+            // the currentURL observer below. Idempotent, so a second onAppear costs nothing.
+            transportKeys.attach(deck: deck, engine: engine)
             // A WINDOW-EDGE DRAG (or the zoom button) ENDS THE RASTER POLICY. The sizer detects it —
             // it is the window's delegate and nothing else sees a live resize — and this is the wire
             // back to the state that owns the answer. `[weak chrome]` because the closure is held by
@@ -486,6 +523,8 @@ struct ContentView: View {
             RasterMenuState.shared.refresh()
         }
         .onDisappear {
+            // Before the engine goes: a closed window must stop inspecting keystrokes.
+            transportKeys.detach()
             engine.stop()
             metalRenderer?.stop()
             waveformModel.stop()
@@ -667,6 +706,10 @@ struct ContentView: View {
         .onChange(of: engine.currentURL) { _, url in
             captions.clear()
             fileWatch.watch(url)
+            // A load while an entry is open would leave the overlay holding the OLD file's frame
+            // arithmetic — its rate, its start timecode, its last frame — and commit it against the
+            // new one. The entry belonged to the file that just left.
+            transportKeys.cancel()
         }
         // The watch's OTHER re-baseline — the one that covers re-opening the file this deck already
         // has — rides in the `engine.metadata` observer further up, for the same type-checker
@@ -1055,6 +1098,10 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.12), value: dropTargeted)
+        // TIMECODE ENTRY, CENTRED OVER THE PICTURE. On the video region and not on `body` for the
+        // same reason the drop target is: the scopes tray is a sibling, and an entry overlay
+        // centred over "the picture plus the waveforms" is centred over neither.
+        .overlay { timecodeEntryLayer }
         .overlay(alignment: .topLeading) { rasterReadout }
         // The two top-edge notices, stacked so they can never overlap: the STANDING arbitration
         // message (a condition that persists until the user acts, in another window) above the
@@ -2188,7 +2235,16 @@ struct ContentView: View {
                     // line breaks that loop at the only place it could start.
                     .lineLimit(1)
                     .frame(minWidth: 86, alignment: .leading)
-                    .onTapGesture { cycleReadout() }
+                    // ⚠️ THE LEADING READOUT NO LONGER CYCLES THE MODE — IT OPENS TIMECODE ENTRY.
+                    // The settled design says clicking the timecode display is one of the two ways
+                    // in, and this is the timecode display: it is the PLAYHEAD, which is the only
+                    // number on this bar you can be taken to. Mode cycling did not go anywhere — the
+                    // trailing readout still carries it, and it cycles both, so the pair behaves
+                    // exactly as before for anyone who reaches for the other end.
+                    .onTapGesture { transportKeys.begin() }
+                    // A pointer cue, because a click target that looks like a label is a click
+                    // target nobody finds.
+                    .onHover { NSCursor.pointingHand.set(); if !$0 { NSCursor.arrow.set() } }
 
                 Slider(
                     value: Binding(
@@ -2498,9 +2554,26 @@ struct ContentView: View {
         }
     }
 
+    /// The entry overlay and its clamp confirmation, as one layer so `videoRegion`'s chain gains a
+    /// single modifier. The two are mutually exclusive by construction: `commit()` clears `isActive`
+    /// in the same turn it raises a notice.
+    @ViewBuilder private var timecodeEntryLayer: some View {
+        if transportKeys.isActive, let ctx = transportKeys.context {
+            TimecodeEntryOverlay(entry: transportKeys.entry, context: ctx, clampNotice: nil)
+        } else if let notice = transportKeys.clampNotice {
+            TimecodeClampOverlay(notice: notice)
+        }
+    }
+
     private var displayTime: Double { isScrubbing ? scrubValue : engine.currentTime }
 
     private var leadingReadout: String {
+        // DURING ENTRY THE SMALL DISPLAY IS THE ENTRY. It renders from the same value the centred
+        // overlay does, so the two cannot drift, and nothing on the bar goes on claiming a playhead
+        // position while the user is typing a different one.
+        if transportKeys.isActive, let ctx = transportKeys.context {
+            return transportKeys.entry.masked(dropFrame: ctx.dropFrame)
+        }
         switch effectiveMode {
         case .source:  return engine.currentSourceTimecode(at: displayTime) ?? timeString(displayTime)
         case .elapsed: return timeString(displayTime)
