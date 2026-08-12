@@ -833,16 +833,30 @@ struct ContentView: View {
         }
     }
 
-    /// Is this something this app can show? Guards the drop, so dragging a PDF onto the picture is
-    /// refused by the drop itself rather than accepted and then failed at load.
+    /// Is this a file the app should ACCEPT and try to open — which is a different question from
+    /// whether it can play it, and the difference is the point.
     ///
-    /// `public.movie` conformance, which is the same filter the open panel uses. MEASURED against
-    /// the formats that matter here: .mov/.mp4/.mxf/.mkv/.avi/.m4v/.r3d all conform; .txt/.pdf/.srt
-    /// do not. Deliberately NOT `.audiovisualContent` — a .wav conforms to that, and this app has
-    /// nothing to show for an audio-only file.
-    private static func isPlayableMedia(_ url: URL) -> Bool {
+    /// ⚠️ IMAGES ARE ACCEPTED HERE **SO THAT THEY CAN BE REFUSED PROPERLY**. That is not a
+    /// contradiction, it is the fix. This predicate used to be `public.movie` alone, so dropping a
+    /// PNG returned false and NOTHING HAPPENED — no message, no log, nothing to tell the user
+    /// apart from a window that ignored them. Meanwhile an .r3d, which does conform to
+    /// `public.movie`, was accepted and then refused by the engine with a message. Two ways of
+    /// saying "no", one of them silent, chosen by a UTType hierarchy that knows nothing about what
+    /// this app can decode.
+    ///
+    /// Letting images through means both land in the SAME place — `FrameEngine.loadAsset`, which
+    /// empties the deck and raises the one banner — and each gets the sentence that is true of it:
+    /// a still is named as a still, an unreadable video track is named as that. See the refusal in
+    /// FrameEngine, which is also where the reason stills are banked is written down.
+    ///
+    /// Everything else (.pdf, .txt, a folder) is still declined here, silently, and that is
+    /// UNCHANGED rather than endorsed: this widening is deliberately the smallest one that closes
+    /// the reported case. A real capability filter — "what can this engine actually open", asked
+    /// once, ahead of acceptance — is the fix for the general problem, and it is the work the drop
+    /// commit already flags as needing to be BUILT rather than extended.
+    private static func acceptsForLoad(_ url: URL) -> Bool {
         guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
-        return type.conforms(to: .movie)
+        return type.conforms(to: .movie) || type.conforms(to: .image)
     }
 
     /// Show (or refresh) the readout from CURRENT facts. Never takes the text from its caller — the
@@ -992,7 +1006,7 @@ struct ContentView: View {
         // to the Dock icon or onto an empty area of the app still opens a NEW window, because that
         // path is LaunchServices → `.onOpenURL`, which this does not touch.
         .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first(where: Self.isPlayableMedia) else { return false }
+            guard let url = urls.first(where: Self.acceptsForLoad) else { return false }
             DeckRegistry.shared.load(url, into: deck)
             wakeHUD()
             return true

@@ -258,6 +258,30 @@ does not, and `makeColorSpace`'s enumerated-pair structure does not either (see 
 7. **The provenance of 1.9609 (§4) is documentation, not measurement.** The two derivations agree
    and the number matches to 1.17e-05, which is strong, but no primary Apple source was read.
 
+8. **Still images are BLOCKED ON THIS DOCUMENT, not on decoding effort — banked post-1.0.**
+   Decoding a PNG is trivial. Showing one honestly is not, and it is the same open question as §7.1.
+
+   A video file declares its colour through NCLC/CICP codes drawn from a **small closed set** —
+   enumerated primaries, transfer functions and matrices — and every path in this app is built on
+   picking from that set: the shader's conversion, the layer's colorspace, the scopes' math, the
+   inspector's readout. A still can carry an **embedded ICC profile**: an arbitrary primaries
+   triangle and an arbitrary tone curve, which must be *converted* rather than looked up.
+
+   Doing that correctly means **the shader owns the display transform** instead of handing the layer
+   a colorspace and letting ColorSync convert — which is exactly Reference mode, and therefore
+   exactly the destination question in §7.1, currently blocked on the MacBook Air measurement
+   (`docs/AIR-COLOUR-TEST.md`).
+
+   **So the order is: settle Reference mode, then stills.** Adding stills first would mean either
+   drawing them through the video path with their profile ignored — a picture this app cannot stand
+   behind — or standing up a second colour path beside the one being rebuilt.
+
+   Until then a still is **refused by name**, through the same path as any other file that cannot be
+   played (`FrameEngine.loadAsset` → `abandonLoad` → the one banner), with a message that says what
+   is actually true — "Manifold plays video — still images aren't supported" — rather than the
+   unreadable-video-track wording, which would blame the file. The refusal site carries this
+   reasoning in full; this entry exists so it is also findable from the colour side.
+
 ---
 
 ## 8. Reproduction
@@ -312,6 +336,7 @@ rTRC : curveType 'curv'  count=1  → PURE POWER LAW, gamma=1.960938
 | 1.9609 = inverted 709 OETF, dim-surround | | | ⚠️ published refs only |
 | Match QuickTime ≡ Embedded on SDR | ✅ waveform | ✅ "both defer to ColorSync" | Screen internals |
 | Reference mode needs a declared destination | | | ⚠️ **open — the real work** |
+| Stills are gated on that same destination question (§7.8) | | ✅ from the ICC/NCLC difference | |
 | (9,1) Rec.2020-SDR flattens to 709 | | ✅ from code | ⚠️ no fixture |
 | Actual display light output | | | ⚠️ never measured |
 

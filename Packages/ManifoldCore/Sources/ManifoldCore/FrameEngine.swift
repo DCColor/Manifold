@@ -1,5 +1,8 @@
 @preconcurrency import AVFoundation
 import Combine
+// UTType, for the still-image refusal in `loadAsset` — the engine has to answer "can I play this"
+// for every entry point, so the type question is asked here rather than in a view.
+import UniformTypeIdentifiers
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -246,7 +249,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     public func load(url: URL, autoplay: Bool) {
-        currentURL = url
+        // ⚠️ `currentURL` IS NO LONGER SET HERE. It used to be assigned the moment `load` was
+        // called, which meant a file that was then REFUSED had already overwritten the URL of the
+        // file still on screen — the inspector's "Edit in Flip", the arbiter's window name and the
+        // caption sidecar's `onChange(of: currentURL)` all followed a file that never loaded. It is
+        // assigned in `loadAsset`'s commit phase now, with everything else the new source owns.
         Task { await loadAsset(url: url, autoplay: autoplay) }
     }
 
@@ -551,10 +558,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // taking a deck over (this runs via onWillActivateStream) would otherwise inherit the
         // departed FILE's aspect and hold it until its own first frame arrived — a 4:3 file's lock
         // on a 16:9 stream, which is worse than the no-lock state because it looks deliberate.
-        // `abandonLoad` already cleared it for the same reason; this is the same rule at the other
-        // teardown. Note `load()` deliberately does NOT clear it — a file→file open holds the
-        // previous shape for the few ms until inspection returns, rather than flashing the 16:9
-        // fallback.
+        // `abandonLoad` used to clear it for the same reason; that function is gone (a refused load
+        // no longer empties the deck — see `rejectLoad`), so `stop()` is now the only teardown that
+        // has to state this rule. Note `load()` deliberately does NOT clear it — a file→file open
+        // holds the previous shape for the few ms until inspection returns, rather than flashing
+        // the 16:9 fallback.
         displaySize = nil
         // …AND THE COLOUR STATE WITH IT, same class of bug, one degree nastier. A deck emptied by
         // an unload — including the deck a live stream is taking the display from — must not hand
@@ -674,39 +682,157 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         currentSourceTimecode(at: duration)
     }
 
-    /// Abandon a load that cannot produce a picture, returning the engine to its NO-MEDIA state and
-    /// raising `notice` in the UI's banner.
+    /// ── REFUSE A FILE WITHOUT TOUCHING WHAT IS ALREADY LOADED ───────────────────────────────
     ///
-    /// The point of the full reset is that `hasMedia` is what the UI keys its empty state off
-    /// (`hasSource = engine.hasMedia || activeLiveSource != nil`), so leaving any of this populated
-    /// would show a has-media surface for a file that will never draw a frame. Bumping the
-    /// generation also retires the inspection Tasks already in flight, so a late metadata result
-    /// cannot repopulate the inspector for a file we just refused.
-    private func abandonLoad(notice: String) {
-        loadGeneration &+= 1
-        hasMedia = false
-        asset = nil
-        videoTrack = nil
-        audioTrack = nil
-        imageGenerator = nil
-        libavThumbnailSource?.close(); libavThumbnailSource = nil
-        metadata = nil
-        displaySize = nil
-        duration = 0
-        currentTime = 0
-        tcInfo = nil
-        currentURL = nil
+    /// Raise `notice` in the UI's banner and do NOTHING ELSE. The deck keeps its media, its
+    /// position, and its playback: you dropped the wrong file, you do not lose the right one.
+    ///
+    /// ⚠️ THIS IS ONLY SAFE BECAUSE OF WHERE IT IS CALLED FROM, and that is the whole of the
+    /// change it belongs to. Every caller is in `loadAsset`'s VETTING PHASE, which runs before the
+    /// function has written a single field — see the phase comment there. A refusal reached after
+    /// the commit point would leave a half-built deck, which is worse than either outcome.
+    ///
+    /// ── WHAT THIS REPLACED, AND THE DISTINCTION THAT WAS MISSING ─────────────────────────────
+    ///
+    /// This used to be `abandonLoad(notice:)`, which reset the engine to its NO-MEDIA state:
+    /// `hasMedia = false`, asset/tracks/generator/metadata/displaySize/duration/tcInfo/currentURL
+    /// all cleared, the colour tags nil'd. Reasonable-sounding, and wrong for every case that
+    /// actually reached it, because it conflated two different events:
+    ///
+    ///   * **THIS LOAD FAILED BEFORE IT BEGAN.** Nothing was replaced; the media on screen is
+    ///     untouched and still correct. Refuse and say so. ← every caller today
+    ///   * **THE MEDIA THAT WAS LOADED IS GONE.** The deck is describing something that can no
+    ///     longer draw, so leaving `hasMedia` true would show a transport over a dead file.
+    ///
+    /// Only the second warrants emptying the deck, and nothing in this engine detects it today —
+    /// no path re-checks a file that is already playing. If one is ever added (a reader that dies
+    /// mid-playback, a `reinspect` that finds the file gone), it needs the destructive counterpart,
+    /// and the fields listed above are what it has to clear — `hasMedia` above all, since that is
+    /// what the UI keys its empty state off (`hasSource = engine.hasMedia || activeLiveSource`),
+    /// and the colour tags, since a stale source colourspace is invisible until the NEXT source is
+    /// drawn through it. It is deliberately not written until something needs it.
+    private func rejectLoad(notice: String) {
         playbackNotice = notice
-        // A WINDOW THAT FAILED TO OPEN A FILE MUST NOT KEEP THE PREVIOUS FILE'S COLOUR SPACE.
-        // Same class as `displaySize` above: state that describes a source which is no longer
-        // there. It is worse than a stale size, because nothing on screen looks wrong — the deck
-        // is empty — right up until the next source arrives and is drawn through it.
-        onSourceColorTags?(nil, nil, nil)
     }
 
+    /// ══════════════════════════════════════════════════════════════════════════════════════════
+    ///  TWO PHASES, AND THE BOUNDARY BETWEEN THEM IS THE POINT OF NO RETURN.
+    ///
+    ///  **PHASE 1 — VET.** Decide whether this file can be played. Writes NOTHING: not one field,
+    ///  not the generation counter, not the libav sources. Every refusal lives here, and because
+    ///  nothing has been touched yet, refusing is free — the deck keeps playing whatever it had.
+    ///
+    ///  **PHASE 2 — COMMIT.** Only now is the previous source torn down and the new one installed.
+    ///  Past this line the old media is gone and there is no way back, so nothing here may fail
+    ///  soft.
+    ///
+    ///  ⚠️ THE ORDER USED TO BE THE OTHER WAY AROUND, AND IT COST THE USER THEIR FILE. Both
+    ///  refusals sat AFTER the teardown, so dropping a still — or an R3D, or anything AVFoundation
+    ///  could not open — stopped the libav sources, replaced the asset, the scrub generator, the
+    ///  timecode and the duration, and THEN discovered the file was no good and emptied the deck to
+    ///  a bare empty state. A mis-drop destroyed the clip that was on screen. The refusal was
+    ///  correct; its position was not.
+    ///
+    ///  ⚠️ MXF IS NOT VETTED, and that is a stated gap rather than an oversight. AVFoundation
+    ///  cannot open it at all, so the phase-1 check has nothing to ask; vetting it means opening it
+    ///  through libav, which is most of the work of loading it. The MXF path therefore commits
+    ///  immediately, exactly as it did before this split — it has never had a refusal to be
+    ///  non-destructive about. When it grows one, it belongs in phase 1 with the others.
+    /// ══════════════════════════════════════════════════════════════════════════════════════════
     private func loadAsset(url: URL, autoplay: Bool) async {
+
+        // ══════════ PHASE 1 — VET. NOTHING BELOW THIS LINE MAY WRITE STATE. ══════════
+
+        // ── A STILL IMAGE, REFUSED BY NAME ────────────────────────────────────────────────────
+        //
+        // Same refusal PATH as every other file this engine cannot play — `rejectLoad`, which
+        // raises the one banner — and a different SENTENCE, because the reason is different and the
+        // generic one would be a lie. "Its video track is unreadable" says the file is damaged or
+        // its codec is beyond us; a PNG's lack of a video track is neither. It is a correct,
+        // healthy file of a kind this app does not open.
+        //
+        // Caught HERE rather than at the drop or the open panel because this is the one place every
+        // entry point passes through — a drop, ⌘O, a Finder double-click, a drag to the Dock icon.
+        // The alternative was a second refusal mechanism sitting in the view layer, which is what
+        // produced the bug this replaces: the drop's own type filter returned false for an image
+        // and nothing happened at all, no message, no log, nothing to distinguish it from a dead
+        // window.
+        //
+        // ── WHY STILLS ARE NOT SUPPORTED, AND WHAT WOULD HAVE TO HAPPEN FIRST ────────────────
+        //
+        // ⚠️ THIS IS BANKED AS POST-1.0 AND IT IS GATED ON THE COLOUR PIPELINE, NOT ON EFFORT.
+        // Decoding a PNG is trivial; showing one HONESTLY is not, and this app's whole claim is
+        // that what it puts on screen is what the file says.
+        //
+        // A still can carry an EMBEDDED ICC PROFILE. Video does not work that way: a video file
+        // declares its colour through NCLC/CICP codes drawn from a small closed set of primaries,
+        // transfer functions and matrices, and every path in this app — the shader's conversion,
+        // the layer's colorspace, the scopes' math, the inspector's readout — is built on picking
+        // from that set. An arbitrary ICC profile is a different problem: an arbitrary source
+        // primaries triangle and an arbitrary tone curve, which have to be converted to the display
+        // rather than looked up.
+        //
+        // Doing that correctly means the SHADER owns the display transform instead of handing the
+        // layer a colorspace and letting ColorSync convert. That is exactly Reference mode, which
+        // is currently open work blocked on the MacBook Air measurement — see
+        // docs/AIR-COLOUR-TEST.md for the test and docs/COLOR_MANAGEMENT_FINDINGS.md for the state
+        // of the question ("Reference mode needs a declared destination — open, the real work").
+        //
+        // So the order is: settle Reference mode, then stills. Adding stills first would mean
+        // either drawing them through the video path with their profile ignored — a picture this
+        // app cannot stand behind — or a second colour path beside the one being rebuilt.
+        if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) {
+            NSLog("[PLAYBACK] refusing %@ — still image (%@). Manifold plays video; see the note at "
+                + "this refusal for why stills are gated on the colour pipeline.",
+                  url.lastPathComponent, type.identifier)
+            rejectLoad(notice: "Manifold plays video — still images aren’t supported.")
+            return
+        }
+
+        // Is this the libav path? Asked here because the answer decides whether phase 1 has
+        // anything left to do — AVFoundation cannot open an MXF, so there is nothing to ask it.
+        let isMXF = url.pathExtension.lowercased() == "mxf"
+
+        // ── AVFOUNDATION OPENED THE CONTAINER BUT EXPOSES NO VIDEO TRACK ──────────────────────
+        // Not "the codec is unsupported" — the track is absent from the asset entirely, so there
+        // is nothing to decode and nothing we can configure our way out of. MEASURED cause on the
+        // file that prompted this: a QuickTime whose video `stsd` carries 8 trailing zero bytes
+        // that parse as a box with SIZE 0 ("extends to end of file"). AVFoundation rejects the
+        // sample description and drops the track; libav ignores the padding and reads the file
+        // fine, which is why other applications open it and Quick Look — also AVFoundation — does
+        // not. Removing exactly those 8 bytes makes the track appear, and injecting them into a
+        // working file makes it vanish, so the mechanism is established rather than inferred.
+        //
+        // This is ALSO where an R3D lands, and every other container AVFoundation declines: it is
+        // the one question that separates "there is a picture in here" from "there is not", and it
+        // is asked BEFORE anything is torn down. Asking it here is what makes the refusal cost the
+        // user nothing.
+        //
+        // ⚠️ THE ASSET IS OPENED ONCE AND CARRIED INTO PHASE 2. Re-creating it after the commit
+        // would ask the file system the same question twice and — worse — leave the possibility of
+        // the two answers differing.
+        var vettedAsset: AVURLAsset?
+        var vettedTrack: AVAssetTrack?
+        if !isMXF {
+            let asset = AVURLAsset(url: url)
+            guard let vTrack = try? await asset.loadTracks(withMediaType: .video).first else {
+                NSLog("[PLAYBACK] no video track — AVFoundation exposes no readable video track for "
+                    + "%@; the container may declare a malformed sample description. Not loading — "
+                    + "the deck keeps what it had.", url.lastPathComponent)
+                rejectLoad(notice: "This file couldn’t be opened — its video track is unreadable.")
+                return
+            }
+            vettedAsset = asset
+            vettedTrack = vTrack
+        }
+
+        // ══════════ PHASE 2 — COMMIT. THE PREVIOUS SOURCE ENDS HERE. ══════════
+
+        currentURL = url
         // A new file gets a clean slate for the degraded-playback notice: the previous file's
-        // "video only" banner must not persist onto one whose audio reads fine.
+        // "video only" banner must not persist onto one whose audio reads fine. NOT done in phase
+        // 1: a refused load must leave the current file's notice alone, since that file is still
+        // the one on screen.
         playbackNotice = nil
         audioFallbackAnnounced = false
 
@@ -722,16 +848,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // MXF: AVFoundation can't demux it — route straight to libav (container-based
         // detection; not a VT-failed fallback). Its metadata comes from libav.
-        if url.pathExtension.lowercased() == "mxf" {
+        if isMXF {
             self.asset = nil
             self.videoTrack = nil
             await loadMXF(url: url, autoplay: autoplay)
             return
         }
 
-        let asset = AVURLAsset(url: url)
+        guard let asset = vettedAsset, let vTrack = vettedTrack else { return }   // unreachable
         self.asset = asset
-        // hasMedia is DELIBERATELY NOT SET HERE — see the no-video-track guard below.
 
         self.imageGenerator = Self.makeScrubPreviewGenerator(for: asset)
 
@@ -758,28 +883,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             if seconds.isFinite { self.duration = seconds }
         }
 
-        // ── AVFOUNDATION OPENED THE CONTAINER BUT EXPOSES NO VIDEO TRACK ──────────────────────
-        // Not "the codec is unsupported" — the track is absent from the asset entirely, so there
-        // is nothing to decode and nothing we can configure our way out of. MEASURED cause on the
-        // file that prompted this: a QuickTime whose video `stsd` carries 8 trailing zero bytes
-        // that parse as a box with SIZE 0 ("extends to end of file"). AVFoundation rejects the
-        // sample description and drops the track; libav ignores the padding and reads the file
-        // fine, which is why other applications open it and Quick Look — also AVFoundation — does
-        // not. Removing exactly those 8 bytes makes the track appear, and injecting them into a
-        // working file makes it vanish, so the mechanism is established rather than inferred.
-        //
-        // We report and stop. `abandonLoad` is what makes this honest: the engine previously set
-        // hasMedia BEFORE this point, so a file it could not play still drove the has-media UI —
-        // transport controls over a black window with nothing to say for itself.
-        guard let vTrack = try? await asset.loadTracks(withMediaType: .video).first else {
-            NSLog("[PLAYBACK] no video track — AVFoundation exposes no readable video track for %@; "
-                + "the container may declare a malformed sample description. Not loading.",
-                  url.lastPathComponent)
-            abandonLoad(notice: "This file couldn’t be opened — its video track is unreadable.")
-            return
-        }
         self.videoTrack = vTrack
-        // Only NOW does the engine genuinely have playable media.
+        // The track was found in phase 1, so by here the media is genuinely playable.
         self.hasMedia = true
         self.audioTrack = try? await asset.loadTracks(withMediaType: .audio).first
 
