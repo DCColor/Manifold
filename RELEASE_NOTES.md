@@ -5,6 +5,19 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.6.0
+
+- Windows are now independent: each one has its own file, its own scopes, and its own transport.
+- Only one window plays at a time — clicking into another window pauses the first.
+- Scopes and the control bar no longer shrink the picture. The window grows instead.
+- Drag the divider above the scopes to make them taller.
+- New raster size control: 100%, 75%, 50%, 25% or fit to screen, where 100% is one source pixel.
+- Type a timecode to go to it. Arrow keys step a frame, hold Shift for a second.
+- Drop a file onto a window to replace what it is showing.
+- The Refresh button now lights up when the file changes on disk.
+- Fixed: streams no longer assume 16:9 — vertical and 4:3 sources are framed correctly.
+- Autoplay is now off by default.
+
 ## 0.5.1
 
 - Fixed: some files played as a black screen, depending on how their audio track was recorded.
