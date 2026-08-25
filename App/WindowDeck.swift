@@ -389,7 +389,13 @@ final class DeckRegistry {
                         keyDeck.sizer.installConstraint()
                     }
                 }
-                registry.applyArbitration("key window")
+                // ⚠️ DEFERRED, NOT DIRECT — see `setNeedsArbitration`. This notification is
+                // delivered by AppKit pumping its event queue, and at launch that pump is nested
+                // inside SwiftUI installing the scene, so a direct pass publishes `gate` into a
+                // view that is mid-update. MEASURED: this was one of the app's launch-time
+                // "Publishing changes from within view updates" emissions, with
+                // `applyArbitration` called from this very closure.
+                registry.setNeedsArbitration()
             }
         })
 
@@ -727,11 +733,31 @@ final class DeckRegistry {
 
     /// Schedule a pass for the next main-actor turn, coalescing bursts.
     ///
-    /// Used by every AppKit-lifecycle trigger — registration, deregistration, app reactivation, a
-    /// service publishing a change — because those can fire inside a SwiftUI update pass and the
-    /// pass writes `@Published` state. Action-initiated triggers (a claim, a release, a key change)
-    /// call `applyArbitration` directly: they arrive on ordinary event handling, where publishing
-    /// is safe and where being one turn late would be visible.
+    /// Used by every AppKit-lifecycle trigger — registration, deregistration, app reactivation,
+    /// A KEY-WINDOW CHANGE, a service publishing a change — because those can fire inside a
+    /// SwiftUI update pass and the pass writes `@Published` state.
+    ///
+    /// ⚠️ THE KEY-WINDOW CHANGE USED TO BE ON THE OTHER LIST, AND THAT MISCLASSIFICATION WAS THE
+    /// BUG. It was grouped with the action-initiated triggers on the reasoning that it "arrives on
+    /// ordinary event handling". It does not: it arrives as an `NSWindow.didBecomeKeyNotification`
+    /// delivered by AppKit pumping its event queue, and at launch that pump is nested inside
+    /// SwiftUI's scene install. Being notification-delivered is what puts it in THIS category, not
+    /// whether a human caused it.
+    ///
+    /// ── WHAT MUST STILL CALL `applyArbitration` DIRECTLY, AND WHY IT IS NOT LATENCY ──────────
+    ///
+    /// `claim` and `release` stay synchronous, and the reason is ORDERING, not responsiveness.
+    /// `claim` runs `applyArbitration("claiming …")` BEFORE `standUp()` because step 5 of a pass
+    /// re-points the device hooks, and `standUp()` calls straight back into
+    /// `liveStreamWillActivate` — synchronously, for NDI and SRT. Defer the pass and the stand-up
+    /// happens first, against hooks still aimed at the PREVIOUS host deck: the card would be fed
+    /// by the old owner's renderer. Coalescing cannot make that safe, because the hazard is the
+    /// re-entrant callback inside `standUp`, not the gate publish.
+    ///
+    /// Ownership itself is never at risk either way: it lives in `claims`, written synchronously
+    /// before the pass, and `currentOwnerID` — which is what refuses a second claimant — reads
+    /// `claims`, never `gate`. Two decks cannot both believe they own a device regardless of when
+    /// arbitration runs.
     private func setNeedsArbitration() {
         guard !arbitrationScheduled else { return }
         arbitrationScheduled = true
