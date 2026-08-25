@@ -5,6 +5,16 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.6.1
+
+- Streams recover better on a lossy connection: lost packets are now re-requested rather than
+  waiting for the next keyframe.
+- Resizing a window from a corner now follows the pointer instead of fighting it.
+- Fixed: the NDI runtime download link pointed at the Windows installer. It now gets the macOS one.
+- Still images now say they are not supported, instead of quietly doing nothing.
+- Dropping a file that can't be opened no longer replaces the one you were watching.
+- Fixed three cases that could log a warning while the interface was updating.
+
 ## 0.6.0
 
 - Windows are now independent: each one has its own file, its own scopes, and its own transport.
