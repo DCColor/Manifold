@@ -333,7 +333,22 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Adjusting volume unmutes (standard behavior). Does not touch audio decode.
     public func setVolume(_ v: Float) {
         let clamped = min(1, max(0, v))
-        volume = clamped
+        // ⚠️ THE GUARD IS ON THE PUBLISH ONLY, AND IT IS DELIBERATELY NOT AN EARLY RETURN.
+        //
+        // `@Published` sends on every assignment, equal or not, so seeding a fresh engine with the
+        // persisted volume published a NO-OP CHANGE — and because the seed runs from
+        // `DeckRegistry.configure` inside `viewDidMoveToWindow`, it invalidated a SwiftUI view
+        // mid-update ("Publishing changes from within view updates is not allowed"). On a default
+        // install both sides are 1.0, so the warning was paid for a write that changed nothing.
+        //
+        // Wrapping the whole body in `guard clamped != volume else { return }` would be a BUG, not
+        // a tidier version of this: the three statements below are not conditional on the volume
+        // having changed. Setting the same volume while muted must still UNMUTE (that is the
+        // standard behaviour this method documents), and `audioRenderer` and the SDI gate must
+        // still be brought into line — a renderer that drifted out of sync would never be
+        // recovered by a later equal-valued call. So only the line that publishes is skipped, and
+        // every audible effect still happens on every call.
+        if clamped != volume { volume = clamped }
         audioRenderer.volume = clamped
         if isMuted { isMuted = false }
         applyAudioMute()
