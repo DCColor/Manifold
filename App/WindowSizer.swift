@@ -192,6 +192,32 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// a programmatic resize DURING a live resize is exactly what the divider does.
     private var isApplyingProgrammaticResize = false
 
+    /// ⚠️ THE AXIS THE USER IS STEERING, CHOSEN ONCE PER GESTURE AND HELD. `nil` between drags, and
+    /// still `nil` during a drag that has not moved yet.
+    ///
+    /// MEASURED, and this is the whole of the corner-shimmer fix — re-deciding this per event is an
+    /// OSCILLATOR, not a heuristic. AppKit generates the proposed size PER AXIS by two different
+    /// rules, which is exactly why side drags were smooth and corners were not:
+    ///
+    ///   * The axis being dragged is OPEN-LOOP: proposal = frame at mouse-down + total pointer
+    ///     delta. What we returned last event is ignored entirely.
+    ///   * The axis NOT being dragged is CLOSED-LOOP: the proposal is verbatim the value we
+    ///     returned last event, so `proposed − current` on that axis is EXACTLY zero.
+    ///
+    /// So on a side drag the height term is identically 0 and the comparison below cannot go wrong.
+    /// On a corner BOTH terms are live, and the one belonging to the axis we overrode last event
+    /// carries the error we ourselves injected rather than any pointer motion — at event 12 of a
+    /// measured corner drag the height delta was +198 points of which only +9 was the mouse. The
+    /// tie-breaker then reads its own previous output as user input, flips, overrides the other
+    /// axis, and flips back: a period-2 oscillation whose amplitude grew ~56 pt per event and swung
+    /// the window 873 ↔ 1266 within fourteen events. It does not self-limit at the screen cap.
+    ///
+    /// Latching kills it at the source. The FIRST event of a live resize is the one moment the
+    /// comparison is clean — nothing has been overridden yet, so `current` is still the mouse-down
+    /// frame and both deltas are pure pointer motion. Decide there, hold it, and no later event can
+    /// feed our own correction back into the choice.
+    private var liveResizeDrivenByHeight: Bool?
+
     // MARK: - Delegate identity
 
     /// `nonisolated(unsafe)` for `deinit`'s sake — see the note there. Written only on main.
@@ -327,8 +353,18 @@ final class WindowSizer: NSObject, NSWindowDelegate {
 
         // WHICH EDGE IS THE USER DRAGGING? `windowWillResize` is handed a size, not an edge, so
         // driving height from width unconditionally would make the top and bottom edges feel dead.
-        // Whichever dimension moved further is the one the user is steering; the other follows.
-        let drivenByHeight = abs(content.height - current.height) > abs(content.width - current.width)
+        // Whichever dimension moved further is the one the user is steering; the other follows —
+        // decided ONCE per gesture and then held. See `liveResizeDrivenByHeight` for why the "then
+        // held" is load-bearing and not a tidiness preference.
+        let movedW = abs(content.width - current.width)
+        let movedH = abs(content.height - current.height)
+        let drivenByHeight = selectDrivenAxis(for: sender, movedW: movedW, movedH: movedH)
+
+        // THE INVERSE SOLVE. Width-dominant hands the proposal straight to the solver, which derives
+        // the height. Height-dominant inverts the same affine relation — subtract the chrome, then
+        // undo the aspect — to recover the width the solver wants as its input. Both then go through
+        // `constrainedContentSize`, so the minimums, the screen cap and ROUTE 2 apply identically to
+        // the two branches and neither can bypass a clamp.
         let width = drivenByHeight
             ? (content.height - chromeHeight) * videoAspect
             : content.width
@@ -336,6 +372,52 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         let fitted = constrainedContentSize(for: sender, contentWidth: width)
         return sender.frameRect(forContentRect: NSRect(origin: sender.frame.origin,
                                                        size: fitted)).size
+    }
+
+    /// Pick the axis the drag is steering, latching it for the duration of one live resize.
+    ///
+    /// ── THE TIE-BREAK IS WIDTH, AND IT IS NOT ARBITRARY ────────────────────────────────────
+    ///
+    /// `movedH > movedW` is a strict inequality, so an exact tie — including the 0/0 case — falls to
+    /// WIDTH. That is the correct side to fall to for two independent reasons, and both of them
+    /// matter:
+    ///
+    ///   1. WIDTH IS THE IDENTITY PATH. `constrainedContentSize` takes a WIDTH and derives the
+    ///      height; every other caller in this file passes a width. The width-dominant branch hands
+    ///      the proposal to the solver untouched, while the height-dominant branch round-trips it
+    ///      through `− chrome` and `× aspect` first. On a tie the two answers differ only by that
+    ///      round-trip's rounding, and taking the branch that does not round is how a 0/0 event
+    ///      stays a genuine no-op instead of twitching the window by a point.
+    ///   2. A 0/0 EVENT MUST NOT LATCH. AppKit does deliver zero-motion resize events, and latching
+    ///      on one would fix the axis before the user has expressed a direction — fine for a side
+    ///      drag, wrong for a top or bottom edge, which would spend the whole gesture deriving from
+    ///      a width the user is not touching. So the tie answers the CURRENT event and deliberately
+    ///      leaves the latch unset for the next one.
+    ///
+    /// Outside a live resize there is no gesture to latch to and no feedback loop to worry about —
+    /// the caller is `windowWillUseStandardFrame`'s neighbours or a programmatic `setFrame`, each a
+    /// one-shot — so the comparison is simply evaluated per event, as it always was.
+    private func selectDrivenAxis(for window: NSWindow, movedW: CGFloat, movedH: CGFloat) -> Bool {
+        guard window.inLiveResize else { return movedH > movedW }
+        if let latched = liveResizeDrivenByHeight { return latched }
+        guard movedW > 0 || movedH > 0 else { return false }   // no direction expressed yet
+        let drivenByHeight = movedH > movedW
+        liveResizeDrivenByHeight = drivenByHeight
+        return drivenByHeight
+    }
+
+    /// ⚠️ BOTH LIVE-RESIZE BOUNDARIES FORWARD BY HAND. Implementing a delegate method makes
+    /// `responds(to:)` answer YES from `super`, so `forwardingTarget(for:)` is never consulted and
+    /// SwiftUI stops hearing about it. Every method this proxy implements must forward explicitly —
+    /// the same discipline `windowWillResize` follows above.
+    func windowWillStartLiveResize(_ notification: Notification) {
+        liveResizeDrivenByHeight = nil
+        inner?.windowWillStartLiveResize?(notification)
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        liveResizeDrivenByHeight = nil
+        inner?.windowDidEndLiveResize?(notification)
     }
 
     /// Zoom (green button, double-click the title bar). Same forward-then-constrain shape, so the
