@@ -520,7 +520,7 @@ struct ContentView: View {
                 guard let chrome, chrome.rasterSize != .custom else { return }
                 chrome.rasterSize = .custom
             }
-            RasterMenuState.shared.refresh()
+            RasterMenuState.shared.setNeedsRefresh()
         }
         .onDisappear {
             // Before the engine goes: a closed window must stop inspecting keystrokes.
@@ -540,7 +540,7 @@ struct ContentView: View {
         //    corrects it the moment the resize lands, which is imperceptible and always true.
         .onChange(of: chrome.rasterSize) { _, _ in
             showRasterNotice()
-            RasterMenuState.shared.refresh()
+            RasterMenuState.shared.setNeedsRefresh()
         }
         // 2. THE PICTURE CHANGED SIZE. Refresh the text while the readout is up (so the numbers
         //    track a live drag), and RAISE it during a live resize even when the state did not
@@ -550,7 +550,7 @@ struct ContentView: View {
         }
         // 3. THE SOURCE CHANGED. A percentage is a percentage OF something; the View menu is dead
         //    until this window has a raster to take one of.
-        .onChange(of: engine.displaySize) { _, _ in RasterMenuState.shared.refresh() }
+        .onChange(of: engine.displaySize) { _, _ in RasterMenuState.shared.setNeedsRefresh() }
         // A slot's selection changed → start newly-active scopes, stop ones that left the tray.
         .onChange(of: activeKinds) { _, _ in updateScopeSampling() }
         .onChange(of: engine.effectiveIsFullRange) { _, _ in

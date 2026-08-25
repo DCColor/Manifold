@@ -243,9 +243,42 @@ final class RasterMenuState: ObservableObject {
     /// well-formed no-ops, which is worse than being visibly unavailable.
     @Published private(set) var enabled = false
 
+    /// Coalesces `refresh()` onto the next main-actor turn — see `setNeedsRefresh`.
+    private var refreshScheduled = false
+
     private init() {}
 
-    func refresh() {
+    /// ⚠️ THE ONLY WAY IN, AND THE DEFERRAL IS THE POINT — `refresh()` is private so it cannot be
+    /// called inline again.
+    ///
+    /// Every trigger this object has fires from inside a SwiftUI update pass: `ContentView`'s
+    /// `.onAppear` and two `.onChange` handlers all run while the view graph is being updated, and
+    /// `DeckRegistry.applyArbitration` can be reached from a registration, which happens in
+    /// `viewDidMoveToWindow` during `makeNSView`. Writing `current`/`enabled` there publishes to
+    /// `RasterSizeCommands`, which holds this object as an `@ObservedObject` — i.e. it invalidates
+    /// a view that is mid-update. That is "Publishing changes from within view updates is not
+    /// allowed", and it MEASURED as two of the four emissions this app makes at launch: bisected to
+    /// d4288d2, the commit that introduced this type.
+    ///
+    /// Deferring is the correct fix HERE and would be the wrong one elsewhere, so the distinction
+    /// is worth stating. These two properties are a MIRROR of facts owned somewhere else — the key
+    /// deck's raster state and whether it has a source — and nothing reads them except the View
+    /// menu's checkmarks and its enablement, at the moment the user opens the menu. Being one
+    /// main-actor turn late is therefore unobservable by construction, rather than merely unlikely.
+    /// The HUD readout does NOT come through here: that is `ContentView.showRasterNotice`, writing
+    /// `@State` on a separate path, and it stays synchronous.
+    ///
+    /// Same idiom, and for the same reason, as `DeckRegistry.setNeedsArbitration`.
+    func setNeedsRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        Task { @MainActor in
+            RasterMenuState.shared.refreshScheduled = false
+            RasterMenuState.shared.refresh()
+        }
+    }
+
+    private func refresh() {
         let deck = DeckRegistry.shared.keyDeck
         current = deck?.chrome?.rasterSize
         enabled = (deck?.engine?.displaySize != nil)

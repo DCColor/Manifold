@@ -857,7 +857,7 @@ final class DeckRegistry {
         // triggers this pass cannot see (the raster state changing, a source arriving) call the same
         // function from ContentView. It reads current facts and writes no state back; see
         // `RasterMenuState`.
-        RasterMenuState.shared.refresh()
+        RasterMenuState.shared.setNeedsRefresh()
 
         // ONLY WHEN THE PICTURE ACTUALLY CHANGED. Passes are cheap and frequent — the four service
         // subscriptions mean NDI's ~1 Hz discovery republish alone triggers one — and a line per
