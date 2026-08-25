@@ -148,9 +148,37 @@ struct DeckGate: Equatable {
     /// this window's file load live-switch the card's output mode.
     var drivesDevices = false
 
+    /// May this deck's PLAYBACK POSITION move — play/pause and Space, the scrubber, J/K/L, the
+    /// arrow jog, loop, frame stepping and timecode entry?
+    ///
+    /// ── WHY THIS IS SEPARATE FROM `transportEnabled` AND NOT FOLDED INTO IT ─────────────────
+    ///
+    /// A live source has no position to move to. NDI, WHEP and SRT push frames straight at the
+    /// renderer through `LiveDisplayRoute` and never touch the engine, so during a stream
+    /// `engine.hasMedia` is false, `duration` is 0 and `currentTime` is 0 — every position control
+    /// is already inert. It was just still ENABLED, which is the bug: a play button that depresses
+    /// and does nothing reads as broken software rather than as an inapplicable control.
+    ///
+    /// ⚠️ IT IS NOT THE WINDOW THAT IS GATED, IT IS THE POSITION. Clearing `transportEnabled`
+    /// instead would have been the one-line version and it would have been wrong: that flag also
+    /// carries mute and the volume fader, which stay meaningful on a stream (NDI carries audio,
+    /// and mute reaches the DeckLink card through `applyAudioMute`). Over-disabling costs a user
+    /// a control that works; this narrower flag disables only what genuinely cannot act.
+    ///
+    /// The two compose — a control needs BOTH to be live — so a non-active deck showing a stream
+    /// is gated by each for its own reason, and each reason is true.
+    var positionControlsEnabled = true
+
     /// Why the transport is gated, in one sentence. nil when it is not. Feeds tooltips always, and
     /// the standing banner when `isStanding`.
     var reason: String?
+
+    /// Why the POSITION controls are gated, in one sentence, when the reason is the source rather
+    /// than the arbitration. nil when they are not.
+    ///
+    /// Kept apart from `reason` because the two conditions are independent and can hold at once;
+    /// a single string would have to pick one and would then be silently wrong about the other.
+    var positionReason: String?
 
     /// TRUE when `reason` describes a STANDING CONDITION the user must clear somewhere else —
     /// another deck owns an exclusive device. Only these get an on-screen affordance; a deck that
@@ -842,6 +870,21 @@ final class DeckRegistry {
             gate.transportEnabled = isActive
             gate.deviceControlsEnabled = (ownerID == nil) || isOwner
             gate.drivesDevices = (deck === hostDeck)
+
+            // A live source showing IN THIS DECK has no playback position. `drivesDevices` is the
+            // ownership half — the three clients are singletons, so without it every window would
+            // answer "yes, a stream is up" for a stream displaying in one of them and grey its own
+            // play button over its own file. Same trap `activeLiveSource` documents in ContentView.
+            //
+            // Recomputed on every pass, and the pass is driven by the four services'
+            // `objectWillChange` (see the sinks in `observe()`), so connect and disconnect both
+            // re-gate without a bespoke notification.
+            if gate.drivesDevices, let live = LiveSource.connected {
+                gate.positionControlsEnabled = false
+                gate.positionReason =
+                    "\(live.displayLabel) is a live stream — there is no playback position to move to. "
+                    + "Disconnect to return to file playback."
+            }
             if let standing, !isOwner {
                 gate.reason = standing
                 gate.isStanding = true

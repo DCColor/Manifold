@@ -34,6 +34,16 @@ struct TrialStatus {
     var daysRemaining: Int
     /// True when the trial period has ended OR was voided by a detected clock rollback.
     var expired: Bool
+    /// True when the trial clock COULD NOT BE READ — the Keychain refused us, so we do not know
+    /// whether a trial was ever started or how much of it is left.
+    ///
+    /// ⚠️ THIS IS NOT `expired`, AND IT IS NOT `active` EITHER. It is the third answer, and the
+    /// caller must not fold it into either of the other two: folding it into `expired` locks out a
+    /// user whose trial is fine, and folding it into `active` hands a fresh trial to anyone who can
+    /// make a Keychain read fail. See `LicenseManager.bootstrap`, which holds instead of deciding.
+    var unreadable: Bool = false
+
+    static let unknown = TrialStatus(active: false, daysRemaining: 0, expired: false, unreadable: true)
 }
 
 /// Evaluates the client-side trial. First-launch and last-seen timestamps live in the Keychain so
@@ -50,22 +60,52 @@ enum TrialManager {
 
     /// Records this launch (advancing last-seen, detecting rollback) and returns the trial status.
     /// Call once at launch, before computing usability.
+    ///
+    /// ── THE FIRST READ IS THE DANGEROUS ONE ─────────────────────────────────────────────────
+    ///
+    /// This function's "first ever launch" branch WRITES a new trial start. That is correct when
+    /// the item is genuinely absent and catastrophic when it merely could not be read: a refused
+    /// read would silently restart the 7-day clock, which is the exact tamper the Keychain
+    /// placement was chosen to prevent, and it would do it on the honest user's machine rather
+    /// than the dishonest one's. So `.failed` returns `.unknown` and writes NOTHING — no stamp, no
+    /// advance, no void. The next launch tries again against a keychain that may well be unlocked
+    /// by then.
     static func recordLaunchAndEvaluate(now: Date = Date()) -> TrialStatus {
         let nowT = now.timeIntervalSince1970
 
-        // First ever launch: stamp the trial start. Keychain persistence means a reinstall lands here
-        // only if the item was truly removed (Keychain items outlive the app bundle).
-        guard let firstStr = KeychainStore.license.get(kFirstLaunch), let firstT = Double(firstStr) else {
+        let first = KeychainStore.license.read(kFirstLaunch)
+        if let status = first.failureStatus {
+            NSLog("[LICENSE] trial clock unreadable (%@) — holding, no trial stamped",
+                  keychainStatusDescription(status))
+            return .unknown
+        }
+
+        // First ever launch: stamp the trial start. Reached ONLY on a confirmed `.absent` — see
+        // above. Keychain persistence means a reinstall lands here only if the item was truly
+        // removed (Keychain items outlive the app bundle).
+        guard let firstStr = first.value, let firstT = Double(firstStr) else {
             KeychainStore.license.set(String(nowT), for: kFirstLaunch)
             KeychainStore.license.set(String(nowT), for: kLastSeen)
             return TrialStatus(active: true, daysRemaining: trialDays(elapsed: 0), expired: false)
         }
 
-        var voided = (KeychainStore.license.get(kVoided) == "1")
+        // A refused read of the void flag must not be read as "not voided" — that would be a way
+        // to un-void a trial by breaking a read. Unknown means hold, same as above.
+        let voidedRead = KeychainStore.license.read(kVoided)
+        if let status = voidedRead.failureStatus {
+            NSLog("[LICENSE] trial void flag unreadable (%@) — holding", keychainStatusDescription(status))
+            return .unknown
+        }
+        var voided = (voidedRead.value == "1")
 
         // Rollback check: the wall clock reading BEFORE last-seen (beyond tolerance) means someone
         // set the clock back to stretch the trial. Void it rather than reward the rollback.
-        if let lastStr = KeychainStore.license.get(kLastSeen), let lastT = Double(lastStr) {
+        let lastRead = KeychainStore.license.read(kLastSeen)
+        if let status = lastRead.failureStatus {
+            NSLog("[LICENSE] trial last-seen unreadable (%@) — holding", keychainStatusDescription(status))
+            return .unknown
+        }
+        if let lastStr = lastRead.value, let lastT = Double(lastStr) {
             if nowT < lastT - rollbackTolerance {
                 voided = true
                 KeychainStore.license.set("1", for: kVoided)
@@ -321,6 +361,93 @@ enum LicenseService {
     }
 }
 
+// MARK: - Durable activation record (the Keychain half of the licence state)
+
+/// Everything about an activation that used to exist ONLY as `@AppStorage` booleans in
+/// `~/Library/Preferences/com.graviton.manifold.plist`.
+///
+/// ── WHY THIS TYPE EXISTS: THE STATE WAS SPLIT ACROSS TWO STORES OF DIFFERENT DURABILITY ─────
+///
+/// The signed licence key was in the Keychain — tamper-resistant, survives app deletion, survives
+/// reinstall. The three facts that DECIDED whether the app was licensed were in a preferences
+/// plist:
+///
+///     license.activated   ← the gate
+///     license.validated   ← the gate
+///     license.machineId   ← the thing the server's 4-machine limit counts
+///
+/// and `bootstrap` read them FIRST:
+///
+///     if licenseActivated, let key = KeychainStore.license.get(kStoredKey) {
+///
+/// so if the plist boolean was false the signed key was never even looked at. A cryptographically
+/// verifiable artifact was subordinate to a `Bool` in a file with none of its guarantees. Lose the
+/// plist and a fully licensed user is shown the trial-expired gate while their valid key sits
+/// unread in the Keychain a function call away.
+///
+/// `machineId` made it worse rather than merely equally bad: it is a random UUID minted on first
+/// access, so a lost plist did not just hide the licence, it minted a NEW machine id. Re-entering
+/// the key then claimed a SECOND of the four machine slots — the licence appeared to recover while
+/// quietly spending a slot that no amount of re-entering gets back.
+///
+/// So this record goes in the Keychain beside the key, and the plist keys become a cache.
+///
+/// ⚠️ THE KEY REMAINS THE AUTHORITY, NOT THIS RECORD. This record is unsigned — it is our own
+/// bookkeeping, and anyone who can write it can write `activated: true`. It is trusted for
+/// `machineId` and for display fields only. Whether the user is LICENSED is decided by
+/// `LicenseCrypto.verify` over the stored key, every launch. That is why restoring from this
+/// record is gated on the key verifying first (see `LicenseManager.bootstrap`).
+struct ActivationRecord: Codable {
+    var activated: Bool
+    var validated: Bool
+    var email: String
+    var type: String
+    var machineId: String
+
+    /// Schema marker. Written but not enforced on read: an older app meeting a newer record should
+    /// degrade to ignoring fields it does not know, never to discarding the record.
+    var v: Int = 1
+
+    func encoded() -> String? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func decode(_ json: String) -> ActivationRecord? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ActivationRecord.self, from: data)
+    }
+}
+
+/// What the licence subsystem resolved to on this launch. ONE VALUE, LOGGED EVERY LAUNCH AND
+/// EXPORTED IN DIAGNOSTICS, because the previous version's entire observable output on the subject
+/// was a DEBUG print about the public key round-tripping — which says nothing about the user.
+///
+/// A tester who cannot tell whether they are licensed, on trial, or failed-to-read produces a bug
+/// report that we cannot tell apart either. That is what made the 0.6.0 → 0.6.1 report take a
+/// signature audit to answer.
+enum LicenseState: Equatable {
+    case licensed(type: String)
+    case trial(daysRemaining: Int)
+    case trialExpired
+    /// The licence exists as far as we know, and the Keychain would not let us read it.
+    /// ⚠️ NEVER RENDERED AS "unlicensed" — see `LicenseManager.userFacingKeychainFault`.
+    case keychainUnreadable(OSStatus)
+    case unlicensed
+
+    /// One-line rendering for the log and the diagnostics export. Deliberately terse and stable —
+    /// it is meant to be greppable across testers' reports.
+    var summary: String {
+        switch self {
+        case .licensed(let t):          return "LICENSED (\(t))"
+        case .trial(let d):             return "TRIAL (\(d) day\(d == 1 ? "" : "s") remaining)"
+        case .trialExpired:             return "TRIAL EXPIRED"
+        case .keychainUnreadable(let s): return "KEYCHAIN UNREADABLE (\(keychainStatusDescription(s)))"
+        case .unlicensed:               return "UNLICENSED (no key stored)"
+        }
+    }
+}
+
 // MARK: - LicenseManager (orchestrator + published state)
 
 @MainActor
@@ -348,7 +475,19 @@ final class LicenseManager: ObservableObject {
     @Published var isWorking = false          // an activate/validate call is in flight (drives UI)
     @Published var lastMessage: String?       // last user-facing error/status (drives UI)
 
-    private let kStoredKey = "storedLicenseKey"   // Keychain account for the raw MNFL- key
+    /// What this launch resolved to. Logged once at bootstrap and read by `DiagnosticsExport`.
+    @Published private(set) var state: LicenseState = .unlicensed
+
+    /// Set when the Keychain REFUSED a licence read (never when it merely had nothing).
+    ///
+    /// ⚠️ THIS IS THE FLAG THAT MUST REACH THE USER, and it is the whole point of the change: the
+    /// person whose licence exists but cannot be read has to be told THAT, not told they are
+    /// unlicensed. `isUsable` returns true while it is set, so they keep working; the UI explains
+    /// rather than gates. See `userFacingKeychainFault`.
+    @Published private(set) var keychainFaultStatus: OSStatus?
+
+    private let kStoredKey = "storedLicenseKey"       // Keychain account for the raw MNFL- key
+    private let kActivationRecord = "activationRecord" // Keychain account for the ActivationRecord JSON
 
     private init() {
         licenseActivated = activatedStore
@@ -363,11 +502,41 @@ final class LicenseManager: ObservableObject {
         return machineIdStore
     }
 
-    /// The one gate the app reads. Licensed (both flags) OR in an active trial.
-    var isUsable: Bool { (licenseActivated && licenseValidated) || trial.active }
+    /// The one gate the app reads. Licensed (both flags) OR in an active trial OR we could not
+    /// read the Keychain and therefore have no standing to lock anyone out.
+    ///
+    /// ⚠️ THE THIRD CLAUSE FAILS OPEN, DELIBERATELY. A Keychain read can fail for reasons that are
+    /// entirely the user's machine's business — a keychain not yet unlocked, a denied prompt, a
+    /// login keychain in a bad state — and every one of them is transient. Gating on an unknown
+    /// would take a paying, licensed user and show them a wall, which is both wrong and unfixable
+    /// from their side. Failing open costs us, at worst, an unlicensed user with a broken keychain
+    /// getting an extra session; the banner tells them what happened either way.
+    var isUsable: Bool {
+        (licenseActivated && licenseValidated) || trial.active || keychainFaultStatus != nil
+    }
 
-    /// Call once at launch. Evaluates the trial, re-verifies any stored key offline (so offline users
-    /// stay licensed), then does a best-effort online revocation check.
+    /// The user-facing explanation for a refused read, or nil when there is nothing to say.
+    ///
+    /// Says three things in order, because a message that only said the first would read as an
+    /// accusation: it is not their fault, they have not lost anything, and they are not blocked.
+    var userFacingKeychainFault: String? {
+        guard let status = keychainFaultStatus else { return nil }
+        return """
+               Manifold couldn't read your licence from the Keychain (\(keychainStatusDescription(status))).                This does not mean your licence is gone — it is still stored, and nothing has been                changed or removed. Manifold is running normally in the meantime. Quitting and                reopening usually clears it; if it keeps happening, send a diagnostics report                (Help ▸ Export Diagnostics…) rather than re-entering your key.
+               """
+    }
+
+    /// Call once at launch. Evaluates the trial, re-verifies any stored key offline (so offline
+    /// users stay licensed), reconciles the Keychain and the preferences cache, then does a
+    /// best-effort online revocation check.
+    ///
+    /// ── THE ORDER OF THIS FUNCTION IS THE FIX, NOT AN INCIDENTAL DETAIL ─────────────────────
+    ///
+    /// It used to open with `if licenseActivated, let key = …` — a preferences boolean guarding
+    /// the read of a signed artifact. It now reads the KEY FIRST and lets the signature decide,
+    /// because the signature is the stronger evidence and always was. A licensed user who loses
+    /// their preferences plist is now recovered silently and completely on the next launch
+    /// instead of being shown the trial-expired gate.
     func bootstrap() async {
         #if DEBUG
         if let reason = LicenseCrypto.runRoundTripSelfCheck() {
@@ -377,18 +546,158 @@ final class LicenseManager: ObservableObject {
         }
         #endif
 
-        trial = TrialManager.recordLaunchAndEvaluate()
+        // ── 1. Read the stored key. UNCONDITIONALLY — no plist boolean gates this any more. ──
+        let keyRead = KeychainStore.license.read(kStoredKey)
 
-        // Offline path: a stored key that still verifies keeps the user licensed with NO network.
-        if licenseActivated, let key = KeychainStore.license.get(kStoredKey) {
-            if case .success(let payload) = LicenseCrypto.verify(licenseKey: key) {
-                email = payload.email; emailStore = payload.email
-                licenseType = payload.licenseType; typeStore = payload.licenseType.rawValue
-                setValidated(true)
+        if let status = keyRead.failureStatus {
+            // ── HOLD. Change nothing, decide nothing, gate nobody. ──
+            //
+            // We do not know whether a licence is stored, so every available action is wrong:
+            // clearing activation punishes a licensed user, starting a trial rewards a broken
+            // read, and gating locks out someone who may well be paid up. The published state
+            // keeps whatever the cache said, `isUsable` returns true on the fault alone, and the
+            // banner explains it. The trial is not even evaluated — its clock lives in the same
+            // keychain that just refused us, so it would only produce a second unknown.
+            keychainFaultStatus = status
+            state = .keychainUnreadable(status)
+            lastMessage = userFacingKeychainFault
+            NSLog("[LICENSE] state: %@", state.summary)
+            NSLog("[LICENSE] ⚠️ licence read refused — holding all state; nothing written, nothing cleared")
+            return
+        }
+        keychainFaultStatus = nil
+
+        // ── 2. Trial. Safe to evaluate now: the keychain answered us once already. ──
+        trial = TrialManager.recordLaunchAndEvaluate()
+        if trial.unreadable {
+            // The key read succeeded and the trial clock did not — a narrow window, but it means
+            // the same thing and gets the same treatment.
+            keychainFaultStatus = errSecAuthFailed
+            state = .keychainUnreadable(errSecAuthFailed)
+            lastMessage = userFacingKeychainFault
+            NSLog("[LICENSE] state: %@", state.summary)
+            return
+        }
+
+        // ── 3. The key is the authority. Verify it offline and let it restore the rest. ──
+        if let key = keyRead.value, case .success(let payload) = LicenseCrypto.verify(licenseKey: key) {
+            let record = readActivationRecord()
+
+            // A stored key that verifies means this install activated at some point: nothing else
+            // can put a correctly signed key in this account. So activation is restored from the
+            // signature, NOT from the plist — which is exactly the recovery the old order missed.
+            email = payload.email; emailStore = payload.email
+            licenseType = payload.licenseType; typeStore = payload.licenseType.rawValue
+            setActivated(true)
+            setValidated(true)
+
+            // Machine id: the Keychain copy wins when there is one, so a lost plist stops minting
+            // a new id and burning a second machine slot.
+            if let stored = record?.machineId, !stored.isEmpty, stored != machineIdStore {
+                NSLog("[LICENSE] restored machine id from the Keychain (preferences copy was %@)",
+                      machineIdStore.isEmpty ? "missing" : "different")
+                machineIdStore = stored
             }
+
+            migrateActivationRecordIfNeeded(existing: record)
+
+            state = .licensed(type: licenseType.display)
+            NSLog("[LICENSE] state: %@", state.summary)
+
             // Best-effort revocation check. Only a definite "revoked" clears validation.
             await refreshValidation()
+            return
         }
+
+        // ── 4. No usable key. Report the trial honestly. ──
+        if keyRead.value != nil {
+            // Present but did not verify: corrupt or tampered. Say so rather than pretending the
+            // account is empty — "your key is unreadable" and "you never had one" are different
+            // sentences and the user can act on only one of them.
+            NSLog("[LICENSE] ⚠️ a stored key is present but failed offline verification")
+            lastMessage = "Your stored licence key could not be verified. Please re-enter it, or contact support."
+        }
+        setValidated(false)
+        state = trial.active ? .trial(daysRemaining: trial.daysRemaining)
+                             : (trial.expired ? .trialExpired : .unlicensed)
+        NSLog("[LICENSE] state: %@", state.summary)
+    }
+
+    // MARK: - Activation record: read, and the one-way migration into it
+
+    private func readActivationRecord() -> ActivationRecord? {
+        let read = KeychainStore.license.read(kActivationRecord)
+        if let status = read.failureStatus {
+            // Not fatal and not a hold: the key already verified, so we are licensed either way.
+            // The record only carries machineId and display fields.
+            NSLog("[LICENSE] activation record unreadable (%@) — continuing on the key alone",
+                  keychainStatusDescription(status))
+            return nil
+        }
+        guard let json = read.value else { return nil }
+        return ActivationRecord.decode(json)
+    }
+
+    /// Writes the durable activation record when it is missing or stale.
+    ///
+    /// ── ORDERING: THIS MIGRATION IS ADDITIVE, SO THERE IS NO DESTRUCTIVE STEP TO GET WRONG ──
+    ///
+    /// `StreamBookmarkStore.migratePassphrasesToKeychain` had to move a secret that existed in
+    /// exactly one place, so it is written write-then-verify-then-strip and leaves the original
+    /// byte-for-byte alone on any failure. The same discipline applies here, and this migration
+    /// takes its strongest possible form: IT NEVER DELETES THE OLD COPY AT ALL.
+    ///
+    ///   1. Read the existing record (already done by the caller).
+    ///   2. Write the new one. If the write fails — locked keychain, denied ACL, full disk —
+    ///      return. Nothing has changed.
+    ///   3. READ IT BACK and confirm it decodes to what we just wrote. A write that reports
+    ///      success and does not read back is the failure the stream migration exists to guard
+    ///      against, and it is cheap to rule out.
+    ///   4. Do nothing else. The `@AppStorage` keys stay exactly where they are, forever.
+    ///
+    /// Step 4 is the deliberate part. The plist keys cost nothing to keep, they remain a useful
+    /// redundant cache, and keeping them means a user who DOWNGRADES to 0.6.1 still launches
+    /// licensed — a build that has never heard of the activation record still finds the booleans
+    /// it expects. There is no window, at any point in this function, in which a licence exists in
+    /// neither store. A partial failure leaves the user exactly as they were.
+    private func migrateActivationRecordIfNeeded(existing: ActivationRecord?) {
+        let desired = ActivationRecord(activated: true,
+                                       validated: licenseValidated,
+                                       email: email,
+                                       type: licenseType.rawValue,
+                                       machineId: machineId)
+
+        if let existing,
+           existing.activated == desired.activated,
+           existing.machineId == desired.machineId,
+           existing.email == desired.email,
+           existing.type == desired.type {
+            return   // already current
+        }
+
+        guard let json = desired.encoded() else {
+            NSLog("[LICENSE] ⚠️ could not encode the activation record — preferences copy retained")
+            return
+        }
+
+        let status = KeychainStore.license.write(json, for: kActivationRecord)
+        guard status == errSecSuccess else {
+            NSLog("[LICENSE] ⚠️ activation record write failed (%@) — nothing removed, will retry next launch",
+                  keychainStatusDescription(status))
+            return
+        }
+
+        // Confirm it reads back before calling this migrated.
+        guard let echo = KeychainStore.license.read(kActivationRecord).value,
+              let decoded = ActivationRecord.decode(echo),
+              decoded.machineId == desired.machineId else {
+            NSLog("[LICENSE] ⚠️ activation record did not read back after a successful write — "
+                  + "treating as not migrated; preferences copy retained")
+            return
+        }
+
+        NSLog("[LICENSE] activation record %@ in the Keychain (machine id now durable)",
+              existing == nil ? "created" : "updated")
     }
 
     /// Activation is inherently ONLINE (the server claims a machine slot). Offline pre-check gives a
@@ -414,7 +723,19 @@ final class LicenseManager: ObservableObject {
 
         switch await LicenseService.activate(key: key, machineId: machineId) {
         case .success(let s):
-            KeychainStore.license.set(key, for: kStoredKey)
+            // ⚠️ THE WRITE IS CHECKED. It used to be a bare `set(...)` whose @discardableResult was
+            // dropped: a failed write left the app reporting "Activated. Welcome!" with the flags
+            // set and NO key stored anywhere — licensed on the strength of a plist boolean, with
+            // nothing to re-verify on the next launch and a machine slot already spent server-side.
+            let writeStatus = KeychainStore.license.write(key, for: kStoredKey)
+            guard writeStatus == errSecSuccess else {
+                NSLog("[LICENSE] ⚠️ activation succeeded on the server but the key could not be stored (%@)",
+                      keychainStatusDescription(writeStatus))
+                lastMessage = """
+                              Your licence was accepted, but Manifold couldn't save it to the Keychain                               (\(keychainStatusDescription(writeStatus))). This machine has been                               registered, so don't re-activate — quit, reopen, and enter the key once                               more. If that fails, send a diagnostics report.
+                              """
+                return
+            }
             email = s.email; emailStore = s.email
             licenseType = s.licenseType; typeStore = s.licenseType.rawValue
             setActivated(true)
@@ -429,6 +750,12 @@ final class LicenseManager: ObservableObject {
                 lastMessage = s.alreadyRegistered ? "This machine was already registered — you're all set."
                                                   : "Activated. Welcome!"
             }
+            keychainFaultStatus = nil
+            state = .licensed(type: licenseType.display)
+            // Write the durable record now rather than waiting for the next bootstrap, so a crash
+            // between activating and relaunching cannot leave the machine id living only in the plist.
+            migrateActivationRecordIfNeeded(existing: readActivationRecord())
+            NSLog("[LICENSE] state: %@", state.summary)
         case .failure(let code):
             lastMessage = code.message
         case .networkError(let msg):
@@ -439,7 +766,9 @@ final class LicenseManager: ObservableObject {
     /// Periodic/at-launch revocation check. Network/ambiguous → leave state ALONE (offline users must
     /// not be punished). A definite `revoked` clears validation → the app gates on next usability read.
     func refreshValidation() async {
-        guard licenseActivated, let key = KeychainStore.license.get(kStoredKey) else { return }
+        // A refused read here is a no-op by design: we cannot revalidate what we cannot read, and
+        // the one thing we must not do is treat that as grounds to clear anything.
+        guard licenseActivated, let key = KeychainStore.license.read(kStoredKey).value else { return }
         switch await LicenseService.validate(key: key, machineId: machineId) {
         case .valid:
             setValidated(true)
@@ -447,6 +776,9 @@ final class LicenseManager: ObservableObject {
             if code == .revoked || code == .invalidKey {
                 setValidated(false)
                 lastMessage = code.message
+                state = trial.active ? .trial(daysRemaining: trial.daysRemaining) : .trialExpired
+                NSLog("[LICENSE] validation cleared by the server (%@) — state: %@",
+                      code.rawValue, state.summary)
             }
             // Other definite-invalids are conservative no-ops here (avoid false lockouts on odd codes).
         case .networkError:
@@ -457,9 +789,14 @@ final class LicenseManager: ObservableObject {
     /// Clears LOCAL activation only. Per the Graviton docs the server still counts this machine until
     /// an admin deregisters it — so we surface that, and we do NOT touch the trial.
     func deactivate() {
+        // BOTH stores, or bootstrap's key-first order would restore from whichever survived.
         KeychainStore.license.delete(kStoredKey)
+        KeychainStore.license.delete(kActivationRecord)
         setActivated(false)
         setValidated(false)
+        keychainFaultStatus = nil
+        state = trial.active ? .trial(daysRemaining: trial.daysRemaining)
+                             : (trial.expired ? .trialExpired : .unlicensed)
         email = ""; emailStore = ""
         typeStore = ""; licenseType = .unknown
         lastMessage = "Deactivated on this machine. Note: the server still counts this machine until an admin deregisters it."
@@ -481,8 +818,23 @@ struct LicenseSettingsSection: View {
 
     var body: some View {
         Section("License") {
+            // ⚠️ BEFORE the status row and before key entry. Someone whose licence could not be
+            // read must be told that FIRST — otherwise the next thing they see is a key field,
+            // which is the app telling them they are unlicensed when it does not know that.
+            if let fault = license.userFacingKeychainFault {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Your licence couldn’t be read", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(fault)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             statusRow
-            if !(license.licenseActivated && license.licenseValidated) {
+            // The `keychainFaultStatus == nil` clause is the point: no key entry while the read is
+            // merely refused. Offering the field would invite a re-activation that spends a second
+            // machine slot to fix a problem that is not a licensing problem at all.
+            if !(license.licenseActivated && license.licenseValidated), license.keychainFaultStatus == nil {
                 keyEntry
             } else {
                 Button("Deactivate on this machine", role: .destructive) { license.deactivate() }
@@ -494,7 +846,11 @@ struct LicenseSettingsSection: View {
     }
 
     @ViewBuilder private var statusRow: some View {
-        if license.licenseActivated && license.licenseValidated {
+        if license.keychainFaultStatus != nil {
+            LabeledContent("Status") {
+                Text("Couldn’t read the Keychain — status unknown").foregroundStyle(.orange)
+            }
+        } else if license.licenseActivated && license.licenseValidated {
             LabeledContent("Status") {
                 Text("Licensed to \(license.email.isEmpty ? "you" : license.email) · \(license.licenseType.display)")
                     .foregroundStyle(.secondary)
@@ -546,6 +902,15 @@ struct LicenseGateView: View {
                 Text("Your Manifold trial has ended").font(.title2).bold()
                 Text("Enter a license key to continue using Manifold.")
                     .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                // Belt and braces: `isUsable` already returns true on a fault, so this view should
+                // be unreachable in that state. If a future edit to `isUsable` breaks that, the
+                // gate says the true thing rather than the accusatory one.
+                if let fault = license.userFacingKeychainFault {
+                    Text(fault)
+                        .font(.callout).foregroundStyle(.orange)
+                        .multilineTextAlignment(.center).frame(maxWidth: 380)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 HStack(spacing: 8) {
                     TextField("MNFL-…", text: $keyField)

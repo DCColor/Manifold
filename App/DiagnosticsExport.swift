@@ -57,6 +57,7 @@
 import AppKit
 import Combine
 import Foundation
+import CryptoKit
 import ManifoldCore   // ManifoldCoreBuild — the package reporting its OWN telemetry state
 import SwiftUI
 
@@ -580,6 +581,81 @@ enum DiagnosticsRedactor {
     }
 }
 
+// MARK: - Licence context
+
+/// The licence subsystem's resolved state, for the MACHINE section of a diagnostics export.
+///
+/// ── WHY THIS IS IN THE REPORT AT ALL ────────────────────────────────────────────────────────
+///
+/// Before this, the subsystem's entire contribution to a diagnostics export was `lastMessage` —
+/// a transient UI string that is nil on any normal launch. A tester reporting "it asked for my
+/// licence again" produced a file that said nothing whatsoever about licensing, so the three
+/// conditions that look identical from the outside — genuinely unlicensed, on an expired trial,
+/// and licensed-but-unreadable — were indistinguishable to us as well as to them.
+///
+/// ⚠️ WHAT IS DELIBERATELY NOT HERE: the licence key, and the email in full. `DiagnosticsRedactor`
+/// has no rule for either — it matches credentials by their surrounding syntax (`passphrase=`,
+/// `Bearer …`) and an `MNFL-…` key on a line of its own would sail straight through. So the key
+/// is reduced to a SHA-256 prefix, which is enough to tell two testers' keys apart and to confirm
+/// the same key across two of one tester's reports, and cannot be activated with. The email is
+/// masked to its first character and domain, which is enough to match against a support thread.
+enum LicenseContext {
+    @MainActor
+    static func lines() -> [String] {
+        let mgr = LicenseManager.shared
+        var out: [String] = ["Licence:"]
+        out.append("  state          : \(mgr.state.summary)")
+        out.append("  activated flag : \(mgr.licenseActivated)")
+        out.append("  validated flag : \(mgr.licenseValidated)")
+        out.append("  type           : \(mgr.licenseType.display)")
+        out.append("  account        : \(mask(mgr.email))")
+        out.append("  trial          : active=\(mgr.trial.active) remaining=\(mgr.trial.daysRemaining)d "
+                 + "expired=\(mgr.trial.expired) unreadable=\(mgr.trial.unreadable)")
+
+        // The three Keychain accounts, by PRESENCE ONLY — absent / present / refused. This is the
+        // line that answers "was the key still there?" without ever putting the key in the file,
+        // and `.refused` is the whole reason the three-way distinction exists.
+        out.append("  keychain:")
+        for account in ["storedLicenseKey", "activationRecord", "trial.firstLaunch"] {
+            out.append("    \(account.padding(toLength: 17, withPad: " ", startingAt: 0)): \(presence(account))")
+        }
+        if let status = mgr.keychainFaultStatus {
+            out.append("  ⚠️ KEYCHAIN FAULT: \(keychainStatusDescription(status))")
+            out.append("     The licence state above is CACHED, not read. Do not read this report as")
+            out.append("     evidence the user is unlicensed.")
+        }
+        return out
+    }
+
+    /// Presence without disclosure. For the key account it also carries a short fingerprint so two
+    /// reports can be compared; the fingerprint is a hash prefix and is not reversible.
+    private static func presence(_ account: String) -> String {
+        switch KeychainStore.license.read(account) {
+        case .absent:
+            return "absent"
+        case .failed(let status):
+            return "REFUSED (\(keychainStatusDescription(status)))"
+        case .found(let value):
+            guard account == "storedLicenseKey" else { return "present" }
+            return "present (fingerprint \(fingerprint(value)))"
+        }
+    }
+
+    private static func fingerprint(_ s: String) -> String {
+        let digest = SHA256.hash(data: Data(s.utf8))
+        return digest.compactMap { String(format: "%02x", $0) }.joined().prefix(12).description
+    }
+
+    /// `robbie@dccolor.com` -> `r***@dccolor.com`. Enough to match a support thread, not enough to
+    /// be the address itself.
+    private static func mask(_ email: String) -> String {
+        guard !email.isEmpty else { return "(none)" }
+        let parts = email.split(separator: "@", maxSplits: 1)
+        guard parts.count == 2, let first = parts[0].first else { return "(masked)" }
+        return "\(first)***@\(parts[1])"
+    }
+}
+
 // MARK: - Machine context
 
 enum MachineContext {
@@ -738,6 +814,41 @@ enum DiagnosticsReport {
 
         section("MACHINE")
         out += MachineContext.lines().joined(separator: "\n") + "\n"
+        out += "\n" + LicenseContext.lines().joined(separator: "\n") + "\n"
+
+        section("NETWORK PATH")
+        // ⚠️ ITS OWN SECTION, ABOVE THE ERROR STATE AND THE LOG, ON PURPOSE. Every recovery,
+        // cushion and underrun figure below is a multiple of this number, and two exports from
+        // two testers cannot be compared without it. Burying it inside the [WHEP-RTP] stats line
+        // is what made the 0.6.1 NACK measurements ambiguous: a 37 ms recovery beside a router
+        // and a 229 ms recovery on a loaded link abroad looked like the same instrument
+        // disagreeing with itself.
+        if let rtt = WHEPClient.shared.roundTripSummary {
+            out += "WHEP round trip  : \(rtt)\n"
+        } else {
+            out += "WHEP round trip  : (no WHEP session at export time)\n"
+        }
+        if let benefit = WHEPClient.shared.nackBenefitSummary {
+            out += "NACK benefit     : \(benefit)\n"
+        }
+        out += """
+
+              How to read the round trip: NO MEDIA ROUND TRIP IS OBTAINABLE on this transport.
+              RTCP SR/DLSR computes the round trip at the SENDER, not the receiver; libdatachannel
+              carries no RTCP XR; and NACKing a packet we already hold is rejected by SRTP replay
+              protection (measured: 73 probes, 73 timeouts). The figure shown is the WHEP
+              signalling POST — an HTTPS round trip over a different path, always an overestimate,
+              and labelled COARSE for that reason. `floor` is the threshold below which an arrival
+              is too fast to have been caused by our request. `NOT MEASURED` means recoveries are
+              reported as `unattributed` rather than sorted into a bucket on a guess.
+
+              How to read the NACK benefit: one declared-missing packet in ten is deliberately
+              NEVER requested. Those recoveries are late originals by construction, so the control
+              arm's recovery rate is what this link would have achieved with no NACK at all. If
+              the two rates match, asking is achieving nothing measurable — that is a real result
+              and should be read as one. Both arms need loss events; a clean link cannot answer it.
+
+              """
 
         section("ACTIVE ERROR STATE")
         var errors: [String] = []

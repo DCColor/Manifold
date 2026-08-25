@@ -159,6 +159,25 @@
 #define MD_DEFAULT_MAX_GAP        64u
 #define MD_DEFAULT_BUDGET_PER_SEC 200u
 
+/// Attribution floor = rttUsMin / 2. See the note on `attributionFloorRttDivisor` in the header
+/// for why a fraction of a MEASURED round trip rather than a fixed millisecond threshold, and
+/// why the minimum rather than the mean.
+#define MD_DEFAULT_FLOOR_RTT_DIVISOR 2u
+
+/// One declared-missing sequence number in ten is deliberately NOT requested, forming a control
+/// group. See MDDeclareMissing for the experiment and why it has to exist.
+///
+/// A tenth is a compromise: large enough that a few hundred loss events produce a usable control
+/// sample, small enough that withholding the request costs the viewer almost nothing even if
+/// retransmission turns out to work perfectly.
+#define MD_DEFAULT_CONTROL_PER_MILLE 100u
+
+/// The signalling POST is TCP+TLS to an HTTP endpoint including the server's SDP work, so it
+/// OVERSTATES the UDP media round trip. Quartered before use: still far above any real floor,
+/// still well under a plausible media RTT, and biased the safe way (a floor that is too low
+/// admits late originals; one that is too high discards genuine retransmits).
+#define MD_SIGNALLING_RTT_DISCOUNT 4u
+
 /// `nextAskNs` sentinel: this sequence number will never be asked for again.
 #define MD_NEVER_ASK              UINT64_MAX
 
@@ -171,9 +190,21 @@ enum {
 typedef struct {
     uint64_t declaredNs;     ///< When the gap that implied this sequence number was detected.
     uint64_t nextAskNs;      ///< Earliest time it may be requested again; MD_NEVER_ASK when done.
+    /// When the FIRST request for this sequence number was handed to the sink; 0 = never asked.
+    ///
+    /// ⚠️ NOT DERIVABLE FROM `nextAskNs`, which is why it is stored separately at the cost of
+    /// eight bytes a slot: `nextAskNs` is overwritten by every retry and by MD_NEVER_ASK, so by
+    /// the time an arrival is classified the moment of the first ask is long gone. Without it
+    /// the only available origin is `declaredNs`, which includes `firstAskDelayMs` and the
+    /// service-loop pass — our own scheduling, charged to the network.
+    uint64_t firstAskNs;
     uint16_t seq;
     uint8_t  asks;           ///< Requests sent for it so far.
     uint8_t  state;          ///< MD_SLOT_*
+    /// Deliberately withheld from the requester as a control observation. DISTINCT FROM
+    /// `asks == 0`, which also covers a request the rate governor swallowed or one the hold-off
+    /// has not reached yet — those are accidents, this is the experiment.
+    uint8_t  control;
 } MDOutstanding;
 
 struct ManifoldH264Depacketizer {
@@ -195,6 +226,9 @@ struct ManifoldH264Depacketizer {
     uint64_t      budgetTokens;
     uint64_t      budgetRefilledNs;
 
+    /// Counts declarations so every Nth can be withheld as a control. See MDDeclareMissing.
+    uint64_t      declareCounter;
+
     // The policy, plus the three durations pre-multiplied into nanoseconds so the receive path
     // never divides or multiplies to compare a deadline.
     ManifoldH264LossPolicy policy;
@@ -204,6 +238,7 @@ struct ManifoldH264Depacketizer {
 
     ManifoldH264NackRequestHandler nackHandler;
     void                          *nackContext;
+
 
     // FU-A reassembly
     ManifoldH264Buffer fragment;
@@ -237,6 +272,10 @@ static void MDWriteOffSlot(ManifoldH264Depacketizer *dp, unsigned int i) {
     dp->outstandingCount--;
     dp->tombstoneCount++;
     dp->stats.packetsStillMissing++;
+    // Charged to whichever arm declared it, so each arm's recovery RATE is computable:
+    //   rate = <arm>Recovered / <arm>Declared, with the remainder written off here.
+    if (dp->outstanding[i].control) dp->stats.controlStillMissing++;
+    else                            dp->stats.askedStillMissing++;
 }
 
 /// Age a bounded number of slots. Called once per packet, so the cost per packet is O(SWEEP)
@@ -285,9 +324,44 @@ static void MDDeclareMissing(ManifoldH264Depacketizer *dp, uint16_t seq, uint64_
         const unsigned int i = (seq + n) % MD_OUTSTANDING_CAP;   // seq-keyed, linear probe
         MDOutstanding *slot = &dp->outstanding[i];
         if (slot->state != MD_SLOT_FREE) continue;
+        // ── THE CONTROL GROUP ───────────────────────────────────────────────────────────────
+        //
+        // ⚠️ WITHOUT THIS, "THE PACKET CAME BACK AFTER WE ASKED" IS NOT EVIDENCE OF ANYTHING.
+        // A retransmit and a late original arrive identically — same SSRC, same sequence number,
+        // no marker of any kind — so a recovery rate measured only on packets we asked for is
+        // consistent with the server retransmitting everything and equally consistent with it
+        // ignoring us entirely while a congested queue delivers late.
+        //
+        // So one in ten declared-missing sequence numbers is NEVER REQUESTED. Those recoveries
+        // are late originals BY CONSTRUCTION — nothing was sent that could have caused them. The
+        // comparison is then a controlled one:
+        //
+        //     recovery rate(asked) ≈ recovery rate(control)  →  our NACKs are achieving nothing
+        //     recovery rate(asked) >  recovery rate(control)  →  retransmission is real, and the
+        //                                                        excess IS the measured benefit
+        //
+        // DETERMINISTIC, NOT RANDOM: every tenth declaration, counted. A receive path has no
+        // business holding an RNG, and a fixed stride makes a session reproducible and the
+        // arithmetic checkable by hand. The stride is uncorrelated with anything about the
+        // network — loss events do not arrive in tens — so it does not bias the sample.
+        bool control = false;
+        if (dp->policy.controlGroupPerMille > 0) {
+            dp->declareCounter++;
+            control = (dp->declareCounter * dp->policy.controlGroupPerMille) / 1000u
+                    != ((dp->declareCounter - 1) * dp->policy.controlGroupPerMille) / 1000u;
+        }
+
         slot->declaredNs = now;
         slot->seq        = seq;
         slot->asks       = 0;
+        slot->firstAskNs = 0;
+        slot->control    = control ? 1u : 0u;
+        if (control) {
+            dp->stats.controlDeclared++;
+            ask = false;                 // the whole point: it is never requested
+        } else {
+            dp->stats.askedDeclared++;
+        }
         slot->state      = MD_SLOT_OUTSTANDING;
         slot->nextAskNs  = ask ? now + dp->firstAskDelayNs : MD_NEVER_ASK;
         dp->outstandingCount++;
@@ -295,6 +369,11 @@ static void MDDeclareMissing(ManifoldH264Depacketizer *dp, uint16_t seq, uint64_
         return;
     }
 }
+
+// Round-trip probe and attribution floor. Defined below, beside MDServiceNacks where the rest of
+// the request machinery lives, but used by MDClaimLate above it — declared here rather than moved
+// so the probe reads next to the requester it borrows.
+static uint64_t MDAttributionFloorUs(const ManifoldH264Depacketizer *dp);
 
 /// A packet arrived with a sequence number at or below the highest seen. If it is one we had
 /// declared missing, reach a verdict on it — and distinguish the two ways it can be too late.
@@ -319,6 +398,62 @@ static void MDClaimLate(ManifoldH264Depacketizer *dp, uint16_t seq, uint64_t now
             dp->stats.packetsRecovered++;
             dp->stats.recoveryLatencyUsTotal += us;
             if (us > dp->stats.recoveryLatencyUsMax) dp->stats.recoveryLatencyUsMax = us;
+
+            // ── THE CONTROLLED COMPARISON ──
+            //
+            // Recorded before the attribution below and independently of it. This pair of
+            // distributions is the ONLY thing in this file that can answer "does asking help?",
+            // because the control arm's recoveries are late originals by construction. The
+            // attribution buckets below are a finer question asked of the treated arm alone.
+            if (slot->control) {
+                dp->stats.controlRecovered++;
+                dp->stats.controlRecoveredUsTotal += us;
+                if (us > dp->stats.controlRecoveredUsMax) dp->stats.controlRecoveredUsMax = us;
+                if (us < dp->stats.controlRecoveredUsMin) dp->stats.controlRecoveredUsMin = us;
+            } else {
+                dp->stats.askedRecovered++;
+                dp->stats.askedRecoveredUsTotal += us;
+                if (us > dp->stats.askedRecoveredUsMax) dp->stats.askedRecoveredUsMax = us;
+                if (us < dp->stats.askedRecoveredUsMin) dp->stats.askedRecoveredUsMin = us;
+            }
+
+            // ── ATTRIBUTION: could OUR request have caused this arrival? ──
+            //
+            // Three outcomes, and the first two are settled by fact rather than by threshold.
+            // See the note on these counters in the header before changing the order: the
+            // `asks == 0` test MUST come first, because a packet never asked for has no
+            // first-ask time to measure against and would otherwise divide by a zero origin.
+            if (slot->control) {
+                // Withheld on purpose. It is a late original by construction, and saying so is
+                // the point of the arm — it is not an accident of the requester's scheduling.
+                dp->stats.recoveredUnrequested++;
+            } else if (slot->asks == 0) {
+                // Never requested — nothing was sent that this could be a reply to. The commonest
+                // sources are a gap too wide to ask about, the rate governor, and simple speed:
+                // with firstAskDelayMs at 0 the service loop still runs on the NEXT packet, so a
+                // reordered packet arriving in the same breath is recovered before we ask.
+                dp->stats.recoveredUnrequested++;
+            } else {
+                const uint64_t sinceAsk   = now - slot->firstAskNs;
+                const uint64_t sinceAskUs = sinceAsk / 1000u;
+                const uint64_t floorUs    = MDAttributionFloorUs(dp);
+                if (floorUs == 0) {
+                    // No round trip measured yet — no floor, so no verdict. Parking it here is
+                    // the whole point: see `recoveredUnattributed` in the header.
+                    dp->stats.recoveredUnattributed++;
+                } else if (sinceAskUs < floorUs) {
+                    // Arrived faster than the request could have reached the server. Physically
+                    // cannot be a retransmit of it; it was already in flight.
+                    dp->stats.recoveredBeforeFloor++;
+                } else {
+                    dp->stats.recoveredAttributable++;
+                    dp->stats.attributableLatencyUsTotal += us;
+                    if (us > dp->stats.attributableLatencyUsMax) dp->stats.attributableLatencyUsMax = us;
+                    dp->stats.sinceAskUsTotal += sinceAskUs;
+                    if (sinceAskUs > dp->stats.sinceAskUsMax) dp->stats.sinceAskUsMax = sinceAskUs;
+                    if (sinceAskUs < dp->stats.sinceAskUsMin) dp->stats.sinceAskUsMin = sinceAskUs;
+                }
+            }
         }
         MDFreeSlot(dp, i);
         return;
@@ -351,6 +486,30 @@ static void MDSortBySeqAscending(uint16_t *seqs, unsigned int count, uint16_t hi
         while (j > 0 && (uint16_t)(highestSeq - seqs[j - 1]) < vAge) { seqs[j] = seqs[j - 1]; j--; }
         seqs[j] = v;
     }
+}
+
+/// The floor currently in force, or 0 when there is no round-trip measurement and attribution is
+/// therefore SUSPENDED. Zero is the "we do not know" signal and callers must branch on it.
+static uint64_t MDAttributionFloorUs(const ManifoldH264Depacketizer *dp) {
+    if (dp->stats.rttSource == ManifoldRttSourceNone) return 0;
+    if (dp->stats.rttUsMin == UINT64_MAX) return 0;
+    const unsigned int div = dp->policy.attributionFloorRttDivisor;
+    return div ? dp->stats.rttUsMin / div : dp->stats.rttUsMin / MD_DEFAULT_FLOOR_RTT_DIVISOR;
+}
+
+/// Fold one measured round trip in and promote the source if this is a better one.
+///
+/// ⚠️ THE SOURCE ONLY EVER IMPROVES. A probe supersedes the signalling seed and nothing demotes
+/// it back — a later timeout means we failed to measure, not that the path became unmeasurable,
+/// and dropping to a coarser source would silently move the floor and with it the classification
+/// of every subsequent arrival.
+static void MDRecordRtt(ManifoldH264Depacketizer *dp, uint64_t rttUs, int source) {
+    if (rttUs == 0) return;
+    if (source < dp->stats.rttSource) return;
+    dp->stats.rttSource = source;
+    dp->stats.rttUsLast = rttUs;
+    if (rttUs < dp->stats.rttUsMin) dp->stats.rttUsMin = rttUs;
+    dp->stats.attributionFloorUsInUse = MDAttributionFloorUs(dp);
 }
 
 /// Decide which outstanding sequence numbers are due to be asked for, and hand them over in one
@@ -400,6 +559,7 @@ static void MDServiceNacks(ManifoldH264Depacketizer *dp, uint64_t now) {
 
         dp->budgetTokens--;
         due[count++] = slot->seq;
+        if (slot->asks == 0) slot->firstAskNs = now;   // stamped once; retries do not move it
         slot->asks++;
         if (slot->asks >= 1u + dp->policy.maxRetries) {
             slot->nextAskNs = MD_NEVER_ASK;
@@ -506,6 +666,7 @@ static void MDApplyPolicy(ManifoldH264Depacketizer *dp) {
     dp->recoveryWindowNs = (uint64_t)dp->policy.recoveryWindowMs * 1000000ull;
     dp->firstAskDelayNs  = (uint64_t)dp->policy.firstAskDelayMs  * 1000000ull;
     dp->retryIntervalNs  = (uint64_t)dp->policy.retryIntervalMs  * 1000000ull;
+    dp->stats.attributionFloorUsInUse = MDAttributionFloorUs(dp);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -518,6 +679,15 @@ ManifoldH264Depacketizer *ManifoldH264DepacketizerCreate(void) {
     dp->payloadType       = -1;
     dp->stats.payloadType = -1;
     dp->nextServiceNs     = MD_NEVER_ASK;
+    // ⚠️ calloc leaves this ZERO, and zero is the identity for a MINIMUM — every comparison
+    // would fail and the field would read 0 forever, which looks exactly like "we measured a
+    // 0 µs round trip". The sentinel has to be the maximum, and the reader has to know that a
+    // UINT64_MAX here means "no attributable recovery yet", not "infinitely slow".
+    dp->stats.sinceAskUsMin = UINT64_MAX;
+    dp->stats.rttUsMin        = UINT64_MAX;   // same sentinel argument as sinceAskUsMin above
+    dp->stats.rttSource       = ManifoldRttSourceNone;
+    dp->stats.askedRecoveredUsMin   = UINT64_MAX;
+    dp->stats.controlRecoveredUsMin = UINT64_MAX;
     dp->policy            = ManifoldH264DefaultLossPolicy();
     MDApplyPolicy(dp);
     return dp;
@@ -530,6 +700,13 @@ void ManifoldH264DepacketizerDestroy(ManifoldH264Depacketizer *dp) {
     free(dp);
 }
 
+void ManifoldH264DepacketizerSeedSignallingRttUs(ManifoldH264Depacketizer *dp, uint64_t roundTripUs) {
+    if (!dp || roundTripUs == 0) return;
+    const uint64_t discounted = roundTripUs / MD_SIGNALLING_RTT_DISCOUNT;
+    if (discounted == 0) return;
+    MDRecordRtt(dp, discounted, ManifoldRttSourceSignalling);
+}
+
 void ManifoldH264DepacketizerSetPayloadType(ManifoldH264Depacketizer *dp, int payloadType) {
     if (!dp) return;
     dp->payloadType       = payloadType;
@@ -539,6 +716,8 @@ void ManifoldH264DepacketizerSetPayloadType(ManifoldH264Depacketizer *dp, int pa
 ManifoldH264LossPolicy ManifoldH264DefaultLossPolicy(void) {
     ManifoldH264LossPolicy policy;
     policy.recoveryWindowMs    = MD_DEFAULT_RECOVERY_MS;
+    policy.attributionFloorRttDivisor = MD_DEFAULT_FLOOR_RTT_DIVISOR;
+    policy.controlGroupPerMille = MD_DEFAULT_CONTROL_PER_MILLE;
     policy.firstAskDelayMs     = MD_DEFAULT_FIRST_ASK_MS;
     policy.retryIntervalMs     = MD_DEFAULT_RETRY_MS;
     policy.maxRetries          = MD_DEFAULT_MAX_RETRIES;
@@ -564,6 +743,17 @@ void ManifoldH264DepacketizerSetLossPolicy(ManifoldH264Depacketizer *dp,
     // latency budget, and this file is not the place to overrule it.
     if (applied.recoveryWindowMs == 0) applied.recoveryWindowMs = dp->policy.recoveryWindowMs;
     if (applied.retryIntervalMs  == 0) applied.retryIntervalMs  = dp->policy.retryIntervalMs;
+    // A zero floor is refused for the same class of reason: it does not tune the attribution
+    // test, it DELETES it — every arrival becomes attributable and `recoveredBeforeFloor` goes
+    // structurally to zero, which reads as "no late originals" when it means "not looking".
+    // A zero divisor would divide by zero; a zero timeout would time every probe out before it
+    // could be answered and strand us on `ManifoldRttSourceNone` forever. Both are refused for
+    // the same reason as the two above: they disable the instrument rather than tune it.
+    // `rttProbeIntervalSec == 0` IS honoured — that one legitimately means "do not probe", and
+    // its consequence (attribution suspends) is visible in `recoveredUnattributed`.
+    if (applied.attributionFloorRttDivisor == 0)
+        applied.attributionFloorRttDivisor = dp->policy.attributionFloorRttDivisor;
+
 
     dp->policy = applied;
     MDApplyPolicy(dp);

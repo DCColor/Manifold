@@ -437,11 +437,15 @@ final class TransportKeyMonitor: ObservableObject {
         // 123 = ←, 124 = →. Key CODES, not characters: the arrows have no printable character and
         // `charactersIgnoringModifiers` gives a private-use scalar that is not worth matching on.
         guard event.keyCode == 123 || event.keyCode == 124 else { return nil }
-        // The same gate the hidden buttons carried via `.disabled` — a deck that does not hold the
-        // transport may not jog it. Not gated on `hasMedia`: the buttons were not either, and
-        // `stepFrame` is a safe no-op with no duration, so an arrow in an empty window stays as
-        // silent as it has always been rather than falling through to a system beep.
-        guard deck?.gate.transportEnabled == true else { return nil }
+        // The same gate the hidden buttons carried via `.disabled`, in both its halves: a deck that
+        // does not hold the transport may not jog it, and a deck showing a LIVE SOURCE has no
+        // playhead to jog — NDI/WHEP/SRT push straight at the renderer and never load the engine.
+        //
+        // Still not gated on `hasMedia`: the buttons were not either, and `stepFrame` is a safe
+        // no-op with no duration, so an arrow in an empty window stays as silent as it has always
+        // been rather than falling through to a system beep.
+        guard deck?.gate.transportEnabled == true,
+              deck?.gate.positionControlsEnabled == true else { return nil }
         let shifted = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift)
         let rate = engine?.metadata?.frameRate ?? 0
         let magnitude = shifted ? max(Int((rate > 0 ? rate : 24).rounded()), 1) : 1

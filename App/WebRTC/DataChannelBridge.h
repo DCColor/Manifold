@@ -174,11 +174,31 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
 /// Intended for the teardown summary. nil if no video has been received.
 - (nullable NSString *)rtpStatsSummary;
 
+/// The measured round trip to the media server, and where the figure came from, on one line.
+///
+/// Separate from `rtpStatsSummary` because it is the number a reader needs FIRST: a 37 ms
+/// recovery next to a router and a 229 ms recovery on a loaded transatlantic link are not
+/// evidence about different code, and without the round trip there is nothing in the export that
+/// says so. nil when no WHEP session is up.
+- (nullable NSString *)roundTripSummary;
+
+/// The controlled comparison — recovery rate for losses we asked about versus losses we
+/// deliberately did not. The only figure in the app that speaks to whether NACK achieves
+/// anything, rather than to what arrived. nil when no WHEP session is up.
+- (nullable NSString *)nackBenefitSummary;
+
 /// Sends a Picture Loss Indication, asking the sender for an IDR.
 ///
 /// Called automatically (a few times, then it gives up) if slices are arriving but no
 /// keyframe has been seen — the normal cause is joining a stream mid-GOP. Exposed so a
 /// debug binding can force one. Main queue.
+/// Hand the session a round trip the signalling layer MEASURED, so the retransmit attribution
+/// floor can be sharpened from a fact instead of resting on its unarguable-but-weak default.
+///
+/// Call after the WHEP POST completes and before media flows. Ignored if non-positive. See the
+/// implementation for why the value is divided rather than used raw.
+- (void)setMeasuredSignallingRoundTripMs:(double)ms;
+
 - (BOOL)requestKeyframe;
 
 /// Closes and destroys the PeerConnection. Main queue only; safe to call twice.

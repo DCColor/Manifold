@@ -412,6 +412,15 @@ final class StreamBookmarkStore: ObservableObject {
     /// — the fix is a build that can read the data — so the state is REPORTED, never worked around.
     @Published private(set) var storedDataUnreadable = false
 
+    /// Set when the Keychain REFUSED a stream-passphrase read (never when there simply is none).
+    ///
+    /// The sibling of `storedDataUnreadable`, one layer down: that one means "the bookmark list
+    /// would not decode", this one means "a bookmark's secret would not come out of the Keychain".
+    /// Same doctrine — say so, change nothing, and do not let the app act as though the value was
+    /// never there. See `connectURL`, which is where treating a refusal as absence used to turn a
+    /// readable secret into an unexplained SRT handshake failure.
+    @Published private(set) var passphraseUnreadable: String?
+
     private init() {
         let data = UserDefaults.standard.data(forKey: Self.key)
         if let data {
@@ -476,8 +485,13 @@ final class StreamBookmarkStore: ObservableObject {
             guard let url = bookmark.url,
                   let split = Self.strippingPassphrase(from: url),
                   let passphrase = split.passphrase else { return bookmark }
-            guard KeychainStore.streams.set(passphrase, for: bookmark.id.uuidString) else {
+            let status = KeychainStore.streams.write(passphrase, for: bookmark.id.uuidString)
+            guard status == errSecSuccess else {
                 failed += 1
+                // ⚠️ Logs the OSStatus, never the value or the bookmark's host. The status is what
+                // tells a locked keychain apart from a denied one; the rest is not ours to send.
+                NSLog("[STREAMS] ⚠️ passphrase migration write failed (%@)",
+                      keychainStatusDescription(status))
                 return bookmark   // untouched — the URL keeps the only copy there is
             }
             migrated += 1
@@ -691,8 +705,10 @@ final class StreamBookmarkStore: ObservableObject {
 
             let account = bookmark.id.uuidString
             if let write {
-                guard KeychainStore.streams.set(write, for: account) else {
-                    NSLog("[STREAMS] ⚠️ keychain write failed — stream not updated")
+                let status = KeychainStore.streams.write(write, for: account)
+                guard status == errSecSuccess else {
+                    NSLog("[STREAMS] ⚠️ keychain write failed (%@) — stream not updated",
+                          keychainStatusDescription(status))
                     return .failure(.passphraseNotStored)
                 }
             }
@@ -712,6 +728,19 @@ final class StreamBookmarkStore: ObservableObject {
             if clear { KeychainStore.streams.delete(account) }
             return .success(updated)
         }
+    }
+
+    /// Record/clear the passphrase-read fault. `connectURL` is `static` and the flag is instance
+    /// state, so these exist to keep the hop through `shared` in one named place.
+    fileprivate func notePassphraseUnreadable(_ status: OSStatus) {
+        let text = """
+                   Manifold couldn’t read this stream’s saved passphrase from the Keychain                    (\(keychainStatusDescription(status))). The passphrase is still saved and hasn’t                    been changed. Manifold didn’t connect rather than connect without it — quitting                    and reopening usually clears this, and there’s no need to re-enter it.
+                   """
+        if passphraseUnreadable != text { passphraseUnreadable = text }
+    }
+
+    fileprivate func notePassphraseReadable() {
+        if passphraseUnreadable != nil { passphraseUnreadable = nil }
     }
 
     /// Delete the entry AND its passphrase. Both, always, in that order — a Keychain item whose
@@ -789,9 +818,26 @@ final class StreamBookmarkStore: ObservableObject {
     ///
     /// Falls back to the stored URL unchanged when there is no stored passphrase, which is every
     /// web bookmark and any SRT one that does not need encryption.
+    /// ⚠️ RETURNS NIL WHEN THE PASSPHRASE READ IS REFUSED, rather than the bare URL.
+    ///
+    /// This used to be `get(...)` collapsing to nil, so a refused read and a stream that needs no
+    /// passphrase produced the SAME RESULT: dial without one. For an encrypted SRT stream that is
+    /// a rejected handshake several seconds later, reported as a connection failure — the user is
+    /// told the stream is unreachable when what actually happened is that their saved passphrase
+    /// was sitting right there and we were not allowed to read it. Refusing to dial is the honest
+    /// answer, and it is also the recoverable one: nothing is overwritten and the next attempt,
+    /// against an unlocked keychain, just works.
     static func connectURL(for bookmark: StreamBookmark) -> URL? {
         guard let url = bookmark.url else { return nil }
-        guard let secret = KeychainStore.streams.get(bookmark.id.uuidString), !secret.isEmpty else {
+        let read = KeychainStore.streams.read(bookmark.id.uuidString)
+        if let status = read.failureStatus {
+            NSLog("[STREAMS] ⚠️ stored passphrase could not be read (%@) — not dialling without it",
+                  keychainStatusDescription(status))
+            shared.notePassphraseUnreadable(status)
+            return nil
+        }
+        shared.notePassphraseReadable()
+        guard let secret = read.value, !secret.isEmpty else {
             return url
         }
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {

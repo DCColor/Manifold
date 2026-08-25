@@ -436,6 +436,64 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
     NSLog(@"[WHEP-BRIDGE] video track %d closed", tr);
 }
 
+/// Renders the round trip for a log line or a diagnostics export.
+///
+/// ⚠️ THE SOURCE IS PART OF THE NUMBER AND IS NEVER PRINTED WITHOUT IT. The only source this app
+/// currently has is the signalling POST, which measures a DIFFERENT PATH — so it is always
+/// rendered with the word COARSE, and a reader comparing two testers' exports can see instantly
+/// that neither figure is a media round trip. See `ManifoldRttSource` for the three routes that
+/// are closed and why.
+static NSString *ManifoldWHEPDescribeRtt(const ManifoldH264DepacketizerStats *s) {
+    switch ((ManifoldRttSource)s->rttSource) {
+        case ManifoldRttSourceNone:
+            return @"NOT MEASURED — ATTRIBUTION SUSPENDED, recoveries counted as `unattributed` "
+                   @"rather than sorted into a bucket on a guess";
+        case ManifoldRttSourceSignalling:
+            return [NSString stringWithFormat:
+                    @"~%llu us COARSE (signalling POST, discounted — an HTTPS round trip, NOT the "
+                    @"media path; no media RTT is obtainable on this transport) floor=%llu us",
+                    s->rttUsMin == UINT64_MAX ? 0 : s->rttUsMin, s->attributionFloorUsInUse];
+    }
+    return @"(unknown source)";
+}
+
+/// Renders the controlled comparison: does asking actually recover anything that would not have
+/// arrived anyway?
+///
+/// ⚠️ WRITTEN TO BE READABLE BY SOMEONE WHO IS NOT LOOKING FOR A GOOD RESULT. If the two rates
+/// match, the line says so in as many words. A NACK requester that demonstrably achieves nothing
+/// is a finding, not a failure to find one, and burying it behind raw counters that the reader
+/// has to divide in their head is how it would get missed.
+static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerStats *s) {
+    const uint64_t askedDone   = s->askedRecovered + s->askedStillMissing;
+    const uint64_t controlDone = s->controlRecovered + s->controlStillMissing;
+    if (askedDone == 0 || controlDone == 0) {
+        return [NSString stringWithFormat:
+                @"NO VERDICT YET — asked arm %llu resolved, control arm %llu resolved. Both arms "
+                @"need loss events before asking can be compared with not asking; a clean link "
+                @"cannot answer this question at all.",
+                askedDone, controlDone];
+    }
+    const double askedRate   = (double)s->askedRecovered   * 100.0 / (double)askedDone;
+    const double controlRate = (double)s->controlRecovered * 100.0 / (double)controlDone;
+    return [NSString stringWithFormat:
+            @"asked %llu/%llu recovered (%.1f%%) vs control %llu/%llu (%.1f%%) — %@ | "
+            @"latency asked min=%@ avg=%llu max=%llu us, control min=%@ avg=%llu max=%llu us",
+            s->askedRecovered, askedDone, askedRate,
+            s->controlRecovered, controlDone, controlRate,
+            askedRate > controlRate + 5.0
+                ? @"asking recovers MORE: retransmission is real and the gap is the benefit"
+                : (askedRate + 5.0 < controlRate
+                    ? @"⚠️ control recovers MORE — unexpected; suspect too few samples"
+                    : @"⚠️ NO MEASURED BENEFIT: asking recovers no more than not asking"),
+            s->askedRecoveredUsMin == UINT64_MAX ? @"n/a" : [NSString stringWithFormat:@"%llu", s->askedRecoveredUsMin],
+            s->askedRecovered ? s->askedRecoveredUsTotal / s->askedRecovered : 0,
+            s->askedRecoveredUsMax,
+            s->controlRecoveredUsMin == UINT64_MAX ? @"n/a" : [NSString stringWithFormat:@"%llu", s->controlRecoveredUsMin],
+            s->controlRecovered ? s->controlRecoveredUsTotal / s->controlRecovered : 0,
+            s->controlRecoveredUsMax];
+}
+
 @implementation ManifoldWHEPSession {
     int  _pc;
     BOOL _closed;
@@ -766,6 +824,34 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
           policy.recoveryWindowMs, policy.firstAskDelayMs,
           policy.retryIntervalMs, policy.maxRetries,
           policy.maxGapToRequest, policy.budgetSeqsPerSecond);
+
+    // Stated separately from the policy line above because it describes the INSTRUMENT, not the
+    // behaviour: changing it alters what we report about recovery, never what we do about it.
+    NSLog(@"[WHEP-RTP] retransmit attribution: floor = RTT / %u. No MEDIA round trip is "
+          @"obtainable on this transport (SR/DLSR runs the wrong way, libdatachannel has no RTCP "
+          @"XR, and SRTP replay kills a self-probe) — the only source is the signalling POST, "
+          @"always labelled COARSE. Without one there is NO floor and recoveries are counted as "
+          @"`unattributed` rather than guessed into a bucket.",
+          policy.attributionFloorRttDivisor);
+    NSLog(@"[WHEP-RTP] NACK control arm: %u per mille of declared-missing sequence numbers are "
+          @"deliberately NOT requested. Their recoveries are late originals by construction, so "
+          @"comparing the two arms' recovery rates is the only thing here that can show whether "
+          @"asking achieves anything. 0 disables the experiment.",
+          policy.controlGroupPerMille);
+}
+
+/// Seed the round trip from the WHEP signalling POST, for the window before the first probe lands.
+///
+/// ⚠️ THE RAW MEASUREMENT IS PASSED THROUGH. The depacketizer owns the discount that accounts for
+/// an HTTPS POST overstating a UDP media path; discounting here as well would double it.
+- (void)setMeasuredSignallingRoundTripMs:(double)ms {
+    if (ms <= 0 || !_depacketizer) return;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerSeedSignallingRttUs(_depacketizer, (uint64_t)(ms * 1000.0));
+    os_unfair_lock_unlock(&_rtpLock);
+    NSLog(@"[WHEP-RTP] RTT seeded at %.1f ms from the signalling POST (COARSE — an HTTPS round "
+          @"trip overstates the media path, and nothing better is obtainable — see "
+          @"ManifoldRttSource).", ms);
 }
 
 - (void)sendNackForSequences:(const uint16_t *)seqs count:(unsigned int)count ssrc:(uint32_t)ssrc {
@@ -1079,6 +1165,24 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
     return NO;
 }
 
+- (nullable NSString *)nackBenefitSummary {
+    if (!_depacketizer) return nil;
+    ManifoldH264DepacketizerStats stats;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerCopyStats(_depacketizer, &stats);
+    os_unfair_lock_unlock(&_rtpLock);
+    return ManifoldWHEPDescribeNackBenefit(&stats);
+}
+
+- (nullable NSString *)roundTripSummary {
+    if (!_depacketizer) return nil;
+    ManifoldH264DepacketizerStats stats;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerCopyStats(_depacketizer, &stats);
+    os_unfair_lock_unlock(&_rtpLock);
+    return ManifoldWHEPDescribeRtt(&stats);
+}
+
 - (nullable NSString *)rtpStatsSummary {
     const ManifoldH264DepacketizerStats stats = [self snapshotStats];
     if (stats.packetsReceived == 0) return nil;
@@ -1092,7 +1196,11 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
             @"%llu pkts (%llu accepted) → %llu frames (%llu key) | "
             @"SPS=%llu PPS=%llu IDR=%llu slice=%llu SEI=%llu | "
             @"seqGaps=%llu declaredLost=%llu (=recovered %llu + stillMissing %llu + outstanding %llu) | "
-            @"recoveryUs avg=%llu max=%llu overflow=%llu | "
+            @"overflow=%llu | "
+            @"RTT %@ | NACK benefit: %@ | "
+            @"attribution: attributable=%llu tooFastToBeOurs=%llu neverAsked=%llu unattributed=%llu "
+            @"(recoveryUs[attributable] avg=%llu max=%llu | sinceAsk min=%@ avg=%llu max=%llu) | "
+            @"allArrivalsUs avg=%llu max=%llu (legacy, pre-attribution baselines) | "
             @"lateAfterGiveUp=%llu (worst %llu ms; a SUBSET of stillMissing) | "
             @"nacks built=%llu seqs=%llu toWire=%llu refused=%llu rateSuppressed=%llu gapsTooWide=%llu | "
             @"reorder=%llu malformed=%llu | "
@@ -1103,8 +1211,19 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
             stats.nalSPS, stats.nalPPS, stats.nalIDR, stats.nalSlice, stats.nalSEI,
             stats.seqGaps, stats.packetsLost,
             stats.packetsRecovered, stats.packetsStillMissing, stats.packetsOutstanding,
+            stats.outstandingOverflow,
+            ManifoldWHEPDescribeRtt(&stats), ManifoldWHEPDescribeNackBenefit(&stats),
+            stats.recoveredAttributable, stats.recoveredBeforeFloor,
+            stats.recoveredUnrequested, stats.recoveredUnattributed,
+            stats.recoveredAttributable ? stats.attributableLatencyUsTotal / stats.recoveredAttributable : 0,
+            stats.attributableLatencyUsMax,
+            // The sentinel has to be rendered as a word. Printing UINT64_MAX would read as a
+            // measurement, and printing 0 would read as an impossibly fast round trip.
+            stats.sinceAskUsMin == UINT64_MAX ? @"n/a" : [NSString stringWithFormat:@"%llu", stats.sinceAskUsMin],
+            stats.recoveredAttributable ? stats.sinceAskUsTotal / stats.recoveredAttributable : 0,
+            stats.sinceAskUsMax,
             stats.packetsRecovered ? stats.recoveryLatencyUsTotal / stats.packetsRecovered : 0,
-            stats.recoveryLatencyUsMax, stats.outstandingOverflow,
+            stats.recoveryLatencyUsMax,
             stats.packetsLateAfterGiveUp, stats.lateAfterGiveUpUsMax / 1000,
             stats.nacksSent, stats.nackSeqsRequested, nacksToWire, nacksRefused,
             stats.nackSeqsSuppressedByRate, stats.nackGapsTooLarge,

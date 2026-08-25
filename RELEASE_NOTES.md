@@ -5,6 +5,22 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.6.2
+
+- Fixed: licence keys were not surviving app updates. The key itself was always safely stored —
+  the app was checking a separate settings file first and giving up before it ever read the key.
+  It now reads the key first, so your licence carries across this and every future update. You
+  should not need to enter it again; if you were asked to re-enter it after the last update, this
+  build restores it on its own the first time you open it.
+- Play/pause, the scrubber, J/K/L, the arrow-key jog and timecode entry are now greyed out while a
+  live stream is showing, with a tooltip saying why. They never did anything on a stream — a live
+  source has no playback position to move to. Volume, mute, scopes, guides, framing, raster size,
+  frame export and the inspector all stay available as before.
+- Saved stream passphrases are handled more carefully: if one cannot be read, Manifold now says so
+  and leaves it alone instead of connecting without it and reporting a confusing connection error.
+- Diagnostics exports now lead with a network path section, so a report from a fast local
+  connection and one from a loaded or distant link can actually be compared.
+
 ## 0.6.1
 
 - Streams recover better on a lossy connection: lost packets are now re-requested rather than

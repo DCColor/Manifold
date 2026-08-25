@@ -52,6 +52,47 @@ extern "C" {
 /// Opaque depacketizer state. One per inbound video track.
 typedef struct ManifoldH264Depacketizer ManifoldH264Depacketizer;
 
+/// Where the round-trip figure driving retransmit attribution came from. REPORTED, ALWAYS —
+/// two diagnostics exports from different testers are not comparable without it.
+///
+/// ── WHY THERE IS NO MEASURED-RTT MEMBER, WHICH IS THE ONE YOU WANT ──────────────────────────
+///
+/// Three routes were tried. All three are closed on this transport:
+///
+///   1. RTCP SR/DLSR. The arithmetic runs SENDER→RECEIVER and cannot be turned around. LSR and
+///      DLSR live in a RECEPTION REPORT BLOCK, which describes a source the reporter RECEIVES
+///      RTP FROM. We compute them and put them in the RR we send, and the SERVER learns OUR
+///      round trip. A WHEP receiver sends no RTP, so no conforming sender will ever emit a
+///      report block about us. This is the shape of the protocol, not a library gap.
+///
+///   2. RTCP XR (RFC 3611) RRTR + DLRR, which exists precisely for receive-only endpoints.
+///      VERIFIED ABSENT from the vendored libdatachannel — rtp.hpp defines SR, RR, SDES, REMB,
+///      PLI, FIR and NACK and no XR of any kind.
+///
+///   3. NACKing a packet WE ALREADY HOLD and timing the duplicate back. MEASURED IN THE FIELD:
+///      73 probes sent, 73 timed out, 0 answered. SRTP replay protection (RFC 3711 §3.3.2)
+///      rejects it — a retransmit of an already-received packet has the same SSRC and sequence
+///      number, so it computes to the same SRTP packet index and `srtp_unprotect` drops it as a
+///      replay before libdatachannel's callback, let alone ours. The vendored libsrtp2 exports
+///      `srtp_rdbx_check`; libdatachannel carries the string "Incoming SRTP packet is a replay".
+///      An SFU that believes the packet was delivered has no reason to resend it either, so the
+///      idea was doubly dead. DO NOT REVIVE IT.
+///
+/// What WOULD work is RTX (RFC 4588): retransmissions on a separate SSRC with their own
+/// sequence-number space, which sidesteps replay AND makes a retransmit self-identifying, so
+/// attribution would need no floor at all. We do not offer it (see kManifoldWHEPVideoMSection).
+/// Until we do, the honest position is that this app cannot measure a media round trip, and the
+/// signalling POST — labelled COARSE wherever it appears — is the only figure available.
+typedef enum {
+    /// No measurement of any kind. ⚠️ ATTRIBUTION IS SUSPENDED — recoveries go to
+    /// `recoveredUnattributed` rather than being guessed into a bucket.
+    ManifoldRttSourceNone = 0,
+    /// The WHEP signalling POST round trip, discounted. A real measurement of a DIFFERENT PATH:
+    /// TCP+TLS to an HTTP endpoint including the server's SDP work. Always an overestimate of
+    /// the UDP media path, and never to be reported without the word COARSE next to it.
+    ManifoldRttSourceSignalling,
+} ManifoldRttSource;
+
 /// Everything the step-3a checkpoint needs to prove depacketization works, plus
 /// the loss counters that say whether the NETWORK (rather than this code) is the
 /// reason a NAL came out malformed. Monotonic; snapshot and diff for rates.
@@ -93,6 +134,148 @@ typedef struct {
     // which is the number that says whether a recovered packet beat its display deadline.
     uint64_t recoveryLatencyUsTotal;   ///< Sum of delays, microseconds. Divide by packetsRecovered.
     uint64_t recoveryLatencyUsMax;     ///< Worst single delay, microseconds.
+
+    // ── WHICH RECOVERIES OUR NACK CAN ACTUALLY TAKE CREDIT FOR ───────────────
+    //
+    // ⚠️ `packetsRecovered` ABOVE COUNTS ARRIVALS, NOT REPAIRS, AND THE TWO ARE NOT THE SAME
+    // THING ONCE THE LINK IS CONGESTED. A retransmit arrives on the same SSRC bearing the same
+    // sequence number as the original, so the packet itself carries NO evidence of which it is.
+    // Under saturation — which is the condition the NACK work was measured under — packets are
+    // delayed rather than dropped, so a sequence number we declared missing is frequently a
+    // packet that was already in flight. It then arrives, and the old code counted it as a
+    // recovery indistinguishable from a genuine retransmit.
+    //
+    // The tell was a 245 MICROSECOND recovery on a quiet wired run. Nothing makes a round trip
+    // to an edge server in 245 µs; that arrival was a late original, and it was being folded
+    // into the same mean and max that the latency presets are sized from.
+    //
+    // These three partition `packetsRecovered` exactly:
+    //
+    //   packetsRecovered == recoveredUnrequested + recoveredBeforeFloor
+    //                       + recoveredAttributable + recoveredUnattributed
+    //
+    // and only the third can contain retransmits caused by us. The first two are LOWER BOUNDS on
+    // late originals, not estimates: each is established by a fact, not by a threshold on the
+    // aggregate. The third is an UPPER bound on genuine retransmits — it is what remains after
+    // the arrivals we can prove were not retransmits have been removed, and it certainly still
+    // contains late originals that happened to arrive slowly.
+    uint64_t recoveredUnrequested;     ///< NO NACK WAS EVER SENT for this seq (`asks == 0`).
+                                       ///< Cannot be a response to a request that does not exist.
+                                       ///< Arises from gapsTooWide, the rate governor, firstAskDelay,
+                                       ///< and arrival before the service loop's next pass.
+    uint64_t recoveredBeforeFloor;     ///< Asked for, but arrived less than `attributionFloorUs`
+                                       ///< after the FIRST ask went out — faster than any plausible
+                                       ///< round trip, so the reply cannot have caused it.
+    uint64_t recoveredAttributable;    ///< Asked for, and arrived at or after the floor. THE ONLY
+                                       ///< ONES A RETRANSMIT EXPLANATION FITS. Size presets from
+                                       ///< these, not from `recoveryLatencyUs*`.
+
+    /// Asked for, arrived, AND WE HAD NO ROUND-TRIP MEASUREMENT AT THE TIME, so there was no
+    /// floor to test against and no honest bucket to put it in.
+    ///
+    /// ⚠️ THIS COUNTER EXISTS SO THAT "WE DO NOT KNOW" HAS SOMEWHERE TO GO. The alternative —
+    /// defaulting to attributable, or to below-floor, whenever RTT is unknown — would put a
+    /// guess into a number whose entire purpose is to be a bound, and it would do it silently.
+    /// A session that never gets an RTT reads `unattributed=N` and is instantly recognisable as
+    /// uninterpretable, instead of quietly reporting a confident wrong answer. Expect a handful
+    /// at the very start of every session, before the first probe lands.
+    uint64_t recoveredUnattributed;
+
+    /// Declaration→arrival latency for `recoveredAttributable` ONLY. Same clock and same origin as
+    /// `recoveryLatencyUs*` above so the two are directly comparable — the difference between them
+    /// is precisely the skew the late originals were contributing.
+    uint64_t attributableLatencyUsTotal;
+    uint64_t attributableLatencyUsMax;
+
+    /// FIRST-ASK→arrival latency for the attributable ones. A different and better question than
+    /// the one above: declaration→arrival includes `firstAskDelayMs` and the service-loop pass,
+    /// which are our own scheduling and not the network's doing. This is the closest thing we have
+    /// to a measured retransmit round trip.
+    ///
+    /// ⚠️ `sinceAskUsMin` IS THE MOST INFORMATIVE NUMBER HERE and the reason it is a min rather
+    /// than a mean: it is an empirical CEILING on the true path RTT. Some attributable arrival is
+    /// the fastest one, and whatever it is, the real round trip is no slower than that. If it ever
+    /// comes back below `attributionFloorUs` the floor is set too high and is discarding genuine
+    /// retransmits; if it sits far above, the floor is too permissive and late originals are still
+    /// leaking into the attributable bucket. Either way it is the calibration signal.
+    uint64_t sinceAskUsTotal;
+    uint64_t sinceAskUsMax;
+    uint64_t sinceAskUsMin;            ///< UINT64_MAX until the first attributable recovery.
+
+    // ── THE CONTROLLED EXPERIMENT: DOES ASKING ACTUALLY HELP? ────────────────
+    //
+    // ⚠️ EVERYTHING ELSE IN THIS FILE MEASURES WHAT ARRIVED. ONLY THIS MEASURES WHETHER WE
+    // CAUSED IT. That distinction is the entire reason these counters exist, and it went
+    // unnoticed for the whole NACK arc: `packetsRecovered` rising after we started sending NACKs
+    // is consistent with the server retransmitting, and equally consistent with it ignoring us
+    // while a congested queue delivers late. A 245 MICROSECOND "recovery" on a quiet wired link
+    // — far faster than any round trip — is direct evidence that at least some of them were
+    // never retransmits at all.
+    //
+    // One declared-missing sequence number in ten is therefore NEVER REQUESTED. Its recoveries
+    // are late originals BY CONSTRUCTION: nothing was sent that could have caused them. Compare
+    // the two rates:
+    //
+    //     askedRecovered/askedDeclared  ≈  controlRecovered/controlDeclared
+    //         → asking achieves NOTHING MEASURABLE. Say so plainly; do not go looking for a
+    //           kinder reading. It would mean the NACK arc has produced no demonstrated benefit.
+    //
+    //     askedRecovered/askedDeclared  >  controlRecovered/controlDeclared
+    //         → retransmission is real, and the DIFFERENCE is the measured benefit.
+    //
+    // Each arm's declarations are conserved:
+    //     askedDeclared   == askedRecovered   + askedStillMissing   + (asked, still outstanding)
+    //     controlDeclared == controlRecovered + controlStillMissing + (control, still outstanding)
+    //
+    // ⚠️ THE TWO ARMS DO NOT SUM TO `packetsLost`, AND EXPECTING THEM TO WILL SEND SOMEONE
+    // HUNTING A BUG THAT IS NOT THERE. A gap wider than `maxGapToRequest` is written off whole
+    // in the receive path and never reaches MDDeclareMissing, so it joins neither arm:
+    //
+    //     askedDeclared + controlDeclared == packetsLost - <packets inside too-wide gaps>
+    //
+    // That is correct, not a leak — an outage is not a loss event either arm could have been
+    // asked about. `nackGapsTooLarge` counts the events; the top-level identity still balances
+    // because both `packetsLost` and `packetsStillMissing` move together there.
+    //
+    // ⚠️ THE CONTROL ARM COSTS THE VIEWER SOMETHING REAL — a tenth of recoverable losses go
+    // unrequested. That is the price of knowing whether the other nine tenths are doing
+    // anything, and it is only worth paying while the question is open. Once the comparison has
+    // an answer on enough links, set `controlGroupPerMille` to 0.
+    uint64_t askedDeclared;
+    uint64_t askedRecovered;
+    uint64_t askedStillMissing;
+    uint64_t controlDeclared;
+    uint64_t controlRecovered;
+    uint64_t controlStillMissing;
+
+    /// Declaration→arrival latency, per arm, microseconds. The control arm's distribution IS the
+    /// reordering-delay distribution of this link, measured rather than assumed — which is the
+    /// other thing the NACK work needed and never had. `…Min` are UINT64_MAX until first use.
+    uint64_t askedRecoveredUsTotal;
+    uint64_t askedRecoveredUsMax;
+    uint64_t askedRecoveredUsMin;
+    uint64_t controlRecoveredUsTotal;
+    uint64_t controlRecoveredUsMax;
+    uint64_t controlRecoveredUsMin;
+
+    // ── Round trip ───────────────────────────────────────────────────────────
+    //
+    // ⚠️ NOT MEASURED ON THE MEDIA PATH, AND THE ONLY HONEST SOURCE IS COARSE. See
+    // `ManifoldRttSource` for the three routes that are closed and why. `rttUsMin` is whatever
+    // the discounted signalling POST gave us, or UINT64_MAX if even that is missing.
+    //
+    // ⚠️ THE PER-ARM LATENCIES ABOVE DELIBERATELY DO NOT FEED THIS, and must never be wired to.
+    // The floor is derived from the round trip, and a late original arriving 245 µs after a
+    // request would drag `rttUsMin` down to 245 µs, the floor to 122 µs, and then classify
+    // essentially every subsequent late original as attributable. The instrument would eat
+    // itself, and it would look like a sharpening rather than a collapse.
+    uint64_t rttUsMin;
+    uint64_t rttUsMax;
+    uint64_t rttUsLast;
+    uint64_t rttUsTotal;
+
+    int      rttSource;                ///< A `ManifoldRttSource`. Int for C-ABI stability.
+    uint64_t attributionFloorUsInUse;  ///< 0 when attribution is suspended.
 
     // ── WHEN THE WINDOW IS THE LIMIT, RATHER THAN THE NETWORK ────────────────
     //
@@ -153,6 +336,16 @@ typedef struct {
     size_t   ppsSize;                  ///< Bytes of PPS held (0 = none yet).
 } ManifoldH264DepacketizerStats;
 
+/// Seed the round trip from the WHEP signalling POST, for the window before the first probe
+/// lands. Recorded as `ManifoldRttSourceSignalling` and REPORTED AS SUCH; the first answered
+/// probe supersedes it and the source never falls back.
+///
+/// ⚠️ PASS THE RAW MEASURED ROUND TRIP. The depacketizer applies its own discount for the fact
+/// that an HTTPS POST overestimates a UDP media path — doing it at the call site too would
+/// double-discount and put the floor under the truth.
+void ManifoldH264DepacketizerSeedSignallingRttUs(ManifoldH264Depacketizer *depacketizer,
+                                                 uint64_t roundTripUs);
+
 /// Allocates a depacketizer. Returns NULL only on allocation failure.
 ManifoldH264Depacketizer *ManifoldH264DepacketizerCreate(void);
 
@@ -195,6 +388,36 @@ typedef struct {
     /// Repeats after the first request. 2 → up to three asks per missing packet.
     /// Asking stops early when a reply could no longer arrive inside the window.
     unsigned int maxRetries;
+
+    /// ── THE RETRANSMIT ATTRIBUTION FLOOR, AS A FRACTION OF THE MEASURED ROUND TRIP ────────
+    ///
+    /// The floor is `rttUsMin / attributionFloorRttDivisor` — with the default 2, half the round
+    /// trip. An arrival sooner than that after our first request cannot be a reply to it, because
+    /// the request had not finished travelling.
+    ///
+    /// ⚠️ A FIXED MILLISECOND THRESHOLD WAS TRIED FIRST AND IS WRONG AT BOTH ENDS. 5 ms would
+    /// throw away genuine retransmits on a LAN or a same-metro edge, where the whole round trip
+    /// is under that; the same 5 ms would wave through late originals on a transatlantic path
+    /// where 5 ms is a rounding error against a 90 ms round trip. Only a fraction of the MEASURED
+    /// round trip is right on both, which is the property that matters the moment a tester in
+    /// another country runs this.
+    ///
+    /// ⚠️ DERIVED FROM `rttUsMin`, NOT THE MEAN, AND THAT IS DELIBERATE. The minimum observed
+    /// round trip is the best available estimate of the path's floor. A mean rises under exactly
+    /// the congestion this instrument is meant to see through, and a floor that rises with load
+    /// would start reclassifying genuine retransmits as late originals precisely when the
+    /// question is live. The minimum is stable and biases the test toward UNDER-claiming late
+    /// originals, which is the safe direction for a bound.
+    ///
+    /// Half is a judgement, not a derivation: a reply cannot beat one full round trip, so any
+    /// divisor above 1 is conservative, and 2 leaves room for the fact that `rttUsMin` is itself
+    /// a sample. Zero is refused (see the .c).
+    unsigned int attributionFloorRttDivisor;
+
+    /// Per-mille of declared-missing sequence numbers withheld from the requester as a control
+    /// arm. 0 disables the experiment entirely — which is the right setting ONCE THE QUESTION IS
+    /// ANSWERED, and the wrong one while it is open. See the note on the counters above.
+    unsigned int controlGroupPerMille;
 
     /// A single gap wider than this is treated as an OUTAGE rather than as loss: it is counted,
     /// but it is neither tracked nor requested. See BURSTS AND STORMS in the .c for why

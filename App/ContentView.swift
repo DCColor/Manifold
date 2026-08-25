@@ -430,7 +430,10 @@ struct ContentView: View {
                 // ══════════════════════════════════════════════════════════════════════════════
             }
             .opacity(0)
-            .disabled(!deck.gate.transportEnabled)
+            // POSITION, not merely transport: J/K/L shuttle and the arrow jog move the playhead,
+            // and a live source has none. `.disabled` on a hidden Button does suppress its
+            // keyboard shortcut — measured, see the note above.
+            .disabled(!deck.gate.transportEnabled || !deck.gate.positionControlsEnabled)
         )
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
@@ -2224,6 +2227,13 @@ struct ContentView: View {
         // is still the seed a user sets by moving the fader, and only the deck that may actually
         // play can move it now.
         let transport = deck.gate.transportEnabled
+        // POSITION vs TRANSPORT — two gates, and the split is the point. `transport` is "is this
+        // the active deck"; `position` is "is there a playback position at all". A live source
+        // fails the second and passes the first, and mute/volume must survive that (see DeckGate).
+        let position = transport && deck.gate.positionControlsEnabled
+        // One sentence for every position control's tooltip, so a greyed play button and a greyed
+        // scrubber never disagree about why.
+        let positionWhy = deck.gate.positionReason ?? deck.gate.reason
         return VStack(spacing: 10) {
             HStack(spacing: 12) {
                 Text(leadingReadout)
@@ -2241,7 +2251,10 @@ struct ContentView: View {
                     // number on this bar you can be taken to. Mode cycling did not go anywhere — the
                     // trailing readout still carries it, and it cycles both, so the pair behaves
                     // exactly as before for anyone who reaches for the other end.
-                    .onTapGesture { transportKeys.begin() }
+                    // Opens timecode entry, which exists to SEEK — so it is a position control and
+                    // carries the position gate. `TransportKeyMonitor.begin` guards on the same
+                    // condition for the type-to-enter route; this is the click route.
+                    .onTapGesture { if position { transportKeys.begin() } }
                     // A pointer cue, because a click target that looks like a label is a click
                     // target nobody finds.
                     .onHover { NSCursor.pointingHand.set(); if !$0 { NSCursor.arrow.set() } }
@@ -2271,7 +2284,10 @@ struct ContentView: View {
                         }
                     }
                 )
-                .disabled(!transport)
+                // A stream has no duration, so this slider's range collapses to 0...0.1 and its
+                // thumb sits pinned at zero. Inert AND operable-looking is the worst pairing.
+                .disabled(!position)
+                .help(position ? "" : (positionWhy ?? ""))
 
                 Text(trailingReadout)
                     .font(.system(.caption, design: .monospaced))
@@ -2291,9 +2307,9 @@ struct ContentView: View {
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill").frame(width: 24)
                 }
                 .keyboardShortcut(.space, modifiers: [])
-                .disabled(!transport)
-                .help(transport ? (engine.isPlaying ? "Pause (Space)" : "Play (Space)")
-                                : (deck.gate.reason ?? "Playback is in another window"))
+                .disabled(!position)
+                .help(position ? (engine.isPlaying ? "Pause (Space)" : "Play (Space)")
+                               : (positionWhy ?? "Playback is in another window"))
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
 
@@ -2321,12 +2337,21 @@ struct ContentView: View {
                 .onHover { h in
                     withAnimation(.easeInOut(duration: 0.15)) { volumeHovering = h }
                 }
+                // ⚠️ `transport`, NOT `position`, AND THAT IS DELIBERATE. Audio is not a position:
+                // NDI carries it, and mute reaches the DeckLink card through `applyAudioMute`, so
+                // a stream being up is no reason to take the fader away. The one live source with
+                // no audio at all is WHEP (its audio track is wired to
+                // ManifoldWHEPDiscardMessage) — not enough to justify a third gate, and greying
+                // the control per-transport would be less predictable than leaving it alone.
                 .disabled(!transport)
                 Button { engine.toggleLoop() } label: { Image(systemName: "repeat") }
-                    .help("Loop playback")
-                    // File-only: NDI takeover calls engine.stop(), which zeroes hasMedia, so this
-                    // self-disables for live sources (loop is meaningless on an indefinite stream).
-                    .disabled(!engine.hasMedia || !transport)
+                    .help(position ? "Loop playback" : (positionWhy ?? "Loop playback"))
+                    // File-only, and now gated twice on purpose. `!engine.hasMedia` already
+                    // self-disabled it for live sources — a live takeover calls engine.stop() —
+                    // but that was incidental, not stated: it read as a no-file gate that happened
+                    // to catch streams. `position` says the intended thing, and the pair costs
+                    // nothing.
+                    .disabled(!engine.hasMedia || !position)
                     .foregroundStyle(engine.isLooping ? Color.green : .white.opacity(0.9))
                 Button { showGuidesPanel.toggle() } label: {
                     // `viewfinder.rectangular` — an outer frame with corner brackets and OPEN space

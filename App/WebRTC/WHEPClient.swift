@@ -353,6 +353,17 @@ final class WHEPClient: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.disconnectRecoveryWindow, execute: work)
     }
 
+    /// The measured round trip to the media edge, and its provenance — nil when no session is up.
+    ///
+    /// ⚠️ THE ONE NUMBER THAT MAKES TWO EXPORTS COMPARABLE, which is why it is surfaced here and
+    /// printed at the top of the diagnostics network section rather than left inside the
+    /// [WHEP-RTP] stats line. Every recovery and cushion figure in this app is a multiple of it.
+    var roundTripSummary: String? { session?.roundTripSummary() }
+
+    /// Whether asking for lost packets recovered anything that would not have arrived anyway.
+    /// See `ManifoldWHEPDescribeNackBenefit` — this is a controlled comparison, not a count.
+    var nackBenefitSummary: String? { session?.nackBenefitSummary() }
+
     /// Stand the backstop down. Safe to call when none is armed. Called on recovery to `.connected`,
     /// on `.closed`, and from disconnect() — so a fire cannot happen after teardown has run.
     private func cancelDisconnectBackstop() {
@@ -494,6 +505,13 @@ final class WHEPClient: ObservableObject {
         request.httpBody = Data(offer.utf8)
 
         NSLog("[WHEP] POSTing offer (%d bytes)…", request.httpBody?.count ?? 0)
+        // ⚠️ TIMED FOR THE ATTRIBUTION FLOOR, NOT FOR THE PROGRESS LOG. This is the only round
+        // trip on this path that Manifold can actually measure: a recvonly WebRTC receiver gets
+        // no RTT from RTCP (RFC 3550's DLSR arithmetic runs sender→receiver, so SR/RR tells the
+        // SENDER our RTT and tells us nothing), and libdatachannel's PeerConnection::rtt() is the
+        // SCTP association's RTT — we create no data channel, so it is always nil here. See
+        // DataChannelBridge's setMeasuredSignallingRoundTripMs for what is done with it.
+        let postStarted = DispatchTime.now()
 
         let data: Data, response: URLResponse
         do {
@@ -513,7 +531,10 @@ final class WHEPClient: ObservableObject {
             }
             return
         }
-        NSLog("[WHEP] HTTP %d — %d bytes back (+%@)", http.statusCode, data.count, elapsed())
+        let postRoundTripMs = Double(DispatchTime.now().uptimeNanoseconds - postStarted.uptimeNanoseconds) / 1_000_000
+        NSLog("[WHEP] HTTP %d — %d bytes back (+%@, POST round trip %.1f ms)",
+              http.statusCode, data.count, elapsed(), postRoundTripMs)
+        session?.setMeasuredSignallingRoundTripMs(postRoundTripMs)
 
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? "<binary>"

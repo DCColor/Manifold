@@ -109,6 +109,16 @@ struct StreamBookmarksSheet: View {
     /// an add (Save also refuses, with `.storeUnreadable`, so the two agree).
     @ViewBuilder private var savedSection: some View {
         Section("Saved") {
+            if let fault = store.passphraseUnreadable {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("A saved passphrase couldn’t be read", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(fault)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             if store.storedDataUnreadable {
                 VStack(alignment: .leading, spacing: 4) {
                     Label("Your saved streams couldn’t be read", systemImage: "exclamationmark.triangle.fill")
