@@ -13,7 +13,6 @@ changelog page. Format notes are at the bottom.
 - Fixed: the NDI runtime download link pointed at the Windows installer. It now gets the macOS one.
 - Still images now say they are not supported, instead of quietly doing nothing.
 - Dropping a file that can't be opened no longer replaces the one you were watching.
-- Fixed three cases that could log a warning while the interface was updating.
 
 ## 0.6.0
 
