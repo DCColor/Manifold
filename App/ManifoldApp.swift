@@ -66,8 +66,10 @@ struct ManifoldApp: App {
             // Discoverable path to the License state — opens Settings (⌘,), where the License section lives.
             CommandGroup(after: .appSettings) {
                 SettingsLink { Text("License…") }
-                // Always enabled — opens the Vizrt NDI runtime download page (also useful for
-                // reinstalling/updating). Single URL source of truth: NDIService.runtimeInstallURL.
+                // Always enabled — downloads Vizrt's macOS NDI runtime installer (also useful for
+                // reinstalling/updating). It is a DIRECT .pkg download, not a page: see
+                // NDIService.runtimeInstallURL, which is the single source of truth for the URL and
+                // carries the measured evidence for which link this has to be.
                 Button("Install NDI Runtime…") {
                     NSWorkspace.shared.open(NDIService.runtimeInstallURL)
                 }

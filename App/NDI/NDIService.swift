@@ -49,10 +49,47 @@ final class NDIService: ObservableObject {
     static let shared = NDIService()
     private init() {}
 
-    /// The single source of truth for the NDI runtime download page (Vizrt redistributable).
-    /// Referenced by BOTH the "Install NDI Runtime…" menu item (ManifoldApp) and the Settings
-    /// button (SettingsView) — no duplicated string literal.
-    static let runtimeInstallURL = URL(string: "https://ndi.link/NDIRedistV6")!
+    /// The single source of truth for the NDI runtime download. Referenced by BOTH the "Install NDI
+    /// Runtime…" menu item (ManifoldApp) and the Settings button (SettingsView) — no duplicated
+    /// string literal.
+    ///
+    /// ── ⚠️ THE `Apple` SUFFIX IS THE WHOLE POINT. IT SHIPPED WITHOUT IT ONCE. ────────────────
+    ///
+    /// This was `https://ndi.link/NDIRedistV6`, and that link is Vizrt's WINDOWS redistributable.
+    /// Followed on a clean machine it 301s straight to
+    /// `https://downloads.ndi.tv/SDK/NDI_SDK/NDI 6 Runtime.exe` and returns 9,648,232 bytes of
+    /// `application/x-msdownload` — a Windows executable, silently, with no landing page to make the
+    /// mistake visible. Manifold is macOS arm64 only, so that download can never be useful to anyone
+    /// who clicks it.
+    ///
+    /// It is NOT a landing page and never was, for either platform: no email form, no interstitial,
+    /// one redirect to a binary. So the failure was invisible until someone opened the file.
+    ///
+    /// ── WHAT THIS ONE ACTUALLY RETURNS, MEASURED RATHER THAN INFERRED ────────────────────────
+    ///
+    ///     https://ndi.link/NDIRedistV6Apple
+    ///       → 200, application/octet-stream, 4,638,592 bytes
+    ///       → https://downloads.ndi.tv/SDK/NDI_SDK_Mac/libNDI_for_Mac.pkg
+    ///
+    ///     file(1):    xar archive  (a real macOS installer package)
+    ///     signature:  Developer ID Installer: NewTek, Inc. (W8U66ET244), notarized and trusted by
+    ///                 the Apple notary service, timestamped 2026-04-13
+    ///     installs:   libndi.dylib + libndi_licenses.txt, install-location /usr/local/lib
+    ///
+    /// THAT LAST LINE IS THE ONE THAT CLOSES THE LOOP: `/usr/local/lib/libndi.dylib` is exactly the
+    /// path `NDIBridge.mm` dlopens at run time (see the entitlements file for why that dlopen needs
+    /// disable-library-validation). The thing this link installs is the thing the app looks for.
+    ///
+    /// ── WHY THE ndi.link VANITY REDIRECT AND NOT THE downloads.ndi.tv PATH IT RESOLVES TO ────
+    ///
+    /// The vanity link is the one Vizrt publishes and maintains, so it follows the file if they move
+    /// or re-version it; the direct path is an implementation detail that would rot silently. Note
+    /// that `NDIRedistV5Apple` and `NDIRedistV6Apple` currently resolve to the SAME
+    /// `libNDI_for_Mac.pkg`, which is evidence Vizrt keeps one stable Mac redistributable behind
+    /// these — the failure mode to watch for is not a 404 but a link that quietly starts serving a
+    /// different platform, which is what happened here. RE-FOLLOW IT, do not re-read it, if this is
+    /// ever revisited.
+    static let runtimeInstallURL = URL(string: "https://ndi.link/NDIRedistV6Apple")!
 
     /// Whether the NDI runtime dylib is present and loadable. Published for the picker empty state
     /// and the Settings status row. Detection is LAZY and RELAUNCH-ONLY by design: the underlying
