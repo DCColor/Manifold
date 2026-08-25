@@ -551,6 +551,90 @@ final class WHEPClient: ObservableObject {
         }
         NSLog("[WHEP] answer SDP received — %d bytes", answer.utf8.count)
 
+        // ── WHAT THE SERVER ACTUALLY AGREED TO ──────────────────────────────────────────
+        //
+        // Only the codec and feedback lines, deliberately: an SDP answer also carries
+        // `a=ice-ufrag`, `a=ice-pwd` and DTLS fingerprints, and a diagnostics export is a file
+        // users attach to emails. `a=rtpmap:` and `a=rtcp-fb:` carry no secrets and are bounded
+        // at a few hundred bytes.
+        //
+        // This exists because "does the server accept nack?" gates any retransmission work and
+        // was previously unanswerable from an export — we logged the answer's BYTE COUNT and
+        // nothing else. An `a=rtcp-fb:<pt> nack` line here means the server agreed to
+        // retransmit on request; its ABSENCE means a receive-side NACK requester would be
+        // wasted effort no matter how well written.
+        // ⚠️ `components(separatedBy: .newlines)` AND NOT `split(separator: "\n")`.
+        //
+        // SDP is CRLF-delimited (RFC 4566 §5), and "\r\n" is ONE extended grapheme cluster in
+        // Swift — so splitting on the Character "\n" matches nothing and hands back the whole
+        // document as a single element. MEASURED: the first version of this logging did exactly
+        // that and reported "0 line(s)" against an answer that plainly contained rtpmap and
+        // rtcp-fb lines, which was then briefly believed. The Obj-C parser next door
+        // (`ManifoldWHEPH264PayloadTypeFromSDP`, componentsSeparatedByString:@"\n") is immune
+        // because NSString splits on UTF-16 code units rather than graphemes, which is why
+        // payload-type detection kept working while this said the answer was empty.
+        let lines = answer.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        // ── THE VIDEO m-SECTION, VERBATIM ───────────────────────────────────────────────
+        //
+        // Dumped rather than parsed. A parser is a thing that can be wrong about what the
+        // server said, and this one was; the raw section can be read directly. ICE credentials
+        // and DTLS fingerprints are session-level (above the first m=) or explicitly dropped
+        // below, so nothing secret rides along — a diagnostics export is a file users email.
+        var videoSection: [String] = []
+        var inVideo = false
+        for line in lines {
+            if line.hasPrefix("m=") { inVideo = line.hasPrefix("m=video") ; if inVideo { videoSection.append(line) }; continue }
+            guard inVideo else { continue }
+            if line.hasPrefix("a=ice-ufrag") || line.hasPrefix("a=ice-pwd") || line.hasPrefix("a=fingerprint") {
+                videoSection.append(String(line.prefix(while: { $0 != ":" })) + ":<redacted>")
+                continue
+            }
+            videoSection.append(line)
+        }
+        NSLog("[WHEP] answer video m-section, verbatim (%d line(s)):\n  %@",
+              videoSection.count, videoSection.joined(separator: "\n  "))
+
+        // ── WHAT THE SERVER AGREED TO, FOR THE PAYLOAD TYPE WE WILL ACTUALLY DECODE ─────
+        //
+        // Two narrowings, both because a receive-side NACK requester will gate on this line and
+        // a line that is confidently wrong is worse than no line:
+        //
+        //   * SCOPED TO THE VIDEO m-SECTION and to the negotiated H.264 payload type. A bare
+        //     `nack` on the VP8 line says nothing about the H.264 stream we are about to
+        //     receive, and an answer-wide `contains("nack")` is a plausible way to switch
+        //     retransmission on against a server that never agreed to it for our codec.
+        //   * TOKEN-EXACT, not substring. `nack pli` also contains "nack", and they are
+        //     different agreements: `nack` is per-packet retransmission, `nack pli` is "ask me
+        //     for a whole keyframe instead". Only the first makes a requester worth writing.
+        let h264PT: String? = videoSection
+            .first { $0.hasPrefix("a=rtpmap:") && $0.range(of: " H264/", options: .caseInsensitive) != nil }
+            .map { String($0.dropFirst("a=rtpmap:".count).prefix(while: { $0 != " " })) }
+
+        // "a=rtcp-fb:96 nack pli" → (pt: "96", tokens: ["nack", "pli"])
+        let feedback: [(pt: String, tokens: [String])] = videoSection
+            .filter { $0.hasPrefix("a=rtcp-fb:") }
+            .map { line in
+                let fields = line.dropFirst("a=rtcp-fb:".count)
+                    .split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                return (pt: fields.first ?? "", tokens: Array(fields.dropFirst()))
+            }
+        // `*` is legal in an rtcp-fb line and means "every payload type in this section".
+        let ours = feedback.filter { $0.pt == "*" || $0.pt == h264PT }
+        let acceptsNack = ours.contains { $0.tokens == ["nack"] }
+        let acceptsPli  = ours.contains { $0.tokens == ["nack", "pli"] }
+        NSLog("[WHEP] negotiated feedback for H.264 pt %@: nack(retransmit)=%@  nack pli(keyframe)=%@"
+            + "  (%d fb line(s) in the video section, %d of them ours)",
+              h264PT ?? "<none>", acceptsNack ? "YES" : "no", acceptsPli ? "YES" : "no",
+              feedback.count, ours.count)
+        if feedback.isEmpty {
+            NSLog("[WHEP] WARNING: no a=rtcp-fb lines parsed from the video m-section at all. PLI is "
+                + "known to work against this server, so treat this as a PARSER fault first — read "
+                + "the verbatim m-section above rather than trusting the line before this one.")
+        }
+
         await MainActor.run { self.applyAnswer(answer) }
     }
 

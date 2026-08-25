@@ -1,0 +1,42 @@
+From: Manifold build
+Subject: [PATCH] Allow a recvonly track to send RTCP when a media handler is chained
+
+impl::Track::outgoing refuses any outgoing message on a RecvOnly or Inactive track
+unless it is typed Message::Control, and only types RTCP as Control when NO media
+handler is chained. Chaining RtcpReceivingSession -- required for rtcRequestKeyframe
+to reach the wire -- therefore makes receive-side NACK unsendable.
+
+Applied by scripts/build_libdatachannel.sh against libdatachannel v0.24.5.
+Upstreamable: the `!handler` condition contradicts the comment on the line it guards.
+---
+--- a/src/impl/track.cpp
++++ b/src/impl/track.cpp
+@@ -170,14 +170,26 @@
+ bool Track::outgoing(message_ptr message) {
+ 	if (mIsClosed)
+ 		throw std::runtime_error("Track is closed");
+ 
+ 	auto handler = getMediaHandler();
+ 
+-	// If there is no handler, the track expects RTP or RTCP packets
+-	if (!handler && IsRtcp(*message))
++	// Outgoing RTCP is control traffic whatever the media direction, and whether or not a media
++	// handler happens to be chained.
++	//
++	// MANIFOLD PATCH. Upstream additionally required `!handler` here. That silently disabled
++	// this exemption for any recvonly track carrying an RtcpReceivingSession -- which is exactly
++	// the configuration a receiver needs in order to send PLI, since Track::requestKeyframe
++	// requires a handler. The effect was that enabling keyframe requests disabled receive-side
++	// NACK, with no way to send one through any public C or C++ API: Track::send lands here and
++	// is refused, and the int->shared_ptr<Track> lookup a custom MediaHandler would need lives
++	// in an anonymous namespace in capi.cpp.
++	//
++	// The comment upstream put on the line below states the intent this patch restores.
++	// See docs/WHEP_LOADED_NETWORK_FINDINGS.md 10.3 in the Manifold repo.
++	if (IsRtcp(*message))
+ 		message->type = Message::Control; // to allow sending RTCP packets irrelevant of direction
+ 
+ 	auto dir = direction();
+ 	if ((dir == Description::Direction::RecvOnly || dir == Description::Direction::Inactive) &&
+ 	    message->type != Message::Control) {
+ 		COUNTER_MEDIA_BAD_DIRECTION++;

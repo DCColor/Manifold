@@ -119,6 +119,47 @@ git fetch --depth 1 origin tag "${LDC_TAG}" 2>/dev/null || true
 git checkout -q "${LDC_TAG}"
 git submodule update --init --recursive --depth 1
 
+# ── PATCH: let a recvonly track send RTCP while a media handler is chained ──
+#
+# ⚠️ A DELIBERATE DIVERGENCE FROM UPSTREAM v0.24.5. WHEP loss recovery does NOT work without
+# it, and the failure is silent: NACKs are built, refused by the library, and never reach the
+# wire, so the symptom is "retransmission does nothing" rather than an error.
+#
+# impl::Track::outgoing refuses any outgoing message on a RecvOnly track unless it is typed
+# Message::Control, and it types RTCP as Control ONLY when no media handler is chained. Manifold
+# chains RtcpReceivingSession, because that is what makes rtcRequestKeyframe (PLI) reach the
+# wire — so upstream, enabling keyframe requests DISABLES receive-side NACK, and no public C or
+# C++ entry point gets around it. See docs/WHEP_LOADED_NETWORK_FINDINGS.md §10.3.
+#
+# DO NOT DROP THIS WHEN BUMPING LDC_TAG. Re-derive it against the new source and re-check that
+# the guard still exists; the apply below fails loudly if the context has moved.
+#
+# `git reset --hard` first so a re-run starts from the pristine tag rather than applying the
+# patch on top of itself. This is a scratch clone the script owns — nothing here is precious.
+LDC_PATCH="${REPO_ROOT}/scripts/patches/libdatachannel-recvonly-rtcp.patch"
+[ -f "${LDC_PATCH}" ] || { echo "FATAL: missing ${LDC_PATCH}"; exit 1; }
+git reset --hard -q "${LDC_TAG}"
+if ! git apply --verbose "${LDC_PATCH}"; then
+  echo "FATAL: $(basename "${LDC_PATCH}") did not apply to libdatachannel ${LDC_TAG}."
+  echo "       If LDC_TAG was just bumped, re-derive the patch against the new source and"
+  echo "       confirm impl::Track::outgoing still gates outgoing RTCP on !handler."
+  exit 1
+fi
+
+# POST-CONDITION, not a hope. `git apply` succeeding is not the same as the guard being gone —
+# and if it is still there, nothing downstream notices until a live stream drops packets and
+# no retransmission happens.
+if has_line "$(cat src/impl/track.cpp)" '!handler && IsRtcp'; then
+  echo "FATAL: the !handler guard is STILL PRESENT in src/impl/track.cpp after patching."
+  exit 1
+fi
+if ! has_line "$(cat src/impl/track.cpp)" 'MANIFOLD PATCH'; then
+  echo "FATAL: patch marker missing from src/impl/track.cpp after patching."
+  exit 1
+fi
+echo "  patched: a recvonly track may send RTCP with a media handler chained ✓"
+echo
+
 # ── Configure ───────────────────────────────────────────────────────────────
 # BUILD_SHARED_LIBS=OFF makes the `datachannel` target itself a static archive,
 # gives it RTC_STATIC as a PUBLIC compile definition, and keeps it covered by the

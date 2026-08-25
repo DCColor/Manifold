@@ -140,3 +140,88 @@ a realistic file and not a contrived one.
 `headroom current=1.0000` — EDR is inert on it — so `wantsExtendedDynamicRangeContent` could not be
 observed to do anything either way here. It is fixed by the same ordering change; it has not been
 seen to matter on a display with headroom.
+
+---
+
+## A failed WHEP connect puts the server's entire HTML error page into the UI and the diagnostics file
+
+**Status:** OPEN. **Found:** 2026-08-24, during Run C of the Wi-Fi streaming tests
+(`docs/WHEP_LOADED_NETWORK_FINDINGS.md` §8).
+
+The first WHEP connect of that session failed with **HTTP 403**, because the URL pasted was a
+Slack permalink rather than the WHEP endpoint. That much is user error and the right outcome.
+
+**The teardown was correct and is not the bug.** The route was released and the arbiter released
+the device, exactly as designed. This entry is only about what the failure *said*.
+
+**The bug is that the response body is treated as an error message.** Slack answered the request
+with a full HTML page — a login/permission interstitial, roughly **78 KB** — and that body was
+carried verbatim into:
+
+1. **A user-facing banner**, which is now 78 KB of markup where a sentence should be. Nothing
+   legible reaches the user; the actual fact ("403") is buried at the front of a wall of `<div>`s.
+2. **The diagnostics export**, which is most of why that export is **241 KB**. A diagnostics file
+   that is three-quarters someone else's HTML is materially harder to read and to attach to a
+   report, and it dwarfs the streaming counters it exists to carry.
+
+**Why nobody has reported it:** pasting a non-WHEP URL is an unusual mistake, and the failure is
+still *technically* correct — it fails, it says 403, it cleans up. The damage is to legibility,
+which nobody files a bug about; they just paste the right URL the second time.
+
+**The fix has two halves, and the second one matters more.**
+
+- **Detect an HTML response and do not show it.** A `Content-Type` of `text/html` (or a body
+  starting `<!DOCTYPE`/`<html`) means the endpoint is not a WHEP server. Say that — "this URL
+  returned a web page, not a WHEP endpoint; check that you pasted the publish/playback URL" — and
+  discard the body.
+- **Cap what any transport error can put into a banner or the diagnostics file**, independently of
+  the HTML check. HTML is the case that turned up; a server returning a large JSON blob or a
+  plain-text stack trace would do the same thing. A few hundred bytes is more than enough for any
+  message a user can act on, and the cap belongs at the point the message is stored, not at each
+  display site.
+
+The second half is the one that generalises. Fixing only the HTML detection leaves the same defect
+one unusual server response away.
+
+---
+
+## The vendored libdatachannel has no provenance chain, and it now carries a required patch
+
+**Status:** OPEN. **Found:** 2026-08-25, during the WHEP NACK work.
+
+`scripts/build_libdatachannel.sh` is supposed to be the reproducible recipe for
+`ThirdParty/libdatachannel/`. **It does not currently complete on this machine** — the submodule
+fetch fails — so the archive that shipped in every build to date was produced by *something other
+than what the script reproduces*. Nobody can say from the repo what is actually in it.
+
+This is unlike FFmpeg, where `ThirdParty/ffmpeg/README.md` plus `build_ffmpeg.sh` do establish a
+chain from source to artifact. Here there is no chain, only an artifact.
+
+**Why it now matters more than it did.** The library is no longer stock upstream. WHEP loss
+recovery depends on `scripts/patches/libdatachannel-recvonly-rtcp.patch`, which removes the
+`!handler` half of a guard in `impl::Track::outgoing`; without it a recvonly track refuses every
+outbound RTCP sent via `Track::send`, so NACKs are built, refused, and never reach the wire. See
+§12.1 and §12.6 of `docs/WHEP_LOADED_NETWORK_FINDINGS.md`.
+
+**The failure is silent.** An unpatched library produces no error — retransmission simply does
+nothing, which looks identical to a server that is not retransmitting. Three things guard against
+it, none of which is a provenance chain:
+
+1. `build_libdatachannel.sh` applies the patch right after the tag checkout, fails loudly if it
+   does not apply, and then asserts the guard is actually gone from the source.
+2. The refusal branch of `-sendNackForSequences:count:ssrc:` in `DataChannelBridge.m` names this
+   patch by path in its log line.
+3. `nacks built` vs `toWire` vs `refused` in the session summary separates "the library refused
+   it" from "the server did not retransmit".
+
+**State as of 2026-08-25.** Both working trees — `~/manifold-webrtc-build/libdatachannel` (the
+script's own) and `~/ldc-nack` (a manual clone) — are patched, and the patched archive is staged
+in `ThirdParty/libdatachannel/lib/`. That state was reached by a hand-driven build, not by a
+script run, which is exactly the gap this entry is about.
+
+**What would close it:** a `build_libdatachannel.sh` run that completes end to end on a clean
+checkout, and a `ThirdParty/libdatachannel/README.md` that records the resulting artifact
+hashes the way the FFmpeg one records its own.
+
+**Blocks:** nothing today. It blocks *confidence* — specifically the ability to answer "is the
+NACK patch in the library this DMG shipped with?" from anything other than a live test.

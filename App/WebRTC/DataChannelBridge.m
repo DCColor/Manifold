@@ -22,7 +22,9 @@
 //
 
 #import "DataChannelBridge.h"
+
 #import "H264Depacketizer.h"
+#import "RTCPNack.h"
 
 #import <os/lock.h>
 #include <stdatomic.h>
@@ -112,6 +114,7 @@ BOOL ManifoldWebRTCLinkSmokeTest(NSString *_Nullable *_Nullable outMessage) {
 // that -snapshotStats in particular has a visible prototype: it returns a struct by value.
 - (void)ingestRTP:(const uint8_t *)packet length:(size_t)length;
 - (void)enqueueAccessUnit:(const ManifoldH264AccessUnit *)accessUnit;
+- (void)sendNackForSequences:(const uint16_t *)seqs count:(unsigned int)count ssrc:(uint32_t)ssrc;
 - (void)configureDepacketizerFromNegotiatedDescription;
 - (void)startRTPStatsTimer;
 - (void)logRTPStatsTick;
@@ -172,29 +175,91 @@ static ManifoldWHEPSession *ManifoldWHEPTrackLookup(int tr) {
     return session;
 }
 
-/// Pulls the negotiated H.264 payload type out of a media description.
+/// What the far end agreed to for the video stream we are about to receive.
+typedef struct {
+    int  payloadType;    ///< Negotiated H.264 PT, or -1 if this description has no H.264 rtpmap.
+    BOOL acceptsNack;    ///< `a=rtcp-fb:<pt> nack` — per-packet RETRANSMISSION on request.
+    BOOL acceptsPli;     ///< `a=rtcp-fb:<pt> nack pli` — whole-keyframe request. A different deal.
+} ManifoldWHEPVideoFeedback;
+
+/// Splits an SDP body into lines, per RFC 4566 §5.
 ///
-/// It MUST come from the SDP rather than being hardcoded to the 96 we offered: the answer
-/// picks, and a server is free to answer with a different number. Feeding the depacketizer
-/// the wrong PT does not fail loudly — it silently discards every packet.
-static int ManifoldWHEPH264PayloadTypeFromSDP(NSString *sdp) {
-    for (NSString *rawLine in [sdp componentsSeparatedByString:@"\n"]) {
-        NSString *line = [rawLine stringByTrimmingCharactersInSet:
-                          NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (![line hasPrefix:@"a=rtpmap:"]) continue;
-
-        NSString *rest = [line substringFromIndex:@"a=rtpmap:".length];   // "<pt> <name>/<clock>"
-        NSRange space = [rest rangeOfString:@" "];
-        if (space.location == NSNotFound) continue;
-
-        NSString *encoding = [rest substringFromIndex:NSMaxRange(space)];
-        // Prefix match on "H264/" so the RTX line (`rtx/90000`, whose apt points AT the
-        // H.264 PT) cannot be mistaken for the codec itself.
-        if ([encoding rangeOfString:@"H264/" options:NSCaseInsensitiveSearch].location != 0) continue;
-
-        return [rest substringToIndex:space.location].intValue;
+/// STRUCTURAL: the terminator is removed AS a terminator, not trimmed off the end of a line
+/// afterwards. SDP lines end in CRLF; a bare LF is tolerated because implementations are
+/// expected to be, and both are named here rather than discovered later. Trimming instead of
+/// splitting is how a stray "\r" survives into a payload-type string — `[@"96\r" intValue]` is
+/// 96 today and something else the moment the field is used as a dictionary key or compared
+/// against a token.
+static NSArray<NSString *> *ManifoldWHEPSDPLines(NSString *sdp) {
+    NSCharacterSet *terminators = [NSCharacterSet characterSetWithCharactersInString:@"\r\n"];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *line in [sdp componentsSeparatedByCharactersInSet:terminators]) {
+        if (line.length > 0) [lines addObject:line];
     }
-    return -1;
+    return lines;
+}
+
+/// Splits an attribute value on spaces, dropping the empty runs a doubled space would produce.
+static NSArray<NSString *> *ManifoldWHEPSDPFields(NSString *value) {
+    NSMutableArray<NSString *> *fields = [NSMutableArray array];
+    for (NSString *field in [value componentsSeparatedByString:@" "]) {
+        if (field.length > 0) [fields addObject:field];
+    }
+    return fields;
+}
+
+/// The negotiated H.264 payload type, and the feedback the far end agreed to FOR THAT TYPE.
+///
+/// ⚠️ THIS IS READ WHEN SOMEONE IS DIAGNOSING A SERVER THAT DOES NOT SUPPORT NACK, and a parser
+/// that is confidently wrong then is worse than no parser at all. Four things make it structural
+/// rather than a set of substring searches that happen to work against one server:
+///
+///   * THE PAYLOAD TYPE COMES FROM `a=rtpmap`, never from the 96 we offered. The answer picks,
+///     and a server is free to pick something else. Feeding the depacketizer the wrong PT does
+///     not fail loudly — it silently discards every packet.
+///   * THE ENCODING NAME IS COMPARED WHOLE. The RTX line (`rtx/90000`, whose `apt` parameter
+///     points AT the H.264 payload type) must never be mistaken for the codec itself.
+///   * FEEDBACK IS MATCHED TO THAT PAYLOAD TYPE. A bare `nack` on the VP8 line says nothing
+///     about the H.264 stream, and arming a requester on it would mean asking a server for
+///     retransmission it never agreed to give.
+///   * TOKENS ARE COMPARED AS TOKENS. `nack pli` CONTAINS "nack" but is a different agreement:
+///     per-packet retransmission versus "ask me for a whole keyframe instead". A `contains:`
+///     test conflates them, and the two have completely different consequences here.
+static ManifoldWHEPVideoFeedback ManifoldWHEPParseVideoFeedback(NSString *sdp) {
+    ManifoldWHEPVideoFeedback result = { .payloadType = -1, .acceptsNack = NO, .acceptsPli = NO };
+    if (sdp.length == 0) return result;
+
+    NSArray<NSString *> *lines = ManifoldWHEPSDPLines(sdp);
+
+    for (NSString *line in lines) {
+        if (![line hasPrefix:@"a=rtpmap:"]) continue;
+        // "a=rtpmap:<pt> <encoding name>/<clock rate>[/<encoding parameters>]" (RFC 4566 §6)
+        NSArray<NSString *> *fields =
+            ManifoldWHEPSDPFields([line substringFromIndex:@"a=rtpmap:".length]);
+        if (fields.count < 2) continue;
+        NSString *encoding = [fields[1] componentsSeparatedByString:@"/"].firstObject;
+        if ([encoding caseInsensitiveCompare:@"H264"] != NSOrderedSame) continue;
+        const int pt = fields[0].intValue;
+        if (pt < 0 || pt > 127) continue;                 // not a payload type; keep looking
+        result.payloadType = pt;
+        break;
+    }
+    if (result.payloadType < 0) return result;
+
+    NSString *ours = [NSString stringWithFormat:@"%d", result.payloadType];
+    for (NSString *line in lines) {
+        if (![line hasPrefix:@"a=rtcp-fb:"]) continue;
+        // "a=rtcp-fb:<pt> <feedback type> [<parameter>]" (RFC 4585 §4.2)
+        NSArray<NSString *> *fields =
+            ManifoldWHEPSDPFields([line substringFromIndex:@"a=rtcp-fb:".length]);
+        if (fields.count < 2) continue;
+        // `*` is legal and means every payload type in this media section.
+        if (![fields[0] isEqualToString:ours] && ![fields[0] isEqualToString:@"*"]) continue;
+        if (![fields[1] isEqualToString:@"nack"]) continue;
+        if (fields.count == 2)                                        result.acceptsNack = YES;
+        else if (fields.count == 3 && [fields[2] isEqualToString:@"pli"]) result.acceptsPli = YES;
+    }
+    return result;
 }
 
 static NSString *ManifoldWHEPStateName(rtcState state) {
@@ -353,6 +418,14 @@ static void ManifoldWHEPAccessUnitReady(const ManifoldH264AccessUnit *accessUnit
     [session enqueueAccessUnit:accessUnit];
 }
 
+/// Fires INSIDE ManifoldH264DepacketizerSubmitRTP, on the network thread, with `_rtpLock` held.
+/// Same contract as ManifoldWHEPAccessUnitReady above; `seqs` is borrowed for the call only.
+static void ManifoldWHEPNackReady(const uint16_t *seqs, unsigned int count,
+                                  uint32_t ssrc, void *context) {
+    ManifoldWHEPSession *session = (__bridge ManifoldWHEPSession *)context;
+    [session sendNackForSequences:seqs count:count ssrc:ssrc];
+}
+
 static void ManifoldWHEPTrackOpen(int tr, void *ptr) {
     (void)ptr;
     NSLog(@"[WHEP-BRIDGE] video track %d open — RTP will start arriving", tr);
@@ -398,6 +471,14 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
     BOOL _loggedParameterSets;
     BOOL _loggedFirstKeyframe;
     BOOL _loggedPayloadTypeMismatch;
+
+    // ── NACK requester (network thread, under _rtpLock — except _nackArmed, main only) ──
+    BOOL     _nackArmed;                    // the answer carried `a=rtcp-fb:<pt> nack`
+    uint64_t _nacksSentToWire;              // rtcSendMessage accepted it
+    uint64_t _nackSendFailures;             // rtcSendMessage refused it
+    unsigned int _consecutiveNackSendFailures;
+    BOOL     _nackSendGivenUp;              // stop calling after a run of refusals; logged once
+    BOOL     _loggedFirstNack;
 }
 
 @synthesize decodeQueue = _decodeQueue;
@@ -478,6 +559,26 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
         NSLog(@"[WHEP-BRIDGE] WARNING: rtcChainRtcpReceivingSession failed (%d) — expect RTCP "
               @"in the RTP stream and no working keyframe requests", chained);
     }
+
+    // ⚠️ STATE THE WHOLE CHAIN, INCLUDING WHAT IS NOT IN IT.
+    //
+    // This line exists because "is NACK actually installed?" has been asked of a diagnostics
+    // export three times and the export could not answer it. It can now.
+    //
+    // There is still no receive-side NACK generator to CHAIN. VERIFIED against the vendored
+    // v0.24.5 headers and symbol table, and against upstream master: rtcpnackresponder.hpp is the
+    // SEND side (it stores outgoing packets and replays them when a remote peer NACKs us), and no
+    // rtcpnackrequester.hpp exists in any version. The five chainable handlers are
+    // RtcpReceivingSession, RtcpSrReporter, RtcpNackResponder, PliHandler, RembHandler.
+    //
+    // The requester Manifold uses is therefore its own: the decision of what to ask for lives in
+    // H264Depacketizer.c, the RFC 4585 encoding in RTCPNack.c, and the arming
+    // in -configureDepacketizerFromNegotiatedDescription, which prints its own policy line once
+    // the answer says whether the server agreed to `nack` at all.
+    NSLog(@"[WHEP-BRIDGE] RTCP chain on track %d: RtcpReceivingSession=%@ "
+          @"| NACK generator: Manifold's own (libdatachannel has no receive-side requester to "
+          @"chain in any version) | keyframe requests: PLI via rtcRequestKeyframe",
+          videoTrack, chained < 0 ? @"FAILED" : @"installed");
 
     session->_depacketizer = ManifoldH264DepacketizerCreate();
     if (!session->_depacketizer) {
@@ -621,10 +722,27 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
         }
     }
 
-    int payloadType = description ? ManifoldWHEPH264PayloadTypeFromSDP(description) : -1;
+    const ManifoldWHEPVideoFeedback feedback = ManifoldWHEPParseVideoFeedback(description);
+    const int payloadType = feedback.payloadType;
+
+    // ── ARM THE REQUESTER ONLY IF THE SERVER AGREED TO IT ────────────────────────────
+    //
+    // `nack` and `nack pli` are different agreements and only the first one licenses this. With
+    // no sink installed the outstanding table still runs and every loss counter still means what
+    // it says — what is switched on here is the ASKING, not the measurement. That separation is
+    // deliberate: it means a server that refuses NACK still produces the numbers that say so.
+    _nackArmed = feedback.acceptsNack;
+
+    const ManifoldH264LossPolicy policy = ManifoldH264DefaultLossPolicy();
 
     os_unfair_lock_lock(&_rtpLock);
-    if (_depacketizer) ManifoldH264DepacketizerSetPayloadType(_depacketizer, payloadType);
+    if (_depacketizer) {
+        ManifoldH264DepacketizerSetPayloadType(_depacketizer, payloadType);
+        ManifoldH264DepacketizerSetLossPolicy(_depacketizer, &policy);
+        ManifoldH264DepacketizerSetNackRequestHandler(_depacketizer,
+                                                      _nackArmed ? ManifoldWHEPNackReady : NULL,
+                                                      (__bridge void *)self);
+    }
     os_unfair_lock_unlock(&_rtpLock);
 
     if (payloadType >= 0) {
@@ -636,6 +754,90 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
         NSLog(@"[WHEP-RTP] WARNING: no H.264 rtpmap in the negotiated video description — "
               @"falling back to latching the first payload type seen. Answer may have "
               @"selected VP8/VP9, in which case nothing here will depacketize.");
+    }
+
+    // The whole loss-recovery policy on one line, because a diagnostics export that reports
+    // `recovered=0` is unreadable without knowing what was asked for and how long we waited.
+    NSLog(@"[WHEP-RTP] loss recovery: nack=%@ (server %@) pli=%@ | window %ums, first ask +%ums, "
+          @"retry %ums ×%u, gaps >%u packets not requested, budget %u seq/s",
+          _nackArmed ? @"ARMED" : @"off",
+          feedback.acceptsNack ? @"agreed" : @"did NOT offer `nack` for this payload type",
+          feedback.acceptsPli ? @"yes" : @"no",
+          policy.recoveryWindowMs, policy.firstAskDelayMs,
+          policy.retryIntervalMs, policy.maxRetries,
+          policy.maxGapToRequest, policy.budgetSeqsPerSecond);
+}
+
+- (void)sendNackForSequences:(const uint16_t *)seqs count:(unsigned int)count ssrc:(uint32_t)ssrc {
+    // Network thread, `_rtpLock` held, called from inside the depacketizer. Build and hand off;
+    // no logging beyond the two one-shots below, and nothing that can block.
+    if (_nackSendGivenUp || _videoTrack <= 0 || count == 0) return;
+
+    uint8_t packet[MANIFOLD_RTCP_NACK_MAX_BYTES];
+    const size_t size = ManifoldRTCPBuildNack(packet, sizeof(packet), ssrc, seqs, count);
+    if (size == 0) return;
+
+    // ⚠️ REENTRANCY: this calls INTO libdatachannel from one of its own track callbacks, which
+    // the note above the callbacks in this file warns against. It is safe here, and the reason is
+    // specific rather than general: RtcpReceivingSession does exactly this. Its `incoming` is
+    // handed a send callback wired straight to the transport and uses it to push RR, REMB and
+    // PLI from inside the receive path, on this same thread. We are reentering the same door the
+    // library reenters itself.
+    const int rc = rtcSendMessage(_videoTrack, (const char *)packet, (int)size);
+
+    if (rc >= 0) {
+        _nacksSentToWire++;
+        _consecutiveNackSendFailures = 0;
+        if (!_loggedFirstNack) {
+            _loggedFirstNack = YES;
+            NSLog(@"[WHEP-RTP] first NACK accepted by the transport — %zu bytes, %u sequence "
+                  @"number(s), ssrc 0x%08x. THIS is the evidence that a request left the "
+                  @"machine; `recovered` and `reorder` are the same arrival counted twice and "
+                  @"cannot establish it.", size, count, ssrc);
+        }
+        return;
+    }
+
+    _nackSendFailures++;
+    _consecutiveNackSendFailures++;
+    if (!_loggedFirstNack) {
+        _loggedFirstNack = YES;
+        // ⚠️ THE MOST LIKELY CAUSE IS A STALE libdatachannel ARCHIVE, not a fault in the code
+        // above. VERIFIED against the v0.24.5 sources:
+        //
+        //   impl::Track::outgoing (src/impl/track.cpp) refuses any message on a RecvOnly track
+        //   unless its type is Message::Control, and UPSTREAM guards the exemption that marks
+        //   outgoing RTCP as Control with `if (!handler && IsRtcp(*message))` — so it applies
+        //   only when the track has no media handler chained.
+        //
+        // We chain RtcpReceivingSession, because that is what makes `rtcRequestKeyframe` work.
+        // Upstream, therefore, the exemption is disabled precisely BECAUSE PLI is enabled, and
+        // the C API has no way to mark a message as Control. (`rtcRequestKeyframe` reaches the
+        // wire only because Track::requestKeyframe calls transportSend directly, bypassing this
+        // check. No public C or C++ entry point gets a NACK past it: the id→Track lookup a
+        // custom MediaHandler would need lives in an anonymous namespace in capi.cpp.)
+        //
+        // Manifold's vendored build removes the `!handler` half of that guard —
+        // scripts/patches/libdatachannel-recvonly-rtcp.patch, applied by
+        // scripts/build_libdatachannel.sh. If this line is printing, the archive in
+        // ThirdParty/libdatachannel was almost certainly built without it.
+        NSLog(@"[WHEP-RTP] NACK REFUSED BY THE TRANSPORT (rc %d). A recvonly track drops "
+              @"outgoing RTCP unless the message is typed Control, and stock libdatachannel only "
+              @"types it that way when NO media handler is chained — we chain "
+              @"RtcpReceivingSession so that PLI works. Manifold's build patches that out, so "
+              @"this almost certainly means ThirdParty/libdatachannel was built WITHOUT "
+              @"scripts/patches/libdatachannel-recvonly-rtcp.patch: re-run "
+              @"scripts/build_libdatachannel.sh. The requester and every counter below keep "
+              @"measuring; nothing is reaching the wire.", rc);
+    }
+
+    // A requester that cannot reach the wire should cost one log line, not one refused call per
+    // missing packet for the rest of the session.
+    static const unsigned int kMaxConsecutiveNackSendFailures = 8;
+    if (_consecutiveNackSendFailures >= kMaxConsecutiveNackSendFailures && !_nackSendGivenUp) {
+        _nackSendGivenUp = YES;
+        NSLog(@"[WHEP-RTP] NACK sending disabled after %u consecutive refusals — the loss "
+              @"counters keep running, the requests stop.", _consecutiveNackSendFailures);
     }
 }
 
@@ -754,14 +956,50 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
     }
 
     NSLog(@"[WHEP-RTP] +%.0fs  frames=%llu (key=%llu)  NALs: SPS=%llu PPS=%llu IDR=%llu slice=%llu "
-          @"SEI=%llu  |  pkts=%llu seqGaps=%llu lost=%llu reorder=%llu  |  "
+          @"SEI=%llu  |  pkts=%llu seqGaps=%llu declaredLost=%llu reorder=%llu  |  "
+          @"recovered=%llu stillMissing=%llu outstanding=%llu  |  "
+          @"nacks=%llu (seqs=%llu)  |  "
           @"FU-A rx=%llu reassembled=%llu dropped=%llu  |  handoff=%llu shed=%llu",
           [NSDate.date timeIntervalSinceDate:_rtpStartedAt],
           MD_DELTA(accessUnits), MD_DELTA(keyframes),
           MD_DELTA(nalSPS), MD_DELTA(nalPPS), MD_DELTA(nalIDR), MD_DELTA(nalSlice), MD_DELTA(nalSEI),
           MD_DELTA(packetsReceived), MD_DELTA(seqGaps), MD_DELTA(packetsLost), MD_DELTA(packetsReordered),
+          MD_DELTA(packetsRecovered), MD_DELTA(packetsStillMissing), now.packetsOutstanding,
+          MD_DELTA(nacksSent), MD_DELTA(nackSeqsRequested),
           MD_DELTA(fuaPackets), MD_DELTA(fuaReassembled), MD_DELTA(fuaDropped),
           handedOffDelta, droppedBusyDelta);
+
+    // ── THE WINDOW WAS THE LIMIT, NOT THE LINK ───────────────────────────────────────
+    //
+    // Its own line, and worded for whoever reads a support export rather than for us. A packet
+    // counted here was asked for, was sent, and ARRIVED — after we had already given up on it.
+    // That is a setting being too tight, and the user is the one who picked the setting. Without
+    // this line the only symptom is a picture breaking up with loss counters identical to a link
+    // that genuinely dropped the packets, and no reason at all to suspect the latency preset.
+    if (MD_DELTA(packetsLateAfterGiveUp) > 0) {
+        NSLog(@"[WHEP-RTP]   WINDOW TOO TIGHT: %llu packet(s) arrived AFTER being written off "
+              @"(worst %llu ms late so far, against a %u ms recovery window). These were not "
+              @"lost — they came back and we had stopped waiting. A longer cushion catches them; "
+              @"a shorter one loses more.",
+              MD_DELTA(packetsLateAfterGiveUp), now.lateAfterGiveUpUsMax / 1000,
+              ManifoldH264DefaultLossPolicy().recoveryWindowMs);
+    }
+
+    // A gap too wide to be worth requesting is handed to the keyframe path by design — see
+    // BURSTS AND STORMS, mechanism 3. The hand-off happens HERE, on the 1 Hz tick, rather than
+    // from the depacketizer, so that the main-thread-only invariant on requestKeyframe holds.
+    if (MD_DELTA(nackGapsTooLarge) > 0) {
+        if ([self requestKeyframe]) {
+            NSLog(@"[WHEP-RTP]   %llu gap(s) too wide to be worth requesting — PLI %d sent instead",
+                  MD_DELTA(nackGapsTooLarge), _pliRequests);
+        }
+    }
+
+    if (MD_DELTA(nackSeqsSuppressedByRate) > 0 || MD_DELTA(outstandingOverflow) > 0) {
+        NSLog(@"[WHEP-RTP]   requester governors bit: %llu sequence number(s) never asked for "
+              @"(rate ceiling), %llu tracking slot(s) lost to overflow",
+              MD_DELTA(nackSeqsSuppressedByRate), MD_DELTA(outstandingOverflow));
+    }
 
     if (droppedBusyDelta > 0) {
         NSLog(@"[WHEP-RTP]   BACKPRESSURE: shed %llu access unit(s) — the decode queue is not "
@@ -847,18 +1085,30 @@ static void ManifoldWHEPTrackClosed(int tr, void *ptr) {
 
     os_unfair_lock_lock(&_rtpLock);
     const uint64_t handedOff = _accessUnitsHandedOff, droppedBusy = _accessUnitsDroppedBusy;
+    const uint64_t nacksToWire = _nacksSentToWire, nacksRefused = _nackSendFailures;
     os_unfair_lock_unlock(&_rtpLock);
 
     return [NSString stringWithFormat:
             @"%llu pkts (%llu accepted) → %llu frames (%llu key) | "
             @"SPS=%llu PPS=%llu IDR=%llu slice=%llu SEI=%llu | "
-            @"seqGaps=%llu lost=%llu reorder=%llu malformed=%llu | "
+            @"seqGaps=%llu declaredLost=%llu (=recovered %llu + stillMissing %llu + outstanding %llu) | "
+            @"recoveryUs avg=%llu max=%llu overflow=%llu | "
+            @"lateAfterGiveUp=%llu (worst %llu ms; a SUBSET of stillMissing) | "
+            @"nacks built=%llu seqs=%llu toWire=%llu refused=%llu rateSuppressed=%llu gapsTooWide=%llu | "
+            @"reorder=%llu malformed=%llu | "
             @"FU-A rx=%llu reassembled=%llu dropped=%llu | "
             @"auClosedByTimestamp=%llu wrongPt=%llu wrongSsrc=%llu rtcpInRtp=%llu | "
             @"handedOffToDecoder=%llu shedForBackpressure=%llu",
             stats.packetsReceived, stats.packetsAccepted, stats.accessUnits, stats.keyframes,
             stats.nalSPS, stats.nalPPS, stats.nalIDR, stats.nalSlice, stats.nalSEI,
-            stats.seqGaps, stats.packetsLost, stats.packetsReordered, stats.packetsMalformed,
+            stats.seqGaps, stats.packetsLost,
+            stats.packetsRecovered, stats.packetsStillMissing, stats.packetsOutstanding,
+            stats.packetsRecovered ? stats.recoveryLatencyUsTotal / stats.packetsRecovered : 0,
+            stats.recoveryLatencyUsMax, stats.outstandingOverflow,
+            stats.packetsLateAfterGiveUp, stats.lateAfterGiveUpUsMax / 1000,
+            stats.nacksSent, stats.nackSeqsRequested, nacksToWire, nacksRefused,
+            stats.nackSeqsSuppressedByRate, stats.nackGapsTooLarge,
+            stats.packetsReordered, stats.packetsMalformed,
             stats.fuaPackets, stats.fuaReassembled, stats.fuaDropped,
             stats.accessUnitsByTimestamp, stats.packetsWrongPayloadType, stats.packetsWrongSSRC,
             stats.packetsRTCP, handedOff, droppedBusy];

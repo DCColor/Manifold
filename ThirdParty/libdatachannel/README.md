@@ -7,7 +7,9 @@ no `/usr/local`, no system packages, no dlopen, no framework.** `otool -L` on th
 built app stays clean.
 
 ## What this is
-- **libdatachannel `v0.24.5`** (MPL-2.0), built from source, **arm64 only**.
+- **libdatachannel `v0.24.5`** (MPL-2.0), built from source, **arm64 only**,
+  **plus one Manifold patch** — see *Local patches* below. This is **not** a
+  pristine upstream build, and the difference is load-bearing.
 - `lib/`
   - `libdatachannel.a` — the library
   - `libjuice.a` — ICE (bundled submodule)
@@ -16,6 +18,56 @@ built app stays clean.
   - `libmbedtls.a`, `libmbedx509.a`, `libmbedcrypto.a` — DTLS backend
 - `include/rtc/` — the public headers. Only `rtc/rtc.h` (**pure C**) is used by
   Manifold; the C++ headers are never included by our code.
+
+## Local patches
+
+`scripts/patches/libdatachannel-recvonly-rtcp.patch`, applied by
+`scripts/build_libdatachannel.sh` immediately after the tag checkout.
+
+It deletes the `!handler` half of one condition in `impl::Track::outgoing`. Upstream,
+a **recvonly** track drops any outgoing message that is not typed `Message::Control`,
+and RTCP is typed `Control` *only when no media handler is chained*. Manifold chains
+`RtcpReceivingSession` — that is what makes `rtcRequestKeyframe` (PLI) reach the wire —
+so upstream, **enabling keyframe requests disables receive-side NACK**, and no public C
+or C++ entry point can work around it.
+
+Without the patch the failure is silent: NACKs are built, refused by the library, and
+never sent, so the symptom is "retransmission does nothing" rather than an error. The
+app says so explicitly — see the refusal branch of `-sendNackForSequences:count:ssrc:`
+in `DataChannelBridge.m`, and §10.3 of `docs/WHEP_LOADED_NETWORK_FINDINGS.md`.
+
+Upstreamable: the `!handler` condition contradicts the comment on the line it guards.
+**Do not drop it when bumping the tag** — re-derive it. The build script fails loudly
+if the patch does not apply, and asserts the guard is actually gone afterwards.
+
+### What the patch does NOT change — read this before theorising
+
+`Track::outgoing` is only on the path of `Track::send` / `rtcSendMessage`. **Receiver
+Reports, PLI and REMB never went through it and were never blocked.** They are emitted
+from inside `RtcpReceivingSession::incoming(messages, send)` through the `send` callback
+that `impl::Track::incoming` builds, which calls `transportSend` directly:
+
+```cpp
+handler->incomingChain(messages, [weak_this = weak_from_this()](message_ptr m) {
+    if (auto locked = weak_this.lock())
+        locked->transportSend(m);      // bypasses Track::outgoing entirely
+});
+```
+
+`rtcRequestKeyframe` takes the same shortcut via `Track::requestKeyframe`. That is why
+PLI worked before the patch and why NACK did not: a hand-built RTCP packet has no route
+to `transportSend` except `Track::send`, and that is the one route the guard covered.
+
+The hypothesis that this patch also un-blocked our Receiver Reports — that Cloudflare had
+been getting no feedback from us at all — was tested and **refuted**. Recorded in §12.2 of
+`docs/WHEP_LOADED_NETWORK_FINDINGS.md` so it does not get re-derived.
+
+### Provenance
+
+⚠️ **There is no provenance chain for this directory.** `scripts/build_libdatachannel.sh`
+does not currently complete on this machine (submodule fetch fails), so the archives here
+were produced by a hand-driven build rather than by the script. Unlike `ThirdParty/ffmpeg/`,
+nothing in the repo establishes what is actually in them. See the entry in `docs/BUGS.md`.
 
 **libdatachannel does not use FFmpeg.** It is transport + depacketization only —
 bring-your-own-decoder. Nothing here touches, reads, or links
