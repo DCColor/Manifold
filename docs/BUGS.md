@@ -225,3 +225,77 @@ hashes the way the FFmpeg one records its own.
 
 **Blocks:** nothing today. It blocks *confidence* — specifically the ability to answer "is the
 NACK patch in the library this DMG shipped with?" from anything other than a live test.
+
+---
+
+## NDI discovery publishes once a second whether or not anything changed, and every consumer of arbitration inherits the heartbeat
+
+**Status:** OPEN. **Found:** 2026-08-26, while diagnosing the Window menu losing its
+window-scoped items. **Blocks:** nothing today.
+
+`NDIService.startDiscovery` polls on a 1 s loop and assigns the result unconditionally:
+
+```swift
+self.discoveredSources = NDIBridge.refreshDiscoveredSources()
+```
+
+`@Published` fires `objectWillChange` on every assignment, equal or not. `DeckRegistry.observe()`
+sinks that publisher into `setNeedsArbitration()`, so **`applyArbitration` runs about once a second
+for the life of any session with a window open** — discovery is reference-counted from
+`ContentView`'s empty state and its streaming control, so in practice it is always running.
+
+Nothing is wrong with the arbitration pass itself: it recomputes from current facts and is
+idempotent by design. The problem is that it is a 1 Hz heartbeat that every future consumer
+inherits, and each consumer has to work out for itself that it must not act on a change that
+did not happen.
+
+**What it has already cost.** `RasterMenuState.refresh` — reached from the pass — assigned its two
+`@Published` mirrors unconditionally. `RasterSizeCommands` holds that object as an
+`@ObservedObject`, so each no-op publish invalidated the app's `Commands` and SwiftUI rebuilt the
+main menu. AppKit injects the window-scoped Window-menu items (Fill, Center, Move & Resize, Full
+Screen Tile, Move to *display*, Arrange in Front, the tab section) only while the menu bar is
+engaged, and a SwiftUI rebuild discards them for the rest of that tracking session. MEASURED,
+probing `NSApp.windowsMenu.items` every 25 ms across a menu open:
+
+```
+menuBEGIN    MENU(8)     ← AppKit has not injected yet
+track+25ms   MENU(26)    ← injected: the full set
+…
+RasterMenuState.refresh PUBLISHES (percent100 -> percent100, true -> true)
+track+175ms  MENU(8)     ← SwiftUI rebuilt; the injected items are gone
+```
+
+The key window was unchanged throughout (`isKeyWindow=1`, `NSApp.keyWindow` non-nil at every
+probe). From the outside this looks exactly like the window resigning key when the menu opens,
+which is the wrong diagnosis and cost a full investigation to rule out.
+
+That symptom is fixed at the consumer, in `RasterMenuState.refresh` (equality guards, with the
+reasoning inline). This entry is about the publisher.
+
+**⚠️ THE OBVIOUS FIX DOES NOT WORK, AND THAT IS THE POINT OF WRITING THIS DOWN.**
+
+`if newSources != discoveredSources { discoveredSources = newSources }` suppresses nothing.
+`NDISource` is an ObjC `NSObject` subclass (`NDIBridge.h:77`, `NDIBridge.mm:240`) with **no
+`-isEqual:` and no `-hash`**, so it inherits pointer identity — and `refreshDiscoveredSources`
+allocates a fresh instance per source on every poll (`NDIBridge.mm:422`). Array `!=` therefore
+compares pointers and is true every tick, forever. Closing this means giving `NDISource` value
+equality on `name` + `url` first (or comparing a derived key), and that is the part that would
+otherwise be rediscovered the hard way.
+
+**Related sites, from a scan done at the same time.**
+
+- `SRTClient` — ALREADY DEFENDED, and its comment (`SRTClient.swift:102`) states this exact
+  hazard: "`@Published` fires objectWillChange on every write, nil-to-nil included, and an
+  unguarded assignment would re-render the view once a second for the life of the session."
+- `WHEPClient.clearError()` / `SRTClient.clearError()` — unguarded, but only reached from
+  user actions and connect attempts, never a repeated path. Not instances.
+- `engine.volume = 1.0` written to an engine already at 1.0 — found separately during the
+  SwiftUI "publishing changes from within view updates" work, same week.
+
+Three sightings in one week, each defended (or not) at a different site. The pattern worth
+naming: **a publisher that emits on a timer must compare before it assigns, because a consumer
+cannot tell a real change from a heartbeat.**
+
+**What would close it:** value equality on `NDISource`, then a compare-before-assign in the
+discovery loop. Optionally a sweep of the remaining `@Published` writers that sit on timers or
+polls, applying the same rule at the source rather than at each consumer.
