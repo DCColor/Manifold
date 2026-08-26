@@ -259,6 +259,49 @@ final class WindowDeck: ObservableObject {
         return nil
     }
 
+    /// What this window is called in the Window menu and in Mission Control.
+    ///
+    /// ⚠️ THE TITLE BAR IS HIDDEN (`.hiddenTitleBar`), SO NOTHING HERE IS DRAWN IN THE WINDOW.
+    /// This exists entirely for the two places macOS shows a window's name anyway — the Window
+    /// menu and Mission Control — which is where multi-window navigation actually happens, and
+    /// where every window reading "Manifold" made comparing two files harder than it needed to be.
+    ///
+    /// Three cases, in priority order, and the order matters because the first two can never both
+    /// hold: a live takeover UNLOADS the file (that is why `displayName` is documented FILE ONLY).
+    ///
+    ///   1. A file        → its name, e.g. "shot_042_v3.mov".
+    ///   2. A live stream OWNED BY THIS DECK → what the user called it: the NDI source name, or
+    ///      the bookmark name they picked. Falls back to the transport ("NDI stream") when the
+    ///      connect came from a path that had no name to give — ⌃⌥N's quick-connect, say.
+    ///   3. Neither       → "Manifold". Deliberately the app name and not "Untitled": this is not
+    ///      a document app, an empty window is not an unsaved document, and two empty windows
+    ///      reading the same thing is exactly as informative as it should be — there is nothing
+    ///      to tell them apart by.
+    ///
+    /// ⚠️ NEVER A URL, for a stream. A stream path can carry the stream key, and this string goes
+    /// into the Window menu, into Mission Control, and into any screenshot of either. That is the
+    /// same rule the bookmark rows and the standing message already follow.
+    var windowTitle: String {
+        if let name = displayName { return name }
+        if let live = DeckRegistry.shared.liveLabel(for: self) { return live }
+        return "Manifold"
+    }
+
+    /// Push `windowTitle` at the window, if there is one yet.
+    ///
+    /// Cheap and idempotent, which is what lets both triggers call it freely: the arbitration pass
+    /// (stream connect/disconnect, window registration) and the file-load observers in ContentView.
+    /// Neither covers the other's cases, and a title is not worth a third mechanism to unify them.
+    ///
+    /// The equality check is not just tidiness — `NSWindow.title` writes post a change notification
+    /// that AppKit acts on, and this is called from an arbitration pass that runs on every service
+    /// publish.
+    @MainActor
+    func applyWindowTitle() {
+        let title = windowTitle
+        if window?.title != title { window?.title = title }
+    }
+
     /// TRUE only when this deck is positively identifiable as a NON-front window while another
     /// registered deck IS front.
     ///
@@ -897,6 +940,11 @@ final class DeckRegistry {
                     : "The transport is in another window — click there, or here to take it over."
             }
             if deck.gate != gate { deck.gate = gate }
+
+            // The pass already runs on every trigger that can change a STREAM title — the four
+            // services' `objectWillChange`, window registration, deck removal. It does NOT run on
+            // a file load, which is why ContentView observes the engine for that half.
+            deck.applyWindowTitle()
         }
 
         // ── LAUNCH WORK THAT BELONGS TO THE APP ───────────────────────────────────────────
@@ -1191,6 +1239,28 @@ final class DeckRegistry {
     func connectLive(_ source: LiveSource, from deck: WindowDeck, label: String? = nil,
                      _ standUp: () -> Void) {
         claim(.live(source), by: deck, label: label, standUp)
+    }
+
+    /// What to call the live source THIS deck owns, or nil when it owns none.
+    ///
+    /// Prefers the source's own live truth over the label recorded at claim time: NDI publishes
+    /// `connectedSourceName`, which follows a source SWITCH that the claim label would not. WHEP
+    /// and SRT publish no name at all, so for those the claim label — the bookmark name the user
+    /// picked — is the only human name in the system, and the transport name is the honest floor
+    /// under it.
+    @MainActor
+    func liveLabel(for deck: WindowDeck) -> String? {
+        let id = ObjectIdentifier(deck)
+        let owned = claims.first { key, claim in
+            if case .live = key { return claim.deck == id }
+            return false
+        }
+        guard let (device, claim) = owned, case .live(let source) = device else { return nil }
+        if source == .ndi, let name = NDIService.shared.connectedSourceName, !name.isEmpty {
+            return name
+        }
+        if let label = claim.label, !label.isEmpty { return label }
+        return source.displayLabel
     }
 
     /// Retire this deck's live source. A no-op when this deck has none — which is what makes it
