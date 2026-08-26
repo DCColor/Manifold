@@ -278,10 +278,37 @@ final class RasterMenuState: ObservableObject {
         }
     }
 
+    /// ⚠️ THE TWO EQUALITY GUARDS ARE LOAD-BEARING. THEY ARE NOT AN OPTIMISATION, AND REMOVING
+    /// THEM BREAKS THE WINDOW MENU IN A WAY THAT LOOKS LIKE AN APPKIT BUG.
+    ///
+    /// `@Published` publishes on EVERY assignment, equal or not. `RasterSizeCommands` holds this
+    /// object as an `@ObservedObject`, so an assignment here invalidates the app's `Commands` and
+    /// SwiftUI rebuilds the main menu. AppKit, meanwhile, injects the window-scoped items into
+    /// `NSApp.windowsMenu` — Fill, Center, Move & Resize, Full Screen Tile, Move to <display>,
+    /// Arrange in Front, the tab items — only while the menu bar is engaged. A SwiftUI rebuild
+    /// DISCARDS them, and AppKit does not put them back for the rest of that tracking session.
+    ///
+    /// This pass is driven by `DeckRegistry.applyArbitration`, which the four services'
+    /// `objectWillChange` sinks run about ONCE A SECOND (NDI's discovery loop republishes on a 1 s
+    /// cadence whether or not the source list changed). So without these guards the Window menu
+    /// was rebuilt underneath the user within ~1 s of being opened, every time.
+    ///
+    /// MEASURED, probing `NSApp.windowsMenu.items` every 25 ms across a menu open:
+    ///
+    ///     menuBEGIN    MENU(8)     ← AppKit has not injected yet
+    ///     track+25ms   MENU(26)    ← injected: the full set
+    ///     …
+    ///     RasterMenuState.refresh PUBLISHES (percent100 -> percent100, true -> true)
+    ///     track+175ms  MENU(8)     ← SwiftUI rebuilt; the injected items are gone
+    ///
+    /// The key window was unchanged throughout (`isKeyWindow=1`, `NSApp.keyWindow` non-nil at every
+    /// probe) — the window never resigned key, which is what this looks like from the outside.
     private func refresh() {
         let deck = DeckRegistry.shared.keyDeck
-        current = deck?.chrome?.rasterSize
-        enabled = (deck?.engine?.displaySize != nil)
+        let newCurrent = deck?.chrome?.rasterSize
+        let newEnabled = (deck?.engine?.displaySize != nil)
+        if current != newCurrent { current = newCurrent }
+        if enabled != newEnabled { enabled = newEnabled }
     }
 }
 

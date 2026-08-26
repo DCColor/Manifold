@@ -248,6 +248,10 @@ final class WindowDeck: ObservableObject {
     /// What this deck is allowed to do. THE ARBITER OWNS THIS — see `DeckRegistry`.
     @Published fileprivate(set) var gate = DeckGate()
 
+    /// Coalescing flag for `setNeedsWindowTitle`. NOT `@Published`, like everything else here that
+    /// no view renders.
+    fileprivate var titleUpdateScheduled = false
+
     /// A human name for this deck, for the message another deck shows while this one holds a
     /// device. FILE ONLY — a deck showing a live stream has no file name (the takeover unloaded
     /// it), so the registry falls back to the name recorded at claim time and then to an honest
@@ -289,9 +293,21 @@ final class WindowDeck: ObservableObject {
 
     /// Push `windowTitle` at the window, if there is one yet.
     ///
-    /// Cheap and idempotent, which is what lets both triggers call it freely: the arbitration pass
-    /// (stream connect/disconnect, window registration) and the file-load observers in ContentView.
-    /// Neither covers the other's cases, and a title is not worth a third mechanism to unify them.
+    /// Cheap and idempotent, which is what lets every trigger call it freely: the arbitration pass
+    /// (stream connect/disconnect), `register` (the window arriving), and `DeckHostView`'s
+    /// subscription to this deck's engine (a file loading or unloading).
+    ///
+    /// ⚠️ `window?` IS A SILENT DROP, AND THAT IS WHY THE CALLERS ARE SHAPED THE WAY THEY ARE.
+    /// A deck exists before its window does — `makeNSView` populates the engine, and only the
+    /// later `viewDidMoveToWindow` supplies the NSWindow — so a title derived in that gap has
+    /// nowhere to go and vanishes. MEASURED, on the first derivation of every new window:
+    ///
+    ///     apply deck=8bfdd11c window=nil was=<nowin> want=Manifold meta=<nil> url=<nil>
+    ///
+    /// That drop is only safe because the window's ARRIVAL is itself a trigger (`register` calls
+    /// this synchronously). It must stay that way: an edge-triggered caller alone would consume
+    /// the one title change a load produces and lose it, and nothing would re-derive it until the
+    /// user next activated the app.
     ///
     /// The equality check is not just tidiness — `NSWindow.title` writes post a change notification
     /// that AppKit acts on, and this is called from an arbitration pass that runs on every service
@@ -300,6 +316,26 @@ final class WindowDeck: ObservableObject {
     func applyWindowTitle() {
         let title = windowTitle
         if window?.title != title { window?.title = title }
+    }
+
+    /// Coalesce a title re-derivation onto the next main-actor turn.
+    ///
+    /// ⚠️ THE HOP IS REQUIRED, NOT TIDINESS. `@Published` fires its publisher from `willSet` — the
+    /// subscriber runs BEFORE the new value is stored. Applying the title synchronously inside
+    /// such a sink reads the PREVIOUS `currentURL`/`metadata` and writes a title one edge stale,
+    /// which is the same class of bug as writing nothing. Same reason, and the same idiom, as
+    /// `DeckRegistry.setNeedsArbitration`.
+    ///
+    /// The coalescing also collapses the three publishes one load produces (`currentURL`, then
+    /// `hasMedia`, then `metadata` a moment later) into a single write.
+    @MainActor
+    func setNeedsWindowTitle() {
+        guard !titleUpdateScheduled else { return }
+        titleUpdateScheduled = true
+        Task { @MainActor [weak self] in
+            self?.titleUpdateScheduled = false
+            self?.applyWindowTitle()
+        }
     }
 
     /// TRUE only when this deck is positively identifiable as a NON-front window while another
@@ -686,6 +722,13 @@ final class DeckRegistry {
     fileprivate func register(_ deck: WindowDeck, window: NSWindow) {
         prune()
         deck.window = window
+        // ⚠️ SYNCHRONOUS, AND BEFORE ANYTHING ELSE THAT COULD RETURN EARLY. This is the moment the
+        // deck acquires somewhere to put a title, and it is the ONLY moment that recovers a title
+        // derived while `window` was still nil — see the drop documented on `applyWindowTitle`.
+        // The deferred arbitration pass at the bottom of this function would also get there, but a
+        // turn later and only for as long as that pass keeps being scheduled; the title of a window
+        // that has just appeared should not depend on either.
+        deck.applyWindowTitle()
         entries[ObjectIdentifier(window)] = Entry(deck: deck, window: window)
         // BEFORE `configure`: the sizer learns which window it governs here, so every PROGRAMMATIC
         // resize works from the moment the deck exists. It deliberately does NOT take the window's
@@ -1367,6 +1410,21 @@ private final class DeckHostView: NSView {
     /// once) and gives the nil case the identity it needs to deregister the right entry.
     private var registeredWindow: NSWindow?
 
+    /// THE TITLE'S FILE-SIDE TRIGGER, AND IT LIVES HERE FOR A LIFETIME REASON.
+    ///
+    /// It used to be a `.onChange(of: deck.windowTitle, initial: true)` in ContentView's body.
+    /// That is edge-triggered on a derived string, and it fires for the first time while this view
+    /// is not yet in a window — so `applyWindowTitle` had nowhere to write, the write was dropped
+    /// (see the note there), and because a load only moves that string ONCE, the observer never
+    /// fired again. What actually repaired the title afterwards was the arbitration pass, reached
+    /// from `NSApplication.didBecomeActiveNotification` — i.e. the title was being fixed by the
+    /// user activating the app, which is why opening a menu appeared to fix it.
+    ///
+    /// Held here because this object's lifetime IS the window's: `viewDidMoveToWindow` gives both
+    /// the moment to subscribe (window in hand, so nothing can be dropped) and the moment to tear
+    /// down. A view-body modifier has neither.
+    private var titleObservers: Set<AnyCancellable> = []
+
     init(deck: WindowDeck) {
         self.deck = deck
         super.init(frame: .zero)
@@ -1384,8 +1442,48 @@ private final class DeckHostView: NSView {
         registeredWindow = window
         if let window {
             DeckRegistry.shared.register(deck, window: window)
+            observeTitleInputs()
         } else {
+            titleObservers.removeAll()
             deck.window = nil
         }
+    }
+
+    /// Subscribe to everything `WindowDeck.displayName` reads.
+    ///
+    /// THREE INPUTS, AND WHAT EACH ONE IS ACTUALLY FOR:
+    ///
+    ///   * `currentURL` — the load edge that matters. It is published in `loadAsset`'s COMMIT
+    ///     phase, synchronously, and `displayName` already falls back to its `lastPathComponent`,
+    ///     so this is what makes the correct name appear at load time rather than when metadata
+    ///     lands. It is also cleared by `stop()`, so it carries the unload edge too.
+    ///   * `metadata` — the refinement. Same string in practice (both producers set
+    ///     `fileName = url.lastPathComponent`), subscribed so the derivation cannot silently
+    ///     depend on which of the two arrived.
+    ///   * `hasMedia` — belt to the URL's braces. Every path that sets it also sets `currentURL`,
+    ///     so it adds no edge that is reachable today; it is here so a future load path that
+    ///     establishes media without going through `currentURL` cannot leave a window unnamed.
+    ///
+    /// The engine is captured, not re-read: it is ContentView's `@StateObject`, created once per
+    /// window and never swapped, and `makeNSView` assigned it before this view could exist.
+    private func observeTitleInputs() {
+        titleObservers.removeAll()
+        guard let engine = deck.engine else { return }
+
+        // `Published.Publisher` replays its current value on subscribe, so this also performs the
+        // initial derivation — a window adopted after a file was already loaded gets named.
+        let inputs: [AnyPublisher<Void, Never>] = [
+            engine.$currentURL.map { _ in () }.eraseToAnyPublisher(),
+            engine.$metadata.map   { _ in () }.eraseToAnyPublisher(),
+            engine.$hasMedia.map   { _ in () }.eraseToAnyPublisher(),
+        ]
+
+        Publishers.MergeMany(inputs)
+            .sink { [weak deck] _ in
+                // Deferred, never inline — `@Published` publishes from `willSet`, so the value
+                // this title is derived FROM has not landed yet. See `setNeedsWindowTitle`.
+                MainActor.assumeIsolated { deck?.setNeedsWindowTitle() }
+            }
+            .store(in: &titleObservers)
     }
 }

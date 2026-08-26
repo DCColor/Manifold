@@ -438,22 +438,17 @@ struct ContentView: View {
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
-        // ── WINDOW TITLE: the FILE half of the trigger set ──────────────────────────────────
+        // ── WINDOW TITLE: NOT HERE ANY MORE, AND DELIBERATELY NOT ───────────────────────────
         //
-        // The arbitration pass covers every STREAM transition and window registration; nothing in
-        // it fires on a file load, and a file load is the commonest title change there is. These
-        // two observers close that gap from the side that can see it — `currentURL` for the load
-        // itself, `metadata?.fileName` because the engine resolves the display name a moment after
-        // the URL lands and the better name should win as soon as it exists.
-        //
-        // ONE modifier, keyed on the finished title rather than two keyed on its inputs: this
-        // body's chain is already at the type-checker's limit (see the notes on splitting it), and
-        // `windowTitle` reads the engine's published metadata, so it is recomputed on exactly the
-        // changes the two separate observers would have caught.
-        //
-        // `initial: true` so a window that binds AFTER the first pass still gets titled; the write
-        // is guarded on inequality inside `applyWindowTitle`, so repeat calls cost nothing.
-        .onChange(of: deck.windowTitle, initial: true) { _, _ in deck.applyWindowTitle() }
+        // This used to be `.onChange(of: deck.windowTitle, initial: true)`. It was wrong twice:
+        // its first fire lands before this view is in a window, so `applyWindowTitle` had nowhere
+        // to write and dropped it silently; and being edge-triggered on a derived string, it got
+        // exactly one edge per load and never fired again to make up for the loss. The title was
+        // then repaired only by the arbitration pass — reached from `didBecomeActive`, i.e. by the
+        // user activating the app. The file-side trigger now lives in `DeckHostView`, whose
+        // lifetime is the window's, so it cannot subscribe before there is somewhere to write.
+        // See the note there. (This chain is also at the type-checker's limit, so a modifier that
+        // does not need to be here should not be.)
         // Finder double-click / drag-to-icon is a file-open too, and it bypasses this view's
         // fileImporter — so it must retire a live stream itself, or the stream keeps pushing to the
         // renderer alongside the new file (double source). Closes the gap for EVERY live source
