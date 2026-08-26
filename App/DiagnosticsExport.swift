@@ -831,6 +831,9 @@ enum DiagnosticsReport {
         if let benefit = WHEPClient.shared.nackBenefitSummary {
             out += "NACK benefit     : \(benefit)\n"
         }
+        if let hist = WHEPClient.shared.arrivalLatencySummary {
+            out += "Arrival latency  : \(hist)\n"
+        }
         out += """
 
               How to read the round trip: NO MEDIA ROUND TRIP IS OBTAINABLE on this transport.
@@ -841,6 +844,13 @@ enum DiagnosticsReport {
               and labelled COARSE for that reason. `floor` is the threshold below which an arrival
               is too fast to have been caused by our request. `NOT MEASURED` means recoveries are
               reported as `unattributed` rather than sorted into a bucket on a guess.
+
+              How to read the arrival latency: two histograms of how long after a packet was
+              declared missing it actually turned up — the top row for losses we asked about, the
+              bottom for losses we deliberately did not. NEITHER is filtered by any threshold. The
+              control row is this link's ordinary reordering delay. A bump in the asked row that
+              the control row lacks is retransmission, and where it sits is the retransmit
+              latency. Identical shapes mean asking changed nothing.
 
               How to read the NACK benefit: one declared-missing packet in ten is deliberately
               NEVER requested. Those recoveries are late originals by construction, so the control

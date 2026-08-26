@@ -187,6 +187,10 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
 /// anything, rather than to what arrived. nil when no WHEP session is up.
 - (nullable NSString *)nackBenefitSummary;
 
+/// Arrival-latency histograms for asked vs never-asked losses, taken before any attribution floor
+/// is applied. The pair is what shows whether retransmission is happening and at what latency.
+- (nullable NSString *)arrivalLatencySummary;
+
 /// Sends a Picture Loss Indication, asking the sender for an IDR.
 ///
 /// Called automatically (a few times, then it gives up) if slices are arriving but no

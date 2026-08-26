@@ -451,10 +451,34 @@ static NSString *ManifoldWHEPDescribeRtt(const ManifoldH264DepacketizerStats *s)
         case ManifoldRttSourceSignalling:
             return [NSString stringWithFormat:
                     @"~%llu us COARSE (signalling POST, discounted — an HTTPS round trip, NOT the "
-                    @"media path; no media RTT is obtainable on this transport) floor=%llu us",
-                    s->rttUsMin == UINT64_MAX ? 0 : s->rttUsMin, s->attributionFloorUsInUse];
+                    @"media path). ⚠️ NO FLOOR DERIVED FROM IT: it measures the wrong path and "
+                    @"binning by it reported the reordering tail as retransmit latency. "
+                    @"Attribution suspended; read the arrival-latency histograms instead.",
+                    s->rttUsMin == UINT64_MAX ? 0 : s->rttUsMin];
     }
     return @"(unknown source)";
+}
+
+/// Renders the two arrival-latency histograms, one line each, aligned so they can be read as a
+/// pair by eye.
+///
+/// ⚠️ THE PAIR IS THE MEASUREMENT. The control row is this link's reordering-delay distribution
+/// (those packets were never asked for). The asked row is that same reordering PLUS anything our
+/// NACKs recovered. A bump in the asked row that the control row does not have is retransmission,
+/// and where the bump sits is the retransmit latency. Identical shapes mean asking changed
+/// nothing — and no average computed over either row can tell you that, which is why this is a
+/// histogram and not two more scalars.
+static NSString *ManifoldWHEPDescribeLatencyHistograms(const ManifoldH264DepacketizerStats *s) {
+    static const char *const kLabels[9] = {
+        "<2ms", "<5", "<10", "<20", "<40", "<80", "<160", "<320", ">=320"
+    };
+    NSMutableString *asked   = [NSMutableString stringWithString:@"asked  "];
+    NSMutableString *control = [NSMutableString stringWithString:@"control"];
+    for (unsigned i = 0; i < 9; i++) {
+        [asked   appendFormat:@" %s:%u", kLabels[i], s->askedLatencyHistogram[i]];
+        [control appendFormat:@" %s:%u", kLabels[i], s->controlLatencyHistogram[i]];
+    }
+    return [NSString stringWithFormat:@"%@ | %@", asked, control];
 }
 
 /// Renders the controlled comparison: does asking actually recover anything that would not have
@@ -1165,6 +1189,15 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     return NO;
 }
 
+- (nullable NSString *)arrivalLatencySummary {
+    if (!_depacketizer) return nil;
+    ManifoldH264DepacketizerStats stats;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerCopyStats(_depacketizer, &stats);
+    os_unfair_lock_unlock(&_rtpLock);
+    return ManifoldWHEPDescribeLatencyHistograms(&stats);
+}
+
 - (nullable NSString *)nackBenefitSummary {
     if (!_depacketizer) return nil;
     ManifoldH264DepacketizerStats stats;
@@ -1197,7 +1230,7 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
             @"SPS=%llu PPS=%llu IDR=%llu slice=%llu SEI=%llu | "
             @"seqGaps=%llu declaredLost=%llu (=recovered %llu + stillMissing %llu + outstanding %llu) | "
             @"overflow=%llu | "
-            @"RTT %@ | NACK benefit: %@ | "
+            @"RTT %@ | NACK benefit: %@ | arrival latency (UNFILTERED, no floor): %@ | "
             @"attribution: attributable=%llu tooFastToBeOurs=%llu neverAsked=%llu unattributed=%llu "
             @"(recoveryUs[attributable] avg=%llu max=%llu | sinceAsk min=%@ avg=%llu max=%llu) | "
             @"allArrivalsUs avg=%llu max=%llu (legacy, pre-attribution baselines) | "
@@ -1213,6 +1246,7 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
             stats.packetsRecovered, stats.packetsStillMissing, stats.packetsOutstanding,
             stats.outstandingOverflow,
             ManifoldWHEPDescribeRtt(&stats), ManifoldWHEPDescribeNackBenefit(&stats),
+            ManifoldWHEPDescribeLatencyHistograms(&stats),
             stats.recoveredAttributable, stats.recoveredBeforeFloor,
             stats.recoveredUnrequested, stats.recoveredUnattributed,
             stats.recoveredAttributable ? stats.attributableLatencyUsTotal / stats.recoveredAttributable : 0,

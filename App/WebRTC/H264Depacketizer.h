@@ -258,6 +258,38 @@ typedef struct {
     uint64_t controlRecoveredUsMax;
     uint64_t controlRecoveredUsMin;
 
+    // ── THE FULL ARRIVAL-LATENCY DISTRIBUTION, UNFILTERED BY ANY FLOOR ───────
+    //
+    // ⚠️ THE REASON THIS EXISTS IS THAT A MEAN OVER A FLOOR-FILTERED SET IS NOT A MEAN, IT IS A
+    // TAIL, AND IT WAS ABOUT TO BE USED TO SIZE THE LATENCY PRESETS.
+    //
+    // `recoveredAttributable` counts only arrivals ABOVE the attribution floor. With the floor
+    // derived from the signalling round trip it sat at ~89 ms, which is several times any
+    // plausible round trip to a Cloudflare edge — so every arrival that looked like a real
+    // retransmit (a few tens of ms) was binned `recoveredBeforeFloor`, and the "attributable"
+    // average was computed over what was left: the slow tail. That produced 330 ms and it is an
+    // artefact of the cut, not a measurement of retransmission.
+    //
+    // These histograms are taken BEFORE any floor is applied and cannot be distorted by one.
+    // Read them as a pair, because the pair is the experiment:
+    //
+    //   * the CONTROL arm was never asked, so its histogram IS this link's reordering-delay
+    //     distribution — what late originals look like here, measured rather than assumed;
+    //   * the ASKED arm contains the same reordering plus any retransmits we caused.
+    //
+    // A mode in the asked arm that the control arm does not have is retransmission, and WHERE
+    // that mode sits is the retransmit latency — the number the presets actually want. If the two
+    // histograms have the same shape, asking changed nothing and no summary statistic will
+    // rescue that.
+    //
+    // Bucket upper bounds in milliseconds, last bucket unbounded:
+    //     [0] <2   [1] <5   [2] <10  [3] <20  [4] <40
+    //     [5] <80  [6] <160 [7] <320 [8] >=320
+    // Log-spaced with fine resolution at the bottom deliberately: a real retransmit on a
+    // same-metro edge lands between 10 and 60 ms, and linear buckets would smear that flat.
+    uint32_t askedLatencyHistogram[9];
+    uint32_t controlLatencyHistogram[9];
+
     // ── Round trip ───────────────────────────────────────────────────────────
     //
     // ⚠️ NOT MEASURED ON THE MEDIA PATH, AND THE ONLY HONEST SOURCE IS COARSE. See

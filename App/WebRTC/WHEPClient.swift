@@ -364,6 +364,9 @@ final class WHEPClient: ObservableObject {
     /// See `ManifoldWHEPDescribeNackBenefit` — this is a controlled comparison, not a count.
     var nackBenefitSummary: String? { session?.nackBenefitSummary() }
 
+    /// Arrival-latency histograms, asked vs never-asked, unfiltered by any attribution floor.
+    var arrivalLatencySummary: String? { session?.arrivalLatencySummary() }
+
     /// Stand the backstop down. Safe to call when none is armed. Called on recovery to `.connected`,
     /// on `.closed`, and from disconnect() — so a fire cannot happen after teardown has run.
     private func cancelDisconnectBackstop() {

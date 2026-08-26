@@ -374,6 +374,7 @@ static void MDDeclareMissing(ManifoldH264Depacketizer *dp, uint16_t seq, uint64_
 // the request machinery lives, but used by MDClaimLate above it — declared here rather than moved
 // so the probe reads next to the requester it borrows.
 static uint64_t MDAttributionFloorUs(const ManifoldH264Depacketizer *dp);
+static unsigned int MDLatencyBucket(uint64_t us);
 
 /// A packet arrived with a sequence number at or below the highest seen. If it is one we had
 /// declared missing, reach a verdict on it — and distinguish the two ways it can be too late.
@@ -407,11 +408,15 @@ static void MDClaimLate(ManifoldH264Depacketizer *dp, uint16_t seq, uint64_t now
             // attribution buckets below are a finer question asked of the treated arm alone.
             if (slot->control) {
                 dp->stats.controlRecovered++;
+                dp->stats.controlLatencyHistogram[MDLatencyBucket(us)]++;
                 dp->stats.controlRecoveredUsTotal += us;
                 if (us > dp->stats.controlRecoveredUsMax) dp->stats.controlRecoveredUsMax = us;
                 if (us < dp->stats.controlRecoveredUsMin) dp->stats.controlRecoveredUsMin = us;
             } else {
                 dp->stats.askedRecovered++;
+                // ⚠️ RECORDED HERE, BEFORE THE ATTRIBUTION BRANCH BELOW, AND THAT POSITION IS THE
+                // WHOLE POINT — nothing downstream can filter it.
+                dp->stats.askedLatencyHistogram[MDLatencyBucket(us)]++;
                 dp->stats.askedRecoveredUsTotal += us;
                 if (us > dp->stats.askedRecoveredUsMax) dp->stats.askedRecoveredUsMax = us;
                 if (us < dp->stats.askedRecoveredUsMin) dp->stats.askedRecoveredUsMin = us;
@@ -488,13 +493,47 @@ static void MDSortBySeqAscending(uint16_t *seqs, unsigned int count, uint16_t hi
     }
 }
 
+/// Which histogram bucket a latency falls in. Bounds mirror the comment on the counters.
+static unsigned int MDLatencyBucket(uint64_t us) {
+    const uint64_t ms = us / 1000u;
+    if (ms <   2u) return 0;
+    if (ms <   5u) return 1;
+    if (ms <  10u) return 2;
+    if (ms <  20u) return 3;
+    if (ms <  40u) return 4;
+    if (ms <  80u) return 5;
+    if (ms < 160u) return 6;
+    if (ms < 320u) return 7;
+    return 8;
+}
+
 /// The floor currently in force, or 0 when there is no round-trip measurement and attribution is
 /// therefore SUSPENDED. Zero is the "we do not know" signal and callers must branch on it.
 static uint64_t MDAttributionFloorUs(const ManifoldH264Depacketizer *dp) {
-    if (dp->stats.rttSource == ManifoldRttSourceNone) return 0;
     if (dp->stats.rttUsMin == UINT64_MAX) return 0;
-    const unsigned int div = dp->policy.attributionFloorRttDivisor;
-    return div ? dp->stats.rttUsMin / div : dp->stats.rttUsMin / MD_DEFAULT_FLOOR_RTT_DIVISOR;
+
+    // ⚠️ ONLY A ROUND TRIP MEASURED ON THE MEDIA PATH MAY DERIVE A FLOOR. THE SIGNALLING
+    // MEASUREMENT MAY NOT, AND LETTING IT DO SO PRODUCED A WRONG ANSWER IN THE FIELD.
+    //
+    // The signalling POST is HTTPS to an HTTP endpoint including the server's SDP work. On a
+    // real session it came back at ~716 ms; quartered and halved that put the floor at ~89 ms,
+    // several times any plausible round trip to a Cloudflare edge. Every arrival that looked
+    // like an actual retransmit — tens of milliseconds — was therefore binned
+    // `recoveredBeforeFloor`, and the average of what survived the cut was reported as the
+    // retransmit latency. It read 330 ms. It was the reordering tail with a confident name on it,
+    // and it was within one step of being used to size the latency presets.
+    //
+    // A bad floor is worse than no floor: no floor puts arrivals in `recoveredUnattributed`,
+    // which is visibly a non-answer, whereas a bad floor puts them in a bucket that LOOKS like an
+    // answer. So until something measures the media path — RTX (RFC 4588) is the route, see
+    // `ManifoldRttSource` — this returns 0 and attribution stays suspended. The signalling figure
+    // is still reported, because knowing roughly how far away the server is remains useful; it
+    // simply no longer classifies anything.
+    switch ((ManifoldRttSource)dp->stats.rttSource) {
+        case ManifoldRttSourceNone:        return 0;
+        case ManifoldRttSourceSignalling:  return 0;
+    }
+    return 0;
 }
 
 /// Fold one measured round trip in and promote the source if this is a better one.
