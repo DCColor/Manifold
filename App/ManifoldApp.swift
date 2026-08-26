@@ -108,5 +108,24 @@ struct ManifoldApp: App {
             AboutView()
         }
         .windowResizability(.contentSize)
+        // ── NO SECOND "About Manifold", IN THE WINDOW MENU ─────────────────────────────────
+        //
+        // SwiftUI gives every single-instance `Window` scene an automatic Window-menu item, titled
+        // with the scene's own title, so the window can be raised after it is closed. Here that put
+        // a second "About Manifold" in the Window menu — a duplicate of the app-menu item above, in
+        // the one menu that should list windows and nothing else.
+        //
+        // ⚠️ `CommandGroup(replacing: .singleWindowList) { }` DOES NOT REMOVE IT. That is the
+        // obvious fix and the one the internet recommends; it was tried here and MEASURED to have
+        // no effect on macOS 26 — the item survived it unchanged. `Scene.commandsRemoved()` is the
+        // scene-level API for the same intent and is what actually works.
+        //
+        // The source was confirmed rather than assumed: renaming this scene to "ZZZPROBE" changed
+        // the Window-menu entry to "ZZZPROBE", which is what proves the entry comes from the scene
+        // and not from the `CommandGroup(replacing: .appInfo)` above.
+        //
+        // This removes ONLY this scene's automatic commands. Opening About is unaffected — that is
+        // the app-menu Button, which calls `openWindow(id:)` directly.
+        .commandsRemoved()
     }
 }
