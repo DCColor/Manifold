@@ -58,6 +58,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import ImageIO
+import QuartzCore   // CACurrentMediaTime — the monotonic clock the suppression window runs on
 import UniformTypeIdentifiers
 import VideoToolbox
 
@@ -75,6 +76,12 @@ final class LiveVideoDecoder {
         var sessionBuilds = 0
         var awaitingKeyframe = true
         var haveFormatDescription = false
+        /// Keyframe requests this decoder actually asked the transport for.
+        var keyframeRequests = 0
+        /// Requests the suppression window swallowed. THE INTERESTING ONE: before the window
+        /// existed this was the number of REDUNDANT PLIs put on the wire, one per undecodable
+        /// access unit, for a keyframe that had already been asked for and was still in flight.
+        var keyframeRequestsSuppressed = 0
         var width = 0
         var height = 0
         var pixelFormat: OSType = 0
@@ -90,6 +97,10 @@ final class LiveVideoDecoder {
 
     /// Fires on the decode queue when the decoder needs an IDR it does not have: no format
     /// description yet, or a decode error forced a resync. The client turns this into a PLI.
+    ///
+    /// ⚠️ CALL IT THROUGH `requestKeyframe(_:)`, NEVER DIRECTLY. Every trigger below is a
+    /// PER-ACCESS-UNIT condition, and firing this from one of them puts a request on the wire for
+    /// every frame that arrives while we wait — see the suppression window for what that cost.
     var onNeedsKeyframe: (() -> Void)?
 
     // MARK: - Output pixel format
@@ -115,6 +126,67 @@ final class LiveVideoDecoder {
     private var currentSPS: Data?
     private var currentPPS: Data?
     private var awaitingKeyframe = true
+
+    // MARK: - Keyframe request suppression (decode queue only)
+
+    /// When the last keyframe request went out; 0 = none outstanding. Decode queue only, which is
+    /// what lets it be a plain var — every trigger site is on that queue.
+    private var keyframeAskedAt: CFTimeInterval = 0
+
+    /// ── ASK ONCE, THEN WAIT ────────────────────────────────────────────────────────────────
+    ///
+    /// ⚠️ WITHOUT THIS, ONE FREEZE COSTS ONE PLI PER FRAME. Every trigger below is evaluated per
+    /// ACCESS UNIT, and the conditions they test — no format description, keyframe gate closed —
+    /// stay true for every access unit until the keyframe actually lands. A measured run showed
+    /// 882 access units dropped at the keyframe gate in a single session, i.e. 882 requests for
+    /// ONE keyframe. The transport's own 250 ms floor turned that into ~4 PLI/s of pure
+    /// redundant feedback on a link that was already losing packets.
+    ///
+    /// A PLI is a REQUEST WITH A LATENCY, not a command, and the interval has to cover the whole
+    /// round: our RTCP out, the SFU forwarding it upstream, the encoder finishing whatever frame
+    /// it is on and emitting an IDR, and that IDR arriving. Asking again before that has had time
+    /// to happen cannot make it happen sooner — it can only add traffic and, on a server that
+    /// honours every request, provoke a burst of back-to-back keyframes whose bitrate spike makes
+    /// the congestion worse.
+    ///
+    /// ── WHY ONE SECOND ────────────────────────────────────────────────────────────────────
+    ///
+    ///   * IT IS COMFORTABLY LONGER THAN THE ANSWER TAKES. Worst plausible media round trip on
+    ///     this transport is a couple of hundred milliseconds (transatlantic, congested), plus an
+    ///     encoder response of one or two frame intervals — call it 350 ms all in. A second
+    ///     leaves the answer time to arrive before we conclude it is not coming, which is the
+    ///     entire job of the number. It is NOT derived from a measurement, because this transport
+    ///     CANNOT measure a media round trip — see ManifoldRttSource in H264Depacketizer.h for
+    ///     the three routes and why all three are closed. A fixed interval chosen with headroom
+    ///     is the honest answer; a fraction of the COARSE signalling RTT would look derived and
+    ///     would not be.
+    ///
+    ///   * IT IS SHORT ENOUGH THAT A LOST PLI IS CHEAP. RTCP rides UDP and is not retransmitted,
+    ///     so a request CAN simply vanish, and something has to ask again or the picture stays
+    ///     frozen forever. One second is the worst-case cost of that, once.
+    ///
+    ///   * IT MATCHES THE CADENCE ALREADY IN THE SYSTEM. The bridge's stats timer and the
+    ///     client's backstop both run at 1 Hz, and the shared floor in
+    ///     `-[ManifoldWHEPSession requestKeyframe]` is now 1 s to match. Every path therefore
+    ///     agrees on one rate instead of racing at three, and the steady-state ask under a total
+    ///     keyframe famine is ONE PLI per second rather than four.
+    ///
+    /// The window is DELIBERATELY NOT CLEARED BY A DECODED FRAME — only by an acquired KEYFRAME
+    /// (see `decode`) and by `invalidate`. A P-frame decoding successfully is not evidence that
+    /// the IDR we asked for arrived.
+    private static let keyframeReaskWindow: CFTimeInterval = 1.0
+
+    /// Ask the transport for a keyframe, at most once per `keyframeReaskWindow`. Decode queue only.
+    private func requestKeyframe() {
+        let now = CACurrentMediaTime()
+        if keyframeAskedAt > 0, now - keyframeAskedAt < Self.keyframeReaskWindow {
+            mutateStats { $0.keyframeRequestsSuppressed += 1 }
+            return
+        }
+        keyframeAskedAt = now
+        mutateStats { $0.keyframeRequests += 1 }
+        onNeedsKeyframe?()
+    }
 
     // MARK: - Cross-thread state
 
@@ -162,6 +234,7 @@ final class LiveVideoDecoder {
         currentSPS = nil
         currentPPS = nil
         awaitingKeyframe = true
+        keyframeAskedAt = 0
     }
 
     /// Main thread. The next decoded frame is written to a PNG.
@@ -204,7 +277,7 @@ final class LiveVideoDecoder {
             // No SPS/PPS yet. Normal for the first few packets of a mid-GOP join; slices
             // before the parameter sets are undecodable by definition, not an error.
             mutateStats { $0.droppedNoFormatDescription += 1 }
-            onNeedsKeyframe?()
+            requestKeyframe()
             return
         }
 
@@ -214,10 +287,14 @@ final class LiveVideoDecoder {
         if awaitingKeyframe {
             guard keyframe else {
                 mutateStats { $0.droppedAwaitingKeyframe += 1 }
-                onNeedsKeyframe?()
+                requestKeyframe()
                 return
             }
             awaitingKeyframe = false
+            // THE ANSWER ARRIVED. Clear the suppression window so the NEXT episode — which may be
+            // seconds or an hour away — asks immediately instead of serving out the remainder of
+            // a window belonging to a request that has already been satisfied.
+            keyframeAskedAt = 0
             mutateStats { $0.awaitingKeyframe = false }
             NSLog("[\(logTag)] keyframe acquired — decoding from here")
         }
@@ -249,7 +326,7 @@ final class LiveVideoDecoder {
             // reference state it had is now suspect.
             awaitingKeyframe = true
             mutateStats { $0.awaitingKeyframe = true }
-            onNeedsKeyframe?()
+            requestKeyframe()
         }
     }
 
@@ -290,6 +367,9 @@ final class LiveVideoDecoder {
 
         // A fresh session has no reference frames whatever the bitstream says.
         awaitingKeyframe = true
+        // …and any keyframe request outstanding against the OLD session is not an answer for this
+        // one. Clear the window so the gate below can ask again immediately.
+        keyframeAskedAt = 0
         mutateStats { $0.awaitingKeyframe = true }
     }
 
@@ -422,7 +502,7 @@ final class LiveVideoDecoder {
                 awaitingKeyframe = true
                 mutateStats { $0.awaitingKeyframe = true }
                 NSLog("[\(logTag)] decode failed (%d) — dropping to next keyframe, PLI requested", status)
-                onNeedsKeyframe?()
+                requestKeyframe()
             }
             return
         }

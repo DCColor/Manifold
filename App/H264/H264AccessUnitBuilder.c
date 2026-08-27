@@ -105,7 +105,14 @@ struct ManifoldH264AccessUnitBuilder {
     uint32_t accessUnitTimestamp;
     bool     accessUnitKeyframe;
     bool     accessUnitOverflowed;
-    bool     parameterSetsChanged; // sticky until the next AU is emitted
+    /// A packet inside this AU's span never arrived. Set by the TRANSPORT (only it can know —
+    /// see the header), sticky until the AU closes, and armed independently of
+    /// `accessUnitActive` so damage discovered before the first slice still lands.
+    bool     accessUnitDamaged;
+    /// Where the FIRST damage reported for this AU was. Meaningless while `accessUnitDamaged`
+    /// is false; read only on the discard path.
+    ManifoldH264AccessUnitDamage accessUnitDamage;
+    bool     parameterSetsChanged; // sticky until the AU it belongs to is EMITTED
 
     uint8_t  sps[MD_MAX_PARAMETER_SET];
     size_t   spsSize;
@@ -124,7 +131,11 @@ struct ManifoldH264AccessUnitBuilder {
 /// handler path (WHEP) and the accessor path (SRT) so the two can never drift.
 static bool MDAccessUnitContents(const ManifoldH264AccessUnitBuilder *ab,
                                  ManifoldH264AccessUnitContents *out) {
-    if (!ab->accessUnitActive || ab->accessUnitOverflowed || ab->accessUnit.size == 0) return false;
+    // `accessUnitDamaged` joins the other two rejections HERE, in the shared predicate, so the
+    // handler path (WHEP) and the accessor path (SRT) cannot drift on what "worth emitting"
+    // means — which is the whole reason this function exists.
+    if (!ab->accessUnitActive || ab->accessUnitOverflowed || ab->accessUnitDamaged ||
+        ab->accessUnit.size == 0) return false;
     out->data                 = ab->accessUnit.data;
     out->size                 = ab->accessUnit.size;
     out->keyframe             = ab->accessUnitKeyframe;
@@ -137,14 +148,35 @@ static bool MDAccessUnitContents(const ManifoldH264AccessUnitBuilder *ab,
 }
 
 static void MDEmitAccessUnit(ManifoldH264AccessUnitBuilder *ab) {
-    if (!ab->accessUnitActive) return;
+    // The damage flag is armed independently of `accessUnitActive` (a transport can discover the
+    // loss before the AU's first slice opens it), so it must be cleared on EVERY close, including
+    // the ones that close nothing. Otherwise a group of packets carrying only parameter sets
+    // could arm it and the NEXT, undamaged frame would inherit the verdict.
+    if (!ab->accessUnitActive) { ab->accessUnitDamaged = false; return; }
 
+    // ⚠️ `parameterSetsChanged` IS NOT CLEARED ON THE DISCARD PATHS BELOW, ONLY ON THE EMIT.
+    // It means "SPS or PPS differ from the ones the DECODER last saw", and a frame we threw away
+    // never reached the decoder — so the change has still not been communicated and must ride
+    // along on the next frame that does get through. Clearing it here would strand the decoder on
+    // a stale format description until the parameter sets happened to change a second time.
     ManifoldH264AccessUnitContents contents;
     if (ab->accessUnitOverflowed) {
         ab->stats.accessUnitsOversize++;
+    } else if (ab->accessUnitDamaged) {
+        // KNOWN INCOMPLETE. Counted, dropped, and NOT reported as an error anywhere downstream:
+        // no decode was attempted, so nothing failed. See the header for why a missing frame
+        // beats a corrupt one in this application.
+        ab->stats.accessUnitsIncomplete++;
+        switch (ab->accessUnitDamage) {
+            case ManifoldH264AccessUnitDamageInterior: ab->stats.accessUnitsIncompleteInterior++; break;
+            case ManifoldH264AccessUnitDamageHead:     ab->stats.accessUnitsIncompleteHead++;     break;
+            case ManifoldH264AccessUnitDamageTail:     ab->stats.accessUnitsIncompleteTail++;     break;
+        }
+        if (ab->accessUnitKeyframe) ab->stats.keyframesIncomplete++;
     } else if (MDAccessUnitContents(ab, &contents)) {
         ab->stats.accessUnits++;
         if (ab->accessUnitKeyframe) ab->stats.keyframes++;
+        ab->parameterSetsChanged = false;   // delivered — see the note above
         if (ab->handler) {
             ManifoldH264AccessUnit accessUnit = {
                 .data                 = contents.data,
@@ -165,7 +197,7 @@ static void MDEmitAccessUnit(ManifoldH264AccessUnitBuilder *ab) {
     ab->accessUnitActive       = false;
     ab->accessUnitKeyframe     = false;
     ab->accessUnitOverflowed   = false;
-    ab->parameterSetsChanged   = false;
+    ab->accessUnitDamaged      = false;
 }
 
 /// Stores a parameter set, reporting whether it actually changed. Re-sent SPS/PPS
@@ -238,6 +270,10 @@ void ManifoldH264AccessUnitBuilderAppendNAL(ManifoldH264AccessUnitBuilder *ab,
         ab->accessUnitTimestamp  = timestamp;
         ab->accessUnitKeyframe   = false;
         ab->accessUnitOverflowed = false;
+        // `accessUnitDamaged` is DELIBERATELY NOT RESET HERE. Opening is lazy — it happens on
+        // this AU's first slice — but the transport may already have seen a hole earlier in the
+        // same timestamp group (between the parameter sets and this slice). Flush is the only
+        // thing that clears it, and Flush ran at the previous AU's boundary.
     }
 
     // KEYFRAME MEANS IDR — NAL TYPE 5, NOTHING ELSE. Do not "simplify" this to
@@ -267,6 +303,21 @@ void ManifoldH264AccessUnitBuilderAppendNAL(ManifoldH264AccessUnitBuilder *ab,
         !ManifoldH264BufferAppend(&ab->accessUnit, nal, size)) {
         ab->accessUnitOverflowed = true;   // allocation failure — discard the frame, keep running
     }
+}
+
+void ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged(ManifoldH264AccessUnitBuilder *ab,
+                                                        ManifoldH264AccessUnitDamage where) {
+    if (!ab) return;
+    // FIRST reason wins. A frame that lost its head and then also lost a slice in the middle is
+    // one skipped frame with one cause, not two — and the first cause is the one that describes
+    // what the link did, before our own state had anything to do with it.
+    if (ab->accessUnitDamaged) return;
+    ab->accessUnitDamaged = true;
+    ab->accessUnitDamage  = where;
+}
+
+bool ManifoldH264AccessUnitBuilderIsAccessUnitDamaged(const ManifoldH264AccessUnitBuilder *ab) {
+    return ab && ab->accessUnitDamaged;
 }
 
 void ManifoldH264AccessUnitBuilderFlush(ManifoldH264AccessUnitBuilder *ab) {

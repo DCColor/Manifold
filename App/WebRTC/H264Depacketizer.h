@@ -360,6 +360,51 @@ typedef struct {
     uint64_t accessUnitsByTimestamp;   ///< AUs closed by an RTP-timestamp change, i.e. a LOST marker bit.
     uint64_t accessUnitsOversize;      ///< AUs that blew the sanity cap and were discarded.
 
+    // ── INCOMPLETE ACCESS UNITS: FRAMES SKIPPED BEFORE THE DECODER SAW THEM ──
+    //
+    // ⚠️ THESE ARE NOT ERRORS AND MUST NOT BE READ AS ANY. Every one of them is a frame we
+    // KNEW was short a packet and therefore never submitted. The alternative — which is what
+    // this code used to do — is to submit it, have VideoToolbox reject it with
+    // kVTVideoDecoderBadDataErr, and have the decoder's resync gate then drop every frame until
+    // the next IDR: ONE lost packet cost roughly a SECOND of video. Now it costs one frame.
+    //
+    // The rule that decides completeness is a SEQUENCE rule and is stated in full in the
+    // AU-COMPLETENESS block in the .c file. In one line: an access unit is complete only if the
+    // RTP packets carrying it form an unbroken run of sequence numbers, and the run is closed
+    // either by a marker bit or by a directly-adjacent packet bearing the next timestamp.
+    //
+    // The identity is exact — the three causes partition the total:
+    //
+    //     accessUnitsIncomplete == …Interior + …Head + …Tail
+    //
+    // and they say DIFFERENT things about the link, which is why they are three counters:
+    //
+    //   * INTERIOR — a hole between two packets we DID receive of the same frame. This is the
+    //     defect's headline case: a slice arriving as a LONE unfragmented packet, lost, with
+    //     nothing left behind to notice it by. It is also every mid-NAL FU-A loss.
+    //   * HEAD — packets were lost across a frame boundary and could have been this frame's
+    //     opening. See the over-drop note in AU COMPLETENESS: when a burst straddles a boundary
+    //     BOTH frames are skipped, because the missing packets took their own timestamps with
+    //     them and there is no way to tell which frame they belonged to.
+    //   * TAIL — the frame's last packets, including the one carrying its marker bit, never
+    //     arrived; it was closed by the arrival of a NON-ADJACENT packet bearing the next
+    //     timestamp. Every one of these is also an `accessUnitsByTimestamp`, but the reverse is
+    //     NOT true: a sender that omits marker bits entirely closes every AU by timestamp with a
+    //     perfectly adjacent packet and produces ZERO tail losses. That distinction is the whole
+    //     reason completeness is tested by ADJACENCY rather than by "did a marker arrive".
+    //
+    // ⚠️ ONE TAIL LOSS PER SESSION IS EXPECTED AND IS NOT THE NETWORK. Teardown flushes whatever
+    // frame was mid-arrival, and a frame caught mid-arrival is genuinely incomplete. Subtract
+    // one before reading these as a loss rate on a short session.
+    uint64_t accessUnitsIncomplete;         ///< Frames SKIPPED, never submitted. See above.
+    uint64_t accessUnitsIncompleteInterior; ///< …a packet BETWEEN two of its own was missing.
+    uint64_t accessUnitsIncompleteHead;     ///< …its opening may have been in a boundary-straddling gap.
+    uint64_t accessUnitsIncompleteTail;     ///< …its final packet(s) never arrived.
+    /// Of `accessUnitsIncomplete`, the ones that would have been KEYFRAMES. Its own counter
+    /// because a skipped IDR is the one skip that costs more than a frame: everything after it
+    /// references a picture the decoder never received, so the keyframe has to be re-requested.
+    uint64_t keyframesIncomplete;
+
     // ── Latched state ────────────────────────────────────────────────────────
     int      payloadType;              ///< Negotiated (or latched) H.264 payload type; -1 if unknown.
     uint32_t ssrc;                     ///< The SSRC we locked onto.

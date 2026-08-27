@@ -1065,13 +1065,13 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
               now.payloadType);
     }
 
-    NSLog(@"[WHEP-RTP] +%.0fs  frames=%llu (key=%llu)  NALs: SPS=%llu PPS=%llu IDR=%llu slice=%llu "
+    NSLog(@"[WHEP-RTP] +%.0fs  frames=%llu (key=%llu, skipped=%llu)  NALs: SPS=%llu PPS=%llu IDR=%llu slice=%llu "
           @"SEI=%llu  |  pkts=%llu seqGaps=%llu declaredLost=%llu reorder=%llu  |  "
           @"recovered=%llu stillMissing=%llu outstanding=%llu  |  "
           @"nacks=%llu (seqs=%llu)  |  "
           @"FU-A rx=%llu reassembled=%llu dropped=%llu  |  handoff=%llu shed=%llu",
           [NSDate.date timeIntervalSinceDate:_rtpStartedAt],
-          MD_DELTA(accessUnits), MD_DELTA(keyframes),
+          MD_DELTA(accessUnits), MD_DELTA(keyframes), MD_DELTA(accessUnitsIncomplete),
           MD_DELTA(nalSPS), MD_DELTA(nalPPS), MD_DELTA(nalIDR), MD_DELTA(nalSlice), MD_DELTA(nalSEI),
           MD_DELTA(packetsReceived), MD_DELTA(seqGaps), MD_DELTA(packetsLost), MD_DELTA(packetsReordered),
           MD_DELTA(packetsRecovered), MD_DELTA(packetsStillMissing), now.packetsOutstanding,
@@ -1093,6 +1093,35 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
               @"a shorter one loses more.",
               MD_DELTA(packetsLateAfterGiveUp), now.lateAfterGiveUpUsMax / 1000,
               ManifoldH264DefaultLossPolicy().recoveryWindowMs);
+    }
+
+    // ── FRAMES WE KNEW WERE SHORT AND DID NOT SUBMIT ─────────────────────────────────
+    //
+    // Its own line, and worded for whoever reads a support export. These are NOT errors and the
+    // line says so explicitly, because the counter sits next to `errors=` in the decode log and
+    // will otherwise be read as one. The frame was skipped BEFORE the decoder saw it, on the
+    // evidence of a sequence gap; the picture holds for one extra tick and nothing else happens.
+    if (MD_DELTA(accessUnitsIncomplete) > 0) {
+        NSLog(@"[WHEP-RTP]   SKIPPED %llu incomplete frame(s) (%llu interior, %llu head, %llu tail; "
+              @"%llu would have been keyframes). NOT decode errors — these were never submitted. "
+              @"A frame missing a slice decodes to a visibly wrong band, which in a colour review "
+              @"tool is worse than no frame at all, so the previous frame is held instead.",
+              MD_DELTA(accessUnitsIncomplete), MD_DELTA(accessUnitsIncompleteInterior),
+              MD_DELTA(accessUnitsIncompleteHead), MD_DELTA(accessUnitsIncompleteTail),
+              MD_DELTA(keyframesIncomplete));
+    }
+
+    // A SKIPPED KEYFRAME is the one skip that costs more than a frame: every picture after it
+    // references an IDR the decoder never received. Ask for another. Same shared 1 s floor as
+    // every other trigger, and raised HERE, on the main-thread stats tick, so requestKeyframe's
+    // main-only invariant holds without a hop. Non-key skips deliberately do NOT ask — the
+    // decoder's own error path is what decides whether the reference chain actually broke, and
+    // a PLI per loss event would force a keyframe roughly once a second on a lossy link.
+    if (MD_DELTA(keyframesIncomplete) > 0) {
+        if ([self requestKeyframe]) {
+            NSLog(@"[WHEP-RTP]   %llu keyframe(s) skipped as incomplete — PLI %d sent to replace them",
+                  MD_DELTA(keyframesIncomplete), _pliRequests);
+        }
     }
 
     // A gap too wide to be worth requesting is handed to the keyframe path by design — see
@@ -1176,7 +1205,26 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     // Time-based instead: a burst of decode errors (23 were seen in one freeze) collapses to
     // ONE PLI, and a freeze ten minutes later still gets one. _pliRequests now only counts
     // sends for the log; it never gates.
-    static const NSTimeInterval kMinPliInterval = 0.250;
+    //
+    // ── 0.250 → 1.0: ONE REQUEST, THEN WAIT ──────────────────────────────────────────────
+    //
+    // 250 ms was a STORM BRAKE, and it did that job: it stopped a burst of decode errors from
+    // becoming a burst of PLIs. It was never a suppression window, because it is shorter than the
+    // answer takes — our RTCP out, the SFU forwarding it upstream, the encoder emitting an IDR,
+    // and that IDR arriving back. At 250 ms we asked four times per second for a keyframe that
+    // was already on its way, and every one of those was pure added traffic on a link that had
+    // just demonstrated it was losing packets.
+    //
+    // One second covers the whole round with headroom (see the WHY ONE SECOND note in
+    // LiveVideoDecoder.swift, which reasons about the same interval from the decoder's side) and
+    // matches the 1 Hz cadence this file's stats timer and the client's backstop already run at.
+    // Every PLI trigger in the app now agrees on one rate instead of racing at three.
+    //
+    // ⚠️ NOT REDUNDANT WITH THE DECODER'S OWN WINDOW. That one suppresses the decoder's
+    // per-access-unit triggers at the source, before they cost a queue hop. This one is the
+    // CROSS-PATH floor: it is what stops the decoder's request, the gap-too-wide hand-off, and
+    // the no-keyframe-yet backstop from landing on top of each other within the same second.
+    static const NSTimeInterval kMinPliInterval = 1.0;
     const NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;   // monotonic
     if (_lastPliRequestedAt > 0 && (now - _lastPliRequestedAt) < kMinPliInterval) {
         return NO;   // a recent PLI is still outstanding — suppress this one
@@ -1236,6 +1284,7 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
             @"allArrivalsUs avg=%llu max=%llu (legacy, pre-attribution baselines) | "
             @"lateAfterGiveUp=%llu (worst %llu ms; a SUBSET of stillMissing) | "
             @"nacks built=%llu seqs=%llu toWire=%llu refused=%llu rateSuppressed=%llu gapsTooWide=%llu | "
+            @"skippedIncomplete=%llu (interior=%llu head=%llu tail=%llu; keyframes=%llu) | """
             @"reorder=%llu malformed=%llu | "
             @"FU-A rx=%llu reassembled=%llu dropped=%llu | "
             @"auClosedByTimestamp=%llu wrongPt=%llu wrongSsrc=%llu rtcpInRtp=%llu | "
@@ -1261,6 +1310,9 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
             stats.packetsLateAfterGiveUp, stats.lateAfterGiveUpUsMax / 1000,
             stats.nacksSent, stats.nackSeqsRequested, nacksToWire, nacksRefused,
             stats.nackSeqsSuppressedByRate, stats.nackGapsTooLarge,
+            stats.accessUnitsIncomplete, stats.accessUnitsIncompleteInterior,
+            stats.accessUnitsIncompleteHead, stats.accessUnitsIncompleteTail,
+            stats.keyframesIncomplete,
             stats.packetsReordered, stats.packetsMalformed,
             stats.fuaPackets, stats.fuaReassembled, stats.fuaDropped,
             stats.accessUnitsByTimestamp, stats.packetsWrongPayloadType, stats.packetsWrongSSRC,

@@ -449,7 +449,7 @@ final class WHEPClient: ObservableObject {
         let accessUnits = now.accessUnitsReceived - was.accessUnitsReceived
         NSLog("""
               [WHEP-DECODE] +%ds  decoded=%d/s (total=%d)  %dx%d %@  |  AUs=%d/s  \
-              dropped: preIDR=%d noFmt=%d sbFail=%d  |  errors=%d
+              dropped: preIDR=%d noFmt=%d sbFail=%d  |  errors=%d  |  PLI: sent=%d suppressed=%d
               """,
               decodeStatsTicks, decoded, now.framesDecoded,
               now.width, now.height, LiveVideoDecoder.formatName(now.pixelFormat),
@@ -457,7 +457,9 @@ final class WHEPClient: ObservableObject {
               now.droppedAwaitingKeyframe - was.droppedAwaitingKeyframe,
               now.droppedNoFormatDescription - was.droppedNoFormatDescription,
               now.sampleBufferFailures - was.sampleBufferFailures,
-              now.decodeErrors - was.decodeErrors)
+              now.decodeErrors - was.decodeErrors,
+              now.keyframeRequests - was.keyframeRequests,
+              now.keyframeRequestsSuppressed - was.keyframeRequestsSuppressed)
 
         if now.decodeErrors > was.decodeErrors {
             NSLog("[WHEP-DECODE]   last decode error: %d", now.lastDecodeError)
@@ -704,12 +706,13 @@ final class WHEPClient: ObservableObject {
             NSLog("""
                   [WHEP-DECODE] session totals: %d access units → %d frames decoded (%dx%d %@) | \
                   dropped: preIDR=%d noFmt=%d sbFail=%d | errors=%d | \
-                  formatDescriptions=%d sessions=%d
+                  PLI sent=%d suppressed=%d | formatDescriptions=%d sessions=%d
                   """,
                   stats.accessUnitsReceived, stats.framesDecoded,
                   stats.width, stats.height, LiveVideoDecoder.formatName(stats.pixelFormat),
                   stats.droppedAwaitingKeyframe, stats.droppedNoFormatDescription,
                   stats.sampleBufferFailures, stats.decodeErrors,
+                  stats.keyframeRequests, stats.keyframeRequestsSuppressed,
                   stats.formatDescriptionBuilds, stats.sessionBuilds)
         }
         #endif

@@ -146,6 +146,63 @@
 //
 // A tombstone does NOT revise `packetsStillMissing` back down — see the header for why.
 
+// ── AU COMPLETENESS: WHICH FRAMES ARE SAFE TO SUBMIT ─────────────────────────────────
+//
+// ⚠️ THIS IS THE FIX FOR "ONE LOST PACKET COSTS A SECOND OF VIDEO". Until it existed, a frame
+// missing a slice was assembled anyway and handed to VideoToolbox, which rejected it with
+// kVTVideoDecoderBadDataErr; the decoder then treated its reference state as poisoned, armed its
+// wait-for-IDR gate, and dropped EVERY frame until the next keyframe. 0.45% packet loss produced
+// 17% frame loss. The cost was never the lost packet — it was the rejected submission.
+//
+// TWO HOLES HAD TO BE CLOSED, AND ONLY ONE OF THEM WAS EVEN VISIBLE.
+//
+//   1. THE FRAGMENTED CASE, which LOOKED handled. A gap mid-NAL calls MDAbandonFragment, which
+//      throws away the partial NAL and counts `fuaDropped`. But abandoning the FRAGMENT is not
+//      abandoning the ACCESS UNIT: the AU stayed open, kept whatever slices had already been
+//      appended, and was emitted at the marker bit — short one slice and structurally valid.
+//      The fragment counter moved, so it read as handled. It was not.
+//
+//   2. THE UNFRAGMENTED CASE, WHICH LEFT NO TRACE AT ALL. A slice small enough to fit one RTP
+//      packet is sent as a single-NAL packet. Lose it and there is no fragment to abandon, no
+//      counter to move, and nothing anywhere in this file that knew the frame was short. This is
+//      the common case for P-frames, and it is the one the defect was actually about.
+//
+// THE RULE. Both are the same question — is this frame's packet run intact? — so both get the
+// same answer, and it is a SEQUENCE question, which means it belongs here and not in the
+// builder. The builder sees complete NAL units and cannot tell two slices from three-minus-one;
+// a slice header carries `first_mb_in_slice` but no count of the slices that were sent.
+//
+// A TIMESTAMP GROUP is every packet sharing one RTP timestamp — one frame's worth, parameter-set
+// packets included. RFC 3550 sends a group's packets consecutively, so:
+//
+//     A frame is COMPLETE iff its packets form an UNBROKEN sequence-number run, and that run is
+//     closed either by a MARKER BIT, or by the immediately-adjacent packet bearing the next
+//     timestamp.
+//
+// Anything else and the frame is marked damaged and DISCARDED — see
+// ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged for why discarding beats submitting.
+//
+// ⚠️ ADJACENCY, NOT "DID A MARKER ARRIVE". The obvious test — treat every AU closed by a
+// timestamp change as a lost marker — is wrong, and wrong in the catastrophic direction: a
+// sender that simply does not set marker bits closes EVERY AU that way and would have 100% of
+// its frames discarded. Testing whether the closing packet directly follows the group's last
+// packet is correct for both senders, and needs no heuristic about which kind we are talking to.
+//
+// ⚠️ A NON-ADJACENT GROUP START DAMAGES THE NEW GROUP TOO, and that is deliberate over-drop.
+// When packets are missing between two groups we cannot tell whether they were the old group's
+// tail, the new group's head, or whole frames in between — the packets are missing, so their
+// timestamps are missing with them. Both ends are marked. The cost when the guess is wrong is
+// ONE extra skipped frame, and it can only be wrong when a loss burst aligns exactly with frame
+// boundaries; the cost of guessing the other way is a submitted partial frame, which is the
+// second of video this whole block exists to stop. Cheap insurance, bought knowingly.
+//
+// ⚠️ A RECOVERED PACKET THAT ARRIVES AFTER ITS FRAME CLOSED DOES NOT UN-DAMAGE IT. There is no
+// jitter buffer here (see the file header) — NALs are appended in ARRIVAL order, so a slice that
+// turns up after its successors would be assembled out of order, which main and high profile
+// forbid and VideoToolbox rejects. Such a frame is still lost; it is now lost CLEANLY. That is
+// also why `packetsRecovered` can climb while frames still skip: only a retransmit that beats
+// the next packet of the same frame can actually save it.
+
 #define MD_OUTSTANDING_CAP        512u   // fixed; the receive path never allocates
 #define MD_OUTSTANDING_SWEEP      8u     // slots aged per packet — bounds the per-packet cost
 #define MD_NACK_SEQS_PER_SERVICE  64u    // sequence numbers handed to the sink in one call
@@ -243,6 +300,18 @@ struct ManifoldH264Depacketizer {
     // FU-A reassembly
     ManifoldH264Buffer fragment;
     bool               fragmentActive;
+
+    // ── AU completeness (see AU COMPLETENESS above) ──────────────────────────
+    // The packet run of the timestamp group currently arriving. `tsRunNextSeq` is the sequence
+    // number the group's next packet must carry; anything else is a hole. Three fields and two
+    // comparisons per packet — this test costs nothing on the receive path.
+    bool     tsRunValid;
+    uint32_t tsRunTimestamp;
+    uint16_t tsRunNextSeq;
+    /// This group already sent its marker bit, so its frame is CLOSED. Any further packet
+    /// bearing the same timestamp is a straggler, and the access unit it would reopen could only
+    /// ever be a fragment of a frame already emitted. See the guard in the sameGroup branch.
+    bool     tsRunClosedByMarker;
 
     // Access-unit assembly and every piece of H.264 state it needs (AU buffer,
     // keyframe flag, SPS/PPS slots, the handler) live here.
@@ -924,15 +993,96 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
     dp->stats.packetsAccepted++;
     dp->stats.lastRTPTimestamp = timestamp;
 
-    // A new timestamp means the previous access unit is over. This is the SAFETY
-    // NET for a lost marker bit; the marker below is the primary signal. Both
-    // boundaries stay here in the RTP layer — the builder only closes when told.
-    uint32_t openTimestamp = 0;
-    if (ManifoldH264AccessUnitBuilderIsAccessUnitOpen(dp->builder, &openTimestamp) &&
-        timestamp != openTimestamp) {
-        dp->stats.accessUnitsByTimestamp++;
+    // ── AU COMPLETENESS: IS THIS PACKET THE NEXT ONE OF THE GROUP IT JOINS? ──────────────
+    //
+    // Both questions are answered by the SAME two comparisons, taken here, BEFORE anything
+    // below mutates the run — the timestamp-change flush needs `contiguous` measured against the
+    // group that is ENDING, and the append below needs it measured against the group this packet
+    // JOINS. They are the same reading. See AU COMPLETENESS at the top of this file.
+    const bool sameGroup  = dp->tsRunValid && timestamp == dp->tsRunTimestamp;
+    const bool contiguous = dp->tsRunValid && seq == dp->tsRunNextSeq;
+    /// How many sequence numbers are missing immediately before this packet. Wrap-correct, and
+    /// for a REORDERED packet it wraps to something enormous — which is the right answer, since a
+    /// packet from the past tells us nothing about what is missing from the present.
+    const uint16_t missingBefore = dp->tsRunValid ? (uint16_t)(seq - dp->tsRunNextSeq) : 0;
+
+    if (sameGroup) {
+        // A STRAGGLER AFTER THE MARKER BIT. This group's frame has already been emitted, so a
+        // further packet carrying its timestamp opens a SECOND access unit that can only hold a
+        // fragment of it. Condemn that fragment. (Reachable via a duplicate or a reordered
+        // packet; SRTP replay protection makes it rare, which is not the same as impossible.)
+        if (dp->tsRunClosedByMarker) {
+            ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged(
+                dp->builder, ManifoldH264AccessUnitDamageInterior);
+        }
+        // INTERIOR LOSS: a hole between two packets of the SAME frame. This is the case no
+        // counter in this file could previously see — a lone unfragmented slice packet leaves
+        // nothing behind when it is lost — and it is also every mid-NAL FU-A gap.
+        //
+        // Marked on the BUILDER rather than on a local flag because the access unit may not have
+        // opened yet: a group's parameter-set packet arrives before its first slice, so a hole
+        // between the two must be recorded somewhere that survives until the AU exists. The
+        // builder's flag is armed independently of whether an AU is open, precisely for this.
+        if (!contiguous) {
+            ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged(
+                dp->builder, ManifoldH264AccessUnitDamageInterior);
+        }
+    } else {
+        // ── A GROUP BOUNDARY ────────────────────────────────────────────────────────────────
+        //
+        // A new timestamp means the previous access unit is over. This is the SAFETY NET for a
+        // lost marker bit; the marker at the foot of this function is the primary signal. Both
+        // boundaries stay here in the RTP layer — the builder only closes when told.
+        const bool auWasOpen = ManifoldH264AccessUnitBuilderIsAccessUnitOpen(dp->builder, NULL);
+        if (auWasOpen) {
+            // TAIL LOSS. The frame is being closed by a packet that does NOT directly follow its
+            // last one, so the packets in between — including whichever carried its marker bit —
+            // never arrived. ADJACENCY is the test, not the absence of a marker: a sender that
+            // never sets marker bits closes every frame here with a perfectly adjacent packet
+            // and is correctly judged complete. See AU COMPLETENESS.
+            if (!contiguous) {
+                ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged(
+                    dp->builder, ManifoldH264AccessUnitDamageTail);
+            }
+            dp->stats.accessUnitsByTimestamp++;
+        }
+        // UNCONDITIONAL, including when nothing is open. Flush is a no-op for a closed AU but it
+        // is also what CLEARS the damage flag, and the flag has to be cleared at every group
+        // boundary — otherwise a group that reported damage and then produced no access unit at
+        // all (every slice lost, only its parameter sets received) would leave the flag armed and
+        // condemn the NEXT, undamaged frame.
         ManifoldH264AccessUnitBuilderFlush(dp->builder);
+
+        // HEAD LOSS. This group's first packet does not directly follow the previous group's
+        // last one, so something was lost across the boundary and we cannot tell which side it
+        // belonged to — the packets are missing, so their timestamps are missing with them. Both
+        // ends are marked: the old one just above, the new one here. Deliberate over-drop; see
+        // AU COMPLETENESS for why it is the cheap direction.
+        //
+        // `dp->tsRunValid` excludes the first packet of the session, which has no predecessor to
+        // be adjacent to and is not evidence of anything.
+        //
+        // ⚠️ ONE CASE IS PROVABLE AND IS EXEMPTED, BECAUSE IT IS THE COMMONEST ONE. An access
+        // unit still OPEN at a boundary means the previous frame's marker packet was never
+        // received — a marker would have flushed it. The missing run is contiguous and starts at
+        // `tsRunNextSeq`, the immediate successor of that frame's last received packet, so its
+        // FIRST element is that missing marker. If it is the ONLY element, every packet after it
+        // arrived, the packet in hand IS the new frame's first, and the new frame is INTACT.
+        //
+        // That is a proof, not a heuristic, and without it every ordinary tail loss would take
+        // the following frame down with it — doubling the cost of the single most common way a
+        // frame gets damaged. With two or more missing the run can straddle the boundary and the
+        // ambiguity is real again, so both ends are marked.
+        const bool provablyOnlyTheMarker = auWasOpen && missingBefore == 1;
+        if (dp->tsRunValid && !contiguous && !provablyOnlyTheMarker) {
+            ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged(
+                dp->builder, ManifoldH264AccessUnitDamageHead);
+        }
+        dp->tsRunValid          = true;
+        dp->tsRunTimestamp      = timestamp;
+        dp->tsRunClosedByMarker = false;
     }
+    dp->tsRunNextSeq = (uint16_t)(seq + 1u);
 
     const uint8_t *payload     = packet + offset;
     const size_t   payloadSize = end - offset;
@@ -948,13 +1098,30 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
         dp->stats.nalUnsupported++;   // STAP-B / MTAP / FU-B / reserved 0, 30, 31
     }
 
-    if (marker) ManifoldH264AccessUnitBuilderFlush(dp->builder);
+    if (marker) {
+        ManifoldH264AccessUnitBuilderFlush(dp->builder);
+        dp->tsRunClosedByMarker = true;   // this frame is finished; see the straggler guard above
+    }
 }
 
 void ManifoldH264DepacketizerFlush(ManifoldH264Depacketizer *dp) {
     if (!dp) return;
     MDAbandonFragment(dp);
+    // END OF STREAM. An access unit still open here never saw its marker bit and never saw the
+    // next timestamp either, so by the rule above it is UNVERIFIABLE — and a frame caught
+    // mid-arrival by teardown genuinely is incomplete. Marked, so the invariant "nothing partial
+    // is ever emitted" holds at every exit and not merely on the steady-state path.
+    //
+    // ⚠️ THIS IS WHY A CLEAN SESSION STILL REPORTS ONE TAIL LOSS. Teardown lands at an arbitrary
+    // instant, and at any given instant a frame is usually part-way through arriving. Subtract
+    // one before reading `accessUnitsTailLoss` as a loss rate on a short session.
+    if (ManifoldH264AccessUnitBuilderIsAccessUnitOpen(dp->builder, NULL)) {
+        ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged(
+            dp->builder, ManifoldH264AccessUnitDamageTail);
+    }
     ManifoldH264AccessUnitBuilderFlush(dp->builder);
+    dp->tsRunValid          = false;
+    dp->tsRunClosedByMarker = false;
 }
 
 void ManifoldH264DepacketizerCopyStats(const ManifoldH264Depacketizer *dp,
@@ -984,6 +1151,14 @@ void ManifoldH264DepacketizerCopyStats(const ManifoldH264Depacketizer *dp,
     outStats->accessUnits         = au.accessUnits;
     outStats->keyframes           = au.keyframes;
     outStats->accessUnitsOversize = au.accessUnitsOversize;
+    // The builder owns the TOTAL (it is the thing that discards the frame); this file owns the
+    // two CAUSES (only the sequence layer knows which it was). They are folded together here so
+    // the identity in the header — total == interior + tail — is checkable in one struct.
+    outStats->accessUnitsIncomplete         = au.accessUnitsIncomplete;
+    outStats->accessUnitsIncompleteInterior = au.accessUnitsIncompleteInterior;
+    outStats->accessUnitsIncompleteHead     = au.accessUnitsIncompleteHead;
+    outStats->accessUnitsIncompleteTail     = au.accessUnitsIncompleteTail;
+    outStats->keyframesIncomplete           = au.keyframesIncomplete;
     outStats->spsSize             = au.spsSize;
     outStats->ppsSize             = au.ppsSize;
     // A zero-length NAL used to be counted as packetsMalformed at the point the

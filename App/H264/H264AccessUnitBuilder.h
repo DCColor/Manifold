@@ -125,6 +125,22 @@ typedef struct {
 /// Opaque builder state. One per inbound video stream.
 typedef struct ManifoldH264AccessUnitBuilder ManifoldH264AccessUnitBuilder;
 
+/// WHERE in an access unit the transport found the hole. Transport-neutral by construction: it
+/// describes a position within the frame, not an RTP concept.
+///
+/// Recorded so the DISCARD, rather than the detection, is what gets counted — see the identity
+/// note on `accessUnitsIncomplete`. Only the FIRST damage reported for an access unit is kept;
+/// once a frame is going to be thrown away, the second reason for throwing it away is noise.
+typedef enum {
+    /// A hole BETWEEN two surviving parts of this access unit. The hardest case to see from
+    /// outside and the one that used to escape entirely.
+    ManifoldH264AccessUnitDamageInterior = 0,
+    /// Data missing BEFORE this access unit's first surviving part, i.e. its opening was lost.
+    ManifoldH264AccessUnitDamageHead,
+    /// This access unit's FINAL part(s) never arrived, so its end was never observed.
+    ManifoldH264AccessUnitDamageTail,
+} ManifoldH264AccessUnitDamage;
+
 /// Counters owned by the H.264 layer. The transport folds these into its own
 /// stats struct — see ManifoldH264DepacketizerCopyStats — so callers keep seeing
 /// one set of numbers. Monotonic; snapshot and diff for rates.
@@ -143,6 +159,29 @@ typedef struct {
     uint64_t accessUnits;              ///< Frames emitted (non-empty AUs).
     uint64_t keyframes;                ///< AUs containing an IDR slice.
     uint64_t accessUnitsOversize;      ///< AUs that blew the sanity cap and were discarded.
+
+    /// AUs DISCARDED because the transport told us part of them never arrived. See
+    /// `ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged`. These frames were never handed to
+    /// the decoder, so they are NOT decode errors and must not be read as any.
+    ///
+    /// The three below partition it EXACTLY:
+    ///
+    ///     accessUnitsIncomplete == …Interior + …Head + …Tail
+    ///
+    /// ⚠️ AND THAT IS WHY THE COUNT HAPPENS AT THE DISCARD RATHER THAN AT THE DETECTION. A
+    /// transport can report damage for a frame that then turns out to have NO surviving picture
+    /// data at all — every slice lost, only its parameter sets received. There is no frame to
+    /// discard in that case and nothing was skipped, so nothing is counted, and the identity
+    /// stays exact instead of accumulating a discrepancy nobody could later explain.
+    uint64_t accessUnitsIncomplete;
+    uint64_t accessUnitsIncompleteInterior;
+    uint64_t accessUnitsIncompleteHead;
+    uint64_t accessUnitsIncompleteTail;
+    /// Of `accessUnitsIncomplete`, the ones that would have been KEYFRAMES. Worth its own
+    /// counter: a discarded IDR is the one skip that costs more than a frame, because everything
+    /// after it references a picture the decoder never got. The transport should re-ask for a
+    /// keyframe when this moves.
+    uint64_t keyframesIncomplete;
 
     // ── Parameter sets held ──────────────────────────────────────────────────
     size_t   spsSize;                  ///< Bytes of SPS held (0 = none yet).
@@ -171,8 +210,48 @@ void ManifoldH264AccessUnitBuilderAppendNAL(ManifoldH264AccessUnitBuilder *build
                                             const uint8_t *nal, size_t size,
                                             uint32_t timestamp);
 
+/// ── THE ACCESS UNIT NOW BEING BUILT IS KNOWN TO BE MISSING SOMETHING. DISCARD IT. ─────────
+///
+/// Sticky until the AU closes: once marked, `Flush` counts the frame in `accessUnitsIncomplete`
+/// and does NOT call the handler, and `CopyAccessUnitContents` returns false. NOTHING PARTIAL IS
+/// EVER HANDED DOWNSTREAM, and no concealment is attempted — see the WHY below.
+///
+/// SAFE TO CALL BEFORE THE AU HAS OPENED. Access units open LAZILY, on the first NAL that is not
+/// a parameter set, so a transport that loses a packet between an AU's `STAP-A(SPS,PPS)` and its
+/// first slice would otherwise have nowhere to record the damage. The flag is therefore armed
+/// independently of `accessUnitActive` and cleared only when an AU closes — which is also why
+/// `Flush` clears it even when it emits nothing.
+///
+/// ⚠️ ONLY THE TRANSPORT CAN CALL THIS, BECAUSE ONLY THE TRANSPORT KNOWS. This file sees a
+/// stream of complete NAL units and has no way to tell "an AU of two slices" from "an AU of
+/// three slices, one of which was lost" — a slice header carries `first_mb_in_slice` but no
+/// count, and nothing in the NAL stream says how many were sent. Completeness is a SEQUENCE
+/// question, and sequence numbers live in the transport. See the AU-COMPLETENESS block in
+/// H264Depacketizer.c for the rule WHEP applies.
+///
+/// ── WHY DISCARD RATHER THAN SUBMIT AND LET THE DECODER COPE ──────────────────────────────
+///
+/// Manifold is a COLOUR REVIEW tool. A frame with a missing slice decodes to a picture with a
+/// visibly wrong band in it, and the viewer cannot tell whether that artifact is in their FILE
+/// or in our transport — which makes it worse than no frame at all. Holding the previous frame
+/// for one extra display tick is silent, obvious, and never lies about the source material.
+///
+/// It is also the cheaper failure. Submitting the partial AU costs kVTVideoDecoderBadDataErr,
+/// which poisons the session's reference state, which arms the decoder's wait-for-IDR gate, and
+/// that gate then drops every frame until the next keyframe — roughly a SECOND of video for one
+/// lost packet. Discarding the frame here costs exactly the frame.
+void ManifoldH264AccessUnitBuilderMarkAccessUnitDamaged(ManifoldH264AccessUnitBuilder *builder,
+                                                        ManifoldH264AccessUnitDamage where);
+
+/// True when the AU under construction has been marked damaged and will be discarded at the next
+/// Flush. Lets a transport avoid re-counting the same frame from two different detections.
+bool ManifoldH264AccessUnitBuilderIsAccessUnitDamaged(const ManifoldH264AccessUnitBuilder *builder);
+
 /// Closes and emits the open access unit, if any. No-op when none is open, so it
 /// is safe to call on every possible boundary signal. Also the end-of-stream call.
+///
+/// A DAMAGED AU IS COUNTED AND DROPPED HERE rather than handed to the handler; the damage flag
+/// is cleared whether or not an AU was open, so it can never carry into the next frame.
 void ManifoldH264AccessUnitBuilderFlush(ManifoldH264AccessUnitBuilder *builder);
 
 /// True when an access unit is under construction; writes its timestamp to
@@ -184,8 +263,9 @@ bool ManifoldH264AccessUnitBuilderIsAccessUnitOpen(const ManifoldH264AccessUnitB
                                                    uint32_t *outTimestamp);
 
 /// Reads the OPEN access unit without emitting or resetting it. True when there is
-/// one worth having; false when none is open, it is still empty, or it blew the
-/// size cap — i.e. exactly the cases the handler would not fire for either.
+/// one worth having; false when none is open, it is still empty, it blew the size
+/// cap, or it was marked DAMAGED — i.e. exactly the cases the handler would not
+/// fire for either.
 ///
 /// FOR TRANSPORTS THAT DISPATCH THEIR OWN AU TYPE. The sequence is: append every
 /// NAL, call this, build and dispatch your own struct, then Flush to advance the
