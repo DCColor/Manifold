@@ -1003,3 +1003,183 @@ one, so **0.45% packet loss costs ~3.5% of frames before anything else goes wron
   Exp-Golomb reader, no emulation-prevention handling. Validated offline: it identified exactly
   120 pictures in a 120-frame encode. `accessUnitsIncompleteHead` is what says whether it is worth
   the change.
+
+---
+
+## 14. First real-network evidence: completeness rule + NACK together (2026-08-27)
+
+**A 12.9-minute WHEP session on the Studio, over a real network with real loss** — the first run
+where both the incomplete-AU skip rule and NACK retransmission were exercised by genuine loss
+rather than by injection. Source: `Manifold-0.6.0-diagnostics-2026-08-25-120716_MBA12.txt`
+(1,114,923 B console export, session 15:35:59 → 15:49:07, 18,511 pictures over 773.6 s).
+
+### 14.1 The numbers
+
+| counter | total |
+|---|---|
+| packets | 525,431 |
+| pictures | 18,580 (803 keyframes) |
+| `seqGaps` | **32** |
+| `declaredLost` | **82** |
+| `recovered` | **62** |
+| `stillMissing` | **20** |
+| NACKs sent | **65** |
+| incomplete AUs skipped | **24** |
+| decode errors | **0** |
+| PLI sent | **1** |
+
+### 14.2 What it says
+
+**The accounting closes.** `declaredLost 82 = recovered 62 + stillMissing 20`, and it closes on
+every one of the 777 per-second lines individually, not merely in the totals.
+
+**NACK is earning its keep at this loss level.** 65 NACKs against 82 declared-lost packets
+recovered 62 of them — **75.6% recovery**. Loss is 82/525,431 = **0.016%**, roughly 28× lighter
+than the 0.45% case §13.7 was written against, and at this level the retransmits do arrive in
+time. That is the first direct evidence for it; every earlier figure came from injection.
+
+**The completeness rule cost 24 pictures in 12.9 minutes** — 0.13% of 18,580, about one skipped
+picture every 32 seconds. Against §13.7's structural prediction (~8 packets/picture, so ~3.5% of
+frames lost at 0.45% loss) this scales as expected: 28× less loss, ~27× fewer skips.
+
+**Zero decode errors.** The rule did what it was built for — 20 unrecoverable packets produced 24
+skipped pictures and *no* malformed submissions to VideoToolbox. The single PLI is consistent
+with one loss event that outran recovery.
+
+### 14.3 `recovered` and `reorder` coincide here — but they are NOT one counter printed twice
+
+**Correction to an earlier draft of this section, which called them the same measurement. They are
+two genuinely different counters that happened to coincide on this run.** The increment sites:
+
+- `packetsReordered` (`H264Depacketizer.c:975`) — incremented on **every** arrival with
+  `seq <= highestSeq`: late arrivals *and* duplicates.
+- `packetsRecovered` (`H264Depacketizer.c:468`, and derived at `:976`) — incremented **from the
+  outstanding table**, not from `packetsReordered`: only packets we had already declared lost.
+
+So `packetsRecovered ⊆ packetsReordered`, as the header states at `H264Depacketizer.h:94-95`. They
+are byte-equal on all 777 lines of this run because the remainder of that subset — duplicates, and
+late arrivals never declared lost — was **exactly zero**. That is a finding about this link, not a
+property of the counters.
+
+### 14.3.1 What a reorder counter would need to observe that this one cannot
+
+§13.7's bounded-reorder-buffer question needs spontaneous reordering told apart from retransmit
+arrival. The depacketizer **already models this** — `recoveredUnrequested` (no NACK ever sent),
+`recoveredAttributable` (asked, and arrived at or after the attribution floor),
+`recoveredBeforeFloor`, `recoveredUnattributed`, summing to `packetsRecovered`.
+
+**The blocker is not the counter, it is the floor.** From this run's own teardown line:
+
+> `attribution: floor = RTT / 2. No MEDIA round trip is obtainable on this transport (SR/DLSR runs
+> the wrong way, libdatachannel has no RTCP XR, and SRTP replay kills a self-probe) — the only
+> source is the signalling POST, always labelled COARSE. Without one there is NO floor and
+> recoveries are counted as `unattributed` rather than guessed into a bucket.`
+
+So the discrimination exists in code and is inert in practice: with no media-path RTT there is no
+floor, and every recovery lands in `unattributed`. **Answering §13.7 from measurement therefore
+requires a media round-trip measurement first** — RTCP XR, or a transport that returns one — not a
+new counter. Until then the split between "the link reordered it" and "our NACK fetched it" is not
+observable, and any reorder-buffer sizing argued from these numbers would be resting on an
+assumption rather than a measurement.
+
+### 14.4 What this does not settle
+
+This run does not test the bounded reorder buffer (§13.7), because at 0.016% loss the condition
+that motivates it barely arises. **These numbers must not be read as retiring that item** — they
+describe a lightly-loaded network, and §13.7's case was built on a heavily-loaded one. The right
+conclusion is that the current mechanisms are sufficient at this loss level, and that the loaded
+case remains untested against real loss rather than injection.
+
+### 14.5 ⚠️ OPERATOR-INDUCED: the 5-second 3-byte window at 15:40:25 is NOT a defect
+
+**Cause known from outside the log, recorded here so nobody re-derives it as a fault.** At
+15:40:25 the operator paused Resolve on the source machine, changed the audio track, and resumed.
+OBS was capturing DeckLink continuously, so the WHEP stream never stopped — only the SDI audio
+content went silent for ~5 s.
+
+In the log that reads as a clean, bounded transition:
+
+```
+15:40:24.030   49 pkt/s   672.39 B/pkt
+15:40:25.036   51 pkt/s     3.00 B/pkt   ← operator pauses Resolve
+15:40:26.061   50 pkt/s     3.00 B/pkt
+15:40:27.034   49 pkt/s     3.00 B/pkt
+15:40:28.035   51 pkt/s     3.00 B/pkt
+15:40:29.030   50 pkt/s     3.00 B/pkt
+15:40:30.036   49 pkt/s   469.29 B/pkt   ← resumed
+```
+
+Packet rate never moves off 49–51/s, `seq gap(s)` does not advance, `malformed` stays 0.
+
+**This is the known-cause instance of the signature §14 previously had only an inference for.** The
+same `exactly 3.00 B/pkt` pattern in the MBA10 capture was argued to be encoder-side DTX purely
+from arithmetic — the reported size is `end - headerLength`, `headerLength` depends only on RTP
+header fields, so a constant 3 across many packets could not come from a wrong read offset. That
+argument was correct, and this window **confirms it against a known cause**: silent source in,
+minimal Opus frames out, decoder unaffected.
+
+The decoder's behaviour across the boundary is the corroboration that matters: `rx`, `decoded` and
+`enqueued` all advance by ~50 per second continuously, `failed=0` and `sbFail=0` throughout, and
+decoded audio duration advances **1.0 s per wall second** across the whole window
+(253.4 s → 259.5 s). Opus DTX frames decode to full-length silence; they are not dropped, and they
+are not garbage being accepted.
+
+### 14.5.1 It produced no clock action and no mirror excursion
+
+Checked against the data rather than assumed, because a content discontinuity is exactly the kind
+of event that might have been expected to disturb the timebase:
+
+- **Snaps, freeze-guard corrections and overflow re-anchors: `0` — in the entire 13-minute run**,
+  not merely in this window. There was no clock action to be provoked.
+- **`timebase−clock` across 15:40:23–32 (n=10): mean +2.45 ms, range +0.6 … +6.0 ms.** Against the
+  run's own mean +1.49 ms and σ 8.62 ms, the window is not an excursion — it is *narrower* than
+  the run as a whole.
+
+That is the expected result and worth stating positively: audio content going silent is not a
+timing event. The mirror tracks `LiveClock`'s mapping, and the mapping is driven by the VIDEO
+path, which never stopped. A reader looking at this window for a timing fault should stop here.
+
+### 14.6 The mirror's rate-smoothing gate WORKS — 899 mapping changes → 4 `setRate` calls
+
+**This is the measurement the code itself asked for.** The comment on the counters in
+`FrameEngine.swift` says it plainly:
+*"`changes` is mappings received, `pushes` is `setRate` calls issued. The ratio is the thing that
+was unmeasurable on the run that motivated this."* It is measurable now, and the gate holds.
+
+Source: `NOISE.txt`, first session, `16:12:01 → 16:13:54` (114 s). Cumulative per-window
+`[WHEP-AUDIO] mirror` lines:
+
+| elapsed | mapping changes | `setRate` calls | `smoothedRate` | `clockRate` | `posErr` |
+|---|---|---|---|---|---|
+| +0 s | 1 | 1 | 1.00000 | 1.00000 | 0.0 ms |
+| +13 s | 3 | 2 | 1.00004 | 1.00129 | 62.8 ms |
+| +23 s | 86 | 3 | 1.00023 | 1.00245 | 2.8 ms |
+| +33 s | 178 | 3 | 1.00017 | 0.99754 | 1.5 ms |
+| +53 s | 358 | 4 | 0.99999 | 1.00209 | 1.2 ms |
+| +74 s | 540 | 4 | 1.00006 | 0.99500 | 1.0 ms |
+| +94 s | 722 | 4 | 1.00000 | 1.00265 | 2.8 ms |
+| **+114 s** | **899** | **4** | 1.00018 | 0.99706 | 3.0 ms |
+
+**899 : 4 ≈ 225 : 1.**
+
+**But read the shape, not just the ratio.** Every push is front-loaded — the last one lands
+inside the first ~25 s and **every window from `16:12:23` onward is marked `(no push this
+window)`**. So the steady state is not "one push in 225 mappings", it is **zero pushes**, and the
+225:1 figure is an artefact of dividing a fixed startup cost by a 114-second run. It gets
+arbitrarily better with session length and should not be quoted as a rate. The third session in
+the same file makes the point from the other end: 66 changes → 8 pushes over ~18 s, an 8:1 ratio
+that is entirely the same startup ramp seen without the long tail to amortise it.
+
+**The gate is selective, not deaf.** Across the run `clockRate` swings the full ±0.5% rail
+(0.99500 … 1.00395, ~17 cents peak-to-peak) while `smoothedRate` stays inside
+**0.99999 … 1.00023** — 94% of the raw signal is buffer-depth correction, exactly as the EMA
+τ was chosen for — and `posErr` never exceeds **3.0 ms** after the ramp. The one outlier, 62.8 ms
+at +13 s, is the second window of the session, before the τ ramp has anything to average.
+
+⚠️ **Provenance caveat, stated because the capture is a defective one.** This is the `NOISE.txt`
+run, whose *audio content* was garbage — a publisher configured for 5.1 against a stereo Opus
+negotiation (see `docs/BUGS.md`). **That does not contaminate this measurement.** The mirror
+tracks `LiveClock`'s mapping, and the mapping is driven by the VIDEO path, which was healthy on
+this run: 2910 access units → 2900 frames decoded, `errors=0`, `sbFail=0`. The rate signal being
+smoothed here never touched the corrupted payload. The same reasoning as §14.5.1, from the other
+direction.

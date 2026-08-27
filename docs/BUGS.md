@@ -143,6 +143,241 @@ seen to matter on a display with headroom.
 
 ---
 
+## ⚠️ UNCONFIRMED: scrub release jumps the picture once, backwards, on ProRes
+
+**Status:** OPEN. **Tolerance mechanism REFUTED by measurement 2026-08-27; staleness mechanism
+matches the magnitude but NOT the direction. Still not reproduced in-house.** **Reported:**
+2026-08-27 by Joey on 0.6.2. **Not seen** on the build Mac. **Blocks:** nothing; it is a trust problem — a
+colourist who sees the picture move after they let go stops believing the scrub.
+
+**The report:** scrubbing a ProRes file, on release the picture jumps once, consistently
+BACKWARDS — *"almost backs up a frame"*. Timecode matches the picture after the jump.
+
+### The reading that SURVIVED measurement: PREVIEW ACCURACY, not a seek bug
+
+Timecode agreeing after the jump means the final seek lands where it was asked to. So the frame
+the user ends on is the correct one, and the frame they were looking at during the drag was not.
+Nothing is wrong with the seek; the scrub preview is the inaccurate half. That much holds.
+
+⚠️ **But the original FORM of this reading — "the preview was running a frame AHEAD of the
+requested time and the release corrected it" — is refuted below.** On ProRes the preview is the
+exactly correct frame *for the time it was asked for*. What is wrong is that it was asked for a
+STALE time and never asked again. **The preview LAGS the drag; it does not lead it.**
+
+The readout corroborates this rather than contradicting it. During a drag the timecode is driven
+by `FrameEngine.scrubSeek(to:)`, which does **no decode at all** — it assigns `currentTime =
+clamped` and returns. So the readout tracks the slider exactly while the picture is whatever the
+preview generator chose to hand back. On release `exactSeek` goes to that same `scrubValue`, so
+**the timecode does not move at all** — only the picture does. "Timecode matches the picture after
+the jump" is exactly the signature this predicts.
+
+⚠️ **STILL UNCONFIRMED AS A WHOLE.** The mechanisms below are measured; the DEFECT is not
+reproduced. The staleness figures come from replaying the real throttle gates against a synthetic
+drag at measured generator latency — that is an analysis of the shipping logic, **not an
+observation of the running app**. No frame-accurate capture of Joey's session exists.
+
+### The two paths ARE different mechanisms — CONFIRMED FROM THE CODE
+
+Checked rather than inferred from the factory's existence:
+
+| | scrub preview | release |
+|---|---|---|
+| trigger | `Slider` `set:` → `requestScrubPreview(at:)` (`ContentView.swift:2884`) | `onEditingChanged(false)` → `engine.exactSeek(to:)` (`ContentView.swift:2525`) |
+| engine call | `FrameEngine.previewImage(at:)` (`:874`) | `exactSeek` → `seek(to:)` → `beginReading(from:resumePlaying:)` |
+| decoder | **`AVAssetImageGenerator`**, `generateCGImagesAsynchronously` | **`AVAssetReader`**, `timeRange = CMTimeRange(start: start, duration: .positiveInfinity)` |
+| surface | a `CGImage` drawn as an OVERLAY above the video layer (`ContentView.swift:1009`) | the Metal playback path itself |
+
+Two decoders, and the overlay is torn down (`scrubPreviewImage = nil`) in the same closure that
+starts the reader. They are genuinely different mechanisms, which is what made the tolerance
+theory worth testing at all — but note what the measurement below then found: **two different
+decoders that nevertheless pick the SAME frame on all-intra.** Being different mechanisms turned
+out not to imply different frame selection.
+
+### MEASURED 2026-08-27 — the tolerance mechanism is REFUTED on ProRes
+
+40 scrub positions per file, spread across the duration, deliberately off frame boundaries (only
+2 of 40 landed on a grid PTS), on two ProRes fixtures — `MONO_STEREO_51.mov` (`apch`, 23.976,
+121 frames) and `SYNC CHECK.mov` (`ap4h`, 23.976, 243 frames). For each position: the frame
+`AVAssetImageGenerator` actually returned (its `actualTime`), and the frame `AVAssetReader`
+delivers for the same request.
+
+| tolerance | preview frame − frame containing request | RELEASE − PREVIEW | sign |
+|---|---|---|---|
+| `before=0.5  after=0.5` (SHIPPING) | 0.000 (sd 0.000) | **0.000 (sd 0.000)** | 80 identical |
+| `before=0.5  after=.zero` | 0.000 (sd 0.000) | **0.000 (sd 0.000)** | 80 identical |
+| `before=.zero after=.zero` | 0.000 (sd 0.000) | **0.000 (sd 0.000)** | 80 identical |
+
+**Zero difference, in all 80 positions, under every tolerance setting.** The generator returns the
+frame CONTAINING the requested time, exactly, and so does the reader. On all-intra ProRes every
+frame is a sync sample, so the ±0.5 s window buys the generator nothing and it never uses it.
+
+**This is a null result and it is not partial. BOTH tolerance hypotheses were wrong, and neither
+was half-right:**
+
+- **"The tolerances are unset, so the generator is free to return any convenient frame."** Wrong
+  twice over. They ARE set — ±0.5 s, not the `kCMTimePositiveInfinity` default — and even at
+  ±0.5 s the generator returns the exact containing frame anyway. The window is present and
+  never used.
+- **"The reader floors to the containing frame while the generator's `+After` tolerance lets it
+  land later, giving a backwards correction every time."** Wrong. Both floor to the SAME frame,
+  so there is no ceiling to floor against and no correction of either sign.
+
+The tolerance does not put the preview a frame ahead, does not produce a jump of either sign, and
+cannot account for the report on this codec. Anything built on it would have been built on air.
+
+**Consequently the asymmetric change is a no-op on this codec.** Setting
+`requestedTimeToleranceAfter = .zero` and leaving `Before` at 0.5 s eliminates nothing on ProRes,
+because there is nothing to eliminate. Latency was unchanged too (15.5 / 14.0 / 14.2 ms per
+request across the three settings) — on all-intra, exact seeking is already what happens.
+
+### The long-GOP side, measured rather than reasoned
+
+`H264.mp4` (`avc1`, 23.976, 279 frames, GOP ≈ 21), same 40 positions:
+
+| tolerance | RELEASE − PREVIEW (frames) | sign | generator latency |
+|---|---|---|---|
+| `before=0.5  after=0.5` (SHIPPING) | mean +1.92, sd 5.99, range −11…+10 | 14 back / 25 fwd | **31.7 ms** |
+| `before=0.5  after=.zero` | mean +3.82, sd 3.96, range 0…+10 | **0 back** / 25 fwd | 38.6 ms |
+| `before=.zero after=.zero` | **0.000 (sd 0.000)** | 40 identical | **46.0 ms** |
+
+So on long-GOP the shipping tolerance *does* cause large preview errors — up to 11 frames, **both
+signs**, which is what a symmetric window predicts. The asymmetric setting removes every backwards
+error but leaves forward ones up to 10 frames, because `Before = 0.5 s` still lets the generator
+fall back to the preceding keyframe. Only both-to-zero is exact, and it costs **+45% generator
+latency (31.7 → 46.0 ms)** on this file. On ProRes it costs nothing.
+
+### The throttle, and why it fits the report better than tolerance does
+
+`ContentView.requestScrubPreview(at:)` has two gates, and **neither is a wall-clock interval**:
+
+```swift
+guard !previewRequestInFlight else { return }
+guard abs(time - lastPreviewTime) > 0.05 else { return }
+```
+
+The slider's range is `0...engine.duration`, so `time` is **media seconds**. The `0.05` gate is
+therefore a media-time DISTANCE gate — **1.20 frames at 23.976** — not a rate limit.
+
+**No final preview request is issued on release.** The release closure (`ContentView.swift:2524`)
+calls `exactSeek`, clears `isScrubbing`, nils `scrubPreviewImage` and resets `lastPreviewTime`. A
+request still in flight at release is discarded (`if isScrubbing` fails). So the last preview the
+user SAW is the last request that COMPLETED, whose requested time can be behind the release point.
+
+Replaying those exact gates against a 60 Hz slider with the measured generator latency:
+
+| drag speed | staleness at release |
+|---|---|
+| 0.25× realtime | 1.00 frames |
+| 0.5× / 1× | 1.20 frames |
+| 2× | 1.60 frames |
+| 5× | 2.00 frames (ProRes) / 4.00 (H.264) |
+| 20× | 7.99 / 15.98 frames |
+| 100× | 39.96 / 79.92 frames |
+
+**Floor of ~1.2 frames at any speed** (the media-time gate), rising with drag speed once the
+in-flight latch dominates — so **yes, it is speed-bounded above ~2×**, and a fast scrub does end
+further behind than a slow one. The floor persists even if the user pauses before releasing,
+because a stationary slider never re-arms the distance gate.
+
+**Magnitude match:** 1.0–1.2 frames is *"almost backs up a frame"*. The tolerance mechanism
+contributes exactly 0.
+
+### Neither mechanism has a code-level directional bias — this is still unexplained
+
+Both gates use `abs()`; the tolerance is symmetric. **Staleness makes the preview lag the drag, so
+its sign is the sign of the last net movement** — dragging forward ends with a FORWARD jump,
+dragging backward with a backward one. A consistently backwards correction therefore requires the
+user's final movement to be consistently backwards (overshoot, then settle back), which is
+behaviour, not code, and is not established. **Do not record the direction as explained.**
+
+### Relative magnitudes
+
+- **On ProRes — the reported codec — staleness is the whole effect: ~1.2 frames vs tolerance's
+  0.** Not "both contribute".
+- **On long-GOP both contribute**, tolerance the larger (up to ±11 frames, sd 6.0) and staleness
+  1.2–16 frames depending on speed.
+
+### The implied fix — UNSCHEDULED, and not a one-liner
+
+The mechanism that matches points at the throttle, not the tolerance. Two parts, and the second is
+why this is not a small change:
+
+1. **Issue a final, UN-THROTTLED preview request on release**, at `scrubValue`, bypassing both
+   gates. That is what closes the ~1.2-frame staleness floor.
+2. **Hold the overlay until the reader's frame lands**, instead of nil-ing `scrubPreviewImage` at
+   `ContentView.swift:2524`.
+
+⚠️ **(2) IS AN ORDERING PROBLEM AND IT IS THE REASON THIS IS NOT ONE LINE.** Today the overlay is
+torn down in the SAME closure that starts the seek — **it goes away before the reader has
+delivered anything.** So (1) on its own would compute the correct final preview and then throw it
+away before it could be seen; the user would still see the jump. Doing (2) needs a signal that the
+reader's first frame is actually on screen, which the release closure does not currently have.
+
+**Not scheduled.** The defect is not reproduced in-house and the direction is unexplained, so this
+would be built against an inferred cause.
+
+### ⚠️ Three measurement traps, recorded because they are the reusable part
+
+Every one produced a clean, plausible, WRONG number before it was caught:
+
+1. **`AVAssetReader` with a trimmed `timeRange` emits a leading EMPTY MARKER buffer** —
+   `numSamples == 0`, duration 0, PTS clamped to the range start. Counting it as a frame and
+   taking "next PTS minus one" produced **−1 frame in 39/40** — a textbook confirmation of the
+   hypothesis under test, entirely manufactured.
+2. **The first real buffer's PTS is TRIMMED to the range start in both output modes**, so it
+   cannot identify the frame. Nearest-matching that trimmed value flips to the next frame whenever
+   the request lands in the later half of a frame — which fabricated a **+1** with mean +0.525,
+   i.e. a uniform [0,1) distribution that is just the sub-frame phase of the sample times.
+3. **Passthrough output is not faithful on long-GOP** — compressed samples can only start at a
+   sync sample, so it returns the preceding keyframe, which is not what is displayed.
+
+The rule that survives all three: **the SECOND decompressed buffer is untrimmed and on the natural
+grid; the delivered frame is one grid step before it.** Cross-checked against the passthrough true
+PTS on all-intra, where both methods are valid and agree.
+
+**THE HARNESS IS KEPT, IN THE REPO:** `docs/scrub-fixtures/scrubmeas.swift`, with its own
+`README.md`. Following `docs/color-fixtures/`, it is a standalone tool, not part of the app target
+— `project.yml`'s `sources:` is `App` plus one explicit DeckLink `.cpp`, so nothing under `docs/`
+compiles into any configuration and no `xcodegen` run is needed.
+
+```bash
+cd docs/scrub-fixtures && xcrun swiftc -O -o scrubmeas scrubmeas.swift
+N=40 ./scrubmeas "/path/to/clip.mov"
+```
+
+It reports, per scrub position, the frame each path returns and the signed difference in frames,
+under all three tolerance settings, plus the staleness replay. **The three traps below are
+documented at the sites where they bite, inside that file** — whoever runs it next will hit all
+three.
+
+**Running it on JOEY'S ACTUAL FILE is the single measurement most likely to settle the direction.**
+Two in-house ProRes fixtures gave exactly zero across 80 positions; a real directional bias on his
+media would show up immediately, and its absence would move the whole question onto the throttle
+where the magnitude already points.
+
+### Before touching it, get the missing facts
+
+Not reproduced in-house, and the report is under-specified in the ways that decide the fix:
+
+- **Frame rate and duration of Joey's file**, and whether it reproduces on a short clip.
+- **Is it exactly one frame, or "almost"?** A sub-frame shift and a one-frame shift have different
+  causes; *"almost backs up a frame"* does not separate them.
+- **Which DIRECTION was the last movement before he let go?** This is now the decisive question,
+  because staleness explains the magnitude and only the drag direction can explain the sign.
+- **How fast was the drag?** Staleness is ~1.2 frames at ≤2× realtime and grows with speed; a
+  larger reported jump would point at a fast scrub, a strictly one-frame one at the gate floor.
+- **Does it reproduce on H.264 as well as ProRes?** No longer a yes/no check but a discriminator:
+  tolerance contributes 0 on all-intra and up to ±11 frames on long-GOP, so a much LARGER and
+  double-signed jump on H.264 would say tolerance is live there while the throttle drives ProRes.
+- **Does it reproduce with the preview overlay disabled** — still the cleanest single
+  discriminator, because it removes both the generator and the throttle from the picture at once.
+
+**Related:** the generator is `FrameEngine.makeScrubPreviewGenerator(for:)`; the preview request is
+`ContentView.requestScrubPreview(at:)`; the release path is `FrameEngine.exactSeek(to:)` →
+`beginReading`; the no-decode readout during the drag is `FrameEngine.scrubSeek(to:)`.
+
+---
+
 ## A failed WHEP connect puts the server's entire HTML error page into the UI and the diagnostics file
 
 **Status:** OPEN. **Found:** 2026-08-24, during Run C of the Wi-Fi streaming tests
@@ -454,6 +689,18 @@ Level-accurate to 0.1 dB against FFmpeg, and the right duration. Implementation:
   build; if a feed turns out to carry MP2, that is a real gap to re-scope, not an assumption to
   make now.
 
+  ⚠️ **THE SRT AUDIO PATH MUST NOT ASSUME STEREO. WHEP CAN; SRT CANNOT.** These two are not
+  symmetric and building them from one template would design multichannel out of the product
+  before anyone noticed. **WHEP audio is stereo BY CONSTRUCTION** — Cloudflare answers
+  `opus/48000/2` with no channel mapping family, so that path can never carry more than two
+  channels no matter what the publisher does (and what happens when a publisher tries is its own
+  entry, *"A publisher configured for 5.1 against a stereo Opus negotiation produces pure
+  NOISE…"* below). **SRT is different: MPEG-TS carries multichannel AAC with the layout declared
+  in the mux.** A 5.1 or 7.1 contribution feed over SRT is ordinary, the declaration is there to
+  be read, and the decode must carry the channel count and the layout through to
+  `AudioTapBuffer` rather than folding or truncating to two on the way. Written here rather than
+  on the fold entry so it is in front of whoever builds this.
+
 Both are additive, both end at the same `AudioTapBuffer` the file and NDI paths already feed, and
 neither touches the video path. Once either lands, its meters light up with no change to the
 meter code — the tap is the seam.
@@ -464,11 +711,126 @@ found this is summarised there and in `AudioTapBuffer.peaks(endingAt:)`. The ful
 
 ---
 
-## SDI carries the monitored track's channels discretely, with no downmix option and no statement of the mapping
+## A publisher configured for 5.1 against a stereo Opus negotiation produces pure NOISE, with a completely clean log
+
+**Status:** OPEN — trigger known, mechanism inferred, detection unsolved. **Found:** 2026-08-27, on a detour from the
+multichannel fold scoping. **Blocks:** nothing structurally; what it costs is diagnosability. A
+tester who hits this sends a log that says nothing is wrong.
+
+**Reproduction:** set OBS's audio output to 5.1 while its publish to Cloudflare has negotiated
+`opus/48000/2`. Manifold's audio is noise — not distorted programme, not intermittent, noise.
+
+**Diagnostics:** `NOISE.txt` (Desktop/MBA_ManifoldTests), first session `16:12:00 → 16:14:17`.
+
+### Every counter reads healthy. That is the defect worth recording.
+
+| | first session |
+|---|---|
+| audio packets | **6055** (121.10 s decoded) |
+| `failed` / `sbFail` | **0 / 0** |
+| `malformed` | **0** |
+| audio `seq gap(s)` | **0** |
+| decoded audio vs wall clock | **1:1 — 75.8 s of audio at `pts=75.835s`** |
+| `timebase−clock`, steady state | **mean −0.84 ms, σ 1.69 ms** (n=100, after the ramp) |
+
+Even the startup shape matches: the first ~20 s ramp (`+253 ms` at the first sample, decaying
+through `−60.9 ms` before the mirror's first push pulls it back) is the same ramp the known-good
+run shows (`+86.5 ms` → `−66.9 ms` over its first 13 s). After it, the noise run holds
+`−5.1 … +3.2 ms`.
+
+There is no observable difference from a correct session anywhere in the log except that the
+output is noise. The decoder is handed packets, accepts them all, produces full-length output at
+the right rate, and the clock mirror tracks perfectly. **Everything downstream of the payload is
+behaving correctly** — which is what the inferred mechanism predicts: the payload is structurally
+valid Opus, just not the Opus the decoder was configured for, so nothing in the chain has anything
+to complain about. That mechanism is INFERRED from the trigger and from the decoder's silence; it
+is not yet confirmed against the packets.
+
+### ⚠️ Detection at negotiation: REFUTED, checked rather than assumed
+
+The read going in was that this is knowable at negotiation rather than from payloads, since Opus
+multichannel requires `channel_mapping=1` in the fmtp line. **Checked against both logs, and it
+does not hold on this topology.** The audio m-section is byte-identical between the noise run and
+a known-good run:
+
+```
+a=rtpmap:111 opus/48000/2
+a=fmtp:111 minptime=10;useinbandfec=1
+```
+
+— the server's answer m-section (`NOISE.txt:314`) and the negotiated track description
+(`:337`), against `…120716_MBA12.txt:314` and `:337` for the good run. Same two lines, in both
+places, in both runs. No `channel_mapping`, no `num_streams`, no `stereo=` / `sprop-stereo=`
+anywhere in either. (Manifold's own offer is not logged verbatim for audio, so the comparison is
+of what came back — which is the half that would have had to carry the signal.)
+
+### Can the receiving side know the source channel count at all? NO — and that changes the approach
+
+**We do not negotiate with the publisher.** The answer Manifold applies comes from Cloudflare, and
+it describes what Cloudflare will send us. Nothing in it describes OBS's local audio
+configuration, and there is no field in which that could arrive — the publisher's mistake is made
+on the far side of a relay that has already told us, correctly, that we are getting `opus/48000/2`.
+
+So there is no negotiation-time check to write. **Any detection must come from the payload or from
+the decoded audio, or it does not exist**, and neither has been tested. What would test the first:
+read the Opus TOC byte on arrival and check whether the frame is a mapping-family-1 multistream
+packet rather than the stereo packet the decoder was configured for. That is a real experiment and
+it is not done — do not write it up as a plan until it has been run against this capture.
+
+Note what the alternative would cost even if it worked: the honest fallback is a UI statement
+about publisher configuration, not a check. That is a worse outcome, which is why the payload
+experiment is worth running before settling for it.
+
+### ⚠️ The payload-size heuristic: REFUTED, and the arithmetic is why
+
+Recorded here because the refutation is more useful than the hypothesis was. The observation that
+prompted it — noise mean **542 B/pkt**, σ **240.5**, min **15.0**, against a good run's mean
+**626.3**, σ **77.5** — is arithmetically correct and **compares the wrong things**. Both figures
+are whole-FILE pools, and neither file holds one uniform session:
+
+| sample | n (per-second) | mean B/pkt | σ | min |
+|---|---|---|---|---|
+| `NOISE.txt` **whole file** (3 sessions) | 148 | 542.0 | 240.5 | 15.0 |
+| `NOISE.txt` **session 1 — the noise one** | 121 | **652.9** | **47.1** | 500.2 |
+| `NOISE.txt` sessions 2 + 3 (9 s, 18 s, near-silent) | 27 | 44.9 | — | 15.0 |
+| `…MBA12.txt` **good run, whole file** | 776 | 626.3 | 77.5 | 3.0 |
+| `…MBA11.txt` good run, no silence window | 55 | 626.3 | 35.8 | 533.1 |
+
+**Like for like, the noise session's distribution is TIGHTER than the good run's** — σ 47.1
+against 77.5 — and its mean is 4% higher, not lower. The pooled σ 240.5 is produced entirely by
+two short near-silent sessions at the end of the file, and the good run's σ 77.5 is inflated by
+its own known 5-second silence window (§14.5 of `WHEP_LOADED_NETWORK_FINDINGS.md`). Strip both and
+the two runs are indistinguishable on this measure.
+
+The byte accounting is the same in both builds — `_audioBytes += (end - headerLength)`,
+`DataChannelBridge.m:1211`, payload only — so the comparison is valid; it is the *pooling* that
+was wrong, not the units. **There is no payload-size signature here**, and the "three times the
+variance" reading should not be carried forward.
+
+(It remains true that OBS was encoding different input in the two runs, so even a surviving
+difference would not have been controlled. That caveat is now moot but worth keeping: the
+experiment that would settle it needs the same source content on both sides.)
+
+### What is left
+
+- **Run the TOC-byte experiment** against `NOISE.txt`'s capture before designing anything.
+- **If it is not detectable, say so in the UI rather than silently playing noise** — this is the
+  one failure mode in the WHEP path where every instrument reads healthy, so the instruments
+  cannot be the answer.
+
+**Related:** the negotiation and decode path is `App/WebRTC/WHEPAudioReceiver.swift` and
+`WHEPAudioDecoder.swift`; the stereo-by-construction consequence for multichannel work is on
+*"BANKED: an OPTIONAL stereo fold for multichannel tracks…"* below; the run's own timing evidence
+is §14 of `docs/WHEP_LOADED_NETWORK_FINDINGS.md`.
+
+---
+
+## SDI carries the monitored track's channels discretely, in FILE order, and never states the mapping
 
 **Status:** OPEN. **Found:** 2026-08-26, during the DeckLink audio-path audit that preceded the
-track selector. **Blocks:** trustworthy surround monitoring over SDI, and stereo monitoring of
-multichannel material over SDI.
+track selector. **Blocks:** trustworthy surround monitoring over SDI. (It does **not** block
+stereo monitoring over SDI — that is an optional capability, not a defect; see the BANKED entry
+below.)
 
 ⚠️ **Two things that sound like this bug are NOT true, and were checked in the code before this
 entry was written.** Getting them wrong points the fix in the wrong direction:
@@ -494,13 +856,15 @@ entry was written.** Getting them wrong points the fix in the wrong direction:
 
 **What is actually wrong** is the inverse, and it has been true since the audio arc shipped:
 
-**1. There is no downmix, and there should be a choice.** A stereo downmix of multichannel
-material is legitimate and often exactly what is wanted — not every room is a surround room, and a
-proper downmix is the right signal to send to a stereo one. Today it is not offered. A colourist
-in a stereo room monitoring a 5.1 track over SDI hears channels 1 and 2 only: **L and R, with the
-centre channel — the dialogue — absent**, because it is sitting discretely on SDI 3 with nothing
-folding it in. That is the more dangerous direction of this defect, because the result sounds
-plausible rather than obviously broken.
+**1. NOT A DEFECT — discrete pass-through is the correct default, and it stays.** ⚠️ **This item
+previously read as a defect ("there is no downmix, and there should be a choice"). That framing
+was wrong and is retracted.** SDI usually feeds an amp and speakers expecting six discrete
+channels, and folding to stereo by default would send a stereo mix into a surround room with half
+of it in the centre speaker. A stereo fold on SDI is a real want for a real case — a colourist
+with a stereo monitoring pair on the SDI output, working a 5.1 or 7.1 deliverable — but it is an
+**optional** per-destination capability for a non-default room, scoped in *"BANKED: an OPTIONAL
+stereo fold for multichannel tracks…"* below, not a fix owed here. Items 2 and 3 are the actual
+defects in this entry.
 
 **2. The mapping is never stated.** Whichever behaviour is active, nothing in the UI or the
 inspector says what is on the wire. A discrete 6-channel feed and a stereo downmix are different
@@ -518,17 +882,18 @@ correct, which is why this has not bitten yet.
 CoreAudio does the role→speaker mapping. The same buffer is therefore mapped correctly to the Mac's
 output and written blind to SDI. The tap is where the roles are dropped.
 
-**Desktop and SDI may legitimately differ, and the fix must allow that.** Mac speakers are stereo
-whatever the file is; the SDI monitor may feed a surround room. "Downmix" is not a global mode —
-it is a per-destination choice, and the correct default for one is not the correct default for the
-other.
+**Desktop and SDI legitimately differ, and anything built here must allow that.** Mac speakers are
+stereo whatever the file is; the SDI monitor usually feeds a surround room. "Downmix" is not a
+global mode — it is a per-destination choice, and the correct default for one is not the correct
+default for the other. Both defaults were measured on 2026-08-27 and both are correct: CoreAudio
+already folds for the desktop, SDI passes through discretely. See the BANKED entry.
 
-**So the fix is not "send all channels".** It is: **make the mapping a choice, and state which is
-active.** Full channel count, or stereo downmix, chosen per destination, with the active mapping
-readable without opening a menu.
+**So the fix here is: send all channels — correctly ordered — and state the mapping.** The channel
+count is not the open question; the ROLE ORDER is, and so is the fact that nothing tells the user
+what is on the wire.
 
-**Gated on the `chan` atom layout work.** Offering "full channel count" without reading per-channel
-roles would ship (3) as a feature. The good news is that the derivation already exists and is
+**Gated on the `chan` atom layout work.** Fixing (3), and stating the mapping honestly for (2),
+both mean reading per-channel roles — without them the wire order is a guess dressed as a mapping. The good news is that the derivation already exists and is
 correct: `MediaInspector.channelRoles(from:)` walks
 `kAudioChannelLayoutTag_UseChannelDescriptions` per-channel descriptions properly (with a correct
 flexible-array-member offset and a bounds check) and falls back to known tags via `roleSequence`,
@@ -627,72 +992,127 @@ AudioTap[AVF]: format → 48000Hz · 1ch (→ 2ch on SDI)
   and the UI must say so rather than offering a control it cannot honour.
 
 **Related:** the SDI half of this is *"SDI carries the monitored track's channels discretely…"*
-below; the chain that found it is `docs/AUDIO_PATH_FINDINGS.md`.
+above; the chain that found it is `docs/AUDIO_PATH_FINDINGS.md`.
 
 ---
 
-## BANKED: no stereo downmix for multichannel tracks, on either destination
+## BANKED: an OPTIONAL stereo fold for multichannel tracks, per destination
 
-**Status:** BANKED — feature request, not yet scheduled. **Raised:** 2026-08-27, once the track
-selector made choosing a 5.1 track possible. **Pairs with:** *"SDI carries the monitored track's
-channels discretely…"* above — **that entry is the SDI half of this same feature and this is the
-desktop half. Read them together; neither is complete alone.**
+**Status:** BANKED — optional capability, not scheduled, **not a defect on either destination.**
+**Raised:** 2026-08-27, once the track selector made choosing a 5.1 track possible.
+**Rewritten:** 2026-08-27, after the measurement below removed the defect from both halves.
+**Pairs with:** *"SDI carries the monitored track's channels discretely…"* above, which holds the
+SDI-side mapping and layout work this would sit on top of.
 
-Selecting a 5.1 track gives six discrete channels. On a stereo monitoring setup only channels 1
-and 2 reach the speakers, so the centre channel — the dialogue — is not heard. A downmix option
-would fold the surround mix to stereo.
+⚠️ **This entry used to describe a defect on the desktop and a defect on SDI. Neither survived
+measurement. Both defaults are correct and both stay.** What remains is one optional feature for
+a room Manifold cannot see and is never told about — read it as a capability request, not as
+something broken.
+
+### The desktop default is already right — MEASURED 2026-08-27
+
+Local file playback in Manifold: a 6-channel file with signal isolated to C, monitored on the
+Mac's own stereo output. **The centre channel is audible** — dialogue is clearly heard through the
+stereo speakers.
+
+The meters corroborate that the buffers really are six discrete channels with the signal only on
+C, so the fold is happening downstream of them and not by accident of the file: 6 ch with the
+roles read from the file (`L R C LFE Ls Rs`), **C at ≈ −6 dBFS, L and R at ≈ −57 dBFS**.
+
+So CoreAudio's output unit already folds a layout-tagged multichannel buffer to stereo on the real
+playback path (`AVSampleBufferAudioRenderer` → CoreAudio). **Dialogue is not being lost on the
+desktop today.** The desktop side of this feature is therefore about **CONTROL** — choosing *not*
+to fold, or choosing the coefficients — and it is **low priority**, because the default behaviour
+is the one you would pick anyway.
+
+### ⚠️ The near-miss, recorded because the method is the reusable part
+
+The measurement that motivated this entry was **correct and irrelevant**, which is the more
+dangerous combination.
+
+MEASURED earlier on 2026-08-27: `AudioConverter` asked to take 6 ch tagged 5.1 SMPTE down to
+stereo **discards rather than mixes** — with signal on one channel at a time, only L and R
+survive; C, LFE, Ls and Rs all come out at **−99 dB**. That number is real and reproducible. It is
+also about a component **the real playback path never calls.** Playback runs through
+`AVSampleBufferAudioRenderer` into CoreAudio's output unit, which has its own multichannel→stereo
+matrix behaviour, and which is what the listening test above actually exercised.
+
+A whole feature — "restore the lost dialogue on the desktop" — was scoped on a measurement of the
+wrong component. **What caught it was this entry's own instruction to verify before building.**
+The test cost one minute: play a 5.1 file with signal only on C, on a stereo output device, and
+listen.
+
+**Keep that pattern.** Every claim here that a destination is or is not folding must be settled by
+listening to the destination, on the path a user actually uses, before anything is built on it.
+Measuring a component in isolation says what that component does, not what the app does.
+
+### The SDI default is already right too — discrete pass-through stays
+
+`d[c] = s[c]` is deliberate and correct for the room SDI usually feeds: an amp and speakers
+expecting six discrete channels. **Folding there by default would be wrong** — it would send a
+stereo mix into a surround room and put half of that mix in the centre speaker. Pass-through is
+the default and stays the default.
+
+### The feature: an optional per-destination stereo fold
+
+The real and specific case it serves: **a colourist with a stereo monitoring pair on the SDI
+output, working on a 5.1 or 7.1 deliverable**, who wants to hear the whole mix — dialogue included
+— without rewiring the room.
+
+**Manifold does not know the room's layout and never asks.** It cannot infer it, and no counter or
+declaration in the file can tell it. **This setting is how the user says.** That is the entire
+justification for the control: not that anything is broken, but that the correct signal for a
+surround room and the correct signal for a stereo pair are different signals, and only the person
+in the room knows which one they are in.
 
 **The choice is PER-DESTINATION, not global.** Mac speakers are stereo whatever the file is; the
-SDI monitor may feed a surround room. The correct default for one is not the correct default for
-the other, so this is two settings that happen to share a control, not one setting.
+SDI monitor is usually a surround room and sometimes is not. Two settings that happen to share a
+control, not one setting — and the correct default for one is not the correct default for the
+other.
 
 **Where it belongs:** alongside the track selector in the control bar — it is the same question,
 *"what am I listening to"*. Probably a second line in that menu, appearing only once a
-multichannel track is selected.
+multichannel track is selected, and stating the active mapping without needing to be opened.
 
-### ⚠️ Verify the desktop half is actually broken before building it
+### Only local files and SDI can exercise this — WHEP structurally cannot
 
-MEASURED 2026-08-27: `AudioConverter` asked to take 6ch tagged 5.1 SMPTE down to stereo
-**discards** rather than mixes — with signal on one channel at a time, only L and R survive; C,
-LFE, Ls and Rs all come out at −99 dB. That supports the premise.
+**WHEP audio is stereo by construction.** Cloudflare answers `opus/48000/2` with no channel
+mapping family, so the WHEP path can never carry more than two channels and can never exercise a
+fold at all. Do not design or test this feature against a WHEP source; it will always look like
+stereo because it is. See *"A publisher configured for 5.1 against a stereo Opus negotiation
+produces pure NOISE…"* above for what happens when someone tries.
 
-**But that is NOT the path desktop playback uses.** Real playback is
-`AVSampleBufferAudioRenderer` → CoreAudio's output unit, which has its own multichannel→stereo
-matrix behaviour, and which was **not** tested. If CoreAudio is already folding correctly for a
-layout-tagged buffer, then the desktop half is about CONTROL (choosing *not* to fold, or choosing
-the coefficients) rather than about restoring lost dialogue — a different and smaller feature.
+SRT is a different matter and is **not** stereo by construction — that note lives on the SRT
+bullet of *"WHEP and SRT carry no audio at all…"* above, where the SRT audio work will see it,
+rather than buried here.
 
-**The test:** play a 5.1 file with signal only on C, on a stereo output device, and listen. One
-minute, and it decides whether this entry describes a defect or an enhancement on the desktop
-side. The SDI half is a defect either way — `d[c] = s[c]` is ours and it definitely does not fold.
-
-### A correct downmix needs ROLES, not counts
+### A correct fold needs ROLES, not counts
 
 Folding `L C R Ls Rs LFE` correctly means knowing which channel is C. Channel COUNT cannot tell
-you: 5.1 SMPTE is `L R C LFE Ls Rs` and 5.1 Film is `L C R Ls Rs LFE` — same six channels, and a
-fold that assumes the wrong one puts dialogue into a surround leg and the LFE into the centre
-image.
+you: 5.1 SMPTE is `L R C LFE Ls Rs` and 5.1 Film is `L C R Ls Rs LFE` — same six channels in a
+different order, and a fold that assumes the wrong one puts dialogue into a surround leg and the
+LFE into the centre image.
 
 **7.1 must be supported too** — it is common in delivery and handling only 5.1 would be an
 arbitrary gap. It carries the same ordering hazard plus one of its own: it distinguishes SIDE
-surrounds from BACK surrounds (`Ls Rs` vs the rear pair), and folding requires knowing which is
-which, not just that there are eight channels.
+surrounds from BACK surrounds, and the two **fold at different coefficients**, so folding requires
+knowing which is which and not merely that there are eight channels.
 
-### Does the chan-atom walk already distinguish side from back? PARTLY — three findings
+### Does the chan-atom walk already distinguish side from back? PARTLY — four findings
 
 **1. Camp B (per-channel descriptions): YES, the distinction is read.**
 `MediaInspector.roleName(for:)` maps `kAudioChannelLabel_LeftSurround` → `"Ls"` and
 `kAudioChannelLabel_RearSurroundLeft` → `"Lss"`. These are distinct Apple labels producing
 distinct strings, so a file describing its channels individually is fully resolvable.
 
-**2. ⚠️ BUT THE STRING NAMES ARE A TRAP, AND A DOWNMIX TABLE KEYED ON THEM WOULD INVERT SIDE AND
+**2. ⚠️ BUT THE STRING NAMES ARE A TRAP, AND A FOLD TABLE KEYED ON THEM WOULD INVERT SIDE AND
 BACK.** `"Lss"` reads as "left SIDE surround" in common usage; here it is
 `kAudioChannelLabel_RearSurroundLeft` — Apple's **rear** — and the source comments the remap
 (`// Apple Rls -> Flip Lss`). Meanwhile `"Ls"` (`kAudioChannelLabel_LeftSurround`) is, in a 7.1
 context, the SIDE surround. So the name that looks like "side" means back, and the name that
 looks generic means side. There is also a third label in play,
 `kAudioChannelLabel_LeftSurroundDirect` → `"Lsd"`, which is the side surround in some Apple 7.1
-families. **Key the coefficients on the raw `AudioChannelLabel`, never on the display string** —
+families. **Key the coefficients on the raw `AudioChannelLabel`, NEVER on the display string** —
 the strings exist for the inspector and the meter, and they are a presentation vocabulary.
 
 **3. Camp A (layout tags): MOSTLY NO — this is the additional work.**
@@ -715,25 +1135,29 @@ before any tag-table work.
 
 - **Infer from count** (6 → assume SMPTE) — this is exactly the inference the app already refuses
   at tier 2 for *naming*, and here the consequence is audible rather than cosmetic. Rejected.
-- **Fall back to the first pair** — this is the CURRENT behaviour and it is the bug being fixed.
-  Worse than doing nothing, because it looks like a downmix while dropping dialogue.
-- **Offer the control, disabled, with the reason stated** — *"this file declares no channel roles,
-  so a downmix would be a guess"* — plus a per-file manual layout ASSERTION for a user who knows
-  what the file is. That matches the app's existing pattern for exactly this shape of problem
+- **Fold the first pair only** — folding L and R and dropping the rest is not a fold; it looks
+  like one while losing the dialogue it was enabled to recover. Rejected.
+- **Offer the control, DISABLED, with the reason stated** — *"this file declares no channel roles,
+  so a fold would be a guess"* — plus a per-file manual layout ASSERTION for a user who knows what
+  the file is. That matches the app's existing pattern for exactly this shape of problem
   (`rangeOverride`, `NDIColorimetryOverride`): Auto follows the declaration, a preset asserts, and
   the assertion is marked as an assertion rather than dressed as a reading. **This is the answer.**
 
+**Never an inferred fold.** A destination whose roles are unknown keeps its default — discrete on
+SDI, CoreAudio's own fold on the desktop.
+
 ### Also to settle when this is built
 
-- **Which downmix.** ITU-R BS.775 / ATSC A/85 give `Lo = L + 0.707·C + 0.707·Ls`; Dolby Lo/Ro and
-  Lt/Rt are different answers again. Whichever is chosen must be STATED, for the same reason the
-  SDI mapping must be — see the entry above.
-- **LFE is excluded by default.** Folding it at unity is the usual cause of a downmix that clips.
+- **Which fold.** ITU-R BS.775 / ATSC A/85 give `Lo = L + 0.707·C + 0.707·Ls`; Dolby Lo/Ro and
+  Lt/Rt are different answers again. Whichever is chosen must be **STATED in the UI**, for the same
+  reason the SDI mapping must be — see the entry above.
+- **LFE is excluded by default.** Folding it at unity is the usual cause of a fold that clips.
 - **Headroom.** `L + 0.707·C + 0.707·Ls` can exceed full scale on legitimate material; whether
   that is handled by attenuation or limiting is a decision, not a detail, on a reference tool.
 - **7.1 folds both surround pairs**, conventionally with the back pair at a lower coefficient than
   the side pair — which is precisely why finding (2) above matters.
 
-**Related:** the SDI half is the entry above; the track selector this hangs off is
-`FrameEngine.selectAudioTrack`; the role derivation is `MediaInspector.channelRoles(from:)`; the
-discovery chain and measurements are `docs/AUDIO_PATH_FINDINGS.md`.
+**Related:** the SDI mapping and layout work this sits on is the entry above; the track selector it
+hangs off is `FrameEngine.selectAudioTrack`; the role derivation is
+`MediaInspector.channelRoles(from:)`; the discovery chain and measurements are
+`docs/AUDIO_PATH_FINDINGS.md`.
