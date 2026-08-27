@@ -14,6 +14,25 @@ public enum LayoutConfidence: Equatable, Sendable {
     case undeclared    // no declaration and no confident guess
 }
 
+/// What the DECODE PATH established about a source's audio, as distinct from what an inspector
+/// guessed. The three cases are deliberately not two: "no audio" and "not determined yet" look
+/// identical to a viewer if they are collapsed, and a meter has to say which it is.
+public enum AudioPresence: Equatable, Sendable {
+    /// Nothing loaded, or the decoder has not reached the audio stream yet. Say so; do not
+    /// render silence, which reads as "this file is quiet".
+    case unknown
+    /// The demuxer opened the source and there is NO audio stream. Positive evidence.
+    case absent
+    /// An audio stream is present, with this many channels. The count is the DECODER's, so it is
+    /// correct on the libav path too, where `AudioTrackInfo` is unavailable entirely.
+    case present(channels: Int)
+
+    public var channelCount: Int? {
+        if case .present(let n) = self { return n }
+        return nil
+    }
+}
+
 public struct AudioTrackInfo: Equatable, Sendable {
     public var codecName: String = "—"
     public var channelCount: Int = 0

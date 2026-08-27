@@ -4,10 +4,18 @@ import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picke
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
-/// The four scopes any tray slot can display. `rawValue` (String) backs @AppStorage persistence
-/// of per-slot selections; `displayName` labels the slot picker menu.
+/// The scopes any tray slot can display. `rawValue` (String) backs @AppStorage persistence of
+/// per-slot selections; `displayName` labels the slot picker menu.
+///
+/// ADDING A CASE IS SAFE FOR EXISTING PREFERENCES: `WindowChrome` decodes with
+/// `ScopeKind(rawValue:) ?? .waveform`, so a stored selection written by an older build still
+/// resolves and an unknown one falls back rather than throwing.
+///
+/// ⚠️ `meters` IS THE ONE THAT IS NOT RENDER-COUPLED. The other four sample the frame the
+/// renderer just drew; the meters sample audio on their own timer, because audio moves when no
+/// frame is being drawn and a paused file draws nothing at all. See AudioMeterScope.swift.
 enum ScopeKind: String, CaseIterable, Identifiable {
-    case waveform, parade, vectorscope, cie
+    case waveform, parade, vectorscope, cie, meters
     var id: String { rawValue }
     var displayName: String {
         switch self {
@@ -15,13 +23,14 @@ enum ScopeKind: String, CaseIterable, Identifiable {
         case .parade:      return "Parade"
         case .vectorscope: return "Vectorscope"
         case .cie:         return "CIE"
+        case .meters:      return "Audio Meters"
         }
     }
 }
 
 /// A tray slot's leading header element: the scope's display label rendered as a Menu (pick which
 /// scope fills this slot) followed by the scope's own context suffix (e.g. "· luma (10-bit)"). The
-/// Menu always lists all four `ScopeKind`s. When `selection` is nil the label is plain text (the
+/// Menu always lists every `ScopeKind`. When `selection` is nil the label is plain text (the
 /// view isn't in a slot-picker context). Leading-edge only — the scope's trailing controls (e.g.
 /// intensity slider) are untouched.
 struct ScopeSlotHeader: View {
@@ -225,6 +234,7 @@ struct ContentView: View {
     @StateObject private var paradeModel = ParadeScopeModel()
     @StateObject private var vectorscopeModel = VectorscopeScopeModel()
     @StateObject private var cieModel = CIEScopeModel()
+    @StateObject private var meterModel = AudioMeterModel()
     /// DeckLink output state (on/off + selected device) — shared singleton, observed so the toolbar
     /// control and the ⌃⌥O/⌃⌥⇧O shortcuts always agree.
     @ObservedObject private var deckLink = DeckLinkService.shared
@@ -1258,6 +1268,7 @@ struct ContentView: View {
         case .parade:      ParadeScopeView(model: paradeModel, slotSelection: selection)
         case .vectorscope: VectorscopeScopeView(model: vectorscopeModel, slotSelection: selection)
         case .cie:         CIEScopeView(model: cieModel, slotSelection: selection)
+        case .meters:      AudioMeterScopeView(model: meterModel, slotSelection: selection)
         }
     }
 
@@ -1306,6 +1317,41 @@ struct ContentView: View {
             cieModel.spaceReadout = engine.metadata.map(Self.cieSpaceReadout) ?? ""
             cieModel.start()
         } else { cieModel.stop() }
+
+        // ── METERS: the one scope gated on AUDIO work rather than GPU work ──────────────────
+        //
+        // start()/stop() add and remove a meter subscriber on the engine's audio tap, and the
+        // tap's peak scan refuses to run at zero subscribers. So a tray with no meter slot costs
+        // NOTHING — which is the whole point, because unlike the other four this samples
+        // continuously rather than once per rendered frame.
+        //
+        // ⚠️ THE TAP ITSELF IS NOT SLEPT, AND MUST NOT BE. DeckLink's audio callback pulls from
+        // the same ring; a tap that stopped ingesting would silence SDI output. What sleeps is
+        // the peak scan, which is the only work metering adds.
+        if active.contains(.meters) {
+            meterModel.tap = engine.audioTap
+            meterModel.playhead = { [weak engine] in engine?.currentTime ?? 0 }
+            meterModel.isPlaying = { [weak engine] in engine?.isPlaying ?? false }
+            meterModel.presence = { [weak engine] in engine?.audioPresence ?? .unknown }
+            // A live source has no playhead to key the ring against — see the note in
+            // AudioMeterModel.tick. NDI is the only live path that carries audio at all today;
+            // WHEP and SRT decode none, so their meters correctly report no audio track.
+            meterModel.isLive = { NDIService.shared.isConnected }
+            // ⚠️ THE TRACK INDEX IS PART OF THE IDENTITY, NOT JUST THE URL. Switching tracks changes
+            // the material the meter is describing as surely as opening a different file does, so a
+            // clip latch earned on the mono track must not survive onto the 5.1 track — it would be
+            // a claim about audio that is no longer being monitored. `resetForNewSource` is polled
+            // off this string every tick (see AudioMeterModel.sourceIdentity), so appending the index
+            // is the whole fix.
+            meterModel.sourceIdentity = { [weak engine] in
+                guard let engine else { return NDIService.shared.connectedSourceName }
+                guard let url = engine.currentURL?.absoluteString else {
+                    return NDIService.shared.connectedSourceName
+                }
+                return "\(url)#audio\(engine.selectedAudioTrackIndex)"
+            }
+            meterModel.start()
+        } else { meterModel.stop() }
 
         let wf = active.contains(.waveform), pd = active.contains(.parade)
         let vs = active.contains(.vectorscope), cie = active.contains(.cie)
@@ -1625,6 +1671,116 @@ struct ContentView: View {
         let all = NDIColorimetryOverride.allCases
         let i = all.firstIndex(of: ndi.colorimetryOverride) ?? 0
         NDIService.shared.setColorimetryOverride(all[(i + 1) % all.count])
+    }
+
+    // MARK: - Audio track selection
+
+    /// Short face/menu description of audio track `index` — "Stereo", "5.1 SMPTE", "6 ch".
+    ///
+    /// ⚠️ THE ENGINE OWNS THE COUNT, THE INSPECTOR OWNS THE DESCRIPTION, AND THEY ARE JOINED BY
+    /// INDEX. Both enumerate `loadTracks(withMediaType: .audio)` on the same asset, which returns
+    /// file order, so index N means the same track to both. The join is still bounds-guarded rather
+    /// than assumed: `metadata` lands asynchronously (`MediaInspector.metadata` is a detached Task),
+    /// so there is a real window where the engine has three tracks and the inspector has none. In
+    /// that window a plain track number is the honest answer, not a blank.
+    private func audioTrackLabel(_ index: Int) -> String {
+        guard let tracks = engine.metadata?.audioTracks, tracks.indices.contains(index) else {
+            return "Track \(index + 1)"
+        }
+        let t = tracks[index]
+        return t.layoutName == "—" ? (t.channelCount > 0 ? "\(t.channelCount) ch" : "Track \(index + 1)")
+                                   : t.layoutName
+    }
+
+    /// The face text: which track is being monitored, readable WITHOUT opening the menu. Numbered
+    /// only when there is more than one — "1 · Stereo" on a single-track file would imply a choice
+    /// that isn't there.
+    private var audioTrackFaceLabel: String {
+        let n = engine.audioTrackCount
+        guard n > 0 else { return "No audio" }
+        let sel = engine.selectedAudioTrackIndex
+        return n == 1 ? audioTrackLabel(0) : "\(sel + 1) · \(audioTrackLabel(sel))"
+    }
+
+    private var audioTrackBinding: Binding<Int> {
+        Binding(get: { engine.selectedAudioTrackIndex },
+                set: { engine.selectAudioTrack($0) })
+    }
+
+    /// Audio track — which of the file's audio tracks is MONITORED. Split face (readout + lone
+    /// chevron) mirroring `colorControl`; see the note there on why the chevron must be its own
+    /// Menu label rather than a trailing element.
+    ///
+    /// ── SHOWN DISABLED RATHER THAN HIDDEN WHEN THERE IS NO CHOICE ─────────────────────────────
+    ///
+    /// One audio track is a FACT about the file worth reading at a glance, and a control that
+    /// appears and disappears as you move between files is harder to learn than one that is
+    /// consistently present and sometimes inert. So a single-track file shows the control, disabled,
+    /// stating that track's layout; a video-only file shows "No audio". Neither is a dead end the
+    /// user has to go looking for.
+    ///
+    /// ⚠️ THE libav (MXF / DNxHR) PATH REPORTS ZERO SELECTABLE TRACKS even when it is playing audio
+    /// perfectly — `LibavAudioSource` opens the first audio stream it finds and the engine holds no
+    /// `AVAssetTrack` list to offer. The control therefore falls back to the presence-derived
+    /// single-track presentation there, which is honest: we cannot offer a choice we cannot honour.
+    private var audioTrackControl: some View {
+        let n = engine.audioTrackCount
+        // Nothing to switch between: one track, or a path that can't offer the choice.
+        let inert = n < 2
+        return HStack(spacing: 2) {
+            Menu {
+                audioTrackMenuContent
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform")
+                    Text(audioTrackFaceLabel)
+                        .font(.system(.caption, design: .monospaced))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(inert)
+
+            Menu {
+                audioTrackMenuContent
+            } label: {
+                Image(systemName: "chevron.down").font(.system(size: 8))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(inert)
+        }
+        .foregroundStyle(.white.opacity(inert ? 0.35 : 0.9))
+        .help(audioTrackHelp)
+    }
+
+    private var audioTrackHelp: String {
+        switch engine.audioTrackCount {
+        case 0:  return "Audio track — this source offers no track selection"
+        case 1:  return "Audio track — this file has one: \(audioTrackLabel(0))"
+        default: return "Audio track — which track you are monitoring (speakers, meters and SDI all follow)"
+        }
+    }
+
+    @ViewBuilder
+    private var audioTrackMenuContent: some View {
+        Section("Monitored audio track") {
+            Picker("Monitored audio track", selection: audioTrackBinding) {
+                ForEach(0..<max(engine.audioTrackCount, 1), id: \.self) { i in
+                    Text("\(i + 1) · \(audioTrackLabel(i))").tag(i)
+                }
+            }
+            .pickerStyle(.inline)
+        }
+        // State the reach of the choice INSIDE the control that makes it. "Which track am I
+        // hearing" and "which track is on the wire" being the same answer is the whole point of
+        // putting this with the output controls rather than in a scope — so say so where the
+        // decision is made, not only in a release note.
+        Section {
+            Button("Speakers, meters and SDI all follow this track") {}.disabled(true)
+        }
     }
 
     /// Color — the color-interpretation control: how Manifold reads the incoming color, and the
@@ -2456,6 +2612,13 @@ struct ContentView: View {
                 .disabled(engine.currentURL == nil)
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
+
+                // Audio track (WHAT YOU ARE HEARING) — first in the group, ahead of the scopes /
+                // DeckLink / streaming controls. It governs PLAYBACK, not display: it decides which
+                // of the file's audio tracks feeds the speakers, the meters and SDI. That is why it
+                // is a control-bar control and not a scope setting — you should not have to open a
+                // scope slot to change what you are listening to.
+                audioTrackControl
 
                 // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is
                 // chosen per-slot via each slot's header picker, not from here.

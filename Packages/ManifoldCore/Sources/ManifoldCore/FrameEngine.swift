@@ -146,6 +146,22 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// closures (like the renderers) so it never crosses the main-actor boundary.
     public let audioTap = AudioTapBuffer()
 
+    /// What the DECODER — not AVFoundation's inspector — knows about this source's audio.
+    ///
+    /// ⚠️ THIS EXISTS BECAUSE `metadata.audioTracks` IS BLIND ON THE libav PATH, AND SILENTLY SO.
+    /// `MediaInspector` reads an AVURLAsset, and `loadMXF` never calls it at all (AVFoundation
+    /// cannot open MXF), so `metadata.audioTracks` is EMPTY for every MXF — including the ones
+    /// playing audio perfectly. Anything that reads emptiness as "this file has no audio" is
+    /// therefore wrong on a headline format for this app.
+    ///
+    /// The distinction that matters to a reader is between "no audio" and "don't know yet", and
+    /// only the decode path can tell them apart, because it is the thing that opened the stream.
+    /// Both paths set this: libav from `LibavAudioSource.open()`, AVFoundation from whether an
+    /// audio track output could be added. Meters key their empty state off it — showing silent
+    /// bars for a file that has audio, or "NO AUDIO" for one whose audio simply has not started,
+    /// are both lies a colourist would act on.
+    @Published public private(set) var audioPresence: AudioPresence = .unknown
+
     private var asset: AVURLAsset?
     private var videoTrack: AVAssetTrack?
     /// The source's signaled range (from the format description), captured once
@@ -173,7 +189,35 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         rangeLock.lock(); defer { rangeLock.unlock() }
         return chromaConventionMirror
     }
-    private var audioTrack: AVAssetTrack?
+    /// EVERY audio track the asset carries, in the order AVFoundation returns them (file order).
+    ///
+    /// ⚠️ THIS USED TO BE A SINGLE `audioTrack` SET FROM `loadTracks(…).first`, AND THAT WAS A
+    /// PLAYBACK GAP, NOT A DISPLAY ONE. A file with mono + stereo + 5.1 had two of its three tracks
+    /// unreachable: not decoded, not rendered, not tapped, not sent to SDI. The inspector listed all
+    /// three (it enumerates the asset directly — see `MediaInspector.audioTracks`), so the two were
+    /// describing different things and only the inspector was complete.
+    ///
+    /// EMPTY ON THE libav PATH. AVFoundation cannot open MXF, so `loadMXF` leaves this empty while
+    /// `LibavAudioSource` decodes the first audio stream it finds. Multi-track selection is therefore
+    /// an AVFoundation-path capability today; `audioTrackCount` reports 0 there and the UI falls back
+    /// to the single-track presentation, which is honest — we genuinely cannot offer a choice.
+    private var audioTracks: [AVAssetTrack] = []
+
+    /// Which of `audioTracks` is monitored — the one track that feeds the audio renderer AND the
+    /// tap, and therefore the meters and DeckLink too. Always a valid index into `audioTracks`, or 0
+    /// when there are none. Reset to 0 on every load: a track index carried across files is a claim
+    /// about material no longer open.
+    @Published public private(set) var selectedAudioTrackIndex: Int = 0
+
+    /// How many audio tracks the user can choose between. 0 on the libav path and for video-only
+    /// files. The UI shows a disabled control at 0 or 1 rather than hiding it — that a file has one
+    /// audio track is worth knowing, and a control that appears and disappears is not.
+    public var audioTrackCount: Int { audioTracks.count }
+
+    /// The monitored track. Nil for video-only files and on the libav path.
+    private var audioTrack: AVAssetTrack? {
+        audioTracks.indices.contains(selectedAudioTrackIndex) ? audioTracks[selectedAudioTrackIndex] : nil
+    }
     private var reader: AVAssetReader?
     /// The current file's video `FrameSource`. The file decode now flows through
     /// this (Stage 1 seam): it owns the video pump and emits frames via
@@ -308,7 +352,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         guard let vTrack = try? await freshAsset.loadTracks(withMediaType: .video).first else { return }
         self.videoTrack = vTrack
-        self.audioTrack = try? await freshAsset.loadTracks(withMediaType: .audio).first
+        // A re-inspect follows a rewrite of the SAME file, so the track set is usually identical —
+        // keep the monitored track if the new asset still has one at that index, rather than
+        // yanking a colourist back to track 1 because the file was re-wrapped underneath them.
+        self.audioTracks = (try? await freshAsset.loadTracks(withMediaType: .audio)) ?? []
+        if !self.audioTracks.indices.contains(self.selectedAudioTrackIndex) {
+            self.selectedAudioTrackIndex = 0
+        }
 
         // Re-read the source range from the fresh format description and reset the
         // per-file override to Auto — a fresh open does the same; the new tags are
@@ -617,6 +667,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         videoRenderer?.flush()
         audioRenderer.flush()
         audioTap.reset()   // D4b-1: drop buffered PCM so nothing survives a stop
+        // Back to "don't know", NOT to "no audio": nothing is loaded, so there is nothing to
+        // assert. A meter must not report absence on the strength of a teardown.
+        audioPresence = .unknown
         isPlaying = false
         currentTime = 0
         // An outstanding frame-step destination belongs to the file that just left. Left set, it
@@ -686,6 +739,37 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public func seek(to seconds: Double) {
         let clamped = max(0, min(seconds, duration))
         Task { await beginReading(from: clamped, resumePlaying: isPlaying) }
+    }
+
+    /// Monitor a different audio track. Governs PLAYBACK, not just metering: the selected track is
+    /// the one that feeds the audio renderer, and — because the tap is teed off that same enqueue —
+    /// the meters and the DeckLink audio stream follow it without any further wiring.
+    ///
+    /// ── WHY THIS REBUILDS THE READER ──────────────────────────────────────────────────────────
+    ///
+    /// `AVAssetReader` outputs must ALL be added before `startReading()` and cannot be added after,
+    /// so switching which track is read means a new reader. That is exactly what `beginReading` is,
+    /// and `seek(to:)` above already calls it for every scrub — so a track switch costs precisely
+    /// what a seek to the current position costs, no more. Position and play state are preserved
+    /// (both are passed straight through), and A/V sync is unaffected: the synchronizer is re-anchored
+    /// to the same time the picture was already at.
+    ///
+    /// The visible cost is a brief re-decode hitch, identical to a scrub — see the note in
+    /// `beginReading` on the flush. A cheaper switch is possible (add every track's output to the ONE
+    /// reader up front and re-point the pump, leaving the video untouched entirely) but that changes
+    /// the reader's failure modes — `startReading` is all-or-nothing, and one malformed track would
+    /// take the others down with it — so it is deliberately NOT part of this arc.
+    ///
+    /// No-ops on an unchanged index, on an out-of-range index, and on the libav path (where
+    /// `audioTracks` is empty and there is nothing to choose between).
+    public func selectAudioTrack(_ index: Int) {
+        guard audioTracks.indices.contains(index), index != selectedAudioTrackIndex else { return }
+        selectedAudioTrackIndex = index
+        // The ring holds the PREVIOUS track's PCM, with a channel count that may not even match.
+        // Drop it before the rebuild so no meter tick and no card callback can serve a sample from
+        // the track the user just stopped monitoring.
+        audioTap.reset()
+        Task { await beginReading(from: currentTime, resumePlaying: isPlaying) }
     }
 
     /// Current frame from the start of the file (0-based).
@@ -999,7 +1083,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.videoTrack = vTrack
         // The track was found in phase 1, so by here the media is genuinely playable.
         self.hasMedia = true
-        self.audioTrack = try? await asset.loadTracks(withMediaType: .audio).first
+        // ALL of them, not `.first` — see `audioTracks`. Selection resets to track 1 for a new file.
+        self.audioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+        self.selectedAudioTrackIndex = 0
 
         // Range (8-bit): capture the SOURCE's signaled range (same format-
         // description determination the inspector uses) and reset the user
@@ -1049,7 +1135,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         installTimeObserverIfNeeded()
 
-        print("FrameEngine: loaded — duration \(self.duration)s, audio: \(self.audioTrack != nil)")
+        print("FrameEngine: loaded — duration \(self.duration)s, audio tracks: \(self.audioTracks.count) (monitoring \(self.audioTracks.isEmpty ? "none" : "#\(self.selectedAudioTrackIndex + 1)"))")
         await beginReading(from: 0, resumePlaying: autoplay)
     }
 
@@ -1101,7 +1187,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.tcInfo = MediaInspector.timecode(for: url)   // nil for MXF; harmless
         self.imageGenerator = nil                          // AVFoundation can't open MXF at all
         self.videoTrack = nil                              // AVFoundation blind → libav supplies metadata
-        self.audioTrack = nil
+        self.audioTracks = []                              // libav picks the stream; no selection to offer
+        self.selectedAudioTrackIndex = 0
         self.rangeOverride = .auto
         self.useLibav = true
         // Scrub thumbnails come from the detached libav decoder (AVFoundation is blind to MXF).
@@ -1266,9 +1353,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     aRenderer.enqueue(sb)
                 }
                 libavAudioSource = audio
+                // The ONLY place an MXF's channel count is knowable — see `audioPresence`.
+                let channels = ainfo.channels
+                Task { @MainActor [weak self] in self?.audioPresence = .present(channels: channels) }
                 print("FrameEngine: libav audio — \(ainfo.codecName) \(ainfo.sampleRate)Hz "
                     + "\(ainfo.channels)ch (\(ainfo.layoutName))")
             } else {
+                // POSITIVE evidence of absence, not merely a lack of evidence: the demuxer opened
+                // the file and found no audio stream.
+                Task { @MainActor [weak self] in self?.audioPresence = .absent }
                 print("FrameEngine: libav — no audio stream (video-only)")
             }
         }
@@ -1508,6 +1601,24 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     aRenderer.enqueue(next)
                 }
             }
+        }
+
+        // Same statement as the libav branch, from the AVFoundation reader's own result: an audio
+        // track output that could be created and added IS the audio, and its ASBD carries the
+        // channel count the meters label. See `audioPresence`.
+        //
+        // `load(.formatDescriptions)` rather than the synchronous `.formatDescriptions` property:
+        // the latter is deprecated on macOS 13+ AND blocks the caller while AVFoundation parses
+        // the track. We are already in an async context here, so there is no reason to.
+        if let aOut {
+            let descs = (try? await aOut.track.load(.formatDescriptions)) ?? []
+            let ch = descs.first.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0) }
+                          .map { Int($0.pointee.mChannelsPerFrame) } ?? 0
+            // A channel count we could not read is NOT evidence of absence — audio is demonstrably
+            // there (the output was added), we simply cannot label the bars yet.
+            audioPresence = ch > 0 ? .present(channels: ch) : .unknown
+        } else {
+            audioPresence = .absent
         }
 
         if resumePlaying { play() }

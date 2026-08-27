@@ -77,7 +77,19 @@ struct InspectorPanel: View {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
                     SectionHeader(m.audioTracks.count == 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
                     ForEach(Array(m.audioTracks.enumerated()), id: \.offset) { index, track in
-                        AudioTrackRow(index: index, track: track, showIndex: m.audioTracks.count > 1)
+                        // Second entry point for the SAME state the control bar's selector drives —
+                        // the tracks are already described here, so making the description clickable
+                        // is a shorter path than reading it here and then going to the toolbar.
+                        // `selectable` is gated on the ENGINE's count, not the inspector's: the
+                        // inspector enumerates the asset and is complete even on paths where the
+                        // engine cannot honour a switch, and a row that looks clickable and does
+                        // nothing is worse than one that plainly isn't.
+                        AudioTrackRow(index: index, track: track,
+                                      showIndex: m.audioTracks.count > 1,
+                                      isMonitored: engine.audioTrackCount > 0
+                                                   && index == engine.selectedAudioTrackIndex,
+                                      selectable: engine.audioTrackCount > 1,
+                                      select: { engine.selectAudioTrack(index) })
                     }
                 }
 
@@ -288,6 +300,11 @@ private struct AudioTrackRow: View {
     let index: Int
     let track: AudioTrackInfo
     let showIndex: Bool
+    /// This is the track feeding the speakers, the meters and SDI right now.
+    var isMonitored: Bool = false
+    /// The engine can actually honour a switch (more than one selectable track).
+    var selectable: Bool = false
+    var select: () -> Void = {}
 
     /// Declared layouts read at full confidence; inferred/undeclared are muted
     /// so a guess never looks like a fact.
@@ -296,8 +313,32 @@ private struct AudioTrackRow: View {
     }
 
     var body: some View {
+        // The row stays a plain readout unless a switch is genuinely available — the inspector's
+        // job is to report what things ARE, and it should only grow an affordance where that
+        // affordance works.
+        if selectable {
+            Button(action: select) { rowBody }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .help(isMonitored ? "Monitoring this track"
+                                  : "Monitor this track — speakers, meters and SDI all follow")
+        } else {
+            rowBody
+        }
+    }
+
+    private var rowBody: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(alignment: .firstTextBaseline) {
+                // The monitored track is marked rather than merely highlighted: with three rows of
+                // near-identical shape, a brightness difference alone is not a reliable read. Only
+                // drawn where a choice exists — a single-track file has nothing to distinguish, and
+                // the marker would just indent a row that reads fine as it is.
+                if selectable {
+                    Image(systemName: isMonitored ? "speaker.wave.2.fill" : "speaker")
+                        .font(.system(size: 9))
+                        .foregroundStyle(isMonitored ? Color.green : .white.opacity(0.3))
+                }
                 Text(showIndex ? "Track \(index + 1)" : "Track")
                     .font(.system(.caption, design: .default))
                     .foregroundStyle(.white.opacity(0.55))

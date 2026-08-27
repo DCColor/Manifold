@@ -348,3 +348,222 @@ teardown line `[WHEP-RTP] reference census — …` reports the disposable share
 **Full reasoning, the measurements, and the two things still on the board** (a bounded reorder
 buffer, and a provable tightening of the head-loss over-drop):
 `docs/WHEP_LOADED_NETWORK_FINDINGS.md` §13.
+
+---
+
+## WHEP and SRT carry no audio at all, so a remote stream cannot be monitored or metered
+
+**Status:** OPEN. **Found:** 2026-08-26, during the audio-meter audit. **Blocks:** audio
+monitoring and metering on the two remote-contribution paths.
+
+⚠️ **This is not a meter limitation.** The meters will correctly report "NO AUDIO TRACK" on these
+sources, and that report is accurate — there is no audio to meter, because these transports
+decode none. Fixing the meters would change nothing. The defect is upstream, in the transports.
+
+**Correction to a natural assumption: NDI is NOT in this category.** NDI has a complete audio
+path — a dedicated pump thread (`NDIService.startAudioPump`, started on connect regardless of
+DeckLink) pulls from the framesync via `captureAudioFrameForMaxSamples:` and pushes interleaved
+Int32 into the shared `AudioTapBuffer`. NDI plays audio and meters correctly today. The gap is
+WHEP and SRT only.
+
+**WHEP.** Audio is negotiated and then deliberately thrown away. The offer carries
+`m=audio 9 UDP/TLS/RTP/SAVPF 111` / `a=rtpmap:111 opus/48000/2`, and the track's message callback
+is `ManifoldWHEPDiscardMessage` — packets are received and dropped so libdatachannel's queue does
+not back up. There is no Opus decoder anywhere in the app.
+
+**SRT.** Audio elementary streams are identified at demux and skipped, with the reason stated in
+the log: *"stream %u: %s / %s (ignored — audio is a later arc)"* (`SRTSession.m`).
+
+**Why it matters more than it looks.** This is arguably where metering matters MOST. A colourist
+reviewing a local file can hear it, scrub it, or open it in something else; a colourist on a
+remote stream has no other instrument at all. "Is the feed carrying audio, and on which channels"
+is a question they currently cannot answer from inside Manifold — and cannot answer by any other
+means either, because the stream is ephemeral.
+
+**Why nobody has reported it:** both transports were built as picture-first arcs and the audio
+omission is documented in their own source, so it reads as known-and-intended rather than as a
+defect. Nothing in the UI said otherwise until the meters gave the absence somewhere to show.
+
+**What would close it.** Neither needs a new dependency — **FFmpeg is already vendored and has a
+native Opus decoder**, which was the part that looked expensive:
+
+- **WHEP:** an RTP Opus depacketizer (RFC 7587 — one Opus frame per packet, essentially no
+  reassembly, far simpler than the H.264 case), then `avcodec` → `AudioTapBuffer.pushInterleavedInt32`.
+  Replace `ManifoldWHEPDiscardMessage` on the audio track with a real handler.
+- **SRT:** stop skipping the audio PID, decode it with the vendored FFmpeg (AAC or MP2 on a
+  typical TS contribution feed), and tee to the same seam.
+
+Both are additive, both end at the same `AudioTapBuffer` the file and NDI paths already feed, and
+neither touches the video path. Once either lands, its meters light up with no change to the
+meter code — the tap is the seam.
+
+**Related:** the meters themselves are `App/AudioMeterScope.swift`; the audio path audit that
+found this is summarised there and in `AudioTapBuffer.peaks(endingAt:)`. The full discovery chain
+— this was the first of four gaps found from one feature request — is `docs/AUDIO_PATH_FINDINGS.md`.
+
+---
+
+## SDI carries the monitored track's channels discretely, with no downmix option and no statement of the mapping
+
+**Status:** OPEN. **Found:** 2026-08-26, during the DeckLink audio-path audit that preceded the
+track selector. **Blocks:** trustworthy surround monitoring over SDI, and stereo monitoring of
+multichannel material over SDI.
+
+⚠️ **Two things that sound like this bug are NOT true, and were checked in the code before this
+entry was written.** Getting them wrong points the fix in the wrong direction:
+
+- **The DeckLink path does not downmix. It never has.** The entire channel mapping is
+  `d[c] = s[c]` for `c` in `0..<srcChannels` (`DeckLinkBridge.mm`, `RenderAudioSamples`). Source
+  channels are written to wire channels 1..n in file order; the padding to the SDK-legal count
+  (2/8/16/32/64) fills the remainder with digital silence. No summing happens anywhere in the
+  path — not in `AudioTapBuffer`, not in the bridge. Nothing uses
+  `AVAssetReaderAudioMixOutput`; the file path uses `AVAssetReaderTrackOutput` and
+  `audioOutputSettings` takes `AVNumberOfChannelsKey` from the track's own ASBD.
+  **MEASURED 2026-08-26** with a purpose-built file whose FIRST audio track is 5.1 (needed
+  because track 1 of the three-track test file is mono):
+  `AudioTap[AVF]: format → 48000Hz · 6ch (→ 8ch on SDI)` — **six channels, not two.** A downmix
+  would have produced 2; and the mono track of the other file produced 1ch, which a stereo
+  downmix could not do either.
+- **There is no `MAX_AUDIO_CHANNELS` constant, and the bridge does not assume stereo.** Both
+  scratch buffers are sized from the runtime counts (`m_srcScratch` from `srcChannels`,
+  `m_outScratch` from `dlChannels`), `scheduleSilence` clears `frames * dlChannels`, and the
+  frame arithmetic is per-sample-frame, so it is channel-count agnostic. A 6-channel track already
+  reaches SDI as six discrete channels today, and the start log reports it as
+  `"source %u ch, %u padded silent"`.
+
+**What is actually wrong** is the inverse, and it has been true since the audio arc shipped:
+
+**1. There is no downmix, and there should be a choice.** A stereo downmix of multichannel
+material is legitimate and often exactly what is wanted — not every room is a surround room, and a
+proper downmix is the right signal to send to a stereo one. Today it is not offered. A colourist
+in a stereo room monitoring a 5.1 track over SDI hears channels 1 and 2 only: **L and R, with the
+centre channel — the dialogue — absent**, because it is sitting discretely on SDI 3 with nothing
+folding it in. That is the more dangerous direction of this defect, because the result sounds
+plausible rather than obviously broken.
+
+**2. The mapping is never stated.** Whichever behaviour is active, nothing in the UI or the
+inspector says what is on the wire. A discrete 6-channel feed and a stereo downmix are different
+signals and the user cannot tell which they are receiving.
+
+**3. Channel ORDER is file order, with no layout awareness.** Nothing in `AudioTapBuffer`,
+`DeckLinkService` or `DeckLinkBridge.mm` reads an `AudioChannelLayout` — `AudioTapBuffer.Format`
+carries `sampleRate`, `channelCount`, `deckLinkChannelCount`, `path` and no roles. So a
+Film-ordered 5.1 (`L C R Ls Rs LFE`) goes to the wire in that order, putting **C on SDI 2** (read
+as R) and **LFE on SDI 6** (read as Rs). SMPTE-ordered 5.1 (`L R C LFE Ls Rs`) happens to be
+correct, which is why this has not bitten yet.
+
+**Note the desktop path is not affected by (3).** `audioOutputSettings` requests the source's own
+`AVChannelLayoutKey` (`FrameEngine.swift`), the renderer receives buffers carrying that layout, and
+CoreAudio does the role→speaker mapping. The same buffer is therefore mapped correctly to the Mac's
+output and written blind to SDI. The tap is where the roles are dropped.
+
+**Desktop and SDI may legitimately differ, and the fix must allow that.** Mac speakers are stereo
+whatever the file is; the SDI monitor may feed a surround room. "Downmix" is not a global mode —
+it is a per-destination choice, and the correct default for one is not the correct default for the
+other.
+
+**So the fix is not "send all channels".** It is: **make the mapping a choice, and state which is
+active.** Full channel count, or stereo downmix, chosen per destination, with the active mapping
+readable without opening a menu.
+
+**Gated on the `chan` atom layout work.** Offering "full channel count" without reading per-channel
+roles would ship (3) as a feature. The good news is that the derivation already exists and is
+correct: `MediaInspector.channelRoles(from:)` walks
+`kAudioChannelLayoutTag_UseChannelDescriptions` per-channel descriptions properly (with a correct
+flexible-array-member offset and a bounds check) and falls back to known tags via `roleSequence`,
+and `layoutName(forRoles:)` already distinguishes `"L R C LFE Ls Rs"` → 5.1 SMPTE from
+`"L C R Ls Rs LFE"` → 5.1 Film **by sequence**. It is `private`, lives in `MediaInspector`, and
+terminates in a display string. The work is to publish it, carry the role array on
+`AudioTapBuffer.Format`, and replace `d[c] = s[c]` with a role→wire-index table.
+
+Undeclared files remain unfixable and must be labelled rather than guessed: a 6-channel track with
+no `chan` atom yields no roles, gets `"5.1 (inferred)"` as a name from the count, and can only
+honestly be sent in source order.
+
+**Also missing, and cheap to add with it:** the app never queries
+`IDeckLinkProfileAttributes` / `BMDDeckLinkMaximumAudioChannels`, so it does not know what the card
+supports — a too-wide `EnableAudioOutput` fails and aborts the whole output start rather than
+degrading. And it passes `bmdVideoConnectionUnspecified`, so it cannot tell SDI (up to 16 channels)
+from HDMI (up to 8).
+
+**One phase-1 consequence to fold in.** The track selector switches which track feeds the tap, so a
+switch that changes the channel count (mono → 5.1) fires `AudioTapBuffer.onFormatChange` →
+`DeckLinkService.audioFormatChanged`, which re-establishes the output — and that stop/start takes
+the SDI **video** with it, so the monitor blinks. The card's rate and channel count are fixed at
+`EnableAudioOutput` and genuinely cannot change under a running stream, so the fix belongs here:
+enable at a count sized to the file's **widest** track and pad the narrower ones, after which no
+track switch changes the enabled format and SDI never re-establishes.
+
+**Related:** the mapping itself is `DeckLinkBridge.mm` `RenderAudioSamples`; the role derivation to
+publish is `MediaInspector.channelRoles(from:)`; the multi-track gap that has to land first is
+*"A file's second and third audio tracks are unreachable…"* above; the chain that found all of it,
+with the measurements and the test-file recipe, is `docs/AUDIO_PATH_FINDINGS.md`.
+
+---
+
+## A file's second and third audio tracks are unreachable, while the inspector reports all of them
+
+**Status:** OPEN. **Found:** 2026-08-26, during the audio-meter audit. **Blocks:** monitoring any
+audio track but the first — which for a mixed-deliverable file is most of them.
+
+`FrameEngine` takes `loadTracks(withMediaType: .audio).first` and builds a single
+`AVAssetReaderTrackOutput` from it. A file carrying mono, stereo and 5.1 mixes plays the first;
+the other two are **not decoded, not rendered, not tapped, and not sent to SDI**. The libav path
+has the same shape — `LibavAudioSource.open()` scans streams and `break`s on the first audio one.
+
+⚠️ **This is a PLAYBACK gap, not a display gap**, and it was found by mistaking it for one. The
+meters showed a single mono bar for `MONO_STEREO_51.mov` and the meters were *right* — they were
+correctly describing what the engine was playing.
+
+**The defect is the app disagreeing with itself.** `MediaInspector.audioTracks` enumerates the
+asset directly and correctly reports "Audio (3)" while playback offers one, so the inspector and
+the transport describe different things with no indication that they differ. Of the two the
+inspector is the honest one.
+
+(The *inverse* asymmetry also exists and is documented on `FrameEngine.audioPresence`: on MXF,
+AVFoundation cannot open the container so the inspector is blind while the decoder is right.
+Neither surface is authoritative on its own — which is exactly why the disagreement has to be
+resolved rather than papered over by trusting one of them.)
+
+**Measured** on `/Volumes/DCCOLOR/TEST FLIP/MONO_STEREO_51.mov` (ProRes HQ 4K 23.98p; three PCM
+24-bit/48 kHz tracks — mono, stereo, 5.1):
+
+```
+FrameEngine: loaded — duration 5.005s, audio tracks: 3 (monitoring #1)
+AudioTap[AVF]: format → 48000Hz · 1ch (→ 2ch on SDI)
+```
+
+**The phase-1 plan** (audited as workable; not yet implemented):
+
+- A **track selector in the control bar**, first in the group with scopes / DeckLink / streaming.
+  It governs **playback**, not just metering — a colourist with mono, stereo and 5.1 in one file
+  needs to *hear* each of them — so it belongs with the output controls, not inside a scope slot
+  that may not be open.
+- **Mirrored in the inspector's Audio section**, where the tracks are already described. Same
+  state, two entry points.
+- **The meters follow the monitored track** for free: the tap is teed off the same enqueue that
+  feeds the audio renderer (`tap.ingest(next)` and `aRenderer.enqueue(next)` are adjacent lines),
+  so one selection governs speakers, meters and SDI with no further wiring. A separate "all
+  tracks" option in the meter header stays **display-only**, for inspection, so *"what am I
+  hearing"* and *"what is in the file"* remain separate questions with separate controls.
+- **Switching rebuilds the reader at the current position.** `AVAssetReader` outputs must all be
+  added before `startReading()` and cannot be added after, so switching tracks means a new reader
+  — which is exactly what `beginReading` is, and what `seek(to:)` already calls for every scrub.
+  A switch therefore costs precisely what a seek to the current position costs. Position and play
+  state are preserved and A/V sync is re-anchored at the same time; the visible cost is a brief
+  re-decode hitch, short on intra-frame codecs and longer on long-GOP, where the reader must
+  decode from the preceding keyframe.
+
+**Two consequences to design for, not discovered late:**
+
+- **A cheaper switch exists but changes the failure modes.** Adding every track's output to the ONE
+  reader up front and re-pointing the pump would leave the video untouched entirely — but
+  `startReading` is all-or-nothing, and one malformed track would take the others down with it.
+  The existing retry (see the ARRI ALEXA `0xFFFF0000` note in `beginReading`) drops *all* audio on
+  failure and would need to degrade per-track instead.
+- **The libav path cannot offer the choice.** MXF/DNxHR files hold no `AVAssetTrack` list, so a
+  multi-track MXF still cannot be switched. That is a separate implementation, not a wiring gap,
+  and the UI must say so rather than offering a control it cannot honour.
+
+**Related:** the SDI half of this is *"SDI carries the monitored track's channels discretely…"*
+below; the chain that found it is `docs/AUDIO_PATH_FINDINGS.md`.

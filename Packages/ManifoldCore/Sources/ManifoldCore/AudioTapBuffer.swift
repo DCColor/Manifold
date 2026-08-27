@@ -285,6 +285,136 @@ public final class AudioTapBuffer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Metering (peak scan, UI thread)
+
+    /// How many meters are currently on screen. The peak scan below refuses to run at zero, so a
+    /// tray with no meter slot costs NOTHING beyond the ingest that was already happening.
+    ///
+    /// ⚠️ THIS GATES THE METER, NOT THE TAP. Ingest must keep running regardless: DeckLink's audio
+    /// callback pulls from this same ring, and a "sleeping" tap would silence SDI output. What
+    /// sleeps is the peak scan — the only work metering adds.
+    ///
+    /// A COUNT rather than a Bool because the same scope kind can occupy more than one tray slot,
+    /// and because two windows can each show a meter against the same engine. Balanced
+    /// add/remove pairs from the model's start()/stop(), which are themselves idempotent.
+    private var meterSubscribers = 0
+
+    /// Balanced pair. Any thread.
+    public func addMeterSubscriber() {
+        lock.lock(); meterSubscribers += 1; lock.unlock()
+    }
+
+    public func removeMeterSubscriber() {
+        lock.lock(); if meterSubscribers > 0 { meterSubscribers -= 1 }; lock.unlock()
+    }
+
+    /// The result of one peak scan.
+    public struct Peaks: Equatable, Sendable {
+        /// Per-channel peak magnitude, 0…1, where 1.0 is Int32 full scale. Linear, NOT dB — the
+        /// caller decides the curve, and a linear magnitude is what both a dB conversion and a
+        /// full-scale clip test want.
+        public var magnitudes: [Float]
+        /// Per-channel count of CONSECUTIVE full-scale samples running at the END of this window,
+        /// carried so a clip run that straddles two scans is not missed. See `clipRunIn`.
+        public var clipRun: [Int]
+        /// Frames actually scanned. 0 means the requested time was outside the retained window —
+        /// the caller must treat that as "no data", NOT as silence.
+        public var framesScanned: Int
+    }
+
+    /// Peak-scan `windowSeconds` of audio ending at source time `endTime`, WITHOUT copying samples
+    /// out. Returns nil when metering is not subscribed, no format is established, or the window
+    /// holds nothing.
+    ///
+    /// ── WHY A SCAN RATHER THAN `read` + A LOOP IN THE CALLER ─────────────────────────────────
+    ///
+    /// `read` copies `frameCount * channels` Int32 into the caller's buffer and the caller then
+    /// walks it again — two passes over the data and a scratch buffer sized for the worst channel
+    /// count. This does one pass, allocates nothing per call, and holds the lock for roughly half
+    /// as long. That matters because DeckLink's audio callback takes this same lock at 50 Hz and
+    /// is realtime-sensitive; the meter must not become a source of jitter on the card.
+    ///
+    /// ── WHY IT IS KEYED TO A SOURCE TIME AND NOT TO "THE NEWEST SAMPLES" ─────────────────────
+    ///
+    /// The ring runs AHEAD of the picture — the audio renderer is fed as fast as it will accept,
+    /// so the newest samples held can be most of a second past the frame on screen. A meter fed
+    /// from the newest samples would lead the picture by that much, which is exactly wrong for
+    /// the question a meter answers ("is there audio on THIS shot"). Pass the synchronizer's
+    /// current time and the meter describes what is being heard. See `peaksOfNewest` for the live
+    /// case, where there is no such thing as a playhead.
+    ///
+    /// `clipRunIn` carries the previous scan's trailing full-scale run per channel so a run
+    /// spanning two scans is counted continuously; pass an empty array on the first call.
+    public func peaks(endingAt endTime: Double, windowSeconds: Double,
+                      clipRunIn: [Int] = []) -> Peaks? {
+        lock.lock(); defer { lock.unlock() }
+        guard meterSubscribers > 0, capacityFrames > 0, channels > 0,
+              !basePTS.isNaN, framesWritten > 0, sampleRate > 0 else { return nil }
+        let wanted = max(1, Int((windowSeconds * sampleRate).rounded()))
+        let endFrame = Int(((endTime - basePTS) * sampleRate).rounded())
+        return scanLocked(endFrame: endFrame, frameCount: wanted, clipRunIn: clipRunIn)
+    }
+
+    /// Peak-scan the `windowSeconds` most recently INGESTED audio, for producers whose PTS is not
+    /// on the caller's timeline.
+    ///
+    /// ⚠️ NDI IS EXACTLY THAT PRODUCER AND IS WHY THIS EXISTS. It pushes with a monotonic host
+    /// timestamp (`NDIService.runAudioPump`), not a synchronizer time, so `peaks(endingAt:)` keyed
+    /// to a playhead would miss the window every time and report "no data" forever. For a live
+    /// source "newest" IS "now" — there is no playhead to lag behind — so this is not an
+    /// approximation on that path, it is the correct question.
+    public func peaksOfNewest(windowSeconds: Double, clipRunIn: [Int] = []) -> Peaks? {
+        lock.lock(); defer { lock.unlock() }
+        guard meterSubscribers > 0, capacityFrames > 0, channels > 0,
+              framesWritten > 0, sampleRate > 0 else { return nil }
+        let wanted = max(1, Int((windowSeconds * sampleRate).rounded()))
+        return scanLocked(endFrame: framesWritten, frameCount: wanted, clipRunIn: clipRunIn)
+    }
+
+    /// One pass over `frameCount` frames ending at absolute frame `endFrame` (exclusive), clamped
+    /// to what is retained. CALLED UNDER `lock`.
+    private func scanLocked(endFrame: Int, frameCount: Int, clipRunIn: [Int]) -> Peaks? {
+        let held = min(framesWritten, capacityFrames)
+        let firstHeld = framesWritten - held
+        let end = min(endFrame, framesWritten)
+        let start = max(end - frameCount, firstHeld)
+        guard end > start else { return nil }
+
+        var mags = [Float](repeating: 0, count: channels)
+        var runs = [Int](repeating: 0, count: channels)
+        for c in 0..<channels { runs[c] = c < clipRunIn.count ? clipRunIn[c] : 0 }
+        var maxAbs = [Int32](repeating: 0, count: channels)
+
+        for abs in start..<end {
+            let base = (abs % capacityFrames) * channels
+            for c in 0..<channels {
+                let v = ring[base + c]
+                // ⚠️ NEGATE IN Int64. `abs(Int32.min)` TRAPS — Int32.min has no positive
+                // counterpart — and Int32.min is not a rare value here: it is exactly what a
+                // float sample of -1.0 converts to in `ingest`, so full-scale material hits it
+                // constantly. Widening first is the whole fix.
+                let m = Int32(clamping: Swift.abs(Int64(v)))
+                if m > maxAbs[c] { maxAbs[c] = m }
+                if m >= Self.clipThresholdInt32 { runs[c] += 1 } else { runs[c] = 0 }
+            }
+        }
+        for c in 0..<channels {
+            mags[c] = Float(Double(maxAbs[c]) / 2147483648.0)
+        }
+        return Peaks(magnitudes: mags, clipRun: runs, framesScanned: end - start)
+    }
+
+    /// −0.1 dBFS as an Int32 magnitude. A sample at or above this counts toward a clip run.
+    ///
+    /// ⚠️ NOT "GREATER THAN 0 dBFS", WHICH IS UNOBSERVABLE HERE. `ingest` CLAMPS float input to
+    /// the Int32 range, so a +3 dBFS overshoot and an exactly-0 dBFS sample both arrive as
+    /// Int32.max and nothing downstream can tell them apart. Clipping is therefore detected as
+    /// material sitting AT the ceiling, which is what the clamp leaves visible.
+    static let clipThresholdInt32: Int32 = {
+        let magnitude = pow(10.0, -0.1 / 20.0) * 2147483648.0   // −0.1 dBFS
+        return Int32(magnitude.rounded())
+    }()
+
     // MARK: - Read (D4b-2: card callback thread) — designed here, wired in D4b-2
 
     /// Copy `frameCount` interleaved Int32 frames beginning at source time `startTime` (synchronizer
