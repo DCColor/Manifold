@@ -11,6 +11,7 @@
 *.xcuserstate
 *.xcscmblueprint
 DerivedData/
+.build-cc/
 build/
 *.hmap
 *.ipa

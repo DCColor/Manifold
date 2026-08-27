@@ -325,6 +325,38 @@ Recreate with `store-credentials` if invalid — see `IDENTITY.md`.
 NDI SDK must be installed at `/Library/NDI SDK for Apple`. Both are gitignored and neither
 is vendored.
 
+**Xcode's Run button: "The executable is not codesigned"** (recorded 2026-08-27)
+
+→ An agent or terminal `xcodebuild` wrote into the SAME derived data Xcode reads from, and a
+Run landed while a build was in flight. **Fix: every command-line `xcodebuild` in this repo
+must pass `-derivedDataPath ./.build-cc`** (gitignored). Read built artifacts back from
+`./.build-cc/Build/Products/<Config>/`, not from `~/Library/Developer/Xcode/DerivedData/`.
+
+⚠️ **THE FIRST EXPLANATION WAS WRONG, AND IT IS THE MORE TEMPTING ONE.** The hypothesis was
+that headless builds pass signing overrides — `CODE_SIGNING_ALLOWED=NO`,
+`CODE_SIGNING_REQUIRED=NO`, or an empty `CODE_SIGN_IDENTITY` — and so deposit an unsigned
+product. **Measured against the actual command lines: no such flag was passed.** The full
+invocation was
+
+```
+xcodebuild -project Manifold.xcodeproj -scheme Manifold -configuration <Config> \
+           -destination 'platform=macOS,arch=arm64' build
+```
+
+and nothing else — no signing variables, no `-allowProvisioningUpdates`, and (the actual
+defect) no `-derivedDataPath`.
+
+The mechanism is a **write race**, not a signing configuration. A both-configurations check
+loop invoked `xcodebuild` twice per configuration — four builds — into the shared derived
+data, and a Run landed on a product that existed but had not yet reached its CodeSign phase.
+Two observations pin it: the artifact left behind afterwards verifies clean
+(`codesign --verify --strict` exit 0, `TeamIdentifier=8UQ7MDM87B`, hardened-runtime flag
+set), so nothing about the signing configuration was wrong; and the failure is not
+reproducible from the resting state, which a bad override would be.
+
+Chasing the override theory means auditing signing settings that were never at fault. The
+directory is the variable — isolate it.
+
 **A dylib assertion fails after export**
 → Install name, authority, hardened runtime flag, or timestamp is wrong on one of the five
 FFmpeg dylibs. Usually means `codeSign: true` was dropped from that dependency in
