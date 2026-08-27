@@ -64,6 +64,105 @@ final class WHEPFrameRouter {
     /// so a file's frame pump and WHEP's push never both feed the renderer.
     var onWillActivateStream: (() -> Void)?
 
+    // MARK: - Live audio seams
+    //
+    // Set by WindowDeck from the deck's engine, exactly as `NDIService.audioTap` is — this type
+    // has no engine handle, for the same reason the renderer is injected rather than reached for.
+    // WHEP goes further than NDI: NDI feeds only the TAP (so it meters and can reach SDI, but is
+    // inaudible on the desktop), whereas these seams reach the shared audio RENDERER too, which is
+    // what makes a WHEP stream actually audible.
+
+    /// Opens the shared renderer to live audio; returns the sink. Takes NO time — the live clock
+    /// is unanchored at this point in the connect sequence (it anchors on the first VIDEO frame),
+    /// so there is no valid instant to hand it. See `anchorLiveAudio`.
+    var beginLiveAudio: ((Double) -> FrameEngine.LiveAudioSink?)?
+    /// Forwards `LiveClock`'s mapping to the engine's audio timebase. Set by `WindowDeck`; called
+    /// on whichever thread changed the mapping, so the engine side is `nonisolated`.
+    var mirrorLiveAudio: ((LiveClock.Mapping?) -> Void)?
+    /// Closes it. Must be called on teardown or the renderer keeps a dead session's timebase.
+    var endLiveAudio: (() -> Void)?
+    /// Publishes the decoded channel count so the meters size their bars.
+    var liveAudioEstablished: ((Int) -> Void)?
+    /// Publishes positive ABSENCE — the server declined audio, or the stream carries none.
+    var liveAudioAbsent: (() -> Void)?
+    /// Synchronizer-timebase minus live-clock, for the stage-1 sync measurement.
+    var liveAudioDrift: ((Double) -> Double?)?
+
+    /// The Opus receive path for the current session. Non-nil only while a session is live.
+    private(set) var audioReceiver: WHEPAudioReceiver?
+
+    /// Start the audio path for a session whose answer accepted the audio m-section.
+    ///
+    /// `channels` is what the ANSWER agreed; the decoder re-establishes it from what actually
+    /// decodes, so a server that answers stereo and sends mono still meters correctly.
+    /// ── WHY LIFETIME KEYING RATHER THAN A GENERATION TOKEN ────────────────────────────────────
+    ///
+    /// An audit asked whether the audio anchor state should join "the same generation token as its
+    /// neighbours". It cannot: THERE IS NO SUCH TOKEN HERE. This router's neighbours are keyed the
+    /// same way this is — `liveClock` nil/non-nil, `route`'s saved state, `audioReceiver`
+    /// nil/non-nil. (`LiveDisplaySize` and `FrameEngine.audioSessionToken` do have counters, but
+    /// they guard different races: a size hopping in from the decode queue, and a file audio-track
+    /// switch. Neither covers this seam.)
+    ///
+    /// Lifetime keying IS sufficient here, for a reason worth stating: every epoch that could go
+    /// stale lives inside `WHEPAudioReceiver`, a fresh instance is constructed per session, and
+    /// `stopAudio` releases it. A new receiver cannot carry an old session's epoch because it has
+    /// never had one — there is no state to reset and therefore no reset to forget. That is a
+    /// stronger guarantee than a counter, which only helps if every reader remembers to check it.
+    ///
+    /// ⚠️ WHAT WAS ACTUALLY WRONG was not the keying but the SILENCE. A second `applyAnswer` with
+    /// no teardown hit `guard audioReceiver == nil else { return }` and did nothing, leaving the
+    /// previous negotiation's receiver running against a new answer, with no line in the log. A new
+    /// answer is a new negotiation, so the old receiver is wrong by definition — it is now torn
+    /// down and rebuilt, loudly.
+    func startAudio(channels: Int) {
+        if audioReceiver != nil {
+            NSLog("[WHEP-AUDIO] startAudio while a session is ALREADY RUNNING — a second answer "
+                + "without a teardown. Retiring the previous audio session and restarting; if this "
+                + "appears outside a renegotiation it is a signalling bug, not a recovery.")
+            stopAudio()
+        }
+        guard let begin = beginLiveAudio, let drift = liveAudioDrift else {
+            NSLog("[WHEP-AUDIO] no engine seam wired — audio cannot be played")
+            return
+        }
+        // ⚠️ RETURNS `-.infinity` UNTIL THE FIRST VIDEO FRAME ANCHORS THE CLOCK — that is
+        // `LiveClock.now()`'s documented "never due" sentinel, not a fault. The receiver must test
+        // `isFinite` before deriving anything from it; `?? 0` covers only a torn-down router.
+        let clock: () -> Double = { [weak self] in
+            guard let self else { return 0 }
+            self.stateLock.lock()
+            let c = self.liveClock
+            self.stateLock.unlock()
+            return c?.now() ?? 0
+        }
+        // The cushion is `targetDepth`, not `startupDepth`: startup describes only the first frame,
+        // whereas the steady-state lead a video frame gets is the control loop's SETPOINT, and that
+        // is what audio must match. They are the same number today (LiveDisplayRoute builds the
+        // clock with `startupDepth: config.targetDepth`) — naming the right one keeps it correct if
+        // they ever diverge.
+        guard let sink = begin(Self.targetDepth) else {
+            NSLog("[WHEP-AUDIO] engine refused a live-audio session"); return
+        }
+        let receiver = WHEPAudioReceiver(clock: clock)
+        receiver.start(sink: sink, channels: channels, driftProbe: drift)
+        audioReceiver = receiver
+        NSLog("[WHEP-AUDIO] audio path ACTIVE — %d ch expected, Opus via AudioToolbox", channels)
+    }
+
+    /// The stream carries no audio. Stated positively so the meters say "NO AUDIO TRACK" rather
+    /// than sitting at "waiting" forever — see `AudioMeterModel.Status`.
+    func declareNoAudio() {
+        liveAudioAbsent?()
+        NSLog("[WHEP-AUDIO] this stream carries no audio — meters will report absence")
+    }
+
+    func stopAudio() {
+        audioReceiver?.stop()
+        audioReceiver = nil
+        endLiveAudio?()
+    }
+
     // MARK: - Depth preset
     //
     // 0.400 s — MEASURED AGAINST A LIVE FEED, NOT TAKEN FROM THE PRESET GRID.
@@ -380,6 +479,15 @@ final class WHEPFrameRouter {
 
         stateLock.lock(); liveClock = clock; stateLock.unlock()
 
+        // ⚠️ INSTALLED HERE, NOT IN startAudio, AND THAT ORDERING IS LOAD-BEARING. The mapping's
+        // FIRST change is the initial anchor, which `registerFrame` performs on the first video
+        // frame — potentially before the answer is applied and `startAudio` runs. Installing this
+        // at activate() means that first anchor is not missed. The engine side no-ops until a
+        // live-audio session is open, so an early mapping costs nothing.
+        clock.onMappingChange = { [weak self] mapping in
+            self?.mirrorLiveAudio?(mapping)
+        }
+
         NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR",
               Self.targetDepth)
     }
@@ -389,6 +497,10 @@ final class WHEPFrameRouter {
     /// reason, as NDIService.disconnect).
     func deactivate() {
         dispatchPrecondition(condition: .onQueue(.main))
+        // BEFORE the clock is cleared: the receiver reads it, and the engine's live-audio teardown
+        // stops the synchronizer. Leaving this until after would let a decode land against a nil
+        // clock and stamp a buffer at time 0.
+        stopAudio()
         stateLock.lock()
         let wasActive = liveClock != nil
         // Clears the clock's per-STREAM state, freeze-guard arming (`hasPresentedOnce`) included,
@@ -396,6 +508,9 @@ final class WHEPFrameRouter {
         // Belt and braces: `activate()` builds a BRAND-NEW LiveClock, so the flag also starts false
         // by construction on every connect — but reset() is the seam that is correct on its own.
         liveClock?.reset()
+        // Drop the mapping callback BEFORE releasing the clock: it captures self, and a mapping
+        // arriving after teardown would reach a torn-down engine seam.
+        liveClock?.onMappingChange = nil
         liveClock = nil
         stateLock.unlock()
         guard wasActive else { return }

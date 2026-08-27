@@ -1177,6 +1177,21 @@ final class DeckRegistry {
         // A web stream displays through this SAME renderer, feeding the same enqueue NDI and the
         // file sources feed — but paced by LiveClock rather than FrameSync or the file timebase.
         WHEPFrameRouter.shared.renderer = renderer
+        // WHEP audio reaches the shared audio RENDERER, not only the tap — so a web stream is
+        // actually audible, unlike NDI, which feeds the tap alone (metered and SDI-capable, but
+        // silent on the desktop). Same injection pattern as the renderer above: the router has no
+        // engine handle and must not acquire one.
+        WHEPFrameRouter.shared.beginLiveAudio = { [weak engine] cushion in
+            engine?.beginLiveAudio(cushion: cushion)
+        }
+        // Nonisolated on the engine side — fires on whichever thread changed LiveClock's mapping.
+        WHEPFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping in
+            engine?.mirrorLiveAudio(mapping)
+        }
+        WHEPFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
+        WHEPFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in engine?.liveAudioEstablished(channels: ch) }
+        WHEPFrameRouter.shared.liveAudioAbsent = { [weak engine] in engine?.liveAudioAbsent() }
+        WHEPFrameRouter.shared.liveAudioDrift = { [weak engine] c in engine?.liveAudioDrift(against: c) }
         // An SRT stream is a push source exactly like WHEP — same renderer, same enqueue, same
         // LiveClock pacing through the same LiveDisplayRoute.
         SRTFrameRouter.shared.renderer = renderer

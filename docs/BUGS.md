@@ -384,14 +384,75 @@ means either, because the stream is ephemeral.
 omission is documented in their own source, so it reads as known-and-intended rather than as a
 defect. Nothing in the UI said otherwise until the meters gave the absence somewhere to show.
 
-**What would close it.** Neither needs a new dependency — **FFmpeg is already vendored and has a
-native Opus decoder**, which was the part that looked expensive:
+**What would close it.** Neither needs a new dependency — but the reason is not the one first
+recorded here.
+
+> ### ⚠️ CORRECTION (2026-08-27) — this section previously claimed the vendored FFmpeg has a native Opus decoder. IT DOES NOT.
+>
+> The original wording was *"FFmpeg is already vendored and has a native Opus decoder, which was
+> the part that looked expensive."* **False.** Upstream FFmpeg has a native Opus decoder; **our
+> build does not contain it.** `--disable-everything` strips every built-in decoder, and the
+> configure line re-enables 10 by name — `opus` is not among them. Verified by loading the shipped
+> dylib and enumerating it, not by inference:
+>
+> ```
+> decoder opus : MISSING
+> --- all registered decoders (10) ---
+>   dnxhd  prores  aac  aac_latm
+>   pcm_f32le  pcm_s16be  pcm_s16le  pcm_s24be  pcm_s24le  pcm_s32le
+> ```
+>
+> **How the error was made, because the method is the reusable part:** the check was
+> `strings libavcodec.62.dylib | grep -i opus`, which hits `Opus (Opus Interactive Audio Codec)`.
+> That string lives in `libavcodec/codec_desc.c` — an **unconditional** object file listing the
+> name of every codec ID FFmpeg knows, independent of build configuration. The same dylib also
+> contains `Apple ProRes RAW` and `Canopus HQ/HQA`. **A capability check must read something that
+> changes when the build changes** — `--verify-only`, or `config_components.h`. Full write-up:
+> `ThirdParty/ffmpeg/README.md` → *"`strings` is the same mistake wearing a different hat"*.
+>
+> **This cost real planning.** A rebuild of all five vendored dylibs was scoped on the strength of
+> it, and would have shipped a decoder nothing calls. It is not needed — see the decided path
+> below.
+
+### ✅ DECIDED: WHEP audio decodes Opus via AudioToolbox. Do not reopen libopus vs. libavcodec.
+
+**macOS decodes Opus natively**, so the expensive-looking part does not exist. Verified on this
+machine rather than assumed — `kAudioFormatProperty_DecodeFormatIDs` returns 51 formats and
+`kAudioFormatOpus` is one of them; `AudioConverterNew(Opus → LPCM int32)` succeeds. Apple documents the constant as available since macOS 10.13 — far below our 15.0 deployment
+target — so there is no availability guard to write. (The 10.13 figure is from Apple's
+documentation; what was verified here is that it works at the target we actually ship.)
+
+**Three options were on the table. Two are closed:**
+
+| Option | Verdict |
+|---|---|
+| **AudioToolbox `AudioConverter`** | **CHOSEN.** No dependency, no build change, no licence entry. |
+| Vendor `libopus` | **Rejected.** A whole new vendored dependency — build script, provenance, `THIRD_PARTY_NOTICES` — for something the OS already does. |
+| `--enable-decoder=opus` in vendored FFmpeg | **Rejected.** Viable, but costs a full rebuild of all five dylibs plus the five-consumer verification pass, for a second decoder no call site would use. |
+
+**It is measured, not merely working.** 101 raw Opus packets (2.02 s of a 1 kHz tone, libopus-encoded
+at 96 kbps, Ogg pages stripped so the input matches what RTP delivers):
+
+| | peak |
+|---|---|
+| source tone before encoding | −21.1 dBFS |
+| FFmpeg's own decode (reference) | −21.0 dBFS |
+| **this path (AudioToolbox)** | **−21.0 dBFS**, 96840 frames = 2.018 s |
+
+Level-accurate to 0.1 dB against FFmpeg, and the right duration. Implementation:
+`App/WebRTC/WHEPAudioDecoder.swift` (`WHEPOpusDecoder`), driven by `App/WebRTC/WHEPAudioReceiver.swift`.
+
+**What remains:**
 
 - **WHEP:** an RTP Opus depacketizer (RFC 7587 — one Opus frame per packet, essentially no
-  reassembly, far simpler than the H.264 case), then `avcodec` → `AudioTapBuffer.pushInterleavedInt32`.
-  Replace `ManifoldWHEPDiscardMessage` on the audio track with a real handler.
+  reassembly, far simpler than the H.264 case), then `WHEPOpusDecoder` →
+  `AudioTapBuffer.pushInterleavedInt32`. Replace `ManifoldWHEPDiscardMessage` on the audio track
+  with a real handler.
 - **SRT:** stop skipping the audio PID, decode it with the vendored FFmpeg (AAC or MP2 on a
-  typical TS contribution feed), and tee to the same seam.
+  typical TS contribution feed), and tee to the same seam. **This one genuinely does use libav** —
+  `aac` and `aac_latm` are in the 10, so it needs no build change either. MP2 is **not** in the
+  build; if a feed turns out to carry MP2, that is a real gap to re-scope, not an assumption to
+  make now.
 
 Both are additive, both end at the same `AudioTapBuffer` the file and NDI paths already feed, and
 neither touches the video path. Once either lands, its meters light up with no change to the
@@ -567,3 +628,112 @@ AudioTap[AVF]: format → 48000Hz · 1ch (→ 2ch on SDI)
 
 **Related:** the SDI half of this is *"SDI carries the monitored track's channels discretely…"*
 below; the chain that found it is `docs/AUDIO_PATH_FINDINGS.md`.
+
+---
+
+## BANKED: no stereo downmix for multichannel tracks, on either destination
+
+**Status:** BANKED — feature request, not yet scheduled. **Raised:** 2026-08-27, once the track
+selector made choosing a 5.1 track possible. **Pairs with:** *"SDI carries the monitored track's
+channels discretely…"* above — **that entry is the SDI half of this same feature and this is the
+desktop half. Read them together; neither is complete alone.**
+
+Selecting a 5.1 track gives six discrete channels. On a stereo monitoring setup only channels 1
+and 2 reach the speakers, so the centre channel — the dialogue — is not heard. A downmix option
+would fold the surround mix to stereo.
+
+**The choice is PER-DESTINATION, not global.** Mac speakers are stereo whatever the file is; the
+SDI monitor may feed a surround room. The correct default for one is not the correct default for
+the other, so this is two settings that happen to share a control, not one setting.
+
+**Where it belongs:** alongside the track selector in the control bar — it is the same question,
+*"what am I listening to"*. Probably a second line in that menu, appearing only once a
+multichannel track is selected.
+
+### ⚠️ Verify the desktop half is actually broken before building it
+
+MEASURED 2026-08-27: `AudioConverter` asked to take 6ch tagged 5.1 SMPTE down to stereo
+**discards** rather than mixes — with signal on one channel at a time, only L and R survive; C,
+LFE, Ls and Rs all come out at −99 dB. That supports the premise.
+
+**But that is NOT the path desktop playback uses.** Real playback is
+`AVSampleBufferAudioRenderer` → CoreAudio's output unit, which has its own multichannel→stereo
+matrix behaviour, and which was **not** tested. If CoreAudio is already folding correctly for a
+layout-tagged buffer, then the desktop half is about CONTROL (choosing *not* to fold, or choosing
+the coefficients) rather than about restoring lost dialogue — a different and smaller feature.
+
+**The test:** play a 5.1 file with signal only on C, on a stereo output device, and listen. One
+minute, and it decides whether this entry describes a defect or an enhancement on the desktop
+side. The SDI half is a defect either way — `d[c] = s[c]` is ours and it definitely does not fold.
+
+### A correct downmix needs ROLES, not counts
+
+Folding `L C R Ls Rs LFE` correctly means knowing which channel is C. Channel COUNT cannot tell
+you: 5.1 SMPTE is `L R C LFE Ls Rs` and 5.1 Film is `L C R Ls Rs LFE` — same six channels, and a
+fold that assumes the wrong one puts dialogue into a surround leg and the LFE into the centre
+image.
+
+**7.1 must be supported too** — it is common in delivery and handling only 5.1 would be an
+arbitrary gap. It carries the same ordering hazard plus one of its own: it distinguishes SIDE
+surrounds from BACK surrounds (`Ls Rs` vs the rear pair), and folding requires knowing which is
+which, not just that there are eight channels.
+
+### Does the chan-atom walk already distinguish side from back? PARTLY — three findings
+
+**1. Camp B (per-channel descriptions): YES, the distinction is read.**
+`MediaInspector.roleName(for:)` maps `kAudioChannelLabel_LeftSurround` → `"Ls"` and
+`kAudioChannelLabel_RearSurroundLeft` → `"Lss"`. These are distinct Apple labels producing
+distinct strings, so a file describing its channels individually is fully resolvable.
+
+**2. ⚠️ BUT THE STRING NAMES ARE A TRAP, AND A DOWNMIX TABLE KEYED ON THEM WOULD INVERT SIDE AND
+BACK.** `"Lss"` reads as "left SIDE surround" in common usage; here it is
+`kAudioChannelLabel_RearSurroundLeft` — Apple's **rear** — and the source comments the remap
+(`// Apple Rls -> Flip Lss`). Meanwhile `"Ls"` (`kAudioChannelLabel_LeftSurround`) is, in a 7.1
+context, the SIDE surround. So the name that looks like "side" means back, and the name that
+looks generic means side. There is also a third label in play,
+`kAudioChannelLabel_LeftSurroundDirect` → `"Lsd"`, which is the side surround in some Apple 7.1
+families. **Key the coefficients on the raw `AudioChannelLabel`, never on the display string** —
+the strings exist for the inspector and the meter, and they are a presentation vocabulary.
+
+**3. Camp A (layout tags): MOSTLY NO — this is the additional work.**
+`roleSequence(forTag:)` handles five tags: Mono, Stereo, `MPEG_5_1_A`, `MPEG_5_1_C`, and for 7.1
+only `MPEG_7_1_C`. Everything else hits `default: return nil` — including `MPEG_7_1_A`,
+`MPEG_7_1_B`, `AudioUnit_7_1`, `AudioUnit_7_1_Front`, `DTS_7_1`, `EAC3_7_1_A`, the ITU variants
+and the `.4`-height layouts. A 7.1 file declaring any of those yields **no roles at all** and
+falls through to count inference. Extending this table is the bulk of the layout work.
+
+**4. Channel BITMAPS are discarded entirely, and needn't be.** `channelRoles(from:)` ends with
+*"Bitmap or unknown tag: no role info we trust"* and returns nil for
+`kAudioChannelLayoutTag_UseChannelBitmap`. But `mChannelBitmap` is fully role-bearing —
+`kAudioChannelBit_LeftSurround` and `kAudioChannelBit_RearSurroundLeft` are separate bits, so it
+distinguishes side from back perfectly well. Adding a bitmap camp is cheap and widens coverage
+before any tag-table work.
+
+### What to do with a file that declares no roles
+
+**Do not guess, and do not silently fall back.** The three options and why only one is right:
+
+- **Infer from count** (6 → assume SMPTE) — this is exactly the inference the app already refuses
+  at tier 2 for *naming*, and here the consequence is audible rather than cosmetic. Rejected.
+- **Fall back to the first pair** — this is the CURRENT behaviour and it is the bug being fixed.
+  Worse than doing nothing, because it looks like a downmix while dropping dialogue.
+- **Offer the control, disabled, with the reason stated** — *"this file declares no channel roles,
+  so a downmix would be a guess"* — plus a per-file manual layout ASSERTION for a user who knows
+  what the file is. That matches the app's existing pattern for exactly this shape of problem
+  (`rangeOverride`, `NDIColorimetryOverride`): Auto follows the declaration, a preset asserts, and
+  the assertion is marked as an assertion rather than dressed as a reading. **This is the answer.**
+
+### Also to settle when this is built
+
+- **Which downmix.** ITU-R BS.775 / ATSC A/85 give `Lo = L + 0.707·C + 0.707·Ls`; Dolby Lo/Ro and
+  Lt/Rt are different answers again. Whichever is chosen must be STATED, for the same reason the
+  SDI mapping must be — see the entry above.
+- **LFE is excluded by default.** Folding it at unity is the usual cause of a downmix that clips.
+- **Headroom.** `L + 0.707·C + 0.707·Ls` can exceed full scale on legitimate material; whether
+  that is handled by attenuation or limiting is a decision, not a detail, on a reference tool.
+- **7.1 folds both surround pairs**, conventionally with the back pair at a lower coefficient than
+  the side pair — which is precisely why finding (2) above matters.
+
+**Related:** the SDI half is the entry above; the track selector this hangs off is
+`FrameEngine.selectAudioTrack`; the role derivation is `MediaInspector.channelRoles(from:)`; the
+discovery chain and measurements are `docs/AUDIO_PATH_FINDINGS.md`.

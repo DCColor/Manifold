@@ -1344,9 +1344,16 @@ struct ContentView: View {
                 return tracks[engine.selectedAudioTrackIndex].roles
             }
             // A live source has no playhead to key the ring against — see the note in
-            // AudioMeterModel.tick. NDI is the only live path that carries audio at all today;
-            // WHEP and SRT decode none, so their meters correctly report no audio track.
-            meterModel.isLive = { NDIService.shared.isConnected }
+            // AudioMeterModel.tick. NDI and WHEP both carry audio now; SRT still decodes none, so
+            // its meters correctly report no audio track.
+            //
+            // ⚠️ WHEP IS LISTED HERE EVEN THOUGH ITS TAP PTS *WOULD* KEY AGAINST THE PLAYHEAD.
+            // Live audio anchors the synchronizer to the live clock, so `engine.currentTime` and
+            // the tap's PTS are on the same timeline and a playhead-keyed read would find data.
+            // But the playhead branch is gated on `isPlaying()`, which is false for a stream (no
+            // file is loaded), so the meter would take the PAUSED branch and decay to silence over
+            // a stream that is audibly playing. Newest-keyed is both correct and simpler here.
+            meterModel.isLive = { NDIService.shared.isConnected || WHEPClient.shared.isConnected }
             // ⚠️ THE TRACK INDEX IS PART OF THE IDENTITY, NOT JUST THE URL. Switching tracks changes
             // the material the meter is describing as surely as opening a different file does, so a
             // clip latch earned on the mono track must not survive onto the 5.1 track — it would be
@@ -1707,7 +1714,21 @@ struct ContentView: View {
     /// that isn't there.
     private var audioTrackFaceLabel: String {
         let n = engine.audioTrackCount
-        guard n > 0 else { return "No audio" }
+        // ⚠️ ZERO SELECTABLE TRACKS IS NOT THE SAME QUESTION AS "NO AUDIO", and conflating them
+        // reads as a bug on every push source. `audioTrackCount` counts AVAssetTracks, so it is 0
+        // for WHEP (and for the libav path) even while audio is decoding and the meters are
+        // moving. Saying "No audio" there contradicts the meters standing next to it.
+        //
+        // So when there is no track LIST, defer to what actually decoded. `.absent` is the only
+        // state that earns "No audio" — it is set positively, either by a video-only file or by a
+        // server declining the m-section. `.unknown` keeps the old wording: nothing is loaded yet,
+        // and a source that never establishes audio should not be announced as having it.
+        guard n > 0 else {
+            if case .present(let ch) = engine.audioPresence {
+                return ch == 1 ? "Mono" : (ch == 2 ? "Stereo" : "\(ch) ch")
+            }
+            return "No audio"
+        }
         let sel = engine.selectedAudioTrackIndex
         return n == 1 ? audioTrackLabel(0) : "\(sel + 1) · \(audioTrackLabel(sel))"
     }
@@ -1768,7 +1789,13 @@ struct ContentView: View {
 
     private var audioTrackHelp: String {
         switch engine.audioTrackCount {
-        case 0:  return "Audio track — this source offers no track selection"
+        case 0:
+            // Same distinction as the face label: "cannot offer a choice" and "there is nothing to
+            // choose between" are different facts and the tooltip is where the difference fits.
+            if case .present(let ch) = engine.audioPresence {
+                return "Audio track — this source decodes \(ch) channel(s) and offers no track selection"
+            }
+            return "Audio track — this source offers no track selection"
         case 1:  return "Audio track — this file has one: \(audioTrackLabel(0))"
         default: return "Audio track — which track you are monitoring (speakers, meters and SDI all follow)"
         }

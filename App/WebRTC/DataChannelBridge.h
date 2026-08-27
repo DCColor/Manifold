@@ -169,6 +169,39 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
                                                      BOOL keyframe,
                                                      uint32_t rtpTimestamp);
 
+#pragma mark - Inbound audio (RTP → Opus packets)
+
+/// Fires once per received Opus packet, on libdatachannel's network thread, in arrival order.
+///
+/// `opus` is ONE Opus packet — the RTP payload with the header stripped and nothing else done to
+/// it. RFC 7587 puts exactly one Opus packet in each RTP payload with no fragmentation and no
+/// payload descriptor, so unlike H.264 there is no reassembly stage: strip the header and the
+/// remainder IS the codec packet. `rtpTimestamp` is the raw 32-bit RTP timestamp at the Opus
+/// clock rate (48 kHz), still wrapped — the receiver unwraps it.
+///
+/// `sequenceNumber` is carried so a consumer can see loss; this seam does not conceal it.
+/// `marker` is passed through unexamined.
+///
+/// ⚠️ THE CALLBACK RUNS ON THE NETWORK THREAD and must not block: the Processor is serialized per
+/// PeerConnection, so time spent here delays every subsequent callback on this connection,
+/// VIDEO INCLUDED. Copy what you need and get off.
+///
+/// SET THIS BEFORE -setRemoteAnswer:. Atomic, for the same reason `onVideoAccessUnit` is.
+@property (copy, nullable) void (^onAudioPacket)(NSData *opus,
+                                                 uint32_t rtpTimestamp,
+                                                 uint16_t sequenceNumber,
+                                                 BOOL marker);
+
+/// Whether the negotiated answer actually accepted the audio m-section — i.e. whether audio can
+/// be expected at all on this connection. NO means the server declined it (port 0, or the section
+/// absent), and a receiver should say "this stream carries no audio" rather than wait forever.
+/// Valid only after -setRemoteAnswer: returns YES.
+@property (nonatomic, readonly) BOOL audioNegotiated;
+
+/// Human-readable audio counters — packets, bytes, loss, and whether any arrived at all.
+/// nil if the audio track was never negotiated.
+- (nullable NSString *)audioStatsSummary;
+
 /// One cumulative, human-readable line of depacketizer counters — the same numbers the
 /// session logs each second under `[WHEP-RTP]`, totalled since the answer was applied.
 /// Intended for the teardown summary. nil if no video has been received.

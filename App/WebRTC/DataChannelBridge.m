@@ -113,9 +113,12 @@ BOOL ManifoldWebRTCLinkSmokeTest(NSString *_Nullable *_Nullable outMessage) {
 // Inbound video (step 3a). Declared here rather than left to same-@implementation lookup so
 // that -snapshotStats in particular has a visible prototype: it returns a struct by value.
 - (void)ingestRTP:(const uint8_t *)packet length:(size_t)length;
+- (void)ingestAudioRTP:(const uint8_t *)packet length:(size_t)length;
 - (void)enqueueAccessUnit:(const ManifoldH264AccessUnit *)accessUnit;
 - (void)sendNackForSequences:(const uint16_t *)seqs count:(unsigned int)count ssrc:(uint32_t)ssrc;
 - (void)configureDepacketizerFromNegotiatedDescription;
+- (void)resolveAudioNegotiationFromAnswer:(NSString *)answerSDP;
+- (void)logAudioTrackBinding;
 - (void)startRTPStatsTimer;
 - (void)logRTPStatsTick;
 - (ManifoldH264DepacketizerStats)snapshotStats;
@@ -399,14 +402,27 @@ static void ManifoldWHEPTrackMessage(int tr, const char *message, int size, void
     [session ingestRTP:(const uint8_t *)message length:(size_t)size];
 }
 
-/// Drains a track we negotiated but do not consume.
+/// Receives the audio track's RTP, strips the header, and hands one Opus packet up.
 ///
-/// This is NOT optional housekeeping. A libdatachannel Channel with no message callback
-/// QUEUES its incoming messages for a later `rtcReceiveMessage` that, for the audio track,
-/// never comes — so leaving it unhandled grows a buffer for the whole session. Discarding
-/// explicitly costs one function call per Opus packet (~50/s).
-static void ManifoldWHEPDiscardMessage(int id, const char *message, int size, void *ptr) {
-    (void)id; (void)message; (void)size; (void)ptr;
+/// This replaced a callback that discarded every packet. That callback still had to EXIST — a
+/// libdatachannel Channel with no message callback queues its messages for an `rtcReceiveMessage`
+/// that never comes, growing a buffer for the whole session — so the choice was always between
+/// discarding explicitly and consuming. This consumes.
+///
+/// ⚠️ RTCP ARRIVES HERE TOO, and must be distinguished rather than parsed as RTP. `rtcp-mux`
+/// puts both on one transport, and the audio track has no `RtcpReceivingSession` chained to
+/// absorb it (only video does — see `rtcChainRtcpReceivingSession` below). RTP payload types
+/// 72–76 are the RTCP range as seen through the RTP header's PT field, which is the standard
+/// demultiplexing rule (RFC 5761 §4). Counted separately so the stats line cannot mistake RTCP
+/// for audio that arrived.
+static void ManifoldWHEPAudioMessage(int tr, const char *message, int size, void *ptr) {
+    (void)ptr;
+    // Same guard as the video callback: a negative size is libdatachannel signalling a STRING
+    // message, which a media track never legitimately delivers.
+    if (size <= 0 || !message) return;
+    ManifoldWHEPSession *session = ManifoldWHEPTrackLookup(tr);
+    if (!session) return;
+    [session ingestAudioRTP:(const uint8_t *)message length:(size_t)size];
 }
 
 /// Fires INSIDE ManifoldH264DepacketizerSubmitRTP, on the network thread, with `_rtpLock`
@@ -583,6 +599,18 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     // ── Inbound video (step 3a) ──────────────────────────────────────────────────────
     int _videoTrack;
 
+    // ── Inbound audio (Opus) ─────────────────────────────────────────────────────────
+    int _audioTrack;
+    BOOL _audioNegotiated;
+    /// Counters. Written on the network thread, read by the 1 Hz logger on main. Plain
+    /// non-atomic ints: every one is a monotonically-increasing statistic where a torn read
+    /// costs a wrong log line and nothing else, which is the same trade the video counters make.
+    uint64_t _audioPackets, _audioBytes, _audioRTCP, _audioMalformed;
+    uint64_t _previousAudioPackets;   ///< For the per-second rate in the stats tick.
+    uint32_t _audioLastSeq;
+    BOOL _audioHaveSeq;
+    uint64_t _audioSeqGaps;
+
     /// Owned by the session, mutated ONLY under `_rtpLock`. The depacketizer itself is
     /// single-threaded by contract; the lock exists because the 1 Hz logger on main reads
     /// its counters while the network thread is writing them, and because `close` frees it
@@ -746,16 +774,22 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
 
     [lock lock];
     [ManifoldWHEPTrackSessions() setObject:session forKey:@(videoTrack)];
+    // ⚠️ THE AUDIO TRACK MUST BE IN THIS TABLE TOO, and the failure mode if it is not is
+    // maximally confusing: ManifoldWHEPAudioMessage would fire for every Opus packet, find no
+    // session for its track id, and return — so audio would be silently discarded while the
+    // logs said "audio accepted — expecting Opus on track N". The symptom reads as "the server
+    // is not sending audio", which is the one conclusion that would send you to the wrong end
+    // of the wire. Registered under the SAME lock acquisition as the video track so a callback
+    // cannot observe one present and the other missing.
+    [ManifoldWHEPTrackSessions() setObject:session forKey:@(audioTrack)];
     [lock unlock];
 
     rtcSetOpenCallback(videoTrack, ManifoldWHEPTrackOpen);
     rtcSetClosedCallback(videoTrack, ManifoldWHEPTrackClosed);
     rtcSetMessageCallback(videoTrack, ManifoldWHEPTrackMessage);
 
-    // Audio is negotiated but not consumed yet. It still needs a callback — see
-    // ManifoldWHEPDiscardMessage — or its packets accumulate in libdatachannel's receive
-    // queue for the life of the session.
-    rtcSetMessageCallback(audioTrack, ManifoldWHEPDiscardMessage);
+    session->_audioTrack = audioTrack;
+    rtcSetMessageCallback(audioTrack, ManifoldWHEPAudioMessage);
 
     NSLog(@"[WHEP-BRIDGE] pc %d created — recvonly video (tr %d) + audio (tr %d), stun: %@",
           pc, videoTrack, audioTrack, stunServer.length > 0 ? stunServer : @"none");
@@ -841,8 +875,114 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     // The answer is applied, so the video track's description is now the NEGOTIATED one and
     // the payload type in it is the one that will actually be on the wire.
     [self configureDepacketizerFromNegotiatedDescription];
+    [self resolveAudioNegotiationFromAnswer:answerSDP];
     [self startRTPStatsTimer];
     return YES;
+}
+
+#pragma mark - Inbound audio
+
+/// Decide from the ANSWER whether audio will actually arrive, and dump the audio m-section.
+///
+/// ⚠️ THE VERBATIM DUMP IS HALF THE POINT. Until now the answer's audio section was never logged
+/// anywhere — the Swift side dumps only `m=video` — so "is the server sending Opus?" could not be
+/// answered from a diagnostics export at all, and the honest answer to it was "unknown". It is
+/// logged here, next to the decision it drives, so the two cannot disagree.
+///
+/// A section is REJECTED when its port is 0 (RFC 3264 §6: the answerer zeroes the port to decline
+/// an offered stream) or when it is absent from the answer entirely. `a=inactive` is also treated
+/// as no audio: the server has agreed the section exists but will send nothing on it.
+///
+/// Parsed with componentsSeparatedByString:@"\n" rather than Swift's `.newlines`, deliberately:
+/// NSString splits on UTF-16 code units, which is immune to the grapheme-cluster bug that made
+/// the Swift-side dump report "0 line(s)" against an answer that plainly had content.
+- (void)resolveAudioNegotiationFromAnswer:(NSString *)answerSDP {
+    _audioNegotiated = NO;
+    if (_audioTrack <= 0) return;
+
+    NSMutableArray<NSString *> *section = [NSMutableArray array];
+    BOOL inAudio = NO, sawSection = NO, portZero = NO, inactive = NO;
+    for (NSString *raw in [answerSDP componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:
+                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (line.length == 0) continue;
+        if ([line hasPrefix:@"m="]) {
+            inAudio = [line hasPrefix:@"m=audio"];
+            if (!inAudio) continue;
+            sawSection = YES;
+            [section addObject:line];
+            // "m=audio <port> ..." — a zero port is the answerer declining the stream.
+            NSArray<NSString *> *parts = [line componentsSeparatedByString:@" "];
+            if (parts.count >= 2 && [parts[1] isEqualToString:@"0"]) portZero = YES;
+            continue;
+        }
+        if (!inAudio) continue;
+        if ([line hasPrefix:@"a=inactive"]) inactive = YES;
+        // Session-level secrets live above the first m=; these are the only per-section ones.
+        if ([line hasPrefix:@"a=ice-ufrag"] || [line hasPrefix:@"a=ice-pwd"] ||
+            [line hasPrefix:@"a=fingerprint"]) {
+            NSRange colon = [line rangeOfString:@":"];
+            [section addObject:[NSString stringWithFormat:@"%@:<redacted>",
+                                colon.location == NSNotFound ? line
+                                                             : [line substringToIndex:colon.location]]];
+            continue;
+        }
+        [section addObject:line];
+    }
+
+    if (!sawSection) {
+        NSLog(@"[WHEP-AUDIO] answer has NO m=audio section — this stream carries no audio");
+        return;
+    }
+    NSLog(@"[WHEP-AUDIO] answer audio m-section, verbatim (%lu line(s)):\n  %@",
+          (unsigned long)section.count, [section componentsJoinedByString:@"\n  "]);
+
+    if (portZero || inactive) {
+        NSLog(@"[WHEP-AUDIO] server DECLINED audio (%@) — this stream carries no audio",
+              portZero ? @"port 0" : @"a=inactive");
+        return;
+    }
+    _audioNegotiated = YES;
+    NSLog(@"[WHEP-AUDIO] audio accepted — expecting Opus on track %d", _audioTrack);
+    [self logAudioTrackBinding];
+}
+
+/// What libdatachannel ACTUALLY bound to the audio track after negotiation, read back from the
+/// library rather than assumed from the m-section we offered.
+///
+/// ⚠️ THERE IS NO SETTER TO CONFIRM. libdatachannel exposes only
+/// `rtcGetTrackPayloadTypesForCodec` — a GETTER. Payload types are not registered by an API call
+/// on our side at all: they come from the SDP, and ours is the literal string
+/// `kManifoldWHEPAudioMSection` ("a=rtpmap:111 opus/48000/2"), handed to `rtcAddTrack` verbatim.
+/// So the question "did the binding call succeed" has no referent; the answerable question is
+/// "what did the library end up with", which is what this logs.
+///
+/// If the PT list comes back empty, or the direction is not recvonly, the track exists but nothing
+/// will route to it — and that is the distinction this line is here to make visible.
+- (void)logAudioTrackBinding {
+    if (_audioTrack <= 0) return;
+
+    int pts[16] = {0};
+    const int n = rtcGetTrackPayloadTypesForCodec(_audioTrack, "opus", pts, 16);
+    NSMutableString *list = [NSMutableString string];
+    for (int i = 0; i < n && i < 16; i++) [list appendFormat:@"%@%d", i ? @"," : @"", pts[i]];
+    NSLog(@"[WHEP-AUDIO] track %d binding — rtcGetTrackPayloadTypesForCodec(\"opus\") → %d "
+          @"(%@)", _audioTrack, n, n > 0 ? list : @"NONE — nothing will route to this track");
+
+    char mid[64] = {0};
+    if (rtcGetTrackMid(_audioTrack, mid, sizeof(mid)) >= 0) {
+        NSLog(@"[WHEP-AUDIO] track %d mid=%s", _audioTrack, mid);
+    }
+    rtcDirection dir = RTC_DIRECTION_UNKNOWN;
+    if (rtcGetTrackDirection(_audioTrack, &dir) >= 0) {
+        NSLog(@"[WHEP-AUDIO] track %d direction=%d (2=recvonly)", _audioTrack, (int)dir);
+    }
+    char desc[2048] = {0};
+    if (rtcGetTrackDescription(_audioTrack, desc, sizeof(desc)) >= 0) {
+        NSLog(@"[WHEP-AUDIO] track %d NEGOTIATED description:\n  %@", _audioTrack,
+              [[NSString stringWithUTF8String:desc]
+                  stringByReplacingOccurrencesOfString:@"\n" withString:@"\n  "]);
+    }
 }
 
 #pragma mark - Inbound video (step 3a)
@@ -1016,6 +1156,76 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     os_unfair_lock_unlock(&_rtpLock);
 }
 
+/// RFC 3550 header parse + RFC 7587 payload hand-off. Network thread; no hop, no logging.
+///
+/// Deliberately NOT a C depacketizer next to H264Depacketizer.c: there is nothing to depacketize.
+/// RFC 7587 §4.2 puts exactly one Opus packet in each RTP payload — no fragmentation, no
+/// aggregation, no payload descriptor — so the whole job is "skip the header". A file mirroring
+/// the H.264 one would be a header parser wearing a depacketizer's name.
+- (void)ingestAudioRTP:(const uint8_t *)packet length:(size_t)length {
+    if (length < 12) { _audioMalformed++; return; }
+
+    const uint8_t version = (packet[0] >> 6) & 0x03;
+    if (version != 2) { _audioMalformed++; return; }
+
+    // RFC 5761 §4: RTCP multiplexed onto the same transport is told apart by the payload-type
+    // field falling in 72–76. The audio track has no RtcpReceivingSession chained to absorb it,
+    // so it lands here and must be counted separately rather than parsed as a media packet.
+    const uint8_t payloadType = packet[1] & 0x7F;
+    if (payloadType >= 72 && payloadType <= 76) { _audioRTCP++; return; }
+
+    const BOOL marker = (packet[1] & 0x80) != 0;
+    const uint16_t seq = (uint16_t)((packet[2] << 8) | packet[3]);
+    const uint32_t timestamp = ((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16)
+                             | ((uint32_t)packet[6] << 8)  | (uint32_t)packet[7];
+
+    // Header length: fixed 12 + 4 per CSRC + the extension block when X is set.
+    const uint8_t csrcCount = packet[0] & 0x0F;
+    size_t headerLength = 12 + (size_t)csrcCount * 4;
+    if (length < headerLength) { _audioMalformed++; return; }
+    if ((packet[0] & 0x10) != 0) {                       // X — one extension header follows
+        if (length < headerLength + 4) { _audioMalformed++; return; }
+        const uint16_t words = (uint16_t)((packet[headerLength + 2] << 8) | packet[headerLength + 3]);
+        headerLength += 4 + (size_t)words * 4;
+        if (length < headerLength) { _audioMalformed++; return; }
+    }
+
+    // Padding: when P is set the LAST byte gives the pad length, which is part of the payload
+    // span and must come off the end. Getting this wrong feeds the decoder trailing garbage.
+    size_t end = length;
+    if ((packet[0] & 0x20) != 0) {
+        const uint8_t pad = packet[length - 1];
+        if (pad == 0 || (size_t)pad > length - headerLength) { _audioMalformed++; return; }
+        end -= pad;
+    }
+    if (end <= headerLength) { _audioMalformed++; return; }   // header-only: no Opus packet
+
+    // Loss is COUNTED, not concealed. Opus has in-band FEC and the decoder can be told to
+    // conceal, but a receiver that silently papers over gaps cannot report feed quality — and on
+    // a monitoring tool that report is the point. See ManifoldWHEPAudioMessage.
+    if (_audioHaveSeq) {
+        const uint16_t expected = (uint16_t)(_audioLastSeq + 1);
+        if (seq != expected) _audioSeqGaps++;
+    }
+    _audioLastSeq = seq; _audioHaveSeq = YES;
+    _audioPackets++; _audioBytes += (end - headerLength);
+
+    void (^sink)(NSData *, uint32_t, uint16_t, BOOL) = self.onAudioPacket;   // atomic read
+    if (!sink) return;
+    sink([NSData dataWithBytes:packet + headerLength length:end - headerLength],
+         timestamp, seq, marker);
+}
+
+- (BOOL)audioNegotiated { return _audioNegotiated; }
+
+- (nullable NSString *)audioStatsSummary {
+    if (_audioTrack <= 0) return nil;
+    if (!_audioNegotiated) return @"audio: m-section not accepted by the server — stream carries no audio";
+    return [NSString stringWithFormat:
+            @"audio: %llu packet(s), %llu byte(s), %llu seq gap(s), %llu RTCP, %llu malformed",
+            _audioPackets, _audioBytes, _audioSeqGaps, _audioRTCP, _audioMalformed];
+}
+
 /// Network thread, `_rtpLock` held, called from inside the depacketizer. Everything here is
 /// a copy and a dispatch — no decode, no CoreMedia, no logging.
 - (void)enqueueAccessUnit:(const ManifoldH264AccessUnit *)accessUnit {
@@ -1081,6 +1291,22 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     const ManifoldH264DepacketizerStats now = [self snapshotStats];
     const ManifoldH264DepacketizerStats was = _previousStats;
     _previousStats = now;
+
+    // ── STAGE 1 OF THE AUDIO CHAIN: ARE OPUS PACKETS ARRIVING AT ALL? ────────────────────
+    //
+    // ⚠️ LOGGED BEFORE THE VIDEO EARLY-RETURN BELOW, DELIBERATELY. That return fires whenever no
+    // VIDEO arrived this tick, and audio is a different question on a different m-line — gating
+    // one on the other is how "is the server sending Opus?" became unanswerable.
+    //
+    // Unconditional, including the zero case: `audio: 0 packet(s)` is the single most useful line
+    // in this whole path, because it separates "never arrived" from "arrived and died downstream"
+    // in one glance. `audioStatsSummary` existed for exactly this and was never called from
+    // anywhere, so none of these counters had ever reached a log.
+    if (_audioTrack > 0 || _audioNegotiated) {
+        const uint64_t audioDelta = _audioPackets - _previousAudioPackets;
+        _previousAudioPackets = _audioPackets;
+        NSLog(@"[WHEP-AUDIO] rtp — %llu pkt/s · %@", audioDelta, [self audioStatsSummary]);
+    }
 
     os_unfair_lock_lock(&_rtpLock);
     const uint64_t handedOff = _accessUnitsHandedOff, droppedBusy = _accessUnitsDroppedBusy;
@@ -1428,10 +1654,26 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
         _videoTrack = 0;
     }
 
+    // Audio, torn down the same way and for the same reason. Symmetry is the point: the audio
+    // track is registered beside the video one at creation, so it must be unregistered beside it
+    // here, BEFORE `onAudioPacket` is cleared below. Order matters — detaching the C callback
+    // first means no new packet can enter, and the table removal then closes the window on one
+    // already in flight.
+    if (_audioTrack > 0) {
+        rtcSetMessageCallback(_audioTrack, NULL);
+
+        NSLock *audioLock = ManifoldWHEPSessionsLock();
+        [audioLock lock];
+        [ManifoldWHEPTrackSessions() removeObjectForKey:@(_audioTrack)];
+        [audioLock unlock];
+        _audioTrack = 0;
+    }
+
     // Stop new work reaching the decode queue. Frames ALREADY queued still run — their
     // blocks hold the handler, and by extension the decoder — which is why the Swift side
     // tears the decoder down with `decodeQueue.async`, behind them, rather than inline.
     self.onVideoAccessUnit = nil;
+    self.onAudioPacket = nil;   // same reason: the network thread must not reach a torn-down sink
 
     // A message callback may be running RIGHT NOW on the track thread, already past the
     // unregister above. Detach the depacketizer under the lock so that callback either

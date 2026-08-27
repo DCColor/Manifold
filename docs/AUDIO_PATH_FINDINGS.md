@@ -55,6 +55,19 @@ NDI (already done) has its own format. **WHEP is the priority**, because it is t
 actually use. Both land at the same `AudioTapBuffer` the file and NDI paths already feed, so the
 meters light up with no change to meter code.
 
+### ✅ The WHEP decoder question is SETTLED (2026-08-27): AudioToolbox, no new dependency
+
+`kAudioFormatOpus` is one of the 51 formats `kAudioFormatProperty_DecodeFormatIDs` reports on this
+machine, so `AudioConverter` decodes Opus natively. **Neither `libopus` nor a vendored-FFmpeg
+rebuild is needed, and neither should be re-proposed.** Measured level-accurate to 0.1 dB against
+FFmpeg's own decode over a 101-packet fixture. Implementation: `WHEPOpusDecoder` in
+`App/WebRTC/WHEPAudioDecoder.swift`.
+
+⚠️ Note for anyone re-checking this: the vendored FFmpeg **has no Opus decoder** — an earlier note
+in `BUGS.md` said it did, from a `strings` hit on a codec name table that lists every codec
+regardless of build config. The full correction, and the right way to test a libav capability, is
+in `BUGS.md` and `ThirdParty/ffmpeg/README.md`.
+
 ---
 
 ## Gap 2 — Multi-track files play only track 1
@@ -139,6 +152,13 @@ The fix is to make the mapping a **choice** and **state which is active** — fu
 stereo downmix — **per destination**, because desktop and SDI may legitimately differ: Mac speakers
 are stereo whatever the file is, while the SDI monitor may feed a surround room.
 
+**The desktop half of that choice is banked separately** as *"BANKED: no stereo downmix for
+multichannel tracks, on either destination"* in `BUGS.md`, raised once the track selector made
+choosing a 5.1 track possible. It carries the 5.1/7.1 role requirements, what to do with a file
+that declares no roles, and — importantly — an unverified premise worth settling first: whether
+CoreAudio's output unit is ALREADY folding multichannel to a stereo device, which would make the
+desktop half a control feature rather than a defect.
+
 ### Channel ORDER, and why phase 2 is gated on it
 
 Nothing in `AudioTapBuffer`, `DeckLinkService` or `DeckLinkBridge.mm` reads an `AudioChannelLayout`
@@ -188,7 +208,14 @@ guess never reads as a fact.
    display string. Phase 2 needs it public, the role array carried on `AudioTapBuffer.Format`, and
    `d[c] = s[c]` replaced with a role→wire-index table. **The derivation does not need writing —
    only plumbing.**
-3. **Query the card.** The app never reads `IDeckLinkProfileAttributes` /
+3. **Widen the role coverage, which the downmix work needs and the inspector benefits from now.**
+   Two specific gaps found 2026-08-27 while scoping the downmix: `roleSequence(forTag:)` handles
+   only five tags — for 7.1, ONLY `MPEG_7_1_C`, so `AudioUnit_7_1`, `MPEG_7_1_A/B`, `DTS_7_1`,
+   `EAC3_7_1_A`, the ITU variants and the height layouts all yield no roles at all; and
+   `channelRoles(from:)` discards `kAudioChannelLayoutTag_UseChannelBitmap` entirely, though
+   `mChannelBitmap` is fully role-bearing and distinguishes side from back surrounds by separate
+   bits. The bitmap camp is the cheaper of the two and widens coverage before any tag-table work.
+4. **Query the card.** The app never reads `IDeckLinkProfileAttributes` /
    `BMDDeckLinkMaximumAudioChannels`, so a too-wide `EnableAudioOutput` aborts the entire output
    start rather than degrading. It also passes `bmdVideoConnectionUnspecified`, so it cannot tell
    SDI (up to 16 channels) from HDMI (up to 8).

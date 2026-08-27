@@ -675,6 +675,25 @@ final class WHEPClient: ObservableObject {
             return
         }
         NSLog("[WHEP] answer applied — ICE checks + DTLS handshake now in flight…")
+
+        // ── AUDIO: START IT, OR SAY POSITIVELY THAT THERE IS NONE ─────────────────────────────
+        //
+        // `audioNegotiated` is decided from the ANSWER (port 0 / a=inactive / section absent all
+        // mean no), so this is the first moment the question has a real answer. Both branches are
+        // load-bearing: a stream with no audio must reach `liveAudioAbsent` so the meters say
+        // "NO AUDIO TRACK" instead of "WAITING FOR AUDIO" forever, and so the track selector reads
+        // "No audio" rather than looking broken. Silence with no explanation is the failure mode
+        // this whole arc exists to remove.
+        if session.audioNegotiated {
+            // 2 is what our offer asked for (`opus/48000/2`); the decoder re-establishes the real
+            // count from what actually decodes, so a mono sender still meters as mono.
+            WHEPFrameRouter.shared.startAudio(channels: 2)
+            session.onAudioPacket = { opus, rtpTimestamp, _, _ in
+                WHEPFrameRouter.shared.audioReceiver?.receive(opus, rtpTimestamp: rtpTimestamp)
+            }
+        } else {
+            WHEPFrameRouter.shared.declareNoAudio()
+        }
     }
 
     // MARK: - Teardown

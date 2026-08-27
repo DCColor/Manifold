@@ -405,14 +405,98 @@ public final class LiveClock: @unchecked Sendable {
     /// Called on the source thread.
     public func registerFrame(senderPTS: Double) -> Double {
         lock.lock()
-        defer { lock.unlock() }
         if anchorSenderPTS == nil {
-            anchorSenderPTS = senderPTS
-            anchorHostTime = hostNow() + startupDepth
+            // `hostNow() + startupDepth` — the anchor is pinned into the FUTURE so the buffer fills
+            // before the first frame comes due. The audio mirror inherits this for free now that it
+            // tracks the mapping rather than copying now()'s value once.
+            setMappingLocked(senderPTS: senderPTS, hostTime: hostNow() + startupDepth, rate: rate)
         }
+        lock.unlock()
+        publishMappingIfChanged()
         // rate == 1.0 (Step 1): presentation PTS == sender PTS. When Step 2 modulates `rate`,
         // this becomes the sender→presentation remap and stops being an identity.
         return senderPTS
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════
+    // THE MAPPING SEAM — ONE PLACE, BECAUSE THERE WERE ALREADY MORE SITES THAN ANYONE THOUGHT
+    // ══════════════════════════════════════════════════════════════════════════════════════
+    //
+    // `now()` is a cursor: `anchorSenderPTS + (hostNow() - anchorHostTime) * rate`. Video reads it
+    // every frame, so it follows any change for free. Anything else that must stay in lockstep —
+    // the WHEP audio timebase — cannot, because it holds its own clock and can only be TOLD.
+    //
+    // ⚠️ THE COUNT IS WHY THIS IS A FUNNEL AND NOT N CALL SITES. An audit of this file listed five
+    // places that rewrite the mapping. There are SEVEN: `registerFrame`, `adjustTargetDepthLocked`,
+    // the `forceUnityRate` pin, the snap, the P-loop rate change, `evaluateFreezeGuard`, and
+    // `overflowReanchorLocked` — the last of which the audit's own grep truncated away. A design
+    // that needs a mirror call added to each one was already one site out of date before it shipped.
+    //
+    // So the fields are written through `setMappingLocked` and nowhere else, and
+    // `publishMappingIfChanged` is called after every unlock that could have touched them. An
+    // eighth site that assigns the fields directly is caught by the tripwire below rather than
+    // silently desynchronising the audio.
+
+    /// The sender→host mapping, whole. `now()` at `hostTime` is exactly `senderPTS`, advancing at
+    /// `rate` per host second.
+    public struct Mapping: Sendable, Equatable {
+        public let senderPTS: Double
+        public let hostTime: Double
+        public let rate: Double
+    }
+
+    /// Fires whenever the mapping changes — including the first anchor — and with `nil` when
+    /// `reset()` un-anchors. CALLED OUTSIDE `lock`, on whichever thread made the change (the source
+    /// thread for `registerFrame`, the display tick for `updateDepth`, main for the tuning hooks).
+    /// A consumer must therefore be safe to call from any thread and must not block.
+    public var onMappingChange: ((Mapping?) -> Void)?
+
+    /// Set under `lock` by `setMappingLocked`; drained by `publishMappingIfChanged` after unlock.
+    private var mappingDirty = false
+    /// What was last handed to `onMappingChange` — the tripwire's reference.
+    private var lastPublishedMapping: Mapping?
+
+    /// THE ONLY writer of `anchorSenderPTS` / `anchorHostTime` / `rate`. Call under `lock`.
+    private func setMappingLocked(senderPTS: Double, hostTime: Double, rate newRate: Double) {
+        anchorSenderPTS = senderPTS
+        anchorHostTime  = hostTime
+        rate            = newRate
+        mappingDirty    = true
+    }
+
+    /// Un-anchor. Call under `lock`. Publishes `nil`.
+    private func clearMappingLocked() {
+        anchorSenderPTS = nil
+        anchorHostTime  = nil
+        rate            = 1.0
+        mappingDirty    = true
+    }
+
+    /// Drain a pending mapping change to `onMappingChange`. MUST be called with `lock` NOT held —
+    /// the consumer touches a CMTimebase, which is not work to do under a priority-donating lock.
+    /// Cheap and safe to call unconditionally after any unlock.
+    private func publishMappingIfChanged() {
+        lock.lock()
+        let live: Mapping? = (anchorSenderPTS != nil && anchorHostTime != nil)
+            ? Mapping(senderPTS: anchorSenderPTS!, hostTime: anchorHostTime!, rate: rate) : nil
+        guard mappingDirty else {
+            // ── TRIPWIRE ────────────────────────────────────────────────────────────────────
+            // Nothing declared a change, so the live mapping must equal what we last published.
+            // If it does not, some site assigned the fields directly instead of going through
+            // `setMappingLocked`, and the audio timebase is now silently wrong. Loud on purpose.
+            let drifted = live != lastPublishedMapping
+            lock.unlock()
+            if drifted {
+                NSLog("[LIVECLOCK] ⚠️ MAPPING CHANGED WITHOUT setMappingLocked — an anchor/rate "
+                    + "write bypassed the funnel; the audio timebase will not be mirrored")
+            }
+            return
+        }
+        mappingDirty = false
+        lastPublishedMapping = live
+        let callback = onMappingChange
+        lock.unlock()
+        callback?(live)
     }
 
     /// Current presentation time, in the SENDER timeline's units — the closure handed to
@@ -485,6 +569,7 @@ public final class LiveClock: @unchecked Sendable {
         lock.lock()
         let change = adjustTargetDepthLocked(by: delta)
         lock.unlock()
+        publishMappingIfChanged()                                           // outside the lock
         if let change { emitTargetStep(from: change.from, to: change.to) }   // outside the lock
         return change
     }
@@ -504,8 +589,7 @@ public final class LiveClock: @unchecked Sendable {
             let mappedNow = aPTS + (t - aHost) * rate   // old now() evaluated at t
             // Deeper target → now() moves BACK by the same amount, so measured depth lands on the
             // new setpoint immediately. `jumped` is the signed presentation time crossed.
-            anchorSenderPTS = mappedNow - shift
-            anchorHostTime  = t
+            setMappingLocked(senderPTS: mappedNow - shift, hostTime: t, rate: rate)
             jumped = -shift
             // Shift the smoothed depth with the clock so the loop's error is preserved, not reset.
             if let s = smoothedDepth { smoothedDepth = s + shift }
@@ -574,6 +658,9 @@ public final class LiveClock: @unchecked Sendable {
                                                   oldestPTS: oldestPTS, newestPTS: newestPTS,
                                                   presented: presented)
         lock.unlock()
+        // The mapping mirror goes FIRST: a snap or rate change must reach the audio timebase before
+        // the line describing it reaches the log, so the two cannot be read in the wrong order.
+        publishMappingIfChanged()
         // OUTSIDE THE LOCK, ALWAYS. See the `lock` declaration: formatting allocates and writing to
         // stderr is a syscall, and neither may happen while holding a priority-donating lock.
         // Periodic line first, then the coarse action — the order the log had before the split, so
@@ -608,10 +695,11 @@ public final class LiveClock: @unchecked Sendable {
         if forceUnityRate {
             if rate != 1.0, let aPTS = anchorSenderPTS, let aHost = anchorHostTime {
                 let t = hostNow()
-                anchorSenderPTS = aPTS + (t - aHost) * rate   // old now() evaluated at t
-                anchorHostTime  = t
+                setMappingLocked(senderPTS: aPTS + (t - aHost) * rate,   // old now() evaluated at t
+                                 hostTime: t, rate: 1.0)
+            } else {
+                rate = 1.0
             }
-            rate = 1.0
         }
         #endif
 
@@ -686,12 +774,10 @@ public final class LiveClock: @unchecked Sendable {
                 let excess = depth - targetDepth
                 let sustained = t - since
                 let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate
-                anchorSenderPTS = mappedNow + excess
-                anchorHostTime  = t
                 // Hand the P-loop a clean slate at the setpoint: unity rate (not the drain rail it
                 // was pinned to while trying to fight this) and a seeded EMA, so it does not spend
                 // the next second unwinding a huge stale error it no longer has.
-                rate = 1.0
+                setMappingLocked(senderPTS: mappedNow + excess, hostTime: t, rate: 1.0)
                 smoothedDepth = targetDepth
                 lastControlHost = nil
                 overThresholdSince = nil
@@ -737,9 +823,7 @@ public final class LiveClock: @unchecked Sendable {
         // pair under this lock, so the force-unwraps cannot trap.
         if newRate != rate {
             let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate   // old now() evaluated at t
-            anchorSenderPTS = mappedNow
-            anchorHostTime  = t
-            rate            = newRate
+            setMappingLocked(senderPTS: mappedNow, hostTime: t, rate: newRate)
         }
 
         return (nil, periodicLogIfDue(t))   // the fine loop reports nothing; only coarse actions do
@@ -817,11 +901,9 @@ public final class LiveClock: @unchecked Sendable {
         let depthBefore = smoothedDepth ?? (newestPTS - mappedNow)
         let oldestAhead = oldestPTS - mappedNow
 
-        anchorSenderPTS = corrected
-        anchorHostTime  = t
         // Same clean slate the snap hands the P-loop: unity rate and a seeded EMA at the setpoint,
         // so it does not spend the next second unwinding an error it no longer has.
-        rate = 1.0
+        setMappingLocked(senderPTS: corrected, hostTime: t, rate: 1.0)
         smoothedDepth = target
         lastControlHost = nil
         overThresholdSince = nil
@@ -863,7 +945,8 @@ public final class LiveClock: @unchecked Sendable {
         lock.lock()
         let event = overflowReanchorLocked(newestPTS: newestPTS, count: count)
         lock.unlock()
-        emit(event)   // outside the lock — see the `lock` declaration
+        publishMappingIfChanged()   // outside the lock — see the `lock` declaration
+        emit(event)                 // outside the lock — see the `lock` declaration
         return event
     }
 
@@ -882,9 +965,7 @@ public final class LiveClock: @unchecked Sendable {
         guard depthBefore > targetDepth else { return nil }
 
         let target = targetDepth
-        anchorSenderPTS = newestPTS - target
-        anchorHostTime  = t
-        rate = 1.0
+        setMappingLocked(senderPTS: newestPTS - target, hostTime: t, rate: 1.0)
         smoothedDepth = target
         lastControlHost = nil
         overThresholdSince = nil
@@ -976,8 +1057,7 @@ public final class LiveClock: @unchecked Sendable {
     /// Safe to call from any thread.
     public func reset() {
         lock.lock()
-        anchorSenderPTS = nil
-        anchorHostTime = nil
+        clearMappingLocked()
         // Re-arm the control loop cleanly for the next stream/loop: forget the smoothed depth and
         // cadence gates, and return the rate to unity so a fresh anchor starts from wall-clock speed.
         smoothedDepth = nil
@@ -1000,6 +1080,7 @@ public final class LiveClock: @unchecked Sendable {
         ineligibleSince = nil
         hasPresentedOnce = false
         lock.unlock()
+        publishMappingIfChanged()   // publishes nil — the mirror must un-anchor with us
     }
 
     /// The app's established monotonic host clock — the same one NDI stamps frames with

@@ -1427,6 +1427,174 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         if resumePlaying { play() }
     }
 
+    // MARK: - Live (push-source) audio
+
+    /// Where a live source hands decoded PCM. Holds the renderer and the tap directly so a network
+    /// or decode thread can enqueue without hopping to the main actor — the same local-capture
+    /// discipline the file and libav pumps use.
+    public final class LiveAudioSink: @unchecked Sendable {
+        private let renderer: AVSampleBufferAudioRenderer
+        private let tap: AudioTapBuffer
+        fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer) {
+            self.renderer = renderer; self.tap = tap
+        }
+        /// Tee to the tap, then to the renderer — the SAME order and the same two consumers the
+        /// file pump feeds, so metering, SDI embedding, routing and mute all apply unchanged.
+        public func enqueue(_ sampleBuffer: CMSampleBuffer) {
+            tap.ingest(sampleBuffer, path: .whep)
+            renderer.enqueue(sampleBuffer)
+        }
+    }
+
+    /// Open the shared audio renderer to a live push source, with the synchronizer's timebase
+    /// anchored to `clockSeconds` — the live clock's current reading.
+    ///
+    /// ── WHY THE SYNCHRONIZER IS ANCHORED RATHER THAN LEFT ALONE ───────────────────────────────
+    ///
+    /// A live source presents VIDEO through `MetalVideoRenderer`, paced by `LiveClock.now()`; the
+    /// synchronizer is not involved in that at all. But `AVSampleBufferAudioRenderer` presents by
+    /// PTS against a timebase, so for audio to land with the picture the timebase has to read the
+    /// SAME timeline LiveClock does. Anchoring it here and stamping every buffer with its live-clock
+    /// presentation time is what makes "the audio is scheduled by the existing LiveClock" literally
+    /// true rather than approximately true.
+    ///
+    /// ⚠️ RATE 1.0 IS AN ASSUMPTION WITH A KNOWN EXPIRY. LiveClock slews its own rate slightly off
+    /// 1.0 to regulate the VIDEO buffer depth; the synchronizer here runs at exactly 1.0. The two
+    /// therefore diverge at the slew rate, which is small but not zero. `liveAudioDrift` reports the
+    /// gap so a lip-sync measurement can see it rather than inferring it, and so the decision about
+    /// whether it matters is made from a number.
+    /// ⚠️ DOES NOT ANCHOR THE TIMEBASE, AND MUST NOT — THE ANCHOR TIME IS NOT KNOWN YET.
+    ///
+    /// This used to take `startingAt clockSeconds` and hand it straight to `synchronizer.setRate`.
+    /// That was wrong on the WHEP path in a way that made audio permanently unschedulable:
+    ///
+    ///   * `LiveClock.now()` returns `-.infinity` — a DELIBERATE sentinel — until the first VIDEO
+    ///     frame calls `registerFrame`. Audio never calls it and cannot anchor the clock.
+    ///   * This function runs when the ANSWER is applied, which is necessarily before any video
+    ///     frame has arrived. So `clockSeconds` was `-.infinity` essentially every time.
+    ///   * `CMTime(seconds: -.infinity, preferredTimescale:)` is an INVALID CMTime, so the
+    ///     synchronizer was anchored to nothing and `currentTime()` read as NaN.
+    ///
+    /// The anchor is now taken by `anchorLiveAudio(at:)`, from the first audio packet that sees a
+    /// FINITE clock — the first moment the value actually exists. Until then the renderer holds at
+    /// rate 0 with nothing scheduled, which is the correct state: video is not presenting yet either.
+    public func beginLiveAudio(cushion: Double) -> LiveAudioSink {
+        // A live source is not a file: retire any file audio session first so two producers can
+        // never feed the renderer at once.
+        teardownAudioReading()
+        liveAudioActive = true
+        liveAudioAnchor = nil
+        mirror.lock.lock()
+        mirror.active = true; mirror.cushion = cushion; mirror.mirrored = false
+        mirror.lock.unlock()
+        audioRenderer.flush()
+        synchronizer.rate = 0      // held until the first mirrored mapping arrives
+        applyAudioMute()
+        audioPresence = .unknown   // "don't know yet" until the first packet establishes channels
+        return LiveAudioSink(renderer: audioRenderer, tap: audioTap)
+    }
+
+    /// Mirror state, reachable from the threads `mirrorLiveAudio` runs on (the WHEP source thread
+    /// and the display tick). Separate from `liveAudioActive`/`liveAudioAnchor`, which are
+    /// main-actor state read by the UI — the two describe the same session but are read from
+    /// different isolation domains, and merging them would put a lock on the main-actor path.
+    final class LiveAudioMirrorState: @unchecked Sendable {
+        let lock = NSLock()
+        var active = false
+        var cushion: Double = 0
+        var mirrored = false          // has at least one mapping landed?
+    }
+    private let mirror = LiveAudioMirrorState()
+
+    /// Track `LiveClock`'s mapping so the audio timebase reads what `now()` reads, minus the
+    /// cushion. THIS REPLACED A ONE-SHOT ANCHOR, and the difference is the whole fix:
+    ///
+    ///   * `LiveClock` rewrites its mapping from SEVEN places (first anchor, target retarget, the
+    ///     unity-rate pin, the snap, the P-loop rate change, the freeze guard, the overflow
+    ///     re-anchor) and slews `rate` within ±0.5% continuously.
+    ///   * Video follows all of it for free because it reads `now()` per frame. A timebase pinned
+    ///     once at rate 1.0 follows none of it. Measured on two saved runs, that divergence reached
+    ///     **190 ms** within 3–4 minutes — about 4.5 frames at 24 fps.
+    ///
+    /// ⚠️ THE CUSHION GOES ON THE HOST ANCHOR, NOT THE MEDIA STAMPS. Video's anchor is pinned
+    /// `startupDepth` into the future (`registerFrame`), and the loop then holds the buffer at
+    /// `targetDepth`, so a video frame is presented `targetDepth` after it arrives. Audio stamps
+    /// carry sender-timeline values with no such offset. Subtracting the cushion HERE gives audio
+    /// the same lead without touching the timestamps, so the two paths' PTS values stay directly
+    /// comparable when someone photographs them side by side.
+    ///
+    /// `nil` means un-anchored (`reset()`): hold the renderer rather than guess.
+    ///
+    /// NONISOLATED because it is called from `LiveClock`'s callback, which fires on whichever
+    /// thread changed the mapping. `AVSampleBufferRenderSynchronizer` handles its own
+    /// thread-safety for `setRate` — the same rationale as `currentSyncTime()` above.
+    public nonisolated func mirrorLiveAudio(_ mapping: LiveClock.Mapping?) {
+        mirror.lock.lock()
+        let active = mirror.active
+        let cushion = mirror.cushion
+        let wasMirrored = mirror.mirrored
+        if active, mapping != nil { mirror.mirrored = true }
+        if mapping == nil { mirror.mirrored = false }
+        mirror.lock.unlock()
+        guard active else { return }
+
+        guard let m = mapping,
+              m.senderPTS.isFinite, m.hostTime.isFinite, m.rate.isFinite, m.rate > 0 else {
+            // Un-anchored, or a mapping we cannot represent. Holding is correct: video is not
+            // presenting either, and a guessed timebase is what produced the -inf failure before.
+            synchronizer.rate = 0
+            return
+        }
+        synchronizer.setRate(Float(m.rate),
+                             time: CMTime(seconds: m.senderPTS - cushion, preferredTimescale: 90_000),
+                             atHostTime: CMTime(seconds: m.hostTime, preferredTimescale: 90_000))
+        if !wasMirrored {
+            NSLog("[WHEP-AUDIO] timebase MIRRORED — first mapping: senderPTS=%.3fs host=%.3fs "
+                + "rate=%.5f cushion=%.3fs → timebase=%.3fs",
+                  m.senderPTS, m.hostTime, m.rate, cushion, m.senderPTS - cushion)
+        }
+    }
+
+    /// The live source has established its channel count — publish it so the meters size their bars
+    /// from the DECODER rather than growing into shape as audio arrives.
+    public func liveAudioEstablished(channels: Int) {
+        audioPresence = channels > 0 ? .present(channels: channels) : .unknown
+    }
+
+    /// The live source carries no audio at all, established positively (the server declined the
+    /// m-section, or the stream has none). Distinct from `.unknown`, which is "not yet".
+    public func liveAudioAbsent() {
+        audioPresence = .absent
+    }
+
+    /// How far the synchronizer's timebase has drifted from the live clock, in seconds. Positive =
+    /// audio timebase is AHEAD of the video clock. Nil when no live audio session is running.
+    public func liveAudioDrift(against clockSeconds: Double) -> Double? {
+        guard liveAudioAnchor != nil else { return nil }
+        return CMTimeGetSeconds(synchronizer.currentTime()) - clockSeconds
+    }
+
+    public func endLiveAudio() {
+        // Guarded on ACTIVE, not on the anchor: a session that never saw a finite clock still has a
+        // renderer and a tap to retire. Keying this to the anchor would leak exactly the session
+        // that failed to start.
+        guard liveAudioActive else { return }
+        liveAudioActive = false
+        liveAudioAnchor = nil
+        mirror.lock.lock()
+        mirror.active = false; mirror.mirrored = false
+        mirror.lock.unlock()
+        synchronizer.rate = 0
+        audioRenderer.flush()
+        audioTap.reset()
+        audioPresence = .unknown
+    }
+
+    private var liveAudioAnchor: Double?
+    /// A live-audio session is open. DISTINCT from `liveAudioAnchor`, which is only set once the
+    /// clock becomes finite — there is a real window where a session is running and unanchored.
+    private var liveAudioActive = false
+
     // MARK: - The audio reading session (independent of the video reader)
 
     /// Retire the current audio reader and pump. Leaves the VIDEO side completely alone.
