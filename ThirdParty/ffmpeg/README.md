@@ -88,6 +88,37 @@ parsers and protocols:
 ./scripts/build_ffmpeg.sh --verify-only
 ```
 
+### `strings` is the same mistake wearing a different hat — it produced a FALSE POSITIVE (2026-08-27)
+
+With `nm` closed off, the next thing to reach for is `strings`. **Do not.** It reads a *name
+table*, not a *build configuration*, and it will confidently tell you a decoder is present when it
+is not. This is not hypothetical — it happened, and the wrong answer propagated into planning:
+
+```sh
+$ strings -a libavcodec.62.dylib | grep -i opus
+Opus (Opus Interactive Audio Codec)     # ← concluded: "the Opus decoder is already compiled in"
+```
+
+The Opus decoder was **not** compiled in. That string comes from `libavcodec/codec_desc.c`, which
+is in libavcodec's **unconditional** `OBJS` list — it carries the `long_name` of *every* `AVCodecID`
+FFmpeg knows about, regardless of what the build actually contains. The same dylib also answers to
+`Apple ProRes RAW` and `Canopus HQ/HQA`, and nothing in this build could decode either.
+
+**The tell is available for free:** if a `strings` hit meant a decoder existed, `--disable-everything`
+would have accomplished nothing at all. A grep that "confirms" every codec is confirming nothing.
+
+**Ask the build, not the binary's text.** Two authoritative sources, in order of preference:
+
+1. `./scripts/build_ffmpeg.sh --verify-only` — LAYER 3 loads the dylib and enumerates it. This is
+   the answer.
+2. `config_components.h` in a configured tree — `#define CONFIG_OPUS_DECODER 0/1`. This is what
+   `--disable-everything` and the `--enable-decoder` flags actually write.
+
+Or link 20 lines of C against the staged dylib and call `avcodec_find_decoder()` / iterate
+`av_codec_iterate()`, which is how the false positive was finally caught. **The general rule: a
+capability check must read something that changes when the build changes.** `codec_desc.c` does
+not.
+
 ## Provenance
 
 **Pinned**, which it was not before. The source is a git checkout asserted against a commit SHA:
@@ -255,8 +286,29 @@ a linked binary anyway.
 
 ## Banked: what `--enable-decoder=prores` was for
 
-Added in this rebuild, **not yet used by anything shipping.** The narrow decoder list closed off
-an option twice on the same day (2026-07-28):
+### ✅ THE DECODER SHIPS TODAY. "Banked" means the PRODUCT DECISION is open, NOT that a rebuild is owed.
+
+**Corrected 2026-08-27**, because this section was read the other way and a full dylib rebuild was
+scoped on the strength of it. To be unambiguous:
+
+- `--enable-decoder=prores` is in the configure line (CHANGE 2), committed, and **built into the
+  `libavcodec.62.dylib` that ships now.** Verified at runtime, not inferred:
+  `avcodec_find_decoder(AV_CODEC_ID_PRORES)` → `prores`, and it is one of the 10 decoders
+  `--verify-only` enumerates.
+- **Nothing needs to be rebuilt to use it.** The libav fallback below is available the moment
+  someone decides to route a file to it. That is a product decision and a few lines of routing —
+  not a build task.
+
+> **A related misreading, corrected in the same pass:** `--disable-everything` **does** disable
+> built-in decoders. It is not limited to external libraries. `configure` implements it as
+> `map 'eval unset \${$(toupper ${v%s})_LIST}' $COMPONENT_LIST`, which clears the native
+> `DECODER_LIST` / `PARSER_LIST` / `DEMUXER_LIST` / `PROTOCOL_LIST` wholesale; external libraries
+> are a separate concern governed by `--disable-autodetect` and the `--enable-lib*` flags. This
+> build ships **exactly the 10 decoders it explicitly re-enables and no others** — which is why
+> ProRes is here (it was named) and Opus is not (it was not). See the `strings` false-positive
+> note above for how the opposite conclusion was reached.
+
+The narrow decoder list closed off an option twice on the same day (2026-07-28):
 
 1. **A libav fallback for AVFoundation-rejected files.** `A027C021_171116_R022.mov` (ProRes 4444,
    `ap4h`) is refused by AVFoundation — its video `stsd` carries 8 trailing zero bytes that parse
@@ -269,8 +321,8 @@ an option twice on the same day (2026-07-28):
    stream-copy that `--disable-everything` strips. (Separate problem — this build also produces no
    CLI at all, per `--disable-programs`.)
 
-**The decision to make first is whether an AVFoundation-rejected file should fall back to libav at
-all.** The flag only makes it possible.
+**The only thing outstanding is whether an AVFoundation-rejected file should fall back to libav at
+all.** The decoder is present and waiting; the flag already made it possible.
 
 ## System libraries
 
