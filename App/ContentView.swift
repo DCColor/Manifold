@@ -1766,14 +1766,14 @@ struct ContentView: View {
 
     @ViewBuilder
     private var audioTrackMenuContent: some View {
-        Section("Monitored audio track") {
-            Picker("Monitored audio track", selection: audioTrackBinding) {
-                ForEach(0..<max(engine.audioTrackCount, 1), id: \.self) { i in
-                    Text("\(i + 1) · \(audioTrackLabel(i))").tag(i)
-                }
+        // ⚠️ NO ENCLOSING `Section` — an inline Picker RENDERS ITS OWN LABEL as the group header,
+        // so wrapping it in a Section titled the same thing prints the title twice.
+        Picker("Monitored audio track", selection: audioTrackBinding) {
+            ForEach(0..<max(engine.audioTrackCount, 1), id: \.self) { i in
+                Text("\(i + 1) · \(audioTrackLabel(i))").tag(i)
             }
-            .pickerStyle(.inline)
         }
+        .pickerStyle(.inline)
         // State the reach of the choice INSIDE the control that makes it. "Which track am I
         // hearing" and "which track is on the wire" being the same answer is the whole point of
         // putting this with the output controls rather than in a scope — so say so where the

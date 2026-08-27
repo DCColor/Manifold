@@ -218,7 +218,44 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var audioTrack: AVAssetTrack? {
         audioTracks.indices.contains(selectedAudioTrackIndex) ? audioTracks[selectedAudioTrackIndex] : nil
     }
+    /// The VIDEO reader. Since audio was decoupled this carries exactly one output — the video
+    /// track — so a `startReading` failure here is unambiguously the video's fault.
     private var reader: AVAssetReader?
+
+    /// The AUDIO reader — a SECOND `AVAssetReader` over the same asset, carrying only the selected
+    /// audio track's output.
+    ///
+    /// ── WHY AUDIO HAS ITS OWN READER ──────────────────────────────────────────────────────────
+    ///
+    /// `AVAssetReader` outputs are frozen at `startReading()` — MEASURED: `canAdd` returns true
+    /// before the start and false after — so with both tracks on one reader, changing which audio
+    /// track is read meant rebuilding the whole thing, which meant re-seeking the VIDEO for a
+    /// purely audio-side decision. That is what made a track switch stutter the picture.
+    ///
+    /// Two readers make the switch free for video: the audio reader is rebuilt and the video reader
+    /// is not touched at all. It also removes a hazard that predates the selector — the two outputs
+    /// used to share one reader, and `startReading()` is all-or-nothing, so an audio track the
+    /// reader refused took the PICTURE down with it (MEASURED in the wild: an ARRI ALEXA Mini
+    /// ProRes 4444 XQ whose 5-channel LPCM track advertises channel layout tag 0xFFFF0000 —
+    /// `kAudioChannelLayoutTag_Unknown` ORed with a channel count of ZERO while its own ASBD says
+    /// 5 — failing -11800 / paramErr -50 seven times in one session, with the tester looking at a
+    /// black screen). The retry-without-audio dance that worked around that is GONE: a malformed
+    /// audio track can no longer reach the video reader to break it.
+    ///
+    /// ⚠️ THIS DOES NOT INTRODUCE DRIFT, AND THE REASON IS STRUCTURAL. Neither reader is a clock.
+    /// Both renderers hang off the ONE `AVSampleBufferRenderSynchronizer`, and every buffer carries
+    /// its SOURCE pts, which comes from the file and not from how far a reader happens to have got.
+    /// The synchronizer presents each buffer when its pts is due against a single timebase, so a
+    /// reader running ahead or behind changes only its own QUEUE DEPTH, never presentation time.
+    /// The failure mode two readers can produce is starvation (a dropout, which self-heals on the
+    /// next buffer), not accumulating skew. Contrast the DeckLink audio callback, where host and
+    /// card clocks genuinely do diverge and an anchor loop is required — there are two clocks there;
+    /// here there is one.
+    ///
+    /// This also mirrors what the libav path has always done: `LibavFrameSource` and
+    /// `LibavAudioSource` are independent demuxers armed separately against the same synchronizer.
+    /// The AVFoundation path now has the same shape.
+    private var audioReader: AVAssetReader?
     /// The current file's video `FrameSource`. The file decode now flows through
     /// this (Stage 1 seam): it owns the video pump and emits frames via
     /// `onVideoFrame`, which we route to the display renderer + Metal tap below.
@@ -252,6 +289,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Increments each new reading session; a pump checks its captured token
     /// against this and stops if it's been superseded (e.g. by a seek).
     private let sessionToken = SessionToken()
+
+    /// Retirement authority for the AUDIO pump, SEPARATE from `sessionToken`.
+    ///
+    /// ⚠️ THE SEPARATION IS THE WHOLE POINT AND MUST NOT BE COLLAPSED. A track switch has to retire
+    /// the audio pump WITHOUT retiring the video pump — bumping the shared token would stop the
+    /// FrameSource mid-playback, which is precisely the stutter this change exists to remove.
+    /// `beginReading` bumps BOTH (a seek moves both readers); `selectAudioTrack` bumps only this one.
+    private let audioSessionToken = SessionToken()
 
     public init() {
         synchronizer.addRenderer(audioRenderer)
@@ -652,7 +697,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavAudioSource = nil
         libavThumbnailSource?.close()   // retire the detached scrub-thumbnail decoder
         libavThumbnailSource = nil
-        audioRenderer.stopRequestingMediaData()
+
+        // Audio is its OWN reader + pump now, so it retires through its own teardown — which bumps
+        // `audioSessionToken`, stops the pump, cancels that reader, flushes the renderer and drops
+        // the tap's ring. Missing this would leave an audio pump running against an unloaded file.
+        teardownAudioReading()
 
         let readerToCancel = reader
         reader = nil
@@ -665,8 +714,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
 
         videoRenderer?.flush()
-        audioRenderer.flush()
-        audioTap.reset()   // D4b-1: drop buffered PCM so nothing survives a stop
         // Back to "don't know", NOT to "no audio": nothing is loaded, so there is nothing to
         // assert. A meter must not report absence on the strength of a teardown.
         audioPresence = .unknown
@@ -745,31 +792,32 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// the one that feeds the audio renderer, and — because the tap is teed off that same enqueue —
     /// the meters and the DeckLink audio stream follow it without any further wiring.
     ///
-    /// ── WHY THIS REBUILDS THE READER ──────────────────────────────────────────────────────────
+    /// ── THE PICTURE DOES NOT MOVE ─────────────────────────────────────────────────────────────
     ///
-    /// `AVAssetReader` outputs must ALL be added before `startReading()` and cannot be added after,
-    /// so switching which track is read means a new reader. That is exactly what `beginReading` is,
-    /// and `seek(to:)` above already calls it for every scrub — so a track switch costs precisely
-    /// what a seek to the current position costs, no more. Position and play state are preserved
-    /// (both are passed straight through), and A/V sync is unaffected: the synchronizer is re-anchored
-    /// to the same time the picture was already at.
+    /// This rebuilds the AUDIO reader ONLY. The video reader, the FrameSource, the video renderer
+    /// and `synchronizer.rate` are all untouched, so there is no flush, no re-anchor and no
+    /// re-preroll on the video side — the frame on screen is not disturbed and playback does not
+    /// pause. It reads as a change of what you are hearing, not as a playback glitch.
     ///
-    /// The visible cost is a brief re-decode hitch, identical to a scrub — see the note in
-    /// `beginReading` on the flush. A cheaper switch is possible (add every track's output to the ONE
-    /// reader up front and re-point the pump, leaving the video untouched entirely) but that changes
-    /// the reader's failure modes — `startReading` is all-or-nothing, and one malformed track would
-    /// take the others down with it — so it is deliberately NOT part of this arc.
+    /// This used to rebuild BOTH readers (it called `beginReading`, i.e. the seek path) because a
+    /// single `AVAssetReader` carried both tracks and its outputs are frozen at `startReading()` —
+    /// MEASURED: `canAdd` is true before the start and false after. Decoupling audio onto its own
+    /// reader is what removed that. See `audioReader` for why this cannot introduce drift.
+    ///
+    /// The audible cost is one renderer flush plus the new reader's spin-up — MEASURED at 3–4 ms
+    /// warm for an audio-only reader, against 25–33 ms for the full rebuild this replaced. Under a
+    /// frame either way, and this is a deliberate, occasional action.
     ///
     /// No-ops on an unchanged index, on an out-of-range index, and on the libav path (where
     /// `audioTracks` is empty and there is nothing to choose between).
     public func selectAudioTrack(_ index: Int) {
         guard audioTracks.indices.contains(index), index != selectedAudioTrackIndex else { return }
         selectedAudioTrackIndex = index
-        // The ring holds the PREVIOUS track's PCM, with a channel count that may not even match.
-        // Drop it before the rebuild so no meter tick and no card callback can serve a sample from
-        // the track the user just stopped monitoring.
-        audioTap.reset()
-        Task { await beginReading(from: currentTime, resumePlaying: isPlaying) }
+        // Positioned at the playhead, NOT at zero. `beginAudioReading` tears down the previous
+        // audio session (which drops the old track's PCM from the ring) and starts the new one
+        // against the clock that is still running.
+        let at = CMTime(seconds: currentTime, preferredTimescale: 600)
+        Task { await beginAudioReading(from: at) }
     }
 
     /// Current frame from the start of the file (0-based).
@@ -1296,9 +1344,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let token = sessionToken.next()
         synchronizer.rate = 0
         currentSource?.stop(); currentSource = nil      // retire any AVFoundation pump
-        audioRenderer.stopRequestingMediaData()
+        // ⚠️ AND THE AVFOUNDATION AUDIO READER, WHICH IS A SEPARATE SESSION SINCE THE DECOUPLING.
+        // This branch RETURNS before `beginReading`'s own teardown, so without this an AVF audio
+        // reader left over from a previously-loaded .mov would keep pumping into the shared
+        // renderer underneath an MXF — the previous file's sound over the new file's picture.
+        teardownAudioReading()
         videoRenderer.stopRequestingMediaData()          // stop the prior pump arm
-        videoRenderer.flush(); audioRenderer.flush(); audioTap.reset(); onFlush?()   // D4b-1: PTS discontinuity → drop stale PCM
+        videoRenderer.flush(); onFlush?()
 
         // Create + open once per file. The libav-reported range is authoritative for
         // DNxHR (ACLR), where AVFoundation's FullRangeVideo extension is often absent.
@@ -1373,6 +1425,104 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavSource?.arm(fromSeconds: time, isCurrent: { session.isCurrent(token) })
         libavAudioSource?.arm(fromSeconds: time, isCurrent: { session.isCurrent(token) })
         if resumePlaying { play() }
+    }
+
+    // MARK: - The audio reading session (independent of the video reader)
+
+    /// Retire the current audio reader and pump. Leaves the VIDEO side completely alone.
+    ///
+    /// Bumps `audioSessionToken` first so an in-flight pump callback bows out at its next check
+    /// rather than racing the cancel, then serializes the cancellation behind the audio pump queue
+    /// so it cannot overlap an `copyNextSampleBuffer()` already running there.
+    private func teardownAudioReading() {
+        _ = audioSessionToken.next()
+        audioRenderer.stopRequestingMediaData()
+        let toCancel = audioReader
+        audioReader = nil
+        audioPumpQueue.async { toCancel?.cancelReading() }
+        audioRenderer.flush()
+        audioTap.reset()   // the ring holds the previous track/position — never serve across a swap
+    }
+
+    /// Build and start the audio reader for the currently selected track, positioned at `start`,
+    /// and wire the pump that feeds the shared `audioRenderer` and the tap.
+    ///
+    /// Called from `beginReading` (load / seek — both readers move together) and from
+    /// `selectAudioTrack` (track switch — ONLY this side moves). It never touches `reader`,
+    /// `currentSource`, `synchronizer.rate` or the video renderer, which is what makes a track
+    /// switch invisible on the picture.
+    ///
+    /// ⚠️ `synchronizer.setRate` IS DELIBERATELY NOT CALLED HERE. The timebase is the one clock both
+    /// renderers share; re-anchoring it for an audio-side rebuild would move the picture. Buffers
+    /// carry their own source pts and the synchronizer places them against the clock that is already
+    /// running — including discarding the few milliseconds that are already past by the time the
+    /// reader spins up (MEASURED at 3–4 ms warm), which is why the splice is inaudible.
+    private func beginAudioReading(from start: CMTime) async {
+        teardownAudioReading()
+
+        guard let asset, let aTrack = audioTrack,
+              let settings = await Self.audioOutputSettings(for: aTrack) else {
+            // No audio track at all, or no readable stream description. Both are POSITIVE evidence
+            // of absence for a file we have successfully opened — the meters are entitled to say
+            // "NO AUDIO TRACK" rather than sit at silence.
+            audioPresence = .absent
+            return
+        }
+
+        let token = audioSessionToken.next()
+
+        guard let newReader = try? AVAssetReader(asset: asset) else {
+            NSLog("[PLAYBACK] could not create the audio reader"); audioPresence = .unknown; return
+        }
+        newReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
+        let out = AVAssetReaderTrackOutput(track: aTrack, outputSettings: settings)
+        out.alwaysCopiesSampleData = false
+        guard newReader.canAdd(out) else {
+            NSLog("[PLAYBACK] audio reader refused the track output"); audioPresence = .absent; return
+        }
+        newReader.add(out)
+
+        guard newReader.startReading() else {
+            // ── THE FAILURE THAT USED TO BLACK OUT THE PICTURE ────────────────────────────────
+            // On the old shared reader this took the video down with it and needed a
+            // retry-without-audio rebuild. Now it is contained: the video reader is already
+            // running and is not involved. We lose this file's audio and say so, once.
+            NSLog("[PLAYBACK] audio reader startReading failed: %@", String(describing: newReader.error))
+            audioPresence = .absent
+            if !audioFallbackAnnounced {
+                audioFallbackAnnounced = true
+                playbackNotice = "This file’s audio track couldn’t be read — playing video only."
+            }
+            return
+        }
+        audioFallbackAnnounced = false
+        self.audioReader = newReader
+
+        let aRenderer = audioRenderer
+        let tap = audioTap          // thread-safe class, captured locally — no main-actor hop
+        let session = audioSessionToken
+        aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [weak self] in
+            guard self != nil, session.isCurrent(token) else {
+                aRenderer.stopRequestingMediaData(); return
+            }
+            while aRenderer.isReadyForMoreMediaData {
+                guard session.isCurrent(token) else {
+                    aRenderer.stopRequestingMediaData(); return
+                }
+                guard newReader.status == .reading, let next = out.copyNextSampleBuffer() else {
+                    aRenderer.stopRequestingMediaData(); return
+                }
+                tap.ingest(next, path: .avFoundation)   // D4b-1 tee — does not alter the buffer
+                aRenderer.enqueue(next)
+            }
+        }
+
+        // The channel count the meters label, from the track's own ASBD. A count we cannot read is
+        // NOT evidence of absence — audio is demonstrably there (the reader started).
+        let descs = (try? await aTrack.load(.formatDescriptions)) ?? []
+        let ch = descs.first.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0) }
+                      .map { Int($0.pointee.mChannelsPerFrame) } ?? 0
+        audioPresence = ch > 0 ? .present(channels: ch) : .unknown
     }
 
     /// LPCM output settings for an audio track, with the channel count taken from the track's OWN
@@ -1459,7 +1609,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.rate = 0
         currentSource?.stop()           // retire the prior session's video pump
         currentSource = nil
-        audioRenderer.stopRequestingMediaData()
+
+        // BOTH readers move on a seek. The audio side retires through its own teardown (bumping
+        // `audioSessionToken`, flushing the renderer and resetting the tap for the pts
+        // discontinuity); `beginAudioReading` at the bottom re-establishes it at the new position.
+        // A scrub therefore still moves picture and sound together — decoupling changed which
+        // operations move ONE side, not whether a seek moves both.
+        teardownAudioReading()
+
         let oldReader = reader
         reader = nil
         videoPumpQueue.async {
@@ -1468,8 +1625,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             }
         }
         videoRenderer.flush()
-        audioRenderer.flush()
-        audioTap.reset()   // D4b-1: PTS discontinuity on seek → drop stale PCM
         onFlush?()
 
         guard let newReader = try? AVAssetReader(asset: asset) else {
@@ -1499,71 +1654,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             print("FrameEngine: cannot add video output"); return
         }
 
-        var aOut: AVAssetReaderTrackOutput?
-        if let aTrack = audioTrack, let audioSettings = await Self.audioOutputSettings(for: aTrack) {
-            let out = AVAssetReaderTrackOutput(track: aTrack, outputSettings: audioSettings)
-            out.alwaysCopiesSampleData = false
-            if newReader.canAdd(out) { newReader.add(out); aOut = out }
+        // ── THE VIDEO READER CARRIES VIDEO ONLY ───────────────────────────────────────────────
+        // Audio lives on its own reader (see `audioReader`), so there is nothing here that could
+        // fail on the audio track's behalf. The retry-without-audio rebuild this function used to
+        // carry — written for the ARRI ALEXA Mini 0xFFFF0000 layout that failed -11800/paramErr -50
+        // and left the tester looking at a black screen — is gone with the coupling that caused it.
+        // A failure here is the VIDEO's, and there is no longer anything to drop and retry without.
+        guard newReader.startReading() else {
+            NSLog("[PLAYBACK] video reader startReading failed: %@", String(describing: newReader.error))
+            return
         }
-
-        // ── AUDIO MUST NOT BE ABLE TO BLACK OUT THE PICTURE ───────────────────────────────────
-        // Both outputs share ONE AVAssetReader, and startReading() is all-or-nothing: an audio
-        // track the reader refuses takes the video down with it. MEASURED in the wild — an ARRI
-        // ALEXA Mini ProRes 4444 XQ whose 5-channel LPCM track advertises channel layout tag
-        // 0xFFFF0000 (kAudioChannelLayoutTag_Unknown ORed with a channel count of ZERO, while its
-        // own ASBD says 5 channels). startReading failed -11800 / paramErr -50 on every attempt,
-        // seven times in one session, and the tester saw a black screen.
-        //
-        // RETRY ORDER IS DELIBERATE: try WITH audio, and only on failure retry without. Probing
-        // first and pre-emptively dropping audio would silently mute files that would have worked.
-        // A failed AVAssetReader cannot be reconfigured or restarted, so the retry rebuilds the
-        // reader and the video source from scratch.
-        var reader = newReader
-        var activeSource = source
-        var degradedToVideoOnly = false
-        if !reader.startReading() {
-            let firstError = reader.error
-            guard aOut != nil else {
-                // Nothing to drop — the failure is not the audio track's doing.
-                NSLog("[PLAYBACK] startReading failed (video-only session): %@",
-                      String(describing: firstError))
-                return
-            }
-            NSLog("[PLAYBACK] startReading failed WITH audio attached: %@", String(describing: firstError))
-            reader.cancelReading()
-
-            guard let retryReader = try? AVAssetReader(asset: asset) else {
-                NSLog("[PLAYBACK] video-only retry failed: could not create a second reader"); return
-            }
-            retryReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
-            guard let retrySource = FileFrameSource(reader: retryReader,
-                                                    track: vTrack,
-                                                    pixelFormat: videoPixelFormat,
-                                                    pacingRenderer: videoRenderer,
-                                                    pumpQueue: videoPumpQueue,
-                                                    isCurrent: { session.isCurrent(token) }) else {
-                NSLog("[PLAYBACK] video-only retry failed: cannot add video output"); return
-            }
-            guard retryReader.startReading() else {
-                NSLog("[PLAYBACK] video-only retry ALSO failed: %@", String(describing: retryReader.error))
-                return
-            }
-            NSLog("[PLAYBACK] recovered — playing VIDEO ONLY; this file's audio track could not be read")
-            reader = retryReader
-            activeSource = retrySource
-            aOut = nil
-            degradedToVideoOnly = true
-        }
-
-        // Tell the USER, not just the log — once per file, so a seek doesn't re-raise it.
-        if degradedToVideoOnly {
-            if !audioFallbackAnnounced {
-                audioFallbackAnnounced = true
-                playbackNotice = "This file’s audio track couldn’t be read — playing video only."
-            }
-        } else if aOut != nil {
-            audioFallbackAnnounced = false
-        }
+        let reader = newReader
+        let activeSource = source
 
         self.reader = reader
         synchronizer.setRate(0, time: start)
@@ -1582,47 +1684,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.currentSource = activeSource
         try? activeSource.start()
 
-        if let aOut {
-            let aRenderer = audioRenderer
-            let aReader = reader   // the reader that actually started (never the retired first try)
-            let tap = audioTap   // local capture (thread-safe class) — no main-actor hop on the pump
-            aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [token, weak self] in
-                guard let self, self.sessionToken.isCurrent(token) else {
-                    aRenderer.stopRequestingMediaData(); return
-                }
-                while aRenderer.isReadyForMoreMediaData {
-                    guard self.sessionToken.isCurrent(token) else {
-                        aRenderer.stopRequestingMediaData(); return
-                    }
-                    guard aReader.status == .reading, let next = aOut.copyNextSampleBuffer() else {
-                        aRenderer.stopRequestingMediaData(); return
-                    }
-                    tap.ingest(next, path: .avFoundation)   // D4b-1 tee — does not alter the enqueued buffer
-                    aRenderer.enqueue(next)
-                }
-            }
-        }
-
-        // Same statement as the libav branch, from the AVFoundation reader's own result: an audio
-        // track output that could be created and added IS the audio, and its ASBD carries the
-        // channel count the meters label. See `audioPresence`.
-        //
-        // `load(.formatDescriptions)` rather than the synchronous `.formatDescriptions` property:
-        // the latter is deprecated on macOS 13+ AND blocks the caller while AVFoundation parses
-        // the track. We are already in an async context here, so there is no reason to.
-        if let aOut {
-            let descs = (try? await aOut.track.load(.formatDescriptions)) ?? []
-            let ch = descs.first.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0) }
-                          .map { Int($0.pointee.mChannelsPerFrame) } ?? 0
-            // A channel count we could not read is NOT evidence of absence — audio is demonstrably
-            // there (the output was added), we simply cannot label the bars yet.
-            audioPresence = ch > 0 ? .present(channels: ch) : .unknown
-        } else {
-            audioPresence = .absent
-        }
+        // AUDIO, on its own reader, positioned at the SAME source time. A seek moves both readers;
+        // a track switch calls this one alone. Awaited rather than fired-and-forgotten so
+        // `audioPresence` is settled before this function returns — the meters key their empty
+        // states off it, and a load that returned with it still stale would flash "NO AUDIO TRACK"
+        // over a file that has some.
+        await beginAudioReading(from: start)
 
         if resumePlaying { play() }
-        print("FrameEngine: reading from \(time)s (audio: \(aOut != nil))")
+        print("FrameEngine: reading from \(time)s (audio reader: \(audioReader != nil))")
     }
 }
 
