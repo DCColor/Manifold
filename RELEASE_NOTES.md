@@ -21,9 +21,9 @@ changelog page. Format notes are at the bottom.
   them.
 - Multi-track files: any audio track can now be selected. Previously only track 1 played.
   Switching tracks no longer disturbs video playback.
-- Window titles now show the file or stream name. ⌘⇧I shows the full name in the HUD.
-- Fixed: a menu rebuild that destroyed window-scoped menu items.
-- Fixed: a duplicate About entry in the Window menu.
+- Window titles now show the file or stream name. N shows the full name in the HUD.
+- Fixed a bug in the Window menu that was preventing correct display.
+- Removed a duplicate About entry in the Window menu
 
 ## 0.6.2
 
