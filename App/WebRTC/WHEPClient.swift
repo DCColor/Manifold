@@ -701,6 +701,14 @@ final class WHEPClient: ObservableObject {
         } else {
             NSLog("[WHEP-RTP] session totals: no RTP was ever received")
         }
+        // MEASUREMENT ONLY — nothing branches on this. Its own line, after the totals, because it
+        // is the number that decides whether skipping an incomplete frame needs a remedy at all:
+        // a skipped REFERENCE picture silently poisons everything after it, a skipped DISPOSABLE
+        // one costs only itself, and which of those this stream produces is a property of the
+        // SENDER'S ENCODER rather than of the link. See -referenceCensusSummary.
+        if let census = session.referenceCensusSummary() {
+            NSLog("[WHEP-RTP] %@", census)
+        }
         if let decoder {
             let stats = decoder.snapshot()
             NSLog("""

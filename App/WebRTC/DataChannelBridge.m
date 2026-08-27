@@ -488,6 +488,64 @@ static NSString *ManifoldWHEPDescribeLatencyHistograms(const ManifoldH264Depacke
 /// match, the line says so in as many words. A NACK requester that demonstrably achieves nothing
 /// is a finding, not a failure to find one, and burying it behind raw counters that the reader
 /// has to divide in their head is how it would get missed.
+/// The reference census. ⚠️ THE CALL HAS ALREADY BEEN MADE — docs/WHEP_LOADED_NETWORK_FINDINGS.md
+/// §13 — so this is worded to state the STANDING DECISION and to shout when the one condition
+/// that would reopen it turns up. See the header for why nothing branches on it.
+static NSString *ManifoldWHEPDescribeReferenceCensus(const ManifoldH264DepacketizerStats *s) {
+    const uint64_t emitted = s->accessUnitsReference + s->accessUnitsDisposable + s->accessUnitsRefUnknown;
+    const uint64_t skipped = s->accessUnitsIncompleteReference + s->accessUnitsIncompleteDisposable +
+                             s->accessUnitsIncompleteRefUnknown;
+
+    // The encoder half is reportable on its own, and is the LARGER sample — a session emits
+    // thousands of frames and skips a handful, so the emitted split is the sounder basis for a
+    // statement about how this encoder codes. It is also available on a clean link, where the
+    // skipped split is structurally empty.
+    NSString *encoder = emitted == 0
+        ? @"no frames emitted"
+        : [NSString stringWithFormat:
+           @"%llu reference, %llu disposable (%.2f%%), %llu unknown, of %llu emitted",
+           s->accessUnitsReference, s->accessUnitsDisposable,
+           (double)s->accessUnitsDisposable * 100.0 / (double)emitted,
+           s->accessUnitsRefUnknown, emitted];
+
+    if (skipped == 0) {
+        return [NSString stringWithFormat:
+                @"reference census — encoder: %@ | skipped: NO VERDICT, no frame was skipped this "
+                @"session. %@",
+                encoder,
+                emitted == 0
+                    ? @"Run it against loss before reading anything into the skipped split."
+                    : (s->accessUnitsDisposable == 0
+                        ? @"This encoder emits NO disposable pictures, which is the census the "
+                          @"reference-skip decision was made on: every frame a lossy link costs us "
+                          @"is a reference picture that poisons the frames after it, and requesting "
+                          @"a keyframe for each one degenerates into asking on every loss. Tearing "
+                          @"is shipped deliberately — see WHEP_LOADED_NETWORK_FINDINGS.md §13."
+                        : @"⚠️ THIS SENDER EMITS DISPOSABLE PICTURES. That is the condition that "
+                          @"REOPENS the reference-skip decision (§13.6): skipping those frames is "
+                          @"free, so holding the picture only for REFERENCE skips becomes affordable "
+                          @"again. Worth re-deciding against this endpoint.")];
+    }
+
+    return [NSString stringWithFormat:
+            @"reference census — encoder: %@ | SKIPPED %llu frame(s): %llu REFERENCE (%.1f%%) — "
+            @"each one poisons every later picture that references it, silently, with no decode "
+            @"error — %llu DISPOSABLE (%.1f%%) which cost only themselves, %llu unknown. %@",
+            encoder, skipped,
+            s->accessUnitsIncompleteReference,
+            (double)s->accessUnitsIncompleteReference * 100.0 / (double)skipped,
+            s->accessUnitsIncompleteDisposable,
+            (double)s->accessUnitsIncompleteDisposable * 100.0 / (double)skipped,
+            s->accessUnitsIncompleteRefUnknown,
+            s->accessUnitsIncompleteDisposable * 4 >= skipped
+                ? @"⚠️ A SUBSTANTIAL SHARE ARE DISPOSABLE — the condition that REOPENS the "
+                  @"reference-skip decision (WHEP_LOADED_NETWORK_FINDINGS.md §13.6). Holding the "
+                  @"picture only for REFERENCE skips would be affordable against this sender."
+                : @"Almost all are reference pictures, which is what §13 rejected the "
+                  @"hold-for-a-keyframe remedy on: it would fire on essentially every loss. The "
+                  @"tearing these frames cause is shipped deliberately."];
+}
+
 static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerStats *s) {
     const uint64_t askedDone   = s->askedRecovered + s->askedStillMissing;
     const uint64_t controlDone = s->controlRecovered + s->controlStillMissing;
@@ -1255,6 +1313,16 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     return ManifoldWHEPDescribeNackBenefit(&stats);
 }
 
+- (nullable NSString *)referenceCensusSummary {
+    if (!_depacketizer) return nil;
+    ManifoldH264DepacketizerStats stats;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerCopyStats(_depacketizer, &stats);
+    os_unfair_lock_unlock(&_rtpLock);
+    if (stats.packetsReceived == 0) return nil;
+    return ManifoldWHEPDescribeReferenceCensus(&stats);
+}
+
 - (nullable NSString *)roundTripSummary {
     if (!_depacketizer) return nil;
     ManifoldH264DepacketizerStats stats;
@@ -1284,7 +1352,9 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
             @"allArrivalsUs avg=%llu max=%llu (legacy, pre-attribution baselines) | "
             @"lateAfterGiveUp=%llu (worst %llu ms; a SUBSET of stillMissing) | "
             @"nacks built=%llu seqs=%llu toWire=%llu refused=%llu rateSuppressed=%llu gapsTooWide=%llu | "
-            @"skippedIncomplete=%llu (interior=%llu head=%llu tail=%llu; keyframes=%llu) | """
+            @"skippedIncomplete=%llu (interior=%llu head=%llu tail=%llu; keyframes=%llu; """
+            @"ref=%llu disposable=%llu refUnknown=%llu) | """
+            @"emittedByRef(ref=%llu disposable=%llu unknown=%llu) | """
             @"reorder=%llu malformed=%llu | "
             @"FU-A rx=%llu reassembled=%llu dropped=%llu | "
             @"auClosedByTimestamp=%llu wrongPt=%llu wrongSsrc=%llu rtcpInRtp=%llu | "
@@ -1313,6 +1383,9 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
             stats.accessUnitsIncomplete, stats.accessUnitsIncompleteInterior,
             stats.accessUnitsIncompleteHead, stats.accessUnitsIncompleteTail,
             stats.keyframesIncomplete,
+            stats.accessUnitsIncompleteReference, stats.accessUnitsIncompleteDisposable,
+            stats.accessUnitsIncompleteRefUnknown,
+            stats.accessUnitsReference, stats.accessUnitsDisposable, stats.accessUnitsRefUnknown,
             stats.packetsReordered, stats.packetsMalformed,
             stats.fuaPackets, stats.fuaReassembled, stats.fuaDropped,
             stats.accessUnitsByTimestamp, stats.packetsWrongPayloadType, stats.packetsWrongSSRC,

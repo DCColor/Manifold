@@ -1159,6 +1159,13 @@ void ManifoldH264DepacketizerCopyStats(const ManifoldH264Depacketizer *dp,
     outStats->accessUnitsIncompleteHead     = au.accessUnitsIncompleteHead;
     outStats->accessUnitsIncompleteTail     = au.accessUnitsIncompleteTail;
     outStats->keyframesIncomplete           = au.keyframesIncomplete;
+    // Reference census — measurement only; see the note in the header.
+    outStats->accessUnitsReference            = au.accessUnitsReference;
+    outStats->accessUnitsDisposable           = au.accessUnitsDisposable;
+    outStats->accessUnitsRefUnknown           = au.accessUnitsRefUnknown;
+    outStats->accessUnitsIncompleteReference  = au.accessUnitsIncompleteReference;
+    outStats->accessUnitsIncompleteDisposable = au.accessUnitsIncompleteDisposable;
+    outStats->accessUnitsIncompleteRefUnknown = au.accessUnitsIncompleteRefUnknown;
     outStats->spsSize             = au.spsSize;
     outStats->ppsSize             = au.ppsSize;
     // A zero-length NAL used to be counted as packetsMalformed at the point the

@@ -177,6 +177,63 @@ typedef struct {
     uint64_t accessUnitsIncompleteInterior;
     uint64_t accessUnitsIncompleteHead;
     uint64_t accessUnitsIncompleteTail;
+
+    // ── REFERENCE CENSUS: WOULD ANYTHING HAVE REFERENCED THE FRAMES WE SKIP? ──
+    //
+    // ⚠️ MEASUREMENT ONLY. NOTHING BRANCHES ON THESE, AND NOTHING SHOULD — the question they were
+    // built to answer is CLOSED. They are kept because they are the EVIDENCE for that decision
+    // and the only thing that can legitimately reopen it.
+    //
+    // ⚠️ THE DECISION, IN FULL, IS docs/WHEP_LOADED_NETWORK_FINDINGS.md §13. READ IT BEFORE
+    // ACTING ON THESE NUMBERS. In short: Manifold SHIPS the resulting tearing on purpose. The
+    // obvious remedy — request a keyframe whenever a reference picture is skipped — was measured
+    // and REJECTED, because this platform's sender emits no disposable pictures at all, so the
+    // remedy degenerates into "request a keyframe on every loss" and freezes roughly a fifth of
+    // the session. Tearing at 92% of frames beat freezing at 83%, judged by watching both.
+    //
+    // THE QUESTION THESE ANSWER is therefore not "should we remedy it" but "has the one condition
+    // that would change the answer arrived yet". Skipping an incomplete frame leaves a hole in the reference chain, so every
+    // later picture that references it decodes to plausible-but-wrong output — visible tearing,
+    // with no decode error anywhere, because nothing failed. The candidate remedy is to hold the
+    // picture until a keyframe repairs the chain, which costs freezes. That trade is only worth
+    // making for frames something will actually REFERENCE:
+    //
+    //   * nal_ref_idc > 0  — a reference picture. Skipping it poisons everything after it.
+    //   * nal_ref_idc == 0 — DISPOSABLE. Nothing will ever reference it, so skipping it costs
+    //                        exactly that frame and needs no remedy at all.
+    //
+    // ⚠️ AND THE ANSWER IS A PROPERTY OF THE ENCODER, NOT OF THE NETWORK, WHICH IS WHY IT HAS TO
+    // BE MEASURED RATHER THAN ASSUMED. A sender using temporal layers or B-frames emits a large
+    // fraction of disposable pictures; a plain low-latency WebRTC encoder emits NONE — in an
+    // offline census of a zerolatency x264 encode, 1298 of 1298 P-slices were reference pictures.
+    //
+    // ⚠️ B-FRAMES ARE NOT A SETTING WE CAN TURN ON. They are disabled in the OBS profile AND were
+    // found to break playback on Cloudflare's WHIP/WHEP path during DC Color Live's development.
+    // That is the load-bearing fact behind §13: it is a platform constraint, so "just enable
+    // B-frames" is not a route to making reference-skipping cheap again.
+    //
+    // A NON-ZERO `accessUnitsDisposable` AGAINST A NEW ENDPOINT IS THE SIGNAL THAT REOPENS §13 —
+    // a different SFU, or Cloudflare's handling changing. Reopen it on this counter, never on the
+    // argument alone.
+    //
+    // TAKEN AS THE MAXIMUM over the access unit's SURVIVING VCL NAL units, not from the first
+    // one. H.264 gives every slice of a picture the same reference status, so any survivor is
+    // authoritative — but taking the max means a non-conforming stream that disagrees with itself
+    // is read the SAFE way (as a reference picture) rather than the convenient way.
+    //
+    // Two exact identities:
+    //     accessUnits           == …Reference + …Disposable + …RefUnknown
+    //     accessUnitsIncomplete == …IncompleteReference + …IncompleteDisposable + …IncompleteRefUnknown
+    uint64_t accessUnitsReference;            ///< Emitted; at least one surviving slice had nal_ref_idc > 0.
+    uint64_t accessUnitsDisposable;           ///< Emitted; every surviving slice had nal_ref_idc == 0.
+    /// Emitted, but with NO VCL NAL to read the status from — an access unit opened by an SEI
+    /// whose slices were all lost. ⚠️ ITS OWN BUCKET SO THAT "WE DO NOT KNOW" HAS SOMEWHERE TO GO,
+    /// the same argument `recoveredUnattributed` makes in H264Depacketizer.h: folding it into
+    /// either real bucket would put a guess inside a number whose only job is to be counted.
+    uint64_t accessUnitsRefUnknown;
+    uint64_t accessUnitsIncompleteReference;  ///< SKIPPED, and something would have referenced it.
+    uint64_t accessUnitsIncompleteDisposable; ///< SKIPPED, and nothing would have. Costs one frame, no more.
+    uint64_t accessUnitsIncompleteRefUnknown; ///< SKIPPED with no surviving slice to ask.
     /// Of `accessUnitsIncomplete`, the ones that would have been KEYFRAMES. Worth its own
     /// counter: a discarded IDR is the one skip that costs more than a frame, because everything
     /// after it references a picture the decoder never got. The transport should re-ask for a
@@ -235,6 +292,11 @@ void ManifoldH264AccessUnitBuilderAppendNAL(ManifoldH264AccessUnitBuilder *build
 /// visibly wrong band in it, and the viewer cannot tell whether that artifact is in their FILE
 /// or in our transport — which makes it worse than no frame at all. Holding the previous frame
 /// for one extra display tick is silent, obvious, and never lies about the source material.
+///
+/// ⚠️ THAT RULE GOVERNS WHICH OF TWO FRAMES TO SHOW. IT DOES NOT LICENSE SHOWING NEITHER. Holding
+/// the picture until a keyframe repairs the reference chain was proposed on exactly this
+/// reasoning and REJECTED — a frozen picture is not "a missing frame", it is a missing SECOND,
+/// and a colourist cannot grade through it at all. See docs/WHEP_LOADED_NETWORK_FINDINGS.md §13.5.
 ///
 /// It is also the cheaper failure. Submitting the partial AU costs kVTVideoDecoderBadDataErr,
 /// which poisons the session's reference state, which arms the decoder's wait-for-IDR gate, and

@@ -848,3 +848,158 @@ the symptom is "retransmission does nothing" rather than an error. `nacks built`
 patch by path.
 
 Provenance of the vendored library is an open item — see `docs/BUGS.md`.
+
+---
+
+## 13. §5 closed — incomplete AUs are skipped, and the tearing that follows is ACCEPTED
+
+**Status: CLOSED, 2026-08-26. Do not reopen without the condition in §13.6.**
+
+§5 ended with "that decision needs its own thinking". This is that thinking, and the decision.
+It is recorded at length because the conclusion — *we ship visible corruption on purpose* —
+is one that any competent reader will want to overturn on sight, and everything they will
+propose has already been tried and measured.
+
+### 13.1 What landed first
+
+Incomplete access units are now detected and **skipped**, never submitted. The rule is a sequence
+rule and lives in `H264Depacketizer.c` (see the AU COMPLETENESS block):
+
+> A frame is complete iff its packets form an unbroken sequence-number run, closed either by a
+> marker bit or by the immediately-adjacent packet bearing the next timestamp.
+
+§5 described only the fragmented case. **There was a second hole, and it was the bigger one:** a
+slice small enough to fit one RTP packet is sent as a single-NAL packet, and losing it left no
+fragment to abandon, no counter to move, and nothing anywhere that knew the frame was short. §5's
+`fuaDropped` reading — "the fragment counter moved, so it is handled" — was measuring the smaller
+half of the problem.
+
+Both hazards in §5.1 are closed by the same rule: contiguity is now checked on every packet of a
+frame's run, and a straggler bearing an old timestamp is condemned rather than spliced.
+
+Measured against the previous night's baseline (0.45% loss, 5519 frames):
+
+| | frames to screen | decode errors | preIDR drops |
+|---|---|---|---|
+| submit the short frame (old) | 83% | 40 | 882 |
+| skip it (now) | **92%** | **0** | **0** |
+
+### 13.2 And it produced exactly the failure §5 predicted
+
+§5 called it: *"An incomplete AU that decoded anyway would be worse in every way: a wrong picture,
+presented as correct, with no error to trigger the PLI and no counter to record it."*
+
+That is what the conditioned run showed. **Visible tearing, with zero decode errors.** Skipping a
+frame leaves a hole in the reference chain; every later picture that references it decodes against
+a picture VideoToolbox never received. VideoToolbox returns `noErr` and hands back a wrong image.
+
+`kVTVideoDecoderReferenceMissingErr` (-17694) exists in the SDK and **was never raised** — the run
+reported 0 decode errors. There is no signal to react to. Nothing downstream can detect this
+after the fact; it has to be predicted at skip time or not at all.
+
+### 13.3 The remedy that was rejected
+
+**Option (a): when a skipped frame is a reference picture (`nal_ref_idc > 0`), request a keyframe
+immediately.** Sound in principle — a skipped *disposable* picture (`nal_ref_idc == 0`) is
+referenced by nothing and costs only itself, so only reference skips need a remedy.
+
+`nal_ref_idc` is genuinely available at skip time. It is bits 5–6 of the NAL header and survives
+every RTP packet form, FU-A included, which rebuilds the header as
+`(indicator & 0xE0) | (fuHeader & 0x1F)`. The mechanism was never the problem.
+
+### 13.4 Why it was rejected: our encoder emits no disposable pictures
+
+An offline census of a low-latency x264 encode — the closest available stand-in for the sender:
+
+| encode | slices/picture | disposable pictures |
+|---|---|---|
+| zerolatency, no B-frames | 11 | **0 / 120 (0%)** |
+| zerolatency, single thread | 1 | **0 / 120 (0%)** |
+| main profile, B-frames | 1 | 45 / 120 (37.5%) |
+
+1298 of 1298 P-slices were reference pictures. Disposable pictures require **B-frames or temporal
+layers**, and B-frames are not available to us:
+
+- they are disabled in the OBS profile, and
+- they were found to **break playback on Cloudflare's WHIP/WHEP path** during DC Color Live's
+  development.
+
+That second point is a **platform constraint, not a settings choice**, and it is the load-bearing
+fact in this entry. Turning B-frames on in OBS does not unlock option (a); it breaks the stream.
+
+So every skipped frame is a reference frame, and option (a) degenerates to **"request a keyframe
+on every loss"** — which is precisely the behaviour removed on 2026-08-25 for costing ~22 frames
+per loss event and making a 0.45% link unwatchable.
+
+### 13.5 The choice is binary, and tearing wins
+
+With no disposable frames there is no middle path. Every skip either tears or freezes.
+Projected on the measured picture-size distribution at 0.45% loss:
+
+| behaviour | frames to screen |
+|---|---|
+| skip and keep decoding (**shipping**) | ~92% observed, 96.5% projected |
+| hold until a keyframe, PLI answered in 3 frames | 86.6% |
+| hold until a keyframe, PLI answered in 6 frames | 77.8% |
+| hold until a keyframe, PLI answered in 12 frames | 63.3% |
+| hold until the next natural IDR (no PLI) | 11.3% |
+
+The baseline implies a PLI turnaround near **22 frames** (882 preIDR drops ÷ 40 cascades), which
+lands below the worst row in that table.
+
+**Both were viewed.** 92% of frames with visible tearing is substantially better than 83% with
+freezes. The judgement is a viewing judgement, not an arithmetic one, and it was made by watching
+the two.
+
+⚠️ Note that this **inverts the rule stated in the AU-skip work itself** — that in a colour review
+tool a corrupt frame is worse than a missing one, because the viewer cannot tell whether the
+artifact is in their file. That rule is still why incomplete AUs are skipped rather than submitted.
+It does **not** extend to freezing the picture for a fifth of the session, because a frozen picture
+is not "a missing frame", it is a missing *second*, and a colourist cannot grade through it at all.
+The rule governs which of two frames to show; it does not license refusing to show any.
+
+### 13.6 What would REOPEN this
+
+**A sender that emits disposable pictures.** That is the whole condition. It would make reference
+skips distinguishable and cheap again, and option (a) would stop degenerating into
+keyframe-on-every-loss. Concretely:
+
+- **Cloudflare's B-frame handling changes** on the WHIP/WHEP path, or
+- **we support a non-Cloudflare WHEP endpoint** whose sender uses B-frames or temporal layers.
+
+Temporal layers are the likelier route: an SFU doing temporal scalability marks its top-layer
+frames `nal_ref_idc == 0`, and those are exactly the frames that are free to skip.
+
+**Do not reopen this on reasoning alone — reopen it on the census.** The
+`nal_ref_idc` instrumentation was kept for exactly this purpose and costs nothing; nothing
+branches on it. Read the teardown line:
+
+```
+[WHEP-RTP] reference census — encoder: … | SKIPPED n frame(s): … REFERENCE … DISPOSABLE …
+```
+
+`disposable=0` means this entry still stands. A non-zero disposable share against a new endpoint
+is the evidence that reopens it. The counters are `accessUnitsIncompleteReference` /
+`…Disposable` / `…RefUnknown` and their emitted counterparts, defined in
+`H264AccessUnitBuilder.h`.
+
+### 13.7 What was NOT done, and is still on the board
+
+Both halves of this are consequences of a high skip rate, and the skip rate is high for a
+structural reason: at ~8 packets per picture, each picture gets eight independent chances to lose
+one, so **0.45% packet loss costs ~3.5% of frames before anything else goes wrong**.
+
+- **A bounded reorder buffer.** Our NACK recoveries can never arrive in time today: a picture's
+  packets arrive within a millisecond or two of each other, a retransmit takes 10–60 ms, and by
+  then the marker bit has closed the AU. Holding packets and assembling a picture only when its
+  sequence range is complete is what libwebrtc does, and it is the only option that improves
+  tearing **and** stutter rather than trading one for the other. It would supersede parts of the
+  completeness rule. See §10.4 and §10.5, where the reorder window was already demoted once —
+  this is a second, stronger reason to build it.
+- **Tightening the head-loss over-drop.** When a loss burst straddles a frame boundary both
+  neighbouring frames are skipped, because the missing packets took their timestamps with them.
+  There is a provable tightening available: `first_mb_in_slice == 0` identifies a picture's first
+  slice, and `ue(v) == 0` is a single `1` bit, so the test is `(nal[1] & 0x80) != 0` — no SPS, no
+  Exp-Golomb reader, no emulation-prevention handling. Validated offline: it identified exactly
+  120 pictures in a 120-frame encode. `accessUnitsIncompleteHead` is what says whether it is worth
+  the change.

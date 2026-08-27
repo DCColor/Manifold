@@ -299,3 +299,52 @@ cannot tell a real change from a heartbeat.**
 **What would close it:** value equality on `NDISource`, then a compare-before-assign in the
 discovery loop. Optionally a sweep of the remaining `@Published` writers that sit on timers or
 polls, applying the same rule at the source rather than at each consumer.
+
+---
+
+## WHEP tears under packet loss, and we ship it on purpose
+
+**Status:** ACCEPTED — WONTFIX, decided 2026-08-26. Not awaiting a fix; see the reopen condition
+below. **Found:** 2026-08-26, in a conditioned-loss run. **Blocks:** nothing.
+
+Under packet loss a WHEP stream shows **visible tearing** — bands of a previous frame's content
+in an otherwise current picture. It is not a decode failure and no counter records it as one:
+the run that surfaced it reported **0 decode errors** while tearing on screen.
+
+**Mechanism.** An access unit missing a slice is detected and skipped rather than submitted (that
+part is deliberate and is a large improvement — see the table in the findings doc). But skipping a
+picture leaves a hole in the reference chain, and every later picture that references it is decoded
+against a picture VideoToolbox never received. VideoToolbox returns `noErr` and hands back a wrong
+image. `kVTVideoDecoderReferenceMissingErr` (-17694) exists but is never raised on this path, so
+there is nothing to detect after the fact — it has to be predicted at skip time or not at all.
+
+**Why it is not fixed.** The fix is to request a keyframe whenever a *reference* picture is
+skipped. It is rejected because our encoder emits **no** disposable pictures: an offline census
+found a low-latency x264 encode is 100% reference frames, and disposable frames require B-frames
+or temporal layers. B-frames are unavailable — disabled in the OBS profile, and found to break
+playback on Cloudflare's WHIP/WHEP path during DC Color Live's development, which is a **platform
+constraint rather than a settings choice**. So every skipped frame is a reference frame, the fix
+degenerates to "request a keyframe on every loss", and that is the behaviour removed the previous
+day for costing ~22 frames per loss event.
+
+The choice is therefore binary — tearing or freezing — and both were viewed side by side:
+
+| | frames to screen |
+|---|---|
+| tearing (**shipping**) | 92% |
+| freezing (keyframe wait) | 83% |
+
+Tearing was judged substantially better. That is a viewing judgement, made by watching both.
+
+**Why nobody has reported it:** it needs real loss to appear at all. Every clean-link session
+looks perfect, and the tearing scales with packet loss, so a wired tester never sees it.
+
+**What would reopen it:** a sender that emits disposable pictures — Cloudflare's B-frame handling
+changing, or support for a non-Cloudflare WHEP endpoint using B-frames or temporal layers. Decide
+it on the evidence, not on the argument: the `nal_ref_idc` census ships and costs nothing, and the
+teardown line `[WHEP-RTP] reference census — …` reports the disposable share directly.
+`disposable=0` means this entry still stands.
+
+**Full reasoning, the measurements, and the two things still on the board** (a bounded reorder
+buffer, and a provable tightening of the head-loss over-drop):
+`docs/WHEP_LOADED_NETWORK_FINDINGS.md` §13.

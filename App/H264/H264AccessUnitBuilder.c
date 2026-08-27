@@ -112,6 +112,13 @@ struct ManifoldH264AccessUnitBuilder {
     /// Where the FIRST damage reported for this AU was. Meaningless while `accessUnitDamaged`
     /// is false; read only on the discard path.
     ManifoldH264AccessUnitDamage accessUnitDamage;
+
+    /// Reference census (MEASUREMENT ONLY — nothing branches on these; see the header).
+    /// `accessUnitRefIdc` is the MAXIMUM nal_ref_idc over this AU's surviving VCL NAL units;
+    /// `accessUnitHaveVCL` says whether there WAS one, which is what separates "disposable" from
+    /// "we never saw a slice and cannot tell".
+    uint8_t  accessUnitRefIdc;
+    bool     accessUnitHaveVCL;
     bool     parameterSetsChanged; // sticky until the AU it belongs to is EMITTED
 
     uint8_t  sps[MD_MAX_PARAMETER_SET];
@@ -147,6 +154,21 @@ static bool MDAccessUnitContents(const ManifoldH264AccessUnitBuilder *ab,
     return true;
 }
 
+/// Files the closing access unit into the reference census. `skipped` picks which of the two
+/// parallel triples it lands in, so both identities in the header hold by construction.
+static void MDCountReference(ManifoldH264AccessUnitBuilder *ab, bool skipped) {
+    if (!ab->accessUnitHaveVCL) {
+        if (skipped) ab->stats.accessUnitsIncompleteRefUnknown++;
+        else         ab->stats.accessUnitsRefUnknown++;
+    } else if (ab->accessUnitRefIdc > 0) {
+        if (skipped) ab->stats.accessUnitsIncompleteReference++;
+        else         ab->stats.accessUnitsReference++;
+    } else {
+        if (skipped) ab->stats.accessUnitsIncompleteDisposable++;
+        else         ab->stats.accessUnitsDisposable++;
+    }
+}
+
 static void MDEmitAccessUnit(ManifoldH264AccessUnitBuilder *ab) {
     // The damage flag is armed independently of `accessUnitActive` (a transport can discover the
     // loss before the AU's first slice opens it), so it must be cleared on EVERY close, including
@@ -173,9 +195,11 @@ static void MDEmitAccessUnit(ManifoldH264AccessUnitBuilder *ab) {
             case ManifoldH264AccessUnitDamageTail:     ab->stats.accessUnitsIncompleteTail++;     break;
         }
         if (ab->accessUnitKeyframe) ab->stats.keyframesIncomplete++;
+        MDCountReference(ab, true);
     } else if (MDAccessUnitContents(ab, &contents)) {
         ab->stats.accessUnits++;
         if (ab->accessUnitKeyframe) ab->stats.keyframes++;
+        MDCountReference(ab, false);
         ab->parameterSetsChanged = false;   // delivered — see the note above
         if (ab->handler) {
             ManifoldH264AccessUnit accessUnit = {
@@ -198,6 +222,8 @@ static void MDEmitAccessUnit(ManifoldH264AccessUnitBuilder *ab) {
     ab->accessUnitKeyframe     = false;
     ab->accessUnitOverflowed   = false;
     ab->accessUnitDamaged      = false;
+    ab->accessUnitRefIdc       = 0;
+    ab->accessUnitHaveVCL      = false;
 }
 
 /// Stores a parameter set, reporting whether it actually changed. Re-sent SPS/PPS
@@ -289,6 +315,22 @@ void ManifoldH264AccessUnitBuilderAppendNAL(ManifoldH264AccessUnitBuilder *ab,
     // schedule, which on a contribution feed can be seconds. The strict test is
     // what makes "wait for a keyframe" mean something on that path.
     if (type == MD_NAL_IDR) ab->accessUnitKeyframe = true;
+
+    // ── REFERENCE CENSUS (measurement only — see the header) ──────────────────
+    //
+    // nal_ref_idc is bits 5–6 of the NAL header byte, and it reaches here intact from every RTP
+    // packet form: single-NAL and STAP-A carry the real header, and FU-A rebuilds it as
+    // `(indicator & 0xE0) | (fuHeader & 0x1F)` — F and NRI come from the indicator.
+    //
+    // VCL NAL UNITS ONLY. Non-VCL types are required to carry nal_ref_idc == 0 (SEI, AUD and
+    // filler all do), so counting them would report every SEI-bearing frame as disposable.
+    // Placed BEFORE the overflow early-return below so an oversize access unit still records what
+    // it was rather than silently becoming "unknown".
+    if (type == MD_NAL_SLICE || type == MD_NAL_IDR) {
+        const uint8_t refIdc = (uint8_t)((nal[0] >> 5) & 0x03u);
+        if (!ab->accessUnitHaveVCL || refIdc > ab->accessUnitRefIdc) ab->accessUnitRefIdc = refIdc;
+        ab->accessUnitHaveVCL = true;
+    }
 
     if (ab->accessUnitOverflowed) return;
     if (ab->accessUnit.size + 4 + size > MD_MAX_ACCESS_UNIT_BYTES) {

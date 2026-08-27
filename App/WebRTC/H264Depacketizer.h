@@ -400,6 +400,36 @@ typedef struct {
     uint64_t accessUnitsIncompleteInterior; ///< …a packet BETWEEN two of its own was missing.
     uint64_t accessUnitsIncompleteHead;     ///< …its opening may have been in a boundary-straddling gap.
     uint64_t accessUnitsIncompleteTail;     ///< …its final packet(s) never arrived.
+    // ── REFERENCE CENSUS ─────────────────────────────────────────────────────
+    //
+    // ⚠️ MEASUREMENT ONLY — NOTHING BRANCHES ON THESE, AND THE QUESTION THEY SETTLED IS CLOSED.
+    // See docs/WHEP_LOADED_NETWORK_FINDINGS.md §13 before acting on them.
+    //
+    // A skipped REFERENCE picture poisons every later picture that references it — visible
+    // tearing, and NO decode error, because nothing fails — while a skipped DISPOSABLE one costs
+    // only itself. The remedy (hold the picture until a keyframe repairs the chain) was measured
+    // and REJECTED: this platform's sender emits NO disposable pictures, so it degenerates into
+    // "request a keyframe on every loss". Manifold ships the tearing on purpose.
+    //
+    // ⚠️ THE ANSWER IS A PROPERTY OF THE ENCODER, NOT THE NETWORK. A sender using temporal layers
+    // or B-frames emits many disposable pictures; a plain low-latency WebRTC encoder emits none.
+    // The emitted triple is here as well as the skipped one precisely so the encoder's structure
+    // is measured over EVERY frame of the session rather than over the handful that were lost —
+    // a few hundred skips is a thin sample to decide a behaviour change on.
+    //
+    // THESE ARE KEPT AS THE EVIDENCE FOR §13 AND AS ITS REOPEN TRIPWIRE. A non-zero
+    // `accessUnitsDisposable` against a new endpoint — a different SFU, or Cloudflare's B-frame
+    // handling changing — is what makes reference-skipping cheap again and puts the decision back
+    // on the table. Nothing else does; reopen on the counter, not on the argument.
+    //
+    // Full definitions and the two exact identities: H264AccessUnitBuilder.h.
+    uint64_t accessUnitsReference;            ///< Emitted; something can reference it.
+    uint64_t accessUnitsDisposable;           ///< Emitted; nal_ref_idc == 0, nothing ever will.
+    uint64_t accessUnitsRefUnknown;           ///< Emitted; no surviving slice to read it from.
+    uint64_t accessUnitsIncompleteReference;  ///< SKIPPED, and something would have referenced it.
+    uint64_t accessUnitsIncompleteDisposable; ///< SKIPPED, and nothing would have.
+    uint64_t accessUnitsIncompleteRefUnknown; ///< SKIPPED with no surviving slice to ask.
+
     /// Of `accessUnitsIncomplete`, the ones that would have been KEYFRAMES. Its own counter
     /// because a skipped IDR is the one skip that costs more than a frame: everything after it
     /// references a picture the decoder never received, so the keyframe has to be re-requested.

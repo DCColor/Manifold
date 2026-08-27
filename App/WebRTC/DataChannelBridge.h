@@ -191,6 +191,26 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
 /// is applied. The pair is what shows whether retransmission is happening and at what latency.
 - (nullable NSString *)arrivalLatencySummary;
 
+/// How many of the frames we SKIPPED as incomplete were reference pictures, and how many were
+/// disposable — plus the same split over every frame the session emitted.
+///
+/// ⚠️ MEASUREMENT ONLY. NO BEHAVIOUR ANYWHERE DEPENDS ON IT, AND THE QUESTION IT SETTLED IS
+/// CLOSED — docs/WHEP_LOADED_NETWORK_FINDINGS.md §13. Skipping an incomplete frame leaves a hole
+/// in the reference chain, and later pictures that reference it decode to plausible-but-wrong
+/// output — visible tearing, with NO decode error, because nothing fails. Manifold ships that
+/// tearing deliberately: the remedy (hold the picture until a keyframe repairs the chain) was
+/// rejected because this platform's sender emits no disposable pictures, which makes it
+/// "request a keyframe on every loss".
+///
+/// This line is kept as the EVIDENCE for that decision and as its REOPEN TRIPWIRE — it says so
+/// itself when it sees a sender that emits disposable pictures.
+///
+/// Separate from `rtpStatsSummary` for the same reason `roundTripSummary` is: it answers a
+/// question a reader has to answer FIRST, and it would be unfindable inside that line.
+///
+/// nil when no WHEP session is up. Reports "NO VERDICT" until a frame has actually been skipped.
+- (nullable NSString *)referenceCensusSummary;
+
 /// Sends a Picture Loss Indication, asking the sender for an IDR.
 ///
 /// Called automatically (a few times, then it gives up) if slices are arriving but no
