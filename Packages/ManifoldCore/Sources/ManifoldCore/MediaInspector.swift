@@ -317,6 +317,11 @@ public enum MediaInspector {
                 let layout = audioLayout(from: fmt, channelCount: info.channelCount)
                 info.layoutName = layout.name
                 info.layoutConfidence = layout.confidence
+                // The per-channel roles the FILE declared, carried through rather than re-derived
+                // downstream. Read independently of the layout NAME above: a track whose role
+                // sequence matches no entry in the name table still has genuine per-channel roles,
+                // and a consumer labelling individual channels wants those. See `AudioTrackInfo.roles`.
+                info.roles = channelRoles(from: fmt) ?? []
             } else {
                 info.layoutName = info.channelCount > 0 ? "\(info.channelCount) ch" : "—"
                 info.layoutConfidence = .undeclared

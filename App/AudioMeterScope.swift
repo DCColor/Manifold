@@ -127,6 +127,55 @@ final class AudioMeterModel: ObservableObject {
     @Published private(set) var channels: [Channel] = []
     @Published private(set) var status: Status = .noSource
 
+    /// Declared roles for the monitored track, refreshed each tick. Empty = the file declared none.
+    @Published private(set) var roles: [String] = []
+
+    /// What to print under bar `index`: the DECLARED role, or the channel NUMBER.
+    ///
+    /// ── TWO KINDS OF TRUE, NOT TWO CONFIDENCE LEVELS ──────────────────────────────────────────
+    ///
+    /// "C" and "3" are both facts. "C" is what the FILE says channel 3 carries; "3" is its position,
+    /// which is true unconditionally. Neither is a guess, so neither is dimmed — the app's
+    /// three-state honesty pattern (declared bright / inferred muted + italic / undeclared) applies
+    /// to values that MIGHT BE WRONG, and a channel number never is. Letters and digits already
+    /// distinguish the two on sight.
+    ///
+    /// ⚠️ WHAT MUST NEVER APPEAR HERE IS AN INFERRED ROLE. `MediaInspector` will name a LAYOUT from
+    /// a channel count alone when nothing is declared (6 → "5.1 (inferred)"), and turning that into
+    /// per-channel labels would print "C" over a bar on the strength of the count — a guess wearing
+    /// the same face as a declaration, over the one instrument a colourist uses to decide which
+    /// channel is which. The inference stops at the layout NAME. Per-channel labels come only from
+    /// `roles`, which is populated only from what the file actually declared, and the fallback is
+    /// the number rather than a guess.
+    ///
+    /// Falls back per-channel rather than per-track: a file that labels five channels and leaves the
+    /// sixth unmapped shows five roles and one number, which is more informative than discarding all
+    /// six. An `Unused` channel is KEPT as "—" — that is a declaration, and it explains a silent bar.
+    /// `allowRole: false` forces the number — used when the bar is too narrow to print a role
+    /// legibly. A truncated "LF…" is worse than "4": it looks like a role and names the wrong thing.
+    func channelLabel(_ index: Int, allowRole: Bool = true) -> String {
+        guard allowRole, roles.indices.contains(index) else { return "\(index + 1)" }
+        let role = roles[index]
+        // "?(1234)" is `roleName(for:)`'s marker for a label it has no name for — real information,
+        // but not something to print in a 26pt-wide column. That channel falls back to its number.
+        return role.hasPrefix("?(") ? "\(index + 1)" : role
+    }
+
+    /// Widest declared role, in characters — the view's input for deciding whether roles fit.
+    var widestRoleLength: Int {
+        roles.filter { !$0.hasPrefix("?(") }.map(\.count).max() ?? 0
+    }
+
+    /// Tooltip that states which of the two the label is, so the distinction is available without
+    /// having to know the convention.
+    func channelHelp(_ index: Int) -> String {
+        let n = index + 1
+        guard roles.indices.contains(index), !roles[index].hasPrefix("?(") else {
+            return "Channel \(n) — this file declares no role for it"
+        }
+        return "Channel \(n) — \(roles[index]) (declared by the file)"
+    }
+
     // ── Ballistics ────────────────────────────────────────────────────────────────────
     //
     // Instant rise, damped fall. A meter that falls as fast as it rises flickers and cannot be
@@ -164,6 +213,10 @@ final class AudioMeterModel: ObservableObject {
     var isLive: () -> Bool = { false }
     /// What the DECODER established, not what an inspector guessed. Drives the empty states.
     var presence: () -> AudioPresence = { .unknown }
+
+    /// Per-channel roles the FILE declared for the MONITORED track, or empty where it declared
+    /// none. Supplied by ContentView from `metadata.audioTracks[selected].roles`.
+    var channelRoles: () -> [String] = { [] }
 
     /// Identifies the loaded source. A CHANGE HERE CLEARS THE CLIP LATCHES.
     ///
@@ -217,6 +270,10 @@ final class AudioMeterModel: ObservableObject {
         clipRun.removeAll()
         holdSince.removeAll()
         channels.removeAll()
+        // Roles belong to the track that just went away. Carrying them onto the next source would
+        // print "C" over a channel of material that never declared one — the same class of stale
+        // claim as a carried-over clip latch. The next tick re-polls.
+        roles.removeAll()
         status = .noSource
     }
 
@@ -245,6 +302,13 @@ final class AudioMeterModel: ObservableObject {
             lastSourceIdentity = .some(identity)
             resetForNewSource()
         }
+
+        // Polled with the identity above, and for the same reason: the roles arrive with
+        // `metadata`, which lands asynchronously AFTER the decoder has already sized the bars, and
+        // they change again whenever the monitored track changes. Assigned only on a real change so
+        // an unchanged array does not republish at 30 Hz.
+        let declaredRoles = channelRoles()
+        if roles != declaredRoles { roles = declaredRoles }
 
         let declared = presence()
 
@@ -449,23 +513,29 @@ struct AudioMeterScopeView: View {
             let raw = (available - CGFloat(n - 1) * barSpacing) / CGFloat(max(n, 1))
             let barWidth = max(minBarWidth, min(maxBarWidth, raw))
             let plotHeight = geo.size.height - labelStripHeight - clipStripHeight - 4
+            // Roles only where the widest one actually FITS. The label font is SF Mono, whose
+            // advance is exactly 0.6 em, so character-count × size × 0.6 is the true width — the
+            // same arithmetic `graticuleLabelWidth` uses for the graticule. Below that the column
+            // shows numbers, which always fit and are never a truncated half-name. A very narrow
+            // slot (many channels, or a shrunk window) is the case this covers.
+            let roleFits = CGFloat(model.widestRoleLength) * 10 * 0.6 <= barWidth
 
             HStack(alignment: .bottom, spacing: barSpacing) {
                 ForEach(Array(model.channels.enumerated()), id: \.offset) { index, ch in
                     VStack(spacing: 2) {
                         clipIndicator(for: ch, index: index)
                         bar(ch, width: barWidth, height: max(plotHeight, 1))
-                        // ⚠️ NUMBERS, NOT ROLES. Channel COUNT is currently mapped to a layout
-                        // NAME upstream (a 4-channel file reports "Quad" whatever it declares),
-                        // so a role label here would inherit a guess and present it as fact.
-                        // A number is always honest. Roles wait for that fix.
-                        // Same legibility standard as the graticule labels: this is the element
-                        // that answers "WHICH channel is it", so it has to be readable at a
-                        // glance rather than merely present.
-                        Text("\(index + 1)")
+                        // The element that answers "WHICH channel is it" — a declared role where
+                        // the file states one, the channel number where it does not. See
+                        // `channelLabel(_:)`. Same legibility standard as the graticule labels:
+                        // it has to be readable at a glance rather than merely present.
+                        Text(model.channelLabel(index, allowRole: roleFits))
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(.white.opacity(graticuleLabelOpacity))
+                            .lineLimit(1)
+                            .fixedSize()
                             .frame(height: labelStripHeight)
+                            .help(model.channelHelp(index))
                     }
                     .frame(width: barWidth)
                 }

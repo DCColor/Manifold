@@ -38,6 +38,19 @@ public struct AudioTrackInfo: Equatable, Sendable {
     public var channelCount: Int = 0
     public var layoutName: String = "—"
     public var layoutConfidence: LayoutConfidence = .undeclared
+
+    /// Short role name per channel, in channel order — `["L","R","C","LFE","Ls","Rs"]`. EMPTY when
+    /// the file declares no per-channel roles, which is the honest answer for a track carrying only
+    /// a channel count.
+    ///
+    /// ⚠️ THIS IS A DIFFERENT QUESTION FROM `layoutConfidence`, AND CONFLATING THEM LOSES
+    /// INFORMATION. `layoutConfidence` says whether we could put a NAME to the whole layout;
+    /// `roles` says whether the FILE declared what each channel is. A track can declare every
+    /// channel per-channel and still land on `.inferred` because its role sequence matches no entry
+    /// in the layout-name table (an unusual order, or a channel count the table has no name for) —
+    /// the roles there are still fully declared and per-channel accurate. Anything wanting to label
+    /// individual channels must read THIS, not the confidence.
+    public var roles: [String] = []
     public var sampleRate: Double = 0      // Hz
     public var bitDepth: Int = 0
     public var dataRate: Double = 0         // bits/sec (estimated)

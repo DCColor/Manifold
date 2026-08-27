@@ -1333,6 +1333,16 @@ struct ContentView: View {
             meterModel.playhead = { [weak engine] in engine?.currentTime ?? 0 }
             meterModel.isPlaying = { [weak engine] in engine?.isPlaying ?? false }
             meterModel.presence = { [weak engine] in engine?.audioPresence ?? .unknown }
+            // Roles for the MONITORED track — the same index join the selector uses, and
+            // bounds-guarded for the same reason: `metadata` lands after the decoder has already
+            // sized the bars, so there is a real window where the engine has three tracks and the
+            // inspector has none. Empty means "declared nothing", which is what the meter falls
+            // back to numbers on. Live sources (NDI) declare no roles and correctly get numbers.
+            meterModel.channelRoles = { [weak engine] in
+                guard let engine, let tracks = engine.metadata?.audioTracks,
+                      tracks.indices.contains(engine.selectedAudioTrackIndex) else { return [] }
+                return tracks[engine.selectedAudioTrackIndex].roles
+            }
             // A live source has no playhead to key the ring against — see the note in
             // AudioMeterModel.tick. NDI is the only live path that carries audio at all today;
             // WHEP and SRT decode none, so their meters correctly report no audio track.
