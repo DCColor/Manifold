@@ -1509,10 +1509,39 @@ struct ContentView: View {
     ///         not the path it drives. Stage 3e wires the stream-bookmark UI (StreamType.srt is
     ///         still marked unsupported there, deliberately, until it does).
     /// The property is defined in all configs (the `.background` mounting it is unconditional);
-    /// only the triggers are `#if DEBUG`.
+    /// only the triggers are conditional.
+    ///
+    /// ⚠️ TWO GATES, AND THEY ARE NOT THE SAME GATE. The outer `#if DEBUG` is TRUE IN PROFILE, which
+    /// is the configuration every shipped build has used — it excludes these triggers from Release
+    /// and from nothing else. The inner `#if MANIFOLD_CONFIG_DEBUG` blocks are the real Debug-only
+    /// gate (Debug is the only configuration carrying that flag), and they hold every trigger that
+    /// reaches a LiveClock setpoint mutator: ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S and — the reason it matters —
+    /// ⌃⌥[ / ⌃⌥], which step a live WHEP or SRT clock. Do not "simplify" the inner gate to `#if
+    /// DEBUG`; that would put all six back in front of testers.
     @ViewBuilder private var syntheticLiveShortcuts: some View {
         #if DEBUG
         Group {
+            // ⚠️ THE GATE BELOW IS `MANIFOLD_CONFIG_DEBUG`, NOT `#if DEBUG`, AND THE DIFFERENCE IS THE
+            // WHOLE POINT. Profile defines DEBUG (project.yml, target-level
+            // SWIFT_ACTIVE_COMPILATION_CONDITIONS) and every build cut to date has been Profile — so
+            // the enclosing `#if DEBUG` has never gated anything in a tester's hands. Only the Debug
+            // configuration gets MANIFOLD_CONFIG_DEBUG (project.yml `settings.configs`, and Debug is
+            // the one config with no target-level override of that key), so it is the real gate.
+            //
+            // WHAT IS INSIDE IT: every trigger here reaches a LiveClock setpoint mutator.
+            //   ⌃⌥L   start()      → setForceUnityRate   (SyntheticLiveSource.swift:185)
+            //   ⌃⌥⇧L  stop()       → reset()             (:297)
+            //   ⌃⌥U   toggle       → setForceUnityRate   (:488)
+            //   ⌃⌥S   startSweep() → setForceUnityRate + setDepths + reset() (:531, :565, :566)
+            // ⌃⌥P mutates no clock — it only moves driftRate/jitterAmplitude — but it configures a
+            // harness that nothing can start once the other four are gated, so leaving it live would
+            // buy nothing except a misleading `[SyntheticLive] preset →` line in a tester's
+            // diagnostics. It is in here for that reason and no other.
+            //
+            // The mutators these reach all land on SyntheticLiveSource's OWN private LiveClock
+            // (built at :183), never on a transport's — that containment is why this block is a
+            // tidiness fix. The ⌃⌥[ / ⌃⌥] block further down is the one that was not.
+            #if MANIFOLD_CONFIG_DEBUG
             Button("") {
                 guard let url = engine.currentURL, let renderer = metalRenderer else {
                     NSLog("[SyntheticLive] load a file first — ⌃⌥L replays the loaded file through the live path")
@@ -1557,6 +1586,7 @@ struct ContentView: View {
                                                  })
             }
             .keyboardShortcut("s", modifiers: [.control, .option])
+            #endif
             // ⌃⌥W — libdatachannel LINK SMOKE TEST (WHEP step 1 of 4). Not a WHEP handshake and
             // not networking: it only proves the vendored static libdatachannel is linked into
             // this binary, initialized, and callable, alongside the DeckLink C++. Delete once a
@@ -1604,6 +1634,16 @@ struct ContentView: View {
             // colour-managed export — see LiveVideoDecoder.exportStill.
             Button("") { WHEPClient.shared.exportNextDecodedFrame() }
                 .keyboardShortcut("e", modifiers: [.control, .option, .shift])
+            // ⚠️ GATED TO `MANIFOLD_CONFIG_DEBUG` — the same real Debug-only gate as the harness
+            // block above, and THIS is the pair that made it urgent rather than tidy.
+            // `stepLiveTargetDepth` routes to WHEPFrameRouter.shared / SRTFrameRouter.shared, so
+            // unlike everything else in this group these two mutate the setpoint of a REAL
+            // transport's LiveClock — re-anchoring it and jumping presentation time — on a live
+            // stream, in a shipped build. `[` sits two keys right of `P` on a US layout, next to
+            // the ⌃⌥P this group already binds, so it is reachable by a slip and not only on
+            // purpose. The FUNCTION stays ungated (it is a private no-op when nothing is live);
+            // only the trigger is removed.
+            //
             // ⌃⌥[ / ⌃⌥] — step the live WHEP buffer target by ∓/± 0.05 s (clamped 0.10…1.00).
             //
             // WHY THIS EXISTS: the cushion is being SIZED against measured jitter, and one
@@ -1622,10 +1662,12 @@ struct ContentView: View {
             // more than WHEP does — a stepper that only moved WHEP's clock would have left the
             // newer number the harder one to measure. The switch is exhaustive over LiveSource on
             // purpose: a fourth push source cannot be added without deciding what this does.
+            #if MANIFOLD_CONFIG_DEBUG
             Button("") { stepLiveTargetDepth(by: -0.05) }
                 .keyboardShortcut("[", modifiers: [.control, .option])
             Button("") { stepLiveTargetDepth(by: 0.05) }
                 .keyboardShortcut("]", modifiers: [.control, .option])
+            #endif
             // ⌃⌥D — SRT SESSION (stage 3d). D for Demux, kept from the stage-2 spike this
             // replaces: S, R and T are all taken (⌃⌥S sweep, ⌃⌥R, ⌃⌥T), and D is free in both
             // plain and shifted form and is not adjacent to ⌃⌥L or ⌃⌥H, the two other live-path

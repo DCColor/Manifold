@@ -945,7 +945,18 @@ final class DiagnosticsExporter: ObservableObject {
             guard response == .OK, let url = panel.url else { return }
             do {
                 try text.write(to: url, atomically: true, encoding: .utf8)
-                NSLog("[DIAG] diagnostics written (%d bytes)", text.utf8.count)
+                // ⚠️ THIS LINE CAN NEVER DESCRIBE THE FILE IT APPEARS IN, AND MUST NOT READ AS IF
+                // IT DOES. It is emitted AFTER `text` is assembled and written, so it lands in the
+                // log ring and is carried into the NEXT export — where a reader sees a byte count
+                // sitting inside a file of a completely different size. That has now misled two
+                // readers into diagnosing a phantom truncation cap (there is none: the limits are
+                // 128 KiB head + 3968 KiB tail, and a 1.1 MB export sat at 27% of them).
+                //
+                // The destination FILENAME is what makes it self-identifying: seeing "…_MBA11.txt"
+                // inside MBA12 settles the question at a glance, where a bare number cannot.
+                NSLog("[DIAG] wrote %d bytes to %@ — NB: this line is captured into the NEXT "
+                    + "export, never the one it describes",
+                      text.utf8.count, url.lastPathComponent)
             } catch {
                 NSLog("[DIAG] ⚠️ could not write diagnostics: %@", String(describing: error))
                 let alert = NSAlert()
