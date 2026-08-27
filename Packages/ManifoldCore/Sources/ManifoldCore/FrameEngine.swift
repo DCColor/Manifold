@@ -1486,6 +1486,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioAnchor = nil
         mirror.lock.lock()
         mirror.active = true; mirror.cushion = cushion; mirror.mirrored = false
+        mirror.smoothedRate = 1.0; mirror.haveSmoothed = false
+        mirror.lastHost = 0; mirror.firstHost = 0
+        mirror.pushedRate = 1.0; mirror.pushedMedia = 0; mirror.pushedHost = 0
+        mirror.changes = 0; mirror.pushes = 0; mirror.lastStatsHost = 0
         mirror.lock.unlock()
         audioRenderer.flush()
         synchronizer.rate = 0      // held until the first mirrored mapping arrives
@@ -1503,7 +1507,81 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var active = false
         var cushion: Double = 0
         var mirrored = false          // has at least one mapping landed?
+
+        // ── RATE SMOOTHING STATE ───────────────────────────────────────────────────────────
+        var smoothedRate: Double = 1.0
+        var haveSmoothed = false
+        var lastHost: Double = 0
+        /// Host time of the first mapping, for the τ ramp. 0 until the first mapping lands.
+        var firstHost: Double = 0
+        // What the synchronizer was last actually told.
+        var pushedRate: Double = 1.0
+        var pushedMedia: Double = 0
+        var pushedHost: Double = 0
+        // Counters — `changes` is mappings received, `pushes` is setRate calls issued. The ratio is
+        // the thing that was unmeasurable on the run that motivated this.
+        var changes = 0
+        var pushes = 0
+        var lastStatsHost: Double = 0
     }
+
+    /// EMA time constant for the mirrored rate, in seconds.
+    ///
+    /// ⚠️ CHOSEN FROM THE MEASURED SENDER CLOCK, NOT PICKED FOR FEEL. `[WHEP-DRIFT]` puts the real
+    /// sender/receiver ratio at σ = 0.021%, |err| max 0.042% — a total spread of **1.1 cents**. The
+    /// control loop meanwhile swings the full ±0.5% rail, **17.3 cents peak-to-peak**, at up to
+    /// `controlHz` = 10 Hz. So ~94% of the rate signal is buffer-depth correction, not clock
+    /// tracking, and for audio that correction IS varispeed — a 17-cent warble at 10 Hz.
+    ///
+    /// 30 s sits between the two timescales by a wide margin in both directions: it is 300× the
+    /// P-loop's 0.1 s update interval and ~30× the ~1 s depth wobble, so depth transients are
+    /// attenuated to nothing; while a genuine sender offset is very nearly a constant, so it is
+    /// still tracked to within a few percent of its value inside a minute.
+    private static let liveAudioRateTau = 30.0
+
+    /// ── STARTUP CONVERGENCE: A SHORT TIME CONSTANT THAT RAMPS TO THE STEADY-STATE ONE ────────
+    ///
+    /// THE DEFECT THIS FIXES: the EMA starts with no history. It is seeded at 1.0 while the clock
+    /// is typically already railed near 1.004 (44.6% of samples sit at a rail), so the mirrored
+    /// rate lags reality by ~0.4% and position error accrues at ~4 ms/s until it trips the position
+    /// tolerance. Measured over a 13-minute run: every excursion above 30 ms fell in the first 27
+    /// seconds, as a monotonic ramp followed by a correction. Steady state was fine — middle and
+    /// last thirds ran mean +3.5 ms, σ 3.2 ms, range −5.4…+11.3 ms.
+    ///
+    /// ⚠️ WHY NOT SEED FROM THE CLOCK'S RATE AT ANCHOR (the obvious one-liner): at anchor time the
+    /// clock is most often AT A RAIL, so seeding from that single instantaneous sample seeds the
+    /// filter with the very excursion it exists to reject — trading a 4 ms/s ramp for a τ-long
+    /// unwind of a 0.5% bias. Averaging quickly beats copying one sample.
+    ///
+    /// τ is therefore ramped linearly from `liveAudioRateTauFast` to `liveAudioRateTau` over
+    /// `liveAudioRateRamp` seconds of session time.
+    ///
+    /// ⚠️ THE STEADY STATE CANNOT REGRESS, AND THAT IS BY CONSTRUCTION RATHER THAN BY MEASUREMENT:
+    /// once elapsed ≥ `liveAudioRateRamp`, τ is exactly `liveAudioRateTau` and the filter is
+    /// bit-identical to the one that produced those numbers. The ramp is unreachable after 10 s,
+    /// so it can only affect the window where the excursions actually were.
+
+    /// 2 s ≈ 20 P-loop updates at `controlHz` — enough to average out per-tick noise, short enough
+    /// that the EMA is within ~5% of the true rate by 3τ ≈ 6 s.
+    private static let liveAudioRateTauFast = 2.0
+
+    /// 10 s. All measured excursions >30 ms were inside the first 27 s, so full smoothing is in
+    /// place well before the steady-state regime the constraint protects begins.
+    private static let liveAudioRateRamp = 10.0
+
+    /// Push the rate only once it has moved this far from what the synchronizer was last told.
+    ///
+    /// 0.02% ≈ the sender ratio's own σ (0.0206%): below this we would be chasing measurement noise
+    /// rather than clock. As a STEP it is 0.35 cents, far under the ~5-cent pitch JND, so each push
+    /// is individually inaudible. And it bounds the position error the rate alone can accumulate:
+    /// at 0.02% residual, a full minute between pushes costs 12 ms — under a third of a frame.
+    private static let liveAudioRateThreshold = 0.0002
+
+    /// Push regardless of rate when the timebase would be this far from `LiveClock`'s position.
+    /// This is what makes a snap, a freeze-guard correction or the first anchor land IMMEDIATELY
+    /// and exactly — they arrive as a large position error, not as a rate change — and it is why
+    /// smoothing the rate does not weaken the anchor mirroring that removed the 190 ms drift.
+    private static let liveAudioPositionTolerance = 0.010
     private let mirror = LiveAudioMirrorState()
 
     /// Track `LiveClock`'s mapping so the audio timebase reads what `now()` reads, minus the
@@ -1545,13 +1623,80 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             synchronizer.rate = 0
             return
         }
-        synchronizer.setRate(Float(m.rate),
-                             time: CMTime(seconds: m.senderPTS - cushion, preferredTimescale: 90_000),
+        // ── ANCHOR FAITHFULLY, RATE SLOWLY ────────────────────────────────────────────────
+        //
+        // Position is mirrored exactly; only the RATE the synchronizer sees is smoothed. The two
+        // are separated by asking what our timebase would read right now given what we last pushed:
+        // a pure P-loop rate change leaves position continuous (LiveClock sets the new anchor to
+        // the old mapping evaluated at the same instant), so it shows up as ~zero position error
+        // and is allowed to be throttled. A snap, freeze-guard correction or first anchor shows up
+        // as a LARGE position error and is pushed immediately, unsmoothed.
+        //
+        // This is not a second mechanism beside the funnel — the funnel is still the only writer of
+        // the mapping. This is the consumer deciding what to forward, which is the only place the
+        // distinction between "the clock moved" and "the controller twitched" can be made.
+        let target = m.senderPTS - cushion
+        mirror.lock.lock()
+        let dt = mirror.haveSmoothed ? max(0.0, min(1.0, m.hostTime - mirror.lastHost)) : 0.0
+        if mirror.haveSmoothed {
+            // dt-based EMA so the constant means seconds, not "per callback" — the callback rate
+            // varies with what the control loop is doing and must not change the filter.
+            let elapsed = m.hostTime - mirror.firstHost
+            let ramp = min(1.0, max(0.0, elapsed / Self.liveAudioRateRamp))
+            let tau = Self.liveAudioRateTauFast
+                    + (Self.liveAudioRateTau - Self.liveAudioRateTauFast) * ramp
+            let alpha = 1.0 - exp(-dt / tau)
+            mirror.smoothedRate += alpha * (m.rate - mirror.smoothedRate)
+        } else {
+            mirror.smoothedRate = m.rate
+            mirror.haveSmoothed = true
+            mirror.firstHost = m.hostTime
+        }
+        mirror.lastHost = m.hostTime
+        mirror.changes += 1
+
+        let predicted = mirror.pushedMedia + (m.hostTime - mirror.pushedHost) * mirror.pushedRate
+        let positionError = wasMirrored ? abs(target - predicted) : .infinity
+        let rateMoved = abs(mirror.smoothedRate - mirror.pushedRate)
+        let shouldPush = positionError > Self.liveAudioPositionTolerance
+                      || rateMoved > Self.liveAudioRateThreshold
+        let rateToPush = mirror.smoothedRate
+        let smoothedNow = mirror.smoothedRate
+        if shouldPush {
+            mirror.pushedRate = rateToPush
+            mirror.pushedMedia = target
+            mirror.pushedHost = m.hostTime
+            mirror.pushes += 1
+        }
+        let changes = mirror.changes, pushes = mirror.pushes
+        let statsDue = m.hostTime - mirror.lastStatsHost >= 10.0
+        if statsDue { mirror.lastStatsHost = m.hostTime }
+        mirror.lock.unlock()
+
+        // ⚠️ EMITTED BEFORE THE PUSH GUARD, AND THAT ORDERING IS THE WHOLE POINT OF THIS LINE.
+        // It used to sit after `guard shouldPush`, while `lastStatsHost` was advanced before it —
+        // so a 10 s window that came due without a push consumed the window and printed nothing.
+        // The effect was to report only the windows that happened to end in a push, which made the
+        // change→call ratio — the one number this line exists to produce — read far too low: two
+        // lines in 67 s claiming 3 mapping changes, against 37 rate changes visible in the 1 Hz
+        // [LIVECLOCK] series over the same run. A throttle that reports only when the throttled
+        // thing fires cannot measure what it is throttling.
+        if statsDue {
+            NSLog("[WHEP-AUDIO] mirror — %d mapping change(s) → %d setRate call(s) "
+                + "· smoothedRate=%.5f · clockRate=%.5f · posErr=%.1f ms%@",
+                  changes, pushes, smoothedNow, m.rate,
+                  positionError.isFinite ? positionError * 1000 : 0,
+                  shouldPush ? "" : " · (no push this window)")
+        }
+
+        guard shouldPush else { return }
+        synchronizer.setRate(Float(rateToPush),
+                             time: CMTime(seconds: target, preferredTimescale: 90_000),
                              atHostTime: CMTime(seconds: m.hostTime, preferredTimescale: 90_000))
         if !wasMirrored {
             NSLog("[WHEP-AUDIO] timebase MIRRORED — first mapping: senderPTS=%.3fs host=%.3fs "
-                + "rate=%.5f cushion=%.3fs → timebase=%.3fs",
-                  m.senderPTS, m.hostTime, m.rate, cushion, m.senderPTS - cushion)
+                + "rate=%.5f (smoothed %.5f) cushion=%.3fs → timebase=%.3fs",
+                  m.senderPTS, m.hostTime, m.rate, rateToPush, cushion, target)
         }
     }
 
@@ -1569,9 +1714,30 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// How far the synchronizer's timebase has drifted from the live clock, in seconds. Positive =
     /// audio timebase is AHEAD of the video clock. Nil when no live audio session is running.
+    /// ⚠️ THIS GUARDED ON `liveAudioAnchor`, WHICH NOTHING SETS ANY MORE — so it returned nil for
+    /// an entire 125 s verification run and printed `timebase−clock=n/a` throughout, which is
+    /// precisely the number that was supposed to prove the mirror was holding. `liveAudioAnchor`
+    /// was written by `anchorLiveAudio(at:)`; when the mirror replaced that, its only writer went
+    /// with it and this guard was left keyed to a field frozen at nil. The mirror's own state is
+    /// the correct predicate: it is set exactly when a mapping has actually reached the timebase.
     public func liveAudioDrift(against clockSeconds: Double) -> Double? {
-        guard liveAudioAnchor != nil else { return nil }
-        return CMTimeGetSeconds(synchronizer.currentTime()) - clockSeconds
+        mirror.lock.lock()
+        let ready = mirror.active && mirror.mirrored
+        mirror.lock.unlock()
+        guard ready, clockSeconds.isFinite else { return nil }
+        let timebase = CMTimeGetSeconds(synchronizer.currentTime())
+        guard timebase.isFinite else { return nil }
+        // The timebase deliberately runs `cushion` behind the live clock (see `mirrorLiveAudio`),
+        // so that offset is removed here. What remains is the MIRROR ERROR — how far the audio
+        // timebase has slipped from the mapping it is tracking — which is what this is read for.
+        // Reporting the raw difference would show a constant −0.400 s and bury the signal.
+        return (timebase + liveAudioCushionValue) - clockSeconds
+    }
+
+    /// Cushion, readable on the main actor for `liveAudioDrift`.
+    private var liveAudioCushionValue: Double {
+        mirror.lock.lock(); defer { mirror.lock.unlock() }
+        return mirror.cushion
     }
 
     public func endLiveAudio() {
