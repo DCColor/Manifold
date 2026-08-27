@@ -5,6 +5,26 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.7.0
+
+- Streams now carry audio. WHEP streams have never had sound — it simply wasn't received. Audio
+  now plays in sync with picture, feeds the meters, and goes out over SDI like any other source.
+  SRT audio is next.
+- Stream audio stays locked to picture for the length of a session, rather than drifting apart
+  over several minutes.
+- A lost packet no longer freezes the picture for around 22 frames. Incomplete frames are now
+  skipped and the previous frame held, instead of being sent to the decoder and triggering a
+  keyframe wait. Measured over 13 minutes on a real connection: 82 packets lost, 62 recovered,
+  no decode errors.
+- New audio meters, a fifth scope alongside waveform, RGB parade, vectorscope and CIE. Channels
+  are labelled with their roles from the file — L, R, C, LFE, Ls, Rs — where the file declares
+  them.
+- Multi-track files: any audio track can now be selected. Previously only track 1 played.
+  Switching tracks no longer disturbs video playback.
+- Window titles now show the file or stream name. ⌘⇧I shows the full name in the HUD.
+- Fixed: a menu rebuild that destroyed window-scoped menu items.
+- Fixed: a duplicate About entry in the Window menu.
+
 ## 0.6.2
 
 - Fixed: licence keys were not surviving app updates. The key itself was always safely stored —
