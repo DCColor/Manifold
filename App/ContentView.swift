@@ -2478,8 +2478,30 @@ struct ContentView: View {
         // fails the second and passes the first, and mute/volume must survive that (see DeckGate).
         let position = transport && deck.gate.positionControlsEnabled
         // One sentence for every position control's tooltip, so a greyed play button and a greyed
-        // scrubber never disagree about why.
+        // scrubber never disagree about why. In the STANDING case this is the arbiter's message,
+        // which already names the owning window's file (`DeckRegistry.standingMessage` →
+        // `WindowDeck.displayName`, with "another window" as the honest fallback) — so the tooltip
+        // tells the user where to go, and no second string has to be invented here.
         let positionWhy = deck.gate.positionReason ?? deck.gate.reason
+        // ── GREY IS PART OF THE GATE, NOT DECORATION ──────────────────────────────────────────
+        //
+        // ⚠️ `.disabled` ALONE DOES NOT GREY ANYTHING IN THIS ROW. The HStack below sets an
+        // explicit `.foregroundStyle(.white.opacity(0.9))`, and an explicit foreground style is
+        // what a `.plain` button's label is drawn with whether or not it is enabled. So a disabled
+        // play button here renders at FULL BRIGHTNESS and simply stops responding — which is the
+        // "looks enabled, does nothing" reading the gate exists to prevent, and is the worse half
+        // of it: an inert control that looks live reads as broken software, where a greyed one
+        // reads as inapplicable.
+        //
+        // `deckLinkOutputControl` already meets this and already solves it the same way — it sets
+        // its own foreground style (it has a green ON state), so it computes `0.35` for its
+        // blocked case by hand. Same value here, so a greyed transport control and a greyed device
+        // control are the same grey.
+        //
+        // ONLY THE POSITION CONTROLS. Mute and the volume fader take `transport`, not `position`,
+        // and keep their own brightness for the reason stated at the fader below.
+        let live = Color.white.opacity(0.9)
+        let dim = Color.white.opacity(0.35)
         return VStack(spacing: 10) {
             HStack(spacing: 12) {
                 Text(leadingReadout)
@@ -2502,8 +2524,18 @@ struct ContentView: View {
                     // condition for the type-to-enter route; this is the click route.
                     .onTapGesture { if position { transportKeys.begin() } }
                     // A pointer cue, because a click target that looks like a label is a click
-                    // target nobody finds.
-                    .onHover { NSCursor.pointingHand.set(); if !$0 { NSCursor.arrow.set() } }
+                    // target nobody finds — AND ONLY WHILE IT IS ONE. A pointing hand over a gated
+                    // readout promises a click that `position` will refuse, which is the same lie
+                    // the ungreyed play button was telling.
+                    .onHover { inside in
+                        if inside && position { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                    }
+                    // NOT DIMMED, unlike the buttons: this is a READOUT first and a click target
+                    // second, and the playhead it shows is still true in a gated window — greying
+                    // the number would cost information to make a point about a click. The tooltip
+                    // is what carries the point.
+                    .help(position ? "Go to timecode — click, or type a number"
+                                   : (positionWhy ?? ""))
 
                 Slider(
                     value: Binding(
@@ -2554,6 +2586,8 @@ struct ContentView: View {
                 }
                 .keyboardShortcut(.space, modifiers: [])
                 .disabled(!position)
+                // See the `dim` note above: `.disabled` does not grey a control in this row.
+                .foregroundStyle(position ? live : dim)
                 .help(position ? (engine.isPlaying ? "Pause (Space)" : "Play (Space)")
                                : (positionWhy ?? "Playback is in another window"))
 
@@ -2598,7 +2632,12 @@ struct ContentView: View {
                     // to catch streams. `position` says the intended thing, and the pair costs
                     // nothing.
                     .disabled(!engine.hasMedia || !position)
-                    .foregroundStyle(engine.isLooping ? Color.green : .white.opacity(0.9))
+                    // Three states, and the middle one is the new part: ON (green), available
+                    // (0.9), gated (0.35). This button ALREADY overrode the row's foreground style
+                    // to carry its green, so it was the clearest case of a disabled control drawn
+                    // at full brightness — see the `dim` note above.
+                    .foregroundStyle(engine.isLooping ? Color.green
+                                     : ((engine.hasMedia && position) ? live : dim))
                 Button { showGuidesPanel.toggle() } label: {
                     // `viewfinder.rectangular` — an outer frame with corner brackets and OPEN space
                     // inside it, which is what a framing guide is: marks over a picture you can

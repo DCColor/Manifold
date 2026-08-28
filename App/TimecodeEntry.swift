@@ -473,11 +473,27 @@ final class TransportKeyMonitor: ObservableObject {
 
     // MARK: State transitions
 
-    /// Open entry. False — and no state change — when this deck has nothing to seek in, which is
-    /// what makes a digit typed at an empty window fall through to the system exactly as it did
-    /// before this feature existed.
+    /// Open entry. False — and no state change — when this deck has nothing to seek in, or when the
+    /// gate says it may not seek. False is what makes the keystroke fall through to the system
+    /// exactly as it did before this feature existed.
     @discardableResult
     func begin(sign: TimecodeEntry.Sign = .absolute) -> Bool {
+        // ── THE GATE, AND IT WAS MISSING ON THIS ROUTE ────────────────────────────────────────
+        //
+        // Entry IS a seek, so it is a position control and carries the same pair `arrowStep` does:
+        // a deck that does not hold the transport may not move a playhead, and a deck showing a
+        // live source has no playhead to move. There are two ways in and only one of them asked.
+        // ContentView's CLICK route guards itself (`if position { transportKeys.begin() }`); the
+        // TYPE-TO-ENTER route in `handle` called straight through, so a digit typed into a gated
+        // window opened the overlay, PAUSED the engine and seeked on ⏎ — the one control in the
+        // 0.6.2 set that was never actually gated, in a window whose banner says the transport is
+        // somewhere else.
+        //
+        // ⚠️ ASKED HERE AND NOT AT THE CALL SITES. This is the funnel both routes already share,
+        // and it is the funnel that PAUSES — a gate at the call sites would have to be repeated
+        // and could drift, whereas a `false` from here cannot open entry by any path.
+        guard deck?.gate.transportEnabled == true,
+              deck?.gate.positionControlsEnabled == true else { return false }
         // Asked BEFORE the pause and answered again after it: a deck that cannot accept an entry
         // must not have its playback stopped by a stray keystroke.
         guard let engine, TimecodeContext(engine: engine) != nil else { return false }
