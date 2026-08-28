@@ -53,6 +53,56 @@ golden-ratio sub-frame offset:
 Positions that cannot be resolved to a grid frame are counted as `unresolved` and excluded rather
 than guessed.
 
+## `MODE=pixdiff` — did the GENERATOR or the COMPOSITOR introduce the difference?
+
+A second mode, for the HDR half of the investigation. It answers what the side-by-side split
+(`MANIFOLD_SCRUB_SPLIT=1`) cannot: the split shows that the overlay and the Metal layer *display*
+the same frame differently, but not whether the difference was introduced when the image was
+**created** or when it was **composited**.
+
+```bash
+MODE=pixdiff T=1.0 ./scrubmeas /path/to/clip.mov
+```
+
+`T` is the media time to compare (default: 1 s, or mid-duration on a short file).
+
+It compares **PQ code values** — the one space in which the two paths are directly comparable,
+because neither applies an EOTF: the Metal shader range-expands and matrixes into `rgba16Float` and
+lets the *layer* carry PQ, and the generator returns a PQ-tagged CGImage. So it replicates
+`PassthroughShader.metal`'s arithmetic on the decoder's `x420` buffer rather than asking CoreGraphics
+to convert anything — a `CGBitmapContext` draw would apply a colour transform and measure *that*.
+
+**Resolution is handled by removing it, not by correcting for it.** The shipping generator is capped
+at 960×540 while the decoder delivers the full raster, and a resample difference and a colour
+difference look alike in a summary statistic. So:
+
+- **PASS 1** sets `maximumSize = .zero` — full encoded raster, 1:1 with the decoder, **nothing
+  resampled on either side**. Any difference here cannot be a filter artefact.
+- **PASS 2** runs the shipping 960×540 cap separately, for comparison.
+
+Both passes also report a **resample-immune subset**: pairs whose decoder 3×3 luma neighbourhood is
+uniform, where no filter can change the value.
+
+Reported per pass: least-squares fit `gen = m·dec + b` with correlation, max absolute difference in
+ten-bit codes, the mean difference **binned by decoder value** (which distinguishes an offset from a
+scale from a curve from a ceiling), ceiling/floor counts, and the value ranges.
+
+### ⚠️ The `superwhite` line decides whether the run means anything
+
+Legal-range expansion maps code 940 → 1.0, so codes 941–1023 expand **above 1.0**. The Metal path
+keeps those values (`rgba16Float`, explicitly unclamped); the generator **cannot** — CGImage.h,
+PQ/HLG float case: *"16-bit or 32-bit float image components values will be clipped to [0.0, 1.0]
+range."* That is a creation-side difference no layer property can undo.
+
+A file that peaks at exactly 1.0 — **including `../color-fixtures/wedge-pq-24track.mov`** — cannot
+exercise it. The tool prints `superwhite: NONE` in that case, and **a `NONE` result does not clear
+the mechanism; it says the file could not test it.** Use content graded above legal white.
+
+⚠️ `makeGenerator`, the shader constants and the matrix coefficients in `scrubmeas.swift` are all
+COPIED from the app (`FrameEngine.makeScrubPreviewGenerator`, `PassthroughShader.metal`,
+`MetalVideoRenderer.colorParams`). If those change, change these, or this measures a pipeline the
+app does not have.
+
 ## ⚠️ Three traps, all of which return plausible wrong numbers
 
 They are documented at the sites where they bite, in `scrubmeas.swift` — read those before

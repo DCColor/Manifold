@@ -536,6 +536,39 @@ final class MetalVideoRenderer {
         // file's CICP tags. wantsExtendedDynamicRangeContent is deliberately NOT set here — see
         // the E2 note there for why it is HDR-conditional rather than globally on.
 
+        // ── NO TONE MAP ON THE DISPLAY PATH. THE DECISION, MADE EXPLICIT ──────────────────────
+        //
+        // ⚠️ THIS IS EXPECTED TO CHANGE NOTHING TODAY, AND THAT IS THE POINT. This layer already
+        // gets the untone-mapped path incidentally: it declares no `contentsHeadroom` and no
+        // `edrMetadata`, so its drawables have UNKNOWN headroom, and CGImage.h's rule — "The image
+        // with unknown content headroom will be excluded from tone mapping" — excludes them. The
+        // correct behaviour is currently a SIDE EFFECT of two absent properties, which is a thing
+        // any future change could remove without anyone noticing. This states the intent instead,
+        // so that adding a headroom tag later cannot silently start tone-mapping the reference
+        // picture.
+        //
+        // WHY NOT TONE-MAPPED — the decision is recorded in full in docs/BUGS.md ("DECISION: the
+        // desktop picture is the REFERENCE and does not tone-map"). The short form:
+        //   1. THE SCOPES READ THE SAME OFFSCREEN THIS PATH DOES. A picture that rolls a highlight
+        //      off while this app's own waveform shows it against the ceiling contradicts itself,
+        //      and the operator cannot tell which to believe.
+        //   2. SO DOES DECKLINK. SDI and desktop are fed the same values and must agree.
+        //   3. EDR headroom MOVES — with display brightness, ambient light, and what else is
+        //      composited (measured here: granted 4.483 against a potential of 8.965). A picture
+        //      that changes when you nudge the brightness slider is not a reference picture.
+        //
+        // ⚠️ `.never` MAY BE IGNORED ON THIS LAYER, AND THAT WOULD NOT CHANGE ANYTHING. The same
+        // property was set on the scrub overlay's CALayer and measured to have NO effect on a
+        // CGImage-contents layer (docs/BUGS.md, 2026-08-28). It is set here for its declarative
+        // value; the behaviour it asks for is the behaviour already in force by another route.
+        // If it turns out to be honoured, it becomes load-bearing — see the note in BUGS.md.
+        //
+        // macos(15.0) — at the deployment floor, no availability branch. Set HERE, on main, at
+        // construction, alongside the other one-time layer properties above and BEFORE any render
+        // thread exists — NOT in the per-source colour block, which is the render thread's and is
+        // reserved for state that varies by source. This does not vary.
+        metalLayer.toneMapMode = .never
+
         // Once per PROCESS, not once per renderer. Headroom is a property of the display, not of
         // this object, so there is nothing to say a second time — and a renderer is constructed
         // per window. (This guard also predates the ContentView fix, where a @State default-value

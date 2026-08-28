@@ -64,7 +64,11 @@ final class MetalHostView: NSView {
 /// SDR unless the layer opts in. So even a correctly-tagged HDR CGImage — which
 /// `dynamicRangePolicy = .matchSource` now produces, see `makeScrubPreviewGenerator` — was still
 /// being tone-mapped on the way to the screen. Tagging the image and hosting it in a layer that
-/// asks for the headroom are two halves of one fix; neither works alone.
+/// asks for the headroom were intended as two halves of one fix.
+///
+/// ⚠️ THAT FIX DID NOT WORK, AND THE REASON IS BELOW. The opt-in is still correct and still here —
+/// it is what lifts the overlay off SDR at all — but it does NOT make this layer match the played
+/// picture, and no layer property does.
 ///
 /// ⚠️ BOTH EDR PROPERTIES ARE USED, ONE PER OS RANGE — see `setPreviewImage`. There are two
 /// declarations of `wantsExtendedDynamicRangeContent` and only one is deprecated: `CAMetalLayer`'s
@@ -84,19 +88,37 @@ final class MetalHostView: NSView {
 /// Both land on an SDR picture, so part 1 alone never fixed the report — but the two are not the
 /// same operation, and describing the un-opted-in case as "what it did before" is wrong.
 ///
-/// ⚠️ BOTH HEADROOM ROUTES ARE NOW SATISFIED — a REVISION, and the reasoning it replaced is worth
-/// knowing. `preferredDynamicRange` activates only on content "that have headroom tagging greater
-/// than 1.0", so an untagged image makes it a silent no-op. A CGImage carries its own tagging as
-/// one of three qualifying routes, and the generator's output was measured: `.matchSource` on a PQ
-/// source returns `contentHeadroom = 4.9261084` (= `kCGDefaultHDRImageContentHeadroom`) against 1.0
-/// under the old `.forceSDR`. That measurement stands, and on it the layer's own `contentsHeadroom`
-/// is redundant — which is what this comment used to say, and why it was left at its default.
+/// ⚠️ THE HEADROOM ROUTES — AND THE FINDING THAT CLOSED THE INVESTIGATION THEY BELONG TO.
+/// `preferredDynamicRange` activates only on content "that have headroom tagging greater than 1.0".
+/// The generator's output was measured: `.matchSource` on a PQ source returns
+/// `contentHeadroom = 4.9261084` (= `kCGDefaultHDRImageContentHeadroom`) against 1.0 under the old
+/// `.forceSDR`. So the content route is live and the layer's own `contentsHeadroom` is redundant —
+/// it was set for a while, measured to change nothing, and has been removed.
 ///
-/// It is now set anyway, along with a wide `contentsFormat`. NEITHER is established as the cause of
-/// anything: the reported failure persists with the content route alone, and 0.0 is the DOCUMENTED
-/// default meaning "not overriding", not a missing tag. They are set because they are the two
-/// remaining implicit assumptions in this layer's configuration and removing a variable costs
-/// nothing. If EDR is working when you read this, they are the first two lines to try removing.
+/// ⚠️⚠️ THE TAG CANNOT BE REMOVED FROM THE IMAGE, BECAUSE THE TAG *IS* THE COLORSPACE. Measured in
+/// `docs/scrub-fixtures/hrprobe.swift`: `CGImageCreateCopyWithContentHeadroom(0.0, …)` is silently
+/// ignored (only values >= 1.0 take), and even plain `CGImageCreate` — an API with no headroom
+/// parameter at all — returns an image reporting 4.9261084. The headroom is derived from
+/// `kCGColorSpaceITUR_2100_PQ`.
+///
+/// >>> CONSEQUENCE, AND IT IS A PROPERTY OF THE PLATFORM RATHER THAN OF THIS FILE: a PQ CGImage on
+/// >>> a CALayer is ALWAYS on Core Animation's TONE-MAPPED path, and nothing settable moves it off.
+/// >>> `contentsHeadroom`, `toneMapMode = .never`, and the `preferredDynamicRange` /
+/// >>> `wantsExtendedDynamicRangeContent` A/B were each measured against the side-by-side split
+/// >>> (`MANIFOLD_SCRUB_SPLIT=1`) and each changed NOTHING.
+///
+/// So this overlay is tone-mapped and the CAMetalLayer is not — the Metal path declares no headroom
+/// and no `edrMetadata`, so its drawables are excluded from tone mapping. **That is a DIFFERENT
+/// COLOUR-MANAGEMENT MODE, not a rendering fault**, and the accepted consequence is that an HDR
+/// scrub preview does not match the played picture. The decision to keep the played picture
+/// untone-mapped (it is the reference: the scopes, the export and the DeckLink SDI output all read
+/// the same offscreen) and to accept the preview being approximate is recorded in full, with the
+/// reasoning and the rejected alternatives, in docs/BUGS.md → "✅ DECISION 2026-08-28: the desktop
+/// picture is the REFERENCE and does not tone-map".
+///
+/// ⚠️ DO NOT ATTEMPT TO FIX THIS WITH A LAYER PROPERTY. Four have been eliminated by measurement.
+/// The only route that closes it is removing this CGImage path entirely — see docs/BUGS.md →
+/// "⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput`".
 ///
 /// This deliberately covers the AVFoundation producer ONLY. `LibavThumbnailSource` (DNx/MXF) builds
 /// an 8-bit RGBA CGImage and is SDR by construction — no layer opt-in can rescue 8-bit RGBA, and
@@ -105,16 +127,22 @@ final class MetalHostView: NSView {
 struct ScrubPreviewSurface: NSViewRepresentable {
     let image: CGImage
 
+    /// ⚠️ DEBUG SPLIT ONLY — nil in every shipping path, and `ScrubDebug.splitEnabled` is the only
+    /// thing that ever passes a value. The fraction of the image's WIDTH to show, measured from the
+    /// left edge; the caller sizes this view to the same fraction of the video rect. See
+    /// `setPreviewImage` for why this is `contentsRect` and not a mask.
+    var splitFraction: CGFloat? = nil
+
     func makeNSView(context: Context) -> ScrubPreviewHostView {
         let view = ScrubPreviewHostView()
         view.wantsLayer = true
         view.layerContentsRedrawPolicy = .never
-        view.setPreviewImage(image)
+        view.setPreviewImage(image, splitFraction: splitFraction)
         return view
     }
 
     func updateNSView(_ nsView: ScrubPreviewHostView, context: Context) {
-        nsView.setPreviewImage(image)
+        nsView.setPreviewImage(image, splitFraction: splitFraction)
     }
 }
 
@@ -131,7 +159,12 @@ final class ScrubPreviewHostView: NSView {
         // A preview swap is a CONTENT REPLACEMENT, not a transition. Without this every new frame
         // during a drag would cross-fade through CALayer's default 0.25 s `contents` animation —
         // a visible smear on a control whose whole purpose is to answer "which frame am I on".
-        layer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        // `contentsRect` joins the list for the DEBUG split: it changes exactly once, when the
+        // split arms, and CALayer would otherwise animate the image sliding/scaling into its half
+        // over 0.25 s. An instrument that transitions into position is an instrument you have to
+        // wait for before you can trust it.
+        layer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(),
+                         "contentsRect": NSNull()]
         return layer
     }
 
@@ -145,30 +178,40 @@ final class ScrubPreviewHostView: NSView {
         layer.wantsExtendedDynamicRangeContent = true
     }
 
-    func setPreviewImage(_ image: CGImage) {
+    func setPreviewImage(_ image: CGImage, splitFraction: CGFloat? = nil) {
         guard let layer else { return }
-        // Belt and braces around the per-property `actions` above: this runs from `updateNSView`,
-        // i.e. inside a SwiftUI update where an enclosing animation transaction may be in flight,
-        // and an inherited animation would re-introduce the cross-fade the actions dictionary is
-        // there to prevent.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        // ── WIDE BACKING FORMAT ───────────────────────────────────────────────────────────────
-        //
-        // ⚠️ THE HEADER SAYS THIS SHOULD NOT MATTER FOR AN ASSIGNED `contents`, AND IT IS SET
-        // ANYWAY. `contentsFormat` is documented as "a hint for the desired storage format of the
-        // layer contents provided by -drawLayerInContext" which "does not affect the
-        // interpretation of the `contents' property directly" — and we never draw into this layer,
-        // we assign a CGImage. So on the header's account an 8-bit default cannot be what flattens
-        // a 16-bit PQ image. It is set because the default was observed as `RGBA8` on a layer whose
-        // EDR was not working, the header is a hint rather than a guarantee, and the cost is
-        // nothing measurable here — NOT because the mechanism is established. If EDR starts working
-        // and you are minimising the change, this is the line to test removing first.
-        //
-        // `kCAContentsFormatRGBA16Float` is macos(10.12) — no availability guard needed.
-        layer.contentsFormat = .RGBA16Float
         layer.contents = image
         layer.contentsScale = window?.backingScaleFactor ?? 2.0
+        // ── THE DEBUG SPLIT'S HALF — `contentsRect`, DELIBERATELY NOT A MASK OR A CLIP ─────────
+        //
+        // ⚠️ EVERY OBVIOUS WAY TO SHOW HALF A LAYER PERTURBS THE THING BEING MEASURED. SwiftUI's
+        // `.mask`, `.clipped()` and `masksToBounds` all introduce a clip on the compositing path,
+        // and at least the first can force an OFFSCREEN pass — which is precisely the class of
+        // operation suspected of flattening this layer's EDR. An instrument that might tone-map
+        // the half it is measuring answers a different question than the one asked, and would do
+        // it silently. `logEDRState`'s ancestor walk already flags `masks`, `compFilter`,
+        // `filters` and `RASTERIZE!` on the chain for this exact reason; adding one on purpose
+        // would be tripping our own wire.
+        //
+        // `contentsRect` is not a clip. It is the sub-rectangle of `contents` that is MAPPED onto
+        // the layer's bounds — a source-side crop applied where the image is sampled, with no
+        // extra pass and no change to how the result is composited. The layer's EDR configuration
+        // below is reached identically either way.
+        //
+        // GEOMETRY, AND WHY THE SEAM LINES UP. Unit coordinates, origin top-left of the image.
+        // With `contentsGravity = .resize` the sub-rect is stretched to fill the bounds, and the
+        // caller sizes this view to the SAME fraction of the video rect — so `f` of the image goes
+        // into `f` of the rect and the scale factor is unchanged from the full-width case. At any
+        // x in the left half the overlay shows the same picture content the Metal layer shows at
+        // that x. A resolution difference across the seam is expected (960×540 upscaled vs.
+        // native); a CONTENT offset would mean this arithmetic is wrong, not that the paths differ.
+        //
+        // Reset to the unit rect when not splitting — this view is reused across preview swaps and
+        // a stranded half-rect would silently halve every later preview.
+        layer.contentsRect = splitFraction.map { CGRect(x: 0, y: 0, width: $0, height: 1) }
+                             ?? CGRect(x: 0, y: 0, width: 1, height: 1)
         // ── THE EDR OPT-IN. AN ORDINARY AVAILABILITY BRANCH, NOT A FALLBACK ───────────────────
         //
         // Two properties, each current for its own range, and they mean the same thing. This
@@ -200,20 +243,19 @@ final class ScrubPreviewHostView: NSView {
         if ScrubDebug.forceLegacyEDR {
             setLegacyEDROptIn(layer)
         } else if #available(macOS 26.0, *) {
-            // ── EXPLICIT HEADROOM TAG ─────────────────────────────────────────────────────────
+            // ⚠️ `layer.contentsHeadroom = CGFloat(image.contentHeadroom)` STOOD HERE AND WAS
+            // REMOVED — MEASURED INERT, not tidied away. Setting it changed nothing (readback
+            // confirmed 0.0, the split's seam did not move), because the image carries its own
+            // 4.9261084 and `contentsHeadroom`'s header says a CGImage with content headroom does
+            // not need it set. Do not put it back expecting an effect.
             //
-            // ⚠️ 0.0 WAS NEVER EVIDENCE OF A FAULT, AND THIS IS STILL NOT ESTABLISHED AS THE FIX.
-            // `contentsHeadroom` "defaults to 0, which means untagged", and its own header says
-            // "if the `contents' is a CGImageRef with content headroom … this property does not
-            // need to be set". Our image carries 4.926, so a 0.0 readback is the DOCUMENTED
-            // default meaning "not overriding — use the content's own tagging", not a missing tag.
-            //
-            // It is set regardless, for one reason: it removes a variable. The content route and
-            // the layer route are the two ways to satisfy `preferredDynamicRange`, and with the
-            // fix not working there is no value in leaving one of them implicit. Copied FROM the
-            // image, never invented — the header says values >0 and <1.0 are undefined, and a
-            // number picked by hand would be a colour decision in disguise.
-            layer.contentsHeadroom = CGFloat(image.contentHeadroom)
+            // ⚠️ AND THE IMAGE'S TAG CANNOT BE CLEARED EITHER, WHICH IS THE FINDING THAT CLOSED
+            // THIS. `docs/scrub-fixtures/hrprobe.swift` measured it: the headroom is DERIVED FROM
+            // the PQ colorspace, `CGImageCreateCopyWithContentHeadroom(0.0, …)` is silently
+            // ignored, and even plain `CGImageCreate` — an API with no headroom parameter at all —
+            // still yields 4.9261084. There is no such thing as a PQ-tagged CGImage with unknown
+            // headroom, so this layer is pinned to Core Animation's tone-mapped path by the
+            // platform. See docs/BUGS.md → "✅ DECISION 2026-08-28".
             layer.preferredDynamicRange = .high
         } else {
             // NOT DEAD CODE, AND NOT A DEPRECATED-API MISTAKE. The annotation on this property is
@@ -310,7 +352,7 @@ final class ScrubPreviewHostView: NSView {
         let potEDR = screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? -1
 
         let line = "[EDRDIAG] img{cs=\(csName) 2100TF=\(is2100) headroom=\(headroom) bpc=\(image.bitsPerComponent) \(producer)}"
-                 + " layer{\(type(of: layer)) \(optIn) wantsEDR=\(wantsEDR) scale=\(layer.contentsScale) fmt=\(layer.contentsFormat.rawValue)}"
+                 + " layer{\(type(of: layer)) \(optIn) wantsEDR=\(wantsEDR) scale=\(layer.contentsScale)}"
                  + " screen{maxEDR=\(maxEDR) potential=\(potEDR)}"
                  + " chain[\(chain.joined(separator: " < "))]"
         // Only when something CHANGES, plus the first one — a drag fires this at up to ~20 Hz and a

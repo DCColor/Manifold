@@ -22,9 +22,28 @@ enum ScrubDebug {
     /// Force the overlay's EDR opt-in to the pre-26 boolean on every OS — the property the Metal
     /// layer uses and which demonstrably works. See the call site in `setPreviewImage`.
     static let forceLegacyEDR = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_EDR_LEGACY"] == "1"
+
+    /// ── SIDE-BY-SIDE SPLIT. `MANIFOLD_SCRUB_SPLIT=1` ──────────────────────────────────────────
+    ///
+    /// ⚠️ THE OTHER THREE DIAGNOSTICS COMPARE IN SEQUENCE, AND THAT IS THEIR SHARED WEAKNESS.
+    /// Metal layer during playback → overlay during the drag → Metal layer on release is three
+    /// observations at three different moments, and the engine pauses, a flush happens and the
+    /// frame changes between them. Any of those could be the variable rather than the overlay's
+    /// rendering, and no amount of A/B-ing the overlay's own properties can separate them.
+    ///
+    /// This one puts BOTH PATHS ON SCREEN AT ONCE: after a scrub release, once the seeked-to frame
+    /// has actually been presented on the Metal layer, the overlay is HELD and narrowed to the LEFT
+    /// HALF of the video rect. Left half = the preview `CGImage` on `ScrubPreviewSurface`'s CALayer.
+    /// Right half = the Metal layer showing through. One frame, one moment, one window; the only
+    /// difference across the seam is which path drew it.
+    ///
+    /// See `splitLatched` in ContentView for the arming rule and `ScrubPreviewSurface`'s
+    /// `splitFraction` for how the half is taken (`contentsRect`, NOT a mask — see there).
+    static let splitEnabled = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_SPLIT"] == "1"
     #else
     static let overlayDisabled = false
     static let forceLegacyEDR = false
+    static let splitEnabled = false
     #endif
 }
 
@@ -182,6 +201,11 @@ struct ContentView: View {
     /// The bounded fallback that guarantees the overlay comes down even if the reader never
     /// delivers. Cancelled when the frame arrives first.
     @State private var scrubHoldTask: Task<Void, Never>?
+    /// ⚠️ TEMPORARY DIAGNOSTIC STATE — `MANIFOLD_SCRUB_SPLIT=1` only; see `ScrubDebug.splitEnabled`.
+    /// True while the side-by-side split is armed and being held for inspection. Always false in a
+    /// build without the env var, and false during the drag itself even with it — see the arming
+    /// rule in `endScrubHandoff(framePresented:)`.
+    @State private var splitLatched = false
 
     @State private var hudVisible = true
     @State private var pinned = false
@@ -404,6 +428,24 @@ struct ContentView: View {
         .background(
             Button("") { metalRenderer?.cycleDebugDestination() }
                 .keyboardShortcut("d", modifiers: [.control, .option])
+                .opacity(0)
+        )
+        // ⚠️ TEMPORARY DIAGNOSTIC — ⌃⌥⇧S dismisses the held scrub SPLIT; see
+        // `ScrubDebug.splitEnabled`. A no-op when nothing is latched, which is always unless
+        // `MANIFOLD_SCRUB_SPLIT=1`, so this is inert in a tester build that was not launched for it.
+        //
+        // ⌃⌥⇧S, not ⌃⌥S: plain ⌃⌥S is the LiveClock sweep. It is `MANIFOLD_CONFIG_DEBUG`-gated and
+        // so is absent from Profile, which would have made the collision invisible in exactly the
+        // configuration this diagnostic is built for and a hard conflict in the one it is not.
+        // ⇧ is free in both.
+        //
+        // MOUNTED HERE, alongside ⌃⌥R and ⌃⌥E, rather than in `syntheticLiveShortcuts` — that group
+        // is `.disabled(!deck.gate.deviceControlsEnabled)`, and this touches only this window's own
+        // overlay. Nothing about a device claim should decide whether you can take a diagnostic off
+        // your own screen.
+        .background(
+            Button("") { dismissScrubSplit() }
+                .keyboardShortcut("s", modifiers: [.control, .option, .shift])
                 .opacity(0)
         )
         #endif
@@ -998,6 +1040,41 @@ struct ContentView: View {
         rasterNotice = text
     }
 
+    /// ⚠️ TEMPORARY DIAGNOSTIC — the split's on-screen furniture; see `ScrubDebug.splitEnabled`.
+    /// Composited only from the `splitLatched` branch, so it cannot appear in a build without the
+    /// env var. Two elements and no more, because everything drawn over the picture is a brightness
+    /// reference the eye will use whether or not you meant it to:
+    ///
+    ///   * THE SEAM. A 1-point magenta hairline down the centre of the video rect — centred in this
+    ///     ZStack, which is where the seam is, so its position is not computed and cannot drift
+    ///     from the split it marks. Magenta because no graded picture contains it, so there is
+    ///     never a question of whether you are looking at the marker or at content.
+    ///   * WHICH SIDE IS WHICH, at 9pt and 55% opacity, pinned to the rect's top corners and well
+    ///     clear of the seam. Deliberately dim: a bright label near the seam would sit next to the
+    ///     exact patch of picture you are comparing, and simultaneous contrast is not something you
+    ///     can decide to ignore while reading a brightness difference by eye.
+    @ViewBuilder private var scrubSplitFurniture: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color(red: 1, green: 0, blue: 1))
+                .frame(width: 1, height: drawnVideoSize.height)
+            VStack {
+                HStack {
+                    Text("OVERLAY")
+                    Spacer()
+                    Text("METAL")
+                }
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.horizontal, 6)
+                .padding(.top, 4)
+                Spacer()
+            }
+            .frame(width: drawnVideoSize.width, height: drawnVideoSize.height)
+        }
+        .allowsHitTesting(false)
+    }
+
     /// The video region: aspect-fit picture (never cropped/stretched), transport
     /// controls, empty state, and the picture-only overlays (inspector, filename).
     /// Fills whatever height the split gives it.
@@ -1060,9 +1137,31 @@ struct ContentView: View {
                 // screen even once the generator started tagging it. The aspect pin stays HERE and
                 // is unchanged: it is the video rect's authority, not the image's own PAR, for the
                 // reason given above, and the layer inside resizes to whatever rect it produces.
-                ScrubPreviewSurface(image: preview)
-                    .aspectRatio(videoAspect, contentMode: .fit)
-                    .allowsHitTesting(false)
+                if splitLatched, drawnVideoSize.width > 0, drawnVideoSize.height > 0 {
+                    // ⚠️ TEMPORARY DIAGNOSTIC BRANCH — see `ScrubDebug.splitEnabled`. Unreachable
+                    // unless `splitLatched`, which only ever becomes true under the env var.
+                    //
+                    // THE VIDEO RECT IS MEASURED HERE, NOT RE-DERIVED. The normal branch below
+                    // pins the overlay with `.aspectRatio(videoAspect, .fit)` — the same authority
+                    // the Metal surface uses, which lands the two on each other. That is right for
+                    // shipping and not good enough for a seam: it is two independent computations
+                    // of the same rect, and a sub-point disagreement between them would show up as
+                    // a content offset across the split and read as "the two paths draw different
+                    // geometry". `drawnVideoSize` is the Metal surface's OWN laid-out size, taken
+                    // off the `.onGeometryChange` above, so the outer frame here IS the video rect
+                    // rather than a second opinion about it. Centred in this ZStack exactly as the
+                    // aspect-fitted surface is, so the two rects coincide by construction.
+                    ScrubPreviewSurface(image: preview, splitFraction: 0.5)
+                        .frame(width: drawnVideoSize.width / 2, height: drawnVideoSize.height)
+                        .frame(width: drawnVideoSize.width, height: drawnVideoSize.height,
+                               alignment: .leading)
+                        .allowsHitTesting(false)
+                    scrubSplitFurniture
+                } else {
+                    ScrubPreviewSurface(image: preview)
+                        .aspectRatio(videoAspect, contentMode: .fit)
+                        .allowsHitTesting(false)
+                }
             }
 
             if hasSource {
@@ -2599,6 +2698,14 @@ struct ContentView: View {
                             // the overlay out from under the new gesture. The IMAGE is left alone:
                             // the first preview of this drag replaces it, so there is no blink.
                             cancelScrubHandoff()
+                            #if DEBUG
+                            // ⚠️ TEMPORARY DIAGNOSTIC — one of the split's two dismissals (⌃⌥⇧S is
+                            // the other): moving the scrubber again ends the held comparison. It
+                            // must happen HERE rather than at the first preview of the new drag,
+                            // because a half-width overlay left standing for even one frame of a
+                            // fresh drag would show the new preview cropped to half the picture.
+                            dismissScrubSplit()
+                            #endif
                             wasPlayingBeforeScrub = engine.isPlaying
                             if engine.isPlaying { engine.pause() }
                             scrubValue = engine.currentTime
@@ -2631,7 +2738,14 @@ struct ContentView: View {
                             requestScrubPreview(at: scrubValue, final: true)
                             // 3. Now start the real seek.
                             engine.exactSeek(to: scrubValue)
-                            if wasPlayingBeforeScrub { engine.play() }
+                            // ⚠️ TEMPORARY DIAGNOSTIC — the split needs the picture to STOP. A
+                            // resumed transport would move the Metal layer off the seeked frame
+                            // within one frame period, leaving the right half advancing against a
+                            // frozen left half: a guaranteed, and guaranteedly meaningless,
+                            // difference. Suppressing the resume is not a workaround for the
+                            // instrument, it is a condition of it. Gated on the env var, so a
+                            // build without it resumes exactly as before.
+                            if wasPlayingBeforeScrub && !ScrubDebug.splitEnabled { engine.play() }
                         }
                     }
                 )
@@ -3069,7 +3183,7 @@ struct ContentView: View {
             // Fires on the RENDER thread — hop before touching any of this view's state.
             Task { @MainActor in
                 guard handoff == scrubHandoff else { return }
-                endScrubHandoff()
+                endScrubHandoff(framePresented: true)
             }
         }
 
@@ -3081,7 +3195,7 @@ struct ContentView: View {
             // would silently carry the whole correctness argument. Same trap the connect banner
             // documents at its own `Task.sleep`.
             guard !Task.isCancelled, handoff == scrubHandoff else { return }
-            endScrubHandoff()
+            endScrubHandoff(framePresented: false)
         }
     }
 
@@ -3098,11 +3212,102 @@ struct ContentView: View {
 
     /// Retire the handoff AND take the overlay down — the normal completion, reached when the
     /// seeked-to frame is on screen or when the timeout fires.
+    ///
+    /// `framePresented` distinguishes the two callers, and under the DEBUG split it is the whole
+    /// arming rule — see the block below. Outside the split the two paths are identical, which is
+    /// what they were before the parameter existed.
     @MainActor
-    private func endScrubHandoff() {
+    private func endScrubHandoff(framePresented: Bool) {
         cancelScrubHandoff()
+        #if DEBUG
+        // ⚠️ TEMPORARY DIAGNOSTIC — `MANIFOLD_SCRUB_SPLIT=1`; see `ScrubDebug.splitEnabled`.
+        //
+        // THIS IS THE ONE MOMENT AT WHICH THE COMPARISON IS VALID, AND IT IS WHY THE SPLIT ARMS
+        // HERE AND NOWHERE ELSE. Three conditions have to hold at once for the two halves to be the
+        // same frame, and all three hold exactly on the `framePresented` path:
+        //
+        //   1. BOTH PATHS WERE ASKED FOR THE SAME MEDIA TIME. The release branch requests the final
+        //      preview at `scrubValue` (past both throttle gates, which is what that request is
+        //      for) and then calls `exactSeek(to: scrubValue)`. One number, both decoders.
+        //   2. THE SEEKED FRAME IS ACTUALLY ON THE METAL LAYER. `framePresented == true` means the
+        //      renderer's `onFirstPresentAfterFlush` one-shot fired, i.e. the first frame belonging
+        //      to THIS seek has been through `presentDrawable`. On the TIMEOUT path it has not, and
+        //      the right half would be showing the pre-seek frame — so that path does not arm, it
+        //      says so, and it takes the overlay down as normal.
+        //   3. NOTHING MOVES AFTERWARDS. The release branch skips the play-resume while the split
+        //      is enabled (see there), so the Metal layer holds this frame for as long as you look.
+        //
+        // ⚠️ WHAT CONDITION 1 IS *NOT*: a guarantee that one media time means one frame. Two
+        // decoders are involved and they select independently. That was measured rather than
+        // assumed — 80 positions across two ProRes fixtures, in docs/BUGS.md → "MEASURED 2026-08-27
+        // — the tolerance mechanism is REFUTED on ProRes": generator and reader returned the SAME
+        // frame in 80 of 80, at every tolerance setting, because on all-intra every frame is a sync
+        // sample. On LONG-GOP the same harness measured the shipping ±0.5 s tolerance putting the
+        // preview up to ELEVEN FRAMES away, in both directions. So the split is a valid instrument
+        // on all-intra and is NOT one on long-GOP; the armed line below prints the codec so the
+        // reading carries its own validity, and `codecIsAllIntra` refuses to guess.
+        if ScrubDebug.splitEnabled {
+            guard framePresented else {
+                NSLog("[SPLIT] NOT ARMED — the seek timed out (400 ms) without presenting a frame. "
+                      + "The Metal half would be the PRE-SEEK frame. Overlay dropped; scrub again.")
+                scrubPreviewImage = nil
+                return
+            }
+            splitLatched = true
+            logScrubSplitArmed()
+            return   // HOLD the overlay. ⌃⌥⇧S or a new drag takes it down — see `dismissScrubSplit`.
+        }
+        #endif
         scrubPreviewImage = nil
     }
+
+    #if DEBUG
+    /// ⚠️ TEMPORARY DIAGNOSTIC — see `ScrubDebug.splitEnabled`. One line, at arm time, carrying the
+    /// facts a still photograph of the screen cannot: which frame both halves are meant to be, and
+    /// whether this file's codec is one the split is valid on at all.
+    @MainActor
+    private func logScrubSplitArmed() {
+        let fps = frameRateOrDefault
+        let codec = engine.metadata?.codecName ?? "—"
+        let validity: String = {
+            switch codecIsAllIntra(codec) {
+            case .some(true):  return "VALID (all-intra: generator and reader select the same frame)"
+            case .some(false): return "⚠️ INVALID — LONG-GOP. The ±0.5 s generator tolerance puts the "
+                                    + "preview up to 11 frames off the seeked frame (measured). The "
+                                    + "halves are probably DIFFERENT FRAMES; do not read brightness."
+            case .none:        return "⚠️ UNKNOWN CODEC — establish all-intra vs long-GOP before "
+                                    + "reading this. Long-GOP invalidates the comparison entirely."
+            }
+        }()
+        NSLog("[SPLIT] ARMED t=%.4f s frame=%d @%.3f fps codec=%@ rect=%.1f×%.1f seam=%.1f | %@",
+              scrubValue, Int((scrubValue * fps).rounded()), fps, codec,
+              drawnVideoSize.width, drawnVideoSize.height, drawnVideoSize.width / 2, validity)
+    }
+
+    /// nil means "not established" — deliberately, and it is the point of the function. A default of
+    /// `true` would print VALID over a long-GOP file and quietly convert an unknown into a
+    /// measurement; a default of `false` would cry wolf over every ProRes variant not listed. The
+    /// names are `MediaInspector.codecName`'s and `avcodec_get_name`'s, which is why both spellings
+    /// of the ProRes family appear.
+    private func codecIsAllIntra(_ codec: String) -> Bool? {
+        let c = codec.lowercased()
+        if c.contains("prores") || c.contains("dnx") || c.contains("jpeg") { return true }
+        if c.contains("h.264") || c.contains("h264") || c.contains("avc")
+            || c.contains("hevc") || c.contains("h.265") || c.contains("av1") { return false }
+        return nil
+    }
+
+    /// ⚠️ TEMPORARY DIAGNOSTIC — see `ScrubDebug.splitEnabled`. Takes the held split down and
+    /// returns the window to the ordinary Metal-only picture. Reached from ⌃⌥⇧S and from a new
+    /// scrub grab; both are no-ops when nothing is latched.
+    @MainActor
+    private func dismissScrubSplit() {
+        guard splitLatched else { return }
+        splitLatched = false
+        scrubPreviewImage = nil
+        NSLog("[SPLIT] dismissed")
+    }
+    #endif
 
     private func cycleReadout() {
         let all = ReadoutMode.allCases

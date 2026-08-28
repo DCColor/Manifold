@@ -977,6 +977,537 @@ opt-in is `MetalVideoRenderer.setSourceColorSpace`; the second preview producer 
 
 ---
 
+## MEASURED 2026-08-28 — the split, four eliminations, and one correction that mattered
+
+The side-by-side split (`MANIFOLD_SCRUB_SPLIT=1`, `ScrubDebug.splitEnabled`) put the overlay and the
+Metal layer on the **same frame, in the same window, at the same instant** — left half overlay, right
+half Metal, seam down the middle. Every earlier comparison in this investigation was SEQUENTIAL
+(Metal during playback → overlay during the drag → Metal on release), and other things change
+alongside: the engine pauses, a flush happens, the frame changes. The split removes all of them.
+
+**Confirmed by eye, on ProRes 4444 PQ, frame 616, display in HDR mode (maxEDR 4.483,
+potential 8.965): the halves clearly differ.** Right (Metal) is brighter and holds highlight
+detail; left (overlay) is flatter and rolls off earlier. Same data, two renderings.
+
+⚠️ The frame-correspondence guarantee is codec-scoped and was already measured — see *"the tolerance
+mechanism is REFUTED on ProRes"* above. Generator and reader select the SAME frame in 80/80
+positions on all-intra; on long-GOP the shipping ±0.5 s tolerance puts them up to **11 frames**
+apart. **The split is a valid instrument on all-intra and is NOT one on long-GOP.** It prints the
+codec and a VALID/INVALID verdict on its own `[SPLIT] ARMED` line for that reason.
+
+### Four display-side controls, individually eliminated
+
+Each with its readback confirmed in `[EDRDIAG]` BEFORE the seam was read — the discipline that
+made each result mean one thing:
+
+| control | how tested | readback | result |
+|---|---|---|---|
+| `CALayer.contentsHeadroom` | deleted the assignment | `contentsHeadroom=0.0` | halves still differ |
+| `CALayer.toneMapMode` | set `.never` | `toneMap=CAToneMapModeNever` | halves still differ |
+| `preferredDynamicRange` vs `wantsExtendedDynamicRangeContent` | `MANIFOLD_SCRUB_EDR_LEGACY=1` | — | no change |
+| the CGImage's own `contentHeadroom` | `CGImageCreateCopyWithContentHeadroom(0.0, …)` | **still 4.9261084** | **the call is a no-op — see below** |
+
+### ⚠️ A PQ image's content headroom cannot be cleared — it is DERIVED FROM the colorspace
+
+`docs/scrub-fixtures/hrprobe.swift`, on `wedge-pq-24track.mov`:
+
+```
+  source              : headroom=4.9261084 cs=kCGColorSpaceITUR_2100_PQ
+  headroom 0.0        : headroom=4.9261084   ← IGNORED. Not NULL, a new object, tag unchanged.
+  headroom 1.0        : headroom=1.0
+  headroom 2.0        : headroom=2.0
+  headroom 8.0        : headroom=8.0
+  plain CGImageCreate : headroom=4.9261084   ← an API with NO headroom parameter AT ALL
+```
+
+**The last line is the finding.** An image built by an API that cannot express headroom still
+reports 4.9261084 (= `kCGDefaultHDRImageContentHeadroom`). The headroom is not metadata we attach;
+it is derived from the PQ colorspace. `0.0` does not mean "clear the tag" — it means "no explicit
+override", and the fallback is the colorspace's implied default. Only values ≥ 1.0 take.
+`copy(colorSpace:)` with the same PQ space preserves it too.
+
+**There is no way to obtain a PQ-tagged CGImage with unknown headroom.** CGImage.h documents a 0.0
+case — *"The headroom value of 0.0f means 'headroom unknown'. The image with unknown content
+headroom will be excluded from tone mapping"* — and that case is **unreachable through this API.**
+
+### ⚠️ THE CORRECTION, and it is the reusable part
+
+Asked whether Core Animation's tone-map is driven by the image's headroom tag or by the
+ITUR_2100_PQ colorspace alone, this investigation answered **"the headroom tag, not the
+colorspace"**, from two header sentences:
+
+- `CALayer.h:464` — `preferredDynamicRange` *"Controls the dynamic range used to render CGColors and
+  `contents' of the layer that have **headroom tagging greater than 1.0**. This only effects the
+  tonemapping of the receiving layer."*
+- `CALayer.h:437` — the ITU-R 2100 tone-map clause sits inside the **`If NO`** branch of
+  `wantsExtendedDynamicRangeContent`, so it governs layers that are NOT opted in. Ours are.
+
+Both sentences are accurate. Read together they describe headroom tagging and colorspace as two
+independent properties, and **for PQ content they are one property.** The distinction kept options
+alive that were never alive: "strip the tag, keep PQ" is not a thing that can be done, because PQ
+*is* the tag.
+
+**The method failure is the point: this was a READING of two correct sentences, and it took a
+five-line probe to refute it.** The same shape as the `maximumExtendedDynamicRangeColorComponentValue`
+error recorded above (a real instrument discarded on a measurement taken under the wrong conditions)
+and the three dead instruments recorded below it. Prefer the probe to the paragraph.
+
+### Creation vs composition: the pixel diff — CREATION IS CLEARED (with one stated gap)
+
+`MODE=pixdiff docs/scrub-fixtures/scrubmeas <file>` compares **PQ code values** — the space both
+paths actually hand to a PQ-tagged layer, neither having applied an EOTF. It replicates
+`passthroughFragment`'s arithmetic on the decoder's `x420` buffer rather than asking CoreGraphics to
+convert anything (a `CGBitmapContext` draw would apply a colour transform and measure that instead).
+
+**Resolution was handled by removing it, not by correcting for it.** PASS 1 sets
+`maximumSize = .zero` so the generator returns the full encoded raster — 1:1 with the decoder, and
+**nothing is resampled on either side**, so no difference it finds can be a filter artefact. PASS 2
+then runs the shipping 960×540 cap separately.
+
+`wedge-pq-24track.mov` (`apch`, 1920×1080, PQ/2020), t = 1.0 s, 74 250 pixels:
+
+| | PASS 1 (native, 1:1) | PASS 2 (shipping 960×540) |
+|---|---|---|
+| fit `gen = m·dec + b` | **m = 1.000001, b = 0.000001, r = 1.000000** | m = 0.999027, b = −0.000060 |
+| max abs difference | **0.00114 = 1.17 ten-bit codes** | 0.0298 = 30.5 codes |
+| resample-immune subset (flat 3×3) | **max 0.00019 = 0.20 codes** | max 0.0226 |
+| binned shape | no curve; bins ±0.00006, alternating sign | monotone, one-sided, ≤1 code mean |
+| clipped at ≥1.0 | 4725 gen / 4725 dec — identical | 5031 / 5400 |
+
+**PASS 1 is identity to within half-float quantisation.** The generator produces the same PQ code
+values as the decoder. **Creation is cleared as the site of the difference the split shows.** The
+1.17-code maximum is accounted for by the generator's half-float storage (`float=true`, ULP ≈ 0.0005
+near 1.0) plus chroma bilinear at edges — the flat-neighbourhood subset falls to 0.20 codes, which
+is the quantisation floor and not a colour effect. PASS 2's larger, one-sided, monotone difference
+is a **downsample**, not a transform: averaging pulls values toward the local mean and softens the
+clipped plateau (5031 vs 5400 at the ceiling), and its per-bin mean never exceeds one code.
+
+### ⚠️ THE GAP THIS FIXTURE CANNOT CLOSE — superwhite, and it is the live hypothesis
+
+`wedge-pq-24track.mov` peaks at **exactly 1.000000**, so it cannot exercise the one asymmetry the
+two paths have by construction:
+
+- Legal-range expansion maps code 940 → 1.0, so **codes 941–1023 expand ABOVE 1.0.**
+- **Metal keeps them.** `passthroughFragment` returns `half4` into an `rgba16Float` target, and the
+  shader says so: *"NOT clamped: the rgba16Float target carries >1.0 and negatives, which is the
+  whole point of E1."*
+- **The generator cannot.** CGImage.h, PQ/HLG float case: *"16-bit or 32-bit float image components
+  values will be **clipped to [0.0, 1.0] range**."*
+
+On content graded above legal white the overlay is therefore **clipped where the Metal layer is
+not** — a creation-side difference no layer property can undo, and one that would read exactly as
+"right holds highlight detail, left rolls off earlier". The file that produced the report is
+**deliberately over-cranked**, which is precisely the condition that puts values there.
+
+`pixdiff` now prints an explicit `SUPERWHITE PRESENT` / `superwhite: NONE` line for this reason. A
+`NONE` result **does not clear the mechanism** — it says the file could not test it.
+
+**NEXT: run `MODE=pixdiff` on the over-cranked file that produced the report.** If the decoder
+exceeds 1.0 where the generator sits pinned at 1.0, that is the answer and the site is the
+generator's float clip.
+
+### Instrument, and what it costs
+
+`ScrubDebug.splitEnabled` — DEBUG-only, `let`, folded away in Release (asserted against the built
+binaries: Profile carries the `[SPLIT]` strings, Release carries zero). The half is taken with
+`contentsRect`, **deliberately not a mask, `clipped()` or `masksToBounds`** — all three add a clip
+to the compositing path and at least one can force an offscreen pass, which is the exact class of
+operation suspected of flattening this layer's EDR. `logEDRState`'s ancestor walk already flags
+`masks` / `compFilter` / `filters` / `RASTERIZE!` on the chain; adding one on purpose would be
+tripping our own wire. `contentsRect` is a source-side crop where the image is sampled — no extra
+pass, and the EDR configuration is reached identically.
+
+
+---
+
+## ✅ DECISION 2026-08-28: the desktop picture is the REFERENCE and does not tone-map
+
+**This closed as a colour decision, not as a scrub bug.** The investigation began as "scrubbing an
+HDR file looks different from playing it" and assumed throughout that the Metal path was correct
+and the overlay had to be made to match it. The side-by-side split inverted that: with the Metal
+layer hidden (⌃⌥R), **the scrub overlay and the `AVSampleBufferDisplayLayer` agree with each
+other**, and the Metal layer is the outlier. Two independent Core Animation paths agree; the
+drawable path does not.
+
+### What each of the three paths ends up with
+
+| path | colour state actually set | headroom | tone-mapped? |
+|---|---|---|---|
+| **CAMetalLayer** (playback) | `colorspace = ITUR_2100_PQ`, `wantsExtendedDynamicRangeContent = true` — [MetalVideoRenderer.swift:1444](../App/MetalVideoRenderer.swift) | **none** (`contentsHeadroom` 0.0, no `edrMetadata` — both verified absent) | **NO** |
+| **scrub overlay** (CALayer, CGImage) | `contentsFormat`, `contents`, `preferredDynamicRange = .high` | 4.9261084, **derived from the PQ colorspace and unclearable** | YES |
+| **AVSampleBufferDisplayLayer** (reference surface) | `videoGravity`, `backgroundColor` — **no EDR properties at all** | none set; sample buffers carry PQ attachments | YES |
+
+⚠️ **The CAMetalLayer and the AVSampleBufferDisplayLayer have effectively IDENTICAL explicit EDR
+configuration — and render differently.** Neither sets `toneMapMode` (both default `.automatic`);
+neither sets `contentsHeadroom`. The discriminator is not a property either one sets: it is the
+CONTENT PATH. A tagged PQ sample buffer gets AVFoundation's HDR presentation; a CAMetalLayer
+drawable is raw pixels plus a colorspace with unknown headroom, and CGImage.h's rule — *"The image
+with unknown content headroom will be excluded from tone mapping"* — excludes it.
+
+**This also resolves the `toneMapMode = .never` null recorded above.** Had `.never` been honoured on
+the overlay, the overlay would have moved TOWARD the Metal layer. It did not move at all, and it now
+sits with the AVSampleBufferDisplayLayer. The only consistent conclusion is that **`.never` is not
+honoured for a CALayer with assigned CGImage `contents`.** That measurement was not a dead end; it
+was evidence that could not be read until this result arrived.
+
+### THE DECISION, and the reasoning
+
+**The desktop picture does not tone-map. Metal is the reference. The scrub overlay is approximate
+during the gesture.** Three reasons, in the order they carry weight:
+
+1. **⚠️ THE SCOPES READ THE SAME OFFSCREEN THE DISPLAY PATH DOES, AND THIS IS DECISIVE ON ITS OWN.**
+   `MetalVideoRenderer.renderPixelFormat`'s own comment: *"Display, export, DeckLink and the SCOPES
+   all read this target."* The waveform, parade, vectorscope and CIE are fed the shader's PQ code
+   values. A picture that rolls a highlight off while this app's own waveform shows it hard against
+   the ceiling **contradicts itself**, and the operator has no way to tell which to believe. For a
+   tool that ships scopes, that is disqualifying by itself.
+2. **DeckLink reads it too, so SDI and desktop must agree.** The SDI feed is the actual reference
+   path to an actual reference monitor. Desktop and SDI are fed the same values and should not
+   diverge. This is also what settles what the product IS.
+3. **A display-adaptive tone-map is not reproducible.** Measured on the build Mac during this
+   investigation: granted headroom **4.483** against a potential of **8.965**. It moves with display
+   brightness, ambient light and whatever else is composited. **A picture that changes when you
+   nudge the brightness slider is not a reference picture.**
+
+#### The counter-argument, and why the scopes answer it
+
+**Clipping at the display ceiling hides whether there is detail above the ceiling.** That is true and
+it is the real cost of this decision: where a tone-map would show a roll-off preserving highlight
+RELATIONSHIPS, this shows a flat clipped plateau, and you cannot tell by eye whether anything is up
+there.
+
+**The scopes are the answer.** They read the offscreen — the unclamped PQ code values, upstream of
+every display mapping — so what is above the display's ceiling is fully visible on the waveform even
+when the picture clips. The information is not lost; it is in the instrument built for reading it.
+"This is beyond what your display can show" is also a fact a colourist wants stated plainly rather
+than smoothed away, and a roll-off that varies with ambient light states it differently every time.
+
+### ⚠️ THE LIMITATION, RECORDED HONESTLY
+
+**During a scrub gesture on an HDR source, the preview is tone-mapped by Core Animation and the
+played picture is not, so the two differ.** The overlay is dimmer and rolls highlights off earlier;
+the played picture is brighter and clips. This is a real, visible, user-facing inconsistency and it
+is being accepted, not fixed.
+
+**⚠️ IT IS NOT FIXABLE BY ANY LAYER PROPERTY — but see option E below, which does not use one.**
+Do not reopen the PROPERTY question without reading why each was eliminated:
+
+- **`contentsHeadroom` — eliminated.** Deleted from the overlay; readback confirmed `0.0`; halves
+  still differed.
+- **`toneMapMode` — eliminated.** Set to `.never` on the overlay; readback confirmed
+  `CAToneMapModeNever`; halves still differed. Now understood to be ignored on a CGImage-contents
+  layer (see above).
+- **`preferredDynamicRange` vs `wantsExtendedDynamicRangeContent` — eliminated.** A/B'd via
+  `MANIFOLD_SCRUB_EDR_LEGACY=1`; no change.
+- **The image's own headroom — UNCLEARABLE, because it IS the colorspace.** `hrprobe.swift` measured
+  it: `CGImageCreateCopyWithContentHeadroom(0.0, …)` is silently ignored, and **plain
+  `CGImageCreate` — an API with no headroom parameter at all — still yields 4.9261084.** The
+  headroom is derived from `kCGColorSpaceITUR_2100_PQ`. There is no such thing as a PQ-tagged
+  CGImage with unknown headroom.
+- **Pixel values — identical.** `MODE=pixdiff` at 1:1 with no resampling: slope 1.000001, r =
+  1.000000, resample-immune max 0.20 ten-bit codes. The generator and the decoder produce the same
+  values. The difference is entirely in presentation.
+
+**No setting makes a CALayer's CGImage take the drawable path.** That is the shape of the wall.
+
+#### The three options that remain, and their disposition
+
+1. **✅ ACCEPT AND DOCUMENT — TAKEN.** The mismatch exists only during the drag, on HDR sources, on
+   a preview whose job is "which frame am I on". The played picture — the one being judged — is
+   correct and is the reference. Cost: a visible brightness step at grab and release on HDR files.
+2. **⚠️ OPTION E — feed the scrub frame into the EXISTING display path. RE-OPENED 2026-08-28, AND
+   MOVED TO ITS OWN ENTRY:** *"⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput` —
+   one decoder, one display path"* below. **Do not plan from this paragraph — the reasoning, the
+   risks and the spike gate are all there.**
+
+   The short form: the original rejection measured ONE implementation (a second `AVAssetReader`
+   path — 27 ms mean / 118 ms worst, long-GOP failing, and the reader-teardown race commit
+   `8896163` fixed) and generalised from it. `AVPlayerItemVideoOutput` on a scrub-only `AVPlayer`
+   has none of those three problems, vends a `CVPixelBuffer` instead of a `CGImage`, and would put
+   the scrub frame through the same shader, offscreen and layer as playback — **identical by
+   construction rather than by matching.** It also closes the scrub-POSITION defect and the stale-
+   scopes defect at the same time. ⚠️ **UNMEASURED on two counts that must be spiked first;** see
+   the entry.
+3. **⏸ SUPPRESS THE OVERLAY ON HDR SOURCES — DEFERRED, and it trades one defect for an older one.**
+   Technically trivial (`ScrubDebug.overlayDisabled` already does exactly this globally). But the
+   overlay exists to fix the scrub-POSITION defect — without it, `scrubSeek` does no decode and the
+   screen shows the PRE-DRAG frame for the whole gesture, which is the bug the overlay was built to
+   remove. Trading a brightness mismatch for "the picture doesn't follow the scrubber" is a worse
+   deal on a tool whose scrubber is its primary control.
+
+### Made explicit in code, and VERIFIED, 2026-08-28
+
+`MetalVideoRenderer`'s init sets `metalLayer.toneMapMode = .never`.
+
+**✅ VERIFIED BY MEASUREMENT, NOT ASSUMED: the split was run with this set and THE SEAM WAS
+UNCHANGED.** That null is the expected and desired result, and it is what closed this decision.
+The line changes nothing today because the correct behaviour was already in force by another
+route — this layer declares no `contentsHeadroom` and no `edrMetadata`, so its drawables have
+UNKNOWN headroom and CGImage.h's rule excludes them from tone mapping.
+
+**It is kept because the correct behaviour was a SIDE EFFECT of two ABSENT properties**, which any
+future change could remove without anyone noticing. The line states the intent so that adding a
+headroom tag later cannot quietly start tone-mapping the reference picture.
+
+⚠️ `.never` may well be ignored on a `CAMetalLayer` exactly as it was measured to be ignored on the
+scrub overlay's `CALayer` — the unchanged seam is consistent with BOTH "honoured and redundant" and
+"ignored", and the two cannot be told apart while the behaviour is already correct. It is kept for
+its declarative value under either reading. **If it is ever found to be honoured, it becomes
+load-bearing and must not be removed.**
+
+### If this decision is ever revisited — what E3 actually is
+
+E3 is `metalLayer.edrMetadata`, marked "deliberately NOT set" in `setSourceColorSpace` since the E2
+work. Three candidate spellings, and they are **not** equivalent:
+
+- **`toneMapMode = .ifSupported`** — one line, macOS 15.0 (floor), and the header names it: *"Tone
+  map whenever supported by the OS. This includes PQ, HLG and extended-range contents for CALayer
+  and CAMetalLayers."* Blunt, and may be ignored as `.never` was.
+- **`contentsHeadroom`** — the header says *"CAMetalLayers can use this value to define how much
+  headroom is needed by their MTLDrawables"*, so it is documented for exactly this. But it is
+  **macos(26.0)**, needs an availability branch, and leaves 15–25 unfixed — the same gap that has
+  already bitten this feature once.
+- **✅ `edrMetadata = CAEDRMetadata.hdr10(minLuminance:maxLuminance:opticalOutputScale:)` — the
+  principled version, and CHEAPER THAN THE "NOT SET" COMMENT IMPLIES.** It needs mastering-display
+  luminance, and **the app already parses it**: `MasteringDisplayInfo.maxLuminance` / `.minLuminance`
+  in `ManifoldCore/HDR10Metadata.swift`, read at `FrameEngine.swift:1300` into `metadata.hdr10`, and
+  already trusted enough to be shown in the Inspector. It is not plumbed to the renderer, so this is
+  a ROUTING job, not a new colour input.
+
+**If E3 is ever done, do it with the file's real mastering metadata, not a generic switch.** A
+tone-map keyed to what the content was actually mastered for is defensible and reproducible; one
+keyed to whatever headroom the display happens to be granting at that moment is precisely what
+reason 3 above rules out. Note that `hdr10(minLuminance:maxLuminance:)`'s own header says *"Any
+content greater than `maxNits' may be clamped when displayed"* — so even that route clips, it just
+clips at a content-referred point instead of a display-referred one.
+
+### ⚠️ THE REFRAMING THAT LOCATES THIS PROPERLY — it is a COLOUR MANAGEMENT CONSISTENCY defect
+
+The same file opened in Video Village Screen, which exposes explicit colour-management modes,
+behaves like this:
+
+- **"Embedded"** shows the blown-out over-cranked grade — **what our Metal layer shows.**
+- **"Match QuickTime"** tone-maps to an SDR-ish image — **what our overlay shows.**
+- **Each mode HOLDS.** The picture changes between modes and stays put within one.
+
+**So neither of our two paths is broken. Both are legitimate colour-management modes. Manifold is
+simply in TWO MODES AT ONCE — and the defect is that one of them switches on whenever a hand is on
+the scrubber.** The overlay's Core Animation tone-map is not a rendering fault to be hunted; it is a
+different, defensible mode, arrived at by accident.
+
+This also explains why QuickTime has no such problem, and the explanation is not that QuickTime is
+better: **QuickTime is consistently in one mode.** Consistency is the property that matters here,
+not which mode is chosen.
+
+#### THE REQUIREMENT, stated so it can be tested
+
+> **Whatever mode is active, the picture HOLDS — through play, pause, scrub, export and SDI.**
+
+That is the invariant this defect violates, and it is the one to check any future change against.
+Note that three of those five already agree by construction: export, SDI and the scopes all read the
+same offscreen (see reason 1 above). It is the SCRUB path, and only the scrub path, that leaves the
+set.
+
+#### Cross-reference: this belongs with the banked colour-management work
+
+`docs/COLOR_MANAGEMENT_FINDINGS.md` §6 already decided a mode picker for Manifold, with names:
+**OS / Reference / Bypass**. Two notes for whoever picks that up:
+
+- ⚠️ **The names above are Screen's, not ours, and ours were chosen deliberately against them.** §6
+  explicitly REJECTED "Embedded" ("reading the file's tags is what *every* mode does — the name
+  points at the wrong axis") and "Match QuickTime" ("loaded, and it names one application for a
+  system-wide ColorSync behaviour that equally describes Safari, Preview, and Final Cut"). Use
+  OS / Reference / Bypass when this is built; the Screen names are used here only because they are
+  the vocabulary the comparison was made in.
+- ⚠️ **This finding adds an AXIS §6 does not currently cover.** That table is about the SDR display
+  transform (ColorSync's γ1.9609 vs an explicit BT.1886 2.4 vs none). What this investigation found
+  is an **HDR headroom/tone-map** axis: whether the path adapts PQ to the display's granted headroom
+  or maps it absolutely and clips. The two are related — both answer "what does the display path do
+  to the values" — but a mode picker built only on the §6 axis would not resolve this defect.
+  §5 already saw the same thing from the other side: *"Screen's modes diverge dramatically on PQ
+  content"*, while collapsing to identical on SDR.
+
+**§5's design consequence is the same argument as reason 3 above, already written down:** *"a
+reference tool must not depend on the user having already calibrated their display in order for its
+transform to be correct. Correctness that is contingent on the destination profile is not
+correctness; it is a coincidence that happens to be common."* A tone-map keyed to a headroom that
+moves with brightness and ambient light is exactly that kind of coincidence.
+
+#### Does a supported Match-QuickTime-equivalent mode make the overlay CORRECT?
+
+**Partly, and the distinction matters.**
+
+**Yes** — in an OS-deferring mode, the overlay's Core Animation tone-map is not merely acceptable,
+it is very close to *what that mode is asking for*. The overlay would stop being a defect and become
+one path that happens to already implement the mode.
+
+**But the problem does NOT reduce to "the two paths must agree on which mode is active", because
+one of them cannot be steered.** Every mechanism for telling the overlay which mode to be in has
+been eliminated by measurement (see the limitation above): its headroom is the colorspace and cannot
+be cleared, `contentsHeadroom` and `toneMapMode` are both ignored on that path. So:
+
+- In an OS-deferring mode, the paths agree only if the **Metal** path is made to tone-map — which is
+  E3, and is achievable (`edrMetadata` with real mastering metadata).
+- In Reference/Embedded-style modes, the paths agree only if the **overlay stops existing as a
+  CGImage on a CALayer** — which is the scrub-architecture question below, not a colour setting.
+
+**So the correct statement of the requirement is: every path must be STEERABLE to the active mode.**
+Today the Metal path is steerable (E3 exists, and `toneMapMode = .never` now states its current
+intent) and the overlay path is not steerable at all — it is pinned to one mode by the platform.
+**That is the real defect, and it is why this is an architecture question rather than a colour
+setting.** A mode picker built while the overlay remains a CGImage-on-CALayer would ship a control
+that one of the paths ignores.
+
+**The decision above stands unchanged.** The desktop picture is the reference and does not tone-map
+— that is what the Embedded/Reference family means, and it is the correct DEFAULT. What this
+reframing changes is where the fix lives (the colour-management mode work, plus the scrub
+architecture) and what "fixed" means (every path steerable to the active mode, and the picture
+holding across all five of play / pause / scrub / export / SDI).
+
+### Instruments this produced, all kept
+
+- `ScrubDebug.splitEnabled` (`MANIFOLD_SCRUB_SPLIT=1`) — the side-by-side split. **The only
+  instrument in this investigation that produced a true result**, and it did so by removing
+  sequencing: same frame, same window, same instant. Every earlier comparison was sequential and
+  three of them returned confident wrong answers.
+- `docs/scrub-fixtures/hrprobe.swift` — the headroom-is-the-colorspace measurement.
+- `docs/scrub-fixtures/scrubmeas.swift MODE=pixdiff` — generator vs decoder pixel values, with
+  resolution removed as a variable rather than corrected for.
+- `docs/scrub-fixtures/wincap.swift` — HDR window capture via ScreenCaptureKit. ⚠️ Built because
+  `screencapture` has **no HDR option** (checked) and `../color-fixtures/sweep.sh`'s PNG capture
+  would have returned a clean null from an instrument that could not detect the effect — the same
+  failure shape as the three dead instruments recorded above.
+
+---
+
+## ⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput` — one decoder, one display path
+
+**Status:** BANKED, not built, **not yet spiked.** **Raised:** 2026-08-28, out of the HDR scrub
+investigation. **Precondition for:** the colour-management mode work
+(`docs/COLOR_MANAGEMENT_FINDINGS.md` §6) — see the last section here, this is NOT a parallel task.
+
+**It has its own entry because it is the common fix for THREE separate recorded problems**, and
+buried inside the HDR argument it would read as a colour fix, which is the least of what it does.
+
+### The three problems it closes at once
+
+1. **HDR scrub mode divergence** — *"✅ DECISION 2026-08-28: the desktop picture is the REFERENCE and
+   does not tone-map"* above. The overlay is a `CGImage` on a `CALayer` and is therefore pinned to
+   Core Animation's tone-mapped path; the Metal layer is not. Routing the scrub frame through the
+   existing display path makes them **identical by construction rather than by matching two
+   pipelines** — which matters because every mechanism for matching them has been eliminated by
+   measurement.
+2. **Scrub-position frame mismatch** — *"⚠️ UNCONFIRMED: scrub release jumps the picture once, on
+   ProRes"* above. Two decoders select frames independently; on long-GOP the shipping ±0.5 s
+   generator tolerance was measured putting preview and reader **up to 11 frames apart, in both
+   directions**. **With one decoder there is nothing left to disagree.** The whole class goes away
+   rather than being narrowed.
+3. **⚠️ THE SCOPES ARE STALE FOR THE ENTIRE SCRUB GESTURE — NOT RECORDED ANYWHERE BEFORE THIS, AND
+   ARGUABLY THE WORST OF THE THREE.** The scrub overlay is a `CGImage` composited over the video
+   rect; it **never reaches the offscreen ring**. The waveform, parade, vectorscope and CIE all read
+   that ring (`MetalVideoRenderer.renderPixelFormat`: *"Display, export, DeckLink and the SCOPES all
+   read this target"*). So for the whole drag they display the **pre-drag frame** while the picture
+   shows a different one. **A colourist scrubbing to find a shot with a waveform up is reading a
+   measurement of a frame they are no longer looking at, and nothing on screen says so.** No one
+   reported it and no one had noticed it; it was found while arguing about colour. Any route that
+   puts the scrub frame through the shader fixes it for free.
+
+### The route
+
+`AVPlayerItemVideoOutput` on a scrub-only `AVPlayer`, used as a **decoder and never as a transport**:
+a warm decoder, AVPlayer's own toleranced seek — which is what QuickTime does when you drag — and
+`copyPixelBuffer(forItemTime:)`, which vends a **`CVPixelBuffer`**. Hand it to
+`MetalVideoRenderer.renderPixelBuffer` and the scrub frame goes through the same shader, the same
+offscreen and the same layer as playback.
+
+⚠️ **THE ARCHITECTURE ALREADY WORKS THIS WAY AND THE OVERLAY IS THE EXCEPTION.** Playback runs one
+decoder into two surfaces: every decoded `CMSampleBuffer` goes to `vRenderer.enqueue(sb)` (the
+`AVSampleBufferDisplayLayer`) **and** to the `onVideoFrame` tap the Metal renderer consumes —
+`FrameEngine.swift:107`, `:1411`. The scrub overlay is the only thing in the app that adds a second
+decoder and a third surface. `onVideoFrame` is also the clean seam for this: it already establishes
+that the renderer accepts frames from an arbitrary producer rather than owning its source, so a
+scrub producer needs no cooperation from the engine.
+
+⚠️ **THE ROOT IS A RETURN TYPE, NOT DECODE COST.** `AVAssetImageGenerator` is already warm, already
+fast (15 ms measured), already tolerant, and already handles long-GOP. It vends `CGImage` and only
+`CGImage`, and that is what forces the Core Animation content path. Nothing about the current
+preview is slow; it is the wrong shape.
+
+### ⚠️ Why the three measured objections to "option E" do NOT apply
+
+The original rejection measured **one** implementation — building a second `AVAssetReader` path —
+and generalised from it. Against this route:
+
+- **Reader churn / the teardown race fixed by commit `8896163`** — there is no `AVAssetReader` to
+  rebuild or tear down. That failure mode is structurally absent, not mitigated.
+- **27 ms mean / 118 ms worst** — that was the cost of a **reader rebuild**. This is a seek against a
+  decoder that stays warm across the whole drag.
+- **Long-GOP failing** — inverted here. **Tolerance is what makes long-GOP cheap on this route**,
+  not what breaks it. It is the same trade the overlay already makes at ±0.5 s and the same one
+  QuickTime makes; on all-intra it is exact anyway (measured, 80/80).
+
+### ⚠️ `AVPlayerEngine` is already in the tree, unused, with this seek in it
+
+`ManifoldCore/AVPlayerEngine.swift` conforms to `PlaybackEngine`, is currently used by nothing
+(superseded by `FrameEngine`), and its `scrubSeek` is literally:
+
+```swift
+player.seek(to: target, toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
+```
+
+That is the QuickTime scrub behaviour, sitting in the repository. **Manifold traded it away for
+frame accuracy, timecode, SDI and scopes — which it needed more, and that trade was correct.** What
+was not noticed at the time is that it also gave up the **single-decoder property**, and all three
+problems above are the bill for that. This entry is not a proposal to undo the trade; it is a
+proposal to get the property back without it.
+
+### ⚠️ SPIKE FIRST — two unmeasured risks, before any implementation
+
+**Neither is known, and an implementation started before they are answered is a bet.**
+
+1. **Latency at drag rate.** AVPlayer's seek is async and must be coalesced (seek-in-flight plus a
+   pending target — the standard AVPlayer scrubbing pattern). Whether it keeps up at ~20 Hz, and
+   what it does on a fast drag, is unmeasured. Compare against the 15 ms the generator currently
+   achieves; `docs/scrub-fixtures/scrubmeas.swift` is the harness to extend, since it already
+   measures generator latency per request and replays the throttle against a synthetic drag.
+2. **Memory and IO of a second decode pipeline on large sources — specifically 8K ProRes off a
+   network volume.** That case is already called out in `MetalVideoRenderer` as the one where a
+   33 ms budget is at risk from raster, codec and storage together. A second full decode pipeline
+   against the same file over the same link is exactly the wrong thing to add there, and it may be
+   the finding that kills this route for large media even if latency is fine on local ProRes.
+   Measure both, on a network volume, before writing anything.
+
+**Fallback if it measures badly:** drive `VTDecompressionSession` directly off a passthrough
+`AVAssetReader`. Full control, vends `CVPixelBuffer`, no AVPlayer — but it means owning keyframe
+tracking and GOP walking ourselves. **Substantial, and only worth it if the AVPlayer route fails on
+one of the two risks above.**
+
+### ⚠️ THE REQUIREMENT THAT SHOULD GOVERN THE COLOUR-MANAGEMENT WORK
+
+> **Every path must be STEERABLE to the active mode — not merely agree with the other paths today.**
+
+Agreement is a property of the current configuration and can be true by accident; steerability is a
+property of the architecture. Measured state today:
+
+| path | steerable to a mode? |
+|---|---|
+| CAMetalLayer (playback) | **yes** — E3 (`edrMetadata` with real mastering metadata) exists, and `toneMapMode = .never` now states its current intent |
+| scrub overlay (CGImage on CALayer) | **NO — by nothing.** Headroom is the colorspace and cannot be cleared; `contentsHeadroom` and `toneMapMode` are both ignored on that path. All measured, see the DECISION entry |
+
+**CONSEQUENCE, and it is the reason this is a precondition rather than a parallel task: a mode
+picker shipped while the scrub preview is still a `CGImage` on a `CALayer` would ship a control that
+one path SILENTLY IGNORES.** The user selects a mode, the picture obeys it, and the moment a hand
+touches the scrubber the picture is in a different mode with nothing saying why. **That is worse
+than the defect the picker was built to fix**, because a control that looks like it works is harder
+to diagnose than a known inconsistency — and this investigation is itself the evidence for how long
+that takes to unpick.
+
+**So: spike this route BEFORE building the mode picker.** If it succeeds, the overlay stops existing
+as a separate path and the picker has one display path to steer. If it fails on either risk, the
+mode picker has to be designed around a permanently unsteerable scrub path — which is a different
+design, and one nobody should discover halfway through building the other one.
+---
+
 ## DeckLink devices are invisible on Desktop Video 14.x — we ask for an interface their driver has never heard of
 
 **Status:** OPEN, cause identified from the SDK headers at **~85% confidence**, one fact still
