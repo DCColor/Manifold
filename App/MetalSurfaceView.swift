@@ -65,12 +65,23 @@ final class MetalHostView: NSView {
 /// being tone-mapped on the way to the screen. Tagging the image and hosting it in a layer that
 /// asks for the headroom are two halves of one fix; neither works alone.
 ///
-/// ⚠️ `preferredDynamicRange`, NOT `wantsExtendedDynamicRangeContent`. There are two declarations
-/// of that older property and only one of them is deprecated: `CAMetalLayer`'s is current (which is
-/// why `MetalVideoRenderer` keeps using it and is NOT touched here), while the plain `CALayer` one
-/// — the declaration a layer like this one would pick up — is
-/// `API_DEPRECATED("Use preferredDynamicRange instead", macos(14.0, 26.0))`. A newly written layer
-/// should not adopt a deprecated property just to match its neighbour.
+/// ⚠️ BOTH EDR PROPERTIES ARE USED, ONE PER OS RANGE — see `setPreviewImage`. There are two
+/// declarations of `wantsExtendedDynamicRangeContent` and only one is deprecated: `CAMetalLayer`'s
+/// is current (which is why `MetalVideoRenderer` keeps using it and is NOT touched here), while the
+/// plain `CALayer` one — the declaration a layer like this one picks up — is
+/// `API_DEPRECATED("Use preferredDynamicRange instead", macos(14.0, 26.0))`. That annotation means
+/// available FROM 14.0, deprecated AS OF 26.0, so on 15–25 it is the only opt-in that exists and
+/// this layer uses it there. On 26+ it uses `preferredDynamicRange`. Deprecated is not unavailable,
+/// and "don't copy the renderer's API" was never a reason to leave most of the supported OS range
+/// with no opt-in at all.
+///
+/// ⚠️ WHAT PART 1 DOES ON ITS OWN, ON EVERY VERSION — worth keeping straight, because it is what
+/// changed for users before this layer existed. `dynamicRangePolicy` is macos(15.0) and is NOT
+/// guarded, so `.matchSource` applies across the whole supported range. Under the old `.forceSDR`
+/// the generator CONVERTED PQ/HLG to 709 and highlights were CLIPPED by that conversion; now the
+/// image arrives correctly PQ-tagged, and a layer with no opt-in TONE-MAPS it (roll-off) instead.
+/// Both land on an SDR picture, so part 1 alone never fixed the report — but the two are not the
+/// same operation, and describing the un-opted-in case as "what it did before" is wrong.
 ///
 /// ⚠️ NO `contentsHeadroom` IS SET, AND THAT IS MEASURED RATHER THAN ASSUMED.
 /// `preferredDynamicRange` activates only on content "that have headroom tagging greater than
@@ -129,16 +140,37 @@ final class ScrubPreviewHostView: NSView {
         CATransaction.setDisableActions(true)
         layer.contents = image
         layer.contentsScale = window?.backingScaleFactor ?? 2.0
-        // The opt-in. Guarded because the property is macOS 26.0 and this target's floor is 15.0 —
-        // below 26 the overlay behaves exactly as it did before this change (tone-mapped), which is
-        // the correct degradation: the picture is still right, only the highlights are held.
+        // ── THE EDR OPT-IN. AN ORDINARY AVAILABILITY BRANCH, NOT A FALLBACK ───────────────────
+        //
+        // Two properties, each current for its own range, and they mean the same thing. This
+        // target's floor is macOS 15.0, so BOTH branches ship.
+        //
+        // ⚠️ THEY ARE EQUIVALENT AT THE SETTING WE USE — checked against the headers, not assumed.
+        // `wantsExtendedDynamicRangeContent = YES` displays contents "up to its NSScreen's
+        // maximumExtendedDynamicRangeColorComponentValue", i.e. the display's FULL headroom with no
+        // modulation. That is `CADynamicRangeHigh` ("provides the best HDR quality"), not
+        // `CADynamicRangeConstrainedHigh` ("brightness is modulated to optimize for co-existence
+        // with other composited content") — the boolean has no modulated mode at all. So the
+        // boolean is the UNCONSTRAINED one, and the two branches below land in the same place.
+        //
+        // Unconstrained is what we want on both, because it is what the picture UNDERNEATH is
+        // already doing: `MetalVideoRenderer.setSourceColorSpace` sets
+        // `wantsExtendedDynamicRangeContent` on the CAMetalLayer. The whole point of this fix is
+        // that the overlay and the layer revealed on release look the same — a constrained overlay
+        // would just relocate the brightness step from release to grab.
         if #available(macOS 26.0, *) {
-            // `.high` and not `.constrainedHigh`, to match what the picture UNDER the overlay is
-            // already doing: `MetalVideoRenderer.setSourceColorSpace` sets
-            // `wantsExtendedDynamicRangeContent` on the CAMetalLayer, which is unconstrained. The
-            // entire point of this fix is that the overlay and the revealed layer look the same, so
-            // a constrained overlay would just relocate the brightness step from release to grab.
             layer.preferredDynamicRange = .high
+        } else {
+            // NOT DEAD CODE, AND NOT A DEPRECATED-API MISTAKE. The annotation on this property is
+            // `API_DEPRECATED("Use preferredDynamicRange instead", macos(14.0, 26.0))`, which means
+            // AVAILABLE FROM 14.0, deprecated AS OF 26.0 — so across all of 15–25 it is the current
+            // API and the only one that exists. `preferredDynamicRange` is macos(26.0); without
+            // this branch every system below 26 got no opt-in at all and the overlay stayed SDR,
+            // which is most of the supported range.
+            //
+            // ⚠️ UNVERIFIED ON REAL HARDWARE. The build Mac runs macOS 26.5.1, so this branch has
+            // never been executed — it is written from the header contract. See docs/BUGS.md.
+            layer.wantsExtendedDynamicRangeContent = true
         }
         CATransaction.commit()
     }

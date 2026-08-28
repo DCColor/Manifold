@@ -596,9 +596,11 @@ the generator is `FrameEngine.makeScrubPreviewGenerator(for:)`; the preview requ
 
 ## Scrubbing an HDR file collapses the picture to SDR luminance
 
-**Status:** **FIXED 2026-08-27 for the AVFoundation path (ProRes/H.264) — parts 1 and 2. Part 3
-(DNx/MXF) DELIBERATELY NOT DONE; HDR previews for those formats stay SDR, see "recorded choice"
-below.** **Reported:** 2026-08-27 by Joey. **Blocks:** judging highlights while scrubbing an HDR deliverable — the one operation where
+**Status:** **FIXED 2026-08-27 for the AVFoundation path (ProRes/H.264) — parts 1 and 2, across
+the WHOLE supported OS range (macOS 15+).** ⚠️ **The macOS 15–25 half is UNVERIFIED — written from
+the header contract and never executed, because the build Mac runs 26.5.1. See "what each OS range
+gets" below.** Part 3 (DNx/MXF) DELIBERATELY NOT DONE; HDR previews for those formats stay SDR, see
+"recorded choice" below. **Reported:** 2026-08-27 by Joey. **Blocks:** judging highlights while scrubbing an HDR deliverable — the one operation where
 the picture and the luminance have to be trusted together.
 
 **The report:** scrubbing a PQ/HLG file drops the picture to SDR luminance. **Highlights clamp,
@@ -851,6 +853,74 @@ Two details in the new layer that are not cosmetic:
   drag cross-fades through CALayer's default 0.25 s `contents` animation — a visible smear on a
   control whose entire purpose is to answer "which frame am I on". The transaction is belt-and-
   braces for the `updateNSView` case, where an enclosing SwiftUI animation may be in flight.
+
+### ⚠️ WHAT EACH OS RANGE GETS — read this before filing "the HDR fix doesn't work"
+
+**Both branches ship. There is no OS in the supported range with no opt-in.**
+
+| range | opt-in used | result | verified? |
+|---|---|---|---|
+| **macOS 26+** | `preferredDynamicRange = .high` | EDR preview | **YES** — build Mac is 26.5.1 |
+| **macOS 15–25** | `wantsExtendedDynamicRangeContent = true` | EDR preview | ⚠️ **NO — see below** |
+
+#### ⚠️ THE 15–25 PATH HAS NEVER BEEN EXECUTED. Say so when reporting on it.
+
+**The build Mac runs macOS 26.5.1, so the `else` branch has never run on real hardware.** It is
+written from the header contract alone. Every claim about it in this entry is READ, not OBSERVED —
+and that distinction must survive: if this path turns out to misbehave, the entry should not read as
+though someone had checked. **No macOS 15–25 machine was available.** Getting one in front of a PQ
+file is the outstanding verification for this fix.
+
+What IS established, from the SDK headers:
+
+- `CALayer.wantsExtendedDynamicRangeContent` is `API_DEPRECATED("Use preferredDynamicRange instead",
+  macos(14.0, 26.0))` — **available FROM 14.0, deprecated AS OF 26.0.** Across 15–25 it is the only
+  opt-in that exists, and deprecation is not removal.
+- **It is the UNCONSTRAINED one, which is what matches the 26+ branch.** Its header says contents
+  "can be displayed up to its NSScreen's `maximumExtendedDynamicRangeColorComponentValue`" — the
+  display's full headroom, no modulation. That is `CADynamicRangeHigh` ("provides the best HDR
+  quality"), NOT `CADynamicRangeConstrainedHigh` ("brightness is **modulated** to optimize for
+  co-existence with other composited content"). The boolean has no modulated mode at all, so the two
+  branches cannot silently diverge on this axis.
+- Unconstrained is also what the picture UNDERNEATH does — `MetalVideoRenderer.setSourceColorSpace`
+  sets the CAMetalLayer's (current, non-deprecated) `wantsExtendedDynamicRangeContent`. So on 15–25
+  the overlay and the layer revealed on release use literally the same property.
+- Swift emits **no deprecation warning**: the availability checker narrows the `else` of
+  `if #available(macOS 26.0, *)` to < 26.0, where the property is not yet deprecated. Verified in
+  both configurations.
+
+#### ⚠️ WHAT PART 1 DOES ON ITS OWN — CLIP vs TONE-MAP, and they are not the same thing
+
+Relevant to any OS where the layer opt-in fails or is absent, and to reading the history of this
+entry correctly.
+
+`dynamicRangePolicy` is `API_AVAILABLE(macos(15.0))` — the whole supported range — and is NOT
+guarded in our code, so `.matchSource` applies everywhere:
+
+| | before (`.forceSDR`) | after (`.matchSource`), no layer opt-in |
+|---|---|---|
+| what the CGImage is | colorSpace **nil**, PQ→709 **converted**, headroom 1.0 | **PQ-tagged** `ITUR_2100_PQ`, headroom 4.93 |
+| what reaches the screen | highlights **CLIPPED** by the transfer conversion | highlights **TONE-MAPPED** (roll-off) |
+| colour | primaries/matrix preserved | primaries/matrix preserved |
+
+Documented, not inferred — `wantsExtendedDynamicRangeContent`'s own header comment: *"If NO,
+contents are clipped or tonemapped to 1.0 (SDR). `contents` with a CGColorSpaceRef conforming to
+ITU-R 2100 (`CGColorSpaceUsesITUR_2100TF`) will be tonemapped."* The measurement above confirms our
+image takes that branch (`UsesITUR_2100TF == true`).
+
+**Both land on an SDR picture, so part 1 alone never fixed the report.** But they are not the same
+operation, and **an un-opted-in layer must not be described as "what it did before this change"** —
+that phrasing was in the code comment briefly and is wrong. Part 1 is also the precondition for
+either opt-in: both properties act on HDR-TAGGED content, and tagging it is what part 1 does.
+
+#### On the earlier "not the deprecated property" note
+
+That decision — recorded above, before the branch existed — was about not COPYING the renderer's API
+for consistency's sake on a newly written layer, and it was reasoned entirely from which declaration
+a new `CALayer` picks up. **Back-deployment was never part of it**, and the deployment-target
+consequence was not noticed at the time: taken literally it would have left most of the supported OS
+range with no opt-in at all. The two properties are compatible and each is current for its own
+range, so an availability branch is the ordinary resolution, not a compromise.
 
 **Where it is NOT fixed — a recorded choice, not an oversight.**
 
