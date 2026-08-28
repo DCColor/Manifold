@@ -52,3 +52,94 @@ final class MetalHostView: NSView {
         renderer?.setLayoutSize(points: bounds.size, scale: scale)
     }
 }
+
+// MARK: - Scrub preview surface (EDR-capable)
+
+/// Hosts the scrub-preview `CGImage` on a plain `CALayer` that can opt into EDR.
+///
+/// ── WHY THIS IS NOT `Image(decorative:)` ANY MORE ─────────────────────────────────────────────
+///
+/// SwiftUI's `Image` exposes NO dynamic-range API, and `CALayer` tone-maps ITU-R 2100 content to
+/// SDR unless the layer opts in. So even a correctly-tagged HDR CGImage — which
+/// `dynamicRangePolicy = .matchSource` now produces, see `makeScrubPreviewGenerator` — was still
+/// being tone-mapped on the way to the screen. Tagging the image and hosting it in a layer that
+/// asks for the headroom are two halves of one fix; neither works alone.
+///
+/// ⚠️ `preferredDynamicRange`, NOT `wantsExtendedDynamicRangeContent`. There are two declarations
+/// of that older property and only one of them is deprecated: `CAMetalLayer`'s is current (which is
+/// why `MetalVideoRenderer` keeps using it and is NOT touched here), while the plain `CALayer` one
+/// — the declaration a layer like this one would pick up — is
+/// `API_DEPRECATED("Use preferredDynamicRange instead", macos(14.0, 26.0))`. A newly written layer
+/// should not adopt a deprecated property just to match its neighbour.
+///
+/// ⚠️ NO `contentsHeadroom` IS SET, AND THAT IS MEASURED RATHER THAN ASSUMED.
+/// `preferredDynamicRange` activates only on content "that have headroom tagging greater than
+/// 1.0", so an untagged image would make this a silent no-op — the worst failure shape available.
+/// A CGImage carries its own tagging as one of the three qualifying routes, and the generator's
+/// output was checked: `.matchSource` on a PQ source returns `contentHeadroom = 4.9261084`
+/// (= `kCGDefaultHDRImageContentHeadroom`), against 1.0 under the shipping `.forceSDR`. The
+/// content route is live, so the layer route is redundant here.
+///
+/// This deliberately covers the AVFoundation producer ONLY. `LibavThumbnailSource` (DNx/MXF) builds
+/// an 8-bit RGBA CGImage and is SDR by construction — no layer opt-in can rescue 8-bit RGBA, and
+/// giving it a float path is a separate producer's worth of work. HDR previews for those formats
+/// stay SDR; that is a recorded choice, not an oversight (docs/BUGS.md).
+struct ScrubPreviewSurface: NSViewRepresentable {
+    let image: CGImage
+
+    func makeNSView(context: Context) -> ScrubPreviewHostView {
+        let view = ScrubPreviewHostView()
+        view.wantsLayer = true
+        view.layerContentsRedrawPolicy = .never
+        view.setPreviewImage(image)
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrubPreviewHostView, context: Context) {
+        nsView.setPreviewImage(image)
+    }
+}
+
+final class ScrubPreviewHostView: NSView {
+
+    override func makeBackingLayer() -> CALayer {
+        let layer = CALayer()
+        // RESIZE, not aspect-fit. The caller pins the aspect with SwiftUI's
+        // `.aspectRatio(videoAspect, contentMode: .fit)` — the same authority the video rect uses,
+        // and deliberately NOT the preview image's own pixel aspect (the two producers disagree
+        // about PAR). So by the time these bounds exist they are already the correct shape, and the
+        // layer's job is to fill them exactly, which is what the old `.resizable()` did.
+        layer.contentsGravity = .resize
+        // A preview swap is a CONTENT REPLACEMENT, not a transition. Without this every new frame
+        // during a drag would cross-fade through CALayer's default 0.25 s `contents` animation —
+        // a visible smear on a control whose whole purpose is to answer "which frame am I on".
+        layer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        return layer
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    func setPreviewImage(_ image: CGImage) {
+        guard let layer else { return }
+        // Belt and braces around the per-property `actions` above: this runs from `updateNSView`,
+        // i.e. inside a SwiftUI update where an enclosing animation transaction may be in flight,
+        // and an inherited animation would re-introduce the cross-fade the actions dictionary is
+        // there to prevent.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.contents = image
+        layer.contentsScale = window?.backingScaleFactor ?? 2.0
+        // The opt-in. Guarded because the property is macOS 26.0 and this target's floor is 15.0 —
+        // below 26 the overlay behaves exactly as it did before this change (tone-mapped), which is
+        // the correct degradation: the picture is still right, only the highlights are held.
+        if #available(macOS 26.0, *) {
+            // `.high` and not `.constrainedHigh`, to match what the picture UNDER the overlay is
+            // already doing: `MetalVideoRenderer.setSourceColorSpace` sets
+            // `wantsExtendedDynamicRangeContent` on the CAMetalLayer, which is unconstrained. The
+            // entire point of this fix is that the overlay and the revealed layer look the same, so
+            // a constrained overlay would just relocate the brightness step from release to grab.
+            layer.preferredDynamicRange = .high
+        }
+        CATransaction.commit()
+    }
+}

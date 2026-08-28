@@ -149,6 +149,15 @@ struct ContentView: View {
     @State private var previewRequestInFlight = false
     @State private var lastPreviewTime: Double = -1
     @State private var wasPlayingBeforeScrub = false
+    /// Generation counter for the release HANDOFF — the window between letting go of the scrubber
+    /// and the seeked-to frame appearing, during which the overlay is deliberately still up.
+    /// Bumped on every release and on every teardown, so an in-flight final preview, the renderer's
+    /// one-shot and the timeout can each ask "am I still the current handoff?" and a late answer
+    /// from any of them is discarded rather than re-showing a stale frame.
+    @State private var scrubHandoff = 0
+    /// The bounded fallback that guarantees the overlay comes down even if the reader never
+    /// delivers. Cancelled when the frame arrives first.
+    @State private var scrubHoldTask: Task<Void, Never>?
 
     @State private var hudVisible = true
     @State private var pinned = false
@@ -1006,7 +1015,14 @@ struct ContentView: View {
                 }
             }
 
-            if isScrubbing, let preview = scrubPreviewImage {
+            // ⚠️ THE GATE IS THE IMAGE, NOT `isScrubbing` — AND THAT IS THE FIX, NOT A TIDY-UP.
+            // The overlay used to be conditioned on the drag being in progress, so it vanished on
+            // the same main-actor turn that STARTED the seek: for the ~25–55 ms until the reader
+            // delivered, the screen showed the frame from BEFORE the drag, and the seeked-to frame
+            // then replaced it. That replacement is the jump in the report. `scrubPreviewImage` is
+            // now the sole gate, and the release path holds it until the new frame is actually
+            // presented (see `beginScrubHandoff`).
+            if let preview = scrubPreviewImage {
                 // SAME aspect authority as the video rect above — deliberately NOT the preview
                 // image's own pixel aspect. The two preview producers disagree about pixel aspect
                 // ratio: AVAssetImageGenerator applies PAR (its default aperture mode is clean-
@@ -1015,9 +1031,14 @@ struct ContentView: View {
                 // .aspectRatio(.fit) sizes from the image, so on anamorphic DNx the scrub preview
                 // changed shape the moment it appeared. Pinning it to videoAspect lands the preview
                 // exactly on the video rect for BOTH producers, whatever the PAR.
-                Image(decorative: preview, scale: 1.0)
-                    .resizable()
+                // EDR-capable host layer, replacing `Image(decorative:)` — which exposes no
+                // dynamic-range API, so a PQ/HLG preview was tone-mapped to SDR on the way to the
+                // screen even once the generator started tagging it. The aspect pin stays HERE and
+                // is unchanged: it is the video rect's authority, not the image's own PAR, for the
+                // reason given above, and the layer inside resizes to whatever rect it produces.
+                ScrubPreviewSurface(image: preview)
                     .aspectRatio(videoAspect, contentMode: .fit)
+                    .allowsHitTesting(false)
             }
 
             if hasSource {
@@ -2549,15 +2570,43 @@ struct ContentView: View {
                     in: 0...max(engine.duration, 0.1),
                     onEditingChanged: { editing in
                         if editing {
+                            // A new grab retires any handoff still running from the last release —
+                            // otherwise its one-shot or its timeout would fire mid-drag and clear
+                            // the overlay out from under the new gesture. The IMAGE is left alone:
+                            // the first preview of this drag replaces it, so there is no blink.
+                            cancelScrubHandoff()
                             wasPlayingBeforeScrub = engine.isPlaying
                             if engine.isPlaying { engine.pause() }
                             scrubValue = engine.currentTime
                             isScrubbing = true
                         } else {
-                            engine.exactSeek(to: scrubValue)
-                            isScrubbing = false
-                            scrubPreviewImage = nil
+                            // ── RELEASE. THE ORDER OF THESE FOUR STEPS IS THE FIX ──────────────
+                            //
+                            // It used to be: seek, then drop the overlay, in one turn. Both halves
+                            // of the reported jump live in that line — the overlay showed a STALE
+                            // preview (the throttle's ~1.2-frame floor, never re-asked at the
+                            // release point) and it was taken down BEFORE the seeked-to frame
+                            // existed. Fixing either alone still jumps: a corrected final preview
+                            // that is thrown away before it can be seen is not seen.
+                            isScrubbing = false          // the readout goes back to the engine…
                             lastPreviewTime = -1
+                            // …but `scrubPreviewImage` is deliberately NOT cleared here. It is the
+                            // overlay's gate now, and the handoff owns its lifetime.
+
+                            // 1. Open the handoff FIRST. It bumps the generation, and the final
+                            //    request below stamps itself with it — order them the other way
+                            //    and the final preview carries the PREVIOUS generation, fails its
+                            //    own staleness check, and is silently thrown away. Arming before
+                            //    the seek is also required on its own account: `exactSeek` hops
+                            //    through a Task, and the flush it performs is the edge the
+                            //    renderer's one-shot keys off.
+                            beginScrubHandoff()
+                            // 2. Ask for the release point itself, past both throttle gates. This
+                            //    is what closes the staleness floor; without it the last preview
+                            //    the user saw is the last request that happened to COMPLETE.
+                            requestScrubPreview(at: scrubValue, final: true)
+                            // 3. Now start the real seek.
+                            engine.exactSeek(to: scrubValue)
                             if wasPlayingBeforeScrub { engine.play() }
                         }
                     }
@@ -2919,19 +2968,112 @@ struct ContentView: View {
         return readoutMode
     }
 
-    private func requestScrubPreview(at time: Double) {
-        // Throttle: skip if a request is in flight or the time barely moved.
-        guard !previewRequestInFlight else { return }
-        guard abs(time - lastPreviewTime) > 0.05 else { return }
+    /// Ask for a scrub preview frame. `final` is the RELEASE request and bypasses both gates.
+    ///
+    /// ⚠️ NEITHER GATE IS A RATE LIMIT, WHICH IS WHY THE FINAL REQUEST HAS TO EXIST. The slider's
+    /// range is `0...engine.duration`, so `time` is MEDIA seconds and `0.05` is a media-time
+    /// DISTANCE — 1.20 frames at 23.976. Between that and the in-flight latch, the last preview the
+    /// user sees at release is the last request that COMPLETED, which sits ~1.2 frames behind the
+    /// release point at any drag speed and further as the drag gets faster. Measured figures and
+    /// the replay they come from are in docs/BUGS.md.
+    private func requestScrubPreview(at time: Double, final: Bool = false) {
+        if !final {
+            // Throttle: skip if a request is in flight or the time barely moved.
+            guard !previewRequestInFlight else { return }
+            guard abs(time - lastPreviewTime) > 0.05 else { return }
+        }
         previewRequestInFlight = true
         lastPreviewTime = time
+        let handoff = scrubHandoff
         Task {
             let image = await engine.previewImage(at: time)
             await MainActor.run {
-                if isScrubbing { scrubPreviewImage = image }
                 previewRequestInFlight = false
+                guard let image else { return }
+                if final {
+                    // ⚠️ ONLY WHILE THIS HANDOFF IS STILL THE CURRENT ONE. The generator can lose
+                    // the race with the reader (~15 ms against ~27 ms typical, but the tails
+                    // overlap), and a late final preview landing after the overlay has already
+                    // been handed off would put a stale frame back on top of the correct one and
+                    // leave it there — the exact failure this change exists to prevent.
+                    guard handoff == scrubHandoff, scrubHoldTask != nil else { return }
+                    scrubPreviewImage = image
+                } else if isScrubbing {
+                    scrubPreviewImage = image
+                }
             }
         }
+    }
+
+    /// Hold the preview overlay until the seeked-to frame is actually on screen, then take it down.
+    ///
+    /// ── THE SIGNAL, AND WHY IT IS RELIABLE ────────────────────────────────────────────────────
+    ///
+    /// `MetalVideoRenderer.onFirstPresentAfterFlush` — a one-shot that fires when the renderer's
+    /// `presentsSinceFlush` counter goes 0 → 1. Every seek flushes (`FrameEngine.beginReading`, and
+    /// the libav path), and `flush()` zeroes that counter, so the edge means exactly "the first
+    /// frame belonging to the seek I just started has been presented". Two properties make it safe:
+    ///
+    ///   * It is an EDGE, not a level. Arming happens mid-generation, while the previous frame is
+    ///     still up and the count is already non-zero, so nothing that repaints the OLD generation
+    ///     can satisfy it — only the seek's own flush can bring the count back to 0.
+    ///   * "Presented" is literal: the counter is incremented immediately after `presentDrawable`,
+    ///     which does `waitUntilScheduled()` and a committed `CATransaction` around `present()`.
+    ///     The frame is with the compositor before we remove the overlay, so there is no turn on
+    ///     which neither surface has content — no flash, no gap.
+    ///
+    /// ── WHAT HAPPENS IF THE SEEK FAILS OR IS SLOW ─────────────────────────────────────────────
+    ///
+    /// The timeout, unconditionally. `beginReading` can return before it ever flushes (no asset, no
+    /// video track, no renderer) and can fail after flushing (`AVAssetReader` create failure), and
+    /// in neither case does a frame arrive — so the one-shot alone would pin the overlay forever.
+    /// The bound is 400 ms: measured first-frame latency after `exactSeek` is 27 ms mean / 118 ms
+    /// worst on ProRes and 54 ms mean / 84 ms worst on H.264, so this is >3× the worst observed and
+    /// still short enough to read as a hesitation rather than a freeze. On timeout the overlay is
+    /// simply dropped, which is the OLD behaviour — a possible one-frame jump. Degrading to the bug
+    /// is acceptable; degrading to a stuck picture is not.
+    private func beginScrubHandoff() {
+        scrubHandoff &+= 1
+        let handoff = scrubHandoff
+        scrubHoldTask?.cancel()
+
+        metalRenderer?.onFirstPresentAfterFlush = {
+            // Fires on the RENDER thread — hop before touching any of this view's state.
+            Task { @MainActor in
+                guard handoff == scrubHandoff else { return }
+                endScrubHandoff()
+            }
+        }
+
+        scrubHoldTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            // A cancelled sleep THROWS and `try?` swallows it, so without this guard the frame
+            // arriving first would run the timeout's body immediately afterwards. Harmless today
+            // (both paths end the same handoff) but only by accident, and the generation check
+            // would silently carry the whole correctness argument. Same trap the connect banner
+            // documents at its own `Task.sleep`.
+            guard !Task.isCancelled, handoff == scrubHandoff else { return }
+            endScrubHandoff()
+        }
+    }
+
+    /// Retire the handoff WITHOUT touching the overlay image. Bumping the generation is what makes
+    /// this idempotent and race-free: whichever of the one-shot, the timeout and the final preview
+    /// gets here first invalidates the other two, because each checks the generation it captured.
+    @MainActor
+    private func cancelScrubHandoff() {
+        scrubHandoff &+= 1
+        scrubHoldTask?.cancel()
+        scrubHoldTask = nil
+        metalRenderer?.onFirstPresentAfterFlush = nil
+    }
+
+    /// Retire the handoff AND take the overlay down — the normal completion, reached when the
+    /// seeked-to frame is on screen or when the timeout fires.
+    @MainActor
+    private func endScrubHandoff() {
+        cancelScrubHandoff()
+        scrubPreviewImage = nil
     }
 
     private func cycleReadout() {

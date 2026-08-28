@@ -7,6 +7,132 @@ A FIXED entry stays here, marked, until the fix has been through a real session 
 what makes a regression recognisable, and deleting it the day the patch lands is how the same bug
 gets rediscovered from scratch.
 
+The file opens with a **pre-ship checklist** — work that is required before public launch but is
+not a defect — and the numbered defect entries follow it.
+
+---
+
+# Pre-ship checklist
+
+**Not defects.** Work that must happen before public launch, kept here because the entries below
+are where the evidence for it accumulated. Each item states what "done" means, so it can be closed
+rather than left open by default.
+
+---
+
+## ☐ PRE-SHIP: American English sweep across all user-facing text
+
+**Status:** OPEN, required before public launch. **Raised:** 2026-08-27. **Scope:** user-facing
+strings are **REQUIRED**; internal docs and comments are **PREFERRED**, for consistency.
+
+British spellings have crept into the docs and **have reached shipping strings — confirmed, not
+suspected.** Scanned 2026-08-27 across `App/` and `Packages/` (excluding `ThirdParty/`):
+
+| where | line hits | verdict |
+|---|---|---|
+| inside a SwiftUI user-facing construct (`Text`, `Label`, …) | **5** | **REQUIRED** |
+| other string literals, several user-visible | **15** | **REQUIRED** where user-visible |
+| `NSLog` / `print` diagnostics | 4 | required-ish — testers read these |
+| comments and prose in source | 243 | preferred |
+| `docs/*.md` | 90 | preferred |
+| `scripts/` | 12 | preferred |
+
+Word frequency in `App/` + `Packages/`, highest first — **note that `colour` is not the biggest
+one**, which is why a `colour`-only sweep would miss most of it:
+
+`licence` 82 · `colour` 64 · `behaviour` 30 · `centre` 26 · `honour` 22 · `grey` 17 ·
+`recognis*` 14 · `optimis*` 7 · `analys*` 6 · `defence` 3 · `normalis*` 2 · `serialis*` 2 ·
+`synchronis*` 2 · `minimis*` 1 · `initialis*` 1 · `artefact` 1
+
+**The list to check is not closed.** Beyond the obvious pairs (colour/color, licence/license,
+behaviour/behavior, normalise/normalize, catalogue/catalog, grey/gray, centre/center,
+analyse/analyze, initialise/initialize, artefact/artifact) the whole **`-ise`/`-isation` family**
+is in play — `recognise`, `organise`, `optimise`, `customise`, `serialise`, `visualise`,
+`synchronise` — plus `-our` words (`honour`, `favour`, `flavour`) and `defence`. This file's own
+introduction contains `recognisable`.
+
+### The confirmed user-facing hits
+
+Required. These are what a customer reads:
+
+- `App/AboutWindow.swift:586` — `Text("Licences").tag(Tab.licences)` — an About-panel **tab name**
+- `App/AboutWindow.swift:642` — `Text("Full licence texts are under “Licences” above.")`
+- `App/AboutWindow.swift:699` — `Text("All licences")` — a picker entry
+- `App/AboutWindow.swift:619` — the missing-licence-text warning
+- `App/LicenseManager.swift:826` — `Label("Your licence couldn’t be read", …)` — an **error state**
+- `App/LicenseManager.swift:618` — *"Your stored **licence** key could not be verified. Please
+  re-enter it, or contact support."* — an **error message**, and the most visible of the lot
+- `App/DiagnosticsExport.swift:689,692` — `"no colour profile"` / `"      colour profile: …"`,
+  which land in every diagnostics report a tester sends
+
+### ⚠️ DO NOT BLANKET-REPLACE. The identifiers are already American and must not move.
+
+The direction is **British → American ONLY**, and **not inside symbol names, file paths, or
+third-party API names**. The codebase is full of correctly-American identifiers that a global
+substitution would corrupt — measured counts of tokens that must be left alone:
+
+`color` 133 · `license` 101 · `colorimetry` 94 · `colorspace` 57 · `Color` 56 · `NDIColorInfo` 44 ·
+`CGColorSpace` 30 · `center` 25 · `licenseType` 20 · `LicenseManager` 20 · `colorMatrixCode` 19 ·
+`setSourceColorSpace` 18 · `colorPrimariesCode` 17
+
+Also off-limits: `NDIColorimetryOverride`, `colorSpace`, `docs/COLOR_MANAGEMENT_FINDINGS.md`,
+`docs/color-fixtures/`, `App/Licenses/`, `App/LicenseManager.swift`, `App/NDI/NDIColorInfo.swift`,
+and every `LICENSE` / `LICENCE` filename inside `ThirdParty/` and `App/Licenses/` — those are
+third-party artifacts and their names are part of the licence obligation, not our prose.
+
+**`AboutWindow.swift:347` is the trap in one line**, and worth reading before starting:
+
+> `+ "licence to take it under — WE TAKE APACHE-2.0. The upstream LICENSE file "`
+
+The first word is our prose and **must change**; `LICENSE` is a filename in someone else's
+repository and **must not**. A regex cannot tell them apart. `App/LicenseManager.swift` is the
+same hazard at file scale: an American filename and American identifiers throughout, wrapping
+British user-facing strings.
+
+**So: change prose, leave code.** Every hit gets looked at.
+
+### Surfaces to cover
+
+Menu items · error and alert messages · tooltips and `.help(…)` · the About panel (including the
+attribution and licence tiers) · the diagnostics export · release notes · the Stream Sources and
+inspector labels · the manual, when it exists.
+
+### Known doc hits to fix with it
+
+`docs/BUGS.md` alone: **"centre channel" in the downmix entry → "center channel"** (`:1015`,
+`:1053`, `:1094`), plus `colourist` (`:863`) and `re-centred` (`:61`).
+
+**Done means:** the scan above returns zero hits in user-facing strings, and the remaining source
+and doc hits have been converted or consciously left with a reason. Re-run the scan to confirm
+rather than declaring it finished.
+
+---
+
+## ☐ PRE-SHIP: dev-path audit — the ungated debug triggers
+
+**Status:** OPEN, required before public launch. **Raised:** 2026-08-27, out of the
+`MANIFOLD_CONFIG_DEBUG` gating work.
+
+Every trigger that reaches a `LiveClock` setpoint mutator is now behind `#if
+MANIFOLD_CONFIG_DEBUG` — ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S, ⌃⌥[ and ⌃⌥] — and that was done because
+Profile defines `DEBUG`, so `#if DEBUG` never gated anything in a tester's hands. **Six triggers
+in the same hidden group were deliberately left ungated** because none of them touches clock
+state, and removing them is a product decision rather than a safety one:
+
+- **⌃⌥W** — libdatachannel link smoke test. Inert; writes a log line.
+- **⌃⌥⇧E** — exports the next decoded WHEP frame to a PNG.
+- **⌃⌥H / ⌃⌥⇧H** and **⌃⌥D / ⌃⌥⇧D** — connect/retire WHEP and SRT through `DeckRegistry`, i.e.
+  the same funnel the shipping menu already uses. They are speed paths over saved bookmarks, not
+  new capability.
+
+**Decide before launch whether a public build should carry them at all.** The gate to use is
+`MANIFOLD_CONFIG_DEBUG`, not `#if DEBUG` — see the comment at `ContentView.syntheticLiveShortcuts`
+for why, and do not "simplify" it back.
+
+**Also on this list:** `LiveClock.setDepths(startup:target:)` is `public` and documented *"NOT for
+production paths"*. It is now only reachable from the gated ⌃⌥S, but nothing in the type system
+says so.
+
 ---
 
 ## Live sources never publish their frame size, so every stream is framed as 16:9
@@ -143,15 +269,34 @@ seen to matter on a display with headroom.
 
 ---
 
-## ⚠️ UNCONFIRMED: scrub release jumps the picture once, backwards, on ProRes
+## ⚠️ UNCONFIRMED: scrub release jumps the picture once, on ProRes
 
-**Status:** OPEN. **Tolerance mechanism REFUTED by measurement 2026-08-27; staleness mechanism
-matches the magnitude but NOT the direction. Still not reproduced in-house.** **Reported:**
-2026-08-27 by Joey on 0.6.2. **Not seen** on the build Mac. **Blocks:** nothing; it is a trust problem — a
+**Status:** **FIXED 2026-08-27, awaiting confirmation from Joey — not reproduced in-house, so
+the fix is verified against the MECHANISM, not against the report.** Tolerance mechanism REFUTED by
+measurement 2026-08-27; staleness mechanism matches the report in full — magnitude and sign — and
+is what was fixed.
+**Reported:** 2026-08-27 by Joey on 0.6.2; **direction corrected by him the same day.** **Not
+seen** on the build Mac. **Blocks:** nothing; it is a trust problem — a
 colourist who sees the picture move after they let go stops believing the scrub.
 
-**The report:** scrubbing a ProRes file, on release the picture jumps once, consistently
-BACKWARDS — *"almost backs up a frame"*. Timecode matches the picture after the jump.
+**The report:** scrubbing a ProRes file, on release the picture jumps once — *"almost backs up a
+frame"*. Timecode matches the picture after the jump.
+
+⚠️ **CORRECTED 2026-08-27 — "BACKWARDS" WAS NEVER PART OF THE REPORT.** This entry was built
+around *"consistently BACKWARDS"*, and that word came from a RETELLING of the report rather than
+from Joey. Asked directly, he says the picture just jumps and **he cannot say which way**. The
+phrase that IS his — *"almost backs up a frame"* — describes a MAGNITUDE, about one frame, and was
+read as if it described a sign.
+
+**Every conclusion this entry drew about direction was an artefact of that retelling**, including
+the one that kept the staleness mechanism from being a complete account. See *"the direction is not
+an anomaly"* below.
+
+**⚠️ SEPARATE FROM the HDR scrub defect** — *"Scrubbing an HDR file collapses the picture to SDR
+luminance"* below. Same gesture and the same overlay, two unrelated causes: this entry is about
+WHICH FRAME is shown, that one is about HOW IT IS LIT. Fixing either does not fix the other. **A
+single change was proposed to fix both — routing scrub preview through the real decode path — and
+it is REJECTED on four grounds recorded in that entry.** Read them before proposing it again.
 
 ### The reading that SURVIVED measurement: PREVIEW ACCURACY, not a seek bug
 
@@ -282,13 +427,27 @@ because a stationary slider never re-arms the distance gate.
 **Magnitude match:** 1.0–1.2 frames is *"almost backs up a frame"*. The tolerance mechanism
 contributes exactly 0.
 
-### Neither mechanism has a code-level directional bias — this is still unexplained
+### The direction is NOT an anomaly — a jump of EITHER sign is what staleness predicts
 
 Both gates use `abs()`; the tolerance is symmetric. **Staleness makes the preview lag the drag, so
-its sign is the sign of the last net movement** — dragging forward ends with a FORWARD jump,
-dragging backward with a backward one. A consistently backwards correction therefore requires the
-user's final movement to be consistently backwards (overshoot, then settle back), which is
-behaviour, not code, and is not established. **Do not record the direction as explained.**
+its sign is just the sign of the last net movement** — a drag ending forward produces a FORWARD
+jump, one ending backward a backward one. Either sign, varying between drags, is the ordinary
+output of a lagging preview.
+
+⚠️ **THIS SECTION PREVIOUSLY RECORDED THE DIRECTION AS UNEXPLAINED. It was answering a question
+nobody had asked.** It reasoned that a CONSISTENTLY backwards jump would require the user's final
+movement to be consistently backwards — behaviour, not code — and filed the gap as the one open
+anomaly standing between staleness and a complete account. **That premise was the retelling's, not
+the report's.** Joey claims no direction, so there is no consistency to explain.
+
+**Nothing about the report is unexplained now.** Staleness accounts for it whole: ~1.2 frames at
+ordinary drag speed, which is the magnitude he describes, in whichever direction the drag last
+moved, which is a sign he does not describe. No assumption about user behaviour is required, and
+the mechanism needs no companion.
+
+⚠️ **WHAT IS STILL UNCONFIRMED IS THE DEFECT, NOT THE MECHANISM.** The staleness figures are a
+replay of the shipping gates against a synthetic drag — an analysis of the code, not an
+observation of Joey's session. That distinction is unchanged by this correction.
 
 ### Relative magnitudes
 
@@ -297,10 +456,10 @@ behaviour, not code, and is not established. **Do not record the direction as ex
 - **On long-GOP both contribute**, tolerance the larger (up to ±11 frames, sd 6.0) and staleness
   1.2–16 frames depending on speed.
 
-### The implied fix — UNSCHEDULED, and not a one-liner
+### The fix, as BUILT 2026-08-27
 
 The mechanism that matches points at the throttle, not the tolerance. Two parts, and the second is
-why this is not a small change:
+why this was not a small change:
 
 1. **Issue a final, UN-THROTTLED preview request on release**, at `scrubValue`, bypassing both
    gates. That is what closes the ~1.2-frame staleness floor.
@@ -313,8 +472,60 @@ delivered anything.** So (1) on its own would compute the correct final preview 
 away before it could be seen; the user would still see the jump. Doing (2) needs a signal that the
 reader's first frame is actually on screen, which the release closure does not currently have.
 
-**Not scheduled.** The defect is not reproduced in-house and the direction is unexplained, so this
-would be built against an inferred cause.
+#### What was built
+
+**Both parts, together, in `ContentView`. Neither works alone** — a corrected final preview that is
+torn down before it can be seen is not seen, and holding a stale overlay longer just shows the wrong
+frame for longer.
+
+1. **`requestScrubPreview(at:final:)`** — the release passes `final: true`, which bypasses the
+   in-flight latch and the 0.05 media-second distance gate and asks for `scrubValue` itself.
+2. **A HANDOFF replaces the teardown.** The overlay's gate changed from `isScrubbing` to
+   `scrubPreviewImage != nil`, so release no longer implies removal. `beginScrubHandoff()` holds it
+   until the seeked-to frame is on screen.
+
+**The signal is `MetalVideoRenderer.onFirstPresentAfterFlush`**, a new one-shot that fires when
+`presentsSinceFlush` goes **0 → 1**. Every seek flushes (`FrameEngine.beginReading`, and the libav
+path) and `flush()` zeroes that counter, so the edge means exactly *"the first frame of the seek I
+just started has been presented"*. Two properties carry it:
+
+- **It is an EDGE, not a level.** Arming happens mid-generation, while the pre-drag frame is still
+  up and the count is already non-zero, so nothing that repaints the OLD generation can satisfy it.
+- **"Presented" is literal.** The counter is incremented immediately after `presentDrawable`, which
+  does `waitUntilScheduled()` plus a committed `CATransaction` around `present()`. The frame is with
+  the compositor before the overlay is removed, so no turn exists on which neither surface has
+  content — no flash, no gap.
+
+⚠️ **THE PAUSED-SEEK BRANCH (`MetalVideoRenderer.swift`) IS NOT THE HOOK, THOUGH IT LOOKS LIKE IT.**
+It is a FALLBACK that runs only when the decoder overshoots the pinned clock *while paused*. A seek
+whose first frame lands at `pts <= now` is taken by the strict gate above it and never reaches that
+branch — so an overlay hung off it would sit until the timeout in the ordinary case. Both selection
+branches funnel through `renderPixelBuffer`, which is why the counter there catches both with one
+condition.
+
+#### The bounded fallback — what happens when the seek fails or is slow
+
+**A 400 ms timeout, unconditionally armed alongside the one-shot.** `beginReading` can return before
+it ever flushes (no asset, no video track, no renderer) and can fail after flushing (`AVAssetReader`
+create failure); in neither case does a frame arrive, so the one-shot alone would pin the overlay
+forever. 400 ms is **>3× the worst measured** first-frame latency (118 ms ProRes, 84 ms H.264) and
+short enough to read as a hesitation rather than a freeze. **On timeout the overlay is simply
+dropped — which is the OLD behaviour, i.e. a possible one-frame jump.** Degrading to the bug is
+acceptable; degrading to a stuck picture is not.
+
+Three races are closed by a **generation counter** (`scrubHandoff`), bumped on every release, every
+new grab and every completion; the one-shot, the timeout and the in-flight final preview each stamp
+themselves with it and a late answer from any of them is discarded:
+
+- the **generator losing to the reader** (~15 ms vs ~27 ms typical, tails overlapping) — a late
+  final preview would otherwise put a stale frame back on top of the correct one and leave it there;
+- a **new grab** starting while a handoff is still running — its one-shot or timeout would otherwise
+  clear the overlay mid-drag;
+- the **cancelled-sleep trap** — a cancelled `Task.sleep` throws, `try?` swallows it, and the
+  timeout body would otherwise run immediately when the frame arrives first.
+
+**NOT VERIFIED AGAINST THE REPORT.** The defect is still not reproduced in-house. What is verified
+is that both configurations build and that the mechanism the measurements identified is closed.
 
 ### ⚠️ Three measurement traps, recorded because they are the reusable part
 
@@ -350,10 +561,11 @@ under all three tolerance settings, plus the staleness replay. **The three traps
 documented at the sites where they bite, inside that file** — whoever runs it next will hit all
 three.
 
-**Running it on JOEY'S ACTUAL FILE is the single measurement most likely to settle the direction.**
-Two in-house ProRes fixtures gave exactly zero across 80 positions; a real directional bias on his
-media would show up immediately, and its absence would move the whole question onto the throttle
-where the magnitude already points.
+**Running it on JOEY'S ACTUAL FILE is still the most useful single measurement — but no longer for
+the direction, which is a withdrawn question.** Two in-house ProRes fixtures gave exactly zero
+across 80 positions, so what his media would settle is whether the tolerance path contributes
+anything at all on it. Silence there would leave the throttle as the sole mechanism, which is where
+the magnitude already points.
 
 ### Before touching it, get the missing facts
 
@@ -362,8 +574,10 @@ Not reproduced in-house, and the report is under-specified in the ways that deci
 - **Frame rate and duration of Joey's file**, and whether it reproduces on a short clip.
 - **Is it exactly one frame, or "almost"?** A sub-frame shift and a one-frame shift have different
   causes; *"almost backs up a frame"* does not separate them.
-- **Which DIRECTION was the last movement before he let go?** This is now the decisive question,
-  because staleness explains the magnitude and only the drag direction can explain the sign.
+- ~~**Which DIRECTION was the last movement before he let go?**~~ **WITHDRAWN 2026-08-27.** It was
+  decisive only while this entry believed the jump was consistently backwards. It is not — see the
+  correction at the top. Staleness predicts the sign of the last net movement, so every possible
+  answer is consistent with the mechanism and none of them discriminates between causes.
 - **How fast was the drag?** Staleness is ~1.2 frames at ≤2× realtime and grows with speed; a
   larger reported jump would point at a fast scrub, a strictly one-frame one at the gate floor.
 - **Does it reproduce on H.264 as well as ProRes?** No longer a yes/no check but a discriminator:
@@ -372,9 +586,485 @@ Not reproduced in-house, and the report is under-specified in the ways that deci
 - **Does it reproduce with the preview overlay disabled** — still the cleanest single
   discriminator, because it removes both the generator and the throttle from the picture at once.
 
-**Related:** the generator is `FrameEngine.makeScrubPreviewGenerator(for:)`; the preview request is
+**Related:** the HDR scrub defect is *"Scrubbing an HDR file collapses the picture to SDR
+luminance"* below — same gesture, unrelated cause, and it holds the rejected shared-fix proposal;
+the generator is `FrameEngine.makeScrubPreviewGenerator(for:)`; the preview request is
 `ContentView.requestScrubPreview(at:)`; the release path is `FrameEngine.exactSeek(to:)` →
 `beginReading`; the no-decode readout during the drag is `FrameEngine.scrubSeek(to:)`.
+
+---
+
+## Scrubbing an HDR file collapses the picture to SDR luminance
+
+**Status:** **FIXED 2026-08-27 for the AVFoundation path (ProRes/H.264) — parts 1 and 2. Part 3
+(DNx/MXF) DELIBERATELY NOT DONE; HDR previews for those formats stay SDR, see "recorded choice"
+below.** **Reported:** 2026-08-27 by Joey. **Blocks:** judging highlights while scrubbing an HDR deliverable — the one operation where
+the picture and the luminance have to be trusted together.
+
+**The report:** scrubbing a PQ/HLG file drops the picture to SDR luminance. **Highlights clamp,
+colour stays correct, and it returns on release.**
+
+**⚠️ SEPARATE FROM the scrub-POSITION defect** — *"⚠️ UNCONFIRMED: scrub release jumps the picture
+once, backwards, on ProRes"* above. Same gesture, same overlay, two unrelated causes: that one is
+about WHICH FRAME is shown, this one is about HOW IT IS LIT. Neither fix implies the other. They
+are cross-referenced because a single change was proposed to fix both, and that change was
+rejected — see the bottom of this entry before proposing it again.
+
+### The cause is ONE LAYER EARLIER than the compositing explanation
+
+The obvious reading — "the overlay isn't EDR-capable, so it clamps" — is true but **second-order**.
+The image is already SDR before compositing is involved:
+
+**`AVAssetImageGenerator.dynamicRangePolicy` defaults to `.forceSDR`**, which the SDK documents as:
+
+> Force standard dynamic range by **converting PQ or HLG transfer functions to 709, while
+> maintaining color primaries and matrix**.
+
+That is the reported symptom stated as an API contract: luminance collapses to 709, highlights
+clamp, and colour still looks right because primaries and matrix are preserved.
+
+**`FrameEngine.makeScrubPreviewGenerator(for:)` never sets it.** `grep dynamicRangePolicy` across
+`App/` and `Packages/` returns **zero hits**. The property is `macos(15.0)`, so it is available at
+our deployment target — this is an unset default, not a missing capability.
+
+The compositing half is nevertheless real, and matters for the fix: the Metal layer is **covered,
+not hidden** (`Image(decorative:)` sits above `MetalSurfaceView` in the same ZStack,
+`ContentView.swift:1008`), and the Metal layer is the EDR-capable one —
+`wantsExtendedDynamicRangeContent = isHDRTransfer` is set per source for PQ (16) and HLG (18) in
+`MetalVideoRenderer.setSourceColorSpace`. On release the overlay is nil'd and the EDR surface is
+revealed, which is why **it returns on release**.
+
+### Scope of a fix: THREE parts, and none of them is a one-liner
+
+⚠️ **Setting the policy alone does NOT fix this.** `CALayer` tone-maps ITU-R 2100 content to SDR
+unless the layer opts in, so a correctly-tagged HDR `CGImage` handed to the current overlay is
+still tone-mapped. All three parts are needed for full coverage:
+
+1. **`dynamicRangePolicy = .matchSource`** on the scrub generator (macOS 15.0+, available to us).
+   Necessary, not sufficient.
+2. **An EDR-capable host layer for the overlay.** SwiftUI's `Image` exposes **no** dynamic-range
+   API, so the overlay has to become an `NSViewRepresentable` hosting a layer that opts in. This
+   is the part that makes it not a one-liner. **Which API to opt in with is now settled — write it
+   against `preferredDynamicRange` and leave the renderer alone; see the follow-up at the end of
+   this entry, which also records what must be TESTED before this part is scheduled.**
+3. **A float path in `LibavThumbnailSource`** if DNx/MXF HDR is to be covered at all. It currently
+   swscales to `AV_PIX_FMT_RGBA` and builds an 8-bit `CGImage` — **SDR by construction**, and no
+   layer opt-in can rescue 8-bit RGBA. This is a second producer, and it needs its own pipeline.
+
+Parts 1 and 2 cover ProRes/H.264 (the AVFoundation path). Part 3 is separable and can be deferred
+with the consequence stated: HDR DNx/MXF previews stay SDR.
+
+### ⚠️ REJECTED: routing scrub preview through the real decode path
+
+**Someone will have this idea again — it was had, scoped and measured on 2026-08-27, and it is
+rejected.** The proposal: drop the generator-to-`CGImage` overlay and drive scrub preview through
+the real decode path (reader → `CVPixelBuffer` → the Metal renderer), which would be EDR-correct
+by construction AND collapse this entry and the frame-mismatch half of the scrub-position entry
+into one fix. It fails on four independent grounds, any one of which is sufficient.
+
+**1. The latency premise was wrong, and the corrected numbers do not fit.** The figures cited in
+support (15.5 / 14.0 / 14.2 ms) were **`AVAssetImageGenerator` latency under the three tolerance
+settings — the cost of the path being REMOVED.** `exactSeek` had never been measured. Measured
+since: build reader at `t`, `startReading`, first decoded frame in the app's `x420` format, 40
+positions, all 4K:
+
+| fixture | mean | p50 | p90 | max | vs the 50 ms throttle budget |
+|---|---|---|---|---|---|
+| ProRes 422 HQ `apch` | 27.4 ms | 24.2 | 28.6 | **117.7** | fits at mean, **not** worst case |
+| ProRes 4444 `ap4h` | 31.4 ms | 29.2 | 34.8 | 72.0 | fits at mean, **not** worst case |
+| H.264 `avc1` | **53.7 ms** | 52.6 | 67.0 | 83.5 | **fails outright** |
+
+All-intra fits on average and blows the budget on its worst case; long-GOP fails at the mean.
+**These are a FLOOR** — they exclude audio-reader teardown (`beginReading` moves both readers), the
+synchronizer re-anchor, the renderer flush, and session-token churn.
+
+**2. The real path is ~1.8× SLOWER than the generator it would replace** — 27 ms against 15 ms on
+ProRes. The generator wins because it decodes to 960×540 and reuses one warm instance per asset,
+while a scrub-driven reader is rebuilt per position. The proposal is a performance regression on
+the codec it supposedly serves best.
+
+**3. It would produce THREE decoders, not one.** Long-GOP still needs the overlay (ground 1) and
+DNx/MXF still needs `LibavThumbnailSource` (VideoToolbox rejects DNxHR), so the reader path would
+be a THIRD producer serving all-intra only — and the frame mismatch would be fixed on the
+all-intra half alone. **The stated appeal of the proposal — "one decoder, no mismatch" — inverts
+into three decoders and a partial fix.**
+
+**4. It walks back a decision made to stop a crash.** Commit `8896163` introduced `videoPumpQueue`
+/ `audioPumpQueue` and serialized `cancelReading()` because reader teardown could overlap an
+in-flight `copyNextSampleBuffer()` during scrub — its own title is *"fix reader teardown race …
+fixes scrub and close-while-playing crashes"*. And the policy predates even that: `scrubSeek`
+carried *"During a scrub drag: just track the target and show it on the clock, WITHOUT rebuilding
+the reader every tick (that storms the decoder)"* before the overlay existed. **The proposal
+reintroduces that churn at up to 20 Hz continuously** — the load the serialization was written to
+survive occasionally.
+
+**What this means for sequencing:** the two scrub defects are independent and must be fixed
+independently. Fixing the HDR one does not fix the frame mismatch, and there is no shared change
+that does both.
+
+### FOLLOW-UP 2026-08-27 — the EDR API decision, scoped. And a CORRECTION.
+
+The note that stood here said an EDR-capable overlay layer would be written against *"whichever
+of the two APIs the renderer settles on"* — deferring a decision into the entry instead of
+recording one, and leaving part 2 unscoped. Settled below, from the SDK headers.
+
+#### ⚠️ CORRECTION: the renderer is NOT using a deprecated API. There is no forced migration.
+
+The note below previously said `wantsExtendedDynamicRangeContent` is deprecated as of macOS 26 and
+that `MetalVideoRenderer` still uses it. **The first half is true only of a DIFFERENT property on a
+different class.** There are two separate declarations:
+
+| declaration | availability |
+|---|---|
+| `CALayer.wantsExtendedDynamicRangeContent` | **`API_DEPRECATED("Use preferredDynamicRange instead", macos(14.0, 26.0))`** |
+| `CAMetalLayer.wantsExtendedDynamicRangeContent` | `API_AVAILABLE(macos(10.11), ios(16.0))` — **not deprecated** |
+
+`MetalVideoRenderer` holds `let metalLayer = CAMetalLayer()` and sets the property on **that**, so
+it is using the CAMetalLayer declaration, which carries no deprecation and no removal path. **The
+renderer migration is optional and not on a clock.** It should not be bundled into the HDR fix on
+urgency grounds, and the "the migration overlaps this fix" framing below is weaker than it was
+stated to be.
+
+#### What `preferredDynamicRange` actually requires
+
+`CALayer.preferredDynamicRange` (macOS 26.0+) defaults to `CADynamicRangeStandard`; values are
+`.automatic`, `.standard`, `.constrainedHigh`, `.high`. It *"controls the dynamic range used to
+render CGColors and `contents` of the layer **that have headroom tagging greater than 1.0**"*.
+
+**Headroom tagging is a RATIO, not a flag** — `kIOSurfaceContentHeadroom` defines it as *"the ratio
+of nominal peak luminance ("peak white") to nominal diffuse luminance ("reference white" or
+"diffuse white")"*. Content qualifies by exactly one of three routes:
+
+- a **`CGImageRef` with content headroom** — `CGImageCreateWithContentHeadroom` /
+  `…CreateCopyWithContentHeadroom`, read via `CGImageGetContentHeadroom` (macOS 26.0), with
+  `kCGDefaultHDRImageContentHeadroom` as the supplied typical value;
+- an **`IOSurfaceRef` carrying `kIOSurfaceContentHeadroom`** (macOS 15.0);
+- or **`CALayer.contentsHeadroom`** set explicitly (macOS 26.0). Defaults to **0, meaning
+  untagged**; values above 0 and below 1.0 are **undefined**. Its own doc notes *"CAMetalLayers can
+  use this value to define how much headroom is needed by their MTLDrawables."*
+
+**Does `MetalVideoRenderer` currently carry it? NO.** `grep` for `contentsHeadroom`,
+`ContentHeadroom`, `preferredDynamicRange` and `toneMapMode` across `App/` and `Packages/` returns
+**zero hits**. The renderer renders into a CAMetalLayer drawable, sets no `contentsHeadroom`, and
+attaches no IOSurface headroom key — so under `preferredDynamicRange` semantics its content is
+**untagged and would not activate EDR at all**.
+
+#### Substitution or pipeline change? PIPELINE CHANGE — and this is the answer that matters
+
+The two APIs have different activation models, which is why this is not a call swap:
+
+- `wantsExtendedDynamicRangeContent` is a **boolean opt-in that requires no tagging**. Set it, and
+  values above 1.0 survive to the display. That is why the current code works with no headroom
+  metadata anywhere.
+- `preferredDynamicRange` **activates only on tagged content**. Setting it while the content stays
+  untagged changes nothing — it would be a silent no-op, which is the worst failure shape for this
+  particular pipeline.
+
+So migrating the renderer means **deciding and writing a headroom number**, not swapping a call.
+That number is a real quantity (peak ÷ diffuse white), and choosing it for PQ and for HLG is a
+colour decision of the same kind as the `edrMetadata` question already deferred in
+`setSourceColorSpace` — **not a detail to settle inside a mechanical migration.**
+
+#### Do the overlay and the renderer need the same API? NO — and they legitimately differ
+
+They are different layer classes with independently-versioned properties, so different APIs is the
+*correct* outcome, not an inconsistency:
+
+- **Renderer — `CAMetalLayer`.** Its `wantsExtendedDynamicRangeContent` is current. Keep it. No
+  reason to touch this as part of the HDR fix.
+- **Overlay — a plain `CALayer` hosting a `CGImage` as `contents`.** Its
+  `wantsExtendedDynamicRangeContent` *is* the deprecated one, so a newly-written overlay layer
+  should use **`preferredDynamicRange`** plus headroom-tagged contents, and should not adopt the
+  deprecated property just to match the renderer.
+
+**This resolves part 2's open question:** write the overlay against `preferredDynamicRange`, leave
+the renderer alone.
+
+#### ⚠️ NOT DETERMINED — these need running code, and are not inferred here
+
+State them as open rather than guessing, because each would otherwise be built on:
+
+1. **Whether `preferredDynamicRange` governs CAMetalLayer DRAWABLES at all.** The headers disagree
+   with themselves: `preferredDynamicRange` speaks only of *"CGColors and `contents`"* (a drawable
+   is neither), `contentsHeadroom` says CAMetalLayers use it for their MTLDrawables, and
+   `toneMapMode` explicitly covers *"CALayer contents and CAMetalLayer drawables"*. **Not
+   determinable from the headers.** It only matters if the renderer migration is ever taken up.
+2. ~~**Whether an `AVAssetImageGenerator` CGImage produced with `.matchSource` carries content
+   headroom.**~~ **MEASURED 2026-08-27 — IT DOES. See the result below; `contentsHeadroom` is NOT
+   needed and part 2 stayed the size it was scoped at.**
+3. **When the deprecated `CALayer` property stops working.** The header gives a deprecation
+   version and **no removal version**, and deprecation is not removal. Not determinable from here.
+   Moot for the renderer, which does not use that declaration.
+4. **What headroom VALUE is correct for our PQ and HLG content.** A policy decision, not a lookup.
+
+**Priority consequence:** since the renderer is not on a removal path, **the migration is optional
+and can wait**. The HDR fix was scoped to the overlay alone, and it stayed there.
+
+### MEASURED 2026-08-27 — the headroom question, answered
+
+`AVAssetImageGenerator`, one frame at mid-duration from
+`docs/color-fixtures/wedge-pq-24track.mov` (`SMPTE_ST_2084_PQ` / `ITU_R_2020`, 1920×1080), both
+policies, reading `CGImage.contentHeadroom`:
+
+| policy | CGImage colorSpace | `UsesITUR_2100TF` | **contentHeadroom** |
+|---|---|---|---|
+| `.forceSDR` (was shipping) | **nil** | false | **1.0** |
+| `.matchSource` (now shipping) | `kCGColorSpaceITUR_2100_PQ` | **true** | **4.9261084** |
+
+**4.9261084 is exactly `kCGDefaultHDRImageContentHeadroom`.** So the generator's output is TAGGED,
+the CGImage route into `preferredDynamicRange` is live, and **the overlay does not need
+`contentsHeadroom` set explicitly.** The fix stayed at the two parts it was scoped at.
+
+**Control:** an SDR fixture (`wedge.mov`, untagged transfer) returns 1.0 under BOTH policies. So
+`.matchSource` follows the source rather than forcing headroom onto content that has none — which
+also means this change is a no-op on every SDR file.
+
+⚠️ **API NOTE:** the C function named in the plan, `CGImageGetContentHeadroom`, no longer compiles
+against the current SDK — *"has been replaced by property `CGImage.contentHeadroom`"*. Same value,
+different spelling.
+
+### What was built, 2026-08-27
+
+**Part 1 — `FrameEngine.makeScrubPreviewGenerator`:** `dynamicRangePolicy = .matchSource`. Not
+availability-guarded; the property is macos(15.0) and this target's floor is 15.0.
+
+**Part 2 — `ScrubPreviewSurface` / `ScrubPreviewHostView` (`App/MetalSurfaceView.swift`):** an
+`NSViewRepresentable` hosting a plain `CALayer`, replacing `Image(decorative:)` in ContentView's
+ZStack. Written against **`preferredDynamicRange = .high`**, guarded `if #available(macOS 26.0, *)`
+— below 26 the overlay behaves exactly as before (tone-mapped), which is the correct degradation:
+the picture is still right, only the highlights are held. `.high` and not `.constrainedHigh`, to
+match the unconstrained `wantsExtendedDynamicRangeContent` on the CAMetalLayer underneath — the
+whole point is that the overlay and the revealed layer look the same, and a constrained overlay
+would just move the brightness step from release to grab.
+
+**The renderer was NOT touched**, per the decision above: its `wantsExtendedDynamicRangeContent` is
+the CAMetalLayer declaration, which is current.
+
+Two details in the new layer that are not cosmetic:
+
+- **`contentsGravity = .resize`**, because the caller still pins the aspect with
+  `.aspectRatio(videoAspect, contentMode: .fit)` — the video rect's authority, deliberately not the
+  image's own PAR (the two preview producers disagree about it). The layer's job is to fill the rect
+  that pin produces, which is what `.resizable()` did before.
+- **Implicit animations disabled** on `contents`, twice over (an `actions` dictionary AND a
+  `CATransaction.setDisableActions(true)` in the setter). Without it every preview swap during a
+  drag cross-fades through CALayer's default 0.25 s `contents` animation — a visible smear on a
+  control whose entire purpose is to answer "which frame am I on". The transaction is belt-and-
+  braces for the `updateNSView` case, where an enclosing SwiftUI animation may be in flight.
+
+**Where it is NOT fixed — a recorded choice, not an oversight.**
+
+⚠️ **Part 3 (`LibavThumbnailSource`, the DNx/MXF producer) was deliberately left out of this pass,
+and HDR previews for those formats therefore STAY SDR.** It swscales to `AV_PIX_FMT_RGBA` and builds
+an **8-bit** CGImage — SDR by construction, and no layer opt-in can rescue 8-bit RGBA. Fixing it
+means a float pipeline in a second, independent producer, which is its own change with its own
+colour decisions. Deferring it costs exactly what this line says it costs and nothing more: the
+AVFoundation path (ProRes/H.264) is correct, DNx/MXF is unchanged.
+
+**Related:** the scrub-POSITION defect is *"⚠️ UNCONFIRMED: scrub release jumps the picture once,
+backwards, on ProRes"* above — same gesture, unrelated cause; the generator is
+`FrameEngine.makeScrubPreviewGenerator(for:)`; the overlay is `ContentView.swift:1008`; the EDR
+opt-in is `MetalVideoRenderer.setSourceColorSpace`; the second preview producer is
+`LibavThumbnailSource.makeCGImage(from:)`; the harness that produced the latency numbers is
+`docs/scrub-fixtures/`.
+
+---
+
+## DeckLink devices are invisible on Desktop Video 14.x — we ask for an interface their driver has never heard of
+
+**Status:** OPEN, cause identified from the SDK headers at **~85% confidence**, one fact still
+needed before the fix direction can be chosen. **Reported:** 2026-08-27 by a tester (Joey).
+**Blocks:** DeckLink output entirely, for anyone not on Desktop Video 16.x.
+
+**The report:** the tester's device is seen by macOS, by Blackmagic Desktop Video and by Resolve —
+and not by Manifold. Diagnostics:
+`docs/Manifold-0.7.0-diagnostics-2026-08-27-195926.txt`.
+
+```
+DeckLink driver  : installed
+DeckLink version : 14.5.0 [output floor: 14.3 — met]
+DeckLink devices : none enumerated
+DeckLink output  : unavailable — No device detected (Desktop Video 14.5.0)
+```
+
+Machine: Mac16,12 (M4), macOS 26.6.2. **Not an enumeration-lifetime problem** — the tester
+relaunched the app and rebooted with the device attached, same result, so this is not a
+sleep/wake or hot-plug gap.
+
+### The cause: a versioned IID we ask for that his driver predates
+
+We build against **DeckLink SDK 16.0.1** and `enumerateOutputDevices` filters every device through
+`QueryInterface(IID_IDeckLinkOutput, …)` (`DeckLinkBridge.mm:848`). **`IDeckLinkOutput` is a
+VERSIONED interface**, and its IID has changed repeatedly. From the SDK 16.0 headers — this table
+is the evidence:
+
+| interface | IID | vended by |
+|---|---|---|
+| `IID_IDeckLinkOutput_v10_11` | `CC5C8A6E-3F2F-4B3A-87EA-FD78AF300564` | ≤ 10.11 |
+| `IID_IDeckLinkOutput_v11_4` | `065A0F6C-C508-4D0D-B919-F5EB0EBFC96B` | 11.0–11.4 |
+| `IID_IDeckLinkOutput_v14_2_1` | `BE2D9020-461E-442F-84B7-E949CB953B9D` | 11.5–14.2.1 |
+| `IID_IDeckLinkOutput_v15_3_1` | `1A8077F1-9FE2-4533-8147-2294305E253F` | **14.3–15.3.1** |
+| **`IID_IDeckLinkOutput` (current)** | **`5F227C95-39D7-46C7-8B7D-9C81795FBBE4`** | **16.0+** |
+
+A versioned header preserves the interface as it was at the version it is named for. So the
+existence of `_v15_3_1` means **`IDeckLinkOutput` changed again in 16.0**, and drivers from 14.3
+through 15.3.1 vend `1A8077F1`.
+
+**The asymmetry is the whole bug. A NEWER driver serves OLD IIDs — that is what the versioned
+headers exist for — but an OLDER driver cannot serve an IID that did not exist yet.** The
+tester's 14.5.0 driver has never heard of `5F227C95`, so `QueryInterface` returns `E_NOINTERFACE`,
+the device is silently dropped by the filter, the array comes back empty, and the app reports "no
+output-capable device connected."
+
+**His hardware is fine.** This is consistent with both machines: the build Mac runs 16.0.1 and
+works; his runs 14.5.0 and does not.
+
+⚠️ **This is NOT a one-line fix.** Two more interfaces the output path queries —
+`IID_IDeckLinkVideoBuffer` (`:645`, `:1007`) and `IID_IDeckLinkVideoFrameMutableMetadataExtensions`
+(`:661`) — exist **only in the current header, with no versioned variants at all**. So even a
+repaired enumeration would hit the same wall one layer down. **Supporting 14.x means querying
+versioned interfaces throughout the output path, not just for enumeration.**
+
+### ⚠️ THE 14.3 FLOOR IS STALE AND FAILS UNSAFE — act on this regardless of the above
+
+The floor was **reasoned from the SDK changelog, not measured.** SDK 14.3 is where
+`IDeckLinkVideoBuffer`, `IDeckLinkMacOutput` and the `IDeckLinkOutput` revision landed (added
+`CreateVideoFrameWithBuffer` / `RowBytesForPixelFormat`, removed
+`SetVideoOutputFrameMemoryAllocator`) — which is exactly what the code comment means by *"the
+IOSurface/zero-copy floor"*. That is a legitimate basis. **But nothing in the repo records a test
+against any 14.3–15.x driver, and no such driver is available on the build Mac to test with.**
+
+**It fails in the unsafe direction.** The floor ADMITS drivers 14.3–15.3.1 that the code cannot
+actually talk to, so a tester on 14.5.0 is told **"floor: 14.3 — met"** and then watches a device
+that silently does not work. A floor that passes a machine which cannot function is worse than no
+floor, because it redirects the investigation away from the version.
+
+**For an app built against SDK 16.0, the effective floor is 16.0.**
+
+**THE CHOICE IS OPEN, and it is a real fork:**
+
+- **Bump the floor to 16.0 and say so honestly in the UI.** Cheap, immediately correct, and it
+  converts a silent failure into an actionable message. Cost: anyone whose hardware cannot run
+  16.x loses DeckLink output entirely.
+- **Query versioned IIDs throughout the output path.** Preserves old hardware. Costs a real
+  compatibility layer across enumeration, `IDeckLinkVideoBuffer` and the metadata extensions, plus
+  a way to test it that does not exist on the build Mac today.
+
+**Which one is correct depends on whether Desktop Video 16.x still supports the affected
+hardware — and that is NOT verifiable from this repo.** If 16.x dropped it, the tester is on
+14.5.0 *by necessity* and old-driver support becomes a requirement rather than a courtesy.
+
+### ⚠️ OPEN QUESTION — resolve before choosing, the model name is not established
+
+**The tester's own diagnostics say "decklink mini monitor", twice** (Location, and "what they were
+doing"). It was relayed as an **UltraStudio 3G**. Those are different products and the difference
+decides the fix:
+
+- **DeckLink Mini Monitor** — PCIe card. Cannot attach to a Mac16,12 laptop except through a
+  Thunderbolt PCIe chassis.
+- **UltraStudio Mini Monitor** — Thunderbolt 2, and **unsupported on Apple Silicon at all**. If it
+  is this, that is a SECOND, INDEPENDENT reason it cannot work, and fixing the IIDs would not help.
+- **UltraStudio Monitor 3G** — USB-C, current, fine on Apple Silicon.
+
+**Get the verbatim model name from Blackmagic Desktop Video Setup before deciding anything.**
+
+On the part that IS settled: all three are **playback-only devices, which is exactly what the
+filter is looking for** — such a device vends `IDeckLinkOutput` and no `IDeckLinkInput`. There is
+no capture-only trap here. The filter's logic is right; only the IID it asks for is wrong.
+
+### What to ask the tester
+
+1. **The verbatim model name** — the single most valuable answer, per the open question above.
+2. **Can Desktop Video update to 16.0.1?** If it can and the device still appears afterwards, that
+   confirms the diagnosis outright and unblocks him the same day. If Setup refuses, or the device
+   disappears, his hardware is 14.x-bound and the fork above resolves toward versioned IIDs.
+3. **Does Resolve still see it on the same boot, after any driver change?** Keeps the comparison
+   clean.
+4. **Not worth asking:** cables, ports, replugging. This failure is version-shaped, not
+   connection-shaped, and enumeration lifetime is already ruled out.
+
+**Related:** the enumeration filter is `DeckLinkBridge.enumerateOutputDevices` (`:833`); the floor
+is `kDeckLinkFloorMajor`/`Minor` (`:785`); the reason this took a code read rather than a log read
+is the next entry, *"DeckLink enumeration diagnostics cannot distinguish two different failures"*.
+
+---
+
+## DeckLink enumeration diagnostics cannot distinguish two different failures
+
+**Status:** OPEN. **Found:** 2026-08-27, while diagnosing the entry above. **Blocks:** nothing at
+runtime — it costs diagnosis time, and it cost a full code read this week.
+
+Two messages describe the DeckLink device state, and they read **the same filtered array**, so
+they cannot tell apart two genuinely different faults:
+
+- `"DeckLink devices : none enumerated"` — `DiagnosticsExport.swift:720`, from
+  `probeDriverStatusAndDevices()`
+- `"no output-capable device connected"` — `DeckLinkService.swift:723`, from `.noDevice`, which is
+  nothing more than `guard deviceCount > 0` (`DeckLinkService.swift:166`)
+
+Both counts come from `DeckLinkBridge.enumerateOutputDevices`, which appends a device **only** if
+it survives an output-capability filter:
+
+```objc
+while (iterator->Next(&device) == S_OK) {
+    IDeckLinkOutput *output = NULL;
+    HRESULT hr = device->QueryInterface(IID_IDeckLinkOutput, (void **)&output);
+    if (hr == S_OK && output != NULL) { ...append... }
+    device->Release();
+    index++;                     // increments even when the filter rejects
+}
+```
+
+**A rejected device is dropped silently, and the RAW ITERATOR COUNT IS NEVER RECORDED ANYWHERE.**
+So these two states are indistinguishable in every log and every diagnostics export:
+
+1. The iterator returned **nothing** — no hardware visible to the driver at all.
+2. The iterator returned **a device that failed `QueryInterface`** — hardware present, interface
+   mismatch. **This is what actually happened** in the entry above, and the output was identical
+   to (1).
+
+The `HRESULT` that would have named the difference is read into `hr`, tested, and thrown away.
+
+### The fix, when it is done
+
+- **Report the raw iterator count alongside the output-capable count.** `"3 device(s) seen, 0
+  output-capable"` names the fault on sight; `"none enumerated"` actively misdirects toward cabling
+  and hot-plug.
+- **Log the `HRESULT` when the filter rejects a device**, with the model name, which is readable
+  from `IDeckLink` before the `QueryInterface`. `E_NOINTERFACE` against a known model is the whole
+  diagnosis in one line.
+
+### ⚠️ THE PATTERN, which is worth more than this instance: three instruments this week
+
+This is the **third** time in one week that an instrument looked like it was reporting and was
+not. Each one cost real investigation, and each failed in the same shape — **a readout that stays
+plausible after the thing it measures stops being connected to it.**
+
+1. **`timebase−clock` returned `nil` for an entire 125 s verification run.** `liveAudioDrift`
+   guarded on `liveAudioAnchor`, whose only writer (`anchorLiveAudio(at:)`) had been replaced by
+   the mirror — so the guard was keyed to a field frozen at nil and printed `timebase−clock=n/a`
+   throughout. As the source now says, that was *"precisely the number that was supposed to prove
+   the mirror was holding"* (`FrameEngine.liveAudioDrift`).
+2. **The `[DIAG]` byte count described the PREVIOUS export.** It is emitted after the text is
+   written, so it can never describe its own file. Per commit `0b6a91c`, it *"misled two readers
+   into diagnosing a truncation cap that does not exist."*
+3. **This entry** — an enumeration count that reports the filtered result as though it were the
+   raw one, so an interface mismatch is indistinguishable from absent hardware.
+
+**What they have in common:** none of them was wrong about a value it computed. Each reported
+faithfully on a quantity that was no longer the quantity a reader would assume — a stale predicate,
+a stale ordering, a filtered count presented as a raw one. **A reading that is plausible and
+unrelated is worse than a missing one**, because a gap prompts a question and a plausible number
+ends the enquiry.
+
+**The habit this argues for:** when an instrument is the thing that will prove a fix worked, check
+what still writes its input before trusting the run — and prefer reporting BOTH the raw and the
+derived quantity, since the disagreement between them is usually the diagnosis. All three of these
+would have been caught by one extra number printed next to the one already there.
+
+**Related:** the failure this masked is *"DeckLink devices are invisible on Desktop Video 14.x"*
+above; the enumeration is `DeckLinkBridge.enumerateOutputDevices` (`:833`); the `[DIAG]` fix is
+commit `0b6a91c`; the drift-readout fix is documented on `FrameEngine.liveAudioDrift`.
 
 ---
 

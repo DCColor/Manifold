@@ -104,3 +104,6 @@ ThirdParty/NDI/
 
 docs/Blackmagic Advanced Video Capture and Playback/
 .wrangler/
+.build-cc-debug/
+.build-cc-profile/
+.build-cc-release/

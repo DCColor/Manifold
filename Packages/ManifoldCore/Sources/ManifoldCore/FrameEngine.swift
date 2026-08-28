@@ -865,6 +865,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
         generator.maximumSize = CGSize(width: 960, height: 540)
+        // ── THE HDR HALF. The default is `.forceSDR`, and that default WAS the bug ─────────────
+        //
+        // `.forceSDR` is documented as "convert PQ or HLG transfer functions to 709, while
+        // maintaining color primaries and matrix" — which is the reported symptom stated as an API
+        // contract: highlights clamp, colour stays right. Scrubbing a PQ file dropped to SDR
+        // luminance and recovered on release, because release reveals the EDR Metal layer.
+        //
+        // MEASURED on `docs/color-fixtures/wedge-pq-24track.mov` (SMPTE_ST_2084_PQ / ITU_R_2020),
+        // one frame, both policies:
+        //
+        //     .forceSDR    → colorSpace nil,                    contentHeadroom 1.0
+        //     .matchSource → colorSpace ITUR_2100_PQ,           contentHeadroom 4.9261084
+        //
+        // 4.9261084 is exactly `kCGDefaultHDRImageContentHeadroom`, so the image comes back TAGGED
+        // and the overlay layer needs no explicit `contentsHeadroom` — see `ScrubPreviewSurface`.
+        // An SDR fixture stays at 1.0 under both policies, so this follows the source rather than
+        // forcing headroom onto content that has none.
+        //
+        // NOT GUARDED: the property is macos(15.0) and this target's floor is 15.0.
+        generator.dynamicRangePolicy = .matchSource
         return generator
     }
 
