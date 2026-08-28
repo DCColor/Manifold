@@ -1384,7 +1384,15 @@ holding across all five of play / pause / scrub / export / SDI).
 
 **Status:** BANKED, not built, **not yet spiked.** **Raised:** 2026-08-28, out of the HDR scrub
 investigation. **Precondition for:** the colour-management mode work
-(`docs/COLOR_MANAGEMENT_FINDINGS.md` §6) — see the last section here, this is NOT a parallel task.
+(`docs/COLOR_MANAGEMENT_FINDINGS.md` §6) — see the last section here, this is NOT a parallel task —
+**and for HLS as a source**, see *"⏸ BANKED: HLS as a source"* below.
+
+⚠️ **THIS SPIKE IS NOT ABOUT THE SCRUB PREVIEW ALONE. It is the same mechanism three features
+need**, and its result should be read as a decision about all three rather than one: (1) the scrub
+preview's colour mode, (2) live scopes during a drag, (3) **HLS ingest** — where `AVPlayer` gives
+the picture nearly free and the entire work is getting frames out of it and into our shader,
+offscreen, scopes and SDI. A cost that looks marginal against the scrub preview alone may be
+obviously worth paying against all three; measure once, decide once.
 
 **It has its own entry because it is the common fix for THREE separate recorded problems**, and
 buried inside the HDR argument it would read as a colour fix, which is the least of what it does.
@@ -1411,6 +1419,15 @@ buried inside the HDR argument it would read as a colour fix, which is the least
    measurement of a frame they are no longer looking at, and nothing on screen says so.** No one
    reported it and no one had noticed it; it was found while arguing about colour. Any route that
    puts the scrub frame through the shader fixes it for free.
+
+⚠️ **AND A FOURTH THING DEPENDS ON THE SAME MECHANISM, THOUGH IT IS NOT A PROBLEM THIS FIXES:**
+**HLS as a source** — see *"⏸ BANKED: HLS as a source — a VIEWER/QC feature on the egress side"*
+below. `AVPlayer` plays HLS natively, so that feature is almost entirely "get the frames out of
+`AVPlayer` and into the offscreen ring", which is exactly what this route does. **Note it stresses
+the two risks DIFFERENTLY and more gently: no drag, so per-seek latency does not matter, and the
+source is a network stream rather than a second decode of a local 8K file. HLS could therefore
+survive a spike result that kills the scrub use** — so record the two risks separately per use
+rather than reaching one verdict.
 
 ### The route
 
@@ -1506,6 +1523,93 @@ that takes to unpick.
 as a separate path and the picker has one display path to steer. If it fails on either risk, the
 mode picker has to be designed around a permanently unsteerable scrub path — which is a different
 design, and one nobody should discover halfway through building the other one.
+---
+
+## ⏸ BANKED: HLS as a source — a VIEWER/QC feature on the egress side, gated on the AVPlayer spike
+
+**Status:** BANKED, not built. **Raised:** 2026-08-28. **Gated on:** *"⏸ BANKED: feed the scrub
+gesture from `AVPlayerItemVideoOutput` — one decoder, one display path"* above — this is no longer
+an independent piece of work, see "Why this is now coupled".
+
+**What exists today:** `StreamType.hls` in `App/Preferences.swift` — detection only. A URL whose
+path contains `.m3u8` is recognised, saved, listed, and shown **disabled** with an honest reason:
+
+```swift
+var isSupported: Bool { self == .web || self == .srt }
+case .hls: return "HLS — not yet supported"
+```
+
+`type` has been stored per bookmark from the beginning precisely so this line can change without a
+migration, exactly as it did for `.srt` in stage 3e. There is no HLS code beyond that.
+
+### ⚠️ WHAT THIS IS FOR — QC ON EGRESS, AND IT IS NOT A SUBSTITUTE FOR SRT
+
+**HLS is the EGRESS side. It shows what the platform actually PUBLISHED — after its transcode, at
+its latency.** The value is putting Manifold's scopes on a live delivery feed and checking what
+went out: colour, frame rate, whether the transcode mangled anything. **That is a QC question and
+nothing else answers it the same way** — you are measuring the platform's output, not your own.
+
+**⚠️ SRT IS THE CONTRIBUTION PATH AND ARRIVES UNTOUCHED. DO NOT TRADE ONE AGAINST THE OTHER WHEN
+SETTING PRIORITIES.** They answer different questions and neither substitutes for the other:
+
+| | SRT | HLS |
+|---|---|---|
+| side of the chain | **contribution** — into the platform | **egress** — out of the platform |
+| what you are looking at | what you SENT, untouched | what the platform PUBLISHED, transcoded |
+| latency | sub-second, monitorable in the room | segment-bound, seconds |
+| the question it answers | "is my feed good?" | "did the platform wreck it?" |
+
+A build that has SRT is not part-way to having HLS, and a build that has HLS has not made SRT less
+necessary. The confusion is easy to make because both are "a stream URL in a box", and the entries
+are worth keeping adjacent so it does not get made.
+
+### Why this is now coupled to the AVPlayer spike
+
+**AVPlayer plays HLS natively, so the PICTURE is nearly free. The work is getting frames OUT of it
+and into our shader, offscreen, scopes and SDI — which is the same mechanism the scrub spike is
+testing.** A picture that only reaches an `AVPlayerLayer` is worth very little here: the entire
+point is the scopes, and the scopes read the offscreen ring
+(`MetalVideoRenderer.renderPixelFormat`: *"Display, export, DeckLink and the SCOPES all read this
+target"*). Without `AVPlayerItemVideoOutput` → `CVPixelBuffer` → `renderPixelBuffer`, HLS would be
+a picture with no instruments attached to it, which is the opposite of the feature.
+
+> **ONE MECHANISM, THREE OUTCOMES.** If the spike measures well, the same route yields: the scrub
+> preview fixed (colour mode consistency), live scopes during a drag, **and HLS as a source.**
+> If it measures badly, **HLS gets harder too** — the alternative is demuxing and decoding HLS
+> ourselves, which means segment fetching, playlist refresh, discontinuity handling and a decoder,
+> against a vendored FFmpeg that has no HTTP protocol at all (`PROTOCOL_IN exactly: file`) and no
+> H.264 decoder (only the parser).
+
+**Spike the AVPlayer route FIRST, and read its result as a decision about three features rather
+than one.** The two risks it must answer are stated in that entry (latency at drag rate; memory and
+IO of a second decode pipeline on large sources). The HLS case actually stresses them *differently*
+and more gently: there is no drag, so per-seek latency does not matter, and the source is a network
+stream rather than a second reader against a local 8K file. **So HLS could survive a spike result
+that kills the scrub use, and that is worth measuring for rather than assuming either way.**
+
+### ⚠️ PLATFORM REALITY — read this before scoping, so nobody scopes it expecting YouTube
+
+**Plain HLS, would work:** Twitch, Vimeo, most broadcasters, and anything self-hosted — a fetchable
+`.m3u8` you can paste. This is the ordinary case and it is the whole of what this entry proposes.
+
+**YouTube live is OUT OF SCOPE, and it is a different problem rather than a limitation of this
+one.** YouTube live is DASH-first with no stable fetchable HLS manifest. Watching a YouTube stream
+means URL extraction from a page — a scraping problem that breaks whenever they change something,
+carries its own terms-of-service question, and has nothing to do with HLS ingest. **If someone asks
+for "watch a YouTube stream", that is a separate entry, not a bug in this one.** Recording it here
+so the request is recognised rather than absorbed.
+
+### What "done" would mean
+
+- An `.m3u8` bookmark connects from the same UI SRT and WHEP already use, with `isSupported`
+  admitting it — no migration, by construction.
+- The picture reaches the **offscreen ring**, so waveform / parade / vectorscope / CIE all read it
+  and DeckLink can embed it. A picture without the scopes does not count as done.
+- Colour tags travel: HLS carries CICP in-band, and `setSourceColorSpace` already takes primaries /
+  transfer / matrix from whatever source publishes them.
+- Latency is REPORTED, not hidden. Segment-bound latency is inherent to the transport and a viewer
+  needs to know what it is looking at is seconds old — the same honesty the SRT connect line already
+  applies to its negotiated latency.
 ---
 
 ## DeckLink devices are invisible on Desktop Video 14.x — we ask for an interface their driver has never heard of
