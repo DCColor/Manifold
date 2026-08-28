@@ -1488,16 +1488,32 @@ struct ContentView: View {
                 return tracks[engine.selectedAudioTrackIndex].roles
             }
             // A live source has no playhead to key the ring against — see the note in
-            // AudioMeterModel.tick. NDI and WHEP both carry audio now; SRT still decodes none, so
-            // its meters correctly report no audio track.
+            // AudioMeterModel.tick.
             //
-            // ⚠️ WHEP IS LISTED HERE EVEN THOUGH ITS TAP PTS *WOULD* KEY AGAINST THE PLAYHEAD.
-            // Live audio anchors the synchronizer to the live clock, so `engine.currentTime` and
-            // the tap's PTS are on the same timeline and a playhead-keyed read would find data.
-            // But the playhead branch is gated on `isPlaying()`, which is false for a stream (no
-            // file is loaded), so the meter would take the PAUSED branch and decay to silence over
-            // a stream that is audibly playing. Newest-keyed is both correct and simpler here.
-            meterModel.isLive = { NDIService.shared.isConnected || WHEPClient.shared.isConnected }
+            // ⚠️ ASK "IS A LIVE TRANSPORT CONNECTED", DO NOT ENUMERATE THE TRANSPORTS. This was
+            // `NDIService.shared.isConnected || WHEPClient.shared.isConnected`, and the enumeration
+            // is exactly what broke: SRT gained a working audio path — 2.4 M frames reaching this
+            // very tap — and the third term was never added, so the meters read NO SOURCE for a
+            // whole session while the audio was decoding correctly. `LiveSource.connected` is the
+            // question actually being asked, and a fourth transport cannot silently miss it.
+            //
+            // ⚠️ WHEP AND SRT ARE LIVE HERE EVEN THOUGH THEIR TAP PTS *WOULD* KEY AGAINST THE
+            // PLAYHEAD. Live audio anchors the synchronizer to the live clock, so `currentTime`
+            // and the tap's PTS share a timeline and a playhead-keyed read would find data. But the
+            // playhead branch is gated on `isPlaying()`, which is false for a stream (no file is
+            // loaded), so the meter would take the PAUSED branch and decay to silence over a stream
+            // that is playing. Newest-keyed is both correct and simpler here.
+            //
+            // ⚠️ DO NOT "IMPROVE" THIS BY ALSO SETTING `audioPresence` ON THE LIVE TRANSPORTS THAT
+            // LACK IT. It reads like the missing half and it is not. With `channels` empty and no
+            // scan, `tick` leaves `status` at its initial `.noSource` — which is honest. Give it a
+            // presence without giving it a scan and it takes
+            // `status = isPlaying() || isLive() ? .metering : .paused` instead, so the panel shows
+            // sized bars decaying to silence and reads PAUSED: a claim about the MATERIAL rather
+            // than about our state, which is the one thing the "NEVER SILENT BARS" rule in
+            // AudioMeterScope forbids. Presence is a refinement on top of a working scan (it sizes
+            // the bars before the first buffer lands), never a substitute for one.
+            meterModel.isLive = { LiveSource.connected != nil }
             // ⚠️ THE TRACK INDEX IS PART OF THE IDENTITY, NOT JUST THE URL. Switching tracks changes
             // the material the meter is describing as surely as opening a different file does, so a
             // clip latch earned on the mono track must not survive onto the 5.1 track — it would be

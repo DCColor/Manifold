@@ -125,6 +125,7 @@ typedef struct ManifoldSRTSession {
     // ── demux (session thread) ──
     ManifoldSRTAccessUnitReader *reader;
     int videoIndex;
+    int audioIndex;
     double connectedAt;
     bool sawFirstPacket, warnedSilent;
 
@@ -432,10 +433,48 @@ static void fillVideoFormat(AVFormatContext *fmt, int index, ManifoldSRTVideoFor
     strlcpy(out->profileName, profile ? profile : "unknown", sizeof(out->profileName));
 }
 
+/// Fill the audio-format struct from the chosen stream, RAW — the same no-interpretation rule
+/// fillVideoFormat follows. Everything here is already in AVCodecParameters after
+/// avformat_find_stream_info; none of it required new parsing.
+static void fillAudioFormat(AVFormatContext *fmt, int index, ManifoldSRTAudioFormat *out) {
+    AVStream *st = fmt->streams[index];
+    AVCodecParameters *par = st->codecpar;
+
+    memset(out, 0, sizeof(*out));
+    out->streamIndex  = index;
+    // AVStream.id IS the PID for mpegts — libavformat sets it from the PMT. Carried because it is
+    // the only stable identifier for "this audio track" across a PMT update, which is what a later
+    // stage needs to notice a stream appearing or changing.
+    out->pid          = st->id;
+    out->codecID      = (int32_t)par->codec_id;
+    out->profile      = par->profile;
+    out->sampleRate   = par->sample_rate;
+    out->channelCount = par->ch_layout.nb_channels;
+    out->channelOrder = (int32_t)par->ch_layout.order;
+    // The mask is meaningful ONLY for a NATIVE-order layout. For any other order it is a union
+    // member holding something else entirely, and copying it regardless would hand the Swift side
+    // a number that looks like a layout and is not.
+    out->channelMask  = (par->ch_layout.order == AV_CHANNEL_ORDER_NATIVE)
+                        ? par->ch_layout.u.mask : 0;
+    out->timeBaseNum  = st->time_base.num;
+    out->timeBaseDen  = st->time_base.den;
+    out->extradata     = par->extradata;
+    out->extradataSize = par->extradata_size;
+
+    const char *codec = avcodec_get_name(par->codec_id);
+    strlcpy(out->codecName, codec ? codec : "?", sizeof(out->codecName));
+    const char *profile = avcodec_profile_name(par->codec_id, par->profile);
+    strlcpy(out->profileName, profile ? profile : "unknown", sizeof(out->profileName));
+    // The mux's own words for the layout. Not used to DECIDE anything in stage 1 — it is what
+    // makes the [SRT] discovery line say "5.1(side)" instead of "6", which is the difference
+    // between a log that proves the declaration arrived and one that merely counts channels.
+    av_channel_layout_describe(&par->ch_layout, out->layoutName, sizeof(out->layoutName));
+}
+
 /// One line per stream, and one for the container. Shorter than the spike's block — the
 /// colorimetry detail now travels up to SRTFrameRouter, which logs it with the
 /// provenance it decides on rather than raw enum names.
-static void logStreamDiscovery(AVFormatContext *fmt, int videoIndex) {
+static void logStreamDiscovery(AVFormatContext *fmt, int videoIndex, int audioIndex) {
     NSLog(@"[SRT] container: %s | streams=%u programs=%u",
           fmt->iformat ? fmt->iformat->name : "?", fmt->nb_streams, fmt->nb_programs);
     for (unsigned i = 0; i < fmt->nb_streams; i++) {
@@ -445,17 +484,24 @@ static void logStreamDiscovery(AVFormatContext *fmt, int videoIndex) {
             NSLog(@"[SRT]   stream %u: %s / %s %dx%d%s", i, type ? type : "?",
                   avcodec_get_name(par->codec_id), par->width, par->height,
                   (int)i == videoIndex ? "  ← CHOSEN" : "");
+        } else if (par->codec_type == AVMEDIA_TYPE_AUDIO) {
+            // The layout is DESCRIBED, not counted — "5.1(side)" rather than "6". That string is
+            // the mux's declaration and it is the thing stage 3's role bridge will consume, so
+            // printing it here is what proves it arrived intact long before anything uses it.
+            char layout[64] = {0};
+            av_channel_layout_describe(&par->ch_layout, layout, sizeof(layout));
+            NSLog(@"[SRT]   stream %u: %s / %s %d Hz, %d ch [%s] pid=0x%x%s",
+                  i, type ? type : "?", avcodec_get_name(par->codec_id),
+                  par->sample_rate, par->ch_layout.nb_channels,
+                  layout[0] ? layout : "?", (unsigned)fmt->streams[i]->id,
+                  (int)i == audioIndex ? "  ← CHOSEN" : "");
         } else {
-            // ── THE AAC STREAM, AND WHY IGNORING IT IS A CLEAN NO-OP ──────────────
-            // av_read_frame demuxes every stream in the program whether we read from
-            // it or not — the PES assembly is driven by the TS packets arriving, not
-            // by our interest — so "ignoring audio" costs one branch per packet and
-            // an av_packet_unref that would have happened anyway. There is no
-            // buffering to grow and no PID filter to get wrong: libavformat does not
-            // queue packets for a stream nobody reads, because av_read_frame RETURNS
-            // each packet to us and we drop it. Audio is a later arc; this is the
-            // whole of what it costs today.
-            NSLog(@"[SRT]   stream %u: %s / %s (ignored — audio is a later arc)",
+            // Everything that is neither video nor audio — timed metadata, KLV, subtitles.
+            // av_read_frame demuxes every stream in the program whether we read from it or not —
+            // the PES assembly is driven by the TS packets arriving, not by our interest — so
+            // ignoring one costs a branch per packet and an av_packet_unref that would have
+            // happened anyway. There is no buffering to grow and no PID filter to get wrong.
+            NSLog(@"[SRT]   stream %u: %s / %s (ignored — not video or audio)",
                   i, type ? type : "?", avcodec_get_name(par->codec_id));
         }
     }
@@ -511,6 +557,7 @@ static void runSession(ManifoldSRTSession *s) {
 
     s->connectedAt = srtNow();
     s->videoIndex = -1;
+    s->audioIndex = -1;
 
     NSLog(@"[SRT] ══ session start ══ %s:%s | libsrt %s | libavformat %s",
           s->host, s->port, SRT_VERSION_STRING, av_version_info());
@@ -791,7 +838,16 @@ static void runSession(ManifoldSRTSession *s) {
     // build has no H.264 DECODER (only the parser), and passing a decoder pointer would
     // make find_best_stream reject the stream for having none.
     s->videoIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    logStreamDiscovery(fmt, s->videoIndex);
+    // ── AND THE AUDIO STREAM, WITH THE VIDEO AS `related_stream` ───────────────
+    //
+    // ⚠️ THE FOURTH ARGUMENT IS THE WHOLE POINT AND IT IS EASY TO PASS AS -1 BY HABIT. A
+    // contribution TS can carry more than one program, and av_find_best_stream ranking across ALL
+    // streams would happily choose an audio track belonging to a DIFFERENT program than the video
+    // we just chose — a pairing that is silently, plausibly wrong: both streams decode, both look
+    // healthy, and the sound is from another feed. Passing videoIndex as `related_stream` is what
+    // makes libavformat prefer audio from the same program, and it is the only thing that does.
+    s->audioIndex = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, s->videoIndex, NULL, 0);
+    logStreamDiscovery(fmt, s->videoIndex, s->audioIndex);
     if (s->videoIndex < 0) {
         NSLog(@"[SRT] no video stream in this program — nothing to display");
         strlcpy(message, "That stream carries no video.", sizeof(message));
@@ -804,6 +860,19 @@ static void runSession(ManifoldSRTSession *s) {
         if (s->callbacks.onVideoFormat) {
             s->callbacks.onVideoFormat(s->callbacks.context, s->generation, &format);
         }
+    }
+
+    // AUDIO IS OPTIONAL AND ITS ABSENCE IS STATED POSITIVELY. A program with no audio is ordinary
+    // (a clean feed, a backup path), and it is a different fact from "audio has not arrived yet" —
+    // the engine models the two separately and the UI reads them differently.
+    if (s->audioIndex >= 0) {
+        ManifoldSRTAudioFormat audioFormat;
+        fillAudioFormat(fmt, s->audioIndex, &audioFormat);
+        if (s->callbacks.onAudioFormat) {
+            s->callbacks.onAudioFormat(s->callbacks.context, s->generation, &audioFormat);
+        }
+    } else if (s->callbacks.onAudioAbsent) {
+        s->callbacks.onAudioAbsent(s->callbacks.context, s->generation);
     }
 
     s->reader = ManifoldSRTAccessUnitReaderCreate();
@@ -828,13 +897,25 @@ static void runSession(ManifoldSRTSession *s) {
         @autoreleasepool {
             readResult = av_read_frame(fmt, pkt);
             if (readResult >= 0) {
-                // Video only. Every other stream — the AAC track above all — is
-                // unref'd and gone; see the note in logStreamDiscovery for why that
-                // is a no-op rather than a leak waiting to happen.
                 if (pkt->stream_index == s->videoIndex) {
                     ManifoldSRTAccessUnitReaderSubmitPacket(s->reader, pkt->data, (size_t)pkt->size,
                                                             pkt->pts, pkt->dts);
+                } else if (s->audioIndex >= 0 && pkt->stream_index == s->audioIndex) {
+                    // FORWARDED RAW, NOT THROUGH THE ACCESS-UNIT READER. That reader reassembles
+                    // H.264 access units from PES payloads split across packets; libavformat's
+                    // mpegts demuxer already hands back one complete AUDIO frame per AVPacket, so
+                    // there is nothing to reassemble and reusing it would be borrowing a solution
+                    // to a problem this stream does not have.
+                    if (s->callbacks.onAudioPacket) {
+                        ManifoldSRTAudioPacket audioPacket = {
+                            .data = pkt->data, .size = (size_t)pkt->size,
+                            .pts = pkt->pts, .dts = pkt->dts,
+                        };
+                        s->callbacks.onAudioPacket(s->callbacks.context, &audioPacket);
+                    }
                 }
+                // Anything else is unref'd and gone — see the note in logStreamDiscovery for why
+                // that is a no-op rather than a leak waiting to happen.
                 av_packet_unref(pkt);
             }
         }
@@ -970,6 +1051,7 @@ ManifoldSRTSession *ManifoldSRTSessionCreate(const ManifoldSRTSessionCallbacks *
     s->runLock = OS_UNFAIR_LOCK_INIT;
     s->sock = SRT_INVALID_SOCK;
     s->videoIndex = -1;
+    s->audioIndex = -1;
     return s;
 }
 
@@ -1011,6 +1093,7 @@ bool ManifoldSRTSessionStart(ManifoldSRTSession *s, const ManifoldSRTSessionConf
     s->sawFirstPacket = s->warnedSilent = false;
     s->eofReason = ManifoldSRTEndReasonStopped;
     s->videoIndex = -1;
+    s->audioIndex = -1;
     if (s->reader) { ManifoldSRTAccessUnitReaderDestroy(s->reader); s->reader = NULL; }
     s->shouldRun = true;
     s->finished = dispatch_semaphore_create(0);

@@ -178,6 +178,65 @@ typedef struct {
     char    profileName[48];     ///< "High", "Constrained Baseline", … or "unknown".
 } ManifoldSRTVideoFormat;
 
+/// The chosen AUDIO stream's format, RAW — same discipline as ManifoldSRTVideoFormat: no
+/// defaulting, no interpretation, the demuxer's values travel intact and the Swift side decides.
+///
+/// ⚠️ EVERY FIELD HERE IS FREE AT DISCOVERY. `avformat_find_stream_info` has already run, so
+/// AVCodecParameters is fully populated — nothing in this struct required new parsing, only
+/// plumbing. That is worth knowing before anyone proposes reading the ADTS/LATM headers to get
+/// facts the demuxer already has.
+///
+/// ⚠️ NO CHANNEL COUNT IS ASSUMED ANYWHERE DOWNSTREAM OF THIS STRUCT, AND THAT IS DELIBERATE.
+/// MPEG-TS carries multichannel AAC routinely (a 5.1 contribution feed is ordinary) and the
+/// layout is DECLARED in the mux. Stage 1 does not build the role bridge, but it carries the
+/// declaration this far rather than collapsing it to a number — see `channelOrder`/`channelMask`.
+typedef struct {
+    int32_t streamIndex;
+    int32_t pid;                 ///< AVStream.id, which libavformat sets to the TS PID. 0 if unset.
+    int32_t codecID;             ///< Raw AVCodecID. THE FRAMING DISCRIMINATOR: AV_CODEC_ID_AAC is
+                                 ///  ADTS-framed (TS stream type 0x0F), AV_CODEC_ID_AAC_LATM is
+                                 ///  LATM/LOAS (0x11). They need different handling and the
+                                 ///  demuxer already knows which it is.
+    int32_t profile;             ///< AVCodecParameters.profile — LC vs HE vs HEv2. Governs frames
+                                 ///  per packet (1024 vs 2048), so it is not cosmetic.
+    int32_t sampleRate;
+    int32_t channelCount;
+
+    /// ── THE LAYOUT, CARRIED AS FAR AS STAGE 1 GOES ────────────────────────────────────────
+    /// `channelOrder` is AVChannelOrder; `channelMask` is `AVChannelLayout.u.mask`, valid when the
+    /// order is AV_CHANNEL_ORDER_NATIVE and 0 otherwise. Together they are the mux's DECLARATION —
+    /// not a guess from the count. Stage 1 logs them and stops; see SRTFrameRouter for exactly
+    /// where they stop and what stage 3 has to add.
+    int32_t  channelOrder;
+    uint64_t channelMask;
+
+    int32_t timeBaseNum;         ///< 1/90000 for MPEG-TS, natively and always — as for video.
+    int32_t timeBaseDen;
+
+    /// AudioSpecificConfig, when the demuxer has one. Borrowed — VALID ONLY FOR THE DURATION OF
+    /// THE CALL, like every other pointer in these callbacks. The decoder copies what it needs.
+    /// May be NULL/0 on a TS where the ASC has not been seen yet; the decoder then synthesises a
+    /// cookie from the ADTS header, which carries the same three facts.
+    const uint8_t *extradata;
+    int32_t extradataSize;
+
+    char codecName[32];          ///< "aac", "aac_latm", "mp2", …
+    char profileName[48];        ///< "LC", "HE-AAC", … or "unknown".
+    char layoutName[64];         ///< av_channel_layout_describe: "stereo", "5.1(side)", …
+} ManifoldSRTAudioFormat;
+
+/// One audio packet from the chosen stream, forwarded raw. Deliberately NOT routed through
+/// ManifoldSRTAccessUnitReader: that reader exists to reassemble H.264 ACCESS UNITS from PES
+/// payloads across packet boundaries, and AAC has no such problem — libavformat's mpegts demuxer
+/// already hands back one complete audio frame per AVPacket. Reusing it would be borrowing a
+/// solution to a problem this stream does not have.
+typedef struct {
+    const uint8_t *data;         ///< Borrowed; valid only for the call.
+    size_t         size;
+    int64_t        pts;          ///< Stream time base (1/90000). MANIFOLD_SRT_NO_TIMESTAMP if absent.
+    int64_t        dts;
+} ManifoldSRTAudioPacket;
+
 #pragma mark - How a session ended
 
 /// A PLAIN int32_t WITH AN ANONYMOUS ENUM, NOT `typedef enum {...} Foo`. Deliberate: how Clang
@@ -227,6 +286,21 @@ typedef struct {
     /// One access unit from the chosen video stream. Pointers inside are valid ONLY
     /// for the duration of the call. NO generation — see above.
     void (*onAccessUnit)(void *context, const ManifoldSRTAccessUnit *accessUnit);
+
+    /// An audio stream was chosen. Fires at most once, in the same place onVideoFormat does.
+    /// NOT fired when the program carries no audio — see `onAudioAbsent`.
+    void (*onAudioFormat)(void *context, uint64_t generation, const ManifoldSRTAudioFormat *format);
+
+    /// Stream discovery finished and there is NO audio stream in this program. Fires at most once.
+    /// ⚠️ A POSITIVE STATEMENT, NOT AN ABSENCE OF ONE. "No audio" and "audio not established yet"
+    /// are different states with different UI, and the engine already models them separately
+    /// (`audioPresence`). Inferring the first from silence is how a stream that simply had not
+    /// started its audio PID yet gets reported as having none.
+    void (*onAudioAbsent)(void *context, uint64_t generation);
+
+    /// One audio packet from the chosen audio stream. Same inline/no-generation contract as
+    /// onAccessUnit, for the same reason.
+    void (*onAudioPacket)(void *context, const ManifoldSRTAudioPacket *packet);
 
     /// The last callback, always. `message` is a human-readable line safe to show a
     /// user — it never contains the passphrase and never the full URL.

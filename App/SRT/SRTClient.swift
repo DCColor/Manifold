@@ -574,6 +574,21 @@ final class SRTClient: ObservableObject {
                 guard let accessUnit else { return }
                 SRTFrameRouter.shared.handleAccessUnit(accessUnit.pointee)
             },
+            // ── SESSION THREAD, inline. Same split rationale as onVideoFormat, minus the hop:
+            // stage 1 has no display-side half to activate on main, because it feeds the tap and
+            // nothing else. The decoder is built here, on the thread that will call decode.
+            onAudioFormat: { _, _, format in
+                guard let format else { return }
+                SRTFrameRouter.shared.prepareAudioDecoder(format: format.pointee)
+            },
+            onAudioAbsent: { _, _ in
+                SRTFrameRouter.shared.handleAudioAbsent()
+            },
+            // ── SESSION THREAD, inline, per audio packet. No hop, as above. ─────────────
+            onAudioPacket: { _, packet in
+                guard let packet else { return }
+                SRTFrameRouter.shared.handleAudioPacket(packet.pointee)
+            },
             // ── SESSION THREAD, last callback, exactly once. ────────────────────────────
             onEnded: { ctx, generation, reason, message in
                 guard let ctx else { return }

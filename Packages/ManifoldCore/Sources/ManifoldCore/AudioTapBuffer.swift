@@ -20,7 +20,7 @@ import AudioToolbox
 public final class AudioTapBuffer: @unchecked Sendable {
 
     /// Which decode path produced a tapped buffer (for logging/validation only).
-    public enum SourcePath: String { case avFoundation = "AVF", libav = "libav", ndi = "NDI", whep = "WHEP" }
+    public enum SourcePath: String { case avFoundation = "AVF", libav = "libav", ndi = "NDI", whep = "WHEP", srt = "SRT" }
 
     /// The normalized capture format. `channelCount` is the SOURCE interleaved channel count (what the
     /// ring stores); `deckLinkChannelCount` is that count padded UP to the nearest SDK-legal value

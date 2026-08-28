@@ -1455,13 +1455,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public final class LiveAudioSink: @unchecked Sendable {
         private let renderer: AVSampleBufferAudioRenderer
         private let tap: AudioTapBuffer
-        fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer) {
-            self.renderer = renderer; self.tap = tap
+        /// ⚠️ THE PATH IS A CONSTRUCTION PARAMETER, NOT A CONSTANT, AND THAT IS A CORRECTION.
+        /// `enqueue` hardcoded `.whep`, which was true while WHEP was the only live source
+        /// reaching this sink and silently wrong the moment a second one did: SRT audio would
+        /// have been labelled WHEP in the tap's stats and in its format-change callback — a
+        /// mislabel that reads as a real observation and would be believed.
+        private let path: AudioTapBuffer.SourcePath
+        fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
+                         path: AudioTapBuffer.SourcePath) {
+            self.renderer = renderer; self.tap = tap; self.path = path
         }
         /// Tee to the tap, then to the renderer — the SAME order and the same two consumers the
         /// file pump feeds, so metering, SDI embedding, routing and mute all apply unchanged.
         public func enqueue(_ sampleBuffer: CMSampleBuffer) {
-            tap.ingest(sampleBuffer, path: .whep)
+            tap.ingest(sampleBuffer, path: path)
             renderer.enqueue(sampleBuffer)
         }
     }
@@ -1498,7 +1505,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The anchor is now taken by `anchorLiveAudio(at:)`, from the first audio packet that sees a
     /// FINITE clock — the first moment the value actually exists. Until then the renderer holds at
     /// rate 0 with nothing scheduled, which is the correct state: video is not presenting yet either.
-    public func beginLiveAudio(cushion: Double) -> LiveAudioSink {
+    /// `path` names which live transport is feeding this sink, for the tap's stats and its
+    /// format-change callback. Defaulted to `.whep` so the existing WHEP call site is unchanged.
+    public func beginLiveAudio(cushion: Double,
+                               path: AudioTapBuffer.SourcePath = .whep) -> LiveAudioSink {
         // A live source is not a file: retire any file audio session first so two producers can
         // never feed the renderer at once.
         teardownAudioReading()
@@ -1515,7 +1525,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.rate = 0      // held until the first mirrored mapping arrives
         applyAudioMute()
         audioPresence = .unknown   // "don't know yet" until the first packet establishes channels
-        return LiveAudioSink(renderer: audioRenderer, tap: audioTap)
+        return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path)
     }
 
     /// Mirror state, reachable from the threads `mirrorLiveAudio` runs on (the WHEP source thread

@@ -1128,6 +1128,7 @@ final class DeckRegistry {
 
         NDIService.shared.renderer = nil
         NDIService.shared.audioTap = nil
+        SRTFrameRouter.shared.audioTap = nil
         WHEPFrameRouter.shared.renderer = nil
         SRTFrameRouter.shared.renderer = nil
     }
@@ -1174,6 +1175,11 @@ final class DeckRegistry {
         // Tee NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the clock-anchored
         // SDI output, SDI/Computer routing and mute apply to NDI for free.
         NDIService.shared.audioTap = engine.audioTap
+        // SRT audio, STAGE 1: the TAP ONLY — metered and SDI-capable, silent on the desktop,
+        // exactly as NDI is. Deliberately NOT `beginLiveAudio`: that opens the audio RENDERER and
+        // the clock mirror, which is stage 2. Wiring only this is what keeps stage 1 falsifiable —
+        // if the meters move, audio reached the tap, and nothing else can explain it.
+        SRTFrameRouter.shared.audioTap = engine.audioTap
         // A web stream displays through this SAME renderer, feeding the same enqueue NDI and the
         // file sources feed — but paced by LiveClock rather than FrameSync or the file timebase.
         WHEPFrameRouter.shared.renderer = renderer

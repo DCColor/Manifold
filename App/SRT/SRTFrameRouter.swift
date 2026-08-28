@@ -586,6 +586,10 @@ final class SRTFrameRouter {
     /// at which that thread is both alive and guaranteed idle, which is why the C layer fires
     /// onEnded before signalling its join rather than after.
     func releaseSessionResources() {
+        // Audio's decode side is single-thread-owned by this same session thread and is retired
+        // here for the same reason the video decoder is — this is the one instant at which the
+        // owning thread is both alive and guaranteed idle.
+        teardownAudio()
         decoder?.invalidate()
         decoder = nil
         transferSession = nil
@@ -823,6 +827,257 @@ final class SRTFrameRouter {
     ///
     /// SESSION THREAD, and every field it touches is session-thread-owned — the same ownership
     /// `framesDelivered` and the promote state already have.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // MARK: - Audio (STAGE 1: tap only — no renderer, no clock, no sync)
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // ⚠️ THIS STAGE FEEDS THE TAP AND NOTHING ELSE, AND THAT IS THE WHOLE POINT. The analogue is
+    // NDI, not WHEP: NDI "feeds the tap alone (metered and SDI-capable, but silent on the
+    // desktop)". Nothing here touches `AVSampleBufferAudioRenderer`, `beginLiveAudio`, LiveClock
+    // or the synchronizer — so nothing is audible, and a PASS is the meters moving.
+    //
+    // Stage 2 adds the renderer and the clock mirror (`beginLiveAudio` / `mirrorLiveAudio` /
+    // `endLiveAudio` / `liveAudioDrift`, plus `clock.onMappingChange`, none of which are wired for
+    // SRT today — WindowDeck wires six such closures for WHEP and only `renderer` for SRT).
+
+    /// The engine's tap. Weak, like `renderer`: the engine owns it. Wired in `WindowDeck`.
+    weak var audioTap: AudioTapBuffer?
+
+    /// Session-thread-owned, exactly like `decoder`. Built in `prepareAudioDecoder` on the session
+    /// thread and used by `handleAudioPacket` on that same thread.
+    private var audioDecoder: SRTAudioDecoder?
+    private var audioPacketsReceived = 0
+    private var audioFramesIngested = 0
+    private var audioPacketsUndecodable = 0
+    private var audioPacketsWithoutPTS = 0
+    private var audioLoggedFirstFrames = false
+    private var audioTimeBase: Double = 1.0 / 90_000.0
+
+    /// ⚠️ THE DECLARED LAYOUT, AND EXACTLY WHERE IT STOPS.
+    ///
+    /// The mux declares the layout and `fillAudioFormat` carries it here intact — the AVChannelOrder
+    /// and, for a NATIVE-order layout, the channel mask, plus libavformat's own description string
+    /// ("stereo", "5.1(side)"). Stage 1 LOGS them and stores them. They go no further, and this is
+    /// the honest statement of why:
+    ///
+    ///   * `AudioTapBuffer.Format` is `(sampleRate, channelCount, deckLinkChannelCount, path)` —
+    ///     there is NO layout field, so the ring cannot carry one.
+    ///   * The meters' role labels come from a DIFFERENT path entirely: `MediaInspector`
+    ///     `channelRoles(from:)` reads a CMFormatDescription's AudioChannelLayout into
+    ///     `metadata.audioTracks[].roles`, and `ContentView` reads that through a closure keyed on
+    ///     `engine.selectedAudioTrackIndex`. A live source has no `metadata.audioTracks`, so that
+    ///     closure returns `[]` and the meters fall back to numbers.
+    ///
+    /// >>> SO: A 5.1 SRT FEED WILL METER AS SIX BARS LABELLED 1–6 IN STAGE 1. The declaration is
+    /// >>> not lost — it is in this property and in the [SRT-AUDIO] line — but it has nowhere to go.
+    ///
+    /// STAGE 3 ADDS: an AVChannelLayout(mask) → AudioChannelLayout(bitmap) bridge, then either a
+    /// layout field on `AudioTapBuffer.Format` or a live-source roles provider parallel to the
+    /// `metadata.audioTracks` one. `MediaInspector.roleSequence(forTag:)` already knows
+    /// `kAudioChannelLayoutTag_MPEG_5_1_A` → ["L","R","C","LFE","Ls","Rs"], so the VOCABULARY
+    /// exists; only the bridge from an AVChannelLayout is missing. It is deliberately NOT guessed
+    /// here: the two bitmaps agree for the common layouts and "mostly agree" is exactly the kind of
+    /// assumption this codebase has paid for before.
+    private(set) var declaredChannelOrder: Int32 = 0
+    private(set) var declaredChannelMask: UInt64 = 0
+    private(set) var declaredLayoutName = ""
+
+    /// SESSION THREAD, inline from `onAudioFormat`. Mirrors `prepareDecoder`'s contract exactly.
+    func prepareAudioDecoder(format: ManifoldSRTAudioFormat) {
+        audioPacketsReceived = 0; audioFramesIngested = 0
+        audioPacketsUndecodable = 0; audioPacketsWithoutPTS = 0
+        audioLoggedFirstFrames = false
+
+        let codec = withUnsafePointer(to: format.codecName) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
+        }
+        let profile = withUnsafePointer(to: format.profileName) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 48) { String(cString: $0) }
+        }
+        let layout = withUnsafePointer(to: format.layoutName) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 64) { String(cString: $0) }
+        }
+        declaredChannelOrder = format.channelOrder
+        declaredChannelMask = format.channelMask
+        declaredLayoutName = layout
+        if format.timeBaseNum > 0 && format.timeBaseDen > 0 {
+            audioTimeBase = Double(format.timeBaseNum) / Double(format.timeBaseDen)
+        }
+
+        // ── THE FRAMING QUESTION, ANSWERED BY THE DEMUXER RATHER THAN GUESSED ─────────────────
+        //
+        // libavformat's mpegts demuxer sets the codec id from the PMT stream type: 0x0F → `aac`
+        // (ADTS-framed) and 0x11 → `aac_latm` (LATM/LOAS). So this line reports which framing the
+        // feed actually uses, on the first connect, with no probing.
+        //
+        // ⚠️ LATM IS NOT DECODED IN STAGE 1, AND IT SAYS SO RATHER THAN GOING QUIET. AudioToolbox
+        // wants raw AAC access units plus a magic cookie; LATM carries its own multiplex layer that
+        // has to be unwrapped first, and the vendored build's `aac_latm` PARSER exists precisely
+        // because that is real work. Refusing loudly is the correct stage-1 behaviour: a silent
+        // meter that might mean "no audio" or might mean "unhandled framing" is the failure mode
+        // this codebase keeps writing entries about.
+        let isLATM = codec == "aac_latm"
+        let formatID: AudioFormatID = kAudioFormatMPEG4AAC
+
+        var extradata: [UInt8] = []
+        if let ptr = format.extradata, format.extradataSize > 0 {
+            extradata = Array(UnsafeBufferPointer(start: ptr, count: Int(format.extradataSize)))
+        }
+
+        NSLog("[SRT-AUDIO] stream %d pid=0x%x codec=%@ profile=%@ %d Hz %d ch layout=%@ "
+            + "framing=%@ extradata=%d B",
+              format.streamIndex, UInt32(bitPattern: format.pid), codec, profile,
+              format.sampleRate, format.channelCount, layout.isEmpty ? "?" : layout,
+              isLATM ? "LATM/LOAS" : "ADTS-or-raw", format.extradataSize)
+
+        guard !isLATM else {
+            audioDecoder = nil
+            NSLog("[SRT-AUDIO] ⚠️ LATM/LOAS framing is NOT decoded in stage 1 — no audio will "
+                + "reach the tap. This is a stated limitation, not a failure. Unwrapping LATM is "
+                + "the work stage 1 deliberately did not do; report this line if you see it.")
+            return
+        }
+        guard codec == "aac" else {
+            audioDecoder = nil
+            NSLog("[SRT-AUDIO] ⚠️ codec '%@' is not handled in stage 1 (AAC only) — no audio will "
+                + "reach the tap. NOTE: this machine's AudioToolbox CAN decode mp2/mp3, so this is "
+                + "a scope boundary rather than a capability one.", codec)
+            return
+        }
+
+        // NOTHING IS ASSUMED — rate and channels come from the stream.
+        audioDecoder = SRTAudioDecoder(sampleRate: Double(format.sampleRate),
+                                       channelCount: Int(format.channelCount),
+                                       formatID: formatID,
+                                       extradata: extradata)
+        if audioDecoder == nil {
+            NSLog("[SRT-AUDIO] decoder construction FAILED — no audio will reach the tap")
+        }
+    }
+
+    /// SESSION THREAD, inline from `onAudioAbsent`.
+    func handleAudioAbsent() {
+        audioDecoder = nil
+        NSLog("[SRT-AUDIO] this program carries NO audio stream — stated positively, not inferred "
+            + "from silence. The meters correctly show nothing.")
+    }
+
+    /// SESSION THREAD, inline, per packet. The hot path — no hop, exactly like `handleAccessUnit`.
+    func handleAudioPacket(_ packet: ManifoldSRTAudioPacket) {
+        audioPacketsReceived += 1
+        // ⚠️ BOUND EXPLICITLY FROM `audioDecoder`. A bare `guard let decoder` resolves to this
+        // type's VIDEO decoder property, which compiles and is wrong — it was caught by the
+        // type checker here only because LiveVideoDecoder has no `sampleRate`.
+        guard let decoder = audioDecoder, let tap = audioTap else { return }
+        guard packet.pts != Self.noTimestamp else { audioPacketsWithoutPTS += 1; return }
+        guard let data = packet.data, packet.size > 0 else { return }
+
+        let pcm = UnsafeRawBufferPointer(start: data, count: packet.size)
+        guard let frames = decoder.decode(pcm) else { audioPacketsUndecodable += 1; return }
+        let frameCount = frames.count / decoder.channelCount
+        guard frameCount > 0 else { return }
+
+        // The stream's own time base — 1/90000 for MPEG-TS, natively and always, the same value
+        // and the same reasoning as the video path. NOT rescaled.
+        let pts = Double(packet.pts) * audioTimeBase
+        guard let sb = Self.makeAudioSampleBuffer(frames, frames: frameCount,
+                                                  channels: decoder.channelCount,
+                                                  sampleRate: decoder.sampleRate, pts: pts)
+        else { audioPacketsUndecodable += 1; return }
+
+        // ⚠️ TAP ONLY. No renderer — see the MARK note above.
+        tap.ingest(sb, path: .srt)
+        audioFramesIngested += frameCount
+
+        if !audioLoggedFirstFrames {
+            audioLoggedFirstFrames = true
+            // ⚠️ THIS LINE ONCE CLAIMED "the meters should now be moving" ON A SESSION WHERE THEY
+            // READ "NO SOURCE" FOR ITS ENTIRE LENGTH. The claim was never checked — it asserted a
+            // downstream consequence this code cannot see, and the ✅ made a broken checkpoint read
+            // as a passing one, which is worse than having no line at all.
+            //
+            // It now reports ONLY what it has verified by reading the tap back, and names the
+            // remaining condition instead of assuming it. The tap is the half we can prove; whether
+            // the METER reads it depends on `AudioMeterModel.isLive`, which lives in the App layer
+            // and is not observable from here.
+            let f = tap.format
+            let verified = f != nil && tap.hasAudio
+            NSLog("[SRT-AUDIO] %@ FIRST FRAMES IN THE TAP — %d frames, %d ch, %.0f Hz, pts=%.3f s. "
+                + "Tap read back: %@. Meters follow only if this transport is reported live "
+                + "(LiveSource.connected); nothing is audible in stage 1, which is correct.",
+                  verified ? "✅" : "⚠️",
+                  frameCount, decoder.channelCount, decoder.sampleRate, pts,
+                  verified
+                    ? String(format: "format %.0f Hz / %d ch, hasAudio=YES",
+                             f!.sampleRate, f!.channelCount)
+                    : "NO FORMAT — the ingest did not land; this is a FAILURE, not a checkpoint")
+        }
+    }
+
+    /// Interleaved Int32 → CMSampleBuffer. Same five CoreMedia calls as the WHEP path, with rate
+    /// and channel count taken from the DECODER rather than from constants.
+    ///
+    /// ⚠️ `layout: nil` IS THE STOPPING POINT DESCRIBED ON `declaredChannelMask` ABOVE. A real
+    /// AudioChannelLayout here is what would carry the mux's declaration into
+    /// `CMAudioFormatDescriptionGetChannelLayout`, which is what `MediaInspector.channelRoles`
+    /// reads. Passing one would mean mapping an AVChannelLayout mask to an AudioChannelLayout
+    /// bitmap, and that mapping is stage 3's, not a guess made here.
+    private static func makeAudioSampleBuffer(_ pcm: UnsafeBufferPointer<Int32>,
+                                              frames: Int, channels: Int,
+                                              sampleRate: Double, pts: Double) -> CMSampleBuffer? {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: UInt32(4 * channels), mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(4 * channels), mChannelsPerFrame: UInt32(channels),
+            mBitsPerChannel: 32, mReserved: 0)
+
+        var format: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
+                                             asbd: &asbd, layoutSize: 0, layout: nil,
+                                             magicCookieSize: 0, magicCookie: nil,
+                                             extensions: nil,
+                                             formatDescriptionOut: &format) == noErr,
+              let format else { return nil }
+
+        let byteCount = frames * channels * MemoryLayout<Int32>.size
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+                allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
+                blockAllocator: kCFAllocatorDefault, customBlockSource: nil,
+                offsetToData: 0, dataLength: byteCount,
+                flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr,
+              let block,
+              CMBlockBufferReplaceDataBytes(with: pcm.baseAddress!, blockBuffer: block,
+                                            offsetIntoDestination: 0,
+                                            dataLength: byteCount) == noErr else { return nil }
+
+        var sb: CMSampleBuffer?
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
+            presentationTimeStamp: CMTime(seconds: pts, preferredTimescale: 90_000),
+            decodeTimeStamp: .invalid)
+        // BYTES PER SAMPLE (one interleaved frame), not the frame count — see the WHEP note.
+        var sampleSize = channels * MemoryLayout<Int32>.size
+        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block,
+                                        formatDescription: format, sampleCount: frames,
+                                        sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                                        sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
+                                        sampleBufferOut: &sb) == noErr else { return nil }
+        return sb
+    }
+
+    /// Retire the decode side. SESSION THREAD, from the same place the video decoder is torn down.
+    func teardownAudio() {
+        if audioPacketsReceived > 0 || audioDecoder != nil {
+            NSLog("[SRT-AUDIO] session end — packets=%d framesIngested=%d undecodable=%d noPTS=%d",
+                  audioPacketsReceived, audioFramesIngested,
+                  audioPacketsUndecodable, audioPacketsWithoutPTS)
+        }
+        audioDecoder = nil
+    }
+
     private func anchorOrDefer(senderPTS: Double, arrivalHost: CFTimeInterval,
                                clock: LiveClock) -> Double {
         // ── THE FIRST DELIVERED FRAME ALWAYS DEFERS, AND THE REASON IS NOT PEDANTRY ──────────
