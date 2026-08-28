@@ -39,6 +39,56 @@
 
 @end
 
+@implementation DeckLinkRejectedDeviceInfo {
+    NSInteger _index;
+    NSString *_modelName;
+    int32_t _hresult;
+}
+
+- (instancetype)initWithIndex:(NSInteger)index
+                    modelName:(NSString *)modelName
+                      hresult:(int32_t)hresult {
+    if ((self = [super init])) {
+        _index = index;
+        _modelName = [modelName copy];
+        _hresult = hresult;
+    }
+    return self;
+}
+
+- (NSInteger)index { return _index; }
+- (NSString *)modelName { return _modelName; }
+- (int32_t)hresult { return _hresult; }
+// Unsigned cast before formatting: HRESULT is signed on macOS, and E_NOINTERFACE printed through a
+// signed conversion comes out "0xFFFFFFFF80000004" on a 64-bit promotion. Testers paste these
+// straight into a search box, so the spelling has to match Blackmagic's own.
+- (NSString *)hresultHex { return [NSString stringWithFormat:@"0x%08X", (uint32_t)_hresult]; }
+
+@end
+
+@implementation DeckLinkEnumerationResult {
+    NSInteger _totalCount;
+    NSArray<DeckLinkDeviceInfo *> *_usable;
+    NSArray<DeckLinkRejectedDeviceInfo *> *_rejected;
+}
+
+- (instancetype)initWithTotalCount:(NSInteger)totalCount
+                            usable:(NSArray<DeckLinkDeviceInfo *> *)usable
+                          rejected:(NSArray<DeckLinkRejectedDeviceInfo *> *)rejected {
+    if ((self = [super init])) {
+        _totalCount = totalCount;
+        _usable = [usable copy];
+        _rejected = [rejected copy];
+    }
+    return self;
+}
+
+- (NSInteger)totalCount { return _totalCount; }
+- (NSArray<DeckLinkDeviceInfo *> *)usable { return _usable; }
+- (NSArray<DeckLinkRejectedDeviceInfo *> *)rejected { return _rejected; }
+
+@end
+
 #pragma mark - Output result
 
 @implementation DeckLinkOutputResult {
@@ -778,12 +828,43 @@ static NSString *NSStringTakeDeckLink(CFStringRef s) {
 
 #pragma mark - Desktop Video version floor (ONE definition, every caller reads it from here)
 
-// The output floor: Desktop Video >= 14.3 (the IOSurface/zero-copy floor). Defined once so the
-// number cannot drift between the startup report, the Settings row, the toolbar gate and the
-// output path's own abort — before this existed, only the output path knew it, which is why a
-// below-floor driver read as "not reachable" everywhere else.
-static const int kDeckLinkFloorMajor = 14;
-static const int kDeckLinkFloorMinor = 3;
+// The output floor: Desktop Video >= 16.0. Defined once so the number cannot drift between the
+// startup report, the Settings row, the toolbar gate and the output path's own abort — before this
+// existed, only the output path knew it, which is why a below-floor driver read as "not reachable"
+// everywhere else.
+//
+// ── ⚠️ WHAT 16.0 IS, AND WHAT IT IS NOT ────────────────────────────────────────────────────
+//
+// 16.0 IS THE SDK VERSION THIS TARGET COMPILES AGAINST, and therefore the newest interface
+// generation this binary knows how to ask for. IT IS NOT A MEASURED LOWER BOUND. Nobody has tested
+// this build against a 16.0 driver and found it to be the last one that works; the claim is
+// narrower and provable from the headers:
+//
+//   `IID_IDeckLinkOutput` is versioned, and we link the CURRENT one. DeckLinkAPI.h (SDK 16.0) also
+//   declares IID_IDeckLinkOutput_v10_11, _v11_4, _v14_2_1 and _v15_3_1 — the interface as it stood
+//   in each of those releases. The newest SUPERSEDED entry is _v15_3_1, so the unversioned
+//   5F227C95-39D7-46C7-8B7D-9C81795FBBE4 we query is the post-15.3.1 revision. A driver older than
+//   16.0 does not vend it and answers E_NOINTERFACE, from perfectly healthy hardware.
+//
+// So the floor is "the oldest driver whose IDeckLinkOutput we are compiled to ask for", which is a
+// statement about this source tree, not about Blackmagic's hardware or about anyone's machine.
+//
+// ── WHY THE PREVIOUS FLOOR (14.3) WAS WORSE THAN NO FLOOR ──────────────────────────────────
+//
+// It was reasoned from the SDK changelog (the IOSurface/zero-copy work) rather than from the IIDs,
+// and nothing in this repo ever recorded a test against a 14.3–15.x driver. It READ as measured. The
+// result was a floor that admitted drivers this binary cannot talk to: a 14.3 machine was waved
+// through as "floor: 14.3 — met", every device was then silently rejected by the QueryInterface
+// above, and the user was told "no device detected" about hardware sitting in the slot. Two wrong
+// answers in a row, each one confidently phrased.
+//
+// ⚠️ IF YOU RAISE THE SDK, RAISE THIS WITH IT. The two numbers are the same fact. A new SDK whose
+// IDeckLinkOutput has been revised again will reject every older driver in exactly the same way,
+// and the only thing standing between that and another silent misdiagnosis is this constant moving
+// at the same time. The rejection counts reported by `enumerateDevices` are the backstop that makes
+// the failure legible if it does not.
+static const int kDeckLinkFloorMajor = 16;
+static const int kDeckLinkFloorMinor = 0;
 
 // Read the INSTALLED driver's runtime API version (not the SDK header we compiled against).
 // Encoding is 0xMMmmpp00 (see the SDK's DeviceList sample).
@@ -831,34 +912,60 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 }
 
 + (NSArray<DeckLinkDeviceInfo *> *)enumerateOutputDevices {
-    NSMutableArray<DeckLinkDeviceInfo *> *devices = [NSMutableArray array];
+    return [self enumerateDevices].usable;
+}
+
++ (DeckLinkEnumerationResult *)enumerateDevices {
+    NSMutableArray<DeckLinkDeviceInfo *> *usable = [NSMutableArray array];
+    NSMutableArray<DeckLinkRejectedDeviceInfo *> *rejected = [NSMutableArray array];
+    NSInteger total = 0;
 
     // Plain C entry point on macOS (no COM initialization needed).
     IDeckLinkIterator *iterator = CreateDeckLinkIteratorInstance();
     if (iterator == NULL) {
-        // Driver not installed / SDK runtime unavailable.
-        return devices;
+        // Driver not installed / SDK runtime unavailable. A zero TOTAL, which is the honest answer:
+        // we never got to look at any hardware.
+        return [[DeckLinkEnumerationResult alloc] initWithTotalCount:0 usable:usable rejected:rejected];
     }
 
     IDeckLink *device = NULL;
     NSInteger index = 0;
     while (iterator->Next(&device) == S_OK) {
+        total++;
         // Output-capable? A device that vends IDeckLinkOutput supports playback.
+        //
+        // ⚠️ A FAILURE HERE IS USUALLY A DRIVER VERSION, NOT A BROKEN CARD. `IID_IDeckLinkOutput` is
+        // the interface as revised for the SDK we compile against, and Blackmagic revises it: the
+        // 16.0 headers carry IID_IDeckLinkOutput_v10_11, _v11_4, _v14_2_1 and _v15_3_1 alongside the
+        // current one. A driver older than our SDK vends one of the superseded IIDs and answers
+        // E_NOINTERFACE to this call — from a card that is plugged in, powered, and fine. That is
+        // why the HRESULT is CARRIED OUT of this loop instead of being tested and dropped.
         IDeckLinkOutput *output = NULL;
         HRESULT hr = device->QueryInterface(IID_IDeckLinkOutput, (void **)&output);
+
+        // Asked on BOTH paths, and asked before the branch: `IDeckLink` has exactly two methods and
+        // exactly one interface ID across every SDK generation (IID_IDeckLink C418FBDD; the 16.0
+        // headers declare no `_vNN` variant of it), so the model name is reachable on a device whose
+        // OUTPUT interface is not — which is precisely the device worth naming.
+        CFStringRef modelName = NULL;
+        device->GetModelName(&modelName);
+        NSString *model = NSStringTakeDeckLink(modelName);
+
         if (hr == S_OK && output != NULL) {
-            CFStringRef modelName = NULL;
             CFStringRef displayName = NULL;
-            device->GetModelName(&modelName);
             device->GetDisplayName(&displayName);
 
             DeckLinkDeviceInfo *info =
                 [[DeckLinkDeviceInfo alloc] initWithIndex:index
-                                                modelName:NSStringTakeDeckLink(modelName)
+                                                modelName:model
                                               displayName:NSStringTakeDeckLink(displayName)];
-            [devices addObject:info];
+            [usable addObject:info];
 
             output->Release();   // balance the QueryInterface +1
+        } else {
+            [rejected addObject:[[DeckLinkRejectedDeviceInfo alloc] initWithIndex:index
+                                                                       modelName:model
+                                                                         hresult:(int32_t)hr]];
         }
         device->Release();       // balance the Next() +1
         device = NULL;
@@ -866,7 +973,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     }
 
     iterator->Release();         // balance CreateDeckLinkIteratorInstance +1
-    return devices;
+    return [[DeckLinkEnumerationResult alloc] initWithTotalCount:total usable:usable rejected:rejected];
 }
 
 + (BOOL)isDriverInstalled {

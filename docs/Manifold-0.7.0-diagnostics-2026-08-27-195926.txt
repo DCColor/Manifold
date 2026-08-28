@@ -1,0 +1,169 @@
+Manifold diagnostics
+Generated        : 2026-08-27T23:59:26Z
+App version      : 0.7.0 (build 13)
+
+==============================================================================
+WHAT THE TESTER REPORTED
+==============================================================================
+Connection       : Wired (ethernet)
+Location         : decklink mini monitor
+What they were doing:
+decklink mini monitor
+
+==============================================================================
+BUILD
+==============================================================================
+configuration    : Profile
+swift            : -O +WMO
+c/objc           : -Os
+DEBUG defined    : true
+app telemetry    : ON
+core telemetry   : ON (via MANIFOLD_TELEMETRY)
+
+==============================================================================
+MACHINE
+==============================================================================
+macOS            : Version 26.6.2 (Build 25G83)
+Hardware model   : Mac16,12
+CPU              : Apple M4
+Cores            : 10 (10 active)
+Physical memory  : 24.0 GB
+Uptime           : 64538 s
+
+Displays:
+  [0] Built-in Display — 2048x1332 @1x
+      colour profile: Color LCD
+      EDR headroom: current=2.000 potential=2.000 reference=0.000
+
+DeckLink driver  : installed
+DeckLink version : 14.5.0 [output floor: 14.3 — met]
+DeckLink devices : none enumerated
+DeckLink output  : unavailable — No device detected (Desktop Video 14.5.0)
+NDI runtime      : installed (NDI SDK APPLE 12:49:17 Apr 13 2026 6.3.2.0)
+NDI sources seen : 0
+
+Licence:
+  state          : LICENSED (Beta)
+  activated flag : true
+  validated flag : true
+  type           : Beta
+  account        : j***@dccolor.com
+  trial          : active=false remaining=0d expired=true unreadable=false
+  keychain:
+    storedLicenseKey : present (fingerprint 8d2ac4db3296)
+    activationRecord : present
+    trial.firstLaunch: present
+
+==============================================================================
+NETWORK PATH
+==============================================================================
+WHEP round trip  : (no WHEP session at export time)
+
+How to read the round trip: NO MEDIA ROUND TRIP IS OBTAINABLE on this transport.
+RTCP SR/DLSR computes the round trip at the SENDER, not the receiver; libdatachannel
+carries no RTCP XR; and NACKing a packet we already hold is rejected by SRTP replay
+protection (measured: 73 probes, 73 timeouts). The figure shown is the WHEP
+signalling POST — an HTTPS round trip over a different path, always an overestimate,
+and labelled COARSE for that reason. `floor` is the threshold below which an arrival
+is too fast to have been caused by our request. `NOT MEASURED` means recoveries are
+reported as `unattributed` rather than sorted into a bucket on a guess.
+
+How to read the arrival latency: two histograms of how long after a packet was
+declared missing it actually turned up — the top row for losses we asked about, the
+bottom for losses we deliberately did not. NEITHER is filtered by any threshold. The
+control row is this link's ordinary reordering delay. A bump in the asked row that
+the control row lacks is retransmission, and where it sits is the retransmit
+latency. Identical shapes mean asking changed nothing.
+
+How to read the NACK benefit: one declared-missing packet in ten is deliberately
+NEVER requested. Those recoveries are late originals by construction, so the control
+arm's recovery rate is what this link would have achieved with no NACK at all. If
+the two rates match, asking is achieving nothing measurable — that is a real result
+and should be read as one. Both arms need loss events; a clean link cannot answer it.
+
+==============================================================================
+ACTIVE ERROR STATE
+==============================================================================
+(no error state active at export time)
+
+==============================================================================
+CAPTURED LOG
+==============================================================================
+Manifold's own output. Times are local; a blank time column means the line came
+from print() or a C library and carried no timestamp of its own.
+
+19:58:21.363  [BUILD] configuration=Profile  swift=-O +WMO  c=-Os  (DEBUG=1)
+19:58:21.363          telemetry: app=ON core=ON (core via MANIFOLD_TELEMETRY)
+              DeckLink: Desktop Video 14.5.0 installed (meets the 14.3 floor) — no output-capable device connected
+              [EDR] headroom (startup) on "Built-in Display": current=2.0000 potential=2.0000 reference=0.0000
+19:58:21.574  [NDI] runtime loaded: /usr/local/lib/libndi.dylib
+19:58:21.574  [NDI] loader symbol resolved: NDIlib_v6_3_load
+19:58:21.574  [NDI] runtime version: NDI SDK APPLE 12:49:17 Apr 13 2026 6.3.2.0
+              [LICENSE] public-key self-check: OK (embedded key round-trips)
+19:58:21.656  [LICENSE] state: LICENSED (Beta)
+19:58:21.657  [UPDATE] checking — running 0.7.0 (build 13)
+19:58:21.714  [ARBITER] deferred — decks=1 active=untitled owner=none
+19:58:21.882  [UPDATE] up to date — server has 0.7.0 (build 13)
+              HDR10 [TEST.mov] no MDCV and no CLLI side data on the video stream
+              [CSDEBUG] layer destination = SOURCE (CoreMedia709 — today)  → CGColorSpace kCGColorSpaceDisplayP3_PQ
+              [EDR] source tags: primaries=12 transfer=16 matrix=1
+              [EDR] layer colorspace = kCGColorSpaceDisplayP3_PQ  (wideGamut=true)
+              [EDR] wantsExtendedDynamicRangeContent = true  (HDR transfer 16 → EDR ON)
+              [EDR] headroom (source load) on "Built-in Display": current=2.0000 potential=2.0000 reference=0.0000
+              [CSPROBE] ──────────────────────────────────────────────────────────────────
+              [CSPROBE] CICP in: primaries=12 transfer=16 matrix=1
+              [CSPROBE] CGColorSpaceCopyName    : kCGColorSpaceDisplayP3_PQ
+              [CSPROBE] isWideGamutRGB=true  usesITUR_2100TF=true
+              [CSPROBE] identity (CFEqual)      : matches NONE of the tested constants
+              [CSPROBE] ICC: 13312 bytes  version 4.0  class=mntr space=RGB  pcs=XYZ 
+              [CSPROBE] tags (8): A2B0, B2A0, chad, cicp, cprt, desc, lumi, wtpt
+              [CSPROBE] desc ('mluc')           : Display P3; SMPTE ST 2084 PQ
+              [CSPROBE] wtpt                    : X=0.964188 Y=1.000000 Z=0.824890  xy=(0.3457, 0.3585)
+              [CSPROBE] cicp                    : primaries=12 TRANSFER=16 matrix=0 fullRange=1   ← declared, not approximated
+              [CSPROBE] A2B0                    : present — transfer carried as a LUT, not a TRC curve
+              [CSPROBE] rTRC                    : ABSENT
+              [CSPROBE] gTRC                    : ABSENT
+              [CSPROBE] bTRC                    : ABSENT
+              [CSPROBE] ──────────────────────────────────────────────────────────────────
+              FrameEngine: loaded — duration 48.708333333333336s, audio tracks: 1 (monitoring #1)
+              [EDR] colour state installed on the layer after 0 present(s) of this source — BEFORE its first frame, as intended
+              FrameEngine: reading from 0.0s (audio reader: true)
+              AudioTap[AVF]: format → 48000Hz · 2ch (→ 2ch on SDI)
+              AudioTap[AVF]: int32 interleaved · 48000Hz · 2ch · pts=0.841s · held≈48000f · total=48000f
+19:58:26.070  [ARBITER] deferred — decks=1 active=TEST.mov owner=none
+19:58:30.236  [ARBITER] claiming DeckLink output — decks=1 active=TEST.mov owner=TEST.mov devices=DeckLink output
+              DeckLink: output not started — DeckLink output — no DeckLink or UltraStudio device connected
+              DeckLink: output not started — DeckLink output — no DeckLink or UltraStudio device connected
+              [RENDER-PERF] n=3 tickMs=16.67/17.67(x1218) texMs=0.07/0.15 drawMs=0.37/0.50 encMs=0.29/0.73 presMs=2.69/4.21 commitMs=0.01/0.03 gpuMs=0.39/0.43 latMs=2.84/4.35(x2) footprintMB=174.9 texFail=0 iosurface=Y
+              DeckLink: output not started — DeckLink output — no DeckLink or UltraStudio device connected
+19:59:05.141  [ARBITER] exclusive device released — every deck paused; nothing auto-resumes
+19:59:05.141  [ARBITER] claim grace expired — decks=1 active=TEST.mov owner=none
+
+
+==============================================================================
+SYSTEM MESSAGES
+==============================================================================
+Framework chatter from inside our process (CoreFoundation, libsqlite3,
+ViewBridge, audio and Network framework). Separated because it is almost never
+relevant — but kept, because occasionally it is.
+
+(none)
+
+==============================================================================
+REDACTION
+==============================================================================
+Every line above was pattern-scrubbed before this file was written.
+Removed: passphrases, stream IDs, tokens, URL paths and query strings, and
+home-directory user names. Replacements are fixed-width, so no length of any
+removed value can be inferred from this file.
+
+  passphrase= 0 occurrence(s) removed
+  streamid= 0 occurrence(s) removed
+  SRT #!:: streamid 0 occurrence(s) removed
+  stream_key= 0 occurrence(s) removed
+  Authorization header 0 occurrence(s) removed
+  Bearer token 0 occurrence(s) removed
+  token/secret/password/api key 0 occurrence(s) removed
+  URL paths 0 occurrence(s) removed
+  URL query strings 0 occurrence(s) removed
+  home directory paths 0 occurrence(s) removed

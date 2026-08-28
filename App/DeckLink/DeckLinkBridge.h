@@ -13,6 +13,39 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSString *displayName;
 @end
 
+/// A device the iterator DID return but which refused `IID_IDeckLinkOutput` — i.e. hardware that is
+/// present, powered and visible to the driver, yet cannot be opened for playback by this build.
+///
+/// ⚠️ THIS CLASS EXISTS BECAUSE ITS ABSENCE MADE TWO FAILURES IDENTICAL. `enumerateOutputDevices`
+/// appended only on success and dropped the HRESULT on the floor, so "the iterator returned nothing"
+/// and "the iterator returned three cards and every one was rejected" both arrived in Swift as an
+/// empty array — and the second is a DRIVER VERSION problem while the first is a cable or a power
+/// supply. Establishing which one a tester was in took a code read; it should have taken a log line.
+@interface DeckLinkRejectedDeviceInfo : NSObject
+/// Position in the driver's device enumeration (0-based) — the same numbering the usable devices use,
+/// so a rejection and an acceptance can be lined up against one bus walk.
+@property (nonatomic, readonly) NSInteger index;
+/// Base model string, or "" when the driver would not give one. `IDeckLink` itself carries
+/// GetModelName and has ONE interface ID across every SDK generation (IID_IDeckLink C418FBDD, with no
+/// `_vNN` variants anywhere in the 16.0 headers), so the name is obtainable from a device whose
+/// OUTPUT interface we cannot reach — which is exactly the case this class reports.
+@property (nonatomic, copy, readonly) NSString *modelName;
+/// The HRESULT QueryInterface actually returned, verbatim. Typically E_NOINTERFACE (0x80000004).
+@property (nonatomic, readonly) int32_t hresult;
+/// `hresult` formatted as "0x80000004", for logs and the diagnostics export.
+@property (nonatomic, copy, readonly) NSString *hresultHex;
+@end
+
+/// The FULL result of one enumeration walk: what the iterator returned, split into what we can use
+/// and what we cannot. `totalCount == usable.count + rejected.count` always.
+@interface DeckLinkEnumerationResult : NSObject
+/// How many devices the iterator returned, BEFORE any filtering. The number that distinguishes
+/// "no hardware" from "hardware this driver cannot present for output".
+@property (nonatomic, readonly) NSInteger totalCount;
+@property (nonatomic, copy, readonly) NSArray<DeckLinkDeviceInfo *> *usable;
+@property (nonatomic, copy, readonly) NSArray<DeckLinkRejectedDeviceInfo *> *rejected;
+@end
+
 /// Result of a D2 output attempt: overall success + a step-by-step log so a failure is
 /// diagnosable at the exact step (version floor / mode support / enable / create / fill / display).
 @interface DeckLinkOutputResult : NSObject
@@ -85,7 +118,15 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 @interface DeckLinkBridge : NSObject
 /// Enumerate connected DeckLink devices that support output (playback), i.e. those exposing
 /// IDeckLinkOutput. Returns an empty array if the driver isn't reachable or no card is present.
+///
+/// ⚠️ LOSSY BY CONSTRUCTION, AND KEPT ONLY FOR THE CALLERS THAT GENUINELY WANT THE LIST. It collapses
+/// "nothing there" and "everything rejected" into the same empty array. Anything that REPORTS the
+/// device situation to a human must call `enumerateDevices` instead and state both counts.
 + (NSArray<DeckLinkDeviceInfo *> *)enumerateOutputDevices;
+
+/// The same bus walk, undiminished: total returned, usable, and each rejection with its HRESULT and
+/// model name. One walk, so the counts cannot disagree with each other the way two calls could.
++ (DeckLinkEnumerationResult *)enumerateDevices;
 
 /// Whether the Blackmagic Desktop Video framework loaded — i.e. the driver is INSTALLED, independent
 /// of whether any card is connected. Lets the UI tell "driver absent" apart from "driver present, no
@@ -108,13 +149,13 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// no caller re-implements it.
 + (BOOL)installedDriverMeetsOutputFloor;
 
-/// The floor as a display string ("14.3") — for UI/diagnostics text, so the number is never typed
+/// The floor as a display string ("16.0") — for UI/diagnostics text, so the number is never typed
 /// out a second time anywhere in the app.
 + (NSString *)requiredDriverVersion;
 
 /// D2 "first light": push ONE synthetic solid-color frame out device index 0 at 2160p23.98 /
 /// 8-bit YUV via DisplayVideoFrameSync, and HOLD it on the output (output stays enabled, frame
-/// retained) so it stays on the monitor. Enforces the Desktop Video >= 14.3 floor first. Hardcoded
+/// retained) so it stays on the monitor. Enforces the Desktop Video output floor first. Hardcoded
 /// device 0 + mode + format for D2 (real device selection / profile-awareness is a later stage).
 /// Safe to call repeatedly (re-fires cleanly). Returns a per-step log.
 - (DeckLinkOutputResult *)startTestFrameOutputOnDevice0;
@@ -125,7 +166,7 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// D3 "scheduled playback": start CONTINUOUS free-running output on device 0 at 2160p23.98 /
 /// v210 10-bit YUV, driven by the frame-completion callback against the card's hardware clock. Frames
 /// are SYNTHETIC (a per-frame hue walk) via a pluggable fill source; the scheduling loop is
-/// source-agnostic. Enforces the Desktop Video >= 14.3 floor. Runs until -stopScheduledPlayback.
+/// source-agnostic. Enforces the Desktop Video output floor. Runs until -stopScheduledPlayback.
 /// Safe to call repeatedly. Returns a step log. (Debug/fallback path — see the WithFill: variant.)
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0;
 

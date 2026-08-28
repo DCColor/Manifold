@@ -703,7 +703,8 @@ enum MachineContext {
         // is readable without a card and without an output attempt, so it is reported unconditionally
         // and the floor verdict is stated next to it.
         let deckLink = DeckLinkService.shared
-        let (dlStatus, dlDevices) = deckLink.probeDriverStatusAndDevices()
+        let (dlStatus, dlWalk) = deckLink.probeDriverStatusAndEnumeration()
+        let dlDevices = dlWalk.usable
         let floor = DeckLinkService.requiredDriverVersion
         out.append("DeckLink driver  : \(dlStatus == .notInstalled ? "NOT installed" : "installed")")
         switch dlStatus {
@@ -712,14 +713,29 @@ enum MachineContext {
         case .versionUnreadable:
             out.append("DeckLink version : UNKNOWN — driver loaded but reported no version "
                      + "[output floor: \(floor), cannot verify]")
-        case .belowFloor(let v):
+        case .belowFloor(let v, _):
             out.append("DeckLink version : \(v) [output floor: \(floor) — NOT met, output disabled]")
-        case .noDevice(let v), .ready(let v, _):
+        case .noDevice(let v, _), .ready(let v, _):
             out.append("DeckLink version : \(v) [output floor: \(floor) — met]")
         }
-        out.append("DeckLink devices : \(dlDevices.isEmpty ? "none enumerated" : "\(dlDevices.count)")")
+        // BOTH COUNTS, ALWAYS, IN ONE LINE. "none enumerated" was true and useless on the report that
+        // produced this change: it was read as "no hardware" when the walk had in fact returned a
+        // card and the output filter had dropped it. The raw count is what makes the two readable
+        // apart, so it is stated even when the two numbers agree.
+        if dlWalk.total == 0 {
+            out.append("DeckLink devices : none enumerated (no device returned by the driver)")
+        } else {
+            out.append("DeckLink devices : \(dlWalk.total) enumerated, \(dlDevices.count) usable"
+                     + (dlDevices.isEmpty ? " with this driver" : ""))
+        }
         for d in dlDevices {
-            out.append("  [\(d.index)] \(d.modelName) — \(d.displayName)")
+            out.append("  usable   [\(d.index)] \(d.modelName) — \(d.displayName)")
+        }
+        // The HRESULT per rejected device — the fact that turns "it doesn't work" into a version
+        // diagnosis without a code read. E_NOINTERFACE (0x80000004) on every device means the driver
+        // predates the IDeckLinkOutput revision this build asks for.
+        for r in dlWalk.rejected {
+            out.append("  rejected \(r.summary)")
         }
         out.append("DeckLink output  : " + (dlStatus.canOutput
             ? "\(deckLink.isOutputting ? "active" : "idle") — \(deckLink.signalLine)"

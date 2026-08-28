@@ -15,6 +15,39 @@ final class DeckLinkService: ObservableObject {
         let displayName: String
     }
 
+    /// A device the driver returned that would not open for output (mirrors
+    /// DeckLinkRejectedDeviceInfo). Carried, not counted-and-discarded: the HRESULT is the sentence
+    /// that says "this is a driver version, not a cable".
+    struct RejectedDevice: Equatable {
+        let index: Int
+        let modelName: String
+        let hresultHex: String
+        /// One log/diagnostics line. `modelName` is "" when the driver would not name it.
+        var summary: String {
+            let name = modelName.isEmpty ? "unnamed device" : modelName
+            return "[\(index)] \(name) — no IDeckLinkOutput (\(hresultHex))"
+        }
+    }
+
+    /// One enumeration walk, whole. THE POINT IS `total`: `usable.count` alone cannot tell "nothing
+    /// is plugged in" from "three cards are plugged in and this driver cannot present any of them",
+    /// and those two have completely different answers for the user.
+    struct Enumeration {
+        var total: Int = 0
+        var usable: [Device] = []
+        var rejected: [RejectedDevice] = []
+
+        static func probe() -> Enumeration {
+            let r = DeckLinkBridge.enumerateDevices()
+            return Enumeration(
+                total: r.totalCount,
+                usable: r.usable.map { Device(index: $0.index, modelName: $0.modelName,
+                                              displayName: $0.displayName) },
+                rejected: r.rejected.map { RejectedDevice(index: $0.index, modelName: $0.modelName,
+                                                          hresultHex: $0.hresultHex) })
+        }
+    }
+
     static let shared = DeckLinkService()
 
     /// The Blackmagic Desktop Video download page — single source of truth for the Settings
@@ -35,6 +68,11 @@ final class DeckLinkService: ObservableObject {
     @Published private(set) var isOutputting = false     // reflects the ACTUAL scheduled-playback state
     @Published private(set) var selectedDeviceIndex = 0  // which enumerated device output targets
     @Published private(set) var devices: [Device] = []   // cached enumeration for the picker
+    /// How many devices the last walk returned BEFORE the output filter, and the ones it dropped.
+    /// Published alongside `devices` from the same walk, so the two counts in any message the UI
+    /// builds are always from one snapshot.
+    @Published private(set) var devicesEnumerated = 0
+    @Published private(set) var rejectedDevices: [RejectedDevice] = []
     /// Whether the Desktop Video framework loaded (driver installed), independent of any card being
     /// present. Distinguishes state (a) "driver absent" from (b) "driver present, no device" — which
     /// `devices.isEmpty` alone cannot. Published by `refreshDevices()`. Relaunch-only for install/uninstall
@@ -62,7 +100,7 @@ final class DeckLinkService: ObservableObject {
 
     // MARK: - Driver readiness (the honest tri-state, plus the two "we don't know" cases)
 
-    /// The minimum Desktop Video version output requires, as text ("14.3"). Comes from the bridge, which
+    /// The minimum Desktop Video version output requires, as text ("16.0"). Comes from the bridge, which
     /// owns the constant — the number is never typed out in Swift.
     static var requiredDriverVersion: String { DeckLinkBridge.requiredDriverVersion() }
 
@@ -74,11 +112,15 @@ final class DeckLinkService: ObservableObject {
     ///   • `.ready` — driver current AND at least one output-capable device.
     /// All five are decided from data we hold at STARTUP (framework load + API version + enumeration).
     /// None of it waits for an output attempt.
+    ///
+    /// `.belowFloor` and `.noDevice` both carry `enumerated` — the RAW count from the bus walk,
+    /// before the output filter. It is the fact that separates a version problem from a hardware
+    /// problem, and neither case can be worded honestly without it.
     enum DriverStatus: Equatable {
         case notInstalled
         case versionUnreadable
-        case belowFloor(installed: String)
-        case noDevice(installed: String)
+        case belowFloor(installed: String, enumerated: Int)
+        case noDevice(installed: String, enumerated: Int)
         case ready(installed: String, deviceCount: Int)
 
         /// Only `.ready` can drive a signal. Everything else fails, and now fails BEFORE the click.
@@ -106,16 +148,28 @@ final class DeckLinkService: ObservableObject {
         }
 
         /// Short value text for the Settings row.
+        ///
+        /// ⚠️ "n found, 0 usable" IS THE WHOLE SENTENCE. A tester who reads it should reach "version
+        /// problem" without being told, because the hardware count is non-zero right there next to
+        /// the driver version — which is precisely what "No device detected" concealed.
         var headline: String {
             switch self {
-            case .notInstalled:            return "Desktop Video not installed"
-            case .versionUnreadable:       return "Desktop Video installed (version unknown)"
-            case .belowFloor(let v):       return "Desktop Video \(v) — too old"
-            case .noDevice(let v):         return "No device detected (Desktop Video \(v))"
-            case .ready(let v, let n):     return n == 1 ? "1 device (Desktop Video \(v))"
-                                                         : "\(n) devices (Desktop Video \(v))"
+            case .notInstalled:      return "Desktop Video not installed"
+            case .versionUnreadable: return "Desktop Video installed (version unknown)"
+            case .belowFloor(let v, let n):
+                return n > 0 ? "\(Self.deviceCount(n)) found, 0 usable with Desktop Video \(v)"
+                             : "Desktop Video \(v) — too old"
+            case .noDevice(let v, let n):
+                return n > 0 ? "\(Self.deviceCount(n)) found, 0 usable with Desktop Video \(v)"
+                             : "No device detected (Desktop Video \(v))"
+            case .ready(let v, let n):
+                return "\(Self.deviceCount(n)) (Desktop Video \(v))"
             }
         }
+
+        /// "1 device" / "3 devices". One speller, so no message in the app can disagree with another
+        /// about the plural.
+        static func deviceCount(_ n: Int) -> String { n == 1 ? "1 device" : "\(n) devices" }
 
         /// The explanatory caption — what the user can DO about this state.
         var detail: String? {
@@ -125,11 +179,30 @@ final class DeckLinkService: ObservableObject {
             case .versionUnreadable:
                 return "The Desktop Video driver loaded but did not report its version. Output requires "
                      + "\(DeckLinkService.requiredDriverVersion) or later; Manifold can't confirm the installed version, so output is disabled."
-            case .belowFloor(let v):
-                return "DeckLink output requires Desktop Video \(DeckLinkService.requiredDriverVersion) or later; you have \(v). "
+            case .belowFloor(let v, let n):
+                let floor = DeckLinkService.requiredDriverVersion
+                guard n > 0 else {
+                    return "DeckLink output requires Desktop Video \(floor) or later; you have \(v). "
+                         + "Update Desktop Video, then relaunch Manifold."
+                }
+                // THE SENTENCE THIS WHOLE CHANGE EXISTS FOR. It names the hardware count first so
+                // the reader knows their device was SEEN, then the version, then the verdict — and
+                // it says outright which kind of problem this is not, because the failure the old
+                // wording produced was a tester checking cables for an afternoon.
+                return "Desktop Video \(v) can see \(Self.deviceCount(n)), but this build of Manifold "
+                     + "needs Desktop Video \(floor) or later to open an output on \(n == 1 ? "it" : "them"). "
+                     + "This is a driver version problem, not a hardware or cabling problem. "
                      + "Update Desktop Video, then relaunch Manifold."
-            case .noDevice:
-                return "Connect a DeckLink or UltraStudio device."
+            case .noDevice(let v, let n):
+                guard n > 0 else { return "Connect a DeckLink or UltraStudio device." }
+                // Driver at or above the floor and STILL rejecting every device: not a case we can
+                // explain, so this says what happened and asks for the file that records the reason
+                // rather than inventing a cause. Reachable if Blackmagic revises IDeckLinkOutput
+                // again — see the floor note in DeckLinkBridge.mm.
+                return "Desktop Video \(v) returned \(Self.deviceCount(n)), but would not open an "
+                     + "output on \(n == 1 ? "it" : "any of them"). This is unexpected on a driver "
+                     + "that meets the \(DeckLinkService.requiredDriverVersion) floor — please send "
+                     + "a diagnostics report, which records the reason for each device."
             case .ready:
                 return nil
             }
@@ -141,8 +214,14 @@ final class DeckLinkService: ObservableObject {
             switch self {
             case .notInstalled:      return "DeckLink output — requires Blackmagic Desktop Video \(DeckLinkService.requiredDriverVersion) or later (not installed)"
             case .versionUnreadable: return "DeckLink output — Desktop Video version could not be read; \(DeckLinkService.requiredDriverVersion) or later is required"
-            case .belowFloor(let v): return "DeckLink output — requires Desktop Video \(DeckLinkService.requiredDriverVersion) or later (you have \(v))"
-            case .noDevice:          return "DeckLink output — no DeckLink or UltraStudio device connected"
+            case .belowFloor(let v, let n):
+                return n > 0
+                    ? "DeckLink output — \(Self.deviceCount(n)) found, 0 usable with Desktop Video \(v); requires \(DeckLinkService.requiredDriverVersion) or later"
+                    : "DeckLink output — requires Desktop Video \(DeckLinkService.requiredDriverVersion) or later (you have \(v))"
+            case .noDevice(_, let n):
+                return n > 0
+                    ? "DeckLink output — \(Self.deviceCount(n)) found, 0 usable; see diagnostics for the reason"
+                    : "DeckLink output — no DeckLink or UltraStudio device connected"
             case .ready:             return nil
             }
         }
@@ -153,18 +232,23 @@ final class DeckLinkService: ObservableObject {
     /// device" to someone whose driver is too old (the exact bug this replaces) would be a fresh lie.
     var driverStatus: DriverStatus {
         Self.status(driverInstalled: driverInstalled, version: driverVersion,
-                    meetsFloor: driverMeetsFloor, deviceCount: devices.count)
+                    meetsFloor: driverMeetsFloor,
+                    enumerated: devicesEnumerated, usableCount: devices.count)
     }
 
     /// The composition rule itself, as a pure function so the startup log (which probes the bridge
     /// off-main, before anything is published) reaches the same verdict by the same path.
-    static func status(driverInstalled: Bool, version: String?,
-                       meetsFloor: Bool, deviceCount: Int) -> DriverStatus {
+    ///
+    /// `enumerated` is the RAW walk count and `usableCount` the filtered one. Both are carried
+    /// through rather than one being derived from the other: they differ exactly when the
+    /// interesting failure is happening, and that difference is the whole message.
+    static func status(driverInstalled: Bool, version: String?, meetsFloor: Bool,
+                       enumerated: Int, usableCount: Int) -> DriverStatus {
         guard driverInstalled else { return .notInstalled }
         guard let version else { return .versionUnreadable }
-        guard meetsFloor else { return .belowFloor(installed: version) }
-        guard deviceCount > 0 else { return .noDevice(installed: version) }
-        return .ready(installed: version, deviceCount: deviceCount)
+        guard meetsFloor else { return .belowFloor(installed: version, enumerated: enumerated) }
+        guard usableCount > 0 else { return .noDevice(installed: version, enumerated: enumerated) }
+        return .ready(installed: version, deviceCount: usableCount)
     }
 
     /// Map a source CICP primaries code → plain-speak label. "(P3 limited)" flags P3 content sitting
@@ -365,16 +449,13 @@ final class DeckLinkService: ObservableObject {
 
     /// Enumerate output-capable DeckLink devices. Synchronous SDK walk; returns [] if the driver
     /// isn't reachable or no card is present.
-    func outputDevices() -> [Device] {
-        DeckLinkBridge.enumerateOutputDevices().map {
-            Device(index: $0.index, modelName: $0.modelName, displayName: $0.displayName)
-        }
-    }
+    func outputDevices() -> [Device] { Enumeration.probe().usable }
 
     /// Refresh the cached device list for the picker (call at startup / when the menu opens). Clamps
     /// the selection if the list shrank. Publishes on main.
     func refreshDevices() {
-        let ds = outputDevices()
+        let walk = Enumeration.probe()
+        let ds = walk.usable
         // Same enumeration also settles the pthread_once framework load, so the driver-present read is
         // valid here — publish it alongside `devices` so state (a) vs (b) is distinguishable in the UI.
         let installed = DeckLinkBridge.isDriverInstalled()
@@ -385,6 +466,8 @@ final class DeckLinkService: ObservableObject {
         let meetsFloor = DeckLinkBridge.installedDriverMeetsOutputFloor()
         DispatchQueue.main.async {
             self.devices = ds
+            self.devicesEnumerated = walk.total
+            self.rejectedDevices = walk.rejected
             self.driverInstalled = installed
             self.driverVersion = version
             self.driverMeetsFloor = meetsFloor
@@ -397,17 +480,22 @@ final class DeckLinkService: ObservableObject {
     /// on a snapshot that predates a driver update or a card being unplugged. All three calls are cheap
     /// (the framework load is pthread_once-cached; the version is a struct read; only the enumeration
     /// walks the bus), and the pre-existing auto-start path already did the enumeration on this thread.
-    func probeDriverStatus() -> DriverStatus { probeDriverStatusAndDevices().status }
+    func probeDriverStatus() -> DriverStatus { probeDriverStatusAndEnumeration().status }
 
-    /// The same probe, also handing back the enumeration it walked — so a caller that needs both (the
-    /// diagnostics machine section) gets one consistent snapshot from one bus walk instead of two.
-    func probeDriverStatusAndDevices() -> (status: DriverStatus, devices: [Device]) {
-        let ds = outputDevices()
+    /// The same probe, also handing back the walk it made — status plus usable plus rejected, from ONE
+    /// bus walk, so the counts in a message built from it cannot disagree. What the diagnostics export
+    /// and the startup log call, because both have to state the rejected devices individually.
+    ///
+    /// ⚠️ THIS REPLACED A `…AndDevices` VARIANT THAT HANDED BACK THE FILTERED LIST ALONE. Keeping both
+    /// would have left the lossy one in reach of the next caller who only thinks they want the list —
+    /// which is how the reporting sites came to be unable to describe their own failure.
+    func probeDriverStatusAndEnumeration() -> (status: DriverStatus, enumeration: Enumeration) {
+        let walk = Enumeration.probe()
         let status = Self.status(driverInstalled: DeckLinkBridge.isDriverInstalled(),
                                  version: DeckLinkBridge.installedDriverVersion(),
                                  meetsFloor: DeckLinkBridge.installedDriverMeetsOutputFloor(),
-                                 deviceCount: ds.count)
-        return (status, ds)
+                                 enumerated: walk.total, usableCount: walk.usable.count)
+        return (status, walk)
     }
 
     private var hasAutoStarted = false   // one-shot guard so launch auto-start fires at most once
@@ -700,12 +788,7 @@ final class DeckLinkService: ObservableObject {
     /// the version is named wherever we have it.
     func logDevicesAtStartup() {
         DispatchQueue.global(qos: .utility).async {
-            let devices = self.outputDevices()
-            let installed = DeckLinkBridge.isDriverInstalled()
-            let version = DeckLinkBridge.installedDriverVersion()
-            let meetsFloor = DeckLinkBridge.installedDriverMeetsOutputFloor()
-            let status = Self.status(driverInstalled: installed, version: version,
-                                     meetsFloor: meetsFloor, deviceCount: devices.count)
+            let (status, walk) = self.probeDriverStatusAndEnumeration()
             switch status {
             case .notInstalled:
                 print("DeckLink: Desktop Video driver not installed — output unavailable "
@@ -713,19 +796,28 @@ final class DeckLinkService: ObservableObject {
             case .versionUnreadable:
                 print("DeckLink: Desktop Video driver is installed but did not report a version; "
                     + "output requires \(Self.requiredDriverVersion) or later — output disabled")
-            case .belowFloor(let v):
-                // The case the tester hit. The driver was never unreachable; it was too old, and it
-                // said so the whole time.
+            case .belowFloor(let v, let n):
+                // The case the tester hit. The driver was never unreachable; it was too old, it said
+                // so the whole time, and the card was in the slot the whole time too — which is the
+                // half this line used to leave out.
                 print("DeckLink: Desktop Video \(v) installed — below the \(Self.requiredDriverVersion) "
                     + "floor DeckLink output requires; output disabled "
-                    + "(\(devices.count) device(s) enumerated)")
-            case .noDevice(let v):
+                    + "(\(n) enumerated, \(walk.usable.count) usable"
+                    + (n > 0 ? " — driver version, not hardware)" : ")"))
+            case .noDevice(let v, let n):
                 print("DeckLink: Desktop Video \(v) installed (meets the \(Self.requiredDriverVersion) floor) — "
-                    + "no output-capable device connected")
+                    + (n > 0 ? "\(n) enumerated, 0 usable — every device refused IDeckLinkOutput"
+                             : "no output-capable device connected"))
             case .ready(let v, _):
-                let list = devices.map { "\($0.modelName) (\($0.displayName))" }.joined(separator: ", ")
-                print("DeckLink: Desktop Video \(v) — found \(devices.count) output device(s): \(list)")
+                let list = walk.usable.map { "\($0.modelName) (\($0.displayName))" }.joined(separator: ", ")
+                print("DeckLink: Desktop Video \(v) — \(walk.total) enumerated, "
+                    + "\(walk.usable.count) usable: \(list)")
             }
+            // ALWAYS, AND ONE LINE EACH. A rejection can coexist with a healthy device (a mixed bag of
+            // cards, or a future driver revision that only some hardware follows), so these are
+            // printed after EVERY verdict above — including `.ready`, where the count line alone
+            // would otherwise hide a card that quietly did not make it.
+            for r in walk.rejected { print("DeckLink:   rejected \(r.summary)") }
         }
     }
 }
