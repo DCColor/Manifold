@@ -1614,9 +1614,20 @@ so the request is recognised rather than absorbed.
 
 ## DeckLink devices are invisible on Desktop Video 14.x — we ask for an interface their driver has never heard of
 
-**Status:** OPEN, cause identified from the SDK headers at **~85% confidence**, one fact still
-needed before the fix direction can be chosen. **Reported:** 2026-08-27 by a tester (Joey).
-**Blocks:** DeckLink output entirely, for anyone not on Desktop Video 16.x.
+**Status:** ✅ **CONFIRMED and RESOLVED for the reported case, 2026-08-28.** Cause was identified
+from the SDK headers at ~85% confidence; it is now **measured, not inferred**. **Reported:**
+2026-08-27 by a tester (Joey). **Blocks:** nothing today — see *What would reopen this* before
+assuming that is permanent.
+
+### ✅ THE CONFIRMATION (2026-08-28)
+
+**The tester updated Desktop Video 14.5.0 → 16.x and his device was recognised immediately.** Same
+hardware, same Thunderbolt chassis, same machine, same boot path — **only the driver changed.**
+
+That is the whole diagnosis, tested directly. The IID table below predicted exactly this: a newer
+driver serves old IIDs, an older driver cannot serve an IID that did not exist yet, so moving the
+driver forward — and nothing else — had to fix it. It did. The ~85% was the gap between "the
+headers say this must be true" and "we watched it happen"; that gap is now closed.
 
 **The report:** the tester's device is seen by macOS, by Blackmagic Desktop Video and by Resolve —
 and not by Manifold. Diagnostics:
@@ -1683,47 +1694,92 @@ floor, because it redirects the investigation away from the version.
 
 **For an app built against SDK 16.0, the effective floor is 16.0.**
 
-**THE CHOICE IS OPEN, and it is a real fork:**
+### ✅ THE FLOOR CHANGE IS VALIDATED — this is the case it was written for
 
-- **Bump the floor to 16.0 and say so honestly in the UI.** Cheap, immediately correct, and it
-  converts a silent failure into an actionable message. Cost: anyone whose hardware cannot run
-  16.x loses DeckLink output entirely.
-- **Query versioned IIDs throughout the output path.** Preserves old hardware. Costs a real
-  compatibility layer across enumeration, `IDeckLinkVideoBuffer` and the metadata extensions, plus
-  a way to test it that does not exist on the build Mac today.
+The fork below resolved toward **bump the floor and say so honestly**, and the confirmation
+validates that choice against the actual failure rather than against a prediction.
 
-**Which one is correct depends on whether Desktop Video 16.x still supports the affected
-hardware — and that is NOT verifiable from this repo.** If 16.x dropped it, the tester is on
-14.5.0 *by necessity* and old-driver support becomes a requirement rather than a courtesy.
+On build 13 the tester would have read:
 
-### ⚠️ OPEN QUESTION — resolve before choosing, the model name is not established
+> Desktop Video 14.5.0 can see 1 device, but this build of Manifold needs Desktop Video 16.0 or
+> later to open an output on it. **This is a driver version problem, not a hardware or cabling
+> problem.** Update Desktop Video, then relaunch Manifold.
 
-**The tester's own diagnostics say "decklink mini monitor", twice** (Location, and "what they were
-doing"). It was relayed as an **UltraStudio 3G**. Those are different products and the difference
-decides the fix:
+— instead of the silence he actually got. He would have updated and been working **without a
+diagnosis session at all**: no export, no code read, no IID table. The comment at
+`DeckLinkService.swift:188` calls this "THE SENTENCE THIS WHOLE CHANGE EXISTS FOR", and this is the
+case that proves it, because the recovery it describes is exactly the one that happened — just
+several days and one investigation later than it needed to.
 
-- **DeckLink Mini Monitor** — PCIe card. Cannot attach to a Mac16,12 laptop except through a
-  Thunderbolt PCIe chassis.
-- **UltraStudio Mini Monitor** — Thunderbolt 2, and **unsupported on Apple Silicon at all**. If it
-  is this, that is a SECOND, INDEPENDENT reason it cannot work, and fixing the IIDs would not help.
-- **UltraStudio Monitor 3G** — USB-C, current, fine on Apple Silicon.
+Note what the message got right that a bare version warning would not: it names the device count
+FIRST, so the reader knows their hardware was *seen*. The failure the old wording produced was a
+tester checking cables. Naming the count is what stops that.
 
-**Get the verbatim model name from Blackmagic Desktop Video Setup before deciding anything.**
+**THE FORK AS IT STOOD:**
+
+- **Bump the floor to 16.0 and say so honestly in the UI.** ✅ **TAKEN.** Cheap, immediately
+  correct, and it converts a silent failure into an actionable message. Cost: anyone whose hardware
+  cannot run 16.x loses DeckLink output entirely.
+- **Query versioned IIDs throughout the output path.** 🏦 **BANKED — deliberately not scheduled.**
+  Preserves old hardware. Costs a real compatibility layer across enumeration,
+  `IDeckLinkVideoBuffer` and the metadata extensions, plus a way to test it that does not exist on
+  the build Mac today.
+
+### 🏦 BANKED: the versioned-IID branch, and what would reopen it
+
+**Why it is banked rather than scheduled.** Requiring current Blackmagic drivers for a new
+application is a defensible system requirement — it is what the SDK is built against, and it is
+what Blackmagic themselves expect. The one tester who hit this **could** update, and when he did,
+it worked. Building and testing a compatibility layer across three interfaces to serve a
+population currently measured at zero would be work spent against a hypothesis.
+
+**⚠️ WHAT WOULD REOPEN IT — a user who CANNOT update.** Two concrete shapes, and neither is a
+thought experiment:
+
+- **Hardware that Desktop Video 16.x dropped support for.** Blackmagic retires older devices from
+  new driver releases. A user on such a device is on 14.x *by necessity*, and for them
+  old-driver support is a requirement rather than a courtesy.
+- **A facility that pins driver versions.** Post houses hold a qualified driver across a room or a
+  whole floor because a working setup — a colour suite, a review theatre, a QC bay — depends on
+  it. "Just update Desktop Video" is not available to that user at any price; the pin is the
+  room's stability policy and one application does not get to override it.
+
+**This is ordinary in post, not an edge case, which is why this entry stays findable rather than
+being closed.** One report of either shape moves this from banked to scheduled — and the IID table
+above is the work already done, so the reopening cost is implementation, not diagnosis.
+
+### ✅ CLOSED — the device is identified
+
+**DeckLink Mini Monitor: a PCIe card in a Thunderbolt expansion chassis.** The tester's own
+diagnostics were right and the "UltraStudio 3G" relay was wrong.
+
+This closes the second half of the question too. **The Thunderbolt-2 concern is moot** — that
+worry applied only to the *UltraStudio* Mini Monitor, a different product, and it is not what he
+has. The DeckLink Mini Monitor works on Desktop Video 16.x on Apple Silicon, which is now observed
+rather than argued: there was never a second, independent reason it could not work.
 
 On the part that IS settled: all three are **playback-only devices, which is exactly what the
 filter is looking for** — such a device vends `IDeckLinkOutput` and no `IDeckLinkInput`. There is
 no capture-only trap here. The filter's logic is right; only the IID it asks for is wrong.
 
-### What to ask the tester
+### What was asked, and what came back — all answered 2026-08-28
 
-1. **The verbatim model name** — the single most valuable answer, per the open question above.
-2. **Can Desktop Video update to 16.0.1?** If it can and the device still appears afterwards, that
-   confirms the diagnosis outright and unblocks him the same day. If Setup refuses, or the device
-   disappears, his hardware is 14.x-bound and the fork above resolves toward versioned IIDs.
-3. **Does Resolve still see it on the same boot, after any driver change?** Keeps the comparison
-   clean.
-4. **Not worth asking:** cables, ports, replugging. This failure is version-shaped, not
-   connection-shaped, and enumeration lifetime is already ruled out.
+Kept rather than deleted: these were the two questions that decided the fork, and the record of
+which one settled it is worth more than the list of asks.
+
+1. **The verbatim model name** → **DeckLink Mini Monitor**, PCIe in a Thunderbolt chassis. Ruled
+   out the UltraStudio Thunderbolt-2 scenario, and with it the possibility of a second independent
+   cause that IID work would not have fixed.
+2. **Can Desktop Video update to 16.0.1?** → **Yes, and the device appeared immediately.** This
+   was written as "confirms the diagnosis outright and unblocks him the same day", and that is
+   precisely what it did. The alternative branch — Setup refusing, or the device disappearing
+   after the update — did not happen, which is why the fork resolved toward the floor rather than
+   toward versioned IIDs.
+3. **Does Resolve still see it after the driver change?** → Not needed. It was a control for the
+   case where the update did *not* fix it; the update fixed it.
+4. **Not worth asking:** cables, ports, replugging. This held. The failure was version-shaped, not
+   connection-shaped, and enumeration lifetime was already ruled out — the afternoon the old
+   wording would have cost in cable-checking is the cost the floor message now prevents.
 
 **Related:** the enumeration filter is `DeckLinkBridge.enumerateOutputDevices` (`:833`); the floor
 is `kDeckLinkFloorMajor`/`Minor` (`:785`); the reason this took a code read rather than a log read
