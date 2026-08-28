@@ -1201,6 +1201,23 @@ final class DeckRegistry {
         // An SRT stream is a push source exactly like WHEP — same renderer, same enqueue, same
         // LiveClock pacing through the same LiveDisplayRoute.
         SRTFrameRouter.shared.renderer = renderer
+        // ⚠️ THE SAME SIX SEAMS WHEP HAS, AND THE ASYMMETRY IS WHY THIS BLOCK EXISTS. SRT had only
+        // `renderer` and `audioTap` wired, so its audio reached the meters and stopped there. Any
+        // transport that decodes audio needs all of these or it is silently half-connected — which
+        // is the same shape as the `isLive` enumeration bug in ContentView: a per-transport list
+        // that a new transport can fail to join without anything failing loudly.
+        SRTFrameRouter.shared.beginLiveAudio = { [weak engine] cushion in
+            engine?.beginLiveAudio(cushion: cushion)
+        }
+        SRTFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping in
+            engine?.mirrorLiveAudio(mapping)
+        }
+        SRTFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
+        SRTFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in
+            engine?.liveAudioEstablished(channels: ch)
+        }
+        SRTFrameRouter.shared.liveAudioAbsent = { [weak engine] in engine?.liveAudioAbsent() }
+        SRTFrameRouter.shared.liveAudioDrift = { [weak engine] c in engine?.liveAudioDrift(against: c) }
 
         // SEED THE INCOMING DECK WITH WHATEVER SHAPE IS ALREADY ON SCREEN. `LiveDisplaySize` only
         // fires on a CHANGE, so a deck that becomes host while a source is running would otherwise

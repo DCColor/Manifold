@@ -499,6 +499,19 @@ final class SRTFrameRouter {
 
         stateLock.lock(); liveClock = clock; stateLock.unlock()
 
+        // ⚠️ INSTALLED AT ACTIVATE, NOT WHEN AUDIO STARTS — the same ordering WHEP needs. The
+        // mapping's FIRST change is the initial anchor, which `registerFrame` performs on the first
+        // presented video frame; that can precede the audio session. Installing here means the
+        // first anchor is not missed. The engine side no-ops until a live-audio session is open.
+        clock.onMappingChange = { [weak self] mapping in
+            self?.mirrorLiveAudio?(mapping)
+        }
+
+        // Open the renderer now, at the SRT cushion. `targetDepth` is 0.250 here, not WHEP's 0.400
+        // — the cushion must match the transport whose clock is being mirrored, because it is the
+        // steady-state lead the control loop holds for THIS route.
+        audioSink = beginLiveAudio?(Self.targetDepth)
+
         NSLog("[SRT] display route ACTIVE — LiveClock target=%.3fs, maxQueued=%d",
               Self.targetDepth, config.maxQueued)
         NSLog("[SRT] colorimetry: %@", colorimetry.summary)
@@ -516,12 +529,19 @@ final class SRTFrameRouter {
         dispatchPrecondition(condition: .onQueue(.main))
         stateLock.lock()
         let wasActive = liveClock != nil
+        // Drop the mapping callback BEFORE releasing the clock: it captures self, and a mapping
+        // arriving after teardown would reach a torn-down engine seam.
+        liveClock?.onMappingChange = nil
         // Clears the clock's per-STREAM state, freeze-guard arming included, so a reconnect
         // re-disarms the guard for its own startup fill rather than tripping it.
         liveClock?.reset()
         liveClock = nil
         stateLock.unlock()
         guard wasActive else { return }
+
+        // Retire the audio session with the clock it was mirroring, not after it.
+        audioSink = nil
+        endLiveAudio?()
 
         route.deactivate(renderer: renderer)
         // No picture, so no shape. On main, after the route teardown, where a size still hopping in
@@ -836,9 +856,37 @@ final class SRTFrameRouter {
     // desktop)". Nothing here touches `AVSampleBufferAudioRenderer`, `beginLiveAudio`, LiveClock
     // or the synchronizer — so nothing is audible, and a PASS is the meters moving.
     //
-    // Stage 2 adds the renderer and the clock mirror (`beginLiveAudio` / `mirrorLiveAudio` /
-    // `endLiveAudio` / `liveAudioDrift`, plus `clock.onMappingChange`, none of which are wired for
-    // SRT today — WindowDeck wires six such closures for WHEP and only `renderer` for SRT).
+    // ── STAGE 2: AUDIBLE ON THE LIVE CLOCK ────────────────────────────────────────────────────
+    //
+    // The seams below are the WHEP ones, wired identically in `WindowDeck`. Audio no longer goes to
+    // the tap directly; it goes through `FrameEngine.LiveAudioSink`, which tees to the tap FIRST
+    // and then the shared renderer — so metering, SDI and mute keep behaving exactly as they did in
+    // stage 1 and the only new consumer is the speaker.
+    //
+    // ⚠️ SRT IS IN A BETTER POSITION THAN WHEP AND THE CODE MUST NOT COPY WHEP'S WORKAROUND.
+    // WHEP audio and video arrive on separate SSRCs with independent random RTP timestamp bases, so
+    // WHEP has to LATCH an epoch on its first packet and ASSUME the two streams start aligned —
+    // `WHEPAudioReceiver`'s stage-1 assumption, the thing its lip-sync measurement exists to test.
+    // MPEG-TS has no such problem: audio and video PTS are both in the program's single 90 kHz
+    // clock, so `packet.pts * audioTimeBase` is ALREADY in the same timeline `LiveClock` reads.
+    // There is no epoch, no crossover, and no assumption to test. Audio is stamped with its own
+    // PTS, unmodified.
+
+    /// Opens the shared renderer to live audio; returns the sink. Wired in `WindowDeck`.
+    var beginLiveAudio: ((Double) -> FrameEngine.LiveAudioSink?)?
+    /// Forwards `LiveClock`'s mapping to the engine's audio timebase.
+    var mirrorLiveAudio: ((LiveClock.Mapping?) -> Void)?
+    /// Closes the session. Must be called on teardown or the renderer keeps a dead timebase.
+    var endLiveAudio: (() -> Void)?
+    /// Publishes the decoded channel count so the meters size their bars.
+    var liveAudioEstablished: ((Int) -> Void)?
+    /// Publishes positive ABSENCE — this program carries no audio stream.
+    var liveAudioAbsent: (() -> Void)?
+    /// Synchronizer-timebase minus live-clock, for the lip-sync measurement.
+    var liveAudioDrift: ((Double) -> Double?)?
+
+    /// The sink for this session. Non-nil only while a live-audio session is open.
+    private var audioSink: FrameEngine.LiveAudioSink?
 
     /// The engine's tap. Weak, like `renderer`: the engine owns it. Wired in `WindowDeck`.
     weak var audioTap: AudioTapBuffer?
@@ -848,6 +896,11 @@ final class SRTFrameRouter {
     private var audioDecoder: SRTAudioDecoder?
     private var audioPacketsReceived = 0
     private var audioFramesIngested = 0
+    /// Packets discarded because the video anchor had not landed. Reported, never silent.
+    private var audioPacketsBeforeAnchor = 0
+    private var audioLoggedAnchorDrop = false
+    private var audioEstablishedPublished = false
+    private var audioLastHeartbeat: CFTimeInterval = 0
     private var audioPacketsUndecodable = 0
     private var audioPacketsWithoutPTS = 0
     private var audioLoggedFirstFrames = false
@@ -958,8 +1011,17 @@ final class SRTFrameRouter {
     /// SESSION THREAD, inline from `onAudioAbsent`.
     func handleAudioAbsent() {
         audioDecoder = nil
+        // ⚠️ SRT LEARNS ABSENCE EARLIER AND MORE RELIABLY THAN WHEP DOES, AND THIS USES THAT.
+        // WHEP infers it from the SDP answer — a negotiation outcome, available only after the
+        // answer is applied, and only as reliable as the server's honesty about a section it may
+        // simply have omitted. SRT reads it from the DEMUXED PROGRAM at stream discovery: the PMT
+        // either lists an audio elementary stream or it does not, and that is known before a single
+        // audio packet could have arrived. So the meters can say "no audio track" from the first
+        // moment there is anything to say, rather than after a timeout.
+        Task { @MainActor in SRTFrameRouter.shared.liveAudioAbsent?() }
         NSLog("[SRT-AUDIO] this program carries NO audio stream — stated positively, not inferred "
-            + "from silence. The meters correctly show nothing.")
+            + "from silence, and known at stream discovery rather than after a wait. The meters "
+            + "will read NO AUDIO TRACK.")
     }
 
     /// SESSION THREAD, inline, per packet. The hot path — no hop, exactly like `handleAccessUnit`.
@@ -985,9 +1047,73 @@ final class SRTFrameRouter {
                                                   sampleRate: decoder.sampleRate, pts: pts)
         else { audioPacketsUndecodable += 1; return }
 
-        // ⚠️ TAP ONLY. No renderer — see the MARK note above.
-        tap.ingest(sb, path: .srt)
+        // ── THE STARTUP WINDOW ────────────────────────────────────────────────────────────
+        //
+        // ⚠️ DROPPED, NOT HELD, AND THE REASON IS NOT WHEP'S REASON. WHEP holds packets because it
+        // CANNOT COMPUTE A PTS until the live clock is finite — its epoch latch needs a clock
+        // reading. SRT never has that problem: `pts` above is already correct and absolute in the
+        // program's 90 kHz clock, whether or not anything is anchored.
+        //
+        // These packets are dropped because of what the VIDEO path is about to do. `anchorOrDefer`
+        // has not chosen its anchor yet, and when it does it DISCARDS every frame from the first
+        // delivered one up to that anchor — 64 frames / 2.669 s of content on the run that
+        // motivated this. Audio for discarded video must be discarded with it; enqueue it and
+        // either the renderer drops it as already-past (harmless but invisible) or, if the anchor
+        // lands early enough, a burst of stale audio plays against picture that was skipped.
+        //
+        // So the WHEP hold-and-count shape transfers, the justification does not, and the window is
+        // shorter: it closes on the first video frame that clears the gap test, with no crossover
+        // to establish afterwards.
+        guard startupAnchored else {
+            audioPacketsBeforeAnchor += 1
+            return
+        }
+        if audioPacketsBeforeAnchor > 0 && !audioLoggedAnchorDrop {
+            audioLoggedAnchorDrop = true
+            NSLog("[SRT-AUDIO] startup: dropped %d packet(s) that arrived before the video anchor "
+                + "— they belong to the content span the anchor discarded, and playing them would "
+                + "put audio against picture that was skipped.", audioPacketsBeforeAnchor)
+        }
+
+        // Tee: tap FIRST, then the renderer — the sink does both, so metering, SDI and mute are
+        // unchanged from stage 1 and the speaker is the only new consumer. Falls back to the tap
+        // alone if no sink was opened, which keeps stage-1 behaviour rather than losing metering.
+        if let sink = audioSink {
+            sink.enqueue(sb)
+        } else {
+            tap.ingest(sb, path: .srt)
+        }
         audioFramesIngested += frameCount
+
+        // The channel count comes from what actually DECODED, so the meters size from the decoder
+        // rather than from the stream header's claim.
+        if !audioEstablishedPublished {
+            audioEstablishedPublished = true
+            let ch = decoder.channelCount
+            Task { @MainActor in SRTFrameRouter.shared.liveAudioEstablished?(ch) }
+        }
+
+        // ── THE LIP-SYNC HEARTBEAT ────────────────────────────────────────────────────────
+        //
+        // ⚠️ WALL CLOCK, NOT DECODED AUDIO. WHEP's line was originally gated on `framesDecoded`
+        // advancing, which meant it went silent exactly when decode stalled — the one failure it
+        // existed to report. Keyed to the host clock, this keeps talking through a stall.
+        //
+        // `timebase−clock` is THE checkpoint number: the audio timebase minus the live clock, with
+        // the cushion already removed by `liveAudioDrift`, so it reads as mirror ERROR around zero
+        // rather than as a constant −0.250.
+        let hostNow = CACurrentMediaTime()
+        if hostNow - audioLastHeartbeat >= 1.0 {
+            audioLastHeartbeat = hostNow
+            stateLock.lock(); let clock = liveClock; stateLock.unlock()
+            let drift = clock.map { c in SRTFrameRouter.shared.liveAudioDrift?(c.now()) } ?? nil
+            NSLog("[SRT-AUDIO] chain — rx=%d frames=%d (%.1f s) undecodable=%d noPTS=%d "
+                + "droppedPreAnchor=%d · pts=%.3fs · timebase−clock=%@",
+                  audioPacketsReceived, audioFramesIngested,
+                  Double(audioFramesIngested) / decoder.sampleRate,
+                  audioPacketsUndecodable, audioPacketsWithoutPTS, audioPacketsBeforeAnchor, pts,
+                  drift.map { String(format: "%+.1f ms", $0 * 1000) } ?? "n/a")
+        }
 
         if !audioLoggedFirstFrames {
             audioLoggedFirstFrames = true
