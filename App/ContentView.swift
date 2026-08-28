@@ -4,6 +4,30 @@ import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picke
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
+/// ⚠️ TEMPORARY DIAGNOSTIC SWITCH — REMOVE with the `[EDRDIAG]` block in MetalSurfaceView.swift.
+///
+/// Takes the scrub preview overlay out of the picture ENTIRELY: no preview is requested, so no
+/// image is ever produced, so the overlay cannot appear at any point in a drag. What remains is
+/// whatever the Metal layer shows — which during a drag is the pre-drag frame, because
+/// `FrameEngine.scrubSeek` deliberately does no decode.
+///
+/// It exists to answer ONE question: does the HDR jump survive with no overlay? That isolates the
+/// overlay from the Metal layer, which no amount of reading either one can do.
+///
+/// DEBUG-only by construction, and a `let` rather than a computed property so Release folds it to
+/// `false` and the branches vanish. Profile defines DEBUG, so it is live in a tester build.
+enum ScrubDebug {
+    #if DEBUG
+    static let overlayDisabled = ProcessInfo.processInfo.environment["MANIFOLD_NO_SCRUB_OVERLAY"] == "1"
+    /// Force the overlay's EDR opt-in to the pre-26 boolean on every OS — the property the Metal
+    /// layer uses and which demonstrably works. See the call site in `setPreviewImage`.
+    static let forceLegacyEDR = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_EDR_LEGACY"] == "1"
+    #else
+    static let overlayDisabled = false
+    static let forceLegacyEDR = false
+    #endif
+}
+
 /// The scopes any tray slot can display. `rawValue` (String) backs @AppStorage persistence of
 /// per-slot selections; `displayName` labels the slot picker menu.
 ///
@@ -1022,7 +1046,7 @@ struct ContentView: View {
             // then replaced it. That replacement is the jump in the report. `scrubPreviewImage` is
             // now the sole gate, and the release path holds it until the new frame is actually
             // presented (see `beginScrubHandoff`).
-            if let preview = scrubPreviewImage {
+            if let preview = scrubPreviewImage, !ScrubDebug.overlayDisabled {
                 // SAME aspect authority as the video rect above — deliberately NOT the preview
                 // image's own pixel aspect. The two preview producers disagree about pixel aspect
                 // ratio: AVAssetImageGenerator applies PAR (its default aperture mode is clean-
@@ -2977,6 +3001,10 @@ struct ContentView: View {
     /// release point at any drag speed and further as the drag gets faster. Measured figures and
     /// the replay they come from are in docs/BUGS.md.
     private func requestScrubPreview(at time: Double, final: Bool = false) {
+        // The kill switch, at the SOURCE rather than at the view: with no request there is no
+        // image, so `scrubPreviewImage` stays nil and the overlay cannot be composited by any
+        // path. See `ScrubDebug`.
+        guard !ScrubDebug.overlayDisabled else { return }
         if !final {
             // Throttle: skip if a request is in flight or the time barely moved.
             guard !previewRequestInFlight else { return }

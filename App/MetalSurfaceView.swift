@@ -1,5 +1,6 @@
 import SwiftUI
 import QuartzCore
+import AppKit
 
 /// Hosts a MetalVideoRenderer's CAMetalLayer. Temporary M1 test surface.
 struct MetalSurfaceView: NSViewRepresentable {
@@ -83,13 +84,19 @@ final class MetalHostView: NSView {
 /// Both land on an SDR picture, so part 1 alone never fixed the report — but the two are not the
 /// same operation, and describing the un-opted-in case as "what it did before" is wrong.
 ///
-/// ⚠️ NO `contentsHeadroom` IS SET, AND THAT IS MEASURED RATHER THAN ASSUMED.
-/// `preferredDynamicRange` activates only on content "that have headroom tagging greater than
-/// 1.0", so an untagged image would make this a silent no-op — the worst failure shape available.
-/// A CGImage carries its own tagging as one of the three qualifying routes, and the generator's
-/// output was checked: `.matchSource` on a PQ source returns `contentHeadroom = 4.9261084`
-/// (= `kCGDefaultHDRImageContentHeadroom`), against 1.0 under the shipping `.forceSDR`. The
-/// content route is live, so the layer route is redundant here.
+/// ⚠️ BOTH HEADROOM ROUTES ARE NOW SATISFIED — a REVISION, and the reasoning it replaced is worth
+/// knowing. `preferredDynamicRange` activates only on content "that have headroom tagging greater
+/// than 1.0", so an untagged image makes it a silent no-op. A CGImage carries its own tagging as
+/// one of three qualifying routes, and the generator's output was measured: `.matchSource` on a PQ
+/// source returns `contentHeadroom = 4.9261084` (= `kCGDefaultHDRImageContentHeadroom`) against 1.0
+/// under the old `.forceSDR`. That measurement stands, and on it the layer's own `contentsHeadroom`
+/// is redundant — which is what this comment used to say, and why it was left at its default.
+///
+/// It is now set anyway, along with a wide `contentsFormat`. NEITHER is established as the cause of
+/// anything: the reported failure persists with the content route alone, and 0.0 is the DOCUMENTED
+/// default meaning "not overriding", not a missing tag. They are set because they are the two
+/// remaining implicit assumptions in this layer's configuration and removing a variable costs
+/// nothing. If EDR is working when you read this, they are the first two lines to try removing.
 ///
 /// This deliberately covers the AVFoundation producer ONLY. `LibavThumbnailSource` (DNx/MXF) builds
 /// an 8-bit RGBA CGImage and is SDR by construction — no layer opt-in can rescue 8-bit RGBA, and
@@ -130,6 +137,14 @@ final class ScrubPreviewHostView: NSView {
 
     override var wantsUpdateLayer: Bool { true }
 
+    /// The pre-26 opt-in, in one place. Marked deprecated-from-26 so the A/B switch can call it from
+    /// an unguarded context without a warning — the annotation is the suppression, and it keeps the
+    /// deprecation visible in the signature where a reader will meet it.
+    @available(macOS, deprecated: 26.0)
+    private func setLegacyEDROptIn(_ layer: CALayer) {
+        layer.wantsExtendedDynamicRangeContent = true
+    }
+
     func setPreviewImage(_ image: CGImage) {
         guard let layer else { return }
         // Belt and braces around the per-property `actions` above: this runs from `updateNSView`,
@@ -138,6 +153,20 @@ final class ScrubPreviewHostView: NSView {
         // there to prevent.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        // ── WIDE BACKING FORMAT ───────────────────────────────────────────────────────────────
+        //
+        // ⚠️ THE HEADER SAYS THIS SHOULD NOT MATTER FOR AN ASSIGNED `contents`, AND IT IS SET
+        // ANYWAY. `contentsFormat` is documented as "a hint for the desired storage format of the
+        // layer contents provided by -drawLayerInContext" which "does not affect the
+        // interpretation of the `contents' property directly" — and we never draw into this layer,
+        // we assign a CGImage. So on the header's account an 8-bit default cannot be what flattens
+        // a 16-bit PQ image. It is set because the default was observed as `RGBA8` on a layer whose
+        // EDR was not working, the header is a hint rather than a guarantee, and the cost is
+        // nothing measurable here — NOT because the mechanism is established. If EDR starts working
+        // and you are minimising the change, this is the line to test removing first.
+        //
+        // `kCAContentsFormatRGBA16Float` is macos(10.12) — no availability guard needed.
+        layer.contentsFormat = .RGBA16Float
         layer.contents = image
         layer.contentsScale = window?.backingScaleFactor ?? 2.0
         // ── THE EDR OPT-IN. AN ORDINARY AVAILABILITY BRANCH, NOT A FALLBACK ───────────────────
@@ -158,7 +187,33 @@ final class ScrubPreviewHostView: NSView {
         // `wantsExtendedDynamicRangeContent` on the CAMetalLayer. The whole point of this fix is
         // that the overlay and the layer revealed on release look the same — a constrained overlay
         // would just relocate the brightness step from release to grab.
-        if #available(macOS 26.0, *) {
+        // ⚠️ TEMPORARY A/B SWITCH — REMOVE with the [EDRDIAG] block. `MANIFOLD_SCRUB_EDR_LEGACY=1`
+        // forces the DEPRECATED boolean on every OS, 26+ included.
+        //
+        // The choice between the two opt-ins is UNPROVEN on 26+.
+        // `wantsExtendedDynamicRangeContent` is demonstrably working in this app right now — it is
+        // what `MetalVideoRenderer.setSourceColorSpace` sets, and HDR playback is correct on this
+        // machine. `preferredDynamicRange` is what this layer uses on 26+, and NOTHING has ever
+        // confirmed it activates for CALayer `contents`, and the A/B was run: forcing the legacy
+        // boolean on 26+ did NOT change the result, so the opt-in API is not the discriminator.
+        // Kept because it costs nothing and re-testing it is one env var.
+        if ScrubDebug.forceLegacyEDR {
+            setLegacyEDROptIn(layer)
+        } else if #available(macOS 26.0, *) {
+            // ── EXPLICIT HEADROOM TAG ─────────────────────────────────────────────────────────
+            //
+            // ⚠️ 0.0 WAS NEVER EVIDENCE OF A FAULT, AND THIS IS STILL NOT ESTABLISHED AS THE FIX.
+            // `contentsHeadroom` "defaults to 0, which means untagged", and its own header says
+            // "if the `contents' is a CGImageRef with content headroom … this property does not
+            // need to be set". Our image carries 4.926, so a 0.0 readback is the DOCUMENTED
+            // default meaning "not overriding — use the content's own tagging", not a missing tag.
+            //
+            // It is set regardless, for one reason: it removes a variable. The content route and
+            // the layer route are the two ways to satisfy `preferredDynamicRange`, and with the
+            // fix not working there is no value in leaving one of them implicit. Copied FROM the
+            // image, never invented — the header says values >0 and <1.0 are undefined, and a
+            // number picked by hand would be a colour decision in disguise.
+            layer.contentsHeadroom = CGFloat(image.contentHeadroom)
             layer.preferredDynamicRange = .high
         } else {
             // NOT DEAD CODE, AND NOT A DEPRECATED-API MISTAKE. The annotation on this property is
@@ -170,8 +225,100 @@ final class ScrubPreviewHostView: NSView {
             //
             // ⚠️ UNVERIFIED ON REAL HARDWARE. The build Mac runs macOS 26.5.1, so this branch has
             // never been executed — it is written from the header contract. See docs/BUGS.md.
-            layer.wantsExtendedDynamicRangeContent = true
+            setLegacyEDROptIn(layer)
         }
         CATransaction.commit()
+
+        #if DEBUG
+        logEDRState(image)
+        #endif
     }
+
+    #if DEBUG
+    // ⚠️ TEMPORARY DIAGNOSTIC — REMOVE once the HDR scrub failure is diagnosed. Answers checks 2, 4
+    // and 5 of the triage list at runtime, on the REAL image and the REAL layer during a drag,
+    // rather than on a test frame. Profile defines DEBUG, so it is live in a tester build and
+    // absent from Release.
+    private static var lastDiag: String = ""
+
+    private func logEDRState(_ image: CGImage) {
+        guard let layer else { NSLog("[EDRDIAG] NO LAYER"); return }
+
+        // ── CHECK 2: the image actually handed to the layer ────────────────────────────────────
+        let cs = image.colorSpace
+        let csName = cs.flatMap { $0.name as String? } ?? "nil"
+        let is2100 = cs.map { CGColorSpaceUsesITUR_2100TF($0) } ?? false
+        let headroom = image.contentHeadroom
+        // bpc DISCRIMINATES THE PRODUCER without needing new API: the AVFoundation generator
+        // returns 16-bit here, LibavThumbnailSource builds 8-bit RGBA (SDR by construction, the
+        // deferred part 3). An 8-bit image means this file is on the libav path and the HDR fix
+        // was never expected to cover it.
+        let producer = image.bitsPerComponent >= 16 ? "AVF-generator" : "libav-8bit(PART-3-NOT-DONE)"
+
+        // ── CHECK 4: the opt-in, read back off the layer AT SET TIME ───────────────────────────
+        var optIn = "n/a"
+        if #available(macOS 26.0, *) {
+            optIn = "preferredDynamicRange=\(layer.preferredDynamicRange.rawValue)"
+                  + " contentsHeadroom=\(layer.contentsHeadroom)"
+        }
+        // Read the deprecated one too, on every OS: if something is resetting the layer or if the
+        // 26+ property is not doing what we think, this says so.
+        let wantsEDR: String = {
+            if #available(macOS 26.0, *) { return "n/a(26+)" }
+            return "\(layer.wantsExtendedDynamicRangeContent)"
+        }()
+
+        // ── CHECK 5: the ancestor chain, and whether EDR is even available right now ───────────
+        var chain: [String] = []
+        var node: CALayer? = layer
+        var hops = 0
+        while let l = node, hops < 8 {
+            var desc = "\(type(of: l))"
+            if l.opacity != 1 { desc += " opacity=\(l.opacity)" }
+            if l.masksToBounds { desc += " masks" }
+            if l.compositingFilter != nil { desc += " compFilter!" }
+            if (l.filters?.isEmpty == false) { desc += " filters!" }
+            if l.shouldRasterize { desc += " RASTERIZE!" }
+            if #available(macOS 26.0, *), l.preferredDynamicRange.rawValue != "CADynamicRangeStandard" {
+                desc += " pdr=\(l.preferredDynamicRange.rawValue)"
+            }
+            chain.append(desc)
+            node = l.superlayer
+            hops += 1
+        }
+        // ── maxEDR IS A REAL MEASUREMENT. READ IT, BUT READ IT WITH THE DISPLAY MODE ──────────
+        //
+        // ⚠️ THIS COMMENT PREVIOUSLY SAID THE METRIC WAS INERT AND SHOULD BE IGNORED. THAT WAS
+        // WRONG, AND THE ERROR IS WORTH KNOWING BECAUSE IT COST A WORKING INSTRUMENT.
+        // `maximumExtendedDynamicRangeColorComponentValue` was probed across every layer
+        // configuration, including the known-good `wantsExtendedDynamicRangeContent`, and read
+        // exactly 1.0000 every time — which was taken as proof the metric could not distinguish
+        // anything. It was not: THE DISPLAY WAS IN SDR MODE FOR THE WHOLE PROBE. A screen that is
+        // not in HDR mode grants no headroom to anything, so 1.0 everywhere was the correct answer
+        // to a question asked under the wrong conditions. In HDR mode this field reads real values
+        // (4.4827 was observed here during a drag).
+        //
+        // So: a 1.0 means "no headroom is being granted RIGHT NOW", which is a fact about the
+        // display's mode first and the layer second. Check `potential` in the same line before
+        // concluding anything — potential=1.0 means the display cannot do EDR at this moment and
+        // NOTHING about the layer can be inferred from the line at all.
+        //
+        // This machine has two displays (an LG TV and an ASUS PA147) and reads the one hosting THIS
+        // view's window, which is the right screen but not necessarily the one another tool sampled.
+        let screen = window?.screen ?? NSScreen.main
+        let maxEDR = screen?.maximumExtendedDynamicRangeColorComponentValue ?? -1
+        let potEDR = screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? -1
+
+        let line = "[EDRDIAG] img{cs=\(csName) 2100TF=\(is2100) headroom=\(headroom) bpc=\(image.bitsPerComponent) \(producer)}"
+                 + " layer{\(type(of: layer)) \(optIn) wantsEDR=\(wantsEDR) scale=\(layer.contentsScale) fmt=\(layer.contentsFormat.rawValue)}"
+                 + " screen{maxEDR=\(maxEDR) potential=\(potEDR)}"
+                 + " chain[\(chain.joined(separator: " < "))]"
+        // Only when something CHANGES, plus the first one — a drag fires this at up to ~20 Hz and a
+        // line per preview would bury the one fact that differs.
+        if line != Self.lastDiag {
+            Self.lastDiag = line
+            NSLog("%@", line)
+        }
+    }
+    #endif
 }

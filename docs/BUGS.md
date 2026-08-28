@@ -913,6 +913,43 @@ operation, and **an un-opted-in layer must not be described as "what it did befo
 that phrasing was in the code comment briefly and is wrong. Part 1 is also the precondition for
 either opt-in: both properties act on HDR-TAGGED content, and tagging it is what part 1 does.
 
+### ⚠️ MEASUREMENT HAZARD — `maximumExtendedDynamicRangeColorComponentValue` AND DISPLAY MODE
+
+**Recorded because it already cost us a working instrument once, on 2026-08-27, and it will do it
+again to whoever reads only the layer properties.**
+
+While diagnosing why the HDR fix did not work on the build Mac, `NSScreen`'s
+`maximumExtendedDynamicRangeColorComponentValue` was probed across every candidate layer
+configuration — including `wantsExtendedDynamicRangeContent = true`, the property
+`MetalVideoRenderer` uses to produce demonstrably correct EDR in this app. It read **exactly 1.0000
+for all of them, including that known-good control.** The conclusion drawn was "the metric is inert
+on this machine; do not judge the fix by it", and the field was labelled NOT-AN-INDICATOR in the
+diagnostic.
+
+**That conclusion was WRONG. The display was in SDR mode for the entire probe.** A screen not in HDR
+mode grants no headroom to anything, so 1.0 everywhere was the correct answer to a question asked
+under the wrong conditions. With the display in HDR mode the same field reads real values — **4.4827
+was observed during a drag** on the same machine.
+
+**The rules that follow:**
+
+1. **Read `potential` before reading `current`.** `potential=1.0` means the display cannot do EDR at
+   that moment, and NOTHING about any layer can be inferred from the line. Only when `potential` is
+   high (8.9654 here) does `current` say anything about whether a layer won a grant.
+2. **The display's mode is not under the test's control and changes between runs.** Two readings
+   minutes apart on this machine gave `potential=8.9654` and `potential=1.0000`.
+3. **This machine has TWO displays** — an LG TV (3840×2160) and an ASUS PA147. `NSScreen.main` is
+   the LG. A probe that opens its own window may sample a different screen than the app does;
+   `MetalVideoRenderer.logEDRHeadroom` uses `NSApp.mainWindow?.screen` and the scrub diagnostic uses
+   the host view's own `window?.screen`. Same property, potentially different screen.
+4. **A separate instrument IS genuinely unavailable and this correction does not rescue it:**
+   `CARenderer` renders NOTHING in this environment — an opaque red background into a `bgra8Unorm`
+   target reads all zeros, which has nothing to do with EDR or display mode. Do not confuse the two
+   failures. The CARenderer route to reading rendered pixel values is closed; the NSScreen route is
+   open whenever the display is in HDR mode.
+
+---
+
 #### On the earlier "not the deprecated property" note
 
 That decision — recorded above, before the branch existed — was about not COPYING the renderer's API
