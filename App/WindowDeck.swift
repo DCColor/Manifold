@@ -1188,7 +1188,7 @@ final class DeckRegistry {
         // silent on the desktop). Same injection pattern as the renderer above: the router has no
         // engine handle and must not acquire one.
         WHEPFrameRouter.shared.beginLiveAudio = { [weak engine] cushion in
-            engine?.beginLiveAudio(cushion: cushion)
+            engine?.beginLiveAudio(cushion: cushion, path: .whep)
         }
         // Nonisolated on the engine side — fires on whichever thread changed LiveClock's mapping.
         WHEPFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping in
@@ -1206,8 +1206,13 @@ final class DeckRegistry {
         // transport that decodes audio needs all of these or it is silently half-connected — which
         // is the same shape as the `isLive` enumeration bug in ContentView: a per-transport list
         // that a new transport can fail to join without anything failing loudly.
+        // ⚠️ `path:` IS THE TRANSPORT LABEL AND IT WAS THE BUG. This line was a copy of WHEP's
+        // above, back when `beginLiveAudio` defaulted `path` to `.whep` — so every SRT session
+        // fed the tap under WHEP's name and printed `AudioTap[WHEP]` and `[WHEP-AUDIO]` from end
+        // to end, over numbers that were entirely real. The default is gone; the argument is
+        // required, and a fifth transport cannot inherit WHEP's name by omission.
         SRTFrameRouter.shared.beginLiveAudio = { [weak engine] cushion in
-            engine?.beginLiveAudio(cushion: cushion)
+            engine?.beginLiveAudio(cushion: cushion, path: .srt)
         }
         SRTFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping in
             engine?.mirrorLiveAudio(mapping)

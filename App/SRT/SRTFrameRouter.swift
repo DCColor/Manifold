@@ -906,31 +906,32 @@ final class SRTFrameRouter {
     private var audioLoggedFirstFrames = false
     private var audioTimeBase: Double = 1.0 / 90_000.0
 
-    /// ⚠️ THE DECLARED LAYOUT, AND EXACTLY WHERE IT STOPS.
+    /// ⚠️ THE DECLARED LAYOUT, AND WHERE IT GOES NOW (STAGE 3 CONNECTED IT).
     ///
     /// The mux declares the layout and `fillAudioFormat` carries it here intact — the AVChannelOrder
     /// and, for a NATIVE-order layout, the channel mask, plus libavformat's own description string
-    /// ("stereo", "5.1(side)"). Stage 1 LOGS them and stores them. They go no further, and this is
-    /// the honest statement of why:
+    /// ("stereo", "5.1(side)"). Stage 1 logged them and stopped, because `AudioTapBuffer.Format` had
+    /// no layout field and a live source has no `metadata.audioTracks` for the meters' role closure
+    /// to read. Both halves now exist:
     ///
-    ///   * `AudioTapBuffer.Format` is `(sampleRate, channelCount, deckLinkChannelCount, path)` —
-    ///     there is NO layout field, so the ring cannot carry one.
-    ///   * The meters' role labels come from a DIFFERENT path entirely: `MediaInspector`
-    ///     `channelRoles(from:)` reads a CMFormatDescription's AudioChannelLayout into
-    ///     `metadata.audioTracks[].roles`, and `ContentView` reads that through a closure keyed on
-    ///     `engine.selectedAudioTrackIndex`. A live source has no `metadata.audioTracks`, so that
-    ///     closure returns `[]` and the meters fall back to numbers.
+    ///   * `AudioChannelLayoutBridge` translates this mask to CoreAudio positions, refusing any
+    ///     position outside the eighteen WAVE ones instead of approximating it.
+    ///   * `SRTAudioDecoder` REQUESTS that order from AudioToolbox and READS IT BACK, then hands the
+    ///     verified layout to `makeAudioSampleBuffer`, which attaches it to the format description.
+    ///   * `AudioTapBuffer.Format.roles` reads it off that description; `ContentView` prefers the
+    ///     file's `metadata.audioTracks` roles and falls back to the tap's, so a live source reaches
+    ///     the meters by the same closure a file does.
     ///
-    /// >>> SO: A 5.1 SRT FEED WILL METER AS SIX BARS LABELLED 1–6 IN STAGE 1. The declaration is
-    /// >>> not lost — it is in this property and in the [SRT-AUDIO] line — but it has nowhere to go.
+    /// ⚠️ THE MASK IS *NOT* THE INTERLEAVE ORDER, AND THAT IS WHY THE DECODER HAS THE LAST WORD.
+    /// `AV_CH_LAYOUT_5POINT1_BACK` reads L R C LFE Ls Rs — libav's native order, i.e. what libav's
+    /// OWN decoder would emit. AudioToolbox decodes the same bitstream to `AAC_5_1` order,
+    /// **C L R Ls Rs LFE**, unless told otherwise. Labelling the converter's output from this mask
+    /// directly would put dialogue on Left and LFE on a surround, with six bars all confidently
+    /// named. See the long note at the top of `SRTAudioDecoder`'s layout section.
     ///
-    /// STAGE 3 ADDS: an AVChannelLayout(mask) → AudioChannelLayout(bitmap) bridge, then either a
-    /// layout field on `AudioTapBuffer.Format` or a live-source roles provider parallel to the
-    /// `metadata.audioTracks` one. `MediaInspector.roleSequence(forTag:)` already knows
-    /// `kAudioChannelLayoutTag_MPEG_5_1_A` → ["L","R","C","LFE","Ls","Rs"], so the VOCABULARY
-    /// exists; only the bridge from an AVChannelLayout is missing. It is deliberately NOT guessed
-    /// here: the two bitmaps agree for the common layouts and "mostly agree" is exactly the kind of
-    /// assumption this codebase has paid for before.
+    /// >>> A FEED THAT DECLARES NOTHING USABLE STILL METERS AS NUMBERS, ON PURPOSE. That is not the
+    /// >>> stage-1 gap; it is the finished behaviour. Count-implies-layout is the inference this
+    /// >>> codebase refuses, and per-channel labels are the one place it would be invisible.
     private(set) var declaredChannelOrder: Int32 = 0
     private(set) var declaredChannelMask: UInt64 = 0
     private(set) var declaredLayoutName = ""
@@ -1002,7 +1003,9 @@ final class SRTFrameRouter {
         audioDecoder = SRTAudioDecoder(sampleRate: Double(format.sampleRate),
                                        channelCount: Int(format.channelCount),
                                        formatID: formatID,
-                                       extradata: extradata)
+                                       extradata: extradata,
+                                       channelMask: format.channelMask,
+                                       channelOrder: format.channelOrder)
         if audioDecoder == nil {
             NSLog("[SRT-AUDIO] decoder construction FAILED — no audio will reach the tap")
         }
@@ -1044,7 +1047,8 @@ final class SRTFrameRouter {
         let pts = Double(packet.pts) * audioTimeBase
         guard let sb = Self.makeAudioSampleBuffer(frames, frames: frameCount,
                                                   channels: decoder.channelCount,
-                                                  sampleRate: decoder.sampleRate, pts: pts)
+                                                  sampleRate: decoder.sampleRate, pts: pts,
+                                                  layout: decoder.channelLayoutData)
         else { audioPacketsUndecodable += 1; return }
 
         // ── THE STARTUP WINDOW ────────────────────────────────────────────────────────────
@@ -1130,12 +1134,17 @@ final class SRTFrameRouter {
             let verified = f != nil && tap.hasAudio
             NSLog("[SRT-AUDIO] %@ FIRST FRAMES IN THE TAP — %d frames, %d ch, %.0f Hz, pts=%.3f s. "
                 + "Tap read back: %@. Meters follow only if this transport is reported live "
-                + "(LiveSource.connected); nothing is audible in stage 1, which is correct.",
+                + "(LiveSource.connected).",
                   verified ? "✅" : "⚠️",
                   frameCount, decoder.channelCount, decoder.sampleRate, pts,
                   verified
-                    ? String(format: "format %.0f Hz / %d ch, hasAudio=YES",
-                             f!.sampleRate, f!.channelCount)
+                    ? String(format: "format %.0f Hz / %d ch, hasAudio=YES, roles %@",
+                             f!.sampleRate, f!.channelCount,
+                             // STAGE 3: read back from the TAP, not from the decoder — the whole
+                             // point is whether the layout survived the trip through the format
+                             // description, and asking the decoder again would not test that.
+                             f!.roles.isEmpty ? "NONE (bars show numbers)"
+                                              : f!.roles.joined(separator: " "))
                     : "NO FORMAT — the ingest did not land; this is a FAILURE, not a checkpoint")
         }
     }
@@ -1143,14 +1152,19 @@ final class SRTFrameRouter {
     /// Interleaved Int32 → CMSampleBuffer. Same five CoreMedia calls as the WHEP path, with rate
     /// and channel count taken from the DECODER rather than from constants.
     ///
-    /// ⚠️ `layout: nil` IS THE STOPPING POINT DESCRIBED ON `declaredChannelMask` ABOVE. A real
-    /// AudioChannelLayout here is what would carry the mux's declaration into
-    /// `CMAudioFormatDescriptionGetChannelLayout`, which is what `MediaInspector.channelRoles`
-    /// reads. Passing one would mean mapping an AVChannelLayout mask to an AudioChannelLayout
-    /// bitmap, and that mapping is stage 3's, not a guess made here.
+    /// STAGE 3: `layout` IS THE FORMER STOPPING POINT, NOW CONNECTED. It is the decoder's
+    /// VERIFIED output layout — requested from the mux's mask and read back from the converter, in
+    /// CoreAudio's descriptions spelling — and attaching it here is what carries the declaration
+    /// into `CMAudioFormatDescriptionGetChannelLayout`, which is what `AudioChannelLayoutBridge`
+    /// (and through it the tap, and through that the meters) reads.
+    ///
+    /// ⚠️ nil IS STILL A FIRST-CLASS ANSWER AND MUST STAY ONE. It means the decoder could not
+    /// establish an order it is willing to stand behind, and the correct consequence is channel
+    /// NUMBERS on the meters. Do not add a "sensible default for 6 channels" here.
     private static func makeAudioSampleBuffer(_ pcm: UnsafeBufferPointer<Int32>,
                                               frames: Int, channels: Int,
-                                              sampleRate: Double, pts: Double) -> CMSampleBuffer? {
+                                              sampleRate: Double, pts: Double,
+                                              layout: Data?) -> CMSampleBuffer? {
         var asbd = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
@@ -1160,12 +1174,24 @@ final class SRTFrameRouter {
             mBitsPerChannel: 32, mReserved: 0)
 
         var format: CMAudioFormatDescription?
-        guard CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
-                                             asbd: &asbd, layoutSize: 0, layout: nil,
-                                             magicCookieSize: 0, magicCookie: nil,
-                                             extensions: nil,
-                                             formatDescriptionOut: &format) == noErr,
-              let format else { return nil }
+        let created: OSStatus
+        if let layout, !layout.isEmpty {
+            created = layout.withUnsafeBytes { raw in
+                CMAudioFormatDescriptionCreate(
+                    allocator: kCFAllocatorDefault, asbd: &asbd,
+                    layoutSize: raw.count,
+                    layout: raw.baseAddress!.assumingMemoryBound(to: AudioChannelLayout.self),
+                    magicCookieSize: 0, magicCookie: nil, extensions: nil,
+                    formatDescriptionOut: &format)
+            }
+        } else {
+            created = CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
+                                                     asbd: &asbd, layoutSize: 0, layout: nil,
+                                                     magicCookieSize: 0, magicCookie: nil,
+                                                     extensions: nil,
+                                                     formatDescriptionOut: &format)
+        }
+        guard created == noErr, let format else { return nil }
 
         let byteCount = frames * channels * MemoryLayout<Int32>.size
         var block: CMBlockBuffer?

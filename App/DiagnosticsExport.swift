@@ -403,14 +403,25 @@ final class LogTap {
 enum LogPartitioner {
 
     /// Every bracket tag emitted anywhere in App/ or Packages/, plus the two supplied at runtime
-    /// through `LiveVideoDecoder(logTag:)`. Regenerate with:
+    /// through `LiveVideoDecoder(logTag:)`.
+    ///
+    /// ⚠️ `WHEP-AUDIO` AND `SRT-AUDIO` ARE NOW *COMPOSED*, NOT LITERAL, in the live-audio mirror:
+    /// `FrameEngine.mirrorLiveAudio` builds its tag from `AudioTapBuffer.SourcePath.rawValue`, so
+    /// the regeneration grep below cannot see them there and a future transport's tag will not
+    /// appear in it either. `NDI-AUDIO` is listed for that reason and is not emitted today. This
+    /// costs nothing — rule 3 keeps an unlisted tag with our log anyway — but the list claims to
+    /// be complete, so the exception is stated rather than left to be rediscovered.
+    ///
+    /// Regenerate with:
     ///   grep -rhoE '@?"\s*\[[A-Za-z0-9_-]+\]' --include=*.swift --include=*.m --include=*.c App Packages
     private static let manifoldTags: Set<String> = [
-        "ABOUT", "BUILD", "CAPTIONS", "CSDEBUG", "CSPROBE", "DIAG", "EDR", "EXPORT", "LICENSE",
-        "LIVECLOCK", "NDI", "Play", "RENDER-PERF", "SRT", "SRT-AU", "SRT-BACKLOG", "SRT-DECODE",
+        "ABOUT", "ARBITER", "BUILD", "CAPTIONS", "CSDEBUG", "CSPROBE", "DIAG", "EDR", "EDRDIAG",
+        "EXPORT", "LICENSE", "LIVE-ROUTE",
+        "LIVECLOCK", "NDI", "NDI-AUDIO", "OPEN", "Play", "RASTER", "RENDER-PERF", "SPLIT",
+        "SRT", "SRT-AU", "SRT-AUDIO", "SRT-BACKLOG", "SRT-DECODE",
         "SRT-FLOW", "SRT-JITTER", "SRT-LIB", "SRT-UNDERRUN", "STREAM", "STREAMS", "SWEEP",
         "PLAYBACK", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE", "WEBRTC", "WEBRTC-SMOKE",
-        "WHEP", "WHEP-BRIDGE", "WHEP-DECODE", "WHEP-FLOW", "WHEP-RTP",
+        "WHEP", "WHEP-AUDIO", "WHEP-BRIDGE", "WHEP-DECODE", "WHEP-FLOW", "WHEP-RTP",
     ]
 
     /// Our log lines that carry no bracket tag at all. These are exactly why rule 3 defaults to

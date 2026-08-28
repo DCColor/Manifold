@@ -348,69 +348,27 @@ public enum MediaInspector {
 
     /// Short role names in channel order, derived from the format description's
     /// AudioChannelLayout. Returns nil if no usable layout/roles are present.
+    ///
+    /// ⚠️ THE READER AND THE VOCABULARY MOVED TO `AudioChannelLayoutBridge`, AND THIS IS NOW A
+    /// FORWARD. They had to move because a LIVE source has no `AVAssetTrack` to inspect — its
+    /// layout arrives on the CMSampleBuffer its decoder produces, and `AudioTapBuffer` reads it
+    /// there. Two readers would have been two role tables, and a file and an SRT stream carrying
+    /// the same 5.1 mix could then have printed different names for it.
+    ///
+    /// TWO CAMPS BECAME THREE, and the third is a widening rather than a guess: a BITMAP layout
+    /// used to fall through to "no role info we trust", which was never true of a bitmap — it
+    /// names the same WAVE positions a description does — and is doubly untrue now that this app
+    /// BUILDS bitmap layouts. CoreAudio expands both tags and bitmaps itself; see the bridge.
     private static func channelRoles(from fmt: CMFormatDescription) -> [String]? {
+        if let roles = AudioChannelLayoutBridge.roles(from: fmt) { return roles }
+        // Fallback for a TAG CoreAudio declines to expand positionally: the hand-written sequences
+        // below, which this file has always carried. Kept rather than deleted — losing a role a
+        // previous build printed would be a regression visible on the meters. (Verified against
+        // CoreAudio's own expansion for all five: the two agree exactly.)
         var size = 0
-        guard let rawPtr = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &size) else {
-            return nil
-        }
-
-        // Read the fixed header fields safely.
-        let tag = rawPtr.pointee.mChannelLayoutTag
-
-        // Camp B: explicit per-channel descriptions.
-        if tag == kAudioChannelLayoutTag_UseChannelDescriptions {
-            let count = Int(rawPtr.pointee.mNumberChannelDescriptions)
-            guard count > 0 else { return nil }
-
-            // mChannelDescriptions is a C flexible-array member. Its byte offset
-            // within AudioChannelLayout is the size of the two leading UInt32 fields
-            // (mChannelLayoutTag, mChannelBitmap) plus the UInt32 count =
-            // offsetof(AudioChannelLayout, mChannelDescriptions). Compute it from
-            // the struct layout rather than via the imported fixed-size tuple.
-            let headerSize = MemoryLayout<AudioChannelLayout>.offset(of: \.mChannelDescriptions)!
-            let descStride = MemoryLayout<AudioChannelDescription>.stride
-
-            // Bound check against the reported size.
-            guard size >= headerSize + count * descStride else { return nil }
-
-            let base = UnsafeRawPointer(rawPtr).advanced(by: headerSize)
-            var roles: [String] = []
-            roles.reserveCapacity(count)
-            for i in 0..<count {
-                let desc = base.advanced(by: i * descStride)
-                    .loadUnaligned(as: AudioChannelDescription.self)
-                roles.append(roleName(for: desc.mChannelLabel))
-            }
-            return roles
-        }
-
-        // Camp A: a known layout tag.
-        if let seq = roleSequence(forTag: tag) { return seq }
-
-        // Bitmap or unknown tag: no role info we trust.
-        return nil
-    }
-
-    /// Apple AudioChannelLabel -> short role name (Flip vocabulary, normalized).
-    private static func roleName(for label: AudioChannelLabel) -> String {
-        switch label {
-        case kAudioChannelLabel_Left: return "L"
-        case kAudioChannelLabel_Right: return "R"
-        case kAudioChannelLabel_Center: return "C"
-        case kAudioChannelLabel_LFEScreen: return "LFE"
-        case kAudioChannelLabel_LeftSurround: return "Ls"
-        case kAudioChannelLabel_RightSurround: return "Rs"
-        case kAudioChannelLabel_CenterSurround: return "Cs"
-        case kAudioChannelLabel_LeftSurroundDirect: return "Lsd"
-        case kAudioChannelLabel_RightSurroundDirect: return "Rsd"
-        case kAudioChannelLabel_RearSurroundLeft: return "Lss"   // Apple Rls -> Flip Lss
-        case kAudioChannelLabel_RearSurroundRight: return "Rss"  // Apple Rrs -> Flip Rss
-        case kAudioChannelLabel_LeftCenter: return "Lc"
-        case kAudioChannelLabel_RightCenter: return "Rc"
-        case kAudioChannelLabel_Mono: return "Mono"
-        case kAudioChannelLabel_Unused: return "—"
-        default: return "?(\(label))"   // unmapped label — show raw value
-        }
+        guard let raw = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &size),
+              size >= MemoryLayout<AudioChannelLayout>.offset(of: \.mChannelDescriptions)! else { return nil }
+        return roleSequence(forTag: raw.pointee.mChannelLayoutTag)
     }
 
     /// For Camp A known tags, the canonical role sequence (so tag-based files name

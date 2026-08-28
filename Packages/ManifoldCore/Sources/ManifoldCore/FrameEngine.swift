@@ -1505,10 +1505,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The anchor is now taken by `anchorLiveAudio(at:)`, from the first audio packet that sees a
     /// FINITE clock — the first moment the value actually exists. Until then the renderer holds at
     /// rate 0 with nothing scheduled, which is the correct state: video is not presenting yet either.
-    /// `path` names which live transport is feeding this sink, for the tap's stats and its
-    /// format-change callback. Defaulted to `.whep` so the existing WHEP call site is unchanged.
+    /// `path` names which live transport is feeding this sink. It reaches the tap's stats, the
+    /// tap's format-change callback AND the mirror's log tag, so it is the one value that decides
+    /// whether a line about this session names the transport that produced it.
+    ///
+    /// ⚠️ NO DEFAULT, AND THE MISSING DEFAULT IS THE FIX. This used to default to `.whep` "so the
+    /// existing WHEP call site is unchanged", which made the parameter optional at exactly the
+    /// moment a second transport arrived — `WindowDeck` wired SRT's seam by copying WHEP's line,
+    /// the default silently applied, and an entire SRT session logged `AudioTap[WHEP]`. The
+    /// LiveAudioSink note below already called that class of mislabel out ("reads as a real
+    /// observation and would be believed") and then a defaulted parameter reintroduced it one
+    /// layer up. A required argument is what makes a new transport unable to inherit WHEP's name.
     public func beginLiveAudio(cushion: Double,
-                               path: AudioTapBuffer.SourcePath = .whep) -> LiveAudioSink {
+                               path: AudioTapBuffer.SourcePath) -> LiveAudioSink {
         // A live source is not a file: retire any file audio session first so two producers can
         // never feed the renderer at once.
         teardownAudioReading()
@@ -1516,6 +1525,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioAnchor = nil
         mirror.lock.lock()
         mirror.active = true; mirror.cushion = cushion; mirror.mirrored = false
+        mirror.path = path
         mirror.smoothedRate = 1.0; mirror.haveSmoothed = false
         mirror.lastHost = 0; mirror.firstHost = 0
         mirror.pushedRate = 1.0; mirror.pushedMedia = 0; mirror.pushedHost = 0
@@ -1537,6 +1547,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var active = false
         var cushion: Double = 0
         var mirrored = false          // has at least one mapping landed?
+
+        /// Which transport opened this session — the mirror's LOG TAG, and nothing else.
+        ///
+        /// ⚠️ THE MIRROR IS TRANSPORT-AGNOSTIC AND ITS LOG WAS NOT. `mirrorLiveAudio` is fed by
+        /// whichever live source holds the clock; both of its lines were nevertheless hardcoded
+        /// `[WHEP-AUDIO]`, so an SRT session reported its timebase mirroring under WHEP's tag —
+        /// the same class of mislabel as `LiveAudioSink`'s hardcoded `.whep`, and just as
+        /// believable, because the numbers in those lines are real.
+        var path: AudioTapBuffer.SourcePath = .whep
 
         // ── RATE SMOOTHING STATE ───────────────────────────────────────────────────────────
         var smoothedRate: Double = 1.0
@@ -1641,6 +1660,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let active = mirror.active
         let cushion = mirror.cushion
         let wasMirrored = mirror.mirrored
+        // The transport's own tag — read under the same lock as everything else this session owns.
+        let tag = "[\(mirror.path.rawValue)-AUDIO]"
         if active, mapping != nil { mirror.mirrored = true }
         if mapping == nil { mirror.mirrored = false }
         mirror.lock.unlock()
@@ -1712,9 +1733,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // [LIVECLOCK] series over the same run. A throttle that reports only when the throttled
         // thing fires cannot measure what it is throttling.
         if statsDue {
-            NSLog("[WHEP-AUDIO] mirror — %d mapping change(s) → %d setRate call(s) "
+            NSLog("%@ mirror — %d mapping change(s) → %d setRate call(s) "
                 + "· smoothedRate=%.5f · clockRate=%.5f · posErr=%.1f ms%@",
-                  changes, pushes, smoothedNow, m.rate,
+                  tag, changes, pushes, smoothedNow, m.rate,
                   positionError.isFinite ? positionError * 1000 : 0,
                   shouldPush ? "" : " · (no push this window)")
         }
@@ -1724,9 +1745,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                              time: CMTime(seconds: target, preferredTimescale: 90_000),
                              atHostTime: CMTime(seconds: m.hostTime, preferredTimescale: 90_000))
         if !wasMirrored {
-            NSLog("[WHEP-AUDIO] timebase MIRRORED — first mapping: senderPTS=%.3fs host=%.3fs "
+            NSLog("%@ timebase MIRRORED — first mapping: senderPTS=%.3fs host=%.3fs "
                 + "rate=%.5f (smoothed %.5f) cushion=%.3fs → timebase=%.3fs",
-                  m.senderPTS, m.hostTime, m.rate, rateToPush, cushion, target)
+                  tag, m.senderPTS, m.hostTime, m.rate, rateToPush, cushion, target)
         }
     }
 

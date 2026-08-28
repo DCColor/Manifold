@@ -35,6 +35,7 @@
 //  extend, which is the whole reason this is written this way in stage 1.
 import AudioToolbox
 import AVFoundation
+import ManifoldCore   // AudioChannelLayoutBridge
 
 final class SRTAudioDecoder {
 
@@ -52,6 +53,55 @@ final class SRTAudioDecoder {
     let channelCount: Int
     let formatID: AudioFormatID
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // MARK: - STAGE 3: the channel layout
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // ⚠️ THE MUX SAYS WHAT THE CHANNELS *ARE*. THE CONVERTER SAYS WHAT ORDER THEY COME OUT IN.
+    // THOSE ARE DIFFERENT QUESTIONS AND CONFLATING THEM IS THE ONE BUG THIS WHOLE SECTION EXISTS
+    // TO AVOID.
+    //
+    // libavformat hands us `AVChannelLayout.u.mask` for the AAC stream. For 5.1 that is
+    // `AV_CH_LAYOUT_5POINT1_BACK` = L R C LFE Ls Rs — but that ORDER is *libav's* native order,
+    // the order libav's OWN decoder would emit. We do not use libav's decoder. AudioToolbox's AAC
+    // decoder, asked for nothing in particular, emits the AAC bitstream's order, which for
+    // channel_configuration 6 is `kAudioChannelLayoutTag_AAC_5_1` — **C L R Ls Rs LFE**. Measured:
+    // CoreAudio expands that tag to exactly that sequence.
+    //
+    // So attaching the mux's mask to the decoder's output as if it described the interleave would
+    // put dialogue on Left, Left on Right, and LFE on the surround pair — six bars, all labelled,
+    // all wrong, and nothing anywhere would look broken. That is precisely the "reads as a real
+    // observation and is not" failure this arc keeps finding.
+    //
+    // THE SEQUENCE HERE IS THEREFORE: ASK, THEN VERIFY.
+    //   1. Translate the mux's mask to CoreAudio positions (`AudioChannelLayoutBridge`) — refusing
+    //      any position outside the eighteen WAVE ones rather than approximating it.
+    //   2. REQUEST that order from the converter via `kAudioConverterOutputChannelLayout`. This is
+    //      the only way to make the mux's declaration true of the interleave rather than merely
+    //      true of the bitstream.
+    //   3. READ THE PROPERTY BACK once the magic cookie is settled, and label with WHAT CAME BACK.
+    //      The converter is the authority on its own output; the read-back is what makes step 2 a
+    //      verified fact instead of a hope. If the read-back disagrees with the request, the
+    //      READ-BACK wins and the log says so.
+    //   4. Any failure at any step → NO LAYOUT AT ALL. Not a fallback order, not the mask used
+    //      anyway. The meters then show channel numbers, which is the honest answer and the one
+    //      this codebase already gives everywhere else that a declaration is missing.
+
+    /// The layout to attach to the decoded `CMSampleBuffer`, in CoreAudio's DESCRIPTIONS spelling,
+    /// or nil when nothing about the channels could be established. Resolved after the first
+    /// successful decode (see `resolveOutputLayout`), so it may be nil for the first packet or two.
+    private(set) var channelLayoutData: Data?
+
+    /// Per-channel role names for `channelLayoutData`, or empty. Logging + the meters' fallback.
+    private(set) var channelRoles: [String] = []
+
+    /// What the mask asked for, for the read-back comparison. Empty when the mask was refused.
+    private var requestedLabels: [AudioChannelLabel] = []
+    private var requestStatus: OSStatus = noErr
+    private var requestMade = false
+    private var maskRefusal: AudioChannelLayoutBridge.MaskRefusal?
+    private var layoutResolved = false
+
     private var converter: AudioConverterRef?
     private let scratch: UnsafeMutablePointer<Int32>
     private let scratchCapacity: Int
@@ -63,7 +113,11 @@ final class SRTAudioDecoder {
 
     /// `extradata` is the AudioSpecificConfig when the demuxer has one; may be empty on a TS whose
     /// ASC has not been seen, in which case a cookie is synthesised from the first ADTS header.
-    init?(sampleRate: Double, channelCount: Int, formatID: AudioFormatID, extradata: [UInt8]) {
+    /// `channelMask` / `channelOrder` are the mux's declaration, straight off `AVCodecParameters`
+    /// (`AVChannelLayout.u.mask` and `AVChannelOrder`). A zero mask, or a non-NATIVE order, means
+    /// the mux declared nothing usable — which is a supported state, not an error.
+    init?(sampleRate: Double, channelCount: Int, formatID: AudioFormatID, extradata: [UInt8],
+          channelMask: UInt64, channelOrder: Int32) {
         guard sampleRate > 0, channelCount > 0 else {
             NSLog("[SRT-AUDIO] refusing to build a decoder with rate=%.0f channels=%d",
                   sampleRate, channelCount)
@@ -109,6 +163,39 @@ final class SRTAudioDecoder {
             return nil
         }
         converter = conv
+
+        // STEP 1 + 2: translate the mux's mask and REQUEST it as the converter's output order.
+        // Done before the cookie so the converter knows the shape we want before it is told what it
+        // is decoding; verified afterwards, in `resolveOutputLayout`, which is the half that counts.
+        switch AudioChannelLayoutBridge.labels(fromFFmpegMask: channelMask,
+                                               channelOrder: channelOrder,
+                                               channelCount: channelCount) {
+        case .success(let labels):
+            requestedLabels = labels
+            let asked = labels.map(AudioChannelLayoutBridge.roleName(for:)).joined(separator: " ")
+            if var blob = AudioChannelLayoutBridge.bitmapLayoutData(for: labels) {
+                requestStatus = blob.withUnsafeMutableBytes { raw in
+                    AudioConverterSetProperty(conv, kAudioConverterOutputChannelLayout,
+                                              UInt32(raw.count), raw.baseAddress!)
+                }
+                requestMade = true
+                NSLog("[SRT-AUDIO] layout: mux declares %@ — requested as the converter's output "
+                    + "order: %@", asked,
+                      requestStatus == noErr ? "ACCEPTED"
+                                             : "REFUSED (\(requestStatus)) — the read-back decides")
+            } else {
+                // Unreachable from the bridge's own output (every label it produces has a bitmap
+                // position), but stated rather than silently skipped: a caller-supplied label set
+                // could land here, and a request that was never made must not read as one that was.
+                maskRefusal = nil
+                NSLog("[SRT-AUDIO] layout: %@ has no WAVE bitmap spelling — no request made.", asked)
+            }
+        case .failure(let why):
+            maskRefusal = why
+            NSLog("[SRT-AUDIO] layout: no layout requested — %@. The converter's own output layout "
+                + "is read back regardless; if that says nothing either, the meters show channel "
+                + "NUMBERS rather than an order inferred from the count.", why.reason)
+        }
 
         if !extradata.isEmpty {
             // libavformat hands AAC extradata as a RAW AudioSpecificConfig, so it needs the same
@@ -293,7 +380,100 @@ final class SRTAudioDecoder {
             if status != noErr && status != Self.noMoreInput { lastStatus = status }
             return nil
         }
+        // STEP 3, and deliberately HERE rather than in `init`: the magic cookie may only have been
+        // set moments ago, from this very packet's ADTS header, and the converter's idea of its own
+        // output layout is not settled until it knows what it is decoding.
+        resolveOutputLayout()
         return UnsafeBufferPointer(start: scratch, count: Int(frames) * channelCount)
+    }
+
+    /// Read `kAudioConverterOutputChannelLayout` back and label from WHAT CAME BACK. Runs once.
+    ///
+    /// ⚠️ THE READ-BACK IS THE AUTHORITY, NOT THE REQUEST — INCLUDING WHEN NO REQUEST WAS MADE.
+    /// A converter that reports a layout is telling us the order it interleaves in; that is a
+    /// decoder's declaration, not a guess, and it is worth having even for a stream whose mux said
+    /// nothing. What is NOT allowed is to label from the request alone: `AudioConverterSetProperty`
+    /// returning `noErr` says the property was accepted, not that the decoder reordered, and the
+    /// difference between those two is the whole 5.1 failure mode.
+    private func resolveOutputLayout() {
+        guard !layoutResolved, let converter else { return }
+        layoutResolved = true
+
+        var size: UInt32 = 0
+        var writable: DarwinBoolean = false
+        let infoStatus = AudioConverterGetPropertyInfo(converter, kAudioConverterOutputChannelLayout,
+                                                       &size, &writable)
+        guard infoStatus == noErr, size >= UInt32(AudioChannelLayoutBridge.headerSize) else {
+            reportNoLayout("the converter reports no output channel layout "
+                         + "(GetPropertyInfo \(infoStatus), \(size) bytes)")
+            return
+        }
+        var bytes = [UInt8](repeating: 0, count: Int(size))
+        var got = size
+        let status = bytes.withUnsafeMutableBytes { raw in
+            AudioConverterGetProperty(converter, kAudioConverterOutputChannelLayout, &got, raw.baseAddress!)
+        }
+        guard status == noErr,
+              let labels = bytes.withUnsafeBytes({ raw in
+                  AudioChannelLayoutBridge.labels(fromLayout: raw.baseAddress!, size: Int(got))
+              }) else {
+            reportNoLayout("the converter's output channel layout could not be read (\(status))")
+            return
+        }
+        guard labels.count == channelCount else {
+            // A layout that does not account for every channel cannot be positional. Refuse it
+            // whole rather than label the channels it does cover and number the rest — a partly
+            // labelled 5.1 bar row invites reading the labelled ones as authoritative.
+            reportNoLayout("the converter reports \(labels.count) layout position(s) for "
+                         + "\(channelCount) decoded channel(s)")
+            return
+        }
+        let roles = labels.map(AudioChannelLayoutBridge.roleName(for:))
+        guard AudioChannelLayoutBridge.isUsable(roles) else {
+            reportNoLayout("the converter's layout names no position this app has a role for "
+                         + "(\(roles.joined(separator: " ")))")
+            return
+        }
+
+        channelLayoutData = AudioChannelLayoutBridge.descriptionsLayoutData(for: labels)
+        channelRoles = roles
+
+        let asked = requestedLabels.map(AudioChannelLayoutBridge.roleName(for:)).joined(separator: " ")
+        let gotRoles = roles.joined(separator: " ")
+        if requestMade && requestStatus == noErr && asked != gotRoles {
+            // Loud, because this is the case where the mux and the decoder disagree about the
+            // interleave and the labels now follow the DECODER. Nothing downstream is wrong — the
+            // labels describe the samples — but the mux's own words are not what is on the wire,
+            // and that is worth a line rather than a silent divergence.
+            NSLog("[SRT-AUDIO] ⚠️ layout: requested %@ and the converter reports %@ — the READ-BACK "
+                + "wins. The bars are labelled with what the decoder actually interleaves.",
+                  asked, gotRoles)
+        } else if requestMade && requestStatus != noErr {
+            NSLog("[SRT-AUDIO] layout: the request was refused; the converter's own output layout "
+                + "is %@ and the bars are labelled from that.", gotRoles)
+        } else if !requestMade {
+            NSLog("[SRT-AUDIO] layout: the mux declared nothing usable, but the CONVERTER declares "
+                + "%@ — a decoder's statement about its own interleave, not an inference from the "
+                + "channel count. Labelling from it.", gotRoles)
+        } else {
+            NSLog("[SRT-AUDIO] ✅ layout CONFIRMED: %@ — requested from the mux's declaration and "
+                + "read back from the converter, which is what makes it a fact about the samples "
+                + "rather than about the header.", gotRoles)
+        }
+    }
+
+    /// One place to say "no layout", so every route to numbers reads the same in the log and none
+    /// of them can quietly leave a stale `channelLayoutData` behind.
+    private func reportNoLayout(_ why: String) {
+        channelLayoutData = nil
+        channelRoles = []
+        NSLog("[SRT-AUDIO] layout: NONE — %@%@. The meters will show channel NUMBERS. This is the "
+            + "designed outcome, not a gap: a per-channel role inferred from a channel count is "
+            + "indistinguishable from a declared one on screen, and this app does not print one.",
+              why,
+              // Both halves in one line: what the MUX said (or failed to say) and what the
+              // CONVERTER said. Reading only one of them is how "no layout" turns into a mystery.
+              maskRefusal.map { "; the mux side: \($0.reason)" } ?? "")
     }
 
     private(set) var lastStatus: OSStatus = noErr

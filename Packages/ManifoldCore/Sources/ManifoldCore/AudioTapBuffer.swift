@@ -19,8 +19,12 @@ import AudioToolbox
 /// the FrameEngine main-actor boundary).
 public final class AudioTapBuffer: @unchecked Sendable {
 
-    /// Which decode path produced a tapped buffer (for logging/validation only).
-    public enum SourcePath: String { case avFoundation = "AVF", libav = "libav", ndi = "NDI", whep = "WHEP", srt = "SRT" }
+    /// Which decode path produced a tapped buffer. NOT logging-only any more: the raw value is
+    /// the LOG TAG the live-audio mirror prints under, so it is the single thing that decides
+    /// whether a line about a session names the transport that actually produced it.
+    public enum SourcePath: String, Sendable {
+        case avFoundation = "AVF", libav = "libav", ndi = "NDI", whep = "WHEP", srt = "SRT"
+    }
 
     /// The normalized capture format. `channelCount` is the SOURCE interleaved channel count (what the
     /// ring stores); `deckLinkChannelCount` is that count padded UP to the nearest SDK-legal value
@@ -31,6 +35,31 @@ public final class AudioTapBuffer: @unchecked Sendable {
         public let channelCount: Int
         public let deckLinkChannelCount: Int
         public let path: SourcePath
+
+        /// STAGE 3: per-channel role names the SOURCE DECLARED, in interleave order, or EMPTY when
+        /// it declared none. Read off the tapped `CMSampleBuffer`'s AudioChannelLayout by
+        /// `AudioChannelLayoutBridge` — the same reader `MediaInspector` uses on a file's track.
+        ///
+        /// ⚠️ EMPTY MEANS "SHOW NUMBERS", NOT "WORK IT OUT FROM THE COUNT". A six-channel feed that
+        /// declares no usable layout meters as 1–6, and that is the finished behaviour, not a gap:
+        /// `MediaInspector` will name a LAYOUT from a count alone ("5.1 (inferred)") but per-channel
+        /// labels are the one place an inference would be indistinguishable from a declaration, over
+        /// the exact instrument someone uses to decide which channel is which. Count-implies-layout
+        /// is the guess this codebase refuses; it is refused here too.
+        ///
+        /// ⚠️ THIS IS WHY IT LIVES ON THE FORMAT AND NOT BESIDE `metadata.audioTracks`. A live
+        /// source has no `AVAssetTrack`, so the track-list route cannot reach it; the tap is the one
+        /// thing every producer — AVF, libav, NDI, WHEP, SRT — already passes through.
+        public var roles: [String] = []
+
+        public init(sampleRate: Double, channelCount: Int, deckLinkChannelCount: Int,
+                    path: SourcePath, roles: [String] = []) {
+            self.sampleRate = sampleRate
+            self.channelCount = channelCount
+            self.deckLinkChannelCount = deckLinkChannelCount
+            self.path = path
+            self.roles = roles
+        }
     }
 
     /// Snapshot for the logging/validation hook + future preference UI.
@@ -201,8 +230,16 @@ public final class AudioTapBuffer: @unchecked Sendable {
         // Hand the converted Int32 scratch to the shared ring-append — the SAME path the raw NDI
         // push funnels through, so the anchoring + windowing discipline has exactly one copy
         // regardless of which producer supplied the samples.
+        // STAGE 3: whatever the producer DECLARED about the channels, read from the same format
+        // description the ASBD came from. Nil (no layout, or one the bridge will not translate)
+        // becomes [] — "show numbers" — never an inference from `ch`.
+        let roles = AudioChannelLayoutBridge.roles(from: fmtDesc).flatMap {
+            AudioChannelLayoutBridge.isUsable($0) ? $0 : nil
+        } ?? []
+
         scratch.withUnsafeBufferPointer { buf in
-            append(buf, frames: frames, channels: ch, sampleRate: rate, pts: pts, path: path)
+            append(buf, frames: frames, channels: ch, sampleRate: rate, pts: pts, path: path,
+                   roles: roles)
         }
     }
 
@@ -215,12 +252,18 @@ public final class AudioTapBuffer: @unchecked Sendable {
     ///
     /// Called off the producer's pull thread (the NDI display-tick pull), OUTSIDE any lock the caller
     /// holds, matching `ingest`'s threading contract.
+    /// `roles` is the producer's DECLARED per-channel roles in interleave order, or empty when it
+    /// declares none — the same contract as `Format.roles`, which this feeds. A producer that
+    /// builds no `CMSampleBuffer` has no format description to read a layout out of, so it must
+    /// state them here or state nothing. NDI states nothing, which is correct: the SDK's audio
+    /// frame carries a channel COUNT and no layout.
     public func pushInterleavedInt32(_ samples: UnsafePointer<Int32>, frameCount: Int,
                                      channelCount ch: Int, sampleRate rate: Double,
-                                     pts: Double, path: SourcePath) {
+                                     pts: Double, path: SourcePath, roles: [String] = []) {
         guard frameCount > 0, ch > 0, rate > 0, pts.isFinite else { return }
         let buf = UnsafeBufferPointer(start: samples, count: frameCount * ch)
-        append(buf, frames: frameCount, channels: ch, sampleRate: rate, pts: pts, path: path)
+        append(buf, frames: frameCount, channels: ch, sampleRate: rate, pts: pts, path: path,
+               roles: roles)
     }
 
     /// Shared ring-append (both `ingest` and `pushInterleavedInt32` funnel here): (re)configure the
@@ -228,20 +271,43 @@ public final class AudioTapBuffer: @unchecked Sendable {
     /// Int32 frames into the window, and fire `onFormatChange` after the lock is dropped. `src` holds
     /// `frames * channels` interleaved Int32.
     private func append(_ src: UnsafeBufferPointer<Int32>, frames: Int, channels ch: Int,
-                        sampleRate rate: Double, pts: Double, path: SourcePath) {
+                        sampleRate rate: Double, pts: Double, path: SourcePath, roles: [String]) {
         lock.lock()
         // (Re)configure on first buffer or a format change (rate/channels): size the ring to the window.
+        //
+        // ⚠️ THE ROLES ARE PART OF THE CHANGE TEST BUT NOT PART OF THE RING RESIZE. A layout that
+        // arrives late — the decoder's first packets carrying no declaration and a later one
+        // carrying it, which is exactly what an ADTS stream does before its ASC is seen — must
+        // still reach the meters, so it re-publishes the format. It must NOT flush the ring: no
+        // sample changed shape, and dropping the window would make a late declaration audible as a
+        // gap. Hence the two conditions are separated rather than merged into one `if`.
         var newFormat: Format?
-        if currentFormat == nil || currentFormat?.sampleRate != rate || currentFormat?.channelCount != ch {
+        // Built under the lock, printed OUTSIDE it — the DeckLink audio callback takes this same
+        // lock at 50 Hz and is realtime-sensitive; a `print` inside it is a stall waiting to be
+        // blamed on something else.
+        var rolesOnlyLog: String?
+        let shapeChanged = currentFormat == nil
+            || currentFormat?.sampleRate != rate || currentFormat?.channelCount != ch
+        let rolesChanged = currentFormat?.roles != roles
+        if shapeChanged {
             channels = ch
             sampleRate = rate
             capacityFrames = max(1, Int((windowSeconds * rate).rounded()))
             ring = [Int32](repeating: 0, count: capacityFrames * ch)
             writeHead = 0; framesWritten = 0; basePTS = .nan
+        }
+        if shapeChanged || rolesChanged {
             let fmt = Format(sampleRate: rate, channelCount: ch,
-                             deckLinkChannelCount: Self.deckLinkChannelCount(for: ch), path: path)
+                             deckLinkChannelCount: Self.deckLinkChannelCount(for: ch), path: path,
+                             roles: roles)
             currentFormat = fmt
-            newFormat = fmt   // notified after the lock is dropped
+            // A roles-only change does NOT fire `onFormatChange`: nothing on the WIRE depends on
+            // the names, and that handler re-establishes the DeckLink output — it would interrupt
+            // audio in order to relabel a meter. The meters poll `format` and pick it up anyway.
+            newFormat = shapeChanged ? fmt : nil   // notified after the lock is dropped
+            rolesOnlyLog = shapeChanged ? nil
+                : "AudioTap[\(path.rawValue)]: channel roles → "
+                  + (roles.isEmpty ? "none declared (meters show numbers)" : roles.joined(separator: " "))
         }
         // Anchor the session clock, or re-anchor on an unexpected PTS jump (seek/gap not routed
         // through reset()).
@@ -275,9 +341,12 @@ public final class AudioTapBuffer: @unchecked Sendable {
         // re-enter the ring while we hold it.
         if let newFormat {
             print("AudioTap[\(path.rawValue)]: format → \(Int(newFormat.sampleRate))Hz · "
-                + "\(newFormat.channelCount)ch (→ \(newFormat.deckLinkChannelCount)ch on SDI)")
+                + "\(newFormat.channelCount)ch (→ \(newFormat.deckLinkChannelCount)ch on SDI) · roles "
+                + (newFormat.roles.isEmpty ? "NONE DECLARED (meters show numbers)"
+                                           : newFormat.roles.joined(separator: " ")))
             onFormatChange?(newFormat)
         }
+        if let rolesOnlyLog { print(rolesOnlyLog) }
 
         if doLog {
             print("AudioTap[\(path.rawValue)]: int32 interleaved · \(logRate)Hz · \(logCh)ch · "

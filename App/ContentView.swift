@@ -1481,11 +1481,43 @@ struct ContentView: View {
             // bounds-guarded for the same reason: `metadata` lands after the decoder has already
             // sized the bars, so there is a real window where the engine has three tracks and the
             // inspector has none. Empty means "declared nothing", which is what the meter falls
-            // back to numbers on. Live sources (NDI) declare no roles and correctly get numbers.
+            // back to numbers on.
+            //
+            // ── STAGE 3: THE TAP IS THE SECOND SOURCE, AND IT IS THE ONLY ONE A LIVE FEED HAS ──
+            //
+            // `metadata.audioTracks` is built from `AVAssetTrack`s. A live source has none — which
+            // is why a 5.1 SRT feed metered as six bars numbered 1–6 even while the mux was
+            // declaring the layout on every packet. The tap's format now carries the roles the
+            // DECODER established (read off the CMSampleBuffer's AudioChannelLayout by the same
+            // `AudioChannelLayoutBridge` the inspector uses), so this closure has somewhere to look
+            // when there is no track list.
+            //
+            // ⚠️ THE TRACK LIST WINS WHERE IT EXISTS, AND THE ORDER IS NOT ARBITRARY. A file can
+            // hold several audio tracks and the meters follow the SELECTED one; the tap only ever
+            // holds the monitored track's format, so preferring the tap would be right by accident
+            // for a single-track file and wrong the moment a second track was chosen. The tap is
+            // the fallback, not the source of truth.
+            //
+            // ⚠️ AN EMPTY TAP ARRAY STAYS EMPTY. It means the source declared nothing usable, and
+            // the meter's answer to that is channel NUMBERS — never a layout inferred from the
+            // count. See `AudioTapBuffer.Format.roles`.
             meterModel.channelRoles = { [weak engine] in
-                guard let engine, let tracks = engine.metadata?.audioTracks,
-                      tracks.indices.contains(engine.selectedAudioTrackIndex) else { return [] }
-                return tracks[engine.selectedAudioTrackIndex].roles
+                guard let engine else { return [] }
+                // ⚠️ THE LIVE TEST COMES FIRST, AND IT IS NOT BELT-AND-BRACES. `engine.metadata`
+                // describes the last FILE this deck opened and is not cleared when a stream takes
+                // the picture over — so a deck that played a stereo file and then connected to a
+                // 5.1 SRT feed would satisfy the track-list branch and label six live bars "L R"
+                // from a file that is no longer on screen. Asking `LiveSource.connected` is the
+                // same question `isLive` above asks, for the same reason, and it cannot be missed
+                // by a fifth transport the way an enumeration can.
+                if LiveSource.connected != nil { return engine.audioTap.format?.roles ?? [] }
+                if let tracks = engine.metadata?.audioTracks,
+                   tracks.indices.contains(engine.selectedAudioTrackIndex) {
+                    return tracks[engine.selectedAudioTrackIndex].roles
+                }
+                // No track list and no live transport: the libav (MXF) path, whose roles — if its
+                // sample buffers ever carry a layout — reach the tap and nowhere else.
+                return engine.audioTap.format?.roles ?? []
             }
             // A live source has no playhead to key the ring against — see the note in
             // AudioMeterModel.tick.
