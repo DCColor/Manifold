@@ -2649,3 +2649,197 @@ SDI, CoreAudio's own fold on the desktop.
 hangs off is `FrameEngine.selectAudioTrack`; the role derivation is
 `MediaInspector.channelRoles(from:)`; the discovery chain and measurements are
 `docs/AUDIO_PATH_FINDINGS.md`.
+
+---
+
+## ✅ CAUSE CONFIRMED 2026-08-29 — the Refresh highlight cannot see a Flip edit, and no metadata fingerprint can
+
+**Status:** ✅ **CAUSE CONFIRMED 2026-08-29.** **NOT a regression in Manifold** — nothing in this
+app's history touched the path, and the code is byte-identical to the day it landed. **NOT a defect
+in Flip either** — the behaviour that defeats us is deliberate there and documented. **FIX LANDED
+2026-08-29:** the highlight is now armed from INTENT (the Edit in Flip press) as well as from
+detection. **Found:** 2026-08-28, during a demo. **Blocked, until the fix:** the Flip round-trip —
+a file edited externally has to be noticed, and the highlight is the only signal.
+
+### ⚠️ THE ENTRY THAT STOOD HERE BEFORE WAS WRONG ON ITS MOST CONFIDENT LINE
+
+It said, in bold, that this is "a regression, not a never-worked", and called that the most useful
+line in the entry. It was the least useful one. **The highlight was never unconditional.** It has
+always fired only for the subset of Flip edits that change the file's byte LENGTH, so which file
+and which edit you demo with decides the outcome — not which build. That is why "when did it break"
+had no answer and a bisect would have found nothing. The observation "I have seen it work" was
+true and was not evidence of a regression.
+
+Kept, rather than deleted, because the wrong inference is the instructive part: *"it used to work"*
+is a report about two sessions with different inputs, not about two builds.
+
+### The cause, in one line
+
+**Flip restores the file's modification date after every in-place write, writes in place so the
+inode never changes, and preserves the file's length wherever it can — which is all three fields
+the fingerprint compares.**
+
+`App/SourceFileWatcher.swift` names this exact case in its own comment as the one thing that slips
+through: *"an edit that rewrites the bytes in place, keeps the length, and then restores the
+modification date."* That is a precise description of Flip.
+
+| fingerprint field | what Flip's in-place write does to it |
+|---|---|
+| modification date | **restored to its pre-write value**, explicitly |
+| size | unchanged for a same-size overwrite, and for a grow absorbed by an adjacent `free`/fill atom; MXF header writes are size-invariant *by assertion* |
+| inode (`st_ino`) | unchanged — the file is opened `r+`, never replaced |
+
+Flip's three write sites, for whoever checks this next:
+
+- `electron/parser/patch.js:27-35` — `preserveMtime` stats, writes, then
+  `fs.utimesSync(filePath, mtimeMs/1000, mtimeMs/1000)`. Every patch write is wrapped in it.
+- `electron/parser/moov.js:310` and `:636` — `writeMoovBack` ends in
+  `fs.utimesSync(filePath, atime, mtime)`. This is the colour-tag / HDR10 / track-name / language
+  path, i.e. the one this feature exists for.
+- `electron/parser/mxf.js:1058` — MXF goes through `preserveMtime` too, and MXF header edits
+  absorb growth from KLV fill under an assertion that the new buffer length equals the old.
+
+**Verified, not inferred.** The real `SourceFileWatcher` class was extracted and run standalone
+against a replica of Flip's write shape (open `r+`, same-size overwrite, restore mtime):
+`mtime same: true  size same: true  inode same: true` → `changedOnDisk = false`. The same harness
+run against `replaceItemAt` — a write-temp-then-rename atomic replace — reported
+`changedOnDisk = true`.
+
+**That kills the atomic-replace hypothesis the previous entry led with.** The watch is path-based
+polling, not a descriptor or inode watch; `Fingerprint(of:)` re-stats the PATH every tick. An
+atomic replace was always caught. It was never the problem.
+
+### ⚠️ FLIP PRESERVING THE MTIME IS DELIBERATE. DO NOT OPEN A BUG AGAINST IT
+
+A metadata edit is not a content change, and the file's modification date carries information a
+facility depends on — when the master was made, not when someone last corrected a colour tag.
+Flip restoring it is the correct behaviour for the product it is.
+
+**Flip already documents the consequence, in as many words** — `electron/scan/scan.js:292-297`:
+
+> THE LIMIT OF mtime, stated plainly: Flip's own MOV writers RESTORE the modification time after
+> writing (writeMoovBack ends in fs.utimesSync; patch.js wraps every write in preserveMtime), and
+> an instant write usually leaves the size unchanged too. So this catches Resolve, Finder, another
+> user, another app — **but it CANNOT catch Flip.** A batch runner must therefore invalidate the
+> rows it wrote itself, from its own knowledge of what it wrote, rather than trusting a re-stat to
+> notice. That is not a gap this module can close.
+
+Flip reached the same conclusion about its own folder-audit staleness check and solved it the same
+way this entry proposes: **act on what you know you did, rather than re-statting to find out.**
+Two products, the same wall, the same door through it.
+
+### ⚠️ THE SMB FINDING — WHY `ctime` IS NOT THE ESCAPE HATCH, AND WHY NOTHING ELSE IS EITHER
+
+`st_ctime` (inode change time) is the obvious fourth field, and the obvious next thing anyone will
+reach for. `utimes(2)` bumps it and it cannot be forged without raw device access, so on a local
+APFS volume it does catch a Flip write. It is exposed to us as
+`URLResourceKey.attributeModificationDateKey`.
+
+**It does not survive the network — but only on SOME servers, and that is worse than "never".**
+
+MEASURED 2026-08-29 on this machine, across every writable mount, by replicating Flip's exact write
+shape (open `r+`, 16-byte same-size overwrite at a fixed offset, `fsync`, then `utimes` restoring
+the original mtime) and comparing `stat` before and after:
+
+| mount | server | dialect | mtime | size | inode | **ctime** |
+|---|---|---|---|---|---|---|
+| local | APFS | — | same | same | same | **MOVED** — detectable |
+| `/Volumes/DCCOLOR` | 10.25.2.125 | SMB 3.1.1 | same | same | same | **MOVED** — detectable |
+| `/Volumes/Qbit` | 10.25.2.125 | SMB 3.1.1 | same | same | same | **MOVED** — detectable |
+| `/Volumes/Photon` | 10.0.1.200 | SMB 3.0.2 | same | same | same | **SAME — INVISIBLE** |
+
+All four shares report `OS_X_SERVER TRUE`, `UNIX_SUPPORT TRUE` and `FILE_IDS_SUPPORTED TRUE`
+(`smbutil statshares -a`), so the capability flags do NOT predict the difference — the server
+implementation does.
+
+**THE MECHANISM ON THE FAILING MOUNT, since a bare "it doesn't move" invites a retest that proves
+nothing:** against 10.0.1.200, smbfs reports **`ctime` as a MIRROR of `mtime`** — the two are
+byte-identical before the write and byte-identical after it, across repeated trials. It is not a
+separate field that happens to stay put; there is no independent ctime to read. Restoring the mtime
+restores the ctime with it, necessarily and every time.
+
+⚠️ **A SECOND, INDEPENDENT HOLE ON THE SAME MOUNT:** timestamps there have **whole-second
+granularity** (`1788040016.000000`), not the sub-second precision `SourceFileWatcher`'s design note
+relies on APFS for. So on that server even a write that DOES move the mtime is invisible if it
+lands in the same second as the baseline — which a metadata edit immediately after a load easily
+does. Two different reasons the fingerprint fails there, and fixing either would not fix the other.
+
+*Still visible on that mount:* a **size** change (verified as a control — 4096 → 4128 with the mtime
+restored). That is the one field that survives everywhere, and it is why the watcher catches the
+subset of Flip edits that change the file's length.
+
+**Why this decided the approach rather than merely complicating it.** The failure is not universal,
+and that is precisely the problem: `ctime` would have made the feature work on the machine it was
+developed on and fail silently on a customer's NAS, with no error, no log line, and no way for
+anyone to tell the two apart from the outside. A hint that is right in the office and wrong on site
+is worse than one that does not depend on the server at all.
+
+**THE CONSTRAINT THIS PUTS ON ANYTHING ANYONE TRIES HERE LATER, stated as a general fact rather
+than as a fact about Flip:**
+
+> **No metadata fingerprint can see an in-place, same-size write with a restored mtime on network
+> storage.** mtime is restored, size is unchanged, the inode is unchanged, and ctime does not move.
+> That exhausts what `stat` gives you.
+
+What remains is content hashing, and it is off the table for the reason the watcher already
+states: hashing a 40 GB master every two seconds is not a trade anyone wants. So the answer is not
+a better fingerprint. **There is no better fingerprint.**
+
+⚠️ Anyone arriving here with *"just add ctime"* has already been answered. Please leave this
+paragraph in place rather than re-deriving it against an SMB volume.
+
+### The watcher STAYS, and what it is still for
+
+Nothing above is an argument for deleting `SourceFileWatcher`. It still catches everything Flip's
+own note lists — **Resolve, Finder, another user, another app** — plus the Flip edits that *do*
+change the file's length (a MOV grow with no adjacent `free` atom to absorb it, which is a real and
+common case). Those are writes by things that do not restore the mtime, which is most things.
+
+What it structurally cannot see is a Flip edit, and that is the one case a colourist hits daily.
+
+### The fix, landed 2026-08-29
+
+**The highlight is armed when the user presses Edit in Flip.** Handing a file to Flip is a strong
+signal of intent to modify it — nobody opens a file in Flip to LOOK at it, since Manifold already
+shows the metadata. It costs nothing, needs no polling or hashing, and behaves identically on local
+and network storage, which the fingerprint demonstrably does not.
+
+**SUPPLEMENT, NOT REPLACEMENT.** Two independent reasons for the same highlight, cleared by the
+same read: the watcher covers writers that move the mtime — Resolve, Finder, another user, another
+app — and the Edit in Flip arm covers the writer that does not. Neither subsumes the other, and
+the watcher was not touched except to add the second flag alongside the first.
+
+What landed:
+
+- `SourceFileWatcher.sentForEditing`, a second published flag, plus `isHighlighted` (either
+  reason) and `noteSentForEditing()`. **Two flags, not one, because the tooltip has to be able to
+  say which reason it is holding** — `changedOnDisk` is observed, `sentForEditing` is inferred from
+  a button press, and one sentence cannot serve both without over-claiming on the weak case.
+- `rebaseline()` clears both. **Nothing expires.** Send to Flip, never save, and the highlight
+  stands until a read clears it — one wasted press, against a timeout that would be a guess about
+  how long someone spends in Flip and would fail silently when it guessed short.
+- `poll()` still guards on `changedOnDisk` ALONE, so a window lit only by the inferred reason keeps
+  taking readings and **upgrades** to the observed one if the write turns out to be visible.
+- `ContentView.editInFlip()` arms in the `NSWorkspace.open` completion handler **on `error == nil`
+  only** — not at the top of the function, which would also light the button in the Flip-not-
+  installed case, the one a new user hits on their very first press.
+- One green for both, two tooltips: *"This file changed on disk — click to reload"* wins over
+  *"Editing in Flip — reload to pick up any changes"*, because an observation beats an inference.
+
+Builds clean in Debug, Profile and Release.
+
+### ⚠️ THE COMMIT MESSAGE THAT INTRODUCED THIS FEATURE IS WRONG — DO NOT GO LOOKING
+
+`ebb23bf` ("Refresh metadata button highlights when the file changes on disk") ends its subject
+line with **"…with alias re-resolution across atomic replaces"**. There is no alias or bookmark
+resolution in that commit, in `SourceFileWatcher.swift`, or anywhere this feature touches:
+`grep -i 'alias\|bookmark'` over the entire diff hits nothing but an unrelated stream-bookmarks
+sheet. The message describes a design that did not ship.
+
+It matters because it points at machinery that would be the obvious place to look for this bug —
+and it is not there to find. The atomic-replace case is handled by re-stat'ing the PATH every tick,
+which needs no alias resolution at all, and which **was verified working** (see the harness result
+above). The commit is published and its message cannot be rewritten, so the correction is recorded
+here and in `SourceFileWatcher.swift`'s header, which is where a reader who followed that line
+will land.
+

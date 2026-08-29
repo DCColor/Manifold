@@ -2943,6 +2943,12 @@ struct ContentView: View {
                 // would be read as a third state of the first meaning rather than as a new one, and
                 // "this control has something for you" is exactly what green already says at a
                 // glance. If it ever reads oddly, that is why.
+                //
+                // ⚠️ TWO DIFFERENT REASONS PRODUCE THIS ONE GREEN, and the tooltip is the ONLY
+                // place they are told apart — see `reloadHelp` below, and `sentForEditing` in
+                // SourceFileWatcher for why they are two flags and not one. Deliberately not two
+                // colours: a second highlight in this row would read as a third state of the
+                // first meaning rather than as a new meaning.
                 Button(action: {
                     // The press IS the acknowledgement — adopt what is on disk now as the truth
                     // before the read, so the highlight clears immediately rather than on the next
@@ -2952,9 +2958,8 @@ struct ContentView: View {
                 }) {
                     Image(systemName: "arrow.clockwise")
                 }
-                .foregroundStyle(fileWatch.changedOnDisk ? Color.green : .white.opacity(0.9))
-                .help(fileWatch.changedOnDisk ? "This file changed on disk — click to reload"
-                                              : "Refresh metadata")
+                .foregroundStyle(fileWatch.isHighlighted ? Color.green : .white.opacity(0.9))
+                .help(reloadHelp)
                 .disabled(engine.currentURL == nil)
 
                 // Export the current frame (ACTION) — sits with the file/action controls.
@@ -3061,12 +3066,51 @@ struct ContentView: View {
         let flipBundleID = "tools.graviton.flip"
         if let flipURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: flipBundleID) {
             let config = NSWorkspace.OpenConfiguration()
+            // Captured as a local rather than reached through `self` in the escaping closure below:
+            // this is a struct, and the closure only ever needs the watcher's identity. A
+            // `@MainActor` class is Sendable, so the capture is clean.
+            let watcher = fileWatch
             NSWorkspace.shared.open([url], withApplicationAt: flipURL, configuration: config) { _, error in
-                if let error { print("Edit in Flip: open failed — \(error.localizedDescription)") }
+                if let error {
+                    print("Edit in Flip: open failed — \(error.localizedDescription)")
+                    return
+                }
+                // ⚠️ THE HIGHLIGHT IS ARMED HERE, IN THE COMPLETION HANDLER ON SUCCESS — NOT AT THE
+                // TOP OF THIS FUNCTION, AND THE DIFFERENCE IS A REAL USER.
+                //
+                // This function has three outcomes and only one of them is intent-to-modify: Flip
+                // opens; Flip is not installed, and we show the Get Flip sheet instead (the `else`
+                // below); or the open is attempted and FAILS. Arming before the open would light
+                // the button in all three — including the not-installed case, which is the one a
+                // NEW USER hits, on the very first press, for a file that nothing has touched and
+                // no editor has even launched against. A hint that fires when nothing happened is
+                // how a control loses its meaning; this one is only worth having while it is
+                // believed. The cost of getting it right is this hop back to the main actor.
+                //
+                // Success here means AppKit launched or activated Flip with the file — not that
+                // Flip wrote anything. That weaker claim is exactly what the tooltip says.
+                Task { @MainActor in watcher.noteSentForEditing() }
             }
         } else {
             showGetFlipSheet = true
         }
+    }
+
+    /// The reload button's tooltip, and the ONLY place the highlight's two reasons are told apart.
+    ///
+    /// `changedOnDisk` takes precedence because an OBSERVATION BEATS AN INFERENCE: if a reading of
+    /// the file actually differs, say so plainly. The middle case says only the two things we know
+    /// — that this window handed the file to Flip, and what the press will do — and deliberately
+    /// does NOT claim Flip wrote anything, because nothing here can know that. See
+    /// `SourceFileWatcher.sentForEditing`.
+    ///
+    /// A computed property rather than a ternary chain inline in `.help(…)`: this body is at the
+    /// Swift type-checker's limit (see the notes on the currentURL observer), and a nested
+    /// conditional inside an already-enormous modifier chain is exactly the shape that tips it.
+    private var reloadHelp: String {
+        if fileWatch.changedOnDisk { return "This file changed on disk — click to reload" }
+        if fileWatch.sentForEditing { return "Editing in Flip — reload to pick up any changes" }
+        return "Refresh metadata"
     }
 
     /// Speaker icon reflecting mute + volume level.
