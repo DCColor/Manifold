@@ -298,6 +298,27 @@ WHICH FRAME is shown, that one is about HOW IT IS LIT. Fixing either does not fi
 single change was proposed to fix both — routing scrub preview through the real decode path — and
 it is REJECTED on four grounds recorded in that entry.** Read them before proposing it again.
 
+⚠️ **THE AVPlayerItemVideoOutput SPIKE PASSED 2026-08-29 AND IT DOES NOT CLOSE THIS ENTRY. Do not
+mark this fixed when that route is built.** See *"⏸ BANKED: feed the scrub gesture from
+`AVPlayerItemVideoOutput`"* below. What it removes is the **disagreement between two decoders** —
+with one decoder there is nothing left to disagree, so the mismatch CLASS goes away. What it does
+NOT remove is **tolerance**, which is this entry's other half. Measured on that route: the delivered
+frame is up to **10.4 frames** from the one requested on 4K H.264, and **26 of 40** positions in a
+20 Hz drag return the frame already on screen. That is not a regression — the shipping ±0.5 s
+overlay measured **up to 11 frames apart in both directions** — and on all-intra the route is exact
+to the nearest frame (0.5 mean, 1.0 max). **But "one decoder" and "frame-accurate scrub preview"
+are different claims, and only the first one is on offer.**
+
+⚠️ **A RELEASE SETTLE THEREFORE SURVIVES THE OVERLAY'S DELETION, ON LONG-GOP ONLY.** The scrub
+producer seeks at infinite tolerance and `exactSeek` does not, so the seek's first frame can differ
+from the frame the drag was showing: **zero on MXF by construction** (exact seek, all-intra —
+measured 0.5 mean / 1.0 max on every fixture), effectively zero on ProRes, **up to 10.4 frames on
+4K H.264**. There is a deferred way out — seek playback to the frame the producer actually
+DELIVERED rather than to `scrubValue` — and it is a **Stage 3 decision requiring its own
+measurement**, not an assumption, because it changes which frame a release lands on and therefore
+interacts with this entry directly. See *"📐 SCOPED, NOT BUILT: two producers, one destination"*
+§2 below.
+
 ### The reading that SURVIVED measurement: PREVIEW ACCURACY, not a seek bug
 
 Timecode agreeing after the jump means the final seek lands where it was asked to. So the frame
@@ -652,6 +673,14 @@ still tone-mapped. All three parts are needed for full coverage:
 3. **A float path in `LibavThumbnailSource`** if DNx/MXF HDR is to be covered at all. It currently
    swscales to `AV_PIX_FMT_RGBA` and builds an 8-bit `CGImage` — **SDR by construction**, and no
    layer opt-in can rescue 8-bit RGBA. This is a second producer, and it needs its own pipeline.
+   ⚠️ **MEASURED 2026-08-30: it does not need a float CGImage path, it needs to stop returning a
+   CGImage.** The same libav decode converted to the app's x420 `CVPixelBuffer` instead carries PQ
+   and HLG tags onto the buffer and preserves the 10-bit luma codes **losslessly over the whole
+   raster** — for 11.4 ms at 4K, inside the drag budget. See *"✅ THE MXF HALF, MEASURED
+   2026-08-30"* under the `AVPlayerItemVideoOutput` entry below. **Part 3 as scoped here — a float
+   path feeding the same overlay — would be building a second producer for a surface that route
+   deletes.** It closes at **Stage 3** of *"📐 SCOPED, NOT BUILT: two producers, one destination"*,
+   by deleting the 8-bit RGBA path rather than giving it a float variant.
 
 Parts 1 and 2 cover ProRes/H.264 (the AVFoundation path). Part 3 is separable and can be deferred
 with the consequence stated: HDR DNx/MXF previews stay SDR.
@@ -659,7 +688,16 @@ with the consequence stated: HDR DNx/MXF previews stay SDR.
 ### ⚠️ REJECTED: routing scrub preview through the real decode path
 
 **Someone will have this idea again — it was had, scoped and measured on 2026-08-27, and it is
-rejected.** The proposal: drop the generator-to-`CGImage` overlay and drive scrub preview through
+rejected.**
+
+⚠️ **READ THIS FIRST: WHAT IS REJECTED HERE IS A SECOND `AVAssetReader`, NOT THE IDEA OF ROUTING
+SCRUB THROUGH THE DISPLAY PATH.** A different implementation of that idea —
+`AVPlayerItemVideoOutput` on a scrub-only `AVPlayer` — was **spiked 2026-08-29 and PASSED**, and it
+beats the `exactSeek` table below on every fixture: **6.7 vs 27.4 ms mean on ProRes 422 HQ, 9.3 vs
+117.7 ms worst case, and 14.8 vs 53.7 ms on the H.264 that failed outright here.** See *"⏸ BANKED:
+feed the scrub gesture from `AVPlayerItemVideoOutput` — one decoder, one display path"* below,
+which also records why each of the four grounds below does not transfer. **The four grounds remain
+correct about the thing they measured.** Do not use this section to reject that one. The proposal: drop the generator-to-`CGImage` overlay and drive scrub preview through
 the real decode path (reader → `CVPixelBuffer` → the Metal renderer), which would be EDR-correct
 by construction AND collapse this entry and the frame-mismatch half of the scrub-position entry
 into one fix. It fails on four independent grounds, any one of which is sufficient.
@@ -1225,9 +1263,17 @@ Do not reopen the PROPERTY question without reading why each was eliminated:
    `8896163` fixed) and generalised from it. `AVPlayerItemVideoOutput` on a scrub-only `AVPlayer`
    has none of those three problems, vends a `CVPixelBuffer` instead of a `CGImage`, and would put
    the scrub frame through the same shader, offscreen and layer as playback — **identical by
-   construction rather than by matching.** It also closes the scrub-POSITION defect and the stale-
-   scopes defect at the same time. ⚠️ **UNMEASURED on two counts that must be spiked first;** see
-   the entry.
+   construction rather than by matching.** It also closes the stale-scopes defect at the same time.
+
+   ✅ **SPIKED 2026-08-29 AND IT PASSED — for this entry's use, without qualification.** Numbers in
+   that entry. What matters here: the scrub frame reaches the **completed offscreen** in 7.7–8.4 ms
+   on 4K ProRes and 16.1 ms on 4K H.264, against a 50 ms budget, and the shader stage that carries
+   it there costs about **1 ms**. So the overlay can stop existing as a separate path, and this
+   entry's mismatch stops being something to reconcile — **there is only one path left to be in a
+   mode.** ⚠️ **The route's three properties are recorded in that entry and NONE of them is a colour
+   property** — they are long-GOP frame CHOICE, network IO, and 6K margin. **This entry's defect is
+   fully closed by the route; the scrub-POSITION entry's is not.** Do not carry the qualification
+   across.
 3. **⏸ SUPPRESS THE OVERLAY ON HDR SOURCES — DEFERRED, and it trades one defect for an older one.**
    Technically trivial (`ScrubDebug.overlayDisabled` already does exactly this globally). But the
    overlay exists to fix the scrub-POSITION defect — without it, `scrubSeek` does no decode and the
@@ -1382,8 +1428,28 @@ holding across all five of play / pause / scrub / export / SDI).
 
 ## ⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput` — one decoder, one display path
 
-**Status:** BANKED, not built, **not yet spiked.** **Raised:** 2026-08-28, out of the HDR scrub
-investigation. **Precondition for:** the colour-management mode work
+**Status:** **✅ SPIKE PASSED 2026-08-29 — on all three uses. Still BANKED and NOT BUILT.** The
+gate is cleared; the work is not scheduled. **Raised:** 2026-08-28, out of the HDR scrub
+investigation. **Spiked:** 2026-08-29 with `docs/scrub-fixtures/avpvomeas.swift` — see *"✅ SPIKE
+RESULT 2026-08-29"* below.
+
+⚠️ **THE IMPLEMENTATION IS NOW SCOPED — see *"📐 SCOPED, NOT BUILT: two producers, one
+destination — deleting the scrub overlay"* below.** ⚠️ **Read it before starting: it corrects the
+seam this entry names.** `renderPixelBuffer` is private and render-thread-only; the public seam is
+`enqueue`, selection is `pts <= clock()`, and during a paused drag that clock is pinned at the
+pre-drag position — so a scrub frame is selected dragging BACKWARDS and rejected dragging FORWARDS.
+The live producers get away with `enqueue` because they also replace the clock. A scrub producer
+cannot.
+
+⚠️ **AND THE MXF HALF WAS MEASURED SEPARATELY ON 2026-08-30, BECAUSE THE ROUTE ABOVE CANNOT OPEN
+MXF AT ALL.** `AVPlayerItemVideoOutput` covers ProRes, H.264 and HEVC and covers **nothing** in MXF
+— AVFoundation has no MXF demuxer. The same destination with a **libav producer** was measured with
+`docs/scrub-fixtures/libavmeas.swift` and **it passes too, with ~2× margin — provided `thread_type`
+is set to `FF_THREAD_SLICE` on the scrub decoder.** In the configuration that ships today it does
+NOT pass. See *"✅ THE MXF HALF, MEASURED 2026-08-30"* below. **Read the two together: the overlay
+cannot be deleted on the strength of either one alone.** ⚠️ **The numbers are the part that makes the case, not the verdict**;
+the comparison against the `exactSeek` figures is what turns "it might be fast enough" into a
+decision. **Precondition for:** the colour-management mode work
 (`docs/COLOR_MANAGEMENT_FINDINGS.md` §6) — see the last section here, this is NOT a parallel task —
 **and for HLS as a source**, see *"⏸ BANKED: HLS as a source"* below.
 
@@ -1482,6 +1548,11 @@ proposal to get the property back without it.
 
 **Neither is known, and an implementation started before they are answered is a bet.**
 
+> **✅ BOTH ANSWERED 2026-08-29. Risk 1 passes with margin; risk 2 is a non-event for memory and a
+> real cost for IO.** The two risk statements below are kept as written because they are the
+> QUESTIONS, and the result only means something against them. The measurements are in *"✅ SPIKE
+> RESULT 2026-08-29"* immediately after.
+
 1. **Latency at drag rate.** AVPlayer's seek is async and must be coalesced (seek-in-flight plus a
    pending target — the standard AVPlayer scrubbing pattern). Whether it keeps up at ~20 Hz, and
    what it does on a fast drag, is unmeasured. Compare against the 15 ms the generator currently
@@ -1494,10 +1565,438 @@ proposal to get the property back without it.
    the finding that kills this route for large media even if latency is fine on local ProRes.
    Measure both, on a network volume, before writing anything.
 
-**Fallback if it measures badly:** drive `VTDecompressionSession` directly off a passthrough
-`AVAssetReader`. Full control, vends `CVPixelBuffer`, no AVPlayer — but it means owning keyframe
-tracking and GOP walking ourselves. **Substantial, and only worth it if the AVPlayer route fails on
-one of the two risks above.**
+**Fallback if it measures badly — ✅ NOT NEEDED, and kept only so it is not re-derived:** drive
+`VTDecompressionSession` directly off a passthrough `AVAssetReader`. Full control, vends
+`CVPixelBuffer`, no AVPlayer — but it means owning keyframe tracking and GOP walking ourselves.
+**Substantial, and only worth it if the AVPlayer route fails on one of the two risks above.**
+Neither risk failed. ⚠️ **The one case that could revive this is the unmeasured one — 8K ProRes off
+a network volume; see *"What was NOT measured"* below.**
+
+### ✅ SPIKE RESULT 2026-08-29 — both risks measured, both pass
+
+**Harness:** `docs/scrub-fixtures/avpvomeas.swift`. Build line, modes and **four traps** (three of
+which return plausible wrong numbers) are in `docs/scrub-fixtures/README.md`. It builds no app and
+links no app code.
+
+**Conditions, because two of the three qualifications below are conditioned on them:** M4 Max,
+64 GB, macOS 26.5.1. `/Volumes/DCCOLOR` is SMB 3.1.1 reached over a **25GBase-CR** link (`en8`).
+Decode format **x420 throughout** — `FrameEngine.videoPixelFormat` / `FileFrameSource.defaultPixelFormat`
+— so this measures the app's own decode contract and not a cheaper one, and the buffers are
+directly consumable by `renderPixelBuffer`.
+
+#### RISK 1 — latency at drag rate: **PASSES**, and not narrowly
+
+Seek at `.positiveInfinity` tolerance both sides, then poll until a `CVPixelBuffer` **for a frame
+not already seen** is in hand. 40 positions per file, spread across the duration and jittered off
+the frame grid by the same golden-ratio sub-frame offset `scrubmeas.swift` uses. Copy only, ms:
+
+| fixture | transport | COLD mean / max | WARM back-to-back | **WARM @20 Hz — mean / p50 / p90 / max** | over 50 ms |
+|---|---|---|---|---|---|
+| ProRes 422 HQ 4K, 53 Mb/s | local | 11.2 / 27.5 | 4.1 / 4.5 | **6.7 / 6.8 / 7.5 / 9.3** | 0/40 |
+| ProRes 4444 4K, 23 Mb/s | local | 11.4 / 18.6 | 4.4 / 5.1 | **7.0 / 7.1 / 8.1 / 8.9** | 0/40 |
+| H.264 4K, 31 Mb/s | local | 17.6 / 22.3 | 12.4 / 16.7 | **14.8 / 15.6 / 20.1 / 20.4** | 0/14 |
+| ProRes 422 HQ 4K, **730 Mb/s** | local | 13.4 / 29.3 | 5.0 / 5.9 | **7.1 / 7.1 / 8.3 / 10.7** | 0/40 |
+| ProRes 422 HQ 4K, 53 Mb/s | SMB | 12.5 / 31.1 | 4.4 / 5.0 | **6.0 / 5.5 / 7.6 / 9.2** | 0/40 |
+| ProRes 4444 4K, 23 Mb/s | SMB | 12.4 / 19.8 | 4.8 / 5.5 | **6.8 / 6.9 / 7.7 / 8.0** | 0/40 |
+| H.264 4K, 31 Mb/s | SMB | 20.3 / 26.0 | 13.1 / 17.9 | **15.0 / 15.2 / 20.1 / 20.6** | 0/14 |
+| ProRes 4444 4K PQ, **1085 Mb/s**, 8.1 GB | SMB | 20.8 / 28.5 | 9.4 / 10.3 | **10.1 / 10.5 / 11.6 / 12.8** | 0/40 |
+| ProRes 4444 4K **59.94p**, 431 Mb/s, 7.5 GB | SMB | 11.0 / 11.6 | 6.4 / 7.8 | **8.0 / 8.2 / 8.8 / 9.5** | 0/40 |
+| HEVC **5760×3240**, 255 Mb/s, 5.2 GB | SMB | 36.4 / 47.9 | 30.2 / 42.3 | **31.3 / 33.1 / 36.9 / 42.1** | 0/40 |
+
+**Zero timeouts in every run, on every file.** ⚠️ The three SMB rows for the small fixtures were
+**cache-warm** — those files had been copied locally first — so they are not network evidence. The
+8.1 GB, 7.5 GB and 5.2 GB rows cannot be meaningfully cached and are.
+
+**COLD is genuinely cold: a fresh `AVPlayer` per trial**, not the first seek on a player that is
+already up. The one-off install cost (`AVURLAsset` → `readyToPlay`) is separate and is **not part
+of the per-seek budget**: 11.9–47.1 ms mean, worst single first-ever load 215.6 ms.
+
+#### ⚠️ THE COMPARISON THAT MAKES THE CASE
+
+Against the `exactSeek` table in *"⚠️ REJECTED: routing scrub preview through the real decode
+path"* (in the HDR scrub entry above) — **same three fixtures, same rasters, same 40 positions**:
+
+| fixture | reader rebuild (mean / p50 / p90 / max) | **this route, warm @20 Hz** | verdict then | verdict now |
+|---|---|---|---|---|
+| ProRes 422 HQ | 27.4 / 24.2 / 28.6 / **117.7** | **6.7 / 6.8 / 7.5 / 9.3** | fits at mean, **not** worst case | **fits everywhere** |
+| ProRes 4444 | 31.4 / 29.2 / 34.8 / 72.0 | **7.0 / 7.1 / 8.1 / 8.9** | fits at mean, **not** worst case | **fits everywhere** |
+| H.264 | **53.7** / 52.6 / 67.0 / 83.5 | **14.8 / 15.6 / 20.1 / 20.4** | **fails outright** | **fits everywhere** |
+
+**4× on the mean, 4–13× on the max, and the 118 ms that killed that route does not reappear
+anywhere in the corpus.** The prediction in *"Why the three measured objections do NOT apply"*
+above — that 27/118 was the cost of a reader REBUILD and not of a seek against a warm decoder —
+holds, and long-GOP inverts exactly as predicted: it is the codec that gained the most.
+
+**It also beats the path it would REPLACE.** `AVAssetImageGenerator` measures 15 ms and does it at
+**960×540**; this is 6.7–7.1 ms at the **full 4K raster**. ⚠️ **This was never a decode-cost problem
+— the root is a return type**, as recorded above, and the spike confirms the replacement is not
+paying for the fix. It is faster and larger at the same time.
+
+#### RISK 1 for the SCOPES is a different number, and it was measured separately
+
+The picture needs a `CVPixelBuffer`; **the scopes need it in the offscreen ring**
+(`MetalVideoRenderer.renderPixelFormat`: *"Display, export, DeckLink and the SCOPES all read this
+target"*). So `SHADER=1` carries each frame the rest of the way — two `CVMetalTextureCache` plane
+textures and a render into an `rgba16Float` offscreen, **waited to GPU completion**, because a
+number that stopped at `commit()` would leave out the part that has to finish.
+
+**The stage costs +0.6 to +1.1 ms mean; the worst single sample in the whole corpus was 2.8 ms.**
+Totals to a COMPLETED offscreen at 20 Hz: **7.7–8.4 ms** on 4K ProRes (all four fixtures),
+**16.1 ms** on 4K H.264, **32.4 ms** on 6K HEVC. ⚠️ **The scopes are therefore not a second
+decision — they ride for about a millisecond.**
+
+#### RISK 2 — memory is a non-event; **IO is the real cost**
+
+Three phases in one process: playback alone, playback **plus** a live scrub player dragging at
+20 Hz, playback again with the scrub player released. Cost of the second pipeline = P2 − P1:
+
+| fixture | physical footprint | CoreMedia pool (the decoder) | IOSurface mapped | playback frames lost |
+|---|---|---|---|---|
+| 4K ProRes HQ 730 Mb/s, local | **+27 MB** | +18 MB | +48 MB | **none** — 492 → 498 |
+| 4K ProRes 4444 1085 Mb/s, SMB | **+25 MB** | +20 MB | +71 MB | **none** — 517 → 517 |
+| 6K HEVC, SMB | −19 MB | −26 MB | +107 MB | **none** — 496 → 498 |
+
+Process peak RSS 173 → 206 MB (local) and 279 → 320 MB (the 8 GB SMB file). **Fully returned when
+the scrub player was released** — checked in P3, not assumed. **Playback never lost a frame to the
+second pipeline in any run**, which was the specific fear.
+
+⚠️ **`resident_size` and `phys_footprint` CANNOT SEE THE PIXEL BUFFERS.** A decoder's
+`CVPixelBufferPool` is IOSurface-backed and charged elsewhere — the first smoke run reported RSS
+34 MB for a pipeline decoding 4K ProRes, which is obviously not the whole story. The table above is
+read from `vmmap --summary` by region type instead. **A verdict taken off RSS alone would have been
+read from the one number that cannot see the thing being measured.**
+
+**The cost is in IO, and it is large:**
+
+| fixture | playback alone | + scrub @20 Hz | delta |
+|---|---|---|---|
+| 4K ProRes HQ, local (block IO) | 95 MB/s | 161 MB/s | **+69%** |
+| 4K ProRes 4444 1085 Mb/s, SMB (network) | 139 MB/s = **1.11 Gb/s** | 236 MB/s = **1.89 Gb/s** | **+774 Mb/s** |
+| 6K HEVC, SMB (network) | 32 MB/s | 91 MB/s | **+186%** |
+
+A 20 Hz drag pulls roughly a second full-rate read of the same file. That is the honest shape of
+"a second decode pipeline against the same file over the same link", and it is what property 2
+below is about.
+
+**Latency UNDER PLAYBACK LOAD** — the case that actually happens — measured in the same phase:
+4K ProRes local **7.4 mean / 30.3 max**; 4K ProRes 4444 over SMB **11.1 / 15.8**; 6K HEVC over SMB
+**31.9 / 57.3**. Load roughly triples the worst case on local ProRes and still leaves it inside the
+budget.
+
+### ⚠️ THREE PROPERTIES OF THIS ROUTE — not caveats to be resolved later
+
+**These are what the route IS. None of them is a defect to be fixed in a follow-up, and describing
+them that way is how a known trade turns into a surprise.**
+
+**1. It will NEVER be frame-accurate scrub preview, and it must not be described as fixing that.**
+Infinite tolerance is what makes long-GOP cheap — that is the trade, stated above and confirmed —
+and the bill is arriving at a frame that is not the one asked for:
+
+| fixture | delivered frame − requested, abs frames (mean / max) | positions returning the frame ALREADY on screen |
+|---|---|---|
+| ProRes (all four fixtures) | 0.5–0.6 / **1.0** | 0/40 |
+| H.264 4K | 4.4 / **10.4** | **26 of 40** |
+| HEVC 6K | 5.9 / **11.8** | 0/40 |
+
+**⚠️ 65% of a 20 Hz drag on 4K H.264 returns the frame that is already displayed.** ⚠️ **This is NOT
+a regression** — the shipping ±0.5 s overlay was measured putting preview and reader **up to 11
+frames apart, in BOTH directions** — so the route does not make position worse, and on all-intra it
+is exact to the nearest frame. **But it does not close the scrub-POSITION defect either.** See
+*"⚠️ UNCONFIRMED: scrub release jumps the picture once, on ProRes"* above, which stays open on its
+own terms; what this route removes is the DISAGREEMENT between two decoders, not the tolerance.
+
+**2. The IO cost is conditioned on the LINK, and this is the finding most likely to bite a USER
+rather than us.** +774 Mb/s measured on a **25 GbE** SMB share, where it is invisible. It would not
+be on 1 GbE. **Above roughly 400 Mb/s of source, a drag does not fit alongside playback on a 1 GbE
+link** — playback alone already occupies most of it, and the drag asks for the same again. The
+media above that line is ordinary facility media, not an edge case: every ProRes 422 HQ or 4444 4K
+master in the corpus is over it. ⚠️ **Nothing in a local-disk or 10 GbE+ test can show this. Do not
+re-measure on this machine and conclude it is fine.**
+
+**3. 6K HEVC over SMB with playback running hit 57.3 ms — the only sample over the 50 ms budget
+anywhere in the spike.** ⚠️ **Raster plus codec, NOT transport:** the same file measured 30.2 ms
+back-to-back with nothing else running, and the ProRes 4444 file at **four times the bitrate** over
+the same link measured 15.8 ms under the same load. **Record this as the point where the route
+stops having margin, not as a failure** — it did not time out, drop a frame, or fail to deliver.
+Above 4K on long-GOP the budget is spent rather than comfortable.
+
+### ⚠️ WHAT WAS NOT MEASURED — and why it must not be extrapolated
+
+**THERE IS NO 8K ProRes IN THE CORPUS.** The whole share was searched; the largest raster found is
+the 5760×3240 HEVC camera original used above. **Risk 2 as written in this entry names "8K ProRes
+off a network volume" and THAT CASE REMAINS OPEN.**
+
+⚠️ **The 6K HEVC must not be read as standing in for it, in EITHER direction.** It is a different
+codec with a different decode cost — and it is precisely the one fixture that got near the budget,
+so it is the worst possible thing to extrapolate from. Reading it as an upper bound would be
+optimistic (8K ProRes is 2.3× the pixels and a far higher data rate); reading it as proof of
+failure would be pessimistic (every ProRes fixture, including one at 1085 Mb/s, beat it by 3×).
+**Neither reading is supported. The measurement is simply absent, and it is the one case that could
+still revive the `VTDecompressionSession` fallback.**
+
+**The playback baseline is a MODEL, not the app.** It is an `AVAssetReader` decoding x420 in real
+time with each frame rendered through the shader — no audio reader, no `AVSampleBufferDisplayLayer`,
+no DeckLink staging, no scopes. **So the absolute footprints above are a FLOOR, and the DELTAS are
+the measurement.** The second pipeline's cost does not depend on what else is resident, which is why
+the delta transfers to the app and the absolute number does not.
+
+### ✅ THE MXF HALF, MEASURED 2026-08-30 — the libav path reaches the same destination, and it PASSES
+
+⚠️ **THE ROUTE ABOVE COVERS ONLY PART OF THE CORPUS, AND THE PART IT MISSES IS NOT A NICHE.**
+`FrameEngine.loadMXF`: *"AVFoundation has no MXF demuxer, so it can't open the file at all — MXF
+routes DIRECTLY to libav."* Confirmed per file by the harness rather than assumed from the
+extension: **every MXF tested reports `AVFoundation can open it: NO`.** So
+`AVPlayerItemVideoOutput` handles ProRes, H.264 and HEVC and handles **nothing** in MXF. If the
+overlay is to stop existing — one picture path, one HDR behaviour, no `CGImage` anywhere — MXF needs
+the **same destination with a different producer**: libav seeking, decoding one frame, and pushing a
+`CVPixelBuffer` to `renderPixelBuffer` exactly where `AVPlayerItemVideoOutput` would.
+
+That seam needs no new architecture: `renderPixelBuffer` already accepts frames from arbitrary
+producers, which is how NDI, WHEP and SRT work. **The only open question was how long libav takes,
+and it is now measured.**
+
+**Harness:** `docs/scrub-fixtures/libavmeas.swift` (+ `build-libavmeas.sh`). It links the app's own
+vendored libav through the app's own `CFFmpeg/include/shim.h`, and its conversion is copied from
+`LibavFrameSource.convert`; its shader stage is byte-identical to `avpvomeas.swift`'s. Modes, and
+**four traps**, are in `docs/scrub-fixtures/README.md`. Same machine and link as the spike above.
+
+#### ⚠️ THE RESULT IS A ONE-LINE CHANGE, AND THE SHIPPING CONFIGURATION IS THE THING THAT FAILS
+
+**Neither `LibavFrameSource` nor `LibavThumbnailSource` sets `thread_type`.** Both set only
+`thread_count`, so both get libav's default, which prefers `FF_THREAD_FRAME`. `avcodec.h:1577`
+states the bill in one line:
+
+> *"Use of FF_THREAD_FRAME will increase decoding delay by one frame per thread."*
+
+For **continuous playback** that delay is free — it is a pipeline and it fills once. For a
+**single-frame seek** it is not: `avcodec_flush_buffers` empties the pipeline, so getting ONE frame
+out costs `thread_count` frames of decode. Measured on 4K DNxHR HQX, 30 positions at 20 Hz,
+seek → decode → x420 `CVPixelBuffer` in hand:
+
+| `thread_count` | `thread_type` = **default** (what ships) | `thread_type` = **`FF_THREAD_SLICE`** |
+|---|---|---|
+| 1 | 52.0 mean / 77.2 max | 51.3 / 73.2 |
+| 2 | 45.6 / 62.4 | 32.0 / 42.7 |
+| 4 | 46.7 / 60.3 | 23.5 / 32.8 |
+| **8** (`LibavThumbnailSource`) | **47.4 / 63.1** | **19.2 / 22.7** |
+| **15** (`LibavFrameSource`) | **56.6 / 85.4** | **17.4 / 19.9** |
+| 16 | 57.4 / 77.1 | 16.8 / 20.2 |
+
+**More threads makes the shipping configuration SLOWER, monotonically, because each extra thread is
+one more frame of delay on a flushed decoder.** The give-away in the raw output is
+`packets read per seek: 17` — seventeen packets to produce one frame of an **all-intra** codec.
+
+⚠️ **THIS IS A PROPERTY OF THE EXISTING APP, NOT ONLY OF THE PROPOSED ROUTE.** `LibavFrameSource`
+runs `cores−1` threads and flushes on every `seekOnPump`, so **every MXF seek in shipping playback
+pays the same 15-frame pipeline refill** — ~57 ms at 4K where ~17 ms was available. It has never
+been measured and it is not what this entry is about, but it is the same mechanism and it is
+recorded here so it is not re-derived. **Do not extend the recommendation below to playback without
+measuring the other side of the trade:** frame threading costs a one-time `thread_count`-frame delay
+per seek and buys steady-state throughput, and only the first half is measured here.
+
+#### RISK 1 — latency at drag rate: **PASSES**, with `FF_THREAD_SLICE`
+
+40 positions per file, spread across the duration and jittered off the frame grid by the same
+golden-ratio sub-frame offset `scrubmeas.swift` and `avpvomeas.swift` use. t0 = `av_seek_frame`;
+t1 = an x420 `CVPixelBuffer` in hand, converted, colour attachments set — the same span the spike
+above timed. `thread_count` 8, `FF_THREAD_SLICE`. ms:
+
+| fixture | transport | COLD mean / max | WARM back-to-back | **WARM @20 Hz — mean / p50 / p90 / max** | over 50 ms |
+|---|---|---|---|---|---|
+| DNxHR 10-bit 4K, 701 Mb/s, 4.27 GB | SMB | 21.3 / 28.0 | 16.4 / 19.7 | **20.3 / 22.0 / 23.4 / 24.3** | 0/40 |
+| DNxHR 10-bit 4K **PQ/2020**, 701 Mb/s | SMB | 17.3 / 19.4 | 15.6 / 19.2 | **19.6 / 20.3 / 22.8 / 23.4** | 0/40 |
+| the same file, copied local | local | 18.4 / 20.7 | 16.5 / 20.4 | **19.6 / 20.6 / 22.9 / 23.5** | 0/40 |
+| DNxHR 10-bit 4K, 713 Mb/s | SMB | 20.6 / 22.9 | 16.2 / 20.2 | **16.4 / 16.5 / 18.7 / 19.4** | 0/40 |
+| DNxHD 8-bit 1080p, 131 Mb/s, **41.86 GB / 42 min** | SMB | 6.4 / 8.1 | 6.0 / 7.9 | **10.4 / 11.2 / 14.7 / 15.8** | 0/40 |
+| DNxHD 8-bit 1080p 29.97, **26.42 GB** | SMB | 7.0 / 8.6 | 5.5 / 7.9 | **10.4 / 10.5 / 13.1 / 15.5** | 0/40 |
+| DNxHR **12-bit** 1080p, 13 streams | SMB | 8.2 / 9.6 | 5.1 / 7.0 | **9.9 / 10.3 / 12.4 / 14.9** | 0/40 |
+
+**Zero failures on every file. Nothing anywhere near 50 ms — the worst single sample in the whole
+corpus is 24.3 ms, less than half the budget.**
+
+**Where the time goes, and it is NOT the seek:**
+
+| component | 4K DNxHR | 1080p DNxHD |
+|---|---|---|
+| `av_seek_frame` + `avcodec_flush_buffers` | **0.01 ms** | 0.03 ms |
+| decode one frame | 8.1 ms | 5.9 ms |
+| swscale → x420 `CVPixelBuffer` | **11.4 ms** | 4.4 ms |
+| shader → `rgba16Float` offscreen | 0.9 ms | 0.8 ms |
+
+⚠️ **THE SEEK IS FREE AND THE CONVERSION IS THE LARGEST SINGLE COST.** DNxHR being all-intra is not
+merely "an exact seek should be cheap" — the seek does no measurable work at all, because the MXF
+index resolves the position and the essence read is one KLV. At 4K, `sws_scale` from `yuv422p10le`
+to P010 costs **more than the decode**. Any future effort to make this faster belongs there, not in
+the seek. **Caching the `sws` context is NOT that effort:** `LibavFrameSource` builds a fresh
+`sws_getContext` per frame and freeing/rebuilding it measured within noise of reusing one
+(10.4 vs 10.8 ms at 1080p; 19.6 vs 19.6 at 4K), so that is a tidy-up, not a saving.
+
+**COLD is genuinely cold — a fresh `AVFormatContext` + decoder per trial.** The install cost is
+reported separately because it is **not** in the per-seek budget: 2.0–33.6 ms total, of which
+`avformat_find_stream_info` is 85–99%. The scrub decoder is opened once at load
+(`LibavThumbnailSource.openAsync`) and held, so a drag never pays it.
+
+#### RISK 1 for the SCOPES — the same "rides for about a millisecond" as the AVPlayer route
+
+Carrying the frame into the `rgba16Float` offscreen, waited to GPU completion, costs **+0.8 to
++1.0 ms mean** across every fixture. Totals to a completed offscreen at 20 Hz: **20.5–21.4 ms** at
+4K, **10.9–11.6 ms** at 1080p. Identical conclusion to the spike above, and the shader stage is the
+identical code, so the two are directly comparable.
+
+#### ⚠️ WHAT A "WARM CONTEXT" IS ON THIS PATH — a weaker property than AVPlayer's, and it does not matter
+
+The AVPlayer route's whole premise is a decoder that stays warm across a drag. **libav's equivalent
+is weaker and must not be described the same way.** A held libav context keeps the demuxer and its
+index, the open file handle, the decoder's threads and tables, the pixel-buffer pool and the swscale
+context. It does **not** keep decoder STATE: `avcodec_flush_buffers` after every `av_seek_frame`
+discards it, by design and by necessity. **So in the strict sense every libav seek IS cold** — and
+on all-intra that costs nothing, because there is no reference state to lose. `frames decoded and
+discarded to reach the target` measured **0.5 mean / 1.0 max** on every fixture in the corpus.
+
+The measurable difference between held and per-request is therefore **entirely the install cost**,
+and it is decisive at 4K: COLD 17–21 ms **plus** a 30–34 ms `find_stream_info` ≈ **50 ms, the whole
+budget, for the open alone**. **A path that opened its own `AVFormatContext` per scrub request would
+not fit. One that holds it does, with 2× margin.**
+
+**Can it be held across a drag without disturbing playback? Yes — and the app already does exactly
+that.** `LibavThumbnailSource` opens its own context at load, holds it for the file's lifetime and
+closes it at unload, precisely *"so thumbnail seeks/decodes never disturb playback"*. **That comment
+is now measured rather than asserted** (see RISK 2): with a 20 Hz drag running for 25 s against live
+playback, playback decoded **775 frames vs 773 with no drag**, and **late frames went 1 → 0**. A
+seek-to-renderer path needs no new lifecycle — it needs the existing one to return a different type.
+
+#### RISK 2 — memory is a non-event; IO is the real cost, and its shape depends on the gesture
+
+Three phases in one process: playback alone, playback **plus** a 20 Hz drag, playback with the drag
+released. The playback model is a libav pump pinned to `LibavFrameSource`'s real settings
+(`cores−1` threads, libav's **default** `thread_type`) so the experiment's setting cannot leak into
+the thing it contends with. Cost of the second pipeline = P2 − P1:
+
+| fixture | physical footprint | IOSurface mapped | playback frames | late frames | scrub latency UNDER LOAD |
+|---|---|---|---|---|---|
+| DNxHD 1080p, **26.42 GB**, SMB | **+16 MB** | +6 MB | 773 → **775** | 1 → **0** | 7.5 mean / 13.1 max |
+| DNxHD 1080p, **41.86 GB**, SMB | **+18 MB** | +6 MB | 620 → **621** | 1 → **0** | 6.7 / 13.4 |
+| DNxHR 4K, 4.27 GB, SMB | **+67 MB** | +24 MB | 505 → 501 | 1 → **0** | 19.1 / 35.3 |
+| DNxHR 4K PQ, 1.46 GB, local | **+26 MB** | +24 MB | 497 → **501** | 2 → **1** | 16.9 / 21.9 |
+
+**Playback never lost a frame to the drag in any run**, and latency under playback load stayed
+inside budget everywhere — **35.3 ms was the worst single sample in the whole exercise**, on the 4K
+SMB file, and it is still 30% under. Memory returns on release (checked in P3, not assumed).
+
+⚠️ **`CoreMedia memory pool` is absent from `vmmap` on this path and the table has no such column.**
+libav's decoder is not CoreMedia; its frames land in libav's own buffers and then in our
+`CVPixelBufferPool`, which vmmap accounts under `IOSurface`. The spike table above HAS that column
+because *its* decoder is VideoToolbox's. **The two tables do not have the same rows** — do not read
+a missing row as a failed measurement.
+
+**The IO, and the finding is that the gesture shape matters more than the transport:**
+
+| | playback alone | + drag @20 Hz | delta |
+|---|---|---|---|
+| DNxHD 1080p 159 Mb/s, **26.42 GB**, SMB — clean P2 − P1 | 20 MB/s | 53 MB/s | **+33 MB/s (+165%)** |
+| DNxHR 4K 701 Mb/s, SMB — **`scatter`**, measured directly | 88 MB/s (= the bitrate) | +130–151 MB/s | **+1.0–1.2 Gb/s** |
+| DNxHR 4K 701 Mb/s, SMB — **`sweep`**, measured directly | 88 MB/s | +28–36 MB/s | **+224–290 Mb/s** |
+
+⚠️ **`scatter` AND `sweep` ARE NOT THE SAME MEASUREMENT AND ONLY ONE IS A GESTURE ANYBODY MAKES.**
+`scatter` jumps to a pseudo-random position every tick — the worst case for read-ahead, and what the
+P2 − P1 phases do. `sweep` walks forward ~2 frames per tick, which is what a hand does to a
+scrubber. **The realistic shape is 4–5× cheaper**, and at 4K it turns a drag that asks for more than
+the file's own bitrate into one that asks for a third of it. Per seek, `scatter` pulled ~7.5 MB for
+a 3.66 MB frame: **read-ahead amplification of ~2×, which is the cost of the random access, not of
+the decode.**
+
+⚠️ **THE 4K NUMBERS ARE MEASURED DIRECTLY BECAUSE THE SUBTRACTION IS INVALID THERE, AND THIS IS AN
+INSTRUMENT LIMIT, NOT A CHOICE.** Every 4K MXF in the corpus is 1.4–4.3 GB on a 64 GB machine, so
+`MODE=memory`'s P1 caches the file it is about to measure P2 against. The long-form 1080p files are
+immune and give the clean delta above; `sudo purge` is not available to the harness. `MODE=io`
+therefore measures the drag alone on files no earlier phase has touched, and both modes **print an
+explicit warning on any phase that moved ~0 bytes** rather than let a cached row read as "free".
+
+⚠️ **THE LOCAL BLOCK-IO DELTA COULD NOT BE ISOLATED AT ALL, FOR THE SAME REASON.** Once playback has
+read a local file it is in the page cache, and the drag then moves **zero** bytes of block IO —
+observed, and flagged by the harness as carrying no information. The one clean local datapoint is
+first-touch playback at 57 MB/s. **On local media the honest statement is that the second decode
+costs no IO on a machine with headroom and is bounded above by 20 × the frame size; it is not that
+the cost was measured to be zero.**
+
+⚠️ **Property 2 of the AVPlayer route transfers, and MXF makes it worse.** Above roughly 400 Mb/s of
+source a drag does not fit alongside playback on a 1 GbE link. **Every 4K DNxHR fixture in this
+corpus is 701 Mb/s**, and playback alone already exceeds a 1 GbE link's practical throughput on
+those — so on 1 GbE the file does not play, with or without this feature. The drag's marginal
++224–290 Mb/s (`sweep`) is a real addition on 10 GbE and invisible on this machine's 25 GbE. **Do
+not re-measure on this machine and conclude it is fine.**
+
+#### HDR — the pixel-buffer path is HDR-correct by construction, and it is measured, not argued
+
+`LibavThumbnailSource.makeCGImage` swscales to **8-bit RGBA in `DeviceRGB` with `dstRange = 1`** —
+SDR by construction, and the recorded reason Part 3 of the HDR preview fix was deliberately not done
+and DNx/MXF HDR previews stay SDR. What the decode actually produces, and what the destination costs:
+
+| | PQ / Rec.2020 4K | HLG / Rec.2020 4K | 12-bit 1080p | 8-bit 1080p |
+|---|---|---|---|---|
+| decoded pixel format | `yuv422p10le`, **10-bit** | `yuv422p10le`, 10-bit | `yuv422p12le`, **12-bit** | `yuv422p`, 8-bit |
+| range | legal/MPEG | legal/MPEG | legal/MPEG | legal/MPEG |
+| frame side data | **mastering-display PRESENT** | absent | absent | absent |
+| → x420 buffer attachments | `ITU_R_2020` / `ITU_R_2020` / **`SMPTE_ST_2084_PQ`** | `ITU_R_2020` / `ITU_R_2020` / **`ITU_R_2100_HLG`** | 709 / 709 / 709 | 709 / 709 / 709 |
+| luma, source vs x420, whole raster | **max \|diff\| 0 — LOSSLESS** | **max \|diff\| 0 — LOSSLESS** | max \|diff\| 1 (12→10 bit) | — |
+| conversion cost | 11.4 ms | 10.6 ms | 3.0 ms | 2.8 ms |
+
+**So reaching x420 costs the swscale already priced above — 11.4 ms at 4K — and costs nothing in
+fidelity on the 10-bit sources: the luma codes arrive unchanged, over the whole raster, with no
+range remap and no truncation, and the PQ and HLG transfer tags land on the buffer.** That is the
+same P010 destination `LibavFrameSource` already uses for playback, so **the scrub frame and the
+playback frame are byte-identical by construction** — which is the property this whole line of work
+is buying, and it is stronger than "the two paths agree".
+
+⚠️ **TWO LOSSES ARE REAL AND ARE SHARED WITH PLAYBACK, NOT INTRODUCED BY THIS ROUTE.** x420 is a
+**10-bit 4:2:0** container: a **12-bit** DNxHR source is truncated (measured: ±1 code), and 4:2:2
+chroma is subsampled vertically. `LibavFrameSource.convert` does both today, so the scrub frame
+matches what is on screen exactly. **Stated so it is a known shared property rather than a later
+discovery** — and note that a route which "fixed" it on the scrub path alone would REINTRODUCE the
+divergence this work exists to remove.
+
+⚠️ **MASTERING-DISPLAY METADATA IS PRESENT ON THE PQ FIXTURE AND THIS PATH DOES NOT CARRY IT.** It
+is decoded as frame side data and then dropped: `LibavFrameSource.convert` sets three attachments
+(matrix, primaries, transfer) and no mastering-display. That matters for E3 (`edrMetadata`) in the
+colour-management work, not for this gate — but it is the one thing `AVPlayerItemVideoOutput` gets
+for free from the container that this producer would have to carry deliberately.
+
+#### VERDICT — MXF does NOT need a different answer
+
+**The libav path reaches `renderPixelBuffer` at drag rate, with roughly 2× margin, on every MXF in
+the corpus including a 42-minute 41.86 GB file over SMB — provided `thread_type` is set to
+`FF_THREAD_SLICE` on the scrub decoder.** In the shipping configuration it does not: 47–57 ms mean
+at 4K, over budget on more than half of a 40-position drag. **The difference between failing and
+passing this gate is one field neither existing libav client sets.**
+
+Read against the AVPlayer route, on the two things that decide whether the overlay can be deleted:
+
+| | `AVPlayerItemVideoOutput` (ProRes/H.264/HEVC) | **libav (MXF)** |
+|---|---|---|
+| warm @20 Hz, mean / max | 6.7–31.3 / 8.9–42.1 ms | **9.9–20.3 / 14.9–24.3 ms** |
+| under playback load, max | 30.3 / 15.8 / **57.3** ms | **13.1 / 13.4 / 35.3 ms** |
+| shader → offscreen (the scopes) | +0.6 to +1.1 ms | **+0.8 to +1.0 ms** |
+| delivered frame − requested | 0.5–5.9 mean, **up to 11.8** frames | **0.5 mean / 1.0 max, every fixture** |
+| positions returning the frame already shown | 0–**26 of 40** | **0** |
+
+⚠️ **THE LAST TWO ROWS ARE THE INTERESTING ONES AND THEY GO THE OTHER WAY.** Property 1 of the
+AVPlayer route — *"it will NEVER be frame-accurate scrub preview, and it must not be described as
+fixing that"* — **does not apply to the libav producer.** libav is asked for an exact position, not
+a toleranced one, and DNxHR is all-intra, so it lands on the requested frame every time. **That is
+not a reason to prefer it; it is a reason not to describe the two producers with one sentence.**
+Whatever is written about scrub accuracy after this work will be **true of MXF and false of H.264**,
+and a single claim covering both will be wrong about one of them.
+
+**No fallback is needed and none is proposed. `VTDecompressionSession` was never available here
+anyway — VideoToolbox rejects DNxHR with −12906, which is why this path exists.**
+
+⚠️ **WHAT THIS DOES NOT SAY.** It does not say the route is built, and it does not say the mode
+picker can be built — both remain gated exactly as the entry above states. It measures the
+mechanism on the corpus that exists. **`.mov`-wrapped DNx is NOT measured** (all 109 `.mov` files on
+the share were checked; none carries `AVdh`/`AVdn`/`dnxh`/`dnxd`), and **JPEG 2000 MXF has no route
+in Manifold at all** — `The_Righteous_Gemstones_404.mxf` fails `avcodec_find_decoder` because the
+vendored build enables only `dnxhd` and `prores`. Neither is a scrub question; both are recorded in
+`docs/scrub-fixtures/README.md` so the sweep that found them is not repeated.
 
 ### ⚠️ THE REQUIREMENT THAT SHOULD GOVERN THE COLOUR-MANAGEMENT WORK
 
@@ -1523,13 +2022,476 @@ that takes to unpick.
 as a separate path and the picker has one display path to steer. If it fails on either risk, the
 mode picker has to be designed around a permanently unsteerable scrub path — which is a different
 design, and one nobody should discover halfway through building the other one.
+
+**✅ RESOLVED 2026-08-29 — IT SUCCEEDED. The mode picker can be designed for ONE steerable display
+path.** That is the branch this entry was written to decide, and it is decided. ⚠️ **The picker
+still cannot be built until the route is actually BUILT** — the spike measured the mechanism, it did
+not ship it, and a picker shipped against a scrub path that is still a `CGImage` on a `CALayer`
+ships the silently-ignored control described above regardless of what the spike says.
+---
+
+## 📐 SCOPED, NOT BUILT: two producers, one destination — deleting the scrub overlay
+
+**Status:** SCOPED 2026-08-30. **Not started.** Both measurement gates have passed — see
+*"⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput`"* above for the AVFoundation half
+(spiked 2026-08-29) and *"✅ THE MXF HALF, MEASURED 2026-08-30"* inside it for the libav half. This
+entry is the **implementation shape and the reasoning behind it**, written before any code so the
+decisions are arguable rather than archaeological.
+
+**The shape, in one line:** two producers, one destination.
+
+| corpus | producer | measured, warm @20 Hz |
+|---|---|---|
+| AVFoundation-openable (ProRes, H.264, HEVC) | `AVPlayerItemVideoOutput` on a scrub-only `AVPlayer` | 6.7–31.3 ms mean |
+| MXF (AVFoundation cannot open it at all) | libav seek + decode, **`FF_THREAD_SLICE`** | 9.9–20.3 ms mean |
+
+Both hand a `CVPixelBuffer` in the app's x420 contract to the Metal renderer, so the scrub frame
+goes through the same shader, the same offscreen, the same layer and the same SDI convert as
+playback. **The `CGImage` overlay stops existing.**
+
+---
+
+### ⚠️ THE SEAM CORRECTION — `renderPixelBuffer` IS NOT THE SEAM, AND THE DIFFERENCE IS A DESIGN DECISION
+
+Every prior entry describing this route says "push it to `renderPixelBuffer`". **That is not
+reachable and it was never the seam.** `MetalVideoRenderer.renderPixelBuffer` is `private` and
+render-thread-only; its only callers are the three branches inside `performDisplayTick`.
+
+The public producer seam is **`enqueue(_ sampleBuffer:)`**, and what happens next is the part that
+matters:
+
+```
+// performDisplayTick, MetalVideoRenderer.swift
+guard let now = clock?() else { return }
+for (i, frame) in frameQueue.enumerated() { if frame.pts <= now { chosen = … } else { break } }
+```
+
+and, for file playback (`WindowDeck.configure`):
+
+```
+renderer.clock = { engine.currentSyncTime().seconds }     // the AVSampleBufferRenderSynchronizer
+```
+
+⚠️ **`FrameEngine.scrubSeek` NEVER MOVES THE SYNCHRONIZER.** It sets the published `currentTime` —
+the readout — and nothing else, deliberately ("just track the target and show it on the clock,
+WITHOUT rebuilding the reader every tick"). The drag also pauses transport. **So for the entire
+duration of a drag the renderer's clock is pinned at the position the picture was at when the
+scrubber was grabbed.**
+
+**CONSEQUENCE, and it is not a corner case:** a scrub frame enqueued at the scrub position is
+
+* **SELECTED when the user drags BACKWARDS** (`pts <= now`), and
+* **REJECTED when the user drags FORWARDS** (`pts > now`).
+
+The `pendingSeekRender` relaxed branch below the strict gate looks like the answer and is not: it is
+a **one-shot armed by `flush()`**, sized for a decoder overshooting a seek target, and it fires at
+most once per flush. A 20 Hz drag issues hundreds of positions.
+
+⚠️ **"THE RENDERER ALREADY ACCEPTS FRAMES FROM ARBITRARY PRODUCERS" IS TRUE AND INCOMPLETE.** NDI,
+WHEP and SRT do push into `enqueue` — **and every one of them also replaces the clock**
+(`renderer.clock = { Self.monotonicNow() }` in `NDIService`, `{ clock.now() }` in
+`LiveDisplayRoute` and `SyntheticLiveSource`). They are not "producers on the file clock"; they are
+producers that brought their own. Reading the NDI/WHEP/SRT precedent as "the seam is open" and
+skipping this is the single most likely way to start building and discover the problem on a forward
+drag.
+
+#### The three ways to fix it, and why (a) wins
+
+**(a) A new one-shot render entry point — `presentImmediate(pixelBuffer:pts:)`. ✅ CHOSEN.**
+Bypasses `frameQueue` and the clock gate entirely; renders the buffer on the next display tick.
+
+- **The pattern already exists in the file.** `pendingRefresh` re-renders `lastPixelBuffer` off the
+  clock when a range override changes while paused, and `pendingSeekRender` renders the earliest
+  queued frame off the clock after a paused seek. A third off-clock one-shot is the same shape as
+  two things already there, guarded by the same `refreshLock`, obeying the same "MAIN COMPUTES, THE
+  RENDER THREAD INSTALLS" discipline.
+- **It touches nothing playback reads.** The clock, the synchronizer, the queue and the strict gate
+  are untouched, so nothing about normal playback, seeking, shuttle or the live routes can change
+  behaviour as a side effect.
+- **It is trivially reversible.** One method, one one-shot flag. If the route is abandoned the
+  method is deleted and nothing else moves.
+
+**(b) Move the pinned synchronizer clock during the drag. ✗ REJECTED.**
+Superficially the "correct" fix — make the clock tell the truth and the existing gate just works.
+But `synchronizer` is also the **audio master**, the source of the periodic time observer that
+publishes `currentTime` and drives the end-of-file/loop logic, and the thing `isPausedNow()` reads.
+Moving it 20 times a second during a drag puts a transport-level mutation on the hot path of a
+gesture, to solve a display-selection problem. **The blast radius is the whole transport for a
+benefit confined to one surface.**
+
+**(c) Substitute the clock for the duration of the drag, like the live sources. ✗ REJECTED.**
+Symmetric with existing code, which is its only argument. It requires save/restore of `clock` and
+`isPausedProvider` around a *gesture* — and `LiveDisplayRoute` and `SyntheticLiveSource` already do
+their own save/restore of exactly those two fields. **Two nested save/restore protocols over the
+same two mutable fields, one of them entered and left by a mouse drag, is a re-entrancy problem
+being created on purpose.** A drag that begins while a live route is standing up, or a route that
+tears down mid-drag, would have to be reasoned about; with (a) neither interaction exists.
+
+---
+
+### 1. WHAT GETS DELETED, AND WHAT IS LOAD-BEARING FOR SOMETHING ELSE
+
+**Deleted.** All of it exists to hold a `CGImage` until the real frame lands:
+
+- `ScrubPreviewSurface` + `ScrubPreviewHostView` (`App/MetalSurfaceView.swift`), including
+  `logEDRState`, the legacy-EDR opt-in A/B and the `contentsRect` split machinery
+- the overlay branch in `ContentView.body`
+- `scrubPreviewImage`, `previewRequestInFlight`, `lastPreviewTime`, `scrubHandoff`, `scrubHoldTask`,
+  `splitLatched`
+- `requestScrubPreview(at:final:)`, `beginScrubHandoff()`, `endScrubHandoff(framePresented:)`,
+  `cancelScrubHandoff()`, the 400 ms timeout
+- `FrameEngine.previewImage(at:)`, `imageGenerator`, `makeScrubPreviewGenerator` — **including
+  `dynamicRangePolicy = .matchSource`**, the fix from the HDR scrub entry. Checked: **one call
+  site**, no other consumer anywhere in the app.
+- **`LibavThumbnailSource` in its entirety.** Its only consumer is `previewImage`. Its *design*
+  survives as the libav producer — own `AVFormatContext`, private serial queue, opened at load — but
+  the class does not.
+- `ScrubDebug.overlayDisabled` / `.forceLegacyEDR` / `.splitEnabled`, `dismissScrubSplit`,
+  `logScrubSplitArmed`, `codecIsAllIntra`, `scrubSplitFurniture`, the ⌃⌥⇧S binding, `[EDRDIAG]`
+
+**⚠️ STAYS — and this is the list that matters, because each of these LOOKS like scrub machinery:**
+
+- **`pendingSeekRender` and the paused-seek relaxed branch.** Serves **every** paused seek — arrow
+  step, timecode entry, the Flip refresh path — not scrub. Deleting it with the overlay would break
+  paused seeking on files whose decoder overshoots, which is a different entry entirely.
+- **`presentsSinceFlush`.** The *callback* `onFirstPresentAfterFlush` has exactly one consumer (the
+  handoff) and goes with it. The *counter* has a second consumer — the `[EDR]` "colour state
+  installed after N present(s) of this source" report — and stays.
+- **`pendingRefresh` / `setNeedsRefresh()`.** Range-override change while paused.
+- **`isScrubbing` and `scrubValue`.** Still drive the slider binding, the `displayTime` readout and
+  the HUD auto-hide guard. Only their *overlay* role goes.
+- `flush()` / `onFlush`, `wasPlayingBeforeScrub`, `MediaInspector.requiresLibavDecode` / `useLibav`
+  (which now selects the **producer** instead of the thumbnail source).
+
+#### ⚠️ ONE DELETED THING CARRIES A MEASURED FACT THAT MUST NOT GO WITH IT
+
+`makeScrubPreviewGenerator` sets **`apertureMode = .encodedPixels`**, and the comment there records
+why: the property defaults to nil, which behaves as clean-aperture, so `AVAssetImageGenerator`
+applied **both the pixel aspect ratio and the clean-aperture crop** and returned an image at the
+file's DISPLAY geometry — while the Metal path renders the full encoded buffer and lets the layer
+scale it. Two geometry rules, disagreeing the moment a file carried either tag.
+
+**MEASURED on ARRI open-gate ProRes 4444 XQ (encoded 2944×2160, clean aperture 2880×2160, pasp 1:1):
+default mode returned 720×540 — clean-aperture cropped, 32 px lost each side — and `.encodedPixels`
+returned 736×540.**
+
+Deleting the generator deletes the *problem*, not the *fact*. Both new producers vend the decoder's
+own buffer, so they should agree with the Metal path by construction — `AVPlayerItemVideoOutput`
+hands back the decoded `CVPixelBuffer`, and libav hands back the decoded `AVFrame`, neither of which
+applies an aperture rule.
+
+⚠️ **THAT IS A PREDICTION, NOT A MEASUREMENT, AND IT MUST BE CHECKED ON THAT FIXTURE.** The ARRI
+open-gate ProRes 4444 XQ file named above is the one that exposed the difference; it is the one to
+scrub in Stage 1. A route that silently reintroduced the 32-px-per-side crop would look like a
+slightly soft preview, not like a geometry bug, and the old harness (`scrubmeas.swift` `MODE=pixdiff`
+with `maximumSize = .zero`) is no longer measuring that path.
+
+The same reasoning retires — but does not disprove — the PAR note on the overlay's `.aspectRatio`
+pin. The pin exists because *the two preview producers disagreed about pixel aspect ratio*
+(`AVAssetImageGenerator` applied PAR, `LibavThumbnailSource` ignored `sample_aspect_ratio`
+entirely). With both producers gone the disagreement evaporates; the pin stays on the Metal surface
+because that is the video rect's authority, which was always a separate argument.
+
+---
+
+### 2. WHAT REPLACES THE 2026-08-28 POSITION FIX
+
+The release path currently does four ordered things — `isScrubbing = false`, `beginScrubHandoff()`,
+`requestScrubPreview(at: scrubValue, final: true)`, `exactSeek(to: scrubValue)` — and the ORDER is
+the fix. Both of the premises it was built on are gone, **but for different reasons, and one leaves
+a residue.**
+
+**The final un-throttled request: absorbed, not deleted.** Its stated job was to close a staleness
+floor created by a **media-time DISTANCE** gate (`> 0.05` s = 1.20 frames at 23.976, never re-asked
+at the release point). Once the throttle is a latest-wins coalescer (§3) there is no distance floor:
+the last position requested is always the current one. What survives is the **in-flight latch** — at
+release one request may still be outstanding at a marginally older position. So the release path
+still issues one request at `scrubValue`, but it is **the coalescer's pending slot being flushed**,
+not a corrective request aimed at a second decoder. No `final:` parameter, no generation stamp, no
+"guard handoff == scrubHandoff" — the reason for all three is gone.
+
+**The hold-until-presented signal: deleted with nothing in its place, and that is correct.** There
+is no second surface to keep alive. On release the Metal layer is **already showing the release
+frame**, because it got there through the ordinary present path during the drag. `exactSeek` →
+`beginReading` → `flush()` clears the queue, and a `CAMetalLayer` keeps its last presented drawable,
+which is the scrub frame. **The hold now happens by default instead of by machinery** — which is
+what "one display path" buys, stated concretely.
+
+#### ⚠️ THE FAILURE MODE INVERTS, AND IT DOES NOT REACH ZERO ON LONG-GOP
+
+The old risk was *the overlay is held too long*. The new risk is **the seek's first frame is not the
+frame the drag was showing** — because the scrub producer seeks at infinite tolerance and
+`exactSeek` does not.
+
+| corpus | delivered frame − requested (measured) | release settle |
+|---|---|---|
+| **MXF / DNxHR** | **0.5 mean / 1.0 max, every fixture; 0 same-frame returns** | **zero, by construction** — libav is asked for an exact position and DNxHR is all-intra |
+| ProRes (AVPlayer route) | 0.5–0.6 mean / **1.0 max** | effectively zero on all-intra |
+| **4K H.264** | 4.4 mean / **10.4 max**; **26 of 40** positions return the frame already on screen | **a one-frame-class settle SURVIVES this work** |
+| 6K HEVC | 5.9 / **11.8** | as above |
+
+⚠️ **SO: "no jump at release" IS TRUE OF MXF AND ProRes AND IS NOT TRUE OF H.264/HEVC.** Any release
+note, commit message or code comment that states it unqualified will be wrong about part of the
+corpus. This is the same trap as *"Property 1"* in the entry above — one sentence covering two
+producers with different accuracy characteristics — and it is recorded here so it is not written
+twice.
+
+**THE DEFERRED WAY OUT, AND IT IS A STAGE 3 DECISION REQUIRING A MEASUREMENT, NOT AN ASSUMPTION.**
+On release, seek playback to **the frame the scrub producer actually delivered** — its
+`itemTimeForDisplay` (AVPlayer) or its frame PTS (libav) — rather than to `scrubValue`. The settle
+becomes zero by construction on every codec, and the position readout stops claiming a frame that
+was never displayed.
+
+⚠️ **Do not fold this into Stage 1 as an obvious improvement.** It changes what "release" means: the
+transport would land on the frame the *tolerance* chose rather than the one the *user* chose, which
+is a different product decision and interacts with the still-open *"⚠️ UNCONFIRMED: scrub release
+jumps the picture once, on ProRes"* entry. It needs its own measurement — does the delivered-frame
+target actually eliminate the settle on 4K H.264, and what does the timecode readout say while it
+does — before it is adopted.
+
+---
+
+### 3. THE THROTTLE — a coalescer, not a number, and NOT per producer
+
+Today there are **two gates and neither is a rate limit**:
+
+```
+guard !previewRequestInFlight else { return }          // in-flight latch — drops the position
+guard abs(time - lastPreviewTime) > 0.05 else { return }   // MEDIA-TIME distance — 1.20 frames
+```
+
+The distance gate is the staleness the position fix was written against: it is a *media* distance,
+so a slow drag suppresses requests outright, and a fast drag makes it irrelevant while the latch
+drops everything that arrives mid-decode.
+
+**What it becomes:**
+
+- keep the in-flight latch — one decode at a time per producer is a real constraint
+- **delete the media-distance gate entirely**
+- a position arriving while a request is in flight **overwrites a single pending slot** (latest
+  wins) and is issued when the in-flight request completes
+- cap at **one issue per display refresh** — producing faster than the layer presents is wasted
+  work, and the scopes sample per render anyway
+
+The producer then self-paces at exactly its own throughput: ~7 ms → bounded by the slider's event
+rate and the refresh cap; ~20 ms → ~50 Hz. **There is no constant to tune.**
+
+#### ⚠️ IT SHOULD *NOT* DIFFER BY PRODUCER, AND THAT IS THE ARGUMENT FOR A COALESCER OVER A NUMBER
+
+The obvious alternative — a wall-clock interval per producer, ~10 ms for AVPlayer and ~25 ms for
+libav — is worse for a specific reason: **it is two constants that must stay in agreement with two
+measured latencies on two codec families on hardware we do not control.** A machine slower than the
+M4 Max moves both numbers; a 6K HEVC file moves one of them by 4×. A latest-wins coalescer is
+correct on every machine and every codec without being told anything, because the decoder's own
+completion is the clock.
+
+What *is* producer-specific: libav decodes synchronously on its own serial queue, while AVPlayer
+does an async seek plus a poll. So "in flight" is defined per producer — but **the coalescer sits
+above both, in the producer seam, not in `ContentView`.** The view's job shrinks to handing over a
+position. The current gates live in the view only because the overlay's state does.
+
+---
+
+### 4. PRODUCER LIFECYCLE — the part commit `8896163` is about
+
+**Where: on the deck's `FrameEngine`.** Not `ContentView`, not app-wide. There is one engine and one
+renderer per deck (`WindowDeck.configure`), and the overlay lives in the view today only because a
+`CGImage` is view state. A `CVPixelBuffer` producer is not.
+
+**The engine already has the right lifecycle. Keep it; change only what the object is.**
+`libavThumbnailSource` is created in `loadAsset`'s PHASE 2 (commit) and in `loadMXF`, and released in
+`stop()` and at the top of the next `loadAsset` commit. That is exactly the shape a scrub producer
+needs, and the engine already knows `useLibav`, so producer selection is one branch at a site that
+already exists.
+
+**Start: at load, both sites, non-blocking.**
+⚠️ **NOT lazily on first drag, and NOT released at drag end.** Both are tempting and both throw away
+the measured result: the warm-vs-cold gap **is** the install cost — 30–34 ms of
+`avformat_find_stream_info` for libav at 4K, and 11.9–47.1 ms mean (215.6 ms worst first-ever) for
+`AVURLAsset` → `readyToPlay`. A per-drag lifecycle pays it on every grab, where it is a visible
+stall on the first movement of the scrubber. At load it is invisible.
+
+**Stop: `FrameEngine.stop()` and the top of the next `loadAsset` commit** — the two places
+`libavThumbnailSource?.close()` already runs. Deck teardown routes through `stop()`.
+
+#### The invariant `8896163` established, restated for a new producer
+
+That commit fixed `reader?.cancelReading()` racing an in-flight `copyNextSampleBuffer()` because
+cancellation ran on whatever queue happened to call `stop()`. The fix was engine-owned stable serial
+queues (`videoPumpQueue`, `audioPumpQueue`) with teardown **serialized behind them**. The rule to
+carry forward:
+
+> **A producer's teardown is enqueued onto the same serial queue its decode runs on, and that queue
+> is owned by the engine and outlives the producer.**
+
+`LibavThumbnailSource` already satisfies it — `thumbQueue` is a `let`, `close()` is
+`thumbQueue.async`. **The AVPlayer producer has a different version of the same hazard:** AVPlayer
+delivers seek completions and item KVO on the **main queue** (documented as trap 3 in
+`docs/scrub-fixtures/README.md`), so its teardown must not block main, and an in-flight seek
+completion can arrive after teardown has been requested.
+
+#### ⚠️ THE THREE GENERATION RACES DO NOT DISAPPEAR. THEY RELOCATE.
+
+Deleting `beginScrubHandoff` removes `scrubHandoff` and with it three checks — the late final
+preview, the renderer's one-shot, and the timeout. **It is tempting, and wrong, to describe this as
+"we removed the concurrency".** The asynchrony that made those checks necessary is a property of
+having an out-of-band frame producer, and the producer is not going away — it is moving from a
+`CGImage` generator behind a `Task` to a `CVPixelBuffer` producer behind a seek completion or a
+serial queue.
+
+**What actually happens: three ad-hoc counters in the view are replaced by ONE engine-owned
+`SessionToken`, sitting beside the two that already exist** (`sessionToken` for the video pump,
+`audioSessionToken` for the audio pump). A third — call it the scrub token — is bumped on producer
+teardown and on every load commit; every async completion captures it and bows out if superseded.
+
+That is a genuine simplification: one token, one idiom, in the file where the other two already live
+and are already understood. **But it is a RELOCATION, not a removal, and recording it as a removal
+is exactly how it ships under-tested.** The tests that matter are the same ones the handoff needed:
+a completion arriving after teardown, and a completion arriving after a *different file* has loaded.
+
+#### ⚠️ THE TOKEN CHECK IS ON THE DELIVERY SIDE, NOT THE REQUEST SIDE
+
+A scrub frame decoded from the OLD file can reach the renderer **after** the new file's
+`setSourceColorSpace(...)` has been installed on the layer — old pixels drawn through the new file's
+colour state. This is not hypothetical: the renderer already has a diagnostic for exactly this
+condition, printing *"⚠️ AFTER a frame was already on screen; that frame was drawn through the
+previous colour state"* when colour state installs late.
+
+So the token must be checked **at the point the buffer is handed to `presentImmediate`**, not only
+when the request is issued. A check at request time is necessary and not sufficient: the window that
+matters is the one between the decode starting and the pixels landing, which is precisely the window
+a load can slip into.
+
+**Mid-drag source change, concretely.** A drop, an Open, a Recent pick or a Flip advance can land
+while the scrubber is held. Rules:
+
+1. `loadAsset`'s commit phase bumps the scrub token — same place it already retires
+   `libavThumbnailSource`.
+2. In-flight scrub frames from the old file fail the delivery-side check and are dropped.
+3. `ContentView` clears `isScrubbing` from the same `onChange(of: engine.currentURL)` that resets
+   other per-file view state — otherwise the slider keeps driving a `scrubValue` that now means a
+   position in a different file with a different duration.
+
+---
+
+### 5. STAGING — smallest first, and MXF deliberately last
+
+#### Stage 0 — the renderer entry point. No behaviour change.
+
+Add `presentImmediate(pixelBuffer:pts:)` with its own `refreshLock`-guarded one-shot, alongside
+`pendingRefresh` and `pendingSeekRender`. Prove it with the existing overlay untouched, driven from
+a DEBUG keystroke.
+
+**Checkpoint:** a buffer pushed while paused, at a pts FORWARD of the pinned clock, reaches the
+offscreen; `onFrameRendered` fires (scopes) and `pushDeckLinkConvert` fires (SDI). Playback,
+seeking, shuttle and the live routes are byte-identical.
+
+#### Stage 1 — AVFoundation producer behind a flag; the overlay is still authoritative.
+
+Introduce the producer seam and the `AVPlayerItemVideoOutput` implementation: engine-owned,
+load/unload lifecycle, scrub token, latest-wins coalescer. Feed `presentImmediate`. **Keep the
+`CGImage` overlay running on top**, so the two paths are directly comparable — reuse
+`MANIFOLD_SCRUB_SPLIT`'s half-width `contentsRect` trick before deleting it, since this is the last
+moment it can be used for its designed purpose.
+
+**Checkpoint:**
+- the drag updates the Metal layer at the measured rate on ProRes and 4K H.264
+- **the scopes move during the drag** — they never have; this is the fix for the third problem in
+  the entry above, and it should be seen working before anything is deleted
+- the split shows the two paths agreeing on all-intra
+- **the ARRI open-gate ProRes 4444 XQ fixture scrubs at the correct geometry** (see the
+  `apertureMode` note in §1 — this is the check that turns a prediction into a measurement)
+- the SDI behaviour change is confirmed working and understood (see below)
+- **the v210 conversion cost during a drag is measured** (see the open item below)
+
+#### Stage 2 — flip the default for AVFoundation files. MXF UNCHANGED.
+
+Delete the overlay branch, `ScrubPreviewSurface`, the handoff, the three races, `previewImage`'s
+AVFoundation branch and the generator. **`useLibav` files keep `LibavThumbnailSource` and the
+overlay path exactly as they are today.** This is the releasable "AVFoundation working, MXF
+untouched" increment.
+
+⚠️ **THIS LEAVES TWO SCRUB MECHANISMS ALIVE AT ONCE, SELECTED BY `useLibav`, AND THAT IS A
+DELIBERATE CHOICE — NOT AN ACCIDENT OF SEQUENCING.** Landing both producers together doubles the
+surface under test in a single change, across two decoders, two lifecycles and two accuracy
+characteristics. Splitting it means the AVFoundation half can ship and be used on real work while
+the libav half is still being written.
+
+**What makes it safe is one line that is already there:** the overlay is gated on
+`if let preview = scrubPreviewImage`, **not** on `isScrubbing`. That gate was introduced as part of
+the 2026-08-28 position fix — *"⚠️ THE GATE IS THE IMAGE, NOT `isScrubbing` — AND THAT IS THE FIX,
+NOT A TIDY-UP"* — for an unrelated reason, and it happens to be exactly the property this staging
+needs: on the AVFoundation path no image is ever produced, so the overlay is structurally
+unreachable rather than conditionally suppressed. **A boolean mode flag would not have been
+equivalent, and if that gate is ever "tidied up" into an `isScrubbing` check, this staging stops
+being safe.**
+
+**Checkpoint:** HDR PQ ProRes scrubs without the mode change (closes the HDR scrub entry's Parts 1
+and 2 by removing their subject); no jump at release on all-intra; the H.264 release settle
+characterised and recorded rather than treated as a regression; MXF behaves exactly as it does
+today, verified rather than assumed.
+
+#### Stage 3 — libav producer for MXF.
+
+Second implementation of the same seam: `FF_THREAD_SLICE`, held `AVFormatContext`, own serial queue,
+same scrub token. Retires `LibavThumbnailSource`. **Decide the release-seek-target question from §2
+here**, with its own measurement.
+
+**Checkpoint:** ~20 ms drag on 4K MXF; **HDR PQ/HLG MXF previews stop being SDR** — which closes the
+deliberately-deferred Part 3 of the HDR scrub entry, by deleting the 8-bit RGBA path rather than
+giving it a float variant; scopes live on MXF; re-run `libavmeas MODE=memory` against the real app
+to confirm playback still loses no frames with the real playback pipeline rather than the model.
+
+#### Stage 4 — scaffolding removal.
+
+`ScrubDebug`'s three env vars, `onFirstPresentAfterFlush`, `codecIsAllIntra`, `[EDRDIAG]`, the split
+furniture. Close or restate the affected entries above. **The colour-management mode picker's
+precondition is met at this point and not before** — see the last section of the entry above.
+
+---
+
+### ✅ DECISION: THE SDI FEED FOLLOWS THE DRAG
+
+**Decided 2026-08-30. Recorded because it is a behaviour change to an output somebody may be
+watching, and because the alternative is defensible enough that it will be re-proposed.**
+
+`pushDeckLinkConvert` is called from inside `renderPixelBuffer`, so any frame that reaches the
+offscreen reaches SDI. **Today a drag leaves the SDI feed frozen on the pre-drag frame** — the
+overlay is a `CALayer` above the Metal layer and never touches the offscreen. After Stage 1 the SDI
+output will track the scrub.
+
+**This is correct and it is the intended behaviour.** It matches the desktop picture and the scopes.
+**A reference tool showing three different frames on three surfaces — desktop, scopes, SDI — is
+worse than one that moves**, and the scopes-are-stale problem recorded in the entry above is the
+same defect on a different surface. Fixing two of three and leaving the third frozen would be a
+strictly worse outcome than either fixing all three or fixing none.
+
+⚠️ **IT IS STILL A BEHAVIOUR CHANGE AT STAGE 1, AND SOMEONE MAY BE MONITORING THAT FEED.** A grade
+suite watching SDI on a broadcast monitor will now see the picture move while a colourist scrubs. It
+must appear in **release notes**, not be discovered by a tester who reports it as a fault. Stage 1's
+checkpoint includes confirming it works as intended, not merely that it happens.
+
+### ⚠️ OPEN ITEM FOR STAGE 1'S CHECKPOINT — the v210 conversion cost during a drag is UNMEASURED
+
+Every frame that reaches `renderPixelBuffer` triggers a v210 convert for DeckLink. A 20 Hz drag
+therefore adds ~20 conversions per second **on top of playback's**, at source raster, on a path that
+already has a 33 ms budget called out as at-risk from raster, codec and storage together.
+
+**Neither spike measured it** — `avpvomeas.swift` and `libavmeas.swift` both stop at the
+`rgba16Float` offscreen, which is the right boundary for the scope question and the wrong one for
+this. It is bounded above by the one-issue-per-display-refresh cap in §3, and the drag is seconds
+long rather than minutes, so it is unlikely to be a problem — **but "unlikely" is not a measurement,
+and this is the one cost on the whole route that nothing has looked at.** Measure it at Stage 1,
+with the card active, on 4K, before Stage 2 deletes the fallback.
+
 ---
 
 ## ⏸ BANKED: HLS as a source — a VIEWER/QC feature on the egress side, gated on the AVPlayer spike
 
-**Status:** BANKED, not built. **Raised:** 2026-08-28. **Gated on:** *"⏸ BANKED: feed the scrub
-gesture from `AVPlayerItemVideoOutput` — one decoder, one display path"* above — this is no longer
-an independent piece of work, see "Why this is now coupled".
+**Status:** BANKED, not built. **✅ THE GATE IS PASSED — 2026-08-29, and this is the use it passed
+most cleanly.** **Raised:** 2026-08-28. **Was gated on:** *"⏸ BANKED: feed the scrub gesture from
+`AVPlayerItemVideoOutput` — one decoder, one display path"* above — see "Why this is now coupled",
+and the result immediately below.
 
 **What exists today:** `StreamType.hls` in `App/Preferences.swift` — detection only. A URL whose
 path contains `.m3u8` is recognised, saved, listed, and shown **disabled** with an honest reason:
@@ -1579,6 +2541,50 @@ a picture with no instruments attached to it, which is the opposite of the featu
 > ourselves, which means segment fetching, playlist refresh, discontinuity handling and a decoder,
 > against a vendored FFmpeg that has no HTTP protocol at all (`PROTOCOL_IN exactly: file`) and no
 > H.264 decoder (only the parser).
+
+### ✅ MEASURED 2026-08-29 — the mechanism works, and this is the strongest of the three uses
+
+⚠️ **THIS WAS MEASURED SEPARATELY AND NOT INFERRED FROM THE FILE NUMBERS.** Nothing in a local-file
+seek measurement answers "does `AVPlayerItemVideoOutput` vend buffers from an HLS item at all" —
+that is a different mechanism against a different source, and it is the whole feature. Run with
+`MODE=hls` in `docs/scrub-fixtures/avpvomeas.swift`, against public adaptive test streams, as a
+~60 Hz pull loop — the shape a `CVDisplayLink`-driven consumer would have, not seek-and-wait.
+
+| | 4K adaptive ladder, 25 s | 29.97p ladder, 20 s |
+|---|---|---|
+| frames pulled | 597 = **23.9 fps** | 596 = **29.8 fps** |
+| vended pixel format | **x420** | **x420** |
+| empty pulls | **0** | **0** |
+| display times repeated / backwards | **0 / 0** | **0 / 0** |
+| `copyPixelBuffer` cost | **0.1 ms** mean, 4.7 max | **0.1 ms** mean, 1.9 max |
+| shader → completed offscreen | 0.7 ms mean, 8.4 max | 0.7 mean, 4.8 max |
+| network | 81 Mb/s | 16 Mb/s |
+| process footprint | 555 MB | 317 MB |
+
+**The buffer arrives as `x420` — the app's own decode contract, unchanged** (`FrameEngine.videoPixelFormat`),
+so it goes to `renderPixelBuffer` with no conversion and reaches the offscreen ring the scopes read.
+**Full frame rate sustained, zero dropped pulls, and zero repeated display times over 25 seconds** —
+a repeat would be a frame the scopes showed twice, which is the specific way this could have been
+useless while looking like it worked.
+
+**Why this use is the strongest, exactly as this entry predicted:**
+
+- **The two risks that qualify the scrub use do not apply here.** There is no drag, so per-seek
+  latency is irrelevant — and the pull cost that IS on the hot path is **0.1 ms**. There is no
+  second decode of a local file, so the **+774 Mb/s IO amplification** recorded against the scrub
+  use has no analogue: HLS is one stream, decoded once, at the ladder's own bitrate.
+- **Memory is the AVPlayer stack itself, not an increment on top of something.** 555 MB for a 4K
+  ladder is the whole cost of the feature, not a second pipeline's delta.
+
+⚠️ **Seeking an HLS VOD item is SLOW — 188 ms mean, 624 ms worst** (segment fetch, measured). **This
+does not touch the QC use**, which is live monitoring with no scrubber. Recorded so nobody discovers
+it while building a transport for HLS and reads it as a defect in this route.
+
+⚠️ **The ABR ladder settled at 1280×720 inside a 25 s window** on the 4K stream. That is the ladder
+ramping, not a ceiling of the mechanism — but it means **the raster of a live HLS feed is not under
+our control and will change during a session.** Anything that assumes a fixed source size, including
+the offscreen sizing, has to handle it changing mid-stream. This is a REAL constraint on the feature
+and it was not visible before this measurement.
 
 **Spike the AVPlayer route FIRST, and read its result as a decision about three features rather
 than one.** The two risks it must answer are stated in that entry (latency at drag rate; memory and
