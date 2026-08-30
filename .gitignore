@@ -107,3 +107,12 @@ docs/Blackmagic Advanced Video Capture and Playback/
 .build-cc-debug/
 .build-cc-profile/
 .build-cc-release/
+
+# Scrub-fixture harness binaries. docs/scrub-fixtures/README.md states the convention — single-file
+# swiftc scripts, built on demand, binary NOT committed — and these patterns enforce it rather than
+# leaving it to be remembered. The .swift sources ARE committed; only the products are ignored.
+docs/scrub-fixtures/scrubmeas
+docs/scrub-fixtures/avpvomeas
+docs/scrub-fixtures/libavmeas
+docs/scrub-fixtures/wincap
+docs/scrub-fixtures/hrprobe
