@@ -858,6 +858,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// .encodedPixels returns 736×540 — the full encoded frame, exactly what playback draws. Paired
     /// with ContentView's `.aspectRatio(videoAspect)` pin, which squashes it into the same rect the
     /// layer squashes the decoded buffer into, the two paths land pixel-for-pixel on each other.
+    ///
+    /// ⚠️ THIS GENERATOR IS SCHEDULED FOR DELETION AND THE FACT ABOVE IS NOT. When the scrub
+    /// producers replace it (docs/BUGS.md, "STAGING"), the `apertureMode` line goes with the
+    /// generator, but "the scrub path must present ENCODED geometry, because that is what the
+    /// Metal path draws" survives it — the producers hand the decoder's buffer straight to
+    /// `MetalVideoRenderer.presentImmediate`, which is where the rule and the ARRI open-gate
+    /// ProRes 4444 XQ check now live. Read that doc comment before deleting this one.
     private static func makeScrubPreviewGenerator(for asset: AVAsset) -> AVAssetImageGenerator {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true

@@ -448,6 +448,20 @@ struct ContentView: View {
                 .keyboardShortcut("s", modifiers: [.control, .option, .shift])
                 .opacity(0)
         )
+        // ⚠️ TEMPORARY — STAGE 0 of the scrub-producer work (docs/BUGS.md, "STAGING"). ⌃⌥⇧P pushes
+        // a synthetic frame through `presentImmediate`, the new off-clock entry point, and reports
+        // whether it reached the offscreen, the scopes' sink and the SDI convert. It exists ONLY
+        // because Stage 0 deliberately wires the entry point to nothing: without a keystroke there
+        // is no way to find out whether the thing that was added works, and a successful build is
+        // not evidence. Delete it — and the `#if DEBUG` probe block in MetalVideoRenderer — as soon
+        // as a real producer feeds `presentImmediate` in Stage 1.
+        //
+        // ⌃⌥⇧P, not ⌃⌥P: plain ⌃⌥P is already taken. Evidence goes to stderr as `[Stage0]`.
+        .background(
+            Button("") { metalRenderer?.debugPresentImmediateProbe() }
+                .keyboardShortcut("p", modifiers: [.control, .option, .shift])
+                .opacity(0)
+        )
         #endif
         // Scope shortcuts (tray + per-scope toggles + CIE live toggles) consolidated into one
         // hidden group so the view body's modifier chain stays type-checkable.
@@ -1123,6 +1137,15 @@ struct ContentView: View {
             // then replaced it. That replacement is the jump in the report. `scrubPreviewImage` is
             // now the sole gate, and the release path holds it until the new frame is actually
             // presented (see `beginScrubHandoff`).
+            //
+            // ⚠️ AND IT IS NOW LOAD-BEARING A SECOND TIME, FOR A DIFFERENT REASON. Stage 2 of the
+            // scrub-producer work leaves TWO scrub mechanisms alive at once (AVFoundation on the
+            // new `presentImmediate` path, MXF still on this overlay), and what makes that window
+            // safe is precisely that this gate is the IMAGE: on the producer path no preview image
+            // is ever made, so the overlay is structurally unreachable rather than conditionally
+            // suppressed. Rewriting it as `if isScrubbing` — or as any mode flag — would make both
+            // mechanisms reachable on the same drag and break the staging, not just this fix.
+            // docs/BUGS.md, "Stage 2 — flip the default for AVFoundation files".
             if let preview = scrubPreviewImage, !ScrubDebug.overlayDisabled {
                 // SAME aspect authority as the video rect above — deliberately NOT the preview
                 // image's own pixel aspect. The two preview producers disagree about pixel aspect
