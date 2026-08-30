@@ -40,10 +40,24 @@ enum ScrubDebug {
     /// See `splitLatched` in ContentView for the arming rule and `ScrubPreviewSurface`'s
     /// `splitFraction` for how the half is taken (`contentsRect`, NOT a mask — see there).
     static let splitEnabled = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_SPLIT"] == "1"
+
+    /// ── STAGE 1. `MANIFOLD_SCRUB_PRODUCER=1` ──────────────────────────────────────────────────
+    ///
+    /// The view's mirror of `ScrubProducerFlags.enabled` — one variable, read twice, because the
+    /// two halves of the instrument live on opposite sides of the package boundary: the engine
+    /// decides whether to BUILD a producer, and the view decides whether to narrow the overlay so
+    /// the producer can be seen underneath it.
+    ///
+    /// ⚠️ IT DOES NOT DISABLE THE OVERLAY. Stage 1 runs both paths at once ON PURPOSE — that is
+    /// what makes them comparable, and it is why this stage exists as its own step rather than
+    /// being folded into the switchover. `MANIFOLD_NO_SCRUB_OVERLAY=1` is still the way to see the
+    /// producer alone.
+    static let producerEnabled = ScrubProducerFlags.enabled
     #else
     static let overlayDisabled = false
     static let forceLegacyEDR = false
     static let splitEnabled = false
+    static let producerEnabled = false
     #endif
 }
 
@@ -2776,6 +2790,23 @@ struct ContentView: View {
                             // because a half-width overlay left standing for even one frame of a
                             // fresh drag would show the new preview cropped to half the picture.
                             dismissScrubSplit()
+                            // ── STAGE 1: THE SPLIT BECOMES A LIVE INSTRUMENT ───────────────────
+                            //
+                            // The post-release split compares two decoders at ONE HELD FRAME. That
+                            // was the right instrument when both halves were static; it is the
+                            // wrong one now, because the question has changed from "do these two
+                            // frames match" to "does the producer track the drag". So when the
+                            // producer is running, the split is armed for the WHOLE DRAG: left
+                            // half = the `CGImage` overlay, right half = the Metal layer the
+                            // producer is driving live, same position, same instant, moving.
+                            //
+                            // Its validity condition is unchanged and still all-intra only — see
+                            // `logScrubSplitArmed`. On long-GOP the ±0.5 s generator tolerance can
+                            // put the overlay up to ELEVEN frames from what the producer decoded,
+                            // and the seam then shows two different frames rather than two
+                            // renderings of one.
+                            if ScrubDebug.splitEnabled && ScrubDebug.producerEnabled { splitLatched = true }
+                            metalRenderer?.debugFlushV210Stats(label: "before-drag")
                             #endif
                             wasPlayingBeforeScrub = engine.isPlaying
                             if engine.isPlaying { engine.pause() }
@@ -2816,6 +2847,12 @@ struct ContentView: View {
                             // difference. Suppressing the resume is not a workaround for the
                             // instrument, it is a condition of it. Gated on the env var, so a
                             // build without it resumes exactly as before.
+                            #if DEBUG
+                            // The drag's v210 cost, against the "before-drag" baseline printed at
+                            // grab. Flushed BEFORE the resume so playback's converts cannot land
+                            // in the drag's numbers.
+                            metalRenderer?.debugFlushV210Stats(label: "drag")
+                            #endif
                             if wasPlayingBeforeScrub && !ScrubDebug.splitEnabled { engine.play() }
                         }
                     }

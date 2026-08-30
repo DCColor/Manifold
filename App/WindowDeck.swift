@@ -827,6 +827,14 @@ final class DeckRegistry {
         engine.onSourceColorTags = { [weak renderer] primaries, transfer, matrix in
             renderer?.setSourceColorSpace(primaries: primaries, transfer: transfer, matrix: matrix)
         }
+        // THE SCRUB SEAM'S DESTINATION — per-window, same shape and same site as the three above.
+        // The engine's coalescer has already applied the delivery-side token check; this is the
+        // hand-off itself. `presentImmediate` bypasses the frame queue and the `pts <= clock()`
+        // gate, which is what a drag FORWARD of the pinned scrub clock needs. Inert unless
+        // `MANIFOLD_SCRUB_PRODUCER=1` built a producer at load.
+        engine.onScrubFrame = { [weak renderer] pixelBuffer, pts in
+            renderer?.presentImmediate(pixelBuffer: pixelBuffer, pts: pts)
+        }
 
         // Seed the kernel's CIE mode from the persisted value so the scatter opens in the
         // last-left mode even if a source loaded before the CIE scope is shown. Set BEFORE

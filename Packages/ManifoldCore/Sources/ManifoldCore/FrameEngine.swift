@@ -298,6 +298,29 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// `beginReading` bumps BOTH (a seek moves both readers); `selectAudioTrack` bumps only this one.
     private let audioSessionToken = SessionToken()
 
+    /// ── THE THIRD TOKEN: retirement authority for the SCRUB PRODUCER ──────────────────────────
+    ///
+    /// Sits beside the two above because it is the same idiom for the same reason, and putting it
+    /// here rather than inventing view-side counters is the actual simplification: deleting the
+    /// scrub handoff removes three ad-hoc generation checks from `ContentView`, and this is the one
+    /// thing that replaces them. ⚠️ **That is a RELOCATION, not a removal.** The asynchrony those
+    /// checks existed for is a property of having an out-of-band frame producer, and the producer
+    /// is not going away — it moved from a `CGImage` behind a `Task` to a `CVPixelBuffer` behind a
+    /// seek completion.
+    ///
+    /// Bumped on producer teardown and on every load commit.
+    private let scrubToken = SessionToken()
+
+    /// The scrub seam. Nil when no producer exists for this source — which in Stage 1 is every
+    /// file (the flag is off) and, once the flag is on, still every MXF: AVFoundation cannot open
+    /// MXF at all, so that half waits for the libav producer in Stage 3 and keeps the overlay.
+    private var scrubCoalescer: ScrubCoalescer?
+
+    /// Called on MAIN with each scrub frame that survives the delivery-side token check. Wired to
+    /// `MetalVideoRenderer.presentImmediate` in `DeckRegistry.configure`, alongside `onVideoFrame`
+    /// and `onFlush` — the same shape, for the same reason: the renderer lives in the app target.
+    public var onScrubFrame: ((CVPixelBuffer, Double) -> Void)?
+
     public init() {
         synchronizer.addRenderer(audioRenderer)
     }
@@ -394,6 +417,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // Rebuild the scrub-preview generator on the fresh asset.
         self.imageGenerator = Self.makeScrubPreviewGenerator(for: freshAsset)
+        // …AND the scrub producer, for the reason stated two lines up and not for a new one: a
+        // re-inspect follows a REWRITE OF THE SAME FILE, and a producer built on the pre-rewrite
+        // asset holds that asset's cached format descriptions exactly as `imageGenerator` did.
+        // The two producers of scrub frames are rebuilt together or they drift apart on precisely
+        // the path this function exists to serve.
+        //
+        // ⚠️ ONLY REACHED WHEN A COLOUR TAG CHANGED — the `guard colorChanged` above returns
+        // first on a no-op refresh, so this does not pay the 11.9–47.1 ms install on every press
+        // of the reload button. `useLibav` is unchanged by a tag rewrite, so it is carried
+        // forward rather than re-derived.
+        installScrubProducer(for: url, useLibav: useLibav)
 
         guard let vTrack = try? await freshAsset.loadTracks(withMediaType: .video).first else { return }
         self.videoTrack = vTrack
@@ -697,6 +731,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavAudioSource = nil
         libavThumbnailSource?.close()   // retire the detached scrub-thumbnail decoder
         libavThumbnailSource = nil
+        installScrubProducer(for: nil, useLibav: false)   // …and the scrub producer, same lifecycle
 
         // Audio is its OWN reader + pump now, so it retires through its own teardown — which bumps
         // `audioSessionToken`, stops the pump, cancels that reader, flushes the renderer and drops
@@ -833,14 +868,62 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// During a scrub drag: just track the target and show it on the clock,
     /// WITHOUT rebuilding the reader every tick (that storms the decoder).
+    ///
+    /// AND — when a scrub producer exists — hand that position to the seam. This is the whole of
+    /// the view's new job: `ContentView` already called this on every slider callback, so "here is
+    /// the position" needed no new call site. Everything the view used to own about the request
+    /// (the in-flight latch, the media-distance gate, the generation stamp) is gone from it; the
+    /// coalescer owns the first, deleted the second, and the token below replaces the third.
     public func scrubSeek(to seconds: Double) {
         let clamped = max(0, min(seconds, duration))
         currentTime = clamped
+        scrubCoalescer?.submit(clamped)
     }
 
     /// On scrub release (or a discrete seek): do the real reader rebuild.
     public func exactSeek(to seconds: Double) {
+        // Release is the natural edge for the drag's `[SCRUB]` summary: it is the one moment that
+        // means "that gesture is over". No-op when no producer ran.
+        scrubCoalescer?.flushStats(label: currentURL?.lastPathComponent ?? "—")
         seek(to: seconds)
+    }
+
+    /// Build the scrub producer for `url`, or tear the old one down and build nothing.
+    ///
+    /// ── ONE FUNCTION, BOTH COMMIT PATHS, AND THE TEARDOWN IN THE SAME PLACE ───────────────────
+    ///
+    /// The lifecycle is `libavThumbnailSource`'s, unchanged — created in `loadAsset`'s PHASE 2 and
+    /// in `loadMXF`, released in `stop()` and at the top of the next commit. Only the object is
+    /// different. Calling this at the top of a commit with `url: nil` is the teardown.
+    ///
+    /// ⚠️ THE TOKEN IS CHECKED AT DELIVERY, NOT AT REQUEST, and the difference is a real bug and
+    /// not a formality. A scrub frame decoded from the OLD file can reach the renderer AFTER the
+    /// new file's `setSourceColorSpace(...)` has been installed on the layer — old pixels drawn
+    /// through the new file's colour state. The renderer already has a diagnostic for exactly that
+    /// condition (`[EDR] … ⚠️ AFTER a frame was already on screen`). A check at request time is
+    /// necessary and not sufficient: the window that matters is between the decode STARTING and
+    /// the pixels LANDING, which is precisely the window a load can slip into. So the check lives
+    /// in the delivery closure below, one line before the hand-off.
+    private func installScrubProducer(for url: URL?, useLibav: Bool) {
+        scrubCoalescer?.close()
+        scrubCoalescer = nil
+        // Bumped on teardown as well as on install, so a completion still in flight from the
+        // producer just closed cannot deliver into the next file.
+        let token = scrubToken.next()
+
+        guard ScrubProducerFlags.enabled, let url else { return }
+        // ⚠️ MXF GETS NO PRODUCER IN STAGE 1 AND THAT IS THE STAGING, NOT AN OVERSIGHT.
+        // AVFoundation has no MXF demuxer, so `AVPlayerScrubProducer` cannot open it at all; the
+        // libav producer is Stage 3. Until then MXF keeps `LibavThumbnailSource` and the overlay,
+        // exactly as it behaves today.
+        guard !useLibav else { return }
+
+        let producer = AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
+        scrubCoalescer = ScrubCoalescer(producer: producer) { [weak self] frame in
+            guard let self else { return }
+            guard self.scrubToken.isCurrent(token) else { return }   // ← the delivery-side check
+            self.onScrubFrame?(frame.pixelBuffer, frame.pts)
+        }
     }
 
     /// The scrub-preview generator, built the SAME way at both construction sites (initial load and
@@ -1117,6 +1200,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavSource?.stop(); libavSource = nil
         libavAudioSource?.stop(); libavAudioSource = nil
         libavThumbnailSource?.close(); libavThumbnailSource = nil
+        // The scrub producer is retired HERE and rebuilt below once `useLibav` is known — the
+        // second half of the same lifecycle, and the bump this performs is what makes an in-flight
+        // frame from the outgoing file fail its delivery check instead of landing on the new one.
+        installScrubProducer(for: nil, useLibav: false)
 
         // MXF: AVFoundation can't demux it — route straight to libav (container-based
         // detection; not a VT-failed fallback). Its metadata comes from libav.
@@ -1207,6 +1294,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             thumb.openAsync()
             libavThumbnailSource = thumb
         }
+        // The scrub producer, at the same point in the same commit and for the same reason: the
+        // decoder has to be warm before the first grab, not built by it. No-op unless the Stage 1
+        // flag is on; skipped for libav files, which have no AVFoundation route.
+        installScrubProducer(for: url, useLibav: useLibav)
 
         installTimeObserverIfNeeded()
 
@@ -1270,6 +1361,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let thumb = LibavThumbnailSource(url: url)
         thumb.openAsync()
         libavThumbnailSource = thumb
+        // Both commit paths call this, so neither can forget it. MXF resolves to "no producer"
+        // inside — see the guard there — but the CALL is what keeps the two paths symmetrical and
+        // is where the Stage 3 libav producer will land without touching this site again.
+        installScrubProducer(for: url, useLibav: true)
         installTimeObserverIfNeeded()
         await beginReading(from: 0, resumePlaying: autoplay)
     }

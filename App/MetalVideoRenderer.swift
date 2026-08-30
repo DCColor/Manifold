@@ -499,8 +499,40 @@ final class MetalVideoRenderer {
     /// Call from MAIN. `pts` is the frame's SOURCE time and rides through to the DeckLink audio
     /// alignment exactly as a queued frame's does; pass `.nan` only if it is genuinely unknown.
     func presentImmediate(pixelBuffer: CVPixelBuffer, pts: Double) {
+        #if DEBUG
+        debugCheckScrubGeometry(pixelBuffer)
+        #endif
         refreshLock.lock(); pendingImmediate = (pixelBuffer, pts); refreshLock.unlock()
     }
+
+    #if DEBUG
+    /// THE ARRI OPEN-GATE CHECK, MADE ARITHMETIC. The rule above says a producer owes ENCODED
+    /// geometry; this is the line that finds out, by comparing what arrived against what playback
+    /// actually drew — the offscreen is sized from the playback buffer (`ensureOffscreenTexture`),
+    /// so it IS the encoded raster and needs no second opinion about PAR or aperture.
+    ///
+    /// It exists because the failure is invisible by eye: a reintroduced clean-aperture crop is
+    /// 32 px per side on the fixture that exposed it (2944 encoded → 2880 clean), which reads as a
+    /// slightly soft preview rather than as a geometry bug. One line per distinct pairing, so a
+    /// drag prints it once and not 200 times.
+    private func debugCheckScrubGeometry(_ pb: CVPixelBuffer) {
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        guard let playback = offscreenTexture else { return }   // nothing to compare against yet
+        let key = "\(w)x\(h)/\(playback.width)x\(playback.height)"
+        guard debugGeomReported.insert(key).inserted else { return }
+        if w == playback.width && h == playback.height {
+            print("[SCRUB-GEOM] ✓ producer \(w)x\(h) == playback \(playback.width)x\(playback.height)"
+                + " — encoded geometry, no aperture rule applied")
+        } else {
+            print("[SCRUB-GEOM] ⚠️ producer \(w)x\(h) != playback \(playback.width)x\(playback.height)"
+                + " — Δ \((playback.width - w) / 2) px/side, \((playback.height - h) / 2) px/top."
+                + " A clean-aperture crop or a PAR resample is being applied on the scrub path.")
+        }
+    }
+    /// Main-thread only (`presentImmediate`'s caller). Cleared by nothing: the set is bounded by
+    /// the number of distinct size pairings a session sees, which is one per file.
+    private var debugGeomReported: Set<String> = []
+    #endif
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -2697,6 +2729,61 @@ final class MetalVideoRenderer {
 
     #endif
 
+    // MARK: - v210 convert cost (DEBUG only, TEMPORARY — Stage 1 measurement)
+
+    #if DEBUG
+    /// ⚠️ STAGE-1 MEASUREMENT SCAFFOLDING. `[V210]`.
+    ///
+    /// THE ONE THING NEITHER SPIKE CAUGHT. `avpvomeas.swift` and `libavmeas.swift` both stop at the
+    /// rgba16Float offscreen — correct for "will the scopes keep up", wrong for this — so the cost
+    /// of the RGB→v210 compute dispatch that every offscreen write drags behind it when DeckLink
+    /// output is running has never been measured at drag rate. It matters BEFORE Stage 2, because
+    /// Stage 2 deletes the overlay and with it the fallback: if the convert cannot keep up at 4K
+    /// with a card running, that has to be known while there is still something to fall back to.
+    ///
+    /// `offered` vs `converted` is the interesting pair, not the mean. The convert is gated
+    /// one-in-flight, so an offered-but-skipped frame is SDI silently dropping a scrub position —
+    /// the picture moves and the wire does not. `skipped` counting up while `gpu` stays flat is
+    /// back-pressure; `gpu` climbing is the dispatch itself being the cost.
+    private let v210Lock = NSLock()
+    private var v210Offered = 0        // guarded by deckLinkLock (incremented inside it)
+    private var v210Skipped = 0        // ditto
+    private var v210Samples = 0
+    private var v210WallSum: Double = 0
+    private var v210GpuSum: Double = 0
+    private var v210GpuMax: Double = 0
+    /// Guarded by `deckLinkLock` (written inside the convert's completion, under that lock).
+    private var v210PtsMin: Double = .nan
+    private var v210PtsMax: Double = .nan
+
+    /// Print and reset. Called from the scrub-drag edges in `ContentView` so a drag's numbers and
+    /// the interval before it can be read against each other. Silent when the card is not running.
+    func debugFlushV210Stats(label: String) {
+        deckLinkLock.lock()
+        let offered = v210Offered, skipped = v210Skipped, active = deckLinkActive
+        let ptsMin = v210PtsMin, ptsMax = v210PtsMax
+        v210Offered = 0; v210Skipped = 0
+        v210PtsMin = .nan; v210PtsMax = .nan
+        deckLinkLock.unlock()
+
+        v210Lock.lock()
+        let n = v210Samples, wall = v210WallSum, gpu = v210GpuSum, gpuMax = v210GpuMax
+        v210Samples = 0; v210WallSum = 0; v210GpuSum = 0; v210GpuMax = 0
+        v210Lock.unlock()
+
+        guard offered > 0 || n > 0 else { return }
+        let size = offscreenTexture.map { "\($0.width)x\($0.height)" } ?? "—"
+        print(String(format:
+            "[V210] %@ src=%@ active=%@ offered=%d converted=%d skipped=%d (%.0f%%) | "
+            + "gpu mean=%.2f max=%.2f ms | encode→done mean=%.2f ms | SDI frontPts %.3f→%.3f s (span %.3f)",
+            label, size, active ? "yes" : "no", offered, n, skipped,
+            offered > 0 ? Double(skipped) * 100 / Double(offered) : 0,
+            n > 0 ? gpu * 1000 / Double(n) : .nan, gpuMax * 1000,
+            n > 0 ? wall * 1000 / Double(n) : .nan,
+            ptsMin, ptsMax, ptsMax - ptsMin))
+    }
+    #endif
+
     // MARK: - DeckLink output (D-real: RGB offscreen → v210 10-bit, push-on-render, pull-latest)
 
     /// Begin DeckLink output for a fixed output frame size. Allocates the double-buffered .shared
@@ -2736,6 +2823,18 @@ final class MetalVideoRenderer {
     /// offscreen dims ≠ output dims, skip (mark not-ready) + log once — scaling is a later stage.
     private func pushDeckLinkConvert(sourcePts: Double) {
         deckLinkLock.lock()
+        #if DEBUG
+        // [V210] — the cost neither scrub spike measured. Both harnesses stopped at the
+        // rgba16Float offscreen, which is the right boundary for the SCOPES question and the wrong
+        // one for this: during a drag the offscreen is written at drag rate, and every write drags
+        // a full-raster RGB→v210 compute dispatch behind it. Counted here, before the gate, so a
+        // convert DROPPED by the one-in-flight latch is visible as itself rather than as a missing
+        // sample — on 4K that drop is the mechanism that would keep SDI behind the picture.
+        if deckLinkActive {
+            v210Offered += 1
+            if deckLinkConverting { v210Skipped += 1 }
+        }
+        #endif
         guard deckLinkActive, !deckLinkConverting, deckLinkStaging.count == 2,
               let outSize = deckLinkOutputSize else { deckLinkLock.unlock(); return }
         let backIndex = 1 - deckLinkFrontIndex
@@ -2764,6 +2863,9 @@ final class MetalVideoRenderer {
               let enc = cmd.makeComputeCommandEncoder() else {
             deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
         }
+        #if DEBUG
+        let v210EncodeStart = CACurrentMediaTime()
+        #endif
         // Matrix selected by source colorMatrixCode ONLY (never from primaries) — read live so a
         // mid-session source change is picked up on the next converted frame.
         let m = ycbcrKrKb(forMatrixCode: sourceMatrixCode)
@@ -2781,14 +2883,35 @@ final class MetalVideoRenderer {
         enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
         enc.endEncoding()
 
-        cmd.addCompletedHandler { [weak self] _ in
+        cmd.addCompletedHandler { [weak self] cb in
             guard let self else { return }
+            #if DEBUG
+            // Wall time covers encode → GPU done, i.e. what the convert costs the pipeline; `gpu`
+            // is the dispatch alone. The two differ by queue wait, which is the number that grows
+            // when a drag outruns the card.
+            self.v210Lock.lock()
+            self.v210WallSum += CACurrentMediaTime() - v210EncodeStart
+            let gpu = cb.gpuEndTime - cb.gpuStartTime
+            if gpu >= 0 { self.v210GpuSum += gpu; self.v210GpuMax = max(self.v210GpuMax, gpu) }
+            self.v210Samples += 1
+            self.v210Lock.unlock()
+            #endif
             self.deckLinkLock.lock()
             // The back buffer is now a COMPLETE frame → make it the front; clear the gate. The frame's
             // SOURCE pts is published in the SAME critical section as the pixels it belongs to, so the
             // audio callback can never pair a source time with the wrong frame (D4b-2).
             self.deckLinkFrontIndex = backIndex
             self.deckLinkFrontPts = sourcePts
+            #if DEBUG
+            // The SOURCE time the card is now being fed. Tracked as a span so the `[V210]` line can
+            // say whether SDI actually swept the dragged range — "converts happened" and "the wire
+            // followed the drag" are different claims, and only the second one is the behaviour
+            // change Stage 1 is meant to demonstrate.
+            if sourcePts.isFinite {
+                self.v210PtsMin = self.v210PtsMin.isFinite ? min(self.v210PtsMin, sourcePts) : sourcePts
+                self.v210PtsMax = self.v210PtsMax.isFinite ? max(self.v210PtsMax, sourcePts) : sourcePts
+            }
+            #endif
             self.deckLinkFrameReady = true
             self.deckLinkConverting = false
             self.deckLinkLock.unlock()
