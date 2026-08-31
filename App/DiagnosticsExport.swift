@@ -429,7 +429,7 @@ enum LogPartitioner {
     /// Our log lines that carry no bracket tag at all. These are exactly why rule 3 defaults to
     /// ours: they existed before any tag convention and nothing forces a new one to adopt it.
     private static let manifoldPrefixes = [
-        "DeckLink", "FrameEngine", "AudioTap[", "HDR10 [", "LibavThumbnailSource",
+        "DeckLink", "FrameEngine", "AudioTap[", "HDR10 [", "LibavScrubProducer",
         "MetalVideoRenderer", "Edit in Flip", "ScopeCompute", "LiveClock",
     ]
 

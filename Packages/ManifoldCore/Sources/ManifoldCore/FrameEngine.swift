@@ -270,11 +270,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var libavAudioSource: LibavAudioSource?
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
-    /// Scrub-preview thumbnail generator for libav (DNx/MXF) files — a DETACHED decoder with
-    /// its own AVFormatContext (AVAssetImageGenerator can't decode DNxHR). Opened at load for
-    /// libav files, nil for AVFoundation files (which use the scrub PRODUCER instead — see
-    /// `installScrubProducer`). The last consumer of `previewImage`; retired in Stage 3.
-    private var libavThumbnailSource: LibavThumbnailSource?
     /// Decoded video format requested at the decode-request site. A named property
     /// rather than a magic constant so the sources/decoders can vary it.
     /// M3b: 10-bit 420 biplanar (x420, raw video-range). 10-bit ProRes and DNxHR
@@ -728,9 +723,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavSource = nil
         libavAudioSource?.stop()
         libavAudioSource = nil
-        libavThumbnailSource?.close()   // retire the detached scrub-thumbnail decoder
-        libavThumbnailSource = nil
-        installScrubProducer(for: nil, useLibav: false)   // …and the scrub producer, same lifecycle
+        installScrubProducer(for: nil, useLibav: false)   // retire the scrub producer
 
         // Audio is its OWN reader + pump now, so it retires through its own teardown — which bumps
         // `audioSessionToken`, stops the pump, cancels that reader, flushes the renderer and drops
@@ -891,7 +884,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     ///
     /// ── ONE FUNCTION, BOTH COMMIT PATHS, AND THE TEARDOWN IN THE SAME PLACE ───────────────────
     ///
-    /// The lifecycle is `libavThumbnailSource`'s, unchanged — created in `loadAsset`'s PHASE 2 and
+    /// The lifecycle is the one `libavThumbnailSource` used to have — created in `loadAsset`'s PHASE 2 and
     /// in `loadMXF`, released in `stop()` and at the top of the next commit. Only the object is
     /// different. Calling this at the top of a commit with `url: nil` is the teardown.
     ///
@@ -903,13 +896,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// necessary and not sufficient: the window that matters is between the decode STARTING and
     /// the pixels LANDING, which is precisely the window a load can slip into. So the check lives
     /// in the delivery closure below, one line before the hand-off.
-    /// Which scrub mechanism this source is on. True ⇒ no producer, `LibavThumbnailSource` and
-    /// the `CGImage` overlay; false ⇒ the producer and `presentImmediate`. The view reads it in
-    /// exactly one place — the guard at the top of `requestScrubPreview` — which is what makes the
-    /// overlay structurally unreachable on the producer path rather than conditionally suppressed.
-    /// Goes away in Stage 3, when there is only one answer.
-    public var usesLibavScrub: Bool { useLibav }
-
     private func installScrubProducer(for url: URL?, useLibav: Bool) {
         scrubCoalescer?.close()
         scrubCoalescer = nil
@@ -918,38 +904,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let token = scrubToken.next()
 
         guard let url else { return }
-        // ⚠️ MXF GETS NO PRODUCER AND THAT IS THE STAGING, NOT AN OVERSIGHT.
-        // AVFoundation has no MXF demuxer, so `AVPlayerScrubProducer` cannot open it at all; the
-        // libav producer is Stage 3. Until then MXF keeps `LibavThumbnailSource` and the overlay,
-        // exactly as it behaves today — and `usesLibavScrub` is how the view knows which of the
-        // two mechanisms this file is on.
-        //
-        // NO FLAG. The producer is the DEFAULT for everything AVFoundation can open, as of Stage 2;
-        // `MANIFOLD_SCRUB_PRODUCER` is deleted with the overlay it used to be compared against.
-        guard !useLibav else { return }
 
-        let producer = AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
+        // ── TWO PRODUCERS, ONE DESTINATION. THIS BRANCH IS THE WHOLE SELECTION. ───────────────
+        //
+        // It sits exactly where the overlay branch used to be selected, and it is the ONLY place
+        // the corpus is split. `useLibav` is the same flag playback already routes on
+        // (`MediaInspector.requiresLibavDecode`, plus MXF unconditionally), so scrub and playback
+        // can never disagree about which demuxer a file needs.
+        //
+        // Below this line nothing is producer-specific: the same coalescer, the same delivery-side
+        // token, the same `onScrubFrame` → `presentImmediate`. There is no `CGImage` on either
+        // path any more, and therefore no second display path, no second colour-management mode,
+        // and no format a scope cannot sample.
+        let producer: ScrubFrameProducer = useLibav
+            ? LibavScrubProducer(url: url, pixelFormat: videoPixelFormat)
+            : AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
         scrubCoalescer = ScrubCoalescer(producer: producer) { [weak self] frame in
             guard let self else { return }
             guard self.scrubToken.isCurrent(token) else { return }   // ← the delivery-side check
             self.onScrubFrame?(frame.pixelBuffer, frame.pts)
         }
-    }
-
-    /// A single preview frame (CGImage) at the given time — **MXF ONLY**, from the detached libav
-    /// thumbnail decoder. Isolated from the playback pump. Returns nil on failure.
-    ///
-    /// ⚠️ THE AVFoundation BRANCH IS GONE AND SO IS `AVAssetImageGenerator`. Those files now decode
-    /// the scrub frame through `AVPlayerScrubProducer` into the Metal renderer, so they need no
-    /// `CGImage` at all — which is what removes the second display path, the second colour-management
-    /// mode, and the reason the scopes could not move during a drag. Nothing calls this for them;
-    /// `ContentView.requestScrubPreview` guards on `usesLibavScrub` before asking.
-    ///
-    /// Retired with `LibavThumbnailSource` in Stage 3.
-    public func previewImage(at seconds: Double) async -> CGImage? {
-        guard useLibav else { return nil }
-        let clamped = max(0, min(seconds, duration))
-        return await libavThumbnailSource?.thumbnail(at: clamped)
     }
 
     /// The source timecode at a time on the file's timeline: the file's start TC plus however many
@@ -1155,7 +1129,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // per-file libav video+audio sources are created lazily in beginLibavReading.
         libavSource?.stop(); libavSource = nil
         libavAudioSource?.stop(); libavAudioSource = nil
-        libavThumbnailSource?.close(); libavThumbnailSource = nil
         // The scrub producer is retired HERE and rebuilt below once `useLibav` is known — the
         // second half of the same lifecycle, and the bump this performs is what makes an in-flight
         // frame from the outgoing file fail its delivery check instead of landing on the new one.
@@ -1240,14 +1213,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         updateEffectiveRange()
 
-        // DNx-in-.mov decodes via libav → AVAssetImageGenerator can't make scrub thumbnails
-        // (VideoToolbox rejects DNxHR). Open the detached libav thumbnail decoder instead; the
-        // Non-libav (ProRes/H.264/HEVC) files take the scrub PRODUCER instead, installed below.
-        if useLibav {
-            let thumb = LibavThumbnailSource(url: url)
-            thumb.openAsync()
-            libavThumbnailSource = thumb
-        }
         // The scrub producer, at the same point in the same commit and for the same reason: the
         // decoder has to be warm before the first grab, not built by it. No-op unless the Stage 1
         // flag is on; skipped for libav files, which have no AVFoundation route.
@@ -1310,13 +1275,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.selectedAudioTrackIndex = 0
         self.rangeOverride = .auto
         self.useLibav = true
-        // Scrub thumbnails come from the detached libav decoder (AVFoundation is blind to MXF).
-        let thumb = LibavThumbnailSource(url: url)
-        thumb.openAsync()
-        libavThumbnailSource = thumb
-        // Both commit paths call this, so neither can forget it. MXF resolves to "no producer"
-        // inside — see the guard there — but the CALL is what keeps the two paths symmetrical and
-        // is where the Stage 3 libav producer will land without touching this site again.
+        // Both commit paths call this, so neither can forget it. MXF resolves to the LIBAV
+        // producer inside — AVFoundation is blind to MXF for scrub exactly as it is for playback.
         installScrubProducer(for: url, useLibav: true)
         installTimeObserverIfNeeded()
         await beginReading(from: 0, resumePlaying: autoplay)

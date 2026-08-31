@@ -307,68 +307,26 @@ public final class LibavFrameSource: @unchecked Sendable {
     private func convert(_ frame: UnsafeMutablePointer<AVFrame>, pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
         let W = Int(frame.pointee.width)
         let H = Int(frame.pointee.height)
-        let srcFmt = AVPixelFormat(frame.pointee.format)
 
         guard let pool = ensurePool(width: W, height: H),
               let pixelBuffer = makePixelBuffer(from: pool) else { return nil }
 
-        let dstFmt = Self.swsDestFormat(for: pixelFormat)
-        guard let sws = sws_getContext(Int32(W), Int32(H), srcFmt,
-                                       Int32(W), Int32(H), dstFmt,
-                                       Int32(SWS_BILINEAR.rawValue), nil, nil, nil) else { return nil }
-        defer { sws_freeContext(sws) }
-        // Force src/dst range EQUAL → no range remap; preserve stored values unclipped.
-        let coeff = sws_getCoefficients(SWS_CS_ITU709)
-        let r: Int32 = (frame.pointee.color_range == AVCOL_RANGE_JPEG) ? 1 : 0
-        _ = sws_setColorspaceDetails(sws, coeff, r, coeff, r, 0, 1 << 16, 1 << 16)
-
-        CVPixelBufferLockBaseAddress(pixelBuffer, [])
-        let srcData: [UnsafePointer<UInt8>?] = [
-            UnsafePointer(frame.pointee.data.0), UnsafePointer(frame.pointee.data.1),
-            UnsafePointer(frame.pointee.data.2), UnsafePointer(frame.pointee.data.3)
-        ]
-        var srcStride: [Int32] = [
-            frame.pointee.linesize.0, frame.pointee.linesize.1,
-            frame.pointee.linesize.2, frame.pointee.linesize.3
-        ]
-        var dst: [UnsafeMutablePointer<UInt8>?] = [
-            CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)?.assumingMemoryBound(to: UInt8.self),
-            CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)?.assumingMemoryBound(to: UInt8.self),
-            nil, nil
-        ]
-        var dstStride: [Int32] = [
-            Int32(CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)),
-            Int32(CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)),
-            0, 0
-        ]
-        let scaled = sws_scale(sws, srcData, &srcStride, 0, Int32(H), &dst, &dstStride)
-        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
-        guard scaled > 0 else { return nil }
-
-        attach(pixelBuffer, key: kCVImageBufferYCbCrMatrixKey, value: Self.cvMatrix(frame.pointee.colorspace))
-        attach(pixelBuffer, key: kCVImageBufferColorPrimariesKey, value: Self.cvPrimaries(frame.pointee.color_primaries))
-        attach(pixelBuffer, key: kCVImageBufferTransferFunctionKey, value: Self.cvTransfer(frame.pointee.color_trc))
-
+        // ⚠️ SHARED WITH `LibavScrubProducer`, DELIBERATELY. The scrub frame and the playback
+        // frame have to be the same pixels through the same conversion or the whole argument for
+        // the producer collapses; two copies of this is how they would drift apart silently.
+        guard LibavPixelConversion.fillPixelBuffer(pixelBuffer, from: frame,
+                                                   cvFormat: pixelFormat) else { return nil }
         return Self.makeSampleBuffer(pixelBuffer, pts: pts, duration: duration)
     }
 
     private func ensurePool(width: Int, height: Int) -> CVPixelBufferPool? {
         if let pool, self.width == width, self.height == height { return pool }
-        let pbAttrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
-            kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
-            kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]() as CFDictionary,
-            kCVPixelBufferMetalCompatibilityKey as String: true
-        ]
         // Pre-warm enough buffers for the frames in flight (Metal frameQueue caps at
         // 12, plus the reference renderer's queue + decode headroom) so steady-state
         // playback recycles instead of churning fresh 4K 10-bit (~16MB) IOSurfaces.
-        let poolAttrs: [String: Any] = [
-            kCVPixelBufferPoolMinimumBufferCountKey as String: 20
-        ]
-        var newPool: CVPixelBufferPool?
-        guard CVPixelBufferPoolCreate(nil, poolAttrs as CFDictionary, pbAttrs as CFDictionary, &newPool) == kCVReturnSuccess else { return nil }
+        guard let newPool = LibavPixelConversion.makePool(width: width, height: height,
+                                                          cvFormat: pixelFormat,
+                                                          minimumBufferCount: 20) else { return nil }
         self.pool = newPool
         self.width = width
         self.height = height
@@ -379,11 +337,6 @@ public final class LibavFrameSource: @unchecked Sendable {
         var pb: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb) == kCVReturnSuccess else { return nil }
         return pb
-    }
-
-    private func attach(_ pb: CVPixelBuffer, key: CFString, value: CFString?) {
-        guard let value else { return }
-        CVBufferSetAttachment(pb, key, value, .shouldPropagate)
     }
 
     private static func makeSampleBuffer(_ pb: CVPixelBuffer, pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
@@ -399,18 +352,8 @@ public final class LibavFrameSource: @unchecked Sendable {
         return sb
     }
 
-    /// swscale destination format matching `pixelFormat` (P010 ↔ x420 10-bit, NV12 ↔ 420v).
-    private static func swsDestFormat(for cvFormat: OSType) -> AVPixelFormat {
-        switch cvFormat {
-        case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-             kCVPixelFormatType_420YpCbCr10BiPlanarFullRange:
-            return AV_PIX_FMT_P010LE
-        default:
-            return AV_PIX_FMT_NV12
-        }
-    }
-
-    // MARK: - libav color enum → CoreVideo attachment mapping
+    // MARK: - libav color enum → human-readable names (logging only; the CoreVideo
+    // attachment mapping lives in LibavPixelConversion, shared with the scrub producer)
 
     private static func rangeName(_ r: AVColorRange) -> String {
         switch r {
@@ -426,32 +369,6 @@ public final class LibavFrameSource: @unchecked Sendable {
         case AVCOL_SPC_BT2020_NCL, AVCOL_SPC_BT2020_CL: return "Rec.2020"
         case AVCOL_SPC_SMPTE170M, AVCOL_SPC_BT470BG: return "Rec.601"
         default: return "Unspecified→709"
-        }
-    }
-
-    private static func cvMatrix(_ s: AVColorSpace) -> CFString {
-        switch s {
-        case AVCOL_SPC_BT2020_NCL, AVCOL_SPC_BT2020_CL: return kCVImageBufferYCbCrMatrix_ITU_R_2020
-        case AVCOL_SPC_SMPTE170M, AVCOL_SPC_BT470BG: return kCVImageBufferYCbCrMatrix_ITU_R_601_4
-        default: return kCVImageBufferYCbCrMatrix_ITU_R_709_2
-        }
-    }
-
-    private static func cvPrimaries(_ p: AVColorPrimaries) -> CFString? {
-        switch p {
-        case AVCOL_PRI_BT709: return kCVImageBufferColorPrimaries_ITU_R_709_2
-        case AVCOL_PRI_BT2020: return kCVImageBufferColorPrimaries_ITU_R_2020
-        case AVCOL_PRI_SMPTE432: return kCVImageBufferColorPrimaries_P3_D65
-        default: return nil
-        }
-    }
-
-    private static func cvTransfer(_ t: AVColorTransferCharacteristic) -> CFString? {
-        switch t {
-        case AVCOL_TRC_BT709: return kCVImageBufferTransferFunction_ITU_R_709_2
-        case AVCOL_TRC_SMPTE2084: return kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-        case AVCOL_TRC_ARIB_STD_B67: return kCVImageBufferTransferFunction_ITU_R_2100_HLG
-        default: return nil
         }
     }
 }

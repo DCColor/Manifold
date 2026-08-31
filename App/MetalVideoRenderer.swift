@@ -207,6 +207,14 @@ final class MetalVideoRenderer {
     /// Called on the RENDER thread, like its siblings — the consumer hops. Set from main; the
     /// backing store is `refreshLock`-guarded for the same "MAIN COMPUTES, THE RENDER THREAD
     /// INSTALLS" reason `pendingRefresh` and `pendingSeekRender` are.
+    /// ⚠️ UNCONSUMED AS OF STAGE 3, AND LEFT STANDING DELIBERATELY FOR ONE MORE STEP.
+    /// Its only consumer was ever the scrub-release handoff: first the AVFoundation one (deleted
+    /// in Stage 2), then the MXF-only hold (deleted in Stage 3, once `LibavScrubProducer` started
+    /// putting real frames on the layer during an MXF drag and the release settle measured
+    /// exactly zero). Nothing arms it now. It is retired with the rest of the scaffolding in
+    /// Stage 4 — see docs/BUGS.md — rather than here, so that step removes it alongside the
+    /// `presentsSinceFlush` accounting it is tangled with rather than in two goes.
+    /// **Do not wire anything new to it.**
     var onFirstPresentAfterFlush: (() -> Void)? {
         get { refreshLock.lock(); defer { refreshLock.unlock() }; return _onFirstPresentAfterFlush }
         set { refreshLock.lock(); _onFirstPresentAfterFlush = newValue; refreshLock.unlock() }
@@ -488,12 +496,11 @@ final class MetalVideoRenderer {
     /// render path to keep in step, which is the reason this is one line of state rather than a
     /// parallel pipeline.
     ///
-    /// ⚠️ IT ALSO INHERITS `presentsSinceFlush`, AND THAT IS A REAL EDGE. The counter increments
-    /// on every present, so an immediate present that lands in the window between a `flush()` and
-    /// the seeked-to frame arriving will take the 0 → 1 edge and fire `onFirstPresentAfterFlush`
-    /// — the scrub-release handoff's "the new frame is up, drop the overlay" signal. Harmless
-    /// while the two mechanisms are staged apart (nothing arms both today), and something Stage 1
-    /// must decide about deliberately when the producer starts feeding this during a release.
+    /// ⚠️ IT ALSO INHERITS `presentsSinceFlush`, which still matters although the callback it used
+    /// to trip is now unconsumed: that counter's OTHER reader is the `[EDR]` "colour state
+    /// installed after N present(s) of this source" report, and an immediate present landing
+    /// between a `flush()` and the seeked-to frame moves that count. It reports the truth — a
+    /// frame really was presented — so this is a note for whoever reads that line, not a defect.
     ///
     /// NOT dropped by `flush()` — a seek does not invalidate a frame a producer has already
     /// decoded and handed over — but IS dropped by `clearToBlack()`, for the same reason
@@ -544,15 +551,31 @@ final class MetalVideoRenderer {
     private func debugCheckScrubGeometry(_ pb: CVPixelBuffer) {
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         guard let playback = offscreenTexture else { return }   // nothing to compare against yet
-        let key = "\(w)x\(h)/\(playback.width)x\(playback.height)"
+        // The colour tags the producer attached, read back off the buffer that arrived. This is
+        // the mechanism behind "MXF HDR previews are no longer SDR": the old libav path swscaled
+        // to 8-bit RGBA and expanded range on the way, so a PQ file could not arrive as PQ. A
+        // scrub buffer that reports SMPTE_ST_2084_PQ here is carrying the source's transfer into
+        // the same shader and the same EDR layer the played frame goes through.
+        func tag(_ key: CFString) -> String {
+            (CVBufferCopyAttachment(pb, key, nil) as? String)
+                .map { $0.replacingOccurrences(of: "kCVImageBuffer", with: "") } ?? "—"
+        }
+        let fourCC = CVPixelBufferGetPixelFormatType(pb)
+        let fmt = String(bytes: [UInt8((fourCC >> 24) & 0xFF), UInt8((fourCC >> 16) & 0xFF),
+                                 UInt8((fourCC >> 8) & 0xFF), UInt8(fourCC & 0xFF)], encoding: .ascii) ?? "?"
+        let colour = "\(fmt) trc=\(tag(kCVImageBufferTransferFunctionKey))"
+            + " pri=\(tag(kCVImageBufferColorPrimariesKey))"
+            + " mtx=\(tag(kCVImageBufferYCbCrMatrixKey))"
+        let key = "\(w)x\(h)/\(playback.width)x\(playback.height)/\(colour)"
         guard debugGeomReported.insert(key).inserted else { return }
         if w == playback.width && h == playback.height {
             print("[SCRUB-GEOM] ✓ producer \(w)x\(h) == playback \(playback.width)x\(playback.height)"
-                + " — encoded geometry, no aperture rule applied")
+                + " — encoded geometry, no aperture rule applied | \(colour)")
         } else {
             print("[SCRUB-GEOM] ⚠️ producer \(w)x\(h) != playback \(playback.width)x\(playback.height)"
                 + " — Δ \((playback.width - w) / 2) px/side, \((playback.height - h) / 2) px/top."
-                + " A clean-aperture crop or a PAR resample is being applied on the scrub path.")
+                + " A clean-aperture crop or a PAR resample is being applied on the scrub path."
+                + " | \(colour)")
         }
     }
     /// Main-thread only (`presentImmediate`'s caller). Cleared by nothing: the set is bounded by

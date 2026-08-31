@@ -620,8 +620,12 @@ the generator is `FrameEngine.makeScrubPreviewGenerator(for:)`; the preview requ
 **Status:** **FIXED 2026-08-27 for the AVFoundation path (ProRes/H.264) — parts 1 and 2, across
 the WHOLE supported OS range (macOS 15+).** ⚠️ **The macOS 15–25 half is UNVERIFIED — written from
 the header contract and never executed, because the build Mac runs 26.5.1. See "what each OS range
-gets" below.** Part 3 (DNx/MXF) DELIBERATELY NOT DONE; HDR previews for those formats stay SDR, see
-"recorded choice" below. **Reported:** 2026-08-27 by Joey. **Blocks:** judging highlights while scrubbing an HDR deliverable — the one operation where
+gets" below.** ~~Part 3 (DNx/MXF) DELIBERATELY NOT DONE; HDR previews for those formats stay SDR,
+see "recorded choice" below.~~ → ✅ **PART 3 CLOSED 2026-08-30 at Stage 3 — see "HOW PART 3 ACTUALLY
+CLOSED" below.** ⚠️ **And the whole entry is now superseded in a way the fix above does not
+describe:** parts 1 and 2 patched the overlay, Stage 2 and Stage 3 *deleted* it. There is no
+`CGImage` in the scrub path on any codec. Read "TWO DISTINCT DEFECTS, ONE DELETION" before quoting
+anything above as the current cause. **Reported:** 2026-08-27 by Joey. **Blocks:** judging highlights while scrubbing an HDR deliverable — the one operation where
 the picture and the luminance have to be trusted together.
 
 **The report:** scrubbing a PQ/HLG file drops the picture to SDR luminance. **Highlights clamp,
@@ -1005,6 +1009,56 @@ an **8-bit** CGImage — SDR by construction, and no layer opt-in can rescue 8-b
 means a float pipeline in a second, independent producer, which is its own change with its own
 colour decisions. Deferring it costs exactly what this line says it costs and nothing more: the
 AVFoundation path (ProRes/H.264) is correct, DNx/MXF is unchanged.
+
+### ✅ HOW PART 3 ACTUALLY CLOSED — 2026-08-30, Stage 3
+
+**Not the way it is scoped above.** The float pipeline was never built. `LibavThumbnailSource` was
+**deleted**, and `LibavScrubProducer` decodes the same libav frame into the app's own x420
+`CVPixelBuffer` via `LibavPixelConversion` — the identical conversion the playback path uses. That
+is exactly what the 2026-08-30 measurement predicted when it said the fix "does not need a float
+CGImage path, it needs to stop returning a CGImage".
+
+**Confirmed at the renderer, not inferred:** an MXF PQ fixture's scrub buffer now arrives as
+`x420 trc=SMPTE_ST_2084_PQ pri=ITU_R_2020 mtx=ITU_R_2020` (`[SCRUB-GEOM]`), into a layer the log
+confirms is `kCGColorSpaceITUR_2100_PQ` with `wantsExtendedDynamicRangeContent = true`. And the
+picture during the drag is **bit-identical to the played picture** at the same position — 0.00
+codes over the video rect. The preview is no longer *like* the played frame; it **is** it.
+
+**Confirmed BY EYE on the HDR display**, which is the check the measurements cannot make: on the
+Mac Studio driving the **LG 42-inch WOLED in HDR mode**, in **both SDR and HDR**, the dim on scrub
+is gone. ⚠️ The dim had **also been present on the MacBook Air**, which matters for the next
+section.
+
+### ⚠️ TWO DISTINCT DEFECTS, ONE DELETION — READ THIS BEFORE RE-DERIVING EITHER
+
+**This is the part most likely to be lost, because the deletion fixed both at once and the entry
+above only explains one of them.** Anyone who reads only the EDR explanation will be unable to
+account for the MacBook Air, and will go looking for a second bug that is not there.
+
+**Defect 1 — COMPOSITING. Visible only where there IS headroom.** The overlay's `CGImage` carried
+`contentHeadroom = 4.9261084`, derived from the PQ colorspace and **not clearable** — measured in
+`docs/scrub-fixtures/hrprobe.swift`: `CGImageCreateCopyWithContentHeadroom(0.0, …)` is silently
+ignored, and even plain `CGImageCreate` returns an image reporting it. A PQ `CGImage` on a `CALayer`
+is therefore pinned to Core Animation's **tone-mapped** path, while the Metal layer — which declares
+no headroom and no `edrMetadata` — is excluded from it. Two different colour-management modes on one
+screen. That divergence is what the 2026-08-28 split confirmed by eye.
+
+**Defect 2 — CODEC VALUES. Visible everywhere, including with no headroom at all.** On the libav
+path the preview was swscaled to `AV_PIX_FMT_RGBA` **with range already expanded**, into 8 bits.
+That is a pixel-value defect and it has nothing to do with EDR: it is wrong on an SDR panel, on a
+laptop, on any display, because the codes are wrong before compositing ever begins. The playback
+path deliberately preserves stored range and expands **in the shader**; the thumbnail path did the
+opposite because a `CGImage` has no shader behind it.
+
+⚠️ **ON A DISPLAY WITH NO HEADROOM, TONE-MAPPING CANNOT BE THE VISIBLE EFFECT.** So the dim seen on
+the MacBook Air was defect 2, not defect 1. Both were real, they had different mechanisms, and they
+were fixed by the same deletion — removing the `CGImage` removed the tone-mapped compositing path
+*and* the 8-bit range-expanded conversion together. **Do not collapse them into one cause.** If a
+similar report ever returns, the first question is which display it was seen on, because that alone
+separates the two.
+
+**Related:** the compositing half is recorded in full at
+*"✅ DECISION 2026-08-28: the desktop picture is the REFERENCE and does not tone-map"*.
 
 **Related:** the scrub-POSITION defect is *"⚠️ UNCONFIRMED: scrub release jumps the picture once,
 backwards, on ProRes"* above — same gesture, unrelated cause; the generator is
@@ -1416,6 +1470,19 @@ holding across all five of play / pause / scrub / export / SDI).
   instrument in this investigation that produced a true result**, and it did so by removing
   sequencing: same frame, same window, same instant. Every earlier comparison was sequential and
   three of them returned confident wrong answers.
+
+  ⚠️ **DEAD AS OF 2026-08-30 (Stage 2/3). IT IS NOW A TRAP, AND A NULL FROM IT IS NOT EVIDENCE.**
+  The split drew the **overlay** on the left half and the **Metal layer** on the right. Both halves
+  now come from the same path — there is no overlay on any codec — so the seam has nothing to
+  straddle and **it will return a clean null on every file regardless of whether a divergence
+  exists**. That is not a passing result; it is an instrument that can no longer detect the thing
+  it was built to detect.
+
+  **This is the same failure shape as `../color-fixtures/sweep.sh`'s PNG capture**, which
+  `wincap.swift` was built to replace (see below): an instrument blind to the effect, returning a
+  confident negative. The difference is that this one *used* to work, which makes it more dangerous
+  — the entry above vouches for it. It is scheduled for removal in Stage 4 of *"two producers, one
+  destination"*; until then, **do not use it and do not cite a null from it.**
 - `docs/scrub-fixtures/hrprobe.swift` — the headroom-is-the-colorspace measurement.
 - `docs/scrub-fixtures/scrubmeas.swift MODE=pixdiff` — generator vs decoder pixel values, with
   resolution removed as a variable rather than corrected for.
@@ -2030,9 +2097,15 @@ not ship it, and a picker shipped against a scrub path that is still a `CGImage`
 ships the silently-ignored control described above regardless of what the spike says.
 ---
 
-## 📐 SCOPED, NOT BUILT: two producers, one destination — deleting the scrub overlay
+## 📐 two producers, one destination — deleting the scrub overlay
 
-**Status:** SCOPED 2026-08-30. **Not started.** Both measurement gates have passed — see
+**Status:** ~~SCOPED 2026-08-30. **Not started.**~~ → **BUILT 2026-08-30. Stages 0, 1, 2 and 3 are
+DONE and verified; Stage 4 (scaffolding removal) is the only one outstanding.** The title's
+"SCOPED, NOT BUILT" is struck rather than rewritten so the entry still reads as what it was —
+reasoning written before any code — with the outcome appended. Per-stage results are in
+*"✅ MEASURED 2026-08-30 — Stage 3: the libav scrub producer, and the end of the CGImage path"*
+below; the AVFoundation stages' numbers are in the Stage 1 and Stage 2 checkpoints as annotated.
+**There is now ONE scrub mechanism and one destination.** Both measurement gates had passed — see
 *"⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput`"* above for the AVFoundation half
 (spiked 2026-08-29) and *"✅ THE MXF HALF, MEASURED 2026-08-30"* inside it for the libav half. This
 entry is the **implementation shape and the reasoning behind it**, written before any code so the
@@ -2131,6 +2204,14 @@ tears down mid-drag, would have to be reasoned about; with (a) neither interacti
 
 ### 1. WHAT GETS DELETED, AND WHAT IS LOAD-BEARING FOR SOMETHING ELSE
 
+> ✅ **DONE 2026-08-30. Every item on the "Deleted" list below is gone**, across Stages 2 and 3, plus
+> three the list did not anticipate: `usesLibavScrub` (added at Stage 2 as the two-mechanism
+> selector and retired with it), `holdScrubOverlayUntilPresented` (the MXF-only remnant of the
+> handoff — see the Stage 2/3 note under `presentsSinceFlush` in the STAYS list), and the Stage 0
+> `presentImmediate` probe with its ⌃⌥⇧P binding. **The "STAYS" list held with one amendment**, also
+> noted below. `LibavThumbnailSource`'s only consumer was confirmed to be `previewImage` before
+> deletion, as this list says — checked, not assumed.
+
 **Deleted.** All of it exists to hold a `CGImage` until the real frame lands:
 
 - `ScrubPreviewSurface` + `ScrubPreviewHostView` (`App/MetalSurfaceView.swift`), including
@@ -2157,6 +2238,14 @@ tears down mid-drag, would have to be reasoned about; with (a) neither interacti
 - **`presentsSinceFlush`.** The *callback* `onFirstPresentAfterFlush` has exactly one consumer (the
   handoff) and goes with it. The *counter* has a second consumer — the `[EDR]` "colour state
   installed after N present(s) of this source" report — and stays.
+  > ⚠️ **AMENDED 2026-08-30.** The callback did **not** go with the handoff, in two steps. Stage 2
+  > deleted the AVFoundation handoff but kept an MXF-only hold on it
+  > (`holdScrubOverlayUntilPresented`), because MXF still had no producer and its Metal layer held
+  > the pre-drag frame for the whole gesture — the "the layer already shows the release frame"
+  > reasoning simply did not reach it. Stage 3 deleted that too, once `LibavScrubProducer` made the
+  > reasoning true for MXF and the settle measured zero. So the callback is now **unconsumed but
+  > still present**, deliberately, until Stage 4 retires it together with the counter's accounting.
+  > **Nothing new should be wired to it**; the declaration in `MetalVideoRenderer` says so.
 - **`pendingRefresh` / `setNeedsRefresh()`.** Range-override change while paused.
 - **`isScrubbing` and `scrubValue`.** Still drive the slider binding, the `displayTime` readout and
   the HUD auto-hide guard. Only their *overlay* role goes.
@@ -2225,7 +2314,7 @@ frame the drag was showing** — because the scrub producer seeks at infinite to
 
 | corpus | delivered frame − requested (measured) | release settle |
 |---|---|---|
-| **MXF / DNxHR** | **0.5 mean / 1.0 max, every fixture; 0 same-frame returns** | **zero, by construction** — libav is asked for an exact position and DNxHR is all-intra |
+| **MXF / DNxHR** | **0.5 mean / 1.0 max, every fixture; 0 same-frame returns** | ~~zero, by construction~~ → **zero, MEASURED 2026-08-30** (Stage 3): **+0.00 frames and 0.00 codes** across 7 consecutive releases on 4K DNxHR, and the same on DNxHR PQ and on the 42-minute DNxHD — same display-side instrument Stage 2 used. The by-construction reasoning is why: libav is asked for an exact position and DNxHR is all-intra, so the scrub seek and `exactSeek` land on the *same frame*, not merely a near one |
 | ProRes (AVPlayer route) | 0.5–0.6 mean / **1.0 max** | effectively zero on all-intra |
 | **4K H.264** | 4.4 mean / **10.4 max**; **26 of 40** positions return the frame already on screen | **a one-frame-class settle SURVIVES this work** |
 | 6K HEVC | 5.9 / **11.8** | as above |
@@ -2237,6 +2326,18 @@ producers with different accuracy characteristics — and it is recorded here so
 twice.
 
 **THE DEFERRED WAY OUT, AND IT IS A STAGE 3 DECISION REQUIRING A MEASUREMENT, NOT AN ASSUMPTION.**
+
+> ⏸ **STILL DEFERRED AFTER STAGE 3 — NOT DECIDED, NOT CLOSED. 2026-08-30.**
+> Stage 3 was scheduled to decide this and did not, for a reason worth stating rather than leaving
+> as a gap: **the MXF settle measured exactly zero**, so on the corpus Stage 3 actually touched the
+> change buys nothing at all. What is left is the case it was proposed for — 4K H.264, where the
+> settle measured 4.80 frames mean / 10.26 max — and there the cost is not a decode question but a
+> PRODUCT one: the transport would land on the frame the tolerance chose rather than the frame the
+> user chose, and the timecode readout would have to say something honest about that. That needs its
+> own measurement on 4K H.264, exactly as the paragraph below says. **Deferring it costs the
+> long-GOP settle and nothing else; adopting it silently would change what "release" means on every
+> codec to fix a defect that only two of them have.**
+
 On release, seek playback to **the frame the scrub producer actually delivered** — its
 `itemTimeForDisplay` (AVPlayer) or its frame PTS (libav) — rather than to `scrubValue`. The settle
 becomes zero by construction on every codec, and the position readout stops claiming a frame that
@@ -2376,7 +2477,7 @@ while the scrubber is held. Rules:
 
 ### 5. STAGING — smallest first, and MXF deliberately last
 
-#### Stage 0 — the renderer entry point. No behaviour change.
+#### ✅ Stage 0 — the renderer entry point. No behaviour change. **DONE 2026-08-30.**
 
 Add `presentImmediate(pixelBuffer:pts:)` with its own `refreshLock`-guarded one-shot, alongside
 `pendingRefresh` and `pendingSeekRender`. Prove it with the existing overlay untouched, driven from
@@ -2386,7 +2487,7 @@ a DEBUG keystroke.
 offscreen; `onFrameRendered` fires (scopes) and `pushDeckLinkConvert` fires (SDI). Playback,
 seeking, shuttle and the live routes are byte-identical.
 
-#### Stage 1 — AVFoundation producer behind a flag; the overlay is still authoritative.
+#### ✅ Stage 1 — AVFoundation producer behind a flag; the overlay is still authoritative. **DONE 2026-08-30.**
 
 Introduce the producer seam and the `AVPlayerItemVideoOutput` implementation: engine-owned,
 load/unload lifecycle, scrub token, latest-wins coalescer. Feed `presentImmediate`. **Keep the
@@ -2404,12 +2505,19 @@ moment it can be used for its designed purpose.
 - the SDI behaviour change is confirmed working and understood (see below)
 - **the v210 conversion cost during a drag is measured** (see the open item below)
 
-#### Stage 2 — flip the default for AVFoundation files. MXF UNCHANGED.
+#### ✅ Stage 2 — flip the default for AVFoundation files. MXF UNCHANGED. **DONE 2026-08-30.**
 
 Delete the overlay branch, `ScrubPreviewSurface`, the handoff, the three races, `previewImage`'s
 AVFoundation branch and the generator. **`useLibav` files keep `LibavThumbnailSource` and the
 overlay path exactly as they are today.** This is the releasable "AVFoundation working, MXF
 untouched" increment.
+
+✅ **RESOLVED AT STAGE 3 — THERE IS NOW ONE MECHANISM AND ONE DESTINATION.** The paragraph below
+described the window Stage 2 opened on purpose; that window is closed. `LibavScrubProducer` put MXF
+on the same seam, `LibavThumbnailSource` and the overlay branch are deleted, and `useLibav` now
+selects between two PRODUCERS rather than between a producer and a `CGImage`. The reasoning is kept
+because it is the argument for splitting a two-decoder change into two releases, and that argument
+is reusable; the state it describes is historical.
 
 ⚠️ **THIS LEAVES TWO SCRUB MECHANISMS ALIVE AT ONCE, SELECTED BY `useLibav`, AND THAT IS A
 DELIBERATE CHOICE — NOT AN ACCIDENT OF SEQUENCING.** Landing both producers together doubles the
@@ -2426,27 +2534,53 @@ unreachable rather than conditionally suppressed. **A boolean mode flag would no
 equivalent, and if that gate is ever "tidied up" into an `isScrubbing` check, this staging stops
 being safe.**
 
+> ✅ **2026-08-30, Stage 3: the gate is gone with the thing it gated.** `scrubPreviewImage`,
+> `requestScrubPreview` and the overlay branch are deleted, so there is no second mechanism to keep
+> structurally unreachable. The property was real and it did its job for exactly one release; it is
+> recorded here as the reason that release was safe, not as live code to protect.
+
 **Checkpoint:** HDR PQ ProRes scrubs without the mode change (closes the HDR scrub entry's Parts 1
 and 2 by removing their subject); no jump at release on all-intra; the H.264 release settle
 characterised and recorded rather than treated as a regression; MXF behaves exactly as it does
 today, verified rather than assumed.
 
-#### Stage 3 — libav producer for MXF.
+#### ✅ Stage 3 — libav producer for MXF. **DONE 2026-08-30.**
 
 Second implementation of the same seam: `FF_THREAD_SLICE`, held `AVFormatContext`, own serial queue,
-same scrub token. Retires `LibavThumbnailSource`. **Decide the release-seek-target question from §2
-here**, with its own measurement.
+same scrub token. Retires `LibavThumbnailSource`. ~~**Decide the release-seek-target question from
+§2 here**, with its own measurement.~~ **NOT decided — see the deferral recorded at that question.**
 
-**Checkpoint:** ~20 ms drag on 4K MXF; **HDR PQ/HLG MXF previews stop being SDR** — which closes the
-deliberately-deferred Part 3 of the HDR scrub entry, by deleting the 8-bit RGBA path rather than
-giving it a float variant; scopes live on MXF; re-run `libavmeas MODE=memory` against the real app
-to confirm playback still loses no frames with the real playback pipeline rather than the model.
+**Checkpoint — all met.** ~20 ms drag on 4K MXF (measured **20.0 ms mean**); **HDR PQ/HLG MXF
+previews stop being SDR**, which closes the deliberately-deferred Part 3 of the HDR scrub entry by
+deleting the 8-bit RGBA path rather than giving it a float variant; scopes live on MXF. Numbers and
+what remains open are in *"✅ MEASURED 2026-08-30 — Stage 3"* below.
 
-#### Stage 4 — scaffolding removal.
+⚠️ **ONE CHECKPOINT ITEM WAS NOT DONE AS WRITTEN.** "Re-run `libavmeas MODE=memory` against the real
+app" was replaced by Xcode's memory gauge on the real app during repeated drags — a different
+instrument answering a narrower question. See the memory row in the Stage 3 entry, which says which
+instrument produced the number.
 
-`ScrubDebug`'s three env vars, `onFirstPresentAfterFlush`, `codecIsAllIntra`, `[EDRDIAG]`, the split
-furniture. Close or restate the affected entries above. **The colour-management mode picker's
-precondition is met at this point and not before** — see the last section of the entry above.
+#### ⏳ Stage 4 — scaffolding removal. **OUTSTANDING — the only stage left.**
+
+~~`ScrubDebug`'s three env vars, `codecIsAllIntra`, `[EDRDIAG]`, the split furniture~~ — **all
+already gone**, pulled forward into Stage 2. What actually remains:
+
+- **`onFirstPresentAfterFlush`** — ⚠️ **UNCONSUMED SINCE STAGE 3 AND DELIBERATELY STILL PRESENT.**
+  Its only consumer was ever the scrub-release handoff: the AVFoundation one (deleted at Stage 2),
+  then the MXF-only `holdScrubOverlayUntilPresented` (deleted at Stage 3, once the MXF settle
+  measured exactly zero). Nothing arms it now. It is kept for this stage because it is tangled with
+  the `presentsSinceFlush` accounting — whose OTHER reader, the `[EDR]` "colour state installed
+  after N present(s)" report, stays — and removing the two together is one careful change rather
+  than two. **Do not wire anything new to it in the meantime**; the declaration carries the same
+  warning.
+- **`[SCRUB]` / `[SCRUB-GEOM]` / `[SETTLE]` / `[V210]`** and `ScrubProducerFlags.stats`
+  (`MANIFOLD_SCRUB_STATS=1`) — the measurement scaffolding the three stages were verified with.
+  `[SCRUB-GEOM]` is the standing ARRI open-gate check and is arguably worth keeping past Stage 4;
+  decide it there rather than by default.
+
+**The colour-management mode picker's precondition is met at this point and not before** — see the
+last section of the entry above. ⚠️ **As of Stage 3 the precondition is in fact already met**: there
+is one display path and it is steerable. Stage 4 removes scaffolding, not a blocker.
 
 ---
 
@@ -2483,6 +2617,88 @@ this. It is bounded above by the one-issue-per-display-refresh cap in §3, and t
 long rather than minutes, so it is unlikely to be a problem — **but "unlikely" is not a measurement,
 and this is the one cost on the whole route that nothing has looked at.** Measure it at Stage 1,
 with the card active, on 4K, before Stage 2 deletes the fallback.
+
+> ✅ **MEASURED at Stage 1, 2026-08-30 — and it is not a problem.** 4K (3840×2160), DeckLink 8K Pro
+> at 2160p23.98, drag at 22.3 Hz: **offered 91, converted 91, skipped 0**, GPU **0.10 ms mean /
+> 0.18 max**, encode→GPU-done 0.30 ms. The playback baseline on the same file seconds earlier was
+> identical (145/145, 0.10 ms mean). The convert is ~1 % of the ~11 ms decode it rides behind, and a
+> drag is *less* v210 work than playing the file because 22 Hz is below 24 fps. Instrument: `[V210]`
+> in `MetalVideoRenderer.debugFlushV210Stats`, flushed at the drag's two edges.
+
+---
+
+## ✅ MEASURED 2026-08-30 — Stage 3: the libav scrub producer, and the end of the CGImage path
+
+**What this is:** the numbers Stage 3 of *"two producers, one destination"* was verified with, kept
+separate from what they imply. Every row under MEASURED was produced by an instrument named in the
+row; every row under INFERRED was not measured and is marked as such. Same discipline as
+`docs/COLOR_MANAGEMENT_FINDINGS.md`.
+
+**What shipped:** `LibavScrubProducer` (`FF_THREAD_SLICE`, held `AVFormatContext`, own serial queue,
+own context — never the playback one), feeding `presentImmediate` through the same `ScrubCoalescer`
+and the same delivery-side scrub token as the AVFoundation producer. `LibavThumbnailSource`, the
+overlay branch, `scrubPreviewImage`, `requestScrubPreview`, `previewImage` and
+`holdScrubOverlayUntilPresented` are deleted. **There is no `CGImage` anywhere in the scrub path.**
+
+### MEASURED
+
+| what | result | instrument |
+|---|---|---|
+| **Drag rate, 4K DNxHR** (`Lip Sync DNX.mxf`, 701 Mb/s, SMB) | 90 issued, 88 delivered, 0 coalesced; **21.3 Hz**; seek→deliver **20.0 ms mean / 20.5 p50 / 22.5 p90 / 24.3 max** | `[SCRUB]`, `ScrubCoalescer.flushStats` |
+| **Drag rate, DNxHR PQ** (`cs2020_pq.mxf`) | 41 issued, 40 delivered; **18.8 ms mean / 32.6 max** | " |
+| **Drag rate, 1080p DNxHD, 41.86 GB / 42 min** | 91 issued, 90 delivered, 0 coalesced, 0 empty; **21.5 Hz**; **7.1 ms mean / 6.7 p50 / 7.4 p90 / 27.7 max** | " |
+| **Release settle, MXF** | **+0.00 frames, 7 consecutive releases on 4K DNxHR**; same on DNxHR PQ and on the 42-min DNxHD. Picture across the release **0.00 codes / 0.0 % of pixels** | `[SETTLE]` (`MetalVideoRenderer.reportSettleIfArmed`) + screen-diff over the video rect |
+| **Scopes move during an MXF drag** | Stage 2, same fixture and same gesture: **0.00 codes / 0.0 %** (bit-identical, frozen). Stage 3: **0.40 / 0.8 %** on that fixture, **1.11→5.47** and **3.05→16.79 codes** on content-varied ones | screen-diff of the scope tray, before/after A/B |
+| **SDI follows an MXF drag** | card front-buffer source time swept **2.002 → 48.465 s** across a 91-position drag; **89 of 89 converts, 0 skipped**; v210 GPU **0.11 ms mean** | `[V210]` front-pts span, DeckLink 8K Pro at 2160p23.98 |
+| **HDR buffer tags, MXF PQ** | scrub buffer arrives `x420 trc=SMPTE_ST_2084_PQ pri=ITU_R_2020 mtx=ITU_R_2020`; layer `kCGColorSpaceITUR_2100_PQ`, `wantsExtendedDynamicRangeContent = true`; picture during drag **bit-identical** to the played picture | `[SCRUB-GEOM]` + `[EDR]` + screen-diff |
+| **HDR, by eye** | dim on scrub **gone**, Mac Studio → LG 42-inch WOLED in HDR mode, **both SDR and HDR** content. The dim had also been present on the MacBook Air | direct observation |
+| **Geometry** | producer dimensions == playback offscreen on every fixture (3840×2160, 1920×1080; and 2944×2160 on the ARRI open-gate ProRes at Stage 1) | `[SCRUB-GEOM]` |
+| **Memory, 42 GB file** | ceiling **under 700 MB**, **519.2 MB at sample**, across repeated drags at varied speeds | ⚠️ **Xcode's memory gauge on the running app — NOT `libavmeas MODE=memory`.** A different instrument answering a narrower question than the checkpoint asked for |
+| **No regressions** | MXF playback **24.0 fps**; six paused frame steps → **five `[ScopeSeek]` relaxed renders**, zero spurious settle lines; matched-size resize round-trip while paused returns the picture at **0.09 codes** | `[Play]`, `[ScopeSeek]`, screen-diff |
+
+### INFERRED, NOT MEASURED
+
+- **Why the 42 GB file is the *fastest* case.** It is 1080p DNxHD, not 4K DNxHR — a smaller decode.
+  The reading that file size and duration cost a held context nothing is consistent with the
+  numbers but was not isolated: no 4K fixture of comparable size exists to separate raster from
+  size.
+- **That the held context is what makes a 42-minute seek cheap.** Not A/B'd against a per-request
+  context in the app; the per-request cost is from `libavmeas`, on the model rather than the app.
+
+### ⚠️ STILL OPEN — recorded rather than omitted
+
+1. **`thread_count = cores − 1` is tuned on a 16-core machine and is UNCHARACTERISED on a small
+   part.** The SLICE-vs-FRAME measurement ran 8 and 15 threads on a 16-core Studio (19.2 vs 17.4 ms)
+   and the shipping value resolved to 15 there. On a **4P/6E MacBook Air M4** that arithmetic gives
+   9, spread across cores that are not interchangeable, and nothing has run there. The choice to
+   leave one core free is defensible on both — it exists so the Metal scope-compute completions get
+   scheduled — but the *number* is a 16-core result being applied to a part with a different
+   topology.
+2. **The coalescer's latest-wins path was never exercised on the libav side.** Every MXF run
+   reported `coalesced=0`: libav never backed the queue up at the rates a mouse-driven drag
+   produces. So the pending-slot logic is **shared code with only one of its two callers stressing
+   it** — the AVFoundation side coalesced 53 of 70 on a deliberately violent drag, the libav side
+   never once. Not a defect; a gap in coverage, and the kind that surfaces on slower hardware.
+3. **`LibavPixelConversion` moved the PLAYBACK path and played MXF colour was not diffed against a
+   pre-Stage-3 binary.** The conversion, the colour-attachment mapping and the pool factory were
+   extracted from `LibavFrameSource` so both libav clients share one definition — which is the point
+   — but that means the playback path now runs through moved code. ⚠️ **No measurement in this stage
+   can catch a regression there**, because the scrub side and the played side would have shifted
+   *together*: every "the preview is bit-identical to the played picture" result would still read
+   0.00 with both halves equally wrong. The check that would catch it is a played-frame export from
+   an MXF diffed against a pre-Stage-3 build, and it has not been done.
+
+### Threading invariant — a deviation, stated
+
+`Decoder.close()` enqueues teardown onto the decode queue (`scrubQueue.async { self?.freeOnQueue() }`),
+which satisfies the first half of the `8896163` invariant. Two departures from how §4 states it:
+**`deinit { freeOnQueue() }` runs synchronously on whatever thread releases the last reference**,
+not on the queue; and **the queue is owned by the `Decoder`, not by the engine**, so it does not
+outlive the producer. ⚠️ `LibavThumbnailSource` had the identical shape — `private let thumbQueue`,
+`close()` doing `thumbQueue.async`, `deinit { freeContexts() }` — so §4's claim that it "already
+satisfies" the invariant was already using a looser reading than the invariant's own wording. The
+new producer matches that precedent exactly and does not match the literal statement. **The deinit
+race was reasoned about, not tested.**
 
 ---
 

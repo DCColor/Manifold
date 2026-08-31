@@ -145,14 +145,6 @@ struct ContentView: View {
 
     @State private var isScrubbing = false
     @State private var scrubValue: Double = 0
-    /// ⚠️ MXF ONLY, AND IT IS THE GATE — see the overlay branch in `body`. On the AVFoundation
-    /// path nothing ever assigns this, because the scrub frame goes through the renderer instead;
-    /// `requestScrubPreview` refuses to ask for an image unless `engine.usesLibavScrub`. Retired
-    /// with `LibavThumbnailSource` in Stage 3.
-    @State private var scrubPreviewImage: CGImage?
-    /// One decode at a time. The only surviving throttle: the media-distance gate is gone with the
-    /// AVFoundation path, and this is a real constraint rather than a tuning number.
-    @State private var previewRequestInFlight = false
     @State private var wasPlayingBeforeScrub = false
 
     @State private var hudVisible = true
@@ -1010,42 +1002,6 @@ struct ContentView: View {
                 if captions.enabled, captions.isLoaded {
                     CaptionOverlay(engine: engine, captions: captions)
                 }
-            }
-
-            // ⚠️ THE GATE IS THE IMAGE, NOT `isScrubbing` — AND THAT IS THE FIX, NOT A TIDY-UP.
-            // The overlay used to be conditioned on the drag being in progress, so it vanished on
-            // the same main-actor turn that STARTED the seek: for the ~25–55 ms until the reader
-            // delivered, the screen showed the frame from BEFORE the drag, and the seeked-to frame
-            // then replaced it. That replacement is the jump in the report.
-            //
-            // ⚠️ AND IT IS NOW LOAD-BEARING A SECOND TIME, FOR A DIFFERENT REASON — the one that
-            // makes THIS stage safe. Two scrub mechanisms are alive at once, selected by
-            // `useLibav`: AVFoundation files go through the producer and
-            // `MetalVideoRenderer.presentImmediate`, MXF still comes through here. What keeps them
-            // from ever both drawing is precisely that this gate is the IMAGE: on the producer path
-            // no preview image is ever made (`requestScrubPreview` returns before asking), so the
-            // overlay is STRUCTURALLY UNREACHABLE rather than conditionally suppressed. Rewriting
-            // it as `if isScrubbing`, or as any mode flag, would make both mechanisms reachable on
-            // the same drag and break the staging, not just this fix.
-            // docs/BUGS.md, "Stage 2 — flip the default for AVFoundation files".
-            if let preview = scrubPreviewImage {
-                // ⚠️ `Image(decorative:)`, NOT THE EDR HOST LAYER THAT USED TO BE HERE. That layer
-                // (`ScrubPreviewSurface`) existed for ONE reason — to opt a PQ/HLG CGImage from
-                // `AVAssetImageGenerator` into extended range — and it is deleted with the
-                // generator. Everything that reaches this branch now is `LibavThumbnailSource`
-                // output: 8-bit RGBA, SDR by construction, with no headroom tag. Both EDR opt-ins
-                // activate only on content tagged above 1.0, so on this image they were already
-                // inert; the layer's other two behaviours (fill the bounds, don't cross-fade on
-                // swap) are what SwiftUI does here anyway. Giving the libav path a float pipeline
-                // is Stage 3's job and closes the deferred Part 3 of the HDR scrub entry.
-                //
-                // The aspect pin STAYS and is unchanged. It is the video rect's authority — the
-                // same `videoAspect` the Metal surface above uses — and deliberately not the
-                // image's own PAR, which `LibavThumbnailSource` does not apply at all.
-                Image(decorative: preview, scale: 1)
-                    .resizable()
-                    .aspectRatio(videoAspect, contentMode: .fit)
-                    .allowsHitTesting(false)
             }
 
             if hasSource {
@@ -2619,7 +2575,6 @@ struct ContentView: View {
                         set: { newValue in
                             scrubValue = newValue
                             engine.scrubSeek(to: newValue)
-                            requestScrubPreview(at: newValue)
                         }
                     ),
                     in: 0...max(engine.duration, 0.1),
@@ -2652,6 +2607,14 @@ struct ContentView: View {
                             // its last presented drawable — which is that scrub frame. The hold now
                             // happens by default instead of by machinery. That is what "one display
                             // path" buys, stated concretely.
+                            //
+                            // ⚠️ AND IT IS NOW TRUE OF EVERY FILE. Stage 2 had to keep an MXF-only
+                            // hold, because MXF still had no producer and its Metal layer held the
+                            // PRE-DRAG frame for the whole gesture — the reasoning above simply did
+                            // not reach it. With `LibavScrubProducer` putting real frames on that
+                            // layer, it does, and the hold, the 400 ms fallback and the last
+                            // `CGImage` in the scrub path are gone with it. MEASURED, not assumed:
+                            // the `[SETTLE]` line on MXF (see MetalVideoRenderer).
                             isScrubbing = false          // the readout goes back to the engine
 
                             // 1. THE PENDING SLOT, FLUSHED AT THE RELEASE POINT. This is what the
@@ -2663,22 +2626,15 @@ struct ContentView: View {
                             //    position, so the release point is submitted and the coalescer
                             //    issues it the moment that decode completes. Latest wins, and the
                             //    latest is now exactly where the user let go.
-                            //    On MXF this is the libav thumbnail request instead — same intent,
-                            //    the other mechanism.
                             engine.scrubSeek(to: scrubValue)
-                            requestScrubPreview(at: scrubValue)
-                            // 2. MXF ONLY: hold the overlay until the seeked-to frame is up.
-                            //    No-op on the producer path — see the function.
-                            holdScrubOverlayUntilPresented()
-                            // 3. The real seek.
+                            // 2. The real seek.
                             engine.exactSeek(to: scrubValue)
                             #if DEBUG
                             // Flushed BEFORE the resume so playback's converts cannot land in the
                             // drag's numbers.
                             metalRenderer?.debugFlushV210Stats(label: "drag")
                             #endif
-                            // 4. …and the transport resumes if it was running. Unconditional again:
-                            //    the split that used to suppress it is gone.
+                            // 3. …and the transport resumes if it was running.
                             if wasPlayingBeforeScrub { engine.play() }
                         }
                     }
@@ -3082,77 +3038,6 @@ struct ContentView: View {
             return .elapsed
         }
         return readoutMode
-    }
-
-    /// THE MXF SCRUB PREVIEW, AND NOTHING ELSE.
-    ///
-    /// ⚠️ THIS IS THE STRUCTURAL HALF OF THE TWO-MECHANISM WINDOW. AVFoundation files return on
-    /// the first line, so no image is ever produced for them, so `scrubPreviewImage` stays nil, so
-    /// the overlay branch in `body` cannot be composited by any path. That is what makes "two
-    /// scrub mechanisms alive at once" safe: the selection happens HERE, once, at the source of
-    /// the image — not as a mode flag consulted at the point of drawing, which is a thing that can
-    /// be got wrong in one place and right in another.
-    ///
-    /// What used to be here and is gone: the media-time DISTANCE gate (`> 0.05` s — a MEDIA
-    /// distance, so a slow drag suppressed requests outright and a fast one made it irrelevant),
-    /// the `final:` parameter and its corrective un-throttled request, and the handoff generation
-    /// stamp. The distance gate created the staleness the 2026-08-28 position fix was written
-    /// against; it is deleted rather than tuned, and on the AVFoundation side its replacement is
-    /// `ScrubCoalescer`'s latest-wins pending slot. Here, one decode at a time is all that is left,
-    /// because that is the only one of the four that was ever a real constraint.
-    ///
-    /// Retired entirely in Stage 3, when the libav producer replaces `LibavThumbnailSource`.
-    private func requestScrubPreview(at time: Double) {
-        guard engine.usesLibavScrub else { return }
-        guard !previewRequestInFlight else { return }
-        previewRequestInFlight = true
-        Task {
-            let image = await engine.previewImage(at: time)
-            await MainActor.run {
-                previewRequestInFlight = false
-                guard let image, isScrubbing || scrubPreviewImage != nil else { return }
-                scrubPreviewImage = image
-            }
-        }
-    }
-
-    /// ⚠️ MXF ONLY, AND IT IS WHAT IS LEFT OF THE RELEASE HANDOFF. On the AVFoundation path this
-    /// returns immediately: the Metal layer is already showing the release frame, `flush()` does
-    /// not disturb the last presented drawable, and there is nothing to hold — which is why the
-    /// handoff, its 400 ms task, its generation counter and its three races are deleted rather
-    /// than kept.
-    ///
-    /// ⚠️ THE SAME REASONING DOES NOT REACH MXF, AND SAYING IT DOES WOULD REINTRODUCE A FIXED BUG.
-    /// MXF has no producer until Stage 3, so during its drag the Metal layer still holds the
-    /// PRE-DRAG frame and the picture the user is looking at is the `CGImage` overlay. Dropping
-    /// that overlay at release would show the pre-drag frame for the ~25–55 ms until the reader
-    /// delivers, and the seeked-to frame would then replace it — which is exactly the jump the
-    /// 2026-08-28 position fix removed. So the hold survives for the one path that still needs it.
-    ///
-    /// WHAT DID GO: the generation counter and the three staleness checks it fed. They existed
-    /// because a `final:` preview, the one-shot and the timeout could each land late and disagree
-    /// about which release they belonged to. There is no `final:` request any more, and the two
-    /// survivors both do the same idempotent thing — nil the image — so a late one cannot put a
-    /// stale frame back. A new grab replaces the image on its first preview, as before.
-    ///
-    /// The 400 ms bound stays for the reason it was written: `beginReading` can return without
-    /// ever flushing (no asset, no video track, no renderer) and can fail after flushing, and in
-    /// neither case does a frame arrive — so the one-shot alone would pin the overlay forever.
-    /// Measured first-frame latency after `exactSeek` is 27 ms mean / 118 ms worst, so this is >3×
-    /// the worst observed. Retired with the whole MXF overlay in Stage 3.
-    @MainActor
-    private func holdScrubOverlayUntilPresented() {
-        guard engine.usesLibavScrub, scrubPreviewImage != nil else { return }
-        metalRenderer?.onFirstPresentAfterFlush = {
-            // Fires on the RENDER thread — hop before touching view state.
-            Task { @MainActor in scrubPreviewImage = nil }
-        }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            guard !Task.isCancelled else { return }
-            metalRenderer?.onFirstPresentAfterFlush = nil
-            scrubPreviewImage = nil
-        }
     }
 
     private func cycleReadout() {
