@@ -9,6 +9,15 @@ changelog page. Format notes are at the bottom.
 
 - SRT streams now carry audio, including multichannel. Channel order is read from the stream
   rather than assumed.
+- MXF and DNx files with several audio tracks can now be switched between. 0.7.0 said any audio
+  track could be selected — that was true for QuickTime and MP4 but not for MXF, which only ever
+  played its first track. It does now.
+- The inspector shows audio tracks for MXF files, which it never has. Codec, layout, sample rate
+  and bit depth, one row per track.
+- Surround channels are named the way delivery layouts name them. Some files declare their
+  surrounds in a way that was reaching the meters as Lsd and Rsd; a 5.1 has one surround pair and
+  it reads Ls and Rs, and a 7.1 reads Ls Rs Lss Rss.
+- Fixed: seeking an MXF could briefly play a moment of audio from before the seek.
 - Scrubbing now shows real decoded frames from the file, so the picture you see while dragging
   is the frame you land on.
 - Scopes move while you scrub. They used to freeze for the whole gesture.
