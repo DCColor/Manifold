@@ -1355,8 +1355,12 @@ struct ContentView: View {
                    tracks.indices.contains(engine.selectedAudioTrackIndex) {
                     return tracks[engine.selectedAudioTrackIndex].roles
                 }
-                // No track list and no live transport: the libav (MXF) path, whose roles — if its
-                // sample buffers ever carry a layout — reach the tap and nowhere else.
+                // No track list and no live transport. NOT the ordinary libav path any more —
+                // `applyLibavAudioTrack` fills a row per stream there, and the branch above is
+                // what keeps a stream SWITCH relabelling the bars (row N is decoded stream N; see
+                // `FrameEngine.selectedAudioTrackIndex`). This is the remainder: a libav file
+                // whose rows never landed, whose roles — if its sample buffers carry a layout —
+                // reach the tap and nowhere else.
                 return engine.audioTap.format?.roles ?? []
             }
             // A live source has no playhead to key the ring against — see the note in
@@ -1769,11 +1773,14 @@ struct ContentView: View {
     /// Short face/menu description of audio track `index` — "Stereo", "5.1 SMPTE", "6 ch".
     ///
     /// ⚠️ THE ENGINE OWNS THE COUNT, THE INSPECTOR OWNS THE DESCRIPTION, AND THEY ARE JOINED BY
-    /// INDEX. Both enumerate `loadTracks(withMediaType: .audio)` on the same asset, which returns
-    /// file order, so index N means the same track to both. The join is still bounds-guarded rather
-    /// than assumed: `metadata` lands asynchronously (`MediaInspector.metadata` is a detached Task),
-    /// so there is a real window where the engine has three tracks and the inspector has none. In
-    /// that window a plain track number is the honest answer, not a blank.
+    /// INDEX. On the AVFoundation path both enumerate `loadTracks(withMediaType: .audio)` on the
+    /// same asset, which returns file order; on the libav path both come from the SAME
+    /// `LibavAudioSource` stream enumeration (`FrameEngine.libavAudioInfo` for the count,
+    /// `applyLibavAudioTrack`'s order-preserving `map` of it for the rows). Either way index N
+    /// means the same track to both. The join is still bounds-guarded rather than assumed:
+    /// `metadata` lands asynchronously on the AVFoundation path (`MediaInspector.metadata` is a
+    /// detached Task), so there is a real window where the engine has three tracks and the
+    /// inspector has none. In that window a plain track number is the honest answer, not a blank.
     private func audioTrackLabel(_ index: Int) -> String {
         guard let tracks = engine.metadata?.audioTracks, tracks.indices.contains(index) else {
             return "Track \(index + 1)"
@@ -1789,9 +1796,14 @@ struct ContentView: View {
     private var audioTrackFaceLabel: String {
         let n = engine.audioTrackCount
         // ⚠️ ZERO SELECTABLE TRACKS IS NOT THE SAME QUESTION AS "NO AUDIO", and conflating them
-        // reads as a bug on every push source. `audioTrackCount` counts AVAssetTracks, so it is 0
-        // for WHEP (and for the libav path) even while audio is decoding and the meters are
-        // moving. Saying "No audio" there contradicts the meters standing next to it.
+        // reads as a bug on every push source. `audioTrackCount` is 0 for WHEP even while audio is
+        // decoding and the meters are moving. Saying "No audio" there contradicts the meters
+        // standing next to it.
+        //
+        // ⚠️ THIS FALLBACK IS NOT DEAD NOW THAT THE libav PATH REPORTS A COUNT. Its purpose is the
+        // paths that never get one, and WHEP is still one of them — it has no track list, no
+        // stream enumeration, and nothing but `audioPresence` to say what it decoded. Deleting it
+        // would put "No audio" under moving meters on every live source.
         //
         // So when there is no track LIST, defer to what actually decoded. `.absent` is the only
         // state that earns "No audio" — it is set positively, either by a video-only file or by a
@@ -1824,10 +1836,14 @@ struct ContentView: View {
     /// stating that track's layout; a video-only file shows "No audio". Neither is a dead end the
     /// user has to go looking for.
     ///
-    /// ⚠️ THE libav (MXF / DNxHR) PATH REPORTS ZERO SELECTABLE TRACKS even when it is playing audio
-    /// perfectly — `LibavAudioSource` opens the first audio stream it finds and the engine holds no
-    /// `AVAssetTrack` list to offer. The control therefore falls back to the presence-derived
-    /// single-track presentation there, which is honest: we cannot offer a choice we cannot honour.
+    /// ⚠️ THE libav (MXF / DNxHR) PATH NOW REPORTS A COUNT OF ITS OWN — `FrameEngine` keeps the
+    /// stream enumeration `LibavAudioSource.open()` produced and `audioTrackCount` reads it there,
+    /// so a four-stream MXF offers four. It is still NOT `audioTracks.count`: that is an
+    /// `AVAssetTrack` list and AVFoundation cannot open MXF at all.
+    ///
+    /// ⚠️ A LIVE SOURCE STILL REPORTS ZERO, and the control still falls back to the
+    /// presence-derived single-track presentation there. That remains honest for the same reason
+    /// it always was: we cannot offer a choice we cannot honour.
     private var audioTrackControl: some View {
         let n = engine.audioTrackCount
         // Nothing to switch between: one track, or a path that can't offer the choice.

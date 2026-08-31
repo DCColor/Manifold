@@ -304,6 +304,36 @@ public final class AudioTapBuffer: @unchecked Sendable {
             // A roles-only change does NOT fire `onFormatChange`: nothing on the WIRE depends on
             // the names, and that handler re-establishes the DeckLink output — it would interrupt
             // audio in order to relabel a meter. The meters poll `format` and pick it up anyway.
+            //
+            // ── ⚠️ AND A DELIBERATE AUDIO-TRACK SWITCH DOES NOT CHANGE THAT ────────────────────
+            //
+            // It looks like it should. Switching between two 6-channel 48 kHz streams that differ
+            // only in ORDER (`decl_5_5_5F_51_51F.mxf` carries exactly that pair: L C R Ls Rs LFE
+            // against L R C LFE Ls Rs) reaches this branch, not the one above — same rate, same
+            // count, different roles — so the ring is not resized and the handler is not fired.
+            // The two events are still DIFFERENT and this must keep telling them apart: a late
+            // ADTS declaration is one stream clarifying itself mid-flight, a switch is a different
+            // stream starting. Do not weaken this test to serve the switch.
+            //
+            // A switch needs three things, and none of them is this callback:
+            //
+            //   · the old stream's samples must not be served across the swap — `FrameEngine`'s
+            //     `teardownAudioReading()` runs first on BOTH switch paths and calls `reset()`,
+            //     which drops the window and the PTS anchor. The ring's backing store is reused,
+            //     but `framesWritten` is zeroed, so nothing before the swap is readable.
+            //   · the METERS must relabel — they read `metadata.audioTracks[selected].roles`, not
+            //     this format, on every path that has rows (see `FrameEngine.audioTrackRow`), and
+            //     that moves the instant `selectedAudioTrackIndex` does.
+            //   · DECKLINK must be correct — and it does not need re-establishing. The card is
+            //     enabled on sample rate and channel COUNT only (`DeckLinkService.audioFormatChanged`
+            //     compares exactly those two and returns early when they match, and
+            //     `enabledAudioFormat` is read for nothing else); the channel ORDER it transmits is
+            //     whatever order the ring holds, which is the new stream's from the first buffer
+            //     on. Firing the handler here would tear the SDI output down and bring it back to
+            //     transmit the identical signal.
+            //
+            // A switch that DOES change rate or channel count takes the branch above and
+            // re-establishes, exactly as a new file does. That was already true and still is.
             newFormat = shapeChanged ? fmt : nil   // notified after the lock is dropped
             rolesOnlyLog = shapeChanged ? nil
                 : "AudioTap[\(path.rawValue)]: channel roles → "

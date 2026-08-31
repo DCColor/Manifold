@@ -60,8 +60,11 @@ public struct AudioTrackInfo: Equatable, Sendable {
     /// ⚠️ IT IS NOT THE ROW'S POSITION IN `audioTracks`, AND THAT IS THE ENTIRE REASON IT EXISTS.
     /// An MXF's video stream is #0, so its four audio streams are #1–#4 while their rows are 0–3;
     /// any file that interleaves audio with anything else makes the two disagree. `av_read_frame`,
-    /// `av_seek_frame` and `avcodec_parameters_to_context` all speak the STREAM index, so a
-    /// future audio-stream switch has to bind with this number, not with the array position.
+    /// `av_seek_frame` and `avcodec_parameters_to_context` all speak the STREAM index, so the
+    /// audio-stream switch binds with this number, not with the array position —
+    /// `FrameEngine.selectLibavAudioStream` does that translation, reading the number from
+    /// `libavAudioInfo` (which is where THIS field is filled from) so the UI keeps passing a
+    /// position.
     ///
     /// NIL ON THE AVFOUNDATION PATH, deliberately. There the row's position IS the index into the
     /// engine's `AVAssetTrack` list, which is what `selectAudioTrack` already takes — inventing a

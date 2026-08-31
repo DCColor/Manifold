@@ -164,9 +164,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     ///
     /// **2026-08-31, the multi-stream enumeration** — that companion now fills one row PER audio
     /// stream, so a four-track MXF has four. `metadata.audioTracks` is no longer blind on this
-    /// path at all: it is complete, for description. (It is not a track LIST you can choose from —
-    /// `audioTracks`/`audioTrackCount` are still empty here and that is a different question. See
-    /// the note on `applyLibavAudioTrack`.)
+    /// path at all: it is complete, for description.
+    ///
+    /// **2026-08-31, the stream switch** — and now for SELECTION too: `audioTrackCount` is sourced
+    /// per path (libav's stream count here, `AVAssetTrack`s there) and `selectAudioTrack` binds a
+    /// new decoder. `audioTracks` is still empty on this path — it is an `AVAssetTrack` list and
+    /// AVFoundation is still blind to MXF — which is exactly why the COUNT could not keep coming
+    /// from it. See `audioTrackCount`.
     ///
     /// ── ⚠️ AND THE REASON SURVIVES ITS ORIGIN STORY, SO DO NOT DELETE THIS ────────────────────
     ///
@@ -223,22 +227,58 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// three (it enumerates the asset directly — see `MediaInspector.audioTracks`), so the two were
     /// describing different things and only the inspector was complete.
     ///
-    /// EMPTY ON THE libav PATH. AVFoundation cannot open MXF, so `loadMXF` leaves this empty while
-    /// `LibavAudioSource` decodes the first audio stream it finds. Multi-track selection is therefore
-    /// an AVFoundation-path capability today; `audioTrackCount` reports 0 there and the UI falls back
-    /// to the single-track presentation, which is honest — we genuinely cannot offer a choice.
+    /// ⚠️ EMPTY ON THE libav PATH, AND NO LONGER A STATEMENT ABOUT SELECTABILITY. AVFoundation
+    /// cannot open MXF, so `loadMXF` leaves this empty — but the libav path now offers a choice of
+    /// its own, backed by `libavAudioInfo` rather than by this. Read this ONLY for the AVFoundation
+    /// audio reader; for "how many can the user pick between" read `audioTrackCount`, which is
+    /// sourced per path.
     private var audioTracks: [AVAssetTrack] = []
 
-    /// Which of `audioTracks` is monitored — the one track that feeds the audio renderer AND the
-    /// tap, and therefore the meters and DeckLink too. Always a valid index into `audioTracks`, or 0
-    /// when there are none. Reset to 0 on every load: a track index carried across files is a claim
-    /// about material no longer open.
+    /// Which audio track is monitored — the one that feeds the audio renderer AND the tap, and
+    /// therefore the meters and DeckLink too. Reset to 0 on every load: a track index carried
+    /// across files is a claim about material no longer open.
+    ///
+    /// ── ⚠️ AN ARRAY POSITION, SHARED BY BOTH PATHS, AND DELIBERATELY NOT BRANCHED ─────────────
+    ///
+    /// It indexes `audioTracks` on the AVFoundation path and `libavAudioInfo.streams` on the libav
+    /// one, and everything that reads it reads it the same way regardless: the meters' role lookup
+    /// (`metadata.audioTracks[selected].roles`), the inspector's monitored mark, the toolbar face
+    /// label, and `meterModel.sourceIdentity`. Splitting it in two would mean four call sites each
+    /// asking which path they are on.
+    ///
+    /// ⚠️ WHICH MAKES ONE INVARIANT LOAD-BEARING: ROW N IS DECODED STREAM N. On the libav path the
+    /// inspector rows are built from `libavAudioInfo.streams` in `AVStream` order
+    /// (`applyLibavAudioTrack`), and `selectLibavAudioStream` translates position N through
+    /// `streams[N].streamIndex` — the same array — so the row the panel marks as monitored is the
+    /// stream the decoder is bound to. The `AVStream` index is NOT this number and must never be
+    /// stored here; see `AudioTrackInfo.sourceStreamIndex`.
     @Published public private(set) var selectedAudioTrackIndex: Int = 0
 
-    /// How many audio tracks the user can choose between. 0 on the libav path and for video-only
-    /// files. The UI shows a disabled control at 0 or 1 rather than hiding it — that a file has one
-    /// audio track is worth knowing, and a control that appears and disappears is not.
-    public var audioTrackCount: Int { audioTracks.count }
+    /// How many audio tracks the user can choose between — 0 where no choice can be OFFERED, which
+    /// is not the same as "no audio" (a live source decodes audio and offers nothing). The UI shows
+    /// a disabled control at 0 or 1 rather than hiding it — that a file has one audio track is
+    /// worth knowing, and a control that appears and disappears is not.
+    ///
+    /// ── ⚠️ SOURCED PER PATH, AND NOT FROM `metadata.audioTracks` ──────────────────────────────
+    ///
+    /// It branches on `useLibav` for the same reason `beginReading` and `selectAudioTrack` do: the
+    /// thing being counted is the thing the engine can BIND A DECODER TO, and on the libav path
+    /// that is a libav stream, not an `AVAssetTrack`. Counting `audioTracks` here reported 0 while
+    /// four MXF streams were selectable.
+    ///
+    /// ⚠️ AND NOT FROM `metadata.audioTracks`, WHICH LOOKS LIKE THE SAME NUMBER AND IS NOT.
+    /// Two reasons, both load-bearing:
+    ///
+    /// 1. The inspector's list is COMPLETE even where the engine cannot honour a switch, and
+    ///    `InspectorPanel` gates row selectability on THIS count precisely to preserve that
+    ///    distinction — its comment says so. Sourcing one from the other collapses it: every row
+    ///    the inspector can describe would look clickable, including on paths that can bind nothing.
+    /// 2. On the AVFoundation path `metadata` is assigned from a DETACHED `Task` in `loadAsset`,
+    ///    so it is nil for a window after load. The count would read 0 there and the toolbar
+    ///    control would appear inert and then come alive — a flicker on every file open.
+    public var audioTrackCount: Int {
+        useLibav ? (libavAudioInfo?.streams.count ?? 0) : audioTracks.count
+    }
 
     /// The monitored track. Nil for video-only files and on the libav path.
     private var audioTrack: AVAssetTrack? {
@@ -294,6 +334,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The libav audio sibling — decodes the DNx file's audio to PCM on the shared
     /// `audioRenderer` (same synchronizer → A/V sync). Nil if the file has no audio.
     private var libavAudioSource: LibavAudioSource?
+
+    /// What `LibavAudioSource.open()` reported for the current file. Nil on the AVFoundation path,
+    /// for video-only files, and before the audio is opened.
+    ///
+    /// ⚠️ THIS USED TO BE RETURNED TO `beginLibavReading` AND DISCARDED, AND THAT WAS THE GAP.
+    /// A switch needs two things the engine had no record of: how many streams there are
+    /// (`audioTrackCount`) and, for array position N, which `AVStream` index to bind
+    /// (`streams[N].streamIndex`). Both are read off the enumeration `open()` already performed —
+    /// nothing re-demuxes and nothing opens a second context to answer them.
+    ///
+    /// ⚠️ ITS `decoded` MEMBER GOES STALE ON A SWITCH, BY DESIGN — it is a snapshot of what was
+    /// bound at open. The monitored stream is `streams[selectedAudioTrackIndex]`. See the note on
+    /// `LibavAudioSource.AudioInfo`.
+    private var libavAudioInfo: LibavAudioSource.AudioInfo?
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
     /// Decoded video format requested at the decode-request site. A named property
@@ -755,6 +809,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavSource = nil
         libavAudioSource?.stop()
         libavAudioSource = nil
+        // Cleared WITH the source, always: it is that source's stream list, and a count left
+        // standing would keep the toolbar offering a choice against an unloaded file.
+        libavAudioInfo = nil
         installScrubProducer(for: nil, useLibav: false)   // retire the scrub producer
 
         // Audio is its OWN reader + pump now, so it retires through its own teardown — which bumps
@@ -867,9 +924,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// warm for an audio-only reader, against 25–33 ms for the full rebuild this replaced. Under a
     /// frame either way, and this is a deliberate, occasional action.
     ///
-    /// No-ops on an unchanged index, on an out-of-range index, and on the libav path (where
-    /// `audioTracks` is empty and there is nothing to choose between).
+    /// No-ops on an unchanged index and on an out-of-range index.
+    ///
+    /// ⚠️ THE `useLibav` BRANCH IS `beginReading`'S, NOT A SECOND DISPATCH. That function's first
+    /// line is the same test for the same reason — which decode path owns this file — and the two
+    /// must not be able to disagree about it. Everything BELOW the branch is the AVFoundation
+    /// rebuild and reads `audioTracks`, which is empty on the libav path; everything the libav path
+    /// needs is in `selectLibavAudioStream`.
+    ///
+    /// `selectedAudioTrackIndex` is NOT branched — see its declaration. Both paths move the one
+    /// shared index, and both keep the invariant that row N is the monitored stream.
     public func selectAudioTrack(_ index: Int) {
+        if useLibav {
+            selectLibavAudioStream(index)
+            return
+        }
         guard audioTracks.indices.contains(index), index != selectedAudioTrackIndex else { return }
         selectedAudioTrackIndex = index
         // Positioned at the playhead, NOT at zero. `beginAudioReading` tears down the previous
@@ -877,6 +946,90 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // against the clock that is still running.
         let at = CMTime(seconds: currentTime, preferredTimescale: 600)
         Task { await beginAudioReading(from: at) }
+    }
+
+    /// The libav half of `selectAudioTrack`: bind the decoder to a different `AVStream` of the same
+    /// file, positioned at the playhead. The demuxer, the video source, the video renderer and
+    /// `synchronizer.rate` are all untouched, so — exactly as on the AVFoundation path — this reads
+    /// as a change of what you are hearing, not as a playback glitch.
+    ///
+    /// ── ⚠️ THE ARRAY POSITION IS TRANSLATED HERE, INSIDE THE ENGINE ───────────────────────────
+    ///
+    /// `InspectorPanel` and the toolbar picker pass an array POSITION and must keep doing so — it
+    /// is the number `selectedAudioTrackIndex` holds and the number the rows are enumerated at.
+    /// `streams[index].streamIndex` is the `AVStream` index, which is what a decoder is bound with
+    /// and what `av_seek_frame` takes; on an MXF the two differ by the video stream sitting at #0.
+    /// A UI that passed the stream index would be carrying a libav detail, and the first
+    /// interleaved container would make every row off by one.
+    ///
+    /// (This reads the translation from `libavAudioInfo` rather than from
+    /// `metadata.audioTracks[index].sourceStreamIndex`. It is the SAME number — that field is
+    /// filled from this array in `audioTrackRow` — but this array is the source of it, is not
+    /// published, and exists on the `.mov`-DNxHR sub-path too, where `applyLibavAudioTrack` bails
+    /// on `videoTrack != nil` and the rows are AVFoundation's with a nil `sourceStreamIndex`.)
+    ///
+    /// ── ⚠️ TEARDOWN, THEN SWAP, THEN ARM ─────────────────────────────────────────────────────
+    ///
+    /// `teardownAudioReading()` is what retires the PREVIOUS arm — `LibavAudioSource.arm` calls
+    /// `requestMediaDataWhenReady` with no preceding `stopRequestingMediaData`, which is only safe
+    /// because every caller has just done exactly this (`beginLibavReading` does, at its top). It
+    /// also bumps `audioSessionToken` so a callback already inside the pump's
+    /// `while isReadyForMoreMediaData` loop bows out at its next `current()` check, flushes the
+    /// renderer of the old stream's queued PCM, and resets the tap's ring so no sample from the
+    /// previous stream is served across the swap. It is a no-op on this path's `audioReader`
+    /// (nil here) — the same call `beginLibavReading` already makes for the same reason.
+    ///
+    /// The swap and the seek are then ordered by the pump queue, not by convention — see
+    /// `LibavAudioSource.selectStream`.
+    private func selectLibavAudioStream(_ index: Int) {
+        guard let info = libavAudioInfo, let source = libavAudioSource,
+              info.streams.indices.contains(index), index != selectedAudioTrackIndex else { return }
+        let stream = info.streams[index]
+        let previous = selectedAudioTrackIndex
+        selectedAudioTrackIndex = index
+        // Set from the stream we are switching TO, before a single buffer of it has been decoded.
+        // It sizes the meters' bars (see `audioPresence`), and it was established once from the
+        // decoded stream's channel count in `beginLibavReading` — a switch to a stereo stream that
+        // left it at 6 would draw six bars over two channels of audio.
+        audioPresence = stream.channels > 0 ? .present(channels: stream.channels) : .unknown
+
+        teardownAudioReading()
+        // The same two-step `beginLibavReading` and `beginAudioReading` both perform: the teardown
+        // above bumped and discarded, this bumps and keeps. Straight-line main-actor code between
+        // them, so nothing can interleave and strand this token stale-on-arrival.
+        let audioSession = audioSessionToken
+        let audioToken = audioSession.next()
+        source.selectStream(stream.streamIndex, fromSeconds: currentTime,
+                            isCurrent: { audioSession.isCurrent(audioToken) },
+                            completion: { [weak self] ok in
+            guard !ok else { return }
+            Task { @MainActor in self?.revertLibavAudioSelection(to: previous, failed: stream) }
+        })
+    }
+
+    /// The stream had no usable decoder, so the swap changed nothing and the PREVIOUS stream is
+    /// still bound and still playing (`LibavAudioSource.rebindOnPump` builds before it commits).
+    /// Put the selection back so the panel is not marking a row nothing is decoding.
+    ///
+    /// ⚠️ THE ROW MARK IS THE POINT, NOT TIDINESS. `selectedAudioTrackIndex` is what the meters
+    /// take their channel ROLES from and what the inspector marks as monitored; left on a stream
+    /// that never bound, the meters would label the old stream's bars with the new stream's layout
+    /// — a wrong label on the instrument someone uses to decide which channel is which, which is
+    /// the one failure this whole area is written to avoid.
+    ///
+    /// `open()` enumerates from `codecpar` and never asks whether a decoder exists, so this is a
+    /// real state and not a defensive one: an MXF may carry a stream in a codec the vendored
+    /// FFmpeg build has no decoder for, and it will be listed and offered.
+    private func revertLibavAudioSelection(to index: Int,
+                                           failed: LibavAudioSource.AudioInfo.StreamInfo) {
+        guard let info = libavAudioInfo, info.streams.indices.contains(index) else { return }
+        selectedAudioTrackIndex = index
+        let restored = info.streams[index]
+        audioPresence = restored.channels > 0 ? .present(channels: restored.channels) : .unknown
+        playbackNotice = "Audio stream #\(failed.streamIndex) (\(failed.codecName)) "
+            + "couldn’t be decoded — still monitoring stream #\(restored.streamIndex)."
+        print("FrameEngine: libav audio stream #\(failed.streamIndex) (\(failed.codecName)) "
+            + "has no usable decoder — selection reverted to #\(restored.streamIndex)")
     }
 
     /// Current frame from the start of the file (0-based).
@@ -1161,6 +1314,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // per-file libav video+audio sources are created lazily in beginLibavReading.
         libavSource?.stop(); libavSource = nil
         libavAudioSource?.stop(); libavAudioSource = nil
+        libavAudioInfo = nil                             // with its source — see `stop()`
         // The scrub producer is retired HERE and rebuilt below once `useLibav` is known — the
         // second half of the same lifecycle, and the bump this performs is what makes an in-flight
         // frame from the outgoing file fail its delivery check instead of landing on the new one.
@@ -1374,21 +1528,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// `AVURLAsset`, `loadMXF` never calls it, and `metadata.audioTracks` therefore stayed EMPTY for
     /// every MXF — including ones playing audio perfectly — so the inspector showed no audio rows.
     ///
-    /// ── ⚠️ DESCRIBING FOUR STREAMS IS NOT OFFERING FOUR STREAMS ───────────────────────────────
+    /// ── ⚠️ ROW N IS DECODED STREAM N, AND SEVERAL THINGS DEPEND ON IT ─────────────────────────
     ///
-    /// `LibavAudioSource` still decodes exactly one stream — the first — and nothing here changes
-    /// that. `audioTrackCount` counts `AVAssetTrack`s and is still 0 on this path, so the toolbar
-    /// picker stays disabled and `InspectorPanel` still renders these rows as plain readouts:
-    /// not clickable, and none marked as monitored. That is deliberate until the SWITCH exists —
-    /// a control that lets you pick a stream nothing can bind is worse than an honest disabled one
-    /// (see the note on `audioTrackControl`). What the rows do is REPORT, which the inspector could
-    /// not do at all a moment ago.
+    /// These rows are now SELECTABLE — `audioTrackCount` is sourced from the same
+    /// `libavAudioInfo.streams` array (`streams.count`) and `selectLibavAudioStream` binds a
+    /// decoder to `streams[N].streamIndex` — so the enumeration below is not merely a description
+    /// any more, it is the list the user picks from and the list the engine binds through.
     ///
-    /// ⚠️ ROW 0 IS THE DECODED STREAM, AND SOMETHING DEPENDS ON THAT. `ContentView` feeds the
-    /// meters `audioTracks[selectedAudioTrackIndex].roles`, and `selectedAudioTrackIndex` is 0 on
-    /// this path (there is nothing to select). Rows are built in `AVStream` order and the decoded
-    /// stream is the FIRST audio stream, so index 0 is it and the meters keep labelling the bars
-    /// with the roles of the audio they are actually showing. A switch has to move both together.
+    /// `ContentView` feeds the meters `audioTracks[selectedAudioTrackIndex].roles`, and
+    /// `InspectorPanel` marks row `selectedAudioTrackIndex` as monitored. Rows are built here by
+    /// `map` over `streams`, which preserves order and count, and the switch translates through
+    /// that same array — so position N means the same stream to the rows, to the count and to the
+    /// decoder. ⚠️ Anything that reorders or filters this `map` breaks all three at once.
     ///
     /// ── ⚠️ WHY THE GUARD, AND WHY IT IS THE SAME ONE `applyLibavMetadata` USES ────────────────
     ///
@@ -1442,7 +1593,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         row.channelCount = stream.channels
         row.sampleRate = Double(stream.sampleRate)
         row.bitDepth = stream.bitsPerRawSample
-        // The number a decoder is bound with — see `AudioTrackInfo.sourceStreamIndex`.
+        // The number a decoder IS bound with — see `AudioTrackInfo.sourceStreamIndex`. Reported
+        // for the inspector's benefit; the switch itself reads `libavAudioInfo`, which is where
+        // this came from, rather than round-tripping through published metadata.
         row.sourceStreamIndex = Int(stream.streamIndex)
         if let fmt = stream.formatDescription {
             let layout = MediaInspector.audioLayout(from: fmt, channelCount: stream.channels)
@@ -1579,6 +1732,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                             + "\(s.sampleRate)Hz \(s.channels)ch (\(s.layoutName))\(mark)")
                     }
                 }
+                // KEPT, not discarded. `audioTrackCount` counts these streams and
+                // `selectLibavAudioStream` translates an array position through them — see
+                // `libavAudioInfo`. Assigned in the same straight-line, no-suspension stretch that
+                // publishes the rows below, so the count and the rows become visible together.
+                libavAudioInfo = ainfo
                 applyLibavAudioTrack(ainfo)
             } else {
                 // POSITIVE evidence of absence, not merely a lack of evidence: the demuxer opened

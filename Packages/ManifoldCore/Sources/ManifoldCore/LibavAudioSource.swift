@@ -18,6 +18,10 @@ import CFFmpeg
 /// Lifecycle/currency mirror the video source exactly: persistent per file, re-armed
 /// per session with the engine's session token; libav state touched only on the
 /// audio pump queue; freed there + in deinit.
+///
+/// WHICH audio stream is decoded can change after `open()` — see `selectStream`. The demuxer,
+/// the packet and the frame are kept across that; only the decoder and everything derived from
+/// the stream are rebound.
 public final class LibavAudioSource: @unchecked Sendable {
 
     public enum LibavError: Error { case open, noAudioStream, noDecoder, decoderOpen }
@@ -32,8 +36,14 @@ public final class LibavAudioSource: @unchecked Sendable {
     ///
     /// `decoded` is an ELEMENT of `streams`, not a second description built alongside it. One
     /// pass, one builder, so the row the inspector prints for the monitored stream cannot disagree
-    /// with the facts the engine logs. Stage 2 (choosing a stream) moves `decoded` to a different
-    /// element; the enumeration itself does not change.
+    /// with the facts the engine logs.
+    ///
+    /// ⚠️ `decoded` DESCRIBES THE STREAM `open()` BOUND, AND `selectStream` DOES NOT UPDATE IT.
+    /// This is a value type returned once; a switch changes the DECODER's state, not a struct the
+    /// caller is already holding. The engine keeps this whole value as its record of the file's
+    /// streams and tracks the monitored one by ARRAY POSITION (`selectedAudioTrackIndex`), which
+    /// is the same index the inspector rows are built at — see `FrameEngine.libavAudioInfo`.
+    /// Reading `decoded` after a switch gives you the stream that was decoding at OPEN.
     public struct AudioInfo: @unchecked Sendable {
 
         /// One audio stream as the CONTAINER declares it.
@@ -48,8 +58,8 @@ public final class LibavAudioSource: @unchecked Sendable {
             /// ⚠️ THE `AVStream` INDEX, NOT THE POSITION IN `streams`. The two diverge the moment
             /// a non-audio stream sits between two audio ones — an MXF's video stream is #0, so
             /// its first audio stream is #1 — and this is the number `av_read_frame` stamps on
-            /// packets and `av_seek_frame` takes. Stage 2 binds a decoder with it; binding the
-            /// array position instead would pick the wrong stream on the first file that
+            /// packets and `av_seek_frame` takes. `selectStream` binds a decoder with it; binding
+            /// the array position instead would pick the wrong stream on the first file that
             /// interleaves.
             public let streamIndex: Int32
 
@@ -127,12 +137,25 @@ public final class LibavAudioSource: @unchecked Sendable {
     private var pkt: UnsafeMutablePointer<AVPacket>?
     private var frame: UnsafeMutablePointer<AVFrame>?
     private var swr: OpaquePointer?
+
+    // ── ⚠️ EVERYTHING BELOW IS PER-STREAM STATE AND `selectStream` MUST REBIND ALL OF IT ──────
+    //
+    // These were write-once in `open()` for as long as this source decoded exactly one stream, and
+    // NOTHING clears them. A switch that frees `codecCtx` and `swr` but leaves the rest builds
+    // buffers with the OLD stream's channel count, timescale and layout out of the NEW stream's
+    // samples — no error anywhere, just a plausibly-wrong result. `rebindOnPump` is the one place
+    // they are written after `open()`, and it writes every one of them.
     private var audioStreamIndex: Int32 = -1
     private var timeBase = AVRational(num: 1, den: 44100)
     private var startTimeTicks: Int64 = 0
     private var sampleRate: Int32 = 0
     private var channels: Int32 = 0
+    /// ⚠️ A LATCH, NOT A FACT: `ensureSwr` returns early while this is non-nil, so a switch must
+    /// clear it (with `swr`) or the new stream's samples go through the old stream's resampler.
     private var formatDesc: CMAudioFormatDescription?
+    /// ⚠️ MUST GO BACK TO -1 ON A SWITCH. Left holding the old stream's target, `nextFrame`
+    /// silently discards the new stream's frames until a timestamp from a different timeline
+    /// happens to pass it.
     private var skipToSeconds: Double = -1
 
     /// The source's channel layout in CoreAudio's DESCRIPTIONS spelling, built once in `open()`
@@ -385,6 +408,40 @@ public final class LibavAudioSource: @unchecked Sendable {
         }
     }
 
+    /// Decode a DIFFERENT audio stream of the same file from now on: retire the current decoder,
+    /// rebind every per-stream fact to `streamIndex`, then seek + arm at `time`.
+    ///
+    /// ── ⚠️ THE SERIAL QUEUE IS THE ORDERING, NOT THE CALL ORDER HERE ──────────────────────────
+    ///
+    /// The swap is enqueued on `pumpQueue` and `arm` enqueues `seekOnPump` on the SAME queue
+    /// immediately after, so the swap is guaranteed to have finished before the seek — and before
+    /// the first `requestMediaDataWhenReady` callback, which also runs there. That is why this is
+    /// one call rather than two the caller must sequence: swap, then arm, enforced by the queue.
+    ///
+    /// ⚠️ ARMING IS THE FLUSH. `seekOnPump` already calls `avcodec_flush_buffers` on whatever
+    /// decoder is bound by the time it runs — the NEW one — so there is no separate flush and
+    /// none is needed. The swap deliberately does not flush a context it is about to free.
+    ///
+    /// ⚠️ THE CALLER MUST HAVE RETIRED THE PREVIOUS ARM. `arm` calls `requestMediaDataWhenReady`
+    /// with no preceding `stopRequestingMediaData`, which was safe only while it ran once per
+    /// `beginLibavReading` — every one of those is preceded by the engine's `teardownAudioReading`,
+    /// which stops the renderer's request block and bumps the audio session token. Re-arming a
+    /// live renderer without that is re-entering the API on an installed block. `FrameEngine`
+    /// calls `teardownAudioReading()` before this for exactly that reason.
+    ///
+    /// `completion` reports whether the rebind actually happened, on the PUMP QUEUE. False means
+    /// the stream has no usable decoder and the PREVIOUS stream is still bound and still playing —
+    /// see `rebindOnPump`. The caller owns putting its own selection state back.
+    public func selectStream(_ streamIndex: Int32, fromSeconds time: Double,
+                             isCurrent: @escaping @Sendable () -> Bool,
+                             completion: @escaping @Sendable (Bool) -> Void) {
+        pumpQueue.async { [weak self] in
+            guard let self else { completion(false); return }
+            completion(self.rebindOnPump(to: streamIndex))
+        }
+        arm(fromSeconds: time, isCurrent: isCurrent)
+    }
+
     public func stop() {
         pumpQueue.async { [weak self] in self?.freeContexts() }
     }
@@ -398,6 +455,63 @@ public final class LibavAudioSource: @unchecked Sendable {
     }
 
     // MARK: - Decode + seek (pumpQueue only)
+
+    /// Bind the decoder to `streamIndex` and rebind everything derived from the stream.
+    /// Returns false — having changed NOTHING — when the stream cannot be decoded.
+    ///
+    /// ── ⚠️ THIS MUST NOT CALL `freeContexts` ──────────────────────────────────────────────────
+    ///
+    /// `freeContexts` closes `fmtCtx`, which is the demuxer we are KEEPING, and closing it frees
+    /// every `AVStream` with it — so the new stream's `time_base` and `start_time`, read three
+    /// lines later, would be reads of freed memory. Only `codecCtx` and `swr` are freed here.
+    /// `pkt` and `frame` stay alive: they have no stream affinity.
+    ///
+    /// ⚠️ BUT THE FRAME IS UNREFFED. `nextFrame`'s EOF and EAGAIN arms both `return` without
+    /// unreffing `frame`, so a switch that lands after one of those inherits a frame still holding
+    /// the old stream's buffer — one frame's data leaked per switch, and libav would only reuse it
+    /// on the next successful `avcodec_receive_frame`. `av_frame_unref` on a clean frame is a
+    /// documented no-op, so this is unconditional.
+    ///
+    /// ⚠️ BUILD FIRST, COMMIT SECOND. Every failure exit above the commit leaves the old decoder
+    /// bound and playing — `open()` enumerated streams from `codecpar`, which says nothing about
+    /// whether a decoder EXISTS for them, so "the container describes it" and "we can decode it"
+    /// are genuinely different questions and this is where the second one is asked. A half-swapped
+    /// source (freed decoder, no replacement) would be silence with the per-stream facts of a
+    /// stream nothing is reading.
+    private func rebindOnPump(to streamIndex: Int32) -> Bool {
+        guard let fmtCtx else { return false }
+        guard streamIndex >= 0, streamIndex < Int32(fmtCtx.pointee.nb_streams),
+              let stream = fmtCtx.pointee.streams[Int(streamIndex)],
+              let par = stream.pointee.codecpar,
+              par.pointee.codec_type == AVMEDIA_TYPE_AUDIO else { return false }
+        // Already there. Cheap, and it keeps this safe to call redundantly; `arm` still re-seeks.
+        guard streamIndex != audioStreamIndex else { return true }
+
+        guard let codec = avcodec_find_decoder(par.pointee.codec_id),
+              let cctx = avcodec_alloc_context3(codec) else { return false }
+        var newCtx: UnsafeMutablePointer<AVCodecContext>? = cctx
+        avcodec_parameters_to_context(cctx, par)
+        guard avcodec_open2(cctx, codec, nil) == 0 else {
+            avcodec_free_context(&newCtx); return false
+        }
+
+        // ── COMMIT. Nothing below can fail. ──────────────────────────────────────────────────
+        if let frame { av_frame_unref(frame) }
+        if swr != nil { swr_free(&swr) }
+        formatDesc = nil                      // with `swr`, the pair `ensureSwr` latches on
+        if codecCtx != nil { avcodec_free_context(&codecCtx) }
+        codecCtx = newCtx
+
+        audioStreamIndex = streamIndex        // what `nextFrame` filters packets on, and seeks with
+        timeBase = stream.pointee.time_base   // a different stream may keep time differently
+        let st = stream.pointee.start_time
+        startTimeTicks = (st == Int64.min) ? 0 : st
+        sampleRate = par.pointee.sample_rate  // read BEFORE the latch above is rebuilt — see `ensureSwr`
+        channels = par.pointee.ch_layout.nb_channels
+        channelLayoutData = Self.declaredChannelLayout(&par.pointee.ch_layout)
+        skipToSeconds = -1                    // back to the sentinel; `seekOnPump` sets the new one
+        return true
+    }
 
     private func seekOnPump(toSeconds time: Double) {
         guard let fmtCtx, let codecCtx else { return }
@@ -486,6 +600,14 @@ public final class LibavAudioSource: @unchecked Sendable {
 
     /// Lazily build the resampler + audio format description from the first decoded
     /// frame's actual format (robust vs reading codecCtx before any decode).
+    ///
+    /// ⚠️ THE INPUT FORMAT COMES FROM THE LIVE FRAME; THE OUTPUT RATE COMES FROM `sampleRate`.
+    /// Reading the input off the frame is robust for a first decode and says nothing about a
+    /// SWITCH: `sampleRate` is per-stream state, so a swap that cleared this latch without
+    /// rebinding it first would resample the new stream's 96 kHz frames to the old stream's
+    /// 48 kHz output rate and hand the renderer buffers timed at the wrong rate. `rebindOnPump`
+    /// therefore rebinds `sampleRate`/`channels`/`channelLayoutData` BEFORE it nils `formatDesc`
+    /// and frees `swr`; the ordering there is load-bearing, not stylistic.
     private func ensureSwr(_ frame: UnsafeMutablePointer<AVFrame>) -> Bool {
         if swr != nil, formatDesc != nil { return true }
         guard let codecCtx else { return false }
