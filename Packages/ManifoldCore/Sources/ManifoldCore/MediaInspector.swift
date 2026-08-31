@@ -331,7 +331,14 @@ public enum MediaInspector {
         return result
     }
 
-    private static func audioCodecName(_ code: FourCharCode) -> String {
+    /// ⚠️ THE SINGLE AUDIO-CODEC NAME LIST FOR THE WHOLE APP. Internal rather than private because
+    /// the libav path names its codecs through it too — see `FrameEngine.applyLibavAudioTrack`.
+    /// That path holds an `AVCodecID`, not a `FourCharCode`, so it translates its KEY into this
+    /// one's (`LibavAudioSource.AudioInfo.audioFormatID`) and calls this. **Do not add a second
+    /// list keyed on `AVCodecID`** — two lists drift, and the symptom is an MXF and a MOV of the
+    /// same content naming the same codec differently in the same panel, which is the defect this
+    /// arrangement exists to prevent.
+    static func audioCodecName(_ code: FourCharCode) -> String {
         switch code {
         case kAudioFormatLinearPCM: return "PCM"
         case kAudioFormatMPEG4AAC: return "AAC"

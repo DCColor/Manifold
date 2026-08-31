@@ -22,11 +22,45 @@ public final class LibavAudioSource: @unchecked Sendable {
 
     public enum LibavError: Error { case open, noAudioStream, noDecoder, decoderOpen }
 
-    public struct AudioInfo: Sendable {
+    public struct AudioInfo: @unchecked Sendable {
         public let codecName: String
         public let sampleRate: Int
         public let channels: Int
         public let layoutName: String
+
+        /// The SOURCE's sample depth (`AVCodecParameters.bits_per_raw_sample`), or 0 when the
+        /// container does not state one.
+        ///
+        /// ⚠️ NOT THE DECODE WIDTH, AND THE DIFFERENCE IS VISIBLE. `formatDescription` below
+        /// describes this source's OUTPUT — interleaved float32, because that is what swresample
+        /// produces and the renderer consumes — so reading a bit depth off it would report 32 for
+        /// a 24-bit file. The inspector's "24-bit" is a fact about the FILE. 0 renders as "—",
+        /// which is the honest answer for a container that declared nothing.
+        public let bitsPerRawSample: Int
+
+        /// The output format description, built at `open()` from the same three facts the decode
+        /// path uses. Carries the channel layout, so it is the input
+        /// `MediaInspector.audioLayout(from:channelCount:)` and `AudioChannelLayoutBridge.roles(from:)`
+        /// need — which is how this path names a layout with the SAME functions the AVFoundation
+        /// path uses instead of a second vocabulary. Nil when the description could not be built.
+        ///
+        /// CoreAudio's spelling of this codec, or nil when there is no equivalent.
+        ///
+        /// ⚠️ A KEY, NOT A NAME — and that distinction is the whole design. `codecName` above is
+        /// `avcodec_get_name` output ("pcm_s24le", "aac"), FFmpeg's INTERNAL identifier, which must
+        /// not reach a user-facing surface. Rather than write a second table of display names here,
+        /// this translates the KEY into the one `MediaInspector.audioCodecName(_:)` already uses, so
+        /// there is exactly one list of names in the app and the libav and AVFoundation paths cannot
+        /// drift apart. Nil means "no CoreAudio equivalent" and the caller falls back to
+        /// `codecName` — an honest unfamiliar identifier, never a guessed name. See
+        /// `audioFormatID(for:name:)`.
+        public let audioFormatID: AudioFormatID?
+
+        /// ⚠️ THIS IS NOT THE DECODE PATH'S INSTANCE. `ensureSwr` still builds and owns its own on
+        /// the pump queue, at first decode, exactly as before — nothing about the decoder's
+        /// lifecycle moved to satisfy the inspector. The two are built by one function from
+        /// identical inputs, so they cannot disagree.
+        public let formatDescription: CMAudioFormatDescription?
     }
 
     /// Handed each decoded PCM CMSampleBuffer on the pump queue — the engine wires
@@ -121,11 +155,18 @@ public final class LibavAudioSource: @unchecked Sendable {
         // `AudioChannelLayoutBridge.roles(from:)` reads FIRST. Without it every libav file reported
         // "roles NONE DECLARED" no matter what the container said.
         self.channelLayoutData = Self.declaredChannelLayout(&par.pointee.ch_layout)
+        let ffmpegName = String(cString: avcodec_get_name(cid))
         return AudioInfo(
-            codecName: String(cString: avcodec_get_name(cid)),
+            codecName: ffmpegName,
             sampleRate: Int(sampleRate),
             channels: Int(channels),
-            layoutName: String(cString: layoutBuf))
+            layoutName: String(cString: layoutBuf),
+            bitsPerRawSample: Int(par.pointee.bits_per_raw_sample),
+            audioFormatID: Self.audioFormatID(for: cid, name: ffmpegName),
+            // Built here, on the OPENING thread, from values this function has just set and that
+            // nothing mutates afterwards — it reads no pump-queue state and assigns none, so it
+            // does not cross the queue discipline the rest of this type keeps.
+            formatDescription: makeOutputFormatDescription())
     }
 
     /// libav's `AVChannelLayout` → a CoreAudio DESCRIPTIONS layout, or nil when it named no
@@ -184,6 +225,55 @@ public final class LibavAudioSource: @unchecked Sendable {
         // strictly more work to read and no more informative.
         guard named > 0 else { return nil }
         return AudioChannelLayoutBridge.descriptionsLayoutData(for: labels)
+    }
+
+    /// `AVCodecID` → the `AudioFormatID` CoreAudio would use for the same codec, or nil.
+    ///
+    /// ⚠️ THIS MAPS KEYS AND NAMES NOTHING. Every display string lives in
+    /// `MediaInspector.audioCodecName(_:)`, keyed on `AudioFormatID`; this supplies that key from
+    /// the libav side so both paths read one list. Adding a codec means adding it in BOTH — a row
+    /// here and, if CoreAudio's name is not already there, a case there — which is the intended
+    /// friction: the alternative is a parallel name table that silently disagrees.
+    ///
+    /// ── ⚠️ EVERY PCM VARIANT COLLAPSES TO ONE FORMAT, DELIBERATELY ────────────────────────────
+    ///
+    /// `kAudioFormatLinearPCM` is a SINGLE `FourCharCode` (`lpcm`) for every depth, sign and
+    /// endianness, so the AVFoundation path has always shown a bare "PCM" for 16-, 24- and 32-bit
+    /// alike. Mapping FFmpeg's 37 `pcm_*` ids onto it reproduces that exactly rather than inventing
+    /// a finer vocabulary for one path — a MOV and an MXF of the same 24-bit master must not read
+    /// "PCM" and "pcm_s24le" in the same panel.
+    ///
+    /// **Nothing is lost by the collapse.** The depth is a SEPARATE field on the row: `bitDepth`,
+    /// filled on this path from `bits_per_raw_sample` (24 for the MXF fixture, measured) and
+    /// rendered by `AudioTrackInfo.summary` as its own "· 24-bit" component. The bit depth was
+    /// never inside the codec name on either path.
+    ///
+    /// ⚠️ THE PCM FAMILY IS MATCHED ON FFmpeg'S OWN IDENTIFIER, NOT ENUMERATED, AND NOT A RANGE.
+    /// All 37 share the `pcm_` prefix of the name `avcodec_get_name` returns — that is FFmpeg's
+    /// canonical, API-visible naming for the family, and no non-PCM codec is named `pcm_*`.
+    /// Enumerating 37 cases would go stale the moment upstream adds one; a raw-value RANGE would
+    /// hardcode an assumption about enum ORDERING that `codec_id.h` does not promise. (This is not
+    /// the `strings | grep opus` mistake recorded in `ThirdParty/ffmpeg/README.md`: that read a
+    /// string out of a BINARY, where its presence said nothing about the build. This reads the
+    /// documented return value of the function whose entire job is to name the codec in hand.)
+    private static func audioFormatID(for cid: AVCodecID, name: String) -> AudioFormatID? {
+        if name.hasPrefix("pcm_") { return kAudioFormatLinearPCM }
+        switch cid {
+        // `aac_latm` is AAC with a different transport framing, not a different codec family, and
+        // it is one of only two AAC decoders in the vendored build — an SRT feed carrying LATM
+        // would otherwise show "aac_latm" in the inspector.
+        case AV_CODEC_ID_AAC, AV_CODEC_ID_AAC_LATM: return kAudioFormatMPEG4AAC
+        case AV_CODEC_ID_ALAC:                      return kAudioFormatAppleLossless
+        case AV_CODEC_ID_AC3:                       return kAudioFormatAC3
+        case AV_CODEC_ID_EAC3:                      return kAudioFormatEnhancedAC3
+        case AV_CODEC_ID_FLAC:                      return kAudioFormatFLAC
+        case AV_CODEC_ID_OPUS:                      return kAudioFormatOpus
+        // Everything else keeps FFmpeg's identifier at the call site. The AVFoundation path's own
+        // default arm does the same thing for the same reason — it falls back to the raw four
+        // characters — so an unfamiliar codec reads as an honest unknown identifier on both paths
+        // rather than as a name someone guessed.
+        default: return nil
+        }
     }
 
     /// Seek to `time` and arm the continuous audio pump for this session, paced by
@@ -318,6 +408,21 @@ public final class LibavAudioSource: @unchecked Sendable {
         guard rc == 0, let s, swr_init(s) == 0 else { if s != nil { var t: OpaquePointer? = s; swr_free(&t) }; return false }
         self.swr = s
 
+        guard let fd = makeOutputFormatDescription() else { return false }
+        self.formatDesc = fd
+        return true
+    }
+
+    /// The OUTPUT format description — interleaved float32 at the source's rate and channel count,
+    /// with the source's declared channel layout attached.
+    ///
+    /// ⚠️ ONE BUILDER, TWO CALLERS, AND THAT IS THE POINT. `ensureSwr` calls it on the pump queue at
+    /// first decode (as it always did — this was its inline body); `open()` calls it on the opening
+    /// thread so the engine has something to hand `MediaInspector.audioLayout(from:)` for the
+    /// inspector row. Two hand-written copies of this could drift, and then the layout the
+    /// inspector NAMES would stop being the layout the decoder ATTACHES to the samples the meters
+    /// label. Pure: reads only values `open()` has already fixed, mutates nothing.
+    private func makeOutputFormatDescription() -> CMAudioFormatDescription? {
         var asbd = AudioStreamBasicDescription(
             mSampleRate: Float64(sampleRate),
             mFormatID: kAudioFormatLinearPCM,
@@ -346,14 +451,12 @@ public final class LibavAudioSource: @unchecked Sendable {
                     formatDescriptionOut: &fd)
             }
         } else {
-            // Unchanged from before: no declaration to make, so none is made up.
+            // No declaration to make, so none is made up.
             status = CMAudioFormatDescriptionCreate(
                 allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil,
                 magicCookieSize: 0, magicCookie: nil, extensions: nil,
                 formatDescriptionOut: &fd)
         }
-        guard status == noErr else { return false }
-        self.formatDesc = fd
-        return true
+        return status == noErr ? fd : nil
     }
 }
