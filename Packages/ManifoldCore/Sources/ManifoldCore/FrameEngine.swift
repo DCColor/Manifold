@@ -272,7 +272,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var useLibav = false
     /// Scrub-preview thumbnail generator for libav (DNx/MXF) files — a DETACHED decoder with
     /// its own AVFormatContext (AVAssetImageGenerator can't decode DNxHR). Opened at load for
-    /// libav files, nil for AVFoundation files (which use `imageGenerator`). See previewImage.
+    /// libav files, nil for AVFoundation files (which use the scrub PRODUCER instead — see
+    /// `installScrubProducer`). The last consumer of `previewImage`; retired in Stage 3.
     private var libavThumbnailSource: LibavThumbnailSource?
     /// Decoded video format requested at the decode-request site. A named property
     /// rather than a magic constant so the sources/decoders can vary it.
@@ -282,7 +283,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// is just the container — raw values are preserved, exactly as the 8-bit path).
     private let videoPixelFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
     private var timeObserver: Any?
-    private var imageGenerator: AVAssetImageGenerator?
     private let videoPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.video")
     private let audioPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.audio")
 
@@ -416,12 +416,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.asset = freshAsset
 
         // Rebuild the scrub-preview generator on the fresh asset.
-        self.imageGenerator = Self.makeScrubPreviewGenerator(for: freshAsset)
-        // …AND the scrub producer, for the reason stated two lines up and not for a new one: a
-        // re-inspect follows a REWRITE OF THE SAME FILE, and a producer built on the pre-rewrite
-        // asset holds that asset's cached format descriptions exactly as `imageGenerator` did.
-        // The two producers of scrub frames are rebuilt together or they drift apart on precisely
-        // the path this function exists to serve.
+        // THE SCRUB PRODUCER, rebuilt on the fresh asset for the reason stated one line up and
+        // not for a new one: a re-inspect follows a REWRITE OF THE SAME FILE, and a producer built
+        // on the pre-rewrite asset holds that asset's cached format descriptions exactly as
+        // `self.asset` did. (The `AVAssetImageGenerator` that used to be rebuilt here is deleted —
+        // this is what replaced it.)
         //
         // ⚠️ ONLY REACHED WHEN A COLOUR TAG CHANGED — the `guard colorChanged` above returns
         // first on a no-op refresh, so this does not pay the 11.9–47.1 ms install on every press
@@ -904,6 +903,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// necessary and not sufficient: the window that matters is between the decode STARTING and
     /// the pixels LANDING, which is precisely the window a load can slip into. So the check lives
     /// in the delivery closure below, one line before the hand-off.
+    /// Which scrub mechanism this source is on. True ⇒ no producer, `LibavThumbnailSource` and
+    /// the `CGImage` overlay; false ⇒ the producer and `presentImmediate`. The view reads it in
+    /// exactly one place — the guard at the top of `requestScrubPreview` — which is what makes the
+    /// overlay structurally unreachable on the producer path rather than conditionally suppressed.
+    /// Goes away in Stage 3, when there is only one answer.
+    public var usesLibavScrub: Bool { useLibav }
+
     private func installScrubProducer(for url: URL?, useLibav: Bool) {
         scrubCoalescer?.close()
         scrubCoalescer = nil
@@ -911,11 +917,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // producer just closed cannot deliver into the next file.
         let token = scrubToken.next()
 
-        guard ScrubProducerFlags.enabled, let url else { return }
-        // ⚠️ MXF GETS NO PRODUCER IN STAGE 1 AND THAT IS THE STAGING, NOT AN OVERSIGHT.
+        guard let url else { return }
+        // ⚠️ MXF GETS NO PRODUCER AND THAT IS THE STAGING, NOT AN OVERSIGHT.
         // AVFoundation has no MXF demuxer, so `AVPlayerScrubProducer` cannot open it at all; the
         // libav producer is Stage 3. Until then MXF keeps `LibavThumbnailSource` and the overlay,
-        // exactly as it behaves today.
+        // exactly as it behaves today — and `usesLibavScrub` is how the view knows which of the
+        // two mechanisms this file is on.
+        //
+        // NO FLAG. The producer is the DEFAULT for everything AVFoundation can open, as of Stage 2;
+        // `MANIFOLD_SCRUB_PRODUCER` is deleted with the overlay it used to be compared against.
         guard !useLibav else { return }
 
         let producer = AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
@@ -926,74 +936,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
     }
 
-    /// The scrub-preview generator, built the SAME way at both construction sites (initial load and
-    /// the colour-tag rewrite path) so the two cannot drift.
+    /// A single preview frame (CGImage) at the given time — **MXF ONLY**, from the detached libav
+    /// thumbnail decoder. Isolated from the playback pump. Returns nil on failure.
     ///
-    /// `apertureMode = .encodedPixels` IS THE LOAD-BEARING LINE. The property defaults to nil, which
-    /// behaves as clean-aperture: AVAssetImageGenerator then applies BOTH the pixel aspect ratio and
-    /// the clean-aperture crop, and hands back an image at the file's DISPLAY geometry. The Metal
-    /// playback path does neither — it renders the full encoded buffer and lets the layer scale it
-    /// into the aspect-fit video rect — so the preview and the playing picture were produced under
-    /// two different geometry rules and disagreed the moment a file carried either tag.
+    /// ⚠️ THE AVFoundation BRANCH IS GONE AND SO IS `AVAssetImageGenerator`. Those files now decode
+    /// the scrub frame through `AVPlayerScrubProducer` into the Metal renderer, so they need no
+    /// `CGImage` at all — which is what removes the second display path, the second colour-management
+    /// mode, and the reason the scopes could not move during a drag. Nothing calls this for them;
+    /// `ContentView.requestScrubPreview` guards on `usesLibavScrub` before asking.
     ///
-    /// MEASURED on ARRI open-gate ProRes 4444 XQ (encoded 2944×2160, clean aperture 2880×2160,
-    /// pasp 1:1): default mode returned 720×540 (clean-aperture cropped, 32px lost each side),
-    /// .encodedPixels returns 736×540 — the full encoded frame, exactly what playback draws. Paired
-    /// with ContentView's `.aspectRatio(videoAspect)` pin, which squashes it into the same rect the
-    /// layer squashes the decoded buffer into, the two paths land pixel-for-pixel on each other.
-    ///
-    /// ⚠️ THIS GENERATOR IS SCHEDULED FOR DELETION AND THE FACT ABOVE IS NOT. When the scrub
-    /// producers replace it (docs/BUGS.md, "STAGING"), the `apertureMode` line goes with the
-    /// generator, but "the scrub path must present ENCODED geometry, because that is what the
-    /// Metal path draws" survives it — the producers hand the decoder's buffer straight to
-    /// `MetalVideoRenderer.presentImmediate`, which is where the rule and the ARRI open-gate
-    /// ProRes 4444 XQ check now live. Read that doc comment before deleting this one.
-    private static func makeScrubPreviewGenerator(for asset: AVAsset) -> AVAssetImageGenerator {
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.apertureMode = .encodedPixels
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
-        generator.maximumSize = CGSize(width: 960, height: 540)
-        // ── THE HDR HALF. The default is `.forceSDR`, and that default WAS the bug ─────────────
-        //
-        // `.forceSDR` is documented as "convert PQ or HLG transfer functions to 709, while
-        // maintaining color primaries and matrix" — which is the reported symptom stated as an API
-        // contract: highlights clamp, colour stays right. Scrubbing a PQ file dropped to SDR
-        // luminance and recovered on release, because release reveals the EDR Metal layer.
-        //
-        // MEASURED on `docs/color-fixtures/wedge-pq-24track.mov` (SMPTE_ST_2084_PQ / ITU_R_2020),
-        // one frame, both policies:
-        //
-        //     .forceSDR    → colorSpace nil,                    contentHeadroom 1.0
-        //     .matchSource → colorSpace ITUR_2100_PQ,           contentHeadroom 4.9261084
-        //
-        // 4.9261084 is exactly `kCGDefaultHDRImageContentHeadroom`, so the image comes back TAGGED
-        // and the overlay layer needs no explicit `contentsHeadroom` — see `ScrubPreviewSurface`.
-        // An SDR fixture stays at 1.0 under both policies, so this follows the source rather than
-        // forcing headroom onto content that has none.
-        //
-        // NOT GUARDED: the property is macos(15.0) and this target's floor is 15.0.
-        generator.dynamicRangePolicy = .matchSource
-        return generator
-    }
-
-    /// Generate a single preview frame (CGImage) at the given time, for scrub preview.
-    /// Tolerant and downscaled for speed; isolated from the playback pump. Returns nil on
-    /// failure. Libav files (DNx/MXF) use the detached libav thumbnail decoder; AVFoundation
-    /// files (ProRes/H.264) use AVAssetImageGenerator — same published preview, same overlay.
+    /// Retired with `LibavThumbnailSource` in Stage 3.
     public func previewImage(at seconds: Double) async -> CGImage? {
+        guard useLibav else { return nil }
         let clamped = max(0, min(seconds, duration))
-        if useLibav {
-            return await libavThumbnailSource?.thumbnail(at: clamped)
-        }
-        guard let generator = imageGenerator else { return nil }
-        let time = CMTime(seconds: clamped, preferredTimescale: 600)
-        return await withCheckedContinuation { continuation in
-            generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, image, _, _, _ in
-                continuation.resume(returning: image)
-            }
-        }
+        return await libavThumbnailSource?.thumbnail(at: clamped)
     }
 
     /// The source timecode at a time on the file's timeline: the file's start TC plus however many
@@ -1217,8 +1173,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         guard let asset = vettedAsset, let vTrack = vettedTrack else { return }   // unreachable
         self.asset = asset
 
-        self.imageGenerator = Self.makeScrubPreviewGenerator(for: asset)
-
         // Same inspection as AVPlayerEngine, via the shared inspector. Both publish only if this
         // load is still the current one (see `loadGeneration`).
         self.tcInfo = MediaInspector.timecode(for: url)
@@ -1288,7 +1242,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // DNx-in-.mov decodes via libav → AVAssetImageGenerator can't make scrub thumbnails
         // (VideoToolbox rejects DNxHR). Open the detached libav thumbnail decoder instead; the
-        // AVFoundation `imageGenerator` above stays for the non-libav (ProRes/H.264) files.
+        // Non-libav (ProRes/H.264/HEVC) files take the scrub PRODUCER instead, installed below.
         if useLibav {
             let thumb = LibavThumbnailSource(url: url)
             thumb.openAsync()
@@ -1351,7 +1305,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func loadMXF(url: URL, autoplay: Bool) async {
         self.hasMedia = true
         self.tcInfo = MediaInspector.timecode(for: url)   // nil for MXF; harmless
-        self.imageGenerator = nil                          // AVFoundation can't open MXF at all
         self.videoTrack = nil                              // AVFoundation blind → libav supplies metadata
         self.audioTracks = []                              // libav picks the stream; no selection to offer
         self.selectedAudioTrackIndex = 0

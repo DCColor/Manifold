@@ -830,8 +830,8 @@ final class DeckRegistry {
         // THE SCRUB SEAM'S DESTINATION — per-window, same shape and same site as the three above.
         // The engine's coalescer has already applied the delivery-side token check; this is the
         // hand-off itself. `presentImmediate` bypasses the frame queue and the `pts <= clock()`
-        // gate, which is what a drag FORWARD of the pinned scrub clock needs. Inert unless
-        // `MANIFOLD_SCRUB_PRODUCER=1` built a producer at load.
+        // gate, which is what a drag FORWARD of the pinned scrub clock needs. Fires for every
+        // AVFoundation-openable source; silent on MXF, which has no producer until Stage 3.
         engine.onScrubFrame = { [weak renderer] pixelBuffer, pts in
             renderer?.presentImmediate(pixelBuffer: pixelBuffer, pts: pts)
         }

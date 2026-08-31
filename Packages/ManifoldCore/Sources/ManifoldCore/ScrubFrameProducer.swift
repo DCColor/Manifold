@@ -64,13 +64,9 @@ public protocol ScrubFrameProducer: AnyObject {
     func close()
 }
 
-/// ⚠️ STAGE 1 FLAG. The scrub producer is built and OFF by default: this stage exists so the
-/// producer and the `CGImage` overlay can run at the same time and be compared, not to switch
-/// over. Stage 2 flips the default for AVFoundation files and deletes the overlay for them.
-///
-/// Lives in the package rather than the app's `ScrubDebug` because the thing it gates — producer
-/// construction — is engine-owned. `ScrubDebug.producerEnabled` mirrors it for the view's half of
-/// the instrument, and the two read the same variable.
+/// Measurement scaffolding for the scrub seam. **Not a feature flag** — the producer itself is
+/// unconditional as of Stage 2, and `MANIFOLD_SCRUB_PRODUCER` is deleted with the overlay it
+/// existed to be compared against.
 ///
 /// `DEBUG || MANIFOLD_TELEMETRY`, not bare `DEBUG`: Xcode maps a package target's configuration by
 /// NAME, so only a config literally called "Debug" gets DEBUG here and Profile — the configuration
@@ -78,14 +74,11 @@ public protocol ScrubFrameProducer: AnyObject {
 /// in Package.swift.
 public enum ScrubProducerFlags {
     #if DEBUG || MANIFOLD_TELEMETRY
-    /// `MANIFOLD_SCRUB_PRODUCER=1` — build the producer at load and feed `presentImmediate`.
-    public static let enabled = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_PRODUCER"] == "1"
-    /// `MANIFOLD_SCRUB_STATS=1` — per-drag `[SCRUB]` rate and latency summary at release.
-    /// Implied by `enabled`, so the common case is one variable.
-    public static let stats = enabled
-        || ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_STATS"] == "1"
+    /// `MANIFOLD_SCRUB_STATS=1` — the per-drag `[SCRUB]` rate and latency summary at release, and
+    /// the `[SETTLE]` line that characterises the release settle. Off by default: this is how the
+    /// numbers in a report are produced, not something a tester needs running.
+    public static let stats = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_STATS"] == "1"
     #else
-    public static let enabled = false
     public static let stats = false
     #endif
 }

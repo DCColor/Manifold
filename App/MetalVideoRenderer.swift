@@ -6,6 +6,7 @@ import CoreMedia
 import QuartzCore
 import ImageIO
 import UniformTypeIdentifiers
+import ManifoldCore   // ScrubProducerFlags.stats — gates the [SETTLE] measurement
 import ManifoldCore      // UnfairLock — priority-donating lock for the live frame queue
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
@@ -421,6 +422,31 @@ final class MetalVideoRenderer {
     /// not an accident of using an Optional.
     private var pendingImmediate: (pixelBuffer: CVPixelBuffer, pts: Double)?
 
+    #if DEBUG
+    /// ── THE RELEASE SETTLE, MEASURED AT THE DISPLAY ───────────────────────────────────────────
+    ///
+    /// The scrub producer seeks at INFINITE tolerance and `exactSeek` does not, so the frame the
+    /// drag was showing and the frame the transport lands on are chosen by two different rules and
+    /// need not be the same one. On all-intra every frame is a sync sample and they agree; on
+    /// long-GOP the toleranced seek snaps to a keyframe and the settle is however far that is.
+    ///
+    /// This measures it where it is visible rather than inferring it from either decoder: the pts
+    /// of the last frame `presentImmediate` put on screen, against the pts of the first frame the
+    /// QUEUE put on screen after the next flush. One line per release, `MANIFOLD_SCRUB_STATS=1`.
+    ///
+    /// `settleScrubPts` is render-thread only (written in the immediate branch, read in the queue
+    /// branch). `settleArmed` is main→render like its `pendingRefresh` neighbours.
+    private var settleScrubPts: Double = .nan
+    private var settleArmed = false
+    /// ⚠️ NOT `cachedFrameInterval`, AND THAT IS THE WHOLE POINT OF A SECOND VARIABLE. `flush()`
+    /// clears the PTS-delta history at every seek — correctly, so a stale Δ is never applied across
+    /// a discontinuity — which means the median is 0 or half-seeded at exactly the moment this
+    /// report fires, and the first settle after each drag came out as `nan frames`. The source's
+    /// frame duration does not change across a seek, so the last well-seeded value is the right
+    /// one to divide by. Latched, never cleared.
+    private var settleFrameIntervalHint: Double = 0
+    #endif
+
     // One-shot "wipe to black" armed by clearToBlack() (main) when a source is torn down with
     // nothing to replace it — serviced on the render thread so nextDrawable() stays single-threaded.
     private var pendingClear = false
@@ -481,20 +507,20 @@ final class MetalVideoRenderer {
     /// buffer and lets the layer scale it into the aspect-fit video rect. A producer that hands
     /// over display geometry instead puts a second, disagreeing geometry rule on the same screen.
     ///
-    /// This is a MEASURED fact, not a caution. It is the surviving half of the `apertureMode`
-    /// note on `FrameEngine.makeScrubPreviewGenerator` — the scrub preview used
+    /// This is a MEASURED fact, not a caution, and this comment is now its only home. It used to
+    /// live on `FrameEngine.makeScrubPreviewGenerator`, which is deleted: that generator was an
     /// `AVAssetImageGenerator`, whose `apertureMode` defaults to clean-aperture, and on ARRI
     /// open-gate ProRes 4444 XQ (encoded 2944×2160, clean aperture 2880×2160, pasp 1:1) the
     /// default returned 720×540 against `.encodedPixels`' 736×540 — 32 px lost each side. The
-    /// generator is deleted in Stage 2; the fact is why it had that line, so it lives here now,
-    /// where the buffers arrive.
+    /// generator is gone; the reason it needed that line is not, because any producer that
+    /// reached the screen through a display-geometry API would reintroduce it.
     ///
-    /// `AVPlayerItemVideoOutput` and libav both vend the decoded frame and apply no aperture
-    /// rule, so both producers SHOULD satisfy this by construction. **That is a prediction. The
-    /// check is to scrub that ARRI open-gate file and confirm the picture does not change size
-    /// or crop between the drag and the release** — a reintroduced 32-px-per-side crop looks like
-    /// a slightly soft preview, not like a geometry bug, which is exactly why it needs a named
-    /// fixture rather than an eye.
+    /// ✅ CHECKED, AND NO LONGER A PREDICTION. `AVPlayerItemVideoOutput` vends the decoded frame
+    /// and applies no aperture rule: on that same ARRI fixture the producer delivered 2944×2160
+    /// against a playback offscreen of 2944×2160, every frame of the drag — even though
+    /// AVFoundation's own `naturalSize` reports the 2880 clean aperture. `debugCheckScrubGeometry`
+    /// below is the standing check, and it is arithmetic on purpose: a reintroduced crop looks
+    /// like a slightly soft preview, not like a geometry bug.
     ///
     /// Call from MAIN. `pts` is the frame's SOURCE time and rides through to the DeckLink audio
     /// alignment exactly as a queued frame's does; pass `.nan` only if it is genuinely unknown.
@@ -1463,6 +1489,9 @@ final class MetalVideoRenderer {
         refreshLock.lock()
         pendingSeekRender = true
         presentsSinceFlush = 0
+        #if DEBUG
+        settleArmed = true
+        #endif
         refreshLock.unlock()
     }
 
@@ -1663,13 +1692,13 @@ final class MetalVideoRenderer {
         pendingImmediate = nil          // cleared AS it is taken — one arm, one present
         refreshLock.unlock()
         if let immediate {
-            #if DEBUG
-            debugNoteImmediateServiced(pts: immediate.pts, clockNow: clock?())
-            #endif
             // NOT counted by `tickPresentedFPS`: that counter reports the on-screen PLAYBACK
             // rate, and a frame pushed in off the clock is not playback. `pendingRefresh` is
             // excluded for the same reason; `pendingSeekRender` counts because the frame it
             // renders IS the one the transport seeked to.
+            #if DEBUG
+            settleScrubPts = immediate.pts
+            #endif
             renderPixelBuffer(immediate.pixelBuffer, pts: immediate.pts)
             return
         }
@@ -1719,6 +1748,15 @@ final class MetalVideoRenderer {
         // identical to floor-before in the healthy sawtooth regime (raw span never near 0 there).
         let depthSpan: Double = (newest != nil && now.isFinite) ? max(0, (newest! - now) + cachedFrameInterval / 2) : 0
         let depthCount = frameQueue.count
+        #if DEBUG
+        // ⚠️ `depthCount >= 4` IS NOT DEFENSIVE PADDING — without it this reported two of ten
+        // settles in the wrong unit. `cachedFrameInterval` is a median over as few as TWO deltas,
+        // and the deltas right after a flush straddle the seek discontinuity, so the value passes
+        // through ~0.026 s on a 0.0417 s source before it settles. Latching only from a
+        // well-populated queue takes the median from steady-state frames.
+        if cachedFrameInterval > 0, depthCount >= 4 { settleFrameIntervalHint = cachedFrameInterval }
+        let settleFrameInterval = settleFrameIntervalHint
+        #endif
         queueLock.unlock()
 
         onDepthSample?(DepthSample(spanSeconds: depthSpan,
@@ -1740,6 +1778,9 @@ final class MetalVideoRenderer {
             // so a seek that resolves normally (incl. seek-and-play) never touches the
             // relaxed branch below.
             refreshLock.lock(); pendingSeekRender = false; refreshLock.unlock()
+            #if DEBUG
+            reportSettleIfArmed(landedPts: chosenPts, frameInterval: settleFrameInterval)
+            #endif
         } else {
             // No frame satisfies pts<=now (e.g. paused). Two one-shot fallbacks:
             refreshLock.lock()
@@ -1773,6 +1814,9 @@ final class MetalVideoRenderer {
                     refreshLock.lock(); pendingSeekRender = false; refreshLock.unlock()
                     renderPixelBuffer(nearest.pixelBuffer, pts: nearest.pts)
                     tickPresentedFPS(nearest.pts)
+                    #if DEBUG
+                    reportSettleIfArmed(landedPts: nearest.pts, frameInterval: settleFrameInterval)
+                    #endif
                 }
             }
         }
@@ -2054,19 +2098,10 @@ final class MetalVideoRenderer {
             self.offscreenIndexLock.lock()
             self.offscreenReadableIndex = writeIndex
             self.offscreenIndexLock.unlock()
-            let frameRenderedSink = self.onFrameRendered
-            frameRenderedSink?()
+            self.onFrameRendered?()
             // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
             // The frame's SOURCE pts rides along so it can be published with the converted pixels.
             self.pushDeckLinkConvert(sourcePts: pts)
-            #if DEBUG
-            // ⚠️ STAGE-0 SCAFFOLDING — see `debugPresentImmediateProbe`. Inert (one atomic-ish
-            // lock + a NaN compare) unless ⌃⌥⇧P armed a probe pts. Placed HERE, after both
-            // callbacks, so it can witness that they ran on THIS frame rather than assert it:
-            // `frameRenderedSink` is the value that was actually invoked one line up.
-            self.debugNoteImmediateRendered(pts: pts, writeIndex: writeIndex,
-                                            frameRenderedSinkInvoked: frameRenderedSink != nil)
-            #endif
         }
         #if DEBUG
         let rpCommitStart = CACurrentMediaTime()
@@ -2465,268 +2500,26 @@ final class MetalVideoRenderer {
             completion: { completion($0, planeW, planeH) })
     }
 
-    // MARK: - Stage 0 probe for presentImmediate (DEBUG only, TEMPORARY)
-
     #if DEBUG
-    /// ⚠️ TEMPORARY STAGE-0 SCAFFOLDING. Delete with this comment block once a real producer
-    /// feeds `presentImmediate` (docs/BUGS.md, "STAGING — smallest first"). Driven by ⌃⌥⇧P.
-    ///
-    /// The point of Stage 0 is that the entry point is added and NOTHING is wired to it, which
-    /// leaves no way to find out whether it works — a build succeeding says nothing about a
-    /// frame reaching the screen. So this synthesises the exact case the entry point exists for
-    /// and measures the result instead of asserting it:
-    ///
-    ///   * a frame the renderer has never seen (a synthetic luma RAMP, so the readback check is
-    ///     arithmetic rather than "the picture changed"), in x420 — the same 10-bit two-plane
-    ///     format the file decoders hand over, so it takes the same shader path real frames do;
-    ///   * at `pts = clock() + 1 s`, i.e. FORWARD of the pinned clock, which is the half of a
-    ///     drag the strict gate rejects and the case that fails today;
-    ///   * while PAUSED, with both existing one-shots confirmed disarmed at the moment of the
-    ///     push — so if a frame lands, `presentImmediate` is the only thing that could have
-    ///     landed it.
-    ///
-    /// Then it reads back the three destinations the checkpoint names:
-    ///   1. the OFFSCREEN, via `readbackRenderedFrame()` — the ramp must be there, monotonic
-    ///      and neutral (this is also the texture the GPU scopes sample, so it is the scopes'
-    ///      data source being checked directly);
-    ///   2. `onFrameRendered`, witnessed at the call site (see `debugNoteImmediateRendered`);
-    ///   3. `pushDeckLinkConvert`, checked by its OUTPUT and not by a log line — the probe arms
-    ///      DeckLink output at the offscreen's own size if it is not already running, then reads
-    ///      `currentDeckLinkSourcePts()` and pulls the v210 staging buffer back through the same
-    ///      `copyLatestDeckLinkFrame` the card's callback uses, decoding the luma out of it.
-    ///      That is SDI's copy of the frame, verified without a card in the machine.
-    ///
-    /// Runs on MAIN (it is a keystroke), which is also where a producer would call
-    /// `presentImmediate` from. The verification pass is deferred ~300 ms so the display tick,
-    /// the render's GPU completion and the v210 convert's own completion have all happened.
-    ///
-    /// ⚠️ IF DECKLINK OUTPUT IS ALREADY RUNNING the probe leaves it alone rather than arming and
-    /// disarming it — but the ramp is then a real frame on a real wire for one frame period,
-    /// because that is what "SDI sees it" means. Do not press this during a broadcast.
-    /// Probe bookkeeping. Its own lock, NOT `refreshLock`: `debugNoteImmediateServiced` is
-    /// called from the tick immediately after `refreshLock` is released, and NSLock is not
-    /// recursive. `debugProbePts` is NaN when no probe is armed, which never compares equal to a
-    /// real frame's pts — so both witnesses below are inert during ordinary playback.
-    private let debugProbeLock = NSLock()
-    private var debugProbePts: Double = .nan
-    private var debugProbeServiced: Double?
-    private var debugProbeRendered: (writeIndex: Int, frameRenderedSinkInvoked: Bool)?
-
-    func debugPresentImmediateProbe() {
-        // Source size = the offscreen's own size, taken through the thread-safe accessor. Using
-        // the source's dimensions keeps `ensureOffscreenTexture` from reallocating the ring
-        // (which would perturb the very thing being measured) and lets the DeckLink native-res
-        // guard pass. No frame rendered yet → nothing to compare against; say so and stop.
-        guard let src = offscreenTexture else {
-            print("[Stage0] no rendered frame yet — load a file and pause first")
-            return
-        }
-        let width = src.width, height = src.height
-        guard let pb = Self.debugMakeRampBuffer(width: width, height: height) else {
-            print("[Stage0] could not synthesise an x420 probe buffer at \(width)x\(height)")
-            return
-        }
-
-        let now = clock?() ?? .nan
-        let pts = now + 1.0                      // FORWARD of the pinned clock, by a full second
-        let paused = isPausedProvider?() ?? true
-
-        // State of the two existing one-shots AT THE MOMENT OF THE PUSH. Both must be false for
-        // the result to mean anything: `pendingRefresh` would re-render `lastPixelBuffer` and
-        // `pendingSeekRender` would render the head of the queue, and either would produce "a
-        // frame rendered while paused" without `presentImmediate` being involved at all.
+    /// One line per release, on the render thread. Fires only when a scrub frame was actually the
+    /// last thing on screen — a bare arrow-step or a timecode seek arms the flush but leaves
+    /// `settleScrubPts` NaN, so those print nothing. Cleared as it fires: one drag, one line.
+    private func reportSettleIfArmed(landedPts: Double, frameInterval: Double) {
         refreshLock.lock()
-        let armedRefresh = pendingRefresh, armedSeekRender = pendingSeekRender
+        let armed = settleArmed
+        if armed { settleArmed = false }
         refreshLock.unlock()
-        queueLock.lock(); let queued = frameQueue.count; queueLock.unlock()
-
-        // Arm DeckLink output if it is not already running, so stage 3 of the check has a
-        // destination. Restored below. Guarded on the real flag so a probe never disturbs an
-        // output that is genuinely on the wire.
-        deckLinkLock.lock(); let deckLinkWasActive = deckLinkActive; deckLinkLock.unlock()
-        if !deckLinkWasActive { beginDeckLinkOutput(width: width, height: height) }
-
-        debugProbeLock.lock()
-        debugProbePts = pts
-        debugProbeServiced = nil
-        debugProbeRendered = nil
-        debugProbeLock.unlock()
-
+        guard armed, ScrubProducerFlags.stats, settleScrubPts.isFinite, landedPts.isFinite else {
+            if armed { settleScrubPts = .nan }
+            return
+        }
+        let delta = landedPts - settleScrubPts
+        let frames = frameInterval > 0 ? delta / frameInterval : Double.nan
         print(String(format:
-            "[Stage0] arm: %dx%d ramp, pts=%.4f now=%.4f Δ=%+.4f (FORWARD → strict gate rejects) "
-            + "paused=%@ queued=%d pendingRefresh=%@ pendingSeekRender=%@ deckLinkWasActive=%@",
-            width, height, pts, now, pts - now,
-            paused ? "true" : "false", queued,
-            armedRefresh ? "true" : "false", armedSeekRender ? "true" : "false",
-            deckLinkWasActive ? "true" : "false"))
-        if armedRefresh || armedSeekRender {
-            print("[Stage0] ⚠️ an existing one-shot was already armed — this run proves nothing; "
-                + "let the tick drain and press ⌃⌥⇧P again")
-        }
-
-        presentImmediate(pixelBuffer: pb, pts: pts)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.debugVerifyImmediateProbe(expectedPts: pts, width: width, height: height,
-                                            restoreDeckLink: !deckLinkWasActive)
-        }
+            "[SETTLE] scrub frame pts=%.4f → first played frame pts=%.4f | Δ=%+.4f s = %+.2f frames"
+            + " (Δt=%.4f s)", settleScrubPts, landedPts, delta, frames, frameInterval))
+        settleScrubPts = .nan
     }
-
-    /// Render-thread witness: the tick actually took the one-shot. Records the clock AT SERVICE
-    /// TIME too, because the claim being made is "pts was forward of the clock when it rendered",
-    /// not merely "when it was armed".
-    fileprivate func debugNoteImmediateServiced(pts: Double, clockNow: Double?) {
-        debugProbeLock.lock()
-        let expected = debugProbePts
-        if pts == expected { debugProbeServiced = (clockNow ?? .nan) }
-        debugProbeLock.unlock()
-        guard pts == expected else { return }
-        print(String(format: "[Stage0] tick serviced the one-shot: pts=%.4f now=%.4f Δ=%+.4f "
-                             + "— queue and gate bypassed", pts, clockNow ?? .nan, pts - (clockNow ?? .nan)))
-    }
-
-    /// Metal-completion-thread witness: the render finished, was published as the readable
-    /// offscreen, and both downstream callbacks were reached ON THIS FRAME.
-    fileprivate func debugNoteImmediateRendered(pts: Double, writeIndex: Int,
-                                                frameRenderedSinkInvoked: Bool) {
-        debugProbeLock.lock()
-        let expected = debugProbePts
-        if pts == expected { debugProbeRendered = (writeIndex, frameRenderedSinkInvoked) }
-        debugProbeLock.unlock()
-        guard pts == expected else { return }
-        print(String(format: "[Stage0] render completed: offscreen ring index %d published; "
-                             + "onFrameRendered %@; pushDeckLinkConvert called with pts=%.4f",
-                     writeIndex,
-                     frameRenderedSinkInvoked ? "INVOKED (sink installed)"
-                                              : "reached but NO sink installed (scopes not mounted)",
-                     pts))
-    }
-
-    /// The measurement pass. Everything above is a log line; this is the part that reads pixels
-    /// back out of the two destinations and checks them.
-    private func debugVerifyImmediateProbe(expectedPts: Double, width: Int, height: Int,
-                                           restoreDeckLink: Bool) {
-        debugProbeLock.lock()
-        let serviced = debugProbeServiced
-        let rendered = debugProbeRendered
-        debugProbePts = .nan
-        debugProbeLock.unlock()
-
-        guard serviced != nil else {
-            print("[Stage0] ✗ the tick never serviced the one-shot")
-            if restoreDeckLink { stopDeckLinkOutput() }
-            return
-        }
-        guard let rendered else {
-            print("[Stage0] ✗ serviced but the render never completed (renderPixelBuffer bailed)")
-            if restoreDeckLink { stopDeckLinkOutput() }
-            return
-        }
-
-        // ── 1. THE OFFSCREEN ────────────────────────────────────────────────────────────────
-        // rgba16Float, so 4 × Float16 per pixel. Sampled across the middle row: the probe wrote a
-        // luma ramp with neutral chroma, so a correct result is monotonically increasing and
-        // r == g == b at every sample. Both properties are checked, because either alone would
-        // pass on a stale frame from the file (a real frame is neither, except by accident).
-        var offscreenVerdict = "✗ readback failed"
-        var samples: [(x: Int, r: Float, g: Float, b: Float)] = []
-        if let rb = readbackRenderedFrame(), rb.width == width, rb.height == height {
-            let y = height / 2
-            let xs = [0, width / 4, width / 2, (3 * width) / 4, width - 1]
-            rb.bytes.withUnsafeBytes { raw in
-                let halfs = raw.bindMemory(to: Float16.self)
-                for x in xs {
-                    let i = (y * rb.bytesPerRow / 2) + x * 4
-                    samples.append((x, Float(halfs[i]), Float(halfs[i + 1]), Float(halfs[i + 2])))
-                }
-            }
-            let monotonic = zip(samples, samples.dropFirst()).allSatisfy { $1.r > $0.r }
-            let neutral = samples.allSatisfy { abs($0.r - $0.g) < 0.02 && abs($0.g - $0.b) < 0.02 }
-            offscreenVerdict = (monotonic && neutral)
-                ? "✓ ramp present (monotonic across the row, r≈g≈b)"
-                : "✗ NOT the probe ramp (monotonic=\(monotonic) neutral=\(neutral))"
-        }
-        print("[Stage0] offscreen \(width)x\(height): \(offscreenVerdict)")
-        for s in samples {
-            print(String(format: "[Stage0]   x=%5d  r=%.4f g=%.4f b=%.4f", s.x, s.r, s.g, s.b))
-        }
-
-        // ── 2. SDI ──────────────────────────────────────────────────────────────────────────
-        // The pts the audio path would align to, then the pixels themselves — pulled through the
-        // exact function the DeckLink callback thread calls, so this is the card's copy.
-        let sdiPts = currentDeckLinkSourcePts()
-        let ptsMatch = (sdiPts == expectedPts)
-        var sdiPixels = "✗ copyLatestDeckLinkFrame returned false"
-        let rowBytes = Self.v210RowBytes(width: width)
-        var dst = [UInt8](repeating: 0, count: rowBytes * height)
-        let ok = dst.withUnsafeMutableBytes {
-            copyLatestDeckLinkFrame(into: $0.baseAddress!, rowBytes: rowBytes,
-                                    width: width, height: height)
-        }
-        if ok {
-            // v210: 16 bytes = 4 little-endian 32-bit words = 6 pixels. Word 0 is Cb0/Y0/Cr0 with
-            // Y0 in bits 10..19, so group g carries the luma of pixel 6g. Two groups a quarter of
-            // the row apart are enough to say the RAMP reached the staging buffer rather than a
-            // flat frame.
-            func luma(atGroup g: Int, row: Int) -> UInt32 {
-                let base = row * rowBytes + g * 16
-                let w = dst.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: base, as: UInt32.self) }
-                return (UInt32(littleEndian: w) >> 10) & 0x3FF
-            }
-            let row = height / 2
-            let a = luma(atGroup: 0, row: row)
-            let b = luma(atGroup: (width / 6) - 1, row: row)
-            sdiPixels = (b > a)
-                ? String(format: "✓ v210 luma ramps %d → %d across the row", a, b)
-                : String(format: "✗ v210 luma flat/backwards: %d → %d", a, b)
-        }
-        print(String(format: "[Stage0] SDI: frontPts=%.4f (%@ the probe's) — %@",
-                     sdiPts, ptsMatch ? "IS" : "is NOT", sdiPixels))
-
-        if restoreDeckLink { stopDeckLinkOutput() }
-
-        let pass = offscreenVerdict.hasPrefix("✓") && ptsMatch && sdiPixels.hasPrefix("✓")
-        print("[Stage0] \(pass ? "PASS" : "FAIL") — offscreen, scopes' data source, and SDI all "
-            + "reached by a frame the queue and the clock gate never saw"
-            + (rendered.1 ? "" : " (note: no onFrameRendered sink was installed)"))
-    }
-
-    /// x420 (`kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange`) probe frame: a horizontal luma
-    /// ramp over the legal range with neutral chroma. 10-bit samples are MSB-aligned in 16 bits
-    /// (code << 6), which is what the r16Unorm/rg16Unorm sample path in `renderPixelBuffer`
-    /// expects — the probe deliberately does NOT use 8-bit 420v, whose r8/rg8 branch the file
-    /// decoders never take and whose range constants are documented as not matching.
-    private static func debugMakeRampBuffer(width: Int, height: Int) -> CVPixelBuffer? {
-        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
-        var out: CVPixelBuffer?
-        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                                  kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                                  attrs as CFDictionary, &out) == kCVReturnSuccess,
-              let pb = out else { return nil }
-        CVPixelBufferLockBaseAddress(pb, [])
-        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
-
-        if let y = CVPixelBufferGetBaseAddressOfPlane(pb, 0) {
-            let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-            for row in 0..<CVPixelBufferGetHeightOfPlane(pb, 0) {
-                let line = y.advanced(by: row * stride).assumingMemoryBound(to: UInt16.self)
-                for x in 0..<width {
-                    let code = 64 + (876 * x) / max(width - 1, 1)   // 64…940, 10-bit legal range
-                    line[x] = UInt16(code << 6)                     // MSB-aligned in 16 bits
-                }
-            }
-        }
-        if let c = CVPixelBufferGetBaseAddressOfPlane(pb, 1) {
-            let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
-            let w = CVPixelBufferGetWidthOfPlane(pb, 1)
-            for row in 0..<CVPixelBufferGetHeightOfPlane(pb, 1) {
-                let line = c.advanced(by: row * stride).assumingMemoryBound(to: UInt16.self)
-                for x in 0..<(w * 2) { line[x] = UInt16(512 << 6) } // neutral Cb/Cr
-            }
-        }
-        return pb
-    }
-
     #endif
 
     // MARK: - v210 convert cost (DEBUG only, TEMPORARY — Stage 1 measurement)

@@ -4,63 +4,6 @@ import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picke
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
-/// ⚠️ TEMPORARY DIAGNOSTIC SWITCH — REMOVE with the `[EDRDIAG]` block in MetalSurfaceView.swift.
-///
-/// Takes the scrub preview overlay out of the picture ENTIRELY: no preview is requested, so no
-/// image is ever produced, so the overlay cannot appear at any point in a drag. What remains is
-/// whatever the Metal layer shows — which during a drag is the pre-drag frame, because
-/// `FrameEngine.scrubSeek` deliberately does no decode.
-///
-/// It exists to answer ONE question: does the HDR jump survive with no overlay? That isolates the
-/// overlay from the Metal layer, which no amount of reading either one can do.
-///
-/// DEBUG-only by construction, and a `let` rather than a computed property so Release folds it to
-/// `false` and the branches vanish. Profile defines DEBUG, so it is live in a tester build.
-enum ScrubDebug {
-    #if DEBUG
-    static let overlayDisabled = ProcessInfo.processInfo.environment["MANIFOLD_NO_SCRUB_OVERLAY"] == "1"
-    /// Force the overlay's EDR opt-in to the pre-26 boolean on every OS — the property the Metal
-    /// layer uses and which demonstrably works. See the call site in `setPreviewImage`.
-    static let forceLegacyEDR = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_EDR_LEGACY"] == "1"
-
-    /// ── SIDE-BY-SIDE SPLIT. `MANIFOLD_SCRUB_SPLIT=1` ──────────────────────────────────────────
-    ///
-    /// ⚠️ THE OTHER THREE DIAGNOSTICS COMPARE IN SEQUENCE, AND THAT IS THEIR SHARED WEAKNESS.
-    /// Metal layer during playback → overlay during the drag → Metal layer on release is three
-    /// observations at three different moments, and the engine pauses, a flush happens and the
-    /// frame changes between them. Any of those could be the variable rather than the overlay's
-    /// rendering, and no amount of A/B-ing the overlay's own properties can separate them.
-    ///
-    /// This one puts BOTH PATHS ON SCREEN AT ONCE: after a scrub release, once the seeked-to frame
-    /// has actually been presented on the Metal layer, the overlay is HELD and narrowed to the LEFT
-    /// HALF of the video rect. Left half = the preview `CGImage` on `ScrubPreviewSurface`'s CALayer.
-    /// Right half = the Metal layer showing through. One frame, one moment, one window; the only
-    /// difference across the seam is which path drew it.
-    ///
-    /// See `splitLatched` in ContentView for the arming rule and `ScrubPreviewSurface`'s
-    /// `splitFraction` for how the half is taken (`contentsRect`, NOT a mask — see there).
-    static let splitEnabled = ProcessInfo.processInfo.environment["MANIFOLD_SCRUB_SPLIT"] == "1"
-
-    /// ── STAGE 1. `MANIFOLD_SCRUB_PRODUCER=1` ──────────────────────────────────────────────────
-    ///
-    /// The view's mirror of `ScrubProducerFlags.enabled` — one variable, read twice, because the
-    /// two halves of the instrument live on opposite sides of the package boundary: the engine
-    /// decides whether to BUILD a producer, and the view decides whether to narrow the overlay so
-    /// the producer can be seen underneath it.
-    ///
-    /// ⚠️ IT DOES NOT DISABLE THE OVERLAY. Stage 1 runs both paths at once ON PURPOSE — that is
-    /// what makes them comparable, and it is why this stage exists as its own step rather than
-    /// being folded into the switchover. `MANIFOLD_NO_SCRUB_OVERLAY=1` is still the way to see the
-    /// producer alone.
-    static let producerEnabled = ScrubProducerFlags.enabled
-    #else
-    static let overlayDisabled = false
-    static let forceLegacyEDR = false
-    static let splitEnabled = false
-    static let producerEnabled = false
-    #endif
-}
-
 /// The scopes any tray slot can display. `rawValue` (String) backs @AppStorage persistence of
 /// per-slot selections; `displayName` labels the slot picker menu.
 ///
@@ -202,24 +145,15 @@ struct ContentView: View {
 
     @State private var isScrubbing = false
     @State private var scrubValue: Double = 0
+    /// ⚠️ MXF ONLY, AND IT IS THE GATE — see the overlay branch in `body`. On the AVFoundation
+    /// path nothing ever assigns this, because the scrub frame goes through the renderer instead;
+    /// `requestScrubPreview` refuses to ask for an image unless `engine.usesLibavScrub`. Retired
+    /// with `LibavThumbnailSource` in Stage 3.
     @State private var scrubPreviewImage: CGImage?
+    /// One decode at a time. The only surviving throttle: the media-distance gate is gone with the
+    /// AVFoundation path, and this is a real constraint rather than a tuning number.
     @State private var previewRequestInFlight = false
-    @State private var lastPreviewTime: Double = -1
     @State private var wasPlayingBeforeScrub = false
-    /// Generation counter for the release HANDOFF — the window between letting go of the scrubber
-    /// and the seeked-to frame appearing, during which the overlay is deliberately still up.
-    /// Bumped on every release and on every teardown, so an in-flight final preview, the renderer's
-    /// one-shot and the timeout can each ask "am I still the current handoff?" and a late answer
-    /// from any of them is discarded rather than re-showing a stale frame.
-    @State private var scrubHandoff = 0
-    /// The bounded fallback that guarantees the overlay comes down even if the reader never
-    /// delivers. Cancelled when the frame arrives first.
-    @State private var scrubHoldTask: Task<Void, Never>?
-    /// ⚠️ TEMPORARY DIAGNOSTIC STATE — `MANIFOLD_SCRUB_SPLIT=1` only; see `ScrubDebug.splitEnabled`.
-    /// True while the side-by-side split is armed and being held for inspection. Always false in a
-    /// build without the env var, and false during the drag itself even with it — see the arming
-    /// rule in `endScrubHandoff(framePresented:)`.
-    @State private var splitLatched = false
 
     @State private var hudVisible = true
     @State private var pinned = false
@@ -442,38 +376,6 @@ struct ContentView: View {
         .background(
             Button("") { metalRenderer?.cycleDebugDestination() }
                 .keyboardShortcut("d", modifiers: [.control, .option])
-                .opacity(0)
-        )
-        // ⚠️ TEMPORARY DIAGNOSTIC — ⌃⌥⇧S dismisses the held scrub SPLIT; see
-        // `ScrubDebug.splitEnabled`. A no-op when nothing is latched, which is always unless
-        // `MANIFOLD_SCRUB_SPLIT=1`, so this is inert in a tester build that was not launched for it.
-        //
-        // ⌃⌥⇧S, not ⌃⌥S: plain ⌃⌥S is the LiveClock sweep. It is `MANIFOLD_CONFIG_DEBUG`-gated and
-        // so is absent from Profile, which would have made the collision invisible in exactly the
-        // configuration this diagnostic is built for and a hard conflict in the one it is not.
-        // ⇧ is free in both.
-        //
-        // MOUNTED HERE, alongside ⌃⌥R and ⌃⌥E, rather than in `syntheticLiveShortcuts` — that group
-        // is `.disabled(!deck.gate.deviceControlsEnabled)`, and this touches only this window's own
-        // overlay. Nothing about a device claim should decide whether you can take a diagnostic off
-        // your own screen.
-        .background(
-            Button("") { dismissScrubSplit() }
-                .keyboardShortcut("s", modifiers: [.control, .option, .shift])
-                .opacity(0)
-        )
-        // ⚠️ TEMPORARY — STAGE 0 of the scrub-producer work (docs/BUGS.md, "STAGING"). ⌃⌥⇧P pushes
-        // a synthetic frame through `presentImmediate`, the new off-clock entry point, and reports
-        // whether it reached the offscreen, the scopes' sink and the SDI convert. It exists ONLY
-        // because Stage 0 deliberately wires the entry point to nothing: without a keystroke there
-        // is no way to find out whether the thing that was added works, and a successful build is
-        // not evidence. Delete it — and the `#if DEBUG` probe block in MetalVideoRenderer — as soon
-        // as a real producer feeds `presentImmediate` in Stage 1.
-        //
-        // ⌃⌥⇧P, not ⌃⌥P: plain ⌃⌥P is already taken. Evidence goes to stderr as `[Stage0]`.
-        .background(
-            Button("") { metalRenderer?.debugPresentImmediateProbe() }
-                .keyboardShortcut("p", modifiers: [.control, .option, .shift])
                 .opacity(0)
         )
         #endif
@@ -1068,40 +970,6 @@ struct ContentView: View {
         rasterNotice = text
     }
 
-    /// ⚠️ TEMPORARY DIAGNOSTIC — the split's on-screen furniture; see `ScrubDebug.splitEnabled`.
-    /// Composited only from the `splitLatched` branch, so it cannot appear in a build without the
-    /// env var. Two elements and no more, because everything drawn over the picture is a brightness
-    /// reference the eye will use whether or not you meant it to:
-    ///
-    ///   * THE SEAM. A 1-point magenta hairline down the centre of the video rect — centred in this
-    ///     ZStack, which is where the seam is, so its position is not computed and cannot drift
-    ///     from the split it marks. Magenta because no graded picture contains it, so there is
-    ///     never a question of whether you are looking at the marker or at content.
-    ///   * WHICH SIDE IS WHICH, at 9pt and 55% opacity, pinned to the rect's top corners and well
-    ///     clear of the seam. Deliberately dim: a bright label near the seam would sit next to the
-    ///     exact patch of picture you are comparing, and simultaneous contrast is not something you
-    ///     can decide to ignore while reading a brightness difference by eye.
-    @ViewBuilder private var scrubSplitFurniture: some View {
-        ZStack {
-            Rectangle()
-                .fill(Color(red: 1, green: 0, blue: 1))
-                .frame(width: 1, height: drawnVideoSize.height)
-            VStack {
-                HStack {
-                    Text("OVERLAY")
-                    Spacer()
-                    Text("METAL")
-                }
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.55))
-                .padding(.horizontal, 6)
-                .padding(.top, 4)
-                Spacer()
-            }
-            .frame(width: drawnVideoSize.width, height: drawnVideoSize.height)
-        }
-        .allowsHitTesting(false)
-    }
 
     /// The video region: aspect-fit picture (never cropped/stretched), transport
     /// controls, empty state, and the picture-only overlays (inspector, filename).
@@ -1148,57 +1016,36 @@ struct ContentView: View {
             // The overlay used to be conditioned on the drag being in progress, so it vanished on
             // the same main-actor turn that STARTED the seek: for the ~25–55 ms until the reader
             // delivered, the screen showed the frame from BEFORE the drag, and the seeked-to frame
-            // then replaced it. That replacement is the jump in the report. `scrubPreviewImage` is
-            // now the sole gate, and the release path holds it until the new frame is actually
-            // presented (see `beginScrubHandoff`).
+            // then replaced it. That replacement is the jump in the report.
             //
-            // ⚠️ AND IT IS NOW LOAD-BEARING A SECOND TIME, FOR A DIFFERENT REASON. Stage 2 of the
-            // scrub-producer work leaves TWO scrub mechanisms alive at once (AVFoundation on the
-            // new `presentImmediate` path, MXF still on this overlay), and what makes that window
-            // safe is precisely that this gate is the IMAGE: on the producer path no preview image
-            // is ever made, so the overlay is structurally unreachable rather than conditionally
-            // suppressed. Rewriting it as `if isScrubbing` — or as any mode flag — would make both
-            // mechanisms reachable on the same drag and break the staging, not just this fix.
+            // ⚠️ AND IT IS NOW LOAD-BEARING A SECOND TIME, FOR A DIFFERENT REASON — the one that
+            // makes THIS stage safe. Two scrub mechanisms are alive at once, selected by
+            // `useLibav`: AVFoundation files go through the producer and
+            // `MetalVideoRenderer.presentImmediate`, MXF still comes through here. What keeps them
+            // from ever both drawing is precisely that this gate is the IMAGE: on the producer path
+            // no preview image is ever made (`requestScrubPreview` returns before asking), so the
+            // overlay is STRUCTURALLY UNREACHABLE rather than conditionally suppressed. Rewriting
+            // it as `if isScrubbing`, or as any mode flag, would make both mechanisms reachable on
+            // the same drag and break the staging, not just this fix.
             // docs/BUGS.md, "Stage 2 — flip the default for AVFoundation files".
-            if let preview = scrubPreviewImage, !ScrubDebug.overlayDisabled {
-                // SAME aspect authority as the video rect above — deliberately NOT the preview
-                // image's own pixel aspect. The two preview producers disagree about pixel aspect
-                // ratio: AVAssetImageGenerator applies PAR (its default aperture mode is clean-
-                // aperture), while LibavThumbnailSource — the DNxHR path — builds from the raw
-                // frame.width/height and ignores sample_aspect_ratio entirely. A ratio-less
-                // .aspectRatio(.fit) sizes from the image, so on anamorphic DNx the scrub preview
-                // changed shape the moment it appeared. Pinning it to videoAspect lands the preview
-                // exactly on the video rect for BOTH producers, whatever the PAR.
-                // EDR-capable host layer, replacing `Image(decorative:)` — which exposes no
-                // dynamic-range API, so a PQ/HLG preview was tone-mapped to SDR on the way to the
-                // screen even once the generator started tagging it. The aspect pin stays HERE and
-                // is unchanged: it is the video rect's authority, not the image's own PAR, for the
-                // reason given above, and the layer inside resizes to whatever rect it produces.
-                if splitLatched, drawnVideoSize.width > 0, drawnVideoSize.height > 0 {
-                    // ⚠️ TEMPORARY DIAGNOSTIC BRANCH — see `ScrubDebug.splitEnabled`. Unreachable
-                    // unless `splitLatched`, which only ever becomes true under the env var.
-                    //
-                    // THE VIDEO RECT IS MEASURED HERE, NOT RE-DERIVED. The normal branch below
-                    // pins the overlay with `.aspectRatio(videoAspect, .fit)` — the same authority
-                    // the Metal surface uses, which lands the two on each other. That is right for
-                    // shipping and not good enough for a seam: it is two independent computations
-                    // of the same rect, and a sub-point disagreement between them would show up as
-                    // a content offset across the split and read as "the two paths draw different
-                    // geometry". `drawnVideoSize` is the Metal surface's OWN laid-out size, taken
-                    // off the `.onGeometryChange` above, so the outer frame here IS the video rect
-                    // rather than a second opinion about it. Centred in this ZStack exactly as the
-                    // aspect-fitted surface is, so the two rects coincide by construction.
-                    ScrubPreviewSurface(image: preview, splitFraction: 0.5)
-                        .frame(width: drawnVideoSize.width / 2, height: drawnVideoSize.height)
-                        .frame(width: drawnVideoSize.width, height: drawnVideoSize.height,
-                               alignment: .leading)
-                        .allowsHitTesting(false)
-                    scrubSplitFurniture
-                } else {
-                    ScrubPreviewSurface(image: preview)
-                        .aspectRatio(videoAspect, contentMode: .fit)
-                        .allowsHitTesting(false)
-                }
+            if let preview = scrubPreviewImage {
+                // ⚠️ `Image(decorative:)`, NOT THE EDR HOST LAYER THAT USED TO BE HERE. That layer
+                // (`ScrubPreviewSurface`) existed for ONE reason — to opt a PQ/HLG CGImage from
+                // `AVAssetImageGenerator` into extended range — and it is deleted with the
+                // generator. Everything that reaches this branch now is `LibavThumbnailSource`
+                // output: 8-bit RGBA, SDR by construction, with no headroom tag. Both EDR opt-ins
+                // activate only on content tagged above 1.0, so on this image they were already
+                // inert; the layer's other two behaviours (fill the bounds, don't cross-fade on
+                // swap) are what SwiftUI does here anyway. Giving the libav path a float pipeline
+                // is Stage 3's job and closes the deferred Part 3 of the HDR scrub entry.
+                //
+                // The aspect pin STAYS and is unchanged. It is the video rect's authority — the
+                // same `videoAspect` the Metal surface above uses — and deliberately not the
+                // image's own PAR, which `LibavThumbnailSource` does not apply at all.
+                Image(decorative: preview, scale: 1)
+                    .resizable()
+                    .aspectRatio(videoAspect, contentMode: .fit)
+                    .allowsHitTesting(false)
             }
 
             if hasSource {
@@ -2778,34 +2625,10 @@ struct ContentView: View {
                     in: 0...max(engine.duration, 0.1),
                     onEditingChanged: { editing in
                         if editing {
-                            // A new grab retires any handoff still running from the last release —
-                            // otherwise its one-shot or its timeout would fire mid-drag and clear
-                            // the overlay out from under the new gesture. The IMAGE is left alone:
-                            // the first preview of this drag replaces it, so there is no blink.
-                            cancelScrubHandoff()
                             #if DEBUG
-                            // ⚠️ TEMPORARY DIAGNOSTIC — one of the split's two dismissals (⌃⌥⇧S is
-                            // the other): moving the scrubber again ends the held comparison. It
-                            // must happen HERE rather than at the first preview of the new drag,
-                            // because a half-width overlay left standing for even one frame of a
-                            // fresh drag would show the new preview cropped to half the picture.
-                            dismissScrubSplit()
-                            // ── STAGE 1: THE SPLIT BECOMES A LIVE INSTRUMENT ───────────────────
-                            //
-                            // The post-release split compares two decoders at ONE HELD FRAME. That
-                            // was the right instrument when both halves were static; it is the
-                            // wrong one now, because the question has changed from "do these two
-                            // frames match" to "does the producer track the drag". So when the
-                            // producer is running, the split is armed for the WHOLE DRAG: left
-                            // half = the `CGImage` overlay, right half = the Metal layer the
-                            // producer is driving live, same position, same instant, moving.
-                            //
-                            // Its validity condition is unchanged and still all-intra only — see
-                            // `logScrubSplitArmed`. On long-GOP the ±0.5 s generator tolerance can
-                            // put the overlay up to ELEVEN frames from what the producer decoded,
-                            // and the seam then shows two different frames rather than two
-                            // renderings of one.
-                            if ScrubDebug.splitEnabled && ScrubDebug.producerEnabled { splitLatched = true }
+                            // The v210 baseline for the interval BEFORE the drag, so the line
+                            // printed at release has something to be read against. Silent unless
+                            // DeckLink output is running.
                             metalRenderer?.debugFlushV210Stats(label: "before-drag")
                             #endif
                             wasPlayingBeforeScrub = engine.isPlaying
@@ -2813,47 +2636,50 @@ struct ContentView: View {
                             scrubValue = engine.currentTime
                             isScrubbing = true
                         } else {
-                            // ── RELEASE. THE ORDER OF THESE FOUR STEPS IS THE FIX ──────────────
+                            // ── RELEASE. FOUR ORDERED STEPS BECAME THREE, AND THE ONE THAT WENT
+                            //    WAS THE HOLD ─────────────────────────────────────────────────
                             //
-                            // It used to be: seek, then drop the overlay, in one turn. Both halves
-                            // of the reported jump live in that line — the overlay showed a STALE
-                            // preview (the throttle's ~1.2-frame floor, never re-asked at the
-                            // release point) and it was taken down BEFORE the seeked-to frame
-                            // existed. Fixing either alone still jumps: a corrected final preview
-                            // that is thrown away before it can be seen is not seen.
-                            isScrubbing = false          // the readout goes back to the engine…
-                            lastPreviewTime = -1
-                            // …but `scrubPreviewImage` is deliberately NOT cleared here. It is the
-                            // overlay's gate now, and the handoff owns its lifetime.
+                            // It used to be: retire the readout, open a handoff, fire a corrective
+                            // un-throttled preview, seek — with the overlay held up by a one-shot
+                            // and a 400 ms timeout until the seeked-to frame was PRESENTED. All of
+                            // that existed to keep a SECOND surface alive across the gap.
+                            //
+                            // ⚠️ THERE IS NOTHING IN ITS PLACE, AND THAT IS CORRECT RATHER THAN AN
+                            // OMISSION. There is no second surface to keep alive: the Metal layer
+                            // is ALREADY showing the release frame, because it got there through
+                            // the ordinary present path during the drag. `exactSeek` →
+                            // `beginReading` → `flush()` clears the queue, and a CAMetalLayer keeps
+                            // its last presented drawable — which is that scrub frame. The hold now
+                            // happens by default instead of by machinery. That is what "one display
+                            // path" buys, stated concretely.
+                            isScrubbing = false          // the readout goes back to the engine
 
-                            // 1. Open the handoff FIRST. It bumps the generation, and the final
-                            //    request below stamps itself with it — order them the other way
-                            //    and the final preview carries the PREVIOUS generation, fails its
-                            //    own staleness check, and is silently thrown away. Arming before
-                            //    the seek is also required on its own account: `exactSeek` hops
-                            //    through a Task, and the flush it performs is the edge the
-                            //    renderer's one-shot keys off.
-                            beginScrubHandoff()
-                            // 2. Ask for the release point itself, past both throttle gates. This
-                            //    is what closes the staleness floor; without it the last preview
-                            //    the user saw is the last request that happened to COMPLETE.
-                            requestScrubPreview(at: scrubValue, final: true)
-                            // 3. Now start the real seek.
+                            // 1. THE PENDING SLOT, FLUSHED AT THE RELEASE POINT. This is what the
+                            //    old `requestScrubPreview(at:final:)` became. Its job was to close
+                            //    a staleness floor created by a media-DISTANCE gate that was never
+                            //    re-asked at the release point; that gate is gone, so there is no
+                            //    floor and no corrective request. What survives is the in-flight
+                            //    LATCH: one decode may still be outstanding at a marginally older
+                            //    position, so the release point is submitted and the coalescer
+                            //    issues it the moment that decode completes. Latest wins, and the
+                            //    latest is now exactly where the user let go.
+                            //    On MXF this is the libav thumbnail request instead — same intent,
+                            //    the other mechanism.
+                            engine.scrubSeek(to: scrubValue)
+                            requestScrubPreview(at: scrubValue)
+                            // 2. MXF ONLY: hold the overlay until the seeked-to frame is up.
+                            //    No-op on the producer path — see the function.
+                            holdScrubOverlayUntilPresented()
+                            // 3. The real seek.
                             engine.exactSeek(to: scrubValue)
-                            // ⚠️ TEMPORARY DIAGNOSTIC — the split needs the picture to STOP. A
-                            // resumed transport would move the Metal layer off the seeked frame
-                            // within one frame period, leaving the right half advancing against a
-                            // frozen left half: a guaranteed, and guaranteedly meaningless,
-                            // difference. Suppressing the resume is not a workaround for the
-                            // instrument, it is a condition of it. Gated on the env var, so a
-                            // build without it resumes exactly as before.
                             #if DEBUG
-                            // The drag's v210 cost, against the "before-drag" baseline printed at
-                            // grab. Flushed BEFORE the resume so playback's converts cannot land
-                            // in the drag's numbers.
+                            // Flushed BEFORE the resume so playback's converts cannot land in the
+                            // drag's numbers.
                             metalRenderer?.debugFlushV210Stats(label: "drag")
                             #endif
-                            if wasPlayingBeforeScrub && !ScrubDebug.splitEnabled { engine.play() }
+                            // 4. …and the transport resumes if it was running. Unconditional again:
+                            //    the split that used to suppress it is gone.
+                            if wasPlayingBeforeScrub { engine.play() }
                         }
                     }
                 )
@@ -3258,208 +3084,76 @@ struct ContentView: View {
         return readoutMode
     }
 
-    /// Ask for a scrub preview frame. `final` is the RELEASE request and bypasses both gates.
+    /// THE MXF SCRUB PREVIEW, AND NOTHING ELSE.
     ///
-    /// ⚠️ NEITHER GATE IS A RATE LIMIT, WHICH IS WHY THE FINAL REQUEST HAS TO EXIST. The slider's
-    /// range is `0...engine.duration`, so `time` is MEDIA seconds and `0.05` is a media-time
-    /// DISTANCE — 1.20 frames at 23.976. Between that and the in-flight latch, the last preview the
-    /// user sees at release is the last request that COMPLETED, which sits ~1.2 frames behind the
-    /// release point at any drag speed and further as the drag gets faster. Measured figures and
-    /// the replay they come from are in docs/BUGS.md.
-    private func requestScrubPreview(at time: Double, final: Bool = false) {
-        // The kill switch, at the SOURCE rather than at the view: with no request there is no
-        // image, so `scrubPreviewImage` stays nil and the overlay cannot be composited by any
-        // path. See `ScrubDebug`.
-        guard !ScrubDebug.overlayDisabled else { return }
-        if !final {
-            // Throttle: skip if a request is in flight or the time barely moved.
-            guard !previewRequestInFlight else { return }
-            guard abs(time - lastPreviewTime) > 0.05 else { return }
-        }
+    /// ⚠️ THIS IS THE STRUCTURAL HALF OF THE TWO-MECHANISM WINDOW. AVFoundation files return on
+    /// the first line, so no image is ever produced for them, so `scrubPreviewImage` stays nil, so
+    /// the overlay branch in `body` cannot be composited by any path. That is what makes "two
+    /// scrub mechanisms alive at once" safe: the selection happens HERE, once, at the source of
+    /// the image — not as a mode flag consulted at the point of drawing, which is a thing that can
+    /// be got wrong in one place and right in another.
+    ///
+    /// What used to be here and is gone: the media-time DISTANCE gate (`> 0.05` s — a MEDIA
+    /// distance, so a slow drag suppressed requests outright and a fast one made it irrelevant),
+    /// the `final:` parameter and its corrective un-throttled request, and the handoff generation
+    /// stamp. The distance gate created the staleness the 2026-08-28 position fix was written
+    /// against; it is deleted rather than tuned, and on the AVFoundation side its replacement is
+    /// `ScrubCoalescer`'s latest-wins pending slot. Here, one decode at a time is all that is left,
+    /// because that is the only one of the four that was ever a real constraint.
+    ///
+    /// Retired entirely in Stage 3, when the libav producer replaces `LibavThumbnailSource`.
+    private func requestScrubPreview(at time: Double) {
+        guard engine.usesLibavScrub else { return }
+        guard !previewRequestInFlight else { return }
         previewRequestInFlight = true
-        lastPreviewTime = time
-        let handoff = scrubHandoff
         Task {
             let image = await engine.previewImage(at: time)
             await MainActor.run {
                 previewRequestInFlight = false
-                guard let image else { return }
-                if final {
-                    // ⚠️ ONLY WHILE THIS HANDOFF IS STILL THE CURRENT ONE. The generator can lose
-                    // the race with the reader (~15 ms against ~27 ms typical, but the tails
-                    // overlap), and a late final preview landing after the overlay has already
-                    // been handed off would put a stale frame back on top of the correct one and
-                    // leave it there — the exact failure this change exists to prevent.
-                    guard handoff == scrubHandoff, scrubHoldTask != nil else { return }
-                    scrubPreviewImage = image
-                } else if isScrubbing {
-                    scrubPreviewImage = image
-                }
+                guard let image, isScrubbing || scrubPreviewImage != nil else { return }
+                scrubPreviewImage = image
             }
         }
     }
 
-    /// Hold the preview overlay until the seeked-to frame is actually on screen, then take it down.
+    /// ⚠️ MXF ONLY, AND IT IS WHAT IS LEFT OF THE RELEASE HANDOFF. On the AVFoundation path this
+    /// returns immediately: the Metal layer is already showing the release frame, `flush()` does
+    /// not disturb the last presented drawable, and there is nothing to hold — which is why the
+    /// handoff, its 400 ms task, its generation counter and its three races are deleted rather
+    /// than kept.
     ///
-    /// ── THE SIGNAL, AND WHY IT IS RELIABLE ────────────────────────────────────────────────────
+    /// ⚠️ THE SAME REASONING DOES NOT REACH MXF, AND SAYING IT DOES WOULD REINTRODUCE A FIXED BUG.
+    /// MXF has no producer until Stage 3, so during its drag the Metal layer still holds the
+    /// PRE-DRAG frame and the picture the user is looking at is the `CGImage` overlay. Dropping
+    /// that overlay at release would show the pre-drag frame for the ~25–55 ms until the reader
+    /// delivers, and the seeked-to frame would then replace it — which is exactly the jump the
+    /// 2026-08-28 position fix removed. So the hold survives for the one path that still needs it.
     ///
-    /// `MetalVideoRenderer.onFirstPresentAfterFlush` — a one-shot that fires when the renderer's
-    /// `presentsSinceFlush` counter goes 0 → 1. Every seek flushes (`FrameEngine.beginReading`, and
-    /// the libav path), and `flush()` zeroes that counter, so the edge means exactly "the first
-    /// frame belonging to the seek I just started has been presented". Two properties make it safe:
+    /// WHAT DID GO: the generation counter and the three staleness checks it fed. They existed
+    /// because a `final:` preview, the one-shot and the timeout could each land late and disagree
+    /// about which release they belonged to. There is no `final:` request any more, and the two
+    /// survivors both do the same idempotent thing — nil the image — so a late one cannot put a
+    /// stale frame back. A new grab replaces the image on its first preview, as before.
     ///
-    ///   * It is an EDGE, not a level. Arming happens mid-generation, while the previous frame is
-    ///     still up and the count is already non-zero, so nothing that repaints the OLD generation
-    ///     can satisfy it — only the seek's own flush can bring the count back to 0.
-    ///   * "Presented" is literal: the counter is incremented immediately after `presentDrawable`,
-    ///     which does `waitUntilScheduled()` and a committed `CATransaction` around `present()`.
-    ///     The frame is with the compositor before we remove the overlay, so there is no turn on
-    ///     which neither surface has content — no flash, no gap.
-    ///
-    /// ── WHAT HAPPENS IF THE SEEK FAILS OR IS SLOW ─────────────────────────────────────────────
-    ///
-    /// The timeout, unconditionally. `beginReading` can return before it ever flushes (no asset, no
-    /// video track, no renderer) and can fail after flushing (`AVAssetReader` create failure), and
-    /// in neither case does a frame arrive — so the one-shot alone would pin the overlay forever.
-    /// The bound is 400 ms: measured first-frame latency after `exactSeek` is 27 ms mean / 118 ms
-    /// worst on ProRes and 54 ms mean / 84 ms worst on H.264, so this is >3× the worst observed and
-    /// still short enough to read as a hesitation rather than a freeze. On timeout the overlay is
-    /// simply dropped, which is the OLD behaviour — a possible one-frame jump. Degrading to the bug
-    /// is acceptable; degrading to a stuck picture is not.
-    private func beginScrubHandoff() {
-        scrubHandoff &+= 1
-        let handoff = scrubHandoff
-        scrubHoldTask?.cancel()
-
+    /// The 400 ms bound stays for the reason it was written: `beginReading` can return without
+    /// ever flushing (no asset, no video track, no renderer) and can fail after flushing, and in
+    /// neither case does a frame arrive — so the one-shot alone would pin the overlay forever.
+    /// Measured first-frame latency after `exactSeek` is 27 ms mean / 118 ms worst, so this is >3×
+    /// the worst observed. Retired with the whole MXF overlay in Stage 3.
+    @MainActor
+    private func holdScrubOverlayUntilPresented() {
+        guard engine.usesLibavScrub, scrubPreviewImage != nil else { return }
         metalRenderer?.onFirstPresentAfterFlush = {
-            // Fires on the RENDER thread — hop before touching any of this view's state.
-            Task { @MainActor in
-                guard handoff == scrubHandoff else { return }
-                endScrubHandoff(framePresented: true)
-            }
+            // Fires on the RENDER thread — hop before touching view state.
+            Task { @MainActor in scrubPreviewImage = nil }
         }
-
-        scrubHoldTask = Task { @MainActor in
+        Task { @MainActor in
             try? await Task.sleep(nanoseconds: 400_000_000)
-            // A cancelled sleep THROWS and `try?` swallows it, so without this guard the frame
-            // arriving first would run the timeout's body immediately afterwards. Harmless today
-            // (both paths end the same handoff) but only by accident, and the generation check
-            // would silently carry the whole correctness argument. Same trap the connect banner
-            // documents at its own `Task.sleep`.
-            guard !Task.isCancelled, handoff == scrubHandoff else { return }
-            endScrubHandoff(framePresented: false)
+            guard !Task.isCancelled else { return }
+            metalRenderer?.onFirstPresentAfterFlush = nil
+            scrubPreviewImage = nil
         }
     }
-
-    /// Retire the handoff WITHOUT touching the overlay image. Bumping the generation is what makes
-    /// this idempotent and race-free: whichever of the one-shot, the timeout and the final preview
-    /// gets here first invalidates the other two, because each checks the generation it captured.
-    @MainActor
-    private func cancelScrubHandoff() {
-        scrubHandoff &+= 1
-        scrubHoldTask?.cancel()
-        scrubHoldTask = nil
-        metalRenderer?.onFirstPresentAfterFlush = nil
-    }
-
-    /// Retire the handoff AND take the overlay down — the normal completion, reached when the
-    /// seeked-to frame is on screen or when the timeout fires.
-    ///
-    /// `framePresented` distinguishes the two callers, and under the DEBUG split it is the whole
-    /// arming rule — see the block below. Outside the split the two paths are identical, which is
-    /// what they were before the parameter existed.
-    @MainActor
-    private func endScrubHandoff(framePresented: Bool) {
-        cancelScrubHandoff()
-        #if DEBUG
-        // ⚠️ TEMPORARY DIAGNOSTIC — `MANIFOLD_SCRUB_SPLIT=1`; see `ScrubDebug.splitEnabled`.
-        //
-        // THIS IS THE ONE MOMENT AT WHICH THE COMPARISON IS VALID, AND IT IS WHY THE SPLIT ARMS
-        // HERE AND NOWHERE ELSE. Three conditions have to hold at once for the two halves to be the
-        // same frame, and all three hold exactly on the `framePresented` path:
-        //
-        //   1. BOTH PATHS WERE ASKED FOR THE SAME MEDIA TIME. The release branch requests the final
-        //      preview at `scrubValue` (past both throttle gates, which is what that request is
-        //      for) and then calls `exactSeek(to: scrubValue)`. One number, both decoders.
-        //   2. THE SEEKED FRAME IS ACTUALLY ON THE METAL LAYER. `framePresented == true` means the
-        //      renderer's `onFirstPresentAfterFlush` one-shot fired, i.e. the first frame belonging
-        //      to THIS seek has been through `presentDrawable`. On the TIMEOUT path it has not, and
-        //      the right half would be showing the pre-seek frame — so that path does not arm, it
-        //      says so, and it takes the overlay down as normal.
-        //   3. NOTHING MOVES AFTERWARDS. The release branch skips the play-resume while the split
-        //      is enabled (see there), so the Metal layer holds this frame for as long as you look.
-        //
-        // ⚠️ WHAT CONDITION 1 IS *NOT*: a guarantee that one media time means one frame. Two
-        // decoders are involved and they select independently. That was measured rather than
-        // assumed — 80 positions across two ProRes fixtures, in docs/BUGS.md → "MEASURED 2026-08-27
-        // — the tolerance mechanism is REFUTED on ProRes": generator and reader returned the SAME
-        // frame in 80 of 80, at every tolerance setting, because on all-intra every frame is a sync
-        // sample. On LONG-GOP the same harness measured the shipping ±0.5 s tolerance putting the
-        // preview up to ELEVEN FRAMES away, in both directions. So the split is a valid instrument
-        // on all-intra and is NOT one on long-GOP; the armed line below prints the codec so the
-        // reading carries its own validity, and `codecIsAllIntra` refuses to guess.
-        if ScrubDebug.splitEnabled {
-            guard framePresented else {
-                NSLog("[SPLIT] NOT ARMED — the seek timed out (400 ms) without presenting a frame. "
-                      + "The Metal half would be the PRE-SEEK frame. Overlay dropped; scrub again.")
-                scrubPreviewImage = nil
-                return
-            }
-            splitLatched = true
-            logScrubSplitArmed()
-            return   // HOLD the overlay. ⌃⌥⇧S or a new drag takes it down — see `dismissScrubSplit`.
-        }
-        #endif
-        scrubPreviewImage = nil
-    }
-
-    #if DEBUG
-    /// ⚠️ TEMPORARY DIAGNOSTIC — see `ScrubDebug.splitEnabled`. One line, at arm time, carrying the
-    /// facts a still photograph of the screen cannot: which frame both halves are meant to be, and
-    /// whether this file's codec is one the split is valid on at all.
-    @MainActor
-    private func logScrubSplitArmed() {
-        let fps = frameRateOrDefault
-        let codec = engine.metadata?.codecName ?? "—"
-        let validity: String = {
-            switch codecIsAllIntra(codec) {
-            case .some(true):  return "VALID (all-intra: generator and reader select the same frame)"
-            case .some(false): return "⚠️ INVALID — LONG-GOP. The ±0.5 s generator tolerance puts the "
-                                    + "preview up to 11 frames off the seeked frame (measured). The "
-                                    + "halves are probably DIFFERENT FRAMES; do not read brightness."
-            case .none:        return "⚠️ UNKNOWN CODEC — establish all-intra vs long-GOP before "
-                                    + "reading this. Long-GOP invalidates the comparison entirely."
-            }
-        }()
-        NSLog("[SPLIT] ARMED t=%.4f s frame=%d @%.3f fps codec=%@ rect=%.1f×%.1f seam=%.1f | %@",
-              scrubValue, Int((scrubValue * fps).rounded()), fps, codec,
-              drawnVideoSize.width, drawnVideoSize.height, drawnVideoSize.width / 2, validity)
-    }
-
-    /// nil means "not established" — deliberately, and it is the point of the function. A default of
-    /// `true` would print VALID over a long-GOP file and quietly convert an unknown into a
-    /// measurement; a default of `false` would cry wolf over every ProRes variant not listed. The
-    /// names are `MediaInspector.codecName`'s and `avcodec_get_name`'s, which is why both spellings
-    /// of the ProRes family appear.
-    private func codecIsAllIntra(_ codec: String) -> Bool? {
-        let c = codec.lowercased()
-        if c.contains("prores") || c.contains("dnx") || c.contains("jpeg") { return true }
-        if c.contains("h.264") || c.contains("h264") || c.contains("avc")
-            || c.contains("hevc") || c.contains("h.265") || c.contains("av1") { return false }
-        return nil
-    }
-
-    /// ⚠️ TEMPORARY DIAGNOSTIC — see `ScrubDebug.splitEnabled`. Takes the held split down and
-    /// returns the window to the ordinary Metal-only picture. Reached from ⌃⌥⇧S and from a new
-    /// scrub grab; both are no-ops when nothing is latched.
-    @MainActor
-    private func dismissScrubSplit() {
-        guard splitLatched else { return }
-        splitLatched = false
-        scrubPreviewImage = nil
-        NSLog("[SPLIT] dismissed")
-    }
-    #endif
 
     private func cycleReadout() {
         let all = ReadoutMode.allCases
