@@ -172,7 +172,7 @@ final class SRTAudioDecoder {
                                                channelCount: channelCount) {
         case .success(let labels):
             requestedLabels = labels
-            let asked = labels.map(AudioChannelLayoutBridge.roleName(for:)).joined(separator: " ")
+            let asked = AudioChannelLayoutBridge.roleNames(for: labels).joined(separator: " ")
             if var blob = AudioChannelLayoutBridge.bitmapLayoutData(for: labels) {
                 requestStatus = blob.withUnsafeMutableBytes { raw in
                     AudioConverterSetProperty(conv, kAudioConverterOutputChannelLayout,
@@ -428,7 +428,11 @@ final class SRTAudioDecoder {
                          + "\(channelCount) decoded channel(s)")
             return
         }
-        let roles = labels.map(AudioChannelLayoutBridge.roleName(for:))
+        // Set-aware, like every site holding a full ordered label set — see `roleNames(for:)`.
+        // ⚠️ AND IT MUST MATCH THE `asked` STRING BELOW, which is why both were converted in one
+        // change: naming one side of that comparison set-aware and the other set-blind would make
+        // an identical layout compare unequal and log a spurious mux/decoder disagreement.
+        let roles = AudioChannelLayoutBridge.roleNames(for: labels)
         guard AudioChannelLayoutBridge.isUsable(roles) else {
             reportNoLayout("the converter's layout names no position this app has a role for "
                          + "(\(roles.joined(separator: " ")))")
@@ -438,7 +442,7 @@ final class SRTAudioDecoder {
         channelLayoutData = AudioChannelLayoutBridge.descriptionsLayoutData(for: labels)
         channelRoles = roles
 
-        let asked = requestedLabels.map(AudioChannelLayoutBridge.roleName(for:)).joined(separator: " ")
+        let asked = AudioChannelLayoutBridge.roleNames(for: requestedLabels).joined(separator: " ")
         let gotRoles = roles.joined(separator: " ")
         if requestMade && requestStatus == noErr && asked != gotRoles {
             // Loud, because this is the case where the mux and the decoder disagree about the

@@ -50,6 +50,11 @@ public final class LibavAudioSource: @unchecked Sendable {
     private var formatDesc: CMAudioFormatDescription?
     private var skipToSeconds: Double = -1
 
+    /// The source's channel layout in CoreAudio's DESCRIPTIONS spelling, built once in `open()`
+    /// from `par.ch_layout`, or nil when the container named nothing this can translate. Attached
+    /// to every `CMFormatDescription` this source creates — see `ensureSwr`.
+    private var channelLayoutData: Data?
+
     // Output PCM contract the AVSampleBufferAudioRenderer consumes: interleaved
     // 32-bit float at the source rate/channel count (swresample normalizes any
     // source format — PCM/AAC/etc. — planar or packed — into this).
@@ -111,11 +116,74 @@ public final class LibavAudioSource: @unchecked Sendable {
 
         var layoutBuf = [CChar](repeating: 0, count: 64)
         _ = av_channel_layout_describe(&par.pointee.ch_layout, &layoutBuf, 64)
+        // ⚠️ `layoutBuf` IS A DISPLAY STRING AND NOTHING READS IT AS DATA. The line below is the
+        // one that carries the declaration: per-channel labels, in interleave order, in the form
+        // `AudioChannelLayoutBridge.roles(from:)` reads FIRST. Without it every libav file reported
+        // "roles NONE DECLARED" no matter what the container said.
+        self.channelLayoutData = Self.declaredChannelLayout(&par.pointee.ch_layout)
         return AudioInfo(
             codecName: String(cString: avcodec_get_name(cid)),
             sampleRate: Int(sampleRate),
             channels: Int(channels),
             layoutName: String(cString: layoutBuf))
+    }
+
+    /// libav's `AVChannelLayout` → a CoreAudio DESCRIPTIONS layout, or nil when it named no
+    /// channel this bridge covers.
+    ///
+    /// ── WHY PER-CHANNEL DESCRIPTIONS AND NOT A LAYOUT TAG ────────────────────────────────────
+    ///
+    /// Because the order is part of the declaration and a tag cannot carry it. Two of the four
+    /// audio streams in `decl_5_5_5F_51_51F.mxf` are `AV_CHANNEL_ORDER_CUSTOM` in FILM order
+    /// (`L C R Ls Rs LFE`) — libav has no canonical name for that layout, and neither does
+    /// CoreAudio: there is no tag whose expansion is that sequence. Descriptions state each
+    /// channel positionally, so the order survives the round trip with no table and no naming
+    /// convention in the middle. `av_channel_layout_channel_from_index` is what makes this work
+    /// for every `AVChannelOrder` — NATIVE, CUSTOM and UNSPEC answer the same question through it.
+    ///
+    /// ⚠️ NEVER INFER A LABEL FROM A COUNT OR A POSITION. A channel whose `AVChannel` is outside
+    /// the 18 WAVE positions `AudioChannelLayoutBridge.positions` covers gets
+    /// `kAudioChannelLabel_Unused` — not a guess from where it sits in the interleave. And when
+    /// NOTHING maps (an `UNSPEC` layout, an ambisonic bed, a binaural pair) this returns nil and
+    /// the format description is built with no layout at all, exactly as it was before this
+    /// existed: the tap then reports NONE DECLARED and the meters show channel NUMBERS. That is
+    /// the honest answer. A wrong label on the instrument someone uses to decide which channel is
+    /// which is worse than no label — the rule is stated on `AudioTapBuffer.Format.roles` and this
+    /// is a second site that has to keep it.
+    ///
+    /// ⚠️ A REFUSAL AND AN ABSENCE LOOK THE SAME DOWNSTREAM. "The container declared nothing" and
+    /// "the container declared something outside the table" both arrive at the tap as NONE
+    /// DECLARED. `AudioChannelLayoutBridge.MaskRefusal` exists because that distinction is worth
+    /// carrying on the SRT path; this source is silent by construction (it logs nothing; the
+    /// engine prints its `AudioInfo`), so the distinction is not available here today.
+    private static func declaredChannelLayout(_ layout: UnsafePointer<AVChannelLayout>) -> Data? {
+        let count = Int(layout.pointee.nb_channels)
+        guard count > 0 else { return nil }
+
+        var labels: [AudioChannelLabel] = []
+        labels.reserveCapacity(count)
+        var named = 0
+        for i in 0..<count {
+            // Answers for CUSTOM order (the `u.map` array) and NATIVE order (the mask's i-th set
+            // bit) alike, which is the reason this walks indices instead of reading `u.mask` —
+            // the mask is meaningless for the two Film-order streams and reading it would refuse
+            // exactly the layouts this change exists to carry.
+            let channel = av_channel_layout_channel_from_index(layout, UInt32(i))
+            if let position = AudioChannelLayoutBridge.positions
+                .first(where: { $0.ffmpegBit == Int(channel.rawValue) }) {
+                labels.append(position.label)
+                named += 1
+            } else {
+                // AV_CHAN_NONE (-1), AV_CHAN_UNKNOWN, the ambisonic range, and everything above
+                // bit 17 land here. Present in the layout, named by nothing we will stand behind.
+                labels.append(kAudioChannelLabel_Unused)
+            }
+        }
+        // All-Unused is a declaration in form only — the same thing `isUsable` refuses one layer
+        // up. Attaching it would replace "no layout" with "a layout that says nothing", which is
+        // strictly more work to read and no more informative.
+        guard named > 0 else { return nil }
+        return AudioChannelLayoutBridge.descriptionsLayoutData(for: labels)
     }
 
     /// Seek to `time` and arm the continuous audio pump for this session, paced by
@@ -261,10 +329,30 @@ public final class LibavAudioSource: @unchecked Sendable {
             mBitsPerChannel: UInt32(bytesPerSample * 8),
             mReserved: 0)
         var fd: CMAudioFormatDescription?
-        guard CMAudioFormatDescriptionCreate(
-            allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil,
-            magicCookieSize: 0, magicCookie: nil, extensions: nil,
-            formatDescriptionOut: &fd) == noErr else { return false }
+        // ⚠️ `layoutSize` IS THE TRUE BYTE COUNT OF A VARIABLE-LENGTH STRUCT, NOT
+        // `MemoryLayout<AudioChannelLayout>.size`. `AudioChannelLayout` declares ONE
+        // `AudioChannelDescription` inline, so a 6-channel layout is `offsetof(mChannelDescriptions)`
+        // plus SIX strides — `descriptionsLayoutData` allocates exactly that and `Data.count` is it.
+        // Passing the struct's own size instead would hand CoreMedia a buffer five descriptions
+        // short of what its header claims and it would read past the end.
+        let status: OSStatus
+        if let channelLayoutData {
+            status = channelLayoutData.withUnsafeBytes { raw in
+                CMAudioFormatDescriptionCreate(
+                    allocator: nil, asbd: &asbd,
+                    layoutSize: raw.count,
+                    layout: raw.baseAddress!.assumingMemoryBound(to: AudioChannelLayout.self),
+                    magicCookieSize: 0, magicCookie: nil, extensions: nil,
+                    formatDescriptionOut: &fd)
+            }
+        } else {
+            // Unchanged from before: no declaration to make, so none is made up.
+            status = CMAudioFormatDescriptionCreate(
+                allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil,
+                magicCookieSize: 0, magicCookie: nil, extensions: nil,
+                formatDescriptionOut: &fd)
+        }
+        guard status == noErr else { return false }
         self.formatDesc = fd
         return true
     }

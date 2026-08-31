@@ -5,6 +5,18 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.8.0
+
+- SRT streams now carry audio, including multichannel. Channel order is read from the stream
+  rather than assumed.
+- Scrubbing now shows real decoded frames from the file, so the picture you see while dragging
+  is the frame you land on.
+- Scopes move while you scrub. They used to freeze for the whole gesture.
+- Fixed: HDR files no longer dim to SDR while scrubbing.
+- Scrubbing MXF and DNx is much faster, and HDR MXF previews are no longer flattened to SDR.
+- SDI output now follows the scrub, matching the desktop and the scopes. It previously held the
+  frame you started from — worth knowing if you monitor SDI in a suite.
+
 ## 0.7.0
 
 - Streams now carry audio. WHEP streams have never had sound — it simply wasn't received. Audio

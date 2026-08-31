@@ -266,10 +266,99 @@ public enum AudioChannelLayoutBridge {
         guard let raw = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &size),
               let labels = labels(fromLayout: UnsafeRawPointer(raw), size: size),
               !labels.isEmpty else { return nil }
-        return labels.map(roleName(for:))
+        return roleNames(for: labels)
+    }
+
+    /// ⚠️ THE SET-AWARE NAMER. **Every site holding a full ordered label set calls this**, never
+    /// `roleName(for:)` in a `map`. The rule below cannot be decided one label at a time — it turns
+    /// on whether the layout has ONE surround pair or TWO — so a caller that maps the single-label
+    /// namer over an array silently opts out of it, and then a file and a stream describing the
+    /// same 5.1 print different names. That is the exact failure this type's header says it exists
+    /// to prevent, which is why all four call sites were converted together.
+    ///
+    /// ── THE RULE ──────────────────────────────────────────────────────────────────────────────
+    ///
+    ///   * A layout with ONE surround pair names it **Ls/Rs** — whether the source declared SIDE
+    ///     (Apple 10/11) or BACK (Apple 5/6).
+    ///   * A layout with BOTH names the side pair **Ls/Rs** and the rear pair **Lss/Rss**.
+    ///   * **`Lsd`/`Rsd` never reach a user-facing surface.**
+    ///
+    /// ── WHY, AND THE PRECEDENT ────────────────────────────────────────────────────────────────
+    ///
+    /// **Flip already made this decision, and this matches it deliberately.** Flip's `ROLE_LABELS`
+    /// is a TRANSLATION LAYER, not a mirror of Apple's header: its entry for Apple label 33 is
+    /// commented Apple `"Rls"` and displayed as `Lss`. Apple's vocabulary in, industry vocabulary
+    /// out. This function is Manifold's copy of that seam.
+    ///
+    /// **Flip keeps one exception — `Lsd`/`Rsd` read-only — and it does not transfer.** Flip WRITES
+    /// files, so normalising 10/11 to 5/6 there would make its encoder write 5/6 back on the next
+    /// save, silently converting a side-declared file to back surrounds. **Manifold has no writing
+    /// path at all** — verified across every Swift/ObjC/C file: no `AVAssetWriter`, no
+    /// `AVAssetExportSession`, no `avformat_write_header`. Nothing this names can be saved, so the
+    /// reason for the exception is absent and the general rule applies.
+    ///
+    /// **And the distinction does not belong on a meter.** SMPTE delivery layouts have exactly ONE
+    /// surround pair at 5.1; surround-direct is not a delivery channel. A colourist reading a bar
+    /// row wants to know which speaker a bar is, and at 5.1 there is only one candidate — so
+    /// printing `Lsd` there states a distinction the layout does not contain, in the one place
+    /// someone uses to decide which channel is which.
+    ///
+    /// ── ⚠️ DISPLAY ONLY. THE NUMERIC VOCABULARY IS UNTOUCHED, ON PURPOSE ──────────────────────
+    ///
+    /// This function renames; it does not remap. `positions` still maps `AV_CHAN_SIDE_LEFT` to
+    /// `kAudioChannelLabel_LeftSurroundDirect` and must keep doing so, because
+    /// `bitmapLayoutData(for:)` feeds `kAudioConverterOutputChannelLayout`
+    /// (`SRTAudioDecoder.swift`, the request beside `AudioConverterSetProperty`). Changing which
+    /// Apple label a side channel maps to would change **the physical channel order AudioToolbox is
+    /// asked to emit** — moving audio in order to change a word. The labels going in are exactly
+    /// the labels the file declared; only the strings coming out change.
+    ///
+    /// ⚠️ **THE HONESTY RULE IS UNCHANGED AND MUST STAY THAT WAY.** This decides what a DECLARED
+    /// channel is CALLED. It never gives a name to something undeclared: `Discrete_0…n`, unmapped
+    /// labels (`?(n)`) and `Unused` (`—`) pass through exactly as `roleName(for:)` renders them,
+    /// `isUsable` still refuses an all-unnamed set, and an undeclared layout still meters as
+    /// NUMBERS. Nothing here infers a role from a count or a position.
+    public static func roleNames(for labels: [AudioChannelLabel]) -> [String] {
+        let hasSide = labels.contains(kAudioChannelLabel_LeftSurroundDirect)
+                   || labels.contains(kAudioChannelLabel_RightSurroundDirect)
+        let hasBack = labels.contains(kAudioChannelLabel_LeftSurround)
+                   || labels.contains(kAudioChannelLabel_RightSurround)
+        let hasRear = labels.contains(kAudioChannelLabel_RearSurroundLeft)
+                   || labels.contains(kAudioChannelLabel_RearSurroundRight)
+
+        // Nothing to resolve unless the SIDE pair is present: with side absent, the existing
+        // single-label names are already the rule's answer (5/6 → Ls/Rs as the lone pair, 33/34 →
+        // Lss/Rss as the rear pair), which is why an AVFoundation 5.1 and an SRT 5.1 are unaffected.
+        //
+        // ⚠️ THREE SURROUND PAIRS AT ONCE IS OUT OF SCOPE AND SAYS SO. Apple has three (5/6, 10/11,
+        // 33/34); a layout declaring all three has more surround pairs than "one pair or two" can
+        // assign without two of them colliding on Lss/Rss. That is beyond the delivery layouts this
+        // rule serves, so it keeps the raw Apple vocabulary — three distinct names — rather than
+        // forcing an industry one. Exotic and honest beats tidy and wrong.
+        guard hasSide, !(hasBack && hasRear) else { return labels.map(roleName(for:)) }
+
+        return labels.map { label in
+            switch label {
+            // The side pair IS the delivery surround pair — what a 5.1 or 7.1 mix calls Ls/Rs.
+            case kAudioChannelLabel_LeftSurroundDirect:  return "Ls"
+            case kAudioChannelLabel_RightSurroundDirect: return "Rs"
+            // Reached ONLY when both pairs are present (WAVE 7.1: BL BR SL SR). Apple's
+            // `LeftSurround` is WAVE's BACK left — see `positions` — so in a two-pair layout it is
+            // the REAR pair and takes the rear pair's name. With side absent this branch is not
+            // entered at all and 5/6 keeps Ls/Rs.
+            case kAudioChannelLabel_LeftSurround:  return "Lss"
+            case kAudioChannelLabel_RightSurround: return "Rss"
+            default: return roleName(for: label)
+            }
+        }
     }
 
     /// Apple `AudioChannelLabel` → short role name (Flip vocabulary, normalized).
+    ///
+    /// ⚠️ **SINGLE-LABEL, AND THEREFORE SET-BLIND.** It cannot apply the one-pair/two-pair rule,
+    /// so it renders the SIDE pair as `Lsd`/`Rsd`. Correct for a caller that genuinely has one
+    /// label and no set context; **wrong for anything holding a whole layout** — that calls
+    /// `roleNames(for:)`. Do not reintroduce `labels.map(roleName(for:))`.
     ///
     /// ⚠️ KEYED ON THE NUMBER, AND THE NAMES ARE NOT SELF-EXPLANATORY. `LeftSurround` (5) is
     /// WAVE's BACK left and prints "Ls"; `LeftSurroundDirect` (10) is the SIDE pair and prints
