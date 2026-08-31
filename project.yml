@@ -221,7 +221,43 @@ targets:
               - public.video
               - com.apple.quicktime-movie
               - public.mpeg-4
+              # ── WHY MXF IS NAMED AND THE OTHER CONTAINERS ARE NOT ──────────────────────
+              #
+              # Every other format this app opens arrives through AVFoundation, and
+              # `public.movie` is the honest claim for them: what Manifold can actually
+              # play is whatever AVFoundation exposes a video track for, which is a
+              # question only FrameEngine's phase-1 vet can answer (see `loadAsset` —
+              # an .r3d conforms to public.movie and is still refused there). Listing
+              # those types individually would be claiming more than is true.
+              #
+              # MXF IS THE EXCEPTION BECAUSE IT IS THE ONE CONTAINER THAT DOES NOT GO
+              # THROUGH THAT VET AT ALL. AVFoundation cannot demux MXF, so FrameEngine
+              # detects it by extension and routes it to libav UNCONDITIONALLY — it is
+              # the single format the app commits to opening before it has looked
+              # inside. That certainty is what earns an explicit claim.
+              #
+              # ⚠️ THIS IS NOT A NEW TYPE AND MUST NOT BECOME ONE. `org.smpte.mxf` is
+              # declared by macOS itself, in CoreTypes.bundle's
+              # UTImportedTypeDeclarations (VERIFIED on 26.5.1/25F80), conforming to
+              # public.movie — so there is nothing here for a
+              # UTImportedTypeDeclarations block in this app to add, and minting a
+              # com.graviton.* type for .mxf would make Launch Services treat our
+              # claim as a DIFFERENT format from everyone else's. It is also the string
+              # already in circulation (Screen.app imports it; Flip's extension binding
+              # resolves to it; only Infuse mints its own, and that is the mistake to
+              # avoid).
+              #
+              # WHAT THE LINE BUYS, given the conformance was already there: Launch
+              # Services ranks a DIRECT type claim above one inherited through
+              # public.movie. Without it, apps that name the extension or the type
+              # outright sit in front of Manifold in the Open With list for the one
+              # container Manifold handles most deliberately.
+              - org.smpte.mxf
             CFBundleTypeRole: Viewer
+            # ⚠️ STAYS `Alternate`, INCLUDING FOR MXF. Rank is a claim about who SHOULD
+            # own the file type, and that is the user's call to make in Finder, not
+            # ours to assert at install time. `Owner`/`Default` here would have a video
+            # player quietly displace whatever the user already chose.
             LSHandlerRank: Alternate
     settings:
       base:

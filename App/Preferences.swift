@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// How the transport controls are presented.
 /// Where **Open…** puts a file: into the window you invoked it from, or into a new one.
@@ -854,6 +855,336 @@ final class StreamBookmarkStore: ObservableObject {
     }
 }
 
+/// ── THE LAUNCH SERVICES DEFAULT HANDLER FOR ONE CONTENT TYPE, AS A SETTINGS ROW ─────────────
+///
+/// Built in the "I/O and Runtimes" idiom — read the system's state, show what it says, offer to
+/// change it, re-read on appear — and deliberately NOT in the `@AppStorage` idiom every other row
+/// in Settings uses.
+///
+/// ⚠️ THIS IS NOT A PREFERENCE AND MUST NOT BE STORED AS ONE. The default handler lives in the
+/// Launch Services database. The user can change it from Finder's Get Info without this app ever
+/// running, and installing another video app can change it too. A mirrored `@AppStorage` copy would
+/// be a second answer to a question the system already answers, and it would be the WRONG answer
+/// the moment either of those happens. Everything below is read from `NSWorkspace` on demand.
+///
+/// ── ⚠️ ONE INSTANCE PER TYPE, AND NEVER A CONTROL THAT CLAIMS SEVERAL AT ONCE ───────────────
+///
+/// Each type gets its own instance, its own row and its own button, because taking `.mov` and
+/// taking `.mp4` are genuinely different decisions and a user may want one without the other.
+/// A single "make Manifold the default video player" action would collapse three deliberate
+/// choices into one click that displaces associations the user made on purpose — which is exactly
+/// the aggressive move this design exists to avoid. There is deliberately no claim-all path.
+final class DefaultHandlerStatus: ObservableObject, Identifiable {
+
+    /// ── WHERE THE INSTANCES LIVE, AND WHY THEY ARE STATIC RATHER THAN `@StateObject` ────────
+    ///
+    /// Statics, in one array, for three reasons:
+    ///
+    ///   1. It is the idiom already in this file — every other observed object in `SettingsView`
+    ///      (`NDIService.shared`, `DeckLinkService.shared`) is a shared instance, and a reader
+    ///      should not have to work out why this one is different.
+    ///   2. THE ARRAY IS WHAT KEEPS THE WIRING SINGULAR. The section's `.onAppear` refreshes the
+    ///      whole array in one line; adding a fourth type is one entry here and nothing else. Three
+    ///      `@StateObject`s would mean three declarations, three refresh calls and three chances
+    ///      to forget one.
+    ///   3. `@StateObject` cannot express this shape anyway: the rows are rendered from a
+    ///      `ForEach`, and per-element state has to be owned outside the loop. `DefaultHandlerRow`
+    ///      observes its own instance, which is what makes a single row re-render when its own
+    ///      claim completes without the parent observing anything.
+    ///
+    /// Lifetime is not a concern in either direction: these are three tiny objects that hold no
+    /// resources, and `refresh()` on appear means a stale read cannot survive the window opening.
+    ///
+    /// ⚠️ `.mov` AND `.mp4` ARE HERE BECAUSE THEY WERE ASKED FOR, NOT BECAUSE THEY ARE SAFE. On an
+    /// editorial machine both usually have associations someone chose on purpose. That is an
+    /// argument for three separate buttons and against a claim-all, NOT an argument for hiding
+    /// them — the row states the current holder by name, so the user can see what they would be
+    /// displacing before they do it.
+    static let videoHandlers: [DefaultHandlerStatus] = [
+        // `org.smpte.mxf` is a string because macOS declares the type but the SDK exposes no
+        // constant for it; the other two have constants whose identifiers were CHECKED against the
+        // strings in project.yml's CFBundleDocumentTypes (com.apple.quicktime-movie, public.mpeg-4)
+        // rather than assumed to match.
+        DefaultHandlerStatus(contentType: UTType("org.smpte.mxf"), name: "MXF files"),
+        DefaultHandlerStatus(contentType: .quickTimeMovie,         name: "QuickTime movies"),
+        DefaultHandlerStatus(contentType: .mpeg4Movie,             name: "MP4 files")
+    ].filter { $0.contentType != nil }
+
+    /// The type this row is about. Optional only because `UTType(_: String)` is; the array above
+    /// filters the nil case out, so a rendered row always has one.
+    let contentType: UTType?
+
+    /// How the row names the type, as a plural noun phrase — the row label reads "\(name) open in"
+    /// and the count caption reads "…can open \(name)".
+    let name: String
+
+    var id: String { contentType?.identifier ?? name }
+
+    /// Display name of the app that currently opens the type; nil if nothing claims it.
+    @Published private(set) var currentHandlerName: String?
+
+    /// Whether THIS bundle is that app.
+    ///
+    /// ⚠️ DECIDED BY BUNDLE IDENTIFIER, NEVER BY URL EQUALITY. MEASURED on the development machine:
+    /// `urlsForApplications(toOpen:)` returns 32 URLs for `org.smpte.mxf` but only SIX distinct
+    /// bundle identifiers — a sibling app alone accounts for four of them, registered from
+    /// `/Applications`, from two dev trees and from a mounted DMG. Comparing URLs would report "not
+    /// the default" while the app in question plainly was, and the failure would be invisible to
+    /// anyone whose machine had never mounted a disk image.
+    @Published private(set) var isSelf = false
+
+    /// How many DISTINCT applications can open the type, counted by bundle identifier for the
+    /// reason above — 6 / 11 / 8 for the three types here, from 32 raw URLs apiece.
+    ///
+    /// ⚠️ A FLOOR, NOT A TOTAL, WHICH IS WHY THE CAPTION SAYS "AT LEAST". MEASURED: this returns
+    /// exactly 32 URLs for all three video types AND for com.red.r3d, while returning 3 for BRAW,
+    /// 5 for DPX and 14 for PDF. A number that stops dead at 32 for every type popular enough to
+    /// reach it, and never exceeds it, is a cap — so a type with more than 32 registrations has
+    /// candidates we were never shown, and any count derived from this list can only be a lower
+    /// bound. Stating it as an exact total would be asserting something this API does not tell us.
+    @Published private(set) var candidateCount = 0
+
+    /// ── WHAT A CLAIM ENDED AS, WHEN IT DID NOT END AS SUCCESS ──────────────────────────────
+    ///
+    /// Two cases and NOT one string, because the row has to render them DIFFERENTLY: a decline is
+    /// not a failure and must not be dressed as one. Success is the absence of this value — the
+    /// row states it by saying "Manifold" and dropping the button, which is a stronger statement
+    /// than any sentence would be.
+    enum ClaimOutcome {
+
+        /// The user was asked and said no. `keeping` is whatever still holds the type, taken from
+        /// the re-query rather than remembered from before — so the sentence and the row above it
+        /// come from the same read and cannot disagree.
+        case declined(keeping: String?)
+
+        /// Something went wrong and we do not know what. Carries the system's own description,
+        /// which is the honest thing to show when we have nothing better to say.
+        case failed(String)
+
+        var message: String {
+            switch self {
+            case .declined(let keeping):
+                // Names WHAT SURVIVED rather than what did not happen. "Kept “Screen”" describes
+                // the state of the machine; "the default wasn't changed" describes our failed
+                // attempt, which is not the user's concern — they answered a question and the
+                // machine did what they said.
+                if let keeping { return "Kept “\(keeping)”." }
+                return "No change."
+            case .failed(let description):
+                return description
+            }
+        }
+
+        /// Whether the row should draw attention to this. Only a genuine failure earns the orange
+        /// the NDI and DeckLink rows use; a decline is ordinary secondary text, because there is
+        /// nothing in it to act on.
+        var isFailure: Bool {
+            if case .failed = self { return true }
+            return false
+        }
+    }
+
+    /// The outcome of the last claim attempt, when it was anything other than success. Cleared by
+    /// the next read. See `claim()` — this is a first-class outcome, not an error path.
+    @Published private(set) var lastOutcome: ClaimOutcome?
+
+    /// A claim is in flight. The system may be showing the user a consent sheet during this, which
+    /// is why the button disables rather than pretending the work is instantaneous.
+    @Published private(set) var isChanging = false
+
+    private init(contentType: UTType?, name: String) {
+        self.contentType = contentType
+        self.name = name
+    }
+
+    /// Read the truth from Launch Services. Cheap, synchronous, main-thread; called on appear and
+    /// again after every claim.
+    func refresh() {
+        lastOutcome = nil
+        guard let type = contentType else {
+            currentHandlerName = nil; isSelf = false; candidateCount = 0
+            return
+        }
+        let workspace = NSWorkspace.shared
+
+        var identifiers = Set<String>()
+        for url in workspace.urlsForApplications(toOpen: type) {
+            if let identifier = Bundle(url: url)?.bundleIdentifier { identifiers.insert(identifier) }
+        }
+        candidateCount = identifiers.count
+
+        guard let handler = workspace.urlForApplication(toOpen: type) else {
+            currentHandlerName = nil
+            isSelf = false
+            return
+        }
+        currentHandlerName = Self.displayName(of: handler)
+        let handlerID = Bundle(url: handler)?.bundleIdentifier
+        isSelf = handlerID != nil && handlerID == Bundle.main.bundleIdentifier
+    }
+
+    /// Ask the system to make this app the default for the type.
+    ///
+    /// ── ⚠️ THE COMPLETION HANDLER RE-READS. IT DOES NOT ASSUME IT WON. ──────────────────────
+    ///
+    /// `setDefaultApplication(at:toOpen:completion:)` is asynchronous BECAUSE the system may put
+    /// the question to the user first — AppKit's own header says so: "Some types require user
+    /// consent before you can change their handlers. If a change requires user consent, the system
+    /// will ask the user asynchronously before invoking the completion handler."
+    ///
+    /// A user who is asked can say no. So the only honest thing this can do on completion is ask
+    /// Launch Services again and render whatever came back. Flipping a local flag on the strength
+    /// of having CALLED the setter would put a row on screen claiming an association the app does
+    /// not hold — and it would claim it most confidently in exactly the case where the user had
+    /// just declined.
+    ///
+    /// Refusal reaches us two ways and both are handled: an `Error`, or NO error and simply no
+    /// change. The `isSelf` re-read below is what catches the second, which is why the outcome is
+    /// derived from the re-read rather than from `error == nil`.
+    func claim() {
+        guard let type = contentType, !isChanging else { return }
+        isChanging = true
+        lastOutcome = nil
+
+        NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpen: type) { [weak self] error in
+            // The callback's queue is not documented as main; the published properties below drive
+            // a view. Marshal, exactly as NDIService's status refresh does.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isChanging = false
+                self.refresh()                    // clears lastOutcome; re-establishes the truth
+                if self.isSelf { return }         // it took — the row now says so on its own
+                if let error {
+                    // POSITIVE IDENTIFICATION, NOT ELIMINATION. A decline is recognised by the
+                    // OSStatus it nests, so anything we cannot recognise is reported as itself
+                    // rather than guessed at — which is why question 2 (does a genuine failure
+                    // return something other than 256?) stopped mattering: we no longer need it
+                    // to differ.
+                    let ns = error as NSError
+                    self.lastOutcome = Self.isUserCancelled(ns)
+                        ? .declined(keeping: self.currentHandlerName)
+                        : .failed(ns.localizedDescription)
+                } else {
+                    // ⚠️ THIS IS NOT THE DECLINE PATH. It used to claim it was, and that was
+                    // provably wrong: a decline arrives WITH an error and is handled above.
+                    //
+                    // What this branch actually is: the setter reported success and the re-query
+                    // still does not name us. It has NEVER BEEN OBSERVED TO FIRE. It is retained
+                    // because whether it CAN is unknown — the completion contract is undocumented,
+                    // so "no error, no change" is not ruled out — and if it ever does happen this
+                    // message is the only thing that will say so.
+                    self.lastOutcome = .failed("The default wasn't changed.")
+                }
+            }
+        }
+    }
+
+    /// Did the user decline, as opposed to something going wrong?
+    ///
+    /// ── THE MEASUREMENT THIS IS BUILT ON ────────────────────────────────────────────────────
+    ///
+    /// RUN: pressed "Use Manifold" on the MP4 row (public.mpeg-4), then chose Keep “Screen” in the
+    /// system's consent dialog.
+    ///
+    /// CAME BACK: NSCocoaErrorDomain 256 — `NSFileReadUnknownError`, Cocoa's generic "read failed,
+    /// reason unspecified" — carrying NSUnderlyingError = NSOSStatusErrorDomain -128,
+    /// `userCanceledErr`.
+    ///
+    /// THE TOP-LEVEL CODE SAYS NOTHING. 256 is what Cocoa returns when it has nothing specific, a
+    /// genuine failure could carry it too, and its `localizedDescription` is "The file couldn’t be
+    /// opened." — a sentence about files, which is what this row used to show a user who had just
+    /// answered a question correctly. THE UNDERLYING CODE IS THE WHOLE SIGNAL, which is why this
+    /// walks the chain rather than reading the top.
+    ///
+    /// ⚠️ APPKIT DOCUMENTS NONE OF THIS, so it is measured behaviour and not a contract.
+    /// NSWorkspace.h describes the consent prompt but says nothing about what the completion
+    /// handler reports, and the whole NSWorkspace error range in AppKitErrors.h (67328–67455)
+    /// holds exactly one named code — NSWorkspaceAuthorizationInvalidError — which concerns
+    /// NSWorkspaceAuthorization and not default handlers. There is no "user declined" constant to
+    /// match against. If a future macOS stops nesting -128, the cost is that a decline reads as a
+    /// failure again; the row stays correct about the STATE either way, because that comes from
+    /// the re-query and not from here.
+    ///
+    /// ⚠️ MATCHED ON DOMAIN AND CODE, NEVER ON TEXT. Every OSStatus error renders as the same
+    /// sentence with a different number in it — "The operation couldn’t be completed. (OSStatus
+    /// error N.)" — so the description distinguishes nothing whatsoever and the number is the
+    /// entire content. Matching the string would also break in every localisation.
+    private static func isUserCancelled(_ error: NSError) -> Bool {
+        // Over the WHOLE chain: -128 was measured one level down, but nothing promises it stays
+        // there, and an NSError can nest or carry several underlying errors at once.
+        var pending: [NSError] = [error]
+        while let current = pending.popLast() {
+            if current.domain == NSOSStatusErrorDomain, current.code == userCanceledErr {
+                return true
+            }
+            if let next = current.userInfo[NSUnderlyingErrorKey] as? NSError {
+                pending.append(next)
+            }
+            if let several = current.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] {
+                pending.append(contentsOf: several)
+            }
+        }
+        return false
+    }
+
+    /// An app's name as the user knows it. `FileManager.displayName(atPath:)` is not used: it
+    /// returns "Screen.app" for anyone who has "Show all filename extensions" turned on, and the
+    /// row reads badly with the extension in it.
+    private static func displayName(of url: URL) -> String {
+        let bundle = Bundle(url: url)
+        for key in ["CFBundleDisplayName", "CFBundleName"] {
+            if let name = bundle?.localizedInfoDictionary?[key] as? String, !name.isEmpty { return name }
+            if let name = bundle?.infoDictionary?[key] as? String, !name.isEmpty { return name }
+        }
+        return url.deletingPathExtension().lastPathComponent
+    }
+}
+
+/// One type's row: who opens it now, and the offer to change that.
+///
+/// ⚠️ A VIEW OF ITS OWN SO THAT EACH ROW OBSERVES ITS OWN OBJECT. `@ObservedObject` cannot be
+/// declared inside a `ForEach` closure, so without this the parent would have to observe all three
+/// and every claim would re-render the whole Settings form. Here a completed claim re-renders one
+/// row — the one that changed.
+private struct DefaultHandlerRow: View {
+
+    @ObservedObject var status: DefaultHandlerStatus
+
+    var body: some View {
+        LabeledContent("\(status.name) open in") {
+            HStack(spacing: 8) {
+                if status.isSelf {
+                    // No button: the only thing it could do has already happened. A disabled one
+                    // would invite "why can't I turn this off?", which is the question the caption
+                    // under the group answers.
+                    Text("Manifold").foregroundStyle(.secondary)
+                } else {
+                    // Named, not just counted — the user should see WHAT they are displacing
+                    // before they press the button, not after.
+                    Text(status.currentHandlerName ?? "No app").foregroundStyle(.secondary)
+                    Button("Use Manifold") { status.claim() }
+                        .disabled(status.isChanging)
+                }
+            }
+        }
+        if let outcome = status.lastOutcome {
+            // ⚠️ ORANGE ONLY FOR A GENUINE FAILURE. That is the signal the NDI and DeckLink rows
+            // use for "you can fix this", and a decline is not that — the user answered a question
+            // and the machine did what they said, so it reads as ordinary secondary text. Colouring
+            // both the same would put a warning next to a correctly-honoured choice.
+            Text(outcome.message)
+                .font(.caption)
+                .foregroundStyle(outcome.isFailure ? Color.orange : Color.secondary)
+        }
+        if status.candidateCount > 1 {
+            // "At least" is load-bearing — see `candidateCount`.
+            Text("At least \(status.candidateCount) apps on this Mac can open \(status.name).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// The Settings window contents (opens with ⌘,).
 struct SettingsView: View {
     // NDI runtime presence for the "NDI Runtime" status row. Observed so the row updates when
@@ -1043,7 +1374,46 @@ struct SettingsView: View {
                 Text("How large the picture is drawn, as a percentage of the source raster — 100% is one source pixel per source pixel, so a 3840×2160 file fills 1920×1080 points on a Retina display. Set it per window in the View menu (⌘1–⌘4, ⌘0); this is what a new window starts at, and it follows the last window you set.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                // ── DEFAULT APP FOR VIDEO TYPES ─────────────────────────────────────────────
+                //
+                // In Interface Options because this is the file-opening cluster — it sits with
+                // "Autoplay on open" and "Open files in", which is where someone looks for it.
+                // Built in the I/O and Runtimes idiom instead: rows reporting system state, an
+                // action next to each, re-read on appear.
+                //
+                // ⚠️ THREE ROWS, THREE BUTTONS, THREE DECISIONS — AND NO CLAIM-ALL. Taking MXF is
+                // an easy call (on a stock Mac nothing opens it well; QuickTime Player claims it
+                // through public.movie and then cannot play it). Taking .mov or .mp4 is not: on a
+                // working editorial machine those usually point somewhere on purpose. One control
+                // that took all three would make the easy call and the contested ones with the
+                // same click. Each row names its current holder so the choice is made with the
+                // consequence in view.
+                //
+                // ⚠️ BUTTONS AND NOT TOGGLES, because there is no API to give an association BACK.
+                // NSWorkspace can set a default; it cannot clear one. A checkbox that could be
+                // ticked but never unticked would be describing a capability this app does not
+                // have — the caption under the group says where the reverse actually lives.
+                if !DefaultHandlerStatus.videoHandlers.isEmpty {
+                    ForEach(DefaultHandlerStatus.videoHandlers) { handler in
+                        DefaultHandlerRow(status: handler)
+                    }
+                    // ── ONE CAPTION FOR THE GROUP, NOT ONE PER ROW ──────────────────────────
+                    // The per-row captions carry what differs (who holds the type, how many apps
+                    // want it, how a claim went). This paragraph is a property of the MECHANISM
+                    // and is identical for all three, so printing it three times would read as
+                    // three separate warnings about three separate problems rather than one fact
+                    // about how macOS file associations work.
+                    Text("Manifold can take an association, but it can't hand it back — to undo one, select a file of that type in the Finder, press ⌘I, and change “Open with”.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            // The default handlers are system state, not ours: they can change in Finder while
+            // Settings is shut, so every row is re-read on each appearance rather than cached. Same
+            // reason and same shape as the I/O and Runtimes section's refresh above — and one line
+            // for the whole group, which is the point of holding the instances in an array.
+            .onAppear { DefaultHandlerStatus.videoHandlers.forEach { $0.refresh() } }
 
             Section("Scopes") {
                 Picker("Scope Scale", selection: $scopeScale) {
