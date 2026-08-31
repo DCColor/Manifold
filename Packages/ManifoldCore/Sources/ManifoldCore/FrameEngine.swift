@@ -317,6 +317,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// the audio pump WITHOUT retiring the video pump — bumping the shared token would stop the
     /// FrameSource mid-playback, which is precisely the stutter this change exists to remove.
     /// `beginReading` bumps BOTH (a seek moves both readers); `selectAudioTrack` bumps only this one.
+    ///
+    /// ⚠️ AND IT GOVERNS THE libav AUDIO PUMP TOO, WHICH IT DID NOT ALWAYS. `beginLibavReading`
+    /// armed `LibavAudioSource` on `sessionToken`, so on the MXF/DNxHR path this token had no audio
+    /// pump to retire and the VIDEO token had two — the exact collapse the paragraph above forbids,
+    /// on the one path that never got the split. Both paths now establish audio currency here, and
+    /// nothing arms an audio pump on `sessionToken`.
     private let audioSessionToken = SessionToken()
 
     /// ── THE THIRD TOKEN: retirement authority for the SCRUB PRODUCER ──────────────────────────
@@ -1582,12 +1588,41 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             }
         }
 
-        // Anchor the clock at the seek target, then seek + arm both pumps (video +
-        // audio) with the SAME session token so they retire together cleanly.
+        // Anchor the clock at the seek target, then seek + arm both pumps.
+        //
+        // ── ⚠️ TWO TOKENS, AND THE COMMENT THAT USED TO SAY "THE SAME SESSION TOKEN" NAMED THE BUG
+        //
+        // Arming the AUDIO pump on `sessionToken` made the VIDEO token the audio pump's only
+        // retirement authority on this path, which is exactly the coupling `audioSessionToken`
+        // exists to prevent (see its declaration). Retiring libav audio alone meant bumping the
+        // video token, which stops `LibavFrameSource` mid-playback — the stutter the two-token
+        // split was built to remove, reintroduced on the one path that never got the split.
+        //
+        // It is also a live gap TODAY, independent of any track switch. `teardownAudioReading`
+        // promises that an in-flight pump callback "bows out at its next check rather than racing
+        // the cancel", and it delivers that by bumping `audioSessionToken`. Its
+        // `stopRequestingMediaData()` prevents FURTHER callbacks, but a callback already inside
+        // `arm`'s `while renderer.isReadyForMoreMediaData` loop re-tests `current()` — the VIDEO
+        // token — finds it unchanged, and keeps enqueuing pre-flush frames into a renderer that
+        // was just flushed. The AVFoundation audio pump has never had that window; this closes it
+        // for libav by giving both pumps the same authority.
         let session = sessionToken
+        // ⚠️ ORDERED, NOT ASSUMED. `teardownAudioReading()` near the top of this function already
+        // bumped `audioSessionToken` and DISCARDED the result; the bump below supersedes that one
+        // and keeps its value. Between the two there is no suspension point — this function is
+        // `async`, but that whole stretch is straight-line main-actor code: it contains no `await`
+        // at all, and its one early `return` is the libav-open failure, which never reaches here.
+        // So no other `teardownAudioReading()` caller (`stop()`, `beginLiveAudio`,
+        // `beginAudioReading`) can interleave between them and strand this token stale-on-arrival.
+        //
+        // This is the SAME two-step `beginAudioReading` performs on the AVFoundation path —
+        // teardown bumps and discards, the new session bumps and keeps — so both paths now
+        // establish audio currency identically rather than by two different rules.
+        let audioSession = audioSessionToken
+        let audioToken = audioSession.next()
         synchronizer.setRate(0, time: CMTime(seconds: time, preferredTimescale: 600))
         libavSource?.arm(fromSeconds: time, isCurrent: { session.isCurrent(token) })
-        libavAudioSource?.arm(fromSeconds: time, isCurrent: { session.isCurrent(token) })
+        libavAudioSource?.arm(fromSeconds: time, isCurrent: { audioSession.isCurrent(audioToken) })
         if resumePlaying { play() }
     }
 
