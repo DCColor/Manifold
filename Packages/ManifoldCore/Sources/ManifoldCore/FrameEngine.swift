@@ -148,11 +148,37 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// What the DECODER — not AVFoundation's inspector — knows about this source's audio.
     ///
-    /// ⚠️ THIS EXISTS BECAUSE `metadata.audioTracks` IS BLIND ON THE libav PATH, AND SILENTLY SO.
+    /// ── WHY THIS EXISTS. ⚠️ THE CONDITION NAMED HERE IS NO LONGER TRUE — SEE BELOW ────────────
+    ///
+    /// This was added because `metadata.audioTracks` WAS blind on the libav path, and silently so.
     /// `MediaInspector` reads an AVURLAsset, and `loadMXF` never calls it at all (AVFoundation
-    /// cannot open MXF), so `metadata.audioTracks` is EMPTY for every MXF — including the ones
-    /// playing audio perfectly. Anything that reads emptiness as "this file has no audio" is
+    /// cannot open MXF), so `metadata.audioTracks` was EMPTY for every MXF — including the ones
+    /// playing audio perfectly. Anything that read emptiness as "this file has no audio" was
     /// therefore wrong on a headline format for this app.
+    ///
+    /// ── WHAT CHANGED, AND WHEN ────────────────────────────────────────────────────────────────
+    ///
+    /// **2026-08-31, `8492039`** — `applyLibavMetadata` gained a companion, `applyLibavAudioTrack`,
+    /// which fills ONE row on the libav path from `LibavAudioSource.AudioInfo`. An MXF stopped
+    /// showing an empty Audio section.
+    ///
+    /// **2026-08-31, the multi-stream enumeration** — that companion now fills one row PER audio
+    /// stream, so a four-track MXF has four. `metadata.audioTracks` is no longer blind on this
+    /// path at all: it is complete, for description. (It is not a track LIST you can choose from —
+    /// `audioTracks`/`audioTrackCount` are still empty here and that is a different question. See
+    /// the note on `applyLibavAudioTrack`.)
+    ///
+    /// ── ⚠️ AND THE REASON SURVIVES ITS ORIGIN STORY, SO DO NOT DELETE THIS ────────────────────
+    ///
+    /// EMPTINESS STILL CANNOT ANSWER THE QUESTION. A file with no audio stream and a file whose
+    /// metadata has not landed yet both present an empty `audioTracks`, and the rows arrive AFTER
+    /// the decoder has sized the meters' bars, so the window is real rather than theoretical. A
+    /// LIVE source never produces rows of its own — `MediaInspector` needs an `AVURLAsset` and a
+    /// push source is not one — and worse, the rows sitting there may describe the last FILE this
+    /// deck opened, since `metadata` is not cleared when a stream takes the picture over. So on a
+    /// live source the row count is not merely uninformative, it is someone else's answer. That is
+    /// why `audioTrackFaceLabel` reads this and why the meters' role closure asks
+    /// `LiveSource.connected` before it looks at `audioTracks` at all.
     ///
     /// The distinction that matters to a reader is between "no audio" and "don't know yet", and
     /// only the decode path can tell them apart, because it is the thing that opened the stream.
@@ -1337,39 +1363,34 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.metadata = meta
     }
 
-    /// ONE audio row for the stream `LibavAudioSource` actually decodes, so an MXF's Audio section
-    /// exists at all. Closes the gap documented on `audioPresence`: `MediaInspector` reads an
+    /// ONE audio row per audio stream in the container, so an MXF's Audio section lists what the
+    /// file actually holds. Closes the gap documented on `audioPresence`: `MediaInspector` reads an
     /// `AVURLAsset`, `loadMXF` never calls it, and `metadata.audioTracks` therefore stayed EMPTY for
     /// every MXF — including ones playing audio perfectly — so the inspector showed no audio rows.
     ///
-    /// ── ⚠️ ONE ROW, DELIBERATELY, AND IT IS NOT THE WHOLE FILE ────────────────────────────────
+    /// ── ⚠️ DESCRIBING FOUR STREAMS IS NOT OFFERING FOUR STREAMS ───────────────────────────────
     ///
-    /// `LibavAudioSource` opens the FIRST audio stream and stops looking, so this describes the
-    /// monitored stream and says nothing about the others. On a four-track MXF the section reads
-    /// "Audio" and not "Audio (4)". That is the honest report of what this path can currently see;
-    /// enumerating the rest is the multi-stream piece and this row must not pretend to have done it.
+    /// `LibavAudioSource` still decodes exactly one stream — the first — and nothing here changes
+    /// that. `audioTrackCount` counts `AVAssetTrack`s and is still 0 on this path, so the toolbar
+    /// picker stays disabled and `InspectorPanel` still renders these rows as plain readouts:
+    /// not clickable, and none marked as monitored. That is deliberate until the SWITCH exists —
+    /// a control that lets you pick a stream nothing can bind is worse than an honest disabled one
+    /// (see the note on `audioTrackControl`). What the rows do is REPORT, which the inspector could
+    /// not do at all a moment ago.
+    ///
+    /// ⚠️ ROW 0 IS THE DECODED STREAM, AND SOMETHING DEPENDS ON THAT. `ContentView` feeds the
+    /// meters `audioTracks[selectedAudioTrackIndex].roles`, and `selectedAudioTrackIndex` is 0 on
+    /// this path (there is nothing to select). Rows are built in `AVStream` order and the decoded
+    /// stream is the FIRST audio stream, so index 0 is it and the meters keep labelling the bars
+    /// with the roles of the audio they are actually showing. A switch has to move both together.
     ///
     /// ── ⚠️ WHY THE GUARD, AND WHY IT IS THE SAME ONE `applyLibavMetadata` USES ────────────────
     ///
     /// A `.mov` carrying DNxHR reaches this branch too — libav decodes its video — but its
     /// `metadata` came from `MediaInspector`, which enumerated the asset and holds ALL of its audio
-    /// tracks. Writing this single row over that complete list would be a downgrade wearing the
-    /// shape of a fix. `videoTrack == nil` means "AVFoundation is blind to this container", which is
-    /// exactly the condition under which this path is the only source of the fact.
-    ///
-    /// ── THE NAMING GOES THROUGH THE AVFOUNDATION PATH'S OWN FUNCTIONS, ON PURPOSE ─────────────
-    ///
-    /// `MediaInspector.audioLayout(from:channelCount:)` for the name + confidence, and
-    /// `AudioChannelLayoutBridge.roles(from:)` for the per-channel roles — the same two readers the
-    /// AVFoundation path uses, fed the description `open()` built. ⚠️ **NOT `ainfo.layoutName`**:
-    /// that is `av_channel_layout_describe` output ("5.1(side)"), a different vocabulary from the
-    /// one `AudioTrackInfo.layoutName` holds. Two namers for one fact is how an MXF and a MOV of the
-    /// same mix come to disagree in the same panel.
-    ///
-    /// ⚠️ AND THE THREE-TIER SHAPE IS USED AS-IS. `audioLayout` returns `.declared` only for a real
-    /// declaration; a stream that declares nothing lands on `.inferred`/`.undeclared` and the row
-    /// shows a channel count, italic and dimmed, rather than a layout name invented from the count.
-    /// Nothing here adds a name the file did not give.
+    /// tracks. Writing these rows over that complete list would be a downgrade wearing the shape of
+    /// a fix. `videoTrack == nil` means "AVFoundation is blind to this container", which is exactly
+    /// the condition under which this path is the only source of the fact.
     ///
     /// MAIN ACTOR, and NOT a second `metadata` assignment. `FrameEngine` is `@MainActor` and
     /// `beginLibavReading` is one of its methods, so this runs on the main actor. It is called from
@@ -1378,26 +1399,59 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// replacing it — there is no window in which a second assignment could race or clobber the
     /// first, and SwiftUI coalesces the two `objectWillChange` emissions into one update.
     private func applyLibavAudioTrack(_ ainfo: LibavAudioSource.AudioInfo) {
-        guard videoTrack == nil, let fmt = ainfo.formatDescription else { return }
+        guard videoTrack == nil, !ainfo.streams.isEmpty else { return }
+        // Optional-chained: `applyLibavMetadata` runs under the identical `videoTrack == nil`
+        // condition and has already published a `metadata`, so this is a mutation of that value.
+        // If it somehow has not, dropping the rows is better than publishing ones with no file facts.
+        self.metadata?.audioTracks = ainfo.streams.map { Self.audioTrackRow(for: $0) }
+    }
+
+    /// One inspector row from one libav audio stream.
+    ///
+    /// ── THE NAMING GOES THROUGH THE AVFOUNDATION PATH'S OWN FUNCTIONS, ON PURPOSE ─────────────
+    ///
+    /// `MediaInspector.audioLayout(from:channelCount:)` for the name + confidence, and
+    /// `AudioChannelLayoutBridge.roles(from:)` for the per-channel roles — the same two readers the
+    /// AVFoundation path uses, fed the description `open()` built for THIS stream. ⚠️ **NOT
+    /// `stream.layoutName`**: that is `av_channel_layout_describe` output ("5.1(side)"), a different
+    /// vocabulary from the one `AudioTrackInfo.layoutName` holds. Two namers for one fact is how an
+    /// MXF and a MOV of the same mix come to disagree in the same panel.
+    ///
+    /// ⚠️ AND THE THREE-TIER SHAPE IS USED AS-IS. `audioLayout` returns `.declared` only for a real
+    /// declaration; a stream that declares nothing lands on `.inferred`/`.undeclared` and the row
+    /// shows a channel count, italic and dimmed, rather than a layout name invented from the count.
+    /// Nothing here adds a name the file did not give.
+    ///
+    /// STATIC AND PURE, so it cannot pick up a fact about the MONITORED stream while describing a
+    /// different one — the mistake this whole change is one instance of avoiding.
+    private static func audioTrackRow(for stream: LibavAudioSource.AudioInfo.StreamInfo) -> AudioTrackInfo {
         var row = AudioTrackInfo()
-        // ⚠️ THE DISPLAY NAME, NOT FFmpeg's IDENTIFIER. `ainfo.codecName` is `avcodec_get_name`
+        // ⚠️ THE DISPLAY NAME, NOT FFmpeg's IDENTIFIER. `stream.codecName` is `avcodec_get_name`
         // output ("pcm_s24le") — an internal identifier that must not reach the inspector while the
         // AVFoundation path shows "PCM" for the same content. `audioFormatID` is the same codec
         // spelled as CoreAudio spells it, which lets both paths read ONE name list. Nil means no
         // CoreAudio equivalent, and then the FFmpeg identifier IS the honest answer — the same
         // fallback `audioCodecName` itself makes to a raw four-character code.
-        row.codecName = ainfo.audioFormatID.map(MediaInspector.audioCodecName) ?? ainfo.codecName
-        row.channelCount = ainfo.channels
-        row.sampleRate = Double(ainfo.sampleRate)
-        row.bitDepth = ainfo.bitsPerRawSample
-        let layout = MediaInspector.audioLayout(from: fmt, channelCount: ainfo.channels)
-        row.layoutName = layout.name
-        row.layoutConfidence = layout.confidence
-        row.roles = AudioChannelLayoutBridge.roles(from: fmt) ?? []
-        // Optional-chained: `applyLibavMetadata` runs under the identical `videoTrack == nil`
-        // condition and has already published a `metadata`, so this is a mutation of that value.
-        // If it somehow has not, dropping the row is better than publishing one with no file facts.
-        self.metadata?.audioTracks = [row]
+        row.codecName = stream.audioFormatID.map(MediaInspector.audioCodecName) ?? stream.codecName
+        row.channelCount = stream.channels
+        row.sampleRate = Double(stream.sampleRate)
+        row.bitDepth = stream.bitsPerRawSample
+        // The number a decoder is bound with — see `AudioTrackInfo.sourceStreamIndex`.
+        row.sourceStreamIndex = Int(stream.streamIndex)
+        if let fmt = stream.formatDescription {
+            let layout = MediaInspector.audioLayout(from: fmt, channelCount: stream.channels)
+            row.layoutName = layout.name
+            row.layoutConfidence = layout.confidence
+            row.roles = AudioChannelLayoutBridge.roles(from: fmt) ?? []
+        } else {
+            // No description means nothing could be built to READ a layout out of, which is not the
+            // same as a file that declared nothing — but it reaches a viewer the same way, and the
+            // channel count is still a fact. Same fallback `MediaInspector.audioTracks` makes for a
+            // track with no format description; no layout is guessed from the count.
+            row.layoutName = stream.channels > 0 ? "\(stream.channels) ch" : "—"
+            row.layoutConfidence = .undeclared
+        }
+        return row
     }
 
     /// Resolve override + source range into the effective full-range flag the
@@ -1508,6 +1562,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 Task { @MainActor [weak self] in self?.audioPresence = .present(channels: channels) }
                 print("FrameEngine: libav audio — \(ainfo.codecName) \(ainfo.sampleRate)Hz "
                     + "\(ainfo.channels)ch (\(ainfo.layoutName))")
+                // The other streams, when there are any. Printed with FFmpeg's own identifiers and
+                // stream NUMBERS, because a diagnostics reader is comparing this against ffprobe,
+                // not against the inspector. Says plainly which one is being decoded — describing
+                // four streams while decoding one is exactly the state that needs stating.
+                if ainfo.streams.count > 1 {
+                    for s in ainfo.streams {
+                        let mark = s.streamIndex == ainfo.decoded.streamIndex ? " ← decoded" : ""
+                        print("FrameEngine: libav audio stream #\(s.streamIndex) — \(s.codecName) "
+                            + "\(s.sampleRate)Hz \(s.channels)ch (\(s.layoutName))\(mark)")
+                    }
+                }
                 applyLibavAudioTrack(ainfo)
             } else {
                 // POSITIVE evidence of absence, not merely a lack of evidence: the demuxer opened

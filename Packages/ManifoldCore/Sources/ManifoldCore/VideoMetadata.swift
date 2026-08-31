@@ -55,6 +55,19 @@ public struct AudioTrackInfo: Equatable, Sendable {
     public var bitDepth: Int = 0
     public var dataRate: Double = 0         // bits/sec (estimated)
 
+    /// The libav `AVStream` index this row describes, or nil on the AVFoundation path.
+    ///
+    /// ⚠️ IT IS NOT THE ROW'S POSITION IN `audioTracks`, AND THAT IS THE ENTIRE REASON IT EXISTS.
+    /// An MXF's video stream is #0, so its four audio streams are #1–#4 while their rows are 0–3;
+    /// any file that interleaves audio with anything else makes the two disagree. `av_read_frame`,
+    /// `av_seek_frame` and `avcodec_parameters_to_context` all speak the STREAM index, so a
+    /// future audio-stream switch has to bind with this number, not with the array position.
+    ///
+    /// NIL ON THE AVFOUNDATION PATH, deliberately. There the row's position IS the index into the
+    /// engine's `AVAssetTrack` list, which is what `selectAudioTrack` already takes — inventing a
+    /// number for it would create a second identifier for a track that already has one.
+    public var sourceStreamIndex: Int?
+
     public var sampleRateString: String {
         sampleRate > 0 ? String(format: "%.1f kHz", sampleRate / 1000) : "—"
     }

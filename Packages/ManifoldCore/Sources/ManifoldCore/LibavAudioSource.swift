@@ -22,45 +22,96 @@ public final class LibavAudioSource: @unchecked Sendable {
 
     public enum LibavError: Error { case open, noAudioStream, noDecoder, decoderOpen }
 
+    /// What `open()` established about the file's audio.
+    ///
+    /// ⚠️ TWO SCOPES IN ONE STRUCT, AND THE DIFFERENCE BETWEEN THEM IS THE POINT. `streams`
+    /// describes EVERY audio stream the container carries; `decoded` is the ONE this source
+    /// actually decodes and renders. The forwarding properties below (`codecName`, `channels`, …)
+    /// are `decoded`'s facts and mean exactly what they meant before `streams` existed — the
+    /// engine's log line, `audioPresence` and the meters read them unchanged.
+    ///
+    /// `decoded` is an ELEMENT of `streams`, not a second description built alongside it. One
+    /// pass, one builder, so the row the inspector prints for the monitored stream cannot disagree
+    /// with the facts the engine logs. Stage 2 (choosing a stream) moves `decoded` to a different
+    /// element; the enumeration itself does not change.
     public struct AudioInfo: @unchecked Sendable {
-        public let codecName: String
-        public let sampleRate: Int
-        public let channels: Int
-        public let layoutName: String
 
-        /// The SOURCE's sample depth (`AVCodecParameters.bits_per_raw_sample`), or 0 when the
-        /// container does not state one.
+        /// One audio stream as the CONTAINER declares it.
         ///
-        /// ⚠️ NOT THE DECODE WIDTH, AND THE DIFFERENCE IS VISIBLE. `formatDescription` below
-        /// describes this source's OUTPUT — interleaved float32, because that is what swresample
-        /// produces and the renderer consumes — so reading a bit depth off it would report 32 for
-        /// a 24-bit file. The inspector's "24-bit" is a fact about the FILE. 0 renders as "—",
-        /// which is the honest answer for a container that declared nothing.
-        public let bitsPerRawSample: Int
+        /// ⚠️ EVERYTHING HERE COMES FROM `AVCodecParameters`, WHICH COSTS NOTHING PER STREAM.
+        /// `avformat_find_stream_info` has already filled `codecpar` for every stream by the time
+        /// `open()` looks, so building one of these opens no decoder, allocates no
+        /// `AVCodecContext`, reads no packets and demuxes nothing a second time. That is why the
+        /// inspector can describe all four streams of an MXF while exactly one is decoded.
+        public struct StreamInfo: @unchecked Sendable {
 
-        /// The output format description, built at `open()` from the same three facts the decode
-        /// path uses. Carries the channel layout, so it is the input
-        /// `MediaInspector.audioLayout(from:channelCount:)` and `AudioChannelLayoutBridge.roles(from:)`
-        /// need — which is how this path names a layout with the SAME functions the AVFoundation
-        /// path uses instead of a second vocabulary. Nil when the description could not be built.
-        ///
-        /// CoreAudio's spelling of this codec, or nil when there is no equivalent.
-        ///
-        /// ⚠️ A KEY, NOT A NAME — and that distinction is the whole design. `codecName` above is
-        /// `avcodec_get_name` output ("pcm_s24le", "aac"), FFmpeg's INTERNAL identifier, which must
-        /// not reach a user-facing surface. Rather than write a second table of display names here,
-        /// this translates the KEY into the one `MediaInspector.audioCodecName(_:)` already uses, so
-        /// there is exactly one list of names in the app and the libav and AVFoundation paths cannot
-        /// drift apart. Nil means "no CoreAudio equivalent" and the caller falls back to
-        /// `codecName` — an honest unfamiliar identifier, never a guessed name. See
-        /// `audioFormatID(for:name:)`.
-        public let audioFormatID: AudioFormatID?
+            /// ⚠️ THE `AVStream` INDEX, NOT THE POSITION IN `streams`. The two diverge the moment
+            /// a non-audio stream sits between two audio ones — an MXF's video stream is #0, so
+            /// its first audio stream is #1 — and this is the number `av_read_frame` stamps on
+            /// packets and `av_seek_frame` takes. Stage 2 binds a decoder with it; binding the
+            /// array position instead would pick the wrong stream on the first file that
+            /// interleaves.
+            public let streamIndex: Int32
 
-        /// ⚠️ THIS IS NOT THE DECODE PATH'S INSTANCE. `ensureSwr` still builds and owns its own on
-        /// the pump queue, at first decode, exactly as before — nothing about the decoder's
-        /// lifecycle moved to satisfy the inspector. The two are built by one function from
-        /// identical inputs, so they cannot disagree.
-        public let formatDescription: CMAudioFormatDescription?
+            public let codecName: String
+            public let sampleRate: Int
+            public let channels: Int
+            public let layoutName: String
+
+            /// The SOURCE's sample depth (`AVCodecParameters.bits_per_raw_sample`), or 0 when the
+            /// container does not state one.
+            ///
+            /// ⚠️ NOT THE DECODE WIDTH, AND THE DIFFERENCE IS VISIBLE. `formatDescription` below
+            /// describes this source's OUTPUT — interleaved float32, because that is what
+            /// swresample produces and the renderer consumes — so reading a bit depth off it would
+            /// report 32 for a 24-bit file. The inspector's "24-bit" is a fact about the FILE. 0
+            /// renders as "—", which is the honest answer for a container that declared nothing.
+            public let bitsPerRawSample: Int
+
+            /// CoreAudio's spelling of this codec, or nil when there is no equivalent.
+            ///
+            /// ⚠️ A KEY, NOT A NAME — and that distinction is the whole design. `codecName` above
+            /// is `avcodec_get_name` output ("pcm_s24le", "aac"), FFmpeg's INTERNAL identifier,
+            /// which must not reach a user-facing surface. Rather than write a second table of
+            /// display names here, this translates the KEY into the one
+            /// `MediaInspector.audioCodecName(_:)` already uses, so there is exactly one list of
+            /// names in the app and the libav and AVFoundation paths cannot drift apart. Nil means
+            /// "no CoreAudio equivalent" and the caller falls back to `codecName` — an honest
+            /// unfamiliar identifier, never a guessed name. See `audioFormatID(for:name:)`.
+            public let audioFormatID: AudioFormatID?
+
+            /// The output format description this stream WOULD produce, built from the same three
+            /// facts the decode path uses. Carries the channel layout, so it is the input
+            /// `MediaInspector.audioLayout(from:channelCount:)` and
+            /// `AudioChannelLayoutBridge.roles(from:)` need — which is how this path names a layout
+            /// with the SAME functions the AVFoundation path uses instead of a second vocabulary.
+            /// Nil when the description could not be built.
+            ///
+            /// ⚠️ NONE OF THESE IS THE DECODE PATH'S INSTANCE, INCLUDING THE MONITORED STREAM'S.
+            /// `ensureSwr` still builds and owns its own on the pump queue, at first decode,
+            /// exactly as before — nothing about the decoder's lifecycle moved to satisfy the
+            /// inspector, and building one of these for a stream does NOT mean that stream is
+            /// open. They come out of one function fed identical inputs, so they cannot disagree.
+            public let formatDescription: CMAudioFormatDescription?
+        }
+
+        /// Every audio stream in the container, in `AVStream` order. Never empty — `open()` throws
+        /// `noAudioStream` before constructing this if there are none.
+        public let streams: [StreamInfo]
+
+        /// The stream feeding the renderer. An element of `streams`; today always its first,
+        /// because `open()` decodes the first audio stream it finds.
+        public let decoded: StreamInfo
+
+        // The decoded stream's facts under their original names, so every existing reader is
+        // untouched and there is no second copy to keep in step.
+        public var codecName: String { decoded.codecName }
+        public var sampleRate: Int { decoded.sampleRate }
+        public var channels: Int { decoded.channels }
+        public var layoutName: String { decoded.layoutName }
+        public var bitsPerRawSample: Int { decoded.bitsPerRawSample }
+        public var audioFormatID: AudioFormatID? { decoded.audioFormatID }
+        public var formatDescription: CMAudioFormatDescription? { decoded.formatDescription }
     }
 
     /// Handed each decoded PCM CMSampleBuffer on the pump queue — the engine wires
@@ -93,7 +144,9 @@ public final class LibavAudioSource: @unchecked Sendable {
     // 32-bit float at the source rate/channel count (swresample normalizes any
     // source format — PCM/AAC/etc. — planar or packed — into this).
     private let outSampleFmt = AV_SAMPLE_FMT_FLT
-    private let bytesPerSample: Int32 = 4
+    // STATIC because the format-description builder below is static — see the note there. It was
+    // always a constant of the output contract, never a fact about one instance.
+    private static let bytesPerSample: Int32 = 4
 
     private static let errEAGAIN: Int32 = -Int32(EAGAIN)
     private static let errEOF: Int32 = {
@@ -110,23 +163,36 @@ public final class LibavAudioSource: @unchecked Sendable {
 
     deinit { freeContexts() }
 
-    /// Open the container + audio decoder and read the audio facts. Throws
-    /// `noAudioStream` if the file has no audio (the engine then plays video-only).
+    /// Open the container, describe EVERY audio stream it carries, and open a decoder on the one
+    /// that will be rendered. Throws `noAudioStream` if the file has no audio (the engine then
+    /// plays video-only).
+    ///
+    /// ⚠️ ENUMERATING AND DECODING ARE SEPARATE STEPS, AND ONLY THE SECOND COSTS ANYTHING. The
+    /// loop below reads `codecpar` — already filled for every stream by
+    /// `avformat_find_stream_info` — and builds one `StreamInfo` per audio stream. Exactly ONE
+    /// decoder is opened, on the FIRST audio stream, exactly as before: no second demux, no
+    /// second `AVCodecContext`, and which stream plays is unchanged by the enumeration.
     public func open() throws -> AudioInfo {
         var ctx: UnsafeMutablePointer<AVFormatContext>? = nil
         guard avformat_open_input(&ctx, url.path, nil, nil) == 0, ctx != nil else { throw LibavError.open }
         guard avformat_find_stream_info(ctx, nil) >= 0 else { avformat_close_input(&ctx); throw LibavError.open }
 
-        var aIdx: Int32 = -1
-        var par: UnsafeMutablePointer<AVCodecParameters>? = nil
-        var stream: UnsafeMutablePointer<AVStream>? = nil
+        // ONE pass over `nb_streams`, collecting every audio stream rather than breaking at the
+        // first. The first collected stream is also the one decoded below, so nothing searches
+        // twice and the monitored stream is still chosen by exactly the rule it always was.
+        var audioStreams: [(index: Int32,
+                            stream: UnsafeMutablePointer<AVStream>,
+                            par: UnsafeMutablePointer<AVCodecParameters>)] = []
         for i in 0..<Int(ctx!.pointee.nb_streams) {
-            guard let st = ctx!.pointee.streams[i] else { continue }
-            if st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
-                aIdx = Int32(i); par = st.pointee.codecpar; stream = st; break
-            }
+            guard let st = ctx!.pointee.streams[i], let par = st.pointee.codecpar,
+                  par.pointee.codec_type == AVMEDIA_TYPE_AUDIO else { continue }
+            audioStreams.append((Int32(i), st, par))
         }
-        guard aIdx >= 0, let par, let stream else { avformat_close_input(&ctx); throw LibavError.noAudioStream }
+        guard let monitored = audioStreams.first else {
+            avformat_close_input(&ctx); throw LibavError.noAudioStream
+        }
+        let par = monitored.par
+        let stream = monitored.stream
 
         let cid = par.pointee.codec_id
         guard let codec = avcodec_find_decoder(cid) else { avformat_close_input(&ctx); throw LibavError.noDecoder }
@@ -141,32 +207,56 @@ public final class LibavAudioSource: @unchecked Sendable {
         self.codecCtx = cctx
         self.pkt = av_packet_alloc()
         self.frame = av_frame_alloc()
-        self.audioStreamIndex = aIdx
+        self.audioStreamIndex = monitored.index
         self.timeBase = stream.pointee.time_base
         let st = stream.pointee.start_time
         self.startTimeTicks = (st == Int64.min) ? 0 : st
         self.sampleRate = par.pointee.sample_rate
         self.channels = par.pointee.ch_layout.nb_channels
 
+        // ⚠️ THE MONITORED STREAM'S LAYOUT, AND ONLY ITS. This is decode-path state — `ensureSwr`
+        // attaches it to the buffers the renderer and the meters see — so it must track
+        // `codecCtx`, not the enumeration. Every OTHER stream's layout is read into its own
+        // `StreamInfo` below and touches nothing here.
+        self.channelLayoutData = Self.declaredChannelLayout(&par.pointee.ch_layout)
+
+        // Built here, on the OPENING thread, from `codecpar` alone. Reads no pump-queue state and
+        // assigns none, so it does not cross the queue discipline the rest of this type keeps —
+        // and it opens nothing: a `StreamInfo` for a stream is not that stream being decoded.
+        let streams = audioStreams.map { Self.streamInfo(index: $0.index, par: $0.par) }
+        // `audioStreams` is non-empty (guarded above) and `map` preserves count, so element 0 is
+        // the first audio stream — the one the decoder was just opened on.
+        return AudioInfo(streams: streams, decoded: streams[0])
+    }
+
+    /// Everything the container states about one audio stream, read from `AVCodecParameters`.
+    ///
+    /// ⚠️ PURE, AND IT MUST STAY THAT WAY. It touches no instance state, opens nothing and frees
+    /// nothing — it is called once per audio stream while exactly one of them has a decoder. A
+    /// version of this that read `self.sampleRate` (as `makeOutputFormatDescription` used to)
+    /// would describe every stream with the monitored stream's numbers.
+    private static func streamInfo(index: Int32,
+                                   par: UnsafeMutablePointer<AVCodecParameters>) -> AudioInfo.StreamInfo {
         var layoutBuf = [CChar](repeating: 0, count: 64)
         _ = av_channel_layout_describe(&par.pointee.ch_layout, &layoutBuf, 64)
         // ⚠️ `layoutBuf` IS A DISPLAY STRING AND NOTHING READS IT AS DATA. The line below is the
         // one that carries the declaration: per-channel labels, in interleave order, in the form
         // `AudioChannelLayoutBridge.roles(from:)` reads FIRST. Without it every libav file reported
         // "roles NONE DECLARED" no matter what the container said.
-        self.channelLayoutData = Self.declaredChannelLayout(&par.pointee.ch_layout)
-        let ffmpegName = String(cString: avcodec_get_name(cid))
-        return AudioInfo(
+        let layoutData = Self.declaredChannelLayout(&par.pointee.ch_layout)
+        let sampleRate = par.pointee.sample_rate
+        let channels = par.pointee.ch_layout.nb_channels
+        let ffmpegName = String(cString: avcodec_get_name(par.pointee.codec_id))
+        return AudioInfo.StreamInfo(
+            streamIndex: index,
             codecName: ffmpegName,
             sampleRate: Int(sampleRate),
             channels: Int(channels),
             layoutName: String(cString: layoutBuf),
             bitsPerRawSample: Int(par.pointee.bits_per_raw_sample),
-            audioFormatID: Self.audioFormatID(for: cid, name: ffmpegName),
-            // Built here, on the OPENING thread, from values this function has just set and that
-            // nothing mutates afterwards — it reads no pump-queue state and assigns none, so it
-            // does not cross the queue discipline the rest of this type keeps.
-            formatDescription: makeOutputFormatDescription())
+            audioFormatID: Self.audioFormatID(for: par.pointee.codec_id, name: ffmpegName),
+            formatDescription: Self.makeOutputFormatDescription(
+                sampleRate: sampleRate, channels: channels, channelLayoutData: layoutData))
     }
 
     /// libav's `AVChannelLayout` → a CoreAudio DESCRIPTIONS layout, or nil when it named no
@@ -356,7 +446,7 @@ public final class LibavAudioSource: @unchecked Sendable {
         guard inSamples > 0, ch > 0 else { return nil }
 
         // Interleaved float output: one buffer, capacity = inSamples (same rate, 1:1).
-        let bytesPerFrame = ch * Int(bytesPerSample)
+        let bytesPerFrame = ch * Int(Self.bytesPerSample)
         let capacityBytes = inSamples * bytesPerFrame
         guard let outBlock = malloc(capacityBytes) else { return nil }
 
@@ -413,16 +503,32 @@ public final class LibavAudioSource: @unchecked Sendable {
         return true
     }
 
-    /// The OUTPUT format description — interleaved float32 at the source's rate and channel count,
-    /// with the source's declared channel layout attached.
-    ///
-    /// ⚠️ ONE BUILDER, TWO CALLERS, AND THAT IS THE POINT. `ensureSwr` calls it on the pump queue at
-    /// first decode (as it always did — this was its inline body); `open()` calls it on the opening
-    /// thread so the engine has something to hand `MediaInspector.audioLayout(from:)` for the
-    /// inspector row. Two hand-written copies of this could drift, and then the layout the
-    /// inspector NAMES would stop being the layout the decoder ATTACHES to the samples the meters
-    /// label. Pure: reads only values `open()` has already fixed, mutates nothing.
+    /// The MONITORED stream's output format description, from this instance's decode-path state.
+    /// `ensureSwr`'s call site is unchanged — this was its inline body, and the three values it
+    /// forwards are the ones `open()` fixed for the stream that is actually decoding.
     private func makeOutputFormatDescription() -> CMAudioFormatDescription? {
+        Self.makeOutputFormatDescription(sampleRate: sampleRate, channels: channels,
+                                         channelLayoutData: channelLayoutData)
+    }
+
+    /// The OUTPUT format description — interleaved float32 at the given rate and channel count,
+    /// with that stream's declared channel layout attached.
+    ///
+    /// ⚠️ ONE BUILDER, AND THAT IS THE POINT. `ensureSwr` reaches it through the wrapper above on
+    /// the pump queue at first decode (as it always did — this was its inline body), and
+    /// `streamInfo` calls it on the opening thread, once per audio stream, so the engine has
+    /// something to hand `MediaInspector.audioLayout(from:)` for each inspector row. Hand-written
+    /// copies of this could drift, and then the layout the inspector NAMES would stop being the
+    /// layout the decoder ATTACHES to the samples the meters label.
+    ///
+    /// ⚠️ AND IT TAKES ITS THREE FACTS AS PARAMETERS RATHER THAN READING `self`. It used to read
+    /// `sampleRate`/`channels`/`channelLayoutData` — instance state `open()` sets for the ONE
+    /// stream it decodes — so calling it per stream in that form would have described all four of
+    /// an MXF's streams with the FIRST one's rate, channel count and layout, silently and
+    /// plausibly. The parameters make the stream being described the caller's choice, which is the
+    /// only way one builder can serve four streams.
+    private static func makeOutputFormatDescription(sampleRate: Int32, channels: Int32,
+                                                    channelLayoutData: Data?) -> CMAudioFormatDescription? {
         var asbd = AudioStreamBasicDescription(
             mSampleRate: Float64(sampleRate),
             mFormatID: kAudioFormatLinearPCM,
