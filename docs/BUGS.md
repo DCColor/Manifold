@@ -505,10 +505,19 @@ frame for longer.
    `scrubPreviewImage != nil`, so release no longer implies removal. `beginScrubHandoff()` holds it
    until the seeked-to frame is on screen.
 
-**The signal is `MetalVideoRenderer.onFirstPresentAfterFlush`**, a new one-shot that fires when
+~~**The signal is `MetalVideoRenderer.onFirstPresentAfterFlush`**, a new one-shot that fires when
 `presentsSinceFlush` goes **0 → 1**. Every seek flushes (`FrameEngine.beginReading`, and the libav
 path) and `flush()` zeroes that counter, so the edge means exactly *"the first frame of the seek I
-just started has been presented"*. Two properties carry it:
+just started has been presented"*. Two properties carry it:~~
+
+> ⚠️ **STRUCK 2026-08-30 — THE SIGNAL NO LONGER EXISTS.** `onFirstPresentAfterFlush` was removed at
+> **Stage 4** of *"📐 two producers, one destination — deleting the scrub overlay"* below, having
+> been unconsumed since Stage 3. It is struck rather than deleted because this whole fix section
+> describes a mechanism the staged rewrite replaced, and **the entry is owed a proper rewrite** —
+> until then, read "What was built" as history rather than as a description of the code. The two
+> properties below described the one-shot accurately while it existed. ⚠️ **`presentsSinceFlush`
+> itself SURVIVES** — its `[EDR]` reader is untouched — so do not read this strike as retiring the
+> counter.
 
 - **It is an EDGE, not a level.** Arming happens mid-generation, while the pre-drag frame is still
   up and the count is already non-zero, so nothing that repaints the OLD generation can satisfy it.
@@ -2100,7 +2109,8 @@ ships the silently-ignored control described above regardless of what the spike 
 ## 📐 two producers, one destination — deleting the scrub overlay
 
 **Status:** ~~SCOPED 2026-08-30. **Not started.**~~ → **BUILT 2026-08-30. Stages 0, 1, 2 and 3 are
-DONE and verified; Stage 4 (scaffolding removal) is the only one outstanding.** The title's
+DONE and verified; Stage 4 (scaffolding removal) is DONE 2026-08-30 — the callback it was waiting
+on can now be deleted, and the measurement instruments are deliberately kept.** The title's
 "SCOPED, NOT BUILT" is struck rather than rewritten so the entry still reads as what it was —
 reasoning written before any code — with the outcome appended. Per-stage results are in
 *"✅ MEASURED 2026-08-30 — Stage 3: the libav scrub producer, and the end of the CGImage path"*
@@ -2235,17 +2245,18 @@ tears down mid-drag, would have to be reasoned about; with (a) neither interacti
 - **`pendingSeekRender` and the paused-seek relaxed branch.** Serves **every** paused seek — arrow
   step, timecode entry, the Flip refresh path — not scrub. Deleting it with the overlay would break
   paused seeking on files whose decoder overshoots, which is a different entry entirely.
-- **`presentsSinceFlush`.** The *callback* `onFirstPresentAfterFlush` has exactly one consumer (the
-  handoff) and goes with it. The *counter* has a second consumer — the `[EDR]` "colour state
+- **`presentsSinceFlush`.** The *callback* that used to trip it had exactly one consumer (the
+  handoff) and went with it. The *counter* has a second consumer — the `[EDR]` "colour state
   installed after N present(s) of this source" report — and stays.
-  > ⚠️ **AMENDED 2026-08-30.** The callback did **not** go with the handoff, in two steps. Stage 2
-  > deleted the AVFoundation handoff but kept an MXF-only hold on it
-  > (`holdScrubOverlayUntilPresented`), because MXF still had no producer and its Metal layer held
-  > the pre-drag frame for the whole gesture — the "the layer already shows the release frame"
-  > reasoning simply did not reach it. Stage 3 deleted that too, once `LibavScrubProducer` made the
-  > reasoning true for MXF and the settle measured zero. So the callback is now **unconsumed but
-  > still present**, deliberately, until Stage 4 retires it together with the counter's accounting.
-  > **Nothing new should be wired to it**; the declaration in `MetalVideoRenderer` says so.
+  > ⚠️ **AMENDED 2026-08-30, and CLOSED at Stage 4.** The callback did **not** go with the handoff,
+  > and it took two further stages. Stage 2 deleted the AVFoundation handoff but kept an MXF-only
+  > hold on it (`holdScrubOverlayUntilPresented`), because MXF still had no producer and its Metal
+  > layer held the pre-drag frame for the whole gesture — the "the layer already shows the release
+  > frame" reasoning simply did not reach it. Stage 3 deleted that too, once `LibavScrubProducer`
+  > made the reasoning true for MXF and the settle measured zero, which left the callback unconsumed
+  > but still standing. **Stage 4 removed it.** The counter, its reset in `flush()`, its increment
+  > after `presentDrawable` and the `[EDR]` line that reads it are all untouched — which is what
+  > this bullet was always about.
 - **`pendingRefresh` / `setNeedsRefresh()`.** Range-override change while paused.
 - **`isScrubbing` and `scrubValue`.** Still drive the slider binding, the `displayTime` readout and
   the HUD auto-hide guard. Only their *overlay* role goes.
@@ -2560,23 +2571,58 @@ app" was replaced by Xcode's memory gauge on the real app during repeated drags 
 instrument answering a narrower question. See the memory row in the Stage 3 entry, which says which
 instrument produced the number.
 
-#### ⏳ Stage 4 — scaffolding removal. **OUTSTANDING — the only stage left.**
+#### ✅ Stage 4 — scaffolding removal. **DONE 2026-08-30.**
 
 ~~`ScrubDebug`'s three env vars, `codecIsAllIntra`, `[EDRDIAG]`, the split furniture~~ — **all
-already gone**, pulled forward into Stage 2. What actually remains:
+already gone**, pulled forward into Stage 2. What remained was one deletion and one decision. Both
+are now made.
 
-- **`onFirstPresentAfterFlush`** — ⚠️ **UNCONSUMED SINCE STAGE 3 AND DELIBERATELY STILL PRESENT.**
-  Its only consumer was ever the scrub-release handoff: the AVFoundation one (deleted at Stage 2),
-  then the MXF-only `holdScrubOverlayUntilPresented` (deleted at Stage 3, once the MXF settle
-  measured exactly zero). Nothing arms it now. It is kept for this stage because it is tangled with
-  the `presentsSinceFlush` accounting — whose OTHER reader, the `[EDR]` "colour state installed
-  after N present(s)" report, stays — and removing the two together is one careful change rather
-  than two. **Do not wire anything new to it in the meantime**; the declaration carries the same
-  warning.
-- **`[SCRUB]` / `[SCRUB-GEOM]` / `[SETTLE]` / `[V210]`** and `ScrubProducerFlags.stats`
-  (`MANIFOLD_SCRUB_STATS=1`) — the measurement scaffolding the three stages were verified with.
-  `[SCRUB-GEOM]` is the standing ARRI open-gate check and is arguably worth keeping past Stage 4;
-  decide it there rather than by default.
+**1. `onFirstPresentAfterFlush` is REMOVED.** What went: the `refreshLock`-guarded property, its
+backing store, the fire-and-clear block in `renderPixelBuffer`, and the rationale comment on the
+declaration. Its only consumer was ever the scrub-release handoff — the AVFoundation one (deleted
+at Stage 2), then the MXF-only `holdScrubOverlayUntilPresented` (deleted at Stage 3, once the MXF
+settle measured exactly zero) — so it had been unconsumed for a full stage before it was retired.
+
+> **ZERO ARM SITES ANYWHERE IN THE TREE — CHECKED, NOT ASSUMED.** The symbol had six occurrences in
+> the entire repository and all six were inside `MetalVideoRenderer.swift`: the declaration, its two
+> accessors, the backing store, and the two lines of the fire-and-clear. The only two ASSIGNMENTS
+> were the setter's own store and the `= nil` that cleared the one-shot as it fired — both internal
+> plumbing, neither an arm. **Nothing in `ContentView`, no test and no fixture assigned it after
+> Stage 3.** That is what made this a self-contained deletion rather than a careful one, and it was
+> established by search before the edit, not inferred from the Stage 3 note.
+
+⚠️ **`presentsSinceFlush` SURVIVES, DELIBERATELY, WITH ITS `[EDR]` READER INTACT.** The declaration,
+the reset under `refreshLock` in `flush()`, the increment immediately after `presentDrawable` — with
+the "counted HERE and not in `presentDrawable`" rationale that keeps a teardown black frame out of
+the count — and the `[EDR]` *"colour state installed on the layer after N present(s) of this
+source"* report all stand unchanged. The only counter-related thing that went is the
+`presentsSinceFlush == 1` edge test that gated the one-shot: the counter now runs purely for the
+colour-state report. The `renderImmediateFrame` doc comment was reworded where it described that
+report as the counter's *"OTHER"* reader, since it is now the only one.
+
+**2. THE INSTRUMENTS ARE KEPT PAST STAGE 4 — DECIDED, NOT DEFAULTED.** `[SCRUB]`, `[SCRUB-GEOM]`,
+`[SETTLE]`, `[V210]` and `ScrubProducerFlags.stats` (`MANIFOLD_SCRUB_STATS=1`) all stay. The
+section above asked for this to be decided here rather than by default; this is that decision.
+
+**The reason is a live open item, not a general preference for keeping instruments.** Open item 1
+of the Stage 3 entry stands: `thread_count = cores − 1` is a **16-core Studio result** — 8 and 15
+threads measured there, 15 shipped — being applied to a **4P/6E MacBook Air M4**, where the same
+arithmetic gives 9 threads spread across cores that are not interchangeable, and **nothing has run
+on that part.** `MANIFOLD_SCRUB_STATS` is the instrument that closes that question. Deleting it now
+would mean rebuilding it to answer it.
+
+Two supporting facts, neither of which is the reason on its own:
+
+- **They cost nothing when off.** All of it is env-gated and **off by default**: a tester's build
+  carries the code and never the output.
+- **`[SCRUB-GEOM]` has a second, permanent job.** It is the standing ARRI open-gate check — the
+  producers' encoded-geometry contract made arithmetic — and it is what would catch a reintroduced
+  clean-aperture crop, which is 32 px per side on the fixture that exposed it and reads as a
+  slightly soft preview rather than as a geometry bug.
+
+**The removal condition, so this is a decision and not a deferral: they come out when the thread
+count is characterised on a small part.** That measurement retires the open item and the instrument
+that exists to serve it, together.
 
 **The colour-management mode picker's precondition is met at this point and not before** — see the
 last section of the entry above. ⚠️ **As of Stage 3 the precondition is in fact already met**: there

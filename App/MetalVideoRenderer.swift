@@ -176,51 +176,6 @@ final class MetalVideoRenderer {
     /// render command buffer is committed — a bailed render doesn't signal).
     var onFrameRendered: (() -> Void)?
 
-    /// ONE-SHOT: the first frame of the CURRENT source generation has been PRESENTED — i.e.
-    /// `presentsSinceFlush` just went 0 → 1. Cleared as it fires, so one arm gives one call.
-    ///
-    /// ── WHY THIS EXISTS, AND WHY IT IS NOT `onFrameRendered` OR THE PAUSED-SEEK BRANCH ────────
-    ///
-    /// The scrub-release handoff needs to know that the SEEKED-TO frame is on screen, so the
-    /// preview overlay can be taken down at that moment instead of in the same closure that starts
-    /// the seek (which is what makes the picture jump — see docs/BUGS.md, "scrub release jumps the
-    /// picture once, on ProRes"). Three candidates, and only this one answers the question asked:
-    ///
-    ///   * `onFrameRendered` fires on EVERY render and is already owned by the scopes
-    ///     (`ContentView` assigns it wholesale). It cannot say "the first one after the seek", and
-    ///     it is not free to take.
-    ///   * The PAUSED-SEEK relaxed branch in `performDisplayTick` looks like the hook and is not:
-    ///     it is a FALLBACK that runs only when the decoder overshoots the pinned clock while
-    ///     paused. A seek whose first frame lands at `pts <= now` is handled by the strict gate
-    ///     above it and never reaches that branch at all — so an overlay hung off it would stay up
-    ///     until the timeout in the ordinary case, which is the common case.
-    ///   * `presentsSinceFlush` is the fact itself. `flush()` zeroes it and every seek flushes
-    ///     (`FrameEngine.beginReading`, and the libav path), so it is already scoped to exactly
-    ///     "since this seek". BOTH selection branches funnel through `renderPixelBuffer`, so
-    ///     counting there catches the overshoot case and the ordinary case with one condition.
-    ///
-    /// ⚠️ "PRESENTED" HERE IS LITERAL. The increment sits directly after `presentDrawable`, which
-    /// does `waitUntilScheduled()` and a committed `CATransaction` around `present()` — so when
-    /// this fires the drawable is handed to the compositor, not merely encoded. That is what makes
-    /// it safe to remove the overlay without a gap: the frame underneath is already there.
-    ///
-    /// Called on the RENDER thread, like its siblings — the consumer hops. Set from main; the
-    /// backing store is `refreshLock`-guarded for the same "MAIN COMPUTES, THE RENDER THREAD
-    /// INSTALLS" reason `pendingRefresh` and `pendingSeekRender` are.
-    /// ⚠️ UNCONSUMED AS OF STAGE 3, AND LEFT STANDING DELIBERATELY FOR ONE MORE STEP.
-    /// Its only consumer was ever the scrub-release handoff: first the AVFoundation one (deleted
-    /// in Stage 2), then the MXF-only hold (deleted in Stage 3, once `LibavScrubProducer` started
-    /// putting real frames on the layer during an MXF drag and the release settle measured
-    /// exactly zero). Nothing arms it now. It is retired with the rest of the scaffolding in
-    /// Stage 4 — see docs/BUGS.md — rather than here, so that step removes it alongside the
-    /// `presentsSinceFlush` accounting it is tangled with rather than in two goes.
-    /// **Do not wire anything new to it.**
-    var onFirstPresentAfterFlush: (() -> Void)? {
-        get { refreshLock.lock(); defer { refreshLock.unlock() }; return _onFirstPresentAfterFlush }
-        set { refreshLock.lock(); _onFirstPresentAfterFlush = newValue; refreshLock.unlock() }
-    }
-    private var _onFirstPresentAfterFlush: (() -> Void)?
-
     /// Returns the engine's effective full-range flag (override + source range).
     /// Read per-frame on the render thread; the engine's accessor is thread-safe.
     /// When nil, defaults to video/legal (expand).
@@ -496,11 +451,11 @@ final class MetalVideoRenderer {
     /// render path to keep in step, which is the reason this is one line of state rather than a
     /// parallel pipeline.
     ///
-    /// ⚠️ IT ALSO INHERITS `presentsSinceFlush`, which still matters although the callback it used
-    /// to trip is now unconsumed: that counter's OTHER reader is the `[EDR]` "colour state
-    /// installed after N present(s) of this source" report, and an immediate present landing
-    /// between a `flush()` and the seeked-to frame moves that count. It reports the truth — a
-    /// frame really was presented — so this is a note for whoever reads that line, not a defect.
+    /// ⚠️ IT ALSO INHERITS `presentsSinceFlush`, which still matters: that counter is read by the
+    /// `[EDR]` "colour state installed after N present(s) of this source" report, and an immediate
+    /// present landing between a `flush()` and the seeked-to frame moves that count. It reports
+    /// the truth — a frame really was presented — so this is a note for whoever reads that line,
+    /// not a defect.
     ///
     /// NOT dropped by `flush()` — a seek does not invalidate a frame a producer has already
     /// decoded and handed over — but IS dropped by `clearToBlack()`, for the same reason
@@ -2140,18 +2095,6 @@ final class MetalVideoRenderer {
         // (presentBlackFrame, on teardown) is not one of this source's frames. Counting it there
         // would report 1 where the teardown→new-source path must report 0.
         presentsSinceFlush &+= 1
-        // 0 → 1 IS THE EDGE, not "presents > 0". A one-shot armed mid-generation (the overlay is
-        // armed just before the seek, while the PREVIOUS generation's frame is still on screen and
-        // its count is already well above zero) must not fire on that generation's next repaint —
-        // a `pendingRefresh` re-render, say. Only the flush that the seek performs can bring the
-        // count back to 0, so only the present that follows it can make this 1.
-        if presentsSinceFlush == 1 {
-            refreshLock.lock()
-            let fire = _onFirstPresentAfterFlush
-            _onFirstPresentAfterFlush = nil     // cleared AS it fires — one arm, one call
-            refreshLock.unlock()
-            fire?()                             // outside the lock: the sink hops to main
-        }
 
         #if DEBUG
         let rpPresEnd = CACurrentMediaTime()
