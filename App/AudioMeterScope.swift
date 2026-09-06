@@ -424,6 +424,48 @@ struct AudioMeterScopeView: View {
     @ObservedObject var model: AudioMeterModel
     var slotSelection: Binding<ScopeKind>? = nil
 
+    /// ── THE USER REFERENCE MARKER: TWO SCALARS, IN dBFS ───────────────────────────────────
+    ///
+    /// The user-line spelling from the waveform and parade (`manifold.<scope>.line1.enabled` /
+    /// `.position`), one scope over: an enable flag and a value, both `@AppStorage`, so the marker
+    /// is app-wide and a second window opens with the one you set.
+    ///
+    /// ⚠️ THE VALUE IS STORED IN dBFS, NOT AS A NORMALIZED 0…1 HEIGHT, AND THAT DIVERGES FROM THE
+    /// WAVEFORM DELIBERATELY. Do not "fix" the two into agreement.
+    ///
+    /// The waveform stores normalized because it has FIVE rulers (8-bit, 10-bit, IRE, PQ nits,
+    /// HLG %), and its own comment states the reason: "Storage is a normalized height, so switching
+    /// rulers re-labels a line rather than moving it." A line typed as 203 nits must not MOVE when
+    /// the ruler becomes 10-bit code.
+    ///
+    /// The meters have ONE ruler. `MeterScale` is absolute and fixed — −18 dBFS means one thing
+    /// forever, on every source, under every setting in this app — and `MeterScale.position(ofDB:)`
+    /// already converts on the way to the screen, so pre-converting buys nothing. What a stored
+    /// FRACTION would cost is specific: `MeterScale.breakpoints` is a tuned piecewise table that has
+    /// already been revised once (the power curve that put −30 dBFS at 2.2% of the bar and was
+    /// wrong), and a stored 0.30 would silently become a different dB value the next time anyone
+    /// touched it — the marker moving with no edit, on a measurement instrument. A stored −18.0
+    /// cannot. The dB is the fact; the height is a rendering of it.
+    ///
+    /// DEFAULT −18 dBFS: the SMPTE RP 155 / EBU R68 alignment level, so the seed is a number a
+    /// colourist recognises rather than an arbitrary one, and it sits clear of the gradient's own
+    /// breaks at −20 and −6 so it cannot be mistaken for structure. It is A SEED, NOT A
+    /// RECOMMENDATION. Off by default, like the waveform's lines: nothing appears until it is asked
+    /// for.
+    ///
+    /// ⚠️ "MARKER", NOT "PEAK MARKER", AND THE KEYS SAY SO — this is the one identifier here that is
+    /// expensive to change later, because renaming a `@AppStorage` key ORPHANS every value already
+    /// saved under the old one. The first cut of this spelled them `manifold.meters.peak.*` while
+    /// every other identifier in the feature said "marker", and the doc block was simultaneously
+    /// arguing that the line is NOT a peak ceiling: this meter measures SAMPLE peak, does not
+    /// measure TRUE peak (see the SCOPE note at the top of this file), and a key called `peak` on an
+    /// instrument that declines to make that measurement is a claim in the one place a user cannot
+    /// see it and a future reader cannot cheaply correct it. It is a marker. It marks whatever the
+    /// user says it marks — an alignment level, a delivery ceiling, a dialogue floor — and the app
+    /// takes no position on which.
+    @AppStorage("manifold.meters.marker.enabled") private var markerOn = false
+    @AppStorage("manifold.meters.marker.db")      private var markerDB = -18.0
+
     /// Bar geometry. Bars are capped rather than stretched: eight channels in a narrow slot
     /// should stay readable, and 24 should not become hairlines.
     private let maxBarWidth: CGFloat = 26
@@ -439,6 +481,17 @@ struct AudioMeterScopeView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
                     ScopeSlotHeader(name: "METERS", suffix: headerSuffix, selection: slotSelection)
+                    // ⚠️ THE GEAR GOES HERE — immediately after the slot header and BEFORE the
+                    // Spacer, the same index the other four use (waveform and parade's
+                    // `ScopeValueAxisGear`, `vectorscopeOptions`, `cieOptions`). That keeps the
+                    // conditional CLIP button on the trailing edge exactly where it was, and it
+                    // keeps the five slot headers reading as one row across a tray.
+                    //
+                    // ⚠️ DO NOT ENLARGE ITS HIT TARGET — no frame, no padding, no `.contentShape`.
+                    // Five points of the tray divider's grab band lie over the top of EVERY scope
+                    // header and swallow `mouseDown`; the reasoning and the margin are written out
+                    // on `ScopeGear` itself.
+                    MeterOptionsGear(markerOn: $markerOn, markerDB: $markerDB)
                     Spacer(minLength: 4)
                     if model.channels.contains(where: { $0.clipped }) {
                         Button { model.clearAllClips() } label: {
@@ -544,7 +597,8 @@ struct AudioMeterScopeView: View {
             .padding(.horizontal, 4)
             .padding(.bottom, 2)
             .overlay(alignment: .bottom) {
-                graticule(plotHeight: max(plotHeight, 1))
+                graticule(plotHeight: max(plotHeight, 1),
+                          markerOn: markerOn, markerDB: markerDB)
                     .padding(.bottom, labelStripHeight + 2)
                     .allowsHitTesting(false)
             }
@@ -613,7 +667,56 @@ struct AudioMeterScopeView: View {
     ///
     /// 0 dBFS is drawn at label opacity rather than major-line opacity — it is the one line a
     /// peak decision is made against, and it reads as a limit rather than as another tick.
-    private func graticule(plotHeight: CGFloat) -> some View {
+    ///
+    /// ── THE USER REFERENCE MARKER IS DRAWN HERE, AT THE `.key` TIER ────────────────────────
+    ///
+    /// This Canvas already spans the whole strip and strokes x 0 → `size.width`, so a line drawn
+    /// here crosses EVERY BAR BY CONSTRUCTION, at any channel count, with no bar geometry threaded
+    /// into it. That is why the marker lives in the graticule and not in `bar(_:width:height:)`
+    /// beside the peak-hold line, which is the other place a horizontal rule already draws.
+    ///
+    /// ⚠️ WEIGHT: `graticuleEmphasisStyle(.key)` — a 0.60 line at 1.0 pt with a 0.9 label — ASKED
+    /// FOR BY NAME rather than spelled out as three numbers. 0.22 (`graticuleMajorOpacity`) is the
+    /// weight for ALWAYS-ON STRUCTURE that is on screen unasked and exists to be looked PAST; this
+    /// marker is off by default, so the only reason it is drawn at all is that someone switched it
+    /// on TO READ IT — a foreground reference. The vectorscope's skintone axis shipped at 0.22 first
+    /// and was reported unreadable: it disappeared into the trace, which is exactly what background
+    /// structure is supposed to do.
+    ///
+    /// ── WHAT ASKING FOR `.key` COUPLES THIS TO, AND HOW STRONGLY ───────────────────────────
+    ///
+    /// ⚠️ THE TIER HAS THREE CONSUMERS NOW AND THEY ARE NOT ALL THE SAME KIND OF THING. Stated
+    /// because the shorthand ("it moves all three together") is true and still misleading about WHY:
+    ///
+    ///   * THE WAVEFORM AND PARADE USER LINES — coupled DELIBERATELY and tightly. They are the same
+    ///     class of object as this marker: a reference A USER PLACED and reads against. If this
+    ///     marker and those lines ever draw at different weights, something is wrong.
+    ///   * THE BT.2408 203-NIT LINE — shares the tier because it shares a RENDERING ROLE, not
+    ///     because it is the same kind of thing. It is a FIXED STANDARD reference the app draws
+    ///     UNASKED under a PQ ruler; nobody placed it, and it is not switched off. That coupling
+    ///     PREDATES this marker — `drawUserLines` already tied the user lines to it, "the weight the
+    ///     203-nit BT.2408 line uses" — and this change extended it to a third consumer rather than
+    ///     creating it.
+    ///
+    /// So `.key` can no longer be tuned for one of the three alone, which is the intended cost for
+    /// the marker and the user lines and an accepted side effect for the 203-nit line. ⚠️ IF THE
+    /// 203-NIT LINE EVER NEEDS TO MOVE INDEPENDENTLY, THE FIX IS A FOURTH CASE ON `GratEmphasis`,
+    /// NOT A TWEAK TO `.key`: `graticuleEmphasisStyle` is already shaped for that, and editing
+    /// `.key` in place would silently move two user-placed references to adjust a standards line.
+    ///
+    /// It lands at the SAME opacity as the 0 dBFS line, at twice its width, and that is deliberate:
+    /// both are limits read AGAINST rather than ticks read past, so they belong at one opacity, and
+    /// the width separates them without inventing a sixth number for this file to own.
+    ///
+    /// ⚠️ ITS LABEL IS ON THE TRAILING EDGE and every tick's is on the leading one. That is the
+    /// whole disambiguation and it costs nothing: a ruler has more than one entry, so a single
+    /// number alone against the right edge cannot be read as a second scale. No COLOUR is
+    /// introduced — the bars own colour in this scope (the gradient's green/amber/red breaks sit ON
+    /// the dB scale, at −20 and −6), and a coloured line would read as a threshold in that
+    /// vocabulary rather than as a mark someone placed.
+    ///
+    /// Drawn AFTER the tick loop, so it wins every overlap.
+    private func graticule(plotHeight: CGFloat, markerOn: Bool, markerDB: Double) -> some View {
         Canvas { ctx, size in
             for db in MeterScale.labelledTicks {
                 let y = size.height - size.height * CGFloat(MeterScale.position(ofDB: db))
@@ -624,23 +727,263 @@ struct AudioMeterScopeView: View {
                            with: .color(.white.opacity(db == 0 ? graticuleLabelOpacity
                                                                : graticuleMajorOpacity)),
                            lineWidth: 0.5)
-
-                let resolved = ctx.resolve(
-                    Text(verbatim: db == 0 ? "0" : "\(Int(db))")
-                        .font(.system(size: graticuleLabelFontSize, design: .monospaced))
-                        .foregroundColor(.white.opacity(graticuleLabelOpacity))
-                )
-                let ts = resolved.measure(in: CGSize(width: 200, height: 100))
-                // Clamp so the -60 and 0 labels stay fully on the plot instead of half-clipped
-                // at the edges — the same treatment drawGraticuleLabel gives the waveform's.
-                let ly = Swift.min(Swift.max(y, ts.height / 2), size.height - ts.height / 2)
-                let plate = CGRect(x: 1, y: ly - ts.height / 2 - 1,
-                                   width: ts.width + 6, height: ts.height + 2)
-                ctx.fill(Path(roundedRect: plate, cornerRadius: 3),
-                         with: .color(.black.opacity(graticuleLabelBackingOpacity)))
-                ctx.draw(resolved, at: CGPoint(x: 4, y: ly), anchor: .leading)
+                drawGraticuleLabel(ctx, size: size, y: y,
+                                   text: db == 0 ? "0" : "\(Int(db))",
+                                   trailing: false, opacity: graticuleLabelOpacity)
             }
+
+            guard markerOn else { return }
+            let my = size.height - size.height * CGFloat(MeterScale.position(ofDB: markerDB))
+            let style = graticuleEmphasisStyle(.key)
+            var marker = Path()
+            marker.move(to: CGPoint(x: 0, y: my))
+            marker.addLine(to: CGPoint(x: size.width, y: my))
+            ctx.stroke(marker, with: .color(.white.opacity(style.lineOpacity)),
+                       lineWidth: style.lineWidth)
+            drawGraticuleLabel(ctx, size: size, y: my, text: meterMarkerLabel(markerDB),
+                               trailing: true, opacity: style.labelOpacity)
         }
         .frame(height: plotHeight)
+    }
+}
+
+// MARK: - The user reference marker: the commit decision, and the gear that edits it
+
+/// What a marker commit attempt decided. Pure data, so `meterMarkerCommitDecision` can be
+/// exercised directly instead of only through a live text field — the same reason
+/// `UserLineCommitOutcome` exists, and the same reason it is not buried inside the `View`.
+///
+/// ⚠️ THERE IS NO `.discarded` CASE, AND ITS ABSENCE IS A FINDING RATHER THAN AN OMISSION — stated
+/// here so nobody re-derives it or "restores" it for symmetry. The waveform's fields carry one
+/// because their buffer is typed IN THE ACTIVE RULER'S UNITS, and the ruler radio rows share a
+/// popover with the field: clicking a ruler BLURS a half-typed value whose meaning has just changed
+/// underneath it, which is how "378" typed as a code value commits as 378 PQ nits and stores 661
+/// code (measured). The meters have ONE ruler. `MeterScale` is fixed and absolute, this field always
+/// edits dBFS, and there is NO control anywhere in this app that can change what a number typed here
+/// means. So there is no stale-unit state to detect and nothing for a discard to protect.
+enum MeterMarkerCommitOutcome: Equatable {
+    /// Nothing was typed, or what was typed means the value already stored. Write NOTHING.
+    case unchanged
+    /// Unparseable, or outside `MeterScale`'s floor…ceiling. Write NOTHING.
+    ///
+    /// ⚠️ AND NOTHING TELLS THE USER IT HAPPENED. This case is distinct from `.unchanged` in the
+    /// source and NOT distinct on screen — both leave the field showing the stored value. The gap,
+    /// why it is deferred, and why it is not the meters' alone to close are on
+    /// `MeterMarkerRow.commit()`.
+    case rejected
+    /// A genuinely new dBFS value.
+    case write(Double)
+}
+
+/// THE WHOLE COMMIT DECISION, WITH NO VIEW STATE IN IT — `userLineCommitDecision`'s discipline minus
+/// the ruler half (see `MeterMarkerCommitOutcome`).
+///
+/// ── `text != seeded` IS THE ONLY DEFINITION OF "THE USER TYPED SOMETHING" ──────────────────
+///
+/// ⚠️ AND IT IS STILL LOAD-BEARING HERE, EVEN THOUGH NOTHING CONVERTS UNITS. `meterMarkerLabel`
+/// rounds to one decimal, so a stored −18.04 displays as "-18" and parses back to −18.0: a
+/// value-difference guard ALONE would read merely focusing the field and leaving as an edit, and
+/// move the marker — the exact bug the waveform's version was written to close. Comparing the BUFFER
+/// against WHAT IT WAS SEEDED WITH asks the right question, because a buffer nobody edited is
+/// byte-identical to its seed whatever rounding produced it. The value test below is then a genuine
+/// no-op check rather than a substitute for this one.
+///
+/// ── OUT OF RANGE IS REJECTED, NOT CLAMPED ─────────────────────────────────────────────────
+///
+/// Same reasoning as the user lines, with a different commonest mistake: dBFS below full scale is
+/// NEGATIVE, so the way to land out of range here is a sign error — typing "18" for −18. A clamp
+/// would answer that by parking the marker at 0 dBFS, on top of the one line a peak decision is
+/// already made against, and the only evidence would be a number you have stopped looking at.
+/// Reverting is visible, costs one retype, and never leaves the marker somewhere unintended.
+func meterMarkerCommitDecision(text: String, seeded: String,
+                               stored: Double) -> MeterMarkerCommitOutcome {
+    // (1) Nobody typed anything. This is the guard that makes focus-and-leave a no-op.
+    guard text != seeded else { return .unchanged }
+
+    let trimmed = text.trimmingCharacters(in: .whitespaces)
+    // Locale-aware first (a decimal-comma locale types "-1,5"), then the plain parse as a fallback
+    // so a "-1.5" typed on such a system is still understood. Lifted from `userLineCommitDecision`.
+    let entered = (try? Double(trimmed, format: .number)) ?? Double(trimmed)
+    guard let v = entered, v.isFinite,
+          v >= MeterScale.floorDB, v <= MeterScale.ceilingDB else { return .rejected }
+
+    // (2) A retype of the value already stored must not reach UserDefaults — see the note on
+    // `MeterMarkerRow` for what a write costs the OTHER four scopes.
+    guard abs(v - stored) > 1e-9 else { return .unchanged }
+    return .write(v)
+}
+
+/// dBFS → the marker's printed label. A trailing ".0" is dropped, so an integer entry reads "-18"
+/// like the graticule's own ticks while a fractional ceiling reads "-1.5". THE FIELD FORMATS WITH
+/// THIS SAME FUNCTION, so the line's label and the number in the gear can never disagree about one
+/// stored value — the same reason `userLineFieldValue` is shared between the waveform's field and
+/// its line label.
+func meterMarkerLabel(_ db: Double) -> String {
+    let r = (db * 10).rounded() / 10
+    return r == r.rounded() ? String(Int(r)) : String(format: "%.1f", r)
+}
+
+/// The meters' options gear — the FIRST one this scope has had; it was the only one of the five
+/// without a gear. Contents: the user reference marker.
+///
+/// ⚠️ ONE LINE ACROSS EVERY CHANNEL, NOT A PER-CHANNEL OVERRIDE, AND THAT IS THE FEATURE RATHER THAN
+/// A FIRST CUT OF IT. The thing a marker is usually set to — a delivery ceiling, an alignment level
+/// — is a property of the DELIVERABLE, not of a channel: the same number applies to L, to LFE and to
+/// channel 7 alike. The per-channel rules that DO exist in the standards are LOUDNESS rules — LFE
+/// excluded from a BS.1770 sum, dialogue gating — and loudness is a measurement this instrument
+/// deliberately does not make (see the SCOPE note at the top of this file). Eight fields would
+/// suggest it did. One line is also the cheap shape: the graticule Canvas already spans the whole
+/// strip, so the marker crosses every bar by construction at any channel count, with no bar geometry
+/// threaded into it.
+///
+/// The two values live in `AudioMeterScopeView` and arrive here as BINDINGS, following the user
+/// lines rather than declaring the keys in this struct — the graticule has to read them too, and one
+/// declaration site is what keeps the drawn line and the edited number over the same two keys.
+struct MeterOptionsGear: View {
+    @Binding var markerOn: Bool
+    @Binding var markerDB: Double
+
+    var body: some View {
+        ScopeGear(title: "Meter options",
+                  help: "Reference marker: one line across every channel, typed in dBFS. Read against SAMPLE peak — this meter does not measure true peak, so a marker set to a true-peak delivery ceiling is not a true-peak check.") {
+            ScopeGearSectionHeader("Reference marker", isFirst: true)
+            MeterMarkerRow(isOn: $markerOn, db: $markerDB)
+        }
+    }
+}
+
+/// The reference marker's row in the gear popover: a checkbox that draws it, and a field carrying its
+/// value in dBFS. `UserLineRow`'s shape and commit discipline, deliberately — `.roundedBorder`, the
+/// fixed 60 pt field, the caption unit beside it, and a LOCAL STRING BUFFER assigned only by
+/// `commit()`, called from `.onSubmit` and from focus leaving.
+///
+/// ⚠️ THE DEFERRED WRITE MATTERS HERE TOO, THOUGH THE COST LANDS ONE SCOPE OVER. The meters model
+/// runs its own 30 Hz timer and does NOT observe UserDefaults, so a per-keystroke write would cost
+/// the METERS nothing — but every other scope model subscribes to `UserDefaults.didChangeNotification`
+/// and re-samples the current frame on it (see `WaveformScopeModel.start`). This popover opens over a
+/// tray whose other two slots are normally full, so a binding that wrote per keystroke would fire a
+/// GPU compute pass per slot per character: typing "-18" would re-sample twice on the way to the
+/// value that was meant, with the traces jumping beside a meter that showed nothing at all.
+///
+/// ⚠️ THERE IS NO SEEDED-RULER GUARD, AND THAT ABSENCE IS THE POINT, NOT A GAP. `UserLineRow` carries
+/// `seededActive` / `seededSdrScale` to catch a buffer typed under one ruler and committed under
+/// another; this field edits one fixed unit and nothing in the app can change what a typed number
+/// means, so there is no analogue and none is missing. See `MeterMarkerCommitOutcome`. `seeded`
+/// ITSELF STAYS — it is a different guard, and it is what makes focus-and-leave a no-op.
+struct MeterMarkerRow: View {
+    @Binding var isOn: Bool
+    /// ⚠️ dBFS, NOT a normalized height — see the note on the two keys in `AudioMeterScopeView`.
+    @Binding var db: Double
+
+    /// What is being typed. Not the stored value, and deliberately allowed to disagree with it while
+    /// a caret is in the field — that disagreement IS the deferred write.
+    @State private var text = ""
+    /// ⚠️ THE BUFFER AS IT WAS LAST SEEDED. Written ONLY by `seed(from:)`, so it cannot drift out of
+    /// step with `text`; a stale seed reads as "the user typed something", which is the bug.
+    @State private var seeded = ""
+
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Toggle("Marker", isOn: $isOn)
+                .font(.caption)
+                .fixedSize()
+            Spacer(minLength: 4)
+            TextField("", text: $text)
+                .frame(width: 60)
+                .multilineTextAlignment(.trailing)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .focused($focused)
+                .onSubmit { commit() }
+            Text("dBFS")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+        }
+        // NOT `.disabled(!isOn)`. A position is a property of the line whether or not the line is
+        // being drawn, and setting a value before switching it on is a natural order — the same
+        // deliberate divergence from `GuidesPanel` that `UserLineRow` makes, for the same reason.
+        .onAppear { reseed() }
+        // Re-format when the STORED value changes under us — another window editing the same
+        // @AppStorage key, or this row's own commit. Skipped while focused so it cannot overwrite
+        // what is being typed. `UserLineRow` additionally reseeds on a RULER change; there is no
+        // ruler here, so this is the whole list rather than a shortened copy of it.
+        .onChange(of: db) { _, _ in if !focused { reseed() } }
+        .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+    }
+
+    /// Fill the buffer from a stored dBFS and record it, so a later commit can tell whether anything
+    /// was typed. ⚠️ THE ONLY WRITER OF `text` AND `seeded`.
+    private func seed(from value: Double) {
+        let s = meterMarkerLabel(value)
+        text = s
+        seeded = s
+    }
+
+    /// Seed from what is actually stored.
+    private func reseed() { seed(from: db) }
+
+    /// The ONLY writer of `db`. Every decision lives in `meterMarkerCommitDecision`; this applies
+    /// the answer and nothing more.
+    ///
+    /// ── THE THREE OUTCOMES ARE THREE DIFFERENT THINGS AND DO NOT SHARE A BRANCH ────────────
+    ///
+    /// `.unchanged` and `.rejected` were ONE `case` here at first, both calling `reseed()`, so "you
+    /// typed the value that was already stored" and "this instrument REFUSES what you typed"
+    /// produced byte-identical screen output. Split, because that conflation is a trap for whoever
+    /// adds feedback later: a shared branch reads as though the two had been considered and found
+    /// equivalent, when only one of them has anything to say.
+    ///
+    ///   * `.rejected` → `reseed()`. The buffer goes back to what IS stored, so a refused entry
+    ///     visibly does not stick.
+    ///   * `.unchanged` → NOTHING. There is nothing to correct: either nobody typed (the buffer
+    ///     already equals its seed), or what was typed parses to the value already stored — and
+    ///     reformatting a just-typed "-18.0" to "-18" under the caret would be a gratuitous edit of
+    ///     an entry that was not wrong. `seeded` is deliberately left as it was; a later commit with
+    ///     nothing typed still lands on `.unchanged`, via the value test rather than the buffer test
+    ///     — see guard (2) in `meterMarkerCommitDecision`.
+    ///
+    /// ── ⚠️ WHAT THE SPLIT DOES NOT FIX — DO NOT READ IT AS HAVING FIXED THIS ────────────────
+    ///
+    /// ⚠️ THE REJECTION IS STILL UNSIGNALLED, AND THE CASE REJECTION EXISTS TO CATCH IS STILL
+    /// INVISIBLE. dBFS below full scale is NEGATIVE, so the commonest bad entry is a sign error:
+    /// typing "18" for −18. That is refused, and the field snaps back to "-18" — WHICH LOOKS
+    /// PLAUSIBLE, and reads as success to the person who meant −18 all along. Nothing beeps, nothing
+    /// highlights, nothing says a value was refused. `.unchanged` and `.rejected` remain
+    /// indistinguishable TO THE USER; what changed is only that they are no longer indistinguishable
+    /// IN THIS SOURCE. This is a code-level fix for a conflation, not a user-facing fix for the
+    /// defect.
+    ///
+    /// THE REAL FIX IS FEEDBACK ON `.rejected` — some visible, transient statement that the entry
+    /// was refused — AND IT IS DEFERRED ON PURPOSE. This popover has no such idiom and neither does
+    /// any other numeric field in the app, so building it means DESIGNING the app's first one rather
+    /// than reaching for an existing pattern, which is more than this change had earned.
+    ///
+    /// ⚠️ NOT A METERS PROBLEM, AND DO NOT FIX IT HERE ALONE. `UserLineRow` has the IDENTICAL gap —
+    /// this row inherited its shape, snap-back and all — so feedback worth building belongs to both
+    /// fields at once; one that alone reported refusals would just relocate the inconsistency.
+    ///
+    /// The app's other numeric fields are NOT a precedent to copy either way: `GuidesPanel`'s
+    /// `customField` and `percentField` CLAMP (1–32, 50–100%), so they never refuse anything and
+    /// have nothing to signal. That is the policy this field and the user lines deliberately do not
+    /// follow — see the rejection note on `meterMarkerCommitDecision` — which is exactly why the
+    /// two of them are the only places in the app where "refused" is a state that needs saying.
+    private func commit() {
+        switch meterMarkerCommitDecision(text: text, seeded: seeded, stored: db) {
+        case .rejected:
+            // Put the buffer back to what IS stored. This snap-back is the ONLY evidence a refusal
+            // produces — see the ⚠️ above for why that is not yet enough.
+            reseed()
+        case .unchanged:
+            // Deliberately nothing. Not a missing `reseed()`; see the bullets above.
+            break
+        case .write(let v):
+            db = v
+            // Seed from the value just written, not from `db`: a `@Binding` over `@AppStorage` is
+            // not guaranteed to read back the new value within the same update.
+            seed(from: v)
+        }
     }
 }

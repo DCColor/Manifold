@@ -898,9 +898,23 @@ func drawValueGraticule(_ ctx: GraphicsContext, size: CGSize, scale: ScopeScale,
 /// Labels anchor to the PANEL edge and therefore land inside the label gutter (see
 /// ScopePlotGutters / scopeLabelGutter, which is sized from these same strings + this pill's
 /// 4pt edge offset and 3pt padding) — clear of the trace, which starts past the gutter.
-private func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat,
-                                text: String, trailing: Bool, opacity: Double,
-                                fontSize: CGFloat = graticuleLabelFontSize) {
+///
+/// ── INTERNAL, NOT `private`, BECAUSE THE METERS DRAW THE SAME PILL ────────────────────────
+///
+/// ⚠️ THE FIVE NUMBERS IN HERE — 4 pt edge offset, 3 pt pad, corner radius 3, the ±1 plate bleed,
+/// and the end-clamp — ARE THE PILL, and they were briefly hand-copied into AudioMeterScope.swift
+/// so the meters' graticule could label its dBFS ruler. A comment saying "keep these in step"
+/// does not keep five numbers in step; the same argument that made `graticuleEmphasisStyle` a
+/// function rather than a fourth copy of three opacities applies verbatim here, so this is now one
+/// implementation with two callers instead. `AudioMeterScopeView.graticule` is the second.
+///
+/// ⚠️ THE GUTTER IS THE WAVEFORM'S, NOT THIS FUNCTION'S. The paragraph above describes how the
+/// value-axis scopes USE these labels, and the meters do not have a label gutter at all — their
+/// labels sit directly ON the bars, which is why the backing pill is load-bearing there rather than
+/// merely tidy. Nothing in this function assumes a gutter exists; do not add such an assumption.
+func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat,
+                        text: String, trailing: Bool, opacity: Double,
+                        fontSize: CGFloat = graticuleLabelFontSize) {
     let resolved = ctx.resolve(
         Text(verbatim: text)
             .font(.system(size: fontSize, design: .monospaced))
