@@ -124,6 +124,68 @@ final class VectorscopeScopeModel: ObservableObject {
         return (cb, cr)
     }
 
+    /// Chroma (Cb, Cr) -> a point in the square plot, in view coordinates. THE ONE mapping from
+    /// chroma units to the screen: the target boxes and the skintone axis both go through it, so a
+    /// marker can never drift away from the boxes it is meant to be read against. Cr is UP (the
+    /// vectorscope convention), hence the negated y. `chromaScaleFrac` is the single scale that ties
+    /// both to the plotted trace, which the kernel builds with that same constant.
+    ///
+    /// WAS INLINE IN THE DRAW, and the arithmetic was already written out twice there (once for the
+    /// box centre, once for the label). Extracted at the second real caller rather than the third:
+    /// two copies of a placement rule is how a "custom target" ends up a few points off the box it
+    /// was placed relative to, with nothing in the source to say which of them is wrong.
+    @inline(__always)
+    static func plotPoint(cb: Float, cr: Float, in size: CGSize) -> CGPoint {
+        let frac = CGFloat(chromaScaleFrac)
+        return CGPoint(x: size.width * 0.5 + CGFloat(cb) * frac * size.width,
+                       y: size.height * 0.5 - CGFloat(cr) * frac * size.height)   // Cr up
+    }
+
+    /// Outer graticule boundary, as a fraction of the plot side. Named because TWO things need it:
+    /// the boundary circle itself, and the skintone axis, which ends ON that circle. Left as a bare
+    /// literal in one of the two, they drift apart the first time the circle is resized.
+    static let graticuleCircleFrac: CGFloat = 0.46
+
+    /// The boundary circle expressed in CHROMA units, so anything drawn out to the rim is positioned
+    /// in chroma and mapped by `plotPoint` like everything else, instead of in view coordinates.
+    static let boundaryChroma: Float = Float(graticuleCircleFrac) / chromaScaleFrac
+
+    /// -- THE SKINTONE (I) AXIS: A FIXED POSITION, NOT A DERIVED ONE ---------------------------
+    ///
+    /// 123 degrees from +Cb, measured with Cr UP. This is the one thing in this graticule that is a
+    /// CONVENTION rather than a derivation, and the difference is deliberate.
+    ///
+    /// SOURCE: the NTSC I/Q axes are the U/V axes ROTATED BY 33 degrees -- I = -U*sin33 + V*cos33 --
+    /// which puts the I axis at 90 + 33 = 123. That 33 was chosen because human skin, across every
+    /// skin tone, holds very nearly ONE HUE and varies in luminance and saturation instead; the axis
+    /// is the line that hue lies along. Every vectorscope since has drawn it at 123, and a colourist
+    /// reads it by its position on the dial.
+    ///
+    /// !! DO NOT RECOMPUTE THIS PER MATRIX, and specifically do not push an RGB triple through
+    /// `chroma(kr:kb:)` the way `boxTargets` does. The boxes SHOULD move with the graticule mode --
+    /// they mark where correctly-encoded bars of that gamut land, which is a different place in 2020
+    /// than in 709. This axis marks where SKIN lands, and skin does not move when the colourist
+    /// changes what the boxes are referenced to. On a Tektronix the flesh line is painted onto the
+    /// graticule; switching standards does not slide it. Deriving it from the active kr/kb would
+    /// drift it several degrees on a 2020 source -- exactly the silent disagreement between what is
+    /// drawn and what it claims that the rest of this file is written to prevent.
+    ///
+    /// !! 123 IS AN ANGLE IN THE PLOTTED Cb/Cr PLANE, WHICH IS NOT THE ANALOGUE U/V PLANE. The two
+    /// are related by an ANISOTROPIC scale (U/V weights B-Y and R-Y by 0.492/0.877; this plot weights
+    /// them by 1/2(1-Kb) and 1/2(1-Kr)), and an anisotropic scale does not preserve angles.
+    /// Transforming the analogue I vector into these units algebraically lands at ~134.5 degrees,
+    /// which reads a third of the way toward Yellow and is not where anyone expects the line. What a
+    /// colourist actually reads is the POSITION ON THE DIAL, so the dial angle is the thing to
+    /// preserve. Sanity check in this plane at 709: R plots at 102.9, Yellow at 174.8, and 123 sits
+    /// in the orange-red wedge between them -- which is where skin belongs.
+    /// !! WHICH HALF THIS IS, AND WHY NOTHING HERE SAYS "-I". 123 rather than 303 puts the ray on
+    /// the POSITIVE I half, which is the half skin is on: I = 0.596R - 0.275G - 0.321B is positive
+    /// for orange. Vectorscopes nonetheless label the axis "-I", because the SMPTE bar signal's -I
+    /// patch is the thing you ALIGN to and that patch lands on the OPPOSITE end, at 303. Nothing
+    /// prints a label today. This is written down for whoever adds one: "-I" is the spelling a
+    /// colourist expects, and against THIS ray it would state the wrong sign.
+    static let skintoneAxisDegrees: Double = 123
+
     /// (Kr,Kb) that PLACES the source-primaries graticule boxes — selected by colorPrimariesCode
     /// (never the matrix code: the graticule follows the gamut). Each gamut's boxes are where a
     /// correctly-encoded 75% bar of that colorspace lands, which is that gamut's CANONICAL YCbCr
@@ -279,6 +341,12 @@ struct VectorscopeScopeView: View {
     /// idiom: small ticks radiating inward from the boundary circle. Overlay-only (graticule redraw).
     @AppStorage("manifold.vectorscope.outerTicks") private var outerTicks = false
 
+    /// Persisted skintone (I) axis — OFF by default, matching `outerTicks`. It is a specialist
+    /// reference that puts a permanent line through the busiest part of the plot, and defaulting it
+    /// on would change the instrument for every existing user without their having asked. ONE LINE
+    /// TO FLIP: the `= false` here. Overlay-only (graticule redraw); the trace math is untouched.
+    @AppStorage("manifold.vectorscope.skintoneAxis") private var skintoneAxis = false
+
     /// The active graticule reference label — "Rec. 709" when fixed, else the SOURCE gamut (from
     /// primaries). Canonical "Rec." form, matching the matrix label + CIE/inspector.
     private var graticuleLabel: String {
@@ -311,6 +379,7 @@ struct VectorscopeScopeView: View {
             }
             Section("Graticule extras") {
                 Toggle("Outer ring ticks", isOn: $outerTicks)
+                Toggle("Skintone axis (I)", isOn: $skintoneAxis)
             }
         } label: {
             Image(systemName: "gearshape")
@@ -427,7 +496,6 @@ struct VectorscopeScopeView: View {
         Canvas { ctx, size in
             let cx = size.width * 0.5
             let cy = size.height * 0.5
-            let frac = CGFloat(VectorscopeScopeModel.chromaScaleFrac)
 
             // Box-placement coefficients: FIXED 709, or the SOURCE gamut's (from primariesCode).
             // The trace math is independent (source matrix, in-kernel) — this only moves the boxes.
@@ -440,7 +508,7 @@ struct VectorscopeScopeView: View {
             }
 
             // Outer chroma boundary circle (subtle). Sized to enclose the 100% targets.
-            let circleR = size.width * 0.46
+            let circleR = size.width * VectorscopeScopeModel.graticuleCircleFrac
             let circleRect = CGRect(x: cx - circleR, y: cy - circleR,
                                     width: circleR * 2, height: circleR * 2)
             ctx.stroke(Path(ellipseIn: circleRect), with: .color(.white.opacity(0.14)), lineWidth: 0.5)
@@ -470,6 +538,40 @@ struct VectorscopeScopeView: View {
             cross.move(to: CGPoint(x: cx, y: cy - 6)); cross.addLine(to: CGPoint(x: cx, y: cy + 6))
             ctx.stroke(cross, with: .color(.white.opacity(0.2)), lineWidth: 0.5)
 
+            // Skintone (I) axis — a FIXED reference ray at 123°, placed through the SAME plotPoint
+            // mapping as the target boxes, so it is positioned AGAINST them rather than merely near
+            // them. Its chroma coordinates are fixed rather than derived from the active kr/kb; see
+            // `skintoneAxisDegrees` for why that is the point and not an omission. Drawn BEFORE the
+            // targets so a box always wins the overlap.
+            if skintoneAxis {
+                let a = VectorscopeScopeModel.skintoneAxisDegrees * .pi / 180
+                let ucb = Float(cos(a)), ucr = Float(sin(a))       // unit vector in chroma
+                let m = VectorscopeScopeModel.boundaryChroma       // out to the boundary circle
+                var axis = Path()
+                axis.move(to: VectorscopeScopeModel.plotPoint(cb: 0, cr: 0, in: size))
+                axis.addLine(to: VectorscopeScopeModel.plotPoint(cb: ucb * m, cr: ucr * m, in: size))
+                // 0.5 at 1.0pt — the TARGET BRACKETS' weight, and DELIBERATELY NOT
+                // `graticuleMajorOpacity`.
+                //
+                // ⚠️ DO NOT "FIX" THIS BACK TO THE SHARED CONSTANT. 0.22 is the weight for
+                // ALWAYS-ON STRUCTURE — the value scopes' rulers, the boundary circle — which is
+                // on screen unasked and exists to be looked PAST while you read the trace. This
+                // axis is OPT-IN: it is off by default, so the only reason it is drawn at all is
+                // that someone switched it on TO READ IT. That makes it a foreground reference,
+                // the same class of thing as the target brackets, not background structure. It
+                // shipped at 0.22 first and was reported unreadable — it disappeared into the
+                // trace, which is precisely what background structure is supposed to do.
+                //
+                // The 0.5 is the brackets' own literal (see `drawTargets` below); they are matched
+                // on purpose, so changing one is a reason to look at the other. Heavier than their
+                // 0.75pt because a full-radius line must hold weight down its whole length, where
+                // a bracket leg only has to read as a corner.
+                //
+                // STILL STROKED BEFORE THE TARGETS: equal weight now, but the boxes are the thing
+                // you measure against, so a bracket keeps the overlap.
+                ctx.stroke(axis, with: .color(.white.opacity(0.5)), lineWidth: 1.0)
+            }
+
             // Targets — derived from the SAME chroma transform as the data. Up to two concentric sets
             // (75% + 100%), selectable per the amplitude menu. Both sets render IDENTICALLY (same
             // brightness, weight, style) like Resolve — distinguished ONLY by radius + label, not by
@@ -483,8 +585,9 @@ struct VectorscopeScopeView: View {
             func drawTargets(level: Float, set: VectorscopeScopeModel.BarSet) {
                 for t in VectorscopeScopeModel.boxTargets(level: level) {
                     let (cb, cr) = VectorscopeScopeModel.chroma(r: t.r, g: t.g, b: t.b, kr: kr, kb: kb)
-                    let bxCenterX = cx + CGFloat(cb) * frac * size.width
-                    let bxCenterY = cy - CGFloat(cr) * frac * size.height   // Cr up
+                    let centre = VectorscopeScopeModel.plotPoint(cb: cb, cr: cr, in: size)
+                    let bxCenterX = centre.x
+                    let bxCenterY = centre.y
                     let h = box / 2
                     let l = bxCenterX - h, r = bxCenterX + h   // frame edges
                     let tp = bxCenterY - h, bt = bxCenterY + h
