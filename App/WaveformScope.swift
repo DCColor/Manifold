@@ -1274,16 +1274,16 @@ struct ScopeValueAxisGear: View {
     let sdrScale: ScopeScale
 
     var body: some View {
-        ScopeGear(title: "Vertical scale & user lines",
-                  help: "Vertical scale: Auto follows the source transfer (PQ→nits, HLG→%/nits); force a ruler to annotate untagged media or A/B. User lines are this scope's own reference lines: type a value in the active ruler's units. Storage is a normalized height, so switching rulers re-labels a line rather than moving it. The trace never changes.") {
+        ScopeGear(title: "Vertical scale & reference markers",
+                  help: "Vertical scale: Auto follows the source transfer (PQ→nits, HLG→%/nits); force a ruler to annotate untagged media or A/B. Reference markers are this scope's own: type a value in the active ruler's units. Storage is a normalized height, so switching rulers re-labels a marker rather than moving it. The trace never changes.") {
             ScopeGearSectionHeader("Vertical scale · transfer", isFirst: true)
             ForEach(ScopeVerticalScale.allCases) { s in
                 ScopeGearRadioRow(label: s.label, selected: verticalScale == s) { verticalScale = s }
             }
-            ScopeGearSectionHeader("User lines")
-            UserLineRow(label: "Line 1", isOn: $line1On, position: $line1Position,
+            ScopeGearSectionHeader("Reference markers")
+            UserLineRow(label: "Marker 1", isOn: $line1On, position: $line1Position,
                         active: active, sdrScale: sdrScale)
-            UserLineRow(label: "Line 2", isOn: $line2On, position: $line2Position,
+            UserLineRow(label: "Marker 2", isOn: $line2On, position: $line2Position,
                         active: active, sdrScale: sdrScale)
         }
     }

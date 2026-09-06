@@ -170,6 +170,16 @@ final class VectorscopeScopeModel: ObservableObject {
     /// drift it several degrees on a 2020 source -- exactly the silent disagreement between what is
     /// drawn and what it claims that the rest of this file is written to prevent.
     ///
+    /// !! AND `VectorscopeUserTarget` IS THE OPPOSITE CASE, WHICH DOES PUSH RGB THROUGH
+    /// `chroma(kr:kb:)`. The two are opt-in references sitting in the same gear popover, one
+    /// tracking the active gamut and one refusing to, so they read as an inconsistency. They are
+    /// not. A USER TARGET IS A SPECIFIC COORDINATE: the same brand orange genuinely lands somewhere
+    /// different in a wider gamut, because the code values that encode it are different there, and
+    /// a mark that stayed put would assert that a colour's position is independent of the space it
+    /// is encoded in -- the one thing a vectorscope exists to show is false. THIS AXIS MARKS A
+    /// REGION, whose hue does not move. Coordinate moves; region does not. The statement is at both
+    /// sites so neither can be "made consistent" with the other by someone reading only one.
+    ///
     /// !! 123 IS AN ANGLE IN THE PLOTTED Cb/Cr PLANE, WHICH IS NOT THE ANALOGUE U/V PLANE. The two
     /// are related by an ANISOTROPIC scale (U/V weights B-Y and R-Y by 0.492/0.877; this plot weights
     /// them by 1/2(1-Kb) and 1/2(1-Kr)), and an anisotropic scale does not preserve angles.
@@ -347,6 +357,27 @@ struct VectorscopeScopeView: View {
     /// TO FLIP: the `= false` here. Overlay-only (graticule redraw); the trace math is untouched.
     @AppStorage("manifold.vectorscope.skintoneAxis") private var skintoneAxis = false
 
+    /// ── USER COLOUR TARGETS: FOUR SCALARS, AND THE VALUE IS THE ENTERED STRING ────────────
+    ///
+    /// The user-line spelling (`manifold.<scope>.<thing>.enabled` / a value key), two of them. Off by
+    /// default like `outerTicks` and `skintoneAxis`, and empty by default: an enabled target with an
+    /// empty field draws NOTHING, because there is no colour to place and inventing a seed would mean
+    /// putting a brand colour nobody chose on a measurement instrument.
+    ///
+    /// ⚠️ THE ENTERED STRING IS STORED, NOT THE COORDINATE IT RESOLVES TO, AND THAT IS THE WHOLE
+    /// POINT. A chroma coordinate is a fact about a colour AND a gamut together. Persisting one would
+    /// freeze the target where it first landed, so opening the same brand orange over a 2020 file
+    /// after a 709 file would mark the position it had on the OTHER source — a stale coordinate
+    /// wearing the label of a live one, which is the class of thing this app's scopes are written to
+    /// prevent. Storing "#FF6600" makes the placement re-derive on every draw, through
+    /// `VectorscopeUserTarget.codeTriple` and the current `sourcePrimariesCode`. It also means the
+    /// user gets back the spelling they typed, which is the one they can check against their own
+    /// brand guideline.
+    @AppStorage("manifold.vectorscope.target1.enabled") private var target1On = false
+    @AppStorage("manifold.vectorscope.target1.value")   private var target1Value = ""
+    @AppStorage("manifold.vectorscope.target2.enabled") private var target2On = false
+    @AppStorage("manifold.vectorscope.target2.value")   private var target2Value = ""
+
     /// The active graticule reference label — "Rec. 709" when fixed, else the SOURCE gamut (from
     /// primaries). Canonical "Rec." form, matching the matrix label + CIE/inspector.
     private var graticuleLabel: String {
@@ -376,6 +407,18 @@ struct VectorscopeScopeView: View {
             ScopeGearSectionHeader("Graticule extras")
             Toggle("Outer ring ticks", isOn: $outerTicks).font(.caption)
             Toggle("Skintone axis (I)", isOn: $skintoneAxis).font(.caption)
+            ScopeGearSectionHeader("Reference markers")
+            VectorscopeTargetRow(label: "Marker 1", isOn: $target1On, value: $target1Value)
+            VectorscopeTargetRow(label: "Marker 2", isOn: $target2On, value: $target2Value)
+            // ⚠️ THE sRGB ASSUMPTION IS STATED, NOT LEFT TO BE INFERRED. A brand hex comes out of a
+            // design tool with no colour space attached to it, and it is sRGB essentially always —
+            // so the app has to assume, and the user must not have to work out WHICH END was
+            // assumed. Naming the destination gamut in the same breath also makes the conversion
+            // visible: on a 2020 file this line reads "→ Rec. 2020" and the mark moves, which is the
+            // behaviour explained on `VectorscopeUserTarget`.
+            Text("Entered as sRGB → placed in \(gamutPrimariesLabel(model.sourcePrimariesCode))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -606,6 +649,394 @@ struct VectorscopeScopeView: View {
             // 75% and 100% are peers — identical style, distinguished by radius + label.
             if boxAmplitude.shows100 { drawTargets(level: VectorscopeScopeModel.barLevel100, set: .p100) }
             if boxAmplitude.shows75  { drawTargets(level: VectorscopeScopeModel.barLevel75,  set: .p75) }
+
+            // ── USER COLOUR TARGETS ────────────────────────────────────────────────────────────
+            //
+            // ⚠️ A RING, NOT CORNER BRACKETS, AND THE SHAPE IS LOAD-BEARING. The brackets mean
+            // something specific — "a correctly-encoded bar of this amplitude lands here" — and they
+            // are the thing a colourist measures against. A user target is a different claim
+            // entirely ("this particular colour lands here"), placed by someone who typed it, and it
+            // has no standard behind it. Reusing the bracket idiom would put a private assertion in
+            // the vocabulary reserved for a standard one. So: an open RING, which is not in this
+            // graticule's vocabulary anywhere else, INKED IN THE ENTERED COLOUR, which no other
+            // element here is — everything else on this overlay is white. Two brand colours are
+            // therefore told apart on the plot the same way they are in the popover.
+            //
+            // The centre stays OPEN, exactly as the brackets' does and for the same reason: the
+            // question is whether the trace has energy at that point, and a filled dot would cover
+            // the one pixel being asked about.
+            //
+            // A faint white keyline rides just outside the coloured ring, because a brand colour can
+            // be #000080 — a navy ring on a black plot is invisible, and the marker must survive its
+            // own colour. It is at the boundary circle's weight, not the brackets': it is not a
+            // reference, it is the thing that stops the reference disappearing.
+            //
+            // ⚠️ PLACEMENT GOES THROUGH `plotPoint` AND `chroma(kr:kb:)` WITH THE ACTIVE MODE'S
+            // Kr/Kb — the same two calls `drawTargets` makes, four lines up. That extraction exists
+            // precisely so a custom target cannot drift from the boxes it is read against. It also
+            // means the target is placed in the GRATICULE's frame rather than the trace's: in
+            // `.fixed709` mode on a 2020 source the boxes are deliberately 709-referenced and the
+            // trace is not, and this mark follows the boxes. That is the correct reading of "read
+            // against the boxes", and it is written down because the alternative looks equally
+            // defensible until you notice it would make the mark disagree with the brackets beside
+            // it.
+            //
+            // ⚠️ AND WHY THIS FOLLOWS THE PRIMARIES WHEN THE SKINTONE AXIS ABOVE REFUSES TO: the
+            // axis marks a REGION whose hue does not move, this marks a COORDINATE that genuinely
+            // does. The full statement is on `VectorscopeUserTarget`; both sites carry it so neither
+            // can be "made consistent" with the other by someone reading only one.
+            //
+            // Drawn LAST, after the brackets: an opt-in mark someone placed deliberately wins the
+            // overlap with always-drawn structure. This is the opposite of the skintone axis's
+            // ordering, which yields to the boxes — that axis is on the plot at a fixed angle
+            // whether or not it relates to the shot, where this is at a colour the user just asked
+            // about.
+            let ringD: CGFloat = 11
+            for (n, entry) in [(1, target1On ? target1Value : ""), (2, target2On ? target2Value : "")] {
+                guard let srgb = VectorscopeUserTarget.parse(entry) else { continue }
+                let code = VectorscopeUserTarget.codeTriple(sRGB: srgb,
+                                                            primariesCode: model.sourcePrimariesCode)
+                let (cb, cr) = VectorscopeScopeModel.chroma(r: code.r, g: code.g, b: code.b,
+                                                            kr: kr, kb: kb)
+                let centre = VectorscopeScopeModel.plotPoint(cb: cb, cr: cr, in: size)
+                let ring = CGRect(x: centre.x - ringD / 2, y: centre.y - ringD / 2,
+                                  width: ringD, height: ringD)
+                ctx.stroke(Path(ellipseIn: ring.insetBy(dx: -1, dy: -1)),
+                           with: .color(.white.opacity(0.35)), lineWidth: 0.5)
+                ctx.stroke(Path(ellipseIn: ring),
+                           with: .color(VectorscopeUserTarget.swatch(entry) ?? .white),
+                           lineWidth: 1.5)
+                // Numeral where the hue names ride, in the hue names' style: two targets have to be
+                // told apart when both are enabled and one is off-screen colour-wise.
+                ctx.draw(
+                    Text(verbatim: "\(n)").font(.system(size: 8, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.55)),
+                    at: CGPoint(x: centre.x, y: centre.y - ringD), anchor: .center
+                )
+            }
+        }
+    }
+}
+
+// MARK: - User colour targets: entry, the sRGB→source-primaries conversion, and the field
+
+/// A user-entered colour target. Owns the two things a brand colour has to survive before it can be
+/// placed: what the field ACCEPTS, and how an sRGB entry becomes a code triple in THIS SOURCE's
+/// primaries.
+///
+/// ── ⚠️ WHY THIS MOVES WITH THE GRATICULE WHEN THE SKINTONE AXIS DOES NOT ───────────────────
+///
+/// These two look inconsistent side by side in the gear popover — one opt-in reference that tracks
+/// the active gamut, one opt-in reference that refuses to — and they are not. Written at BOTH sites
+/// so neither can be "made consistent" with the other by someone reading only one:
+///
+///   * THE SKINTONE AXIS MARKS A REGION. Skin holds very nearly one HUE across every skin tone, and
+///     that hue does not move when the colourist changes what the boxes are referenced to. On a
+///     Tektronix the flesh line is painted onto the graticule. See `skintoneAxisDegrees`.
+///   * A USER TARGET IS A SPECIFIC COORDINATE. The same brand orange genuinely lands somewhere
+///     different in a wider gamut, because the code values that encode it are different there. A
+///     target that stayed put would be asserting the opposite — that a colour's position is
+///     independent of the space it is encoded in — which is the one thing a vectorscope exists to
+///     show is false.
+///
+/// So this follows the primaries EXACTLY as `boxTargets` does, and for the same reason: both mark
+/// where a nameable colour actually lands on this source.
+enum VectorscopeUserTarget {
+
+    /// Parse the field into sRGB components, 0…255.
+    ///
+    /// ── ONE FIELD, TWO SPELLINGS, BECAUSE BRAND GUIDELINES ARRIVE IN BOTH ──────────────────
+    ///
+    /// Accepted: `#RRGGBB`, `RRGGBB`, `#RGB`, `RGB` (the short form expands each nibble, `F60` →
+    /// `FF6600`, which is the CSS rule and the one every design tool writes); and three 0–255
+    /// components separated by commas, whitespace, or both — `255,102,0`, `255 102 0`, `255, 102, 0`.
+    ///
+    /// The two forms cannot collide: the hex branch requires 3 or 6 CONTIGUOUS hex digits with no
+    /// separator, so `255102` is hex and `255,102,0` is a triple, and neither reading is available
+    /// for the other's input.
+    ///
+    /// ⚠️ ANYTHING ELSE RETURNS nil AND IS REFUSED — never guessed at, never partially read. A
+    /// four-component entry, a component over 255, a stray unit, `rgb(...)` wrapper syntax: all nil.
+    /// Guessing here would put a mark on a measurement instrument at a colour nobody typed.
+    static func parse(_ raw: String) -> (r: Double, g: Double, b: Double)? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return nil }
+
+        let hex = s.hasPrefix("#") ? String(s.dropFirst()) : s
+        if hex.count == 3 || hex.count == 6, hex.allSatisfy(\.isHexDigit) {
+            let digits = hex.count == 3 ? hex.flatMap { [$0, $0] } : Array(hex)
+            func byte(_ i: Int) -> Double? {
+                UInt8(String(digits[i * 2 ... i * 2 + 1]), radix: 16).map(Double.init)
+            }
+            guard let r = byte(0), let g = byte(1), let b = byte(2) else { return nil }
+            return (r, g, b)
+        }
+
+        let parts = s.split(whereSeparator: { $0 == "," || $0.isWhitespace })
+                     .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 3 else { return nil }
+        var v: [Double] = []
+        for p in parts {
+            // Integers only. A "255.0" is not a spelling any brand guideline uses, and accepting it
+            // would mean deciding what to do with "254.6" — a rounding the user did not ask for.
+            guard let n = Int(p), n >= 0, n <= 255 else { return nil }
+            v.append(Double(n))
+        }
+        return (v[0], v[1], v[2])
+    }
+
+    /// The swatch / marker ink for an entry: THE COLOUR AS TYPED, in sRGB, deliberately NOT the
+    /// converted triple. The mark on the plot should look like the colour the user entered; the
+    /// conversion decides WHERE it goes, not what it looks like.
+    static func swatch(_ raw: String) -> Color? {
+        guard let c = parse(raw) else { return nil }
+        return Color(red: c.r / 255, green: c.g / 255, blue: c.b / 255)
+    }
+
+    /// sRGB 0…255 → the code triple this colour has IN `primariesCode`'s gamut, 0…255 — the domain
+    /// `boxTargets` produces and `chroma(r:g:b:kr:kb:)` consumes.
+    ///
+    /// Linearize by the sRGB EOTF → 709 linear RGB → XYZ → destination linear RGB → re-encode. On a
+    /// 709/sRGB source every step is an identity and the entered triple comes straight back out,
+    /// which is the correct answer and worth knowing when reading a 709 file.
+    ///
+    /// ── ⚠️ THE TRANSFER IS sRGB AT BOTH ENDS, AND THAT IS A STATED LIMIT, NOT AN OVERSIGHT ────
+    ///
+    /// This converts PRIMARIES. The re-encode uses the sRGB curve rather than the SOURCE's transfer,
+    /// and the reason is that the question has no answer for the transfers where it would differ: a
+    /// brand hex carries no luminance, and placing it in PQ requires choosing an absolute nit level
+    /// for it (203? 100? peak?) — a judgement this instrument has no basis to make and would be
+    /// making silently. What that costs, said plainly: on a PQ or HLG source the target's ANGLE
+    /// (hue) stays right, because hue in this plane is driven by the RATIOS between the three code
+    /// values and the same curve is applied to all three; its RADIUS (saturation) is approximate.
+    /// On SDR sources — 709, sRGB, and gamma-2.2-ish material generally, which is what brand colours
+    /// are actually checked against — both are right.
+    ///
+    /// ⚠️ THE CLAMP HERE IS NOT THE FIELD'S REJECT-DON'T-CLAMP RULE BEING BROKEN. That rule is about
+    /// what the user TYPED. This clamps a value this function DERIVED: a colour outside the
+    /// destination gamut produces a negative linear component, and `pow(negative, 1/2.4)` is NaN.
+    /// 709 → P3/2020 is always into a wider gamut so it cannot arise today; it is guarded because
+    /// the day a narrower destination appears, a NaN would place the mark at the plot origin with
+    /// nothing to say it had.
+    static func codeTriple(sRGB c: (r: Double, g: Double, b: Double),
+                           primariesCode: Int?) -> (r: Float, g: Float, b: Float) {
+        let lin = (srgbToLinear(c.r / 255), srgbToLinear(c.g / 255), srgbToLinear(c.b / 255))
+
+        let source = CIEScopeModel.gamut(forPrimariesCode: primariesCode)
+        guard let toXYZ709 = rgbToXYZ(CIEScopeModel.gamut(forPrimariesCode: 1)),
+              let toXYZDest = rgbToXYZ(source),
+              let fromXYZDest = toXYZDest.inverse else {
+            return (Float(c.r), Float(c.g), Float(c.b))   // unreachable; a degenerate gamut table
+        }
+        let dest = fromXYZDest * (toXYZ709 * lin)
+
+        func encode(_ v: Double) -> Float {
+            Float(linearToSRGB(Swift.min(Swift.max(v, 0), 1)) * 255)
+        }
+        return (encode(dest.0), encode(dest.1), encode(dest.2))
+    }
+}
+
+/// sRGB EOTF and its inverse (IEC 61966-2-1). The linear segment near black is part of the standard,
+/// not a convenience: a pure 2.2 power would put an entered `#010101` in a visibly different place.
+private func srgbToLinear(_ c: Double) -> Double {
+    c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+}
+private func linearToSRGB(_ c: Double) -> Double {
+    c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055
+}
+
+/// Row-major 3×3, enough for one gamut change and nothing more.
+private struct Mat3 {
+    var m: [Double]   // 9, row-major
+
+    static func * (a: Mat3, v: (Double, Double, Double)) -> (Double, Double, Double) {
+        (a.m[0] * v.0 + a.m[1] * v.1 + a.m[2] * v.2,
+         a.m[3] * v.0 + a.m[4] * v.1 + a.m[5] * v.2,
+         a.m[6] * v.0 + a.m[7] * v.1 + a.m[8] * v.2)
+    }
+
+    static func * (a: Mat3, b: Mat3) -> Mat3 {
+        var o = [Double](repeating: 0, count: 9)
+        for r in 0..<3 { for c in 0..<3 {
+            o[r * 3 + c] = a.m[r * 3] * b.m[c] + a.m[r * 3 + 1] * b.m[3 + c] + a.m[r * 3 + 2] * b.m[6 + c]
+        } }
+        return Mat3(m: o)
+    }
+
+    /// nil only for a singular matrix, which for a real gamut's primaries means the table is wrong.
+    var inverse: Mat3? {
+        let (a, b, c) = (m[0], m[1], m[2])
+        let (d, e, f) = (m[3], m[4], m[5])
+        let (g, h, i) = (m[6], m[7], m[8])
+        let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+        guard abs(det) > 1e-12 else { return nil }
+        return Mat3(m: [(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
+                        (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det,
+                        (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det])
+    }
+}
+
+/// Linear RGB → CIE XYZ for a gamut, DERIVED from its xy primaries and D65 (the standard
+/// SMPTE RP 177 construction: scale each primary's unit-luminance XYZ so the three sum to the white
+/// point). Not a transcription of `cieRGBtoXYZ`'s three hardcoded matrices from
+/// PassthroughShader.metal — see `CIEScopeModel.gamut(forPrimariesCode:)` for why deriving is what
+/// keeps one statement of where each primary is, and for the numbers confirming the two agree.
+private func rgbToXYZ(_ g: CIEScopeModel.Gamut) -> Mat3? {
+    func tristimulus(_ x: CGFloat, _ y: CGFloat) -> (Double, Double, Double) {
+        (Double(x / y), 1.0, Double((1 - x - y) / y))
+    }
+    let R = tristimulus(g.r.x, g.r.y), G = tristimulus(g.g.x, g.g.y), B = tristimulus(g.b.x, g.b.y)
+    let primaries = Mat3(m: [R.0, G.0, B.0,
+                             R.1, G.1, B.1,
+                             R.2, G.2, B.2])
+    guard let inv = primaries.inverse else { return nil }
+    let w = tristimulus(CIEScopeModel.whiteXY.x, CIEScopeModel.whiteXY.y)
+    let s = inv * w
+    return Mat3(m: [primaries.m[0] * s.0, primaries.m[1] * s.1, primaries.m[2] * s.2,
+                    primaries.m[3] * s.0, primaries.m[4] * s.1, primaries.m[5] * s.2,
+                    primaries.m[6] * s.0, primaries.m[7] * s.1, primaries.m[8] * s.2])
+}
+
+/// What a colour-target commit attempt decided. `MeterMarkerCommitOutcome`'s shape with a String
+/// payload — the entry is STORED AS TYPED, so there is nothing to convert on the way in.
+///
+/// ⚠️ NO `.discarded` CASE, for the reason spelled out on `MeterMarkerCommitOutcome`: that case
+/// exists in `UserLineCommitOutcome` to catch a buffer typed under one RULER and committed under
+/// another. This field always means sRGB and no control changes that, so there is no stale-unit
+/// state to detect. The gamut the entry is PLACED IN does change under the field — a new source, a
+/// different primaries code — but that is exactly why the string is what is stored: the coordinate
+/// re-derives, so a stored value cannot go stale in the first place.
+enum VectorscopeTargetCommitOutcome: Equatable {
+    /// Nothing was typed, or what was typed is the string already stored. Write NOTHING.
+    case unchanged
+    /// Parses as neither a hex colour nor an 0–255 triple. Write NOTHING — and see the ⚠️ on
+    /// `VectorscopeTargetRow.commit()` for what the user is told about it, which is nothing.
+    case rejected
+    /// A genuinely new entry, stored verbatim.
+    case write(String)
+}
+
+/// THE WHOLE COMMIT DECISION, WITH NO VIEW STATE IN IT.
+///
+/// ⚠️ THIS IS THE THIRD COPY OF ONE SHAPE — guard the buffer against its seed, parse, validate, test
+/// for a genuine change, write — after `userLineCommitDecision` and `meterMarkerCommitDecision`. The
+/// shape is now a real extraction candidate (a generic over the parsed type plus a parse closure
+/// would cover this one and the meters'; the waveform's extra ruler guard would not fold in as
+/// cleanly). NOT extracted here, deliberately: doing it means editing two already-reviewed fields
+/// while adding a third, and a refactor of the commit path is worth its own change rather than
+/// riding along inside a feature. Recorded so the next person adding a FOURTH field extracts it
+/// instead of typing this out again.
+///
+/// The empty string is `.rejected` rather than a distinct "cleared" outcome. Clearing a target is
+/// what its checkbox is for; treating an emptied field as a command would make deleting the text to
+/// retype it destroy the stored value the moment focus moved.
+func vectorscopeTargetCommitDecision(text: String, seeded: String,
+                                     stored: String) -> VectorscopeTargetCommitOutcome {
+    // (1) Nobody typed anything — the guard that makes focus-and-leave a no-op.
+    guard text != seeded else { return .unchanged }
+    let trimmed = text.trimmingCharacters(in: .whitespaces)
+    guard VectorscopeUserTarget.parse(trimmed) != nil else { return .rejected }
+    // (2) Retyping the stored value in the same spelling must not reach UserDefaults — every scope
+    // model re-samples on `UserDefaults.didChangeNotification`. A DIFFERENT spelling of the same
+    // colour ("#F60" for "#FF6600") IS a write: the entry is stored as typed, so the two are
+    // genuinely different stored values, and the user's spelling is the one to keep.
+    guard trimmed != stored else { return .unchanged }
+    return .write(trimmed)
+}
+
+/// One colour target's row in the gear popover: a checkbox, a swatch, and one entry field.
+///
+/// `UserLineRow` and `MeterMarkerRow`'s discipline, unchanged: a LOCAL STRING BUFFER, `commit()` the
+/// only writer, called from `.onSubmit` and from focus leaving, never per keystroke — every scope
+/// model re-samples the current frame on `UserDefaults.didChangeNotification`, so a per-keystroke
+/// binding would fire a GPU compute pass per filled slot per character.
+///
+/// ⚠️ THE SWATCH SHOWS THE STORED VALUE, NOT THE BUFFER, AND THAT IS A CHOICE AGAINST THE MORE
+/// OBVIOUS ONE. Repainting it per keystroke costs nothing (no write is involved) and would look
+/// livelier — and it would also make this the ONE field in the app that visibly answers back while
+/// you type, which means a garbled entry would blank the swatch here and do nothing at all in the
+/// other two. That is a feedback channel arriving by accident, in one place, instead of by design in
+/// all three. When the refusal feedback below is actually built, this swatch is the natural place to
+/// put the vectorscope's half of it.
+///
+/// ⚠️ REJECTION IS UNSIGNALLED HERE TOO, AND THIS FIELD IS NOT SPECIAL. Typing something that parses
+/// as neither form snaps the field back to the stored entry, with nothing to say it was refused —
+/// the identical gap `MeterMarkerRow.commit()` documents and `UserLineRow` shares. The real fix is
+/// visible transient feedback on `.rejected` across all three fields; it is deferred for the same
+/// reason there (it means designing the app's first such idiom, not reaching for an existing one),
+/// and it is NOT to be solved here alone, which would just relocate the inconsistency.
+struct VectorscopeTargetRow: View {
+    let label: String
+    @Binding var isOn: Bool
+    /// ⚠️ THE ENTRY AS TYPED, not a coordinate. See the note on the four keys in
+    /// `VectorscopeScopeView` for why the string is what is persisted.
+    @Binding var value: String
+
+    @State private var text = ""
+    /// ⚠️ THE BUFFER AS IT WAS LAST SEEDED. Written ONLY by `seed(from:)`.
+    @State private var seeded = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Toggle(label, isOn: $isOn)
+                .font(.caption)
+                .fixedSize()
+            Spacer(minLength: 4)
+            swatch
+            TextField("#RRGGBB or R,G,B", text: $text)
+                .frame(width: 108)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .focused($focused)
+                .onSubmit { commit() }
+        }
+        // NOT `.disabled(!isOn)` — the same deliberate divergence from `GuidesPanel` the other two
+        // rows make: a colour is a property of the target whether or not it is being drawn, and
+        // entering one before switching it on is a natural order.
+        .onAppear { reseed() }
+        // Re-seed when the STORED value changes under us — another window editing the same
+        // @AppStorage key, or this row's own commit. Skipped while focused so it cannot overwrite
+        // what is being typed.
+        .onChange(of: value) { _, _ in if !focused { reseed() } }
+        .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+    }
+
+    /// The colour, or an empty well. Two brand colours in two rows are told apart here rather than by
+    /// reading two hex strings back — which is the whole reason a swatch is in a popover this narrow.
+    private var swatch: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(VectorscopeUserTarget.swatch(value) ?? Color.white.opacity(0.06))
+            .frame(width: 14, height: 14)
+            .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+    }
+
+    /// ⚠️ THE ONLY WRITER OF `text` AND `seeded`.
+    private func seed(from v: String) {
+        text = v
+        seeded = v
+    }
+
+    private func reseed() { seed(from: value) }
+
+    /// The ONLY writer of `value`. The three outcomes take three branches, for the reason written out
+    /// on `MeterMarkerRow.commit()`: `.unchanged` and `.rejected` sharing one would make "you retyped
+    /// what was already there" and "this was refused" indistinguishable in the source as well as on
+    /// screen.
+    private func commit() {
+        switch vectorscopeTargetCommitDecision(text: text, seeded: seeded, stored: value) {
+        case .rejected:
+            // Snap back to the stored entry. The only evidence a refusal produces — see the ⚠️ above.
+            reseed()
+        case .unchanged:
+            // Deliberately nothing.
+            break
+        case .write(let v):
+            value = v
+            // Seed from the value just written, not from `value`: a `@Binding` over `@AppStorage` is
+            // not guaranteed to read back the new value within the same update.
+            seed(from: v)
         }
     }
 }

@@ -30,8 +30,8 @@
 //
 //    TIER 1, "Credits" — one line per component: name, version, licence, what it does.
 //                        The whole list fits without scrolling. This is what gets read.
-//    TIER 2, "Licences" — the verbatim texts, one component at a time from a popup, plus an
-//                        "All licences" option that concatenates the lot.
+//    TIER 2, "Licenses" — the verbatim texts, one component at a time from a popup, plus an
+//                        "All licenses" option that concatenates the lot.
 //
 //  EXACTLY THE SAME BYTES SHIP EITHER WAY. Tier 2 shows every file in App/Licenses/ in
 //  full; tier 1 adds no legal claim it does not also make in tier 2.
@@ -344,7 +344,7 @@ enum Attributions {
             provenance: "~/manifold-webrtc-build/mbedtls/LICENSE",
             note: "Statically linked; the DTLS backend for libdatachannel and the AES/PBKDF2 "
                 + "provider for libsrt's stream passphrase. Mbed TLS lets the user choose which "
-                + "licence to take it under — WE TAKE APACHE-2.0. The upstream LICENSE file "
+                + "license to take it under — WE TAKE APACHE-2.0. The upstream LICENSE file "
                 + "below carries BOTH texts, including the GPL-2.0 half we are not taking, "
                 + "because it is reproduced unedited.",
             documents: [LicenseDoc(title: "Mbed TLS LICENSE — Apache-2.0 and GPL-2.0, as shipped upstream",
@@ -362,7 +362,7 @@ enum Attributions {
             note: """
                   SDK build NDI 2026-04-13 git-5396c5f1. NOT LINKED — the NDI runtime is loaded \
                   dynamically at run time if the user has installed it; Manifold ships no NDI \
-                  binary. The SDK licence itself is at http://ndi.link/ndisdk_license and is not \
+                  binary. The SDK license itself is at http://ndi.link/ndisdk_license and is not \
                   reproduced here: the agreement designates the SDK confidential and permits \
                   distribution only of files the SDK identifies as distributable. The third-party \
                   notice file below IS one of those ("This file should be included with all \
@@ -384,7 +384,7 @@ enum Attributions {
             note: """
                   Only DeckLinkAPIDispatch.cpp and the Mac/include headers are used, and the EULA's \
                   clause 0.1 excludes exactly those files from its clauses 1, 4.3, 4.4, 5, 7 and 8. \
-                  The notice reproduced below is the licence carried in that file's own header. The \
+                  The notice reproduced below is the license carried in that file's own header. The \
                   runtime is the user's installed Desktop Video driver; no Blackmagic binary is \
                   shipped. The EULA itself is not reproduced — we redistribute no part of the SDK \
                   it governs — and is at https://www.blackmagicdesign.com/EULA/DeckLinkSDK.
@@ -463,7 +463,7 @@ enum Attributions {
         DeckLink is a trademark of Blackmagic Design Pty. Ltd., used here solely to state that \
         Manifold is compatible with Blackmagic Design DeckLink hardware. Portions of the DeckLink \
         SDK are Copyright (c) 2009 Blackmagic Design, used under the permission notice reproduced \
-        under Licences. Manifold is not a Blackmagic Design product.
+        under Licenses. Manifold is not a Blackmagic Design product.
         """,
     ]
 
@@ -491,7 +491,7 @@ enum Attributions {
         var out = String(repeating: "─", count: 78) + "\n"
         out += entry.fullName + "\n"
         out += "Version:    \(entry.version)\n"
-        out += "Licence:    \(entry.license)\n"
+        out += "License:    \(entry.license)\n"
         out += "Source:     \(entry.provenance)\n"
         if let note = entry.note {
             out += "\n" + note.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
@@ -510,8 +510,8 @@ enum Attributions {
     private static func loadLicense(_ resource: String) -> String {
         guard let url = Bundle.main.url(forResource: resource, withExtension: "txt"),
               let text = try? String(contentsOf: url, encoding: .utf8) else {
-            NSLog("[ABOUT] ⚠️ licence resource missing from the bundle: %@.txt", resource)
-            return "[ licence text \"\(resource).txt\" is missing from this build — this is a "
+            NSLog("[ABOUT] ⚠️ license resource missing from the bundle: %@.txt", resource)
+            return "[ license text \"\(resource).txt\" is missing from this build — this is a "
                  + "packaging fault, please report it ]"
         }
         return text
@@ -583,7 +583,7 @@ struct AboutView: View {
 
             Picker("", selection: $tab) {
                 Text("Credits").tag(Tab.credits)
-                Text("Licences").tag(Tab.licences)
+                Text("Licenses").tag(Tab.licences)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -602,7 +602,7 @@ struct AboutView: View {
             // Touching the lazy static is what runs the preflight; the log fires from there.
             let missing = Attributions.missingResources
             if !missing.isEmpty {
-                NSLog("[ABOUT] ⚠️ %d licence resource(s) missing from the bundle: %@",
+                NSLog("[ABOUT] ⚠️ %d license resource(s) missing from the bundle: %@",
                       missing.count, missing.joined(separator: ", "))
             }
         }
@@ -616,7 +616,7 @@ struct AboutView: View {
                 if !Attributions.missingResources.isEmpty {
                     // The banner half of the missing-file guarantee. Red, at the top, before the
                     // credits — a packaging fault in the licence texts is not a footnote.
-                    Text("⚠️ \(Attributions.missingResources.count) licence text(s) failed to "
+                    Text("⚠️ \(Attributions.missingResources.count) license text(s) failed to "
                        + "bundle in this build: \(Attributions.missingResources.joined(separator: ", ")). "
                        + "This is a packaging fault — please report it.")
                         .font(.caption)
@@ -639,7 +639,7 @@ struct AboutView: View {
                     }
                 }
 
-                Text("Full licence texts are under “Licences” above.")
+                Text("Full license texts are under “Licenses” above.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -696,7 +696,7 @@ struct AboutView: View {
                     Divider()
                     // The escape hatch for anyone who wants the corpus in one selectable block —
                     // the old behaviour, kept, but no longer what the window opens on.
-                    Text("All licences").tag(Attributions.Selection.everything)
+                    Text("All licenses").tag(Attributions.Selection.everything)
                 }
                 .labelsHidden()
                 .frame(width: 220)
@@ -716,7 +716,7 @@ struct AboutView: View {
 
 /// The licence body: ONE NSTextView, not a SwiftUI `ScrollView` of `Text`s.
 ///
-/// A single component is up to ~31 KB and "All licences" is ~96 KB. A `LazyVStack` of `Text`
+/// A single component is up to ~31 KB and "All licenses" is ~96 KB. A `LazyVStack` of `Text`
 /// views measures and lays out every string it has instantiated, and the MPL, LGPL and Apache
 /// texts are each long enough that the scroll stutters visibly; `TextEditor` is a text view
 /// anyway but brings editing behaviour that has to be switched back off. AppKit's text system is

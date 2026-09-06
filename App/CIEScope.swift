@@ -154,6 +154,37 @@ final class CIEScopeModel: ObservableObject {
     /// D65 white point (xy).
     static let whiteXY: (x: CGFloat, y: CGFloat) = (0.3127, 0.3290)
 
+    /// The gamut a CICP PRIMARIES code names, as chromaticities — the same mapping
+    /// `gamutPrimariesLabel` makes to a string and `VectorscopeScopeModel.graticuleKrKb` makes to a
+    /// (Kr,Kb) pair, resolved here to the xy data all three are ultimately about.
+    ///
+    /// ⚠️ LIVES HERE BECAUSE `gamuts` LIVES HERE. The vectorscope's user colour targets need a
+    /// RGB→XYZ matrix for the source gamut to convert an sRGB entry into the source's primaries, and
+    /// the alternative was a second table of primaries — or, worse, a Swift transcription of
+    /// `cieRGBtoXYZ`'s three matrices from PassthroughShader.metal. Those matrices are DERIVABLE
+    /// from these chromaticities plus `whiteXY` (verified: the derivation reproduces the shader's P3
+    /// and 2020 rows to ~1e-7, and 709's to 2e-4 — the published 709 matrix is a rounded one), so
+    /// deriving is what keeps ONE statement of where each primary actually is. The GPU copy stays
+    /// where it is; a shader cannot call this.
+    ///
+    /// P3 covers both DCI (11) and Display P3 (12), matching `gamutPrimariesLabel` and the shader —
+    /// the DCI white-point nuance is deferred in all three places, not just this one. Everything
+    /// unrecognised is 709, which is the same fallback every other CICP reader in this app takes.
+    /// Looked up BY NAME rather than by index into `gamuts`: the array's order is a drawing order
+    /// (and `triangleVisible` already keys off these same names), so an index here would break
+    /// silently the first time a fourth gamut was inserted anywhere but the end.
+    static func gamut(forPrimariesCode code: Int?) -> Gamut {
+        let name: String
+        switch code {
+        case 9:      name = "2020"
+        case 11, 12: name = "P3"
+        default:     name = "709"      // Rec.709 / sRGB / unknown
+        }
+        // The `??` is unreachable while `gamuts` contains 709, and is 709-shaped rather than a crash
+        // because a missing table entry should mislocate a user's target, not take the window down.
+        return gamuts.first { $0.name == name } ?? gamuts[0]
+    }
+
     // MARK: - Plane sizing
 
     private var plane = 300

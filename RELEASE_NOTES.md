@@ -5,6 +5,18 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.8.1
+
+- Reference markers on the waveform, parade and vectorscope, alongside the one already on the
+  meters. Type a value — a code, a nit level, a percentage, a hex color — and a line or a ring
+  marks it. Two per scope.
+- A skintone axis on the vectorscope, off by default, in the scope's own options.
+- Scope options now open in a panel rather than a menu, so you can change several things without
+  it closing each time.
+- Manifold can now be the default app for MXF, QuickTime and MP4 files. Set it per file type in
+  Settings; the file types you don't set are left alone.
+- Fixed: some text read "licence" where it should have read "license".
+
 ## 0.8.0
 
 - SRT streams now carry audio, including multichannel. Channel order is read from the stream

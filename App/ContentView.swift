@@ -94,11 +94,40 @@ struct ScopeSlotHeader: View {
 /// `.contentShape` here spends a budget that has about 5 points in it. `.buttonStyle(.plain)` is
 /// load-bearing for the same reason: the default button style would add its own chrome and padding.
 ///
-/// ⚠️ `arrowEdge: .top`, WHICH PUTS THE PANEL ABOVE THE GEAR. The gear sits in the scope header, at
-/// the TOP of a tray pinned to the BOTTOM of the window, so there are only ~200 points below it
-/// (`WindowChrome.defaultTrayHeight`) and the whole picture above. Opening downward would fight the
-/// tray's height on every scope; opening upward has the video to spread over. AppKit treats this as
-/// a preference and repositions if the panel does not fit, so this is the good case, not a promise.
+/// ⚠️ `arrowEdge: .top`, WHICH PUTS THE PANEL ABOVE THE GEAR. The gear sits in the 22-pt header at
+/// the TOP of a tray pinned to the BOTTOM of the window, so there is the whole picture above it and
+/// very little below. Opening upward has the video to spread over. AppKit treats this as a
+/// preference and repositions if the panel does not fit, so this is the good case, not a promise.
+///
+/// ── ⚠️ `.bottom` WAS TRIED AND REVERTED. DO NOT TRY IT AGAIN WITHOUT READING THIS. ───────────
+///
+/// Opening downward, over the scopes rather than over the picture, is the obviously nicer idea and
+/// it does not survive the measurements. The room below the gear is the tray's height
+/// (`WindowChrome.minTrayHeight` 186, `defaultTrayHeight` 204) less the ~11 pt to the gear's centre,
+/// PLUS whatever screen lies under the window — and a window sized to its display has almost none.
+/// So roughly 175–195 points, against panels of approximately:
+///
+///     Meters                        ~90    fits
+///     CIE                          ~195    marginal at the default, over at the 186 floor
+///     Waveform / parade            ~225    does not fit
+///     Vectorscope                  ~360    does not fit at any tray height
+///
+/// (Derived from the panel contents — 12 pt padding each side, a headline, `ScopeGearSectionHeader`
+/// dividers, and per-row heights — NOT measured on screen. The right order of magnitude, not figures
+/// to design against.)
+///
+/// TWO OF FOUR WOULD THEREFORE FLIP ALWAYS AND CIE WOULD FLIP AT THE MINIMUM TRAY HEIGHT, which
+/// makes `.bottom` INCONSISTENT PLACEMENT rather than a preference: the same gesture would put the
+/// meters panel below the gear and the vectorscope panel above it, on the same tray. Uniformly
+/// upward is worse in the abstract and better in the hand. Nothing is broken either way — AppKit
+/// repositions rather than clipping — which is exactly why this is a judgement about consistency
+/// and not a bug report.
+///
+/// ⚠️ THE THING THAT WOULD ACTUALLY CHANGE THE ANSWER IS MAKING THE PANELS SHORTER, NOT FLIPPING
+/// THE EDGE. The vectorscope is the binding constraint at ~360 pt (it grew a section when the
+/// reference markers landed); shortening it, or giving it a `ScrollView`, is what would bring the
+/// set close enough to a common answer for `.bottom` to be worth revisiting. Changing this constant
+/// on its own only moves the inconsistency to a different pair of scopes.
 ///
 /// Container metrics — `.padding(12)`, `.frame(width: 280)`, `VStack(alignment: .leading, spacing:
 /// 4)`, a `.headline` title — are `GuidesPanel`'s, deliberately copied rather than re-chosen. That

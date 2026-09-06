@@ -522,7 +522,7 @@ final class LicenseManager: ObservableObject {
     var userFacingKeychainFault: String? {
         guard let status = keychainFaultStatus else { return nil }
         return """
-               Manifold couldn't read your licence from the Keychain (\(keychainStatusDescription(status))).                This does not mean your licence is gone — it is still stored, and nothing has been                changed or removed. Manifold is running normally in the meantime. Quitting and                reopening usually clears it; if it keeps happening, send a diagnostics report                (Help ▸ Export Diagnostics…) rather than re-entering your key.
+               Manifold couldn't read your license from the Keychain (\(keychainStatusDescription(status))).                This does not mean your license is gone — it is still stored, and nothing has been                changed or removed. Manifold is running normally in the meantime. Quitting and                reopening usually clears it; if it keeps happening, send a diagnostics report                (Help ▸ Export Diagnostics…) rather than re-entering your key.
                """
     }
 
@@ -562,7 +562,7 @@ final class LicenseManager: ObservableObject {
             state = .keychainUnreadable(status)
             lastMessage = userFacingKeychainFault
             NSLog("[LICENSE] state: %@", state.summary)
-            NSLog("[LICENSE] ⚠️ licence read refused — holding all state; nothing written, nothing cleared")
+            NSLog("[LICENSE] ⚠️ license read refused — holding all state; nothing written, nothing cleared")
             return
         }
         keychainFaultStatus = nil
@@ -615,7 +615,7 @@ final class LicenseManager: ObservableObject {
             // account is empty — "your key is unreadable" and "you never had one" are different
             // sentences and the user can act on only one of them.
             NSLog("[LICENSE] ⚠️ a stored key is present but failed offline verification")
-            lastMessage = "Your stored licence key could not be verified. Please re-enter it, or contact support."
+            lastMessage = "Your stored license key could not be verified. Please re-enter it, or contact support."
         }
         setValidated(false)
         state = trial.active ? .trial(daysRemaining: trial.daysRemaining)
@@ -732,7 +732,7 @@ final class LicenseManager: ObservableObject {
                 NSLog("[LICENSE] ⚠️ activation succeeded on the server but the key could not be stored (%@)",
                       keychainStatusDescription(writeStatus))
                 lastMessage = """
-                              Your licence was accepted, but Manifold couldn't save it to the Keychain                               (\(keychainStatusDescription(writeStatus))). This machine has been                               registered, so don't re-activate — quit, reopen, and enter the key once                               more. If that fails, send a diagnostics report.
+                              Your license was accepted, but Manifold couldn't save it to the Keychain                               (\(keychainStatusDescription(writeStatus))). This machine has been                               registered, so don't re-activate — quit, reopen, and enter the key once                               more. If that fails, send a diagnostics report.
                               """
                 return
             }
@@ -823,7 +823,7 @@ struct LicenseSettingsSection: View {
             // which is the app telling them they are unlicensed when it does not know that.
             if let fault = license.userFacingKeychainFault {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("Your licence couldn’t be read", systemImage: "exclamationmark.triangle.fill")
+                    Label("Your license couldn’t be read", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                     Text(fault)
                         .font(.caption).foregroundStyle(.secondary)

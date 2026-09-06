@@ -44,6 +44,39 @@ one**, which is why a `colour`-only sweep would miss most of it:
 `recognis*` 14 · `optimis*` 7 · `analys*` 6 · `defence` 3 · `normalis*` 2 · `serialis*` 2 ·
 `synchronis*` 2 · `minimis*` 1 · `initialis*` 1 · `artefact` 1
 
+### ⚠️ THE COUNTS ABOVE ARE UNDERCOUNTS — the 2026-08-27 scan could not see inside `"""` blocks
+
+Added 2026-09-06. The scan that produced the table and the frequencies matched single-line `"…"`
+literals only, so **every multi-line string in the app was invisible to it** — and multi-line is
+exactly where the long user-facing prose lives: attribution notes, trademark notices, Keychain
+fault messages, the diagnostics explainers. Treat the "5 inside a SwiftUI construct" and "15 other
+string literals" rows as floors, not totals.
+
+A multi-line-aware re-scan of `App/` + `Packages/` on 2026-09-06 found **six more hits in
+`AboutWindow.swift`, `LicenseManager.swift` and `DiagnosticsExport.swift` alone, five of them
+user-facing** — none of which the original scan had reported:
+
+- `AboutWindow.swift:466` — the DeckLink trademark notice in `requiredNotices`, "reproduced under
+  **Licences**". Rendered permanently in the Credits pane, not behind a popup, so it was the most
+  visible hit in the file.
+- `AboutWindow.swift:365` — the NDI attribution note, "The SDK **licence** itself is at …".
+- `AboutWindow.swift:387` — the DeckLink attribution note, "the **licence** carried in that file's
+  own header".
+- `LicenseManager.swift:525` — `userFacingKeychainFault`, TWICE in one paragraph.
+- `LicenseManager.swift:735` — the `lastMessage` shown when activation succeeds but the Keychain
+  write fails.
+- `DiagnosticsExport.swift:873` — "**labelled** COARSE" in the WHEP round-trip explainer.
+
+Those six are FIXED. What is not fixed is the METHOD: the re-scan was heuristic (it tracks the
+triple-quote delimiter by counting occurrences per line), and it re-derived only the
+STRING-LITERAL rows — the comment, docs and scripts counts have never been checked against
+multi-line content at all. One multi-line hit is known and deliberately left,
+`SRT/SRTFrameRouter.swift:1325` ("today's behaviour"), because it is an `NSLog`.
+
+**So: re-run a MULTI-LINE-AWARE scan before closing this item.** A single-line scan returning zero
+proves nothing — it returned zero for these three files on 2026-09-06, hours before the six above
+were found by looking properly.
+
 **The list to check is not closed.** Beyond the obvious pairs (colour/color, licence/license,
 behaviour/behavior, normalise/normalize, catalogue/catalog, grey/gray, centre/center,
 analyse/analyze, initialise/initialize, artefact/artifact) the whole **`-ise`/`-isation` family**
@@ -102,9 +135,10 @@ inspector labels · the manual, when it exists.
 `docs/BUGS.md` alone: **"centre channel" in the downmix entry → "center channel"** (`:1015`,
 `:1053`, `:1094`), plus `colourist` (`:863`) and `re-centred` (`:61`).
 
-**Done means:** the scan above returns zero hits in user-facing strings, and the remaining source
-and doc hits have been converted or consciously left with a reason. Re-run the scan to confirm
-rather than declaring it finished.
+**Done means:** a MULTI-LINE-AWARE scan (see the ⚠️ above — a single-line one is not evidence)
+returns zero hits in user-facing strings, and the remaining source and doc hits have been
+converted or consciously left with a reason. Re-run the scan to confirm rather than declaring
+it finished.
 
 ---
 
