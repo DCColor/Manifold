@@ -297,29 +297,24 @@ struct CIEScopeView: View {
     /// CIE-specific options menu (gear): mode picker (drives the kernel) + per-triangle visibility
     /// toggles (overlay-only). Distinct from the leading slot-picker menu. Shortcut hints teach the
     /// accelerators. Same @AppStorage underneath — a click and the shortcut do the same thing.
-    private var cieOptionsMenu: some View {
-        Menu {
-            Section("Mode · ⌃⌥X") {
-                Picker("Mode", selection: modeBinding) {
-                    Text("u′v′ (1976)").tag(true)
-                    Text("xy (1931)").tag(false)
-                }
-                .pickerStyle(.inline)
-            }
-            Section("Gamut triangles") {
-                Toggle("709 · ⌃⌥1", isOn: $show709)
-                Toggle("P3 · ⌃⌥2", isOn: $showP3)
-                Toggle("2020 · ⌃⌥3", isOn: $show2020)
-            }
-        } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(0.5))
+    /// The ⌃⌥X hint stays in its section heading and the ⌃⌥1/2/3 hints stay in their row labels —
+    /// both are exactly where the menu had them, since a caption heading replaces a `Section` title
+    /// and a checkbox row replaces a menu `Toggle` one-for-one.
+    ///
+    /// ⚠️ THE MODE ROWS WRITE THROUGH `modeBinding`, NOT `$useUV`, and that is the same requirement
+    /// the `Picker` had: the binding routes through `CIEScopeModel.applyMode`, which drives the
+    /// KERNEL as well as the stored value. Assigning `useUV` directly would flip the overlay and
+    /// leave the scatter plotting in the old mode.
+    private var cieOptions: some View {
+        ScopeGear(title: "CIE options", help: "CIE options") {
+            ScopeGearSectionHeader("Mode · ⌃⌥X", isFirst: true)
+            ScopeGearRadioRow(label: "u′v′ (1976)", selected: useUV) { modeBinding.wrappedValue = true }
+            ScopeGearRadioRow(label: "xy (1931)", selected: !useUV) { modeBinding.wrappedValue = false }
+            ScopeGearSectionHeader("Gamut triangles")
+            Toggle("709 · ⌃⌥1", isOn: $show709).font(.caption)
+            Toggle("P3 · ⌃⌥2", isOn: $showP3).font(.caption)
+            Toggle("2020 · ⌃⌥3", isOn: $show2020).font(.caption)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("CIE options")
     }
 
     /// Is a gamut currently visible? (drives both its triangle and its legend entry.)
@@ -341,7 +336,7 @@ struct CIEScopeView: View {
                                     selection: slotSelection)
                     // CIE-specific options (mode + triangle visibility) — a gear menu right after
                     // the suffix, distinct from the leading slot-picker chevron.
-                    cieOptionsMenu
+                    cieOptions
                     Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 6)

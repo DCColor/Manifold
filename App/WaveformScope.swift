@@ -131,18 +131,38 @@ private func scopeLabelGutter(widest labels: [String]) -> CGFloat {
 }
 
 /// Plot-region gutters for the active value-axis ruler (waveform + parade share this).
-func scopePlotGutters(active: ActiveVerticalScale, sdrScale: ScopeScale) -> ScopePlotGutters {
+///
+/// ⚠️ `userLines` IS NOT OPTIONAL AND HAS NO DEFAULT, ON PURPOSE. The left gutter is what keeps the
+/// value labels OFF the trace, and it is sized from the widest label the ruler will actually draw.
+/// A user line draws a label too, and its label can be WIDER than any of the ruler's own — a PQ line
+/// low in the plot reads "0.05" where the ruler's narrowest is "0.1", and an HLG line reads
+/// "75%·203" against a ruler whose widest is "100%". Left out of this calculation, that label runs
+/// over the trace. Making the parameter required means a future value-axis scope cannot forget it;
+/// it is a compile error rather than a rendering bug. Positions are NORMALIZED heights (0…1).
+///
+/// Two assumptions inherited from the helpers above, both of which the user labels satisfy because
+/// they are drawn by the same `drawGraticuleLabel`: `graticuleLabelWidth` assumes a 0.6 em advance,
+/// true only for `.monospaced`; and `scopeLabelGutter`'s `+ 10` encodes that function's pill
+/// geometry (4pt edge offset + 3pt pad + 3pt clearance). A user label drawn any other way would
+/// need its own width rule.
+func scopePlotGutters(active: ActiveVerticalScale, sdrScale: ScopeScale,
+                      userLines: [Double]) -> ScopePlotGutters {
+    // The SAME strings the draw will render — sized from `userLineLabels`, not approximated.
+    let userLabels = userLines.map { userLineLabels(position: $0, active: active, sdrScale: sdrScale) }
+    let userLeading = userLabels.map(\.leading)
+    let userTrailing = userLabels.compactMap(\.trailing)
     switch active {
     case .sdr:
-        return ScopePlotGutters(leading: scopeLabelGutter(widest: sdrScale.majors.map { String(Int($0)) }),
+        return ScopePlotGutters(leading: scopeLabelGutter(widest: sdrScale.majors.map { String(Int($0)) } + userLeading),
                                 trailing: 0)
     case .pq:
-        return ScopePlotGutters(leading: scopeLabelGutter(widest: pqNitsLevels.map(\.label)),
+        return ScopePlotGutters(leading: scopeLabelGutter(widest: pqNitsLevels.map(\.label) + userLeading),
                                 trailing: 0)
     case .hlg:
-        // Primary % ruler on the left, secondary nits ruler on the right — both get a gutter.
-        return ScopePlotGutters(leading: scopeLabelGutter(widest: hlgPercentLevels.map { "\(Int($0))%" }),
-                                trailing: scopeLabelGutter(widest: hlgNitsLevels.map { String(Int($0)) }))
+        // Primary % ruler on the left, secondary nits ruler on the right — both get a gutter, and a
+        // user line's two labels join the matching side.
+        return ScopePlotGutters(leading: scopeLabelGutter(widest: hlgPercentLevels.map { "\(Int($0))%" } + userLeading),
+                                trailing: scopeLabelGutter(widest: hlgNitsLevels.map { String(Int($0)) } + userTrailing))
     }
 }
 
@@ -312,9 +332,187 @@ private func hlgSignalForNits(_ nits: Double, peak: Double = 1000.0, gamma: Doub
     return hlgSignal(sceneLinear: e)
 }
 
+// MARK: - The INVERSES (normalized height → ruler value), for the user-line readout
+//
+// Every function above answers "where does this value sit?". A user line is stored the other way
+// round — as a NORMALIZED HEIGHT — so its readout needs the opposite direction, and nothing in this
+// app had it. All four are closed-form; none needs a numeric solve.
+//
+// PRIOR ART, AND WHY IT COULD NOT BE CALLED: `PassthroughShader.metal` already carries `ciePqEOTF`
+// and `cieHlgInvOETF` for the CIE scope's linearization. They prove the inversion is analytic, and
+// the PQ one is the same algebra as `pqNits` below — but they are MSL, running on the GPU, not
+// reachable from Swift. They also stop short of what a readout needs: `ciePqEOTF` returns
+// NORMALIZED linear and discards the absolute nit scale on purpose ("irrelevant for chromaticity"),
+// and `cieHlgInvOETF` deliberately OMITS the display OOTF, which is exactly the half that turns an
+// HLG signal into a luminance. So these are written fresh, against the forward functions above.
+
+/// Absolute display luminance in NITS at a normalized PQ code — THE INVERSE of `pqCodeNormalized`.
+/// ST 2084 solved for L: L = ((max(E'^(1/m2) − c1, 0)) / (c2 − c3·E'^(1/m2)))^(1/m1), nits = L·10000.
+///
+/// The denominator cannot vanish for a clamped code: E' ≤ 1 so c2 − c3·E' ≥ c2 − c3 = 0.164, which
+/// is why there is no guard here. The `max(…, 0)` on the numerator is load-bearing though — below
+/// the PQ code floor E'^(1/m2) dips under c1 and a negative base would make `pow` return NaN.
+func pqNits(codeNormalized code: Double) -> Double {
+    let m1 = 0.1593017578125
+    let m2 = 78.84375
+    let c1 = 0.8359375
+    let c2 = 18.8515625
+    let c3 = 18.6875
+    let ep = pow(clampedUnit(code), 1.0 / m2)
+    let num = max(ep - c1, 0.0)
+    let den = c2 - c3 * ep
+    return pow(num / den, 1.0 / m1) * 10000.0
+}
+
+/// Scene-linear E at an HLG signal value E′ — the inverse OETF, i.e. the inverse of `hlgSignal`.
+/// Branches at E′ = 0.5, which is where the forward function's own branch (scene-linear 1/12) lands:
+/// sqrt(3·(1/12)) = 0.5, and the log branch agrees there to 5 decimal places.
+private func hlgSceneLinear(signal s: Double) -> Double {
+    let a = 0.17883277, b = 0.28466892, c = 0.55991073
+    let x = clampedUnit(s)
+    if x <= 0.5 { return x * x / 3.0 }
+    return (exp((x - c) / a) + b) / 12.0
+}
+
+/// Display NITS at an HLG signal value — THE INVERSE of `hlgSignalForNits`, and it must undo BOTH
+/// of that function's steps: the OETF (above) and then the OOTF, L ≈ peak·E^γ. Same nominal peak and
+/// system gamma as the forward function, so the two round-trip; a different peak here would silently
+/// disagree with the secondary nits ruler drawn beside it.
+private func hlgNitsForSignal(_ s: Double, peak: Double = 1000.0, gamma: Double = 1.2) -> Double {
+    peak * pow(hlgSceneLinear(signal: s), gamma)
+}
+
+/// Clamp to the unit interval. User-line positions are normalized heights and every entry point
+/// takes one, including values that could have been hand-written into the defaults plist.
+@inline(__always)
+func clampedUnit(_ v: Double) -> Double { Swift.max(0.0, Swift.min(1.0, v)) }
+
+/// Format a nits value for a label: integers once the value is big enough for a fraction to be
+/// noise, more precision as it shrinks.
+///
+/// ⚠️ THE THRESHOLDS ARE 9.95 AND 0.995, NOT 10 AND 1, AND THE TRAILING ZEROS ARE STRIPPED. Both
+/// exist so a user line and the FIXED LADDER spell the same height the same way — the ladder draws
+/// "10" and "0.1", and a user line sitting on it must not read "10.0" and "0.10" beside it.
+/// Round-tripping 10 nits through the transfer lands a hair BELOW 10 (9.999999999999998), so a bare
+/// `>= 10` test drops into the one-decimal branch and renders "10.0"; testing against the value that
+/// will round to 10 at zero decimals is the fix. Verified against all eight PQ ladder levels and all
+/// five HLG ones — every label matches the ruler's own string exactly.
+private func nitsLabel(_ n: Double) -> String {
+    guard n.isFinite, n > 0 else { return "0" }
+    let dp = n >= 9.95 ? 0 : (n >= 0.995 ? 1 : 2)
+    var s = String(format: "%.\(dp)f", n)
+    if s.contains(".") {
+        while s.hasSuffix("0") { s.removeLast() }
+        if s.hasSuffix(".") { s.removeLast() }
+    }
+    return s
+}
+
+/// What a user line reads on the ACTIVE ruler. This is the whole point of the inverses above: the
+/// line is STORED as a normalized height, and this is the only place that height is interpreted.
+///
+/// ⚠️ THE LINE DOES NOT MOVE WHEN THIS STRING CHANGES. Switching 8-bit → 10-bit → IRE relabels the
+/// same line ("128" → "512" → "50"), because all three are spellings of one normalized value.
+/// Switching SDR → PQ relabels it too ("512" → "94"), and that is a change of INTERPRETATION, not a
+/// change of position: nits are what a transfer function ASSIGNS to a code, so the same code is a
+/// different luminance under PQ than under HLG and is not a luminance at all under SDR. Storing the
+/// height rather than the reading is what makes the line mark the SIGNAL.
+///
+/// ⚠️ HLG RETURNS TWO LABELS, SPLIT THE SAME WAY THE HLG RULER SPLITS ITS OWN. That ruler is two
+/// ladders — signal % anchored LEFT, nits @1000-nit peak anchored RIGHT — and a user line sits on
+/// both, so it reads on both. Putting the pair in one left-hand label ("75%·203") was the first
+/// version and it is worse twice over: it stops matching the ruler it is drawn against, and it
+/// widens the LEFT gutter to fit nine characters where the ruler's widest is four, costing plot
+/// width on every HLG line. Split, each label joins a gutter that is already sized for that ladder's
+/// own strings, and neither gutter grows at all.
+private func userLineLabels(position: Double, active: ActiveVerticalScale,
+                            sdrScale: ScopeScale) -> (leading: String, trailing: String?) {
+    let p = clampedUnit(position)
+    switch active {
+    case .sdr: return (String(Int((p * sdrScale.rangeMax).rounded())), nil)
+    case .pq:  return (nitsLabel(pqNits(codeNormalized: p)), nil)
+    case .hlg: return ("\(Int((p * 100).rounded()))%", nitsLabel(hlgNitsForSignal(p)))
+    }
+}
+
+// MARK: - The user-line FIELD: what unit it edits in, and the two conversions
+
+/// The unit a user-line field edits in on the active ruler, and what counts as a valid entry.
+///
+/// ⚠️ THIS IS A DISPLAY UNIT, NOT THE STORED ONE. The line is stored as a normalized height and
+/// nothing here changes that — the field converts on the way in and on the way out, which is what
+/// makes switching the ruler RELABEL the field instead of MOVING the line.
+struct UserLineUnit {
+    /// Printed after the field. Also what the entry means, so it must name a real ruler unit.
+    let suffix: String
+    /// Valid entries are 0…this. The lower bound is always 0 — every ruler starts at the plot floor.
+    let upperBound: Double
+    /// True only where the ruler spans orders of magnitude and a fraction carries information: PQ
+    /// nits run from 0.1 to 10000. Code values, IRE and HLG % are integer domains.
+    let allowsFractions: Bool
+}
+
+/// The active ruler's field unit.
+///
+/// ⚠️ HLG EDITS IN PERCENT, NOT NITS, THOUGH ITS RULER DRAWS BOTH. Three reasons, in order of
+/// weight. (1) Percent is the PRIMARY ladder — `drawHLGGraticule` labels it left and dominant and
+/// calls nits "secondary ... fainter". (2) Percent is EXACT: for HLG the signal value IS the
+/// normalized height, so percent is that stored number with the point moved, and a typed 75 round
+/// trips to exactly 75. (3) Nits for HLG is not a property of the signal at all — it exists only
+/// under an assumed 1000-nit peak display and γ 1.2 (see `hlgSignalForNits`'s defaults), so a typed
+/// nit value would silently bake a display assumption into stored data. The nits reading is not
+/// lost: `userLineLabels` still prints it on the line's right-hand label, where the ruler puts it.
+func userLineUnit(active: ActiveVerticalScale, sdrScale: ScopeScale) -> UserLineUnit {
+    switch active {
+    case .sdr:
+        return UserLineUnit(suffix: sdrScale == .ire ? "IRE" : "code",
+                            upperBound: sdrScale.rangeMax, allowsFractions: false)
+    case .pq:
+        return UserLineUnit(suffix: "nits", upperBound: 10000, allowsFractions: true)
+    case .hlg:
+        return UserLineUnit(suffix: "%", upperBound: 100, allowsFractions: false)
+    }
+}
+
+/// Normalized height → the number the field shows. The same interpretation `userLineLabels` draws,
+/// as a value rather than a string, so the field and the line's own label can never disagree.
+func userLineFieldValue(position: Double, active: ActiveVerticalScale, sdrScale: ScopeScale) -> Double {
+    let p = clampedUnit(position)
+    switch active {
+    case .sdr: return p * sdrScale.rangeMax
+    case .pq:  return pqNits(codeNormalized: p)
+    case .hlg: return p * 100
+    }
+}
+
+/// A typed value → the normalized height to store. The exact inverse of `userLineFieldValue`, which
+/// for PQ means the FORWARD transfer function: the field is in nits, storage is in code, and
+/// `pqCodeNormalized` is the map between them. Not clamped here — the caller decides what to do with
+/// an out-of-range entry, and this one silently coercing is precisely what it must not do.
+func userLineNormalized(fieldValue v: Double, active: ActiveVerticalScale, sdrScale: ScopeScale) -> Double {
+    switch active {
+    case .sdr: return sdrScale.rangeMax > 0 ? v / sdrScale.rangeMax : 0
+    case .pq:  return pqCodeNormalized(nits: v)
+    case .hlg: return v / 100
+    }
+}
+
 /// Line-emphasis tiers for the HDR graticules: normal, strong (SDR white 100 nits), key
 /// (BT.2408 HDR diffuse/graphics white 203 nits — the primary grading reference).
 enum GratEmphasis { case normal, strong, key }
+
+/// The line + label style for an emphasis tier. Extracted from the inline switch in
+/// `drawPQGraticule` so a user line can ask for `.key` BY NAME and get literally the same weight the
+/// 203-nit line draws at, rather than a second copy of three numbers that agree until someone tunes
+/// one of them. `.normal` defers to the shared graticule constants; `.strong` and `.key` are the two
+/// deliberate steps above them.
+func graticuleEmphasisStyle(_ e: GratEmphasis) -> (lineOpacity: Double, lineWidth: CGFloat, labelOpacity: Double) {
+    switch e {
+    case .key:    return (0.60, 1.0, 0.9)
+    case .strong: return (0.42, 1.0, 0.8)
+    case .normal: return (graticuleMajorOpacity, 0.5, graticuleLabelOpacity)
+    }
+}
 
 /// One PQ nits reference line: its nits value, label, and emphasis.
 struct PQNitsLevel { let nits: Double; let label: String; let emphasis: GratEmphasis }
@@ -537,6 +735,31 @@ struct WaveformScopeView: View {
     // Transfer-aware ruler override, SHARED with parade (one key). Default .auto follows the source.
     @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
 
+    // ── This scope's two user reference lines ───────────────────────────────────────────────
+    //
+    // Four scalar keys on the `outerTicks` precedent: dotted names, declared here in the view,
+    // nothing in Preferences, no JSON store — two lines is not a collection. The `manifold.waveform.`
+    // prefix is what keeps them SEPARATE from the parade's identically-shaped set; the two scopes
+    // share the drawing code and share nothing else. Off by default, like every graticule extra.
+    //
+    // ⚠️ THE POSITION IS A NORMALIZED HEIGHT (0 = bottom of the plot, 1 = top), NOT A NIT OR A CODE
+    // VALUE. 8-bit, 10-bit and IRE are three spellings of one normalized value, so a line stored
+    // this way does not move when the ruler changes — only `userLineLabels`' reading of it does.
+    @AppStorage("manifold.waveform.line1.enabled")  private var line1On = false
+    @AppStorage("manifold.waveform.line1.position") private var line1Position = 0.50
+    @AppStorage("manifold.waveform.line2.enabled")  private var line2On = false
+    @AppStorage("manifold.waveform.line2.position") private var line2Position = 0.75
+
+    /// The enabled lines' positions, in draw order. The ONE value handed to both `scopePlotGutters`
+    /// and `drawActiveValueGraticule`: they must agree, or the gutter is sized for labels the draw
+    /// never renders — or, worse, not sized for ones it does.
+    private var userLines: [Double] {
+        var v: [Double] = []
+        if line1On { v.append(line1Position) }
+        if line2On { v.append(line2Position) }
+        return v
+    }
+
     /// Resolved ruler (auto follows the source transfer, else forced). Drives header + graticule.
     private var activeScale: ActiveVerticalScale {
         resolveVerticalScale(override: verticalScale, transferCode: model.sourceTransferCode)
@@ -545,7 +768,7 @@ struct WaveformScopeView: View {
     /// Label-column insets for the active ruler — the trace starts past them so the value labels
     /// stay on clean background instead of on top of a bright trace.
     private var gutters: ScopePlotGutters {
-        scopePlotGutters(active: activeScale, sdrScale: scopeScale)
+        scopePlotGutters(active: activeScale, sdrScale: scopeScale, userLines: userLines)
     }
 
     var body: some View {
@@ -561,7 +784,9 @@ struct WaveformScopeView: View {
                                                                    active: activeScale, sdrScale: scopeScale,
                                                                    forced: verticalScale != .auto),
                                     selection: slotSelection)
-                    ScopeVerticalScaleMenu()
+                    ScopeValueAxisGear(line1On: $line1On, line1Position: $line1Position,
+                                       line2On: $line2On, line2Position: $line2Position,
+                                       active: activeScale, sdrScale: scopeScale)
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")
                         .font(.system(size: 8))
@@ -625,7 +850,7 @@ struct WaveformScopeView: View {
         let g = gutters
         return Canvas { ctx, size in
             drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale,
-                                     gutters: g)
+                                     gutters: g, userLines: userLines)
         }
     }
 }
@@ -707,19 +932,13 @@ func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGut
     for level in pqNitsLevels {
         let norm = pqCodeNormalized(nits: level.nits)   // 0…1 == full-range code fraction == height
         let y = size.height * (1.0 - norm)
-        let lineOp: Double
-        let lineW: CGFloat
-        let labelOp: Double
-        switch level.emphasis {
-        case .key:    lineOp = 0.60; lineW = 1.0; labelOp = 0.9
-        case .strong: lineOp = 0.42; lineW = 1.0; labelOp = 0.8
-        case .normal: lineOp = graticuleMajorOpacity; lineW = 0.5; labelOp = graticuleLabelOpacity
-        }
+        let style = graticuleEmphasisStyle(level.emphasis)
         var p = Path()
         p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
-        ctx.stroke(p, with: .color(.white.opacity(lineOp)), lineWidth: lineW)
+        ctx.stroke(p, with: .color(.white.opacity(style.lineOpacity)), lineWidth: style.lineWidth)
         // Nits label in the LEFT gutter (standard scope convention); line spans the plot region.
-        drawGraticuleLabel(ctx, size: size, y: y, text: level.label, trailing: false, opacity: labelOp)
+        drawGraticuleLabel(ctx, size: size, y: y, text: level.label, trailing: false,
+                           opacity: style.labelOpacity)
     }
 }
 
@@ -757,38 +976,301 @@ func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGu
 /// parade so both annotate the same axis identically.
 func drawActiveValueGraticule(_ ctx: GraphicsContext, size: CGSize,
                               active: ActiveVerticalScale, sdrScale: ScopeScale,
-                              gutters: ScopePlotGutters) {
+                              gutters: ScopePlotGutters, userLines: [Double]) {
     switch active {
     case .sdr: drawValueGraticule(ctx, size: size, scale: sdrScale, gutters: gutters)
     case .pq:  drawPQGraticule(ctx, size: size, gutters: gutters)
     case .hlg: drawHLGGraticule(ctx, size: size, gutters: gutters)
     }
+    // AFTER the ruler, so a user line reads on top of the structure it is measured against — the
+    // same ordering decision the vectorscope's skintone axis records. Both scopes reach this one
+    // call, so a line drawn here appears on both by construction; the waveform's lines and the
+    // parade's differ only by the array that arrives here.
+    drawUserLines(ctx, size: size, active: active, sdrScale: sdrScale,
+                  gutters: gutters, positions: userLines)
 }
 
-// MARK: - Shared vertical-scale gear menu (waveform + parade)
-
-/// Gear menu for the shared transfer-aware vertical scale (Auto / SDR / PQ / HLG), placed in BOTH
-/// the waveform and parade headers. Reads/writes the single @AppStorage("manifold.scope.verticalScale")
-/// so the two scopes stay in lock-step (one setting, one axis). Mirrors the vectorscope's gear-menu
-/// pattern; overlay-only — picking a scale re-labels the ruler without touching the trace math.
-struct ScopeVerticalScaleMenu: View {
-    @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
-    var body: some View {
-        Menu {
-            Section("Vertical scale · transfer") {
-                Picker("Vertical scale", selection: $verticalScale) {
-                    ForEach(ScopeVerticalScale.allCases) { s in Text(s.label).tag(s) }
-                }
-                .pickerStyle(.inline)
-            }
-        } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(0.5))
+/// User-placed reference lines. `positions` are NORMALIZED HEIGHTS (0 = bottom of the plot, 1 = top)
+/// and are already filtered to the enabled ones by the caller.
+///
+/// ⚠️ A NORMALIZED HEIGHT IS THE STORED QUANTITY, AND THAT IS WHY THIS FUNCTION NEEDS NO INVERSE TO
+/// POSITION ANYTHING. The height IS the fraction of the plot, exactly as the trace's own 0–1 code
+/// values are, so placement is one multiply on every ruler. The inverse is needed only for the
+/// LABEL, which is `userLineLabels`' job. Storing nits instead would invert the situation: placement
+/// would need a forward map per ruler, and the line would jump whenever the transfer changed.
+///
+/// Drawn at the `.key` tier — the weight the 203-nit BT.2408 line uses — via the shared
+/// `graticuleEmphasisStyle`, because a user line is the same KIND of thing: a reference you put
+/// there deliberately and read against, not background structure you look past.
+private func drawUserLines(_ ctx: GraphicsContext, size: CGSize,
+                           active: ActiveVerticalScale, sdrScale: ScopeScale,
+                           gutters: ScopePlotGutters, positions: [Double]) {
+    guard !positions.isEmpty else { return }
+    let x0 = gutters.leading
+    let x1 = size.width - gutters.trailing
+    let style = graticuleEmphasisStyle(.key)
+    for pos in positions {
+        let y = size.height * (1.0 - clampedUnit(pos))
+        var p = Path()
+        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
+        ctx.stroke(p, with: .color(.white.opacity(style.lineOpacity)), lineWidth: style.lineWidth)
+        // Both gutters were sized from these exact strings — see scopePlotGutters — so the labels
+        // land on clean background rather than on the trace. The trailing one exists only under HLG,
+        // whose ruler carries a second ladder on the right.
+        let labels = userLineLabels(position: pos, active: active, sdrScale: sdrScale)
+        drawGraticuleLabel(ctx, size: size, y: y, text: labels.leading,
+                           trailing: false, opacity: style.labelOpacity)
+        if let secondary = labels.trailing {
+            drawGraticuleLabel(ctx, size: size, y: y, text: secondary,
+                               trailing: true, opacity: style.labelOpacity)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Vertical scale: Auto follows the source transfer (PQ→nits, HLG→%/nits); force a ruler to annotate untagged media or A/B. The trace never changes.")
+    }
+}
+
+// MARK: - Shared value-axis gear menu (waveform + parade)
+
+/// What a commit attempt decided. Pure data, so `userLineCommitDecision` can be exercised directly
+/// instead of only through a live text field.
+enum UserLineCommitOutcome: Equatable {
+    /// Nothing was typed, or what was typed means the height already stored. Write NOTHING.
+    case unchanged
+    /// The buffer was typed under a ruler that is no longer the active one. Write NOTHING.
+    case discarded
+    /// Unparseable, or outside the ruler's range. Write NOTHING.
+    case rejected
+    /// A genuinely new normalized height.
+    case write(Double)
+}
+
+/// THE WHOLE COMMIT DECISION, WITH NO VIEW STATE IN IT — the fix for a bug that could only be
+/// diagnosed by reading the preferences plist, because the logic was buried in a `View` where
+/// nothing could reach it. Every guard below is here rather than in `UserLineRow.commit()` so it can
+/// be tested against the exact sequences that broke it.
+///
+/// ── 1. IDEMPOTENT: `text != seeded` IS THE ONLY DEFINITION OF "THE USER TYPED SOMETHING" ──
+///
+/// ⚠️ THE OLD `abs(normalized - position) > 1e-9` GUARD CANNOT DO THIS JOB, AND ASSUMING IT COULD IS
+/// THE BUG. That guard asks "is the parsed value different from what is stored", and a value parsed
+/// back from a ROUNDED DISPLAY STRING is legitimately different — 378 code shows as "23" nits, and
+/// "23" re-derives to 377.68 code. So merely focusing a field and leaving moved the line, every
+/// time, with no typing at all. Comparing the BUFFER against WHAT IT WAS SEEDED WITH asks the right
+/// question: a buffer nobody edited is byte-identical to its seed, whatever rounding produced it.
+///
+/// ── 2. THE BUFFER REMEMBERS ITS RULER, AND A STALE ONE IS DISCARDED ───────────────────────
+///
+/// ⚠️ A BUFFER TYPED UNDER ONE RULER MUST NEVER BE COMMITTED UNDER ANOTHER. The ruler radio rows and
+/// these fields share a popover, so clicking a ruler BLURS a focused field — the blur and the ruler
+/// change land in the same update and their order is SwiftUI's to choose, not ours. Interpreting the
+/// buffer under whatever ruler happens to be current is how "378" typed as a code value becomes 378
+/// PQ nits and stores 661 code (measured). Comparing the seeded ruler against the current one makes
+/// the guard independent of that ordering.
+///
+/// DISCARD, NOT REINTERPRET — chosen over converting the entry through the ruler it was typed under.
+/// Both are safe from the 661-code failure; the difference is what a half-typed value MEANS. The
+/// user did not press Return; they clicked a different control, and treating that as "commit 378"
+/// moves the line to a value they never confirmed, then relabels it into units they were not looking
+/// at — so the field reads 661 and the line has jumped, from an action that was about the ruler. The
+/// two failure modes are not symmetric: discarding costs a retype of something still on screen,
+/// reinterpreting silently moves a reference line on a measurement instrument. Discarding is also
+/// the behaviour the unfocused case already had, so focused and unfocused now agree.
+func userLineCommitDecision(text: String, seeded: String,
+                            seededActive: ActiveVerticalScale, seededSdrScale: ScopeScale,
+                            active: ActiveVerticalScale, sdrScale: ScopeScale,
+                            position: Double) -> UserLineCommitOutcome {
+    // (1) Nobody typed anything. This is the guard that makes focus-and-leave a no-op.
+    guard text != seeded else { return .unchanged }
+    // (2) The ruler moved under the buffer.
+    guard seededActive == active, seededSdrScale == sdrScale else { return .discarded }
+
+    let trimmed = text.trimmingCharacters(in: .whitespaces)
+    // Locale-aware first (a decimal-comma locale types "0,5"), then the plain parse as a fallback so
+    // a "0.5" typed on such a system is still understood.
+    let entered = (try? Double(trimmed, format: .number)) ?? Double(trimmed)
+    let unit = userLineUnit(active: active, sdrScale: sdrScale)
+    guard let v = entered, v.isFinite, v >= 0, v <= unit.upperBound else { return .rejected }
+
+    let normalized = clampedUnit(userLineNormalized(fieldValue: v, active: active, sdrScale: sdrScale))
+    // Still worth asking: a retype of the value already there must not cost every scope a GPU
+    // re-sample. This is now a genuine no-op test, not a substitute for guard (1).
+    guard abs(normalized - position) > 1e-9 else { return .unchanged }
+    return .write(normalized)
+}
+
+/// One user line's row in the gear popover: a checkbox that draws it, and a field carrying its
+/// value IN THE ACTIVE RULER'S UNITS.
+///
+/// ── WHY THIS IS A STRING BUFFER AND NOT `TextField(value:format:)` ────────────────────────
+///
+/// ⚠️ THE WRITE MUST HAPPEN ON SUBMIT AND ON BLUR, AND AT NO OTHER TIME. `position` is `@AppStorage`,
+/// so every write reaches `UserDefaults` — and every scope model subscribes to
+/// `UserDefaults.didChangeNotification` and re-samples the current frame on it (see
+/// `WaveformScopeModel.start`). A binding that wrote per keystroke would fire a GPU compute pass per
+/// scope per character: typing `203` would place the line at 2, then 20, then 203, with the trace
+/// jumping under it twice on the way to the value that was meant. So the field edits a LOCAL STRING
+/// and `commit()` is the only thing that ever assigns, called from `.onSubmit` and from focus
+/// leaving. This is the one place this deliberately departs from `GuidesPanel`, whose fields write
+/// straight through — free there, because guides are a SwiftUI overlay with no GPU behind them.
+///
+/// The field's own style still follows that panel: `.roundedBorder`, fixed narrow width, centred-ish
+/// text, a caption unit beside it.
+///
+/// ── OUT-OF-RANGE ENTRIES ARE REJECTED, NOT CLAMPED ────────────────────────────────────────
+///
+/// ⚠️ A REJECTED ENTRY PUTS THE FIELD BACK AND WRITES NOTHING. Clamping would be worse than useless
+/// on an instrument: type 2000 on a 10-bit ruler and a clamp gives you a line at 1023 labelled
+/// "1023" — the app has quietly answered a different question and the only evidence is a number you
+/// have already stopped looking at. The commonest way to land out of range is a UNIT error (typing
+/// nits while the ruler is showing code), which is exactly the mistake a clamp hides and a snap-back
+/// exposes. Reverting is visible, costs one retype, and never leaves a line somewhere unintended.
+struct UserLineRow: View {
+    let label: String
+    @Binding var isOn: Bool
+    /// ⚠️ NORMALIZED HEIGHT, 0…1 — never the number in the field. See `userLineFieldValue`.
+    @Binding var position: Double
+    let active: ActiveVerticalScale
+    let sdrScale: ScopeScale
+
+    /// What is being typed. Not the stored value, and deliberately allowed to disagree with it while
+    /// a caret is in the field — that disagreement IS the deferred write.
+    @State private var text = ""
+
+    /// ⚠️ THE BUFFER AS IT WAS LAST SEEDED, AND THE RULER IT WAS SEEDED UNDER. Together these are
+    /// what make a commit safe: `text != seeded` is the only thing that counts as "the user typed",
+    /// and the two ruler fields let a commit tell that the axis moved beneath a half-typed value.
+    /// Written ONLY by `seed(from:)`, so they cannot drift out of step with `text`.
+    @State private var seeded = ""
+    @State private var seededActive: ActiveVerticalScale = .sdr
+    @State private var seededSdrScale: ScopeScale = .bit10
+
+    @FocusState private var focused: Bool
+
+    private var unit: UserLineUnit { userLineUnit(active: active, sdrScale: sdrScale) }
+    private var displayed: Double { userLineFieldValue(position: position, active: active, sdrScale: sdrScale) }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Toggle(label, isOn: $isOn)
+                .font(.caption)
+                .fixedSize()
+            Spacer(minLength: 4)
+            TextField("", text: $text)
+                .frame(width: 60)
+                .multilineTextAlignment(.trailing)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .focused($focused)
+                .onSubmit { commit() }
+            Text(unit.suffix)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+        }
+        // NOT `.disabled(!isOn)`, which is what GuidesPanel does to its dependent controls. A
+        // position is a property of the line whether or not the line is being drawn, and setting a
+        // value before switching it on is a natural order; a safe-zone slider with the zones off has
+        // no such reading. Deliberate divergence, not an oversight.
+        .onAppear { reseed() }
+        // Re-format when the STORED value changes under us — another window editing the same
+        // @AppStorage key, or this row's own commit. Skipped while focused so it cannot overwrite
+        // what is being typed.
+        .onChange(of: displayed) { _, _ in if !focused { reseed() } }
+        // ⚠️ A RULER CHANGE RESEEDS EVEN WHILE FOCUSED, AND THAT IS THE DISCARD. Switching 8-bit →
+        // 10-bit → PQ relabels the field (378 → 378 → 23) while the line stays exactly where it is,
+        // which is the whole normalized-storage argument made visible. Anything half-typed is
+        // dropped rather than carried into units it was not meant for — see `userLineCommitDecision`.
+        .onChange(of: active) { _, _ in reseed() }
+        .onChange(of: sdrScale) { _, _ in reseed() }
+        .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+    }
+
+    /// Stored value → field text. Integer rulers print plainly; PQ borrows `nitsLabel`, so the field
+    /// spells a value the same way the drawn label does.
+    private func format(_ v: Double) -> String {
+        unit.allowsFractions ? nitsLabel(v) : String(Int(v.rounded()))
+    }
+
+    /// Fill the buffer from a normalized height under the CURRENT ruler, and record both, so a later
+    /// commit can tell whether anything was typed and whether the axis has moved since.
+    ///
+    /// ⚠️ THE ONLY WRITER OF `text`, `seeded`, `seededActive` AND `seededSdrScale`. Setting `text`
+    /// anywhere else would leave `seeded` stale, and a stale seed reads as "the user typed
+    /// something" — which is the bug this replaced, wearing a different hat.
+    private func seed(from height: Double) {
+        let s = format(userLineFieldValue(position: height, active: active, sdrScale: sdrScale))
+        text = s
+        seeded = s
+        seededActive = active
+        seededSdrScale = sdrScale
+    }
+
+    /// Seed from what is actually stored. Takes `position` explicitly rather than reading it back
+    /// after a write, because a `@Binding` over `@AppStorage` is not guaranteed to read back the new
+    /// value within the same update.
+    private func reseed() { seed(from: position) }
+
+    /// The ONLY writer of `position`. Every decision lives in `userLineCommitDecision`; this applies
+    /// the answer and nothing more.
+    private func commit() {
+        switch userLineCommitDecision(text: text, seeded: seeded,
+                                      seededActive: seededActive, seededSdrScale: seededSdrScale,
+                                      active: active, sdrScale: sdrScale, position: position) {
+        case .unchanged, .discarded, .rejected:
+            // Nothing stored moves. Put the buffer back to what IS stored, under the ruler now
+            // showing — a rejected entry snaps back visibly, a discarded one re-reads in new units.
+            reseed()
+        case .write(let height):
+            position = height
+            // Seed from the height just written, not from `position`. Also re-formats, so a PQ nits
+            // entry reads back as the nearest code actually kept.
+            seed(from: height)
+        }
+    }
+}
+
+/// Gear menu for the value-axis scopes: the shared transfer-aware vertical scale (Auto / SDR / PQ /
+/// HLG), and THAT scope's own two user reference lines. Placed in BOTH the waveform and parade
+/// headers. Mirrors the vectorscope's gear-menu pattern; overlay-only — nothing here touches the
+/// trace math.
+///
+/// ⚠️ THE TWO HALVES ARE STORED DIFFERENTLY BECAUSE THEY MEAN DIFFERENT THINGS. The vertical scale
+/// is ONE @AppStorage key, read directly here: the two scopes annotate the same axis and must stay
+/// in lock-step, so sharing the key IS the feature. The USER LINES are the opposite — per-scope and
+/// independent, nothing linked — so they arrive as BINDINGS from the view that owns them. That keeps
+/// the literal-key @AppStorage declarations in the views (the `outerTicks` precedent) while leaving
+/// exactly one copy of this UI, and it is what makes "same feature, separate storage" enforceable:
+/// there is no key in here for the two scopes to end up sharing by accident.
+///
+/// (Was `ScopeVerticalScaleMenu`, then `ScopeValueAxisMenu`. Renamed again with the popover
+/// conversion: it is not a menu any more, and a name that says otherwise is how the next person
+/// reaches for `Section` and wonders why it renders as a grey bar.)
+struct ScopeValueAxisGear: View {
+    @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
+
+    @Binding var line1On: Bool
+    @Binding var line1Position: Double
+    @Binding var line2On: Bool
+    @Binding var line2Position: Double
+
+    /// The RESOLVED ruler and its SDR sub-scale, passed in rather than re-derived. The owning view
+    /// already computes these for `gutters` and `drawActiveValueGraticule`, and the field must edit
+    /// in the units the line is actually drawn against — deriving them a second time here is how the
+    /// two would come to disagree. `active` cannot be computed from `verticalScale` alone anyway: on
+    /// `.auto` it depends on the source's transfer code, which only the scope's model carries.
+    let active: ActiveVerticalScale
+    let sdrScale: ScopeScale
+
+    var body: some View {
+        ScopeGear(title: "Vertical scale & user lines",
+                  help: "Vertical scale: Auto follows the source transfer (PQ→nits, HLG→%/nits); force a ruler to annotate untagged media or A/B. User lines are this scope's own reference lines: type a value in the active ruler's units. Storage is a normalized height, so switching rulers re-labels a line rather than moving it. The trace never changes.") {
+            ScopeGearSectionHeader("Vertical scale · transfer", isFirst: true)
+            ForEach(ScopeVerticalScale.allCases) { s in
+                ScopeGearRadioRow(label: s.label, selected: verticalScale == s) { verticalScale = s }
+            }
+            ScopeGearSectionHeader("User lines")
+            UserLineRow(label: "Line 1", isOn: $line1On, position: $line1Position,
+                        active: active, sdrScale: sdrScale)
+            UserLineRow(label: "Line 2", isOn: $line2On, position: $line2Position,
+                        active: active, sdrScale: sdrScale)
+        }
     }
 }

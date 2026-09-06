@@ -179,6 +179,29 @@ struct ParadeScopeView: View {
     // Transfer-aware ruler override, SHARED with the waveform (one key). Default .auto follows source.
     @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
 
+    // ── This scope's two user reference lines ───────────────────────────────────────────────
+    //
+    // Four scalar keys on the `outerTicks` precedent, and the SAME SHAPE as the waveform's under a
+    // `manifold.parade.` prefix. Same feature, SEPARATE STORAGE: the drawing code is shared (see
+    // drawUserLines, which both scopes reach through drawActiveValueGraticule) and the values are
+    // not linked in any way. Off by default, like every graticule extra.
+    //
+    // ⚠️ THE POSITION IS A NORMALIZED HEIGHT (0 = bottom of the plot, 1 = top), NOT A CODE VALUE.
+    // A line spans all three R|G|B columns, because the value axis is one axis shared by the three.
+    @AppStorage("manifold.parade.line1.enabled")  private var line1On = false
+    @AppStorage("manifold.parade.line1.position") private var line1Position = 0.50
+    @AppStorage("manifold.parade.line2.enabled")  private var line2On = false
+    @AppStorage("manifold.parade.line2.position") private var line2Position = 0.75
+
+    /// The enabled lines' positions, in draw order — handed to both `scopePlotGutters` and
+    /// `drawActiveValueGraticule`, which must be given the same value.
+    private var userLines: [Double] {
+        var v: [Double] = []
+        if line1On { v.append(line1Position) }
+        if line2On { v.append(line2Position) }
+        return v
+    }
+
     /// Resolved ruler (auto follows the source transfer, else forced). Drives header + graticule.
     private var activeScale: ActiveVerticalScale {
         resolveVerticalScale(override: verticalScale, transferCode: model.sourceTransferCode)
@@ -187,7 +210,7 @@ struct ParadeScopeView: View {
     /// Label-column insets for the active ruler — the R|G|B trace starts past them so the value
     /// labels stay on clean background instead of on top of a bright trace.
     private var gutters: ScopePlotGutters {
-        scopePlotGutters(active: activeScale, sdrScale: scopeScale)
+        scopePlotGutters(active: activeScale, sdrScale: scopeScale, userLines: userLines)
     }
 
     var body: some View {
@@ -199,7 +222,9 @@ struct ParadeScopeView: View {
                                     suffix: valueScopeHeaderSuffix(lead: "RGB", active: activeScale,
                                                                    sdrScale: scopeScale, forced: verticalScale != .auto),
                                     selection: slotSelection)
-                    ScopeVerticalScaleMenu()
+                    ScopeValueAxisGear(line1On: $line1On, line1Position: $line1Position,
+                                       line2On: $line2On, line2Position: $line2Position,
+                                       active: activeScale, sdrScale: scopeScale)
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")
                         .font(.system(size: 8))
@@ -257,7 +282,7 @@ struct ParadeScopeView: View {
         return Canvas { ctx, size in
             // Transfer-aware value-axis graticule (same axis as waveform), spanning all 3 columns.
             drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale,
-                                     gutters: g)
+                                     gutters: g, userLines: userLines)
             // Thin R|G|B column separators at 1/3 and 2/3 OF THE PLOT REGION — must track the
             // same inset as the trace image, or they'd drift off the channel boundaries.
             let x0 = g.leading, x1 = size.width - g.trailing

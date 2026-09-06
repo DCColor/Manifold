@@ -356,40 +356,27 @@ struct VectorscopeScopeView: View {
         }
     }
 
-    /// Vectorscope options (gear): the graticule-reference picker. Mirrors the CIE scope's gear menu
-    /// + shortcut-hint style; the plain `$graticule` binding is enough because the overlay reads the
-    /// same @AppStorage (no kernel push needed — the math already tracks the source matrix).
-    private var vectorscopeOptionsMenu: some View {
-        Menu {
-            Section("Graticule reference · ⌃⌥G") {
-                Picker("Graticule", selection: $graticule) {
-                    ForEach(VectorscopeGraticule.allCases) { g in
-                        Text(g.label).tag(g)
-                    }
-                }
-                .pickerStyle(.inline)
+    /// Vectorscope options (gear). Mirrors the CIE scope's panel + shortcut-hint style; the plain
+    /// `$graticule` binding is enough because the overlay reads the same @AppStorage (no kernel push
+    /// needed — the math already tracks the source matrix).
+    ///
+    /// The ⌃⌥G / ⌃⌥B hints STAY IN THE SECTION HEADINGS, where the menu's `Section` titles carried
+    /// them. A caption heading is the popover's spelling of that title, so the hint keeps both its
+    /// wording and its position; nothing had to be found a new home.
+    private var vectorscopeOptions: some View {
+        ScopeGear(title: "Vectorscope options", help: "Vectorscope options") {
+            ScopeGearSectionHeader("Graticule reference · ⌃⌥G", isFirst: true)
+            ForEach(VectorscopeGraticule.allCases) { g in
+                ScopeGearRadioRow(label: g.label, selected: graticule == g) { graticule = g }
             }
-            Section("Target boxes · ⌃⌥B") {
-                Picker("Target boxes", selection: $boxAmplitude) {
-                    ForEach(VectorscopeBoxAmplitude.allCases) { a in
-                        Text(a.label).tag(a)
-                    }
-                }
-                .pickerStyle(.inline)
+            ScopeGearSectionHeader("Target boxes · ⌃⌥B")
+            ForEach(VectorscopeBoxAmplitude.allCases) { a in
+                ScopeGearRadioRow(label: a.label, selected: boxAmplitude == a) { boxAmplitude = a }
             }
-            Section("Graticule extras") {
-                Toggle("Outer ring ticks", isOn: $outerTicks)
-                Toggle("Skintone axis (I)", isOn: $skintoneAxis)
-            }
-        } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(0.5))
+            ScopeGearSectionHeader("Graticule extras")
+            Toggle("Outer ring ticks", isOn: $outerTicks).font(.caption)
+            Toggle("Skintone axis (I)", isOn: $skintoneAxis).font(.caption)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Vectorscope options")
     }
 
     var body: some View {
@@ -402,7 +389,7 @@ struct VectorscopeScopeView: View {
                     ScopeSlotHeader(name: "VECTORSCOPE",
                                     suffix: " · \(ycbcrMatrixLabel(model.sourceMatrixCode)) · gr \(graticuleLabel) · box \(boxAmplitude.headerTag)",
                                     selection: slotSelection)
-                    vectorscopeOptionsMenu
+                    vectorscopeOptions
                     Spacer(minLength: 4)
                     Image(systemName: "sun.max")
                         .font(.system(size: 8))

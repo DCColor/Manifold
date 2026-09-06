@@ -72,6 +72,133 @@ struct ScopeSlotHeader: View {
     }
 }
 
+/// A tray slot's trailing header element: the per-scope options GEAR, and the popover it opens.
+///
+/// ── WHY A POPOVER AND NOT A MENU ──────────────────────────────────────────────────────────
+///
+/// A menu dismisses on every selection. These panels are mostly multi-toggle work — three gamut
+/// triangles, two graticule extras, two user lines — so a menu made the common case "open, flip one,
+/// reopen, flip the next". A popover stays up until it is dismissed. It is also the only container
+/// that can hold a text field: an `NSTextField` inside an AppKit menu does not reliably take focus,
+/// which is what numeric entry for the user lines needs (a later step; nothing here types).
+///
+/// THE LABEL IS UNCHANGED FROM THE MENU IT REPLACES — same glyph, same 9pt, same 0.5 white, same
+/// `.fixedSize()`. Only what it opens is different.
+///
+/// ⚠️ DO NOT ENLARGE THE HIT TARGET. The scope tray's divider grab band is an overlay on the tray's
+/// top edge — `.frame(height: 10)` with `.offset(y: -5)`, see `ContentView.scopeTrayDivider` — so 5
+/// points of it lie over the top of EVERY scope header, backed by an NSView that takes `mouseDown`
+/// and will swallow anything underneath. This glyph is ~11pt centred in the 22pt header band, so it
+/// clears that strip by a hair, and the band's own comment claims it "does not swallow clicks meant
+/// for the top row of the scope slots" on exactly that margin. A larger frame, extra padding, or a
+/// `.contentShape` here spends a budget that has about 5 points in it. `.buttonStyle(.plain)` is
+/// load-bearing for the same reason: the default button style would add its own chrome and padding.
+///
+/// ⚠️ `arrowEdge: .top`, WHICH PUTS THE PANEL ABOVE THE GEAR. The gear sits in the scope header, at
+/// the TOP of a tray pinned to the BOTTOM of the window, so there are only ~200 points below it
+/// (`WindowChrome.defaultTrayHeight`) and the whole picture above. Opening downward would fight the
+/// tray's height on every scope; opening upward has the video to spread over. AppKit treats this as
+/// a preference and repositions if the panel does not fit, so this is the good case, not a promise.
+///
+/// Container metrics — `.padding(12)`, `.frame(width: 280)`, `VStack(alignment: .leading, spacing:
+/// 4)`, a `.headline` title — are `GuidesPanel`'s, deliberately copied rather than re-chosen. That
+/// panel is this app's only other popover, and two popovers that agree on their metrics read as one
+/// idiom; two that each picked their own read as an accident.
+struct ScopeGear<Content: View>: View {
+    /// Headline inside the panel.
+    let title: String
+    /// Tooltip on the gear itself.
+    let help: String
+    let content: Content
+
+    /// Popover presentation is the gear's OWN state, not the scope's. Each slot's gear opens and
+    /// closes independently, and nothing outside needs to know whether one is up.
+    @State private var isOpen = false
+
+    /// Content is built EAGERLY (`content()` here, not a stored closure) so its evaluation timing
+    /// matches the `Menu { … }` this replaced: constructed when the owning scope's `body` runs.
+    /// `ScopeValueAxisGear`'s position submenus read the current position to build their own titles,
+    /// which a deferred closure would sample at a different moment.
+    init(title: String, help: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.help = help
+        self.content = content()
+    }
+
+    var body: some View {
+        Button { isOpen.toggle() } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help(help)
+        .popover(isPresented: $isOpen, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline).padding(.bottom, 2)
+                content
+            }
+            .padding(12)
+            .frame(width: 280)
+        }
+    }
+}
+
+/// A section heading inside a gear popover: a rule, then a caption label.
+///
+/// `Section` is menu-native and has no popover equivalent, so this is what replaces it — and it is
+/// `GuidesPanel`'s spelling of the same thing (`Divider().padding(.vertical, 2)` followed by
+/// `Text(...).font(.caption).foregroundStyle(.secondary)`), not a new one.
+///
+/// `isFirst` suppresses the rule for the section directly under the panel's title, where a divider
+/// would be separating the heading from nothing.
+struct ScopeGearSectionHeader: View {
+    let title: String
+    let isFirst: Bool
+
+    init(_ title: String, isFirst: Bool = false) {
+        self.title = title
+        self.isFirst = isFirst
+    }
+
+    var body: some View {
+        if !isFirst { Divider().padding(.vertical, 2) }
+        Text(title).font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+/// One option of a mutually-exclusive set inside a gear popover — what an inline `Picker` was in the
+/// menu, which likewise has no popover equivalent.
+///
+/// Lifted from `GuidesPanel.row(label:selected:action:)`: the same `largecircle.fill.circle` /
+/// `circle` glyph pair, the same accent-vs-secondary colouring, the same full-width
+/// `.contentShape(Rectangle())` so the whole row is the target rather than just the glyph.
+///
+/// ⚠️ THE LABEL FONT IS THE DEFAULT, NOT `.caption`, WHICH LOOKS INCONSISTENT WITH THE TOGGLES BESIDE
+/// IT — and it is inconsistent, in `GuidesPanel` too, where the radio rows run at body size and the
+/// toggles at `.caption`. Copied as-is on purpose: matching the one popover this app already has
+/// matters more than tidying it, and changing it here would leave the two panels disagreeing. If it
+/// is worth fixing it is worth fixing in both, as its own change.
+struct ScopeGearRadioRow: View {
+    let label: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                Text(label)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// Owns the single MetalVideoRenderer for ContentView's lifetime.
 ///
 /// WHY THIS EXISTS — it is not ceremony. The renderer used to be held as
