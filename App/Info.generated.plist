@@ -19,6 +19,7 @@
 				<string>public.video</string>
 				<string>com.apple.quicktime-movie</string>
 				<string>public.mpeg-4</string>
+				<string>org.smpte.mxf</string>
 			</array>
 		</dict>
 	</array>
