@@ -26,6 +26,14 @@ struct WindowConfigurator: NSViewRepresentable {
     /// can act on. Travels with the chrome height because it is the same kind of input: a per-window
     /// statement about the window's size that only `WindowSizer` may act on. See RasterSize.swift.
     var raster: RasterRequest
+    /// ── PROBE INPUTS (temporary) ─────────────────────────────────────────────────────────
+    /// The chrome height above arrives already TOTALLED, so a window whose tray is open but whose
+    /// total reads zero cannot be told apart from a window with no chrome at all. These carry the
+    /// terms separately, for `WindowLayoutProbe` and for nothing else — nothing sizes from them.
+    var trayVisible: Bool
+    var trayHeight: CGFloat
+    var barDocked: Bool
+    var barHeight: CGFloat
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -85,5 +93,101 @@ struct WindowConfigurator: NSViewRepresentable {
         // THE ONLY WRITER OF THE CONSTRAINT'S INPUTS. A no-op when neither the picture's shape nor
         // the chrome height moved, which is the overwhelming majority of update passes.
         deck.sizer.setGeometry(sourceSize: displaySize, chromeHeight: chromeHeight, raster: raster)
+
+        // TEMPORARY. Runs after `setGeometry` so the window it measures is the one the sizer has
+        // just finished shaping, and dedupes internally so an idle window prints once.
+        WindowLayoutProbe.log(window: window,
+                              from: nsView,
+                              trayVisible: trayVisible,
+                              trayHeight: trayHeight,
+                              barDocked: barDocked,
+                              barHeight: barHeight,
+                              chromeHeight: chromeHeight)
+    }
+}
+
+// ── THE LAYOUT PROBE ────────────────────────────────────────────────────────────────────────
+//
+// TEMPORARY DIAGNOSTIC. One line per distinct layout, from the main thread on an update pass,
+// stating the three sizes that sit BETWEEN the window and the video region — window frame,
+// content view bounds, hosting view bounds — plus the video region's own rect in WINDOW
+// coordinates, and the three chrome terms the sizer was fed.
+//
+// The question it answers: when every measurement INSIDE the display path reads 2880×1080 and
+// black bars are still on screen, is the content area wider than the picture with the picture
+// centred in it (a layout problem above the video region), or is the content area 2880 too (in
+// which case nothing in the app is drawing the black)?
+//
+// It also prints the chrome breakdown against the total, because a `[RASTER]` line reporting
+// chrome=0 on a window that visibly has a tray means the sizer sized for picture-only and the
+// picture is being fitted into less room than was allocated for it.
+enum WindowLayoutProbe {
+
+    /// Last line printed per window, so an idle app does not repeat itself on every body pass.
+    /// Main-thread only, which is where `updateNSView` runs.
+    private static var lastLine: [ObjectIdentifier: String] = [:]
+
+    static func log(window: NSWindow,
+                    from anchor: NSView,
+                    trayVisible: Bool,
+                    trayHeight: CGFloat,
+                    barDocked: Bool,
+                    barHeight: CGFloat,
+                    chromeHeight: CGFloat) {
+        let frame = window.frame
+        let content = window.contentRect(forFrameRect: frame).size
+        let contentView = window.contentView
+        let hosting = firstDescendant(of: window.contentView) { view in
+            String(describing: type(of: view)).contains("NSHostingView")
+        }
+        // The video region as the WINDOW sees it — origin included, because "2880 wide, centred in
+        // something wider" and "2880 wide, filling it" are the two answers being separated here and
+        // a size alone cannot tell them apart.
+        let videoRect: CGRect? = firstDescendant(of: window.contentView) { view in
+            view is MetalHostView
+        }.map { $0.convert($0.bounds, to: nil) }
+
+        var line = "[WINPROBE]"
+            + " window.frame=\(fmt(frame))"
+            + " contentRect=\(fmt(content))"
+            + " contentView=\(describe(contentView))"
+            + " hosting=\(describe(hosting))"
+            + " video=\(videoRect.map(fmt) ?? "—")"
+            + " anchorInWindow=\(fmt(anchor.convert(anchor.bounds, to: nil)))"
+            + " tray=\(trayVisible ? "shown" : "hidden")/\(r(trayHeight))"
+            + " bar=\(barDocked ? "docked" : "overlay")/\(r(barHeight))"
+            + " chrome=\(r(chromeHeight))"
+        // The one arithmetic check worth making inline: does the chrome the sizer was handed match
+        // the chrome that is actually on screen? A mismatch is the bug, not a symptom of it.
+        let expected = (trayVisible ? trayHeight : 0) + (barDocked ? barHeight : 0)
+        if abs(expected - chromeHeight) > 0.5 { line += " ⚠️MISMATCH expected=\(r(expected))" }
+
+        let key = ObjectIdentifier(window)
+        guard lastLine[key] != line else { return }
+        lastLine[key] = line
+        NSLog("%@", line)
+    }
+
+    private static func firstDescendant(of root: NSView?,
+                                        where match: (NSView) -> Bool) -> NSView? {
+        guard let root else { return nil }
+        if match(root) { return root }
+        for subview in root.subviews {
+            if let hit = firstDescendant(of: subview, where: match) { return hit }
+        }
+        return nil
+    }
+
+    private static func describe(_ view: NSView?) -> String {
+        guard let view else { return "—" }
+        return "\(type(of: view))\(fmt(view.bounds))"
+    }
+
+    private static func r(_ value: CGFloat) -> String {
+        String(format: "%.1f", Double(value))
+    }
+    private static func fmt(_ size: CGSize) -> String { "\(r(size.width))×\(r(size.height))" }
+    private static func fmt(_ rect: CGRect) -> String {
+        "(\(r(rect.origin.x)),\(r(rect.origin.y)) \(r(rect.width))×\(r(rect.height)))"
     }
 }

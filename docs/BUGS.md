@@ -4145,3 +4145,246 @@ above). The commit is published and its message cannot be rewritten, so the corr
 here and in `SourceFileWatcher.swift`'s header, which is where a reader who followed that line
 will land.
 
+
+---
+
+## ⚠️ CAUSE CONFIRMED 2026-09-08 — the clean aperture is applied to the window's SHAPE and never to the PIXELS, so every ARRI open-gate file draws 1.1% narrow
+
+**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-08, by measurement.** **FIX DECIDED** (Option A, below)
+**and NOT YET LANDED.** **Found:** 2026-09-07, while chasing black bars that appeared after the
+pixel-aspect fix. **NOT a regression from that fix** — the defect is as old as clean-aperture
+support; the fix only changed the drawable's shape and made it visible. **Blocks:** nothing
+user-facing hard-stops, but every instrument in the app mis-reports on any file with a cropping
+`clap`, silently, and has done since before anyone looked.
+
+### The defect
+
+**Every ARRI open-gate file has been drawn about 1.1 percent narrow, and every scope has been
+reading 32 columns of black at each end.** The waveform, the parade, the vectorscope, the CIE
+plot, the DeckLink v210 output and the ⌃⌥E frame export all read the offscreen ring, and the
+offscreen ring is the encoded 2944-wide raster including the codec-alignment padding.
+
+It became visible only when honouring the pixel aspect ratio changed the drawable's aspect. Before
+that the window was shaped 4:3 from `naturalSize`, which also applies the clean aperture, so the
+same proportional inset was present and read as "the picture" rather than as bars.
+
+### MEASURED, not inferred — the padding is in the FILES
+
+One frame pulled from each fixture at full encoded geometry, with libav's own `clap` crop disabled
+(`ffmpeg -apply_cropping 0`), then scanned column by column:
+
+| fixture | encoded | first non-black col | last | active width |
+|---|---|---|---|---|
+| `A001C025_190913_R1HE.mov` (ProRes 4444, pasp 2:1) | 2944×2160 | **32** | **2911** | **2880** |
+| `M001C008_161207_R00H.mov` (ProRes 4444 XQ, pasp 1:1) | 2944×2160 | **32** | **2911** | **2880** |
+
+Columns 0–31 and 2912–2943 are **literal zero** in both files. The active picture is columns
+32–2911 — 2880 wide at offset 32, which is the declared clean aperture, centred.
+
+**ARRI's own metadata inside the file agrees:** `com.arri.camera.sensor.PhotoSites: 2880x2160`,
+sitting in a 2944 raster. ARRI documents the padding publicly — the Alexa Mini LF writes 4480
+around a 4448 active image. **This is not damaged media and not a decode fault. It is alignment
+padding, and no instrument should report it.**
+
+#### ⚠️ 32 IS THE PER-SIDE OFFSET, NOT THE ALIGNMENT — and the alignment the two samples support is 128
+
+Easy to conflate, because 32 is the number you measure at the left edge. It is `(2944 − 2880) ÷ 2`,
+a consequence of centring, and it is not even constant across the two files: the Mini LF's per-side
+offset is 16, not 32.
+
+**The alignment has to be a width the ACTIVE image violates and the PADDED width satisfies**, or
+there would be nothing to pad. That rules out 32 and 64:
+
+| width | ÷32 | ÷64 | ÷128 |
+|---|---|---|---|
+| 2880 active (open gate) | 90 ✓ | 45 ✓ | 22.5 ✗ |
+| **2944 padded** | 92 ✓ | 46 ✓ | **23 ✓** |
+| 4448 active (Mini LF) | 139 ✓ | 69.5 ✗ | 34.75 ✗ |
+| **4480 padded** | 140 ✓ | 70 ✓ | **35 ✓** |
+
+Both active widths are already multiples of 32, so 32-alignment would require padding neither. And
+2880 is `64 × 45`, so 64-alignment would not require padding the open-gate file either. **128 is
+the smallest alignment that both files support** — it is the only one of the three that both active
+widths violate and both padded widths satisfy.
+
+**Stated as inference, not as documentation.** 128 is what two samples support; it is not a figure
+read out of an ARRI specification, and two points do not establish a rule. A third fixture could
+rule it out.
+
+**Nothing about the fix depends on any of this.** The `clap` atom declares WHERE the picture is,
+and the crop follows that declaration regardless of WHY the padding exists. The alignment question
+is provenance for the entry, not an input to the code.
+
+### The mechanism — one application, to the wrong quantity, not two
+
+**The clean aperture is applied exactly once, to the display SHAPE, and never to the pixels.**
+
+- `MediaInspector.presentationSize` calls `CMVideoFormatDescriptionGetPresentationDimensions(fmt,
+  usePixelAspectRatio: true, useCleanAperture: true)`. That value becomes `FrameEngine.displaySize`,
+  which shapes the video rect (`ContentView.videoAspect`) and the window (`WindowSizer.setGeometry`),
+  and through the view's bounds it shapes the drawable.
+- The pixel path never crops. The offscreen is sized from `CVPixelBufferGetWidth/Height` — the
+  encoded 2944 — and `displayCopyVertex` stretches uv 0…1 across all of it onto the drawable.
+  There is no `setViewport` or `setScissorRect` anywhere in the project, and nothing reads
+  `kCVImageBufferCleanApertureKey`.
+
+**Both earlier readings of this were right and neither contradicted the other.** Applying a
+clean-aperture SHAPE to a full stretch of ENCODED pixels is arithmetically identical to scaling the
+picture by clap ÷ encoded. That is why one audit called it a full-viewport stretch with no aspect
+preservation and another called it a horizontal scale. Same fact, two ends.
+
+### The arithmetic, which is what identified it
+
+| quantity | predicted | measured on screen |
+|---|---|---|
+| black per side, in a 2880-wide drawable | 2880 × 32 ÷ 2944 = **31.3 px** | 31–32 px |
+| picture width | 2880 × 2880 ÷ 2944 = **2817 px** | ~2812 px |
+
+**That measurement is what found this.** Every value in the display path reported correct — host
+view bounds, layer bounds, drawable size, contents gravity, pipeline present, all consistent at
+2880×1080 — and four successive hypotheses (a layout inset above the video region, stale layer
+bounds from a re-parented host view, a `contentsGravity` of `resizeAspect`, and the scope tray's
+chrome height) were **all wrong.** The ratio in the black bars was the only thing that pointed
+anywhere, and it pointed at `clap ÷ encoded` exactly.
+
+### ✅ DECISION 2026-09-08: crop everywhere, at the offscreen (Option A)
+
+The padding is codec alignment and no instrument should report it, so the crop belongs upstream of
+every consumer rather than on the display alone.
+
+- **Option A (CHOSEN).** `ensureOffscreenTexture` allocates the ACTIVE picture — 2880 wide — and
+  the offscreen pass samples the cropped uv range. One crop. The display copy needs **no change**
+  (its uv stays 0…1), and the four scope kernels, the v210 convert and the export inherit it for
+  free, because every one of them already derives its geometry from `src.width`/`src.height`.
+- **Option B (rejected).** The offscreen stays the literal decoded 2944 buffer and seven consumers
+  each apply the crop themselves.
+
+**The argument is the DEFAULT, not the edit count.** After A, a consumer added later is correct for
+free. After B, it reads the padding unless its author knows better — which is exactly the failure
+that produced this defect. B also acquires an unenforceable second rule ("every consumer must
+exclude the padding") with no compiler behind it.
+
+A costs, in exchange: one real bug fix (below), one rewritten check, one rewritten rule, and a new
+per-source aperture hand-off into the renderer — which today never sees a format description, so
+the aperture must be parked main→render the way `pendingColorState` already is.
+
+### ⚠️ THE OFFSCREEN RULE IS NARROWED, NOT VIOLATED, AND THE DISTINCTION MATTERS
+
+The rule on `ensureOffscreenTexture` says the offscreen stays at SOURCE resolution because the
+scopes, the v210 convert and the frame export all read it and all mean source pixels — *"a waveform
+that changed when the window was resized would be a measurement bug. The window's size reaches the
+drawable and stops there."*
+
+**The quantity that rule forbids the offscreen from depending on is the LAYOUT.** The active
+picture is a per-source constant: it does not move with the window, the tray, the display, or the
+raster percentage. Resize the window and the waveform is byte-identical. The invariant the rule
+exists to protect is untouched.
+
+What A changes is the REFERENT of "source resolution" — from the encoded raster to the active
+picture. That makes the rule's own stated rationale **truer than it is today**, because 32 columns
+of alignment padding were never source pixels in the sense that sentence intends.
+
+**What the rule should say afterwards:** the offscreen is sized from the SOURCE and never from the
+layout — specifically from the source's ACTIVE PICTURE, the encoded raster with the declared clean
+aperture removed, which is a per-source constant. Plus the new prohibition the current text does
+not cover and which the blit fallback is currently violating:
+
+> **Nothing may assume `offscreen.width == CVPixelBufferGetWidth(buffer)`.**
+
+### Two traps, with file and line, so tomorrow does not rediscover them
+
+**1. The blit fallback reads past the end of the texture.**
+`App/MetalVideoRenderer.swift:2086-2092` copies FROM the offscreen using the PIXEL BUFFER's extent:
+
+```swift
+} else if let blit = cmdBuffer.makeBlitCommandEncoder() {
+    blit.copy(from: offscreen, ...
+              sourceSize: MTLSize(width: width, height: height, depth: 1),   // 2944
+```
+
+With a 2880-wide offscreen that is a read 64 px past the end. **It fires only when
+`displayCopyPipelineState == nil`, which essentially never happens — so it would ship untested and
+fail on somebody else's machine.** It must move to the texture's own dimensions in the same change.
+`App/MetalVideoRenderer.swift:2010` has the same shape in the pre-layout drawable fallback: harmless
+(the next layout pass supersedes it) but it would be stating something false.
+
+**2. A non-integral clap offset is undecided policy.**
+A `clap` offset is a rational and need not be integral, and the decode is 4:2:0, so an odd offset
+cannot be honoured exactly on the chroma plane. **32 is even and integral, so on these files the
+crop stays bit-exact 1:1** — texel centres still align and the offscreen pass introduces no
+resample. The policy for a non-integral offset — round and record, or decline to crop — does not
+exist yet, and A is what forces the decision.
+
+### Two consequences to VERIFY rather than assume
+
+**`[SCRUB-GEOM]` would fire a false warning on every clap file, every drag.**
+`App/MetalVideoRenderer.swift:507-535` compares the producer's buffer against the offscreen, and its
+own doc comment states the premise A retires: *"the offscreen is sized from the playback buffer, so
+it IS the encoded raster."* Producer 2944×2160 against a 2880×2160 offscreen gives `Δ -32 px/side`
+and a message accusing the scrub path of precisely the crop the renderer now performs deliberately.
+It should compare against a STORED encoded size instead — which makes it assert two things (the
+producer handed over encoded geometry, AND the offscreen is that minus twice the padding) where it
+asserts one today.
+
+**The DeckLink native-res guard changes its left-hand side for every cropping-clap file.**
+`App/MetalVideoRenderer.swift:2655-2656` tests `src.width != outSize.w || src.height != outSize.h`,
+where `outSize` is only ever 3840×2160 or 1920×1080.
+
+- **No effect on ARRI open gate.** Refused at 2944 against a 3840 mode; still refused at 2880. The
+  mode itself does not move either — `sourceFormatChanged` is fed `meta.width/height`
+  (`ContentView.swift:772`), which are the ENCODED dimensions and are not what A changes.
+- **But a file whose clean aperture is exactly 1920×1080 inside a padded 1088 coded raster flips
+  from refused to passing.** That flip is CORRECT — the guard is currently refusing such a file on
+  padding alone — but it is a behaviour change on the SDI path and **wants a fixture.**
+- Trap specific to B, recorded in case A is ever reconsidered: crop in the v210 kernel while the
+  guard still tests `src.width` and the guard is judging the wrong number.
+
+### ⚠️ THE TEMPORARY DIAGNOSTICS ARE STILL IN THE TREE — they are how this gets verified, and they come out with the fix
+
+**Deliberately left in.** They are the instruments that produced the numbers above and they are how
+the fix gets confirmed. **All of them come out in the same commit as the fix.** Grep `[GEOM-DIAG]`
+and `[WINPROBE]`.
+
+| tag | file | what it prints |
+|---|---|---|
+| `[GEOM-DIAG]` | `App/MetalSurfaceView.swift:33,48,52-58` | `MetalHostView` bounds, backing scale, object identity, per layout pass |
+| `[GEOM-DIAG]` | `App/SampleBufferSurfaceView.swift:41,51-61` | the sibling AV surface's bounds — a whole `layout()` override added purely to print |
+| `[GEOM-DIAG]` | `App/MetalVideoRenderer.swift:541-546, 1608-1648` | layer state on the RENDER thread: `drawableSize`, bounds, `contentsScale`, `contentsGravity`, copy-pipeline-nil |
+| `[WINPROBE]` | `App/PlayerWindow.swift:29-36, 96-108, 110-end` | window frame, content rect, `NSHostingView` bounds, video rect in window coords, and the chrome breakdown with a mismatch marker |
+| `[WINPROBE]` | `App/ContentView.swift:1198-1201` | the four extra args feeding the probe (`trayVisible`, `trayHeight`, `barDocked`, `barHeight`) |
+| `[WINPROBE]` | `App/DiagnosticsExport.swift:425` | the tag registered in `LogPartitioner.manifoldTags` |
+
+Three `[GEOM-DIAG]` print sites across three files; one `[WINPROBE]` print site whose plumbing
+touches three more. **Six files in total**, and the `PlayerWindow.swift` probe added four stored
+properties to `WindowConfigurator` that nothing sizes from — those come out too.
+
+Two of them read main-thread layer properties from the render thread (`contentsGravity`, `bounds`,
+`contentsScale`). That is a diagnostic liberty and is noted at the site. It must not ship.
+
+**Unrelated, and predating this work:** `App/MetalVideoRenderer.swift:1227` carries its own
+"TEMPORARY DIAGNOSTIC — DELETE WHOLESALE" marker for the `[CSPROBE]` colourspace dump. It is not
+part of this arc. Do not sweep it up with these.
+
+### Shipped alongside, and unrelated to the defect above
+
+**The pixel aspect ratio is now honoured on the AVFoundation path**, and the inspector reports
+**resolution, clean aperture, pixel aspect and display size as four separate declarations** rather
+than one conflated number. `naturalSize` applies the clean aperture and NOT the pixel aspect, so an
+anamorphic file and a square-pixel one were indistinguishable downstream and both drew at 4:3.
+
+**A declared 1:1 is distinguished from no `pasp` atom at all** — the three-state
+`DeclaredPixelAspect`. **Proved, not assumed:** a file was authored with the atom renamed to `free`
+and the format-description extension confirmed to read ABSENT rather than defaulting to 1:1.
+
+### ⏸ OPEN CONVENTION QUESTION, undecided: 5760×2160 or 2880×1080?
+
+`GetPresentationDimensions` returns **5760×2160** for a 2:1 anamorphic file — it expands the width.
+Screen presents the same file as **2880×1080** — it halves the height. Same aspect, different
+raster.
+
+- **5760×2160** preserves every stored sample, and implies a width the file does not have.
+- **2880×1080** keeps the number inside the source's own pixel count, and makes the raster
+  percentages reachable on a 3840-wide display.
+
+**No AVFoundation call returns the second form**, so adopting it would be a deliberate
+reinterpretation rather than a bug fix. Left open on purpose.

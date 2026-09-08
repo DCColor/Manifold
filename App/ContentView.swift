@@ -1194,7 +1194,11 @@ struct ContentView: View {
                 deck: deck,
                 displaySize: engine.displaySize,
                 chromeHeight: chromeHeight,
-                raster: rasterRequest
+                raster: rasterRequest,
+                trayVisible: chrome.showTray,
+                trayHeight: effectiveTrayHeight,
+                barDocked: isDocked && hasSource,
+                barHeight: dockedBarHeight
             )
             .frame(width: 0, height: 0)
 

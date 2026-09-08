@@ -422,7 +422,7 @@ enum LogPartitioner {
         "SRT", "SRT-AU", "SRT-AUDIO", "SRT-BACKLOG", "SRT-DECODE",
         "SRT-FLOW", "SRT-JITTER", "SRT-LIB", "SRT-UNDERRUN", "STREAM", "STREAMS", "SWEEP",
         "PLAYBACK", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE",
-        "V210", "WEBRTC", "WEBRTC-SMOKE",
+        "V210", "WEBRTC", "WEBRTC-SMOKE", "WINPROBE",
         "WHEP", "WHEP-AUDIO", "WHEP-BRIDGE", "WHEP-DECODE", "WHEP-FLOW", "WHEP-RTP",
     ]
 

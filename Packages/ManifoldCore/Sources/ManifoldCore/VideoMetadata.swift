@@ -14,6 +14,70 @@ public enum LayoutConfidence: Equatable, Sendable {
     case undeclared    // no declaration and no confident guess
 }
 
+/// A source's DECLARED pixel aspect ratio — THREE STATES, NOT TWO, and the third is the point.
+///
+/// ⚠️ `pasp 1:1` IS A DECLARATION, NOT AN ABSENCE. A file that carries a `pasp` atom saying square
+/// pixels has STATED that its pixels are square; a file with no `pasp` atom has stated nothing and
+/// is being assumed square by us. Those are different facts and an instrument must not print the
+/// same thing for both — the same three-state honesty `LayoutConfidence` applies to audio layouts
+/// and `colorRange` applies to the range flag ("Untagged" is not "Video (Legal)").
+///
+/// MEASURED, so the distinction is real and not merely principled: AVFoundation reports
+/// `kCMFormatDescriptionExtension_PixelAspectRatio` as ABSENT when the atom is absent, and as
+/// `{HorizontalSpacing 1, VerticalSpacing 1}` when the atom declares square. Verified 2026-09-07 by
+/// stripping the atom from a ProRes file (renaming it to `free`, size-preserving) and re-reading:
+/// the extension went from present-and-1:1 to absent, with `naturalSize` unchanged throughout.
+public enum DeclaredPixelAspect: Equatable, Sendable {
+    /// No `pasp` atom. We assume square pixels; the file did not say so.
+    case undeclared
+    /// A `pasp` atom, INCLUDING one that says 1:1.
+    case declared(horizontal: Int, vertical: Int)
+
+    /// h/v as a number, or nil when nothing was declared. Never defaults to 1.0 — a caller that
+    /// wants "assume square" must say so itself, which is what keeps the assumption visible.
+    public var ratio: Double? {
+        guard case .declared(let h, let v) = self, v > 0 else { return nil }
+        return Double(h) / Double(v)
+    }
+
+    /// Declared AND not square — i.e. this file needs a desqueeze. Undeclared is FALSE, because an
+    /// undeclared file gets the square assumption and no transform.
+    public var isAnamorphic: Bool {
+        guard case .declared(let h, let v) = self else { return false }
+        return h != v
+    }
+
+    /// Three visibly different strings, because the three states are three different facts.
+    public var displayString: String {
+        switch self {
+        case .undeclared: return "Not declared"
+        case .declared(let h, let v):
+            return h == v ? "\(h):\(v) (square, declared)" : "\(h):\(v)"
+        }
+    }
+}
+
+/// A source's DECLARED clean aperture — the `clap` atom, or its absence.
+///
+/// Two states rather than three: unlike `pasp`, a `clap` equal to the encoded raster is not a
+/// meaningfully different statement from no `clap` at all, because both mean "nothing is being
+/// cropped". `MediaInspector` reports the atom when it is present; the inspector shows the row only
+/// when it actually differs from the encoded size, which is the point at which it says something.
+public enum DeclaredCleanAperture: Equatable, Sendable {
+    case undeclared
+    case declared(width: Double, height: Double, hOffset: Double, vOffset: Double)
+
+    public var size: CGSize? {
+        guard case .declared(let w, let h, _, _) = self else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    public var displayString: String {
+        guard case .declared(let w, let h, _, _) = self else { return "Not declared" }
+        return "\(Int(w.rounded())) × \(Int(h.rounded()))"
+    }
+}
+
 /// What the DECODE PATH established about a source's audio, as distinct from what an inspector
 /// guessed. The three cases are deliberately not two: "no audio" and "not determined yet" look
 /// identical to a viewer if they are collapsed, and a meter has to say which it is.
@@ -105,8 +169,40 @@ public struct TextTrackInfo: Equatable, Sendable {
 
 public struct VideoMetadata: Equatable, Sendable {
     public var codecName: String = "—"
+    /// ⚠️ THE ENCODED RASTER — what the file's sample description says it stores, i.e.
+    /// `CMVideoFormatDescriptionGetDimensions`. NOT `naturalSize`, and NOT what is on screen.
+    ///
+    /// This changed 2026-09-07 and the old value was neither of the two useful numbers.
+    /// `naturalSize` applies the clean aperture and NOT the pixel aspect ratio, so on ARRI open-gate
+    /// ProRes (encoded 2944×2160, `clap` 2880×2160, `pasp` 2:1) it reported 2880×2160 — not what the
+    /// file encodes, and not what should be drawn either, which is 5760×2160. An inspector's job is
+    /// to report what the file DECLARES; the transforms applied on top of it are `cleanAperture`,
+    /// `pixelAspect` and `displaySize`, stated separately so each can be read on its own.
+    ///
+    /// ⚠️ THIS IS ALSO WHAT DECKLINK'S OUTPUT MODE IS DERIVED FROM (`ContentView` →
+    /// `DeckLinkService.sourceFormatChanged`), and encoded is the CORRECT input there: the v210
+    /// convert reads `offscreenTexture`, which is sized from the decoded buffer, and refuses a
+    /// mismatch outright. Under `naturalSize` those two disagreed by the clean aperture on exactly
+    /// the files that declare one.
     public var width: Int = 0
     public var height: Int = 0
+
+    /// The `pasp` atom, three-state. See `DeclaredPixelAspect` for why 1:1 and absent are not the
+    /// same answer.
+    public var pixelAspect: DeclaredPixelAspect = .undeclared
+
+    /// The `clap` atom, or its absence.
+    public var cleanAperture: DeclaredCleanAperture = .undeclared
+
+    /// WHAT IS ACTUALLY DRAWN: the encoded raster with the clean aperture and the pixel aspect ratio
+    /// both applied — `CMVideoFormatDescriptionGetPresentationDimensions(_:usePixelAspectRatio:
+    /// useCleanAperture:)` with both true, then the preferred transform. nil where no format
+    /// description was readable.
+    ///
+    /// The same number `FrameEngine.displaySize` carries, reported here so the inspector can show
+    /// the file's declaration and the app's response to it side by side rather than one number that
+    /// is quietly both.
+    public var displaySize: CGSize?
     public var frameRate: Double = 0
     public var fileName: String = "—"
     public var container: String = "—"
@@ -147,8 +243,30 @@ public struct VideoMetadata: Equatable, Sendable {
     public var audioTracks: [AudioTrackInfo] = []
     public var textTracks: [TextTrackInfo] = []
 
+    /// The ENCODED raster. See `width`.
     public var resolutionString: String {
         (width > 0 && height > 0) ? "\(width) × \(height)" : "—"
+    }
+
+    /// What is drawn, once the clean aperture and the pixel aspect ratio are applied.
+    public var displaySizeString: String {
+        guard let d = displaySize, d.width > 0, d.height > 0 else { return "—" }
+        return "\(Int(d.width.rounded())) × \(Int(d.height.rounded()))"
+    }
+
+    /// TRUE when the drawn geometry differs from the encoded raster — i.e. when a transform is
+    /// actually being applied and the two numbers are worth showing together. Compared with a
+    /// half-pixel tolerance because presentation dimensions are floating point.
+    public var displayDiffersFromEncoded: Bool {
+        guard let d = displaySize, width > 0, height > 0 else { return false }
+        return abs(d.width - CGFloat(width)) > 0.5 || abs(d.height - CGFloat(height)) > 0.5
+    }
+
+    /// TRUE when the `clap` atom actually crops something. A `clap` equal to the encoded raster is
+    /// a declaration that nothing is cropped, which is not news — see `DeclaredCleanAperture`.
+    public var cleanApertureCrops: Bool {
+        guard let c = cleanAperture.size, width > 0, height > 0 else { return false }
+        return abs(c.width - CGFloat(width)) > 0.5 || abs(c.height - CGFloat(height)) > 0.5
     }
     public var frameRateString: String {
         frameRate > 0 ? String(format: "%.3f fps", frameRate) : "—"

@@ -18,15 +18,24 @@ public enum MediaInspector {
         }
 
         if let track = try? await asset.loadTracks(withMediaType: .video).first {
-            if let naturalSize = try? await track.load(.naturalSize) {
-                meta.width = Int(naturalSize.width.rounded())
-                meta.height = Int(naturalSize.height.rounded())
-            }
             if let fps = try? await track.load(.nominalFrameRate), fps > 0 {
                 meta.frameRate = Double(fps)
             }
             if let formats = try? await track.load(.formatDescriptions),
                let fmt = formats.first {
+                // ⚠️ ENCODED DIMENSIONS, FROM THE FORMAT DESCRIPTION — deliberately NOT
+                // `naturalSize`, which applies the clean aperture and not the pixel aspect ratio and
+                // is therefore neither of the two numbers worth reporting. See `VideoMetadata.width`
+                // for the measurement that settled it. No `naturalSize` fallback: a track with no
+                // readable format description gives us no honest encoded number, and 0 → "—" says
+                // that, where a clean-aperture size labelled "Resolution" would not.
+                let dims = CMVideoFormatDescriptionGetDimensions(fmt)
+                meta.width = Int(dims.width)
+                meta.height = Int(dims.height)
+                meta.pixelAspect = declaredPixelAspect(for: fmt)
+                meta.cleanAperture = declaredCleanAperture(for: fmt)
+                let transform = (try? await track.load(.preferredTransform)) ?? .identity
+                meta.displaySize = presentationSize(for: fmt, transform: transform)
                 meta.codecName = codecName(for: fmt)
                 let c = colorTags(for: fmt)
                 meta.colorPrimaries = c.primName
@@ -72,14 +81,81 @@ public enum MediaInspector {
         return meta
     }
 
-    /// Produce the display size (naturalSize × preferredTransform), or nil.
+    /// WHAT SHOULD BE DRAWN: the encoded raster with the clean aperture AND the pixel aspect ratio
+    /// applied, then the preferred transform. nil when there is no video track.
+    ///
+    /// ── ⚠️ THIS WAS `naturalSize` AND `naturalSize` IS NOT THE DISPLAY SIZE ──────────────────
+    ///
+    /// `naturalSize` applies the clean aperture and NOT the pixel aspect ratio. MEASURED 2026-09-07
+    /// on two ARRI open-gate ProRes files, both encoded 2944×2160 with a 2880×2160 `clap`:
+    ///
+    ///     A001C025_190913_R1HE.mov   pasp 2:1    naturalSize 2880×2160   presentation 5760×2160
+    ///     M001C008_161207_R00H.mov   pasp 1:1    naturalSize 2880×2160   presentation 2880×2160
+    ///
+    /// `naturalSize` returns the SAME number for both, so an anamorphic file and a square-pixel one
+    /// were indistinguishable downstream and both drew at 4:3. QuickLook shows the first at 2.667:1
+    /// and is right. `GetPresentationDimensions` with both flags is the call that separates them.
+    ///
+    /// ── ⚠️ THE TRANSFORM THIS FEEDS IS A LAYER TRANSFORM AND MUST STAY ONE ─────────────────
+    ///
+    /// This value reaches exactly two places — `ContentView.videoAspect` (which shapes the video
+    /// rect the Metal layer fills) and `WindowSizer.setGeometry` (which shapes the window). It must
+    /// NEVER reach `MetalVideoRenderer.ensureOffscreenTexture` or anything sized from it. The
+    /// scopes, the DeckLink v210 convert and the ⌃⌥E frame export all read that texture and all of
+    /// them mean SOURCE pixels: a waveform must not change shape because a file declares
+    /// anamorphic. The rule is stated at the offscreen (`setLayoutSize`) and again at the producer
+    /// geometry rule (`presentImmediate`); this desqueeze leaves both true, and `[SCRUB-GEOM]`
+    /// — which compares producer against playback, both encoded — stays silent.
     public static func displaySize(for asset: AVURLAsset) async -> CGSize? {
         guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-              let naturalSize = try? await track.load(.naturalSize),
               let transform = try? await track.load(.preferredTransform)
         else { return nil }
-        let displayRect = CGRect(origin: .zero, size: naturalSize).applying(transform)
-        return CGSize(width: abs(displayRect.width), height: abs(displayRect.height))
+        if let fmt = (try? await track.load(.formatDescriptions))?.first {
+            return presentationSize(for: fmt, transform: transform)
+        }
+        // No format description. `naturalSize` is the only thing left and it is the pre-2026-09-07
+        // answer: clean aperture applied, pixel aspect ignored. Kept as the fallback because a shape
+        // that is wrong only for anamorphic files beats no shape at all (which is a 16:9 window
+        // around whatever this is), but it cannot be reached by any file that decodes.
+        guard let naturalSize = try? await track.load(.naturalSize) else { return nil }
+        let r = CGRect(origin: .zero, size: naturalSize).applying(transform)
+        return CGSize(width: abs(r.width), height: abs(r.height))
+    }
+
+    /// Presentation dimensions with BOTH transforms applied, then the preferred transform (rotation).
+    /// The one place the two flags are set, so the metadata's `displaySize` and the engine's cannot
+    /// disagree about what "display size" means.
+    private static func presentationSize(for fmt: CMFormatDescription,
+                                         transform: CGAffineTransform) -> CGSize {
+        let pres = CMVideoFormatDescriptionGetPresentationDimensions(
+            fmt, usePixelAspectRatio: true, useCleanAperture: true)
+        let r = CGRect(origin: .zero, size: pres).applying(transform)
+        return CGSize(width: abs(r.width), height: abs(r.height))
+    }
+
+    /// The `pasp` atom as three states. ABSENT IS NOT 1:1 — see `DeclaredPixelAspect`. Read from the
+    /// format description's extensions, which report absence as absence (measured).
+    private static func declaredPixelAspect(for fmt: CMFormatDescription) -> DeclaredPixelAspect {
+        guard let dict = CMFormatDescriptionGetExtension(
+                fmt, extensionKey: kCMFormatDescriptionExtension_PixelAspectRatio) as? [CFString: Any],
+              let h = (dict[kCMFormatDescriptionKey_PixelAspectRatioHorizontalSpacing] as? NSNumber)?.intValue,
+              let v = (dict[kCMFormatDescriptionKey_PixelAspectRatioVerticalSpacing] as? NSNumber)?.intValue,
+              h > 0, v > 0
+        else { return .undeclared }
+        return .declared(horizontal: h, vertical: v)
+    }
+
+    /// The `clap` atom, or its absence.
+    private static func declaredCleanAperture(for fmt: CMFormatDescription) -> DeclaredCleanAperture {
+        guard let dict = CMFormatDescriptionGetExtension(
+                fmt, extensionKey: kCMFormatDescriptionExtension_CleanAperture) as? [CFString: Any],
+              let w = (dict[kCMFormatDescriptionKey_CleanApertureWidth] as? NSNumber)?.doubleValue,
+              let h = (dict[kCMFormatDescriptionKey_CleanApertureHeight] as? NSNumber)?.doubleValue,
+              w > 0, h > 0
+        else { return .undeclared }
+        let hOff = (dict[kCMFormatDescriptionKey_CleanApertureHorizontalOffset] as? NSNumber)?.doubleValue ?? 0
+        let vOff = (dict[kCMFormatDescriptionKey_CleanApertureVerticalOffset] as? NSNumber)?.doubleValue ?? 0
+        return .declared(width: w, height: h, hOffset: hOff, vOffset: vOff)
     }
 
     /// Read the start-timecode info for the file (nil if no TC track).

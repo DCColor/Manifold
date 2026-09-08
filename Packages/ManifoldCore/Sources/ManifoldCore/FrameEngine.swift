@@ -56,6 +56,31 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     @Published public private(set) var isPlaying = false
     @Published public private(set) var currentTime: Double = 0
     @Published public private(set) var duration: Double = 0
+
+    /// THE SHAPE THE PICTURE IS DRAWN AT. Feeds `ContentView.videoAspect` (the video rect) and
+    /// `WindowSizer.setGeometry` (the window), and nothing else. NEVER the offscreen texture — see
+    /// the rule on `MediaInspector.displaySize(for:)`.
+    ///
+    /// ── ⚠️ THE THREE PATHS DO NOT ALL MEAN THE SAME THING BY THIS, AND THAT IS RECORDED RATHER
+    ///    THAN FIXED ─────────────────────────────────────────────────────────────────────────
+    ///
+    /// As of 2026-09-07 they diverge, deliberately and in one direction only — each path applies
+    /// what it can actually read, and says so:
+    ///
+    ///   * AVFOUNDATION FILES — clean aperture AND pixel aspect ratio applied
+    ///     (`MediaInspector.displaySize`). The full answer.
+    ///   * LIBAV / MXF FILES — the ENCODED dimensions, verbatim (`applyLibavMetadata`). Neither
+    ///     transform is applied. libav DOES carry `sample_aspect_ratio` on `AVStream`/`codecpar`,
+    ///     so this path could do better; `LibavFrameSource.StreamInfo` does not carry it yet, so
+    ///     there is nothing to apply. Not changed in the same commit as the AVFoundation fix on
+    ///     purpose — a geometry change to the MXF path deserves its own fixtures.
+    ///   * LIVE (NDI / WHEP / SRT) — the decoded buffer's dimensions, a stated square-pixel
+    ///     assumption. See `setLiveDisplaySize`, and the matching note in `SRTFrameRouter`, which
+    ///     names the same `sample_aspect_ratio` opportunity for that transport.
+    ///
+    /// So an anamorphic MXF still draws squeezed today. That is a KNOWN GAP with a named cause, not
+    /// an inconsistency nobody noticed, and the honest reading of this property right now is "the
+    /// best shape the path that loaded this source was able to establish".
     @Published public private(set) var displaySize: CGSize?
     @Published public private(set) var hasMedia = false
     @Published public private(set) var metadata: VideoMetadata?
@@ -1475,6 +1500,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// pixel-buffer attachment the source sets. Called on the main actor.
     private func applyLibavMetadata(_ info: LibavFrameSource.StreamInfo, url: URL) {
         if info.durationSeconds.isFinite, info.durationSeconds > 0 { self.duration = info.durationSeconds }
+        // ⚠️ ENCODED DIMENSIONS AS THE DISPLAY SIZE, WHICH IS NOT WHAT THE AVFOUNDATION PATH NOW
+        // DOES. That path applies the clean aperture and the pixel aspect ratio
+        // (`MediaInspector.displaySize`); this one applies neither, because `StreamInfo` carries
+        // neither. libav has both to give — `AVStream.sample_aspect_ratio` and the codec's
+        // cropping — so the gap is in what we ask for, not in what is available. An anamorphic MXF
+        // therefore still draws squeezed. Stated here and on `displaySize` so the divergence is a
+        // recorded decision rather than a latent one; `SRTFrameRouter` carries the same note for
+        // the SRT path.
         if info.width > 0, info.height > 0 { self.displaySize = CGSize(width: info.width, height: info.height) }
 
         var meta = VideoMetadata()

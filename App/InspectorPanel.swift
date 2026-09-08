@@ -35,7 +35,27 @@ struct InspectorPanel: View {
                 Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
 
                 MetadataRow(label: "Codec", value: m.codecName)
+                // ⚠️ WHAT THE FILE DECLARES FIRST, THEN WHAT IS BEING DONE ABOUT IT. "Resolution" is
+                // the ENCODED raster; the two rows below are the transforms, each shown only where
+                // it says something. This used to be one `naturalSize` number that was neither —
+                // clean aperture applied, pixel aspect ignored — which is ambiguous the moment a
+                // desqueeze exists, because the reader cannot tell which of the three it is.
                 MetadataRow(label: "Resolution", value: m.resolutionString)
+                // Only when it actually crops: a `clap` equal to the encoded raster declares that
+                // nothing is cropped, which is not news.
+                if m.cleanApertureCrops {
+                    MetadataRow(label: "Clean Aperture", value: m.cleanAperture.displayString)
+                }
+                // ALWAYS SHOWN, three-state. "Not declared" and "1:1 (square, declared)" are
+                // different facts and this is the row where that distinction lives — see
+                // `DeclaredPixelAspect`. It is the one row a squeezed picture sends you to, so it
+                // does not hide on the files where the answer is boring.
+                MetadataRow(label: "Pixel Aspect", value: m.pixelAspect.displayString)
+                // What is on screen, once both transforms are applied — shown only when it differs
+                // from the encoded raster, i.e. when there is a second number to reconcile.
+                if m.displayDiffersFromEncoded {
+                    MetadataRow(label: "Display Size", value: m.displaySizeString)
+                }
                 MetadataRow(label: "Frame Rate", value: m.frameRateString)
                 if let tc = m.startTimecode {
                     MetadataRow(label: "Start TC", value: tc)

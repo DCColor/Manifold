@@ -30,8 +30,33 @@ final class MetalHostView: NSView {
     /// would close a cycle through `renderer.metalLayer === self.layer`.
     weak var renderer: MetalVideoRenderer?
 
+    // ⚠️⚠️ TEMPORARY DIAGNOSTIC — REMOVE BEFORE COMMIT. Grep `[GEOM-DIAG]`. ⚠️⚠️
+    //
+    // Chasing: the picture is correctly proportioned at 2.667:1 but does not fill an
+    // aspect-fitted region that IS 2.667:1, so this view is inset within the inner ZStack.
+    // `drawnVideoSize` measures the `.aspectRatio` modifier's frame, NOT this view's bounds —
+    // nothing in the app measures this view, which is the number the diagnosis needs.
+    //
+    // ObjectIdentifier is as much the point as the size: `renderer.metalLayer` is ONE long-lived
+    // layer owned by the renderer, and a CALayer has one superlayer. If two host views are alive
+    // (the `if let renderer, !showReferenceLayer` child being re-created), the layer is re-parented
+    // to the newer one while the older can still receive `layout()` and size the drawable from its
+    // own stale bounds. Two distinct identifiers here is that, confirmed.
+    //
+    // De-duplicated on (identity, size, scale) so a live resize does not bury the signal; any NEW
+    // identity or size still prints. The set is unbounded — another reason this is temporary.
+    private static var geomDiagSeen: Set<String> = []
+
     override func layout() {
         super.layout()
+        // ⚠️ TEMPORARY DIAGNOSTIC — REMOVE. See above.
+        let diagKey = "M/\(ObjectIdentifier(self))/\(bounds.size)/\(window?.backingScaleFactor ?? -1)"
+        if Self.geomDiagSeen.insert(diagKey).inserted {
+            NSLog("[GEOM-DIAG] MetalHostView   bounds=%.1f×%.1f  scale=%@  id=%@",
+                  bounds.size.width, bounds.size.height,
+                  window?.backingScaleFactor.description ?? "nil-window",
+                  String(describing: ObjectIdentifier(self)))
+        }
         // Keep the metal layer filling the view; account for backing scale.
         guard let metalLayer else { return }
         metalLayer.frame = bounds

@@ -538,6 +538,13 @@ final class MetalVideoRenderer {
     private var debugGeomReported: Set<String> = []
     #endif
 
+    // ⚠️⚠️ TEMPORARY DIAGNOSTIC — REMOVE BEFORE COMMIT. Grep `[GEOM-DIAG]`. ⚠️⚠️
+    // De-duplication for the layer-state print at the top of `performDisplayTick`, so a 60 Hz tick
+    // logs once per DISTINCT set of values rather than once per frame. Touched only from the render
+    // thread (that one call site), which is why it needs no lock. Unbounded, like the host views'
+    // equivalents — one more reason this comes out before the fix lands.
+    private var geomDiagSeen: Set<String> = []
+
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
             print("MetalVideoRenderer: no Metal device"); return nil
@@ -1596,6 +1603,47 @@ final class MetalVideoRenderer {
         // whatever size is current when it is called.
         if let drawableSize, metalLayer.drawableSize != drawableSize {
             metalLayer.drawableSize = drawableSize
+        }
+
+        // ⚠️⚠️ TEMPORARY DIAGNOSTIC — REMOVE BEFORE COMMIT. Grep `[GEOM-DIAG]`. ⚠️⚠️
+        //
+        // The layer's own state, read on the RENDER THREAD, which is the thread that owns
+        // `drawableSize` and the one that draws. `[GEOM-DIAG]` from `MetalHostView` already showed
+        // the host view is the full 2880×1080 aspect-fitted rect, so the inset is INSIDE the layer:
+        // the layer is the right size and what is drawn into it is not filling it. These five are
+        // what separates the remaining causes.
+        //
+        // ⚠️ PLACED AFTER THE `drawableSize` INSTALL ABOVE, ON PURPOSE. Printing before it would
+        // report the PREVIOUS frame's raster; the install is what governs the `nextDrawable()`
+        // below, so this is the value actually in effect for the frame about to be drawn.
+        //
+        // ⚠️ `contentsGravity`, `bounds` AND `contentsScale` ARE MAIN-THREAD PROPERTIES AND THIS
+        // READS THEM FROM THE RENDER THREAD. That is a diagnostic liberty, not a pattern to copy —
+        // this file's discipline (see `setLayoutSize`) is that only the render thread touches
+        // `drawableSize` and only main touches the rest. A torn read is possible and harmless for a
+        // print; it would not be harmless for anything that acted on the value. Another reason this
+        // must not ship.
+        //
+        // `contentsGravity` is the one that was previously INFERRED rather than measured: nothing in
+        // the app assigns it, so it "should" be the CALayer default `resize`. But
+        // `MetalSurfaceView.makeNSView` sets `view.wantsLayer = true` BEFORE `view.layer = …`, the
+        // reverse of the documented order for a layer-HOSTING view, which can leave AppKit treating
+        // it as layer-BACKED and bring `NSView.layerContentsPlacement` into play — and that maps
+        // onto exactly this property. `resizeAspect` here would letterbox the layer's own contents
+        // inside its bounds at a constant proportion, which matches every symptom.
+        let diagGravity = metalLayer.contentsGravity.rawValue
+        let diagBounds = metalLayer.bounds.size
+        let diagDrawable = metalLayer.drawableSize
+        let diagScale = metalLayer.contentsScale
+        let diagPipelineNil = (displayCopyPipelineState == nil)
+        let diagKey = "\(diagPipelineNil)/\(diagDrawable)/\(diagBounds)/\(diagScale)/\(diagGravity)"
+        if geomDiagSeen.insert(diagKey).inserted {
+            NSLog("[GEOM-DIAG] layer  copyPipelineNil=%@  drawableSize=%.1f×%.1f  bounds=%.1f×%.1f"
+                  + "  contentsScale=%.2f  contentsGravity=%@",
+                  diagPipelineNil ? "TRUE ⚠️" : "false",
+                  diagDrawable.width, diagDrawable.height,
+                  diagBounds.width, diagBounds.height,
+                  diagScale, diagGravity)
         }
 
         if let colorState {

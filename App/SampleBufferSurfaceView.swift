@@ -38,6 +38,29 @@ final class SampleBufferNSView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    // ⚠️⚠️ TEMPORARY DIAGNOSTIC — REMOVE BEFORE COMMIT. Grep `[GEOM-DIAG]`. ⚠️⚠️
+    //
+    // This class had NO `layout()` override; one is added purely to print. The question it answers:
+    // this view is the SIBLING of `MetalHostView` in the same inner ZStack, and a ZStack sizes
+    // itself to the UNION of its children and centres each one — so a sibling that comes back
+    // LARGER would leave the Metal child inset inside the stack, which is the symptom. If these
+    // bounds match the Metal view's, the sibling is not the cause and the inset is the Metal
+    // child's own returned size.
+    //
+    // Same de-duplication and the same removal note as `MetalHostView.layout()`.
+    private static var geomDiagSeen: Set<String> = []
+
+    override func layout() {
+        super.layout()
+        let diagKey = "S/\(ObjectIdentifier(self))/\(bounds.size)/\(window?.backingScaleFactor ?? -1)"
+        if Self.geomDiagSeen.insert(diagKey).inserted {
+            NSLog("[GEOM-DIAG] SampleBufferView bounds=%.1f×%.1f  scale=%@  id=%@",
+                  bounds.size.width, bounds.size.height,
+                  window?.backingScaleFactor.description ?? "nil-window",
+                  String(describing: ObjectIdentifier(self)))
+        }
+    }
+
     var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 
     /// Enqueue one decoded frame for display. The frame engine calls this.
