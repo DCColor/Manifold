@@ -55,6 +55,40 @@ public enum DeclaredPixelAspect: Equatable, Sendable {
             return h == v ? "\(h):\(v) (square, declared)" : "\(h):\(v)"
         }
     }
+
+    /// The declared ratio in lowest terms, or nil when nothing was declared. Nil is the same
+    /// "the file said nothing" answer `ratio` gives, and for the same reason: a caller that wants
+    /// to assume square has to say so itself.
+    ///
+    /// Reduced because both consumers are about IDENTITY rather than arithmetic — the `_par` tag
+    /// in an exported frame's filename and the exact integer ratio written into its PNG `pHYs`
+    /// chunk. `4:2` and `2:1` are the same declaration and must not produce two different
+    /// filenames for the same squeeze.
+    public var reduced: (horizontal: Int, vertical: Int)? {
+        guard case .declared(let h, let v) = self, h > 0, v > 0 else { return nil }
+        let g = Self.gcd(h, v)
+        return (h / g, v / g)
+    }
+
+    /// The filename marker for an exported frame — `"par2-1"` — or NIL when it would say nothing.
+    ///
+    /// ⚠️ NIL ON SQUARE, AND THAT IS THE WHOLE DESIGN OF THE MARKER. Tagging every ordinary export
+    /// `_par1-1` would put noise on the common case and make the marker's presence meaningless;
+    /// tagging only the anamorphic ones makes it informative — a filename carrying `_par` is a
+    /// frame that needs a desqueeze, and one that does not, does not. Nil is therefore returned
+    /// for BOTH `.undeclared` and a declared 1:1: the marker answers "does this need
+    /// desqueezing?", which is one question with one answer, not the three-state question the
+    /// inspector row and the `pHYs` chunk answer.
+    public var filenameTag: String? {
+        guard let r = reduced, r.horizontal != r.vertical else { return nil }
+        return "par\(r.horizontal)-\(r.vertical)"
+    }
+
+    private static func gcd(_ a: Int, _ b: Int) -> Int {
+        var a = abs(a), b = abs(b)
+        while b != 0 { (a, b) = (b, a % b) }
+        return max(a, 1)
+    }
 }
 
 /// A source's DECLARED clean aperture — the `clap` atom, or its absence.
@@ -75,6 +109,104 @@ public enum DeclaredCleanAperture: Equatable, Sendable {
     public var displayString: String {
         guard case .declared(let w, let h, _, _) = self else { return "Not declared" }
         return "\(Int(w.rounded())) × \(Int(h.rounded()))"
+    }
+}
+
+/// ── THE DECLARATION RESOLVED INTO A RECT THE SAMPLER CAN HONOUR EXACTLY ───────────────────────
+///
+/// `DeclaredCleanAperture` is what the file SAYS. This is what can be DONE about it: a pixel rect
+/// inside the encoded raster, on the 2-px grid, which `MetalVideoRenderer` allocates the offscreen
+/// from and which `InspectorPanel` reports when it differs from the declaration.
+///
+/// ⚠️ ONE RESOLVER, TWO CALLERS, ON PURPOSE. The renderer crops and the inspector describes the
+/// crop. If each did its own arithmetic the inspector could describe a rect the renderer did not
+/// use, which is the one failure mode a "clean aperture" row must not have.
+///
+/// ── WHY THE 2-PX GRID, AND WHY ROUNDING RATHER THAN DECLINING ────────────────────────────────
+///
+/// A `clap` offset is a rational and need not be integral. The decode contract is 4:2:0, so the
+/// chroma plane is half-resolution and only an EVEN luma offset leaves the chroma sample phase
+/// where it already is. That is the whole of the constraint, and it is exact rather than a
+/// tolerance:
+///
+///   * On an even, integral rect the offscreen pass is bit-exact. Fragment `i` of a `w`-wide
+///     offscreen samples normalized `(x + i + 0.5) / encodedWidth`, which is the CENTRE of luma
+///     texel `x + i` — bilinear returns that texel unchanged. In chroma texel units the same
+///     coordinate is `x/2 + (i + 0.5)/2`, i.e. the identical fractional phase the UNCROPPED path
+///     samples today, so chroma is byte-for-byte what it was before the crop existed.
+///   * An ODD offset moves that phase by half a chroma texel and re-blends every chroma sample in
+///     the frame. Silently. That is a measurement corruption in four scopes and the SDI output.
+///
+/// So the rect is snapped to the even grid. ROUNDED, not refused, and the argument is that the two
+/// errors are not the same size: rounding places the crop within 1 px of where the file said, and
+/// the crop stays bit-exact because it is still integral; declining to crop reports 32 columns of
+/// alignment padding as picture, which is precisely the defect this exists to remove. A 1 px
+/// placement error is a smaller lie than a 64 px one.
+///
+/// **`isExact` is how the rounding stops being silent.** The inspector shows the applied rect
+/// whenever it is false, and the renderer logs `[CLAP]` once per source.
+public struct CleanApertureCrop: Equatable, Sendable {
+    public let x: Int
+    public let y: Int
+    public let width: Int
+    public let height: Int
+    /// FALSE when the declaration did not already sit on the 2-px grid and was snapped onto it.
+    /// TRUE means the rect below IS the declaration, to the pixel.
+    public let isExact: Bool
+
+    public init(x: Int, y: Int, width: Int, height: Int, isExact: Bool) {
+        self.x = x; self.y = y; self.width = width; self.height = height; self.isExact = isExact
+    }
+
+    public var displayString: String { "\(width) × \(height) at \(x), \(y)" }
+
+    /// The crop to apply to `encodedWidth` × `encodedHeight`, or NIL when there is nothing to do —
+    /// no `clap`, a `clap` that crops nothing, or a declaration that survives neither the grid nor
+    /// the raster bounds. Nil is the "use the whole buffer" answer and every caller reads it so.
+    ///
+    /// ⚠️ THE OFFSETS ARE CENTRE-RELATIVE. QuickTime's `clap` states the displacement of the clean
+    /// aperture's CENTRE from the encoded raster's centre, not a top-left origin. On both ARRI
+    /// open-gate fixtures the offsets are 0 and the entire crop comes from the centring term —
+    /// `(2944 − 2880) / 2 = 32`, which is the number measured at the left edge of the picture.
+    public static func resolve(encodedWidth: Int, encodedHeight: Int,
+                               aperture: DeclaredCleanAperture) -> CleanApertureCrop? {
+        guard encodedWidth > 0, encodedHeight > 0,
+              case .declared(let cw, let ch, let hOff, let vOff) = aperture,
+              cw > 0, ch > 0 else { return nil }
+
+        let left = (Double(encodedWidth) - cw) / 2 + hOff
+        let top  = (Double(encodedHeight) - ch) / 2 + vOff
+
+        // Recorded BEFORE any snapping, so `isExact` describes the declaration and not the result.
+        let exact = isEvenIntegral(left) && isEvenIntegral(top)
+                 && isEvenIntegral(cw) && isEvenIntegral(ch)
+
+        var x = roundToEven(left)
+        var y = roundToEven(top)
+        var w = roundToEven(cw)
+        var h = roundToEven(ch)
+
+        // Clamp into the raster, then re-even: the clamp can produce an odd extent, and an odd
+        // extent puts the RIGHT edge off the chroma grid the same way an odd offset puts the left
+        // edge off it.
+        x = min(max(0, x), max(0, encodedWidth - 2))
+        y = min(max(0, y), max(0, encodedHeight - 2))
+        w = min(w, encodedWidth - x); w -= w % 2
+        h = min(h, encodedHeight - y); h -= h % 2
+        guard w >= 2, h >= 2 else { return nil }
+
+        // A rect equal to the raster is a declaration that nothing is cropped — see
+        // `DeclaredCleanAperture`. Returning nil keeps that file on the identical code path as a
+        // file with no `clap` at all, rather than on a "crop of everything".
+        guard x != 0 || y != 0 || w != encodedWidth || h != encodedHeight else { return nil }
+        return CleanApertureCrop(x: x, y: y, width: w, height: h, isExact: exact)
+    }
+
+    private static func roundToEven(_ v: Double) -> Int { Int((v / 2).rounded()) * 2 }
+
+    private static func isEvenIntegral(_ v: Double) -> Bool {
+        let r = v.rounded()
+        return abs(v - r) < 1e-6 && Int(r).isMultiple(of: 2)
     }
 }
 
@@ -267,6 +399,17 @@ public struct VideoMetadata: Equatable, Sendable {
     public var cleanApertureCrops: Bool {
         guard let c = cleanAperture.size, width > 0, height > 0 else { return false }
         return abs(c.width - CGFloat(width)) > 0.5 || abs(c.height - CGFloat(height)) > 0.5
+    }
+
+    /// THE CROP THE RENDERER ACTUALLY APPLIES, resolved from the two rows above it. Nil where
+    /// nothing is cropped.
+    ///
+    /// The inspector reads this so the panel can never describe a rect the offscreen does not
+    /// use: `MetalVideoRenderer` resolves the same declaration through the same function, from
+    /// the same two encoded dimensions this struct reports as `width`/`height`.
+    public var activeCrop: CleanApertureCrop? {
+        CleanApertureCrop.resolve(encodedWidth: width, encodedHeight: height,
+                                  aperture: cleanAperture)
     }
     public var frameRateString: String {
         frameRate > 0 ? String(format: "%.3f fps", frameRate) : "—"

@@ -24,6 +24,18 @@ private struct ColorParams {
     var chromaConvention: Int32   // full-range only: 0 = full-swing (÷255), 1 = Resolve (×219/224)
 }
 
+/// Matches the shader's CropRect struct (memory layout). The ACTIVE PICTURE's uv range inside the
+/// decoded buffer, bound to the offscreen pass's VERTEX stage at buffer(0). `.identity` (0,0,1,1)
+/// is what every source without a cropping `clap` binds, so those files render byte-for-byte what
+/// they rendered before the crop existed.
+private struct CropRect {
+    var u0: Float
+    var v0: Float
+    var u1: Float
+    var v1: Float
+    static let identity = CropRect(u0: 0, v0: 0, u1: 1, v1: 1)
+}
+
 /// Matches the shader's WaveformParams struct (memory layout). GPU waveform prototype.
 private struct WaveformParams {
     var width: UInt32      // source (offscreen) width
@@ -477,12 +489,20 @@ final class MetalVideoRenderer {
     /// generator is gone; the reason it needed that line is not, because any producer that
     /// reached the screen through a display-geometry API would reintroduce it.
     ///
+    /// ⚠️ AND IT MATTERS MORE SINCE THE RENDERER STARTED CROPPING, NOT LESS. This path now applies
+    /// the clean aperture itself, at the offscreen. A producer that pre-cropped would be cropped a
+    /// SECOND time and lose another 32 px per side — so "encoded geometry, no aperture applied" is
+    /// now the input contract of a transform rather than merely a consistency preference.
+    ///
     /// ✅ CHECKED, AND NO LONGER A PREDICTION. `AVPlayerItemVideoOutput` vends the decoded frame
-    /// and applies no aperture rule: on that same ARRI fixture the producer delivered 2944×2160
-    /// against a playback offscreen of 2944×2160, every frame of the drag — even though
-    /// AVFoundation's own `naturalSize` reports the 2880 clean aperture. `debugCheckScrubGeometry`
-    /// below is the standing check, and it is arithmetic on purpose: a reintroduced crop looks
-    /// like a slightly soft preview, not like a geometry bug.
+    /// and applies no aperture rule: on that same ARRI fixture the producer delivered 2944×2160,
+    /// every frame of the drag — even though AVFoundation's own `naturalSize` reports the 2880
+    /// clean aperture. THE MEASUREMENT STANDS; THE EQUALITY IT WAS CITED FOR DOES NOT. It used to
+    /// read "…against a playback offscreen of 2944×2160", and that offscreen is now 2880×2160 by
+    /// design, so producer-equals-offscreen is no longer the passing condition.
+    /// `debugCheckScrubGeometry` below is the standing check and has been rewritten to say so; it
+    /// is arithmetic on purpose, because a reintroduced crop looks like a slightly soft preview
+    /// rather than like a geometry bug.
     ///
     /// Call from MAIN. `pts` is the frame's SOURCE time and rides through to the DeckLink audio
     /// alignment exactly as a queued frame's does; pass `.nan` only if it is genuinely unknown.
@@ -495,16 +515,34 @@ final class MetalVideoRenderer {
 
     #if DEBUG
     /// THE ARRI OPEN-GATE CHECK, MADE ARITHMETIC. The rule above says a producer owes ENCODED
-    /// geometry; this is the line that finds out, by comparing what arrived against what playback
-    /// actually drew — the offscreen is sized from the playback buffer (`ensureOffscreenTexture`),
-    /// so it IS the encoded raster and needs no second opinion about PAR or aperture.
+    /// geometry; this is the line that finds out.
     ///
-    /// It exists because the failure is invisible by eye: a reintroduced clean-aperture crop is
-    /// 32 px per side on the fixture that exposed it (2944 encoded → 2880 clean), which reads as a
-    /// slightly soft preview rather than as a geometry bug. One line per distinct pairing, so a
-    /// drag prints it once and not 200 times.
+    /// ── ⚠️ REWRITTEN: IT COMPARES AGAINST THE DECLARED ENCODED SIZE, NOT AGAINST THE OFFSCREEN ─
+    ///
+    /// It used to compare the producer's buffer against the offscreen, on the premise — stated in
+    /// its own doc comment — that "the offscreen is sized from the playback buffer, so it IS the
+    /// encoded raster". THE RENDERER NOW CROPS, so that premise is retired: a 2944×2160 producer
+    /// against a 2880×2160 offscreen is the CORRECT state on every `clap` file, and the old form
+    /// would have fired ⚠️ on every one of them, every drag, accusing the scrub path of precisely
+    /// the crop the renderer performs deliberately.
+    ///
+    /// Rewritten against `mainSourceGeometry` — the encoded raster as the FILE declared it — the
+    /// check asserts TWO things where it asserted one:
+    ///
+    ///   1. THE PRODUCER HANDED OVER ENCODED GEOMETRY. `producer == declared encoded`. This is the
+    ///      contract in the rule above, and it is now the input contract of a transform.
+    ///   2. THE OFFSCREEN IS THAT RASTER MINUS THE APERTURE. `offscreen == encoded − crop`. This
+    ///      is the fix itself, checked at the only point where both numbers are in hand.
+    ///
+    /// Either failing is a distinct defect and the message says which. It exists because both are
+    /// invisible by eye: a reintroduced clean-aperture crop is 32 px per side on the fixture that
+    /// exposed it (2944 encoded → 2880 clean), which reads as a slightly soft preview rather than
+    /// as a geometry bug. One line per distinct pairing, so a drag prints it once and not 200 times.
     private func debugCheckScrubGeometry(_ pb: CVPixelBuffer) {
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        // The DECLARED raster, not the drawn one. Nil until this source published an aperture,
+        // which is before its first frame — so nil here means there is genuinely nothing to check.
+        guard let source = mainSourceGeometry, source.encodedWidth > 0 else { return }
         guard let playback = offscreenTexture else { return }   // nothing to compare against yet
         // The colour tags the producer attached, read back off the buffer that arrived. This is
         // the mechanism behind "MXF HDR previews are no longer SDR": the old libav path swscaled
@@ -521,15 +559,35 @@ final class MetalVideoRenderer {
         let colour = "\(fmt) trc=\(tag(kCVImageBufferTransferFunctionKey))"
             + " pri=\(tag(kCVImageBufferColorPrimariesKey))"
             + " mtx=\(tag(kCVImageBufferYCbCrMatrixKey))"
-        let key = "\(w)x\(h)/\(playback.width)x\(playback.height)/\(colour)"
+        let encW = source.encodedWidth, encH = source.encodedHeight
+        let expectedW = source.crop?.width ?? encW
+        let expectedH = source.crop?.height ?? encH
+        let key = "\(w)x\(h)/\(encW)x\(encH)/\(playback.width)x\(playback.height)/\(colour)"
         guard debugGeomReported.insert(key).inserted else { return }
-        if w == playback.width && h == playback.height {
-            print("[SCRUB-GEOM] ✓ producer \(w)x\(h) == playback \(playback.width)x\(playback.height)"
-                + " — encoded geometry, no aperture rule applied | \(colour)")
-        } else {
-            print("[SCRUB-GEOM] ⚠️ producer \(w)x\(h) != playback \(playback.width)x\(playback.height)"
-                + " — Δ \((playback.width - w) / 2) px/side, \((playback.height - h) / 2) px/top."
-                + " A clean-aperture crop or a PAR resample is being applied on the scrub path."
+
+        let producerOK = (w == encW && h == encH)
+        let offscreenOK = (playback.width == expectedW && playback.height == expectedH)
+        let cropNote = source.crop.map { "crop \($0.displayString)\($0.isExact ? "" : " (rounded)")" }
+            ?? "no crop"
+
+        if producerOK && offscreenOK {
+            print("[SCRUB-GEOM] ✓ producer \(w)x\(h) == encoded \(encW)x\(encH)"
+                + " — encoded geometry, no aperture rule applied by the producer;"
+                + " offscreen \(playback.width)x\(playback.height) == encoded − aperture"
+                + " (\(cropNote)) | \(colour)")
+            return
+        }
+        if !producerOK {
+            print("[SCRUB-GEOM] ⚠️ producer \(w)x\(h) != encoded \(encW)x\(encH)"
+                + " — Δ \((encW - w) / 2) px/side, \((encH - h) / 2) px/top."
+                + " A clean-aperture crop or a PAR resample is being applied on the SCRUB PATH,"
+                + " where the renderer already applies the aperture itself — this frame would be"
+                + " cropped twice. | \(colour)")
+        }
+        if !offscreenOK {
+            print("[SCRUB-GEOM] ⚠️ offscreen \(playback.width)x\(playback.height) !="
+                + " \(expectedW)x\(expectedH) — encoded \(encW)x\(encH) minus the declared"
+                + " aperture (\(cropNote)). The renderer is not cropping to what the file declares."
                 + " | \(colour)")
         }
     }
@@ -537,13 +595,6 @@ final class MetalVideoRenderer {
     /// the number of distinct size pairings a session sees, which is one per file.
     private var debugGeomReported: Set<String> = []
     #endif
-
-    // ⚠️⚠️ TEMPORARY DIAGNOSTIC — REMOVE BEFORE COMMIT. Grep `[GEOM-DIAG]`. ⚠️⚠️
-    // De-duplication for the layer-state print at the top of `performDisplayTick`, so a 60 Hz tick
-    // logs once per DISTINCT set of values rather than once per frame. Touched only from the render
-    // thread (that one call site), which is why it needs no lock. Unbounded, like the host views'
-    // equivalents — one more reason this comes out before the fix lands.
-    private var geomDiagSeen: Set<String> = []
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -741,10 +792,11 @@ final class MetalVideoRenderer {
     ///     call.
     ///
     /// ⚠️ THE OFFSCREEN IS UNAFFECTED AND MUST STAY THAT WAY. It remains at SOURCE resolution
-    /// (`ensureOffscreenTexture`), because the scopes, the DeckLink v210 convert and the frame
-    /// export all read it and all of them mean SOURCE pixels. A waveform must not change because the
-    /// window was resized. Sizing the offscreen from the layout would be a measurement bug wearing a
-    /// performance optimisation's clothes.
+    /// (`ensureOffscreenTexture`) — specifically the source's ACTIVE PICTURE, which is a per-source
+    /// constant and does not move with the window — because the scopes, the DeckLink v210 convert
+    /// and the frame export all read it and all of them mean SOURCE pixels. A waveform must not
+    /// change because the window was resized. Sizing the offscreen from the layout would be a
+    /// measurement bug wearing a performance optimisation's clothes.
     func setLayoutSize(points: CGSize, scale: CGFloat) {
         let pixels = CGSize(width: (points.width * scale).rounded(),
                             height: (points.height * scale).rounded())
@@ -786,6 +838,53 @@ final class MetalVideoRenderer {
     }
     private var pendingColorState: PendingColorState?
 
+    /// ── THE SOURCE'S DECLARED GEOMETRY, HANDED FROM MAIN TO THE RENDER THREAD ────────────
+    ///
+    /// ⚠️ THIS TYPE HAS NO FORMAT DESCRIPTION AND WILL NOT BE GETTING ONE. `presentImmediate` and
+    /// `enqueue` both take a bare `CVPixelBuffer`, and a `CVPixelBuffer` carries neither a `clap`
+    /// nor a `pasp`. So both declarations arrive the only way they can: as a PER-SOURCE hand-off,
+    /// at the same site and under the same discipline as `setSourceColorSpace` — MAIN COMPUTES,
+    /// THE RENDER THREAD INSTALLS, parked under `refreshLock`, consumed at the top of
+    /// `performDisplayTick`.
+    ///
+    /// ⚠️ TWO DECLARATIONS, AND ONLY ONE OF THEM IS APPLIED TO PIXELS. They ride together because
+    /// they are read off the same format description in the same main-actor turn, NOT because
+    /// they mean the same kind of thing:
+    ///
+    ///   * `crop` IS APPLIED. It sizes the offscreen and the offscreen pass samples it, which is
+    ///     what puts the active picture — and only the active picture — in front of the scopes,
+    ///     the v210 convert and the export.
+    ///   * `pixelAspect` IS DELIBERATELY NEVER APPLIED. The desqueeze is a DISPLAY transform and
+    ///     it stops at the drawable; the offscreen is source pixels and every consumer of it
+    ///     means source pixels. This field exists so the frame export can WRITE THE RATIO INTO
+    ///     THE FILE (PNG `pHYs` + a filename tag) without baking it into the samples. Anything
+    ///     that starts scaling by it has misread the pipeline — see `exportCurrentFrame`.
+    ///
+    /// The encoded size travels WITH the crop and is not decoration. It is the guard that makes a
+    /// double crop impossible: the rect is only applied to a buffer whose dimensions match the
+    /// raster the `clap` was declared against. A producer that already cropped (libav's
+    /// `apply_cropping` is on by default, and the MXF path goes through libav) hands over a 2880
+    /// buffer, which does not match the declared 2944, and the renderer declines rather than
+    /// cropping 32 px off a picture that has already lost them.
+    private struct SourceGeometry: Equatable {
+        let encodedWidth: Int
+        let encodedHeight: Int
+        let crop: CleanApertureCrop?         // nil → nothing to crop; use the whole buffer
+        let pixelAspect: DeclaredPixelAspect // CARRIED, NEVER APPLIED — see above
+    }
+    /// Parked by `setSourceGeometry` (main), installed at the top of `performDisplayTick`.
+    private var pendingGeometry: SourceGeometry?
+    /// RENDER THREAD ONLY. What `renderPixelBuffer` actually crops by. nil until a source declares
+    /// one, and set back to a cleared value when a deck is emptied.
+    private var activeGeometry: SourceGeometry?
+    /// MAIN THREAD ONLY — the same value `setSourceGeometry` last parked. Two main-thread readers,
+    /// and neither could use the render thread's copy:
+    ///
+    ///   * the scrub-geometry check (`presentImmediate` → `debugCheckScrubGeometry`), which
+    ///     compares a producer's buffer against the ENCODED raster rather than the offscreen;
+    ///   * `exportCurrentFrame`, which needs the PIXEL ASPECT to annotate the PNG.
+    private var mainSourceGeometry: SourceGeometry?
+
     /// ── THE DISPLAY RASTER, HANDED FROM MAIN TO THE RENDER THREAD ────────────────────────
     ///
     /// The drawable is sized from the LAYOUT, in device pixels, and no longer from the source. See
@@ -818,21 +917,6 @@ final class MetalVideoRenderer {
     /// frame?" a question with a true answer. Written on the render thread; reset under
     /// `refreshLock` in `flush()`.
     private var presentsSinceFlush: UInt64 = 0
-
-    /// The space that actually goes on the layer: the source-derived one, unless the Experiment 3
-    /// destination override is active. Resolved on MAIN so the render thread installs a value and
-    /// makes no decisions — in a Release build the override does not exist and this is identity.
-    private func resolvedDestinationColorSpace(_ sourceDerived: CGColorSpace) -> CGColorSpace {
-        #if DEBUG
-        switch debugDestination {
-        case .source:   return sourceDerived
-        case .itur709:  return CGColorSpace(name: CGColorSpace.itur_709) ?? sourceDerived
-        case .synthG24: return Self.synthesisedGamma24ColorSpace ?? sourceDerived
-        }
-        #else
-        return sourceDerived
-        #endif
-    }
 
     /// Derive the layer's colorspace from the source's authoritative color tags
     /// (CICP codes from MediaInspector) and hand it to the render thread to install.
@@ -911,28 +995,11 @@ final class MetalVideoRenderer {
         //      Scoping the flag to HDR sources removes the question instead of betting on it.
         let isHDRTransfer = (transfer == 16 || transfer == 18)   // PQ / HLG
 
-        #if DEBUG   // ⚠️ EXPERIMENT 3 — retain the source space, then honour any active override.
-        // Retained BEFORE the hand-off so `cycleDebugDestination` (⌃⌥D) has something to swap back
-        // to. The destination override is resolved here, on main, and what reaches the layer is
-        // the resolved space — the render thread installs one value and makes no decisions.
-        sourceDerivedColorSpace = cs
-        #endif
-        let resolved = resolvedDestinationColorSpace(cs)
-        #if DEBUG
-        // ONE [CSDEBUG] LINE PER SOURCE LOAD, and it is not decoration: `sweep.sh` greps exactly
-        // this line out of each run's log to confirm WHICH destination the capture it just took was
-        // made under — "the capture is only interpretable alongside that confirmation". The old
-        // code emitted it as a side effect of re-applying the layer space on every load; this path
-        // no longer writes the layer from main, so the line is stated deliberately instead.
-        logCSDebug("[CSDEBUG] layer destination = \(debugDestination.label)  → CGColorSpace "
-                   + (resolved.name.map { String($0) } ?? "<unnamed>"))
-        #endif
-
         // HAND OFF; DO NOT ASSIGN. The layer's colour properties are written on the render thread
         // only — see the threading note above. `pendingRefresh` rides along so a frame already on
         // screen is re-presented under the new state rather than waiting for the next one.
         refreshLock.lock()
-        pendingColorState = PendingColorState(colorSpace: resolved, wantsEDR: isHDRTransfer)
+        pendingColorState = PendingColorState(colorSpace: cs, wantsEDR: isHDRTransfer)
         pendingRefresh = true
         refreshLock.unlock()
 
@@ -954,124 +1021,73 @@ final class MetalVideoRenderer {
         #endif
     }
 
-    // ══════════════════════════════════════════════════════════════════════════════════════════
-    // ⚠️⚠️  EXPERIMENT 3 — TEMPORARY DEBUG. DELETE WHOLESALE.  ⚠️⚠️
-    //
-    // Cycles metalLayer.colorspace between the source-derived space (today's behaviour) and the
-    // candidate Reference destinations, so the CAMetalLayer display path can be measured rather
-    // than inferred from the CoreGraphics conversion path.
-    //
-    // TO REMOVE: delete this block, the `applyLayerColorSpace()` call sites in setSourceColorSpace,
-    // and the ⌃⌥D button in ContentView. No other file, no state.
-    // ══════════════════════════════════════════════════════════════════════════════════════════
-    #if DEBUG
-    /// Candidate layer destinations under test.
-    enum DebugDestination: Int, CaseIterable {
-        case source = 0      // today: whatever makeColorSpace derived from the source tags
-        case itur709 = 1     // kCGColorSpaceITUR_709 — measured as exact x^2.4 on the CG path
-        case synthG24 = 2    // synthesised v4 'para' type 0, g=2.399994, 709 primaries
-        var label: String {
-            switch self {
-            case .source:    return "SOURCE (CoreMedia709 — today)"
-            case .itur709:   return "kCGColorSpaceITUR_709"
-            case .synthG24:  return "SYNTH para-type0 g2.4 (709 primaries)"
-            }
-        }
-    }
-
-    /// Active destination. Seeded from a FILE rather than only a keystroke, so the sweep can be
-    /// driven from a script (launch → capture → quit) with no GUI automation and no accessibility
-    /// permission. Absent/unparseable file → .source (today's behaviour).
-    private static let debugOverrideFile = "/tmp/manifold_debug_cs"
-    private(set) var debugDestination: DebugDestination = {
-        guard let s = try? String(contentsOfFile: debugOverrideFile, encoding: .utf8),
-              let i = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let d = DebugDestination(rawValue: i) else { return .source }
-        return d
-    }()
-
-    /// The source-derived colorspace, retained so the destination can be swapped without re-reading
-    /// the source tags (and swapped BACK to it).
-    private var sourceDerivedColorSpace: CGColorSpace?
-
-    /// ⌃⌥D — advance to the next destination and re-apply. Main thread.
+    /// ── THE SOURCE'S DECLARED GEOMETRY, SET ONCE PER SOURCE, EXACTLY LIKE ITS COLOUR STATE ───
     ///
-    /// Goes through the SAME hand-off as a source change (`queueColorState`), so the sweep is
-    /// still measuring the real display path and not a second, differently-threaded one.
-    func cycleDebugDestination() {
-        let all = DebugDestination.allCases
-        let next = all[(all.firstIndex(of: debugDestination)! + 1) % all.count]
-        debugDestination = next
-        guard let cs = sourceDerivedColorSpace else {
-            logCSDebug("[CSDEBUG] destination \(debugDestination.label) unavailable — no source space yet")
-            return
+    /// Call from MAIN, with the ENCODED raster (`CMVideoFormatDescriptionGetDimensions`) and the
+    /// `clap` and `pasp` atoms as declared. `(0, 0, .undeclared, .undeclared)` is the CLEAR —
+    /// publish it on teardown and on every source that declares nothing, for the same reason
+    /// `setSourceColorSpace(nil, nil, nil)` exists: a deck emptied by an unload must not hand the
+    /// next source the departed file's geometry. Holding a stale crop is worse than holding no
+    /// crop, because it would take 32 px off a file that never asked for it; holding a stale
+    /// `pasp` would put another file's squeeze in this one's exported filename.
+    ///
+    /// The two atoms are used very differently — one crops the pixels, one only annotates an
+    /// exported file and never touches a sample. See `SourceGeometry` for that split.
+    ///
+    /// ── THE ORDERING HAZARD, AND WHY IT DOES NOT FIRE ────────────────────────────────────────
+    ///
+    /// The parking pattern brings the hazard the colour state used to have: a frame landing before
+    /// the aperture would render UNCROPPED, and the aperture's arrival would then reallocate the
+    /// offscreen ring — one wrong frame and one realloc, at source load.
+    ///
+    /// It does not happen, and the reason is placement rather than luck. `FrameEngine` calls this
+    /// from the SAME point it calls `setSourceColorSpace`: on the main actor, off the format
+    /// description already in hand, and BEFORE `beginReading` — which is the only thing in that
+    /// function that creates a reader and therefore the only thing that can enqueue a frame.
+    /// Nothing between that call and there produces a picture. The libav branch calls it at that
+    /// path's equivalent point, above the decode pump. So the aperture is installed before the
+    /// source's first frame exists, by construction, exactly as the colour state is — and the
+    /// `presents=0` line the tick already prints is the standing evidence for both.
+    ///
+    /// The residual case is a LIVE source, which has no `clap` to declare: it clears, the clear is
+    /// idempotent, and the encoded-size guard in `renderPixelBuffer` refuses to apply a crop to a
+    /// buffer that does not match the declared raster anyway. There is no path on which a wrong
+    /// crop survives a frame.
+    ///
+    /// `pendingRefresh` rides along for the same reason it does on the colour state: a paused deck
+    /// whose aperture changed must re-render, or the offscreen keeps the previous geometry until
+    /// the user hits play.
+    func setSourceGeometry(encodedWidth: Int, encodedHeight: Int,
+                           aperture: DeclaredCleanAperture,
+                           pixelAspect: DeclaredPixelAspect) {
+        let crop = CleanApertureCrop.resolve(encodedWidth: encodedWidth,
+                                             encodedHeight: encodedHeight,
+                                             aperture: aperture)
+        let state = SourceGeometry(encodedWidth: encodedWidth, encodedHeight: encodedHeight,
+                                   crop: crop, pixelAspect: pixelAspect)
+        // A RE-ASSERT OF THE SAME GEOMETRY IS A NO-OP, like the colour state's. The metadata
+        // observer is not the only caller and must not re-post what the load path already set.
+        guard mainSourceGeometry != state else { return }
+        mainSourceGeometry = state
+
+        if let crop {
+            // PERMANENT, AND REGISTERED IN `LogPartitioner.manifoldTags`. One line per source
+            // that actually crops, and the only place an INEXACT crop becomes visible outside
+            // the inspector — see
+            // `CleanApertureCrop` for why rounding is the chosen policy and why it has to be said
+            // out loud when it happens.
+            print("[CLAP] active picture \(crop.displayString) of encoded "
+                + "\(encodedWidth)x\(encodedHeight)"
+                + (crop.isExact ? " — exact, 1:1"
+                                : " — ⚠️ DECLARATION ROUNDED to the 2-px chroma grid; the crop is"
+                                  + " bit-exact but sits up to 1 px from where the file declared it"))
         }
-        let resolved = resolvedDestinationColorSpace(cs)
-        // EDR is a property of the SOURCE, not of the destination under test, so it is carried
-        // through unchanged rather than recomputed here.
+
         refreshLock.lock()
-        let wantsEDR = pendingColorState?.wantsEDR ?? metalLayer.wantsExtendedDynamicRangeContent
-        pendingColorState = PendingColorState(colorSpace: resolved, wantsEDR: wantsEDR)
-        pendingRefresh = true      // redraw so the change is on screen even when paused/ended
+        pendingGeometry = state
+        pendingRefresh = true
         refreshLock.unlock()
-        let nm = resolved.name.map { String($0) } ?? "<unnamed>"
-        logCSDebug("[CSDEBUG] layer destination = \(debugDestination.label)  → CGColorSpace \(nm)")
     }
-
-    /// stderr, not print(): stdout is block-buffered when redirected to a file, so a print() here
-    /// is still sitting in the buffer when the sweep script kills the app.
-    private func logCSDebug(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }
-
-    /// A synthesised ICC: 709/sRGB primaries (Bradford-adapted to D50, the standard colorant
-    /// values) with a 'para' functionType-0 TRC. 2.4 is not exactly representable in s15Fixed16 —
-    /// it encodes as 157286/65536 = 2.3999938965, whose max deviation from true x^2.4 over [0,1]
-    /// is 9.36e-07. Verified byte-identical on round-trip through CGColorSpaceCopyICCData.
-    private static let synthesisedGamma24ColorSpace: CGColorSpace? = {
-        func be32(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24 & 0xFF), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
-        func be16(_ v: UInt16) -> [UInt8] { [UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
-        func sg(_ s: String) -> [UInt8] { Array(s.utf8) }
-        func s15(_ d: Double) -> [UInt8] { be32(UInt32(bitPattern: Int32((d * 65536.0).rounded()))) }
-        func xyz(_ x: Double, _ y: Double, _ z: Double) -> [UInt8] { sg("XYZ ") + be32(0) + s15(x) + s15(y) + s15(z) }
-        func mluc(_ t: String) -> [UInt8] {
-            let u = Array(t.utf16).flatMap { be16($0) }
-            return sg("mluc") + be32(0) + be32(1) + be32(12) + sg("enUS") + be32(UInt32(u.count)) + be32(28) + u
-        }
-        let trc = sg("para") + be32(0) + be16(0) + be16(0) + s15(2.4)
-        let tags: [(String, [UInt8])] = [
-            ("desc", mluc("Manifold Reference 709 g2.4")),
-            ("wtpt", xyz(0.964202880859375, 1.0, 0.824905395507813)),
-            ("rXYZ", xyz(0.436065673828125, 0.222488403320313, 0.013916015625)),
-            ("gXYZ", xyz(0.385147094726563, 0.716873168945313, 0.097076416015625)),
-            ("bXYZ", xyz(0.143051147460938, 0.06060791015625, 0.714157104492188)),
-            ("rTRC", trc), ("gTRC", trc), ("bTRC", trc),
-            ("cprt", mluc("Manifold experiment")),
-        ]
-        let tableSize = 4 + 12 * tags.count
-        var offset = 128 + tableSize
-        var table: [UInt8] = be32(UInt32(tags.count))
-        var body: [UInt8] = []
-        var trcOffset: (UInt32, UInt32)?
-        for (name, data) in tags {
-            if name.hasSuffix("TRC"), let (o, s) = trcOffset { table += sg(name) + be32(o) + be32(s); continue }
-            let pad = (4 - data.count % 4) % 4
-            table += sg(name) + be32(UInt32(offset)) + be32(UInt32(data.count))
-            if name.hasSuffix("TRC") { trcOffset = (UInt32(offset), UInt32(data.count)) }
-            body += data + [UInt8](repeating: 0, count: pad)
-            offset += data.count + pad
-        }
-        var h = [UInt8](repeating: 0, count: 128)
-        h.replaceSubrange(0..<4, with: be32(UInt32(128 + tableSize + body.count)))
-        h.replaceSubrange(4..<8, with: sg("appl"))
-        h.replaceSubrange(8..<12, with: be32(0x04300000))
-        h.replaceSubrange(12..<16, with: sg("mntr"))
-        h.replaceSubrange(16..<20, with: sg("RGB "))
-        h.replaceSubrange(20..<24, with: sg("XYZ "))
-        h.replaceSubrange(36..<40, with: sg("acsp"))
-        h.replaceSubrange(40..<44, with: sg("APPL"))
-        h.replaceSubrange(68..<80, with: s15(0.964202880859375) + s15(1.0) + s15(0.824905395507813))
-        return CGColorSpace(iccData: Data(h + table + body) as CFData)
-    }()
-    #endif
 
     /// Fires `logEDRHeadroom` exactly once per process (lazy static = dispatch_once).
     private static let logStartupHeadroomOnce: Void = {
@@ -1595,7 +1611,17 @@ final class MetalVideoRenderer {
         pendingColorState = nil
         let drawableSize = pendingDrawableSize
         pendingDrawableSize = nil
+        let geometry = pendingGeometry
+        pendingGeometry = nil
         refreshLock.unlock()
+
+        // THE ACTIVE PICTURE, INSTALLED HERE FOR THE SAME REASON AS THE TWO ABOVE IT — and with
+        // one extra property that is specific to it: this is above frame selection, so any frame
+        // THIS tick renders is already cropped by the aperture that arrived with it. There is no
+        // window in which a frame and its aperture disagree. Unlike the colour state this touches
+        // no layer property, so it needs no CATransaction; it is parked and installed here purely
+        // to keep the "one writer, one thread" rule that governs everything else on this type.
+        if let geometry { activeGeometry = geometry }
 
         // THE DISPLAY RASTER, INSTALLED HERE AND NOWHERE ELSE — same placement and the same reason
         // as the colour state above: this is the one thread that touches the layer, and it must
@@ -1603,47 +1629,6 @@ final class MetalVideoRenderer {
         // whatever size is current when it is called.
         if let drawableSize, metalLayer.drawableSize != drawableSize {
             metalLayer.drawableSize = drawableSize
-        }
-
-        // ⚠️⚠️ TEMPORARY DIAGNOSTIC — REMOVE BEFORE COMMIT. Grep `[GEOM-DIAG]`. ⚠️⚠️
-        //
-        // The layer's own state, read on the RENDER THREAD, which is the thread that owns
-        // `drawableSize` and the one that draws. `[GEOM-DIAG]` from `MetalHostView` already showed
-        // the host view is the full 2880×1080 aspect-fitted rect, so the inset is INSIDE the layer:
-        // the layer is the right size and what is drawn into it is not filling it. These five are
-        // what separates the remaining causes.
-        //
-        // ⚠️ PLACED AFTER THE `drawableSize` INSTALL ABOVE, ON PURPOSE. Printing before it would
-        // report the PREVIOUS frame's raster; the install is what governs the `nextDrawable()`
-        // below, so this is the value actually in effect for the frame about to be drawn.
-        //
-        // ⚠️ `contentsGravity`, `bounds` AND `contentsScale` ARE MAIN-THREAD PROPERTIES AND THIS
-        // READS THEM FROM THE RENDER THREAD. That is a diagnostic liberty, not a pattern to copy —
-        // this file's discipline (see `setLayoutSize`) is that only the render thread touches
-        // `drawableSize` and only main touches the rest. A torn read is possible and harmless for a
-        // print; it would not be harmless for anything that acted on the value. Another reason this
-        // must not ship.
-        //
-        // `contentsGravity` is the one that was previously INFERRED rather than measured: nothing in
-        // the app assigns it, so it "should" be the CALayer default `resize`. But
-        // `MetalSurfaceView.makeNSView` sets `view.wantsLayer = true` BEFORE `view.layer = …`, the
-        // reverse of the documented order for a layer-HOSTING view, which can leave AppKit treating
-        // it as layer-BACKED and bring `NSView.layerContentsPlacement` into play — and that maps
-        // onto exactly this property. `resizeAspect` here would letterbox the layer's own contents
-        // inside its bounds at a constant proportion, which matches every symptom.
-        let diagGravity = metalLayer.contentsGravity.rawValue
-        let diagBounds = metalLayer.bounds.size
-        let diagDrawable = metalLayer.drawableSize
-        let diagScale = metalLayer.contentsScale
-        let diagPipelineNil = (displayCopyPipelineState == nil)
-        let diagKey = "\(diagPipelineNil)/\(diagDrawable)/\(diagBounds)/\(diagScale)/\(diagGravity)"
-        if geomDiagSeen.insert(diagKey).inserted {
-            NSLog("[GEOM-DIAG] layer  copyPipelineNil=%@  drawableSize=%.1f×%.1f  bounds=%.1f×%.1f"
-                  + "  contentsScale=%.2f  contentsGravity=%@",
-                  diagPipelineNil ? "TRUE ⚠️" : "false",
-                  diagDrawable.width, diagDrawable.height,
-                  diagBounds.width, diagBounds.height,
-                  diagScale, diagGravity)
         }
 
         if let colorState {
@@ -1992,6 +1977,45 @@ final class MetalVideoRenderer {
         let rpTexEnd = CACurrentMediaTime()
         #endif
 
+        // ── THE CLEAN APERTURE, RESOLVED FOR THIS BUFFER ─────────────────────────────────────
+        //
+        // ⚠️ GUARDED ON THE ENCODED SIZE, AND THE GUARD IS LOAD-BEARING. The rect was declared
+        // against a specific raster; applying it to a buffer of a different size would be cropping
+        // by a number that does not describe this picture. The concrete case is not hypothetical:
+        // libav decodes with `apply_cropping` on by default, so a producer on that path can hand
+        // over a buffer that has ALREADY had the aperture removed — and cropping it again would
+        // take a second 32 px per side off a picture that is already the active one.
+        let crop: CleanApertureCrop? = {
+            guard let a = activeGeometry, a.encodedWidth == width, a.encodedHeight == height
+            else { return nil }
+            return a.crop
+        }()
+        // THE ACTIVE PICTURE — the decoded buffer's dimensions minus the declared clean aperture,
+        // and the size of everything downstream of this pass. Identical to the buffer on any
+        // source that declares no cropping `clap`, which is nearly all of them.
+        let pictureW = crop?.width ?? width
+        let pictureH = crop?.height ?? height
+        var cropRect = CropRect.identity
+        if let crop {
+            cropRect = CropRect(u0: Float(crop.x) / Float(width),
+                                v0: Float(crop.y) / Float(height),
+                                u1: Float(crop.x + crop.width) / Float(width),
+                                v1: Float(crop.y + crop.height) / Float(height))
+        }
+
+        // Render into this frame's ring texture (the ACTIVE PICTURE — see ensureOffscreenTexture),
+        // then resample it to the drawable for display. We write the WRITE-index buffer (not the
+        // readable one); it's published as readable in the completion handler below, once its GPU
+        // write is done.
+        //
+        // ⚠️ HOISTED ABOVE THE DRAWABLE FALLBACK BELOW, DELIBERATELY. Both fallbacks want the
+        // OFFSCREEN's dimensions, not the pixel buffer's, and the least breakable way to state
+        // that is to read them off the texture itself. That requires the texture to exist first.
+        ensureOffscreenTexture(width: pictureW, height: pictureH)
+        let writeIndex = offscreenWriteIndex
+        guard writeIndex < offscreenRing.count else { return }
+        let offscreen = offscreenRing[writeIndex]
+
         // ⚠️ THE DRAWABLE IS NO LONGER SIZED FROM THE SOURCE. It is the DISPLAY raster and is
         // installed at the top of `performDisplayTick` from the layout — see `setLayoutSize`. Two
         // fallbacks to the source size remain, and both are degradations rather than policy:
@@ -2002,23 +2026,20 @@ final class MetalVideoRenderer {
         //      supersedes it.
         //   2. NO SCALING PIPELINE. The offscreen→drawable stage resamples, and the blit fallback
         //      below cannot scale (`MTLBlitCommandEncoder.copy` requires equal extents). If the
-        //      pipeline failed to build we pin the drawable to the source so the blit is valid and
-        //      Core Animation scales it, exactly as it did before this change — a worse picture,
-        //      never a black one.
+        //      pipeline failed to build we pin the drawable to the OFFSCREEN so the blit is valid
+        //      and Core Animation scales it, exactly as it did before this change — a worse
+        //      picture, never a black one.
+        //
+        // ⚠️ AND IT IS THE OFFSCREEN'S SIZE, NOT THE PIXEL BUFFER'S — see trap 1 in the clean-aperture entry of
+        // docs/BUGS.md. This fallback pins the drawable so the blit fallback further down has
+        // equal extents to copy between; the blit's SOURCE is the offscreen, so the drawable has
+        // to match the OFFSCREEN. Stating the pixel buffer's size here was true only while the two
+        // were the same number, and on a cropping `clap` file they are not.
         if metalLayer.drawableSize.width < 1 || metalLayer.drawableSize.height < 1
             || displayCopyPipelineState == nil {
-            let sourceSize = CGSize(width: width, height: height)
-            if metalLayer.drawableSize != sourceSize { metalLayer.drawableSize = sourceSize }
+            let pinnedSize = CGSize(width: offscreen.width, height: offscreen.height)
+            if metalLayer.drawableSize != pinnedSize { metalLayer.drawableSize = pinnedSize }
         }
-
-        // Render into this frame's ring texture (SOURCE resolution — see ensureOffscreenTexture),
-        // then resample it to the drawable for display. We write the WRITE-index buffer (not the
-        // readable one); it's published as readable in the completion handler below, once its GPU
-        // write is done.
-        ensureOffscreenTexture(width: width, height: height)
-        let writeIndex = offscreenWriteIndex
-        guard writeIndex < offscreenRing.count else { return }
-        let offscreen = offscreenRing[writeIndex]
 
         let passDesc = MTLRenderPassDescriptor()
         passDesc.colorAttachments[0].texture = offscreen
@@ -2041,6 +2062,10 @@ final class MetalVideoRenderer {
 
         var params = colorParams(for: pixelBuffer)
         encoder.setRenderPipelineState(pipelineState)
+        // THE CROP, AND THE ONLY PLACE IT IS APPLIED. Bound unconditionally — a Metal vertex
+        // function's buffer argument must always have something at its index, and the identity
+        // rect is the correct something for a source with no cropping `clap`.
+        encoder.setVertexBytes(&cropRect, length: MemoryLayout<CropRect>.stride, index: 0)
         encoder.setFragmentTexture(lumaTexture, index: 0)
         encoder.setFragmentTexture(chromaTexture, index: 1)
         encoder.setFragmentBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
@@ -2084,9 +2109,15 @@ final class MetalVideoRenderer {
                 copyEnc.endEncoding()
             }
         } else if let blit = cmdBuffer.makeBlitCommandEncoder() {
+            // ⚠️ THE SOURCE EXTENT IS THE TEXTURE'S OWN, NOT THE PIXEL BUFFER'S — trap 1 in the
+            // clean-aperture entry of docs/BUGS.md, and it is crash-class rather than cosmetic.
+            // This copies FROM the offscreen; with a 2880-wide offscreen and a 2944-wide buffer,
+            // the old form read 64 px past the end of the texture. It fires only when
+            // `displayCopyPipelineState` is nil, which essentially never happens — so it would
+            // have shipped untested and failed on a machine where the pipeline failed to build.
             blit.copy(from: offscreen, sourceSlice: 0, sourceLevel: 0,
                       sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                      sourceSize: MTLSize(width: width, height: height, depth: 1),
+                      sourceSize: MTLSize(width: offscreen.width, height: offscreen.height, depth: 1),
                       to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
                       destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
             blit.endEncoding()
@@ -2301,11 +2332,37 @@ final class MetalVideoRenderer {
 
     /// (Re)create the persistent offscreen render target when missing or when the size changes.
     ///
-    /// ⚠️ SIZED FROM THE SOURCE, AND NOT FROM THE DRAWABLE. It used to be the same thing; since the
-    /// drawable became the DISPLAY raster (`setLayoutSize`) it is not. The offscreen must stay at
-    /// source resolution because the scopes, the DeckLink v210 convert and the frame export all read
-    /// this ring and all of them mean source pixels — a waveform that changed when the window was
-    /// resized would be a measurement bug. The window's size reaches the drawable and stops there.
+    /// ⚠️ SIZED FROM THE SOURCE, AND NOT FROM THE LAYOUT. It used to be the same thing as the
+    /// drawable; since the drawable became the DISPLAY raster (`setLayoutSize`) it is not. The
+    /// offscreen must stay at source resolution because the scopes, the DeckLink v210 convert and
+    /// the frame export all read this ring and all of them mean source pixels — a waveform that
+    /// changed when the window was resized would be a measurement bug. The window's size reaches
+    /// the drawable and stops there.
+    ///
+    /// ── ⚠️ "SOURCE RESOLUTION" MEANS THE ACTIVE PICTURE, NOT THE ENCODED RASTER ──────────────
+    ///
+    /// Specifically: the decoded buffer's dimensions with the declared clean aperture removed
+    /// (`CleanApertureCrop`), which the offscreen pass samples via a uv sub-rect. On ARRI open gate
+    /// that is 2880×2160 out of a 2944×2160 buffer — the 32 columns of codec alignment padding per
+    /// side are not source pixels in the sense the rule above intends, and every instrument in the
+    /// app was reporting them. See the clean-aperture entry in docs/BUGS.md.
+    ///
+    /// THE RULE IS NARROWED BY THAT, NOT VIOLATED, AND THE DISTINCTION IS THE WHOLE ARGUMENT. What
+    /// the rule forbids the offscreen from depending on is the LAYOUT. The active picture is a
+    /// PER-SOURCE CONSTANT: it does not move with the window, the tray, the display or the raster
+    /// percentage. Resize the window and the waveform is byte-identical. Only the REFERENT of
+    /// "source resolution" moved, and it moved toward the rule's own stated rationale rather than
+    /// away from it.
+    ///
+    /// ── ⚠️ AND THE PROHIBITION THE OLD TEXT DID NOT COVER ────────────────────────────────────
+    ///
+    ///     NOTHING MAY ASSUME `offscreen.width == CVPixelBufferGetWidth(buffer)`.
+    ///
+    /// They are equal on most sources and unequal on every file with a cropping `clap`. Anything
+    /// reading this ring takes its extent from the TEXTURE — `src.width` / `src.height` — which is
+    /// what the four scope kernels, the v210 convert and `readbackRenderedFrame` already do, and
+    /// is what makes them inherit the crop with no plumbing. The two blits in `renderPixelBuffer`
+    /// did not, and were reading past the end of the texture as a result.
     private func ensureOffscreenTexture(width: Int, height: Int) {
         if !offscreenRing.isEmpty, let size = offscreenSize, size.w == width, size.h == height {
             return
@@ -2841,8 +2898,70 @@ final class MetalVideoRenderer {
             print("[EXPORT] CGImage creation failed"); return
         }
 
+        // ── THE PIXEL ASPECT TRAVELS WITH THE FILE; THE PIXELS STAY NATIVE ───────────────────
+        //
+        // ⚠️ DECIDED, AND IT IS A DECISION RATHER THAN AN OMISSION: the export is the OFFSCREEN's
+        // geometry — the active picture at encoded pixel dimensions — and is NOT desqueezed. That
+        // is what the rest of the app already does. The offscreen is source pixels, the scopes
+        // read source pixels, SDI carries source pixels, and the desqueeze is a DISPLAY transform
+        // that stops at the drawable (`displayCopyFragment`). An export that baked in a display
+        // decision would be the one thing in the pipeline that did. It is also what a frame export
+        // is FOR — dropping into Resolve or Flip, comparing against the file, reading a value off
+        // a pixel — and every one of those reads the metadata itself.
+        //
+        // So the ratio has to reach the file some other way, and it does, twice:
+        //
+        //   1. THE PNG `pHYs` CHUNK, which is the correct mechanism: a reader that honours it
+        //      displays the frame at the right proportions with no help from anyone.
+        //   2. A `_par2-1` MARKER IN THE FILENAME, which pHYs cannot do — the filename survives
+        //      being copied, emailed and dropped into a folder of stills, and a human can read it
+        //      when a viewer silently ignores the chunk.
+        //
+        // ⚠️ THREE-STATE HONESTY APPLIES HERE TOO, and this is where it lands. `.undeclared` and a
+        // declared 1:1 are DIFFERENT STATEMENTS and the file says so differently:
+        //
+        //   * `.declared(h, v)` — write the chunk, INCLUDING for 1:1. The file stated its pixels
+        //     are square and the export repeats that statement.
+        //   * `.undeclared`     — write NO CHUNK AT ALL. Omission is the carry-through of "the
+        //     file said nothing". A viewer treats a chunk-less PNG as square either way, so the
+        //     rendered result matches a 1:1 chunk — but writing one would be inventing a
+        //     declaration the source never made, which is exactly what `DeclaredPixelAspect`'s
+        //     third state exists to prevent.
+        //
+        // The FILENAME tag is gated differently and deliberately so: it is present only when the
+        // frame actually needs a desqueeze, i.e. declared AND not square. See `filenameTag`.
+        let pixelAspect = mainSourceGeometry?.pixelAspect ?? .undeclared
+        let parTag = pixelAspect.filenameTag
+
+        // ⚠️ MEASURED, NOT ASSUMED, BECAUSE THE OBVIOUS KEYS DO NOT WORK.
+        // `kCGImagePropertyPNGXPixelsPerMeter` / `…YPixelsPerMeter` are IGNORED ON WRITE — they
+        // produce no `pHYs` chunk at all (verified by writing a file and walking its chunks).
+        // The top-level DPI keys DO produce one, unit=1 (metre).
+        //
+        // ImageIO converts DPI → px/m as `round(dpi / 0.0254)`, so a naive 72/144 dpi pair lands
+        // on 2835/5669 and states a ratio of 1.99965 rather than 2. We therefore choose the
+        // INTEGER px/m pair first and express it back as DPI, which round-trips exactly (verified
+        // for 1:1, 3:2, 2:1 and 40:33 on this exact 16-bit/709 image shape).
+        //
+        // DIRECTION, since it is easy to invert: `pHYs` is pixels PER METRE, so the axis with the
+        // WIDER pixels has the LOWER density. `pasp` h:v is pixel width:height, hence
+        // `yPPM / xPPM == h / v`.
+        //
+        // The scale factor `k` anchors the LARGER density at 72 dpi so the nominal figure stays in
+        // a sane print range; the ratio is exact for any k, so k only affects the absolute number.
+        // That number is not a claim about physical size — the chunk is being used here as an
+        // aspect carrier, which is what unit=1 forces on us (there is no ImageIO route to the
+        // spec's unit=0 "aspect only" form).
+        var properties: [CFString: Any]? = nil
+        if let r = pixelAspect.reduced {
+            let k = max(1, 2835 / max(r.horizontal, r.vertical))   // 2835 px/m == 72 dpi
+            let xPPM = k * r.vertical, yPPM = k * r.horizontal
+            properties = [kCGImagePropertyDPIWidth: Double(xPPM) * 0.0254,
+                          kCGImagePropertyDPIHeight: Double(yPPM) * 0.0254]
+        }
+
         let ts = Int(Date().timeIntervalSince1970)
-        let filename = "Manifold_frame_\(ts).png"
+        let filename = "Manifold_frame_\(ts)" + (parTag.map { "_\($0)" } ?? "") + ".png"
 
         // Write into the user-chosen folder (security-scoped, resolved from a bookmark),
         // or ~/Desktop by default / on stale bookmark. Image encoding/colorspace above
@@ -2853,11 +2972,16 @@ final class MetalVideoRenderer {
                 url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
                 print("[EXPORT] destination create failed"); return
             }
-            CGImageDestinationAddImage(dest, cgImage, nil)
+            CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary?)
             if CGImageDestinationFinalize(dest) {
                 let csName = cs.name.map { "\($0)" } ?? "\(cs)"
                 print("[EXPORT] wrote \(url.path)")
                 print("[EXPORT] texture format=\(Self.renderPixelFormat) colorspace=\(csName)")
+                // SAY WHAT WENT INTO THE FILE, including the absence. "pHYs omitted" is a
+                // reportable outcome, not a silent default — see the three-state note above.
+                print("[EXPORT] \(width)x\(height) native pixels (not desqueezed)"
+                    + " | pixel aspect \(pixelAspect.displayString)"
+                    + " | pHYs \(properties == nil ? "omitted (nothing declared)" : "written")")
             } else {
                 print("[EXPORT] PNG finalize failed")
             }

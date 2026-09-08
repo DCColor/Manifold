@@ -827,6 +827,14 @@ final class DeckRegistry {
         engine.onSourceColorTags = { [weak renderer] primaries, transfer, matrix in
             renderer?.setSourceColorSpace(primaries: primaries, transfer: transfer, matrix: matrix)
         }
+        // THE SOURCE'S DECLARED GEOMETRY — `clap` and `pasp` — at the same site and per-window for
+        // the same reason: this deck's engine describes this deck's file to this deck's renderer.
+        // Fired from the same point in the load as the colour tags, which is what keeps it ahead
+        // of the first frame.
+        engine.onSourceGeometry = { [weak renderer] encodedW, encodedH, aperture, pixelAspect in
+            renderer?.setSourceGeometry(encodedWidth: encodedW, encodedHeight: encodedH,
+                                        aperture: aperture, pixelAspect: pixelAspect)
+        }
         // THE SCRUB SEAM'S DESTINATION — per-window, same shape and same site as the three above.
         // The engine's coalescer has already applied the delivery-side token check; this is the
         // hand-off itself. `presentImmediate` bypasses the frame queue and the `pts <= clock()`

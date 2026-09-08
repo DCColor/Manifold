@@ -133,8 +133,16 @@ public enum MediaInspector {
         return CGSize(width: abs(r.width), height: abs(r.height))
     }
 
-    /// The `pasp` atom as three states. ABSENT IS NOT 1:1 — see `DeclaredPixelAspect`. Read from the
-    /// format description's extensions, which report absence as absence (measured).
+    /// The `pasp` atom as three states. ABSENT IS NOT 1:1 — see `DeclaredPixelAspect`.
+    ///
+    /// PUBLIC for the same reason `cleanAperture(for:)` below is: the LOAD PATH reads it off the
+    /// format description it already holds, well before this inspection task returns. The frame
+    /// export writes the ratio into the PNG, and the renderer has no other route to it.
+    public static func pixelAspect(for fmt: CMFormatDescription) -> DeclaredPixelAspect {
+        declaredPixelAspect(for: fmt)
+    }
+
+    /// Read from the format description's extensions, which report absence as absence (measured).
     private static func declaredPixelAspect(for fmt: CMFormatDescription) -> DeclaredPixelAspect {
         guard let dict = CMFormatDescriptionGetExtension(
                 fmt, extensionKey: kCMFormatDescriptionExtension_PixelAspectRatio) as? [CFString: Any],
@@ -146,6 +154,15 @@ public enum MediaInspector {
     }
 
     /// The `clap` atom, or its absence.
+    ///
+    /// PUBLIC because the LOAD PATH needs it too, and needs it earlier than this inspection runs:
+    /// `FrameEngine` hands the aperture to the renderer from the same format description it reads
+    /// the colour codes from, before anything can produce a frame. One reader of the atom, two
+    /// callers — the same arrangement as `colorCodes(for:)` directly below the load-path use.
+    public static func cleanAperture(for fmt: CMFormatDescription) -> DeclaredCleanAperture {
+        declaredCleanAperture(for: fmt)
+    }
+
     private static func declaredCleanAperture(for fmt: CMFormatDescription) -> DeclaredCleanAperture {
         guard let dict = CMFormatDescriptionGetExtension(
                 fmt, extensionKey: kCMFormatDescriptionExtension_CleanAperture) as? [CFString: Any],

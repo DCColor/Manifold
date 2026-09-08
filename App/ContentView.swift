@@ -518,15 +518,6 @@ struct ContentView: View {
                 .keyboardShortcut("e", modifiers: [.control, .option])
                 .opacity(0)
         )
-        #if DEBUG
-        // ⚠️ EXPERIMENT 3 — TEMPORARY. ⌃⌥D cycles the layer's destination colorspace so the
-        // CAMetalLayer display path can be measured. Delete with the block in MetalVideoRenderer.
-        .background(
-            Button("") { metalRenderer?.cycleDebugDestination() }
-                .keyboardShortcut("d", modifiers: [.control, .option])
-                .opacity(0)
-        )
-        #endif
         // Scope shortcuts (tray + per-scope toggles + CIE live toggles) consolidated into one
         // hidden group so the view body's modifier chain stays type-checkable.
         .background(scopeShortcuts)
@@ -1194,11 +1185,7 @@ struct ContentView: View {
                 deck: deck,
                 displaySize: engine.displaySize,
                 chromeHeight: chromeHeight,
-                raster: rasterRequest,
-                trayVisible: chrome.showTray,
-                trayHeight: effectiveTrayHeight,
-                barDocked: isDocked && hasSource,
-                barHeight: dockedBarHeight
+                raster: rasterRequest
             )
             .frame(width: 0, height: 0)
 

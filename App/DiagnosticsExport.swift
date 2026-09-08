@@ -415,14 +415,14 @@ enum LogPartitioner {
     /// Regenerate with:
     ///   grep -rhoE '@?"\s*\[[A-Za-z0-9_-]+\]' --include=*.swift --include=*.m --include=*.c App Packages
     private static let manifoldTags: Set<String> = [
-        "ABOUT", "ARBITER", "BUILD", "CAPTIONS", "CSDEBUG", "CSPROBE", "DIAG", "EDR",
+        "ABOUT", "ARBITER", "BUILD", "CAPTIONS", "CLAP", "CSPROBE", "DIAG", "EDR",
         "EXPORT", "LICENSE", "LIVE-ROUTE",
         "LIVECLOCK", "NDI", "NDI-AUDIO", "OPEN", "Play", "RASTER", "RENDER-PERF",
         "SCRUB", "SCRUB-GEOM", "SETTLE",
         "SRT", "SRT-AU", "SRT-AUDIO", "SRT-BACKLOG", "SRT-DECODE",
         "SRT-FLOW", "SRT-JITTER", "SRT-LIB", "SRT-UNDERRUN", "STREAM", "STREAMS", "SWEEP",
         "PLAYBACK", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE",
-        "V210", "WEBRTC", "WEBRTC-SMOKE", "WINPROBE",
+        "V210", "WEBRTC", "WEBRTC-SMOKE",
         "WHEP", "WHEP-AUDIO", "WHEP-BRIDGE", "WHEP-DECODE", "WHEP-FLOW", "WHEP-RTP",
     ]
 

@@ -50,22 +50,50 @@ constexpr constant float kFullLumaSwing = kCodeMax / 1023.0;   // full-range lum
 // 876/896, which is bit-for-bit the same number as the 8-bit 219/224. Left as-is deliberately.
 constexpr constant float kResolveChromaScale = 219.0 / 224.0;
 
-vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]]) {
+// The ACTIVE PICTURE's uv range inside the decoded buffer — the encoded raster with the declared
+// clean aperture removed. Mirrors CropRect in MetalVideoRenderer.swift (field order + type must
+// match exactly). (0,0,1,1) is the no-crop identity and is what every source without a cropping
+// `clap` binds, so this pass is byte-for-byte what it was on those files.
+struct CropRect {
+    float u0;  // left   edge, normalized
+    float v0;  // top    edge, normalized
+    float u1;  // right  edge, normalized
+    float v1;  // bottom edge, normalized
+};
+
+// ── THE ONE PLACE THE CLEAN APERTURE IS APPLIED TO PIXELS ────────────────────────────────────
+//
+// The render target is the ACTIVE PICTURE (see `ensureOffscreenTexture`), and this remaps the
+// full-screen quad's texture coordinates onto the aperture's sub-rect of the decoded buffer. So
+// the offscreen holds picture and nothing else, and every consumer of the offscreen ring — the
+// four scope kernels, the DeckLink v210 convert, the ⌃⌥E export, the display copy — inherits the
+// crop with no plumbing of its own, because all of them derive geometry from the TEXTURE.
+//
+// ⚠️ BIT-EXACT, NOT A RESAMPLE, AND THAT IS A PROPERTY OF THE RECT RATHER THAN OF THIS CODE.
+// `CleanApertureCrop.resolve` guarantees an even, integral rect, and the destination is exactly
+// its size, so fragment `i` samples the centre of texel `x + i` and `filter::linear` returns that
+// texel unchanged. Chroma keeps the identical sample phase it had uncropped. See the resolver for
+// why the even grid is the whole of the constraint.
+vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]],
+                                   constant CropRect &crop [[buffer(0)]]) {
     float2 positions[4] = {
         float2(-1.0, -1.0),
         float2( 1.0, -1.0),
         float2(-1.0,  1.0),
         float2( 1.0,  1.0)
     };
+    // Unit texture coordinates, y DOWN (0 = top). Vertices 0/1 are the clip-space BOTTOM, so they
+    // carry t=1 and must land on the crop's BOTTOM edge, v1.
     float2 texCoords[4] = {
         float2(0.0, 1.0),
         float2(1.0, 1.0),
         float2(0.0, 0.0),
         float2(1.0, 0.0)
     };
+    float2 t = texCoords[vertexID];
     VertexOut out;
     out.position = float4(positions[vertexID], 0.0, 1.0);
-    out.texCoord = texCoords[vertexID];
+    out.texCoord = float2(mix(crop.u0, crop.u1, t.x), mix(crop.v0, crop.v1, t.y));
     return out;
 }
 
@@ -166,6 +194,11 @@ fragment half4 passthroughFragment(VertexOut in [[stage_in]],
 // before the present rather than after it. What IS new is that a 1080p source in a 4K window is now
 // resampled ONCE, to the display raster, instead of being presented at 1080p and upscaled by the
 // compositor.
+//
+// ⚠️ ITS uv STAYS 0…1 AND THAT IS NOT AN OVERSIGHT. The clean-aperture crop is applied at the
+// offscreen pass above, so by the time this stage runs the offscreen IS the clean raster — the
+// active picture and nothing else. Applying the aperture again here would crop the picture a
+// second time; there is exactly one crop in the pipeline and it is not this one.
 //
 // `filter::linear` — bilinear. Correct for the scale-up case (the common one: a 1080p source in a
 // window larger than 1080p on a 2x display). It is deliberately NOT the `.none` interpolation the

@@ -45,6 +45,15 @@ struct InspectorPanel: View {
                 // nothing is cropped, which is not news.
                 if m.cleanApertureCrops {
                     MetadataRow(label: "Clean Aperture", value: m.cleanAperture.displayString)
+                    // ⚠️ WHERE AN INEXACT CROP BECOMES VISIBLE. The renderer crops the offscreen to
+                    // the aperture, and the rect has to sit on the 2-px chroma grid to stay
+                    // bit-exact — so a declaration that does not already sit there is ROUNDED onto
+                    // it (see `CleanApertureCrop`). This row is the promise that the rounding is
+                    // never silent: it appears only when the applied rect differs from what the
+                    // file declared, and it states what was actually used.
+                    if let crop = m.activeCrop, !crop.isExact {
+                        MetadataRow(label: "Crop Applied", value: crop.displayString + " (rounded)")
+                    }
                 }
                 // ALWAYS SHOWN, three-state. "Not declared" and "1:1 (square, declared)" are
                 // different facts and this is the row where that distinction lives — see

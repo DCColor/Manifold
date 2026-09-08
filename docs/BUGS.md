@@ -4268,6 +4268,74 @@ A costs, in exchange: one real bug fix (below), one rewritten check, one rewritt
 per-source aperture hand-off into the renderer — which today never sees a format description, so
 the aperture must be parked main→render the way `pendingColorState` already is.
 
+### ✅ DECISION 2026-09-08: the frame export stays at NATIVE pixels; the aspect travels as metadata
+
+A consequence of A, decided with it: after A the ⌃⌥E export is the OFFSCREEN's geometry — the
+active picture at **encoded pixel dimensions** (2880×2160 on both ARRI fixtures) — and it is
+**NOT desqueezed**, even on a 2:1 anamorphic file whose display size is 5760×2160.
+
+**The argument is consistency, and it is the same one that sizes the offscreen.** The offscreen is
+source pixels, the scopes read source pixels, SDI carries source pixels, and the desqueeze is a
+DISPLAY transform that stops at the drawable (`displayCopyFragment`). An export that baked in a
+display decision would be the one thing in the pipeline that did. It is also what a frame export is
+FOR — dropping into Resolve or Flip, comparing against the file, reading a value off a pixel — and
+every one of those reads the metadata itself.
+
+**But an anamorphic export looks wrong in a dumb viewer**, so the ratio travels with the file two
+ways, and the two are gated DIFFERENTLY on purpose:
+
+| | written when | states |
+|---|---|---|
+| PNG `pHYs` chunk | `pasp` **declared**, including 1:1 | the exact ratio |
+| `_par2-1` in the filename | declared **AND not square** | "this needs a desqueeze" |
+
+**Three-state honesty applies to the chunk.** `.undeclared` writes **NO CHUNK AT ALL** — omission is
+the carry-through of "the file said nothing". A declared 1:1 **does** write one. A viewer treats a
+chunk-less PNG as square either way, so the rendered result is identical; the STATEMENT is not, and
+inventing a declaration the source never made is what `DeclaredPixelAspect`'s third state exists to
+prevent.
+
+The filename tag is gated on *anamorphic* rather than *declared* because it answers one question
+("does this need desqueezing?"), not the three-state one. Always-on would put `_par1-1` on every
+ordinary export — noise on the common case, and it would make the marker's presence mean nothing.
+Only-when-anamorphic makes its presence informative. It earns its place beside `pHYs` because a
+filename survives being copied, emailed and dropped into a folder of stills, which `pHYs` does not,
+and because a human can read it when a viewer silently ignores the chunk.
+
+#### ⚠️ MEASURED, BECAUSE THE OBVIOUS ImageIO KEYS SILENTLY DO NOTHING
+
+- **`kCGImagePropertyPNGXPixelsPerMeter` / `…YPixelsPerMeter` are IGNORED ON WRITE.** They produce
+  **no `pHYs` chunk at all** — verified by writing a file and walking its chunk list. No error, no
+  warning, just no chunk.
+- **The top-level `kCGImagePropertyDPIWidth` / `DPIHeight` DO write one**, unit=1 (metre).
+- **ImageIO converts DPI → px/m as `round(dpi / 0.0254)`**, so the naive 72/144 dpi pair for a 2:1
+  squeeze lands on **2835/5669** and states a ratio of **1.99965, not 2**.
+
+So the code picks the INTEGER px/m pair first and expresses it back as DPI (`ppm × 0.0254`), which
+round-trips exactly. `pHYs` is pixels PER METRE, so the axis with the WIDER pixels has the LOWER
+density: `yPPM / xPPM == h / v`. A scale factor anchors the larger density at 72 dpi so the nominal
+figure stays in a sane print range; the ratio is exact for any factor.
+
+**Verified against the shipped `DeclaredPixelAspect`, on the real 16-bit/709 image shape:**
+
+| declared | filename | `pHYs` |
+|---|---|---|
+| undeclared | `Manifold_frame_….png` | **omitted** |
+| 1:1 | `Manifold_frame_….png` | x=2835 y=2835 → 1.0 exact |
+| 2:1 | `…_par2-1.png` | x=1417 y=2834 → 2.0 exact |
+| 4:2 | `…_par2-1.png` | x=1417 y=2834 → 2.0 exact (reduced — same declaration, same name) |
+| 3:2 | `…_par3-2.png` | x=1890 y=2835 → 1.5 exact |
+| 40:33 | `…_par40-33.png` | x=2310 y=2800 → 1.212121… exact |
+
+**The renderer had no `pasp` and needed the same hand-off the `clap` got.** `MetalVideoRenderer`
+held the CICP codes and (after A) the aperture, but the pixel aspect lived only in
+`VideoMetadata.pixelAspect` — the inspection task's product, which reaches `InspectorPanel` and the
+window shape and never the renderer. Rather than add a third per-source channel, A's hand-off was
+widened: `onSourceCleanAperture` → **`onSourceGeometry`**, carrying encoded size + `clap` + `pasp`,
+read off the same format description in the same main-actor turn. `SourceAperture` →
+**`SourceGeometry`**, whose doc states the split that matters: **the crop IS applied to pixels, the
+pixel aspect NEVER is.**
+
 ### ⚠️ THE OFFSCREEN RULE IS NARROWED, NOT VIOLATED, AND THE DISTINCTION MATTERS
 
 The rule on `ensureOffscreenTexture` says the offscreen stays at SOURCE resolution because the
@@ -4339,31 +4407,49 @@ where `outSize` is only ever 3840×2160 or 1920×1080.
 - Trap specific to B, recorded in case A is ever reconsidered: crop in the v210 kernel while the
   guard still tests `src.width` and the guard is judging the wrong number.
 
-### ⚠️ THE TEMPORARY DIAGNOSTICS ARE STILL IN THE TREE — they are how this gets verified, and they come out with the fix
+### ✅ THE TEMPORARY DIAGNOSTICS ARE OUT, 2026-09-08 — they were the instruments, and they served their purpose
 
-**Deliberately left in.** They are the instruments that produced the numbers above and they are how
-the fix gets confirmed. **All of them come out in the same commit as the fix.** Grep `[GEOM-DIAG]`
-and `[WINPROBE]`.
+**Removed after the fix landed, not with it.** They were the instruments that produced every number
+in this entry, and they were deliberately kept through the implementation so the fix could be
+verified against them. `[GEOM-DIAG]`, `[WINPROBE]` and `geomDiagSeen` now return **no hits in
+`App/` or `Packages/`.**
 
-| tag | file | what it prints |
+| tag | file | what came out |
 |---|---|---|
-| `[GEOM-DIAG]` | `App/MetalSurfaceView.swift:33,48,52-58` | `MetalHostView` bounds, backing scale, object identity, per layout pass |
-| `[GEOM-DIAG]` | `App/SampleBufferSurfaceView.swift:41,51-61` | the sibling AV surface's bounds — a whole `layout()` override added purely to print |
-| `[GEOM-DIAG]` | `App/MetalVideoRenderer.swift:541-546, 1608-1648` | layer state on the RENDER thread: `drawableSize`, bounds, `contentsScale`, `contentsGravity`, copy-pipeline-nil |
-| `[WINPROBE]` | `App/PlayerWindow.swift:29-36, 96-108, 110-end` | window frame, content rect, `NSHostingView` bounds, video rect in window coords, and the chrome breakdown with a mismatch marker |
-| `[WINPROBE]` | `App/ContentView.swift:1198-1201` | the four extra args feeding the probe (`trayVisible`, `trayHeight`, `barDocked`, `barHeight`) |
-| `[WINPROBE]` | `App/DiagnosticsExport.swift:425` | the tag registered in `LogPartitioner.manifoldTags` |
+| `[GEOM-DIAG]` | `App/MetalSurfaceView.swift` | the comment block, the static `geomDiagSeen`, and the print at the top of `layout()`. **The `layout()` override itself STAYS** — it sizes the metal layer and reports the drawable size, which is real work. |
+| `[GEOM-DIAG]` | `App/SampleBufferSurfaceView.swift` | the **entire `layout()` override**, which this class never had and which existed only to print, plus its static set. |
+| `[GEOM-DIAG]` | `App/MetalVideoRenderer.swift` | the `geomDiagSeen` property and the layer-state block in `performDisplayTick` — with it, the render-thread reads of `contentsGravity` / `bounds` / `contentsScale` that were the diagnostic liberty this file's threading rule forbids. |
+| `[WINPROBE]` | `App/PlayerWindow.swift` | the whole `WindowLayoutProbe` enum, its call in `updateNSView`, and the **four stored properties** on `WindowConfigurator` (`trayVisible`, `trayHeight`, `barDocked`, `barHeight`) that nothing sized from. |
+| `[WINPROBE]` | `App/ContentView.swift` | the four matching arguments at the `WindowConfigurator` call site. The four *terms* stay — they still feed `chromeHeight`; only the probe-only arguments went. |
+| `[WINPROBE]` | `App/DiagnosticsExport.swift` | the tag registration in `LogPartitioner.manifoldTags`. |
 
-Three `[GEOM-DIAG]` print sites across three files; one `[WINPROBE]` print site whose plumbing
-touches three more. **Six files in total**, and the `PlayerWindow.swift` probe added four stored
-properties to `WindowConfigurator` that nothing sizes from — those come out too.
+**EXPERIMENT 3 came out in the same sweep**, per its own `DELETE WHOLESALE` banner: the
+`DebugDestination` enum, `debugDestination` and its `/tmp/manifold_debug_cs` seed,
+`sourceDerivedColorSpace`, `cycleDebugDestination()`, `logCSDebug`, the synthesised g2.4 ICC
+(`synthesisedGamma24ColorSpace`), `resolvedDestinationColorSpace(_:)`, and the ⌃⌥D keystroke in
+`ContentView`. `setSourceColorSpace` now hands the source-derived space to the layer directly
+(`PendingColorState(colorSpace: cs, …)`) with no override interposed.
 
-Two of them read main-thread layer properties from the render thread (`contentsGravity`, `bounds`,
-`contentsScale`). That is a diagnostic liberty and is noted at the site. It must not ship.
+- The block's own removal note cited "the `applyLayerColorSpace()` call sites in
+  `setSourceColorSpace`". **That function no longer exists** — it had already gone when the colour
+  state moved to the main→render parking pattern. The note was stale; nothing was missed.
+- `[CSDEBUG]` was emitted only from inside that block, so its tag registration came out too. The
+  tag list audits clean against its own documented regeneration grep: nothing emitted-but-unlisted,
+  and the only listed-but-unemitted entries are the composed-tag exceptions the file already
+  documents.
+- ⚠️ **`docs/color-fixtures/sweep.sh` IS NOW DEAD** and was deliberately left in place — it is the
+  harness that ran the experiment and it records how the captures were taken. It greps `[CSDEBUG]`
+  and already self-reports `⚠️ NO [CSDEBUG] STRINGS IN THIS BINARY` rather than producing a
+  misleading result, so it fails loudly. Delete it whenever E3's captures stop mattering.
 
-**Unrelated, and predating this work:** `App/MetalVideoRenderer.swift:1227` carries its own
-"TEMPORARY DIAGNOSTIC — DELETE WHOLESALE" marker for the `[CSPROBE]` colourspace dump. It is not
-part of this arc. Do not sweep it up with these.
+**⚠️ `[CSPROBE]` WAS NOT TOUCHED, AND THE DISTINCTION IS EASY TO GET WRONG.** The `[CSPROBE]`
+colourspace dump (`dumpColorSpaceDiagnostic`) carries its own "TEMPORARY DIAGNOSTIC — DELETE
+WHOLESALE" banner and **predates this arc entirely** — a grep for that phrase hits it. It is not
+part of this work and was left exactly as it was, tag registration included.
+
+**`[CLAP]` and `[EXPORT]` are PERMANENT**, not diagnostics, and stay registered in
+`LogPartitioner.manifoldTags`. `[CLAP]` is the only place outside the inspector where an inexact
+crop becomes visible; `[EXPORT]` states what actually went into the written PNG.
 
 ### Shipped alongside, and unrelated to the defect above
 

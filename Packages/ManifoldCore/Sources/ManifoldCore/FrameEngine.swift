@@ -161,6 +161,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// leaving the PREVIOUS file's colour space on the layer.
     public var onSourceColorTags: ((Int?, Int?, Int?) -> Void)?
 
+    /// THE SOURCE'S ENCODED RASTER AND ITS TWO GEOMETRY ATOMS — `clap` and `pasp` — published on
+    /// exactly the same edges and for exactly the same reason as `onSourceColorTags` above; see
+    /// that comment for the argument, this one adds only what is specific to geometry.
+    ///
+    /// The renderer applies the clean aperture to the PIXELS (it used to reach only the window's
+    /// shape), so the offscreen ring — and therefore the four scopes, the DeckLink v210 convert
+    /// and the frame export — measures the active picture instead of the codec's alignment
+    /// padding. The pixel aspect is NOT applied: it rides along so the frame export can write the
+    /// ratio into the PNG rather than into the samples.
+    ///
+    /// The renderer has no format description of its own to read either from: `presentImmediate`
+    /// and the frame queue both carry a bare `CVPixelBuffer`, which has neither atom. So this
+    /// hand-off is the only route, and it is fired BEFORE the reader that produces the first
+    /// frame exists.
+    ///
+    /// `(0, 0, .undeclared, .undeclared)` on unload, for the same reason nil colour codes are
+    /// published there: a deck emptied by an unload must not crop the next source by the departed
+    /// file's aperture, nor tag its export with the departed file's squeeze.
+    public var onSourceGeometry: ((Int, Int, DeclaredCleanAperture, DeclaredPixelAspect) -> Void)?
+
     nonisolated(unsafe) private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
     private let audioRenderer = AVSampleBufferAudioRenderer()
@@ -895,6 +915,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // colorspace at PRESENT time, so the next source's FIRST frame would be drawn through the
         // dead file's space and would stay that way until something presented again.
         onSourceColorTags?(nil, nil, nil)
+        // …AND THE GEOMETRY WITH IT, same rule one line down: a stale crop would take 32 px off a
+        // file that never declared one, which is a worse failure than the padding it removes, and
+        // a stale `pasp` would follow the next file into its exported filename.
+        onSourceGeometry?(0, 0, .undeclared, .undeclared)
     }
 
     /// Publish the frame size of a LIVE (non-file) source into this deck.
@@ -1411,6 +1435,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // headers are re-derived, which genuinely do belong to the full inspection.
             let codes = MediaInspector.colorCodes(for: fmt)
             onSourceColorTags?(codes.primaries, codes.transfer, codes.matrix)
+            // ── THE ACTIVE PICTURE, ESTABLISHED AT THE SAME POINT AND ON THE SAME ARGUMENT ────
+            //
+            // Every clause of the paragraph above applies unchanged: same format description,
+            // same main-actor turn, and above all BEFORE `beginReading`, which is the only thing
+            // that can enqueue a frame. That placement is what closes the ordering hazard the
+            // parking pattern would otherwise carry — a frame arriving before its aperture would
+            // render uncropped and then force a reallocation of the offscreen ring. It cannot,
+            // because no frame of this source exists yet.
+            let encoded = CMVideoFormatDescriptionGetDimensions(fmt)
+            onSourceGeometry?(Int(encoded.width), Int(encoded.height),
+                              MediaInspector.cleanAperture(for: fmt),
+                              MediaInspector.pixelAspect(for: fmt))
             // DNxHR can't decode through VideoToolbox; route it to libav. Its real
             // range (DNxHR/MXF ACLR) comes from libav's color_range, applied in
             // beginLibavReading — overriding the often-untagged AVFoundation read.
@@ -1421,6 +1457,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // skipped: leaving the previous file's codes standing is the stale-colour bug in its
             // purest form. nils resolve to the renderer's 709 default.
             onSourceColorTags?(nil, nil, nil)
+            // NO FORMAT DESCRIPTION MEANS NEITHER ATOM IS DECLARED, which is an answer and must
+            // be published for the same reason the nil codes are.
+            onSourceGeometry?(0, 0, .undeclared, .undeclared)
         }
         updateEffectiveRange()
 
@@ -1716,6 +1755,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // for the whole of the load — and `applyLibavMetadata` (which does carry these
                 // codes) is both later and behind a SwiftUI update pass.
                 onSourceColorTags?(info.primariesCode, info.transferCode, info.matrixCode)
+                // AND CLEAR THE GEOMETRY, at this path's equivalent point and above the pump.
+                // libav decodes with `apply_cropping` on by default, so a frame off this path has
+                // already had any declared aperture removed — the renderer must not remove it a
+                // second time. (Its encoded-size guard would refuse anyway; this states the
+                // intent rather than relying on the arithmetic to fall out right.) On a .mov-DNx
+                // file the AVFoundation branch above ran first and published the real aperture,
+                // so this is also the line that retracts it. The `pasp` goes with it: libav
+                // supplies its own sample aspect and this path does not read it, so claiming a
+                // declaration we have not read would be worse than claiming none.
+                onSourceGeometry?(0, 0, .undeclared, .undeclared)
                 // MXF: AVFoundation is blind to the container, so the UI facts
                 // (duration/size/fps/color/codec) come from libav. .mov-DNx already
                 // has them from AVFoundation (videoTrack set) — leave those untouched.
