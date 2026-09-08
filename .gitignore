@@ -116,3 +116,8 @@ docs/scrub-fixtures/avpvomeas
 docs/scrub-fixtures/libavmeas
 docs/scrub-fixtures/wincap
 docs/scrub-fixtures/hrprobe
+
+# MXF-fixture harness binary + its difference-plane dumps. docs/mxf-fixtures/README.md states the
+# same convention as the scrub fixtures — single-file script, built on demand, binary not committed.
+docs/mxf-fixtures/mxfmeas
+docs/mxf-fixtures/mxfmeas-out/
