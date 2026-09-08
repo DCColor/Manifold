@@ -550,6 +550,14 @@ final class DeckRegistry {
         NDIService.shared.onWillActivateStream = willActivate
         WHEPFrameRouter.shared.onWillActivateStream = willActivate
         SRTFrameRouter.shared.onWillActivateStream = willActivate
+        // HLS installs it on the CLIENT, not on a router, because it has no router: a pull source
+        // has no frame-delivery object between the transport and the renderer — `HLSClient` pulls
+        // on the display tick and enqueues in the same call. NDI is the same shape and for the same
+        // reason its hook is on `NDIService`. Same closure, same guarantee: the deck losing the
+        // display gets a full `stop()`, so no departed file's duration, end timecode, aspect,
+        // colour tags or clean aperture can stand behind the stream — and every other deck merely
+        // yields its transport and keeps its paused frame, scopes and inspector.
+        HLSClient.shared.onWillActivateStream = willActivate
 
         // ── AND THE SAME SEAM FOR THE PICTURE'S SHAPE ─────────────────────────────────────
         //
@@ -1147,6 +1155,7 @@ final class DeckRegistry {
         SRTFrameRouter.shared.audioTap = nil
         WHEPFrameRouter.shared.renderer = nil
         SRTFrameRouter.shared.renderer = nil
+        HLSClient.shared.renderer = nil
     }
 
     private func attachDeviceHooks(to deck: WindowDeck?) {
@@ -1188,6 +1197,12 @@ final class DeckRegistry {
         // NDI displays THROUGH this same renderer — it pulls frames on the display tick and feeds
         // the same enqueue the file sources do.
         NDIService.shared.renderer = renderer
+        // …and so does HLS, which is the same PULL shape: `renderer.onDisplayTick` plus the same
+        // `enqueue`. NO `audioTap` — HLS is video-only in this stage and its player is muted, so
+        // there is nothing to tee. That absence is deliberate and is stated on `HLSClient` itself;
+        // wiring a tap here without the rest of the audio seams would be the half-connected state
+        // the SRT block below warns about.
+        HLSClient.shared.renderer = renderer
         // Tee NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the clock-anchored
         // SDI output, SDI/Computer routing and mute apply to NDI for free.
         NDIService.shared.audioTap = engine.audioTap

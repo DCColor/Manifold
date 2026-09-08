@@ -262,8 +262,9 @@ final class Preferences: ObservableObject {
 // it is ever written — see `add` and `strippingPassphrase`.
 
 /// The transport a bookmarked URL uses, detected from the URL on save and stored per entry so a
-/// later SRT/HLS implementation needs no migration. Only `.web` connects today; the others are
-/// saved, listed, and shown disabled with an honest reason.
+/// later implementation needs no migration. All three connect today — `.web` from the start,
+/// `.srt` from stage 3e, `.hls` once the AVPlayer pull route landed — and each arrived by
+/// changing `isSupported` and nothing else. See that property for what a single gate bought.
 enum StreamType: String, Codable {
     case web    // http(s) — the default; there is no reliable WHEP signature, it is just an https URL
     case srt    // srt://
@@ -287,16 +288,36 @@ enum StreamType: String, Codable {
         }
     }
 
-    /// Web and SRT connect; HLS does not. SRT joined in stage 3e — `type` has been stored per entry
-    /// since the beginning precisely so this line could change without a migration, and an srt://
-    /// bookmark saved months ago becomes connectable the moment this admits it.
-    var isSupported: Bool { self == .web || self == .srt }
+    /// ALL THREE CONNECT. SRT joined in stage 3e and HLS joins here — `type` has been stored per
+    /// entry since the beginning precisely so this line could change without a migration, and an
+    /// `.m3u8` bookmark saved months ago becomes connectable the moment this admits it. That
+    /// promise is now spent twice and it held both times.
+    ///
+    /// ⚠️ VERIFIED, NOT ASSUMED, and the check is worth restating because the value of a single
+    /// gate is exactly that it has no second copy. Admitting `.hls` here lights up every refusal
+    /// site at once, all four of which read THIS property and none of which name a transport:
+    ///
+    ///   1. `ContentView.streamBookmarkRows`  — the disabled menu row becomes a live Button
+    ///   2. `StreamBookmarksSheet.row`        — the Connect button and the tap gesture appear,
+    ///                                          the orange reason line reverts to the host, and
+    ///                                          the row's 0.55 opacity lifts
+    ///   3. `StreamBookmarksSheet.savedNotice`— "Saved. HLS — not yet supported." stops being said
+    ///   4. `StreamBookmarksSheet.pasteAndConnect` — "Connect without saving" stops refusing
+    ///
+    /// …plus `firstConnectable`, which gates the empty-state pill's default entry.
+    /// `firstConnectable(ofType:)` is unaffected: ⌃⌥H and ⌃⌥D name their transports explicitly.
+    var isSupported: Bool { true }
 
     /// Honest greyed-row reason for an unsupported entry; nil when supported.
+    ///
+    /// ⚠️ KEPT, AND DELIBERATELY NOT DELETED NOW THAT NOTHING RETURNS A REASON. This is the seam a
+    /// FOURTH transport is detected on before it is implemented — the state `.srt` and `.hls` both
+    /// passed through, where a bookmark is saved, listed and honestly refused rather than rejected
+    /// at the door and lost. Deleting it would mean the next transport's detection-only stage has
+    /// to rebuild all four call sites above instead of returning a string.
     var unsupportedReason: String? {
         switch self {
-        case .web, .srt: return nil
-        case .hls:       return "HLS — not yet supported"
+        case .web, .srt, .hls: return nil
         }
     }
 }

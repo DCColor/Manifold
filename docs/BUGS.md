@@ -2914,6 +2914,81 @@ so the request is recognised rather than absorbed.
   applies to its negotiated latency.
 ---
 
+## ⏸ BANKED: an unrecognised CICP primaries code silently becomes 709, and the fallback is written twice
+
+**Status:** BANKED, not fixed. **NOT an HLS bug** — pre-existing, app-wide, and deliberately left
+alone while HLS was built. **Found:** 2026-09-08, on the first live HLS run, which is the first
+thing that ever made it visible. **Belongs to:** the colour-management work
+(`docs/COLOR_MANAGEMENT_FINDINGS.md`), not to the transport that surfaced it.
+
+**What happens:** a source declaring CICP primaries **6** (SMPTE-C) is treated as **1** (Rec.709) by
+every instrument in the app. The raw code is stored and reported honestly — `sourcePrimariesCode`
+keeps it, and the `[HLS] colour signalling` / `[EDR] source tags` lines print `primaries=6` — but
+nothing downstream distinguishes it. SMPTE-C and 709 primaries genuinely differ (green ≈ 0.310,0.595
+vs 0.300,0.600; red also moves), so the CIE gamut triangle and the layer colorspace are drawn for a
+gamut the source did not declare. Small, and this is a QC instrument.
+
+**⚠️ THE MATRIX AXIS IS NOT AFFECTED, AND THAT IS THE PART THAT WOULD HAVE MATTERED.**
+`ycbcrKrKb(forMatrixCode:)` has an explicit `case 6: return (0.299, 0.114) // Rec.601`, so the
+shader's YCbCr→RGB conversion and the waveform's luma weights DO follow a 601 declaration. Decoding
+601-matrixed chroma with 709 coefficients is a visible error; that does not happen. What collapses
+is only the primaries/gamut axis.
+
+### Why HLS is what exposed it
+
+Every previous source declares its colorimetry ONCE, at open. **ABR renditions are tagged
+individually**, so an HLS ladder is the first source that can change its declared primaries
+*mid-session* — and the first that shows two different declarations in one session. Measured on
+Apple's bipbop stream: `primaries=6 matrix=6` on the 416×234 rendition, stepping to
+`primaries=1 matrix=1` on the HD rungs. Before this, a 601-tagged SD file would have been quietly
+mis-plotted too; nothing put the two side by side where the difference could be noticed.
+
+### ⚠️ THE FALLBACK IS WRITTEN TWICE, AND THAT IS THE ACTUAL DEFECT TO FIX
+
+Two independent switches decide what a primaries code means, and they must agree:
+
+| site | what it decides | codes it knows |
+|---|---|---|
+| `MetalVideoRenderer.makeColorSpace` | the LAYER colorspace | `(12,_)`, `(9,16)`, `(9,18)`, `(1,1)` → else 709 |
+| `CIEScope.gamut(forPrimariesCode:)` | the CIE GAMUT TRIANGLE | `9`, `11`, `12` → else 709 |
+
+They do not even agree today about which codes are *recognised* — `makeColorSpace` keys off a
+`(primaries, transfer)` PAIR while `gamut` keys off primaries alone, so 11 and 12 are one case in
+one and split in the other. They currently reach the same answer for code 6 by both falling
+through, which is agreement by coincidence rather than by construction.
+
+**DO NOT FIX THIS BY ADDING `case 6:` TO BOTH SWITCHES.** That leaves exactly the
+two-copies-must-agree problem that two earlier extractions in this codebase exist to remove:
+
+> `LibavPixelConversion` — *"The libav→CoreVideo mapping, in ONE place because there are now two
+> clients of it… Two copies of a colour table is how that stops being true silently: a file with an
+> unusual transfer would render one way while playing and another way while scrubbing, and nothing
+> would say so."*
+
+> `VectorscopeScopeModel.plotPoint` — *"Extracted at the second real caller rather than the third:
+> two copies of a placement rule is how a 'custom target' ends up a few points off the box it was
+> placed relative to, with nothing in the source to say which of them is wrong."*
+
+The same argument applies here and is stronger, because the two consumers are the PICTURE and the
+INSTRUMENT MEASURING THE PICTURE. Two copies drifting means the scope and the display disagree about
+what gamut is on screen — the one disagreement a QC tool must not have, and the one it is least
+able to reveal, since both would look internally consistent.
+
+**What the fix should be:** ONE place that answers *"what does this CICP primaries code mean"* —
+chromaticities, a colorspace name, and a label — with `makeColorSpace`, `gamut(forPrimariesCode:)`,
+`gamutPrimariesLabel` and `VectorscopeScopeModel.graticuleKrKb` all deriving from it. Then a
+primaries code is handled ONCE and every consumer inherits it, including the next one. Note
+`CIEScope.gamut` already carries half the argument in its own doc comment — it derives the shader's
+RGB→XYZ matrices from its chromaticities *"so deriving is what keeps ONE statement of where each
+primary actually is"* — so the pattern is established and this is an extension of it, not a new
+idea. `docs/COLOR_MANAGEMENT_FINDINGS.md` §6 is where the shape of that work is already being
+argued.
+
+**Until then it is a KNOWN, BOUNDED inaccuracy:** wrong gamut triangle and layer primaries on
+SMPTE-C/601-tagged sources, correct matrix, correct transfer, and honest reporting of the raw code
+in the logs so the discrepancy is at least discoverable.
+---
+
 ## DeckLink devices are invisible on Desktop Video 14.x — we ask for an interface their driver has never heard of
 
 **Status:** ✅ **CONFIRMED and RESOLVED for the reported case, 2026-08-28.** Cause was identified

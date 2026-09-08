@@ -20,14 +20,23 @@
 //
 //  ── WHAT THIS IS DELIBERATELY NOT ──────────────────────────────────────────────────────
 //
-//  NOT a FrameSource abstraction, and not an attempt at one. NDI is a PULL source
-//  (renderer.onDisplayTick, free-running monotonic clock, no LiveClock at all) and WHEP is a
-//  PUSH source (LiveClock plus a depth control loop). Abstracting over "who owns the clock"
-//  across both is the hard, low-payoff part and it is not attempted here. This type answers
-//  exactly two questions — WHICH source is live, and how do I retire it — and both answers
-//  are identical for a pull source and a push source, which is why this much factors cleanly
-//  and the rest does not. The clock-shaped sharing lives in LiveDisplayRoute, on the PUSH
-//  axis only.
+//  NOT a FrameSource abstraction, and not an attempt at one. NDI and HLS are PULL sources
+//  (renderer.onDisplayTick, free-running monotonic clock, no LiveClock at all) and WHEP and
+//  SRT are PUSH sources (LiveClock plus a depth control loop). Abstracting over "who owns the
+//  clock" across both is the hard, low-payoff part and it is not attempted here. This type
+//  answers exactly two questions — WHICH source is live, and how do I retire it — and both
+//  answers are identical for a pull source and a push source, which is why this much factors
+//  cleanly and the rest does not. The clock-shaped sharing lives in LiveDisplayRoute, on the
+//  PUSH axis only.
+//
+//  ── ⚠️ THE AXIS SPLIT IS NOW 2–2, AND IT IS NOT A DETAIL OF THIS FILE ──────────────────
+//
+//  It decides the TEARDOWN, and therefore what a source does when it takes over from itself.
+//  A PUSH source owns the thread that delivers its frames and can (SRT) or cannot (WHEP) join
+//  it. A PULL source hangs off the renderer's CVDisplayLink and owns NOTHING — so no join is
+//  available to it at all, and safety comes from making an in-flight tick harmless instead.
+//  All four `connect*` funnels below state which rule they follow and why; read the one you
+//  are copying before you copy it.
 //
 
 import Foundation
@@ -46,6 +55,18 @@ enum LiveSource: CaseIterable {
     /// LiveDisplayRoute. Added in stage 3d, and adding it broke every switch below until each was
     /// handled — which is exactly what this type exists to guarantee.
     case srt
+
+    /// HLS. PULL, like `.ndi` and unlike the two above: `renderer.onDisplayTick` + a free-running
+    /// monotonic clock, no LiveClock and no depth loop. AVFoundation owns the pacing, so there is
+    /// nothing for the PUSH axis to regulate — `HLSClient` does not touch `LiveDisplayRoute`.
+    ///
+    /// Adding this case broke `isConnected`, `displayLabel`, `disconnect()` and `clearBanner()`
+    /// until each was handled, exactly as adding `.srt` did. THREE SITES THE COMPILER CANNOT
+    /// CATCH were handled by hand and are named here so the next transport finds them:
+    /// `ContentView.activeLiveSource` (an if-chain, not a switch), `ContentView.connectToStreamURL`
+    /// (switches on `StreamType`, not on this type), and the `@ObservedObject` declaration that
+    /// subscribes the view to the client's `@Published` state.
+    case hls
 
     /// PRIVATE, AND IT MUST STAY PRIVATE — this is the whole safety property of the type.
     ///
@@ -67,6 +88,7 @@ enum LiveSource: CaseIterable {
         case .ndi: return NDIService.shared.isConnected
         case .web: return WHEPClient.shared.isConnected
         case .srt: return SRTClient.shared.isConnected
+        case .hls: return HLSClient.shared.isConnected
         }
     }
 
@@ -92,6 +114,7 @@ enum LiveSource: CaseIterable {
         case .ndi: return "NDI stream"
         case .web: return "WHEP stream"
         case .srt: return "SRT stream"
+        case .hls: return "HLS stream"
         }
     }
 
@@ -120,6 +143,7 @@ enum LiveSource: CaseIterable {
         case .ndi: NDIService.shared.disconnect()
         case .web: WHEPClient.shared.disconnect()
         case .srt: SRTClient.shared.disconnect()
+        case .hls: HLSClient.shared.disconnect()
         }
     }
 
@@ -153,6 +177,7 @@ enum LiveSource: CaseIterable {
         case .ndi: break
         case .web: WHEPClient.shared.clearError()
         case .srt: SRTClient.shared.clearError()
+        case .hls: HLSClient.shared.clearError()
         }
     }
 
@@ -246,5 +271,40 @@ enum LiveSource: CaseIterable {
         retireActive()
         clearBanners(except: .srt)   // SRT clears its own via `retireError` on the next line but one
         SRTClient.shared.connect(to: url, arbitratedBy: Arbitration())
+    }
+
+    /// HLS.
+    ///
+    /// ── ⚠️ `except: .hls` — HLS→HLS IS A SWAP, AND IT IS **NDI'S** SWAP, NOT SRT'S ───────────
+    ///
+    /// The three funnels above already show all three possible answers to "what does a source do
+    /// when it takes over from ITSELF", and which one is available is decided by the teardown, not
+    /// by preference. This is the fourth case and it lands on NDI's:
+    ///
+    ///   * NOT SRT'S SWAP (`retireActive()`, nothing excepted). That is safe because
+    ///     `SRTClient.disconnect()` JOINS the session thread — by the time `connect` runs the old
+    ///     session is *provably* finished, not merely asked to stop. **HLS has no such join and
+    ///     cannot have one:** the pull hangs off `renderer.onDisplayTick`, so the thread that can
+    ///     deliver a frame is the renderer's CVDisplayLink, which we do not own and which keeps
+    ///     running across the swap. Routing through `retireActive()` would LOOK like SRT's
+    ///     discipline while providing none of its guarantee, which is worse than not having it.
+    ///   * NOT WHEP'S REFUSAL either (`except: .web`, and `connect` early-outs). WHEP refuses
+    ///     because it can neither join libdatachannel's threads nor sequence its own teardown
+    ///     safely. HLS can sequence its teardown: `HLSPull.retire()` sets its flag and then
+    ///     dismantles, in order, synchronously, on main.
+    ///   * SO: NDI'S. `NDIService.connect(to:)` tears the old receiver down and starts the new one
+    ///     in the SAME MAIN-THREAD TURN, so `isConnected` never dips to false and the control bar
+    ///     and empty state never flicker. `HLSClient.connect` does exactly that — see the swap
+    ///     block there — and excepting `.hls` here is what leaves it able to.
+    ///
+    /// What makes it safe is not a join but the same property NDI relies on: an in-flight tick is
+    /// HARMLESS BY CONSTRUCTION. The hook is `[weak self]`, `pull` is re-read through a guard, and
+    /// a tick that already passed that guard holds a strong `HLSPull` whose `capture()` checks
+    /// `retired` before touching AVFoundation and returns nil. Read `HLSClient`'s file header
+    /// before changing this line.
+    static func connectHLS(to url: URL) {
+        retireActive(except: .hls)
+        clearBanners(except: .hls)
+        HLSClient.shared.connect(to: url, arbitratedBy: Arbitration())
     }
 }

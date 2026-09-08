@@ -323,6 +323,14 @@ struct ContentView: View {
     // SRT's published connection state — same role as `whep` above: it feeds `hasSource`, drives
     // `activeLiveSource`, and surfaces a failed connect through the shared error banner.
     @ObservedObject private var srt = SRTClient.shared
+    // HLS's published connection state — same role again. ⚠️ ONE OF THE THREE SITES ADDING A
+    // `LiveSource` CASE DOES **NOT** BREAK THE BUILD (the others are `activeLiveSource` below and
+    // `connectToStreamURL`'s `StreamType` switch). Omitting this line compiles perfectly and fails
+    // silently at runtime: reading `HLSClient.shared` without observing it does not subscribe this
+    // `body` to its `@Published` changes, so the view would render once and then never update —
+    // the empty state would sit over live HLS video and the control bar would never appear. See
+    // the warning on `LiveSource.isConnected`, which is the same trap stated from the other end.
+    @ObservedObject private var hls = HLSClient.shared
     // Saved stream bookmarks — observed so the chevron and empty-state menus rebuild when the set
     // changes (empty ↔ non-empty flips the "Stream URL" item between a flat entry and a flyout).
     @ObservedObject private var bookmarks = StreamBookmarkStore.shared
@@ -429,7 +437,15 @@ struct ContentView: View {
     /// Reads the `@ObservedObject` instances, which is what makes `body` re-render on connect and
     /// disconnect. `LiveSource.isLive` exists but is deliberately not for views (reading a
     /// singleton does not subscribe a `body` to it), so there is no shortcut to reach for here by
-    /// mistake. Adding SRT is one more line here and one more case there.
+    /// mistake. Adding SRT was one more line here and one more case there; adding HLS was the same.
+    ///
+    /// ⚠️ AND THIS SITE IS AN IF-CHAIN, NOT A SWITCH, SO THE COMPILER DOES NOT ENFORCE IT. That is
+    /// deliberate — it must read the `@ObservedObject` instances rather than `LiveSource`'s own
+    /// `isConnected`, which is what makes `body` re-render — but it means a new case added to
+    /// `LiveSource` compiles cleanly while never being reported here. Two other sites share that
+    /// property: the `@ObservedObject` declaration above, and `connectToStreamURL`'s `StreamType`
+    /// switch. All three are named in `LiveSource.hls`'s doc comment so the next transport finds
+    /// them from the enumeration rather than by accident.
     ///
     /// ⚠️ THE OWNERSHIP TERM IS NOT DECORATION. The three clients are singletons, so before stage 2
     /// EVERY window answered "yes, NDI is connected" for a stream that was displaying in ONE of
@@ -443,6 +459,7 @@ struct ContentView: View {
         if ndi.isConnected { return .ndi }
         if whep.isConnected { return .web }
         if srt.isConnected { return .srt }
+        if hls.isConnected { return .hls }
         return nil
     }
 
@@ -1897,13 +1914,23 @@ struct ContentView: View {
 
     /// Step the LIVE push source's LiveClock target. The two push transports keep their own
     /// routers (and their own measured cushions), so this asks which one owns the display rather
-    /// than assuming. NDI is a PULL source with no LiveClock at all — there is nothing to step,
-    /// and saying so beats silently doing nothing.
+    /// than assuming. NDI and HLS are PULL sources with no LiveClock at all — there is nothing to
+    /// step, and saying so beats silently doing nothing.
+    ///
+    /// ⚠️ THIS SITE WAS FOUND BY THE COMPILER WHEN `.hls` WAS ADDED, WHICH IS THE POINT OF THE
+    /// ENUMERATION. It is not listed among the three hand-checked sites in `LiveSource.hls`'s doc
+    /// comment precisely because it did not need to be: a non-exhaustive switch failed the build,
+    /// which is the guarantee the hand-written pairwise chains could not give. Note the asymmetry
+    /// worth keeping in mind — `case .ndi` and `case .hls` are spelled separately rather than
+    /// folded together, so the message can name the transport the user actually has connected.
     private func stepLiveTargetDepth(by delta: Double) {
         switch activeLiveSource {
         case .web: WHEPFrameRouter.shared.adjustTargetDepth(by: delta)
         case .srt: SRTFrameRouter.shared.adjustTargetDepth(by: delta)
         case .ndi: NSLog("[LIVECLOCK] NDI is a pull source with no depth loop — ⌃⌥[ / ⌃⌥] do nothing")
+        case .hls: NSLog("[LIVECLOCK] HLS is a pull source with no depth loop — ⌃⌥[ / ⌃⌥] do nothing. "
+                       + "Its latency is segment-bound and set by the platform, not by us; see the "
+                       + "[HLS] latency line for what it actually is")
         case nil:  NSLog("[LIVECLOCK] no live push source — ⌃⌥[ / ⌃⌥] adjust WHEP or SRT while connected")
         }
     }
@@ -2487,6 +2514,13 @@ struct ContentView: View {
     /// ONE SWITCH, FROM THE SAME `StreamType.detect` THAT DECIDED THE SAVED TYPE, so a bookmark
     /// listed as SRT cannot be dialled by WHEP. Every caller — menu row, sheet row, paste, ⌃⌥H —
     /// arrives here, which is what makes that guarantee worth anything.
+    ///
+    /// ⚠️ THE THIRD SITE A NEW `LiveSource` CASE DOES NOT BREAK. This switches over `StreamType`,
+    /// not over `LiveSource`, so the two enumerations are related only by this function — adding
+    /// `.hls` to `LiveSource` left this arm compiling with its old refusal in place, and it had to
+    /// be replaced by hand. The refusal it replaced (`NSLog("… not supported in this build")`)
+    /// existed precisely because `isSupported` excluded HLS; both changed in the same pass, and
+    /// they have to.
     private func connectToStreamURL(_ url: URL, name: String? = nil) {
         switch StreamType.detect(url) {
         case .web:
@@ -2498,10 +2532,9 @@ struct ContentView: View {
                 LiveSource.connectSRT(to: url)
             }
         case .hls:
-            // Unreachable through the UI: every entry point gates on `type.isSupported`, which
-            // still excludes HLS. Handled rather than ignored so a future caller that forgets the
-            // gate gets a message instead of a silent no-op.
-            NSLog("[STREAM] refusing to connect — HLS is not supported in this build")
+            DeckRegistry.shared.connectLive(.hls, from: deck, label: name) {
+                LiveSource.connectHLS(to: url)
+            }
         }
     }
 
@@ -2512,10 +2545,11 @@ struct ContentView: View {
     /// and never a full URL, never a passphrase. Auto-dismisses; the close button or a new attempt
     /// clears it sooner. Never blocks: the user can pick another bookmark or open a file immediately.
     ///
-    /// ONE BANNER FOR BOTH TRANSPORTS. They cannot both be connecting, so there is at most one
-    /// message to show, and WHEP is checked first only because it is the older path. Both are
-    /// cleared on dismissal so a stale message from the other transport cannot re-appear behind
-    /// this one.
+    /// ONE BANNER FOR EVERY TRANSPORT. They cannot all be connecting at once — `LiveSource` is what
+    /// guarantees that — so there is at most one message to show, and the order is age, not
+    /// priority: WHEP, then SRT, then HLS. ALL are cleared on dismissal so a stale message from
+    /// another transport cannot re-appear behind this one. (NDI publishes no `lastError`; its
+    /// failures are log-only, which is why it is absent here and `break`s in `clearBanner`.)
     ///
     /// THAT PREMISE IS NOW ENFORCED RATHER THAN ASSERTED. It was written when `retireActive` was
     /// merely the convention, and two call sites (⌃⌥D, ⌃⌥H) went around it — so a live WHEP
@@ -2532,7 +2566,8 @@ struct ContentView: View {
     ///
     /// ⚠️ DELIBERATELY NOT A FOURTH `??` TERM ON `connectErrorBanner`, AND NOT A COPY OF IT. That
     /// banner's own doc comment explains that its single `whep.lastError ?? srt.lastError ??
-    /// engine.playbackNotice` slot works ONLY because those three are mutually exclusive — an
+    /// hls.lastError ?? engine.playbackNotice` slot works ONLY because those are mutually
+    /// exclusive — an
     /// arbitration message is not, and a window can perfectly well be gated AND have just failed a
     /// connect. It also auto-dismisses after 9 s, which is exactly wrong here: this is a STANDING
     /// CONDITION, true until someone acts in another window, and a message that quietly vanishes
@@ -2560,7 +2595,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var connectErrorBanner: some View {
-        if let message = whep.lastError ?? srt.lastError ?? engine.playbackNotice {
+        if let message = whep.lastError ?? srt.lastError ?? hls.lastError ?? engine.playbackNotice {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -2569,7 +2604,10 @@ struct ContentView: View {
                     .foregroundStyle(.white)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Button { whep.clearError(); srt.clearError(); engine.playbackNotice = nil } label: {
+                Button {
+                    whep.clearError(); srt.clearError(); hls.clearError()
+                    engine.playbackNotice = nil
+                } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
                 .buttonStyle(.plain)

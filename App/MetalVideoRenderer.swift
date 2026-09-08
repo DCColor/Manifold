@@ -907,6 +907,23 @@ final class MetalVideoRenderer {
     /// set from the render thread: a flag read on main should be written on main.
     private var hasQueuedColorState = false
 
+    /// ── THE SEAM THE VERBOSE COLOUR DIAGNOSTIC IS GATED ON ───────────────────────────────────
+    ///
+    /// True once a source has published a REAL colour state; cleared by the `(nil, nil, nil)` clear
+    /// that every teardown posts (`FrameEngine.stop`). So it means "this source has already been
+    /// diagnosed", which is the distinction the `[CSPROBE]` block was always implicitly sized for
+    /// and never actually expressed.
+    ///
+    /// ⚠️ NOT `hasQueuedColorState`, WHICH LOOKS LIKE THE SAME THING AND IS NOT. That one is set
+    /// true on the first install and NEVER reset — it is a process-lifetime latch guarding the
+    /// re-assert no-op, so reusing it here would emit the diagnostic once per LAUNCH rather than
+    /// once per source, and every file after the first would open undiagnosed.
+    private var hasDiagnosedColorForSource = false
+
+    /// The EDR opt-in the last headroom line was logged against, so a mid-source change that
+    /// FLIPS it still reports — see the gate in `setSourceColorSpace`. nil = never logged.
+    private var lastLoggedEDROptIn: Bool?
+
     /// Presents since the last `flush()`, i.e. since the current source began.
     ///
     /// ⚠️ SINCE THE FLUSH, NOT SINCE LAUNCH, AND THE DIFFERENCE IS THE WHOLE POINT. A cumulative
@@ -1008,13 +1025,64 @@ final class MetalVideoRenderer {
         // without it, edrMetadata is REQUIRED-to-display rather than a tonemapping refinement,
         // and that is the finding this stage exists to produce.
 
+        // ── ⚠️ THREE TIERS OF LOGGING, BECAUSE THIS IS NO LONGER A ONCE-PER-SOURCE EVENT ────
+        //
+        // Every line below was written when a colour state arrived EXACTLY ONCE PER FILE OPEN, and
+        // the volume was sized for that. It is no longer true: an ABR source (HLS) re-publishes on
+        // every rendition change, because renditions are tagged individually — a measured bipbop
+        // ramp moved primaries/matrix 6→1 as it stepped 416×234 → HD. A flapping ladder on a poor
+        // link does it repeatedly. Unconditional, that emitted ~17 lines plus an `NSApp.windows`
+        // walk per step and buried the `[HLS]` heartbeat that reports fps and latency.
+        //
+        // So the tiers are, cheapest and most frequent first:
+        //
+        //   1. THE STATE ITSELF — always. Three lines, no allocation beyond the strings, and it is
+        //      the record of what the layer is actually set to. A mid-stream change MUST show up
+        //      here or the log stops describing the picture; it is marked as such so a reader can
+        //      tell a rendition step from a source load without counting lines.
+        //   2. EDR HEADROOM — on a source load, and on any change that FLIPS the EDR opt-in. The
+        //      headroom is a property of the DISPLAY, not the source, so re-reading it per
+        //      rendition is nearly always noise — but an SDR→PQ rendition step is exactly when it
+        //      becomes decision-relevant, so that case is kept.
+        //   3. THE `[CSPROBE]` DUMP — source load only. Thirteen lines describing a CGColorSpace,
+        //      whose own header calls it "⚠️ TEMPORARY". It answers "what did CoreVideo build from
+        //      these tags", which is a question about the TAGS, and a rendition step that reports
+        //      its tags in tier 1 has already answered everything tier 3 would repeat.
+        //
+        // ⚠️ THE CLEAR IS NOT A SOURCE. `(nil, nil, nil)` is the teardown post, and it neither
+        // diagnoses nor logs headroom — there is nothing to describe. It RESETS the latch, which
+        // is what makes "per source" mean per source rather than per launch.
+        let isClear = (primaries == nil && transfer == nil && matrix == nil)
+        let isFirstForSource = !hasDiagnosedColorForSource
+
         let csName = Self.colorSpaceIdentity(cs)
+        let origin = isClear ? " (cleared — no source)"
+                             : (isFirstForSource ? "" : " (MID-SOURCE CHANGE — e.g. an ABR rendition step)")
         print("[EDR] source tags: primaries=\(primaries.map(String.init) ?? "nil") "
-            + "transfer=\(transfer.map(String.init) ?? "nil") matrix=\(matrix.map(String.init) ?? "nil")")
+            + "transfer=\(transfer.map(String.init) ?? "nil") "
+            + "matrix=\(matrix.map(String.init) ?? "nil")\(origin)")
         print("[EDR] layer colorspace = \(csName)  (wideGamut=\(cs.isWideGamutRGB))")
         print("[EDR] wantsExtendedDynamicRangeContent = \(isHDRTransfer)"
             + (isHDRTransfer ? "  (HDR transfer \(transfer!) → EDR ON)" : "  (SDR source → EDR OFF, unchanged path)"))
-        Self.logEDRHeadroom(context: "source load")
+
+        if isClear {
+            hasDiagnosedColorForSource = false
+            lastLoggedEDROptIn = nil
+            return
+        }
+
+        // ⚠️ THE CONTEXT IS DERIVED, NOT HARDCODED. It read `"source load"` unconditionally, which
+        // printed `headroom (source load)` in the middle of a ladder step when nothing had loaded —
+        // a line that would be read later as evidence of a load that never happened.
+        let edrFlipped = (lastLoggedEDROptIn != nil && lastLoggedEDROptIn != isHDRTransfer)
+        if isFirstForSource || edrFlipped {
+            Self.logEDRHeadroom(context: isFirstForSource ? "source load"
+                                                          : "EDR opt-in changed mid-source")
+            lastLoggedEDROptIn = isHDRTransfer
+        }
+
+        guard isFirstForSource else { return }
+        hasDiagnosedColorForSource = true
 
         #if DEBUG   // ⚠️ TEMPORARY — delete these 3 lines with the dumpColorSpaceDiagnostic block.
         Self.dumpColorSpaceDiagnostic(cs, primaries: primaries, transfer: transfer, matrix: matrix)
