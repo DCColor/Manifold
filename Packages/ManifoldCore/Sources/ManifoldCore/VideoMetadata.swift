@@ -291,11 +291,26 @@ public struct TextTrackInfo: Equatable, Sendable {
     public var kind: String = "—"        // "Closed Caption", "Subtitle", "Timed Text"
     public var format: String = "—"      // "CEA-608", "CEA-708", "WebVTT", "TTML", etc.
     public var language: String = "—"
+    /// WHICH service inside the format — "Line 21 field 1" for 608, "Service 1" for 708.
+    /// A caption stream carries several of these and they can say different things (measured:
+    /// `Mixed Captions.mxf`'s 708 service carries text its 608 service does not), so a row
+    /// that named only the format would be describing a container rather than a service.
+    /// "—" for track kinds with no service concept (`.subtitle`, `.text`).
+    public var service: String = "—"
+    /// Whether this service actually carries payload, and the count behind the claim.
+    /// `.unknown` where nothing counted — see `CaptionDataPresence`, which is careful about
+    /// the difference between "empty", "never appears" and "not looked at".
+    public var dataPresence: CaptionDataPresence = .unknown
 
+    /// The row's headline value: what it is, which service, and in what language — the three
+    /// facts the file DECLARES. Whether the service is actually carrying anything is a
+    /// measurement rather than a declaration and is rendered separately, so that a file which
+    /// declares a service and delivers nothing cannot read as healthy at a glance.
     public var summary: String {
-        var s = format
-        if language != "—" && !language.isEmpty { s += " · \(language)" }
-        return s
+        var parts = [format]
+        if service != "—" && !service.isEmpty { parts.append(service) }
+        if language != "—" && !language.isEmpty { parts.append(language) }
+        return parts.joined(separator: " · ")
     }
 }
 

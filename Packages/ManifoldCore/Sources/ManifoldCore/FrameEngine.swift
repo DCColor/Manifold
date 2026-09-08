@@ -1635,6 +1635,51 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.metadata?.audioTracks = ainfo.streams.map { Self.audioTrackRow(for: $0) }
     }
 
+    /// Caption-service rows for the libav path, closing the SAME blindness `applyLibavAudioTrack`
+    /// closes for audio. `MediaInspector` reads an `AVURLAsset`; `loadMXF` never calls it because
+    /// AVFoundation cannot open MXF at all (-11828, failing at `assetProperty_Tracks`), so
+    /// `metadata.textTracks` was EMPTY for every MXF — including ones that declare two caption
+    /// services and carry data in both.
+    ///
+    /// ── ⚠️ WHY THIS SITS BESIDE `applyLibavMetadata` AND NOT IN `loadMXF` ─────────────────────
+    ///
+    /// `applyLibavMetadata` REPLACES `self.metadata` wholesale, and it runs on every
+    /// `beginLibavReading` — which is every seek and every loop restart, not only the load. Rows
+    /// written once at load time would be wiped by the first loop and never come back. So they are
+    /// re-applied wherever the value they live in is rebuilt, which is exactly the rule
+    /// `applyLibavAudioTrack` already follows for the audio rows.
+    ///
+    /// ⚠️ AND THAT RATE IS WHY THE SCAN HAD TO BE CHEAP, WHICH IT IS. It skips
+    /// `avformat_find_stream_info` (the MXF demuxer already types every stream during
+    /// `open_input`) and sets `AVDISCARD_ALL` on the video and audio, measuring **4.9–6.5 ms**
+    /// end to end on the 5.2 GB fixture — against 120–143 ms for the probe alone had it been left
+    /// in. That is what lets this be an inline, synchronous call rather than a Task with a
+    /// `loadGeneration` guard and an ordering race against the metadata it has to mutate.
+    ///
+    /// ⚠️ AND IT IS CHEAP HERE SPECIFICALLY BECAUSE `LibavFrameSource.open()` RAN FIRST, a few
+    /// lines above, on the same URL: the container header is already in the page cache. Cold,
+    /// the same call measured ~150 ms. Moving this call earlier than the source open would
+    /// change that and would need a Task. See `CaptionPresenceReader.services(inANCTrackOf:)`.
+    ///
+    /// The `videoTrack == nil` guard is the same one `applyLibavMetadata` uses, for the same
+    /// reason: a `.mov` carrying DNxHR reaches this path too, and ITS captions already came from
+    /// `MediaInspector`, which enumerated the asset properly and reads `clcp` sample data
+    /// AVFoundation exposes and an ANC scan would not find. Overwriting that here would be a
+    /// downgrade wearing the shape of a fix.
+    ///
+    /// PRESENCE ONLY. These rows describe what the file declares and whether it carries bytes.
+    /// Nothing here decodes a caption, and nothing downstream may present them as selectable —
+    /// `CaptionController` and the Aa menu remain an SRT-sidecar feature and are untouched.
+    private func applyLibavTextTracks(url: URL) {
+        guard videoTrack == nil else { return }
+        let rows = CaptionPresenceReader.services(inANCTrackOf: url)
+        guard !rows.isEmpty else { return }
+        // Optional-chained for the reason `applyLibavAudioTrack` states: `applyLibavMetadata` ran
+        // on the same straight-line stretch immediately above with no suspension between, so this
+        // MUTATES the metadata that call published rather than replacing it.
+        self.metadata?.textTracks = rows
+    }
+
     /// One inspector row from one libav audio stream.
     ///
     /// ── THE NAMING GOES THROUGH THE AVFOUNDATION PATH'S OWN FUNCTIONS, ON PURPOSE ─────────────
@@ -1768,7 +1813,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // MXF: AVFoundation is blind to the container, so the UI facts
                 // (duration/size/fps/color/codec) come from libav. .mov-DNx already
                 // has them from AVFoundation (videoTrack set) — leave those untouched.
-                if videoTrack == nil { applyLibavMetadata(info, url: url) }
+                if videoTrack == nil {
+                    applyLibavMetadata(info, url: url)
+                    applyLibavTextTracks(url: url)
+                }
                 print("FrameEngine: libav opened — \(info.width)x\(info.height), "
                     + "src \(info.sourcePixelFormat), range \(info.rangeName), "
                     + "matrix \(info.matrixName), audio=\(info.hasAudio)")

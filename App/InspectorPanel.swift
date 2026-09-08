@@ -125,8 +125,8 @@ struct InspectorPanel: View {
                 if !m.textTracks.isEmpty {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
                     SectionHeader(m.textTracks.count == 1 ? "Timed Text" : "Timed Text (\(m.textTracks.count))")
-                    ForEach(Array(m.textTracks.enumerated()), id: \.offset) { index, track in
-                        MetadataRow(label: track.kind, value: track.summary)
+                    ForEach(Array(m.textTracks.enumerated()), id: \.offset) { _, track in
+                        TextTrackRow(track: track)
                     }
                 }
 
@@ -202,6 +202,52 @@ private struct MetadataRow: View {
                 .foregroundStyle(.white.opacity(isFact ? 0.92 : 0.5))
                 .italic(!isFact)
                 .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+/// One caption or subtitle service: what it is, which service, in what language — and, where
+/// something counted, whether it is actually carrying anything.
+///
+/// ⚠️ A PLAIN READOUT, AND NOT A BUTTON — deliberately unlike `AudioTrackRow`. Nothing in the app
+/// can select or display an embedded caption service: the Aa control and `CaptionController` are
+/// an SRT-sidecar feature and know nothing about these rows. `AudioTrackRow` only grows an
+/// affordance where the engine can honour one, and here it cannot honour any, so this row stays
+/// inert. A clickable caption row would promise a feature that does not exist.
+private struct TextTrackRow: View {
+    let track: TextTrackInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(track.kind)
+                    .font(.system(.caption, design: .default))
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer(minLength: 16)
+                Text(track.summary)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .multilineTextAlignment(.trailing)
+            }
+            // Absent when nothing was measured — a row that cannot speak to data presence says
+            // nothing about it, rather than implying health by staying quiet in the same shape a
+            // healthy row uses.
+            if let statement = track.dataPresence.statement {
+                HStack(alignment: .firstTextBaseline) {
+                    Spacer(minLength: 0)
+                    Text(statement)
+                        .font(.system(.caption2, design: .monospaced))
+                        // A DECLARED SERVICE CARRYING NOTHING IS THE FINDING THIS ROW EXISTS FOR,
+                        // so it is the state that gets colour; a healthy service stays as quiet as
+                        // the audio rows' second line. Amber, not red: the file is not malformed —
+                        // every packet is valid and correctly timed — it is a question for whoever
+                        // cut it, which is exactly the register QC wants.
+                        .foregroundStyle(track.dataPresence.carriesData
+                                         ? Color.white.opacity(0.5)
+                                         : Color.orange.opacity(0.9))
+                }
+            }
         }
         .padding(.vertical, 3)
     }

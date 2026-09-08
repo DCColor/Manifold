@@ -4549,3 +4549,155 @@ raster.
 
 **No AVFoundation call returns the second form**, so adopting it would be a deliberate
 reinterpretation rather than a bug fix. Left open on purpose.
+
+---
+
+## ⚠️ CAUSE CONFIRMED 2026-09-08 — VideoToolbox plug-in codecs and MediaToolbox plug-in format readers are OPT-IN PER PROCESS, and Manifold never opts in. "AVFoundation cannot open MXF" is false.
+
+**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-08, by measurement, from a plain unsigned CLI.**
+**NOTHING DECIDED AND NOTHING BUILT.** **Found:** 2026-09-08, while investigating why
+`Mixed Captions.mxf` (DNxHR 444 12-bit) renders green and magenta. **Blocks:** nothing today,
+because nothing depends on it yet. **Invalidates:** the premise under the entire libav/MXF path —
+see the site list below, and re-read those comments before trusting them.
+
+### The finding
+
+Two **public** functions, present since macOS 10.9 and 10.10 respectively:
+
+```
+VTRegisterProfessionalVideoWorkflowVideoDecoders()    VideoToolbox/VTProfessionalVideoWorkflow.h
+MTRegisterProfessionalVideoWorkflowFormatReaders()    MediaToolbox/MTProfessionalVideoWorkflow.h
+```
+
+Plug-in codecs and plug-in container readers are **not available to a process until it asks for
+them**. ProRes, H.264 and HEVC are built into VideoToolbox and need no opt-in, which is why every
+control in this investigation passed while every DNxHR test failed — the difference was never the
+file, the container, the signature or the API.
+
+**Manifold calls neither.** No source reference in `App/` or `Packages/`, and the shipped
+`Manifold.app` binary imports neither symbol. **Both working clients import both**
+(`nm -u`): Screen (`co.videovillage.Screen`) imports the decoder, encoder and format-reader
+registrations; QuickTime Player imports the decoder and format-reader registrations.
+
+### MEASURED — plain unsigned CLI, no notarization, no bundle, no entitlement
+
+| what | before registration | after registration |
+|---|---|---|
+| `VTDecompressionSessionCreate` for `'AVdh'` | **−12906** (`kVTCouldNotFindVideoDecoderErr`) | **0** — decoder found |
+| `AVURLAsset.load(.tracks)` on `Mixed Captions.mxf` | **−11828** "Cannot Open" | **3 tracks, 30.03 s** — `vide 'AVdh'`, `soun 'lpcm'`, `tmcd` |
+
+With both registered, `AVAssetReader` requesting `kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange`
+— **the same `x420` the pipeline already asks for** — decoded all three:
+
+| fixture | codec | result |
+|---|---|---|
+| `Mixed Captions.mxf` | DNxHR **444 12-bit**, `ACT=1` | 3840×2160 `x420`, **natural colour** |
+| `OP1A Test.mxf` | DNxHR HQX 422 10-bit | 3840×2160 `x420`, correct |
+| `DNX As MOV 10bit.mov` | DNxHR HQX 422 10-bit | 3840×2160 `x420`, correct |
+
+**The 444 frame renders in natural colour where libav renders green and magenta.** The Avid
+decoder handles the variable ACT flag that libav's `dnxhd` refuses (`Unsupported: variable ACT
+flag.`, identical output across FFmpeg 5.2 → 8.1.1 → trunk 2025-07, byte-for-byte). **So this is a
+correctness fix, not a performance one**, and it covers both profiles.
+
+### ⚠️ WHAT THIS INVALIDATES — every one of these carries a premise that was never tested
+
+"AVFoundation cannot open MXF" is **not a property of AVFoundation**. It is a property of not
+having made one call. It is the stated justification at all of these sites, and each needs
+re-reading rather than trusting:
+
+| site | what it asserts |
+|---|---|
+| [`FrameEngine.swift:1516`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1516) | `loadMXF` — "AVFoundation has no MXF demuxer, so it can't open the file at all" |
+| [`FrameEngine.swift:1374`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1374) | the `isMXF` branch that routes straight to libav, bypassing `MediaInspector` |
+| [`FrameEngine.swift:1540`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1540) | `applyLibavMetadata` — exists because AVFoundation "supplies nothing" |
+| [`FrameEngine.swift:1630`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1630) | `applyLibavAudioTrack` and its `videoTrack == nil` guard |
+| [`FrameEngine.swift:1673`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1673) | `applyLibavTextTracks` — same guard, same reasoning, written 2026-09-08 |
+| [`FrameEngine.swift:200`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L200), [`:217`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L217), [`:276`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L276), [`:441`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L441) | the `audioPresence` / `audioTracks` / `selectedAudioTrackIndex` notes |
+| [`FrameEngine.swift:1309`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1309), [`:1529`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1529), [`:1813`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1813) | "there is nothing to ask it" / "blind to MXF for scrub" / "blind to the container" |
+| [`MediaInspector.swift:214`](../Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift#L214) | `requiresLibavDecode` — routes `AVdh AVdn dnxh dnxd` away from VideoToolbox unconditionally |
+| [`ScrubFrameProducer.swift:28`](../Packages/ManifoldCore/Sources/ManifoldCore/ScrubFrameProducer.swift#L28), [`LibavScrubProducer.swift:8`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavScrubProducer.swift#L8) | the scrub seam's whole reason for a libav half |
+| [`LibavFrameSource.swift:48`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L48) | `StreamInfo`'s container-sourced facts "when AVFoundation can't open the file" |
+| [`CaptionPresence.swift:334`](../Packages/ManifoldCore/Sources/ManifoldCore/CaptionPresence.swift#L334) | `CaptionPresenceReader` — "containers AVFoundation cannot open" |
+| [`ContentView.swift:2016`](../App/ContentView.swift#L2016) | the audio-track-count face label |
+
+⚠️ **`requiresLibavDecode` is the sharper one.** `DNXDecoder.bundle` declares exactly `AVdh` and
+`AVdn`; the set also lists `dnxh` and `dnxd`, which **no installed plug-in declares at all**. So
+two of the four fourCCs are routed away from a decoder that exists and two from one that does not.
+
+### ⚠️ THE FALSE TRAILS — do not re-run these, all were the wrong variable
+
+Recorded because each cost real time and each looked convincing:
+
+- **Notarization.** Hypothesised as the gate. A probe signed Developer ID + hardened runtime +
+  Apple secure timestamp, **submitted to Apple's notary service (Accepted), stapled, verified
+  `source=Notarized Developer ID`**, failed identically — `−12906`, run both directly and via
+  LaunchServices. Also failed on `v210`, which is not DNxHR at all.
+- **File provenance.** Hypothesised that VideoToolbox only accepts format descriptions from
+  Apple's own demuxers. A **Resolve-authored** `.mov` (`FormatName = Avid DNxHR HQX 10-bit`,
+  proper `ACLR` + `ADHR` atoms) failed exactly like an ffmpeg-remuxed one.
+- **The format description.** Varied across empty extensions, the real container's, `Vendor=AVID`,
+  `FormatName='Avid DNxHR'`, and an injected `AvidDNxHRDescriptionExtension` carrying the ADHR
+  atom. No change.
+- **Signing.** Unsigned, ad-hoc, Developer ID, Developer ID + hardened runtime. No change.
+- **Process shape.** Bare binary, `.app` bundle, real `NSApplication` with a visible window and an
+  `AVPlayerLayer`, shell launch and LaunchServices launch. No change.
+- **API surface.** `AVAssetReader`, `AVPlayerItemVideoOutput`, hand-built `VTDecompressionSession`;
+  six pixel formats; four decoder specifications. No change.
+- **`VTCopyVideoDecoderList` as evidence.** It does **not** enumerate plug-in codecs — AVC-Intra,
+  DVCPRO HD, IMX and Uncompressed are all equally absent from it despite being installed. Any
+  reasoning built on that list is void.
+
+⚠️ **THE METHOD THAT WORKED, AND IT WAS ASKED FOR REPEATEDLY BEFORE IT WAS DONE:** read what the
+working clients import. `nm -u` on Screen and QuickTime Player named both functions in one step.
+Every attempt to capture a working client's call by attaching was blocked by hardened runtime
+(`flags=0x10000`, no `get-task-allow`) — but the **import table needed no attach at all**.
+
+### What Pro Video Formats installs, and what Manifold cannot open today
+
+`com.apple.pkg.ProVideoFormats`, in `/Library/Video/Professional Video Workflow Plug-Ins/`.
+Eleven bundles — ten codecs plus `AppleMXFImport`, which is a **container reader**
+(`com.apple.mediatoolbox.pluginformatreader`), not a codec. fourCCs read from each bundle's own
+`CMMatchingInfo → VTCodecType`:
+
+| bundle | decodes |
+|---|---|
+| `DNXDecoder` (Avid Technology) | `AVdh` `AVdn` — DNxHR / DNxHD |
+| `AppleAVCIntraCodec` | `ai12…ai5q` (AVC-Intra 50/100/200), `ai42` `ai44`, `aivx` (XAVC Intra), `Xfi8` `Xfia` `xf4a` `xf4c` (XF-AVC Intra) |
+| `AppleAVCLGCodec` | `avlg` `xalg` `Avc1` `xfg8` `xfga` `xfi8` `xfia` `ailt` |
+| `AppleDVCPROHDCodec` | `dvhp dvhq dvh6 dvh5 dvh3 dvh2` |
+| `AppleHEVCProCodec` | `he22` — HEVC 10-bit 4:2:2 |
+| `AppleIMXCodec` | `mx3n mx4n mx5n mx3p mx4p mx5p` — MPEG IMX |
+| `AppleIntermediateCodec` | `icod` |
+| `AppleProResRAWCodec` | `aprh aprn` |
+| `AppleUncompressedCodec` | `2vuy v210 R10k` |
+| `AppleMXFImport` | *(format reader — MXF)* |
+
+⚠️ **Manifold can open none of these today except DNxHR/DNxHD, and that one only through libav.**
+The vendored FFmpeg is built `--disable-everything` with decoders `dnxhd, prores, pcm_*, aac` only,
+so nothing else on that list has a libav decoder either — and without the registration call the
+AVFoundation path cannot reach them regardless of container. **Measured for `v210`:**
+`VTDecompressionSessionCreate` returns `−12906` before registration. The rest is the same
+mechanism, not separately measured.
+
+### ⚠️ TWO CONSTRAINTS, NOT FOOTNOTES
+
+**1. It is a deliberate declaration, not a free upgrade.** The header says a caller "indicates to
+VideoToolbox that it wishes to support Media Extension video decoders" and explicitly warns it "is
+not recommended for network-facing applications such as web browsers, messaging clients, mail
+clients". Manifold is a QC tool and is squarely the intended audience — but it also carries NDI,
+WHEP, SRT and HLS transports, so the network-facing caveat deserves a decision rather than an
+assumption.
+
+**2. It depends on Pro Video Formats being installed**, which is a user-installable Apple package
+Manifold does not ship and cannot assume. **libav must remain the fallback**, and any design has
+**two paths for MXF from the outset** — not one path with a rescue. The ACT defect is unfixable on
+the libav path on a machine without the package, so a file can be correct on one machine and green
+and magenta on another with the same build.
+
+### Nothing is decided
+
+This entry records what was measured and what it invalidates. It does not propose a route, a
+staging, or a change to `requiresLibavDecode`. The working probes are in the session scratchpad
+(`reg.swift`, `mtreg.swift`, `final.swift`) and are three files of about forty lines each if they
+need re-running.

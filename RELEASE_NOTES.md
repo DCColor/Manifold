@@ -5,6 +5,17 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.8.2
+
+- Fixed: ARRI open-gate files were drawn slightly narrow, and the scopes were reading about 32
+  columns of black at each edge. Manifold now crops to the picture the file declares, so what you
+  see and what the scopes measure are the actual image.
+- HLS streams. Paste an .m3u8 link and it plays, with the scopes and SDI following as they do for
+  any other source. Video only in this release; audio is next.
+- The inspector now reports embedded closed captions — CEA-608 and CEA-708, which services are
+  present, in what language, and whether they carry any data. Reading them is a later release.
+- Known: DNxHR 444 files may show incorrect color. A fix is in progress.
+
 ## 0.8.1
 
 - Reference markers on the waveform, parade and vectorscope, alongside the one already on the

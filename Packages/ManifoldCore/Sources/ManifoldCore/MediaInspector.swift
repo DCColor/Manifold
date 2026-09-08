@@ -557,10 +557,110 @@ public enum MediaInspector {
                 if let lang = (try? await track.load(.languageCode)) ?? nil, !lang.isEmpty {
                     info.language = lang
                 }
-                result.append(info)
+                // A `clcp` track's format description says "CEA-608" and stops there — it does not
+                // say WHICH line-21 field, and it cannot say whether a single byte of the track is
+                // anything but padding. Both of those live in the samples, and reading them is
+                // cheap, so the row is upgraded from a declaration to a measurement where possible.
+                // Any other track kind (and any clcp track we could not read) keeps exactly the row
+                // this function has always produced, with `dataPresence` left `.unknown`.
+                if mediaType == .closedCaption,
+                   let measured = await captionServices(trackID: track.trackID,
+                                                        url: asset.url,
+                                                        language: info.language),
+                   !measured.isEmpty {
+                    result.append(contentsOf: measured)
+                } else {
+                    result.append(info)
+                }
             }
         }
         return result
+    }
+
+    /// Caption presence for a `.mov`'s `clcp` track, measured from its samples.
+    ///
+    /// The AVFoundation sibling of `CaptionPresenceReader.services(inANCTrackOf:)`, and it
+    /// feeds the SAME `CaptionCDPScanner` — the two containers wrap the identical payloads
+    /// (measured: a `'cdat'` atom holds the very byte pair a CDP triplet carries), so one
+    /// roster, one counter and one output shape serve both. Returns nil when nothing could be
+    /// read, which the caller treats as "keep the declaration-only row" rather than as "no
+    /// captions".
+    ///
+    /// ⚠️ A FRESH `AVURLAsset`, NOT THE ONE PASSED IN. The asset this inspector is handed is
+    /// the one `FrameEngine` is simultaneously playing from; hanging a second `AVAssetReader`
+    /// off it to count caption bytes is not a risk worth taking for a readout. The track is
+    /// re-found by `trackID` on the private copy. Cost is one extra asset open — measured at
+    /// ~164 ms for the 30 s fixture, and this already runs in the detached metadata Task.
+    private static func captionServices(trackID: CMPersistentTrackID,
+                                        url: URL,
+                                        language: String) async -> [TextTrackInfo]? {
+        let scanAsset = AVURLAsset(url: url)
+        guard let tracks = try? await scanAsset.loadTracks(withMediaType: .closedCaption),
+              let track = tracks.first(where: { $0.trackID == trackID }),
+              let reader = try? AVAssetReader(asset: scanAsset) else { return nil }
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        guard reader.canAdd(output) else { return nil }
+        reader.add(output)
+        guard reader.startReading() else { return nil }
+        defer { reader.cancelReading() }
+
+        var scanner = CaptionCDPScanner()
+        var sawCaptionAtom = false
+        while let sample = output.copyNextSampleBuffer() {
+            guard let block = CMSampleBufferGetDataBuffer(sample) else { continue }
+            var length = 0
+            var pointer: UnsafeMutablePointer<CChar>?
+            guard CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil,
+                                              totalLengthOut: &length,
+                                              dataPointerOut: &pointer) == noErr,
+                  let pointer, length > 0 else { continue }
+            let bytes = UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self)
+            if ingestCaptionAtoms(UnsafeBufferPointer(start: bytes, count: length), into: &scanner) {
+                sawCaptionAtom = true
+            }
+        }
+        guard sawCaptionAtom else { return nil }
+        return scanner.rows(defaultLanguage: language)
+    }
+
+    /// Walk one `clcp` sample's concatenated QuickTime atoms — 4-byte big-endian size, then a
+    /// four-character type, then payload — and feed the caption ones to `scanner`. Returns
+    /// true if any atom was one we understand, which is how the caller tells "an empty track"
+    /// apart from "a track shaped in a way this does not read".
+    ///
+    /// Measured on `608 Captions.mov`: 389 samples, 385 `'cdat'` atoms, no `'cdt2'` at all.
+    /// ⚠️ The `'ccdp'` case (a whole CDP in a `c708` track) is written from the format and is
+    /// NOT exercised by any fixture on hand; it routes into the same CDP walk the MXF path
+    /// uses, so if it is wrong it is wrong in one place rather than two.
+    private static func ingestCaptionAtoms(_ b: UnsafeBufferPointer<UInt8>,
+                                           into scanner: inout CaptionCDPScanner) -> Bool {
+        var o = 0
+        var sawKnownAtom = false
+        while o + 8 <= b.count {
+            let size = Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+            guard size >= 8, o + size <= b.count else { break }
+            let type = UInt32(b[o + 4]) << 24 | UInt32(b[o + 5]) << 16
+                     | UInt32(b[o + 6]) << 8  | UInt32(b[o + 7])
+            let payload = o + 8
+            let payloadEnd = o + size
+            switch type {
+            case 0x6364_6174:                       // 'cdat' — line 21 field 1
+                sawKnownAtom = true
+                var i = payload
+                while i + 2 <= payloadEnd { scanner.ingest(pairField: 1, b[i], b[i + 1]); i += 2 }
+            case 0x6364_7432:                       // 'cdt2' — line 21 field 2
+                sawKnownAtom = true
+                var i = payload
+                while i + 2 <= payloadEnd { scanner.ingest(pairField: 2, b[i], b[i + 1]); i += 2 }
+            case 0x6363_6470:                       // 'ccdp' — a whole SMPTE 334-1 CDP
+                sawKnownAtom = true
+                scanner.ingest(cdp: b, from: payload, count: size - 8)
+            default:
+                break
+            }
+            o += size
+        }
+        return sawKnownAtom
     }
 
     private static func textFormatName(_ code: FourCharCode) -> String {
