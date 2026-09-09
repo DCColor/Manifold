@@ -176,11 +176,26 @@ The measurement was incidental — it came out of routing DNxHR decode to Apple'
 
 **The range carrier in the vended format description is `ADHR` field 6**, on this evidence. It is independently known to be load-bearing: zeroing it fails `VTDecompressionSessionCreate` with `−12910 kVTVideoDecoderUnsupportedDataFormatErr`.
 
-⚠️ **What this does NOT overturn.** The chroma-scale measurements in the body of this document stand — they are raw code values and do not depend on the range-tag row. What changes is only the claim about *which atom signals range in DNxHR/MXF*, and therefore the framing of question 4 and the last row of the summary table: for DNxHR/MXF the range tag is **not** absent the way it is for ProRes. It is present in the file, it is present in what Apple's reader vends, and the correction is that it lives in `ADHR`, not `ACLR`.
+### ⚠️ But `ADHR` is not in the file either — where the range actually lives in an MXF
+
+Added after the above, and it supersedes the framing rather than contradicting the measurement. **Neither `ADHR` nor `ACLR` appears anywhere in these MXF files** — grepped for the literal bytes across all four. Apple's MXF reader **synthesises** both atoms. What it synthesises them *from* is the standard SMPTE picture descriptor, and that is what an MXF actually carries:
+
+| fixture | descriptor | the declaration | depth |
+|---|---|---|---|
+| `TEST OMNISCOPE_FULL.mxf` | **CDCIDescriptor** | `BlackRefLevel=0` `WhiteRefLevel=1023` `ColorRange=1023` | 10 |
+| `TEST OMNISCOPE_LEGAL.mxf` | **CDCIDescriptor** | `BlackRefLevel=64` `WhiteRefLevel=940` `ColorRange=897` | 10 |
+| `OP1A Test.mxf` | **CDCIDescriptor** | `BlackRefLevel=64` `WhiteRefLevel=940` `ColorRange=897` | 10 |
+| `Mixed Captions.mxf` | **RGBADescriptor** | `ComponentMinRef=0` `ComponentMaxRef=4095` | 12 |
+
+`Mixed Captions.mxf` carries **no CDCI descriptor at all** — it is 4:4:4, and its `PixelLayout` is `52 0c 47 0c 42 0c 46 04` (`R`12 `G`12 `B`12 `F`ill 4). At 12 bits, `0…4095` is the **full** excursion; legal would be `256…3760`.
+
+**So the range signal in DNxHR/MXF is ordinary SMPTE descriptor metadata, not an Avid extension**, and `ADHR` f6 is Apple's faithful re-encoding of it. ⚠️ **libav's `mxfdec` reads the CDCI reference levels and does not read the RGBA ones** — which is exactly, and only, why it is silent on the 4:4:4 file.
+
+⚠️ **What this does NOT overturn.** The chroma-scale measurements in the body of this document stand — they are raw code values and do not depend on the range-tag row. What changes is only the claim about *which atom signals range in DNxHR/MXF*, and therefore the framing of question 4 and the last row of the summary table: for DNxHR/MXF the range tag is **not** absent the way it is for ProRes. It is present in the file — as `BlackRefLevel`/`WhiteRefLevel` or `ComponentMinRef`/`ComponentMaxRef` on the picture descriptor — and it is present in what Apple's reader vends, as `ADHR` field 6. The correction is that it is **not** in `ACLR`, and that the file-side carrier is the SMPTE descriptor rather than any Avid atom.
 
 ### The consequence inside Manifold, recorded separately
 
-On `Mixed Captions.mxf` the container says full (`ADHR` f6 = 2) and libav reports `UNSPECIFIED`. Manifold's libav path computes `isFullRange = (range == AVCOL_RANGE_JPEG)`, so unspecified becomes legal, silently, and the picture is expanded legal→full on codes that were already full. **That is a shipping defect and it has its own `BUGS.md` entry** — *"an MXF whose range libav reports as UNSPECIFIED renders as legal range"* — including the fix shape and what remains untested. It is not repeated here.
+On `Mixed Captions.mxf` the container says full — `ComponentMinRef=0`, `ComponentMaxRef=4095` at 12-bit, on an `RGBADescriptor` — and libav reports `UNSPECIFIED` because it does not read RGBA reference levels. Manifold's libav path computes `isFullRange = (range == AVCOL_RANGE_JPEG)`, so unspecified becomes legal, silently, and the picture is expanded legal→full on codes that were already full. **That is a shipping defect and it has its own `BUGS.md` entry** — *"an MXF whose range libav reports as UNSPECIFIED rendered as legal range"* — now **fixed**, with the descriptor read and what remains untested recorded there. It is not repeated here.
 
 ⚠️ **Four fixtures is not a survey.** Whether libav's `UNSPECIFIED` correlates with 4:4:4, with the ACT flag, with the authoring tool, or with none of those, is unknown.
 

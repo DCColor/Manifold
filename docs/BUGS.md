@@ -5334,12 +5334,13 @@ fields resist.
 reports `AVCOL_RANGE_UNSPECIFIED`. It does **not** touch this plan — f6 is required for the session
 to open and is supplied verbatim either way — so it is not chased here.
 
-**It is a shipping defect and has its own entry:** *"an MXF whose range libav reports as UNSPECIFIED
-renders as legal range and the inspector positively claims Video (Legal)"*, above. ⚠️ **That entry
-also corrects a published row in
-[`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md):** `ACLR` is
-**not** the range tag — a matched full/legal fixture pair carries byte-identical `ACLR` atoms and
-differs only in `ADHR` f6.
+**It is a shipping defect, has its own entry, and is now FIXED:** *"an MXF whose range libav reports
+as UNSPECIFIED rendered as legal range"*, **below**. ⚠️ **Two things that entry establishes matter
+back here:** `ACLR` is **not** the range tag (a matched full/legal pair carries byte-identical
+`ACLR` atoms), and **neither `ADHR` nor `ACLR` is in the MXF at all** — Apple's reader synthesises
+both from the SMPTE picture descriptor, which is where the range actually lives and what the fix
+reads. It also corrects a published row in
+[`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md).
 
 ### The probe
 
@@ -5358,76 +5359,94 @@ target.
 
 ---
 
-## ⚠️ CAUSE CONFIRMED 2026-09-09 — an MXF whose range libav reports as UNSPECIFIED renders as legal range and the inspector positively claims "Video (Legal)". `.untagged` is unreachable on the libav path
+## ✅ FIXED 2026-09-09 — an MXF whose range libav reports as UNSPECIFIED rendered as legal range, and the inspector positively claimed "Video (Legal)". `.untagged` was unreachable on the libav path
 
-**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-09**, mechanism read off the source and confirmed against
-four fixtures. **NOT FIXED.** **Found:** incidentally, while measuring the DNxHR decode route — see
-*"the narrow MXF plan is VIABLE"* below. **Blocks:** nothing structurally; it is a live correctness
-defect on files that hit it. **Breaks:** the three-state honesty the app enforces everywhere else,
-on the one axis where a wrong answer changes pixels.
+**Status:** ✅ **FIXED 2026-09-09.** Built clean into `.build-cc`; **compile-verified and
+parser-verified against the four fixtures, but NOT through a real session** — no picture has been
+captured through the running app — so this entry stays until it has. **Found:** incidentally, while
+measuring the DNxHR decode route — see *"the narrow MXF plan is VIABLE"* above. **Was breaking:**
+the three-state honesty the app enforces everywhere else, on the one axis where a wrong answer
+changes pixels.
 
-⚠️ **READ THE PREMISE CORRECTION FIRST.** This entry was opened on the hypothesis that **`ACLR`
-carries the range convention and libav drops it**. **A controlled fixture pair disproved that.** The
-defect is real and the consequence is as stated, but the mechanism is not ACLR. See *"What ACLR is
-not"* below, which also **corrects a published row in
-[`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md).**
+> ⚠️ **THE DIAGNOSIS BELOW IS PRESERVED IN THE PRESENT TENSE AND NO LONGER DESCRIBES THE CODE.** It
+> is kept because it is what makes a regression recognisable. **What actually landed is at the end
+> under "✅ WHAT LANDED".**
 
-### The chain
+### ⚠️ TWO PREMISE CORRECTIONS, AND THE SECOND ONE INVALIDATED THIS ENTRY'S OWN PROPOSED FIX
 
-1. **The MXF carries the range convention**, and Apple's MXF reader surfaces it in the format
-   description as **`ADHR` field 6** — measured, see the table below.
-2. **libav's `mxfdec` does not always surface it.** On `Mixed Captions.mxf` it reports
-   **`AVCOL_RANGE_UNSPECIFIED`** where `ADHR` f6 says full. On the other three fixtures libav does
-   report a range, correctly. ⚠️ **So this is not "libav never reads range" — it is "libav is
-   sometimes silent", which is harder to notice and is why it survived.**
-3. **`LibavFrameSource` collapses three states into two.**
-   [`LibavFrameSource.swift:192`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L192)
-   computes `isFullRange: range == AVCOL_RANGE_JPEG` into a `Bool`
-   ([`:43`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L43)).
-   `UNSPECIFIED` and `MPEG` both become `false`, indistinguishably.
-4. **`FrameEngine` turns that `Bool` back into a three-state enum that can now only hold two of its
-   cases.** [`FrameEngine.swift:1794`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1794)
-   — `sourceRange = info.isFullRange ? .full : .videoLegal` — and
-   [`:1567`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1567) does the same
-   for the inspector string.
+Opened twice on a wrong mechanism. Both recorded, because each looked settled:
 
-⚠️ **`MediaInspector.SourceColorRange.untagged` ALREADY EXISTS AND IS UNREACHABLE ON THE LIBAV
-PATH.** [`MediaInspector.swift:337`](../Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift#L337)
-declares all three cases and displays them as `"Full"` / `"Video (Legal)"` / `"Untagged"`, and
-[`sourceColorRange(for:)`](../Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift#L363)
-returns all three from a `CMFormatDescription`. **The AVFoundation path reaches all three. The libav
-path cannot reach `.untagged` at all**, because the only route in is a `Bool`. Nothing is logged.
+1. **`ACLR` carries the range and libav drops it.** ❌ Disproved by a controlled fixture pair — see
+   *"What ACLR is not"* below. It also **corrected a published row** in
+   [`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md).
+2. **⚠️ `ADHR` field 6 carries the range, so read f6 off the MXF.** ❌ **IMPOSSIBLE — AND THE FIRST
+   VERSION OF THIS ENTRY PRESCRIBED IT AS THE FIX.** **`ADHR` IS NOT IN THE CONTAINER AT ALL.**
+   Grepping all four fixtures for the literal bytes `ADHR` and `ACLR` finds **neither, anywhere**.
+   Apple's MXF reader **synthesises** both atoms from the MXF descriptor. Reading `ADHR` would
+   therefore require AVFoundation to open the container — exactly what the libav path exists to
+   avoid. **What `ADHR` f6 *encodes* IS in the container, and that is what is read instead.**
 
-### ⚠️ SO A FULL-RANGE DNxHR DELIVERY RENDERS AS LEGAL RANGE, SILENTLY
+**The consequence stated originally was right throughout. Only the mechanism moved.**
 
-[`updateEffectiveRange`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1737)
-under the default `.auto` override computes `isFull = (sourceRange == .full)`. A file whose range
-libav did not state therefore takes the legal path, **and the shader expands legal→full on codes
-that were already full** — the picture is wrong, not merely mislabelled.
+### The chain — as it actually is
+
+1. **The MXF declares the range in its picture descriptor**, and there are **two descriptor kinds**:
+   - **`CDCIDescriptor`** (Y′CbCr) — `BlackRefLevel` (`0x3304`), `WhiteRefLevel` (`0x3305`),
+     `ColorRange` (`0x3306`), `ComponentDepth` (`0x3301`).
+   - **`RGBADescriptor`** (4:4:4) — `ComponentMinRef` (`0x3407`), `ComponentMaxRef` (`0x3406`),
+     `PixelLayout` (`0x3401`, which is where the bit depth lives).
+2. **libav sets `color_range` at `avformat_open_input`, from the `CDCIDescriptor`.** ⚠️ **MEASURED,
+   and it matters: `color_range` is already final after `open_input` and is NOT changed by
+   `avformat_find_stream_info`.** So the DNxHD decoder is not the source, and **the `Unsupported:
+   variable ACT flag.` decode failure is NOT the cause of the silence** — the obvious wrong guess.
+3. **⚠️ libav does not map the `RGBADescriptor`'s ref levels.** `Mixed Captions.mxf` is 4:4:4 and
+   carries an `RGBADescriptor` **instead of** a `CDCIDescriptor` — it has no CDCI set at all — so
+   libav has nothing to read and reports `AVCOL_RANGE_UNSPECIFIED`. **That is the entire cause.**
+4. **`LibavFrameSource` collapsed three states into two** — `isFullRange: range == AVCOL_RANGE_JPEG`
+   into a `Bool`. `UNSPECIFIED` and `MPEG` both became `false`, indistinguishably.
+5. **`FrameEngine` turned that `Bool` back into a three-state enum that could hold only two of its
+   cases** — `sourceRange = info.isFullRange ? .full : .videoLegal`, and the same ternary for the
+   inspector string.
+
+⚠️ **THIS IS MUCH NARROWER THAN "MXF RANGE IS DROPPED", AND THE NARROWNESS IS THE POINT.** **libav
+was correct on three of the four fixtures** and is not to be treated as unreliable here. It is
+silent on **one descriptor kind**, and the fix had to fill that silence without touching the cases
+that already worked.
+
+### What the containers actually say — parsed directly out of the MXF, no AVFoundation
+
+| fixture | descriptor kind | the declaration | depth | libav `color_range` |
+|---|---|---|---|---|
+| `TEST OMNISCOPE_FULL.mxf` | **CDCI** | `BlackRef=0  WhiteRef=1023  ColorRange=1023` | 10 | **2** `JPEG` (full) ✅ |
+| `TEST OMNISCOPE_LEGAL.mxf` | **CDCI** | `BlackRef=64  WhiteRef=940  ColorRange=897` | 10 | **1** `MPEG` (legal) ✅ |
+| `OP1A Test.mxf` | **CDCI** | `BlackRef=64  WhiteRef=940  ColorRange=897` | 10 | **1** `MPEG` (legal) ✅ |
+| `Mixed Captions.mxf` | **RGBA** | **`ComponentMinRef=0  ComponentMaxRef=4095`** — full, explicitly | **12** | **0 `UNSPECIFIED`** ❌ |
+
+`Mixed Captions.mxf`'s `PixelLayout` is `52 0c 47 0c 42 0c 46 04` — `R`12 `G`12 `B`12 `F`ill 4. At
+12 bits, `0…4095` is the **full** excursion; legal would be `256…3760`. ⚠️ **The file states full
+range plainly. Nothing about it is ambiguous, untagged, or a matter of inference.**
+
+### ⚠️ THIS CORROBORATES THE `ADHR` f6 INFERENCE RATHER THAN INVALIDATING IT
+
+The f6 reading previously rested on four fixtures in which `Mixed Captions.mxf` differed from the
+OMNISCOPE pair in **both** f6 **and** subsampling — a real confound, flagged at the time. **The
+container now states full independently of `ADHR`**, so `f6 = 2` ⇒ full is **corroborated by a
+second, independent source**. `ADHR` f6 remains the correct reading of what Apple's reader vends; it
+is simply not the right thing to *read*, because it is not in the file.
+
+### Two defects, kept apart — and only one of them changes pixels
+
+⚠️ **Do not merge these. Different consequences, different fixes.**
+
+| | what it is | does it change the picture? |
+|---|---|---|
+| **A. The false claim** | `UNSPECIFIED` collapsed to `.videoLegal`, so the inspector printed **"Video (Legal)"** about a file that had said nothing | ⚠️ **NO.** Under the default `.auto`, [`updateEffectiveRange`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1738) computes `isFull = (sourceRange == .full)`, so `.untagged` and `.videoLegal` behave **identically**. This half was purely a false statement about the file |
+| **B. The render defect** | a file **declaring full** whose declaration never arrived, so `sourceRange` became `.videoLegal` and the shader **expanded legal→full on codes that were already full** | ✅ **YES.** The picture was wrong, not merely mislabelled |
 
 **And the metadata that would have said otherwise is in the container.** ⚠️ **This is NOT the ProRes
-case, where the range tag is genuinely absent from the file.** Here it is present in the MXF, it is
-present in the format description Apple's reader vends, and it is absent **only from the reader we
-use**. That distinction is the whole finding: an absent tag is a fact about the file, a dropped tag
-is a fact about us.
-
-### Measured — four fixtures, and the middle pair is a controlled experiment
-
-| fixture | codec | libav `color_range` | `ACLR` f1 | **`ADHR` f6** | what the app concludes |
-|---|---|---|---|---|---|
-| `TEST OMNISCOPE_FULL.mxf` | DNxHR HQX 10-bit | **2** `JPEG` (full) | 1 | **2** | `.full` — **correct** |
-| `TEST OMNISCOPE_LEGAL.mxf` | DNxHR HQX 10-bit | **1** `MPEG` (legal) | 1 | **1** | `.videoLegal` — correct |
-| `OP1A Test.mxf` | DNxHR HQX 10-bit | 1 `MPEG` (legal) | 1 | 1 | `.videoLegal` — correct |
-| `Mixed Captions.mxf` | DNxHR 444 12-bit | **0 `UNSPECIFIED`** | 2 | **2** | **`.videoLegal` — WRONG, and no `.untagged` available to say so** |
-
-⚠️ **`TEST OMNISCOPE_FULL.mxf` and `TEST OMNISCOPE_LEGAL.mxf` are the same content graded to the two
-range conventions, identical file size, and their format descriptions differ in EXACTLY ONE FIELD:
-`ADHR` f6, 1 → 2.** libav's range moves with it, 1 → 2. That pair is what identifies f6 as the range
-carrier, and it is why the identification does not rest on the 444 file.
-
-`ADHR` f6 was independently shown to be load-bearing by bisection — zeroing it fails
-`VTDecompressionSessionCreate` with `−12910 kVTVideoDecoderUnsupportedDataFormatErr`. See the
-narrow-plan entry's field table.
+case, where the range tag is genuinely absent from the file.** Here it is present in the MXF, and it
+was absent **only from the reader we use**. An absent tag is a fact about the file; a dropped tag is
+a fact about us.
 
 ### What `ACLR` is NOT — and a correction to a published document
 
@@ -5436,12 +5455,13 @@ narrow-plan entry's field table.
 `41434c52 30303031 00000001 00000000`, i.e. f1 = 1 — while being full and legal respectively. A
 field that does not change across a matched full/legal pair is not the range field. `ACLR` f1 = 2
 appears only on `Mixed Captions.mxf`, the only 4:4:4 12-bit fixture, so it plausibly tracks
-colour/subsampling; **that has not been established and is not chased here.**
+colour/subsampling; **that has not been established and is not chased here.** ⚠️ And like `ADHR`,
+`ACLR` is **synthesised by Apple's reader** — it is not in the MXF either.
 
 ⚠️ **[`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md)'s summary
 table carries the row `Range tag (DNxHR/MXF): ACLR=1 (legal) … ACLR=2 (Resolve full)`. That row is
-contradicted by the OMNISCOPE pair and has been corrected in place**, with the measurement recorded
-there. It matters because that document is externally facing and prepared for technical review.
+contradicted by the OMNISCOPE pair and has been corrected in place.** It matters because that
+document is externally facing and prepared for technical review.
 
 ### Why this is a defect and not a rounding of a display string
 
@@ -5455,35 +5475,86 @@ The app enforces three-state honesty deliberately and in writing, everywhere the
 | [`CaptionDataPresence`](../Packages/ManifoldCore/Sources/ManifoldCore/CaptionPresence.swift#L48) | `unknown` is *"nobody looked"*; `measured(carrying: 0, …)` is *"we looked and found none"* |
 | [`KeychainRead`](../App/KeychainStore.swift#L41) | `.absent` is *"nothing is stored"*; `.failed` is *"something may be stored and we could not see it"* — and only `.absent` may be acted on |
 
-⚠️ **`DeclaredPixelAspect`'s comment cites this exact axis as settled precedent.** The rule is
-already written down and the libav path does not follow it. **Unspecified and legal are different
-answers**, and the inspector currently prints the second when it knows only the first — a positive
-claim about the file that the file never made, on a QC tool whose value is that its readings are
-literal.
+⚠️ **`DeclaredPixelAspect`'s comment cites this exact axis as settled precedent.** The rule was
+already written down and the libav path did not follow it. **Unspecified and legal are different
+answers.**
 
-### The fix shape — recorded, not decided
+---
 
-Two halves, and **the second is the one that is easy to skip**:
+## ✅ WHAT LANDED, 2026-09-09 — one new file, two edited, and `updateEffectiveRange` untouched
 
-1. **Read the range off the container the way the probe already reads `ADHR`.** The narrow-plan
-   probe parses `ADHR` out of the format description and reconstructs it byte-exactly; reading f6
-   for range is **the same class of work on the same atom**, not a new capability. ⚠️ Whether the
-   source should be Apple's format description (which needs the container opened by AVFoundation)
-   or libav's own MXF descriptor parsing is **not decided here**, and the two have very different
-   costs — see the narrow-plan entry's discussion of the second container open.
-2. **The three-state distinction has to survive into `isFullRange` rather than being collapsed at
-   the boundary.** ⚠️ **Fixing only half of this is worse than fixing neither**, because reading the
-   atom correctly and then funnelling it through a `Bool` reintroduces the same loss one layer
-   later, with the bug now harder to see. `StreamInfo.isFullRange: Bool` is the seam; the precedents
-   above all model the shape the replacement should take.
+Its 2→1 mapping was correct; the loss was upstream of it.
 
-### What is untested
+**1. [`MXFDeclaredRange.swift`](../Packages/ManifoldCore/Sources/ManifoldCore/MXFDeclaredRange.swift)
+— NEW.** Reads the declared range straight off the MXF picture descriptor, **CDCI and RGBA both**.
+Bounded read: it takes `HeaderByteCount` from the header partition pack rather than guessing, so it
+reads ~262 KB on these fixtures and never scans the essence. It is **self-gating** — the partition
+pack key is checked first, so a non-MXF costs 0.4 ms and returns `.untagged` without sniffing the
+extension. ⚠️ **It never guesses:** only the two standard excursions map to an answer; anything else
+— no descriptor, absent ref levels, an excursion matching neither convention — returns `.untagged`,
+a real answer meaning *the file did not say*.
 
-- **Breadth.** Four fixtures, all DNxHR, three HQX 422 10-bit and one 444 12-bit. **Whether libav's
-  `UNSPECIFIED` correlates with 4:4:4, with the ACT flag, with the authoring tool, or with none of
-  those, is unknown** — one silent file is not a pattern.
-- **`ADHR` f6 semantics beyond {1, 2}.** No other value has been observed.
-- **No mis-render has been reproduced end-to-end in the app.** The render consequence is derived
-  from `updateEffectiveRange` by inspection, and it is certain from the code, but the picture has
-  not been captured through the running app on a file that hits it. `Mixed Captions.mxf` is the
-  fixture that would do it.
+**2. `LibavFrameSource` — the `Bool` route is gone.**
+[`StreamInfo.declaredRange`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L52)
+replaces `isFullRange: Bool`. ⚠️ **`isFullRange` survives only as a
+[computed getter](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L74) that
+re-collapses the three states ON PURPOSE**, so reaching for it reads as a deliberate choice at the
+call site rather than as the only route available — the exact shape and reasoning of
+`KeychainRead.value`. Also fixed: `rangeName` returned `Full (ACLR=2/JPEG)` / `Legal (ACLR=1/MPEG)`,
+encoding the **disproved** mapping in every log line and pointing the next reader at the wrong atom.
+It now reports the resolved state plus its provenance, e.g.
+`Full (libav silent, MXF picture descriptor)`.
+
+**3. `FrameEngine` — three states carried through, both halves.**
+[`:1570`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1570) is defect **A**
+(the inspector row; no pixels change).
+[`:1799`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1799) is defect **B**
+(`sourceRange`, which reaches the shader).
+
+### ⚠️ THE FALLBACK IS CONSULTED ONLY WHEN LIBAV IS SILENT, AND THAT IS A CHOICE
+
+[`LibavFrameSource.swift:222`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L222)
+sits in the `default:` branch of a switch on `AVColorRange` — `JPEG` and `MPEG` are taken from libav
+and the container is **never consulted**.
+
+**So the two readers cannot disagree. There is no precedence rule because there is no contest**, and
+that is deliberate rather than accidental: **libav was right on every fixture where it spoke**, so
+letting a second parser override a *stated* answer would risk files that are correct today in order
+to fix files that are not. The fallback **fills silence**; it does not arbitrate.
+
+⚠️ **The parser was nonetheless tested against all four fixtures, including the three it is never
+asked about — and it agrees with libav independently on all three CDCI files.** That is what makes
+"no contest" a measurement rather than an assumption: the fallback-only choice is not concealing a
+disagreement. Cross-checking libav against the container on **every** open is a separate decision
+and was deliberately not taken.
+
+### Verified — `MXFDeclaredRange.read`, against the real files
+
+Compiled against the shipping source, not a reimplementation:
+
+| input | result | time |
+|---|---|---|
+| `TEST OMNISCOPE_FULL.mxf` | **Full** | 4.2 ms |
+| `TEST OMNISCOPE_LEGAL.mxf` | **Video (Legal)** | 2.2 ms |
+| `OP1A Test.mxf` | **Video (Legal)** | 2.6 ms |
+| `Mixed Captions.mxf` | **Full** — was "Video (Legal)" | 1.9 ms |
+| a ProRes `.mov` (not MXF) | **Untagged** | 0.4 ms |
+| a nonexistent path | **Untagged** | 0.0 ms |
+
+⚠️ **NONE OF THE FOUR FIXTURES PRINTS "Untagged", AND THAT IS THE SURPRISE.** The fix makes
+`.untagged` **reachable** on the libav path for the first time — but the file that looked untagged
+turns out to **declare full range explicitly**; libav simply does not read RGBA descriptors. **An
+MXF that declares nothing at all would now print "Untagged", and there is no fixture that does.**
+
+### Still open
+
+- ⚠️ **NOT THROUGH A REAL SESSION. No picture has been captured through the running app**, so
+  defect **B**'s correction — `Mixed Captions.mxf` no longer double-expanding — is verified by
+  construction and by the parser, **not by eye**. That file is the obvious regression test.
+- **Breadth.** Four fixtures, all DNxHR. Whether libav's `UNSPECIFIED` tracks 4:4:4 specifically or
+  the `RGBADescriptor` more generally across other codecs is **not** established — the mechanism
+  says the latter; one fixture cannot confirm it.
+- **`.untagged` has no fixture.** The state is now reachable and untested end-to-end.
+- **RGB vs Y′CbCr.** `Mixed Captions.mxf`'s `PixelLayout` declares R/G/B components. Whether the
+  essence is genuinely RGB — and what that implies for the shader's **matrix**, as distinct from its
+  range flag — was **not** investigated.

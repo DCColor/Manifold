@@ -34,13 +34,22 @@ public final class LibavFrameSource: @unchecked Sendable {
 
     public enum LibavError: Error { case open, noVideoStream, noDecoder, decoderOpen }
 
-    /// Color/format facts read from the stream — the engine uses `isFullRange` to
-    /// set its range flag (DNxHR/MXF ACLR: JPEG=full, MPEG=legal). `hasAudio`
-    /// reports whether an audio decode path would be needed (Stage 3a is video-only).
+    /// Color/format facts read from the stream — the engine uses `declaredRange` to
+    /// set its range flag. `hasAudio` reports whether an audio decode path would be
+    /// needed (Stage 3a is video-only).
     public struct StreamInfo: Sendable {
         public let width: Int
         public let height: Int
-        public let isFullRange: Bool
+        /// What the SOURCE declared — THREE STATES, and `.untagged` is a real answer meaning
+        /// *the file did not say*, not a synonym for legal.
+        ///
+        /// ⚠️ **THIS REPLACED AN `isFullRange: Bool` AND THE BOOL IS NOT COMING BACK.** libav has
+        /// three range states and this struct used to have two, so `UNSPECIFIED` and `MPEG` both
+        /// arrived as `false` and the libav path could never reach
+        /// `MediaInspector.SourceColorRange.untagged` — the AVFoundation path could, which is what
+        /// made it a defect rather than a simplification. Same three-state honesty as
+        /// `DeclaredPixelAspect`, `LayoutConfidence`, `CaptionDataPresence` and `KeychainRead`.
+        public let declaredRange: MediaInspector.SourceColorRange
         public let hasAudio: Bool
         public let rangeName: String
         public let sourcePixelFormat: String
@@ -56,6 +65,13 @@ public final class LibavFrameSource: @unchecked Sendable {
         /// Start timecode as libav formats it (HH:MM:SS:FF, ';FF' for drop-frame) —
         /// the MXF Material Package TC. Nil if the file carries none.
         public let startTimecode: String?
+
+        /// Full range only. ⚠️ **`.untagged` is FALSE here, and that is a LOSS, not a default** —
+        /// this getter re-collapses the three states on purpose, so that reaching for it reads as
+        /// a deliberate choice at the call site rather than as the only route available. Callers
+        /// that need to tell "the file said legal" from "the file said nothing" must read
+        /// `declaredRange`. Same shape and same reasoning as `KeychainRead.value`.
+        public var isFullRange: Bool { declaredRange == .full }
     }
 
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
@@ -187,11 +203,33 @@ public final class LibavFrameSource: @unchecked Sendable {
                 }
             }
         }
+        // RANGE — libav first, and the container consulted ONLY when libav said nothing.
+        //
+        // ⚠️ libav is NOT uniformly blind here and must not be treated as if it were: `mxfdec`
+        // maps the CDCIDescriptor's Black/WhiteRefLevel correctly, and was right on every fixture
+        // where it spoke. It is silent only for the RGBADescriptor (4:4:4 DNxHR), whose
+        // ComponentMin/MaxRef it does not read. So the fallback FILLS SILENCE and never overrides
+        // a stated answer — the two can never disagree, because the second reader is not asked
+        // unless the first abstained. See MXFDeclaredRange for why that is deliberate.
+        let declaredRange: MediaInspector.SourceColorRange
+        let rangeProvenance: String
+        switch range {
+        case AVCOL_RANGE_JPEG:
+            declaredRange = .full;       rangeProvenance = "libav"
+        case AVCOL_RANGE_MPEG:
+            declaredRange = .videoLegal; rangeProvenance = "libav"
+        default:
+            declaredRange = MXFDeclaredRange.read(url: url)
+            rangeProvenance = declaredRange == .untagged
+                ? "libav silent, container declares nothing"
+                : "libav silent, MXF picture descriptor"
+        }
+
         return StreamInfo(
             width: width, height: height,
-            isFullRange: range == AVCOL_RANGE_JPEG,
+            declaredRange: declaredRange,
             hasAudio: hasAudio,
-            rangeName: Self.rangeName(range),
+            rangeName: "\(declaredRange.displayName) (\(rangeProvenance))",
             sourcePixelFormat: srcPix,
             matrixName: Self.matrixName(par.pointee.color_space),
             durationSeconds: durationSeconds,
@@ -355,11 +393,17 @@ public final class LibavFrameSource: @unchecked Sendable {
     // MARK: - libav color enum → human-readable names (logging only; the CoreVideo
     // attachment mapping lives in LibavPixelConversion, shared with the scrub producer)
 
+    /// ⚠️ **`ACLR` DOES NOT CARRY THE RANGE — this used to say it did.** A matched full/legal
+    /// fixture pair (`TEST OMNISCOPE_FULL/LEGAL.mxf`) carries BYTE-IDENTICAL `ACLR` atoms and
+    /// differs only in the picture descriptor's reference levels. Measured 2026-09-09; the old
+    /// strings named `ACLR=1`/`ACLR=2` and would have sent the next reader to the wrong atom.
+    /// `StreamInfo.rangeName` is now built from the resolved state plus its provenance, so a log
+    /// line says which reader answered. Kept for any caller that has only an `AVColorRange`.
     private static func rangeName(_ r: AVColorRange) -> String {
         switch r {
-        case AVCOL_RANGE_JPEG: return "Full (ACLR=2/JPEG)"
-        case AVCOL_RANGE_MPEG: return "Legal (ACLR=1/MPEG)"
-        default: return "Unspecified"
+        case AVCOL_RANGE_JPEG: return "Full (libav JPEG)"
+        case AVCOL_RANGE_MPEG: return "Legal (libav MPEG)"
+        default: return "Unspecified (libav)"
         }
     }
 

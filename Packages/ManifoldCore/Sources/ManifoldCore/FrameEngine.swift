@@ -1564,9 +1564,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         meta.colorPrimaries = MediaInspector.primariesName(forCode: info.primariesCode)
         meta.transferFunction = MediaInspector.transferName(forCode: info.transferCode)
         meta.colorMatrix = MediaInspector.matrixName(forCode: info.matrixCode)
-        meta.colorRange = (info.isFullRange
-            ? MediaInspector.SourceColorRange.full
-            : MediaInspector.SourceColorRange.videoLegal).displayName
+        // ⚠️ Carry the DECLARED state through, all three of it. This used to be a ternary on a
+        // Bool, so the libav path could print "Video (Legal)" for a file that had said nothing —
+        // a positive claim the file never made. `.untagged` renders as "Untagged".
+        meta.colorRange = info.declaredRange.displayName
         meta.startTimecode = info.startTimecode   // MXF Material Package TC (libav)
         // Same HDR10 reader the AVFoundation path uses, so the inspector's HDR10 section
         // reads identically whichever backend supplied the rest of the metadata.
@@ -1791,7 +1792,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // open() enables auto-threaded decode so the 4K 10-bit source cost
                 // doesn't contend with the render pipeline (locks 23.976fps).
                 let info = try source.open()
-                sourceRange = info.isFullRange ? .full : .videoLegal
+                // ⚠️ Same three-state carry as the inspector row above, and this one reaches the
+                // shader: `updateEffectiveRange` maps `.full` to passthrough and everything else
+                // to a legal→full expand. A file that DECLARES full (4:4:4 DNxHR, whose range
+                // libav does not read) was being expanded a second time.
+                sourceRange = info.declaredRange
                 updateEffectiveRange()
                 // Same rule as the AVFoundation path, at this path's equivalent point: libav has
                 // just told us what the stream declares, and the decode pump is armed BELOW this
