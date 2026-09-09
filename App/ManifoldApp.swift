@@ -12,6 +12,10 @@ struct ManifoldApp: App {
     //
     // App-layer licensing (see LicenseManager.swift). Owns the trial + license state and the gate.
     @StateObject private var license = LicenseManager.shared
+    // ⚠️ OBSERVED HERE, AND THAT IS WHAT MAKES File ▸ Open Recent UPDATE. The commands below are
+    // rebuilt when state this scene observes changes; an unobserved read of `RecentFiles.shared`
+    // inside the menu would render once and then never follow the list.
+    @StateObject private var recents = RecentFiles.shared
     // Opens the About scene below. `openWindow` and not `orderFrontStandardAboutPanel`, because the
     // standard panel cannot host the attributions — see AboutWindow.swift.
     @Environment(\.openWindow) private var openWindow
@@ -88,6 +92,12 @@ struct ManifoldApp: App {
             CommandGroup(after: .newItem) {
                 Button("Open…") { DeckRegistry.shared.presentOpenPanel(from: nil) }
                     .keyboardShortcut("o", modifiers: .command)
+                // Directly under Open…, where a Mac user looks for it. A SwiftUI command rather
+                // than an item inserted into `NSApp.mainMenu`: the insertion approach was built,
+                // measured, and RETIRED — SwiftUI removes a foreign item the first time the menu
+                // bar is displayed, so it passed every in-process check and was never once on
+                // screen. The measurement is written up on `OpenRecentMenu`.
+                OpenRecentMenu(recents: recents)
             }
             // The View menu: raster size (⌘1–⌘4, ⌘0) — how large the picture is drawn, as a
             // percentage of the source raster. The app's first real menu of window commands; see

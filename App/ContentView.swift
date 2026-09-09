@@ -891,6 +891,13 @@ struct ContentView: View {
         .onChange(of: engine.currentURL) { _, url in
             captions.clear()
             fileWatch.watch(url)
+            // File ▸ Open Recent is recorded HERE and nowhere else, because this is the commit
+            // edge: `currentURL` is assigned in `loadAsset`'s phase 2, so a file phase 1 refused
+            // (a still, an R3D, anything with no readable video track) never reaches this line and
+            // never enters the list. Noting at the open panel would have listed every refusal.
+            // Streams cannot arrive here at all — they never call `load(url:)` — so there is no
+            // guard for them; see the note on `RecentFiles.note`.
+            if let url { RecentFiles.note(url) }
             // A load while an entry is open would leave the overlay holding the OLD file's frame
             // arithmetic — its rate, its start timecode, its last frame — and commit it against the
             // new one. The entry belonged to the file that just left.
