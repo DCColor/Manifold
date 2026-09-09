@@ -5558,3 +5558,66 @@ MXF that declares nothing at all would now print "Untagged", and there is no fix
 - **RGB vs Y′CbCr.** `Mixed Captions.mxf`'s `PixelLayout` declares R/G/B components. Whether the
   essence is genuinely RGB — and what that implies for the shader's **matrix**, as distinct from its
   range flag — was **not** investigated.
+
+---
+
+## ⚠️ The NDI runtime is dlopened and `NDIlib_initialize()`d at LAUNCH, on every machine, from the first view body — which is what `NDIService` explicitly forbids
+
+**Status:** ⚠️ **RECORDED 2026-09-09, NOT FIXED, and deliberately so** — found while making the NDI
+menu item conditional, which is a different change and did not need this one. **Found:** by an A/B
+launch measurement and a backtrace. **Blocks:** nothing. **Affects:** every launch, including users
+who never touch NDI.
+
+### What happens
+
+[`ContentView.swift:2442`](../App/ContentView.swift#L2442) calls `NDIBridge.loadRuntime()` directly,
+inside `ndiSourceListItems`. That `@ViewBuilder` is reached from the **empty state's stream menu**,
+which is what every launch renders — so the call runs during the FIRST `ContentView.body`, on the
+main thread, inside `main`. **MEASURED**, backtrace at first load:
+
+```
+main → ContentView.body → videoRegion → emptyState → Menu → ndiSourceListItems
+     → +[NDIBridge loadRuntime] → NDILoadOnce
+```
+
+Confirmed by removing the (unrelated) launch probe added the same day and relaunching: the
+`[NDI] runtime loaded: /usr/local/lib/libndi.dylib` line still appears, so this is pre-existing and
+not caused by that work.
+
+### Why it is a defect and not a detail
+
+⚠️ **It is the exact thing the API's own doc comment forbids.**
+[`NDIService.refreshRuntimeStatus`](../App/NDI/NDIService.swift#L266) says *"Call it lazily (Settings
+opening, streaming UI appearing), **NOT at app launch**"*, and
+[`runtimeAvailable`](../App/NDI/NDIService.swift#L99) documents detection as lazy and relaunch-only.
+The rule is followed everywhere it is stated and broken by a call that does not mention it.
+
+⚠️ **AND `loadRuntime` IS NOT A PROBE.** `NDILoadOnce` `dlopen`s the runtime, resolves a loader
+symbol, calls `load()`, **and then `lib->initialize()`** — standing NDI's machinery up (threads,
+discovery infrastructure) for users who never touch NDI. The time is small (**2.7 ms measured, with
+the runtime present**) and the time is not the objection; the side effect is.
+
+### The second half, which is worse for callers
+
+⚠️ **That call site bypasses the publish.** `refreshRuntimeStatus()` and `startDiscovery()` both set
+`runtimeAvailable` from their load result; this one calls the bridge directly and sets nothing. **So
+the runtime is loaded while `runtimeAvailable` is still `false`** — the flag is not merely stale, it
+is wrong in the direction that reads as "NDI is unavailable".
+
+The window closes when the empty state's `.onAppear` reaches `startDiscovery()`, and the comment at
+the call site is explicit that the direct call exists as *"an ordering-safe fallback should the
+empty state render before the flag publishes"* — so the ordering hazard was known. **What was not
+weighed is that the fallback's side effect is enormously larger than the question it answers**: it
+initialises the whole runtime to decide which of two disabled menu labels to draw.
+
+⚠️ **This already cost something.** `NDIService.runtimePresence` — the three-state filesystem check
+added 2026-09-09 for the conditional menu item — exists **because `runtimeAvailable` could not be
+trusted at launch**. A cheap `fileExistsAtPath` was the right tool for that job anyway, but the
+reason it had to be written at all is this entry.
+
+### Not fixed on purpose
+
+The obvious shapes are to publish through `NDIService` instead of calling the bridge directly, or to
+have the empty state use `runtimePresence` for its "runtime not installed" label and stop calling
+`loadRuntime` in a view body at all. **Neither is attempted here** — it is a live UI path, the
+current behaviour is at least self-consistent, and nothing depends on changing it today.

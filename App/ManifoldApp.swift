@@ -16,6 +16,13 @@ struct ManifoldApp: App {
     // rebuilt when state this scene observes changes; an unobserved read of `RecentFiles.shared`
     // inside the menu would render once and then never follow the list.
     @StateObject private var recents = RecentFiles.shared
+    // ⚠️ OBSERVED HERE FOR THE SAME REASON `recents` IS, and it is the only thing that makes the
+    // conditional Pro Video Formats item below appear/disappear. Reading
+    // `ProVideoWorkflow.shared.availability` inside the menu closure WITHOUT this property would
+    // evaluate once — at launch, while the probe is still `.unknown` — and never follow it.
+    @StateObject private var proVideo = ProVideoWorkflow.shared
+    // Observed for the same reason again — the NDI runtime item below is now conditional too.
+    @StateObject private var ndi = NDIService.shared
     // Opens the About scene below. `openWindow` and not `orderFrontStandardAboutPanel`, because the
     // standard panel cannot host the attributions — see AboutWindow.swift.
     @Environment(\.openWindow) private var openWindow
@@ -73,6 +80,9 @@ struct ManifoldApp: App {
         //           package. That is a real residual, accepted knowingly, and it is the thing to
         //           re-examine if HLS ever starts following URLs it was not handed directly.
         ProVideoWorkflow.shared.beginRegistrationAtLaunch()
+        // Filesystem presence only — NOT `refreshRuntimeStatus()`, which would dlopen the runtime
+        // and call NDIlib_initialize() at launch for every user. See NDIService.runtimePresence.
+        NDIService.shared.probeRuntimePresenceAtLaunch()
     }
 
     var body: some Scene {
@@ -119,12 +129,52 @@ struct ManifoldApp: App {
             // Discoverable path to the License state — opens Settings (⌘,), where the License section lives.
             CommandGroup(after: .appSettings) {
                 SettingsLink { Text("License…") }
-                // Always enabled — downloads Vizrt's macOS NDI runtime installer (also useful for
-                // reinstalling/updating). It is a DIRECT .pkg download, not a page: see
-                // NDIService.runtimeInstallURL, which is the single source of truth for the URL and
-                // carries the measured evidence for which link this has to be.
-                Button("Install NDI Runtime…") {
-                    NSWorkspace.shared.open(NDIService.runtimeInstallURL)
+                // Downloads Vizrt's macOS NDI runtime installer. It is a DIRECT .pkg download,
+                // not a page: see NDIService.runtimeInstallURL, which is the single source of
+                // truth for the URL and carries the measured evidence for which link this has to
+                // be.
+                //
+                // ⚠️ WAS UNCONDITIONAL UNTIL 2026-09-09, AND THE OLD REASONING IS KEPT BECAUSE IT
+                // IS STILL TRUE — JUST OUTWEIGHED. It read: "Always enabled — also useful for
+                // reinstalling/updating." A direct .pkg link genuinely does stay useful when you
+                // already have the runtime, which a support PAGE does not. What changed is that a
+                // second item of this kind arrived (Pro Video Formats below), and two items of the
+                // same kind following two different rules is worse than either rule applied to
+                // both. Weighed against that: deliberately reinstalling the NDI runtime is rare,
+                // and someone doing it can reach Vizrt's site — or, now, Preferences, which keeps
+                // a button in BOTH states precisely so this path did not disappear, only move.
+                //
+                // ⚠️ HIDDEN WHILE `.unknown` TOO, same rule as Pro Video Formats: the probe lands a
+                // few ms after launch, and flashing the item on screen and removing it on every
+                // launch of a machine that HAS the runtime is worse than appearing a moment late on
+                // one that does not.
+                //
+                // ⚠️ KEYED ON `runtimePresence`, NOT `runtimeAvailable`. The latter is a Bool that
+                // is `false` until something calls `refreshRuntimeStatus()`, which does not happen
+                // at launch by design — so it would show this item on EVERY machine until the user
+                // visited Settings. See NDIService.runtimePresence.
+                if ndi.runtimePresence == .notInstalled {
+                    Button("Install NDI Runtime…") {
+                        NSWorkspace.shared.open(NDIService.runtimeInstallURL)
+                    }
+                }
+                // Same rule as the NDI item above — offered only when we know it is missing,
+                // hidden while `.unknown`. The two are deliberately identical in shape: these are
+                // the app's only two "you need this" menu items, and one rule applied to both
+                // beats a rule each.
+                //
+                // MEASURED that the conditional works at all — see `proVideo`'s declaration for
+                // why the observed property must exist. The commands closure evaluates with
+                // `.unknown` and then RE-EVALUATES once the probe lands, confirmed in both
+                // directions: `.unknown` → `.installed` on this machine, and `.unknown` →
+                // `.notInstalled` with the probe pointed at a missing directory.
+                if proVideo.availability == .notInstalled {
+                    Button("Download Pro Video Formats…") {
+                        // Same URL the Preferences button opens — ProVideoWorkflow.downloadURL is
+                        // the single source of truth, exactly as NDIService.runtimeInstallURL is
+                        // for the item above. Not duplicated here.
+                        NSWorkspace.shared.open(ProVideoWorkflow.downloadURL)
+                    }
                 }
                 // In the app menu and NOT behind a debug gate: the people who need it are the
                 // testers, and they are on whichever configuration we shipped them.

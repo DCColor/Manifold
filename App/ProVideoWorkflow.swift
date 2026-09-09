@@ -47,6 +47,27 @@ final class ProVideoWorkflow: ObservableObject {
 
     private var registration: Task<Void, Never>?
 
+    /// Apple's download page for Pro Video Formats — the Preferences row's button. Analogous to
+    /// `NDIService.runtimeInstallURL` and `DeckLinkService.driverInstallURL`.
+    ///
+    /// ⚠️ **WE DO NOT SHIP THIS PACKAGE AND MUST NOT APPEAR TO.** It is Apple's, it is installed by
+    /// the user, and the only thing Manifold does is open the page. VERIFIED 2026-09-09: the older
+    /// `support.apple.com/kb/DL2100` redirects here, and `support.apple.com/downloads/…` lands on a
+    /// generic docs page rather than this one.
+    static let downloadURL = URL(string: "https://support.apple.com/en-us/106396")!
+
+    /// Re-probe the plug-in directory. Called when Settings appears, for the same reason the NDI
+    /// and DeckLink rows re-detect there: the row should be current rather than as-of-launch.
+    ///
+    /// ⚠️ **THIS UPDATES THE DISPLAY, NOT THE PROCESS.** Registration is per-process and already
+    /// happened; a package installed mid-session is NOT usable until relaunch. The row says so.
+    func refresh() {
+        Task.detached(priority: .utility) {
+            let found = Self.probeInstalledBundles()
+            await MainActor.run { self.availability = found }
+        }
+    }
+
     /// The plug-in directory. Not a search path — this is the single location the installer uses,
     /// and the bundles are loaded by VideoToolbox's and MediaToolbox's own machinery, not by us.
     private static let pluginDirectory = "/Library/Video/Professional Video Workflow Plug-Ins"

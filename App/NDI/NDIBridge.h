@@ -93,6 +93,20 @@ NS_ASSUME_NONNULL_BEGIN
 /// Returns NO when the runtime is absent or too old to resolve a loader symbol.
 + (BOOL)loadRuntime;
 
+/// Whether the runtime DYLIB EXISTS ON DISK — a filesystem check only.
+///
+/// ⚠️ THIS IS NOT `loadRuntime` AND MUST NOT BE USED AS IF IT WERE. It does no `dlopen`, resolves
+/// no loader symbol, and — the part that matters — never calls `NDIlib_initialize()`. That is the
+/// whole reason it exists: `loadRuntime` stands the NDI library up (threads, discovery machinery),
+/// which is why `NDIService` says to call it lazily and NOT at app launch. This answers the much
+/// smaller question "is the package installed", cheaply enough to ask at launch, so a menu item can
+/// decide whether to offer the download.
+///
+/// ⚠️ It checks only the ABSOLUTE candidate paths. `loadRuntime`'s last candidate is the bare name
+/// `libndi.dylib`, which is a dyld search rather than a file, so a runtime reachable only that way
+/// reads as absent here. `loadRuntime` remains the authoritative answer to "can we use NDI".
++ (BOOL)runtimeFilePresent;
+
 /// Which loader symbol actually resolved ("NDIlib_v6_3_load" / "NDIlib_v6_load" /
 /// "NDIlib_v5_load"), or nil if none did. The installed 6.0.1 runtime exports only v5.
 @property (class, nonatomic, copy, readonly, nullable) NSString *loaderSymbol;

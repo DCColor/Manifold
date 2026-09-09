@@ -98,6 +98,27 @@ final class NDIService: ObservableObject {
     /// load. Main-thread only (SwiftUI observes it).
     @Published private(set) var runtimeAvailable: Bool = false
 
+    /// Whether the runtime is INSTALLED — three states, and the third is why this exists
+    /// alongside `runtimeAvailable`.
+    ///
+    /// ⚠️ **`runtimeAvailable` CANNOT ANSWER THIS AT LAUNCH AND MUST NOT BE ASKED TO.** It is a
+    /// `Bool` that defaults to `false` and is only set once something calls `refreshRuntimeStatus()`
+    /// — Settings opening, or the streaming UI appearing. So before then, "no runtime" and "nobody
+    /// has looked" are the same value, and a menu item keyed on it would offer to install NDI on
+    /// every machine at launch, including machines that have it.
+    ///
+    /// This is a filesystem presence check (`NDIBridge.runtimeFilePresent`) run once at launch. It
+    /// does NOT `dlopen` and does NOT call `NDIlib_initialize()`, so it does not violate the
+    /// lazy-load rule `runtimeAvailable` documents — that rule exists to keep NDI's machinery from
+    /// starting for users who never touch NDI, and nothing here starts it.
+    ///
+    /// ⚠️ **`runtimeAvailable` REMAINS THE AUTHORITATIVE ANSWER** to "can we use NDI". This one is
+    /// only good enough to decide whether to OFFER a download. A dylib can be present and unloadable
+    /// (too old to resolve a loader symbol), and only `loadRuntime()` knows.
+    enum RuntimePresence: Equatable { case unknown, installed, notInstalled }
+
+    @Published private(set) var runtimePresence: RuntimePresence = .unknown
+
     /// The loaded runtime's version string, or nil when unavailable. Main-thread only.
     @Published private(set) var runtimeVersion: String? = nil
 
@@ -256,6 +277,19 @@ final class NDIService: ObservableObject {
                 self.runtimeAvailable = available
                 self.runtimeVersion = version
             }
+        }
+    }
+
+    /// One filesystem probe at launch, off the main actor, so the app menu can decide whether to
+    /// offer the runtime download.
+    ///
+    /// ⚠️ DELIBERATELY NOT `refreshRuntimeStatus()`, WHICH IS DIRECTLY ABOVE AND MUST STAY LAZY.
+    /// That one calls `loadRuntime()`, which dlopens the runtime and calls `NDIlib_initialize()`.
+    /// This one only stats a file. See `runtimePresence` for why the `Bool` cannot serve here.
+    func probeRuntimePresenceAtLaunch() {
+        Task.detached(priority: .utility) {
+            let present = NDIBridge.runtimeFilePresent()
+            await MainActor.run { self.runtimePresence = present ? .installed : .notInstalled }
         }
     }
 

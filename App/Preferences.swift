@@ -1277,6 +1277,7 @@ struct SettingsView: View {
     // DeckLink driver + device presence for the "DeckLink" status row. Observed so the tri-state row
     // updates when refreshDevices() publishes (called from that section's .onAppear).
     @ObservedObject private var dl = DeckLinkService.shared
+    @ObservedObject private var pvf = ProVideoWorkflow.shared
 
     // @AppStorage here drives the picker and persists the choice, writing the SAME
     // "controlDisplayMode" key WindowChrome seeds each window from. This is currently the only
@@ -1379,7 +1380,17 @@ struct SettingsView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-                Button("Install NDI Runtime…") {
+                // ⚠️ PRESENT IN BOTH STATES, AND THAT IS WHAT MAKES THE CONDITIONAL MENU ITEM
+                // SAFE. The app-menu item is the "you need this" surface and hides once the
+                // runtime is there; this is the inspection-and-management surface, so the
+                // reinstall/update path does not disappear — it moves to where someone would look
+                // for it. Removing it here as well would strand anyone with a corrupt or outdated
+                // runtime.
+                //
+                // Worded for the state rather than one label for both: "Install" is wrong when it
+                // is already installed, and the difference is the whole reason the button is still
+                // here in that case.
+                Button(ndi.runtimeAvailable ? "Reinstall NDI Runtime…" : "Install NDI Runtime…") {
                     NSWorkspace.shared.open(NDIService.runtimeInstallURL)
                 }
                 Text("After installing the NDI runtime, relaunch Manifold to enable NDI sources.")
@@ -1415,12 +1426,89 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                // Pro Video Formats — Apple's optional professional codec package.
+                //
+                // ⚠️ THIS ROW IS WORDED DIFFERENTLY FROM NDI AND DECKLINK ON PURPOSE, AND THE
+                // DIFFERENCE IS NOT COSMETIC. Those two are ALL-OR-NOTHING: without the NDI
+                // runtime there is no NDI at all, without the Desktop Video driver there is no
+                // output at all, so "install this to use it" is the accurate sentence and orange
+                // is the accurate colour — the user has a missing thing they can go and fix.
+                //
+                // Pro Video Formats is ADDITIVE. Every format Manifold opens today opens without
+                // it. So the row says what the package ADDS and never what Manifold lacks, and it
+                // is GREY IN BOTH STATES — orange here would dress an optional extra up as a
+                // defect, which is the same misreading the DeckLink row avoids by using grey for
+                // "nothing is wrong with the software, there's just no card".
+                LabeledContent("Pro Video Formats") {
+                    switch pvf.availability {
+                    case .installed(let bundles):
+                        Text("Installed (\(bundles.count) components)")
+                            .foregroundStyle(.secondary)
+                    case .notInstalled:
+                        // Deliberately NOT orange. Nothing is broken.
+                        Text("Not installed")
+                            .foregroundStyle(.secondary)
+                    case .unknown:
+                        // The launch probe has not finished. Says so rather than guessing —
+                        // `.unknown` is a real state, not a synonym for absent.
+                        Text("Checking…")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                // Both states, same reasoning as the NDI button above — the menu item is
+                // conditional, so this is the surface that keeps the reinstall path reachable.
+                //
+                // "Download" rather than "Install" when absent, because unlike NDI's direct .pkg
+                // this opens Apple's support PAGE — the click gets you the installer, it does not
+                // start one. "Reinstall" when present, matching NDI, because that is the user's
+                // intent even though the first step is the same page.
+                if pvf.availability != .unknown {
+                    Button(pvf.availability == .notInstalled
+                           ? "Download Pro Video Formats…" : "Reinstall Pro Video Formats…") {
+                        NSWorkspace.shared.open(ProVideoWorkflow.downloadURL)
+                    }
+                }
+                switch pvf.availability {
+                case .installed:
+                    Text("Apple's optional package. Adds AVC-Intra, XAVC, IMX, DVCPRO HD, "
+                       + "uncompressed and ProRes RAW to the formats Manifold can open.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .notInstalled:
+                    Text("Apple's optional package. Adds AVC-Intra, XAVC, IMX, DVCPRO HD, "
+                       + "uncompressed and ProRes RAW to the formats Manifold can open. Every "
+                       + "format Manifold opens today works without it. Relaunch after installing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .unknown:
+                    EmptyView()
+                }
+                // ⚠️ TEMPORARY, AND IT MUST BE DELETED WHEN THE MXF DECODE ROUTING LANDS.
+                //
+                // As of today the plug-ins are REGISTERED but nothing routes to them for MXF:
+                // FrameEngine's `isMXF` branch goes straight to libav, and
+                // `MediaInspector.requiresLibavDecode` sends every DNx fourCC there too. So DNxHR
+                // 4:4:4 still renders green whether or not this package is installed, and a row
+                // that implied otherwise would be selling a fix the app has not shipped.
+                //
+                // The codecs listed above ARE genuinely enabled today — MEASURED: a v210 .mov goes
+                // from -12906 to a working decode with registration, and nothing routes it away.
+                // It is only the MXF/DNxHR half that is still pending, which is why this sentence
+                // is narrow rather than a blanket "not used yet".
+                Text("MXF and DNxHR files are decoded by Manifold itself and are not affected by "
+                   + "this package.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             // Detection is lazy; refresh when Settings opens so the rows are current. NDI is
             // relaunch-only; DeckLink card presence updates live via this re-enumeration.
             .onAppear {
                 NDIService.shared.refreshRuntimeStatus()
                 DeckLinkService.shared.refreshDevices()
+                // Display only — registration is per-process and already happened, so a package
+                // installed mid-session needs a relaunch. The caption says that.
+                ProVideoWorkflow.shared.refresh()
             }
 
             Section("DeckLink Output") {

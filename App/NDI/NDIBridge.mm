@@ -324,6 +324,17 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     return ok;
 }
 
++ (BOOL)runtimeFilePresent {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *path in NDICandidatePaths()) {
+        // Skip the bare "libndi.dylib" candidate — it is a dyld search path, not a file location,
+        // so there is nothing to stat. See the header for why that makes this a presence HINT.
+        if (![path isAbsolutePath]) continue;
+        if ([fm fileExistsAtPath:path]) return YES;
+    }
+    return NO;
+}
+
 + (NSString *)loaderSymbol { return gLoaderSymbol; }
 + (NSString *)runtimeVersion { return gRuntimeVersion; }
 + (NSString *)runtimePath { return gRuntimePath; }
