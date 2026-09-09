@@ -32,6 +32,47 @@ struct ManifoldApp: App {
         BuildInfo.logAtStartup()
         // D1: prove the DeckLink SDK links and the card is reachable — enumerate + log at startup.
         DeckLinkService.shared.logDevicesAtStartup()
+        // Opt this PROCESS in to Apple's professional-video-workflow plug-in decoders and format
+        // readers. See ProVideoWorkflow.swift for what it costs (12–15 ms, hence off the main
+        // actor) and why "we called it" is not the same as "they are installed".
+        //
+        // ⚠️ WHY HERE. The registration is documented as PER-PROCESS and must precede any file
+        // open. `init()` runs before the first scene body — and therefore before ContentView's
+        // stored property initialisers, which the licensing entry in docs/BUGS.md establishes run
+        // earlier than the scene's `.task` modifiers are even attached. So this is ahead of
+        // `.onOpenURL`, ahead of the Open dialog, and ahead of Open Recent: every route media can
+        // arrive by. It sits with the other two process-wide installs above for that reason.
+        //
+        // ⚠️ AND `init()` ALONE IS NOT THE ORDERING GUARANTEE, BECAUSE THE WORK IS OFF-MAIN.
+        // Starting early makes the race vanishingly unlikely; it does not make it impossible. The
+        // guarantee is `await ProVideoWorkflow.shared.ready()` on the open path, which is what
+        // actually orders registration before the first decode.
+        //
+        // ⚠️ THE HEADER'S NETWORK-FACING CAVEAT — DECIDED, NOT ASSUMED. Apple warns that opting in
+        // "is not recommended for network-facing applications such as web browsers, messaging
+        // clients, mail clients". Manifold is a QC tool and is squarely the intended audience, but
+        // it also carries NDI, WHEP, SRT and HLS, so the caveat is answered per transport rather
+        // than waved off. Registration is process-global: it cannot be scoped to the file path.
+        //
+        //   NDI   — STRUCTURAL. No VideoToolbox decoder is ever created. The NDI SDK hands back
+        //           CVPixelBuffers and NDIService converts them; there is no codec lookup to reach
+        //           a plug-in with.
+        //   SRT   — STRUCTURAL. The only decoder is LiveVideoDecoder, whose format description
+        //   WHEP    comes from CMVideoFormatDescriptionCreateFromH264ParameterSets — which can
+        //           only ever produce 'avc1', a codec built into VideoToolbox. The fourCC is
+        //           chosen by US from the transport's payload type and is never read off the wire,
+        //           so no stream can name a plug-in codec into existence. (SRTClient.swift's own
+        //           comment records that the access-unit builder is H.264-only by construction.)
+        //
+        //   HLS   — ⚠️ NOT STRUCTURAL, AND SAYING OTHERWISE WOULD BE FALSE. HLSClient plays
+        //           through AVPlayer, which selects a decoder from what the STREAM declares. With
+        //           the plug-ins registered process-wide, a manifest declaring a plug-in fourCC
+        //           could in principle reach one. What bounds it is narrower than structure: HLS
+        //           carries H.264/HEVC by spec, the URL is typed by the user rather than followed
+        //           from a document, and the plug-ins are Apple-signed bundles from an Apple
+        //           package. That is a real residual, accepted knowingly, and it is the thing to
+        //           re-examine if HLS ever starts following URLs it was not handed directly.
+        ProVideoWorkflow.shared.beginRegistrationAtLaunch()
     }
 
     var body: some Scene {
