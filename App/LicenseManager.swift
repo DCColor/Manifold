@@ -497,6 +497,101 @@ enum GateDecision {
     case undetermined
 }
 
+// MARK: - The launch path's off-actor Keychain facade
+
+/// One batched, off-main-thread gather for `LicenseManager.bootstrap`, plus the two follow-up calls
+/// its best-effort tail needs. THE ONLY CLIENT IS THE LAUNCH PATH.
+///
+/// ── WHY A WRAPPER, AND NOT AN `async` `KeychainStore` ────────────────────────────────────────
+///
+/// ⚠️ MARKING `KeychainStore.read` `async` WOULD HAVE DONE NOTHING. An `async` function with no
+/// suspension inside it runs on its CALLER's executor, so `read` declared `async` and called from
+/// `@MainActor bootstrap` would have gone on blocking the main thread exactly as before — while
+/// looking, in the diff, exactly like the fix. What relocates work is an executor change and
+/// nothing else.
+///
+/// Making `KeychainStore` itself `async`, or an `actor`, WOULD relocate the work — and would turn
+/// roughly a dozen call sites in `Preferences.swift` and `StreamBookmarksSheet.swift` into
+/// suspension points, several of which cannot `await` without themselves becoming `async`:
+/// `StreamBookmarkStore.add`, `.update`, `.delete`, `migratePassphrasesToKeychain`, and
+/// `connectURL`, which is a plain `static func` on the dial path. A button handler that writes a
+/// passphrase has no reason to be `async`. So `KeychainStore` stays exactly as it is — synchronous,
+/// three-way, correct — and this wrapper carries the one path that has to leave the main actor.
+///
+/// ── WHY A `DispatchQueue`, AND NOT AN `actor` OR `Task.detached` ─────────────────────────────
+///
+/// All three leave the main actor. Only this one is honest about what it does with the thread it
+/// lands on. `SecItemCopyMatching` is a SYNCHRONOUS, BLOCKING, CROSS-PROCESS call with no upper
+/// bound on its latency — the entire reason this change exists is that it can sit for seconds
+/// behind a keychain-unlock dialog. An `actor`'s executor and `Task.detached` both run on Swift's
+/// COOPERATIVE THREAD POOL, which holds roughly one thread per core and is explicitly not to be
+/// blocked; parking one of those on a modal dialog trades a main-thread stall for a pool-starvation
+/// hazard, which is a worse bug in a harder place to see. A dedicated queue blocks a thread that
+/// belongs to nobody else.
+///
+/// SERIAL rather than concurrent, because `securityd` serialises these requests anyway: a
+/// concurrent queue would buy no parallelism, and it would let two launches race the trial clock's
+/// read-modify-write.
+enum LicenseKeychain {
+    /// Everything one launch must read before it can decide anything — and NOTHING ELSE.
+    ///
+    /// ⚠️ THE ACTIVATION RECORD IS DELIBERATELY ABSENT. It is needed only on the licensed path, and
+    /// only for the machine-id restore and the durability migration — neither of which
+    /// `gateDecision` consults. Gathering it here would add a Keychain round trip to every trial
+    /// and unlicensed launch, which today make none, in order to save nothing. It is read in the
+    /// tail, after the publish.
+    struct LaunchRead: Sendable {
+        let key: KeychainRead
+        let trial: TrialStatus
+    }
+
+    private static let queue = DispatchQueue(label: "tools.graviton.manifold.keychain",
+                                             qos: .userInitiated)
+
+    /// The one place a `KeychainStore` call is allowed to leave the calling actor.
+    private static func offMainThread<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: work()) }
+        }
+    }
+
+    /// ⚠️ ONE GATHER, NOT ONE `await` PER READ. Every suspension point is a main-actor re-entry, and
+    /// SwiftUI can compose a frame at each one — so five of them would be five chances to render
+    /// half-decided licensing state, which is the flicker class this change exists to remove.
+    /// Everything the decision needs is read here, in a single hop, and `bootstrap` then runs its
+    /// whole decision tree on the main actor with no I/O left in it.
+    ///
+    /// ⚠️ `recordLaunchAndEvaluate` IS NOT A PURE READ. It stamps `trial.firstLaunch` and
+    /// `trial.lastSeen`, and it can set `trial.voided`. THE WHOLE FUNCTION MOVES HERE, WRITES
+    /// INCLUDED — this is not a read-gathering exercise. It is safe to call from this queue because
+    /// it is a nonisolated `enum` static that touches only `KeychainStore` and returns a value type.
+    static func gatherAtLaunch(keyAccount: String) async -> LaunchRead {
+        await offMainThread {
+            let key = KeychainStore.license.read(keyAccount)
+            // ⚠️ THE TRIAL IS NOT EVALUATED WHEN THE KEY READ WAS REFUSED. That is `bootstrap`'s
+            // existing rule, moved here intact, and it is load-bearing rather than an optimisation:
+            // the trial clock lives in the same keychain that just refused us, so evaluating it
+            // could only produce a second unknown — and `recordLaunchAndEvaluate` WRITES. Asking it
+            // to stamp a clock we were not allowed to read is precisely the tamper that putting the
+            // clock in the Keychain exists to prevent.
+            guard key.failureStatus == nil else {
+                return LaunchRead(key: key, trial: .unknown)
+            }
+            return LaunchRead(key: key, trial: TrialManager.recordLaunchAndEvaluate())
+        }
+    }
+
+    /// One read, off the main thread. For the tail only — the launch decision uses `gatherAtLaunch`.
+    static func read(_ account: String) async -> KeychainRead {
+        await offMainThread { KeychainStore.license.read(account) }
+    }
+
+    /// One write, off the main thread. Returns the raw `OSStatus`, like `KeychainStore.write`.
+    static func write(_ value: String, for account: String) async -> OSStatus {
+        await offMainThread { KeychainStore.license.write(value, for: account) }
+    }
+}
+
 // MARK: - LicenseManager (orchestrator + published state)
 
 @MainActor
@@ -636,8 +731,19 @@ final class LicenseManager: ObservableObject {
         }
         #endif
 
-        // ── 1. Read the stored key. UNCONDITIONALLY — no plist boolean gates this any more. ──
-        let keyRead = KeychainStore.license.read(kStoredKey)
+        // ── 1. ONE GATHER, OFF THE MAIN ACTOR. The stored key and the trial clock, in one hop. ──
+        //
+        // ⚠️ THIS IS THE ONLY I/O LEFT IN THIS FUNCTION, AND THAT IS THE POINT. It used to hold
+        // four to eight synchronous `securityd` round trips inline on the main actor, which meant
+        // the main run loop could not turn — so the first window never painted and the app looked
+        // hung rather than slow (docs/BUGS.md, 2026-09-09). Everything from here to the end of this
+        // function runs on the main actor against values already in hand: no second stall, and no
+        // moment in which a half-decided state can be composed into a frame.
+        //
+        // The key is read UNCONDITIONALLY — no plist boolean gates it, which is the ordering fix
+        // described above and is unchanged by this one.
+        let launch = await LicenseKeychain.gatherAtLaunch(keyAccount: kStoredKey)
+        let keyRead = launch.key
 
         if let status = keyRead.failureStatus {
             // ── HOLD. Change nothing, decide nothing, gate nobody. ──
@@ -657,8 +763,8 @@ final class LicenseManager: ObservableObject {
         }
         keychainFaultStatus = nil
 
-        // ── 2. Trial. Safe to evaluate now: the keychain answered us once already. ──
-        trial = TrialManager.recordLaunchAndEvaluate()
+        // ── 2. Trial. Evaluated inside the gather, and only because the key read answered. ──
+        trial = launch.trial
         if trial.unreadable {
             // The key read succeeded and the trial clock did not — a narrow window, but it means
             // the same thing and gets the same treatment.
@@ -671,8 +777,6 @@ final class LicenseManager: ObservableObject {
 
         // ── 3. The key is the authority. Verify it offline and let it restore the rest. ──
         if let key = keyRead.value, case .success(let payload) = LicenseCrypto.verify(licenseKey: key) {
-            let record = readActivationRecord()
-
             // A stored key that verifies means this install activated at some point: nothing else
             // can put a correctly signed key in this account. So activation is restored from the
             // signature, NOT from the plist — which is exactly the recovery the old order missed.
@@ -681,21 +785,20 @@ final class LicenseManager: ObservableObject {
             setActivated(true)
             setValidated(true)
 
-            // Machine id: the Keychain copy wins when there is one, so a lost plist stops minting
-            // a new id and burning a second machine slot.
-            if let stored = record?.machineId, !stored.isEmpty, stored != machineIdStore {
-                NSLog("[LICENSE] restored machine id from the Keychain (preferences copy was %@)",
-                      machineIdStore.isEmpty ? "missing" : "different")
-                machineIdStore = stored
-            }
-
-            migrateActivationRecordIfNeeded(existing: record)
-
             state = .licensed(type: licenseType.display)
             NSLog("[LICENSE] state: %@", state.summary)
 
+            // ── PUBLISHED. `gateDecision` CAN ANSWER, AND THE WINDOW CAN PAINT. ──
+            //
+            // ⚠️ EVERYTHING BELOW THIS LINE IS BEST-EFFORT AND IS DELIBERATELY AFTER THE PUBLISH.
+            // Neither the activation record nor the server revalidation is consulted by
+            // `gateDecision`, so neither has any business holding the first frame. The record
+            // reconcile alone was a Keychain read, a write and a read-back — three more round trips
+            // ahead of the window, for durability bookkeeping the user cannot see. Moving them here
+            // is most of the win on the licensed path.
+            await reconcileActivationRecord()
             // Best-effort revocation check. Only a definite "revoked" clears validation.
-            await refreshValidation()
+            await refreshValidation(key: key)
             return
         }
 
@@ -715,17 +818,53 @@ final class LicenseManager: ObservableObject {
 
     // MARK: - Activation record: read, and the one-way migration into it
 
-    private func readActivationRecord() -> ActivationRecord? {
-        let read = KeychainStore.license.read(kActivationRecord)
+    private func readActivationRecord() async -> ActivationRecord? {
+        let read = await LicenseKeychain.read(kActivationRecord)
         if let status = read.failureStatus {
             // Not fatal and not a hold: the key already verified, so we are licensed either way.
             // The record only carries machineId and display fields.
+            //
+            // ⚠️ AND EVERY CALLER STILL FALLS THROUGH TO THE MIGRATION on this `nil`, exactly as
+            // before. A refused read is not evidence that no record exists, but the migration is
+            // additive and its write is gated on its own status, so attempting it costs nothing —
+            // and a keychain that recovers between the two calls gets its record written rather
+            // than waiting a whole launch.
             NSLog("[LICENSE] activation record unreadable (%@) — continuing on the key alone",
                   keychainStatusDescription(status))
             return nil
         }
-        guard let json = read.value else { return nil }
-        return ActivationRecord.decode(json)
+        return read.value.flatMap(ActivationRecord.decode)
+    }
+
+    /// The LAUNCH path's use of the record: read it, restore the machine id from it, migrate it.
+    ///
+    /// ⚠️ CALLED AFTER `state` IS PUBLISHED, NOT BEFORE, and the split into its own function is what
+    /// makes that possible. Nothing here feeds `gateDecision`: the key has already verified, so the
+    /// user is licensed and the gate is already open. This is durability bookkeeping, and it used to
+    /// sit between the Keychain and the first frame.
+    ///
+    /// ⚠️ `activate` DELIBERATELY DOES NOT CALL THIS — it calls `readActivationRecord` and the
+    /// migration directly, WITHOUT the machine-id restore below. It has just registered this
+    /// machine on the server under the CURRENT `machineId`; adopting a different id from an old
+    /// record immediately afterwards would leave the local id disagreeing with the one the server
+    /// now holds a slot for. The restore is a launch-time recovery and belongs only to launch.
+    private func reconcileActivationRecord() async {
+        let existing = await readActivationRecord()
+
+        // Machine id: the Keychain copy wins when there is one, so a lost plist stops minting
+        // a new id and burning a second machine slot.
+        //
+        // ⚠️ MAIN ACTOR, AND IT HAS TO BE. `machineIdStore` is `@AppStorage`, and `machineId` (used
+        // by the migration below) is A GETTER THAT MUTATES — it assigns a fresh UUID when the store
+        // is empty. It reads like a property and it is a write, which is exactly why nothing on the
+        // Keychain queue may touch it.
+        if let stored = existing?.machineId, !stored.isEmpty, stored != machineIdStore {
+            NSLog("[LICENSE] restored machine id from the Keychain (preferences copy was %@)",
+                  machineIdStore.isEmpty ? "missing" : "different")
+            machineIdStore = stored
+        }
+
+        await migrateActivationRecordIfNeeded(existing: existing)
     }
 
     /// Writes the durable activation record when it is missing or stale.
@@ -750,7 +889,7 @@ final class LicenseManager: ObservableObject {
     /// licensed — a build that has never heard of the activation record still finds the booleans
     /// it expects. There is no window, at any point in this function, in which a licence exists in
     /// neither store. A partial failure leaves the user exactly as they were.
-    private func migrateActivationRecordIfNeeded(existing: ActivationRecord?) {
+    private func migrateActivationRecordIfNeeded(existing: ActivationRecord?) async {
         let desired = ActivationRecord(activated: true,
                                        validated: licenseValidated,
                                        email: email,
@@ -770,7 +909,7 @@ final class LicenseManager: ObservableObject {
             return
         }
 
-        let status = KeychainStore.license.write(json, for: kActivationRecord)
+        let status = await LicenseKeychain.write(json, for: kActivationRecord)
         guard status == errSecSuccess else {
             NSLog("[LICENSE] ⚠️ activation record write failed (%@) — nothing removed, will retry next launch",
                   keychainStatusDescription(status))
@@ -778,7 +917,7 @@ final class LicenseManager: ObservableObject {
         }
 
         // Confirm it reads back before calling this migrated.
-        guard let echo = KeychainStore.license.read(kActivationRecord).value,
+        guard let echo = await LicenseKeychain.read(kActivationRecord).value,
               let decoded = ActivationRecord.decode(echo),
               decoded.machineId == desired.machineId else {
             NSLog("[LICENSE] ⚠️ activation record did not read back after a successful write — "
@@ -844,7 +983,7 @@ final class LicenseManager: ObservableObject {
             state = .licensed(type: licenseType.display)
             // Write the durable record now rather than waiting for the next bootstrap, so a crash
             // between activating and relaunching cannot leave the machine id living only in the plist.
-            migrateActivationRecordIfNeeded(existing: readActivationRecord())
+            await migrateActivationRecordIfNeeded(existing: await readActivationRecord())
             NSLog("[LICENSE] state: %@", state.summary)
         case .failure(let code):
             lastMessage = code.message
@@ -855,10 +994,23 @@ final class LicenseManager: ObservableObject {
 
     /// Periodic/at-launch revocation check. Network/ambiguous → leave state ALONE (offline users must
     /// not be punished). A definite `revoked` clears validation → the app gates on next usability read.
-    func refreshValidation() async {
+    ///
+    /// ⚠️ `key` IS PASSED IN ON THE LAUNCH PATH. `bootstrap` has already read `storedLicenseKey`
+    /// and still holds it, so re-reading it here was a second `securityd` round trip for an item
+    /// already in hand — and on a keychain that prompts, a second chance to prompt. The parameter
+    /// defaults to `nil` so a future non-launch caller still works, and that path reads off the
+    /// main thread like every other Keychain call the launch path makes.
+    func refreshValidation(key knownKey: String? = nil) async {
         // A refused read here is a no-op by design: we cannot revalidate what we cannot read, and
         // the one thing we must not do is treat that as grounds to clear anything.
-        guard licenseActivated, let key = KeychainStore.license.read(kStoredKey).value else { return }
+        guard licenseActivated else { return }
+        let key: String
+        if let knownKey {
+            key = knownKey
+        } else {
+            guard let read = await LicenseKeychain.read(kStoredKey).value else { return }
+            key = read
+        }
         switch await LicenseService.validate(key: key, machineId: machineId) {
         case .valid:
             setValidated(true)
