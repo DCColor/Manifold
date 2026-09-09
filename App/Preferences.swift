@@ -463,6 +463,68 @@ final class StreamBookmarkStore: ObservableObject {
         } else {
             bookmarks = []   // fresh install: no key. Distinct from the case above.
         }
+        // ⚠️ `migratePassphrasesToKeychain()` USED TO BE CALLED HERE, AND THE PLACEMENT WAS THE BUG
+        // — not the migration, which is unchanged below. See `migratePassphrasesAtLaunch`.
+        //
+        // `ContentView` holds `@ObservedObject private var bookmarks = StreamBookmarkStore.shared`
+        // as a STORED PROPERTY INITIALISER, so this `init` runs the first time `ContentView()` is
+        // evaluated — inside the `WindowGroup` content closure, on the main thread, BEFORE the
+        // scene's `.task` modifiers are attached and before the window has painted. A Keychain
+        // WRITE therefore sat ahead of the first frame, earlier in the launch than licensing, where
+        // no amount of restructuring `LicenseManager.bootstrap` could reach it.
+        //
+        // This `init` now does only what it claims: decode the list. No Keychain, no I/O beyond
+        // the one `UserDefaults` read above, nothing that can block a paint or raise a dialog.
+    }
+
+    /// Whether this process has already ATTEMPTED the passphrase migration.
+    /// See `migratePassphrasesAtLaunch`, which is the only thing that reads or writes it.
+    private var hasAttemptedPassphraseMigration = false
+
+    /// Runs the one-shot passphrase migration, once per process, from after the first frame.
+    ///
+    /// ── WHY THIS IS A DEFERRAL AND NOT AN `async` SPLIT ─────────────────────────────────────
+    ///
+    /// The alternative was to make the migration itself asynchronous — batch the Keychain writes
+    /// off the main actor, then return to mutate `bookmarks`. That was REJECTED, and the reason is
+    /// worth keeping. `migratePassphrasesToKeychain` is NOT PURE I/O: it maps over `bookmarks`,
+    /// which is `@Published` on an `ObservableObject`. An async version therefore has to carry the
+    /// correlation between "which write succeeded" and "which entry may be stripped" across a
+    /// suspension point — and getting that correlation wrong strips a passphrase whose write
+    /// FAILED, destroying the only copy of a credential the user may never have written down. That
+    /// is the one place in this line of work where a mistake loses user data, and it is not a risk
+    /// worth taking inside a change about launch responsiveness.
+    ///
+    /// Deferring buys the actual goal — the migration is off the launch path — without touching one
+    /// line of the migration's logic. Nothing needs it before the first frame: no stream passphrase
+    /// is read until connect, and `connectURL` is the only reader.
+    ///
+    /// ⚠️ IF THE APP IS QUIT BEFORE THIS RUNS, NOTHING IS LOST AND NOTHING CHANGES. An unmigrated
+    /// bookmark still carries its passphrase inline in `urlString`, exactly as it does today.
+    /// `connectURL` reads the Keychain, gets `.absent` — NOT `.failed`, so it does not refuse — and
+    /// returns the stored URL unchanged, which still has `?passphrase=` on it for `SRTClient.parse`
+    /// to lift back out. The stream dials and works. The migration simply runs at the next launch.
+    ///
+    /// ── ONCE PER PROCESS, NOT ONCE PER WINDOW ──────────────────────────────────────────────
+    ///
+    /// ⚠️ THE GUARD IS ON THE ATTEMPT, NOT ON SUCCESS, and that is deliberate. `.task` is attached
+    /// to the `WindowGroup`'s content, so it fires for EVERY window — without this, opening a second
+    /// deck would re-run the migration and, on a keychain that prompts, raise a second dialog for
+    /// something the user did not ask for. Guarding the attempt reproduces exactly the cadence the
+    /// `init` call had: one attempt per process, and a failure retried on the NEXT LAUNCH.
+    ///
+    /// ⚠️ AND THAT RETRY-FOREVER BEHAVIOUR IS CORRECT. A keychain that keeps refusing means this
+    /// runs at every launch and never converges. That is the price of the confirmed-write gate
+    /// below, which exists so a failed write can never destroy the only copy of a credential. It is
+    /// not a defect to be fixed by dropping the retry or by relaxing the gate.
+    ///
+    /// `@MainActor` because this class is main-thread only (see the type's own note) and `.task`
+    /// hands us a nonisolated closure — the annotation is what makes the hop explicit at the call
+    /// site rather than accidental.
+    @MainActor
+    func migratePassphrasesAtLaunch() {
+        guard !hasAttemptedPassphraseMigration else { return }
+        hasAttemptedPassphraseMigration = true
         migratePassphrasesToKeychain()
     }
 

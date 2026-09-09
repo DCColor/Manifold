@@ -4704,13 +4704,21 @@ need re-running.
 
 ---
 
-## ⚠️ CAUSE CONFIRMED 2026-09-09 — `LicenseManager.bootstrap` blocks the main actor for the whole of launch, and the trial gate's opening frame accuses a valid trial of being expired
+## ✅ FIXED 2026-09-09 — `LicenseManager.bootstrap` blocks the main actor for the whole of launch, and the trial gate's opening frame accuses a valid trial of being expired
 
-**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-09, from the code, against one observed stall.**
-**NOTHING DECIDED AND NOTHING BUILT.** **Found:** 2026-08/09, during the Open Recent work, as
-"the app came up with no window at all". **Blocks:** nothing today. **Invalidates:** the
-attribution recorded at the time — that this was the unsigned build's `SecurityAgent` prompt. That
-is true of the **trigger** and false of the **shape**, and the shape ships.
+**Status:** ✅ **FIXED 2026-09-09, in three separate changes.** Built clean; **not yet through a
+real session**, so this entry stays until it has been. **Found:** 2026-08/09, during the Open
+Recent work, as "the app came up with no window at all". **Invalidates:** the attribution recorded
+at the time — that this was the unsigned build's `SecurityAgent` prompt. That is true of the
+**trigger** and false of the **shape**, and the shape ships.
+
+> ⚠️ **THE DIAGNOSIS BELOW IS PRESERVED IN THE PRESENT TENSE AND NO LONGER DESCRIBES THE CODE.**
+> It is kept because it is what makes a regression recognisable — the shapes it names are the ones
+> to watch for coming back. **What actually landed, and why each route was chosen over its
+> alternative, is at the end under "✅ WHAT LANDED".** Read that before acting on anything here.
+>
+> ⚠️ **AND READ "WHAT IS STILL TRUE" IN THAT SECTION.** This did not make the Keychain fast. The
+> stall is not fixed and cannot be; what changed is where it lands.
 
 ### What was observed, and what was derived — kept apart
 
@@ -4901,10 +4909,210 @@ thread, holding the first window's paint. The same judgement, applied consistent
 the launch path far more strongly than it argued against the sheet — a prompt on a pencil click is
 at least attributable by the user; one before the first window is not.
 
-### Nothing is decided
+### ~~Nothing is decided~~ — SUPERSEDED 2026-09-09
 
-This entry records what was observed, what was derived, and what it invalidates. It proposes no
-route and no change to `bootstrap`, `KeychainStore`, `isUsable`, or the migration. Two defects are
-recorded here on purpose — the **blocking** and the **gate's opening frame** — because they are
-independent, and a fix that only moves the keychain call off the main actor closes the first and
-leaves the second exactly where it is.
+The original entry proposed no route. Three changes were then made, in the order below. Two defects
+were recorded here on purpose — the **blocking** and the **gate's opening frame** — because they are
+independent, and a fix that only moved the Keychain call off the main actor would have closed the
+first and left the second exactly where it was. ⚠️ **Worse than left alone: it would have made the
+second one VISIBLE.** That is why the order matters and why it is recorded.
+
+---
+
+## ✅ WHAT LANDED, 2026-09-09 — three changes, in this order
+
+Three changes and not one. They are independent in mechanism, in affected population, and in blast
+radius, and bundling them would have put a credential-losing risk inside a commit about launch
+speed.
+
+### 1 — The gate's fourth state (FIRST, and the order is the whole point)
+
+⚠️ **THIS HAD TO LAND BEFORE THE ASYNC WORK, NOT AFTER.** Today the trial-ended frame was
+constructed and never seen, because the main actor never turned the run loop to paint it. Making
+the Keychain call async paints the window immediately — and what it would paint, for every trial
+user, is that accusation, held for exactly as long as the Keychain is slow. Fixing the blocking
+first would have shipped a regression more visible than the bug it fixed, to precisely the users
+the fix existed for.
+
+**Built:** `LicenseState` gained `case indeterminate` as the initial value of `state`; `trial` now
+initialises to `TrialStatus.unknown` instead of `TrialStatus(active: false, daysRemaining: 0,
+expired: true)`; and a new three-way `GateDecision { open, gated, undetermined }` is what
+`LicenseGate` reads.
+
+**⚠️ THE ROUTE NOT TAKEN, AND WHY.** The one-line version is `|| state == .indeterminate` inside
+`isUsable`, and it was rejected. `isUsable` answers *"is this user entitled to work?"* — every one
+of its clauses is a **reason to say yes**. "We have not looked yet" is not a reason to say yes; it
+is a refusal to answer. Putting it there would have pushed the exact collapse this change removes
+down one level, into the property every future caller reads, where it would be inherited silently.
+`isUsable` therefore keeps its two cases and is simply not consulted until it can be answered.
+
+This is `KeychainRead`'s own doctrine one layer up: absent and refused are different answers and
+must not collapse. The gate needed the same discipline applied to **time** — not-yet-answered is
+not an answer.
+
+**⚠️ THREE RENDER SITES, NOT ONE.** All three corrected:
+
+| site | what it did while undetermined |
+|---|---|
+| `LicenseGate` | rendered the opaque, hit-capturing `LicenseGateView` — the accusation itself |
+| `LicenseSettingsSection.statusRow` | final `else` rendered **"Trial expired"** in Settings |
+| the control block under it | fell into its `else` and offered **"Deactivate on this machine"** — proposing to tear down a licence never confirmed to exist. Needed a third branch rendering neither control, not a clause on the first |
+| `DiagnosticsExport.LicenseContext` | wrote a confident, wrong **`TRIAL EXPIRED`** into a tester's diagnostics file — a support artefact that reads as evidence |
+
+That last row is why this change was **independently correct before any async work**: the
+diagnostics path could already produce the false claim with the blocking still in place.
+
+**What renders before `bootstrap` answers: nothing.** Not a spinner, not a "Checking your
+license…" line, not the gate. Most launches resolve in milliseconds, so any such affordance would
+flash on every one of them to serve the rare slow case, and would turn an ordinary launch into a
+visible licensing interrogation. The app renders, ungated; the gate appears only on a *determined*
+negative. Settings is the one place that gets a neutral "Checking…" line, because a
+`LabeledContent("Status")` has to say something and it is a window the user deliberately opened.
+
+**⚠️ `.undetermined` LEAVES THE APP CONTENT ENABLED, DELIBERATELY.** `LicenseGate` drives
+`.disabled()` from the same decision, so launch is briefly interactive before any verdict exists.
+The alternative buys nothing — an empty deck with no file open has nothing to misuse — and costs a
+real hazard: a `bootstrap` that never returns would leave the app permanently dead, every control
+disabled, with no gate on screen to say why. It is also the call `isUsable` already makes one
+clause up, where a **refused** read fails open; not-yet-asked is a strictly weaker claim than
+could-not-read and cannot warrant a harsher response.
+
+### ⚠️ THE INVARIANT THIS CREATED — read before adding an early return to `bootstrap`
+
+`state` now doubles as the **"has bootstrap answered?"** flag. That was deliberate: every exit path
+in `bootstrap` already assigns `state` before returning, so the invariant is
+**not `.indeterminate` ⟺ bootstrap has answered**, with one source of truth. A separate `Bool`
+would be a second fact about the same thing, and two facts can disagree.
+
+**The cost is that it fails silently.** An early return added to `bootstrap` later that leaves
+`state` as `.indeterminate` does not crash, does not log, and does not gate. It leaves the app
+**ungated forever, with no gate on screen to explain it** — indistinguishable, from the outside,
+from a working unlicensed launch. Any new `return` in that function must assign `state` first. The
+obligation is documented on the property itself.
+
+### 2 — The blocking
+
+**Built:** a new `LicenseKeychain` — a nonisolated `enum` facade over the **unchanged**
+`KeychainStore`, dispatching to a dedicated **serial `DispatchQueue`**. `bootstrap` now does one
+batched off-actor gather, publishes state, and only then runs its best-effort tails.
+
+**⚠️ MARKING THE METHODS `async` WOULD HAVE DONE NOTHING.** An `async` function with no suspension
+inside it runs on its **caller's** executor, so `read` declared `async` and called from
+`@MainActor bootstrap` would have gone on blocking the main thread exactly as before — while
+looking, in the diff, exactly like the fix. Only an executor change relocates work. Record this:
+it is the plausible non-fix that would have survived review.
+
+**⚠️ WHY A WRAPPER, NOT AN `async` OR `actor` `KeychainStore`.** Either would relocate the work,
+and both would turn roughly a dozen call sites in `Preferences.swift` and `StreamBookmarksSheet.swift`
+into suspension points — several of which cannot `await` without themselves becoming `async`
+(`StreamBookmarkStore.add`, `.update`, `.delete`, the passphrase migration, and `connectURL`, a
+plain `static func` on the dial path). A button handler that writes a passphrase has no reason to
+be `async`. `KeychainStore` stays synchronous, three-way and correct; the wrapper carries the one
+path that has to leave the main actor.
+
+**⚠️ WHY A `DispatchQueue`, NOT AN `actor` OR `Task.detached`.** All three leave the main actor;
+only the queue is honest about the thread it blocks. `SecItemCopyMatching` is synchronous,
+cross-process and unbounded — the whole premise is that it can sit for seconds behind an unlock
+dialog. An actor's executor and `Task.detached` both run on Swift's **cooperative thread pool**,
+roughly one thread per core and explicitly not to be blocked; parking one of those on a modal
+dialog **trades a main-thread stall for pool starvation**, which is a worse bug somewhere harder to
+see. Serial rather than concurrent, because `securityd` serialises anyway and a concurrent queue
+would let two launches race the trial clock's read-modify-write.
+
+**⚠️ ONE GATHER, NOT TWELVE AWAITS.** Every suspension point is a main-actor re-entry and SwiftUI
+can compose a frame at each one, so N awaits would be N chances to render half-decided licensing
+state — manufacturing the flicker class this work exists to remove. `gatherAtLaunch` returns one
+`Sendable` value and `bootstrap` then runs its entire decision tree on the main actor with **no I/O
+left in it**.
+
+**The three boundaries, in order:** gather off-actor → **publish `state`, which is where the gate
+unblocks** → then the tails, `reconcileActivationRecord()` and `refreshValidation(key:)`. Neither
+tail feeds `gateDecision`, so neither has any business holding the first frame; on the licensed
+path the record reconcile alone was a read, a write and a read-back sitting between the Keychain
+and the window.
+
+`recordLaunchAndEvaluate` moved **whole**, writes included — it stamps `firstLaunch`/`lastSeen` and
+can set `voided`, so this was never a read-gathering exercise. Its rule that the trial is not
+evaluated when the key read was refused moved with it intact; that rule is load-bearing, not an
+optimisation, because stamping a clock we were not allowed to read is the exact tamper the Keychain
+placement prevents.
+
+**Also removed:** `refreshValidation` re-read `storedLicenseKey`, which `bootstrap` had already read
+and still held. It now takes the key as a parameter — one fewer `securityd` round trip and one
+fewer chance to prompt on every licensed launch.
+
+**Found while building:** `activate(key:)` was a second caller of `readActivationRecord()`. It must
+**not** get the machine-id restore — it has just registered this machine on the server under the
+*current* `machineId`, so adopting a different id from an old record would leave the local id
+disagreeing with the slot the server holds. The read was split back out so both call sites keep
+their exact prior semantics.
+
+**Left synchronous on purpose:** `activate`'s key write and `deactivate`'s deletes. Both are
+user-initiated button presses with the window already up and `isWorking` driving a spinner —
+attributable, expected, and outside the launch path.
+
+### ⚠️ WHAT IS STILL TRUE — this made launch RESPONSIVE, not FASTER
+
+**Do not read this entry as saying the stall is fixed.** It is not, and it cannot be from here.
+`securityd` still serialises. The calls take exactly as long as they always took. The
+`SecurityAgent` prompt on an unsigned build, and the unlock dialog on a locked login keychain,
+still appear whenever the conditions in the section above call for them — **every one of those
+conditions is still live.**
+
+What changed is where the dialog lands. An OS keychain dialog is a legitimate thing to show; it
+must not be shown *instead of* a window. It now arrives **on top of a live, painted app** the user
+can attribute it to, rather than behind a window that never existed. The failure mode moved from
+"the app is hung" to "the system is asking me for my keychain password" — which is the whole of the
+win, and it is worth having, but it is not speed.
+
+### 3 — The migration, deferred rather than made async
+
+**Built:** `migratePassphrasesToKeychain()` was removed from `StreamBookmarkStore.init` and is now
+called from a `.task` on the `WindowGroup` content, guarded to one attempt per process. **The
+migration's own body is byte-identical** — verified by diffing the function range.
+
+**⚠️ WHY DEFERRED AND NOT SPLIT.** The async route was the dangerous one. The migration is **not
+pure I/O**: it maps over `bookmarks`, which is `@Published` on an `ObservableObject`. An async
+version has to carry the correlation between *which write confirmed* and *which entry may be
+stripped* across a suspension point — and getting that correlation wrong **strips a passphrase
+whose write failed, destroying the only copy of a credential the user may never have written
+down.** That is the one place in this entire line of work where a mistake loses user data, and it
+was not worth taking inside a change about launch responsiveness. Deferring achieves the actual
+goal — the migration is off the launch path — without touching one line of its logic.
+
+**⚠️ THE CONFIRMED-WRITE GATE AND ITS NON-CONVERGENCE ARE UNTOUCHED.** A keychain that keeps
+refusing still retries at every launch, forever, and never converges. That is the **price** of the
+gate, which exists so a failed write can never destroy the only copy of a credential. It is not a
+defect and must not be "fixed" by dropping the retry or relaxing the gate.
+
+**Where the trigger went, and why that point is after the first frame.** `init` ran from
+`ContentView`'s **stored property initialiser** (`ContentView.swift:336`), i.e. inside the
+`WindowGroup` content closure, before the scene's `.task` modifiers were attached at all — earlier
+in launch than licensing, which is why no restructuring of `bootstrap` could reach it. `.task`
+cannot run before the view appears, so the Keychain work can no longer precede the window's
+existence. ⚠️ Stated precisely, because the limit matters: `.task` means "after the view appears",
+**not** a hard "after the first pixel", and the migration is still synchronous on the main actor
+when it does run. For a legacy user that is a brief hitch after the window is up rather than a hang
+before it exists. That categorical change is the fix; sub-frame precision is not claimed. It is the
+same seam `UpdateChecker.checkAtLaunch` already uses, with the same stated contract.
+
+**The guard is on the ATTEMPT, not on success**, because `.task` fires per window — without it a
+second deck would re-run the migration and raise a second dialog on a prompting keychain. Guarding
+the attempt reproduces `init`'s exact cadence: one attempt per process, failures retried next
+launch.
+
+**If the app is quit before the deferred migration runs, nothing is lost and nothing changes.** An
+unmigrated bookmark still carries its passphrase inline in `urlString`. `connectURL` reads the
+Keychain, gets `.absent` — **not** `.failed`, so the refuse-to-dial path is not taken — and returns
+the stored URL unchanged, still carrying `?passphrase=` for `SRTClient.parse` to lift back out. The
+stream dials and works exactly as before. The migration runs at the next launch. That safety is
+load-bearing for the whole deferral, and it is the three-way `KeychainRead` distinction that
+provides it.
+
+### Still open
+
+- **Not yet through a real session.** Built clean; no launch has been measured against a slow or
+  locked keychain. The unsigned `.build-cc` prompt remains the cheapest way to reproduce the
+  condition on demand and is the obvious regression test.
+- **The `#if DEBUG` `LicenseCrypto.runRoundTripSelfCheck()`** still runs on the main actor at the
+  top of `bootstrap`, ahead of the gather, in every Profile build. Sub-millisecond, knowingly left.

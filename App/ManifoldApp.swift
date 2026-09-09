@@ -53,6 +53,14 @@ struct ManifoldApp: App {
                 // genuinely something newer — and silent on every failure, so a tester with no
                 // network sees nothing at all. Guarded to one check per process.
                 .task { await UpdateChecker.shared.checkAtLaunch() }
+                // One-shot migration of legacy inline SRT passphrases into the Keychain. A `.task`
+                // for the same reason the update check is one — it must never delay startup — and
+                // MOVED OUT OF `StreamBookmarkStore.init` for a stronger reason than that: the
+                // store is built by `ContentView`'s stored property initialiser, which runs before
+                // these modifiers are even attached, so a Keychain WRITE sat ahead of the first
+                // frame in a place no restructuring of the licensing path could reach. Guarded to
+                // one attempt per process, because this closure runs once per window.
+                .task { await StreamBookmarkStore.shared.migratePassphrasesAtLaunch() }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
