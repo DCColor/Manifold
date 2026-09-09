@@ -4701,3 +4701,210 @@ This entry records what was measured and what it invalidates. It does not propos
 staging, or a change to `requiresLibavDecode`. The working probes are in the session scratchpad
 (`reg.swift`, `mtreg.swift`, `final.swift`) and are three files of about forty lines each if they
 need re-running.
+
+---
+
+## ⚠️ CAUSE CONFIRMED 2026-09-09 — `LicenseManager.bootstrap` blocks the main actor for the whole of launch, and the trial gate's opening frame accuses a valid trial of being expired
+
+**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-09, from the code, against one observed stall.**
+**NOTHING DECIDED AND NOTHING BUILT.** **Found:** 2026-08/09, during the Open Recent work, as
+"the app came up with no window at all". **Blocks:** nothing today. **Invalidates:** the
+attribution recorded at the time — that this was the unsigned build's `SecurityAgent` prompt. That
+is true of the **trigger** and false of the **shape**, and the shape ships.
+
+### What was observed, and what was derived — kept apart
+
+**OBSERVED**, once, on a `.build-cc` unsigned build: the app launched with no window, and `sample`
+on the stalled process showed the main thread parked in
+`ManifoldApp.body → LicenseManager.bootstrap → KeychainStore.read → SecItemCopyMatching`.
+
+**DERIVED FROM THE CODE 2026-09-09**, everything below. The call counts, the isolation, the
+ordering and the gate's opening frame are read off the source and are checkable by inspection.
+**The signed-build stall conditions in the last section are predicted from the mechanism and have
+NOT been reproduced** — they are named so the shape is recognisable, not asserted as measured.
+
+### The isolation, which is the part that makes it straight-line blocking
+
+`KeychainStore.read` — `App/KeychainStore.swift:196` — is not `async`, has no completion handler
+and no queue. `SecItemCopyMatching` is a synchronous C entry point that does a cross-process round
+trip to `securityd` and blocks the calling thread until it answers.
+
+`KeychainStore` is a plain `struct` with no isolation annotation, in a file with none, so `read` is
+**nonisolated**. ⚠️ **That is not an escape hatch.** `nonisolated` changes where *async* functions
+run; a nonisolated *synchronous* function called from an actor-isolated context is an ordinary
+function call executed inline on that actor's thread. Nothing hops off.
+
+`bootstrap()` is `async`, which is misleading. `App/LicenseManager.swift:453` declares
+`@MainActor final class LicenseManager`, so `bootstrap` is main-actor-isolated. `.task` at
+`App/ManifoldApp.swift:50` takes a `@Sendable` nonisolated closure (`SWIFT_VERSION: "5.0"`,
+`project.yml:280`), so the task body starts off-main, hops **onto** the main actor at
+`await license.bootstrap()`, and does not leave it again until the first suspension point that
+executes.
+
+⚠️ **ON THE TRIAL PATH THERE IS NO SUCH POINT.** `bootstrap` spans `LicenseManager.swift:540-624`
+and contains exactly **one** `await` — `await refreshValidation()` at `:608` — inside the
+`if let key = keyRead.value, case .success` branch, which returns at `:609`. A user with no stored
+key never reaches it: step 1 reads `.absent` at `:550`, step 2 evaluates the trial at `:571`, step
+3's condition fails, step 4 runs, the function ends at `:623`. **From entry to return it is
+straight-line blocking main-thread work.**
+
+### Four to eight synchronous `securityd` round trips, before anything can paint
+
+| path | blocking `SecItem*` calls before the first `await` that executes |
+|---|---|
+| **trial / unlicensed** | **5** — `read(storedLicenseKey)` `:550`; then `TrialManager.recordLaunchAndEvaluate` `:571` reads `trial.firstLaunch`, `trial.voided`, `trial.lastSeen` and **writes** `trial.lastSeen`. Never suspends. |
+| **first-ever launch** | **4** — `read(firstLaunch)`, then two `set` calls, each a `SecItemUpdate` → `SecItemAdd` pair. |
+| **licensed** | **6–8** — the four above, plus `readActivationRecord` `:628`, optionally the record write + read-back (`:683`, `:691`), then `refreshValidation` at `:771` does **a fifth read of `storedLicenseKey`** — the item already read at `:550` — before `await LicenseService.validate` finally yields. |
+
+The `#if DEBUG` `LicenseCrypto.runRoundTripSelfCheck()` at `:541` runs ahead of all of it, on the
+main thread, in **every Profile build** — which per `CLAUDE.md` is every build cut to date. Cheap,
+but first in the queue.
+
+### Why "no window", not "a blank window"
+
+`.task` runs after the view-graph update, but "the view appeared" in SwiftUI's sense is not "the
+window is flushed to screen". `NSWindow` creation, `orderFront`, and the run-loop turns that
+actually paint the first frame are all main-thread work. Once the task body is on the main actor
+and never suspends, **the main run loop does not turn again until `bootstrap` returns.** The window
+is gated on the thread, not on any licensing state. The second `.task` —
+`UpdateChecker.checkAtLaunch()`, `ManifoldApp.swift:55` — is main-actor too and cannot start.
+
+### ⚠️ A SECOND, SEPARATE DEFECT: the gate's opening frame accuses a valid trial
+
+**This is not the blocking bug and would SURVIVE a fix that only made the keychain call async.**
+Record it as its own thing.
+
+`.licenseGate(license)` at `ManifoldApp.swift:49` reads `isUsable`:
+
+```swift
+var isUsable: Bool {
+    (licenseActivated && licenseValidated) || trial.active || keychainFaultStatus != nil
+}
+```
+
+At first render `trial` is still its **initializer value** — `LicenseManager.swift:475`,
+`TrialStatus(active: false, daysRemaining: 0, expired: true)` — and `keychainFaultStatus` is nil.
+So for anyone whose plist does not already say activated **and** validated, all three clauses are
+false and **the first composed frame is `LicenseGateView`: "Your Manifold trial has ended."** It
+stays that way until `bootstrap` assigns `trial` at `:571`.
+
+On a fast keychain nobody ever sees it, because it is the same run-loop turn. **On a slow one it
+tells a user in a perfectly valid trial that their trial is over — and does it while the app is
+unresponsive, so they cannot dismiss it, activate, or quit cleanly.** The false accusation and the
+hang arrive together and reinforce each other: the app looks like it has gated them and died.
+
+Note the irony to preserve when this is fixed: `LicenseGateView` already carries a careful
+`userFacingKeychainFault` branch so that a *refused* read never reads as an accusation. None of
+that helps here, because at this instant the read has not been refused — it has not been **made**.
+
+### ⚠️ THE UNSIGNED PROMPT IS THE CHEAPEST REPRODUCTION, NOT A SEPARATE PROBLEM
+
+The trigger is understood and is genuinely build-specific: on a `.build-cc` unsigned build the
+item's ACL does not list the calling binary, so `securityd` suspends the call and asks
+`SecurityAgent`, and the call blocks for as long as the dialog is up. Launching from Xcode, which
+signs with a stable development identity, never triggers it. Signing with the team certificate
+makes the partition list match — `teamid:8UQ7MDM87B`, documented at `KeychainStore.swift:136`.
+
+**That removes exactly one trigger. It does not make the call asynchronous, bounded or
+cancellable.** The latency of `SecItemCopyMatching` is `securityd`'s latency, and that is not
+something the app controls. Signed-build conditions that produce the same stall:
+
+- **A locked login keychain — the one most likely to reach a customer.** The write path sets
+  `kSecAttrAccessibleAfterFirstUnlock` (`KeychainStore.swift:173`), but that is an iOS
+  data-protection attribute; a generic-password item in `login.keychain-db` on macOS is governed by
+  the keychain's own lock state. The login keychain desynchronises from the login password after a
+  **password change, an MDM-driven reset, or a FileVault/admin recovery** — ordinary support
+  scenarios — and it locks on schedule with lock-after-inactivity or lock-on-sleep enabled. In
+  every one of those states the call raises an unlock dialog and blocks until it is answered. Same
+  stall, different dialog, signed build.
+- **First keychain access after login.** Unlocking `login.keychain-db` for the session is a real
+  credential operation — tens to hundreds of milliseconds under contention. Launch is exactly when
+  it is cold, and Manifold does four to eight of these back to back.
+- **Network home directory.** `login.keychain-db` lives in `~/Library/Keychains/`. On an AD/OD
+  mobile account or a home redirected over SMB/NFS, that file is on the network and `securityd`
+  reads it through the file system. Keychain latency inherits network latency; a hung mount blocks
+  without bound. Enterprise and education facilities are exactly the population with this setup.
+- **Login-time system load.** `securityd` is one process per session and serialises. Spotlight,
+  Time Machine, MDM agents and every other launch agent hitting it at once is the normal condition
+  at login, which is the normal time to launch an app.
+- **iCloud Keychain.** These items are not `kSecAttrSynchronizable` and do not sync, but enabling,
+  repairing, or joining the circle puts `securityd` into work that delays unrelated requests to the
+  same daemon. Lower probability; not zero.
+- **A damaged or oversized `login.keychain-db`**, and the repair path macOS runs against one.
+
+### ⚠️ WHAT THE THREE-WAY `KeychainRead` DESIGN CANNOT COVER
+
+`KeychainStore.swift` is careful and correct about a **refused** read: three cases, fail open, hold
+everything, explain it to the user. **All of that reasoning pays off only after the call returns.**
+There is no equivalent for a **slow** read, and there cannot be, because a synchronous call has no
+way to express "has not answered yet". From the main thread, refused and not-yet-answered are
+indistinguishable: one returns an `OSStatus`, the other simply never returns.
+
+The severity is entirely in the tail. The median signed launch on a healthy local keychain is a few
+milliseconds and invisible. What ships is a launch path with **no ceiling and no timeout**, whose
+worst case presents as a hang rather than a delay, with the trial-expired gate on top of it.
+
+### A second launch-time keychain caller, and it runs BEFORE licensing
+
+`App/ContentView.swift:336` is a **stored property initializer** on the `ContentView` struct:
+
+```swift
+@ObservedObject private var bookmarks = StreamBookmarkStore.shared
+```
+
+So `StreamBookmarkStore.shared` is constructed the first time `ContentView()` is evaluated, inside
+the `WindowGroup` content closure, on the main thread — **before the `.task` at
+`ManifoldApp.swift:50` is even attached.** `StreamBookmarkStore.init` ends with
+`migratePassphrasesToKeychain()` at `App/Preferences.swift:466`.
+
+That migration walks every bookmark and, only for ones whose persisted `urlString` still carries
+`?passphrase=`, calls `KeychainStore.streams.write` — `SecItemUpdate`, then `SecItemAdd` on
+not-found. So:
+
+- **Zero keychain calls for most users**, which is why it has never appeared in a sample.
+- **One to two synchronous round trips per legacy bookmark** for anyone who saved SRT URLs with
+  inline passphrases before the migration shipped — on the main thread, ahead of licensing. These
+  are **writes**, which prompt on a locked keychain exactly as reads do.
+- ⚠️ **Permanent for anyone whose keychain refuses.** The strip is gated on a confirmed write
+  (`Preferences.swift:484`) and a failure leaves the entry byte-for-byte alone, so the migration
+  **retries at every launch, forever, and never converges.** That gate is right — it exists so a
+  failed write cannot destroy the only copy of a credential — but it means a broken keychain buys a
+  permanent launch cost rather than a one-time one.
+
+The stream passphrases **themselves are read lazily, on connect, not at launch**:
+`StreamBookmarkStore.connectURL(for:)` at `Preferences.swift:852` is the only read of
+`KeychainStore.streams` and it is on the dial path. The bookmark *list* is eager; the secrets are
+not.
+
+Everything else is clean: `DiagnosticsExport.presence` (`:646`) reads three accounts on
+user-initiated export only; `activate` / `deactivate` are user-initiated.
+
+**So launch touches the keychain in two subsystems, both on the main thread, in this order:**
+`StreamBookmarkStore`'s migration (usually zero calls, non-zero for legacy users, **writes**), then
+`bootstrap`'s four to eight.
+
+### ⚠️ THE APP ALREADY MADE THIS JUDGEMENT, IN THE OTHER DIRECTION, AND WROTE IT DOWN
+
+`App/StreamBookmarksSheet.swift:391` deliberately **declines** a keychain read. It shows the
+passphrase-removal control for every SRT bookmark without first checking whether one is stored,
+and the comment states the reason:
+
+> ⚠️ SHOWN FOR EVERY SRT BOOKMARK, WITHOUT FIRST CHECKING WHETHER ONE IS STORED. The obvious gate —
+> `KeychainStore.streams.get(id) != nil` — is a Keychain READ, and these items live in the
+> ACL-guarded file keychain (verified: they are in login.keychain-db), where a read can raise an
+> authorization prompt. A password dialog appearing because someone clicked a pencil would make the
+> app feel like it was doing something it had not been asked to do.
+
+It accepted a redundant `SecItemDelete` rather than take a synchronous keychain read on a UI path,
+**to avoid a prompt on a pencil click.** The launch path takes four to eight of them, on the main
+thread, holding the first window's paint. The same judgement, applied consistently, argues against
+the launch path far more strongly than it argued against the sheet — a prompt on a pencil click is
+at least attributable by the user; one before the first window is not.
+
+### Nothing is decided
+
+This entry records what was observed, what was derived, and what it invalidates. It proposes no
+route and no change to `bootstrap`, `KeychainStore`, `isUsable`, or the migration. Two defects are
+recorded here on purpose — the **blocking** and the **gate's opening frame** — because they are
+independent, and a fix that only moves the keychain call off the main actor closes the first and
+leaves the second exactly where it is.

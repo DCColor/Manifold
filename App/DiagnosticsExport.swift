@@ -632,6 +632,16 @@ enum LicenseContext {
         for account in ["storedLicenseKey", "activationRecord", "trial.firstLaunch"] {
             out.append("    \(account.padding(toLength: 17, withPad: " ", startingAt: 0)): \(presence(account))")
         }
+        // ⚠️ THE FIELDS ABOVE ARE INITIAL VALUES UNTIL BOOTSTRAP HAS ANSWERED, and an export can
+        // reach this before it has. This is why the fourth state is worth having even with the
+        // launch blocking still in place: `state` used to initialise to `.unlicensed` and `trial`
+        // to `expired: true`, so an unbootstrapped manager wrote a confident, wrong "TRIAL EXPIRED"
+        // into a tester's diagnostics file — a support artefact that reads as evidence.
+        if case .indeterminate = mgr.state {
+            out.append("  ⚠️ BOOTSTRAP HAS NOT ANSWERED. Every field above is an INITIAL VALUE, not")
+            out.append("     a reading. Nothing here is evidence of this user's license state, and")
+            out.append("     in particular the trial line does NOT mean the trial has expired.")
+        }
         if let status = mgr.keychainFaultStatus {
             out.append("  ⚠️ KEYCHAIN FAULT: \(keychainStatusDescription(status))")
             out.append("     The license state above is CACHED, not read. Do not read this report as")

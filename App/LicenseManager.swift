@@ -427,6 +427,31 @@ struct ActivationRecord: Codable {
 /// report that we cannot tell apart either. That is what made the 0.6.0 → 0.6.1 report take a
 /// signature audit to answer.
 enum LicenseState: Equatable {
+    /// ⚠️ NOT AN ANSWER. `bootstrap` has not returned, so nothing has been read and nothing has
+    /// been decided. THE INITIAL VALUE OF `LicenseManager.state`, and the only case here that is
+    /// not a conclusion.
+    ///
+    /// ── WHY THIS CASE EXISTS ────────────────────────────────────────────────────────────────
+    ///
+    /// This is `KeychainRead`'s doctrine one layer up. That type exists because "there is no item"
+    /// and "there is an item and I was refused it" are different answers that must not collapse
+    /// into one `nil`. The same collapse was happening here, against TIME rather than outcome: the
+    /// other five cases are all conclusions, so a manager that had not yet asked anything still had
+    /// to publish one of them — and it published `.trialExpired`, by way of a `trial` property that
+    /// initialised to `expired: true`.
+    ///
+    /// That made the first composed frame, for every user not already cached as licensed,
+    /// `LicenseGateView`: "Your Manifold trial has ended." Nobody has ever seen it, because
+    /// `bootstrap` blocks the main actor for the whole of launch and the run loop never turns to
+    /// paint it (docs/BUGS.md, 2026-09-09).
+    ///
+    /// ⚠️ THAT IS PRECISELY WHY THIS LANDS BEFORE THE ASYNC WORK, NOT AFTER IT. Moving the Keychain
+    /// reads off the main actor makes the window paint immediately, and what it would paint is that
+    /// accusation — held on screen for exactly as long as the Keychain is slow, which means shown
+    /// to the users the async fix exists for and to nobody else.
+    ///
+    /// NOT-YET-ANSWERED IS NOT AN ANSWER. Nothing renders a verdict while this is the state.
+    case indeterminate
     case licensed(type: String)
     case trial(daysRemaining: Int)
     case trialExpired
@@ -439,6 +464,7 @@ enum LicenseState: Equatable {
     /// it is meant to be greppable across testers' reports.
     var summary: String {
         switch self {
+        case .indeterminate:            return "NOT YET DETERMINED (bootstrap has not answered)"
         case .licensed(let t):          return "LICENSED (\(t))"
         case .trial(let d):             return "TRIAL (\(d) day\(d == 1 ? "" : "s") remaining)"
         case .trialExpired:             return "TRIAL EXPIRED"
@@ -446,6 +472,29 @@ enum LicenseState: Equatable {
         case .unlicensed:               return "UNLICENSED (no key stored)"
         }
     }
+}
+
+/// What the gate should do RIGHT NOW. Three cases, because `isUsable` is a two-way answer and the
+/// question has three answers.
+///
+/// ── WHY THIS IS NOT A FOURTH CLAUSE ON `isUsable` ───────────────────────────────────────────
+///
+/// The one-line version of this fix is `|| state == .indeterminate` inside `isUsable`, and it was
+/// REJECTED. `isUsable` answers "is this user entitled to work?" — it is the licensing verdict, and
+/// every one of its clauses is a REASON TO SAY YES. "We have not looked yet" is not a reason to say
+/// yes; it is a refusal to answer. Making the verdict property return `true` for it would push the
+/// exact collapse this change removes down one level, into the property every future caller reads,
+/// where it would be inherited silently.
+///
+/// So `isUsable` KEEPS ITS TWO CASES and is simply not consulted until it can be answered. The
+/// three-way choice lives here, at the one place that has to make it.
+enum GateDecision {
+    /// Determined, and the user may work.
+    case open
+    /// Determined, and the user may not. THE ONLY CASE THAT RENDERS `LicenseGateView`.
+    case gated
+    /// Not determined — `bootstrap` has not answered. Renders NOTHING and disables NOTHING.
+    case undetermined
 }
 
 // MARK: - LicenseManager (orchestrator + published state)
@@ -471,12 +520,28 @@ final class LicenseManager: ObservableObject {
     @Published private(set) var licenseValidated = false
     @Published private(set) var email = ""
     @Published private(set) var licenseType: LicenseType = .unknown
-    @Published private(set) var trial = TrialStatus(active: false, daysRemaining: 0, expired: true)
+    /// ⚠️ INITIALISES TO `.unknown`, NOT TO `expired: true`. The old initial value asserted a
+    /// conclusion the manager had not reached: it claimed the trial was OVER before a single
+    /// Keychain item had been read, and both `isUsable` and `LicenseSettingsSection.statusRow`
+    /// believed it. `TrialStatus.unknown` already exists for exactly this, and its own doc comment
+    /// forbids folding it into either `active` or `expired` — this property only has to use it.
+    @Published private(set) var trial = TrialStatus.unknown
     @Published var isWorking = false          // an activate/validate call is in flight (drives UI)
     @Published var lastMessage: String?       // last user-facing error/status (drives UI)
 
-    /// What this launch resolved to. Logged once at bootstrap and read by `DiagnosticsExport`.
-    @Published private(set) var state: LicenseState = .unlicensed
+    /// What this launch resolved to — or `.indeterminate` until it has resolved to anything.
+    /// Logged once at bootstrap and read by `DiagnosticsExport`.
+    ///
+    /// ⚠️ `.indeterminate` IS ALSO THE "HAS BOOTSTRAP ANSWERED?" FLAG, deliberately, rather than a
+    /// second `Bool` sitting beside it. Every exit path in `bootstrap` assigns this before it
+    /// returns, so the invariant is "not `.indeterminate` ⟺ bootstrap has answered" and there is
+    /// ONE source of truth for it. A separate flag is a second one, and two facts about the same
+    /// thing can disagree.
+    ///
+    /// ⚠️ IF A FUTURE EDIT ADDS AN EARLY RETURN TO `bootstrap`, IT MUST ASSIGN THIS FIRST. A return
+    /// that leaves the state `.indeterminate` does not fail loudly — it leaves the app permanently
+    /// ungated with no gate on screen to explain it.
+    @Published private(set) var state: LicenseState = .indeterminate
 
     /// Set when the Keychain REFUSED a licence read (never when it merely had nothing).
     ///
@@ -511,8 +576,33 @@ final class LicenseManager: ObservableObject {
     /// would take a paying, licensed user and show them a wall, which is both wrong and unfixable
     /// from their side. Failing open costs us, at worst, an unlicensed user with a broken keychain
     /// getting an extra session; the banner tells them what happened either way.
+    ///
+    /// ⚠️ DO NOT CONSULT THIS BEFORE `bootstrap` HAS ANSWERED — use `gateDecision`, which is the
+    /// three-way form and the only thing the gate reads. Every clause below is a reason to say YES,
+    /// so `false` from this property means "we looked and the answer is no", NOT "we have not
+    /// looked". Those were the same value once and that is the bug this file's fourth state fixes.
     var isUsable: Bool {
         (licenseActivated && licenseValidated) || trial.active || keychainFaultStatus != nil
+    }
+
+    /// What the gate does right now — the three-way form of `isUsable`, and the ONLY thing
+    /// `LicenseGate` reads.
+    ///
+    /// ⚠️ `.undetermined` DELIBERATELY LEAVES THE APP CONTENT ENABLED. `LicenseGate` drives
+    /// `.disabled()` from this too, so a launch is briefly interactive before any licensing verdict
+    /// exists. THAT IS THE DECISION, NOT AN OVERSIGHT, and the reasoning is:
+    ///
+    ///   • It buys nothing. The window being enabled during an undetermined moment means an empty
+    ///     deck with no file open is clickable. There is nothing there to misuse.
+    ///   • It costs a real hazard to do the opposite. A `bootstrap` that never returns would leave
+    ///     the app permanently DEAD — every control disabled, no gate on screen to say why, and no
+    ///     way for the user to tell that from a crash.
+    ///   • It is the call `isUsable` already makes one clause up. A REFUSED Keychain read fails
+    ///     open, because we have no standing to lock anyone out on an unknown. Not-yet-asked is a
+    ///     strictly weaker claim than could-not-read, so it cannot warrant a harsher response.
+    var gateDecision: GateDecision {
+        if case .indeterminate = state { return .undetermined }
+        return isUsable ? .open : .gated
     }
 
     /// The user-facing explanation for a refused read, or nil when there is nothing to say.
@@ -834,7 +924,16 @@ struct LicenseSettingsSection: View {
             // The `keychainFaultStatus == nil` clause is the point: no key entry while the read is
             // merely refused. Offering the field would invite a re-activation that spends a second
             // machine slot to fix a problem that is not a licensing problem at all.
-            if !(license.licenseActivated && license.licenseValidated), license.keychainFaultStatus == nil {
+            if license.gateDecision == .undetermined {
+                // ⚠️ NEITHER CONTROL, and this needed a third branch rather than a clause on the
+                // first one. Falling into the `else` while undetermined was the worse half of the
+                // bug: it offered "Deactivate on this machine" — tearing down a licence we have not
+                // confirmed exists — to a user whose state had never been read. `keyEntry` is the
+                // milder error in the same family, inviting a re-activation that spends a second
+                // machine slot before anything has been established as wrong.
+                EmptyView()
+            } else if !(license.licenseActivated && license.licenseValidated),
+                      license.keychainFaultStatus == nil {
                 keyEntry
             } else {
                 Button("Deactivate on this machine", role: .destructive) { license.deactivate() }
@@ -846,7 +945,21 @@ struct LicenseSettingsSection: View {
     }
 
     @ViewBuilder private var statusRow: some View {
-        if license.keychainFaultStatus != nil {
+        if license.gateDecision == .undetermined {
+            // ⚠️ FIRST, AND AHEAD OF THE CACHED-LICENCE BRANCH. Every branch below states a
+            // CONCLUSION — licensed, in trial, expired — and none of them has been reached yet. The
+            // old final `else` meant an unbootstrapped manager rendered "Trial expired" HERE, in
+            // Settings, for the same reason the gate did.
+            //
+            // A neutral line is right here and wrong in the gate, and the difference is not taste:
+            // Settings is a window the user deliberately opened, and a `LabeledContent("Status")`
+            // has to say something. The gate is on screen at every launch and would flash. This
+            // branch is close to unreachable in practice — bootstrap resolves long before anyone
+            // reaches ⌘, — and exists so that it cannot lie if it is ever reached.
+            LabeledContent("Status") {
+                Text("Checking…").foregroundStyle(.secondary)
+            }
+        } else if license.keychainFaultStatus != nil {
             LabeledContent("Status") {
                 Text("Couldn’t read the Keychain — status unknown").foregroundStyle(.orange)
             }
@@ -943,13 +1056,29 @@ struct LicenseGateView: View {
 private struct LicenseGate: ViewModifier {
     @ObservedObject var license: LicenseManager
     func body(content: Content) -> some View {
-        ZStack {
+        // ⚠️ ONE READ, USED TWICE. `gateDecision` must not be evaluated separately for the
+        // `.disabled` and for the `if` — a single snapshot is what guarantees the veil and the
+        // disabling can never disagree inside one frame.
+        let decision = license.gateDecision
+        return ZStack {
             // Disable the whole app subtree when gated so its controls AND hidden keyboard-shortcut
             // buttons stop responding — the gate isn't just a visual veil.
-            content.disabled(!license.isUsable)
+            //
+            // `.undetermined` does NOT disable — see `LicenseManager.gateDecision` for why that is
+            // a decision and not an omission.
+            content.disabled(decision == .gated)
             // The gate is a ZStack SIBLING (not under the disabled subtree), so its own key field
             // and Activate button stay interactive — that's how the user gets out of the gate.
-            if !license.isUsable {
+            //
+            // ⚠️ `.gated` ONLY, NEVER `.undetermined`. `LicenseGateView` is opaque and
+            // hit-capturing, so putting it up before `bootstrap` has answered IS the accusation —
+            // there is no neutral way to show a black wall reading "your trial has ended".
+            //
+            // AND NOTHING ELSE GOES HERE EITHER: no spinner, no "Checking your license…" line. Most
+            // launches resolve in milliseconds, so any such affordance would flash on every single
+            // one of them to serve the rare slow case, and it would turn an ordinary launch into a
+            // visible licensing interrogation. What renders before the answer is the app.
+            if decision == .gated {
                 LicenseGateView().transition(.opacity)
             }
         }
