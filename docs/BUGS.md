@@ -4702,6 +4702,16 @@ staging, or a change to `requiresLibavDecode`. The working probes are in the ses
 (`reg.swift`, `mtreg.swift`, `final.swift`) and are three files of about forty lines each if they
 need re-running.
 
+> ⚠️ **ANSWERED 2026-09-09 — see *"the narrow MXF plan is VIABLE"* at the end of this file.** The
+> open question here was whether the decode step could be routed to the Avid decoder *without*
+> giving up libav's demuxing. It can: libav's `AVdh` packets decode through a hand-built
+> `VTDecompressionSession` bit-identically to `AVAssetReader`, with no AVFoundation container open.
+> **That entry also retires two of the false trails above.** "File provenance" and "the format
+> description" were both measured *before* registration, when nothing reached a decoder at all, so
+> neither carried information — and after registration the format description turns out to matter
+> enormously. **One atom, `ADHR`, is necessary and sufficient.** Do not read those two bullets as
+> settled; the rest of the list stands.
+
 ---
 
 ## ✅ FIXED 2026-09-09 — `LicenseManager.bootstrap` blocks the main actor for the whole of launch, and the trial gate's opening frame accuses a valid trial of being expired
@@ -5116,3 +5126,364 @@ provides it.
   condition on demand and is the obvious regression test.
 - **The `#if DEBUG` `LicenseCrypto.runRoundTripSelfCheck()`** still runs on the main actor at the
   top of `bootstrap`, ahead of the gather, in every Profile build. Sub-millisecond, knowingly left.
+
+---
+
+## ✅ MEASURED 2026-09-09 — the narrow MXF plan is VIABLE. libav's `AVdh` packets decode through a hand-built `VTDecompressionSession`, bit-identically, and ONE ATOM is what makes it work
+
+**Status:** ✅ **MEASURED 2026-09-09, two fixtures, bit-exact.** **NOTHING BUILT AND NOTHING
+CHANGED IN THE APP** — this is the design record for the work that follows, not a report of work
+done. **Found:** by re-running the `vtdnx.c` probe from the 2026-09-08 registration investigation
+with `VTRegisterProfessionalVideoWorkflowVideoDecoders()` called first. **Closes:** the open
+question left by *"⚠️ CAUSE CONFIRMED 2026-09-08 — VideoToolbox plug-in codecs … are OPT-IN PER
+PROCESS"* above, which recorded the cause and deliberately proposed no route. **Blocks:** nothing
+today.
+
+### The narrow plan, and the finding
+
+The plan under test: **keep the MXF path exactly as it is** — libav demuxing, range detection,
+captions, audio tracks, geometry — and **route ONLY the decode step** to the Avid decoder, and only
+for the profile libav cannot handle. That needs compressed packets from libav to reach a VT session.
+
+**They do.** Compressed `AVdh` packets demuxed by libav from the original MXF reach a hand-built
+`VTDecompressionSession` and decode **bit-identically to `AVAssetReader`** — max |Δ| = 0, mean
+|Δ| = 0.00000, **0.0000 % differing samples on every plane of both fixtures** — with **no
+AVFoundation container open anywhere in the path**. `x420` can be requested and is delivered, which
+is [the app's existing decode contract](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift)
+unchanged. Sustained decode runs at **42 fps on 4K 444 12-bit including the SMB read**.
+
+⚠️ **The cost the alternative route would have carried is therefore NOT incurred.** Opening the
+whole container through AVFoundation would have cost the range tag and the ANC captions. Nothing in
+this path opens the container through AVFoundation, so nothing is lost.
+
+### The measurement
+
+Both fixtures on `//10.25.2.125/DCCOLOR` over SMB. Frame index 10 in both cases; the libav packet
+PTS and the `AVAssetReader` sample PTS were **asserted equal before any pixel was compared**
+(0.4171 s on both files, both paths). Reference and test decode ran **in the same process**, both
+asked for `kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange`.
+
+| fixture | codec | libav | packet | result vs `AVAssetReader` |
+|---|---|---|---|---|
+| `Mixed Captions.mxf` (5.26 GB, 30.030 s) | DNxHR **444 12-bit**, `ACT=1` | `profile=5`, `bits_per_raw=12` | 7,286,784 B | **max \|Δ\| = 0, both planes** |
+| `OP1A Test.mxf` (1.46 GB, 16.642 s) | DNxHR **HQX 422 10-bit** | `profile=4`, `bits_per_raw=10` | 3,641,344 B | **max \|Δ\| = 0, both planes** |
+
+⚠️ **The 444 fixture is the one that matters, because libav is known-incorrect on it.** libav prints
+`Unsupported: variable ACT flag.` and renders green and magenta; this path renders natural colour
+and is bit-identical to the decoder that `docs/mxf-fixtures/README.md` already treats as the
+reference. **So this is a correctness fix, not a performance one** — the same conclusion the
+registration entry reached, now established for a route that keeps libav demuxing.
+
+Decoded 10-bit code ranges, identical across every arm that produced a frame:
+
+| fixture | plane0 (luma) | plane1 (chroma, interleaved) |
+|---|---|---|
+| `Mixed Captions.mxf` | `[78..908]` | `[273..596]` |
+| `OP1A Test.mxf` | `[63..940]` | `[401..630]` |
+
+### ⚠️ ONE ATOM IS NECESSARY AND SUFFICIENT — `ADHR`, 28 bytes, and nothing else
+
+Not `ACLR`, not `mtdt`, not `FormatName`, `Depth`, `CVFieldCount` or the three `CVImageBuffer…`
+colour keys. Apple's MXF reader hands out a format description with **seven** extension keys; six of
+them are decoration as far as the decoder is concerned.
+
+Measured, every row on `Mixed Captions.mxf`, all with codec `'AVdh'` and 3840×2160:
+
+| format-description extensions | `VTDecompressionSessionCreate` | decode |
+|---|---|---|
+| **NULL** | **0** | callback **−17696**, no frame — *and see the crash section* |
+| **empty dictionary** | **0** | callback **−17696**, no frame — *same* |
+| `FormatName` + `Depth` + `CVFieldCount` + the 3 colour keys, no atoms | **−12902** | — |
+| atoms = `{ACLR}` only | **−12902** | — |
+| atoms = `{mtdt}` only | **−12902** | — |
+| atoms = **`{ADHR}`** only | **0** | **bit-identical** |
+| atoms = `{ACLR, ADHR, mtdt}` | **0** | **bit-identical** |
+| all 7 keys, live off the `AVAssetTrack` | **0** | **bit-identical** |
+| all 7 keys, rebuilt from a binary plist | **0** | **bit-identical** |
+| **hand-built `{ADHR}`, 28 bytes, nothing from the container** | **0** | **bit-identical** |
+
+⚠️ **Note the two shapes of failure and do not confuse them.** An extensions dictionary that is
+NULL or empty **opens the session and then fails at decode**. One that is non-empty but lacks
+`ADHR` **fails at session create with −12902**. Session-create success is therefore *not* the gate
+to test a format description against.
+
+### The `ADHR` field table — derived by bisection, undocumented
+
+28 bytes: ASCII `"0002"` followed by six big-endian `uint32`.
+
+| fixture | libav `profile` | CID | f2 | f3 | f4 | f5 | f6 |
+|---|---|---|---|---|---|---|---|
+| `Mixed Captions.mxf` — DNxHR 444 12-bit | 5 | **1270** | 2 | 3 | `0x00010000` | 0 | 2 |
+| `OP1A Test.mxf` — DNxHR HQX 10-bit | 4 | **1271** | 0 | 2 | 0 | 0 | 1 |
+
+`CID` is the DNxHR compression ID and **maps 1:1 onto libav's `profile`** (5 → 1270 = 444,
+4 → 1271 = HQX). The semantics of f2, f3, f4 and f6 are **not known** — they were established as
+load-bearing by zeroing one field at a time and reading the failure:
+
+| field zeroed | on `Mixed Captions.mxf` | on `OP1A Test.mxf` |
+|---|---|---|
+| **CID** | **−12907** `kVTCouldNotCreateInstanceErr` at create | **−12907**, same |
+| **f2** | **−12910** `kVTVideoDecoderUnsupportedDataFormatErr` at create | already 0, not testable |
+| **f3** | **−12910** at create | **−12910** at create |
+| **f4** | create **0**, then callback **−12909** `kVTVideoDecoderBadDataErr` | already 0, not testable |
+| **f5** | already 0, not testable | already 0, not testable |
+| **f6** | **−12910** at create | **−12910** at create |
+
+⚠️ **`f4` is the trap.** It is the only field whose absence lets the session open and then fails at
+decode, and on the 444 fixture it is the only non-zero one of the four unknowns. A `CID`-only atom
+with everything else zeroed fails on **both** fixtures — **the compression ID alone is not enough**,
+which is the obvious wrong guess.
+
+### Provenance is decisively NOT the blocker, and the description can be synthesised
+
+The 2026-09-08 entry lists **file provenance** and **the format description** among its false
+trails. Both were measured *before* registration, when nothing reached a decoder at all, so neither
+result carried any information. **Re-established here, after registration:**
+
+**A completely hand-built `ADHR` — 28 bytes assembled in the probe, nothing lifted from the
+container, no Apple demuxer involved — decodes bit-identically on both fixtures.** Provenance is
+not a blocker. The description does not have to come from Apple's MXF reader; it can be
+**synthesised from libav's stream parameters**, which is what makes the narrow plan narrow.
+
+⚠️ **Two libav gaps to code around**, both confirmed on both fixtures:
+
+- **`extradata` is 0 bytes.** There is no ACLR/ADHR to lift; the atom must be constructed.
+- **`codec_tag` is `0x00000000`.** libav reports no fourCC for this stream, so **`'AVdh'` must be
+  supplied as a constant** rather than passed through from the container.
+
+### ⚠️ A WRONG FORMAT DESCRIPTION SEGFAULTS APPLE'S DECODER, AND THE WEDGE IS WORSE THAN THE CRASH
+
+**`DNXDecoder`'s `parse_metadata` calls `CFDictionaryGetValue` with no null check** and dies inside
+`VTDecoderXPCService`. Measured, `SIGSEGV`, `KERN_INVALID_ADDRESS at 0x0000000000000000`:
+
+```
+CoreFoundation   __CF_IS_OBJC
+CoreFoundation   CFDictionaryGetValue
+DNXDecoder       parse_metadata(opaqueCMFormatDescription const*, DNX_CompressedParams_t&,
+                                decodeColorMapping_t&, bool&)
+DNXDecoder       ???
+VideoToolbox     ???
+libxpc.dylib     _xpc_connection_call_event_handler
+```
+
+**24 crash reports on the build Mac on 2026-09-09**, all from this investigation, all from a NULL
+or empty extensions dictionary.
+
+⚠️ **VideoToolbox surfaces this as −17696 `kVTVideoDecoderUnknownErr`, which reads like a soft
+failure. It is not.** After it, **`VTDecompressionSessionInvalidate` blocks forever** in
+`xpc_connection_send_message_with_reply_sync` → `mach_msg2_trap`, waiting on a reply from a process
+that is already dead. **Measured at seven minutes at 0 % CPU** before the probe was killed; there is
+no evidence it would ever return.
+
+⚠️ **ANYTHING BUILT ON THIS PATH NEEDS THE DESCRIPTION RIGHT *AND* A WATCHDOG AROUND TEARDOWN.**
+Getting the description right is necessary but not sufficient as a safety argument: a future file
+whose parameters produce an atom the decoder rejects turns a decode failure into a hung teardown on
+a real user's machine. `−17696` should be treated as "the decoder process died", and session
+teardown should not be allowed to block a thread that matters.
+
+### Pixel formats — `x420` is available, and so is everything else asked for
+
+On a correct format description, every requested format was delivered, `Mixed Captions.mxf`:
+
+| requested | delivered | shape |
+|---|---|---|
+| `kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange` | **`x420`** | 3840×2160, 2 planes, stride 7680 |
+| `…422YpCbCr10BiPlanarVideoRange` | `x422` | 2 planes, chroma 1920×2160 |
+| `…444YpCbCr10BiPlanarVideoRange` | `x444` | 2 planes, chroma 3840×2160 stride 15360 |
+| `kCVPixelFormatType_32BGRA` | `BGRA` | packed |
+| `kCVPixelFormatType_422YpCbCr10` | `v210` | packed |
+| **nothing requested** | **`b64a`** | packed 16-bit RGBA — the decoder's native for 444 |
+
+Colour attachments come back tagged `ITU_R_709_2` on primaries, transfer and matrix.
+
+### Sustained decode, not one frame
+
+**60 consecutive libav packets pushed through ONE session** built from a synthesised `ADHR`, 4K
+DNxHR 444 12-bit off SMB: **60 decoded, 0 failed**, 1.42 s total, **23.7 ms/frame, 42.1 fps** —
+and that figure *includes* the SMB read and the libav demux, so the decode itself is faster. Above
+real time for 24000/1001. No session rebuild between frames, no format-description change.
+
+### ⚠️ WHAT IS UNTESTED — the `ADHR` semantics are pinned for two profiles only
+
+**HQX 422 10-bit and 444 12-bit. That is all.** `DNxHD` (`AVdn`) and the DNxHR **LB, SQ and HQ**
+profiles each need their own field values, and f2/f3/f4/f6 cannot be predicted from two samples —
+`CID` can, the rest cannot. That is bounded work, not open-ended, but it is work and it is not done.
+
+**The fallback is proven and needs no reverse engineering:** lifting the extensions off an
+`AVAssetTrack` decodes bit-identically, including **rebuilt from a binary plist**, so the atom does
+not even have to be used live. The cost is **a second container open** — AVFoundation opens the file
+alongside libav purely to read the description, then closes. That keeps the demux, captions, range
+and audio on libav and still costs nothing from the picture. It is the safety net if a profile's
+fields resist.
+
+### Unchanged constraints — neither is affected by this result
+
+1. **Pro Video Formats is a user-installable Apple package** (`com.apple.pkg.ProVideoFormats`) that
+   Manifold does not ship and cannot assume. **libav stays as the fallback**, and any design has two
+   paths for MXF from the outset. **The ACT defect stays unfixable on a machine without the
+   package** — a file can be correct on one machine and green and magenta on another with the same
+   build.
+2. **The network-facing caveat in the registration header still deserves its own decision.** The
+   header warns that opting in "is not recommended for network-facing applications". Manifold is a
+   QC tool and is the intended audience, but it also carries NDI, WHEP, SRT and HLS. Nothing here
+   changes that; it is still a deliberate declaration, not a free upgrade.
+
+### One loose thread, promoted to its own entry
+
+`ADHR` field 6 carries the range convention, and on `Mixed Captions.mxf` it says full where libav
+reports `AVCOL_RANGE_UNSPECIFIED`. It does **not** touch this plan — f6 is required for the session
+to open and is supplied verbatim either way — so it is not chased here.
+
+**It is a shipping defect and has its own entry:** *"an MXF whose range libav reports as UNSPECIFIED
+renders as legal range and the inspector positively claims Video (Legal)"*, above. ⚠️ **That entry
+also corrects a published row in
+[`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md):** `ACLR` is
+**not** the range tag — a matched full/legal fixture pair carries byte-identical `ACLR` atoms and
+differs only in `ADHR` f6.
+
+### The probe
+
+Four phases — `ref`, `try`, `cmp`, `seq` — in a single-file `clang -fobjc-arc` Objective-C source
+linking `libavformat`/`libavcodec`/`libavutil` plus `AVFoundation`, `VideoToolbox` and
+`MediaToolbox`. ⚠️ **The phase split is not tidiness; it is required.** A decoder crash wedges the
+process that caused it, so the reference capture, each format-description attempt and the comparison
+must run as separate processes or one bad variant takes the whole run with it. `try` sets
+`alarm(60)` and `_exit`s rather than calling `VTDecompressionSessionInvalidate`, for the same reason.
+
+⚠️ **It lives in the 2026-09-09 session scratchpad and is NOT committed**, same as the `reg.swift` /
+`mtreg.swift` / `final.swift` probes the registration entry names. If this work proceeds, the
+comparison belongs in [`docs/mxf-fixtures/`](mxf-fixtures/) alongside `mxfmeas.swift`, whose
+conventions it already follows — one file, built on demand, binary not committed, not in the app
+target.
+
+---
+
+## ⚠️ CAUSE CONFIRMED 2026-09-09 — an MXF whose range libav reports as UNSPECIFIED renders as legal range and the inspector positively claims "Video (Legal)". `.untagged` is unreachable on the libav path
+
+**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-09**, mechanism read off the source and confirmed against
+four fixtures. **NOT FIXED.** **Found:** incidentally, while measuring the DNxHR decode route — see
+*"the narrow MXF plan is VIABLE"* below. **Blocks:** nothing structurally; it is a live correctness
+defect on files that hit it. **Breaks:** the three-state honesty the app enforces everywhere else,
+on the one axis where a wrong answer changes pixels.
+
+⚠️ **READ THE PREMISE CORRECTION FIRST.** This entry was opened on the hypothesis that **`ACLR`
+carries the range convention and libav drops it**. **A controlled fixture pair disproved that.** The
+defect is real and the consequence is as stated, but the mechanism is not ACLR. See *"What ACLR is
+not"* below, which also **corrects a published row in
+[`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md).**
+
+### The chain
+
+1. **The MXF carries the range convention**, and Apple's MXF reader surfaces it in the format
+   description as **`ADHR` field 6** — measured, see the table below.
+2. **libav's `mxfdec` does not always surface it.** On `Mixed Captions.mxf` it reports
+   **`AVCOL_RANGE_UNSPECIFIED`** where `ADHR` f6 says full. On the other three fixtures libav does
+   report a range, correctly. ⚠️ **So this is not "libav never reads range" — it is "libav is
+   sometimes silent", which is harder to notice and is why it survived.**
+3. **`LibavFrameSource` collapses three states into two.**
+   [`LibavFrameSource.swift:192`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L192)
+   computes `isFullRange: range == AVCOL_RANGE_JPEG` into a `Bool`
+   ([`:43`](../Packages/ManifoldCore/Sources/ManifoldCore/LibavFrameSource.swift#L43)).
+   `UNSPECIFIED` and `MPEG` both become `false`, indistinguishably.
+4. **`FrameEngine` turns that `Bool` back into a three-state enum that can now only hold two of its
+   cases.** [`FrameEngine.swift:1794`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1794)
+   — `sourceRange = info.isFullRange ? .full : .videoLegal` — and
+   [`:1567`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1567) does the same
+   for the inspector string.
+
+⚠️ **`MediaInspector.SourceColorRange.untagged` ALREADY EXISTS AND IS UNREACHABLE ON THE LIBAV
+PATH.** [`MediaInspector.swift:337`](../Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift#L337)
+declares all three cases and displays them as `"Full"` / `"Video (Legal)"` / `"Untagged"`, and
+[`sourceColorRange(for:)`](../Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift#L363)
+returns all three from a `CMFormatDescription`. **The AVFoundation path reaches all three. The libav
+path cannot reach `.untagged` at all**, because the only route in is a `Bool`. Nothing is logged.
+
+### ⚠️ SO A FULL-RANGE DNxHR DELIVERY RENDERS AS LEGAL RANGE, SILENTLY
+
+[`updateEffectiveRange`](../Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift#L1737)
+under the default `.auto` override computes `isFull = (sourceRange == .full)`. A file whose range
+libav did not state therefore takes the legal path, **and the shader expands legal→full on codes
+that were already full** — the picture is wrong, not merely mislabelled.
+
+**And the metadata that would have said otherwise is in the container.** ⚠️ **This is NOT the ProRes
+case, where the range tag is genuinely absent from the file.** Here it is present in the MXF, it is
+present in the format description Apple's reader vends, and it is absent **only from the reader we
+use**. That distinction is the whole finding: an absent tag is a fact about the file, a dropped tag
+is a fact about us.
+
+### Measured — four fixtures, and the middle pair is a controlled experiment
+
+| fixture | codec | libav `color_range` | `ACLR` f1 | **`ADHR` f6** | what the app concludes |
+|---|---|---|---|---|---|
+| `TEST OMNISCOPE_FULL.mxf` | DNxHR HQX 10-bit | **2** `JPEG` (full) | 1 | **2** | `.full` — **correct** |
+| `TEST OMNISCOPE_LEGAL.mxf` | DNxHR HQX 10-bit | **1** `MPEG` (legal) | 1 | **1** | `.videoLegal` — correct |
+| `OP1A Test.mxf` | DNxHR HQX 10-bit | 1 `MPEG` (legal) | 1 | 1 | `.videoLegal` — correct |
+| `Mixed Captions.mxf` | DNxHR 444 12-bit | **0 `UNSPECIFIED`** | 2 | **2** | **`.videoLegal` — WRONG, and no `.untagged` available to say so** |
+
+⚠️ **`TEST OMNISCOPE_FULL.mxf` and `TEST OMNISCOPE_LEGAL.mxf` are the same content graded to the two
+range conventions, identical file size, and their format descriptions differ in EXACTLY ONE FIELD:
+`ADHR` f6, 1 → 2.** libav's range moves with it, 1 → 2. That pair is what identifies f6 as the range
+carrier, and it is why the identification does not rest on the 444 file.
+
+`ADHR` f6 was independently shown to be load-bearing by bisection — zeroing it fails
+`VTDecompressionSessionCreate` with `−12910 kVTVideoDecoderUnsupportedDataFormatErr`. See the
+narrow-plan entry's field table.
+
+### What `ACLR` is NOT — and a correction to a published document
+
+**`ACLR` does not carry the range convention.** `TEST OMNISCOPE_FULL.mxf` and
+`TEST OMNISCOPE_LEGAL.mxf` carry **byte-identical `ACLR` atoms** —
+`41434c52 30303031 00000001 00000000`, i.e. f1 = 1 — while being full and legal respectively. A
+field that does not change across a matched full/legal pair is not the range field. `ACLR` f1 = 2
+appears only on `Mixed Captions.mxf`, the only 4:4:4 12-bit fixture, so it plausibly tracks
+colour/subsampling; **that has not been established and is not chased here.**
+
+⚠️ **[`full-range-chroma-convention-findings.md`](full-range-chroma-convention-findings.md)'s summary
+table carries the row `Range tag (DNxHR/MXF): ACLR=1 (legal) … ACLR=2 (Resolve full)`. That row is
+contradicted by the OMNISCOPE pair and has been corrected in place**, with the measurement recorded
+there. It matters because that document is externally facing and prepared for technical review.
+
+### Why this is a defect and not a rounding of a display string
+
+The app enforces three-state honesty deliberately and in writing, everywhere the distinction exists
+— and this axis is the one where the third state is not cosmetic, because `.auto` acts on it:
+
+| precedent | the third state, and what it refuses to say |
+|---|---|
+| [`DeclaredPixelAspect`](../Packages/ManifoldCore/Sources/ManifoldCore/VideoMetadata.swift#L30) | `pasp 1:1` **is a declaration**; no `pasp` is an absence. Its own doc comment names `colorRange` as the same pattern — *"Untagged is not Video (Legal)"* |
+| [`LayoutConfidence`](../Packages/ManifoldCore/Sources/ManifoldCore/VideoMetadata.swift#L11) | `declared` / `inferred` / `undeclared` — a guess from channel count is marked as a guess |
+| [`CaptionDataPresence`](../Packages/ManifoldCore/Sources/ManifoldCore/CaptionPresence.swift#L48) | `unknown` is *"nobody looked"*; `measured(carrying: 0, …)` is *"we looked and found none"* |
+| [`KeychainRead`](../App/KeychainStore.swift#L41) | `.absent` is *"nothing is stored"*; `.failed` is *"something may be stored and we could not see it"* — and only `.absent` may be acted on |
+
+⚠️ **`DeclaredPixelAspect`'s comment cites this exact axis as settled precedent.** The rule is
+already written down and the libav path does not follow it. **Unspecified and legal are different
+answers**, and the inspector currently prints the second when it knows only the first — a positive
+claim about the file that the file never made, on a QC tool whose value is that its readings are
+literal.
+
+### The fix shape — recorded, not decided
+
+Two halves, and **the second is the one that is easy to skip**:
+
+1. **Read the range off the container the way the probe already reads `ADHR`.** The narrow-plan
+   probe parses `ADHR` out of the format description and reconstructs it byte-exactly; reading f6
+   for range is **the same class of work on the same atom**, not a new capability. ⚠️ Whether the
+   source should be Apple's format description (which needs the container opened by AVFoundation)
+   or libav's own MXF descriptor parsing is **not decided here**, and the two have very different
+   costs — see the narrow-plan entry's discussion of the second container open.
+2. **The three-state distinction has to survive into `isFullRange` rather than being collapsed at
+   the boundary.** ⚠️ **Fixing only half of this is worse than fixing neither**, because reading the
+   atom correctly and then funnelling it through a `Bool` reintroduces the same loss one layer
+   later, with the bug now harder to see. `StreamInfo.isFullRange: Bool` is the seam; the precedents
+   above all model the shape the replacement should take.
+
+### What is untested
+
+- **Breadth.** Four fixtures, all DNxHR, three HQX 422 10-bit and one 444 12-bit. **Whether libav's
+  `UNSPECIFIED` correlates with 4:4:4, with the ACT flag, with the authoring tool, or with none of
+  those, is unknown** — one silent file is not a pattern.
+- **`ADHR` f6 semantics beyond {1, 2}.** No other value has been observed.
+- **No mis-render has been reproduced end-to-end in the app.** The render consequence is derived
+  from `updateEffectiveRange` by inspection, and it is certain from the code, but the picture has
+  not been captured through the running app on a file that hits it. `Mixed Captions.mxf` is the
+  fixture that would do it.

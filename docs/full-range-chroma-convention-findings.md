@@ -150,10 +150,39 @@ Then export the *same* 75% red, **data levels: Full**, Rec.709, from Resolve (Pr
 | Chroma scale | 224 | 255 | ~261 (255×224/219) |
 | Renders 75% red R≈ | 191 | 190 | 191* |
 | Range tag (ProRes) | none | none | none |
-| Range tag (DNxHR/MXF) | ACLR=1 | — | ACLR=2 |
+| Range tag (DNxHR/MXF) | ~~ACLR=1~~ **see Addendum — ACLR is not the range tag** | — | ~~ACLR=2~~ **see Addendum** |
 | Distinguishable from metadata? | yes (vs full) | **no — same "full" tag as Resolve** | **no — same "full" tag as full-swing** |
 
 *\*The Resolve file renders ~191 only when decoded with the matching (Resolve) chroma scale; decoded full-swing (÷255) it renders ~195 (hot).*
+
+---
+
+## Addendum, 2026-09-09 — ⚠️ CORRECTION: ACLR is not the range tag, and the MXF range row above is wrong
+
+**This addendum corrects the `Range tag (DNxHR/MXF)` row of the summary table.** That row asserted `ACLR=1` for legal and `ACLR=2` for Resolve-full. **A controlled fixture pair disproves it.** The row has been struck through rather than silently edited, because it was published and may have been read.
+
+The measurement was incidental — it came out of routing DNxHR decode to Apple's Avid plug-in decoder, recorded in `BUGS.md` under *"the narrow MXF plan is VIABLE"*. `ACLR` and `ADHR` were read from the `SampleDescriptionExtensionAtoms` of the format description Apple's MXF reader vends; `color_range` from libav's `AVCodecParameters` on the same file.
+
+| fixture | libav `color_range` | `ACLR` f1 | **`ADHR` f6** |
+|---|---|---|---|
+| `TEST OMNISCOPE_FULL.mxf` — DNxHR HQX 10-bit | **2** = `AVCOL_RANGE_JPEG` (full) | **1** | **2** |
+| `TEST OMNISCOPE_LEGAL.mxf` — DNxHR HQX 10-bit | **1** = `AVCOL_RANGE_MPEG` (legal) | **1** | **1** |
+| `OP1A Test.mxf` — DNxHR HQX 10-bit | 1 = `MPEG` (legal) | 1 | 1 |
+| `Mixed Captions.mxf` — DNxHR 444 12-bit | **0** = `UNSPECIFIED` | 2 | **2** |
+
+**The first two rows are the same content graded to the two range conventions** — identical file size, same encoder, same profile. Their format descriptions differ in **exactly one field**: `ADHR` field 6, `1 → 2`. libav's range moves with it, `1 → 2`. Their `ACLR` atoms are **byte-identical**: `41434c52 30303031 00000001 00000000`.
+
+**So `ACLR` f1 does not distinguish full from legal.** It is 1 on a full-range file and 1 on the matching legal-range file. `ACLR` f1 = 2 occurs only on `Mixed Captions.mxf`, which is the only 4:4:4 12-bit fixture here, so it plausibly tracks colour or subsampling rather than range — **that is a guess and has not been established.**
+
+**The range carrier in the vended format description is `ADHR` field 6**, on this evidence. It is independently known to be load-bearing: zeroing it fails `VTDecompressionSessionCreate` with `−12910 kVTVideoDecoderUnsupportedDataFormatErr`.
+
+⚠️ **What this does NOT overturn.** The chroma-scale measurements in the body of this document stand — they are raw code values and do not depend on the range-tag row. What changes is only the claim about *which atom signals range in DNxHR/MXF*, and therefore the framing of question 4 and the last row of the summary table: for DNxHR/MXF the range tag is **not** absent the way it is for ProRes. It is present in the file, it is present in what Apple's reader vends, and the correction is that it lives in `ADHR`, not `ACLR`.
+
+### The consequence inside Manifold, recorded separately
+
+On `Mixed Captions.mxf` the container says full (`ADHR` f6 = 2) and libav reports `UNSPECIFIED`. Manifold's libav path computes `isFullRange = (range == AVCOL_RANGE_JPEG)`, so unspecified becomes legal, silently, and the picture is expanded legal→full on codes that were already full. **That is a shipping defect and it has its own `BUGS.md` entry** — *"an MXF whose range libav reports as UNSPECIFIED renders as legal range"* — including the fix shape and what remains untested. It is not repeated here.
+
+⚠️ **Four fixtures is not a survey.** Whether libav's `UNSPECIFIED` correlates with 4:4:4, with the ACT flag, with the authoring tool, or with none of those, is unknown.
 
 ---
 

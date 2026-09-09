@@ -121,3 +121,8 @@ docs/scrub-fixtures/hrprobe
 # same convention as the scrub fixtures — single-file script, built on demand, binary not committed.
 docs/mxf-fixtures/mxfmeas
 docs/mxf-fixtures/mxfmeas-out/
+docs/mxf-fixtures/vtdnxprobe
+# vtdnxprobe's ref-phase working directories: pkt.bin / pkt.plist / ext.plist / *.raw. Named by the
+# caller, so this covers only the two the README's examples use.
+docs/mxf-fixtures/mixed/
+docs/mxf-fixtures/op1a/
