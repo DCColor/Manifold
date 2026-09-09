@@ -401,6 +401,29 @@ public struct VideoMetadata: Equatable, Sendable {
         return "\(Int(d.width.rounded())) × \(Int(d.height.rounded()))"
     }
 
+    /// THE SHAPE OF THE ROW ABOVE, SPOKEN THE WAY COLOURISTS SPEAK IT — "1.78", "2.39". A decimal
+    /// to two places rather than a ratio, because that is the vocabulary: a grade is delivered at
+    /// 2.39, not at 1024:429, and "16:9" is the one form of it nobody says at a monitor.
+    ///
+    /// ⚠️ DIVIDED FROM `displaySize`, NOT FROM `width`/`height`, AND THE DIFFERENCE IS THE WHOLE
+    /// REASON THE ROW EXISTS. On a file with no `clap` and square pixels the two divisions agree
+    /// and the row is a convenience; on a file with either one they do NOT, and the encoded
+    /// division is the wrong answer — ARRI open-gate ProRes encodes 2944×2160 (1.36) and displays
+    /// 5760×2160 (2.67). Anyone reading a DAR wants the second number. Dividing the raster would
+    /// print a squeeze factor wearing an aspect ratio's label, on exactly the files the row is for.
+    ///
+    /// NIL WHERE THERE IS NO DISPLAY SIZE, so the inspector omits the row rather than inventing
+    /// one. That is not hypothetical: the libav/MXF path sets no `displaySize` at all (see
+    /// `FrameEngine.applyLibavMetadata` — `StreamInfo` carries neither transform, so the engine's
+    /// own `displaySize` there is the ENCODED size and the metadata's is left nil). Falling back to
+    /// `width`/`height` would restore the row on that path by printing the encoded aspect under a
+    /// display label — the precise lie described above, told on the path least able to detect it.
+    /// An absent row says "not established here"; a wrong number would not.
+    public var displayAspectRatioString: String? {
+        guard let d = displaySize, d.width > 0, d.height > 0 else { return nil }
+        return String(format: "%.2f", Double(d.width / d.height))
+    }
+
     /// TRUE when the drawn geometry differs from the encoded raster — i.e. when a transform is
     /// actually being applied and the two numbers are worth showing together. Compared with a
     /// half-pixel tolerance because presentation dimensions are floating point.

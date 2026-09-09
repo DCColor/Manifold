@@ -65,6 +65,21 @@ struct InspectorPanel: View {
                 if m.displayDiffersFromEncoded {
                     MetadataRow(label: "Display Size", value: m.displaySizeString)
                 }
+                // That row's shape, said out loud: 1.78, 2.39. Derived from `displaySize` — the
+                // number with the clean aperture and the pixel aspect ALREADY IN IT — and NOT from
+                // `width`/`height`, which on any file declaring either would give the encoded
+                // aspect instead (2944×2160 reads 1.36; the picture is 2.67). Those are the only
+                // files anyone consults a DAR row about, so the encoded division would be wrong
+                // exactly where it is asked.
+                //
+                // NOT under `displayDiffersFromEncoded`, unlike the row above: "Display Size" hides
+                // when it merely repeats the resolution, but a plain 3200×1800 ProRes still has a
+                // DAR worth reading — 1.78 — and nothing else on the panel states it. It hides only
+                // when there is no display size to divide, which is the libav/MXF path (nil there;
+                // see `displayAspectRatioString`), and an absent row is the honest report of that.
+                if let dar = m.displayAspectRatioString {
+                    MetadataRow(label: "Display Aspect", value: dar)
+                }
                 MetadataRow(label: "Frame Rate", value: m.frameRateString)
                 if let tc = m.startTimecode {
                     MetadataRow(label: "Start TC", value: tc)
