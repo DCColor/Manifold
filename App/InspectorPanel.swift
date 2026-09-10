@@ -35,6 +35,22 @@ struct InspectorPanel: View {
                 Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
 
                 MetadataRow(label: "Codec", value: m.codecName)
+                // ⚠️ THE STANDING STATEMENT THAT THE PICTURE IS WRONG, AND IT SITS DIRECTLY UNDER
+                // THE CODEC BECAUSE THAT IS WHAT IT IS ABOUT. Shown only when non-nil, so it never
+                // appears on a file we decode correctly — including every 4:4:4 file on a machine
+                // where the plug-in decoder took it.
+                //
+                // Read off the ENGINE, not the metadata: this is a fact about how the file is
+                // being decoded ON THIS MACHINE, not a property of the file. Same reason
+                // `rangeValue` above consults `engine.rangeOverride`.
+                //
+                // Orange, not red: nothing has failed and the user has done nothing wrong. It is
+                // the same "attention, and here is what to install" register the Preferences rows
+                // use for a missing runtime.
+                if let caveat = engine.pictureCaveat {
+                    MetadataRow(label: "Picture", value: caveat)
+                        .foregroundStyle(.orange)
+                }
                 // ⚠️ WHAT THE FILE DECLARES FIRST, THEN WHAT IS BEING DONE ABOUT IT. "Resolution" is
                 // the ENCODED raster; the two rows below are the transforms, each shown only where
                 // it says something. This used to be one `naturalSize` number that was neither —

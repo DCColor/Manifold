@@ -96,6 +96,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// the UI and not merely logged. Cleared by the UI when dismissed, and on the next load.
     @Published public var playbackNotice: String?
 
+    /// Why THIS file's picture cannot be trusted, or nil when it can — a STANDING condition, true
+    /// for as long as the file is open, shown as a row in the inspector.
+    ///
+    /// ⚠️ **THIS IS NOT A SECOND BANNER AND THE DIFFERENCE IS THE WHOLE REASON IT EXISTS.**
+    /// `playbackNotice` auto-dismisses after 9 s, which is right for "your audio track dropped"
+    /// and wrong for "every frame you are looking at has the wrong colour" — that stays true until
+    /// the file is closed, so a message that quietly vanishes leaves someone staring at a green
+    /// picture with no explanation, which is the exact failure this set out to prevent. The banner
+    /// gets attention at load; this is the record that persists.
+    ///
+    /// Today's one producer is DNxHR 4:4:4 on a machine without Pro Video Formats. Cleared on
+    /// every load, like the notice.
+    @Published public private(set) var pictureCaveat: String?
+
     /// True once this file has fallen back to video-only, so the notice is raised ONCE per file
     /// rather than re-firing on every seek (beginReading runs per seek, and the fallback with it).
     private var audioFallbackAnnounced = false
@@ -1350,6 +1364,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // 1: a refused load must leave the current file's notice alone, since that file is still
         // the one on screen.
         playbackNotice = nil
+        pictureCaveat = nil
         audioFallbackAnnounced = false
 
         // Retire any inspection Tasks still in flight from a previous load before starting this one.
@@ -1825,14 +1840,33 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 //     `xf20`, which would simply invert the bug. No fixture exists to check it.
                 sourceRange = source.bufferColorRange
                 updateEffectiveRange()
+                // ⚠️ THE HONEST HALF. Non-nil means libav is about to decode a DNxHR 4:4:4 file
+                // and the colour will be wrong — so say so, in BOTH places, because they do
+                // different jobs: the banner is seen at load and then dismisses itself, and the
+                // inspector row is the standing statement for as long as the file is open.
+                //
+                // ⚠️ WE DO NOT REFUSE THE FILE. Green and playing with an explanation beats
+                // nothing at all: the timecode, the audio and the captions are all still correct
+                // and someone may be here for exactly those.
+                pictureCaveat = source.pictureCaveat
+                if let caveat = source.pictureCaveat, !caveat.isEmpty {
+                    playbackNotice = DNxHRVideoToolboxDecoder.PictureCaveat.banner
+                    print("FrameEngine: \(DNxHRVideoToolboxDecoder.PictureCaveat.banner)")
+                }
                 // The route can fall back to libav mid-file, and the buffers revert to carrying
                 // the source's own range when it does. Weak on both sides: the engine owns the
                 // source, and this closure is stored inside it.
-                source.onBufferColorRangeChanged { [weak self, weak source] in
+                source.onDecodeRouteChanged { [weak self, weak source] in
                     Task { @MainActor in
                         guard let self, let source else { return }
                         self.sourceRange = source.bufferColorRange
                         self.updateEffectiveRange()
+                        // The route died mid-file, so the picture just became untrustworthy —
+                        // raise the banner here too, for the same reason it is raised at load.
+                        if self.pictureCaveat == nil, source.pictureCaveat != nil {
+                            self.playbackNotice = DNxHRVideoToolboxDecoder.PictureCaveat.banner
+                        }
+                        self.pictureCaveat = source.pictureCaveat
                     }
                 }
                 // Same rule as the AVFoundation path, at this path's equivalent point: libav has

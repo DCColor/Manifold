@@ -41,11 +41,46 @@ final class DNxHRVideoToolboxDecoder {
     /// libav's `FF_PROFILE_DNXHD_444`. Not exported to Swift by the shim, so it is named here.
     static let libavProfile444: Int32 = 5
 
+    /// Is this the one profile libav decodes INCORRECTLY? A property of the FILE alone — it says
+    /// nothing about whether we can do anything about it.
+    ///
+    /// ⚠️ **THIS IS THE SINGLE CONDITION BOTH HALVES HANG OFF, AND THAT IS WHAT MAKES THEM
+    /// MUTUALLY EXCLUSIVE.** When it is true, either the plug-in decoder takes the file (piece 3)
+    /// or the user is told the colour cannot be trusted (piece 4) — never both, never neither,
+    /// because the two branches are `vtDecoder != nil` and `vtDecoder == nil` on one variable.
+    static func isProfile444(codecID: AVCodecID, profile: Int32) -> Bool {
+        codecID == AV_CODEC_ID_DNXHD && profile == libavProfile444
+    }
+
     /// Whether this decoder should take the file. All three must hold.
     static func shouldRoute(codecID: AVCodecID, profile: Int32) -> Bool {
-        codecID == AV_CODEC_ID_DNXHD
-            && profile == libavProfile444
-            && ProVideoDecoderAvailability.isAvailable
+        isProfile444(codecID: codecID, profile: profile) && ProVideoDecoderAvailability.isAvailable
+    }
+
+    // MARK: - What the user is told when we CANNOT decode this correctly
+
+    /// ⚠️ **THE HONEST HALF, AND IT HELPS MORE PEOPLE THAN THE ROUTING DOES.** The routing only
+    /// works on machines that have Pro Video Formats. This fires on the ones that do not — where
+    /// the file decodes through libav, comes back with the ACT failure, and renders green and
+    /// magenta.
+    ///
+    /// ⚠️ **THE FAILURE MODE THIS PREVENTS IS A WRONG CONCLUSION, NOT A MISSING FEATURE.** On a QC
+    /// tool, a picture that is silently wrong is worse than one that is absent: the reasonable
+    /// reading of green-and-magenta is *this file is broken*, and someone may reject a delivery
+    /// over it. Both strings therefore say the same three things — the picture is wrong, OUR
+    /// decoder is why, and what is still trustworthy.
+    ///
+    /// ⚠️ **WORDED AS CAPABILITY, NEVER AS ERROR.** Nothing here is the user's doing and nothing is
+    /// wrong with their file, so no string says "failed", "invalid" or "unsupported file".
+    enum PictureCaveat {
+        /// The inspector's standing row — true for as long as the file is open.
+        static let short = "Colour unreliable — needs Pro Video Formats"
+        /// The banner, shown once at load. Longer because it has to name the fix and, just as
+        /// importantly, say what IS still good: a colourist may want the timecode, the audio or
+        /// the captions from a file whose picture is unusable, and we do not refuse the file.
+        static let banner = "This file is DNxHR 4:4:4, which Manifold’s built-in decoder renders "
+            + "with the wrong colour. Apple’s Pro Video Formats package decodes it correctly — "
+            + "install it and relaunch. Timecode, audio and captions are unaffected."
     }
 
     // MARK: - The synthesised format description

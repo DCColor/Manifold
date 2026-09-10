@@ -106,7 +106,8 @@ public final class LibavFrameSource: @unchecked Sendable {
     private var declaredRangeAtOpen: MediaInspector.SourceColorRange = .untagged
     private let bufferRangeLock = NSLock()
     private var _bufferColorRange: MediaInspector.SourceColorRange = .untagged
-    private var bufferRangeChanged: (() -> Void)?
+    private var _pictureCaveat: String?
+    private var routeChanged: (() -> Void)?
 
     /// **The range of the PIXELS THIS SOURCE IS PRODUCING**, which is not always the range the
     /// FILE declares — and the difference is the whole reason this property exists.
@@ -130,18 +131,35 @@ public final class LibavFrameSource: @unchecked Sendable {
         bufferRangeLock.lock(); defer { bufferRangeLock.unlock() }; return _bufferColorRange
     }
 
-    /// Fired when `bufferColorRange` changes mid-file — which happens exactly once, if the VT
-    /// route falls back to libav and the buffers revert to carrying the source's own range.
-    /// Called from the decode pump.
-    public func onBufferColorRangeChanged(_ handler: @escaping () -> Void) {
-        bufferRangeLock.lock(); bufferRangeChanged = handler; bufferRangeLock.unlock()
+    /// Why this file's picture cannot be trusted, or nil when it can.
+    ///
+    /// ⚠️ **NON-NIL MEANS "WE ARE DECODING THIS WRONG AND WE KNOW IT".** Today the one producer is
+    /// DNxHR 4:4:4 on a machine without Pro Video Formats: libav refuses the variable ACT flag and
+    /// returns green and magenta. The file is fine; our decoder is not. See
+    /// `DNxHRVideoToolboxDecoder.PictureCaveat`.
+    ///
+    /// ⚠️ **IT IS THE EXACT COMPLEMENT OF THE VT ROUTE AND CANNOT COEXIST WITH IT.** Both are set
+    /// from one branch on `vtDecoder == nil`, so a machine where the routing works never sees this
+    /// and a machine where it does not always does.
+    public var pictureCaveat: String? {
+        bufferRangeLock.lock(); defer { bufferRangeLock.unlock() }; return _pictureCaveat
     }
 
-    private func setBufferColorRange(_ range: MediaInspector.SourceColorRange) {
+    /// Fired when the decode route changes mid-file — which happens exactly once, if the VT route
+    /// falls back to libav. Both `bufferColorRange` and `pictureCaveat` change together at that
+    /// moment, so one notification covers both. Called from the decode pump.
+    public func onDecodeRouteChanged(_ handler: @escaping () -> Void) {
+        bufferRangeLock.lock(); routeChanged = handler; bufferRangeLock.unlock()
+    }
+
+    /// Set both route-derived facts together. They are always decided by the same branch, so
+    /// setting them separately would make it possible for them to disagree.
+    private func setRouteState(bufferRange: MediaInspector.SourceColorRange, caveat: String?) {
         bufferRangeLock.lock()
-        let changed = _bufferColorRange != range
-        _bufferColorRange = range
-        let handler = bufferRangeChanged
+        let changed = _bufferColorRange != bufferRange || _pictureCaveat != caveat
+        _bufferColorRange = bufferRange
+        _pictureCaveat = caveat
+        let handler = routeChanged
         bufferRangeLock.unlock()
         if changed { handler?() }
     }
@@ -226,12 +244,24 @@ public final class LibavFrameSource: @unchecked Sendable {
         // ROUTE. It is the runtime fallback: if the session dies mid-file, `nextFrame()` hands the
         // very packet that failed to `avcodec_send_packet` and carries on. Skipping `avcodec_open2`
         // to save the allocation would remove the only thing that keeps a dead deck off screen.
-        if DNxHRVideoToolboxDecoder.shouldRoute(codecID: cid, profile: par.pointee.profile) {
-            self.vtDecoder = DNxHRVideoToolboxDecoder(width: par.pointee.width,
-                                                      height: par.pointee.height)
+        // ⚠️ ONE CONDITION, TWO OUTCOMES, AND THAT IS HOW THE ROUTING AND THE WARNING STAY
+        // MUTUALLY EXCLUSIVE. `isProfile444` is a fact about the FILE. Inside it, either we get a
+        // working plug-in decoder or we do not, and `vtDecoder == nil` decides which of the two
+        // halves applies. There is no path on which both fire and none on which neither does.
+        //
+        // ⚠️ AND THE TEST IS THE PROFILE, NEVER libav's WARNING TEXT. `Unsupported: variable ACT
+        // flag.` is decoder log output with no stability guarantee and is not reachable as a value.
+        if DNxHRVideoToolboxDecoder.isProfile444(codecID: cid, profile: par.pointee.profile) {
+            if ProVideoDecoderAvailability.isAvailable {
+                self.vtDecoder = DNxHRVideoToolboxDecoder(width: par.pointee.width,
+                                                          height: par.pointee.height)
+            }
             if self.vtDecoder == nil {
-                print("[DNX-VT] session unavailable — this 4:4:4 file stays on libav "
-                    + "(it will render green; see docs/BUGS.md)")
+                // Either the package is absent, or it is present and the session would not open.
+                // Both land here, because both mean the same thing to the person watching: libav
+                // is about to decode this and the colour will be wrong.
+                print("[DNX-VT] DNxHR 4:4:4 with no usable plug-in decoder — libav will decode it "
+                    + "and the colour will be wrong. Telling the user.")
             }
         }
 
@@ -302,7 +332,10 @@ public final class LibavFrameSource: @unchecked Sendable {
         // EXACTLY as it does today. The absence of a conversion means "nothing changed", never a
         // new default.
         declaredRangeAtOpen = declaredRange
-        setBufferColorRange(vtDecoder != nil ? .videoLegal : declaredRange)
+        setRouteState(
+            bufferRange: vtDecoder != nil ? .videoLegal : declaredRange,
+            caveat: DNxHRVideoToolboxDecoder.isProfile444(codecID: cid, profile: par.pointee.profile)
+                    && vtDecoder == nil ? DNxHRVideoToolboxDecoder.PictureCaveat.short : nil)
 
         return StreamInfo(
             width: width, height: height,
@@ -446,8 +479,10 @@ public final class LibavFrameSource: @unchecked Sendable {
                 }
                 decoder.shutdown()
                 vtDecoder = nil
-                // The buffers revert to libav's, which carry the source's own range again.
-                setBufferColorRange(declaredRangeAtOpen)
+                // The buffers revert to libav's (source range again) AND the picture becomes
+                // untrustworthy, at the same instant and for the same reason.
+                setRouteState(bufferRange: declaredRangeAtOpen,
+                              caveat: DNxHRVideoToolboxDecoder.PictureCaveat.short)
                 _ = avcodec_send_packet(codecCtx, pkt)
                 av_packet_unref(pkt)
                 return nil
@@ -464,7 +499,8 @@ public final class LibavFrameSource: @unchecked Sendable {
                     print("[DNX-VT] expected x420, got \(fourCCString(got)) — falling back to libav")
                     decoder.shutdown()
                     vtDecoder = nil
-                    setBufferColorRange(declaredRangeAtOpen)
+                    setRouteState(bufferRange: declaredRangeAtOpen,
+                                  caveat: DNxHRVideoToolboxDecoder.PictureCaveat.short)
                     return nil
                 }
                 print("[DNX-VT] decoding DNxHR 4:4:4 through Apple's plug-in; x420 confirmed "
