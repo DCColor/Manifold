@@ -69,14 +69,41 @@ public enum CaptionDataPresence: Equatable, Sendable {
     ///
     /// ⚠️ WORDED AS BYTES, NOT MEANING. "carries data" is the strongest claim this layer can
     /// support; it has not read a caption and must not imply it has.
+    ///
+    /// ⚠️ **PRESENT-OR-EMPTY AND NOTHING MORE. THE COUNTS MOVED — THEY DID NOT GO AWAY.** This
+    /// used to read "carries data — 46 of 720 line-21 pairs", which is diagnostic evidence rather
+    /// than something a colourist acts on, and it wrapped to a second line at the inspector's
+    /// 280 pt. The numbers are still measured and are still reported, in `diagnosticDetail` →
+    /// the captured log → the diagnostics export, which is where a tester looks for evidence.
+    ///
+    /// ⚠️ **THE EMPTY CASE IS THE FINDING AND MUST NOT BE QUIETER THAN THE POSITIVE ONE.** Both
+    /// no-data cases print the same flat "NO DATA": a declared service carrying nothing is the
+    /// thing this row exists to surface, and the caller renders it in amber while "carries data"
+    /// stays dim. The difference between "all null" and "never appears" is preserved in the MODEL
+    /// (the enum is unchanged) and stated in the diagnostics line — it is a question for whoever
+    /// cut the file, not a distinction that changes what the operator does next.
     public var statement: String? {
         switch self {
         case .unknown:
             return nil
+        case .measured(let carrying, _, _):
+            return carrying > 0 ? "carries data" : "NO DATA"
+        }
+    }
+
+    /// The evidence behind `statement`, for the diagnostics export. Nil when nothing was counted.
+    ///
+    /// This is where the counts the inspector used to print now live — same numbers, same units,
+    /// and here the "all null" and "never appears" cases stay distinct because a tester reading a
+    /// bug report needs to tell them apart.
+    public var diagnosticDetail: String? {
+        switch self {
+        case .unknown:
+            return nil
         case .measured(let carrying, let observed, let unit):
-            if carrying > 0 { return "carries data — \(carrying) of \(observed) \(unit)" }
-            if observed > 0 { return "NO DATA — \(observed) \(unit), all null" }
-            return "NO DATA — declared, but never appears in the stream"
+            if carrying > 0 { return "\(carrying) of \(observed) \(unit) carried data" }
+            if observed > 0 { return "\(observed) \(unit) observed, ALL NULL" }
+            return "declared, but never appears in the stream (0 \(unit) observed)"
         }
     }
 }
@@ -397,5 +424,24 @@ public enum CaptionPresenceReader {
             scanner.ingest(ancElement: UnsafeBufferPointer(start: data, count: Int(packet.pointee.size)))
         }
         return scanner.rows()
+    }
+}
+
+/// Emits the caption measurement into the captured log, and therefore into the diagnostics export.
+///
+/// ⚠️ **THIS IS WHERE THE INSPECTOR'S COUNTS WENT.** The panel answers present-or-empty; the
+/// evidence for that answer belongs where a tester reads evidence. `DiagnosticsReport` has no
+/// per-file section — the CAPTURED LOG is where per-file facts land today — so this prints, and the
+/// export carries it.
+///
+/// Called from BOTH readers (the libav/ANC one and the AVFoundation one) so an MXF and a .mov of
+/// the same master produce the same line.
+public enum CaptionPresenceLog {
+    public static func emit(_ rows: [TextTrackInfo], source: String) {
+        guard !rows.isEmpty else { return }
+        for row in rows {
+            let detail = row.dataPresence.diagnosticDetail ?? "not scanned"
+            print("[CAPTIONS] \(source): \(row.summary) — \(detail)")
+        }
     }
 }

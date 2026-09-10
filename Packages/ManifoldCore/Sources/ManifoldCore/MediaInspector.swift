@@ -59,6 +59,8 @@ public enum MediaInspector {
 
         meta.audioTracks = await audioTracks(for: asset)
         meta.textTracks = await textTracks(for: asset)
+        // Same line the libav/ANC reader emits, so an MXF and a .mov of one master agree.
+        CaptionPresenceLog.emit(meta.textTracks, source: url.lastPathComponent)
         let tc = TimecodeReader.readStartTimecode(url: url)
         meta.startTimecode = tc?.timecode
         meta.chapters = await chapters(for: asset)

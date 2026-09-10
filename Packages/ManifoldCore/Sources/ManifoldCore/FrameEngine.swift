@@ -1694,6 +1694,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // on the same straight-line stretch immediately above with no suspension between, so this
         // MUTATES the metadata that call published rather than replacing it.
         self.metadata?.textTracks = rows
+        // The counts the inspector no longer prints — see CaptionDataPresence.statement.
+        CaptionPresenceLog.emit(rows, source: url.lastPathComponent)
     }
 
     /// One inspector row from one libav audio stream.
