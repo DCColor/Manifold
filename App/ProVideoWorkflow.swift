@@ -1,4 +1,5 @@
 import Foundation
+import ManifoldCore
 import VideoToolbox
 import MediaToolbox
 
@@ -64,6 +65,10 @@ final class ProVideoWorkflow: ObservableObject {
     func refresh() {
         Task.detached(priority: .utility) {
             let found = Self.probeInstalledBundles()
+            // Push the one fact ManifoldCore needs — it cannot import the app layer, and the MXF
+            // 4:4:4 decode route must not turn itself on before we know the decoder is there.
+            // Set on BOTH paths (launch probe and Settings refresh) so the two can never disagree.
+            ProVideoDecoderAvailability.set(Self.hasDNxDecoder(in: found))
             await MainActor.run { self.availability = found }
         }
     }
@@ -96,6 +101,10 @@ final class ProVideoWorkflow: ObservableObject {
             VTRegisterProfessionalVideoWorkflowVideoDecoders()
             MTRegisterProfessionalVideoWorkflowFormatReaders()
             let found = Self.probeInstalledBundles()
+            // Push the one fact ManifoldCore needs — it cannot import the app layer, and the MXF
+            // 4:4:4 decode route must not turn itself on before we know the decoder is there.
+            // Set on BOTH paths (launch probe and Settings refresh) so the two can never disagree.
+            ProVideoDecoderAvailability.set(Self.hasDNxDecoder(in: found))
             // Logged for the same reason the DeckLink enumeration is: a tester's log has to be
             // able to say WHICH of the two machines it came from. "MXF opens on mine and not on
             // yours" is otherwise unanswerable, and this is the line that answers it.
@@ -123,6 +132,13 @@ final class ProVideoWorkflow: ObservableObject {
     func ready() async {
         beginRegistrationAtLaunch()
         await registration?.value
+    }
+
+    /// `DNXDecoder.bundle` present in a probe result. Static so the off-main probe can use it
+    /// without hopping to the main actor just to read `hasDNxDecoder`.
+    private nonisolated static func hasDNxDecoder(in availability: Availability) -> Bool {
+        if case .installed(let bundles) = availability { return bundles.contains("DNXDecoder.bundle") }
+        return false
     }
 
     // MARK: - The presence probe

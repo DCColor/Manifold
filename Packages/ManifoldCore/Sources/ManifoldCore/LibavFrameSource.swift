@@ -94,6 +94,57 @@ public final class LibavFrameSource: @unchecked Sendable {
     private var timeBase = AVRational(num: 1, den: 600)
     private var startTimeTicks: Int64 = 0
     private var pool: CVPixelBufferPool?
+
+    /// The VideoToolbox route for DNxHR 4:4:4 — nil for every other file, and nil for a 4:4:4 file
+    /// once the route has failed at runtime. See `nextFrame()`.
+    private var vtDecoder: DNxHRVideoToolboxDecoder?
+    /// Said once, not per frame.
+    private var vtFallbackAnnounced = false
+    /// The x420 contract is CONFIRMED on the first frame rather than assumed. See `nextFrame()`.
+    private var vtFormatConfirmed = false
+    /// What the FILE declared, kept so the buffer range can revert to it if the VT route falls back.
+    private var declaredRangeAtOpen: MediaInspector.SourceColorRange = .untagged
+    private let bufferRangeLock = NSLock()
+    private var _bufferColorRange: MediaInspector.SourceColorRange = .untagged
+    private var bufferRangeChanged: (() -> Void)?
+
+    /// **The range of the PIXELS THIS SOURCE IS PRODUCING**, which is not always the range the
+    /// FILE declares — and the difference is the whole reason this property exists.
+    ///
+    /// ⚠️ **THIS IS NOT `StreamInfo.declaredRange` AND MUST NOT BE CONFLATED WITH IT.**
+    /// `declaredRange` is the truth about the FILE and feeds the inspector's Range row; it is
+    /// correct and does not change. This is the truth about the BUFFER and feeds the render
+    /// decision. On every path but one they are identical, which is why one value served both
+    /// until now:
+    ///
+    /// | path | buffer carries | so this returns |
+    /// |---|---|---|
+    /// | libav + swscale (everything today) | the source's own codes, unconverted | `declaredRange` |
+    /// | the DNxHR 4:4:4 VideoToolbox route | **legal**, because VT compresses full→legal on the way to a VIDEO-RANGE pixel format | `.videoLegal` |
+    ///
+    /// MEASURED on `Mixed Captions.mxf` frame 10: asked for `x420` VideoToolbox returns luma
+    /// 78…908, asked for `xf20` it returns 16…987 — and 64 + 16×876/1023 = 77.7, 64 + 987×876/1023
+    /// = 909. The compression is exact, so the buffer really is legal and the shader was expanding
+    /// it a second time (lifted blacks, compressed highlights).
+    public var bufferColorRange: MediaInspector.SourceColorRange {
+        bufferRangeLock.lock(); defer { bufferRangeLock.unlock() }; return _bufferColorRange
+    }
+
+    /// Fired when `bufferColorRange` changes mid-file — which happens exactly once, if the VT
+    /// route falls back to libav and the buffers revert to carrying the source's own range.
+    /// Called from the decode pump.
+    public func onBufferColorRangeChanged(_ handler: @escaping () -> Void) {
+        bufferRangeLock.lock(); bufferRangeChanged = handler; bufferRangeLock.unlock()
+    }
+
+    private func setBufferColorRange(_ range: MediaInspector.SourceColorRange) {
+        bufferRangeLock.lock()
+        let changed = _bufferColorRange != range
+        _bufferColorRange = range
+        let handler = bufferRangeChanged
+        bufferRangeLock.unlock()
+        if changed { handler?() }
+    }
     private var width = 0
     private var height = 0
     /// After a seek, frames earlier than this (seconds) are decoded-and-discarded so
@@ -164,6 +215,26 @@ public final class LibavFrameSource: @unchecked Sendable {
             avcodec_free_context(&cctxOpt); avformat_close_input(&ctx); throw LibavError.decoderOpen
         }
 
+        // ── THE ROUTE DECISION. Once per file, and this is the ONLY place it is made. ──
+        //
+        // ⚠️ ONE PROFILE: DNxHR 4:4:4 (libav profile 5 → CID 1270), and only when Apple's plug-in
+        // decoder is actually present. HQX and everything else stay on libav, which decodes them
+        // correctly today. When Pro Video Formats is absent this is false and the file takes
+        // exactly the path it takes today — unchanged behaviour, not a regression.
+        //
+        // ⚠️ THE libav DECODER IS OPENED ABOVE REGARDLESS, INCLUDING FOR FILES THAT TAKE THIS
+        // ROUTE. It is the runtime fallback: if the session dies mid-file, `nextFrame()` hands the
+        // very packet that failed to `avcodec_send_packet` and carries on. Skipping `avcodec_open2`
+        // to save the allocation would remove the only thing that keeps a dead deck off screen.
+        if DNxHRVideoToolboxDecoder.shouldRoute(codecID: cid, profile: par.pointee.profile) {
+            self.vtDecoder = DNxHRVideoToolboxDecoder(width: par.pointee.width,
+                                                      height: par.pointee.height)
+            if self.vtDecoder == nil {
+                print("[DNX-VT] session unavailable — this 4:4:4 file stays on libav "
+                    + "(it will render green; see docs/BUGS.md)")
+            }
+        }
+
         self.fmtCtx = ctx
         self.codecCtx = cctx
         self.pkt = av_packet_alloc()
@@ -225,6 +296,14 @@ public final class LibavFrameSource: @unchecked Sendable {
                 : "libav silent, MXF picture descriptor"
         }
 
+        // ⚠️ THE RENDER DECISION FOLLOWS THE BUFFER; THE INSPECTOR KEEPS FOLLOWING THE FILE.
+        // `declaredRange` goes into StreamInfo untouched. This is the separate, parallel fact —
+        // and note the default is `declaredRange`, so every path that is not the VT route behaves
+        // EXACTLY as it does today. The absence of a conversion means "nothing changed", never a
+        // new default.
+        declaredRangeAtOpen = declaredRange
+        setBufferColorRange(vtDecoder != nil ? .videoLegal : declaredRange)
+
         return StreamInfo(
             width: width, height: height,
             declaredRange: declaredRange,
@@ -277,6 +356,10 @@ public final class LibavFrameSource: @unchecked Sendable {
         if fmtCtx != nil { avformat_close_input(&fmtCtx) }
         if pkt != nil { av_packet_free(&pkt) }
         if frame != nil { av_frame_free(&frame) }
+        // Watchdogged — see DNxHRVideoToolboxDecoder.shutdown(). Bounded at 3 s even if the
+        // decoder process has died, so closing a file can never stall the deck indefinitely.
+        vtDecoder?.shutdown()
+        vtDecoder = nil
         pool = nil
     }
 
@@ -296,6 +379,8 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// intra DNxHR and reordered codecs alike).
     private func nextFrame() -> CMSampleBuffer? {
         guard let fmtCtx, let codecCtx, let pkt, let frame else { return nil }
+        // ⚠️ ONE Bool TEST — this is the whole per-frame cost on files that do not take the route.
+        if vtDecoder != nil, let sb = nextFrameViaVideoToolbox() { return sb }
         while true {
             let ret = avcodec_receive_frame(codecCtx, frame)
             if ret == 0 {
@@ -320,6 +405,81 @@ public final class LibavFrameSource: @unchecked Sendable {
             }
             av_packet_unref(pkt)
         }
+    }
+
+    /// The DNxHR 4:4:4 route: read compressed packets with libav, decode them with Apple's plug-in.
+    ///
+    /// ⚠️ **NOTHING ELSE MOVES.** The demux, the range read, the ANC caption scan, the audio
+    /// tracks, the geometry and the clean aperture all still come from libav exactly as before —
+    /// this changes the destination of the compressed packet and nothing else.
+    ///
+    /// Returns nil to mean **"fall back"**, having already disabled the route and pushed the
+    /// offending packet into the libav decoder, so the caller's normal loop picks up seamlessly.
+    private func nextFrameViaVideoToolbox() -> CMSampleBuffer? {
+        guard let fmtCtx, let codecCtx, let pkt, let decoder = vtDecoder else { return nil }
+        while true {
+            let rret = av_read_frame(fmtCtx, pkt)
+            if rret < 0 { return nil }                          // EOF: let the libav loop drain
+            guard pkt.pointee.stream_index == videoStreamIndex else {
+                av_packet_unref(pkt); continue
+            }
+            let ts = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            let sec = ptsSeconds(ts)
+            // Same seek-discard rule as the libav path, applied BEFORE decoding rather than after:
+            // DNxHR is all-intra, so a pre-target packet can be dropped without decoding it at all.
+            if skipToSeconds >= 0, sec + 1e-6 < skipToSeconds {
+                av_packet_unref(pkt); continue
+            }
+            let pts = ptsCMTime(ts)
+            let duration = pkt.pointee.duration > 0
+                ? CMTime(value: pkt.pointee.duration &* Int64(timeBase.num), timescale: timeBase.den)
+                : CMTime.invalid
+
+            guard let pixelBuffer = decoder.decode(packet: pkt, pts: pts, duration: duration) else {
+                // ⚠️ RUNTIME FALLBACK. Said ONCE, not per frame, and the packet that failed is not
+                // dropped — it goes straight to libav so the picture continues from this frame.
+                if !vtFallbackAnnounced {
+                    vtFallbackAnnounced = true
+                    print("[DNX-VT] decode failed — falling back to libav for the rest of this "
+                        + "file. The picture will be wrong on 4:4:4 (green/magenta) but the deck "
+                        + "keeps playing. See docs/BUGS.md → \"the narrow MXF plan is VIABLE\".")
+                }
+                decoder.shutdown()
+                vtDecoder = nil
+                // The buffers revert to libav's, which carry the source's own range again.
+                setBufferColorRange(declaredRangeAtOpen)
+                _ = avcodec_send_packet(codecCtx, pkt)
+                av_packet_unref(pkt)
+                return nil
+            }
+            av_packet_unref(pkt)
+
+            // ⚠️ CONFIRMED, NOT ASSUMED — once per file. If the decoder ever hands back something
+            // other than the contract, treat it as a failure and fall back rather than pushing an
+            // unexpected format at the renderer.
+            if !vtFormatConfirmed {
+                vtFormatConfirmed = true
+                let got = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                guard got == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange else {
+                    print("[DNX-VT] expected x420, got \(fourCCString(got)) — falling back to libav")
+                    decoder.shutdown()
+                    vtDecoder = nil
+                    setBufferColorRange(declaredRangeAtOpen)
+                    return nil
+                }
+                print("[DNX-VT] decoding DNxHR 4:4:4 through Apple's plug-in; x420 confirmed "
+                    + "(\(CVPixelBufferGetWidth(pixelBuffer))×\(CVPixelBufferGetHeight(pixelBuffer)))")
+            }
+            skipToSeconds = -1
+            return Self.makeSampleBuffer(pixelBuffer, pts: pts, duration: duration)
+        }
+    }
+
+    private func fourCCString(_ code: OSType) -> String {
+        let bytes = [UInt8((code >> 24) & 0xff), UInt8((code >> 16) & 0xff),
+                     UInt8((code >> 8) & 0xff), UInt8(code & 0xff)]
+        return String(bytes: bytes.map { $0 >= 32 && $0 < 127 ? $0 : UInt8(ascii: "?") },
+                      encoding: .ascii) ?? "????"
     }
 
     private func ptsSeconds(_ ticks: Int64) -> Double {

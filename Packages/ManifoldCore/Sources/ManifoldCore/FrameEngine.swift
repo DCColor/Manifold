@@ -1792,12 +1792,49 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // open() enables auto-threaded decode so the 4K 10-bit source cost
                 // doesn't contend with the render pipeline (locks 23.976fps).
                 let info = try source.open()
-                // ⚠️ Same three-state carry as the inspector row above, and this one reaches the
-                // shader: `updateEffectiveRange` maps `.full` to passthrough and everything else
-                // to a legal→full expand. A file that DECLARES full (4:4:4 DNxHR, whose range
-                // libav does not read) was being expanded a second time.
-                sourceRange = info.declaredRange
+                // ⚠️ THE RENDER DECISION FOLLOWS THE BUFFER, NOT THE FILE — AND THOSE ARE NOT
+                // ALWAYS THE SAME FACT. `updateEffectiveRange` maps `.full` to shader passthrough
+                // and everything else to a legal→full expand, so what it needs to know is what
+                // range THE PIXELS ARE IN. On every path but one that equals what the file
+                // declares, which is why `info.declaredRange` sat here and was right.
+                //
+                // The DNxHR 4:4:4 VideoToolbox route broke that identity: VT performs the
+                // full→legal compression itself on the way to a VIDEO-RANGE pixel format, so its
+                // buffer is already legal while the file still declares Full — and the shader
+                // expanded it a second time (lifted blacks, compressed highlights). MEASURED:
+                // x420 luma 78…908 vs xf20 16…987 on the same frame, an exact 64 + v×876/1023.
+                //
+                // ⚠️ `info.declaredRange` IS UNCHANGED AND STILL FEEDS THE INSPECTOR (see
+                // `applyLibavMetadata`). It is the truth about the FILE and the Range row reading
+                // "Full" on that file is CORRECT. Only this line moved.
+                //
+                // ⚠️ AND `bufferColorRange` DEFAULTS TO `declaredRange`, so every other source is
+                // bit-for-bit unchanged: libav+swscale, AVFoundation and the streaming paths all
+                // hand over buffers carrying the source's own codes, and this reads exactly what
+                // it read before.
+                //
+                // WHY NOT THE OTHER TWO OPTIONS, both considered and rejected:
+                //   • Reporting the buffer's range AS the file's range would have made the
+                //     inspector say "Video (Legal)" about a file that is full range — making the
+                //     picture right by making the instrument lie. That is the exact false-claim
+                //     defect docs/BUGS.md records fixing.
+                //   • Requesting a FULL-range pixel format (`xf20`) from VT instead would keep one
+                //     value serving both, but it changes the format flowing through the whole app
+                //     for one profile and lands on a shader branch untested on this path — and it
+                //     is unverified whether VT symmetrically EXPANDS a legal 4:4:4 source into
+                //     `xf20`, which would simply invert the bug. No fixture exists to check it.
+                sourceRange = source.bufferColorRange
                 updateEffectiveRange()
+                // The route can fall back to libav mid-file, and the buffers revert to carrying
+                // the source's own range when it does. Weak on both sides: the engine owns the
+                // source, and this closure is stored inside it.
+                source.onBufferColorRangeChanged { [weak self, weak source] in
+                    Task { @MainActor in
+                        guard let self, let source else { return }
+                        self.sourceRange = source.bufferColorRange
+                        self.updateEffectiveRange()
+                    }
+                }
                 // Same rule as the AVFoundation path, at this path's equivalent point: libav has
                 // just told us what the stream declares, and the decode pump is armed BELOW this
                 // block, so this precedes the first frame. On the MXF path AVFoundation supplies
