@@ -5,6 +5,25 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.8.3
+
+- DNxHR 4:4:4 files now decode correctly. They previously came up green and magenta — Manifold's
+  own decoder can't read that profile. With Apple's Pro Video Formats installed, those files now
+  go to the system decoder instead. Without it the picture is still wrong, but Manifold now says
+  why rather than leaving you wondering whether the file is broken.
+- Fixed: some MXF files declare full range in a way Manifold wasn't reading, so they came up with
+  lifted blacks and clipped highlights. The inspector now reports what the file actually declares.
+- Open Recent in the File menu.
+- The inspector reports display aspect ratio — 1.78, 2.39 and so on — alongside the raster and
+  pixel aspect.
+- Pro Video Formats is listed in Settings under I/O and Runtimes, alongside the NDI runtime and
+  DeckLink. It's an optional Apple package that adds AVC-Intra, XAVC, IMX, DVCPRO HD, uncompressed
+  and ProRes RAW to what Manifold can open.
+- Caption rows in the inspector are simpler: they say whether a service carries data, and the
+  detail has moved to Export Diagnostics.
+- Fixed: the app could take a long time to show its window at launch while it read your license
+  from the keychain.
+
 ## 0.8.2
 
 - Fixed: ARRI open-gate files were drawn slightly narrow, and the scopes were reading about 32
