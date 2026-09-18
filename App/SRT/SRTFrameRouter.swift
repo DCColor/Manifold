@@ -1229,6 +1229,23 @@ final class SRTFrameRouter {
                                             dataLength: byteCount) == noErr else { return nil }
 
         var sb: CMSampleBuffer?
+        // ⚠️ A 90 kHz AUDIO PTS IS SAFE HERE BY TWO COINCIDENCES, NOT BY DESIGN. AUDIT BOTH BEFORE
+        // CHANGING THE CODEC OR THE SAMPLE RATE.
+        //
+        //   1. `pts` is `packet.pts × 1/90000` — it IS a 90 kHz value, so the conversion back to a
+        //      90 kHz CMTime recovers `packet.pts` exactly. Nothing is rounded on the way in.
+        //   2. Consecutive buffers still have to ABUT: PTS must advance by exactly
+        //      `frameSize × 90000 / sampleRate` ticks. At 48 kHz that is integral when `frameSize`
+        //      is a multiple of 8 — AAC-LC's 1024 → 1920 ticks ✓, HE-AAC's 2048 → 3840 ✓.
+        //
+        // ⚠️ AT 44.1 kHz IT IS NOT: 1024 × 90000/44100 = 2089.79… ticks, so every buffer boundary
+        // would be rounded and the desktop would crackle exactly as NDI's did — with the tap, the
+        // meters and SDI all still perfect, because only the renderer uses per-buffer timing.
+        //
+        // **An audio CMTime belongs on the sample rate's own timescale**
+        // (`CMTime(value: ticks, timescale: CMTimeScale(sampleRate))`), which is exact for any frame
+        // size and any rate. See `NDIService.makeAudioSampleBuffer` and docs/BUGS.md #NDI-AUDIO.
+        // Comment-only note: SRT's audio is measured working on the wire and is left alone.
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
             presentationTimeStamp: CMTime(seconds: pts, preferredTimescale: 90_000),

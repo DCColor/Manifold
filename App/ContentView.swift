@@ -1694,6 +1694,13 @@ struct ContentView: View {
     ///   ⌃⌥⇧L  stop: restore normal file playback (also ABORTS a running ⌃⌥S sweep, with a partial table)
     ///   ⌃⌥P   cycle drift/jitter tuning preset (clean → drift → drift+jitter), live + next start
     ///   ⌃⌥U   toggle control loop OFF (rate≡1.0) to read measured depth at unity — live + next start
+    ///   ⌃⌥A   NDI audio TONE TEST — cycle OFF → 1 kHz 0 dBFS → 1 kHz −6 dBFS → OFF. Replaces the
+    ///         pulled NDI samples with a continuous synthesised sine and changes nothing else about
+    ///         the buffers, so a crackle that survives it is in the PATH, not the samples. Also
+    ///         reaches the meters and SDI — see NDIService.
+    ///         ⚠️ NOT DEFINED IN THIS FILE — it is `Debug ▸ NDI Audio Tone Test` in ManifoldApp,
+    ///         which owns the ⌃⌥A binding too. Listed here only so this table stays the one place
+    ///         that answers "what are the dev chords".
     ///   ⌃⌥S   auto-sweep the (targetDepth × jitter) grid — 24 cells × 15s, per-cell verdict + summary
     ///         table to stderr; load a clip, hit ⌃⌥S, walk away. Second ⌃⌥S aborts early.
     ///   ⌃⌥W   libdatachannel link smoke test (WHEP step 1) — logs version + PeerConnection
@@ -1794,6 +1801,22 @@ struct ContentView: View {
             }
             .keyboardShortcut("s", modifiers: [.control, .option])
             #endif
+            // ── ⌃⌥A (NDI audio tone test) IS DELIBERATELY NOT HERE. IT IS A MENU ITEM. ────────
+            //
+            // It was here, as a hidden Button, and it did nothing at all: it sat INSIDE the
+            // `MANIFOLD_CONFIG_DEBUG` gate above, and Profile — the configuration every build is
+            // cut from — defines DEBUG but NOT that. The button was compiled out entirely, so the
+            // keystroke reached no handler and macOS just beeped. The gate's own header says
+            // exactly this, and it still did not stop a non-LiveClock trigger being put behind the
+            // LiveClock gate.
+            //
+            // Moving it out of the gate would have fixed that one bug and left the real weakness:
+            // a hidden Button fires only while this view is mounted and only if nothing upstream
+            // has already claimed the chord (⌃⌥T, two screens up, is the scope tray), and a chord
+            // that loses that race fails SILENTLY as a beep. `Debug ▸ NDI Audio Tone Test`
+            // (ManifoldApp) is bound to the application instead, cannot be shadowed, states its own
+            // current mode, and carries ⌃⌥A itself. A diagnostic that has to be reachable on demand
+            // during a live capture belongs in a menu.
             // ⌃⌥W — libdatachannel LINK SMOKE TEST (WHEP step 1 of 4). Not a WHEP handshake and
             // not networking: it only proves the vendored static libdatachannel is linked into
             // this binary, initialized, and callable, alongside the DeckLink C++. Delete once a

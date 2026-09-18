@@ -70,6 +70,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import CoreMedia   // CMTimeGetSeconds — the NDI desktop-audio timebase read below
 import UniformTypeIdentifiers
 import ManifoldCore
 
@@ -1251,7 +1252,54 @@ final class DeckRegistry {
         }
         // Tee NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the clock-anchored
         // SDI output, SDI/Computer routing and mute apply to NDI for free.
+        //
+        // ⚠️ STILL ASSIGNED, BUT IT IS NOW THE FALLBACK ROUTE, NOT THE ROUTE. With the four seams
+        // below wired, the pump enqueues through `LiveAudioSink`, which tees to this same tap and
+        // THEN to the renderer. NDI pushes to the tap directly only when `beginLiveAudio` could not
+        // open a session — see the one-route-or-the-other note in `NDIService.runAudioPump`.
         NDIService.shared.audioTap = engine.audioTap
+        // ── NDI DESKTOP AUDIO — THE SAME FOUR SEAMS WHEP AND SRT HAVE, WITH ONE SUBSTITUTED ─────
+        //
+        // WHEP and SRT wire `beginLiveAudio` / `mirrorLiveAudio` / `liveAudioDrift` / `endLiveAudio`.
+        // NDI wires `beginLiveAudio` / **`anchorLiveAudio`** / `liveAudioTimebase` / `endLiveAudio`.
+        //
+        // ⚠️ THE SUBSTITUTION IS THE WHOLE DESIGN AND IT IS NOT A SHORTCUT. `mirrorLiveAudio` takes
+        // a `LiveClock.Mapping`, and NDI owns no LiveClock — it stamps `CACurrentMediaTime()` at
+        // pull and runs at a true rate 1.0. Feeding the mirror an identity mapping would not work
+        // even if the type allowed it: the mirror's push gate computes `predicted` from what it last
+        // pushed, so an identity mapping yields `positionError == 0` forever and it would anchor
+        // once and never again. WHEP and SRT get their re-anchors incidentally, from LiveClock
+        // slewing rate for VIDEO depth; NDI has no slew and so needs the loop to be closed
+        // explicitly. `liveAudioTimebase` is the closing half — `currentSyncTime()` is the only
+        // reading in the system taken on the audio DEVICE's clock rather than on mach time.
+        //
+        // See `FrameEngine.anchorLiveAudio`, the slew-site note in `LiveClock.updateDepthLocked`,
+        // and docs/BUGS.md "NDI has no desktop playback path at all".
+        NDIService.shared.beginLiveAudio = { [weak engine] cushion in
+            engine?.beginLiveAudio(cushion: cushion, path: .ndi)
+        }
+        NDIService.shared.anchorLiveAudio = { [weak engine] media, host in
+            engine?.anchorLiveAudio(mediaTime: media, hostTime: host)
+        }
+        // `currentSyncTime()` is `nonisolated` — read straight from the pump thread, which is the
+        // point: the measurement has to be taken next to the `monotonicNow()` it is compared with.
+        NDIService.shared.liveAudioTimebase = { [weak engine] in
+            guard let engine else { return .nan }
+            return CMTimeGetSeconds(engine.currentSyncTime())
+        }
+        NDIService.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
+        // Readiness / status / error / measured synchronizer rate. Diagnostic only — nothing acts
+        // on it yet — but the live path has never read ANY of it, and a renderer in `.failed` would
+        // otherwise be indistinguishable from bad samples. `nonisolated`, so the pump reads it
+        // directly beside the clock values it is compared against.
+        NDIService.shared.liveAudioRendererState = { [weak engine] in
+            engine?.liveAudioRendererState()
+                ?? FrameEngine.LiveAudioRendererState(
+                    isReadyForMoreMediaData: false,
+                    hasSufficientMediaDataForReliablePlaybackStart: false,
+                    statusRawValue: 0, errorDescription: "engine gone",
+                    synchronizerRate: 0, timebaseSeconds: .nan)
+        }
         // SRT audio, STAGE 1: the TAP ONLY — metered and SDI-capable, silent on the desktop,
         // exactly as NDI is. Deliberately NOT `beginLiveAudio`: that opens the audio RENDERER and
         // the clock mirror, which is stage 2. Wiring only this is what keeps stage 1 falsifiable —

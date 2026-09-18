@@ -268,9 +268,23 @@ final class WHEPAudioReceiver {
     }
 
     /// Interleaved Int32 → a CMSampleBuffer the shared renderer accepts, stamped on the live
-    /// timeline. Timescale 90 kHz to match the video clock's grid exactly; 48 kHz audio frames land
-    /// on integer 90 kHz ticks only every 15 samples, so a coarser scale would quantise the offset
-    /// being measured.
+    /// timeline. Timescale 90 kHz to match the video clock's grid exactly.
+    ///
+    /// ⚠️ THIS COMMENT USED TO SAY 48 kHz FRAMES LAND ON INTEGER 90 kHz TICKS "only every 15
+    /// samples". THAT NUMBER IS WRONG — IT IS EVERY **8**. 90000/48000 = 1.875, so `n/48000` is a
+    /// whole number of 90 kHz ticks exactly when `n` is a multiple of 8. The correction matters
+    /// because the wrong number is what made this timescale look safe to copy: NDI reused it, its
+    /// per-pull counts are 480..530 with an arbitrary running total, seven buffers in eight were
+    /// silently rounded, and the desktop audio crackled until it was traced back here.
+    ///
+    /// ⚠️ AND WHEP IS EXACT BY COINCIDENCE, NOT BY DESIGN. Opus at 48 kHz is **960 samples** per
+    /// packet, 960 is a multiple of 8, and the PTS is a running multiple of 960 — so every value
+    /// lands on the grid and the rounding never fires. Change the packetisation to anything whose
+    /// frame count is not a multiple of 8 and this line starts corrupting audio with no other
+    /// symptom. **An audio CMTime belongs on the SAMPLE RATE's timescale** (`CMTime(value: ticks,
+    /// timescale: CMTimeScale(sampleRate))`), which is exact for any frame size; see
+    /// `NDIService.makeAudioSampleBuffer` and docs/BUGS.md #NDI-AUDIO. Comment-only change here —
+    /// WHEP's behaviour is measured working and is deliberately left alone.
     private static func makeSampleBuffer(_ pcm: UnsafeBufferPointer<Int32>,
                                          frames: Int, channels: Int,
                                          pts: Double) -> CMSampleBuffer? {

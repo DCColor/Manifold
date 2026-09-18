@@ -270,6 +270,10 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 @end
 
 @implementation NDIBridge {
+    // Audio plane-stride diagnostic — see the note in captureAudioFrameForInterval:.
+    BOOL _loggedAudioStride;
+    int _lastAudioStride;
+    int _lastAudioFrames;
     NDIReceiver *_receiver;
     int64_t _lastTimestamp;
     BOOL _loggedFirstFrame;
@@ -711,9 +715,45 @@ static const double kNDIAudioMaxPullSeconds = 0.250;
         return nil;
     }
     const uint8_t *base = (const uint8_t *)frame.p_data;
+    const int tight = (int)((size_t)frames * sizeof(float));
     const int stride = frame.channel_stride_in_bytes > 0
                      ? frame.channel_stride_in_bytes
-                     : (int)((size_t)frames * sizeof(float));   // defensive: tightly packed planes
+                     : tight;   // defensive: assume tightly packed planes
+    // ── ⚠️ THE STRIDE IS REPORTED, NOT ASSUMED, AND THE FALLBACK IS THE PART THAT CAN LIE ──────
+    //
+    // The planes are at `p_data + c * channel_stride_in_bytes`, and this loop has always used that
+    // field — so "does it assume tight packing" is answered NO. What is NOT safe is the fallback
+    // above: it is reached only when FrameSync reports a stride of 0, and it then guesses
+    // `no_samples * 4`. That guess is right only if the buffer is sized to what was RETURNED.
+    //
+    // If FrameSync ever allocates for what was REQUESTED and returns fewer (`no_samples < want`),
+    // the true stride is `want * 4`, the guess is short, and **every channel after the first is read
+    // misaligned** — channel 0 correct, the rest sliding progressively into the previous plane's
+    // tail. That is audible as the programme on one channel with grit layered over it, which is
+    // precisely the symptom under investigation, and nothing else in the pipeline would flag it:
+    // the sample COUNT and the PTS are both still perfect.
+    //
+    // So all three numbers are printed on the first pull and again whenever the relationship
+    // changes. `stride == no_samples*4` and `no_samples == want` together mean the fallback can
+    // never be wrong; either inequality is the finding.
+    if (!_loggedAudioStride || stride != _lastAudioStride || frames != _lastAudioFrames) {
+        _loggedAudioStride = YES;
+        _lastAudioStride = stride;
+        _lastAudioFrames = frames;
+        NSLog(@"[NDI-AUDIO] plane stride: channel_stride_in_bytes=%d · no_samples*4=%d · want*4=%d "
+              @"· no_samples=%d requested=%d channels=%d → %@%@",
+              frame.channel_stride_in_bytes, tight, want * (int)sizeof(float),
+              frames, want, ch,
+              frame.channel_stride_in_bytes > 0
+                ? (frame.channel_stride_in_bytes == tight
+                     ? @"REPORTED and tightly packed — planes exact"
+                     : @"REPORTED and NOT tight — honoured, planes exact (a guess would have been wrong)")
+                : @"⚠️ NOT REPORTED (0) — falling back to no_samples*4",
+              (frame.channel_stride_in_bytes == 0 && frames != want)
+                ? @" ⚠️⚠️ AND no_samples != want, so the fallback may be MISALIGNING every channel "
+                   "after the first — this is the defect described above"
+                : @"");
+    }
     for (int c = 0; c < ch; c++) {
         const float *plane = (const float *)(base + (size_t)c * (size_t)stride);
         for (int f = 0; f < frames; f++) {

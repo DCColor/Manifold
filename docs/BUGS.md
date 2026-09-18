@@ -5840,7 +5840,156 @@ carried zero frames on all 259 callbacks.
 
 ## NDI has no desktop playback path at all — the pump meters, feeds SDI, and drops the audio
 
-**Status:** OPEN, and the BLOCKER HAS BEEN RE-DIAGNOSED — see "What it actually needs" below.
+**Status:** FIXED 2026-09-18, after **five stacked defects** — see "The chain" immediately below,
+which is the part worth reading. The presentation lead is now **250 ms**, an evidence-backed floor;
+the true threshold is between 40 and 150 ms and is not narrowed. The analysis further down is kept
+because it is the reasoning the fix rests on.
+
+### ⚠️ THE CHAIN — FOUR BUGS, EACH ONE HIDING THE NEXT
+
+Nothing here was discovered until the one in front of it was fixed. That is the whole lesson of this
+entry, and it is why each fix looked complete and each next symptom looked like a new problem.
+
+| # | defect | symptom while it was on top | what it hid |
+|---|---|---|---|
+| 1 | FrameSync asked for `framesync_audio_queue_depth`, so it **manufactured 82% of the samples** (8.1M delivered against 1.44M sent) | meters read levels off invented audio | everything |
+| 2 | the pull was sized from the **nominal** poll interval, not measured elapsed — a 44030 Hz consumer declared against a 48000 Hz stream | `cum=44030Hz`, `depth` sawtooth, ring re-anchoring ~2/s | the clock was declared unusable on this evidence |
+| 3 | the desktop PTS was a **wall-clock read per pull**, while the sample count came from a different elapsed measurement inside the bridge | crackle — mean \|residual\| 0.15–0.57 ms (7–27 samples), ~50 gaps + ~40 overlaps per second | #4, entirely |
+| 4 | the PTS was built with **`preferredTimescale: 90_000`**, which cannot represent a 48 kHz sample position unless the sample count is a multiple of 8 | crackle again, finer — ≤0.27 samples, 7 buffers in 8 | #5 |
+| 5 | the desktop presentation lead was **40 ms**, far below what this renderer needs | crackle again — and now with every buffer provably perfect | — |
+
+⚠️ **#1 IS WHY THE ENTRY ORIGINALLY SAID THE PUMP'S CLOCK WAS UNUSABLE** ("not a timebase an
+`AVSampleBufferAudioRenderer` can be anchored to"). That was a conclusion drawn from a broken pump
+and it sent the design down a resample/drop-pad/slave-the-timebase path that was never needed. It is
+retracted below.
+
+### ⚠️ #5 — THE RENDERER HAD BEEN REPORTING IT SINCE THE FIRST SESSION AND NOTHING READ IT
+
+`AVSampleBufferAudioRenderer.hasSufficientMediaDataForReliablePlaybackStart` read **NO on every
+sample of every session** while `status` read `rendering` — the renderer playing while permanently
+below its own declared threshold. It was there for the whole investigation. Nothing on the live path
+has ever consulted it, or `status`, or `error`, or `isReadyForMoreMediaData`: `LiveAudioSink.enqueue`
+is `tap.ingest` then `renderer.enqueue`, unconditionally. **Every FILE path in this app does the
+opposite** — `LibavAudioSource`, `FileFrameSource`, `LibavFrameSource` and `beginAudioReading` each
+drive a `requestMediaDataWhenReady` + `while isReadyForMoreMediaData` pump. The live path is the only
+consumer in the codebase that pushes blind, so this class of failure is structurally invisible on it.
+
+**MEASURED** with a runtime-adjustable lead (`Debug ▸ Desktop Audio Lead`), real programme,
+reproducible in both directions:
+
+| lead | result |
+|---|---|
+| 40 ms | crackly |
+| **150 ms** | **clean** |
+| 250 / 300 / 400 / 600 ms | clean |
+| back to 40 ms | crackly again |
+
+Shipped default: **250 ms**, which is SRT's `targetDepth` — the smallest lead anywhere in this app
+measured clean through this same renderer. **An evidence-backed floor, not a measured optimum.**
+
+**The true threshold is between 40 and 150 ms on this machine, and was deliberately not narrowed**,
+because nothing depends on the exact value: 250 ms is comfortably above it, matches a lead already
+proven in this app, and costs 250 ms of desktop monitoring latency that a QC operator will not
+notice. Narrowing it would have bought precision nobody can spend — and the figure would be specific
+to this output device anyway.
+
+⚠️ **DO NOT DERIVE THIS FROM THE +291 ms RENDER-AHEAD THE HLS WORK MEASURED.** That was the leading
+hypothesis for the mechanism and **150 ms being clean refutes it** — the threshold is nowhere near
+291. The render-ahead may be why *a* lead is needed at all; it does not set the size of one.
+
+### ⚠️ RETRACTED: `sufficientForStart=NO` WAS NEVER EVIDENCE OF STARVATION
+
+This entry briefly framed `hasSufficientMediaDataForReliablePlaybackStart` reading NO as the
+renderer reporting its own starvation. **That framing is wrong and is withdrawn.** Re-run with
+working instrumentation, it reads **NO at every rung — 40, 150, 250, 300, 400 and 600 ms — while
+only 40 ms is audibly distorted.** It does not track the threshold, it does not track audible
+cleanliness, and on this path it appears to read NO unconditionally.
+
+It looked like evidence for exactly one reason: **it was first observed at the only rung that was
+also broken.** A constant mistaken for a measurement because it was sampled once, where the fault
+was.
+
+**So no adaptive loop.** Growing the lead until that property flips was the obvious next step and
+would have been machinery built on a coincidence — a control loop driven by a signal that never
+changes. Fixed 250 ms is the honest answer.
+
+The instrumentation failure that delayed this is worth its own note: the `renderer:` line was nested
+inside the push closure, behind `if let sink`, behind `guard let sb`, and in grouped mode behind "a
+group completed this tick". It printed five lines, all at 40 ms, then stopped at the first lead
+change — so the first ladder run had **no reading at any clean rung** and the correlation looked
+plausible because nothing contradicted it. It now runs from the pump loop, outside every one of those
+guards, and forces a reading at each new rung.
+
+### ⚠️ THE MOST TRANSFERABLE THING THIS INVESTIGATION PRODUCED — FOUR INSTRUMENTS THAT READ THE SAME WHETHER OR NOT THE FAULT WAS PRESENT
+
+Every one of these was trusted at the time. Every one of them read "fine" across a defect it was
+positioned to catch. **The recurring failure in this chain was not bad reasoning about audio — it was
+believing instruments nobody had ever watched respond to a known change.**
+
+| instrument | what it read | what it was blind to |
+|---|---|---|
+| **the meters** | plausible levels | 82% of the samples were synthesised by FrameSync (#1) — a level is a level whoever made it |
+| **`cum` / `real=Nf` / `underruns=0`** | 48000 Hz, ring read, no underruns | *whether the bytes were right*. These count transactions, not contents. "SDI plays this cleanly" rested on them and was never true as stated — nobody had listened |
+| **`recordPTSContinuity`** | `0.000 ms` residual | it compared `Double`s, and #4 was a rounding that happened in `CMTime`. A PTS can be exact to twelve decimals in seconds and unrepresentable on its own timescale — which is how #4 hid behind the fix for #3 |
+| **`hasSufficientMediaDataForReliablePlaybackStart`** | `NO` | everything. It reads NO at every lead, clean or broken (#5) |
+
+The rule that falls out, and the one worth carrying to the next investigation: **before trusting an
+instrument, make it respond to a change you control.** The tone test, the WAV capture and the lead
+ladder all earned their answers precisely because they were A/B-able — the WAV settled bytes-versus-
+playback in one listen after four rounds of inference had failed to.
+
+And a corollary specific to this file: **a diagnostic that can be suppressed by the thing it is
+diagnosing is not a diagnostic.**
+
+The Debug lead ladder stays in the build for the same family of reasons: the lead is a property of
+the output device, 150 ms clean is one machine and one interface, and the next person on different
+hardware needs to check it by stepping it live rather than by trusting this table.
+
+⚠️ **#3 AND #4 ARE THE SAME SYMPTOM AT TWO SCALES, AND THAT IS WHY #4 SURVIVED THE FIX FOR #3.**
+Both are splices. Fixing #3 took the residual from 7–27 samples to zero *as measured in `Double`
+seconds* — and the instrumentation measured Doubles, so it reported `0.000 ms` and looked clean while
+the audio was still crackling. **A PTS can be exact to twelve decimal places in seconds and
+unrepresentable on the timescale it is stored at.** The grid check that catches this now prints the
+PTS as raw `value/timescale` with the rounding error in ticks and samples, because in seconds it is
+invisible.
+
+### ⚠️ THE GENERAL RULE: AN AUDIO CMTime BELONGS ON THE SAMPLE RATE'S TIMESCALE
+
+```swift
+CMTime(value: anchorTicks + cumulativeFrames, timescale: CMTimeScale(sampleRate))
+```
+
+Not 90 kHz, which is the video/mux grid, and not seconds. On the sample rate's own timescale a
+sample position is a tick by definition, `duration` is `1/sampleRate` on the same scale, and buffer
+n's end is bit-identical to buffer n+1's start rather than merely equal as a `Double`. There is
+nothing left to round, at any frame size and any sample rate.
+
+**90000/48000 = 1.875**, so `n/48000` lands on an integer 90 kHz tick exactly when `n` is a multiple
+of 8. This is the test to apply to any audio PTS on a foreign timescale.
+
+⚠️ **WHEP AND SRT BOTH PASS THIS TEST BY COINCIDENCE, AND NEITHER IS SAFE BY DESIGN.** Audited, and
+noted in a comment at each call site:
+
+* **WHEP** — Opus at 48 kHz is **960 samples** per packet and the PTS is a running multiple of 960.
+  960 % 8 == 0, so every value lands on the grid. Any other packetisation breaks it silently.
+* **SRT** — the PTS *is* a 90 kHz value (`packet.pts × 1/90000`), so nothing is rounded on the way
+  in; and AAC-LC's **1024** frames → 1920 ticks at 48 kHz, HE-AAC's 2048 → 3840. Both integral.
+  ⚠️ **At 44.1 kHz it would NOT be**: 1024 × 90000/44100 = 2089.79… ticks, and SRT would crackle
+  exactly as NDI did.
+* **The file path already does it correctly** — `LibavAudioSource` stamps on the stream's own
+  timebase, whose denominator is the sample rate for audio. That was the pattern to copy and it was
+  in the repo the whole time.
+* Video PTS at 90 kHz (`HLSClient`, `NDIService`, `SRTFrameRouter`, `WHEPFrameRouter`) and the
+  synchronizer anchors in `FrameEngine.mirrorLiveAudio` / `anchorLiveAudio` are **not** affected:
+  none of them is a sample-exact splice point.
+
+⚠️ **AND THE WRONG NUMBER IN A COMMENT IS WHAT PROPAGATED IT.** `WHEPAudioReceiver.makeSampleBuffer`
+said 48 kHz frames land on 90 kHz ticks "only every 15 samples". It is every 8. That comment is why
+the timescale looked safe to reuse for NDI. It has been corrected in place (comment-only; WHEP's
+behaviour is untouched). **This is the third time in this file that a confident, mechanism-shaped
+comment has been the actual propagation vector for a bug** — see also the two inverted
+`framesync_audio_queue_depth` claims. Treat prose here as a claim to check.
+
 **Found:** 2026-09-17, while comparing transports for the HLS audio work. **Re-diagnosed:**
 2026-09-18, from source, after the pump was fixed. **Blocks:** monitoring an NDI source on a machine
 with no DeckLink card.
@@ -5980,10 +6129,39 @@ is why `sndR` and `cum` both read 48000. It says nothing about **us ↔ the outp
 a seam entirely outside the NDI SDK. Each transport does reconcile drift at a different layer, as
 suspected — but NDI's layer stops one seam short of the speaker, and no other layer picks it up.
 
-### The decision — SHIP THREE, NOT FOUR
+### ~~The decision — SHIP THREE, NOT FOUR~~ → SUPERSEDED: the fourth was built
 
-**Not implemented, deliberately.** What is missing is small but it is a *mechanism*, and it is a
-fourth shape rather than a reuse of WHEP's and SRT's:
+**The closed-loop option below was implemented on 2026-09-18.** What landed, and where:
+
+* `FrameEngine.anchorLiveAudio(mediaTime:hostTime:)` — a `nonisolated` sibling to `mirrorLiveAudio`
+  that sets the timebase unconditionally at rate 1.0. **A `public init` on `LiveClock.Mapping` was
+  considered and rejected: it does not work.** An identity mapping makes the mirror's `predicted ==
+  target` by construction, so `positionError` is 0 at every call and `shouldPush` is false after the
+  first — a non-slewing transport would anchor once and never again, which is the very drift being
+  fixed. The mirror cannot serve a transport that does not slew.
+* **The read side needed no new seam at all** — `FrameEngine.currentSyncTime()` was already
+  `public nonisolated`, and it is the only reading in the system taken on the audio device's clock.
+* `NDIService.serviceDesktopAudioAnchor` — the loop, on the existing ~10 ms pump thread. Checks at
+  **1 Hz**, re-anchors past a **10 ms** tolerance (`FrameEngine.liveAudioPositionTolerance`'s number,
+  so both live-audio paths correct at one threshold), and logs every correction with the interval
+  and the implied ppm, so **a machine whose crystals are further apart shows up as a higher
+  correction rate rather than silently**. The ppm is nowhere pinned as a constant.
+* The pump now enqueues through `LiveAudioSink` (Int32 → `CMSampleBuffer`, the same shape as
+  `WHEPAudioReceiver.makeSampleBuffer`) **instead of** `pushInterleavedInt32` — the sink already tees
+  to the tap, and keeping both would double-feed the ring. The direct tap push survives only as the
+  fallback for an unwired seam, so meters and SDI cannot regress to silence.
+* Mute, fader and `deckLinkOwnsAudio` now govern NDI for free, because it finally passes through
+  `audioRenderer`.
+
+⚠️ **THE 40 ms PRESENTATION LEAD IS THE OPEN NUMBER.** The timebase is anchored 40 ms behind the
+pull clock so the renderer holds a queue — at zero lead a buffer is due the instant it is enqueued
+and every pump hiccup is a gap. 40 ms is ~4 pull periods and ~40× the largest per-push deviation the
+`[NDI-AUDIO]` trace has measured (+1.02 ms), **but it is also 40 ms of desktop lip-sync offset and
+that has not been checked by ear.** SDI is unaffected — it reads the tap keyed to video PTS and
+never consults this timebase.
+
+The options as they were assessed, kept because the rejected ones explain the shape of the one that
+landed:
 
 * an **unconditional periodic re-anchor** (say 1 Hz identity mapping) is strictly worse than the
   mirror, not better — it injects a micro-discontinuity into a playing renderer every second, which
@@ -5996,9 +6174,8 @@ fourth shape rather than a reuse of WHEP's and SRT's:
   bypasses `shouldPush`, or a dedicated entry point beside `mirrorLiveAudio`);
 * a **rate slew** that nulls the offset properly is a PLL and is more machinery still.
 
-The honest state is therefore: **three transports audible on the desktop, one not, and a written
-reason.** Anyone picking this up should implement the closed-loop re-anchor, and should expect to
-add a seam to `ManifoldCore` rather than to find one.
+Of the three, the middle one landed. The seam cost in `ManifoldCore` was **one method**, not the
+two-part change anticipated here — because `currentSyncTime()` already existed.
 
 **HLS is not a template for this.** It avoided the question entirely by having `AVPlayer` own the
 output path — and note *why* that works, because it is the same mechanism in a different place:
@@ -6172,8 +6349,11 @@ individually rather than assumed:
   through the `externalAudioOutput` seam instead: `ManifoldCore/FrameEngine.swift:694` hands it the
   SAME already-combined `effectiveMute`, wired at `App/WindowDeck.swift:1237-1239` →
   `HLSClient.applyAudioOutput` (`App/HLS/HLSClient.swift:391`). ✅
-* **NDI** — has no desktop audio path at all: it feeds the tap alone
-  (`App/WindowDeck.swift:1242`), so there is nothing to double-monitor. ✅
+* **NDI** — ⚠️ **THIS BULLET CHANGED ON 2026-09-18 AND THE REASON IT PASSES CHANGED WITH IT.** It
+  used to pass vacuously ("no desktop audio path at all: it feeds the tap alone, so there is nothing
+  to double-monitor"). NDI now routes through `FrameEngine.LiveAudioSink` → `audioRenderer` like
+  WHEP and SRT, so it passes for the SAME reason they do — `audioRenderer.isMuted = effectiveMute`,
+  and `effectiveMute` includes `deckLinkOwnsAudio`. ✅
 
 The earlier note that this condition "is not currently reachable, precisely because the card is
 silent for live sources" is now spent — it became reachable with this fix, and the four checks above

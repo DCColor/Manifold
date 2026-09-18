@@ -2378,6 +2378,138 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
     }
 
+    /// ── THE DIRECT ANCHOR — FOR A TRANSPORT THAT HAS NO `LiveClock` TO MIRROR ────────────────
+    ///
+    /// Sets the audio timebase to `mediaTime` at `hostTime`, at rate 1.0, unconditionally. It is the
+    /// sibling of `mirrorLiveAudio` for a caller that produces no `LiveClock.Mapping` — today, NDI.
+    ///
+    /// ⚠️ WHY THIS EXISTS RATHER THAN A `public init` ON `LiveClock.Mapping`. That was the obvious
+    /// smaller change and it does not work. `mirrorLiveAudio`'s push gate is
+    ///
+    ///     predicted     = pushedMedia + (hostTime - pushedHost) * pushedRate
+    ///     positionError = abs(target - predicted)
+    ///
+    /// For a transport whose media timeline IS the host timeline at rate 1.0, an identity mapping
+    /// makes `predicted == target` BY CONSTRUCTION, forever. `positionError` is 0 at every call,
+    /// `rateMoved` is 0 because the rate never moves, so `shouldPush` is false for every mapping
+    /// after the first. Such a caller would anchor ONCE and never re-anchor — which is precisely the
+    /// unbounded drift the caller came here to fix. The mirror cannot serve a transport that does
+    /// not slew; that is a property of its gate, not an oversight.
+    ///
+    /// ⚠️ AND IT WOULD HAVE BEEN A LIE ABOUT PROVENANCE. A `LiveClock.Mapping` fabricated by a
+    /// transport that owns no `LiveClock` is a value of a type named after a clock that does not
+    /// exist for it. The mapping type stays what it says it is.
+    ///
+    /// ── WHY UNCONDITIONAL, WHEN THE MIRROR THROTTLES ─────────────────────────────────────────
+    ///
+    /// The mirror throttles because it is fed by a control loop running at `controlHz` and most of
+    /// what that loop emits is twitch rather than clock. This is fed by a CALLER'S OWN CLOSED LOOP,
+    /// which has already decided a correction is warranted by measuring `currentSyncTime()` against
+    /// its own axis. Throttling a decision that was made from a measurement would just be second-
+    /// guessing it with less information. **The policy — how far is too far, how often to look —
+    /// belongs to the caller; the mechanism belongs here.**
+    ///
+    /// ⚠️ NOTHING IN WHEP'S OR SRT'S PATH REACHES THIS. They mirror; `mirrorLiveAudio` is unchanged
+    /// and does not call this. A transport uses one or the other, never both.
+    ///
+    /// NONISOLATED for the same reason `mirrorLiveAudio` and `currentSyncTime()` are: the caller is
+    /// a pump thread, and `AVSampleBufferRenderSynchronizer` handles its own thread-safety.
+    ///
+    /// No-op unless a live-audio session is open (`beginLiveAudio`), so a late call from a pump that
+    /// is still draining after `endLiveAudio` cannot resurrect the timebase.
+    public nonisolated func anchorLiveAudio(mediaTime: Double, hostTime: Double) {
+        guard mediaTime.isFinite, hostTime.isFinite else { return }
+        mirror.lock.lock()
+        let active = mirror.active
+        let first = active && !mirror.mirrored
+        let tag = "[\(mirror.path.rawValue)-AUDIO]"
+        if active {
+            // `mirrored` is what `liveAudioDrift` keys its readiness on, so a directly-anchored
+            // session reports drift exactly as a mirrored one does.
+            mirror.mirrored = true
+            // Keep the mirror's own model in step even though nothing reads it on this path: if a
+            // mapping ever did arrive for this session, it must not compute `predicted` from a
+            // stale anchor that predates every direct push.
+            mirror.pushedRate = 1.0
+            mirror.pushedMedia = mediaTime
+            mirror.pushedHost = hostTime
+            mirror.pushes += 1
+        }
+        mirror.lock.unlock()
+        guard active else { return }
+
+        synchronizer.setRate(1.0,
+                             time: CMTime(seconds: mediaTime, preferredTimescale: 90_000),
+                             atHostTime: CMTime(seconds: hostTime, preferredTimescale: 90_000))
+        if first {
+            NSLog("%@ timebase ANCHORED DIRECTLY (no LiveClock) — media=%.3fs at host=%.3fs, "
+                + "rate 1.0. Re-anchors from here are the caller's closed loop.",
+                  tag, mediaTime, hostTime)
+        }
+    }
+
+    /// Everything the live-audio renderer will tell us about its own state, in one atomic-ish read.
+    ///
+    /// ⚠️ NOTHING HAS EVER READ ANY OF THIS, AND THAT IS THE POINT OF ADDING IT. The live path
+    /// (`LiveAudioSink.enqueue`) pushes UNCONDITIONALLY: it consults neither
+    /// `isReadyForMoreMediaData` nor `requestMediaDataWhenReady`, and it never looks at `status` or
+    /// `error`. The FILE paths all do — `LibavAudioSource`, `FileFrameSource`, `LibavFrameSource`
+    /// and `beginAudioReading` every one drive a `requestMediaDataWhenReady` +
+    /// `while isReadyForMoreMediaData` pump. So a renderer that has gone `.failed`, or that is
+    /// refusing data, is INVISIBLE on the live path and would present as "audio is wrong" with every
+    /// counter upstream reading clean.
+    ///
+    /// `rate` is read from the synchronizer rather than assumed: `anchorLiveAudio` sets 1.0, but
+    /// `setRate` is documented to update the rate property synchronously and the TIMEBASE
+    /// asynchronously, and `delaysRateChangeUntilHasSufficientMediaData` (default YES) can hold a
+    /// rate change until a renderer says it has enough data. Neither has ever been confirmed to
+    /// stick.
+    ///
+    /// NONISOLATED — read from a pump thread, same thread-safety rationale as `currentSyncTime()`.
+    public struct LiveAudioRendererState: Sendable {
+        public let isReadyForMoreMediaData: Bool
+        public let hasSufficientMediaDataForReliablePlaybackStart: Bool
+        /// 0 unknown · 1 rendering · 2 failed — `AVQueuedSampleBufferRenderingStatus.rawValue`.
+        public let statusRawValue: Int
+        public let errorDescription: String?
+        public let synchronizerRate: Float
+        public let timebaseSeconds: Double
+        /// Public so a caller can build the "engine is gone" placeholder rather than making the
+        /// whole thing optional at every use site.
+        public init(isReadyForMoreMediaData: Bool,
+                    hasSufficientMediaDataForReliablePlaybackStart: Bool,
+                    statusRawValue: Int, errorDescription: String?,
+                    synchronizerRate: Float, timebaseSeconds: Double) {
+            self.isReadyForMoreMediaData = isReadyForMoreMediaData
+            self.hasSufficientMediaDataForReliablePlaybackStart =
+                hasSufficientMediaDataForReliablePlaybackStart
+            self.statusRawValue = statusRawValue
+            self.errorDescription = errorDescription
+            self.synchronizerRate = synchronizerRate
+            self.timebaseSeconds = timebaseSeconds
+        }
+
+        public var statusLabel: String {
+            switch statusRawValue {
+            case 0:  return "unknown"
+            case 1:  return "rendering"
+            case 2:  return "FAILED"
+            default: return "status \(statusRawValue)"
+            }
+        }
+    }
+
+    public nonisolated func liveAudioRendererState() -> LiveAudioRendererState {
+        LiveAudioRendererState(
+            isReadyForMoreMediaData: audioRenderer.isReadyForMoreMediaData,
+            hasSufficientMediaDataForReliablePlaybackStart:
+                audioRenderer.hasSufficientMediaDataForReliablePlaybackStart,
+            statusRawValue: audioRenderer.status.rawValue,
+            errorDescription: audioRenderer.error?.localizedDescription,
+            synchronizerRate: synchronizer.rate,
+            timebaseSeconds: CMTimeGetSeconds(synchronizer.currentTime()))
+    }
+
     /// The live source has established its channel count — publish it so the meters size their bars
     /// from the DECODER rather than growing into shape as audio arrives.
     public func liveAudioEstablished(channels: Int) {

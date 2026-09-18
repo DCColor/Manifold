@@ -179,6 +179,31 @@ final class NDIService: ObservableObject {
     /// applies to NDI audio for free. Weak, like `renderer`: the engine owns it.
     weak var audioTap: AudioTapBuffer?
 
+    // MARK: - Desktop audio seams (wired by WindowDeck, same shape as WHEP's and SRT's)
+
+    /// Open the shared audio renderer for this stream. The argument is `beginLiveAudio`'s `cushion`
+    /// — "how far behind the timebase's own axis does this transport stamp its audio PTS" — and NDI
+    /// passes **0**, the value WHEP now passes: the pump stamps `monotonicNow()` at pull, which IS
+    /// the axis the timebase is anchored on. SRT's 0.250 is right for SRT because SRT stamps on
+    /// `LiveClock.now()`, which sits a buffer depth behind the sender timeline. NDI has no such
+    /// offset to declare. The desktop presentation lead is a DIFFERENT quantity and is applied at
+    /// the anchor, not here — see `desktopAudioLead`.
+    var beginLiveAudio: ((Double) -> FrameEngine.LiveAudioSink?)?
+    /// Retire the renderer session. Called on disconnect only, NOT on a source switch.
+    var endLiveAudio: (() -> Void)?
+    /// `FrameEngine.anchorLiveAudio(mediaTime:hostTime:)` — the direct timebase anchor NDI uses in
+    /// place of the LiveClock mirror. See the note on that method for why the mirror cannot serve
+    /// a transport that never slews.
+    var anchorLiveAudio: ((Double, Double) -> Void)?
+    /// `CMTimeGetSeconds(FrameEngine.currentSyncTime())` — the ACTUAL audio timebase, read from the
+    /// pump thread. This is the closed half of the loop and the reason it is a loop at all: it is
+    /// the only quantity in the system that is on the AUDIO DEVICE's clock rather than on mach time.
+    var liveAudioTimebase: (() -> Double)?
+    /// `FrameEngine.liveAudioRendererState()` — readiness, status, error and the MEASURED
+    /// synchronizer rate. Nothing on the live path has ever read any of it; see the reporting note
+    /// on `reportRendererState`.
+    var liveAudioRendererState: (() -> FrameEngine.LiveAudioRendererState)?
+
     private var bridge: NDIBridge?
     private var transferSession: VTPixelTransferSession?
     private var pixelBufferPool: CVPixelBufferPool?
@@ -456,6 +481,32 @@ final class NDIService: ObservableObject {
         // Pull VIDEO on the display tick: FrameSync hands us the current frame on OUR clock.
         renderer.onDisplayTick = { [weak self] in self?.pullFrame() }
 
+        // ── DESKTOP AUDIO: OPEN THE RENDERER BEFORE THE PUMP, NOT AFTER ─────────────────────
+        //
+        // `beginLiveAudio` FLUSHES the renderer and parks the synchronizer at rate 0, so it has to
+        // happen before any buffer is enqueued or the first buffers would be flushed away behind
+        // the pump. Re-entered on a SOURCE SWITCH too (`start(with:)` is the switch path as well),
+        // which is correct: the flush drops the old sender's audio and the first pull of the new one
+        // re-anchors. That is a brief silence across a switch, which is what a switch is.
+        //
+        // The pump-thread anchor state is reset HERE, on main, before the thread exists — the pump
+        // owns it exclusively once it is running.
+        anchoredDesktopAudio = false
+        anchorCount = 0
+        audioFormatCache = nil
+        audioAnchorTicks = nil; audioCumulativeFrames = 0
+        audioAxisRate = 0; audioAxisChannels = 0
+        audioResyncCount = 0; lastAudioResyncHost = 0
+        audioBuffersDumped = 0
+        lastAudioPTS = nil; lastAudioFrames = 0; lastAudioRate = 0
+        ptsSamples = 0; ptsResidualSum = 0; ptsResidualAbsSum = 0; ptsQuantisedAbsSum = 0
+        ptsGaps = 0; ptsOverlaps = 0; ptsWorstResidual = 0; ptsWorstResidualSamples = 0
+        liveAudioSink = beginLiveAudio?(0)
+        if liveAudioSink == nil {
+            NSLog("[NDI-AUDIO] no engine seam wired — audio will be metered and SDI-capable but "
+                + "SILENT on the desktop (the pre-existing behaviour, not a new failure)")
+        }
+
         // Pull AUDIO on its OWN thread, at real-time cadence, independent of the video tick.
         startAudioPump(connected)
 
@@ -566,6 +617,13 @@ final class NDIService: ObservableObject {
         // frames between receivers rather than holding the old shape until the new one states its
         // own. Same reasoning as `isConnected` not dipping across a switch.
         loggedRational = nil
+        // HERE AND NOT IN `tearDownReceiver`, for the same reason the size latch is cleared here:
+        // that one is the SOURCE-SWITCH path, and ending the renderer session mid-switch would
+        // retire a session `start(with:)` is about to reopen two statements later.
+        liveAudioSink = nil
+        anchoredDesktopAudio = false
+        audioFormatCache = nil
+        endLiveAudio?()
         LiveDisplaySize.shared.clear()
         resetColorimetry()
         NSLog("[NDI] disconnected")
@@ -667,6 +725,1229 @@ final class NDIService: ObservableObject {
     /// Spin up the audio pump thread. Started at connect, joined at disconnect. Runs whether or not
     /// the source actually carries audio — `captureAudioFrame` returns nil (cheaply) until audio
     /// arrives, so an audio-less source just polls an empty queue.
+    // MARK: - Desktop audio: the closed-loop timebase anchor
+
+    /// ── HOW FAR BEHIND REAL TIME THE DESKTOP TIMEBASE RUNS, i.e. THE RENDERER'S QUEUE ────────
+    ///
+    /// The pump stamps each buffer `monotonicNow()` at pull. If the timebase were anchored at
+    /// exactly that axis, a buffer would be DUE THE INSTANT IT IS ENQUEUED: the renderer would hold
+    /// no queue at all and every pump hiccup would be a gap. So the timebase is anchored `lead`
+    /// BEHIND the stamp axis, which makes a buffer stamped `t` due at `t + lead` and leaves the
+    /// renderer exactly `lead` of audio in hand.
+    ///
+    /// ⚠️ THIS IS A LIP-SYNC OFFSET AND IT IS NOT FREE: NDI video is stamped on the same clock and
+    /// presented at the next display tick, so desktop audio lands `lead` LATE against the picture.
+    /// SDI is unaffected — that path reads the tap keyed to video PTS and never consults this
+    /// timebase.
+    ///
+    /// 40 ms, CHOSEN FROM THE PUMP'S OWN MEASURED BEHAVIOUR rather than from feel: the pull period
+    /// measured ~10.9 ms against a nominal 10 ms, and the `[NDI-AUDIO]` trace's per-push deviation
+    /// ran +0.01..+1.02 ms over 72 s. 40 ms is ~4 pull periods of queue and ~40× the largest
+    /// deviation ever measured on that trace.
+    ///
+    /// ⚠️ THE ONE NUMBER HERE NOT SETTLED BY MEASUREMENT IS WHETHER 40 ms IS AUDIBLE AS LIP-SYNC.
+    /// It is inside the range usually quoted as tolerable for audio-late, but this has NOT been
+    /// confirmed by ear. If it reads late, lower it and expect the renderer to become more
+    /// sensitive to pump jitter; that trade is the whole content of this constant.
+    /// ── 250 ms: AN EVIDENCE-BACKED FLOOR, NOT A MEASURED OPTIMUM ─────────────────────────────
+    ///
+    /// It is SRT's `targetDepth` — the smallest lead anywhere in this app that is measured clean
+    /// through this same `AVSampleBufferAudioRenderer` — and it sits comfortably above the observed
+    /// threshold. It is chosen because it is defensible, not because it is minimal.
+    ///
+    /// ⚠️ THE TRUE THRESHOLD IS LOWER, AND IS NOT 291 ms. Measured on this machine with real
+    /// programme, reproducible in both directions: 40 ms crackly · **150 ms clean** · 300/400/600 ms
+    /// clean · back to 40 ms crackly again. So the boundary lies somewhere between 40 and 150 ms and
+    /// has not been narrowed further.
+    ///
+    /// ⚠️ DO NOT DERIVE THIS FROM THE +291 ms RENDER-AHEAD THE HLS WORK MEASURED. That figure was
+    /// the leading hypothesis for the mechanism and **150 ms being clean refutes it** — the
+    /// threshold is nowhere near 291. The render-ahead may still be why *a* lead is needed at all,
+    /// but it does not set the size of it, and presenting it as the explanation would be exactly the
+    /// kind of confident mechanism-shaped claim this file has been bitten by three times already.
+    ///
+    /// ⚠️ AND IT IS A PROPERTY OF THE OUTPUT DEVICE. 150 ms clean is one machine and one interface.
+    /// Keep the Debug lead ladder in the build: it is how this was found, and it is how the next
+    /// person on different hardware checks whether 250 ms is still enough.
+    private static let desktopAudioLeadDefault = 0.250
+
+    /// ── ⚠️ 40 ms IS NOT ENOUGH — MEASURED, AND THE RENDERER HAD BEEN SAYING SO ───────────────
+    ///
+    /// The ladder settled it: 40 ms crackly, 150 ms and above clean, and crackly again on the way
+    /// back down. The lead was being honoured exactly the whole time (`queue` held +42..50 ms
+    /// against a 40 ms target) — it was simply far too small.
+    ///
+    /// ⚠️ `hasSufficientMediaDataForReliablePlaybackStart` IS **NOT** THE SIGNAL, AND THE EARLIER
+    /// CLAIM THAT IT WAS IS RETRACTED. It reads NO at EVERY rung — 40, 150, 250, 300, 400, 600 —
+    /// while only 40 ms is audibly distorted. It does not track the threshold, it does not track
+    /// audible cleanliness, and it appears to read NO unconditionally on this path. It looked like
+    /// evidence of starvation only because it was first observed at the one rung that was also
+    /// broken. **No adaptive loop is built on it**, and nothing should be: it is a constant, not a
+    /// measurement.
+    ///
+    /// For scale: WHEP runs a 400 ms lead (LiveClock's `targetDepth`) and SRT 250 ms, both clean
+    /// through this same renderer.
+    ///
+    /// RUNTIME-ADJUSTABLE so the threshold can be found in ONE session instead of one value per
+    /// build — see `cycleDesktopAudioLead`. Read on the pump thread under `toneLock`.
+    private var desktopAudioLead = NDIService.desktopAudioLeadDefault
+    /// Set on main when the lead changes; consumed by the pump, which re-anchors immediately.
+    private var desktopAudioLeadChanged = false
+
+    /// The ladder the Debug menu steps through. Spans the two known-good live leads (SRT's 250 ms,
+    /// WHEP's 400 ms) and brackets the measured 291 ms render-ahead, with the current 40 ms at the
+    /// bottom so the first step reproduces today's behaviour exactly.
+    private static let desktopAudioLeadLadder = [0.040, 0.150, 0.250, 0.300, 0.400, 0.600]
+
+    /// Debug ▸ Desktop Audio Lead — cycle the ladder. Main thread.
+    ///
+    /// ⚠️ RE-ANCHORS RATHER THAN REQUIRING A RECONNECT. The lead is only ever expressed as the
+    /// offset between the timebase and the PTS axis, so moving it is one `setRate(...atHostTime:)`
+    /// away — `desktopAudioLeadChanged` makes the pump take its first-anchor branch on the very next
+    /// pull. Nothing about the sample axis, the cumulative counter or the sink is disturbed.
+    ///
+    /// Expect a brief discontinuity ON the change: enlarging the lead pushes already-enqueued
+    /// buffers later (the renderer simply holds them), shrinking it makes some of them instantly
+    /// past-due (the renderer drops those). That is inherent to moving a timebase under a running
+    /// queue and is not what is being measured — judge each step after it settles.
+    func cycleDesktopAudioLead() {
+        toneLock.lock()
+        let ladder = Self.desktopAudioLeadLadder
+        let previous = desktopAudioLead
+        let idx = ladder.firstIndex(where: { abs($0 - previous) < 1e-9 }) ?? 0
+        let next = ladder[(idx + 1) % ladder.count]
+        desktopAudioLead = next
+        desktopAudioLeadChanged = true
+        rendererForceReport = true
+        toneLock.unlock()
+        audioLeadTitle = String(format: "Desktop Audio Lead: %.0f ms", next * 1000)
+        NSLog("%@", String(format: "[NDI-AUDIO] desktop audio lead → %.0f ms (was %.0f ms) — "
+                           + "re-anchoring the timebase on the next pull, no reconnect. For "
+                           + "reference: SRT runs 250 ms and WHEP 400 ms through this same renderer, "
+                           + "and this machine's audio device measured a +291 ms render-ahead. Watch "
+                           + "sufficientForStart and queue in the next [NDI-AUDIO] renderer: line.",
+                           next * 1000, previous * 1000))
+    }
+
+    @Published private(set) var audioLeadTitle =
+        String(format: "Desktop Audio Lead: %.0f ms", NDIService.desktopAudioLeadDefault * 1000)
+
+    /// How far the timebase may sit from where it should be before an absolute re-anchor is worth
+    /// the discontinuity it costs.
+    ///
+    /// 10 ms, WHICH IS THE NUMBER THIS CODEBASE ALREADY USES FOR EXACTLY THIS DECISION —
+    /// `FrameEngine.liveAudioPositionTolerance` is 0.010 and governs when the LiveClock mirror stops
+    /// smoothing and pushes position immediately. Adopting it means the two live-audio paths correct
+    /// at the same threshold rather than at two numbers nobody can compare. It also sits under the
+    /// ~12 ms that `liveAudioRateThreshold`'s own note already accepts as a tolerable standing error
+    /// ("a full minute between pushes costs 12 ms — under a third of a frame"), and under one frame
+    /// at every rate this app outputs (16.7 ms at 60p).
+    ///
+    /// ⚠️ THE CORRECTION RATE IS DELIBERATELY NOT A CONSTANT AND MUST NOT BECOME ONE. This is a
+    /// tolerance on a MEASURED offset, so how often it trips is whatever this machine's two crystals
+    /// dictate. At the −7.8 ppm one run of the HLS work measured it is roughly one correction per
+    /// 21 minutes — but `HLSAudioTap` is explicit that such figures are properties of the output
+    /// device, so a different interface will trip at a different rate and that is the system working,
+    /// not a fault. The log line below reports the interval precisely so a far-apart pair of crystals
+    /// shows up as a higher rate instead of silently.
+    private static let desktopAudioAnchorTolerance = 0.010
+
+    /// How often the loop LOOKS (it corrects only when the tolerance is exceeded). Reading
+    /// `currentSyncTime()` is cheap but not free and the pump ticks at 100 Hz, so checking every
+    /// pull would be 100× the rate any crystal offset can possibly need.
+    ///
+    /// 1 Hz is ~1260 samples per correction at 7.8 ppm, and still ~20 samples per correction at an
+    /// absurd 500 ppm — so the sampling rate cannot become the limiting factor across any plausible
+    /// pair of crystals. That headroom is the reason for the number.
+    private static let desktopAudioCheckInterval = 1.0
+
+    /// The renderer session for this connection, or nil when the engine seam is unwired (the pump
+    /// then falls back to feeding the tap directly — see `runAudioPump`).
+    private var liveAudioSink: FrameEngine.LiveAudioSink?
+    /// Cached format description, rebuilt only when the source's rate/channel count changes. At 100
+    /// pulls a second a fresh `CMAudioFormatDescriptionCreate` per buffer is pure waste.
+    private var audioFormatCache: (rate: Double, channels: Int, desc: CMAudioFormatDescription)?
+    /// Pump-thread state for the closed loop. Touched ONLY on the audio pump thread.
+    private var anchoredDesktopAudio = false
+    private var lastAnchorCheck = 0.0
+    private var lastAnchorHost = 0.0
+    private var anchorCount = 0
+
+    /// Interleaved Int32 → a CMSampleBuffer the shared renderer accepts.
+    ///
+    /// ⚠️ DELIBERATELY THE SAME SHAPE AS `WHEPAudioReceiver.makeSampleBuffer`, not a new one — same
+    /// ASBD flags, same 90 kHz PTS grid, same `sampleSize` = BYTES PER INTERLEAVED FRAME (passing
+    /// the frame count there builds a buffer claiming frames×frames bytes and the renderer reads off
+    /// the end; that trap is documented at WHEP's copy and is repeated here because it only bites
+    /// once real audio flows).
+    ///
+    /// THE ONE REAL DIFFERENCE: rate and channel count come from the FRAME, not from a constant.
+    /// WHEP is always 48 kHz Opus; NDI carries the source's native format and a source switch can
+    /// change it mid-session without a disconnect.
+    ///
+    /// ── ⚠️ THE PTS IS BUILT FROM TICKS ON THE SAMPLE RATE'S OWN TIMESCALE. NOT FROM SECONDS. ──
+    ///
+    /// This is the second half of the splice fix and it is the half that is invisible in a debugger:
+    /// `CMTime(seconds:preferredTimescale: 90_000)` was ROUNDING every PTS. For `n/48000` to land on
+    /// an integer 90 kHz tick, `n` must be a multiple of 8 (90000/48000 = 1.875). NDI's per-pull
+    /// counts are 480..530 and the running total is arbitrary, so SEVEN BUFFERS IN EIGHT were
+    /// rounded — by up to 0.5 tick = 0.27 samples. Buffer n's end and buffer n+1's start were then
+    /// independently rounded values that could not meet, and the renderer resolved each mismatch by
+    /// dropping or duplicating a sample. Tens of times a second: crackle with the programme intact
+    /// underneath, which is exactly what it sounded like.
+    ///
+    /// ⚠️ IT WAS EXACT AS A `Double` THE WHOLE TIME. The sample-counted axis (`audioPTSTicks`) is
+    /// correct and the PTS-continuity instrumentation measured zero residual — because it measures
+    /// Doubles. A PTS can be right to twelve decimal places in seconds and unrepresentable on the
+    /// timescale it is stored at. **That is why the fix is the timescale and not the arithmetic.**
+    ///
+    /// On the sample rate's own timescale every value is exact by construction: `duration` is
+    /// `1/sampleRate`, the PTS is an integer count of the same unit, so buffer n's end
+    /// (`pts + numSamples × duration`) is BIT-IDENTICAL to buffer n+1's start rather than merely
+    /// equal as a Double. There is nothing left to round.
+    ///
+    /// ⚠️ GENERAL RULE, AND IT IS THE LESSON OF THIS WHOLE CHAIN: **an audio CMTime belongs on the
+    /// sample rate's timescale.** 90 kHz is the video/mux grid and it is the wrong unit for a
+    /// quantity measured in samples. WHEP and SRT both pass through a 90 kHz audio PTS and both
+    /// happen to be safe — WHEP because Opus is 960 samples and SRT because AAC-LC is 1024, and
+    /// both are multiples of 8 at 48 kHz. Neither is safe BY DESIGN; see the notes added at those
+    /// two call sites.
+    private func makeAudioSampleBuffer(_ pcm: UnsafePointer<Int32>, frames: Int, channels: Int,
+                                       sampleRate: Double, ptsTicks: Int64) -> CMSampleBuffer? {
+        let format: CMAudioFormatDescription
+        if let cached = audioFormatCache, cached.rate == sampleRate, cached.channels == channels {
+            format = cached.desc
+        } else {
+            var asbd = AudioStreamBasicDescription(
+                mSampleRate: sampleRate,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+                mBytesPerPacket: UInt32(4 * channels), mFramesPerPacket: 1,
+                mBytesPerFrame: UInt32(4 * channels), mChannelsPerFrame: UInt32(channels),
+                mBitsPerChannel: 32, mReserved: 0)
+            var made: CMAudioFormatDescription?
+            guard CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault,
+                                                 asbd: &asbd, layoutSize: 0, layout: nil,
+                                                 magicCookieSize: 0, magicCookie: nil,
+                                                 extensions: nil,
+                                                 formatDescriptionOut: &made) == noErr,
+                  let made else { return nil }
+            audioFormatCache = (sampleRate, channels, made)
+            format = made
+            // Fires on the first buffer of a connection and again only on a real format change, so
+            // it is one line per format rather than per pull. It prints what we DECLARE beside what
+            // the bridge actually HANDS US, because a mismatch between those two is invisible by
+            // inspection and reads as distortion rather than as an error.
+            logDeclaredAudioFormat(asbd, frames: frames, channels: channels, sampleRate: sampleRate)
+        }
+
+        let byteCount = frames * channels * MemoryLayout<Int32>.size
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+                allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
+                blockAllocator: kCFAllocatorDefault, customBlockSource: nil,
+                offsetToData: 0, dataLength: byteCount,
+                flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr,
+              let block,
+              CMBlockBufferReplaceDataBytes(with: pcm, blockBuffer: block,
+                                            offsetIntoDestination: 0,
+                                            dataLength: byteCount) == noErr else { return nil }
+
+        var sb: CMSampleBuffer?
+        // BOTH on the sample rate's timescale, so `pts + n × duration` is exact integer arithmetic.
+        let timescale = CMTimeScale(sampleRate)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: timescale),
+            presentationTimeStamp: CMTime(value: ptsTicks, timescale: timescale),
+            decodeTimeStamp: .invalid)
+        var sampleSize = channels * MemoryLayout<Int32>.size
+        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block,
+                                        formatDescription: format, sampleCount: frames,
+                                        sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                                        sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
+                                        sampleBufferOut: &sb) == noErr else { return nil }
+        return sb
+    }
+
+    /// Dump the EXACT ASBD handed to `CMAudioFormatDescriptionCreate`, every field, with the flag
+    /// word decoded bit by bit — beside what `NDIAudioFrame` actually delivers. The two must agree;
+    /// this exists so that agreement is checked rather than assumed.
+    private func logDeclaredAudioFormat(_ asbd: AudioStreamBasicDescription,
+                                        frames: Int, channels: Int, sampleRate: Double) {
+        let f = asbd.mFormatFlags
+        func on(_ flag: AudioFormatFlags) -> String { (f & flag) != 0 ? "YES" : "no" }
+        let fourCC = withUnsafeBytes(of: asbd.mFormatID.bigEndian) { raw in
+            String(bytes: raw, encoding: .ascii) ?? "????"
+        }
+        NSLog("""
+        [NDI-AUDIO] ── DECLARED ASBD (what the renderer and the tap are told this buffer is) ──
+          mFormatID        = 0x%08X '%@'  (kAudioFormatLinearPCM = 0x%08X 'lpcm')
+          mFormatFlags     = 0x%08X → signedInteger=%@ float=%@ packed=%@ nonInterleaved=%@ bigEndian=%@ alignedHigh=%@
+          mBitsPerChannel  = %u
+          mChannelsPerFrame= %u
+          mBytesPerFrame   = %u
+          mBytesPerPacket  = %u
+          mFramesPerPacket = %u
+          mSampleRate      = %.1f
+        [NDI-AUDIO] ── DELIVERED BY NDIAudioFrame (what the bytes actually are) ──
+          element type     = int32_t (const int32_t *samples), SIGNED, native little-endian on arm64
+          bit depth        = 32, full-scale (bridge converts float→Int32 as sample × 2147483647)
+          interleaving     = INTERLEAVED, channel-major within each frame
+          channelCount     = %d · sampleRate = %.1f · frameCount(this pull) = %d
+          bytes per frame  = %d (= channelCount × 4)   block length = %d
+        """,
+              asbd.mFormatID, fourCC, kAudioFormatLinearPCM,
+              f,
+              on(kAudioFormatFlagIsSignedInteger), on(kAudioFormatFlagIsFloat),
+              on(kAudioFormatFlagIsPacked), on(kAudioFormatFlagIsNonInterleaved),
+              on(kAudioFormatFlagIsBigEndian), on(kAudioFormatFlagIsAlignedHigh),
+              asbd.mBitsPerChannel, asbd.mChannelsPerFrame, asbd.mBytesPerFrame,
+              asbd.mBytesPerPacket, asbd.mFramesPerPacket, asbd.mSampleRate,
+              channels, sampleRate, frames,
+              channels * 4, frames * channels * 4)
+    }
+
+    // MARK: - ⌃⌥A — TONE TEST: bisect the path by replacing the CONTENT and nothing else
+
+#if DEBUG
+    /// ── WHAT THIS ISOLATES, AND WHY IT IS BUILT THIS WAY ─────────────────────────────────────
+    ///
+    /// Timing is exhausted as an explanation: grid rounding 0.0000 samples on every dumped buffer,
+    /// PTS continuity 0.000 ms in BOTH columns, `dev` +0.00 ms, zero re-anchors, `dataLength ==
+    /// numSamples × mBytesPerFrame`, one timing entry. The buffers are, by every measurement
+    /// available, correctly constructed — and the desktop still crackles while the SAME
+    /// CMSampleBuffer plays cleanly to SDI.
+    ///
+    /// So substitute the CONTENT and change NOTHING ELSE. The tone rides the real pull: it is
+    /// written into the buffer sizes `captureAudioFrameForInterval:` actually returned this tick
+    /// (480..530, from the same elapsed calculation), at the source's real rate and channel count,
+    /// on the same PTS ticks, through the same `makeAudioSampleBuffer`, the same `LiveAudioSink`,
+    /// the same renderer. The ONLY difference from a live run is which bytes are in the block.
+    ///
+    ///   * TONE CLEAN   → construction, cadence and renderer are all fine and the fault is in the
+    ///                    NDI samples themselves. That contradicts SDI playing the same buffer
+    ///                    cleanly, and the contradiction is then the finding.
+    ///   * TONE CRACKLY → the path is broken independently of content; the NDI samples are
+    ///                    irrelevant and the next step is the 960-sample restructure.
+    ///
+    /// ⚠️ PHASE IS CONTINUOUS ACROSS BUFFERS AND THAT IS LOAD-BEARING. The phase accumulator is
+    /// per-sample and survives from one buffer to the next, so the tone is a single unbroken sine
+    /// across the whole session. A per-buffer phase reset would put a discontinuity at every buffer
+    /// boundary — manufacturing exactly the artefact being hunted, and guaranteeing a false
+    /// positive. If this is ever rewritten, that property is the test.
+    ///
+    /// ⚠️ THE TAP GETS THE TONE TOO. `LiveAudioSink.enqueue` tees before the renderer, so the
+    /// meters will show the tone and, if DeckLink output is on, SDI WILL CARRY IT. That is useful
+    /// — a tone that is clean on SDI and crackly on the desktop reproduces the whole problem in one
+    /// keystroke with a known-perfect source — but do not leave it running into a real output.
+    ///
+    /// ⚠️ TWO AMPLITUDES, CYCLED, BECAUSE 0 dBFS ALONE CANNOT ANSWER THE QUESTION. A full-scale
+    /// sine is the requested test, but if anything downstream applies gain > 1 it clips, and
+    /// clipping sounds like exactly the crackle being diagnosed. −6 dBFS has 6 dB of headroom, so
+    /// the pair separates "the path is broken" from "something downstream has gain": crackly at
+    /// 0 dBFS and clean at −6 is a level problem, crackly at both is the path.
+    private enum ToneTest: Int {
+        case off = 0, fullScale = 1, minus6dB = 2
+        var next: ToneTest { ToneTest(rawValue: (rawValue + 1) % 3) ?? .off }
+        var amplitude: Double {
+            switch self {
+            case .off:       return 0
+            case .fullScale: return 1.0
+            case .minus6dB:  return 0.5
+            }
+        }
+        var label: String {
+            switch self {
+            case .off:       return "OFF — real NDI samples"
+            case .fullScale: return "ON — 1 kHz sine at 0 dBFS (full scale)"
+            case .minus6dB:  return "ON — 1 kHz sine at −6 dBFS (6 dB of headroom)"
+            }
+        }
+        /// Short form for the menu item, which states where the NEXT press goes as well as where
+        /// it is now — a cycling item that only names its current state leaves you pressing it to
+        /// find out what comes next.
+        var menuTitle: String {
+            switch self {
+            case .off:       return "Off (next: 1 kHz 0 dBFS)"
+            case .fullScale: return "1 kHz 0 dBFS (next: 1 kHz −6 dBFS)"
+            case .minus6dB:  return "1 kHz −6 dBFS (next: Off)"
+            }
+        }
+    }
+
+    private static let toneFrequency = 1000.0
+    /// Toggled on MAIN by the keystroke, read on the PUMP THREAD once per pull — hence the lock.
+    /// `UnfairLock` for the same reason `LiveDisplaySize` uses one: the reader is latency-sensitive
+    /// and must never block behind an unboosted holder.
+    private let toneLock = UnfairLock()
+    private var toneMode: ToneTest = .off
+    /// Pump-thread only. Radians, wrapped to [0, 2π) so it cannot lose precision over a long run —
+    /// at 48 kHz an unwrapped accumulator reaches 3e8 radians in an hour and the per-sample
+    /// increment starts rounding away, which would itself become a slow distortion.
+    private var tonePhase = 0.0
+    /// Pump-thread only. Grown to fit, never shrunk — no allocation in the steady state.
+    ///
+    /// ⚠️ A MANUAL ALLOCATION, NOT AN `[Int32]`, AND THAT IS NOT A MICRO-OPTIMISATION. The pointer
+    /// handed to `makeAudioSampleBuffer` has to outlive the call that produces it, and a Swift
+    /// Array's `baseAddress` is valid ONLY inside `withUnsafeMutableBufferPointer` — returning it is
+    /// undefined behaviour that happens to work until the optimiser or a reallocation says
+    /// otherwise. Exactly the class of latent fault this whole investigation has been chasing, so
+    /// it is not worth introducing one to save a `deallocate`.
+    private var toneScratch: UnsafeMutablePointer<Int32>?
+    private var toneScratchCapacity = 0
+
+    /// The Debug menu item's title, carrying the CURRENT state so the menu itself is the readout —
+    /// no need to find the log line to know whether the tone is on. Published, main-thread only.
+    @Published private(set) var audioToneTestTitle = "NDI Audio Tone Test: Off"
+
+    /// Debug ▸ NDI Audio Tone Test, and ⌃⌥A — cycle OFF → 0 dBFS → −6 dBFS → OFF. Main thread.
+    func cycleAudioToneTest() {
+        toneLock.lock()
+        toneMode = toneMode.next
+        let mode = toneMode
+        toneLock.unlock()
+        audioToneTestTitle = "NDI Audio Tone Test: " + mode.menuTitle
+        NSLog("[NDI-AUDIO] ⌃⌥A TONE TEST %@ · %.0f Hz · same buffer sizes, same PTS ticks, same "
+            + "makeAudioSampleBuffer → LiveAudioSink → renderer as the real samples. Only the BYTES "
+            + "differ. The tap and (if output is on) SDI carry it too.",
+              mode.label, Self.toneFrequency)
+    }
+
+    /// Fill `toneScratch` with a continuous sine and hand back a pointer to it, or nil when the
+    /// test is off. Pump thread.
+    private func toneSamples(frames: Int, channels: Int, sampleRate: Double) -> UnsafePointer<Int32>? {
+        toneLock.lock(); let mode = toneMode; toneLock.unlock()
+        guard mode != .off, frames > 0, channels > 0, sampleRate > 0 else { return nil }
+
+        let count = frames * channels
+        if toneScratchCapacity < count {
+            toneScratch?.deallocate()
+            toneScratch = UnsafeMutablePointer<Int32>.allocate(capacity: count)
+            toneScratchCapacity = count
+        }
+        guard let scratch = toneScratch else { return nil }
+
+        let step = 2.0 * Double.pi * Self.toneFrequency / sampleRate
+        // 2^31 − 1, so a +1.0 peak is Int32.max exactly and cannot wrap. The same full-scale
+        // convention the bridge uses for the real float→Int32 conversion.
+        let peak = mode.amplitude * 2147483647.0
+        var phase = tonePhase
+        for f in 0..<frames {
+            let v = Int32(sin(phase) * peak)
+            // Same value to every channel — this is a path test, not a routing test.
+            for c in 0..<channels { scratch[f * channels + c] = v }
+            phase += step
+            if phase >= 2.0 * Double.pi { phase -= 2.0 * Double.pi }
+        }
+        tonePhase = phase
+        return UnsafePointer(scratch)
+    }
+#endif
+
+    /// THE SUBSTITUTION POINT, and deliberately the only one. Everything downstream — sizes, rate,
+    /// channels, PTS ticks, format description, block buffer, sink, renderer — is identical either
+    /// way; the tone changes which bytes are copied and nothing else.
+    ///
+    /// Defined in ALL configurations even though the tone is DEBUG-only, because the pump's call
+    /// site is unconditional. In Release it is `audio.samples` and the optimiser erases it.
+    private func toneOrRealSamples(_ audio: NDIAudioFrame) -> UnsafePointer<Int32> {
+        #if DEBUG
+        return toneSamples(frames: Int(audio.frameCount), channels: Int(audio.channelCount),
+                           sampleRate: Double(audio.sampleRate)) ?? audio.samples
+        #else
+        return audio.samples
+        #endif
+    }
+
+    // MARK: - TEST 2 — regroup into WHEP's shape: fixed 960-sample buffers at 50 Hz
+
+#if DEBUG
+    /// ── WHAT THIS CHANGES, AND WHAT IT DELIBERATELY DOES NOT ─────────────────────────────────
+    ///
+    /// The WAV of the exact enqueued bytes plays CLEAN, so the samples, the float→Int32 conversion
+    /// and the plane-stride handling are all correct and SDI has been carrying good audio the whole
+    /// time. The fault is in `AVSampleBufferAudioRenderer`'s CONSUMPTION — which is also why the
+    /// synthesised tone was distorted: the content never mattered.
+    ///
+    /// That leaves the SHAPE of what NDI hands the renderer as the thing to test, and there is a
+    /// known-good reference for it in this very app: WHEP goes through the SAME `LiveAudioSink`, the
+    /// SAME renderer, and is audibly fine. Its input differs from NDI's in exactly two ways —
+    ///
+    ///     WHEP:  fixed 960 samples, pushed every 20 ms  (50 Hz)
+    ///     NDI:   variable 480..530,  pushed every ~10.9 ms (~92 Hz)
+    ///
+    /// — so this accumulates pulls into fixed 960-sample buffers and pushes at WHEP's cadence.
+    /// A pull straddling a boundary is split, never padded and never dropped: the carry becomes the
+    /// head of the next group, so the sample stream is bit-identical to the un-grouped one and only
+    /// the packaging changes. That is what makes this a controlled A/B rather than a second variable.
+    ///
+    /// ⚠️ THE PTS AXIS IS UNCHANGED AND STAYS SAMPLE-COUNTED. `audioPTSTicks` is still the source of
+    /// the stamp; a group's PTS is simply the tick of its FIRST sample. 960 is a multiple of 8, so a
+    /// group boundary is additionally exact on a 90 kHz grid — which removes the timescale as a
+    /// variable even for anyone who later moves this back to 90 kHz.
+    ///
+    /// ⚠️ IT ADDS LATENCY, AND THAT IS INHERENT TO THE TEST, NOT A DEFECT. A group cannot be pushed
+    /// until it is full, so desktop audio sits up to 20 ms further behind the picture. Say so rather
+    /// than let it read as a regression if the grouping turns out to help.
+    private static let groupedFrameCount = 960
+
+    /// Pump-thread only. Accumulates interleaved Int32 until `groupedFrameCount` frames are held.
+    private var groupBuffer: UnsafeMutablePointer<Int32>?
+    private var groupCapacityFrames = 0
+    private var groupHeldFrames = 0
+    private var groupChannels = 0
+    private var groupFirstTicks: Int64 = 0
+
+    /// Toggled on MAIN, read on the PUMP THREAD once per pull.
+    private var groupedMode = false
+    @Published private(set) var audioGroupedTitle = "Renderer Input: NDI-native (480..530 @ ~92 Hz)"
+
+    /// Pump-thread copy of `groupedMode`, so a mode change is noticed ON the pump and the partial
+    /// group is dropped THERE. `groupHeldFrames` is pump-thread-owned and must not be written from
+    /// main — that was the first shape of this and it was a data race on the accumulator.
+    private var groupedModeOnPump = false
+
+    /// Debug ▸ Renderer Input — A/B the cadence live, without a rebuild. Main thread.
+    func toggleGroupedAudio() {
+        toneLock.lock()
+        groupedMode.toggle()
+        let on = groupedMode
+        toneLock.unlock()
+        audioGroupedTitle = on
+            ? "Renderer Input: WHEP-shaped (fixed 960 @ 50 Hz)"
+            : "Renderer Input: NDI-native (480..530 @ ~92 Hz)"
+        NSLog("[NDI-AUDIO] renderer input shape → %@. %@",
+              on ? "WHEP-SHAPED: fixed 960-sample buffers at 50 Hz"
+                 : "NDI-NATIVE: variable 480..530 at ~92 Hz",
+              on ? "Adds up to 20 ms of latency by construction — a group is pushed only once full."
+                 : "The cadence the pull produces, pushed straight through.")
+    }
+
+    /// Accumulate into fixed-size groups. Returns the groups ready to push this tick, each with the
+    /// sample tick of its first frame. Pump thread.
+    ///
+    /// A pull is SPLIT across groups rather than padded or dropped, so the sample stream is
+    /// unchanged — `[Int32]` copies only, no resampling, no silence insertion.
+    /// ⚠️ EMITS THROUGH A CALLBACK RATHER THAN RETURNING AN ARRAY, AND THAT IS CORRECTNESS, NOT
+    /// STYLE. Every group is written into the SAME accumulator, so a returned array of pointers
+    /// would alias — the second group would overwrite the first before the caller had enqueued it.
+    /// Emitting inline guarantees each group is consumed before the buffer is refilled, whatever
+    /// the pull size. (Today a 530-frame pull cannot fill two 960-frame groups, so it could never
+    /// bite; this does not depend on that remaining true.)
+    private func regroup(_ samples: UnsafePointer<Int32>, frames: Int, channels: Int,
+                         startTicks: Int64,
+                         emit: (_ ticks: Int64, _ frames: Int, _ data: UnsafePointer<Int32>) -> Void) {
+        let target = Self.groupedFrameCount
+        if groupCapacityFrames < target || groupChannels != channels {
+            groupBuffer?.deallocate()
+            groupBuffer = UnsafeMutablePointer<Int32>.allocate(capacity: target * channels)
+            groupCapacityFrames = target
+            groupChannels = channels
+            groupHeldFrames = 0
+        }
+        guard let group = groupBuffer else { return }
+
+        var consumed = 0
+        while consumed < frames {
+            if groupHeldFrames == 0 {
+                // The group's PTS is the tick of its first sample — the axis is untouched.
+                groupFirstTicks = startTicks + Int64(consumed)
+            }
+            let take = min(target - groupHeldFrames, frames - consumed)
+            memcpy(group + groupHeldFrames * channels,
+                   samples + consumed * channels,
+                   take * channels * MemoryLayout<Int32>.size)
+            groupHeldFrames += take
+            consumed += take
+            if groupHeldFrames == target {
+                emit(groupFirstTicks, target, UnsafePointer(group))
+                groupHeldFrames = 0
+            }
+        }
+    }
+#endif
+
+    // MARK: - WAV capture: the exact bytes handed to the renderer, written to disk
+
+#if DEBUG
+    /// ── WHY THIS EXISTS: NOTHING SO FAR HAS SEPARATED "THE BYTES" FROM "THE PLAYBACK" ─────────
+    ///
+    /// Every measurement to date has been of METADATA — sample counts, PTS grids, strides, ring
+    /// counters, meter levels — and all of them are now clean while the audio is still audibly
+    /// wrong. `real=Nf` and `underruns=0` prove the ring was READ, not what was in it; the meters
+    /// metered 82% synthesised audio without complaint. The one question never asked is whether the
+    /// bytes themselves are good, and it is answerable only by listening to them somewhere other
+    /// than through the renderer under suspicion.
+    ///
+    /// So: take the CMSampleBuffer's OWN block buffer contents at the enqueue point and write them
+    /// to a .wav. Not regenerated, not re-derived from `audio.samples` — copied out of the exact
+    /// object that goes to `LiveAudioSink`, after `makeAudioSampleBuffer` has built it.
+    ///
+    ///   * tone WAV clean       → the bytes are perfect and the renderer's CONSUMPTION is the fault
+    ///   * tone WAV crackly     → the tone GENERATOR is the bug and this branch was a false positive
+    ///   * real NDI WAV clean   → the samples were always fine, and SDI has been carrying good audio
+    ///   * real crackly, tone clean → the conversion is wrong in a way the stride check misses
+    ///
+    /// ⚠️ `CMBlockBufferCopyDataBytes`, NOT `CMBlockBufferGetDataPointer`. A CMBlockBuffer may be
+    /// non-contiguous; the pointer form hands back only the run at that offset and `lengthAtOffset`
+    /// can be less than `totalLength`. Copying is the form that cannot silently truncate — and a
+    /// diagnostic that truncates would manufacture exactly the discontinuities being hunted.
+    ///
+    /// ⚠️ BUFFERED IN MEMORY, WRITTEN AT STOP, AND THAT IS DELIBERATE. File I/O on the pump thread
+    /// at 100 Hz would add its own jitter to the cadence under investigation — the measurement would
+    /// perturb the thing it measures. The capacity is reserved up front so even the array growth
+    /// cannot stall a pull. 48 kHz × 2ch × 4 bytes ≈ 384 KB/s, so the cap below is ~46 MB.
+    private static let wavMaxSeconds = 120.0
+    private let wavLock = UnfairLock()
+    private var wavCapturing = false
+    private var wavBytes = [UInt8]()
+    private var wavRate = 0.0
+    private var wavChannels = 0
+    private var wavStartHost = 0.0
+    private var wavLastTitleUpdate = 0.0
+    private var wavToneModeAtStart = "real"
+
+    /// Menu title, carrying the state and the size so the menu is the readout.
+    @Published private(set) var audioCaptureTitle = "Record NDI Audio to WAV"
+
+    /// Debug ▸ Record NDI Audio to WAV — start, or stop and write. Main thread.
+    func toggleAudioWAVCapture() {
+        wavLock.lock()
+        let wasCapturing = wavCapturing
+        wavLock.unlock()
+        if wasCapturing { finishAudioWAVCapture() } else { beginAudioWAVCapture() }
+    }
+
+    private func beginAudioWAVCapture() {
+        toneLock.lock(); let mode = toneMode; toneLock.unlock()
+        let tag: String
+        switch mode {
+        case .off:       tag = "real"
+        case .fullScale: tag = "tone-0dBFS"
+        case .minus6dB:  tag = "tone-minus6dBFS"
+        }
+        wavLock.lock()
+        wavBytes.removeAll(keepingCapacity: false)
+        // Reserve for the cap at the commonest format so no append can trigger a realloc mid-pull.
+        wavBytes.reserveCapacity(Int(Self.wavMaxSeconds * 48000 * 2 * 4))
+        wavRate = 0; wavChannels = 0
+        wavStartHost = Self.monotonicNow()
+        wavLastTitleUpdate = 0
+        wavToneModeAtStart = tag
+        wavCapturing = true
+        wavLock.unlock()
+        audioCaptureTitle = "Stop Recording & Write WAV (0 s)"
+        NSLog("[NDI-AUDIO] WAV capture STARTED (source: %@) — recording the exact block-buffer bytes "
+            + "handed to LiveAudioSink. Stops automatically after %.0f s.", tag, Self.wavMaxSeconds)
+    }
+
+    /// PUMP THREAD, at the enqueue point. Copies the buffer's own bytes verbatim.
+    private func captureEnqueuedAudio(_ sb: CMSampleBuffer, sampleRate: Double, channels: Int) {
+        wavLock.lock()
+        guard wavCapturing else { wavLock.unlock(); return }
+        if wavRate == 0 { wavRate = sampleRate; wavChannels = channels }
+        // A format change mid-capture would make one WAV header describe two formats. Stop rather
+        // than write a file that silently misrepresents half its own contents.
+        guard wavRate == sampleRate, wavChannels == channels else {
+            wavCapturing = false
+            wavLock.unlock()
+            NSLog("[NDI-AUDIO] WAV capture STOPPED — the audio format changed mid-capture "
+                + "(%.0fHz·%dch → %.0fHz·%dch). Writing what was captured before the change.",
+                  wavRate, wavChannels, sampleRate, channels)
+            DispatchQueue.main.async { [weak self] in self?.finishAudioWAVCapture() }
+            return
+        }
+        let elapsed = Self.monotonicNow() - wavStartHost
+        guard elapsed < Self.wavMaxSeconds else {
+            wavCapturing = false
+            wavLock.unlock()
+            DispatchQueue.main.async { [weak self] in self?.finishAudioWAVCapture() }
+            return
+        }
+
+        if let bb = CMSampleBufferGetDataBuffer(sb) {
+            let len = CMBlockBufferGetDataLength(bb)
+            if len > 0 {
+                let start = wavBytes.count
+                wavBytes.append(contentsOf: repeatElement(UInt8(0), count: len))
+                wavBytes.withUnsafeMutableBytes { raw in
+                    _ = CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: len,
+                                                   destination: raw.baseAddress!.advanced(by: start))
+                }
+            }
+        }
+        let bytes = wavBytes.count
+        let due = elapsed - wavLastTitleUpdate >= 1.0
+        if due { wavLastTitleUpdate = elapsed }
+        wavLock.unlock()
+
+        if due {
+            DispatchQueue.main.async { [weak self] in
+                self?.audioCaptureTitle = String(format: "Stop Recording & Write WAV (%.0f s, %.1f MB)",
+                                                 elapsed, Double(bytes) / 1_048_576)
+            }
+        }
+    }
+
+    /// Stop and write. Main thread.
+    private func finishAudioWAVCapture() {
+        wavLock.lock()
+        wavCapturing = false
+        let bytes = wavBytes
+        let rate = wavRate
+        let channels = wavChannels
+        let tag = wavToneModeAtStart
+        wavBytes.removeAll(keepingCapacity: false)
+        wavLock.unlock()
+
+        audioCaptureTitle = "Record NDI Audio to WAV"
+        guard !bytes.isEmpty, rate > 0, channels > 0 else {
+            NSLog("[NDI-AUDIO] WAV capture stopped with nothing recorded — is a source connected "
+                + "and carrying audio?")
+            return
+        }
+
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withYear, .withMonth, .withDay, .withTime]
+        // Colons are legal in HFS+ filenames but display as "/" in Finder — swap them out so the
+        // name reads as a timestamp rather than as a path.
+        let when = stamp.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let name = "Manifold-NDI-\(tag)-\(when).wav"
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Desktop").appendingPathComponent(name)
+
+        var file = Self.wavHeader(dataBytes: bytes.count, sampleRate: rate, channels: channels)
+        file.append(contentsOf: bytes)
+        do {
+            try Data(file).write(to: url)
+            let frames = bytes.count / (channels * 4)
+            NSLog("[NDI-AUDIO] WAV WRITTEN → %@\n"
+                + "            %d frames · %.3f s · %.0f Hz · %dch · 32-bit signed int · %.1f MB\n"
+                + "            These are the EXACT bytes handed to LiveAudioSink, copied from the "
+                + "CMSampleBuffer's own block buffer at the enqueue point.",
+                  url.path, frames, Double(frames) / rate, rate, channels,
+                  Double(file.count) / 1_048_576)
+        } catch {
+            NSLog("[NDI-AUDIO] WAV write FAILED at %@ — %@", url.path, error.localizedDescription)
+        }
+    }
+
+    /// A 44-byte canonical PCM WAV header. Little-endian throughout, format tag 1 (PCM integer),
+    /// 32 bits per sample — matching the ASBD the buffers actually carry
+    /// (`kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked`, `mBitsPerChannel = 32`), so
+    /// the file is a faithful container for the bytes rather than a conversion of them.
+    private static func wavHeader(dataBytes: Int, sampleRate: Double, channels: Int) -> [UInt8] {
+        var h = [UInt8]()
+        func u32(_ v: UInt32) { h.append(contentsOf: [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF),
+                                                      UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)]) }
+        func u16(_ v: UInt16) { h.append(contentsOf: [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)]) }
+        func ascii(_ s: String) { h.append(contentsOf: Array(s.utf8)) }
+
+        let blockAlign = UInt16(channels * 4)
+        ascii("RIFF"); u32(UInt32(36 + dataBytes)); ascii("WAVE")
+        ascii("fmt "); u32(16)
+        u16(1)                                  // PCM integer
+        u16(UInt16(channels))
+        u32(UInt32(sampleRate))
+        u32(UInt32(sampleRate) * UInt32(blockAlign))   // byte rate
+        u16(blockAlign)
+        u16(32)                                 // bits per sample
+        ascii("data"); u32(UInt32(dataBytes))
+        return h
+    }
+#endif
+
+    // MARK: - The audio PTS axis: SAMPLE-COUNTED, not read off the wall clock per buffer
+
+    /// How far the sample axis may drift from the wall clock before it is re-pinned.
+    ///
+    /// 25 ms — deliberately HALF of `AudioTapBuffer.append`'s 50 ms PTS/sample disagreement
+    /// threshold, so the axis is corrected before the tap would ever consider re-anchoring. The tap
+    /// re-anchor DROPS THE RETAINED WINDOW, which is what DeckLink reads from, so an axis that only
+    /// corrected at the tap's own threshold would be trading a renderer glitch for an SDI dropout.
+    /// Staying inside its tolerance means the tap never sees a step it has to act on.
+    private static let audioAxisResyncTolerance = 0.025
+
+    /// Anchor of the sample axis, IN SAMPLE TICKS on the sample rate's own timescale, and the count
+    /// of frames delivered since it was set. `ptsTicks = anchorTicks + cumulative` — an integer add,
+    /// which is the whole fix.
+    ///
+    /// ⚠️ TICKS, NOT SECONDS, AND THAT DISTINCTION IS THE SECOND BUG. Holding the anchor in seconds
+    /// and converting per buffer is what put the PTS back on a grid that could not represent it —
+    /// see `makeAudioSampleBuffer`. The conversion from seconds happens ONCE, here, at the anchor.
+    private var audioAnchorTicks: Int64?
+    private var audioCumulativeFrames: Int64 = 0
+    private var audioAxisRate = 0.0
+    private var audioAxisChannels = 0
+    private var audioResyncCount = 0
+    private var lastAudioResyncHost = 0.0
+
+    /// ── WHY THE PTS IS COUNTED IN SAMPLES AND NOT READ OFF THE CLOCK ─────────────────────────
+    ///
+    /// ⚠️ THIS REPLACED A PER-PULL `monotonicNow()` STAMP AND THAT STAMP WAS THE DISTORTION BUG.
+    /// `AVSampleBufferAudioRenderer` schedules by PTS exactly, so buffer n+1 must begin where
+    /// buffer n ended — TO THE SAMPLE. A wall-clock read per pull cannot do that, and it could not
+    /// even in principle: the SAMPLE COUNT comes from an elapsed measurement taken inside
+    /// `captureAudioFrameForInterval:`, while the PTS was a second, later reading of the same clock
+    /// taken in Swift after that call returned. Nothing tied the two together, so consecutive
+    /// buffers overlapped or gapped by whatever the difference happened to be. MEASURED before the
+    /// fix: mean |residual| 0.15–0.57 ms (7–27 samples), ~50 gaps and ~40 overlaps PER SECOND, mean
+    /// residual ~0 — i.e. not a drift, just permanent jitter. The renderer must drop or pad samples
+    /// to splice each one, 100 times a second, which is continuous distortion rather than clicks.
+    ///
+    /// The tap never noticed because `AudioTapBuffer.append` reconciles the two axes with a 50 ms
+    /// tolerance and silently absorbs anything smaller; SDI reads the ring by sample position and
+    /// never consults a per-buffer PTS at all. That asymmetry is why the same samples were clean on
+    /// the wire and distorted on the desktop.
+    ///
+    /// Counting samples makes buffers tile BY CONSTRUCTION, because the PTS *is* the running sample
+    /// count. It is the same property that makes WHEP's stamps tile perfectly — its PTS is
+    /// `unwrap(rtpTimestamp) / 48000`, a sample counter, not a clock reading.
+    ///
+    /// ── THE WALL CLOCK KEEPS TWO JOBS AND LOSES THE THIRD ────────────────────────────────────
+    ///
+    /// It still sets the initial anchor, and it still drives `serviceDesktopAudioAnchor`. It is no
+    /// longer the per-buffer timestamp.
+    ///
+    /// ⚠️ AND IT IS STILL THE AXIS THE SAMPLE COUNT IS PINNED TO, WHICH IS NOT OPTIONAL. NDI's
+    /// VIDEO is stamped `monotonicNow()` and DeckLink aligns audio to video by that PTS, so a sample
+    /// axis allowed to free-run would take SDI lip-sync with it. The per-pull check below is what
+    /// keeps the two ends together: sample-exact in the small, wall-clock-pinned in the large.
+    ///
+    /// ── ⚠️ A STALL PAST `kNDIAudioMaxPullSeconds` (250 ms) IS ABSORBED HERE, NOT SPECIAL-CASED ──
+    ///
+    /// When the pump is starved past the clamp the bridge caps the request and **those samples are
+    /// genuinely gone from the queue** — it says so in its own log line. The sample axis therefore
+    /// falls behind the wall clock by the whole dropped duration, at once, and by more than this
+    /// tolerance.
+    ///
+    /// THAT IS A RE-ANCHOR, AND IT NEEDS NO CODE OF ITS OWN, because a stall produces exactly the
+    /// quantity this check already measures: `pts - wallNow` past tolerance. Special-casing it would
+    /// mean detecting the stall a second way (Swift cannot even see it — the bridge clamps
+    /// internally and returns a normal short frame) and acting on it with the same correction. The
+    /// check is per-pull rather than per-second precisely so a stall is corrected on the very next
+    /// buffer instead of up to a second later.
+    ///
+    /// The alternative — letting the closed loop absorb it — is wrong: `serviceDesktopAudioAnchor`
+    /// moves the TIMEBASE to match the audio, so it would have followed the audio into the hole and
+    /// left the desktop permanently late against a picture that never stalled.
+    ///
+    /// Format change and audio disappearing reset the counter and re-anchor, matching the bridge,
+    /// which drops `_audioLastPullTime` and `_audioSampleCarry` at the same two points — the axis
+    /// and the thing that feeds it must restart together or the first buffer after the change
+    /// carries a PTS computed from the old stream's rate.
+    private func audioPTSTicks(forFrames frames: Int, sampleRate: Double, channels: Int,
+                               wallNow: Double) -> Int64 {
+        // (Re)anchor: first buffer of a session, or the source's format moved under us. A rate
+        // change makes `cumulative / sampleRate` meaningless — the divisor is no longer the one the
+        // frames were counted at — so the counter restarts rather than being converted.
+        if audioAnchorTicks == nil || sampleRate != audioAxisRate || channels != audioAxisChannels {
+            if audioAnchorTicks != nil {
+                NSLog("[NDI-AUDIO] audio format moved %.0fHz·%dch → %.0fHz·%dch — sample axis "
+                    + "restarted and re-anchored to the wall clock",
+                      audioAxisRate, audioAxisChannels, sampleRate, channels)
+            }
+            // The ONE conversion from seconds in the whole axis. Rounded to the nearest sample tick,
+            // because a tick is the finest thing the axis can express and a fractional anchor would
+            // reintroduce exactly the rounding this replaced.
+            audioAnchorTicks = Int64((wallNow * sampleRate).rounded())
+            audioCumulativeFrames = 0
+            audioAxisRate = sampleRate
+            audioAxisChannels = channels
+        }
+
+        var ticks = audioAnchorTicks! + audioCumulativeFrames
+        let divergence = Double(ticks) / sampleRate - wallNow
+        if abs(divergence) > Self.audioAxisResyncTolerance {
+            let sinceLast = lastAudioResyncHost > 0 ? wallNow - lastAudioResyncHost : 0
+            audioResyncCount += 1
+            lastAudioResyncHost = wallNow
+            // Re-pin the anchor so THIS buffer lands at the wall clock, keeping the running count
+            // intact — the axis moves, the counter does not restart. Still an integer tick, so the
+            // grid property survives a re-pin.
+            audioAnchorTicks = Int64((wallNow * sampleRate).rounded()) - audioCumulativeFrames
+            ticks = audioAnchorTicks! + audioCumulativeFrames
+            // ⚠️ THE INTERVAL IS THE MEASUREMENT. A one-off is a stall (the bridge logs its own
+            // line for that). A REGULAR cadence means the sample axis is genuinely running at a
+            // different rate from the wall clock, and the implied ppm says by how much — in which
+            // case the fault is in the pump's request sizing, not here, and this line is where it
+            // becomes visible instead of silently costing lip-sync.
+            let ppm = sinceLast > 0 ? divergence / sinceLast * 1e6 : 0
+            NSLog("%@", String(format: "[NDI-AUDIO] sample axis RE-PINNED — it had run %+.1f ms "
+                               + "%@ the wall clock (tolerance %.0f ms) after %.1f s → %.0f ppm "
+                               + "· re-pin #%d. A one-off is a stall past the 250 ms pull clamp; "
+                               + "a steady cadence is a rate error in the pull sizing.",
+                               divergence * 1000, divergence > 0 ? "AHEAD OF" : "BEHIND",
+                               Self.audioAxisResyncTolerance * 1000, sinceLast, ppm,
+                               audioResyncCount))
+        }
+
+        audioCumulativeFrames += Int64(frames)
+        return ticks
+    }
+
+    /// How many of a connection's first buffers get the full property dump. Enough to see the
+    /// pattern repeat and to catch a first-buffer-only anomaly; few enough to cost nothing.
+    private static let audioBufferDumpCount = 8
+    private var audioBuffersDumped = 0
+
+    /// Dump what the CMSampleBuffer ACTUALLY carries, read back off the finished object rather than
+    /// from the values that went in — so a field CoreMedia reinterpreted is visible.
+    ///
+    /// ⚠️ THE PTS IS PRINTED AS RAW value/timescale, NOT AS SECONDS, AND THAT IS THE POINT. A PTS
+    /// that is correct to 12 decimal places in seconds can still be UNREPRESENTABLE on its own
+    /// timescale, and printing it in seconds hides exactly that. `exactOnGrid` below is the test.
+    private func dumpSampleBuffer(_ sb: CMSampleBuffer, expectedFrames: Int, channels: Int,
+                                  sampleRate: Double, cumulativeFrames: Int64) {
+        // DEVELOPER DIAGNOSTIC — compiled to nothing in Release. Bounded to the first few buffers of
+        // a connection, so the cost was never the issue; it is that these lines answer a question
+        // (is the buffer built correctly) that is settled, and a tester's log is better spent on the
+        // `renderer:` line, which answers one that is not.
+        #if !DEBUG
+        return
+        #else
+        guard audioBuffersDumped < Self.audioBufferDumpCount else { return }
+        audioBuffersDumped += 1
+
+        let numSamples = CMSampleBufferGetNumSamples(sb)
+        let dataLength = CMSampleBufferGetDataBuffer(sb).map { CMBlockBufferGetDataLength($0) } ?? -1
+
+        var timingCount: CMItemCount = 0
+        CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: 0, arrayToFill: nil,
+                                               entriesNeededOut: &timingCount)
+        var timings = [CMSampleTimingInfo](repeating: CMSampleTimingInfo(), count: max(1, timingCount))
+        CMSampleBufferGetSampleTimingInfoArray(sb, entryCount: timingCount, arrayToFill: &timings,
+                                               entriesNeededOut: nil)
+        let t = timings[0]
+
+        var bytesPerFrame: UInt32 = 0, framesPerPacket: UInt32 = 0, bytesPerPacket: UInt32 = 0
+        if let fd = CMSampleBufferGetFormatDescription(sb),
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd) {
+            bytesPerFrame = asbd.pointee.mBytesPerFrame
+            framesPerPacket = asbd.pointee.mFramesPerPacket
+            bytesPerPacket = asbd.pointee.mBytesPerPacket
+        }
+
+        // THE CHECK THAT MATTERS, AND IT IS KEPT AFTER THE FIX: is this PTS exactly representable
+        // on the timescale it carries? The sample position `cumulative` must be a whole number of
+        // ticks on that timescale. When it is not, the stored value has been ROUNDED and buffer n's
+        // end can no longer equal buffer n+1's start.
+        //
+        // ⚠️ POST-FIX THIS MUST READ ZERO ON EVERY BUFFER — the timescale IS the sample rate, so
+        // `ticksPerSample` is exactly 1 and a sample position is a tick by definition. A non-zero
+        // here means something has put the PTS back on a foreign timescale, which is the failure
+        // this whole chain ended in. It is the cheapest possible guard against a regression that is
+        // otherwise audible-only.
+        let ticksPerSample = Double(t.presentationTimeStamp.timescale) / sampleRate
+        let ptsTicksExact = Double(cumulativeFrames) * ticksPerSample
+        let gridErrorTicks = ptsTicksExact - ptsTicksExact.rounded()
+        let gridErrorSamples = abs(gridErrorTicks) / ticksPerSample
+
+        NSLog("""
+        [NDI-AUDIO] ── CMSampleBuffer #%d AS BUILT ──
+          numSamples        = %d   (expected %d)  %@
+          dataLength        = %d   numSamples × mBytesPerFrame = %d  %@
+          mBytesPerFrame    = %u · mFramesPerPacket = %u · mBytesPerPacket = %u
+          timing entries    = %d  (1 = "every sample has this duration")
+          duration          = %lld/%d  = %.9f s   one sample at %.0f Hz = %.9f s  %@
+          PTS               = %lld/%d  = %.9f s
+          decodeTS          = %@
+          ── PTS GRID CHECK (the one that is not visible in seconds) ──
+          timescale/rate    = %.4f ticks per audio sample (must be an integer for every PTS to land)
+          cumulative frames = %lld → %.4f ticks exactly
+          rounding error    = %+.4f ticks = %.4f samples  %@
+        """,
+              audioBuffersDumped,
+              numSamples, expectedFrames,
+              numSamples == expectedFrames ? "OK" : "⚠️ MISMATCH",
+              dataLength, numSamples * Int(bytesPerFrame),
+              dataLength == numSamples * Int(bytesPerFrame) ? "OK" : "⚠️ MISMATCH",
+              bytesPerFrame, framesPerPacket, bytesPerPacket,
+              timingCount,
+              t.duration.value, t.duration.timescale, CMTimeGetSeconds(t.duration),
+              sampleRate, 1.0 / sampleRate,
+              abs(CMTimeGetSeconds(t.duration) - 1.0 / sampleRate) < 1e-12
+                ? "OK — PER-SAMPLE, not the buffer total" : "⚠️ NOT the per-sample duration",
+              t.presentationTimeStamp.value, t.presentationTimeStamp.timescale,
+              CMTimeGetSeconds(t.presentationTimeStamp),
+              CMTIME_IS_VALID(t.decodeTimeStamp) ? "valid (should be invalid)" : "invalid (correct)",
+              ticksPerSample, cumulativeFrames, ptsTicksExact,
+              gridErrorTicks, gridErrorSamples,
+              abs(gridErrorTicks) < 1e-9
+                ? "OK — lands on the grid"
+                : "⚠️ OFF-GRID: this PTS was ROUNDED, so it cannot abut the previous buffer")
+        #endif
+    }
+
+    /// ── PTS CONTINUITY: DOES BUFFER n+1 START WHERE BUFFER n ENDED? ──────────────────────────
+    ///
+    /// `AVSampleBufferAudioRenderer` schedules by PTS against the timebase, so the answer has to be
+    /// YES TO THE SAMPLE. This measures the residual — `pts − (previousPTS + previousFrames/rate)` —
+    /// both as computed and as QUANTISED to the 90 kHz grid the CMTime actually carries, because the
+    /// quantisation is part of what the renderer sees.
+    ///
+    /// Positive = a GAP (silence the renderer must fill). Negative = an OVERLAP (samples it must
+    /// drop). Either, repeated at the pull rate, is continuous distortion rather than a click.
+    ///
+    /// ⚠️ KEPT AFTER THE FIX, AND IT SHOULD NOW READ EXACTLY ZERO. With `audioPTS` counting samples
+    /// the residual is zero BY CONSTRUCTION — `pts` is `anchor + cumulative/rate` and the next one
+    /// adds exactly `frames/rate`, so the arithmetic cannot produce anything else. That is precisely
+    /// why the line stays: a zero is cheap to print and a NON-zero means the construction has been
+    /// broken by something not yet understood, which is the case worth catching. The two readings
+    /// that are legitimately non-zero are a re-pin and a format restart, each of which prints its
+    /// own line in the same window, so they can be told apart from an unexplained residual.
+    ///
+    /// MEASURED BEFORE THE FIX, for comparison: mean |residual| 0.15–0.57 ms (7–27 samples), ~50
+    /// gaps and ~40 overlaps per second, mean residual ~0.
+    private func recordPTSContinuity(pts: Double, frames: Int, sampleRate: Double) {
+        // DEVELOPER DIAGNOSTIC — compiled to nothing in Release. Post-fix this is zero BY
+        // CONSTRUCTION (see above), so in the field it can only ever confirm arithmetic that cannot
+        // have changed without a code change. It earns its place in a dev build and nowhere else.
+        #if !DEBUG
+        return
+        #else
+        defer { lastAudioPTS = pts; lastAudioFrames = frames; lastAudioRate = sampleRate }
+        guard let prevPTS = lastAudioPTS, lastAudioFrames > 0, lastAudioRate > 0 else {
+            ptsWindowStart = pts
+            return
+        }
+        let expected = prevPTS + Double(lastAudioFrames) / lastAudioRate
+        let residual = pts - expected
+        // What the renderer really receives: both ends rounded to 1/90000 s.
+        let qActual = (pts * 90_000).rounded() / 90_000
+        let qExpected = (expected * 90_000).rounded() / 90_000
+        let qResidual = qActual - qExpected
+
+        ptsSamples += 1
+        ptsResidualSum += residual
+        ptsResidualAbsSum += abs(residual)
+        if residual > 0 { ptsGaps += 1 } else if residual < 0 { ptsOverlaps += 1 }
+        if abs(residual) > abs(ptsWorstResidual) { ptsWorstResidual = residual }
+        ptsQuantisedAbsSum += abs(qResidual)
+        // In SAMPLES, which is the unit that decides whether the renderer can splice cleanly.
+        let residualSamples = abs(residual) * sampleRate
+        if residualSamples > ptsWorstResidualSamples { ptsWorstResidualSamples = residualSamples }
+
+        guard pts - ptsWindowStart >= 1.0 else { return }
+        let n = max(1, ptsSamples)
+        NSLog("%@", String(format: "[NDI-AUDIO] PTS continuity over %d buffer(s): mean residual "
+                           + "%+.3f ms · mean |residual| %.3f ms (%.1f samples) · worst %+.3f ms "
+                           + "(%.1f samples) · gaps %d / overlaps %d · mean |residual| after 90kHz "
+                           + "quantisation %.3f ms — buffer n+1 should start EXACTLY where n ended",
+                           ptsSamples,
+                           ptsResidualSum / Double(n) * 1000,
+                           ptsResidualAbsSum / Double(n) * 1000,
+                           ptsResidualAbsSum / Double(n) * sampleRate,
+                           ptsWorstResidual * 1000, ptsWorstResidualSamples,
+                           ptsGaps, ptsOverlaps,
+                           ptsQuantisedAbsSum / Double(n) * 1000))
+        ptsWindowStart = pts
+        ptsSamples = 0; ptsResidualSum = 0; ptsResidualAbsSum = 0; ptsQuantisedAbsSum = 0
+        ptsGaps = 0; ptsOverlaps = 0; ptsWorstResidual = 0; ptsWorstResidualSamples = 0
+        #endif
+    }
+
+    /// PTS-continuity state. Pump thread only; reset on `start(with:)` before the thread exists.
+    private var lastAudioPTS: Double?
+    private var lastAudioFrames = 0
+    private var lastAudioRate = 0.0
+    private var ptsWindowStart = 0.0
+    private var ptsSamples = 0
+    private var ptsResidualSum = 0.0
+    private var ptsResidualAbsSum = 0.0
+    private var ptsQuantisedAbsSum = 0.0
+    private var ptsGaps = 0
+    private var ptsOverlaps = 0
+    private var ptsWorstResidual = 0.0
+    private var ptsWorstResidualSamples = 0.0
+
+    /// ── WHAT THE RENDERER SAYS ABOUT ITSELF, WHICH NOTHING HAS EVER ASKED ────────────────────
+    ///
+    /// ⚠️ THE LIVE PATH PUSHES UNCONDITIONALLY AND ALWAYS HAS. `LiveAudioSink.enqueue` is
+    /// `tap.ingest` then `renderer.enqueue`, with no `isReadyForMoreMediaData` test and no
+    /// `requestMediaDataWhenReady` pump. EVERY FILE PATH IN THIS APP DOES THE OPPOSITE —
+    /// `LibavAudioSource`, `FileFrameSource`, `LibavFrameSource` and `FrameEngine.beginAudioReading`
+    /// each drive a `requestMediaDataWhenReady` + `while isReadyForMoreMediaData` loop. So the one
+    /// class of failure that is structurally invisible here is the renderer refusing or failing,
+    /// and it would present exactly as "the audio is wrong" with every upstream counter clean.
+    ///
+    /// ⚠️ AND IT BITES NDI HARDER THAN WHEP EVEN THOUGH BOTH USE THE SAME SINK: NDI pushes at
+    /// ~92 Hz in 480..530-sample buffers, WHEP at 50 Hz in fixed 960s. Same samples per second,
+    /// nearly twice the number of enqueue calls.
+    ///
+    /// Counted continuously, reported once a second — `notReady` is the number of pushes made while
+    /// the renderer had said it did not want more, which is the count that distinguishes "the
+    /// renderer is refusing us" from every other hypothesis.
+    private var rendererPushes = 0
+    private var rendererNotReadyPushes = 0
+    private var rendererLastReport = 0.0
+    private var rendererSawFailure = false
+    /// Latched by `noteRendererPush` so the 1 Hz line has a value even on a pull that produced no
+    /// buffer — stale is informative, absent is not.
+    private var rendererLastNewestPTS = Double.nan
+    /// Set by `cycleDesktopAudioLead` so every rung gets a reading IMMEDIATELY rather than up to a
+    /// second later — the ladder is stepped by hand and a missing first line is what made the last
+    /// run unreadable.
+    private var rendererForceReport = false
+
+    /// Per-push bookkeeping. CHEAP and unconditional — one property read and two increments.
+    private func noteRendererPush(newestPTS: Double) {
+        guard let read = liveAudioRendererState else { return }
+        let st = read()
+        rendererPushes += 1
+        rendererLastNewestPTS = newestPTS
+        if !st.isReadyForMoreMediaData { rendererNotReadyPushes += 1 }
+        // A failure is stated the INSTANT it appears — it explains everything downstream of it.
+        if st.statusRawValue == 2, !rendererSawFailure {
+            rendererSawFailure = true
+            NSLog("[NDI-AUDIO] ⚠️⚠️ AUDIO RENDERER STATUS = FAILED — %@. Nothing on the live path "
+                + "reads this, so it would otherwise present only as bad audio.",
+                  st.errorDescription ?? "no NSError supplied")
+        }
+    }
+
+    /// ── ⚠️ CALLED FROM THE PUMP LOOP, NOT FROM INSIDE `push`, AND THAT IS THE BUG FIX ─────────
+    ///
+    /// This reporting used to live at the bottom of the `push` closure, which sits behind
+    /// `if let sink`, behind `guard let sb = makeAudioSampleBuffer(...) else { return }`, and — in
+    /// WHEP-shaped mode — behind "a group happened to complete this tick". **Any one of those
+    /// declining silently took the instrumentation with it**, which is exactly what happened: five
+    /// lines, all at 40 ms, then nothing, so the ladder ran with no reading at any clean rung and
+    /// the correlation between `sufficientForStart` and audible cleanliness stayed unmeasured.
+    ///
+    /// It now runs from the pump loop itself, once per pull, outside every one of those guards. The
+    /// only thing it needs from the push path is the newest PTS, which is latched by
+    /// `noteRendererPush` and simply goes stale (not absent) if a pull produced no buffer.
+    ///
+    /// ⚠️ AND IT IS STRING INTERPOLATION, NOT `String(format:)`. The old line mixed `%@`, `%d` with
+    /// 64-bit `Int`, `%.4f` with `Float` and `%.0f` with `Double` in one variadic call. The `%@`
+    /// fields came first so `sufficientForStart` was trustworthy, but everything after the first
+    /// `%d` depended on vararg slot alignment that is not worth relying on. Interpolation is
+    /// type-checked and cannot silently shift a field.
+    ///
+    /// **A DIAGNOSTIC THAT CAN BE SUPPRESSED BY THE THING IT IS DIAGNOSING IS NOT A DIAGNOSTIC.**
+    /// That is the third time this evening an instrument reported cleanly while the thing under it
+    /// was broken — after `recordPTSContinuity` measuring Doubles and the meters metering
+    /// synthesised audio.
+    private func reportRendererStateIfDue(now: Double) {
+        guard let read = liveAudioRendererState else { return }
+        toneLock.lock()
+        let lead = desktopAudioLead
+        let forced = rendererForceReport
+        rendererForceReport = false
+        toneLock.unlock()
+
+        guard forced || now - rendererLastReport >= 1.0 else { return }
+        rendererLastReport = now
+        let st = read()
+        let pushes = rendererPushes, notReady = rendererNotReadyPushes
+        rendererPushes = 0; rendererNotReadyPushes = 0
+
+        // Queue depth as the renderer sees it: how far the newest stamped sample is ahead of the
+        // timebase. This is the number the lead is supposed to hold, MEASURED rather than assumed.
+        let queueMs = rendererLastNewestPTS.isFinite
+            ? (rendererLastNewestPTS - st.timebaseSeconds) * 1000 : Double.nan
+        let err = st.errorDescription.map { " (\($0))" } ?? ""
+        let q = queueMs.isFinite ? String(format: "%+.1f", queueMs) : "n/a"
+        NSLog("[NDI-AUDIO] renderer: lead=\(Int((lead * 1000).rounded()))ms · "
+            + "sufficientForStart=\(st.hasSufficientMediaDataForReliablePlaybackStart ? "YES" : "NO") "
+            + "· status=\(st.statusLabel)\(err) · ready=\(st.isReadyForMoreMediaData ? "YES" : "NO") "
+            + "· pushes=\(pushes) (of which \(notReady) while NOT ready) "
+            + "· syncRate=\(String(format: "%.4f", st.synchronizerRate)) "
+            + "· queue=newestPTS−timebase=\(q) ms"
+            + (forced ? "  ← first reading at this lead" : ""))
+    }
+
+    /// ── THE CLOSED LOOP, ON THE PUMP THREAD ──────────────────────────────────────────────────
+    ///
+    /// Compare the ACTUAL timebase against where it is supposed to be and re-anchor past the
+    /// tolerance. Both readings are taken as close together as they can be, because the quantity
+    /// being measured is the difference between the two clocks they each run on.
+    ///
+    /// ⚠️ THIS IS THE ONE THING IN THE LIVE-AUDIO PATH THAT IS ACTUALLY CLOSED. `mirrorLiveAudio`'s
+    /// gate computes its `predicted` from what it last pushed plus host time — both mach-axis — so
+    /// it is blind to the audio device crystal by construction, and WHEP and SRT are corrected only
+    /// incidentally, by LiveClock's video-depth slew forcing absolute re-anchors. NDI has no slew,
+    /// so nothing would correct it. Reading `currentSyncTime()` is what closes it, and it is why
+    /// this is a loop rather than a one-shot anchor. See docs/BUGS.md, "NDI has no desktop playback
+    /// path at all", and the slew-site note in LiveClock.
+    ///
+    /// ── ⚠️ A SAMPLE-COUNTED PTS AXIS DOES NOT MAKE THIS REDUNDANT. IT MAKES IT NECESSARY. ────
+    ///
+    /// A reader arriving from `audioPTS` will reasonably think the problem is solved: if the PTS is
+    /// a running sample count, it is exact, so what is there to correct? The answer is that it is
+    /// exact ON ITS OWN AXIS, and that axis is **frames ÷ the sender's nominal rate**, pinned to
+    /// mach time. The timebase it is being played against advances on the AUDIO DEVICE's crystal
+    /// (`AVSampleBufferRenderSynchronizer.h`: the timebase is driven by an added audio renderer's
+    /// clock). Two independent oscillators, so 48000 counted samples and 48000 device samples are
+    /// not the same duration — they differ by the crystal offset, measured at −7.8 ppm on one
+    /// machine by the HLS work, and that is a PROPERTY OF THE OUTPUT DEVICE, not a constant.
+    ///
+    /// So the sample axis makes buffers tile perfectly against EACH OTHER and drifts, as a block,
+    /// against the clock they are played on. Nothing about counting samples can fix that; only
+    /// measuring the device clock can, and `currentSyncTime()` is the only reading in the system
+    /// taken on it. **The two mechanisms address different seams and both are load-bearing:
+    /// `audioPTS` removes the per-buffer splice, this removes the accumulating block offset.**
+    ///
+    /// ⚠️ IT COMPARES AGAINST THE SAMPLE AXIS, NOT THE WALL CLOCK, and that changed with the fix.
+    /// The buffers are stamped on the sample axis, so that is the axis the timebase has to agree
+    /// with; measuring against the wall clock would be measuring against something no buffer
+    /// carries. `audioPTS` keeps the sample axis pinned to the wall clock separately, so the two
+    /// corrections compose instead of fighting.
+    private func serviceDesktopAudioAnchor(mediaNow: Double, wallNow: Double) {
+        guard let anchor = anchorLiveAudio else { return }
+        // The lead is runtime-adjustable (Debug ▸ Desktop Audio Lead), so it is read per call rather
+        // than captured — and a change forces the first-anchor branch below, which is the whole of
+        // "re-anchor cleanly instead of reconnecting".
+        toneLock.lock()
+        let lead = desktopAudioLead
+        let leadChanged = desktopAudioLeadChanged
+        desktopAudioLeadChanged = false
+        toneLock.unlock()
+
+        // FIRST ANCHOR. `beginLiveAudio` parks the synchronizer at rate 0 and holds it there until
+        // something anchors the timebase, so without this NDI would be silent, not merely drifting.
+        guard anchoredDesktopAudio, !leadChanged else {
+            anchor(mediaNow - lead, wallNow)
+            anchoredDesktopAudio = true
+            lastAnchorCheck = wallNow
+            lastAnchorHost = wallNow
+            anchorCount = 1
+            NSLog("%@", String(format: "[NDI-AUDIO] desktop timebase anchored %.0f ms behind the "
+                               + "pull clock — closed loop armed (tolerance %.1f ms, checked every "
+                               + "%.1f s)",
+                               lead * 1000,
+                               Self.desktopAudioAnchorTolerance * 1000,
+                               Self.desktopAudioCheckInterval))
+            return
+        }
+        guard wallNow - lastAnchorCheck >= Self.desktopAudioCheckInterval else { return }
+        lastAnchorCheck = wallNow
+        guard let readTimebase = liveAudioTimebase else { return }
+        let timebase = readTimebase()
+        guard timebase.isFinite else { return }
+
+        // Where the timebase SHOULD read, given the axis the buffers are actually stamped on.
+        let expected = mediaNow - lead
+        let offset = timebase - expected
+        guard abs(offset) > Self.desktopAudioAnchorTolerance else { return }
+
+        let sinceLast = wallNow - lastAnchorHost
+        anchor(expected, wallNow)
+        anchorCount += 1
+        lastAnchorHost = wallNow
+        // ⚠️ THE INTERVAL IS THE POINT OF THIS LINE, NOT THE OFFSET. The offset is always ~the
+        // tolerance by construction — that is what tripped it. How LONG it took to get there is the
+        // measurement: it is this machine's two crystals, in ppm, and it is the number that differs
+        // between machines. A pair further apart shows up as a shorter interval instead of silently.
+        let ppm = sinceLast > 0 ? offset / sinceLast * 1e6 : 0
+        NSLog("%@", String(format: "[NDI-AUDIO] desktop timebase RE-ANCHORED — offset %+.2f ms past "
+                           + "a %.1f ms tolerance after %.1f s (%.1f ppm between the audio device "
+                           + "clock and mach time on this machine) · re-anchor #%d",
+                           offset * 1000, Self.desktopAudioAnchorTolerance * 1000,
+                           sinceLast, ppm, anchorCount))
+    }
+
     private func startAudioPump(_ bridge: NDIBridge) {
         audioRunLock.lock(); audioShouldRun = true; audioRunLock.unlock()
         let done = DispatchSemaphore(value: 0)
@@ -718,17 +1999,88 @@ final class NDIService: ObservableObject {
             autoreleasepool {
                 // Convert happens INSIDE the bridge, OUTSIDE the tap lock; only the finished Int32
                 // buffer is copied into the ring under the lock (see AudioTapBuffer.append).
-                if let tap = audioTap,
-                   let audio = bridge.captureAudioFrame(forInterval: pollInterval) {
+                if let audio = bridge.captureAudioFrame(forInterval: pollInterval) {
                     // Stamped ONCE into a local so the trace below reports the value the ring
                     // actually received, not a second, later reading of the same clock.
-                    let pts = Self.monotonicNow()
-                    tap.pushInterleavedInt32(audio.samples,
-                                             frameCount: Int(audio.frameCount),
-                                             channelCount: Int(audio.channelCount),
-                                             sampleRate: Double(audio.sampleRate),
-                                             pts: pts,
-                                             path: .ndi)
+                    let wallNow = Self.monotonicNow()
+                    // ⚠️ NOT `wallNow` — THE PTS IS THE RUNNING SAMPLE COUNT. A per-pull clock read
+                    // here is what made the desktop distort; see `audioPTS`. `wallNow` still pins
+                    // that axis and still drives the timebase loop, and the tap gets the same
+                    // stamped buffer either way.
+                    let ptsTicks = audioPTSTicks(forFrames: Int(audio.frameCount),
+                                                 sampleRate: Double(audio.sampleRate),
+                                                 channels: Int(audio.channelCount),
+                                                 wallNow: wallNow)
+                    // Seconds are derived FROM the ticks, never the other way round — the two loops
+                    // below and the continuity trace want a Double; the buffer never does.
+                    let pts = Double(ptsTicks) / Double(audio.sampleRate)
+                    // ── ONE ROUTE OR THE OTHER, NEVER BOTH ──────────────────────────────────
+                    //
+                    // `LiveAudioSink.enqueue` tees to the tap AND the renderer, so pushing to the
+                    // tap here as well would double-feed the ring: every sample written twice, the
+                    // PTS axis advancing at half the sample axis, and `append`'s 50 ms disagreement
+                    // check wiping the window on a loop. The tap push below is the FALLBACK for an
+                    // unwired seam, not a companion to the sink.
+                    //
+                    // The fallback is kept rather than refused (WHEP just logs and gives up) because
+                    // NDI's tap feed is not only the desktop: it is the meters and the SDI embed,
+                    // both of which worked before this change and must not regress to silence
+                    // because a renderer could not be opened.
+                    if let sink = liveAudioSink {
+                        // The timebase must be anchored BEFORE the first buffer is due, not after:
+                        // `beginLiveAudio` holds the synchronizer at rate 0, and a buffer enqueued
+                        // against a stopped timebase simply waits.
+                        serviceDesktopAudioAnchor(mediaNow: pts, wallNow: wallNow)
+                        recordPTSContinuity(pts: pts, frames: Int(audio.frameCount),
+                                            sampleRate: Double(audio.sampleRate))
+
+                        let rate = Double(audio.sampleRate)
+                        let ch = Int(audio.channelCount)
+                        let src = toneOrRealSamples(audio)
+                        // One closure, used by both shapes, so the ONLY difference between them is
+                        // how the samples are packaged — same construction, same capture, same dump,
+                        // same sink.
+                        let push: (Int64, Int, UnsafePointer<Int32>) -> Void = { ticks, n, data in
+                            guard let sb = self.makeAudioSampleBuffer(data, frames: n, channels: ch,
+                                                                      sampleRate: rate,
+                                                                      ptsTicks: ticks) else { return }
+                            #if DEBUG
+                            // AT THE ENQUEUE POINT, on the finished buffer — the same object, the
+                            // same bytes, the same instant as the renderer receives them.
+                            self.captureEnqueuedAudio(sb, sampleRate: rate, channels: ch)
+                            #endif
+                            self.dumpSampleBuffer(sb, expectedFrames: n, channels: ch,
+                                                  sampleRate: rate,
+                                                  cumulativeFrames: ticks - (self.audioAnchorTicks ?? 0))
+                            self.noteRendererPush(newestPTS: Double(ticks + Int64(n)) / rate)
+                            sink.enqueue(sb)
+                        }
+
+                        #if DEBUG
+                        toneLock.lock(); let grouped = groupedMode; toneLock.unlock()
+                        if grouped != groupedModeOnPump {
+                            // Mode changed: the partial group describes the OTHER shape. Dropped HERE,
+                            // on the thread that owns the accumulator, never from main.
+                            groupedModeOnPump = grouped
+                            groupHeldFrames = 0
+                        }
+                        if grouped {
+                            regroup(src, frames: Int(audio.frameCount), channels: ch,
+                                    startTicks: ptsTicks, emit: push)
+                        } else {
+                            push(ptsTicks, Int(audio.frameCount), src)
+                        }
+                        #else
+                        push(ptsTicks, Int(audio.frameCount), src)
+                        #endif
+                    } else if let tap = audioTap {
+                        tap.pushInterleavedInt32(audio.samples,
+                                                 frameCount: Int(audio.frameCount),
+                                                 channelCount: Int(audio.channelCount),
+                                                 sampleRate: Double(audio.sampleRate),
+                                                 pts: pts,
+                                                 path: .ndi)
+                    }
                     #if DEBUG
                     trace.record(pts: pts,
                                  frames: Int(audio.frameCount),
@@ -742,6 +2094,11 @@ final class NDIService: ObservableObject {
             // exceeds `pollInterval` the loop simply runs at whatever rate the work allows, which
             // is not a busy-spin (the work dominates) and which the elapsed-derived request sizes
             // correctly anyway.
+            // ⚠️ OUTSIDE the `if let audio` / `if let sink` / `guard let sb` chain above, and
+            // outside `autoreleasepool` — once per pull, unconditionally, so nothing downstream can
+            // silence it. See the note on `reportRendererStateIfDue`.
+            if liveAudioSink != nil { reportRendererStateIfDue(now: Self.monotonicNow()) }
+
             let workElapsed = Self.monotonicNow() - cycleStart
             if workElapsed < pollInterval {
                 Thread.sleep(forTimeInterval: pollInterval - workElapsed)

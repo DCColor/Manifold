@@ -206,6 +206,27 @@ struct ManifoldApp: App {
             // percentage of the source raster. The app's first real menu of window commands; see
             // RasterSize.swift for why it is a menu and not another item on the control bar.
             RasterSizeCommands()
+            #if DEBUG
+            // ── A TOP-LEVEL "Debug" MENU, AND IT IS A MENU BECAUSE THE KEYSTROKE WAS NOT ENOUGH ──
+            //
+            // The ⌃⌥A binding for this lives in `ContentView.syntheticLiveShortcuts` as a hidden
+            // Button, which fires only when that view is mounted AND nothing upstream has already
+            // claimed the chord. That space is crowded — ⌃⌥T, for instance, is the scope tray — and
+            // a chord that loses the race fails SILENTLY, as a system beep. A CommandMenu is bound
+            // to the application, not to whatever has focus, so it cannot be shadowed and cannot be
+            // missed. When a diagnostic has to be reachable on demand during a live capture, this
+            // is the shape it should take.
+            //
+            // `#if DEBUG`, matching the trigger it drives — Profile carries DEBUG, so this is
+            // present in the builds testers actually run, and absent from Release.
+            CommandMenu("Debug") {
+                NDIAudioToneTestCommand()
+                NDIAudioGroupedCommand()
+                NDIAudioLeadCommand()
+                Divider()
+                NDIAudioWAVCaptureCommand()
+            }
+            #endif
         }
 
         // The standard macOS Settings window (⌘,).
@@ -242,3 +263,72 @@ struct ManifoldApp: App {
         .commandsRemoved()
     }
 }
+
+#if DEBUG
+/// Debug ▸ NDI Audio Tone Test — one item that cycles OFF → 1 kHz 0 dBFS → 1 kHz −6 dBFS → OFF and
+/// names the state it is in.
+///
+/// ⚠️ A SEPARATE `View` RATHER THAN A `Button` INLINE IN THE `CommandMenu`, and that is not style.
+/// The title has to track `NDIService.audioToneTestTitle`, so something has to OBSERVE the service;
+/// a `@StateObject`/`@ObservedObject` cannot be declared inside a `commands` builder. Giving the
+/// item its own view is what lets the menu re-title itself when the mode changes, so the menu is the
+/// readout and there is no need to go and find the log line.
+///
+/// WHAT IT DOES: substitutes a continuous synthesised sine for NDI's pulled samples at the single
+/// point where they enter `makeAudioSampleBuffer`, and changes nothing else — same buffer sizes
+/// (the real 480..530 from this tick's pull), same rate and channel count, same PTS ticks, same
+/// construction, same `LiveAudioSink`, same renderer. It bisects "is the desktop crackle in the
+/// SAMPLES or in the PATH".
+///
+/// ⚠️ The tap tees BEFORE the renderer, so the meters show the tone and SDI CARRIES IT if DeckLink
+/// output is on. Do not leave it running into a real output.
+private struct NDIAudioToneTestCommand: View {
+    @ObservedObject private var ndi = NDIService.shared
+    var body: some View {
+        Button(ndi.audioToneTestTitle) { NDIService.shared.cycleAudioToneTest() }
+            .keyboardShortcut("a", modifiers: [.control, .option])
+    }
+}
+
+/// Debug ▸ Record NDI Audio to WAV — writes the EXACT bytes handed to `LiveAudioSink`, copied out
+/// of the CMSampleBuffer's own block buffer at the enqueue point, to a .wav on the Desktop.
+///
+/// It captures whatever is in the buffers, so it serves the tone test and real NDI audio equally —
+/// the filename records which was running when the capture started. This is the one instrument that
+/// separates "are the bytes good" from "is the renderer playing them properly", which every
+/// counter-based measurement so far has been unable to do.
+///
+/// Same `@ObservedObject` reasoning as the item above: the title has to track the service so the
+/// menu can show the elapsed time and size while recording.
+/// Debug ▸ Renderer Input — TEST 2. Toggles NDI's renderer input between its native shape
+/// (variable 480..530 samples at ~92 Hz) and WHEP's (fixed 960 at 50 Hz), which is known good
+/// through this exact renderer. A/B it live; the samples are identical either way, only the
+/// packaging changes.
+private struct NDIAudioGroupedCommand: View {
+    @ObservedObject private var ndi = NDIService.shared
+    var body: some View {
+        Button(ndi.audioGroupedTitle) { NDIService.shared.toggleGroupedAudio() }
+    }
+}
+
+/// Debug ▸ Desktop Audio Lead — cycles 40 / 150 / 300 / 400 / 600 ms, re-anchoring the timebase on
+/// the next pull rather than requiring a reconnect.
+///
+/// This is the one that matters: the renderer reports
+/// `hasSufficientMediaDataForReliablePlaybackStart = NO` for entire sessions at 40 ms, while WHEP
+/// (400 ms) and SRT (250 ms) run clean through the same renderer. Watch `sufficientForStart` and
+/// `queue` in the per-second `[NDI-AUDIO] renderer:` line as you step it.
+private struct NDIAudioLeadCommand: View {
+    @ObservedObject private var ndi = NDIService.shared
+    var body: some View {
+        Button(ndi.audioLeadTitle) { NDIService.shared.cycleDesktopAudioLead() }
+    }
+}
+
+private struct NDIAudioWAVCaptureCommand: View {
+    @ObservedObject private var ndi = NDIService.shared
+    var body: some View {
+        Button(ndi.audioCaptureTitle) { NDIService.shared.toggleAudioWAVCapture() }
+    }
+}
+#endif
