@@ -5621,3 +5621,631 @@ The obvious shapes are to publish through `NDIService` instead of calling the br
 have the empty state use `runtimePresence` for its "runtime not installed" label and stop calling
 `loadRuntime` in a view body at all. **Neither is attempted here** — it is a live UI path, the
 current behaviour is at least self-consistent, and nothing depends on changing it today.
+
+---
+
+## ✅ WHAT LANDED, 2026-09-17 — HLS audio: metered, SDI-fed, audible, and on the item's own clock
+
+**Status:** LANDED, built and verified against Apple's `bipbop_16x9` ladder on macOS 26.5.1 (25F80).
+**Preceded by:** *"⏸ BANKED: HLS as a source"* above, whose picture half shipped in 0.8.2.
+
+HLS was picture-only: `player.isMuted = true`, no tap, meters flat, SDI silent. It now feeds the
+shared `AudioTapBuffer`, and the stream is audible on the default output device.
+
+**New file** `App/HLS/HLSAudioTap.swift`; edits to `HLSClient`, `WindowDeck` (`DeckRegistry`),
+`AudioTapBuffer` (a `.hls` case on `SourcePath`) and `FrameEngine` (one new seam, below).
+
+### The seam is `pushInterleavedInt32`, and THERE IS NO FLOAT PATH
+
+⚠️ **A "float path that already existed for NDI and had no caller" DOES NOT EXIST — do not go
+looking for it.** `AudioTapBuffer` has exactly two entry points: `ingest(_:path:)` (a
+`CMSampleBuffer`) and `pushInterleavedInt32(...)`. **NDI uses the latter and always has**
+(`NDIService.runAudioPump`), so it is neither float nor uncalled. The ring itself is
+`private var ring: [Int32]` — "card-ready" Int32 is the buffer's stated contract, `ingest`
+converts float32 to Int32 internally, and DeckLink embeds Int32.
+
+The tap delivers **Float32 NON-INTERLEAVED**, so `HLSAudioTap` interleaves and converts to Int32
+in the process callback and calls `pushInterleavedInt32` — the same call NDI makes, same arguments
+in the same order. The conversion arithmetic is copied from `ingest` clamp-for-clamp on purpose:
+the meters' clip detector keys off `clipThresholdInt32` (−0.1 dBFS as an Int32 magnitude), so a
+different rounding would make HLS meter differently from every other producer for the same signal.
+Verified against an independent recomputation of channel 0: **0 mismatches**.
+
+### ⚠️ THE CLOCK WAS FREE, AND IT WAS MEASURED. DO NOT ADD RECONCILIATION LATER.
+
+**Audio and video out of an `AVPlayerItem` are two reads of ONE clock.** The item's timebase drives
+both, and its source clock is the audio output device itself — the probe printed
+`FigClock[AudioDeviceClock(deviceID=154, trackDefaultDevice=true)]`. **AVFoundation is already
+doing the lip-sync.** There is nothing to reconcile.
+
+Measured, 238 consecutive callbacks over 20 s:
+
+- the tap's `timeRangeOut` is on the **item's timeline** — started at 0.0000, advanced 0.08533 s
+  per callback, **0 backwards steps, 0 discontinuities > 2 ms**;
+- it leads presentation by a **constant render-ahead** — `range.start` minus
+  `CMTimebaseGetTime(item.timebase)`, read at the same instant inside the callback, was +0.2910,
+  +0.2909, +0.2910 … flat to ±0.1 ms after the first few callbacks;
+- the item↔host mapping is flat too: `hostTime − itemTime` moved **−0.000266 s over 39.7 s with
+  zero steps > 10 ms**, a −7.8 ppm residual that is the audio device crystal against mach time and
+  which **never accumulates**, because the mapping is re-read per buffer rather than integrated.
+
+The entire clock handling is one subtraction on the drain thread:
+
+```swift
+pts = itemTime + (hostAtCallback - output.itemTime(forHostTime: hostAtCallback).seconds)
+```
+
+— the same `itemTime(forHostTime:)` mapping `HLSPull.capture()` already queries every display tick,
+used to put audio on the same host axis video is stamped with (which DeckLink's
+`read(framesStartingAt:)` requires, since it keys off the video frame's PTS). One reading, no state,
+no filter, no loop. Verified live: audio PTS advances at exactly 1.0 against the host clock, never
+backwards, and **A/V agree to a mean of +1.8 ms**.
+
+> **NO `LiveClock`, NO SENTINEL, NO CUSHION, NO EPOCH LATCH, NO DRIFT PID, NO RATE SLEW.** WHEP
+> needed those because its audio and video arrive on separate SSRCs with independent random RTP
+> bases — hence its stage-1 "SSRCs ASSUMED aligned" assumption and the `-.infinity` `LiveClock`
+> sentinel fix. SRT took three stages for its own reasons. **NEITHER APPLIES HERE.** If you are
+> about to add reconciliation to this path, re-measure first; do not add it because the other two
+> have it.
+
+⚠️ **THE RENDER-AHEAD AND THE BUFFER SIZE ARE PROPERTIES OF THE OUTPUT DEVICE, NOT OF HLS.** Here:
+`maxFrames` 4096 (85.3 ms) and +291 ms lead against a Scarlett 18i20 at 48 kHz. Both have been seen
+much smaller elsewhere (1024 frames, ~164 ms) — **the two co-vary and neither is a constant to
+pin.** Nothing in the code hardcodes either: the frame count comes from the callback argument and
+the lead falls out of the mapping. A figure baked in from one machine's interface is a bug waiting
+for a different one.
+
+**What "no drift" does NOT mean is "no discontinuity".** Over 292 callbacks the PTS never went
+backwards, but took four steps past `AudioTapBuffer`'s 50 ms tolerance: three during the first
+~250 ms (+0.085, +0.085, +0.120 s — the render-ahead ramping in) and **one of +0.817 s mid-stream**
+(a rebuffer or rendition change; the item timeline genuinely jumped and the PTS correctly followed).
+Each makes `append` re-anchor and drop its window, so **a rendition change costs a brief SDI audio
+dropout**. That is the ring doing its job, not a clock fault.
+
+### ⚠️ THE TAP SITS *AFTER* THE MUTE — MEASURED, AND THIS CORRECTS AN EARLIER CLAIM
+
+The claim that "the tap sits before the mute, so buffers carry signal with `isMuted` true" is
+**false and was measured false three independent times.**
+
+| condition | result |
+|---|---|
+| `isMuted = true`, PostEffects | **238 of 238 buffers ALL ZERO**, peak exactly 0.0 |
+| `isMuted = true`, PreEffects | **239 of 239 ALL ZERO** — Pre/Post is about the MIX's effects, not the player's mute stage |
+| `isMuted = false` | 200 zero / 38 signal, peak −1.8 dBFS (bipbop is beeps with silent gaps) |
+| `volume = 0.02` | same source buffer at **−35.7 dBFS** vs −1.8 at 1.0 — a 33.9 dB drop against the 33.98 dB the volume implies |
+
+So **`AVPlayer.isMuted` and `AVPlayer.volume` both sit UPSTREAM of the tap.** Leaving the mute on
+would have failed in the worst available way: callbacks firing, format published, meters sized,
+DeckLink re-establishing its audio stream — and every sample silence, with every status line
+reporting success. `player.isMuted = false` and `player.volume = 1.0` are now **pinned**, and the
+monitoring decision is applied at the tap's OUTPUT instead.
+
+### Passthrough does not disturb capture — verified, not assumed
+
+Two 20 s runs, identical but for whether the tap returns its frames or returns 0:
+
+|  | returns 0 frames | passes through |
+|---|---|---|
+| callbacks | 238 | 238 |
+| all-zero buffers | 200 | 200 |
+| signal buffers | 38 | 38 |
+| session peak | **0.8164637** (−1.8 dBFS) | **0.8164637** (−1.8 dBFS) |
+| loudest 10 | #213 @ 18.176 s, #96 @ 8.192 s, … | identical indices, times, dB |
+
+**What the tap RECEIVES is independent of what it RETURNS**, so the meters and the SDI embed read
+identically either way and this decision can be reversed without touching them.
+
+### The attachment is a WILDCARD trackID, and the documented form is the one that fails
+
+`AVMutableAudioMixInputParameters(track:)` — the form every example uses — produces a tap that
+**never fires** on an HLS item. Isolated 20 s cells: bound to the item's audio `assetTrack`
+(trackID 1) → **0 callbacks**; bare `AVMutableAudioMixInputParameters()`
+(`kCMPersistentTrackID_Invalid`) → **235 callbacks**; bare params with `.trackID` set explicitly →
+**0 callbacks**. It is not the initializer — **any non-invalid trackID silences it.** An HLS
+`AVURLAsset` vends no `AVAssetTrack`s at all (`asset.tracks.count == 0`) and the synthesised
+`AVPlayerItemTrack.assetTrack.trackID` is **not stable across sessions** (1 in one run, 5 in
+another), so it is not an identity worth keying to. Do not "fix" this by looking the track up.
+
+### Channel count is carried; roles are measured-absent
+
+Derived from `mNumberBuffers` **every callback**, never cached from `prepare`, because an ABR
+rendition switch can move the format **with the tap still alive** — measured: switching audio
+rendition mid-stream produced no `unprepare`, no re-`prepare`, and the callbacks continued. The
+count is passed straight through so `AudioTapBuffer`'s own comparison fires `onFormatChange` →
+`DeckLinkService.audioFormatChanged`, the existing path that re-establishes the SDI stream. Wider
+than 16 channels is **refused and counted**, never folded.
+
+⚠️ **bipbop is stereo and nothing wider was testable. The multichannel path is written but
+unexercised — do not read it as verified.**
+
+Roles come back empty, and that is **measured absence, not an unimplemented feature**: the HLS
+`AVURLAsset` vends no `AVAssetTrack`s, the item's synthesised audio track carries **no
+`AudioChannelLayout`** (checked at runtime — its format description reports 22050 Hz AAC and a nil
+layout), and the tap's ASBD has none either. Empty means the meters show NUMBERS, which is this
+codebase's stated answer for a source that declares nothing.
+
+### Threading and teardown
+
+The process callback is AVFoundation's **real-time thread** — one dedicated thread for the whole
+session, never main, never migrating, QoS unspecified. `MTAudioProcessingTap.h` forbids allocation
+and blocking calls there, and `pushInterleavedInt32` → `append` both allocates on a format change
+and takes an `NSLock` **that DeckLink's audio callback also takes at 50 Hz**. So the callback
+follows **WHEP's rule** (`WHEPAudioReceiver.receive`: *"Copies and gets off immediately"*) with a
+preallocated target, handing off to a drain thread modelled on **NDI's** `startAudioPump` /
+`stopAudioPump`. Both disciplines already existed; neither was invented.
+
+**Teardown** is `HLSClient`'s existing shape: `retired` flag first (an in-flight callback reads it
+and returns having touched nothing), then **join the drain thread** — we own that one, so a join
+*is* available and is taken — then detach the mix. The tap's own callback thread is never joined
+and does not need to be.
+
+⚠️ **THE RETAIN CYCLE, FOUND IN REVIEW AND FIXED.** A C function pointer cannot capture context, so
+the tap is handed `Unmanaged.passRetained(self)` as `clientInfo` — **the tap holds a +1 on
+`HLSAudioTap`**, while `HLSAudioTap` holds the tap (`tapRef`, and again via `audioMix`). The
+balancing `release()` lives in `finalize`, which AVFoundation runs only once the **last** reference
+to the tap goes away — so keeping ours meant finalize never fired and **every HLS connect leaked
+the object and its 4 MB relay.** `detach(from:)` now drops all three references, and a `deinit` log
+line proves the chain completed.
+
+⚠️ **THE RELEASE IS IN `finalize`, NOT `unprepare`, AND THE REASON IS THE CONTRACT RATHER THAN A
+THREAD HAZARD.** `MTAudioProcessingTap.h` specifies finalize is *"called exactly once when the
+`MTAudioProcessingTap` object is finalized"*, which is the only correct balance point for a
+`passRetained`. `unprepare` is explicitly **paired and repeatable** — *"the callback may be called
+multiple times"* — so releasing there would over-release on the second prepare/unprepare cycle. The
+object unretained is `HLSAudioTap`, not `HLSClient`; `HLSClient` is never retained by the tap.
+
+### The audio controls DO reach it — `FrameEngine.externalAudioOutput`
+
+**This was going to be filed as a defect and was instead fixed the same day**, so it is recorded
+here rather than below. HLS is the only transport whose audio never enters the engine's shared
+`AVSampleBufferAudioRenderer`, so `applyAudioMute` could not govern it: the toolbar mute, the volume
+fader and the SDI/Computer destination all missed it, and with DeckLink enabled the program would
+have been audible from the card and the Mac at once.
+
+`applyAudioMute()` now publishes its **already-combined** decision —
+`isMuted || offSpeed || deckLinkOwnsAudio`, plus the fader — through a new
+`FrameEngine.externalAudioOutput` seam, which `DeckRegistry` routes to
+`HLSClient.applyAudioOutput` → `HLSPull.setMonitor` → `HLSAudioTap.setMonitor`. **One rule,
+computed once, applied to two outputs** — the callee never re-derives the terms, which is what
+keeps it from becoming a second control. The hook is on the **decision, not the connect**, so a
+change made after connect reaches a running player; `didSet` fires it once at wiring time, and
+`HLSClient` caches the last value so a stream connected while already muted comes up correct.
+
+⚠️ **IT IS APPLIED AT THE TAP'S OUTPUT, NOT AT `player.isMuted` / `player.volume`** — forced by the
+measurements above, which would otherwise blank or attenuate the meters and the SDI ring. **And
+the fader had to stay pre-fader to match files:** `FrameEngine`'s file pump does
+`tap.ingest(next)` *then* `aRenderer.enqueue(next)`, with the fader on `audioRenderer.volume`
+applied inside the renderer — so **a file's meters are pre-fader and keep moving while muted.**
+Putting the gain on `player.volume` would have made HLS the one source whose meters fall when you
+turn monitoring down. `AVPlayer.volume` and `AVSampleBufferAudioRenderer.volume` are documented in
+identical words (0.0 silence, 1.0 full) with no curve on either, so the scale needed no conversion;
+only the insertion point mattered.
+
+Verified: at gain 0.25 the relay saw 0.8164637 (−1.8 dBFS) while the output carried 0.20411593
+(−13.8 dBFS) — **ratio exactly 0.2500**; when muted the relay still saw 0.8164637 while the output
+carried zero frames on all 259 callbacks.
+
+### Not verified
+
+- **Nothing has been run inside the app.** Every measurement above is from standalone probes
+  against the live stream. The assembled path compiles and its pieces are verified individually;
+  the meters lighting up in Manifold itself has not been observed here.
+- **The desktop audio has not been confirmed by ear from within the app**, only that the samples
+  leaving the tap carry signal at the expected level.
+- **Live (non-VOD) playlists.** bipbop is a 1800 s VOD; a sliding-window live playlist is untested,
+  and live is the actual use case for this feature.
+- **Multichannel**, as above.
+
+---
+
+## NDI has no desktop playback path at all — the pump meters, feeds SDI, and drops the audio
+
+**Status:** OPEN. **Found:** 2026-09-17, while comparing transports for the HLS audio work.
+**Blocks:** monitoring an NDI source on a machine with no DeckLink card.
+
+`NDIService.runAudioPump` pulls with `captureAudioFrameForMaxSamples:`, pushes interleaved Int32
+into the shared `AudioTapBuffer`, and **stops there**. The ring feeds the meters and the SDI embed;
+nothing enqueues into `FrameEngine`'s `audioRenderer`, so **an NDI source is silent on the Mac** no
+matter what the fader says. `WindowDeck` states it plainly at the wiring site: NDI *"feeds the tap
+alone (metered and SDI-capable, but silent on the desktop)"*.
+
+**Manifold is a desktop player first, so this is a defect and not a scoping choice.** A colourist
+without a card can see an NDI feed and cannot hear it.
+
+### ⚠️ WHEP AND SRT ARE *NOT* THE SAME SHAPE — NDI IS THE ONLY SILENT ONE
+
+This is the correction that matters for anyone sizing the work, and it is easy to get wrong because
+all three are "live sources":
+
+| transport | audible on the desktop? | how |
+|---|---|---|
+| **NDI** | **No** | tap only |
+| **WHEP** | **Yes** | `beginLiveAudio` → `LiveAudioSink` → shared `audioRenderer` |
+| **SRT** | **Yes** | same, since its stage 2 |
+| **HLS** | **Yes** | `AVPlayer`'s own output (a pull source owns one) |
+
+`WHEPFrameRouter.startAudio` and `SRTFrameRouter` both call `beginLiveAudio(...)` and enqueue
+through `FrameEngine.LiveAudioSink`, which tees to the tap and then to the renderer. SRT's own
+header records the transition: *"STAGE 2: AUDIBLE ON THE LIVE CLOCK … the only new consumer is the
+speaker."* **Any comment claiming SRT is "tap only / stage 1" is stale.**
+
+### What it needs — a renderer, not a flag
+
+The seams already exist and are proven twice over; NDI simply never adopted them. The work is
+`beginLiveAudio` → `LiveAudioSink`, plus the thing that makes it non-trivial:
+
+⚠️ **THE RATE QUESTION IS THE DESIGN DECISION, AND IT IS NDI-SPECIFIC.** WHEP and SRT mirror
+`LiveClock`'s mapping into the synchronizer's timebase, and `FrameEngine.beginLiveAudio` already
+warns that its rate 1.0 is *"AN ASSUMPTION WITH A KNOWN EXPIRY"* because LiveClock slews off 1.0 to
+regulate video depth. NDI has **no LiveClock at all** — its pump stamps `monotonicNow()` at pull
+time and the video tick does the same, which is *"a small constant offset, not drift"* for the tap
+but is **not** a timebase an `AVSampleBufferAudioRenderer` can be anchored to. The sender's clock
+and the output device's clock are independent and will drift; deciding how that is absorbed
+(resample, drop/pad, or slave the timebase to a mapping NDI does not currently produce) is the
+decision, and it should be made before any code.
+
+**HLS is not a template for this.** It avoided the question entirely by having `AVPlayer` own the
+output path — a property of a pull source with a built-in player, which NDI is not.
+
+---
+
+## FIXED — `applyAudioMute` silenced SDI audio for EVERY live source (confirmed by instrumentation)
+
+**Status:** CONFIRMED by measurement, then FIXED. **Raised:** 2026-09-17, during the HLS audio work,
+as UNSETTLED ("the code reads this way but a report says HLS SDI audio works"). **Settled:**
+2026-09-17 — the code reading was right, the report was not. **Affects (before the fix):** NDI, WHEP,
+SRT and HLS equally.
+
+### The defect
+
+`FrameEngine.applyAudioMute` ended with:
+
+```swift
+setCardAudioSilent(isMuted || shuttleRate != 1)
+```
+
+**`shuttleRate` is 0 for every live source.** Its only writer is `setShuttleRate`, reachable only
+from play / pause / JKL — all file transport controls — and `stop()`, which a live takeover calls,
+zeroes it. So `shuttleRate != 1` was true, `isCardAudioSilent()` returned true,
+`DeckLinkBridge.mm`'s `RenderAudioSamples` took its `if (silent)` branch, and the card was fed
+`scheduleSilence(want)`.
+
+**No live transport had ever embedded audio on SDI.**
+
+### ⚠️ THE EVIDENCE, AND WHY THE EXISTING COUNTERS COULD NOT PRODUCE IT
+
+The first attempt to settle this read the stopped summary and got
+
+```
+DeckLinkAudio: stopped — scheduled=337324f underruns=0 shortReads=0 resyncs=0
+```
+
+and took it for healthy audio. **It is not evidence of audio at all.** Every schedule — real PCM and
+digital silence alike — goes through the one `scheduleFrames()` call that advances the audio stream
+time, so `scheduled` counts both. And the three counters beside it are all incremented *inside* the
+real path, **after** the gate has returned: a run that scheduled nothing but silence reports zeroes
+for all three. `337324f / 0 / 0 / 0` is exactly what total silence looks like.
+
+Settling it therefore required new instrumentation, which is now permanent:
+
+* a **branch trace** in `RenderAudioSamples` (`#ifdef DEBUG`) naming which of the four exits each
+  callback took, and on the real one the frames the ring actually supplied — first 20 callbacks
+  verbatim, then ~1/s;
+* a **real-vs-silence split** of the scheduled total (`m_pcmFramesScheduled` /
+  `m_silenceFramesScheduled`, deliberately NOT DEBUG-gated), so the stopped summary now reads
+  `scheduled=Nf TOTAL = real=Nf + silence=Nf` and prints an explicit "NO audio reached SDI this run"
+  line when `real == 0`.
+
+**MEASURED, live HLS source, 2026-09-17:** `2025545` audio frames scheduled, **`real=0f`**, every
+sampled callback on `silent=true → SILENCE · transport gate`. The reading was correct; the reports of
+working HLS SDI audio were of the meters and the `audio format → …; re-establishing output` log
+line, not of the wire — exactly as the video-half entry below predicted they would turn out to be.
+
+### ⚠️ THE CONSEQUENCE THAT MADE IT URGENT: NO AUDIO ANYWHERE
+
+This was not "SDI is silent, monitor on the Mac instead". With DeckLink output enabled and the
+destination at `.sdi` (the default), `ownsSystemAudio` is true, `setDeckLinkOwnsAudio(true)` reaches
+the engine, and `deckLinkOwnsAudio` enters `effectiveMute` — which **silences the desktop path on
+purpose**, so the program cannot be heard from the card and the Mac at once. With the card ALSO
+silent, the user got **silence on the wire and silence on the desktop simultaneously.** Enabling a
+broadcast output made a live source completely inaudible, and nothing in any log said so.
+
+### The fix
+
+```swift
+setCardAudioSilent(isMuted || (hasMedia && shuttleRate != 1))
+```
+
+`ManifoldCore/FrameEngine.swift:723`. `isMuted` stays unconditional. The rate term is now
+conditioned on a FILE being the source.
+
+**⚠️ THE FIX IS NOT UNIFYING THE TWO EXPRESSIONS, AND MUST NEVER BECOME THAT.** `shuttleRate != 1`
+is a PROXY for *"the source's time is frozen"*. That proxy is sound for a paused file — the card
+asks for samples at ~50 Hz at a frozen source time, so serving PCM would re-send the same window
+forever (a drone), and silence is the honest answer. **That behaviour is deliberate and survives
+unchanged.** The proxy is simply false for a live feed, whose ring is being filled in real time.
+
+**`hasMedia` is the term, and it already existed** — no new flag was invented:
+`ManifoldCore/FrameEngine.swift:94`, written at exactly three sites (`stop()` → false;
+AVFoundation load → true; MXF/libav load → true). No live path sets it, and
+`DeckRegistry.liveStreamWillActivate` (`App/WindowDeck.swift:1473`) calls `engine.stop()` on the
+deck a stream takes over. The app already reads it as the file/live discriminator —
+`App/ContentView.swift:430` (`engine.hasMedia || activeLiveSource != nil`).
+
+Three candidates were rejected, and the reasons are worth keeping:
+
+* **`liveAudioActive`** (`ManifoldCore/FrameEngine.swift:2420`, set by `beginLiveAudio`) covers
+  **only WHEP and SRT**. NDI is tap-only (`App/WindowDeck.swift:1244`, *"Deliberately NOT
+  `beginLiveAudio`"*) and HLS never calls it (`App/HLS/HLSAudioTap.swift:25`). Using it would have
+  left HLS — the very transport measured above — still silenced, and the fix would have looked
+  correct in review.
+* **`currentSource`** (`ManifoldCore/FrameEngine.swift:399`) is nil for the whole DNxHR/libav path
+  (that uses `libavSource`) and transiently nil across every seek
+  (`ManifoldCore/FrameEngine.swift:2602`) — it would have dropped SDI audio on DNxHR entirely and
+  blipped it on every scrub.
+* **`liveStreamWillActivate`** sets no engine state of its own; its effect on the engine *is*
+  `stop()`, i.e. `hasMedia = false`.
+
+### ⚠️ `hasMedia` NOW CARRIES A `didSet`, AND IT IS LOAD-BEARING
+
+`hasMedia` is an INPUT to the gate, so a change to it changes the answer and the callback-thread
+mirror must be recomputed — hence `didSet { applyAudioMute() }`
+(`ManifoldCore/FrameEngine.swift:95`).
+
+Without it the fix would have been **order-dependent and half-working**: `stop()` calls
+`applyAudioMute()` while `hasMedia` is still true and only clears it afterwards
+(`ManifoldCore/FrameEngine.swift:973`), so a live takeover leaves the gate latched at `true`.
+Connecting the stream *then* enabling DeckLink happens to recompute it (`setDeckLinkOwnsAudio` →
+`applyAudioMute`); enabling DeckLink *then* connecting does not, and nothing else would ever
+recompute it for the life of the stream. A tester following one order would report a fix and a
+tester following the other would report the bug unchanged.
+
+### ⚠️ DO NOT TIDY `offSpeed` TO MATCH — ITS `!= 0` CONJUNCT IS LOAD-BEARING THE OTHER WAY
+
+`ManifoldCore/FrameEngine.swift:687`:
+
+```swift
+let offSpeed = shuttleRate != 0 && shuttleRate != 1
+```
+
+The two expressions now look gratuitously different and **they must stay that way.** `offSpeed`
+governs the DESKTOP outputs, and its `!= 0` conjunct is precisely why HLS audio survives on the Mac
+at `shuttleRate == 0` — which is every moment of every live HLS session. Making it match the card
+term would silence HLS on the desktop. One expression protects live audio by EXCLUDING rate 0; the
+other now protects it by excluding live sources from the rate test altogether. Same goal, two
+outputs, two different mechanisms.
+
+### ⚠️ THE DESTINATION TERM — WHICH THIS ENTRY PREVIOUSLY DID NOT MENTION
+
+The transport gate is **not** the only input to the card's silence decision, and the original entry
+missed this. `DeckLinkService.makeAudioConfig`'s `isSilent` block
+(`App/DeckLink/DeckLinkService.swift:684-685`) is a conjunction of two independent terms:
+
+```swift
+if !self.sdiIsAudioDestination() { return true }
+return self.isCardAudioSilentProvider?() ?? true
+```
+
+`sdiIsAudioDestination()` (`App/DeckLink/DeckLinkService.swift:309`) reads a lock-guarded mirror of
+the `.sdi` / `.computer` destination picker (`App/DeckLink/DeckLinkService.swift:301`, default
+`.sdi`). **The fix changes ONLY the second term.** The destination term is untouched and still
+short-circuits first, so:
+
+* **destination `.computer` → the card is still silenced**, for every source, file or live — via the
+  same `scheduleSilence()` path, so the stream stays continuous and the card never starves, never
+  re-prerolls and never drops video. Confirmed unchanged.
+* destination `.sdi` + live source + unmuted → real PCM, which is the behaviour this fix restores.
+* destination `.sdi` + paused FILE → silence, unchanged.
+
+### ⚠️ NO DOUBLE-MONITORING ONCE THE CARD IS LIVE — VERIFIED PER TRANSPORT
+
+The card going audible makes "program from the card AND the Mac at once" reachable for the first
+time. It does not occur, because `deckLinkOwnsAudio` already reaches all four transports — checked
+individually rather than assumed:
+
+* **WHEP** — audible through the shared `audioRenderer` (`beginLiveAudio` wired at
+  `App/WindowDeck.swift:1255-1257`), silenced by `audioRenderer.isMuted = effectiveMute`
+  (`ManifoldCore/FrameEngine.swift:689`), and `effectiveMute` includes `deckLinkOwnsAudio`
+  (`ManifoldCore/FrameEngine.swift:688`). ✅
+* **SRT** — same path, wired at `App/WindowDeck.swift:1279-1281`
+  (`App/SRT/SRTFrameRouter.swift:513`). ✅
+* **HLS** — does NOT pass through `audioRenderer` (`AVPlayer` owns its own output), so it is governed
+  through the `externalAudioOutput` seam instead: `ManifoldCore/FrameEngine.swift:694` hands it the
+  SAME already-combined `effectiveMute`, wired at `App/WindowDeck.swift:1237-1239` →
+  `HLSClient.applyAudioOutput` (`App/HLS/HLSClient.swift:391`). ✅
+* **NDI** — has no desktop audio path at all: it feeds the tap alone
+  (`App/WindowDeck.swift:1242`), so there is nothing to double-monitor. ✅
+
+The earlier note that this condition "is not currently reachable, precisely because the card is
+silent for live sources" is now spent — it became reachable with this fix, and the four checks above
+are what covers it.
+
+### Re-verifying
+
+The branch instrumentation is deliberately kept. A correct run now shows
+`silent=false → PCM · read from the ring (ringRead=Nf of want=Nf)` in the burst, and a stopped summary
+with a non-zero `real=Nf`. A regression shows `real=0f` and the explicit "NO audio reached SDI this
+run" line. See the instrumentation notes in `App/DeckLink/DeckLinkBridge.mm` (`logAudioBranch`).
+
+---
+
+## Live SDI output carries NEUTRAL at a stale or default display mode — ALL FOUR live transports, not just HLS
+
+**Status:** OPEN. **Found:** 2026-09-17, while tracing why HLS SDI behaviour did not match
+expectations. **Affects:** NDI, WHEP, SRT and HLS equally. **Blocks:** SDI monitoring of any live
+source — which is most of the point of a broadcast output on a QC tool.
+
+**A live source never sets the DeckLink output mode.** The card is enabled at whatever mode the
+last FILE established, or at the built-in default if no file has been opened this session, and the
+picture is then withheld because the raster does not match. **The wire carries a valid, lockable
+signal containing black.**
+
+### The chain, end to end
+
+`DeckLinkService.resolveOutputMode(width:height:frameRate:)`
+(`App/DeckLink/DeckLinkService.swift:429`) derives the mode from
+**both** raster and rate: the family from height (`height >= 1620` → 3840×2160, else 1920×1080) and
+the rate by nearest match against the eight `standardRates`
+(`App/DeckLink/DeckLinkService.swift:405-414`).
+
+Its only input is `sourceFormatChanged(width:height:frameRate:)`
+(`App/DeckLink/DeckLinkService.swift:742`), and **that function has exactly one caller** —
+`App/ContentView.swift:780`, inside
+`.onChange(of: engine.metadata)` (`App/ContentView.swift:746`):
+
+```swift
+DeckLinkService.shared.sourceFormatChanged(width: meta.width, height: meta.height,
+                                           frameRate: meta.frameRate)
+```
+
+⚠️ **`engine.metadata` IS FILE-ONLY.** Its three writers are
+`ManifoldCore/FrameEngine.swift:543`
+(re-inspect), `ManifoldCore/FrameEngine.swift:1435`
+(AVFoundation load) and
+`ManifoldCore/FrameEngine.swift:1640` (libav load). **No
+live path writes it.** So the observer never fires for a stream, `sourceFormatChanged` is never
+called, and `currentMode` retains the last file's value — or
+`OutputMode.default2160p2398` (`App/DeckLink/DeckLinkService.swift:418`,
+`App/DeckLink/DeckLinkService.swift:396` — **3840×2160 @ 23.976**) on a session where no
+file was ever opened.
+
+Note what this is *not*: `resolveOutputMode`'s own `frameRate <= 0 → standardRates[0]` fallback
+(`App/DeckLink/DeckLinkService.swift:438-439`) is **never reached**, because the
+function is never invoked on a live path. The mode is stale, not defaulted-from-zero.
+
+### ⚠️ THE FAILURE IS WORSE THAN A LOCK FAILURE, BECAUSE IT LOOKS LIKE WORKING OUTPUT
+
+The card is enabled at a **valid** mode, so a downstream monitor, scope or recorder **locks
+cleanly** — to the wrong mode. What goes missing is the picture:
+`App/MetalVideoRenderer.swift:2871-2872` refuses the copy
+on a raster mismatch —
+
+```swift
+guard deckLinkFrameReady, deckLinkStaging.count == 2,
+      let outSize = deckLinkOutputSize, outSize.w == width, outSize.h == height else { return false }
+```
+
+— and the caller fills neutral. The path says so out loud at
+`App/MetalVideoRenderer.swift:2789`:
+
+```
+DeckLink D-real: source 1920x1080 != output 3840x2160 — native-res only, holding neutral (scaling is a later stage)
+```
+
+**CONFIRMED IN A REAL RUN, 2026-09-17:** mode `2160p23.98` selected for a **1080p30 HLS source**,
+with exactly that line in the log. A tester reading "output enabled, 2160p23.98, locked" would call
+this working.
+
+### And the CADENCE is wrong even when the raster is right
+
+Raster is the only thing the mismatch guard checks. Where the family happens to match — a 1080p
+stream against a session whose last file was 1080p — the picture DOES reach the wire, **clocked at
+the last file's rate**. A 25 fps stream emitted at 23.976 is the ordinary case, and it produces
+repeated/dropped frames on the wire with no log line at all, because nothing is mismatched from the
+copy guard's point of view.
+
+⚠️ **NO FRAME RATE IS PUBLISHED FOR ANY LIVE SOURCE, BY ANY PATH.** `LiveDisplaySize` carries width
+and height only, and `setLiveDisplaySize(_ size: CGSize?)`
+(`ManifoldCore/FrameEngine.swift:989`)
+takes a `CGSize` — **there is nowhere to put a rate.** This is the structural half of the defect and
+it is not fixable inside any one transport.
+
+### What is NOT wrong here — the 2026-08-11 size fix was picked up
+
+Worth stating because it is the natural first suspicion and it is false. **HLS publishes its size
+correctly**, per frame, exactly as the other three do:
+`App/HLS/HLSClient.swift:658`
+(`LiveDisplaySize.shared.publish(width:height:)`), cleared at
+`App/HLS/HLSClient.swift:940`. It is routed through
+`App/WindowDeck.swift:569` → `liveDisplaySizeChanged`
+`App/WindowDeck.swift:583-584` → `setLiveDisplaySize`, with a mid-stream adoption
+seed at `App/WindowDeck.swift:1303-1304`. `engine.displaySize` for a connected HLS
+source is the decoded raster, not nil.
+
+**One stale comment, no behaviour:** the `displaySize` doc at
+`ManifoldCore/FrameEngine.swift:77`
+enumerates `LIVE (NDI / WHEP / SRT)` and omits HLS — an enumeration a fourth transport joined
+without the comment following, which is the same shape as the `isLive` enumeration bug recorded
+above. Comment-only.
+
+### ⚠️ INTERACTION: live SDI has TWO INDEPENDENT DEFECTS, and this one HID the other
+
+See *"FIXED — `applyAudioMute` silenced SDI audio for EVERY live source"* above. That entry records
+the AUDIO half: `setCardAudioSilent(isMuted || shuttleRate != 1)` with `shuttleRate` pinned at 0 for
+every live source, which held the card's audio stream silent. **It has since been CONFIRMED by
+measurement (live HLS: 2025545 frames scheduled, real=0f) and FIXED.**
+
+**The two are independent and they compound.** This entry is the VIDEO half. Together they mean a
+live source on SDI produces black pictures and silence — and **the video defect is why the audio
+one went unnoticed for so long: there was never a live SDI picture to monitor against.** Nobody
+sits watching a black raster wondering why it is also silent.
+
+⚠️ **DO NOT FIX ONE AND DECLARE LIVE SDI WORKING — AND THE AUDIO HALF IS NOW THE ONE THAT IS
+FIXED.** The audio gate has been corrected; **this VIDEO entry is still OPEN**, so a live source on
+SDI still carries black at a stale mode. Verifying the audio fix by ear therefore still requires
+working around this one (feed the card a mode the source matches, or verify from the branch trace
+and `real=Nf` rather than from a monitor).
+
+That entry's open question — *"is the code reading wrong, or has live SDI audio never worked?"* —
+resolved as **"never worked"**, exactly as predicted here: the reports it contradicted were of the
+meters and the `audio format → …; re-establishing output` log line rather than of the wire, which is
+what someone had to fall back on with no picture to confirm.
+
+### Scoping the fix — ⚠️ THE SHAPE IS A DECISION NOT YET MADE
+
+Two candidate shapes. **Neither is obviously right, and they are not increments of each other.**
+
+**(a) Publish a rate on the live path and let the mode follow the source.** A rate field on
+`LiveDisplaySize`, or a sibling latch, feeding `sourceFormatChanged` the way file metadata does.
+
+What it costs:
+
+- ⚠️ **HLS ABR MOVES THE RASTER MID-STREAM, SO "MODE FOLLOWS SOURCE" MEANS RE-ESTABLISHING THE SDI
+  OUTPUT ON EVERY RENDITION STEP.** The 2026-09-17 run stepped **416×234 → 960×540 → 1920×1080**;
+  the earlier measurement in *"⏸ BANKED: HLS as a source"* recorded a 4K ladder settling to
+  1280×720 inside 25 s. Each step would stop scheduled playback and restart the card — a visible
+  glitch on the wire, several times, during the first seconds of every connect. **This needs a
+  latching or hysteresis policy** (settle time, highest-seen rung, or operator pin), and that
+  policy is itself the design work.
+- **Rate availability differs per transport, and one of them has nothing:**
+  - **SRT** — already plumbed. `guessedFrameRate` (`av_guess_frame_rate`, 0 when unknown) at
+    `App/SRT/SRTSession.h:176`, populated at
+    `App/SRT/SRTSession.m:428` and already read by
+    `App/SRT/SRTFrameRouter.swift:584`.
+  - **NDI** — the SDK's `NDIlib_video_frame_v2_t` carries `frame_rate_N`/`frame_rate_D`, but
+    **`NDIBridge` does not surface it**: `NDIVideoFrame` exposes `width`/`height` only
+    (`App/NDI/NDIBridge.h:28-29`), and neither the header nor the
+    implementation mentions a rate. Available upstream, needs plumbing — not available today.
+  - **WHEP** — **nothing.** No rate field anywhere in `App/WebRTC/`. H.264 SPS VUI may carry
+    `num_units_in_tick`/`time_scale`, but nothing parses it; the only fps figures in that code are
+    measured observations in comments.
+  - **HLS** — no declared rate either; `AVPlayerItemVideoOutput` vends buffers, not a cadence.
+    It would have to be inferred from presentation timestamps.
+
+**(b) An explicit operator-chosen output mode, plus the scaling stage the code already defers.**
+The mismatch guard's own log names the missing piece — *"scaling is a later stage"*
+(`App/MetalVideoRenderer.swift:2789`) — and
+`resolveOutputMode`'s comment says the same
+(`App/DeckLink/DeckLinkService.swift:423-425`).
+
+What it costs: it **depends on work that is currently parked**. But it is the colourist-facing
+answer — a reference output is normally pinned to the room's mode, not re-negotiated by the source
+— and it makes ABR raster hopping a **non-issue**, because the output mode stops tracking the
+source at all.
+
+⚠️ **STATE PLAINLY: (a) ALONE DOES NOT SOLVE HLS, AND (b) DEPENDS ON PARKED WORK.** (a) leaves HLS
+re-establishing the card repeatedly through every ABR ramp and still needs a rate HLS does not
+declare; (b) cannot ship until scaling does. **So the decision is which of the two the feature
+actually needs, and it should be made before any code is written.** Building (a) because it is the
+smaller diff would spend the effort on the transport that needs it least (SRT, which already has
+its rate) and leave the worst case (HLS) worse.
+
+### Not verified
+
+**Whether `startOutputOnQueue` has some other guard that refuses to start when no source matches,
+rather than enabling the card and emitting neutral.** The per-frame copy
+(`App/MetalVideoRenderer.swift:2871-2872`) and the mode
+resolution (`App/DeckLink/DeckLinkService.swift:429`) were traced;
+the full output-start sequence was not. If such a guard exists the symptom would be "output refuses
+to start on a live source" rather than "output starts and carries black" — a different report, same
+root cause.
