@@ -614,17 +614,25 @@ final class NDIService: ObservableObject {
 
     /// The pump loop. PACING — this is the load-bearing part, so it is explicit:
     ///
-    /// Each wake we drain exactly what FrameSync has buffered SINCE THE LAST WAKE
-    /// (`framesync_audio_queue_depth`, inside `captureAudioFrame`), then sleep ~`pollInterval`. That
-    /// is drift-free real-time pacing WITHOUT a busy-spin, and it is the pattern the SDK documents:
-    ///   • No faster than real-time: the sleep bounds how often we pull; we never spin.
-    ///   • No slower / no drift: because we drain the *queue depth* (whatever accumulated during the
-    ///     sleep) rather than a fixed count, the average pull rate self-corrects to the true production
-    ///     rate — if a sleep runs long, the next pull is correspondingly bigger and we're back level.
-    /// The sleep interval therefore sets only the GRANULARITY (and thus how small `held` stays), not
-    /// the rate. At 10 ms, `held` sits around one–two NDI audio frames rather than climbing. The
-    /// 4800-sample cap passed to the bridge is a pure safety ceiling for a startup/stall backlog (it
-    /// bounds a single iteration's work); steady-state pulls are far below it, so it never paces.
+    /// Each wake we ask FrameSync for the audio that has ELAPSED since the previous pull — the
+    /// bridge measures that itself and turns it into `elapsed * sampleRate`, carrying the
+    /// sub-sample remainder — and then sleep whatever is left of `pollInterval` after the work.
+    ///
+    /// ⚠️ THE SLEEP IS CORRECTED FOR WORK TIME, AND THAT IS TIDINESS, NOT THE FIX. `Thread.sleep`
+    /// used to sit unconditionally at the bottom of the loop, making the true period
+    /// `pollInterval + pull + convert` ≈ 10.9 ms while the request assumed 10 ms — an 8.3% deficit
+    /// (measured `cum=44030Hz`). Subtracting the work makes the period genuinely ~10 ms, but it
+    /// CANNOT be relied on alone: the sleep cannot go negative, so any hiccup that pushes work past
+    /// the interval reintroduces exactly the same deficit. The elapsed-derived count is the robust
+    /// half and holds at any period; this just keeps the period close to what was intended.
+    ///
+    /// ⚠️ THE PREVIOUS MODEL WAS THE INVERSE OF THIS AND IT WAS WRONG. It drained
+    /// `framesync_audio_queue_depth` each wake, on the theory that pulling "whatever accumulated"
+    /// self-corrects to the production rate. `no_samples` is not a ceiling — it is a statement
+    /// about the consumer's clock, which FrameSync satisfies by manufacturing samples. Asking for
+    /// the backlog announced a consumer running at up to 480 kHz, and measured 8.1M samples
+    /// delivered against 1.44M sent. Do not reintroduce a per-pull size that varies with anything.
+    /// See BUGS.md #NDI-AUDIO and the contract note on `captureAudioFrameForInterval:`.
     ///
     /// AUDIO PTS — stamped `monotonicNow()` at pull time, the SAME free-running clock the video tick
     /// stamps frames with (NOT the NDI frame's sender-clock timestamp). The tap→DeckLink read aligns
@@ -634,23 +642,44 @@ final class NDIService: ObservableObject {
     /// offset, not drift (FrameSync keeps the underlying A/V timing coherent).
     private func runAudioPump(_ bridge: NDIBridge, finished: DispatchSemaphore) {
         let pollInterval = 0.010   // 100 Hz poll — steady, well below any busy-spin, keeps `held` tiny
+        #if DEBUG
+        var trace = AudioPushTrace()
+        #endif
         while true {
             audioRunLock.lock(); let run = audioShouldRun; audioRunLock.unlock()
             if !run { break }
+            let cycleStart = Self.monotonicNow()
             autoreleasepool {
                 // Convert happens INSIDE the bridge, OUTSIDE the tap lock; only the finished Int32
                 // buffer is copied into the ring under the lock (see AudioTapBuffer.append).
                 if let tap = audioTap,
-                   let audio = bridge.captureAudioFrame(forMaxSamples: 4800) {
+                   let audio = bridge.captureAudioFrame(forInterval: pollInterval) {
+                    // Stamped ONCE into a local so the trace below reports the value the ring
+                    // actually received, not a second, later reading of the same clock.
+                    let pts = Self.monotonicNow()
                     tap.pushInterleavedInt32(audio.samples,
                                              frameCount: Int(audio.frameCount),
                                              channelCount: Int(audio.channelCount),
                                              sampleRate: Double(audio.sampleRate),
-                                             pts: Self.monotonicNow(),
+                                             pts: pts,
                                              path: .ndi)
+                    #if DEBUG
+                    trace.record(pts: pts,
+                                 frames: Int(audio.frameCount),
+                                 sampleRate: Double(audio.sampleRate),
+                                 senderTimestamp: audio.timestamp,
+                                 queueDepth: Int(audio.queueDepthAtPull))
+                    #endif
                 }
             }
-            Thread.sleep(forTimeInterval: pollInterval)
+            // Sleep only the remainder of the interval. No floor and no minimum: if the work ever
+            // exceeds `pollInterval` the loop simply runs at whatever rate the work allows, which
+            // is not a busy-spin (the work dominates) and which the elapsed-derived request sizes
+            // correctly anyway.
+            let workElapsed = Self.monotonicNow() - cycleStart
+            if workElapsed < pollInterval {
+                Thread.sleep(forTimeInterval: pollInterval - workElapsed)
+            }
         }
         finished.signal()   // release the join in stopAudioPump()
     }
@@ -665,6 +694,227 @@ final class NDIService: ObservableObject {
         audioThreadFinished = nil
         audioThread = nil
     }
+
+    #if DEBUG
+    /// PUSH TRACE (dev diagnostic, DEBUG builds only — Debug and Profile define DEBUG=1 for the app
+    /// target; see project.yml). It answers the one question the `AudioTap[NDI]` line cannot:
+    ///
+    ///   Does the PTS stamped on each push advance in step with the SAMPLE COUNT that push carries?
+    ///
+    /// It must, because those are the ring's two independent notions of time and it silently
+    /// reconciles them. `runAudioPump` stamps `monotonicNow()` — WHEN WE ASKED — while the ring
+    /// advances its own clock by `framesWritten / sampleRate` — WHAT WE DELIVERED. `append` compares
+    /// the two on every push and, past a 50 ms disagreement, DROPS THE ENTIRE WINDOW and re-anchors
+    /// (AudioTapBuffer.swift:343-352). Nothing downstream reports that it happened: the periodic
+    /// `AudioTap[NDI]` line prints `held≈` AFTER the wipe, so a ring that was just emptied still
+    /// reads plausible, and DeckLink's `logPeriodic` only ever runs on the success path
+    /// (DeckLinkBridge.mm:600), so a run that underran on 99 % of callbacks reports its 1 % as if it
+    /// were the whole picture.
+    ///
+    /// So this mirrors the ring's anchor arithmetic EXACTLY — same expression, same tolerance, same
+    /// pre-append ordering — and prints what the ring never says out loud: the per-push deviation
+    /// and the re-anchor count. `implied` (frames ÷ Δpts) is the instantaneous rate and is EXPECTED
+    /// to be a little noisy: the pull size is now fixed, but the poll is a sleeping thread, so the
+    /// interval it divides by jitters. `cum` (total frames ÷ total elapsed) is the steady figure: if
+    /// THAT is not ~48000 and flat, the two axes genuinely diverge and every re-anchor follows.
+    ///
+    /// ── `sndR` IS THE AUTHENTICITY COLUMN, AND IT IS THE ONE THAT CANNOT BE FAKED ─────────────
+    ///
+    /// Everything above is our own bookkeeping: it says whether the samples arrive at the right
+    /// RATE, not whether they are the samples the source sent. FrameSync will manufacture audio to
+    /// satisfy an over-large request, and `cum` reads a perfect 48000 either way, because we are
+    /// dividing OUR sample count by OUR clock and both are consistent with a lie.
+    ///
+    /// `sndΔ` is the advance in NDI's sender-submit timestamp between consecutive pulls, and
+    /// `sndR` = frames ÷ sndΔ is the rate implied by the SENDER's clock. That number comes from
+    /// outside this process and FrameSync cannot invent it. Authentic audio reads ~48000. Audio
+    /// stretched k× reads 48000 ÷ k; the old defect would have read ~8500. `sndR=n/a` means the
+    /// sender supplies no timestamp (`NDIlib_recv_timestamp_undefined`), which is legal and leaves
+    /// the question genuinely unanswerable rather than answered optimistically.
+    ///
+    /// `depth` is `framesync_audio_queue_depth` at the moment of the pull — the SDK side of the
+    /// seam, carried for diagnosis only and used to size nothing. Low and flat means FrameSync is
+    /// consuming what it hands us; a sawtooth climbing toward the request is the old failure.
+    ///
+    /// Volume: every push verbatim for the first `burst` (~2 s at the 100 Hz poll — long enough to
+    /// see the chunk pattern), then one aggregate line per second carrying the range of every
+    /// quantity plus the re-anchors since the last line, so throttling loses no evidence. Printed on
+    /// the pump thread, which is exactly where the timing being measured lives — raise `burst` only
+    /// as far as the print cost stays below the 10 ms poll.
+    private struct AudioPushTrace {
+        /// Pushes printed verbatim before falling back to the 1 Hz aggregate.
+        static let burst = 200
+        /// `AudioTapBuffer.discontinuityToleranceSeconds` — mirrored, not shared: the ring's copy is
+        /// private, and a trace that drifted from it would report the wrong verdict convincingly.
+        static let reanchorTolerance = 0.050
+
+        /// `NDIlib_recv_timestamp_undefined` (Processing.NDI.structs.h:183) — the sender declined to
+        /// stamp.
+        static let senderTimestampUndefined = Int64.max
+        /// Largest sender-clock gap accepted between consecutive pulls. Anything beyond this is not
+        /// a slow pull, it is a corrupt endpoint (see `senderSeconds`), and it is discarded rather
+        /// than averaged in.
+        static let senderDeltaCeiling = 1.0
+        /// NDI timestamps are in 100 ns units.
+        static let senderTicksPerSecond = 10_000_000.0
+
+        // Session totals.
+        private var pushes = 0
+        private var totalFrames = 0
+        private var firstPTS = Double.nan
+        private var lastPTS = Double.nan
+        private var lastSenderTimestamp = Int64.max
+        private var reanchors = 0
+
+        // Mirror of the ring's anchor state (AudioTapBuffer's `basePTS` / `framesWritten`).
+        private var sampleRate: Double = 0
+        private var basePTS = Double.nan
+        private var framesWritten = 0
+
+        // Accumulated since the last printed line, so the 1 Hz throttle drops no extremes.
+        private var windowStartPTS = Double.nan
+        private var windowPushes = 0
+        private var windowReanchors = 0
+        private var devMin = Double.infinity, devMax = -Double.infinity
+        private var deltaMin = Double.infinity, deltaMax = -Double.infinity
+        private var framesMin = Int.max, framesMax = 0
+        private var depthMin = Int.max, depthMax = 0
+        /// Sender-clock rate accumulated over the window, so the aggregate line reports the ratio
+        /// over a second rather than one jittery pull's worth of it.
+        private var windowSenderSeconds = 0.0
+        private var windowSenderFrames = 0
+        /// Pulls whose sender stamp was unusable. PRINTED, not swallowed: `sndR` computed over a
+        /// third of the window is a different claim from `sndR` over all of it, and the reader is
+        /// entitled to know which one they are looking at.
+        private var windowSenderDropped = 0
+
+        /// Usable = strictly positive and not the SDK's "no timestamp" sentinel. See the note in
+        /// `record` for why zero has to be excluded explicitly.
+        static func isUsableSenderTimestamp(_ ts: Int64) -> Bool {
+            ts > 0 && ts != senderTimestampUndefined
+        }
+
+        mutating func record(pts: Double, frames: Int, sampleRate rate: Double,
+                             senderTimestamp: Int64, queueDepth: Int) {
+            guard pts.isFinite, frames > 0, rate > 0 else { return }
+            pushes += 1
+            windowPushes += 1
+
+            // A rate change resizes the ring and zeroes its anchor (`shapeChanged`,
+            // AudioTapBuffer.swift:307-313) — mirror that so the deviation stays comparable.
+            if rate != sampleRate { sampleRate = rate; basePTS = .nan; framesWritten = 0 }
+
+            // ── THE RING'S OWN TEST, EVALUATED HERE ────────────────────────────────────────
+            // Ordering matters: `append` compares BEFORE counting this chunk, so `expected` is the
+            // time the ring believes this chunk's FIRST sample carries.
+            var deviation = 0.0
+            var reanchored = false
+            if basePTS.isNaN {
+                basePTS = pts
+            } else {
+                deviation = pts - (basePTS + Double(framesWritten) / rate)
+                if abs(deviation) > Self.reanchorTolerance {
+                    reanchors += 1
+                    windowReanchors += 1
+                    reanchored = true
+                    framesWritten = 0
+                    basePTS = pts
+                }
+            }
+            framesWritten += frames
+
+            let delta = lastPTS.isNaN ? Double.nan : pts - lastPTS
+            lastPTS = pts
+            if firstPTS.isNaN { firstPTS = pts; windowStartPTS = pts }
+            totalFrames += frames
+
+            let implied = (delta.isFinite && delta > 0) ? Double(frames) / delta : Double.nan
+            let elapsed = pts - firstPTS
+            let cumulative = elapsed > 0 ? Double(totalFrames) / elapsed : Double.nan
+
+            // SENDER CLOCK. Δ between consecutive pulls, in seconds; `sndR` is frames ÷ that.
+            //
+            // ⚠️ BOTH ENDPOINTS MUST BE PLAUSIBLE, AND "PLAUSIBLE" IS NOT JUST "NOT THE SENTINEL".
+            // This originally excluded only `NDIlib_recv_timestamp_undefined` (INT64_MAX), which
+            // missed the case that actually happened: a pull whose timestamp comes back ZERO. We
+            // `memset` the frame struct, so a frame FrameSync does not stamp reads 0 rather than
+            // the sentinel. Zero then poisons the NEXT difference, which is measured against it and
+            // comes out as the whole Unix epoch — ~1.7e9 seconds. One of those in a window drove
+            // `windowSenderSeconds` to ~1e9 and printed the aggregate as `sndR=0.0Hz` while every
+            // per-push line still read a correct 48000 Hz. That is the defect being fixed here, and
+            // it is worth the paragraph because the symptom accused the FORMAT STRING, which was
+            // fine: a single bad sample in a mean is invisible until the mean is the only thing
+            // anyone reads.
+            //
+            // So: a usable stamp is strictly positive and not the sentinel, the difference must be
+            // forward, and the gap must be smaller than `senderDeltaCeiling`. Anything else is
+            // dropped from BOTH the per-push line and the window mean rather than averaged in.
+            var senderDelta = Double.nan
+            if Self.isUsableSenderTimestamp(senderTimestamp),
+               Self.isUsableSenderTimestamp(lastSenderTimestamp) {
+                let ticks = senderTimestamp - lastSenderTimestamp
+                if ticks > 0 {
+                    let seconds = Double(ticks) / Self.senderTicksPerSecond
+                    if seconds <= Self.senderDeltaCeiling { senderDelta = seconds }
+                }
+            }
+            lastSenderTimestamp = senderTimestamp
+            let senderRate = senderDelta.isFinite ? Double(frames) / senderDelta : Double.nan
+            if senderDelta.isFinite {
+                windowSenderSeconds += senderDelta
+                windowSenderFrames += frames
+            } else {
+                windowSenderDropped += 1
+            }
+
+            devMin = min(devMin, deviation); devMax = max(devMax, deviation)
+            if delta.isFinite { deltaMin = min(deltaMin, delta); deltaMax = max(deltaMax, delta) }
+            framesMin = min(framesMin, frames); framesMax = max(framesMax, frames)
+            depthMin = min(depthMin, queueDepth); depthMax = max(depthMax, queueDepth)
+
+            if pushes <= Self.burst {
+                print(String(format:
+                    "[NDI-AUDIO] push #%d · pts=%.6fs · \u{0394}=%.2fms · n=%df · implied=%.0fHz · "
+                    + "cum=%.1fHz · snd\u{0394}=%@ sndR=%@ · depth=%df · dev=%+.2fms%@",
+                    pushes, pts, delta * 1000.0, frames, implied, cumulative,
+                    senderDelta.isFinite ? String(format: "%.2fms", senderDelta * 1000.0) : "n/a",
+                    senderRate.isFinite ? String(format: "%.0fHz", senderRate) : "n/a",
+                    queueDepth, deviation * 1000.0,
+                    reanchored ? "  !! RING RE-ANCHORED (window dropped)" : ""))
+                return
+            }
+            guard pts - windowStartPTS >= 1.0 else { return }
+            // Sender rate over the WHOLE window, not one pull: a per-pull ratio is quantised by the
+            // sender's own packetisation and reads noisy even when it is exactly right.
+            let windowSenderRate = windowSenderSeconds > 0
+                ? Double(windowSenderFrames) / windowSenderSeconds : Double.nan
+            // `sndR` carries how many pulls it was computed over when any were dropped, so a mean
+            // taken over a fraction of the window can never be read as a mean over all of it.
+            let sndR: String
+            if windowSenderRate.isFinite {
+                let scope = windowSenderDropped > 0
+                    ? " (\(windowPushes - windowSenderDropped)/\(windowPushes) pulls)" : ""
+                sndR = String(format: "%.1fHz", windowSenderRate) + scope
+            } else {
+                sndR = "n/a (no usable sender stamp in \(windowPushes) pulls)"
+            }
+            print(String(format:
+                "[NDI-AUDIO] pushes=%d (+%d in %.2fs) · n=[%d..%d]f · \u{0394}=[%.2f..%.2f]ms · "
+                + "cum=%.1fHz over %.1fs · sndR=%@ · depth=[%d..%d]f · dev=[%+.2f..%+.2f]ms · "
+                + "re-anchors=+%d (total %d)",
+                pushes, windowPushes, pts - windowStartPTS, framesMin, framesMax,
+                deltaMin * 1000.0, deltaMax * 1000.0, cumulative, elapsed, sndR,
+                depthMin == .max ? 0 : depthMin, depthMax,
+                devMin * 1000.0, devMax * 1000.0, windowReanchors, reanchors))
+            windowStartPTS = pts; windowPushes = 0; windowReanchors = 0
+            devMin = .infinity; devMax = -.infinity
+            deltaMin = .infinity; deltaMax = -.infinity
+            framesMin = .max; framesMax = 0
+            depthMin = .max; depthMax = 0
+            windowSenderSeconds = 0; windowSenderFrames = 0; windowSenderDropped = 0
+        }
+    }
+    #endif
 
     // MARK: - Colorimetry (CVDisplayLink thread)
 

@@ -5843,7 +5843,7 @@ carried zero frames on all 259 callbacks.
 **Status:** OPEN. **Found:** 2026-09-17, while comparing transports for the HLS audio work.
 **Blocks:** monitoring an NDI source on a machine with no DeckLink card.
 
-`NDIService.runAudioPump` pulls with `captureAudioFrameForMaxSamples:`, pushes interleaved Int32
+`NDIService.runAudioPump` pulls with `captureAudioFrameForInterval:`, pushes interleaved Int32
 into the shared `AudioTapBuffer`, and **stops there**. The ring feeds the meters and the SDI embed;
 nothing enqueues into `FrameEngine`'s `audioRenderer`, so **an NDI source is silent on the Mac** no
 matter what the fader says. `WindowDeck` states it plainly at the wiring site: NDI *"feeds the tap
@@ -6249,3 +6249,213 @@ resolution (`App/DeckLink/DeckLinkService.swift:429`) were traced;
 the full output-start sequence was not. If such a guard exists the symptom would be "output refuses
 to start on a live source" rather than "output starts and carries black" — a different report, same
 root cause.
+
+---
+
+## ⚠️ #NDI-AUDIO — FrameSync was asked for the queue depth, so it MANUFACTURED audio: 8.1M samples delivered against 1.44M sent, and the meters read levels off the difference
+
+**Status:** CAUSE CONFIRMED by measurement and by the SDK header; **first fix landed 2026-09-18 and
+was MEASURED — it made the audio authentic but left an 8.3% rate deficit, fixed in turn the same
+day (see "The second defect" below). The second fix is NOT yet re-measured.** **Found:** 2026-09-18, while diagnosing why the DeckLink audio
+callback underran on ~99% of callbacks. **Affects:** NDI only — SRT, HLS and WHEP are measured
+working on the wire and share none of this code.
+
+**The SDI underrun was the symptom that got this looked at. It is not the serious half.** The
+serious half is that **the meters and the shared `AudioTapBuffer` have been fed synthesised audio
+for the entire life of the NDI audio path**, and a reference tool reporting levels off manufactured
+samples is a correctness failure of a different order than "SDI is quiet". Nothing in any log said
+so. The `AudioTap[NDI]` line reported a plausible sample rate, plausible channel count and a
+plausible held-frame count throughout, because every number in it is computed from our own sample
+count against our own clock — and both were consistent with the lie.
+
+### The measurement
+
+NobeOmniScope 1080p24, 30 s run, via the `[NDI-AUDIO]` push trace:
+
+| quantity | measured | expected |
+|---|---|---|
+| samples sent by the source | 1.44M | — |
+| samples delivered into the tap | **8.1M** | 1.44M |
+| effective sample rate (`cum`) | **~270000 Hz** | 48000 Hz |
+| `n` per pull | sawtooth 540 → 4800, reset, repeat | flat 480 |
+| `dev` (ring PTS axis vs sample axis) | monotonically **negative**, [−110 ms .. 0] | ~0 |
+| `AudioTapBuffer` re-anchors | **~57/s** (129 in the first 2.2 s) | ~0 |
+| DeckLink real frames scheduled | 13165 of 1168810 (**1.1%**) | ~100% |
+
+**At least 82% of every sample that ever entered the NDI audio path was synthesised by FrameSync's
+resampler rather than sent by the source.** That is arithmetic from the two totals, not inference,
+and it holds regardless of whether the synthesised material turns out to be time-stretched or
+literally re-served.
+
+### The cause — an inverted reading of `no_samples`
+
+`App/NDI/NDIBridge.mm` sized every pull as `min(4800, framesync_audio_queue_depth(...))` and passed
+that as `no_samples` to `NDIlib_framesync_capture_audio`, on the premise that the parameter is a
+**ceiling**. It is not. `Processing.NDI.FrameSync.h`, verbatim:
+
+> This function will pull audio samples from the frame-sync queue. This function will **always
+> return data immediately, inserting silence if no current audio data is present**. You should call
+> this **at the rate that you want audio** and it will **automatically adapt the incoming audio
+> signal to match the rate at which you are calling by using dynamic audio sampling**.
+
+`no_samples` is therefore an **instruction about the consumer's clock**, and FrameSync satisfies it
+by manufacturing whatever it does not hold. Asking for a queue depth of up to 4800 every 10 ms
+announced a consumer running at up to **480 kHz**. FrameSync obliged. The queue was never drained by
+the amount requested — it is drained by FrameSync's own time-base correction against our *call
+rate* — which is why the depth sawtoothed up to the request ceiling instead of sitting near zero.
+
+The header also warns against this exact use of the depth function, in its own words:
+
+> you should treat the results of this function with some care because **in reality the frame-sync
+> API is meant to dynamically resample audio to match the rate that you are calling it**. If you
+> have an inaccurate clock then this function can be useful.
+
+### ⚠️ THE OLD COMMENT ASSERTED THE EXACT OPPOSITE OF THE HEADER, AND THAT IS WHY IT SURVIVED
+
+`NDIBridge.mm:563-565` read:
+
+> Requesting no more than what's buffered means FrameSync never pads silence; the remainder stays
+> queued (and FrameSync bounds/ages its own queue), and the >nominal cap gives headroom to catch up.
+
+Every clause is false, and it is a *confident, mechanism-shaped* falsehood — the kind that gets
+read, believed, and skipped over on the next visit. It pads whenever the request exceeds what it
+holds; there is no "remainder stays queued" because the request is not a ceiling; the cap does not
+buy headroom, it sets the upper bound on how much audio gets invented. **It was also load-bearing
+in the wrong direction**: it explained away the very symptom that would have exposed the bug.
+
+The comment's second paragraph was a real fix to a real earlier bug — draining the depth on the
+*CVDisplayLink tick* coupled pull size to tick interval and collapsed fps 10→7→…→1 — and moving the
+pull to a dedicated thread genuinely fixed that. The mistake was keeping the depth-based sizing
+after the move, and writing a rationale for it.
+
+### The SDK's own examples — none of them do this
+
+`/Library/NDI SDK for Apple/examples` contains five framesync audio examples. **`grep` for
+`audio_queue_depth` across all of them returns zero hits.** Every one computes `no_samples` from the
+consumer's own cadence:
+
+| example | `no_samples` |
+|---|---|
+| `NDIlib_Recv_FrameSync.cpp:71` | fixed `1600`, with `sleep_for(33ms)` → exactly 48000/s |
+| `NDIlib_Recv_FrameSync_Audio.cpp:42` | the CoreAudio device callback's `frameCount` |
+| `NDIlib_Recv_FrameSync_resend.cpp:86` | computed from the video frame's duration |
+| `NDIlib_Recv_FrameSync_timing.cpp:133` | computed from the video frame's duration |
+| `NDIlib_FreeAudio.cpp:251` | the device callback's `frameCount` |
+
+`NDIlib_Recv_FrameSync_Audio.cpp:48-50` then reads exactly `frameCount` samples out of the returned
+frame **without checking `no_samples`** — the SDK's own example relies on getting back precisely
+what it asked for. That is the "exactly this many" contract confirmed by usage, not just prose.
+
+### What landed, 2026-09-18
+
+Three files, all NDI-only:
+
+- **`NDIBridge.h` / `NDIBridge.mm`** — `captureAudioFrameForMaxSamples:` → **`captureAudioFrameForInterval:`**.
+  The caller passes its **poll interval**; the bridge asks for `round(seconds * sampleRate)` — 480
+  at 48 kHz for the 10 ms pump. The signature changed deliberately rather than the body alone: the
+  old name invited a ceiling and the new one cannot be passed one.
+- **The format query is no longer per-pull.** The zero-parameter `capture_audio` that reads the
+  native rate/channels ran on every iteration, making this a *second* `capture_audio` call at 200/s
+  against a library whose whole job is inferring the consumer's clock from its call rate. It is now
+  cached and re-queried once a second. ⚠️ **It cannot simply run once:** we pull at the source's
+  native rate/channels, and the header is explicit that any requested format is converted to — so a
+  source moving 2ch → 8ch would be silently **downmixed** to the cached count with no error and no
+  short read. One second bounds that; never re-querying would not.
+- **`NDIService.swift`** — the pump passes `pollInterval`; the `[NDI-AUDIO]` trace gained two
+  columns (below). Its pacing comment, which restated the same inverted premise, was replaced.
+
+`framesync_audio_queue_depth` is **kept, as a diagnostic only**, carried out on
+`NDIAudioFrame.queueDepthAtPull` and used to size nothing. It earns its place as the only view of
+the SDK side of the seam: low and flat means FrameSync is consuming what it hands us, and a sawtooth
+climbing toward the request is this defect recurring.
+
+### ⚠️ HOW TO TELL IF IT IS ACTUALLY FIXED — `sndR`, AND NOTHING ELSE
+
+**`cum` reading 48000 does not prove the audio is real.** It is our sample count over our clock, and
+it read a perfect 48000 through the entire broken period whenever the ring had just re-anchored.
+Any fix verified on `cum` alone is unverified.
+
+The trace now prints **`sndR` = `frameCount` ÷ Δ(NDI sender submit timestamp)**. The sender's 100 ns
+timestamp comes from outside this process and FrameSync cannot invent it:
+
+- `sndR ≈ 48000` → sender time advances by `n/48000` per pull. **The samples are authentic.**
+- `sndR ≈ 48000/k` → the audio is stretched k×. The old defect would have read ~8500.
+- `sndR = n/a` → the sender supplies no timestamp (`NDIlib_recv_timestamp_undefined`). Legal, and it
+  leaves the question **unanswerable** — record that, do not record it as a pass.
+
+Also expect: `n` flat at 480, `depth` low and flat, `dev` near zero with `re-anchors` at ~0/s.
+
+### MEASURED 2026-09-18 — the stretching is gone, and it exposed a second defect underneath
+
+NobeOmniScope 1080p24, 48 s:
+
+| quantity | before | after the first fix | verdict |
+|---|---|---|---|
+| `n` per pull | sawtooth 540 → 4800 | **480 flat** | fixed |
+| per-push `sndR` | (not instrumented) | **48000 Hz at `sndΔ`=10.00 ms** | **the samples are AUTHENTIC** |
+| `cum` | ~270000 Hz | **44030 Hz** | still wrong, and by a new mechanism |
+| `depth` | sawtooth to the ceiling | sawtooth 250..2280f | still wrong |
+| `dev` | negative to −110 ms | **positive**, climbing to +50 ms | sign flipped: now UNDER-consuming |
+| re-anchors | ~57/s | ~2/s | better, not fixed |
+
+**`sndR = 48000` is the result that matters: the manufactured audio is gone.** Everything below is a
+rate error on real samples, which is a far smaller defect than the one this entry opens with.
+
+### The second defect — a nominal interval that was never the real period
+
+`44030 = 480 / 0.0109`, exactly. `NDIService.runAudioPump` sleeps `pollInterval` at the **bottom** of
+its loop, so the true period is `pollInterval + pull + convert` — measured ~10.9 ms against a
+nominal 10 ms. Requesting one NOMINAL interval's worth while calling 91.7 times a second declares a
+44030 Hz consumer and leaves 8.3% of the stream unconsumed. The queue grows at ~4 kHz (the `depth`
+sawtooth) and the tap's PTS axis runs ahead of its sample axis until it re-anchors (the climbing
+positive `dev`).
+
+⚠️ **AND THE FIRST FIX'S OWN COMMENT FORBADE THE CORRECT ANSWER.** `NDIBridge.h` carried: *"DO NOT
+'IMPROVE' THIS BY DERIVING THE COUNT FROM MEASURED ELAPSED TIME … a second controller measuring the
+same thing would fight [the TBC]."* Wrong, and wrong the same way the comment this entry opens with
+was wrong — **a confident mechanism-shaped claim resting on an unstated assumption**, here that the
+pump's period equalled `pollInterval`. It never did. Measuring elapsed time does not fight the TBC,
+it feeds it: `elapsed × rate` makes our draw exactly `rate` per second by our own clock, which is
+the quantity the TBC reconciles against the sender's. The SDK examples use fixed counts because
+theirs are driven by an audio device callback or a video frame duration — cadences that ARE exact.
+A sleeping thread's is not. **Two comments in one file have now asserted the opposite of the truth
+about this API; treat prose here as a claim to check, not a finding.**
+
+What landed: `captureAudioFrameForInterval:` now sizes from `CACurrentMediaTime()` elapsed since the
+previous pull, carrying the sub-sample remainder so truncation cannot accumulate (at 10.9 ms each
+pull owes 523.2 samples and dropping the .2 would leak ~0.04%). A 250 ms clamp bounds a stall —
+beyond that the samples are gone from the queue and asking would only make FrameSync invent them.
+The pump additionally sleeps `pollInterval − workElapsed`, which is tidiness only: the sleep cannot
+go negative, so any hiccup past the interval would reintroduce the deficit. **The elapsed-derived
+count is the robust half.**
+
+### Also fixed: the trace's aggregate line was lying, and the per-push lines were not
+
+The 1 Hz aggregate printed `sndR=0.0Hz` while every per-push line read a correct 48000 Hz. **The
+format string was fine** — the mean was poisoned. A pull whose `timestamp` comes back **zero** (the
+struct is `memset`, so a frame FrameSync does not stamp reads 0, not the `NDIlib_recv_timestamp_undefined`
+sentinel) makes the NEXT difference the whole Unix epoch, ~1.7e9 seconds. One of those swamps a
+window and drives the mean to ~0. The guard now requires a stamp to be strictly positive AND not the
+sentinel AND the gap to be under one second, and the line reports how many pulls it averaged over
+when any were dropped.
+
+**The general lesson is the one worth keeping: a single bad sample in a mean is invisible until the
+mean is the only number anyone reads.** The per-push lines were correct the whole time and nobody
+reads 100 lines a second.
+
+### Not verified
+
+- **Re-measurement after the SECOND fix.** The 44030 Hz run above is post-first-fix, pre-second.
+  **Nothing should be treated as fixed until a run shows `cum` ≈ 48000 flat, `depth` low with no
+  sawtooth, `dev` near zero, re-anchors ~0/s and a large `real=Nf` in the DeckLink summary.**
+- **Whether the synthesised audio was time-stretched or literally duplicated.** The header's silence
+  path ("if no current audio data is present") does not apply — the queue was deep — so dynamic
+  resampling is the strong reading, but the two were never distinguished. `sndR` on a *pre-fix*
+  build would settle it, if it is ever worth knowing.
+- **Whether the SDI underrun is fully explained by this.** It is necessary — a ring re-anchoring
+  57×/s cannot serve a continuous cursor — but a second, independent finding from the same
+  investigation is still open: the DeckLink cursor `ideal = stagedPts + (audioDepth − videoDepth)`
+  appears to sit *ahead* of the ring head by a margin of ~10–30 ms that depends on an unmeasured
+  render latency, with `audioDepth` 180 ms against a `videoDepth` of 125–167 ms from a 4-frame pool.
+  That may resolve itself once the ring stops being wiped, or it may not. **Re-measure before
+  touching the DeckLink side.**

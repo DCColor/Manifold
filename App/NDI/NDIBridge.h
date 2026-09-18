@@ -62,10 +62,30 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) int frameCount;
 @property (nonatomic, readonly) int channelCount;
 @property (nonatomic, readonly) int sampleRate;
-/// NDI's 100ns submit timestamp (the SENDER's clock). Carried for logging / the deferred real-clock
-/// step — NOT used as the tap PTS (the receive path keys audio to the same free-running monotonic
-/// clock it stamps video with, so audio and video land together on the SDI wire).
+/// NDI's 100ns submit timestamp (the SENDER's clock), or `NDIlib_recv_timestamp_undefined`
+/// (INT64_MAX) when the sender does not supply one. NOT used as the tap PTS — the receive path keys
+/// audio to the same free-running monotonic clock it stamps video with, so audio and video land
+/// together on the SDI wire.
+///
+/// It is, however, the AUTHENTICITY PROOF for the pulled samples, and that is not a decorative
+/// claim: FrameSync will happily manufacture samples to satisfy an over-large request (see
+/// `captureAudioFrameForInterval:`), and manufactured samples are indistinguishable from real ones
+/// by inspection. Sender time is the one quantity FrameSync cannot invent. Across consecutive pulls
+/// it must advance by `frameCount / sampleRate`; if it advances more slowly than that, the
+/// difference was synthesised. The `[NDI-AUDIO]` trace prints exactly that ratio.
 @property (nonatomic, readonly) int64_t timestamp;
+
+/// `framesync_audio_queue_depth` READ AT PULL TIME, in samples per channel — a DIAGNOSTIC ONLY, and
+/// deliberately not used to size anything (it was, and that was the defect; see BUGS.md #NDI-AUDIO).
+///
+/// It earns its place because it is the only view of the SDK side of the seam: with the pull
+/// correctly sized to our cadence, this sits low and roughly flat, because FrameSync is consuming
+/// what it hands us. The failure it exists to make un-missable is the old one — a depth that
+/// sawtooths up to the request ceiling, which is what "we are asking for samples that were never
+/// sent" looks like from outside the library. One `int` read per pull, so it stays unconditional
+/// rather than `#if DEBUG`: the cost is nothing and a diagnostic compiled out of the build that
+/// ships is a diagnostic nobody can ask a tester for.
+@property (nonatomic, readonly) int queueDepthAtPull;
 
 @end
 
@@ -161,15 +181,48 @@ NS_ASSUME_NONNULL_BEGIN
 /// tap→DeckLink seam, not resampled here). Uses the v2 (float, non-FourCC) FrameSync audio API,
 /// which sits inside the v5 struct slice this bridge is pinned to.
 ///
-/// PACING lives in the caller: this drains `framesync_audio_queue_depth` (whatever accumulated since
-/// the last call) and returns it, so calling it steadily on a real-time-paced loop self-corrects to
-/// the true production rate with no drift. `maxSamples` is a SAFETY CEILING that bounds one call's
-/// work if a startup/stall backlog is large (the result is `min(maxSamples, queue_depth)`); it does
-/// NOT set the rate. The dedicated NDI audio pump thread (NDIService) calls this every ~10 ms with a
-/// generous ceiling — NOT the CVDisplayLink tick, whose rate must not gate the audio drain (that
-/// coupling was the fps-collapse bug). Requesting no more than what's buffered means FrameSync never
-/// pads silence. Non-blocking; safe to call from the audio pump thread.
-- (nullable NDIAudioFrame *)captureAudioFrameForMaxSamples:(int)maxSamples;
+/// ── PACING: PASS YOUR CADENCE, NOT A CEILING. `seconds` IS THE CALLER'S POLL INTERVAL. ────────
+///
+/// `NDIlib_framesync_capture_audio`'s `no_samples` is "give me EXACTLY this many, resampled to the
+/// rate at which I am calling you" — NOT "give me at most this many". Processing.NDI.FrameSync.h,
+/// verbatim: "This function will always return data immediately, inserting silence if no current
+/// audio data is present. You should call this at the rate that you want audio and it will
+/// automatically adapt the incoming audio signal to match the rate at which you are calling by
+/// using dynamic audio sampling."
+///
+/// So the request is an INSTRUCTION about the consumer's clock, and what must be true is that the
+/// counts we ask for add up to `sampleRate` over a second of OUR time. This method therefore asks
+/// for `MEASURED elapsed since the previous pull × sampleRate`, carrying the sub-sample remainder.
+/// `seconds` is the caller's NOMINAL interval and is used for the first pull only (there is no
+/// previous one to measure against) and to pace the format requery.
+///
+/// ⚠️ A FIXED COUNT AT A NOMINAL CADENCE IS NOT GOOD ENOUGH, AND THIS COMMENT ONCE SAID IT WAS.
+/// It read: "DO NOT 'IMPROVE' THIS BY DERIVING THE COUNT FROM MEASURED ELAPSED TIME … a second
+/// controller measuring the same thing would fight [the TBC]". That is wrong, and it is wrong for a
+/// reason worth keeping: it assumed the pump's period EQUALLED `pollInterval`. It does not — the
+/// sleep is at the bottom of the loop, so the period is `pollInterval + pull + convert`, measured
+/// ~10.9 ms against a nominal 10 ms. Asking for 480 samples 91.7 times a second declares a 44030 Hz
+/// consumer and leaves 8.3% of the stream unconsumed: measured `cum=44030Hz`, a `depth` sawtooth of
+/// 250..2280 samples, `dev` climbing to +50 ms and ~2 tap re-anchors a second.
+///
+/// Measuring elapsed time does not fight the TBC, it FEEDS it: `elapsed × rate` makes our draw
+/// exactly `rate` per second by our own clock, which is the quantity the TBC reconciles against the
+/// sender's. The SDK examples use fixed counts because theirs are driven by an audio device
+/// callback or a video frame duration — cadences that ARE exact. A sleeping thread's is not.
+///
+/// ⚠️ AND DO NOT SIZE IT FROM `framesync_audio_queue_depth`. That is what this used to do, and it
+/// told FrameSync the consumer clock ran at up to 480 kHz: measured 1.44M samples sent against 8.1M
+/// delivered, a sustained ~270 kHz effective rate, and a tap fed ~82% synthesised audio. The header
+/// warns against it in its own words — "you should treat the results of this function with some
+/// care because in reality the frame-sync API is meant to dynamically resample audio to match the
+/// rate that you are calling it" — and the comment that used to sit here asserted the exact
+/// opposite ("Requesting no more than what's buffered means FrameSync never pads silence"). It
+/// pads whenever the request exceeds what it holds, regardless. See BUGS.md #NDI-AUDIO.
+///
+/// The dedicated NDI audio pump thread (NDIService) calls this every ~10 ms — NOT the CVDisplayLink
+/// tick, whose rate must not gate the audio drain (that coupling was the fps-collapse bug).
+/// Non-blocking; safe to call from the audio pump thread.
+- (nullable NDIAudioFrame *)captureAudioFrameForInterval:(double)seconds;
 
 /// Tear down the receiver. The underlying framesync/recv instances are destroyed once the last
 /// outstanding NDIVideoFrame is also released (see the lifetime note on NDIVideoFrame).

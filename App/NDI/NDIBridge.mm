@@ -1,5 +1,6 @@
 #import "NDIBridge.h"
 
+#import <QuartzCore/QuartzCore.h>   // CACurrentMediaTime — the audio pull's own elapsed-time clock
 #import <dlfcn.h>
 #import <string>
 
@@ -207,18 +208,21 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
 @synthesize frameCount = _frameCount, channelCount = _channelCount;
 @synthesize sampleRate = _sampleRate, timestamp = _timestamp;
+@synthesize queueDepthAtPull = _queueDepthAtPull;
 
 - (instancetype)initWithSamples:(int32_t *)samples
                      frameCount:(int)frameCount
                    channelCount:(int)channelCount
                      sampleRate:(int)sampleRate
-                      timestamp:(int64_t)timestamp {
+                      timestamp:(int64_t)timestamp
+               queueDepthAtPull:(int)queueDepth {
     if ((self = [super init])) {
         _samples = samples;   // takes ownership
         _frameCount = frameCount;
         _channelCount = channelCount;
         _sampleRate = sampleRate;
         _timestamp = timestamp;
+        _queueDepthAtPull = queueDepth;
     }
     return self;
 }
@@ -265,6 +269,17 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     BOOL _loggedFirstFrame;
     BOOL _loggedUnexpectedFourCC;
     BOOL _loggedFirstAudio;
+    // Cached native audio format, so the zero-parameter format query is NOT a second
+    // `framesync_capture_audio` on every pull. See `refreshAudioFormat:`.
+    int _audioRate;
+    int _audioChannels;
+    int _audioFormatPullsUntilRequery;
+    // Elapsed-time pull sizing. `_audioLastPullTime` is CACurrentMediaTime() at the previous pull
+    // (0 = none yet); `_audioSampleCarry` is the sub-sample remainder carried across pulls so that
+    // truncation cannot accumulate into a rate error. See `captureAudioFrameForInterval:`.
+    double _audioLastPullTime;
+    double _audioSampleCarry;
+    BOOL _loggedPullClamp;
 }
 
 /// Build a receiver + FrameSync for a source whose name/url bytes we already OWN (std::string, so
@@ -539,33 +554,136 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     return result;
 }
 
-- (NDIAudioFrame *)captureAudioFrameForMaxSamples:(int)maxSamples {
-    if (maxSamples <= 0) return nil;
-    NDIReceiver *receiver = _receiver;
-    if (!gNDI || !receiver || !receiver->_framesync) return nil;
+/// How often the zero-parameter format query runs, in seconds of pull cadence.
+///
+/// ⚠️ IT CANNOT SIMPLY RUN ONCE, AND THE REASON IS A TRAP WORTH STATING. We pull at the source's
+/// NATIVE rate/channels, and the header is explicit that "you have no obligation that your
+/// requested sample rate, no channels and no samples match the incoming signal and all combinations
+/// of conversions are supported" — so if the source switched 48k/2ch → 48k/8ch and we kept asking
+/// for the cached 2ch, FrameSync would DOWNMIX to 2ch and hand it back without complaint. The
+/// change would be invisible: no error, no short read, just silently wrong audio. Re-querying
+/// bounds how long that can last to one second, against the 100/s it used to cost.
+static const double kNDIAudioFormatRequerySeconds = 1.0;
 
-    // Ask FrameSync for the CURRENT incoming format without consuming any samples: a zero-parameter
-    // capture fills sample_rate / no_channels and pulls nothing (sample_rate == 0 ⇒ no audio yet).
-    // We need the native rate + channels to request the pull at NATIVE format (no resampling).
+/// Largest gap the elapsed-time pull will honour, in seconds. Beyond this the samples are gone from
+/// FrameSync's queue anyway and the request would only be filled with manufactured audio.
+static const double kNDIAudioMaxPullSeconds = 0.250;
+
+/// Refresh `_audioRate` / `_audioChannels` if due. Returns NO when the source carries no audio yet.
+///
+/// The query is `framesync_capture_audio` with all three parameters zero, which the header
+/// documents as returning the current incoming format and pulling nothing: "If you wish to know
+/// what the current incoming audio format is, then you can make a call with the parameters set to
+/// zero and it will then return the associated settings."
+///
+/// It used to run on EVERY pull, which made this a second `capture_audio` call at 200/s against a
+/// library whose whole job is to infer the consumer's clock from the rate it is called at. Whether
+/// the zero-parameter form is excluded from that estimate is not documented either way, and a
+/// diagnostic that might be perturbing the thing it measures is not one to leave in place.
+///
+/// Until a format exists the query runs every pull: at start-up there is nothing to cache and
+/// nothing to perturb, and delaying the first audio by up to a second to save 100 calls would be
+/// a poor trade.
+- (BOOL)refreshAudioFormat:(NDIReceiver *)receiver interval:(double)seconds {
+    const BOOL haveFormat = (_audioRate > 0 && _audioChannels > 0);
+    if (haveFormat && --_audioFormatPullsUntilRequery > 0) return YES;
+
     NDIlib_audio_frame_v2_t info;
     memset(&info, 0, sizeof(info));
     gNDI->framesync_capture_audio(receiver->_framesync, &info, 0, 0, 0);
     const int rate = info.sample_rate;
     const int channels = info.no_channels;
     gNDI->framesync_free_audio(receiver->_framesync, &info);   // no-op on an empty query frame
-    if (rate <= 0 || channels <= 0) return nil;   // source has no audio (yet)
 
-    // Pull at the native rate/channels (native rate ⇒ FrameSync time-base corrects to our pull
-    // cadence but does NOT sample-rate convert). Pull at most `maxSamples` — ONE tick's real-time
-    // worth as computed by the caller — NEVER the whole backlog. Draining queue_depth exhaustively
-    // was the starvation bug: it coupled the per-tick pull SIZE to the tick INTERVAL, so any tick
-    // slowdown pulled more audio, which slowed the tick more, which pulled more… a runaway that
-    // collapsed fps (10→7→…→1). Capping decouples per-tick cost from the interval. Requesting no
-    // more than what's buffered means FrameSync never pads silence; the remainder stays queued (and
-    // FrameSync bounds/ages its own queue), and the >nominal cap gives headroom to catch up.
-    const int available = gNDI->framesync_audio_queue_depth(receiver->_framesync);
-    if (available <= 0) return nil;
-    const int want = maxSamples < available ? maxSamples : available;
+    if (rate > 0 && channels > 0) {
+        if (haveFormat && (rate != _audioRate || channels != _audioChannels)) {
+            NSLog(@"[NDI] audio format moved: %dHz·%dch → %dHz·%dch",
+                  _audioRate, _audioChannels, rate, channels);
+        }
+        if (!haveFormat || rate != _audioRate || channels != _audioChannels) {
+            // New or changed format: the elapsed clock and the carry describe the OLD stream.
+            _audioLastPullTime = 0;
+            _audioSampleCarry = 0;
+        }
+        _audioRate = rate;
+        _audioChannels = channels;
+        // Re-arm in PULLS, derived from the caller's own cadence, so the wall-clock period holds
+        // whatever interval the pump runs at without this needing a clock of its own.
+        const int pulls = (int)lround(kNDIAudioFormatRequerySeconds / seconds);
+        _audioFormatPullsUntilRequery = pulls > 1 ? pulls : 1;
+        return YES;
+    }
+    // Source has no audio (yet) — drop any cached format so a later arrival is queried afresh, and
+    // with it the elapsed clock: the gap until audio appears is not time we owe anybody samples for.
+    _audioRate = 0;
+    _audioChannels = 0;
+    _audioFormatPullsUntilRequery = 0;
+    _audioLastPullTime = 0;
+    _audioSampleCarry = 0;
+    return NO;
+}
+
+- (NDIAudioFrame *)captureAudioFrameForInterval:(double)seconds {
+    if (!(seconds > 0)) return nil;
+    NDIReceiver *receiver = _receiver;
+    if (!gNDI || !receiver || !receiver->_framesync) return nil;
+
+    if (![self refreshAudioFormat:receiver interval:seconds]) return nil;
+    const int rate = _audioRate;
+    const int channels = _audioChannels;
+
+    // ── THE REQUEST IS OUR MEASURED CONSUMPTION RATE. NOT A CEILING, NOT THE QUEUE DEPTH. ──────
+    //
+    // `no_samples` tells FrameSync what the consumer's clock is, and it will manufacture whatever
+    // it takes to satisfy it. So the one thing that must be true is that the samples we ask for
+    // over a second add up to `rate` — otherwise we are declaring a consumer clock that is not the
+    // one we actually run at, and the arithmetic does the rest.
+    //
+    // ⚠️ THIS IS `elapsed * rate`, NOT `seconds * rate`, AND THE DIFFERENCE WAS AN 8.3% DEFICIT.
+    // The pump sleeps `pollInterval` at the BOTTOM of its loop, so its true period is
+    // `pollInterval + pull + convert` — measured ~10.9 ms against a nominal 10 ms. Asking for one
+    // NOMINAL interval's worth while calling 91.7 times a second declares a 44030 Hz consumer:
+    // 480 / 0.0109 = 44030, which is exactly what the trace reported. The queue then grows at
+    // ~4 kHz, which is the `depth` sawtooth, and the tap's PTS axis runs ahead of its sample axis
+    // until it re-anchors, which is the climbing positive `dev`.
+    //
+    // Deriving from MEASURED elapsed time does NOT fight FrameSync's time-base corrector — the
+    // earlier note here claimed it would, and that claim assumed the poll period equalled
+    // `pollInterval`, which it never did. Consuming `elapsed * rate` makes our draw exactly `rate`
+    // per second BY OUR OWN CLOCK, which is precisely the quantity the TBC exists to reconcile
+    // against the sender's. A fixed count is only equivalent to this when the cadence is exact,
+    // and a sleeping thread's cadence never is.
+    //
+    // The CARRY is what keeps truncation from becoming a second, smaller version of the same bug:
+    // at 10.9 ms and 48 kHz each pull owes 523.2 samples, and dropping the .2 every time would
+    // leak ~0.04%. `floor` plus remainder makes the error bounded rather than cumulative.
+    const double now = CACurrentMediaTime();
+    double elapsed = (_audioLastPullTime > 0) ? (now - _audioLastPullTime) : seconds;
+    if (elapsed < 0) elapsed = 0;                      // monotonic, but do not trust it to be
+    if (elapsed > kNDIAudioMaxPullSeconds) {
+        // A real stall (thread starved, debugger, app resumed). The elapsed samples genuinely
+        // existed, but FrameSync no longer holds them, so asking would just make it manufacture —
+        // the original defect wearing a different hat. Take the clamp and let the tap re-anchor.
+        if (!_loggedPullClamp) {
+            _loggedPullClamp = YES;
+            NSLog(@"[NDI] audio pull elapsed %.0f ms exceeds the %.0f ms clamp — dropping the "
+                  @"excess rather than asking FrameSync to invent it (logged once)",
+                  elapsed * 1000.0, kNDIAudioMaxPullSeconds * 1000.0);
+        }
+        elapsed = kNDIAudioMaxPullSeconds;
+        _audioSampleCarry = 0;
+    }
+    _audioLastPullTime = now;
+
+    const double exact = elapsed * (double)rate + _audioSampleCarry;
+    const int want = (int)floor(exact);
+    _audioSampleCarry = exact - (double)want;
+    if (want <= 0) return nil;   // called again before a whole sample period elapsed
+
+    // DIAGNOSTIC ONLY — read, carried out on the frame, and used to size NOTHING. See the note on
+    // `NDIAudioFrame.queueDepthAtPull` for why it stays. Read BEFORE the pull so it reports what
+    // FrameSync was holding when we asked.
+    const int queueDepth = gNDI->framesync_audio_queue_depth(receiver->_framesync);
 
     NDIlib_audio_frame_v2_t frame;
     memset(&frame, 0, sizeof(frame));
@@ -604,16 +722,17 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
     if (!_loggedFirstAudio) {
         _loggedFirstAudio = YES;
-        NSLog(@"[NDI] first audio: %d Hz · %dch · %d samples "
+        NSLog(@"[NDI] first audio: %d Hz · %dch · %d samples requested, %d returned "
               @"(float planar → int32 interleaved, full-scale, no reference-level gain)",
-              rate, ch, frames);
+              rate, ch, want, frames);
     }
 
     return [[NDIAudioFrame alloc] initWithSamples:out
                                        frameCount:frames
                                      channelCount:ch
                                        sampleRate:rate
-                                        timestamp:ts];
+                                        timestamp:ts
+                                 queueDepthAtPull:queueDepth];
 }
 
 - (void)disconnect {
