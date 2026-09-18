@@ -87,6 +87,9 @@ public final class LiveClock: @unchecked Sendable {
 
     /// Hard cap on rate deviation from 1.0. TIGHT — ±0.5% keeps `now()` in 0.995…1.005 so the
     /// correction is invisible on video. The loop can only recover senders within this ratio.
+    ///
+    /// ⚠️ SETTING THIS TO 0 IS NOT "DISABLE THE VIDEO LOOP" — it also silently removes WHEP's and
+    /// SRT's only audio-drift correction. Read the slew-site note in `updateDepthLocked` first.
     public var maxSlew: Double = 0.005
 
     /// EMA weight on each incoming depth sample (0…1). Low-passes the per-tick span so the loop
@@ -319,6 +322,11 @@ public final class LiveClock: @unchecked Sendable {
     /// rate≡1.0 to confirm the setpoint is real (not a sawtooth / tick-quantization offset the loop
     /// would otherwise chase). `private(set)` + the locked setter below keep read (in `updateDepth`,
     /// under `lock`) and write (cross-thread, from the App harness) consistently guarded. Default OFF.
+    ///
+    /// ⚠️ DIAGNOSTIC-ONLY FOR A REASON BEYOND THE MEASUREMENT IT SERVES: while pinned, WHEP's and
+    /// SRT's desktop audio has NO drift correction at all (the slew is what supplies it — see the
+    /// note at the slew site in `updateDepthLocked`). Fine for a short depth reading, which is all
+    /// this is for. NOT a mechanism to promote to a shipping low-latency mode as it stands.
     public private(set) var forceUnityRate = false
     /// Lock-clean cross-thread write for `forceUnityRate` — same `lock` `updateDepth` reads it under,
     /// so the pin is applied with no window of ambiguity near the steady-state depth measurement.
@@ -801,6 +809,48 @@ public final class LiveClock: @unchecked Sendable {
         if forceUnityRate { return (nil, periodicLogIfDue(t)) }
         #endif
 
+        // ══════════════════════════════════════════════════════════════════════════════════
+        // ⚠️ THE SLEW IS LOAD-BEARING FOR **AUDIO DRIFT CORRECTION**, NOT ONLY FOR VIDEO DEPTH.
+        // ⚠️ DO NOT PIN `rate` AT UNITY WITHOUT READING THIS. IT LOOKS FREE. IT IS NOT.
+        // ══════════════════════════════════════════════════════════════════════════════════
+        //
+        // Everything below reads as a VIDEO control loop, and that is all it was written to be.
+        // It is also, entirely by accident, the only thing keeping WHEP's and SRT's DESKTOP AUDIO
+        // from drifting out of lip-sync over a long session. The chain is not visible from here,
+        // which is exactly why this comment is here and not only in the docs:
+        //
+        //   * `FrameEngine.mirrorLiveAudio` forwards every mapping change to the audio
+        //     synchronizer as `setRate(_:time:atHostTime:)`, which is an ABSOLUTE re-anchor: it
+        //     restates "media time T at host time H" and so WIPES whatever error had accumulated.
+        //   * The synchronizer's timebase is driven by the AUDIO DEVICE's clock, not by mach time
+        //     (`AVSampleBufferRenderSynchronizer.h`: "this timebase will be driven by the clock of
+        //     an added AVSampleBufferAudioRenderer"; `FrameEngine` adds one unconditionally at
+        //     init). The PTS fed to it are on the mach axis. Two crystals — they diverge, measured
+        //     at −7.8 ppm on one machine (≈28 ms/hour), and that figure is a property of the
+        //     output device, not a constant.
+        //   * `mirrorLiveAudio`'s push gate is OPEN-LOOP — its `predicted` comes from what it last
+        //     pushed plus host time, never from `synchronizer.currentTime()` — so it CANNOT SEE
+        //     that divergence. Nothing in the audio path detects it. Nothing corrects it.
+        //
+        // What actually corrects it is the line below moving `rate`. Each move publishes a mapping,
+        // which becomes a `setRate(atHostTime:)`, which re-anchors, which wipes the drift. **Nobody
+        // designed a drift corrector; one fell out of the video path.** WHEP and SRT are bounded by
+        // ACCIDENT.
+        //
+        // ⚠️ SO IF THE SLEW EVER STOPS — pinned at unity for a low-latency mode, `maxSlew` set to 0,
+        // an early return because "depth is stable, stop correcting" — WHEP AND SRT SILENTLY BECOME
+        // UNBOUNDED TOO. The failure is the worst shape available: slow lip-sync drift over a long
+        // session, with EVERY COUNTER READING CLEAN, because every counter in the audio path is
+        // measured on the mach axis and the mach axis is not where the error lives.
+        //
+        // This is not hypothetical — it is the state NDI is in TODAY, and it is the reason NDI has
+        // no desktop audio path. NDI genuinely runs at rate 1.0, so its mapping never changes, so
+        // it would anchor once and integrate the crystal offset forever. Full reasoning, the source
+        // citations, and what a REAL corrector would have to look like: docs/BUGS.md, "NDI has no
+        // desktop playback path at all".
+        //
+        // Pinning the rate is therefore a change to the AUDIO contract as well as the video one. If
+        // you pin it, WHEP and SRT need a real closed-loop re-anchor first — the one NDI needs.
         let depth = smoothedDepth ?? spanSeconds
         let error = depth - targetDepth
         // Proportional slew, hard-clamped to ±maxSlew so `rate` stays in ~0.995…1.005.

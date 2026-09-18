@@ -5939,6 +5939,31 @@ pushes costs 12 ms"*, i.e. the design already tolerates ~12 ms of open-loop erro
 re-anchors. The point is that for WHEP and SRT it is bounded by the next rate change, and there is
 always a next one.
 
+### ⚠️ WHICH MEANS WHEP AND SRT ARE ONE "OPTIMISATION" AWAY FROM THE SAME DEFECT
+
+**If `LiveClock` ever stops slewing, WHEP and SRT silently become unbounded too.** Nothing in the
+audio path would notice, because nothing in the audio path is looking: `mirrorLiveAudio`'s gate is
+open-loop (finding 4 above), so the error lives on an axis none of its counters measure.
+
+The ways to stop the slew all look like improvements and none of them mentions audio:
+
+* pinning `rate` at unity for a **low-latency mode** — `forceUnityRate` already exists and does
+  exactly this, today, as a ⌃⌥U diagnostic;
+* setting **`maxSlew = 0`** to "disable the video control loop";
+* an early return on **"depth is stable, stop correcting"**.
+
+**The only symptom would be slow lip-sync drift over a long session, with every counter reading
+clean.** `[WHEP-AUDIO] mirror` would report `0 setRate call(s)` — which is what a settled, healthy
+clock is *supposed* to look like — and `liveAudioDrift` reports the timebase against `LiveClock`,
+which is precisely the pair that stays in agreement while both drift away from the output device.
+
+⚠️ **THE COMMENT AT THE SLEW SITE IS THE PRIMARY RECORD OF THIS, NOT THIS ENTRY.** See
+`LiveClock.updateDepthLocked`, with pointers from `maxSlew` and `forceUnityRate`. That placement is
+deliberate and the precedent is in this same file: the inverted `framesync_audio_queue_depth`
+guidance survived for as long as it did because it was wrong **at the call site**, which is the only
+place anyone looked. A caveat that lives only in `docs/` is a caveat that will be discovered
+afterwards.
+
 ⚠️ **NDI INVERTS THIS, AND THE INVERSION IS THE WHOLE ANSWER TO "IS RATE 1.0 SIMPLY TRUE FOR NDI?".**
 Yes — nothing slews NDI's rate, so the *"ASSUMPTION WITH A KNOWN EXPIRY"* never expires. **But the
 slew is exactly what was doing the correcting.** A transport that genuinely runs at 1.0 pushes
