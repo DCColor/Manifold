@@ -5840,8 +5840,10 @@ carried zero frames on all 259 callbacks.
 
 ## NDI has no desktop playback path at all — the pump meters, feeds SDI, and drops the audio
 
-**Status:** OPEN. **Found:** 2026-09-17, while comparing transports for the HLS audio work.
-**Blocks:** monitoring an NDI source on a machine with no DeckLink card.
+**Status:** OPEN, and the BLOCKER HAS BEEN RE-DIAGNOSED — see "What it actually needs" below.
+**Found:** 2026-09-17, while comparing transports for the HLS audio work. **Re-diagnosed:**
+2026-09-18, from source, after the pump was fixed. **Blocks:** monitoring an NDI source on a machine
+with no DeckLink card.
 
 `NDIService.runAudioPump` pulls with `captureAudioFrameForInterval:`, pushes interleaved Int32
 into the shared `AudioTapBuffer`, and **stops there**. The ring feeds the meters and the SDI embed;
@@ -5869,23 +5871,115 @@ through `FrameEngine.LiveAudioSink`, which tees to the tap and then to the rende
 header records the transition: *"STAGE 2: AUDIBLE ON THE LIVE CLOCK … the only new consumer is the
 speaker."* **Any comment claiming SRT is "tap only / stage 1" is stale.**
 
-### What it needs — a renderer, not a flag
+### ⚠️ THE OLD FRAMING WAS WRONG AND IS RETRACTED — THE PUMP'S CLOCK IS FINE
 
-The seams already exist and are proven twice over; NDI simply never adopted them. The work is
-`beginLiveAudio` → `LiveAudioSink`, plus the thing that makes it non-trivial:
+This entry used to say NDI's pull-time `monotonicNow()` stamp *"is **not** a timebase an
+`AVSampleBufferAudioRenderer` can be anchored to"*, and that the decision to make was **resample vs
+drop/pad vs slaving the timebase to a mapping NDI does not produce**. **That was written while the
+audio pump was broken** — it was drawing 5.6× manufactured samples on a cadence that meant nothing
+(see #NDI-AUDIO), so of course its clock looked unusable. It was a property of the defect, not of NDI.
 
-⚠️ **THE RATE QUESTION IS THE DESIGN DECISION, AND IT IS NDI-SPECIFIC.** WHEP and SRT mirror
-`LiveClock`'s mapping into the synchronizer's timebase, and `FrameEngine.beginLiveAudio` already
-warns that its rate 1.0 is *"AN ASSUMPTION WITH A KNOWN EXPIRY"* because LiveClock slews off 1.0 to
-regulate video depth. NDI has **no LiveClock at all** — its pump stamps `monotonicNow()` at pull
-time and the video tick does the same, which is *"a small constant offset, not drift"* for the tap
-but is **not** a timebase an `AVSampleBufferAudioRenderer` can be anchored to. The sender's clock
-and the output device's clock are independent and will drift; deciding how that is absorbed
-(resample, drop/pad, or slave the timebase to a mapping NDI does not currently produce) is the
-decision, and it should be made before any code.
+With the pump fixed, measured over 72 s: `cum=48006.6Hz`, `sndR=48015.5Hz` from the sender's own
+timestamps, `dev` +0.01..+1.02 ms, **zero ring re-anchors**. And `monotonicNow()` is
+`CACurrentMediaTime()` (`NDIService.swift:260`) — literally the axis
+`AVSampleBufferRenderSynchronizer.setRate(_:time:atHostTime:)` takes as `atHostTime`. **NDI's PTS
+axis is not the problem and never needed a resampler.** None of the three options above is the
+decision to make. Strike the question.
+
+### What it actually needs — a RE-ANCHOR DRIVER, which is the one thing NDI has no source for
+
+The seams exist and are proven twice over, but `beginLiveAudio` → `LiveAudioSink` **on its own
+produces silence, not drift**, and then drift once it is made to play. Four findings from source:
+
+1. **`beginLiveAudio` parks the synchronizer at rate 0 and holds it there.**
+   `FrameEngine.swift:2160` — `synchronizer.rate = 0 // held until the first mirrored mapping
+   arrives`. The only thing that ever starts it is `mirrorLiveAudio`, which takes a
+   `LiveClock.Mapping`. **NDI produces no mappings, so NDI audio would never begin.** Not a subtle
+   failure — total silence.
+
+2. **NDI cannot even fabricate one.** `LiveClock.Mapping` (`LiveClock.swift:442-446`) declares three
+   `public let`s and **no explicit `public init`**, so its memberwise initialiser is internal to
+   `ManifoldCore`. `NDIService` is in the app module. This is a compile-time wall, not a style
+   preference.
+
+3. **⚠️ THE SYNCHRONIZER'S TIMEBASE RUNS ON THE AUDIO DEVICE CLOCK, NOT ON MACH TIME.** From the SDK
+   header, `AVSampleBufferRenderSynchronizer.h:31-33`, verbatim: *"By default, this timebase will be
+   driven by the clock of an added `AVSampleBufferAudioRenderer`. If no `AVSampleBufferAudioRenderer`
+   has been added, the source clock will be the host time clock."* `FrameEngine.swift:476` does
+   `synchronizer.addRenderer(audioRenderer)` unconditionally at init, **so the first clause is the
+   one in force for every live session.** A mach-axis PTS stream therefore drifts against this
+   timebase at the two crystals' offset — the same **−7.8 ppm** the HLS work measured
+   (`HLSAudioTap.swift:48`), ≈ 28 ms/hour on that machine, and NOT a constant to assume elsewhere:
+   that file is explicit that such figures are properties of the output device.
+
+4. **⚠️ AND THE PUSH DECISION IS OPEN-LOOP, SO IT CANNOT SEE THAT DRIFT.** `mirrorLiveAudio`'s
+   gate (`FrameEngine.swift:2336-2341`) is
+
+   ```swift
+   let predicted = mirror.pushedMedia + (m.hostTime - mirror.pushedHost) * mirror.pushedRate
+   let positionError = wasMirrored ? abs(target - predicted) : .infinity
+   ```
+
+   `predicted` is computed **entirely from what was last pushed plus host time**. It never reads
+   `synchronizer.currentTime()`. Both `target` and `predicted` live on the mach axis, so the device
+   crystal is invisible to `shouldPush` by construction.
+
+### So why don't WHEP and SRT drift? Incidentally — and that is the finding
+
+Every `setRate(rate, time:atHostTime:)` is an **absolute re-anchor**: per the same header, *"the
+timebase is adjusted so that its time will be (or was) `time` when host time is (or was)
+`hostTime`"*. It wipes whatever device-clock drift had accumulated since the last one.
+
+WHEP and SRT get those re-anchors **for free, as a side effect of something else**: `LiveClock`
+slews `rate` continuously within ±0.5% to regulate *video* buffer depth, `rateMoved >
+liveAudioRateThreshold` (0.02%) fires, and a push lands. Nobody wrote a drift corrector — the
+video-depth P-loop is one, accidentally, because its output happens to be routed through an
+absolute-anchoring API. `FrameEngine`'s own estimate of the worst case is *"a full minute between
+pushes costs 12 ms"*, i.e. the design already tolerates ~12 ms of open-loop error **between**
+re-anchors. The point is that for WHEP and SRT it is bounded by the next rate change, and there is
+always a next one.
+
+⚠️ **NDI INVERTS THIS, AND THE INVERSION IS THE WHOLE ANSWER TO "IS RATE 1.0 SIMPLY TRUE FOR NDI?".**
+Yes — nothing slews NDI's rate, so the *"ASSUMPTION WITH A KNOWN EXPIRY"* never expires. **But the
+slew is exactly what was doing the correcting.** A transport that genuinely runs at 1.0 pushes
+once and never again — identity mapping in, `positionError == 0` forever out — and then integrates
+the crystal offset with nothing to reset it. **Removing the thing that made the assumption false is
+what makes the drift unbounded.** WHEP and SRT are bounded by accident; NDI would be unbounded by
+correctness.
+
+### Does FrameSync's TBC cover it? No — it reconciles the wrong seam
+
+FrameSync's time-base corrector resamples the **sender's** audio to match **our consumption rate**,
+and after the pump fix we consume at exactly 48000 per mach-second. That closes sender ↔ us, and it
+is why `sndR` and `cum` both read 48000. It says nothing about **us ↔ the output device**, which is
+a seam entirely outside the NDI SDK. Each transport does reconcile drift at a different layer, as
+suspected — but NDI's layer stops one seam short of the speaker, and no other layer picks it up.
+
+### The decision — SHIP THREE, NOT FOUR
+
+**Not implemented, deliberately.** What is missing is small but it is a *mechanism*, and it is a
+fourth shape rather than a reuse of WHEP's and SRT's:
+
+* an **unconditional periodic re-anchor** (say 1 Hz identity mapping) is strictly worse than the
+  mirror, not better — it injects a micro-discontinuity into a playing renderer every second, which
+  is precisely why the mirror smooths `rate` and only moves position past a 10 ms tolerance;
+* a **closed-loop re-anchor** — compare `CMTimeGetSeconds(synchronizer.currentTime())` against
+  `monotonicNow()` on the existing ~10 ms audio pump thread and re-anchor past a tolerance — is the
+  correct minimum. At 7.8 ppm it is one 10 ms correction every ~21 minutes. **But reading the actual
+  timebase is something neither WHEP nor SRT does**, so it is a new mechanism, and it would need its
+  own seam in `ManifoldCore` (both a `public init` on `LiveClock.Mapping` and a push path that
+  bypasses `shouldPush`, or a dedicated entry point beside `mirrorLiveAudio`);
+* a **rate slew** that nulls the offset properly is a PLL and is more machinery still.
+
+The honest state is therefore: **three transports audible on the desktop, one not, and a written
+reason.** Anyone picking this up should implement the closed-loop re-anchor, and should expect to
+add a seam to `ManifoldCore` rather than to find one.
 
 **HLS is not a template for this.** It avoided the question entirely by having `AVPlayer` own the
-output path — a property of a pull source with a built-in player, which NDI is not.
+output path — and note *why* that works, because it is the same mechanism in a different place:
+`AVPlayerItem`'s timebase source clock **is the audio output device** (measured, printed by the
+probe as `FigClock[AudioDeviceClock(...)]`, `HLSAudioTap.swift:36-37`), so there is no mach-vs-device
+seam to cross at all. NDI is a push source with no player and cannot inherit that.
 
 ---
 
