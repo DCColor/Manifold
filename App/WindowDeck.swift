@@ -566,8 +566,8 @@ final class DeckRegistry {
         // in existence. `LiveDisplaySize` holds the latch and the thread discipline (it is called
         // from the render thread, a decode queue and a session thread); this end knows which deck
         // it belongs to, which is the half no transport can answer.
-        LiveDisplaySize.shared.onChange = { [weak self] size in
-            MainActor.assumeIsolated { self?.liveDisplaySizeChanged(size) }
+        LiveDisplaySize.shared.onChange = { [weak self] format in
+            MainActor.assumeIsolated { self?.liveDisplayFormatChanged(format) }
         }
     }
 
@@ -580,8 +580,20 @@ final class DeckRegistry {
     /// does NOT re-publish an unchanged size, so a deck adopting the hooks mid-stream is seeded
     /// from `LiveDisplaySize.current` in `attachDeviceHooks` rather than waiting for a change that
     /// may never come.
-    private func liveDisplaySizeChanged(_ size: CGSize?) {
-        hostDeck?.engine?.setLiveDisplaySize(size)
+    /// ⚠️ TWO CONSUMERS OF ONE LATCH, AND THEY WANT DIFFERENT HALVES OF IT.
+    ///
+    /// The ENGINE wants the shape only — it feeds `videoAspect`, the framing guides, the caption
+    /// rect and the window's aspect lock, none of which have any use for a cadence. The DECKLINK
+    /// SERVICE wants both, because an output display mode is a (family, rate) pair and it cannot
+    /// resolve one from a raster alone.
+    ///
+    /// Splitting here, at the one place that already knows which deck the stream belongs to, is why
+    /// neither consumer needed a second seam: the transports still publish one value, once.
+    private func liveDisplayFormatChanged(_ format: LiveVideoFormat?) {
+        hostDeck?.engine?.setLiveDisplaySize(format?.size)
+        // The card follows the LIVE source's format the same way it follows a file's — which,
+        // until this line existed, it simply never did. See `DeckLinkService.liveFormatChanged`.
+        DeckLinkService.shared.liveFormatChanged(format)
     }
 
     // MARK: Frontmost
@@ -1266,8 +1278,11 @@ final class DeckRegistry {
         // ONLY WHEN THERE IS ONE. Passing nil here would run on EVERY ordinary host adoption — a
         // key-window change with no stream anywhere near it — and wipe the incoming deck's own
         // FILE size. `nil` from this seam means "nothing to say", not "no picture".
-        if let liveSize = LiveDisplaySize.shared.current {
-            engine.setLiveDisplaySize(liveSize)
+        if let liveFormat = LiveDisplaySize.shared.current {
+            engine.setLiveDisplaySize(liveFormat.size)
+            // …AND THE CARD TOO, for the same reason: a deck adopting the hooks mid-stream would
+            // otherwise leave the output at whatever mode the previous host had established.
+            DeckLinkService.shared.liveFormatChanged(liveFormat)
         }
 
         DeckLinkService.shared.refreshDevices()   // populate the device picker

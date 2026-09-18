@@ -586,6 +586,26 @@ final class SRTFrameRouter {
         anchorNominalRate = anchorRateWasDeclared ? guessed : Self.anchorFallbackFrameRate
         anchorGapThreshold = Self.anchorGapFraction / anchorNominalRate
 
+        // ── THE SAME READING, PUBLISHED FOR THE DECKLINK OUTPUT MODE ────────────────────────
+        //
+        // SRT is the ONE live transport with a declared rate, so it is the one that can drive
+        // "Follow source" on the card. This deliberately publishes the DECLARED value or NOTHING —
+        // never `anchorNominalRate`, which substitutes a 60 fps fallback when the demuxer had no
+        // answer. That substitution is right for the anchor's gap threshold (a threshold wants a
+        // number and 60 is the conservative one) and WRONG here: it would reconfigure a broadcast
+        // output to 60p for a stream nobody measured, and the operator would have no way to tell
+        // that from a real 60p source. Unknown stays unknown and the mode picker takes over.
+        publishedFrameRate = anchorRateWasDeclared ? guessed : nil
+        if let publishedFrameRate {
+            print(String(format: "[SRT-FORMAT] frame rate %.3f fps declared by the demuxer "
+                                 + "(av_guess_frame_rate) — DeckLink Follow source can use it",
+                         publishedFrameRate))
+        } else {
+            print("[SRT-FORMAT] frame rate NOT declared "
+                + "(av_guess_frame_rate returned \(guessed), outside \(Self.anchorPlausibleFrameRates)) — "
+                + "publishing no rate; DeckLink Follow source will be unavailable for this stream")
+        }
+
         let decoder = LiveVideoDecoder(logTag: "SRT-DECODE")
         decoder.onDecodedFrame = { [weak self] pixelBuffer, pts in
             self?.deliver(pixelBuffer, pts: pts)
@@ -837,6 +857,9 @@ final class SRTFrameRouter {
     private var anchorGapThreshold: Double = 0.5 / anchorFallbackFrameRate
     private var anchorRateWasDeclared = false
     private var anchorNominalRate: Double = anchorFallbackFrameRate
+    /// The rate handed to `LiveDisplaySize` for the DeckLink output mode: the DECLARED value, or nil.
+    /// ⚠️ NOT `anchorNominalRate` — see where this is set. Session thread, like every anchor field.
+    private var publishedFrameRate: Double?
     /// Host time of the previous DELIVERED frame, or nil when none has been delivered yet.
     private var lastArrivalHost: CFTimeInterval?
     private var deferralBeganHost: CFTimeInterval = 0
@@ -1360,8 +1383,14 @@ final class SRTFrameRouter {
         // `ManifoldSRTVideoFormat` yet, so there is nothing to apply; when it is, this is the call
         // site that would apply it (and `FrameEngine.setLiveDisplaySize` documents what the file
         // path's equivalent value does and does not include).
+        //
+        // THE RATE TRAVELS WITH IT, from `publishedFrameRate` — the demuxer's declared value latched
+        // at stream open, or nil. It is stated on EVERY publish and not once at connect because
+        // `LiveVideoFormat` is one value: a raster change mid-stream must re-state the rate or the
+        // latch would deliver a format whose rate had gone missing.
         LiveDisplaySize.shared.publish(width: CVPixelBufferGetWidth(decoded),
-                                       height: CVPixelBufferGetHeight(decoded))
+                                       height: CVPixelBufferGetHeight(decoded),
+                                       frameRate: publishedFrameRate)
 
         let senderPTS = CMTimeGetSeconds(pts)
         guard senderPTS.isFinite else { logFlowIfDue(); return }

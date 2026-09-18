@@ -98,6 +98,12 @@ final class DeckLinkService: ObservableObject {
     /// The full Signal line for the output menu: active display mode · fixed format · source colorspace.
     var signalLine: String { "\(modeLabel) · \(Self.formatDetail) · \(colorspaceLabel)" }
 
+    /// The Signal line, or the mismatch warning when there is one. The warning REPLACES the healthy
+    /// reading rather than sitting beside it: "2160p23.98 · 10-bit 4:2:2 · Rec. 709" is not a true
+    /// statement about a black output, and showing both would let the reassuring half be the one
+    /// that gets read.
+    var signalLineOrWarning: String { rasterMismatch ?? signalLine }
+
     // MARK: - Driver readiness (the honest tri-state, plus the two "we don't know" cases)
 
     /// The minimum Desktop Video version output requires, as text ("16.0"). Comes from the bridge, which
@@ -268,7 +274,34 @@ final class DeckLinkService: ObservableObject {
 
     /// The renderer that produces the real video frames (set by the App at startup). Weak — the
     /// renderer owns its lifecycle; the fill block sources v210 frames from it.
-    weak var renderer: MetalVideoRenderer?
+    weak var renderer: MetalVideoRenderer? {
+        didSet {
+            // Take the renderer's raster-mismatch report and publish it. Installed HERE rather than
+            // at the App's wiring site so it cannot be forgotten when a renderer is re-pointed:
+            // the warning describes THIS renderer's output and must move with it.
+            oldValue?.onDeckLinkRasterMismatch = nil
+            renderer?.onDeckLinkRasterMismatch = { [weak self] message in
+                guard let self else { return }
+                guard self.rasterMismatch != message else { return }
+                self.rasterMismatch = message
+                if let message {
+                    print("DeckLink D4a: ⚠️ \(message) — the card is enabled and locked, and the "
+                        + "picture is BLACK. Pick a matching output mode, or change the source.")
+                } else {
+                    print("DeckLink D4a: raster mismatch cleared")
+                }
+            }
+        }
+    }
+
+    /// The raster mismatch the renderer is currently refusing to copy for, as one operator-facing
+    /// sentence — or nil when the picture is reaching the card.
+    ///
+    /// ⚠️ THIS EXISTS BECAUSE THE FAILURE LOOKED LIKE SUCCESS. The card enables at a valid mode, a
+    /// downstream monitor locks cleanly, `signalLine` reads healthy, and the only symptom is that
+    /// the frame is empty. Nothing on screen said otherwise; the single log line at the first
+    /// mismatch scrolled away. See docs/BUGS.md.
+    @Published private(set) var rasterMismatch: String?
 
     // MARK: - D4b-2: SDI audio
 
@@ -394,7 +427,27 @@ final class DeckLinkService: ObservableObject {
 
         /// Default when no file is loaded / rate can't be matched — matches the pre-D4a fixed output.
         static let default2160p2398 = OutputMode(width: 3840, height: 2160, standardRate: 24000.0 / 1001.0, label: "2160p23.98")
+
+        /// Stable identity for the picker and for persistence. The label already uniquely names the
+        /// (family, rate) pair — it is built from exactly those two — so it is the id, and nothing
+        /// second has to be kept in step with it.
+        var id: String { label }
     }
+
+    /// Every mode the operator may pick by hand: both families × all eight standard rates, in the
+    /// order the rates are declared. Built from the SAME `standardRates` table `resolveOutputMode`
+    /// matches against, so a rate can never appear in the picker that the resolver cannot produce,
+    /// or vice versa.
+    static let selectableModes: [OutputMode] = {
+        var modes: [OutputMode] = []
+        for (w, h, fam) in [(3840, 2160, "2160p"), (1920, 1080, "1080p")] {
+            for rate in standardRates {
+                modes.append(OutputMode(width: w, height: h, standardRate: rate.fps,
+                                        label: "\(fam)\(rate.token)"))
+            }
+        }
+        return modes
+    }()
 
     /// The standard broadcast frame rates D4a targets, as EXACT fps (the fractional NTSC rates use
     /// their true n/1001 value, NOT a rounded literal) paired with the status token. Nearest-match
@@ -413,9 +466,70 @@ final class DeckLinkService: ObservableObject {
         (60.0,             "60"),
     ]
 
-    /// The output mode resolved from the CURRENT source (or the default when none is loaded). Read on
-    /// the serial queue when (re)starting; written on `sourceFormatChanged`.
+    /// The output mode the card is (or would be) started at. Read on the serial queue when
+    /// (re)starting; written ONLY by `applyEffectiveMode`, which is the one place the auto/manual
+    /// decision is made.
     private var currentMode = OutputMode.default2160p2398
+
+    // MARK: - Mode selection: follow the source, or the operator's pick
+
+    /// @AppStorage-style key for the operator's manual mode pick. Stores the mode's LABEL (which is
+    /// its id), or is absent for "Follow source". A label that no longer resolves — the rate table
+    /// changed under a stored preference — is treated as absent rather than as an error.
+    static let manualModeKey = "manifold.decklink.manualOutputMode"
+
+    /// ── WHY THERE IS A MANUAL PICKER AT ALL ────────────────────────────────────────────────
+    ///
+    /// Follow-source needs a RATE, and three of the four live transports cannot state one: WHEP
+    /// parses no SPS VUI, NDI's `frame_rate_N/D` is not surfaced by the bridge, and HLS declares
+    /// none at all (it is measured, and only after a 120-frame window has closed). Without a manual
+    /// pick those three would have no way to reach a correct output mode ever — which is the state
+    /// this whole change exists to end. The picker is the answer for them, and follow-source is the
+    /// answer for files and for SRT.
+    ///
+    /// nil = follow the source. Non-nil = the operator has chosen, and the choice WINS over any
+    /// source-derived mode until they clear it.
+    @Published private(set) var manualMode: OutputMode?
+
+    /// What the current source says the mode should be, or nil when it cannot say. Files always can
+    /// (metadata carries both raster and rate); live transports can only when they published a rate.
+    @Published private(set) var sourceDerivedMode: OutputMode?
+
+    /// Why follow-source is unavailable right now, in one line for the menu — or nil when it IS
+    /// available. The menu greys the "Follow source" row and shows this beneath it.
+    @Published private(set) var followSourceUnavailableReason: String?
+
+    /// True when a source-derived mode exists to follow.
+    var followSourceAvailable: Bool { sourceDerivedMode != nil }
+
+    /// ── ABR HYSTERESIS: WHY A SETTLE DELAY AND NOT A PINNED RENDITION ──────────────────────
+    ///
+    /// An HLS ladder moves under us — MEASURED today: 416x234 → 960x540 → 1920x1080 inside one
+    /// connection. Re-establishing the card on each rung would stop and restart scheduled playback
+    /// three times in a few seconds, which drops the video output, re-prerolls the audio, and is
+    /// visibly worse on the wire than the stale mode it replaced.
+    ///
+    /// TWO THINGS ALREADY ABSORB MOST OF IT, and they are worth stating because they decide how much
+    /// hysteresis is actually needed:
+    ///   * the output mode depends on the FAMILY (`height >= 1620`), not the raster, so 416x234,
+    ///     960x540 and 1920x1080 all resolve to the SAME 1080p mode — the ladder above causes zero
+    ///     re-establishes once the rate is known;
+    ///   * `currentMode` only re-establishes when the mode actually CHANGES.
+    /// What remains is a ladder that crosses the 2160/1080 boundary (a 4K rendition stepping down),
+    /// and the rate estimate settling from nil to a value. Those are real and this covers them.
+    ///
+    /// ⚠️ DELIBERATELY NOT `preferredMaximumResolution` / `preferredPeakBitRate`. Pinning the
+    /// rendition would stop the raster moving, but it does so by REFUSING the quality the network is
+    /// offering — on a QC tool, where the entire job is to show what the source actually looks like,
+    /// capping the ladder silently degrades the thing being judged. It also cannot help the other
+    /// three transports, which have no ladder and the same rate problem. Hysteresis is local to the
+    /// mode decision, changes nothing about the stream, and works for all four.
+    private static let liveModeSettleSeconds = 2.0
+
+    /// The live-derived mode waiting out `liveModeSettleSeconds`, and the timer doing the waiting.
+    /// Main-thread only (every writer is a main-thread delivery from `LiveDisplaySize`).
+    private var pendingLiveMode: OutputMode?
+    private var liveModeSettleTimer: Timer?
 
     /// Map a file's (width, height, frameRate) → the output display mode.
     /// - Resolution family: nearest of the two D4a families by height (≥1620 → 2160p, else 1080p). The
@@ -741,15 +855,181 @@ final class DeckLinkService: ObservableObject {
     /// output is off, just remember the target so the next start uses it. Call after setSourceColorSpace.
     func sourceFormatChanged(width: Int, height: Int, frameRate: Double) {
         let mode = Self.resolveOutputMode(width: width, height: height, frameRate: frameRate)
+        // A FILE's format change is immediate — no settle delay. A file's raster and rate are facts
+        // read once at load, they do not step the way an ABR ladder does, and delaying the switch
+        // would put a visible stale-mode window at the front of every file open. The hysteresis
+        // below exists for the live path and only for the live path.
+        cancelPendingLiveMode()
+        sourceDerivedMode = mode
+        followSourceUnavailableReason = nil
+        print("DeckLink D4a: FILE source format \(width)x\(height) @ "
+            + String(format: "%.3f fps", frameRate) + " → mode \(mode.label)")
+        applyEffectiveMode(trigger: "file source format")
+    }
+
+    // MARK: - The live path into the same decision
+
+    /// A live transport stated its video format, or lost it. Routed here by `DeckRegistry` from the
+    /// one `LiveDisplaySize` latch, on main.
+    ///
+    /// ⚠️ THIS IS THE CALL THAT DID NOT EXIST, AND ITS ABSENCE WAS THE BUG. `sourceFormatChanged`'s
+    /// only caller was `ContentView`'s `.onChange(of: engine.metadata)`, and `metadata` is written
+    /// by the three FILE load paths and by nothing else — so a stream never reconfigured the card.
+    /// It kept the last file's mode, or `default2160p2398` on a session where no file had ever been
+    /// opened; the raster then mismatched, `MetalVideoRenderer` refused the copy and held neutral,
+    /// no frame ever staged, and the SDI audio ring read failed its anchor with "no staged video PTS
+    /// to anchor to". One missing call, black picture AND silence. See docs/BUGS.md.
+    ///
+    /// ⚠️ A nil RATE IS NOT A REASON TO RECONFIGURE ANYTHING. Three of the four transports cannot
+    /// state one. Guessing would set a broadcast output to a cadence no source has — worse than the
+    /// stale mode, because it looks deliberate. So: raster without rate updates NOTHING except the
+    /// reason string the menu shows, and the operator's manual pick is how those transports get a
+    /// correct mode.
+    func liveFormatChanged(_ format: LiveVideoFormat?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        guard let format else {
+            // The live source is gone. Drop the derived mode but leave `currentMode` exactly where
+            // it is: tearing the card back to a default on disconnect would be a second, pointless
+            // re-establish at the worst possible moment, and the next source will set it anyway.
+            cancelPendingLiveMode()
+            sourceDerivedMode = nil
+            followSourceUnavailableReason = "No source is connected."
+            print("DeckLink D4a: live source gone — holding output mode \(currentMode.label)")
+            return
+        }
+
+        guard let frameRate = format.frameRate else {
+            cancelPendingLiveMode()
+            sourceDerivedMode = nil
+            followSourceUnavailableReason =
+                "This source does not report a frame rate, so the output mode cannot follow it. "
+                + "Pick a mode below."
+            print("DeckLink D4a: live source \(format.describedForLog) — NO RATE, not reconfiguring; "
+                + "output stays at \(currentMode.label)"
+                + (manualMode == nil ? " (pick a mode by hand to match the source)" : " (manual pick)"))
+            return
+        }
+
+        let mode = Self.resolveOutputMode(width: Int(format.size.width),
+                                          height: Int(format.size.height),
+                                          frameRate: frameRate)
+        followSourceUnavailableReason = nil
+
+        // Already there, or already waiting for exactly this: nothing to do. Re-arming the timer on
+        // every frame of a steady stream would mean it never fired.
+        guard mode != sourceDerivedMode || pendingLiveMode != nil else { return }
+        guard mode != pendingLiveMode else { return }
+
+        // ── HYSTERESIS ──────────────────────────────────────────────────────────────────────
+        // First mode of a connection (nothing derived yet) lands IMMEDIATELY — the whole point is
+        // to get a picture up, and there is no flap to damp when there is no previous value. Every
+        // LATER change waits out the settle window, which is what absorbs an ABR ladder crossing
+        // the 2160/1080 boundary.
+        guard sourceDerivedMode != nil else {
+            cancelPendingLiveMode()
+            sourceDerivedMode = mode
+            print("DeckLink D4a: LIVE source format \(format.describedForLog) → mode \(mode.label) "
+                + "(first format of this connection — applying immediately)")
+            applyEffectiveMode(trigger: "live source format")
+            return
+        }
+
+        cancelPendingLiveMode()
+        pendingLiveMode = mode
+        print("DeckLink D4a: LIVE source format \(format.describedForLog) → mode \(mode.label); "
+            + String(format: "holding %.1fs for it to settle before re-establishing output "
+                             + "(current %@)", Self.liveModeSettleSeconds, currentMode.label))
+        liveModeSettleTimer = Timer.scheduledTimer(withTimeInterval: Self.liveModeSettleSeconds,
+                                                   repeats: false) { [weak self] _ in
+            // Scheduled on the main run loop, so this fires on main — the same isolation every
+            // other writer of this state runs on.
+            guard let self, let settled = self.pendingLiveMode else { return }
+            self.pendingLiveMode = nil
+            self.liveModeSettleTimer = nil
+            self.sourceDerivedMode = settled
+            print("DeckLink D4a: live mode \(settled.label) settled — applying")
+            self.applyEffectiveMode(trigger: "live source format (settled)")
+        }
+    }
+
+    private func cancelPendingLiveMode() {
+        if let pending = pendingLiveMode {
+            print("DeckLink D4a: live mode \(pending.label) superseded before it settled")
+        }
+        liveModeSettleTimer?.invalidate()
+        liveModeSettleTimer = nil
+        pendingLiveMode = nil
+    }
+
+    // MARK: - The operator's pick
+
+    /// Choose a mode by hand, or pass nil to go back to following the source. Persisted.
+    func setManualMode(_ mode: OutputMode?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard mode != manualMode else { return }
+        manualMode = mode
+        if let mode {
+            UserDefaults.standard.set(mode.id, forKey: Self.manualModeKey)
+            print("DeckLink D4a: operator picked output mode \(mode.label) "
+                + "(manual pick now WINS over the source"
+                + (sourceDerivedMode.map { ", which says \($0.label)" } ?? ", which states none") + ")")
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.manualModeKey)
+            print("DeckLink D4a: operator cleared the manual pick — following the source again "
+                + (sourceDerivedMode.map { "(\($0.label))" } ?? "(which states no mode yet)"))
+        }
+        applyEffectiveMode(trigger: mode == nil ? "manual pick cleared" : "manual pick")
+    }
+
+    /// Restore the stored pick at startup. A stored label that no longer resolves to a selectable
+    /// mode is dropped silently — the rate table is allowed to change between versions, and a
+    /// preference is not worth an error dialog.
+    func restoreManualMode() {
+        guard let stored = UserDefaults.standard.string(forKey: Self.manualModeKey) else { return }
+        guard let mode = Self.selectableModes.first(where: { $0.id == stored }) else {
+            UserDefaults.standard.removeObject(forKey: Self.manualModeKey)
+            print("DeckLink D4a: stored output mode \"\(stored)\" is no longer offered — "
+                + "falling back to Follow source")
+            return
+        }
+        manualMode = mode
+        currentMode = mode
+        modeLabel = mode.label
+        print("DeckLink D4a: restored manual output mode \(mode.label) from preferences")
+    }
+
+    // MARK: - One place the mode is decided, and one place output is re-established for it
+
+    /// THE decision: the operator's pick if there is one, else what the source says, else the
+    /// pre-D4a default. Called by every input that can change the answer.
+    ///
+    /// ⚠️ EVERY SDI RE-ESTABLISH FOR A MODE CHANGE GOES THROUGH HERE, and says what triggered it.
+    /// Before this there was one path (a file's metadata) and it logged one line; there are now four
+    /// inputs (file format, live format, the settle timer, the manual picker) and a log that did not
+    /// name which one fired would be useless for exactly the question this change has to answer.
+    private func applyEffectiveMode(trigger: String) {
+        let mode = manualMode ?? sourceDerivedMode ?? .default2160p2398
+        let source = manualMode != nil ? "manual pick"
+                   : sourceDerivedMode != nil ? "follow source" : "default (nothing to follow)"
         let changed = (mode != currentMode)
         currentMode = mode
-        DispatchQueue.main.async { self.modeLabel = mode.label }
+        modeLabel = mode.label
 
-        // Only a running output needs a live switch; an off output just adopts `currentMode` on start.
-        guard isOutputting, changed else { return }
+        guard isOutputting else {
+            print("DeckLink D4a: mode → \(mode.label) via \(source) [\(trigger)]; "
+                + "output is OFF, so the next start will use it")
+            return
+        }
+        guard changed else {
+            print("DeckLink D4a: mode stays \(mode.label) via \(source) [\(trigger)] — "
+                + "no re-establish needed")
+            return
+        }
+
         let deviceIndex = selectedDeviceIndex
         let primariesCode = renderer?.sourcePrimariesCode ?? 1
-        print("DeckLink D4a: source mode → \(mode.label); switching live output")
+        print("DeckLink D4a: RE-ESTABLISHING SDI output at \(mode.label) via \(source) [\(trigger)]")
         queue.async {
             // Race-safe stop (clear running → StopScheduledPlayback → unset callback → DisableVideoOutput
             // → release pool), then re-establish at the new mode. isOutputting stays true across the

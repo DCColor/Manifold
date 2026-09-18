@@ -295,6 +295,11 @@ final class MetalVideoRenderer {
     private var deckLinkOutputSize: (w: Int, h: Int)?  // DeckLink output frame dims (e.g. 3840x2160)
     private var deckLinkRowBytes = 0                   // v210 row stride (128-byte aligned), matches the frame
     private var deckLinkResMismatchLogged = false      // one-time native-res-mismatch log
+
+    /// Set when the raster does not match the output frame and the card is therefore getting
+    /// neutral, cleared when it matches again. Carries the sentence the UI shows; nil = matched.
+    /// Delivered on MAIN, edge-triggered, installed by `DeckLinkService`.
+    var onDeckLinkRasterMismatch: ((String?) -> Void)?
     /// D4b-2: SOURCE PTS (seconds) of the frame sitting in the FRONT v210 staging buffer — i.e. the
     /// frame the DeckLink fill block is handing to the card. NaN when no converted frame is ready.
     /// This is the number the whole A/V alignment hangs on: displayTick chooses a frame by PTS, and
@@ -2740,13 +2745,21 @@ final class MetalVideoRenderer {
 
     /// Stop DeckLink output: disarm the convert and release the staging buffers.
     func stopDeckLinkOutput() {
-        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        deckLinkLock.lock()
         deckLinkActive = false
         deckLinkFrameReady = false
         deckLinkStaging = []
         deckLinkOutputSize = nil
         deckLinkRowBytes = 0
         deckLinkFrontPts = .nan
+        let wasMismatched = deckLinkResMismatchLogged
+        deckLinkResMismatchLogged = false
+        deckLinkLock.unlock()
+        // A re-establish at a NEW mode goes stop → start, and the mismatch it is fixing would
+        // otherwise still be on screen afterwards: the restart clears the latch, so the match path
+        // never fires and never takes the warning down. Clear it here, where the output the warning
+        // was about genuinely ends.
+        if wasMismatched { DispatchQueue.main.async { self.onDeckLinkRasterMismatch?(nil) } }
     }
 
     /// PUSH: convert the just-completed offscreen → v210 into the BACK staging buffer, then (on GPU
@@ -2788,8 +2801,26 @@ final class MetalVideoRenderer {
             if !alreadyLogged {
                 print("DeckLink D-real: source \(src.width)x\(src.height) != output \(outSize.w)x\(outSize.h) — native-res only, holding neutral (scaling is a later stage)")
             }
+            // ⚠️ AND SAY SO IN THE UI, NOT ONLY IN THE LOG. This is the branch that produces a
+            // BLACK SDI PICTURE while every indicator reads healthy: the card is enabled, the mode
+            // is valid, a downstream monitor locks cleanly, and the only symptom is that nothing is
+            // in the frame. A tester reading "output enabled, 2160p23.98, locked" calls that
+            // working. One log line at the moment of the first mismatch was not enough — it scrolls
+            // away and nothing on screen ever contradicts it.
+            //
+            // Edge-triggered on BOTH sides via `alreadyLogged`/`reportDeckLinkRasterMatch`, so this
+            // is not a per-frame main-thread hop on a steady mismatch.
+            if !alreadyLogged {
+                let message = "source \(src.width)x\(src.height) does not match output "
+                            + "\(outSize.w)x\(outSize.h) — no picture"
+                DispatchQueue.main.async { self.onDeckLinkRasterMismatch?(message) }
+            }
             return
         }
+        // Matched. Clear a mismatch that was being reported, edge-triggered the same way — a mode
+        // change or an ABR step that fixes the raster must take the warning down, or it would
+        // outlive the condition and become the next misleading indicator.
+        reportDeckLinkRasterMatch()
 
         guard let cmd = deckLinkCommandQueue.makeCommandBuffer(),
               let enc = cmd.makeComputeCommandEncoder() else {
@@ -2859,6 +2890,18 @@ final class MetalVideoRenderer {
     func currentDeckLinkSourcePts() -> Double {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
         return deckLinkFrameReady ? deckLinkFrontPts : .nan
+    }
+
+    /// Take the mismatch warning down, once, when the raster starts matching again. Reads and
+    /// clears the same latch the mismatch branch sets, under the same lock.
+    private func reportDeckLinkRasterMatch() {
+        deckLinkLock.lock()
+        let wasMismatched = deckLinkResMismatchLogged
+        deckLinkResMismatchLogged = false
+        deckLinkLock.unlock()
+        guard wasMismatched else { return }
+        print("DeckLink D-real: source raster now matches the output — picture restored")
+        DispatchQueue.main.async { self.onDeckLinkRasterMismatch?(nil) }
     }
 
     /// PULL (DeckLink callback thread): memcpy the current FRONT staging buffer into the DeckLink

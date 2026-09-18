@@ -136,13 +136,20 @@ private final class HLSPull: @unchecked Sendable {
     /// nil is the ordinary answer between frames: at 60 Hz against a 25 fps ladder most ticks have
     /// nothing new, and `hasNewPixelBuffer` is the cheap way to say so. Enqueuing nothing is
     /// correct — the renderer keeps displaying the frame it has (same contract as NDI's).
-    func capture() -> CVPixelBuffer? {
+    /// Returns the buffer AND the item time it was taken at. The caller needs the timestamp to
+    /// measure the source's cadence (`FrameRateEstimator`) — HLS declares no frame rate anywhere in
+    /// the manifest or the item, so the only honest answer is a measured one, and this is the only
+    /// place the timeline is read.
+    func capture() -> (buffer: CVPixelBuffer, itemTime: CMTime)? {
         // FIRST, BEFORE ANY AVFOUNDATION CALL. This is the line that makes a tick which raced the
         // teardown harmless rather than merely unlikely.
         guard !retired else { return nil }
         let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
         guard itemTime.isValid, output.hasNewPixelBuffer(forItemTime: itemTime) else { return nil }
-        return output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil)
+        guard let buffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) else {
+            return nil
+        }
+        return (buffer, itemTime)
     }
 
     /// What this item can honestly say about its own timeline. THREE states, not two, and keeping
@@ -241,6 +248,116 @@ private final class HLSPull: @unchecked Sendable {
 /// use — the feature is "put the scopes on the egress feed", and the scopes are visual. Reaching
 /// audio means an `AVAudioMix`/tap on the item feeding `engine.audioTap`, which is a second
 /// mechanism with its own clock question, not a line in this file.
+/// ── MEASURING HLS'S FRAME RATE, BECAUSE NOTHING DECLARES IT ──────────────────────────────────
+///
+/// An HLS manifest has no frame-rate attribute we can rely on (`FRAME-RATE` is optional on
+/// `EXT-X-STREAM-INF` and absent from most real ladders, including Apple's own bipbop), and
+/// `AVPlayerItem` exposes no cadence for a remote stream — `AVAssetTrack.nominalFrameRate` needs an
+/// asset track, which an HLS item may never populate. So the rate the DeckLink output mode needs has
+/// to be MEASURED, or left nil. This measures it.
+///
+/// ── WHAT IS SAMPLED, AND WHY IT IS THE FRAME RATE AND NOT THE TICK RATE ─────────────────
+///
+/// `HLSPull.capture()` runs on every display tick but returns a buffer only when
+/// `hasNewPixelBuffer(forItemTime:)` says a NEW one exists — i.e. once per SOURCE frame. The item
+/// time at those instants is on the item's own timeline (measured flat to ±0.1 ms against the
+/// presentation clock — see `HLSAudioTap`'s clock notes), so the gap between successive successful
+/// captures is one source frame duration. Ticks that produce nothing are never sampled, so a 60 Hz
+/// display watching a 25 fps ladder measures 25, not 60.
+///
+/// ── WINDOW: 120 SAMPLES, AND THE TRIMMED MEAN ───────────────────────────────────────────
+///
+/// 120 inter-frame gaps ≈ 2 s at 60 fps, ≈ 4 s at 30 fps, ≈ 5 s at 25 fps. Long enough that display-
+/// tick quantization averages out, short enough that the rate is available well inside a normal
+/// connect-and-watch.
+///
+/// The estimate is a TRIMMED MEAN, not a plain mean and not a bare median, because the two failure
+/// modes pull opposite ways:
+///   * a plain mean is wrecked by ONE outlier — a stall, a segment boundary, an ABR switch, or the
+///     app being suspended, any of which contributes a gap of seconds;
+///   * a bare median is robust to those but keeps the display-tick QUANTIZATION BIAS: a 59.94 fps
+///     source on a 60 Hz display lands on alternating 1- and 2-tick gaps whose median is one of the
+///     two, not the average of them.
+/// So: take the median, discard every gap outside [0.5×, 2×] of it, and average what survives. The
+/// discard kills the outliers; the average over the survivors kills the quantization.
+///
+/// The result is NOT snapped here. `DeckLinkService.resolveOutputMode` already does exact
+/// nearest-match against the eight standard broadcast rates with no boundaries and no seams, and
+/// doing it twice would be two rounding rules to keep in step. This reports fps and stops.
+///
+/// ⚠️ RESET ON AN ABR STEP. The caller resets this when the raster changes: the new rendition is a
+/// different encode and may well be a different cadence, and carrying gaps across the step would
+/// average two rates into one that is neither.
+///
+/// Single-threaded by construction — every method is called from the CVDisplayLink tick that owns
+/// `pullFrame`, and from nowhere else.
+private struct FrameRateEstimator {
+    /// Gaps needed before an estimate is offered. See the window note above.
+    private static let windowSize = 120
+    /// Gaps outside this band, at more than the window's span, are not a cadence — a segment
+    /// boundary, a stall, or an app suspension. Sampling stops making sense long before this.
+    private static let implausibleGapSeconds = 1.0
+
+    private var lastItemTime: CMTime?
+    private var gaps: [Double] = []
+    /// The last value handed out, so the caller can log a CHANGE rather than a stream of samples.
+    private(set) var estimate: Double?
+
+    /// Feed one captured frame's item time. Returns true when `estimate` changed meaningfully
+    /// (first estimate, or a move of more than 1%), which is the caller's cue to log.
+    mutating func record(itemTime: CMTime) -> Bool {
+        defer { lastItemTime = itemTime }
+        guard let lastItemTime else { return false }
+        let gap = CMTimeGetSeconds(CMTimeSubtract(itemTime, lastItemTime))
+        // Backwards (a seek / a live-edge jump) or implausibly long (a stall): not a cadence sample.
+        guard gap.isFinite, gap > 0, gap < Self.implausibleGapSeconds else { return false }
+
+        gaps.append(gap)
+        if gaps.count > Self.windowSize { gaps.removeFirst(gaps.count - Self.windowSize) }
+        guard gaps.count == Self.windowSize else { return false }
+
+        let sorted = gaps.sorted()
+        let median = sorted[sorted.count / 2]
+        guard median > 0 else { return false }
+        let kept = gaps.filter { $0 >= median * 0.5 && $0 <= median * 2.0 }
+        guard !kept.isEmpty else { return false }
+        let mean = kept.reduce(0, +) / Double(kept.count)
+        guard mean > 0 else { return false }
+
+        let fps = 1.0 / mean
+
+        // ⚠️ THE ESTIMATE IS HELD UNTIL IT MOVES MEANINGFULLY, AND THAT IS NOT COSMETIC. A rolling
+        // window re-computes every frame and lands a few thousandths of an fps away each time. If
+        // every one of those became the published value, `LiveVideoFormat` would differ on EVERY
+        // FRAME, `LiveDisplaySize.publish` would fail its dedup 60 times a second and hop to main
+        // 60 times a second, and the mode decision would re-run just as often — all to arrive at
+        // the same standard rate. Holding until a 1% move means a steady stream publishes ONCE and
+        // costs one comparison per frame thereafter, which is the contract the latch was built to.
+        //
+        // 1% is far tighter than the gaps between adjacent standard rates (the closest pair,
+        // 29.97 and 30, are 0.1% apart — but they resolve to different modes only if the estimate
+        // crosses the midpoint, and a 1% hold cannot stop that; it only stops the noise).
+        guard let held = estimate else { estimate = fps; return true }
+        guard abs(fps - held) / held > 0.01 else { return false }
+        estimate = fps
+        return true
+    }
+
+    /// An ABR step, or a new connection: the gaps collected so far describe a different encode.
+    /// Keeps `estimate` so the card is not dropped back to "unknown" mid-stream on every ladder
+    /// step — a rendition change is a reason to RE-measure, not a reason to forget.
+    mutating func resetWindow() {
+        gaps.removeAll(keepingCapacity: true)
+        lastItemTime = nil
+    }
+
+    /// A new connection: forget everything, including the estimate.
+    mutating func reset() {
+        resetWindow()
+        estimate = nil
+    }
+}
+
 final class HLSClient: ObservableObject {
 
     static let shared = HLSClient()
@@ -265,6 +382,12 @@ final class HLSClient: ObservableObject {
     /// full `stop()` (so no departed file's duration, timecode, aspect, colour tags or clean
     /// aperture survive behind the stream) and every other deck merely yields its transport.
     var onWillActivateStream: (() -> Void)?
+
+    /// Cadence measurement for the DeckLink output mode. Display-tick thread only, like `pullFrame`.
+    private var frameRateEstimator = FrameRateEstimator()
+    /// The raster the last pulled frame had, so an ABR step can be detected here rather than inferred
+    /// from the latch (which this function is the one writing). Display-tick thread only.
+    private var lastPulledRaster: (Int, Int)?
 
     private var pull: HLSPull?
     /// Bumped on every teardown. An async KVO/status hop captures it and bows out if superseded —
@@ -498,10 +621,33 @@ final class HLSClient: ObservableObject {
     /// underneath us mid-call — which `capture()` answers with nil rather than a crash.
     private func pullFrame() {
         guard let pull, let renderer else { return }
-        guard let pixelBuffer = pull.capture() else { return }
+        guard let captured = pull.capture() else { return }
+        let pixelBuffer = captured.buffer
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
+
+        // ── THE CADENCE, MEASURED ───────────────────────────────────────────────────────────
+        //
+        // An ABR step means a different encode, so the window is thrown away and re-measured; the
+        // ESTIMATE survives it (see `resetWindow`) rather than dropping the card back to "unknown"
+        // on every rung of the ladder. The raster comparison is against the last raster THIS
+        // function saw, not against the latch, because the latch is what we are about to write.
+        if lastPulledRaster.map({ $0 != (width, height) }) ?? true {
+            if lastPulledRaster != nil {
+                print("[HLS-FORMAT] rendition changed to \(width)x\(height) — re-measuring frame rate "
+                    + "(previous estimate "
+                    + (frameRateEstimator.estimate.map { String(format: "%.3f fps", $0) } ?? "none")
+                    + " retained meanwhile)")
+            }
+            lastPulledRaster = (width, height)
+            frameRateEstimator.resetWindow()
+        }
+        if frameRateEstimator.record(itemTime: captured.itemTime), let fps = frameRateEstimator.estimate {
+            print(String(format: "[HLS-FORMAT] frame rate measured %.3f fps over a 120-frame window "
+                                 + "(trimmed mean of item-time gaps) — DeckLink Follow source can use it",
+                         fps))
+        }
 
         // ⚠️ THE SHAPE, PER FRAME, AND FOR HLS THIS IS NOT A FORMALITY. MEASURED: the ABR ladder
         // settled from 4K to 1280×720 inside a 25 s window (docs/BUGS.md). The raster of a live
@@ -519,7 +665,12 @@ final class HLSClient: ObservableObject {
         //   * the WINDOW does not move: `WindowSizer.setGeometry` compares the ASPECT RATIO, and
         //     3840/2160 == 1280/720. It DOES move if a raster percentage is active, because
         //     "100% of source" is a statement about a raster the ladder is entitled to change.
-        LiveDisplaySize.shared.publish(width: width, height: height)
+        //
+        // THE MEASURED RATE TRAVELS WITH THE RASTER. nil until the first full window closes, which
+        // is the honest state — "we have a picture and do not yet know its cadence" — and is exactly
+        // when `DeckLinkService` declines to follow and says so in the menu.
+        LiveDisplaySize.shared.publish(width: width, height: height,
+                                       frameRate: frameRateEstimator.estimate)
 
         publishColorTagsIfChanged(of: pixelBuffer)
 
@@ -801,6 +952,8 @@ final class HLSClient: ObservableObject {
         // and clearing there would drop the window to the 16:9 fallback for the few frames between
         // pulls rather than holding the old shape until the new one states its own. Same reasoning
         // as `isConnected` not dipping across a swap.
+        frameRateEstimator.reset()
+        lastPulledRaster = nil
         LiveDisplaySize.shared.clear()
         NSLog("[HLS] disconnected")
     }

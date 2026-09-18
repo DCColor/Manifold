@@ -2198,6 +2198,24 @@ struct ContentView: View {
                 set: { DeckLinkService.shared.selectDevice($0) })
     }
 
+    /// The output-mode picker. `nil` tag = "Follow source"; a mode tag = the operator's pick, which
+    /// wins until they clear it. Routed through `setManualMode` so the picker, persistence and the
+    /// re-establish decision cannot diverge — the same discipline as the device and destination
+    /// pickers beside it.
+    private var deckLinkModeBinding: Binding<String> {
+        Binding(get: { DeckLinkService.shared.manualMode?.id ?? Self.followSourceTag },
+                set: { tag in
+                    DeckLinkService.shared.setManualMode(
+                        tag == Self.followSourceTag
+                            ? nil
+                            : DeckLinkService.selectableModes.first { $0.id == tag })
+                })
+    }
+    /// Sentinel tag for the "Follow source" row. A `Picker` over `OutputMode?` would need the
+    /// optional to be Hashable and tagged nil, which SwiftUI handles badly; a String tag is the
+    /// plain thing that works, and `OutputMode.id` is already a String.
+    private static let followSourceTag = "__follow_source__"
+
     /// D4b-3: route the destination picker through setAudioDestination — routing only, so a mid-session
     /// flip re-points the audio WITHOUT re-establishing the card (no video blip, no lost preroll depth).
     private var deckLinkAudioDestinationBinding: Binding<DeckLinkService.AudioDestination> {
@@ -2232,6 +2250,10 @@ struct ContentView: View {
                              : .white.opacity(blocked ? 0.35 : 0.9))
             .help((arbitrated ? deck.gate.reason : nil)
                   ?? (blocked ? status.blockedReason : nil)
+                  // A mismatch means the card is ON and the picture is BLACK — the one state where
+                  // the green tv.fill icon is actively misleading, so it is said in the tooltip
+                  // rather than only inside the menu.
+                  ?? deckLink.rasterMismatch
                   ?? (deckLink.isOutputting ? "DeckLink output ON — click to stop (⌃⌥⇧O)"
                                             : "DeckLink output — click to start (⌃⌥O)"))
 
@@ -2261,8 +2283,32 @@ struct ContentView: View {
                     .pickerStyle(.inline)
                     .disabled(!deckLink.isOutputting)
                 }
+                // THE OUTPUT MODE. Above Signal deliberately: Signal READS the mode, so the control
+                // that sets it belongs before the readout, and a mismatch warning shown in Signal is
+                // then immediately above the picker that fixes it.
+                Section("Output mode") {
+                    Picker("Output mode", selection: deckLinkModeBinding) {
+                        Text(deckLink.followSourceAvailable
+                             ? "Follow source (\(deckLink.sourceDerivedMode?.label ?? ""))"
+                             : "Follow source — unavailable")
+                            .tag(Self.followSourceTag)
+                        // Greyed rather than hidden: "Follow source" disappearing on three of the
+                        // four transports would read as a missing feature. Present-and-explained is
+                        // the honest shape, and the reason sits directly beneath it.
+                        ForEach(DeckLinkService.selectableModes, id: \.id) { mode in
+                            Text(mode.label).tag(mode.id)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    if let reason = deckLink.followSourceUnavailableReason {
+                        Button(reason) {}.disabled(true)
+                    }
+                }
                 Section("Signal") {
-                    Button(deckLink.signalLine) {}.disabled(true)
+                    // `signalLineOrWarning`, not `signalLine`: a healthy-looking mode/format/
+                    // colorspace reading is a FALSE statement while the renderer is refusing the
+                    // copy and the wire is carrying black. See DeckLinkService.rasterMismatch.
+                    Button(deckLink.signalLineOrWarning) {}.disabled(true)
                 }
                 // A below-floor driver enumerates devices perfectly well, so the picker above can look
                 // healthy while output is impossible. State the reason where the picker is.

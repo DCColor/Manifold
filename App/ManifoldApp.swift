@@ -39,6 +39,10 @@ struct ManifoldApp: App {
         BuildInfo.logAtStartup()
         // D1: prove the DeckLink SDK links and the card is reachable — enumerate + log at startup.
         DeckLinkService.shared.logDevicesAtStartup()
+        // …and restore the operator's manual output-mode pick BEFORE any source can be opened, so a
+        // file or stream arriving early cannot briefly establish the card at a mode the operator
+        // already overrode. Cheap and synchronous: one UserDefaults read.
+        DeckLinkService.shared.restoreManualMode()
         // Opt this PROCESS in to Apple's professional-video-workflow plug-in decoders and format
         // readers. See ProVideoWorkflow.swift for what it costs (12–15 ms, hence off the main
         // actor) and why "we called it" is not the same as "they are installed".

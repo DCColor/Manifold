@@ -523,6 +523,7 @@ final class WHEPFrameRouter {
         // No picture, so no shape. Ordered AFTER the route teardown and on main, where it cannot be
         // overtaken by a size still hopping in from the decode queue — see LiveDisplaySize's
         // generation counter.
+        noRateLogged = false
         LiveDisplaySize.shared.clear()
 
         NSLog("[WHEP] display route released — file-playback clock restored")
@@ -621,8 +622,19 @@ final class WHEPFrameRouter {
         // ⚠️ SQUARE PIXELS ASSUMED, and on this transport that is not merely a default — H.264
         // signals sample aspect ratio in the SPS VUI and our RTP depacketizer does not parse the
         // VUI at all, which is the same limitation that makes the colorimetry assumed here.
+        //
+        // ⚠️ AND NO RATE, EXPLICITLY. `frameRate: nil` is written out rather than left to the default
+        // so that this reads as a STATEMENT — "WHEP does not know its cadence" — and not as a call
+        // site somebody forgot to update. H.264 carries timing in the SPS VUI
+        // (`num_units_in_tick` / `time_scale`), our RTP depacketizer does not parse the VUI at all
+        // (the same limitation that makes the colorimetry assumed here), and RTP timestamps are a
+        // 90 kHz media clock that tells you when frames were SENT, not the cadence they were shot
+        // at. Deriving a rate from arrival times would measure the network, not the source. So the
+        // card's "Follow source" is unavailable on WHEP and the operator picks the mode by hand.
         LiveDisplaySize.shared.publish(width: CVPixelBufferGetWidth(decoded),
-                                       height: CVPixelBufferGetHeight(decoded))
+                                       height: CVPixelBufferGetHeight(decoded),
+                                       frameRate: nil)
+        logNoDeclaredRateOnce()
 
         let senderPTS = CMTimeGetSeconds(pts)
         guard senderPTS.isFinite else { logFlowIfDue(); return }
@@ -953,6 +965,19 @@ final class WHEPFrameRouter {
     /// LiveClock prints its own `[LIVECLOCK] depth/target/rate/err` line at the same cadence; this
     /// one deliberately repeats depth/count so the producer and consumer sides can be read as a pair
     /// without interleaving two logs. Decode queue only.
+    /// Set once per connection, cleared on teardown beside the other per-connection flags.
+    private var noRateLogged = false
+
+    /// One line per connection saying the card cannot follow this transport, and why. Once, not per
+    /// frame: the reason cannot change within a session.
+    private func logNoDeclaredRateOnce() {
+        guard !noRateLogged else { return }
+        noRateLogged = true
+        print("[WHEP-FORMAT] no frame rate available (SPS VUI timing is not parsed; RTP timestamps "
+            + "describe transmission, not capture cadence) — publishing no rate; DeckLink "
+            + "Follow source will be unavailable for this stream")
+    }
+
     private func logFlowIfDue() {
         #if DEBUG || MANIFOLD_TELEMETRY
         let now = CACurrentMediaTime()

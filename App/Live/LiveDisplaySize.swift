@@ -52,9 +52,51 @@
 //  again on main before delivery. A hop that straddles a clear is dropped. A source that is still
 //  running simply re-publishes on its next frame, because `clear` also drops the latched value.
 //
+//  ── THE FRAME RATE RIDES ALONG, AND IT RIDES HERE RATHER THAN IN A SIBLING LATCH ───────
+//
+//  The DeckLink output mode needs BOTH raster and rate (`resolveOutputMode(width:height:frameRate:)`),
+//  and until this carried a rate no live transport could reconfigure the card at all — it kept the
+//  last FILE's mode, or `default2160p2398` on a session where no file had been opened, and the
+//  renderer then refused the copy on the raster mismatch and held neutral. That is the defect this
+//  closes; see docs/BUGS.md, "Live SDI output carries NEUTRAL at a stale or default display mode".
+//
+//  ⚠️ ONE LATCH, NOT TWO, AND THE REASON IS THE GENERATION COUNTER ABOVE. A sibling latch for the
+//  rate would need its OWN generation counter against the same `clear`, and the two could then
+//  straddle a teardown independently — pairing stream A's raster with stream B's rate, which is a
+//  worse answer than either alone and would reconfigure the card to a mode no source ever had.
+//  Raster and rate are one fact about one stream, they change together (an ABR step can move both),
+//  and the file path they are being made to match already delivers them together. So they travel as
+//  one value, latched once, retired once.
+//
+//  `frameRate` IS OPTIONAL AND nil IS A REAL ANSWER — "this transport does not know", which is the
+//  honest state for three of the four. NOTHING may substitute a guess for it: an assumed rate would
+//  reconfigure a broadcast output to a cadence the source does not have, which is worse than the
+//  stale mode it replaced because it looks deliberate. `DeckLinkService` declines to follow a nil
+//  rate and says so; the operator picks the mode by hand instead.
+//
 
 import Foundation
 import ManifoldCore   // UnfairLock — priority-donating, for the render-thread caller
+
+/// What a live transport knows about its own video format: the shape, always, and the cadence when
+/// the transport can honestly state one.
+///
+/// `Equatable` carries the whole dedup contract — `publish` delivers only on a change of EITHER
+/// field, so a stream that learns its rate after its raster (SRT: raster per decoded frame, rate
+/// once at stream open) delivers a second time with both, and the card follows on that delivery.
+struct LiveVideoFormat: Equatable {
+    let size: CGSize
+    /// Frames per second, or nil when the transport cannot state one. NEVER a fallback or a guess —
+    /// see the header. `0` is not used for "unknown"; it would survive a `> 0` test somewhere.
+    let frameRate: Double?
+
+    /// For the log and the menu: "1920x1080 @ 29.97 fps" / "1920x1080, rate unknown".
+    var describedForLog: String {
+        let raster = "\(Int(size.width))x\(Int(size.height))"
+        guard let frameRate else { return "\(raster), rate unknown" }
+        return String(format: "%@ @ %.3f fps", raster, frameRate)
+    }
+}
 
 final class LiveDisplaySize {
 
@@ -64,18 +106,18 @@ final class LiveDisplaySize {
     /// Where a size goes once it is known. Installed ONCE, at app scope, by `DeckRegistry.init` —
     /// alongside the `onWillActivateStream` hooks, and for the same reason: the transports must not
     /// learn about decks. Assigned and invoked on MAIN only, which is what makes it lock-free.
-    var onChange: ((CGSize?) -> Void)?
+    var onChange: ((LiveVideoFormat?) -> Void)?
 
     private let lock = UnfairLock()
     /// The last size delivered, so the per-frame call costs one comparison and no hop. nil when
     /// nothing is live.
-    private var published: CGSize?
+    private var published: LiveVideoFormat?
 
     /// The shape currently on screen, or nil when no live source has stated one. ANY THREAD.
     ///
     /// For the deck that adopts the device hooks WHILE a source is running: `onChange` fires only
     /// on a change, so there is nothing for a late arrival to receive. See `attachDeviceHooks`.
-    var current: CGSize? {
+    var current: LiveVideoFormat? {
         lock.lock(); defer { lock.unlock() }
         return published
     }
@@ -92,13 +134,22 @@ final class LiveDisplaySize {
     /// Non-positive dimensions are ignored rather than published as a degenerate size: `0` reaches
     /// `videoAspect` as a division and `contentAspectRatio` as the invalid geometry that trips
     /// AppKit's internal trap (see the `.zero` note in WindowConfigurator).
-    func publish(width: Int, height: Int) {
+    /// `frameRate`: the transport's HONEST cadence, or nil when it has none to state. A
+    /// non-positive or non-finite value is normalised to nil at the door rather than travelling as a
+    /// degenerate number — `SRTSession` reports 0 for "av_guess_frame_rate could not work one out",
+    /// and 0 reaching `resolveOutputMode` would silently resolve to the 23.976 entry and reconfigure
+    /// a broadcast output to a cadence nothing asked for.
+    func publish(width: Int, height: Int, frameRate: Double? = nil) {
         guard width > 0, height > 0 else { return }
-        let size = CGSize(width: width, height: height)
+        let rate: Double? = {
+            guard let frameRate, frameRate.isFinite, frameRate > 0 else { return nil }
+            return frameRate
+        }()
+        let format = LiveVideoFormat(size: CGSize(width: width, height: height), frameRate: rate)
 
         lock.lock()
-        guard published != size else { lock.unlock(); return }
-        published = size
+        guard published != format else { lock.unlock(); return }
+        published = format
         let stamp = generation
         lock.unlock()
 
@@ -107,9 +158,9 @@ final class LiveDisplaySize {
             self.lock.lock()
             let current = self.generation
             self.lock.unlock()
-            // Straddled a clear — the source this size describes is already gone.
+            // Straddled a clear — the source this format describes is already gone.
             guard current == stamp else { return }
-            self.onChange?(size)
+            self.onChange?(format)
         }
     }
 
@@ -121,10 +172,10 @@ final class LiveDisplaySize {
         dispatchPrecondition(condition: .onQueue(.main))
         lock.lock()
         generation &+= 1
-        let hadSize = published != nil
+        let hadFormat = published != nil
         published = nil
         lock.unlock()
-        guard hadSize else { return }
+        guard hadFormat else { return }
         onChange?(nil)
     }
 }

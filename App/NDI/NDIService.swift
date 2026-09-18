@@ -464,6 +464,19 @@ final class NDIService: ObservableObject {
         NSLog("[NDI] receiving from \"\(connected.sourceName)\" — video on the display tick, audio on a dedicated pump")
     }
 
+    /// Set once per connection; cleared on disconnect beside the size latch.
+    private var noRateLogged = false
+
+    /// One line per connection saying the card cannot follow NDI, and that the reason is our bridge
+    /// rather than the protocol. Once, not per frame — the reason cannot change within a session.
+    private func logNoDeclaredRateOnce() {
+        guard !noRateLogged else { return }
+        noRateLogged = true
+        NSLog("%@", "[NDI-FORMAT] no frame rate published — NDIlib_video_frame_v2_t.frame_rate_N/D "
+            + "is not surfaced by NDIBridge (follow-up work). DeckLink Follow source is unavailable "
+            + "for this stream; pick the mode by hand.")
+    }
+
     /// Tear down the receiver, audio pump and display hook WITHOUT touching the published mode state
     /// (`isConnected` / `connectedSourceName`). Shared by disconnect() and the source-switch path:
     /// the switch rebuilds immediately afterwards, so it must NOT flip isConnected to false (which
@@ -493,6 +506,7 @@ final class NDIService: ObservableObject {
         // that one, and clearing there would drop the window to the 16:9 fallback for the few
         // frames between receivers rather than holding the old shape until the new one states its
         // own. Same reasoning as `isConnected` not dipping across a switch.
+        noRateLogged = false
         LiveDisplaySize.shared.clear()
         resetColorimetry()
         NSLog("[NDI] disconnected")
@@ -540,7 +554,18 @@ final class NDIService: ObservableObject {
         // (0 meaning "derive it from xres/yres"), which is the one honest PAR signal any of the
         // three transports has — and `NDIBridge` does not currently expose it. Until it does, this
         // is the decoded geometry and nothing more, which is exactly what the renderer draws.
-        LiveDisplaySize.shared.publish(width: Int(frame.width), height: Int(frame.height))
+        //
+        // ⚠️ AND NO RATE — BUT UNLIKE WHEP, THIS ONE IS MERELY UNPLUMBED, AND IS FOLLOW-UP WORK.
+        // `NDIlib_video_frame_v2_t` carries `frame_rate_N` / `frame_rate_D`, an EXACT rational the
+        // sender states — the best rate signal of any of the four transports, better even than SRT's
+        // `av_guess_frame_rate`. `NDIBridge` does not surface it: `NDIBridge.h:28-29` exposes width
+        // and height and nothing else. Plumbing that is a bridge change and is deliberately NOT part
+        // of this one, so NDI publishes nil today and the card's "Follow source" is unavailable on
+        // it. When the bridge grows the two fields, this call site is the one that changes, and NDI
+        // becomes the transport Follow source works BEST on.
+        LiveDisplaySize.shared.publish(width: Int(frame.width), height: Int(frame.height),
+                                       frameRate: nil)
+        logNoDeclaredRateOnce()
 
         // What is this frame, actually? What the sender declared (re-read per frame — colorimetry
         // can change under us), resolved against whatever the user has asserted in the picker.
