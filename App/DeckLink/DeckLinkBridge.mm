@@ -255,6 +255,13 @@ static const double kAudioErrorEmaAlpha = 0.02;      // ~1 s time constant at a 
 static const int32_t kAudioMaxCorrectionFrames = 2;
 static const double kAudioResyncSeconds = 0.100;
 
+#ifdef DEBUG
+// BRANCH TRACE burst length (dev diagnostic — see logAudioBranch). The first N callbacks print
+// verbatim because the gate's answer in the first half-second IS the question being asked; after
+// that the trace throttles to ~1/s like the other audio logs.
+static const uint64_t kAudioBranchLogBurst = 20;
+#endif
+
 // The scheduled-playback engine + BOTH SDK output callbacks in ONE ref-counted object (the SDK
 // requires an IDeckLinkVideoOutputCallback, and — D4b-2 — an IDeckLinkAudioOutputCallback for the
 // pull-model audio stream; the SDK's own FilePlayback sample implements both on one object the same
@@ -477,6 +484,8 @@ public:
         if (silent) {
             m_cursorAnchored = false;   // re-anchor to the video on the next unmuted callback
             m_errEma = 0.0;
+            logAudioBranch("SILENCE · transport gate (isCardAudioSilent: muted or shuttleRate != 1)",
+                           silent, -1, want);
             return scheduleSilence(want) ? S_OK : E_FAIL;
         }
 
@@ -485,6 +494,7 @@ public:
         const double stagedPts = m_audio.sourceTime ? m_audio.sourceTime() : NAN;
         if (!std::isfinite(stagedPts)) {
             m_cursorAnchored = false;
+            logAudioBranch("SILENCE · no staged video PTS to anchor to", silent, -1, want);
             return scheduleSilence(want) ? S_OK : E_FAIL;
         }
 
@@ -541,9 +551,12 @@ public:
             m_underruns++;
             m_cursorAnchored = false;
             m_errEma = 0.0;
+            logAudioBranch("SILENCE · ring empty at the cursor (underrun)", silent, 0, want);
             logUnderrunThrottled(m_cursorSeconds, want);
             return scheduleSilence(want) ? S_OK : E_FAIL;
         }
+        // Past every silence return: this callback is serving REAL audio out of the ring.
+        logAudioBranch("PCM · read from the ring", silent, got, want);
         // The ring had SOME but not all of what we asked for — the decoder simply hasn't reached that far
         // yet. Schedule only what exists (see kAudioCriticalDepthSeconds) unless the card is about to run
         // dry, in which case pad the tail with silence to keep the hardware fed.
@@ -574,6 +587,12 @@ public:
         }
 
         const uint32_t written = scheduleFrames(dst, toSchedule);
+        // Split what the card accepted into REAL and SILENCE for the stopped-summary breakdown: the
+        // buffer is `got` ring frames followed by `silencePad` zeros, so a short accept takes from the
+        // tail first. Without this split the summary's total is indistinguishable from pure silence.
+        const uint32_t writtenReal = std::min(written, (uint32_t)got);
+        m_pcmFramesScheduled     += writtenReal;
+        m_silenceFramesScheduled += written - writtenReal;
         // Sample-continuous: the cursor advances ONLY over REAL frames that the card actually accepted.
         // Silence padding is deliberately NOT counted as source time consumed — the source audio it stood
         // in for is not skipped, it is simply late, and the anchor loop (or a resync) reconciles that.
@@ -655,7 +674,7 @@ private:
         frames = std::min(frames, m_maxCallbackFrames);
         if (frames <= 0) return true;
         memset(m_outScratch.data(), 0, (size_t)frames * m_audio.dlChannels * sizeof(int32_t));
-        scheduleFrames(m_outScratch.data(), frames);
+        m_silenceFramesScheduled += scheduleFrames(m_outScratch.data(), frames);
         return true;
     }
 
@@ -677,6 +696,39 @@ private:
                 (unsigned long long)m_resyncs);
         fflush(stdout);
     }
+
+#ifdef DEBUG
+    // BRANCH TRACE (dev diagnostic, DEBUG builds only — Debug and Profile define DEBUG=1; see
+    // project.yml). It answers one question the other audio logs CANNOT:
+    //
+    //   Is this callback serving real PCM out of the ring, or is it serving digital silence?
+    //
+    // underruns / shortReads / resyncs are all counted INSIDE the real path, after the gate. The
+    // gate's `if (silent)` returns before the ring is ever touched, so a run that scheduled nothing
+    // but silence reports underruns=0 shortReads=0 resyncs=0 — identical to a perfectly healthy run.
+    // That ambiguity is what this line removes: it names the branch and, on the real branch, the
+    // frame count the ring actually supplied.
+    //
+    // `got` convention: -1 = the ring was never read (gate / no anchor), >= 0 = frames read.
+    // First kAudioBranchLogBurst callbacks verbatim (start-up is where the gate's answer matters
+    // most), then ~1/s of SCHEDULED audio, matching logPeriodic, so a long run stays readable.
+    void logAudioBranch(const char *branch, bool silent, int32_t got, int32_t want) {
+        const uint64_t call = ++m_branchLogCalls;
+        if (call > kAudioBranchLogBurst &&
+            m_audioStreamFrames - m_lastBranchLogFrames < (BMDTimeValue)m_audio.sampleRate) return;
+        m_lastBranchLogFrames = m_audioStreamFrames;
+        if (got < 0) {
+            fprintf(stdout, "DeckLinkAudio: branch #%llu — silent=%s → %s (want=%df, ring NOT read)\n",
+                    (unsigned long long)call, silent ? "true" : "false", branch, want);
+        } else {
+            fprintf(stdout, "DeckLinkAudio: branch #%llu — silent=%s → %s (ringRead=%df of want=%df)\n",
+                    (unsigned long long)call, silent ? "true" : "false", branch, got, want);
+        }
+        fflush(stdout);
+    }
+#else
+    void logAudioBranch(const char *, bool, int32_t, int32_t) { }
+#endif
 
     // Underruns are logged DISTINCTLY from the periodic line (they are the "audio is missing" signal,
     // not a drift datum) but throttled to ~1/s: a video-only file, or a long pause outside the ring's
@@ -745,8 +797,18 @@ private:
     uint64_t m_shortReads = 0;              // ring had SOME but not all → short schedule (no hole)
     uint64_t m_shortSchedules = 0;          // card accepted fewer frames than offered
     uint64_t m_resyncs = 0;                 // smoothed drift exceeded the band → cursor snapped
+    // The scheduled-frame total splits in two. NOT DEBUG-gated: the stopped summary that prints the
+    // split is itself unconditional, and a Release build reporting only a total would re-create the
+    // exact ambiguity this split exists to remove. Two integer adds at 50 Hz cost nothing.
+    uint64_t m_pcmFramesScheduled = 0;      // accepted frames that came from the ring (REAL audio)
+    uint64_t m_silenceFramesScheduled = 0;  // accepted frames of digital silence (gate / no anchor /
+                                            // underrun / critical-depth tail pad)
     BMDTimeValue m_lastAudioLogFrames = 0;
     BMDTimeValue m_lastUnderrunLogFrames = 0;
+#ifdef DEBUG
+    uint64_t m_branchLogCalls = 0;          // branch-trace invocations (burst counter, see logAudioBranch)
+    BMDTimeValue m_lastBranchLogFrames = 0;
+#endif
 
 public:
     uint64_t audioUnderrunCount() const { return m_underruns; }
@@ -754,6 +816,8 @@ public:
     uint64_t audioResyncCount()   const { return m_resyncs; }
     uint64_t audioShortScheduleCount() const { return m_shortSchedules; }
     BMDTimeValue audioFramesScheduled() const { return m_audioStreamFrames; }
+    uint64_t audioPcmFramesScheduled()     const { return m_pcmFramesScheduled; }
+    uint64_t audioSilenceFramesScheduled() const { return m_silenceFramesScheduled; }
 };
 
 // Output colorspace TAG from the source CICP PRIMARIES code ONLY (never the matrix). P3 has no
@@ -1416,13 +1480,29 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
                 (unsigned long long)_player->droppedCount(),
                 (unsigned long long)_player->flushedCount());
         if (hadAudio) {
-            fprintf(stdout, "DeckLinkAudio: stopped — scheduled=%lldf underruns=%llu shortReads=%llu "
-                            "shortSchedules=%llu resyncs=%llu\n",
-                    (long long)_player->audioFramesScheduled(),
+            // `scheduled` COUNTS BOTH KINDS OF FRAME. Every schedule — real PCM and digital silence
+            // alike — goes through the one scheduleFrames() call that advances the audio stream time,
+            // so the total says only "the card was fed a continuous stream", never "the card was fed
+            // AUDIO". Nor do the counters beside it disambiguate: underruns / shortReads / resyncs are
+            // all incremented inside the real path, AFTER the transport gate has returned, so a run
+            // that scheduled nothing but silence reports zeroes for all three. Hence the explicit
+            // split — read `real=`, never `scheduled=`, when asking whether audio reached SDI.
+            const unsigned long long pcm     = (unsigned long long)_player->audioPcmFramesScheduled();
+            const unsigned long long silence = (unsigned long long)_player->audioSilenceFramesScheduled();
+            fprintf(stdout, "DeckLinkAudio: stopped — scheduled=%lldf TOTAL = real=%lluf (PCM read from "
+                            "the ring) + silence=%lluf (transport gate / no anchor / underrun / tail pad) "
+                            "· underruns=%llu shortReads=%llu shortSchedules=%llu resyncs=%llu\n",
+                    (long long)_player->audioFramesScheduled(), pcm, silence,
                     (unsigned long long)_player->audioUnderrunCount(),
                     (unsigned long long)_player->audioShortReadCount(),
                     (unsigned long long)_player->audioShortScheduleCount(),
                     (unsigned long long)_player->audioResyncCount());
+            if (pcm == 0 && silence > 0) {
+                fprintf(stdout, "DeckLinkAudio: stopped — real=0f: NO audio reached SDI this run. The "
+                                "stream was continuous silence; the zero underruns/shortReads/resyncs "
+                                "above are NOT evidence of healthy audio, they are what the silent "
+                                "branch looks like (it returns before the ring is ever read).\n");
+            }
         }
         fflush(stdout);
         _player->Release();   // drops the construction ref → delete
