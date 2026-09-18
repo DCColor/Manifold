@@ -27,6 +27,22 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) CVPixelBufferRef pixelBuffer;
 @property (nonatomic, readonly) int width;
 @property (nonatomic, readonly) int height;
+/// The sender's DECLARED frame rate, handed over as NDI's EXACT RATIONAL and never as a float:
+/// `frame_rate_N` / `frame_rate_D` verbatim. 24000/1001 is 23.976 and 30000/1001 is 29.97 — the
+/// two rates a bridge-side division would round away, and the two that matter most to a broadcast
+/// output. Swift divides and decides (NDIService); this stays a transport.
+///
+/// 0 IN EITHER FIELD MEANS "THIS SENDER DECLARED NOTHING", and that is not an inference: the
+/// capture struct is `memset` to zero before `framesync_capture_video` fills it, so an untouched
+/// pair reads 0/0. They are therefore handed over UNVALIDATED — refusing a nonsense pair is a
+/// policy decision about what may reconfigure an SDI card, and it belongs with the other three
+/// transports' refusals, not here.
+///
+/// This is the best rate signal any of the four live transports has — an exact rational the
+/// sender states outright, where SRT guesses, HLS measures and WHEP parses. It is also the one
+/// with NO independent measurement to cross-check it against; see NDIService.
+@property (nonatomic, readonly) int frameRateN;
+@property (nonatomic, readonly) int frameRateD;
 /// NDI's FourCC as text (e.g. "UYVY") — for logging / the "what did we actually get" check.
 @property (nonatomic, copy, readonly) NSString *fourCC;
 @property (nonatomic, readonly) int lineStrideInBytes;

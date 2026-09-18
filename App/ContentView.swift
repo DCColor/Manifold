@@ -2203,7 +2203,26 @@ struct ContentView: View {
     /// re-establish decision cannot diverge — the same discipline as the device and destination
     /// pickers beside it.
     private var deckLinkModeBinding: Binding<String> {
-        Binding(get: { DeckLinkService.shared.manualMode?.id ?? Self.followSourceTag },
+        Binding(get: {
+                    let service = DeckLinkService.shared
+                    if let manual = service.manualMode { return manual.id }
+                    if service.followSourceAvailable { return Self.followSourceTag }
+                    // ⚠️ NO MANUAL PICK AND NOTHING TO FOLLOW — AND THIS USED TO RETURN THE FOLLOW
+                    // TAG ANYWAY. That drew a checkmark against "Follow source — unavailable": a row
+                    // whose own subtitle told the operator to pick something else was rendered as
+                    // the thing they had already picked, while `applyEffectiveMode` quietly fell
+                    // through to `.default2160p2398` (or whatever a restored preference had left in
+                    // `currentMode`) — 2160p23.98 against a 1080 source, a black wire under a
+                    // checkmark that said everything was fine.
+                    //
+                    // Naming `currentMode` makes the selection TRUE: it is the mode the card is on.
+                    // It is not a pin — `manualMode` stays nil — so the moment the source states a
+                    // rate (or a file is loaded), the selection returns to Follow source on its own.
+                    // That reversibility is the load-bearing part: HLS publishes its raster long
+                    // before its measured rate, so pinning here would permanently disable
+                    // follow-source on the transport that needs it most.
+                    return service.currentMode.id
+                },
                 set: { tag in
                     DeckLinkService.shared.setManualMode(
                         tag == Self.followSourceTag
@@ -2287,14 +2306,24 @@ struct ContentView: View {
                 // that sets it belongs before the readout, and a mismatch warning shown in Signal is
                 // then immediately above the picker that fixes it.
                 Section("Output mode") {
+                    // STILL SHOWN WHEN UNAVAILABLE, STILL NOT A PICKER OPTION. Greyed rather than
+                    // hidden for the original reason — "Follow source" vanishing whenever a source
+                    // cannot state a rate would read as a missing feature, and present-and-explained
+                    // is the honest shape, with the reason directly beneath it.
+                    //
+                    // But it is a DISABLED BUTTON and no longer a tagged row inside the Picker,
+                    // because a tagged row is selectable and, worse, gets the checkmark whenever the
+                    // binding has nothing else to name. A Button cannot be checked and cannot be
+                    // chosen, which is half the fix; `deckLinkModeBinding` — which now names the
+                    // mode actually in force instead of this row — is the other half.
+                    if !deckLink.followSourceAvailable {
+                        Button("Follow source — unavailable") {}.disabled(true)
+                    }
                     Picker("Output mode", selection: deckLinkModeBinding) {
-                        Text(deckLink.followSourceAvailable
-                             ? "Follow source (\(deckLink.sourceDerivedMode?.label ?? ""))"
-                             : "Follow source — unavailable")
-                            .tag(Self.followSourceTag)
-                        // Greyed rather than hidden: "Follow source" disappearing on three of the
-                        // four transports would read as a missing feature. Present-and-explained is
-                        // the honest shape, and the reason sits directly beneath it.
+                        if deckLink.followSourceAvailable {
+                            Text("Follow source (\(deckLink.sourceDerivedMode?.label ?? ""))")
+                                .tag(Self.followSourceTag)
+                        }
                         ForEach(DeckLinkService.selectableModes, id: \.id) { mode in
                             Text(mode.label).tag(mode.id)
                         }

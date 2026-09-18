@@ -169,6 +169,7 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 }
 
 @synthesize width = _width, height = _height, fourCC = _fourCC;
+@synthesize frameRateN = _frameRateN, frameRateD = _frameRateD;
 @synthesize lineStrideInBytes = _lineStrideInBytes, timestamp = _timestamp;
 @synthesize metadataXML = _metadataXML;
 
@@ -179,6 +180,11 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
         _pixelBuffer = (CVPixelBufferRef)CFRetain(pb);
         _width = frame->xres;
         _height = frame->yres;
+        // Copied AS A RATIO, exactly as it arrived. No division, no plausibility test, no
+        // substitution for 0 — see the header: the fraction is the fact, and judging it is
+        // NDIService's job.
+        _frameRateN = frame->frame_rate_N;
+        _frameRateD = frame->frame_rate_D;
         _lineStrideInBytes = frame->line_stride_in_bytes;
         _timestamp = frame->timestamp;
         _fourCC = [fourCC copy];

@@ -493,9 +493,15 @@ final class DeckLinkService: ObservableObject {
     ]
 
     /// The output mode the card is (or would be) started at. Read on the serial queue when
-    /// (re)starting; written ONLY by `applyEffectiveMode`, which is the one place the auto/manual
-    /// decision is made.
-    private var currentMode = OutputMode.default2160p2398
+    /// (re)starting; written ONLY by `applyEffectiveMode` and `restoreManualMode`, both main-thread,
+    /// and `applyEffectiveMode` is the one place the auto/manual decision is made.
+    ///
+    /// PUBLISHED, AND READ BY THE MODE PICKER, because it is the answer to "what is the output
+    /// actually set to" — which the picker has to be able to state when there is no manual pick and
+    /// nothing to follow. `modeLabel` is NOT that answer and must not be used for it: it is
+    /// overwritten with the bridge's `activeModeName`, which is the card's own spelling of the mode
+    /// it settled on and need not be one of `selectableModes`' ids.
+    @Published private(set) var currentMode = OutputMode.default2160p2398
 
     // MARK: - Mode selection: follow the source, or the operator's pick
 
@@ -506,12 +512,14 @@ final class DeckLinkService: ObservableObject {
 
     /// ── WHY THERE IS A MANUAL PICKER AT ALL ────────────────────────────────────────────────
     ///
-    /// Follow-source needs a RATE, and three of the four live transports cannot state one: WHEP
-    /// parses no SPS VUI, NDI's `frame_rate_N/D` is not surfaced by the bridge, and HLS declares
-    /// none at all (it is measured, and only after a 120-frame window has closed). Without a manual
-    /// pick those three would have no way to reach a correct output mode ever — which is the state
-    /// this whole change exists to end. The picker is the answer for them, and follow-source is the
-    /// answer for files and for SRT.
+    /// Follow-source needs a RATE, and when this was written three of the four live transports could
+    /// not state one. All four can now — SRT from `av_guess_frame_rate`, WHEP from SPS VUI timing,
+    /// HLS from the master playlist's FRAME-RATE, NDI from the sender's `frame_rate_N/D` — but NONE
+    /// of them can state one ALWAYS: a demuxer probe can come up empty, VUI is optional, a playlist
+    /// may omit FRAME-RATE (HLS then measures, and only after a 120-frame window has closed), and an
+    /// NDI sender may leave the rational zero-filled. Every transport therefore still has a
+    /// rate-unknown state, and the picker is the answer in it. Follow-source is the answer whenever
+    /// a rate IS known, and for files always.
     ///
     /// nil = follow the source. Non-nil = the operator has chosen, and the choice WINS over any
     /// source-derived mode until they clear it.
@@ -906,11 +914,11 @@ final class DeckLinkService: ObservableObject {
     /// no frame ever staged, and the SDI audio ring read failed its anchor with "no staged video PTS
     /// to anchor to". One missing call, black picture AND silence. See docs/BUGS.md.
     ///
-    /// ⚠️ A nil RATE IS NOT A REASON TO RECONFIGURE ANYTHING. Three of the four transports cannot
-    /// state one. Guessing would set a broadcast output to a cadence no source has — worse than the
-    /// stale mode, because it looks deliberate. So: raster without rate updates NOTHING except the
-    /// reason string the menu shows, and the operator's manual pick is how those transports get a
-    /// correct mode.
+    /// ⚠️ A nil RATE IS NOT A REASON TO RECONFIGURE ANYTHING. Every transport has a rate-unknown
+    /// state, however good its usual signal. Guessing would set a broadcast output to a cadence no
+    /// source has — worse than the stale mode, because it looks deliberate. So: raster without rate
+    /// updates NOTHING except the reason string the menu shows, and the operator's manual pick is
+    /// how a source in that state gets a correct mode.
     func liveFormatChanged(_ format: LiveVideoFormat?) {
         dispatchPrecondition(condition: .onQueue(.main))
 

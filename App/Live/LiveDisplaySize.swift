@@ -68,8 +68,11 @@
 //  and the file path they are being made to match already delivers them together. So they travel as
 //  one value, latched once, retired once.
 //
-//  `frameRate` IS OPTIONAL AND nil IS A REAL ANSWER — "this transport does not know", which is the
-//  honest state for three of the four. NOTHING may substitute a guess for it: an assumed rate would
+//  `frameRate` IS OPTIONAL AND nil IS A REAL ANSWER — "this transport does not know". All four can
+//  now usually say (SRT guesses via the demuxer, WHEP parses SPS VUI, HLS reads the playlist or
+//  measures, NDI reads the sender's exact rational), and not one of them can say ALWAYS, so nil
+//  stays a first-class answer rather than a gap being closed. NOTHING may substitute a guess for it:
+//  an assumed rate would
 //  reconfigure a broadcast output to a cadence the source does not have, which is worse than the
 //  stale mode it replaced because it looks deliberate. `DeckLinkService` declines to follow a nil
 //  rate and says so; the operator picks the mode by hand instead.

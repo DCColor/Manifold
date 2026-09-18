@@ -464,17 +464,76 @@ final class NDIService: ObservableObject {
         NSLog("[NDI] receiving from \"\(connected.sourceName)\" — video on the display tick, audio on a dedicated pump")
     }
 
-    /// Set once per connection; cleared on disconnect beside the size latch.
-    private var noRateLogged = false
+    /// What counts as a frame rate at all. The SAME range SRT screens `av_guess_frame_rate` with
+    /// (`anchorPlausibleFrameRates`), deliberately: a rate that would be refused as implausible
+    /// arriving one way must be refused arriving the other, or the card's behavior depends on which
+    /// transport happened to be connected. Wide on purpose — it exists to catch a garbage rational,
+    /// not to police unusual-but-real cadences; `resolveOutputMode` does the snapping.
+    private static let plausibleFrameRates = 1.0...240.0
 
-    /// One line per connection saying the card cannot follow NDI, and that the reason is our bridge
-    /// rather than the protocol. Once, not per frame — the reason cannot change within a session.
-    private func logNoDeclaredRateOnce() {
-        guard !noRateLogged else { return }
-        noRateLogged = true
-        NSLog("%@", "[NDI-FORMAT] no frame rate published — NDIlib_video_frame_v2_t.frame_rate_N/D "
-            + "is not surfaced by NDIBridge (follow-up work). DeckLink Follow source is unavailable "
-            + "for this stream; pick the mode by hand.")
+    /// The sender's declared rate for THIS frame, or nil when it declares none or declares nonsense.
+    ///
+    /// ⚠️ IT IS A RATIO AND IT IS DIVIDED HERE, ONCE, AND NOT ROUNDED. 24000/1001 is 23.976023…,
+    /// 30000/1001 is 29.970029… — the two values that a "helpful" rounding to 23.98 / 29.97 would
+    /// destroy. `resolveOutputMode` matches against the EXACT `n/1001` entries in its own table by
+    /// minimum |Δfps|, so an unrounded quotient lands ~0 from the right entry and cannot be trapped
+    /// on a boundary. Pre-rounding here would hand it a number that is merely near the table
+    /// instead of on it, for no gain.
+    ///
+    /// nil, NOT A SUBSTITUTE, for every refusal: a zero denominator (the `memset` default — the
+    /// sender said nothing), a zero or negative numerator, or a quotient outside
+    /// `plausibleFrameRates`. Publishing a garbage rate would reconfigure a broadcast output to a
+    /// cadence no source has, which is the one outcome worse than following nothing. Same refusal
+    /// SRT makes on an implausible guess and WHEP makes on an absent VUI.
+    private static func declaredFrameRate(numerator: Int32, denominator: Int32) -> Double? {
+        guard numerator > 0, denominator > 0 else { return nil }
+        let fps = Double(numerator) / Double(denominator)
+        guard fps.isFinite, plausibleFrameRates.contains(fps) else { return nil }
+        return fps
+    }
+
+    /// The rational last reported by `logDeclaredRate`, so a steady stream logs once. nil = nothing
+    /// logged yet on this connection; cleared on disconnect beside the size latch.
+    ///
+    /// KEYED ON THE VALUE RATHER THAN A ONCE-FLAG, and that is not tidiness: a SOURCE SWITCH rebuilds
+    /// the receiver through `tearDownReceiver` WITHOUT a disconnect (which is why `isConnected` never
+    /// dips and why the raster is republished per frame), so a once-per-connection flag would never
+    /// reset and the new sender's rate would go unreported. Comparing the pair logs exactly when the
+    /// declared rate actually changes, which is the thing worth a line.
+    private var loggedRational: (n: Int32, d: Int32)?
+
+    /// ── DECLARED, WITH NOTHING TO CHECK IT AGAINST ─────────────────────────────────────────
+    ///
+    /// ⚠️ THIS IS A THIRD SHAPE AND IT IS DELIBERATE. HLS cross-checks its playlist FRAME-RATE
+    /// against a 120-frame estimator, and WHEP cross-checks its SPS VUI timing the same way; both
+    /// can say "the sender declares X and does Y". NDI cannot, and the reason is structural rather
+    /// than unfinished work: frames arrive through FrameSync, which buffers, repeats and drops to
+    /// keep our clock fed (see `captureVideoFrame`'s timestamp dedup — we do not even see every
+    /// repeat). Inter-arrival gaps measured on this side describe the CVDisplayLink tick and
+    /// FrameSync's smoothing, not the sender's cadence, so an estimator here would produce a
+    /// confident number about the wrong thing and disagreements with it would be meaningless.
+    ///
+    /// The sender's 100ns `timestamp` IS a real clock and could in principle carry a cross-check —
+    /// it is what the `[NDI-AUDIO]` trace uses to prove audio was not synthesised. Adding one is not
+    /// part of this change, and on balance it does not look worth it: it would be checking an exact
+    /// rational the sender states outright against a derivative of the same sender's clock, which is
+    /// not an independent witness the way HLS's playlist-vs-media or WHEP's VUI-vs-arrival is.
+    private func logDeclaredRate(_ rate: Double?, numerator: Int32, denominator: Int32) {
+        guard loggedRational?.n != numerator || loggedRational?.d != denominator else { return }
+        loggedRational = (numerator, denominator)
+        if let rate {
+            NSLog("%@", String(format: "[NDI-FORMAT] frame rate %.3f fps declared by the sender "
+                                       + "(frame_rate_N/D = %d/%d) — DeckLink Follow source can use it",
+                               rate, numerator, denominator))
+        } else {
+            NSLog("%@", "[NDI-FORMAT] frame rate NOT declared "
+                + "(frame_rate_N/D = \(numerator)/\(denominator), which is "
+                + (denominator <= 0 || numerator <= 0
+                   ? "the zero-filled default — this sender states no rate"
+                   : "outside \(Self.plausibleFrameRates) fps")
+                + ") — publishing no rate; DeckLink Follow source will be unavailable for this "
+                + "stream, pick a mode by hand.")
+        }
     }
 
     /// Tear down the receiver, audio pump and display hook WITHOUT touching the published mode state
@@ -506,7 +565,7 @@ final class NDIService: ObservableObject {
         // that one, and clearing there would drop the window to the 16:9 fallback for the few
         // frames between receivers rather than holding the old shape until the new one states its
         // own. Same reasoning as `isConnected` not dipping across a switch.
-        noRateLogged = false
+        loggedRational = nil
         LiveDisplaySize.shared.clear()
         resetColorimetry()
         NSLog("[NDI] disconnected")
@@ -555,17 +614,24 @@ final class NDIService: ObservableObject {
         // three transports has — and `NDIBridge` does not currently expose it. Until it does, this
         // is the decoded geometry and nothing more, which is exactly what the renderer draws.
         //
-        // ⚠️ AND NO RATE — BUT UNLIKE WHEP, THIS ONE IS MERELY UNPLUMBED, AND IS FOLLOW-UP WORK.
-        // `NDIlib_video_frame_v2_t` carries `frame_rate_N` / `frame_rate_D`, an EXACT rational the
-        // sender states — the best rate signal of any of the four transports, better even than SRT's
-        // `av_guess_frame_rate`. `NDIBridge` does not surface it: `NDIBridge.h:28-29` exposes width
-        // and height and nothing else. Plumbing that is a bridge change and is deliberately NOT part
-        // of this one, so NDI publishes nil today and the card's "Follow source" is unavailable on
-        // it. When the bridge grows the two fields, this call site is the one that changes, and NDI
-        // becomes the transport Follow source works BEST on.
+        // ⚠️ THE RATE RIDES THE SAME CALL, AND THAT IS THE WHOLE POINT OF ONE LATCH. `LiveVideoFormat`
+        // carries raster and rate together because they are one fact about one stream (see
+        // LiveDisplaySize's header on why a sibling latch would be worse than none). NDI is the
+        // transport where that costs least: both quantities live on the SAME frame struct, so the
+        // rate needs no second event, no settle window and no plumbing of its own — it is read
+        // beside `xres`/`yres` and published beside them, per frame, for the same reason.
+        //
+        // PER FRAME AND NOT ONCE, for the rate as much as the raster: a source switch rebuilds the
+        // receiver without a disconnect, so the next frame can legitimately be a different sender at
+        // a different cadence. `LiveDisplaySize` dedups, so a steady stream costs one comparison.
+        //
+        // `declaredFrameRate` returns nil rather than a guess for a sender that states nothing — the
+        // same refusal SRT and WHEP make, and the reason the four transports behave alike here.
+        let declaredRate = Self.declaredFrameRate(numerator: frame.frameRateN,
+                                                  denominator: frame.frameRateD)
         LiveDisplaySize.shared.publish(width: Int(frame.width), height: Int(frame.height),
-                                       frameRate: nil)
-        logNoDeclaredRateOnce()
+                                       frameRate: declaredRate)
+        logDeclaredRate(declaredRate, numerator: frame.frameRateN, denominator: frame.frameRateD)
 
         // What is this frame, actually? What the sender declared (re-read per frame — colorimetry
         // can change under us), resolved against whatever the user has asserted in the picker.
