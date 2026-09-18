@@ -82,7 +82,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// an inconsistency nobody noticed, and the honest reading of this property right now is "the
     /// best shape the path that loaded this source was able to establish".
     @Published public private(set) var displaySize: CGSize?
-    @Published public private(set) var hasMedia = false
+    /// ⚠️ AN INPUT TO THE SDI AUDIO GATE SINCE THE FILE/LIVE SPLIT — hence the `didSet`.
+    ///
+    /// `applyAudioMute` reads this to decide whether `shuttleRate != 1` may silence the card, so a
+    /// change here changes the answer and the callback-thread mirror has to be recomputed. Without
+    /// this the mirror goes stale in a way that is ORDER-DEPENDENT and would have half-fixed the bug:
+    /// `stop()` calls `applyAudioMute()` while `hasMedia` is still true and only clears it afterwards,
+    /// so a live takeover would leave the gate latched at `true`. Enabling DeckLink AFTER connecting
+    /// happens to recompute it (`setDeckLinkOwnsAudio` → `applyAudioMute`); enabling it BEFORE does
+    /// not, and nothing else would ever recompute it for the life of the stream.
+    @Published public private(set) var hasMedia = false {
+        didSet { applyAudioMute() }
+    }
     @Published public private(set) var metadata: VideoMetadata?
     @Published public private(set) var currentURL: URL?
     // Audio output gain/mute (passthrough to the persistent audioRenderer).
@@ -657,8 +668,30 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // The system renderer gets that for free (a stopped synchronizer clock simply stops pulling);
         // the card asks for samples at ~50 Hz regardless, and the source time it asks at is frozen while
         // paused — so serving PCM would re-send the same window forever (a drone). Silence is the honest
-        // answer. Net: real PCM only at exactly 1× forward, unmuted.
-        setCardAudioSilent(isMuted || shuttleRate != 1)
+        // answer.
+        //
+        // ⚠️ `hasMedia &&` IS WHAT MAKES THAT RULE APPLY TO FILES ONLY, AND IT IS A FIX, NOT A TIDY.
+        //
+        // `shuttleRate != 1` is a PROXY for "the source's time is frozen". That proxy is sound for a
+        // file and FALSE FOR EVERY LIVE SOURCE: nothing in the NDI, WHEP, SRT or HLS paths ever calls
+        // `setShuttleRate`, and the live takeover's `stop()` zeroes it — so `shuttleRate` is 0 for all
+        // four, the gate read `true` forever, and `RenderAudioSamples` took its `if (silent)` branch on
+        // every callback. MEASURED: a live HLS run scheduled 2025545 audio frames of which real=0f,
+        // every sampled callback on "silent=true → SILENCE · transport gate". No live transport had
+        // ever embedded audio on SDI. A live feed's source time is NOT frozen — the ring is being
+        // filled by the transport in real time — so the reasoning above simply does not transfer to it.
+        //
+        // `hasMedia` is the engine's existing term for "a FILE is the source": no live path sets it,
+        // and `liveStreamWillActivate` → `stop()` clears it on the deck a stream takes over. So a
+        // paused FILE still serves silence (unchanged, deliberate, see above) while a live source is
+        // gated on `isMuted` alone.
+        //
+        // ⚠️ DO NOT "UNIFY" THIS WITH `offSpeed` ABOVE. That term's `!= 0` conjunct is load-bearing in
+        // the opposite direction — it is why HLS desktop audio survives at `shuttleRate == 0`. Making
+        // the two expressions match would silence HLS on the Mac.
+        //
+        // Net: real PCM at exactly 1× forward for a file, whenever unmuted for a live source.
+        setCardAudioSilent(isMuted || (hasMedia && shuttleRate != 1))
     }
 
     /// D4b-2: thread-safe mirror of the SDI audio gate, readable from the DeckLink audio-callback
