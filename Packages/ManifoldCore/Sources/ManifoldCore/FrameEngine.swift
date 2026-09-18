@@ -656,13 +656,42 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         applyAudioMute()
     }
 
+    /// ── A SECOND OUTPUT THAT IS NOT `audioRenderer`, GOVERNED BY THE SAME DECISION ───────────
+    ///
+    /// A live transport may own a complete output path of its own and never enqueue into
+    /// `audioRenderer` at all — HLS is that case: `AVPlayer` plays its own audio to the default
+    /// device. Such a transport is invisible to every line in `applyAudioMute` below, so without
+    /// this seam the toolbar mute does nothing to it, the fader does nothing to it, and selecting
+    /// SDI as the destination leaves it audible on the desktop beside the card.
+    ///
+    /// ⚠️ THIS CARRIES THE DECISION, NOT THE INPUTS. The callee receives the ALREADY-COMBINED mute
+    /// (`isMuted || offSpeed || deckLinkOwnsAudio`) and the fader value — it does not get the three
+    /// terms and re-derive them. That is the whole point: one rule, computed once, applied to two
+    /// outputs. A callee that recombined them would be a second control, which is what this exists
+    /// to avoid.
+    ///
+    /// Assigning it FIRES IT IMMEDIATELY (`didSet`), so a transport wired up after the user has
+    /// already muted or moved the fader inherits the current state instead of starting at full
+    /// volume. That seeding is the reason this is a `didSet` and not a plain stored closure.
+    ///
+    /// MAIN ACTOR, like everything else here.
+    public var externalAudioOutput: ((_ muted: Bool, _ volume: Float) -> Void)? {
+        didSet { applyAudioMute() }
+    }
+
     /// Effective renderer mute = the user's mute OR an active non-1× shuttle OR the SDI destination
     /// owning the program (D4b-3).
     /// Fast-forward replays audio at >1× (pitch/garble), so we mute off-speed and
     /// restore the user's choice when returning to 1× — standard NLE behavior.
     private func applyAudioMute() {
         let offSpeed = shuttleRate != 0 && shuttleRate != 1
-        audioRenderer.isMuted = isMuted || offSpeed || deckLinkOwnsAudio
+        let effectiveMute = isMuted || offSpeed || deckLinkOwnsAudio
+        audioRenderer.isMuted = effectiveMute
+        // The SAME decision, handed to any transport that plays through its own output rather than
+        // through `audioRenderer`. All three terms reach it because all three are already combined
+        // above; `deckLinkOwnsAudio` is the one that matters most here, because it is what stops
+        // the program being heard from the card AND the Mac at the same time.
+        externalAudioOutput?(effectiveMute, volume)
         // D4b-2: mirror the same decision for the SDI audio stream, which pulls from a callback thread
         // and cannot touch main-actor state. One addition the PULL model forces: PAUSE is silence too.
         // The system renderer gets that for free (a stopped synchronizer clock simply stops pulling);

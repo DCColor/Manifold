@@ -1154,6 +1154,9 @@ final class DeckRegistry {
         DeckLinkService.shared.isCardAudioSilentProvider = nil
         DeckLinkService.shared.systemAudioRouting = nil
         deck.engine?.audioTap.onFormatChange = nil
+        // The outgoing engine must stop steering HLS's output — otherwise a background deck's
+        // mute would keep reaching a stream the host deck now owns.
+        deck.engine?.externalAudioOutput = nil
 
         // ⚠️ THE OUTGOING ENGINE MUST BE TOLD IT NO LONGER OWES THE CARD ITS SILENCE. It is holding
         // `deckLinkOwnsAudio == true` from the last routing call, and nothing else will ever clear
@@ -1165,6 +1168,7 @@ final class DeckRegistry {
         NDIService.shared.renderer = nil
         NDIService.shared.audioTap = nil
         SRTFrameRouter.shared.audioTap = nil
+        HLSClient.shared.audioTap = nil
         WHEPFrameRouter.shared.renderer = nil
         SRTFrameRouter.shared.renderer = nil
         HLSClient.shared.renderer = nil
@@ -1210,11 +1214,41 @@ final class DeckRegistry {
         // the same enqueue the file sources do.
         NDIService.shared.renderer = renderer
         // …and so does HLS, which is the same PULL shape: `renderer.onDisplayTick` plus the same
-        // `enqueue`. NO `audioTap` — HLS is video-only in this stage and its player is muted, so
-        // there is nothing to tee. That absence is deliberate and is stated on `HLSClient` itself;
-        // wiring a tap here without the rest of the audio seams would be the half-connected state
-        // the SRT block below warns about.
+        // `enqueue`.
         HLSClient.shared.renderer = renderer
+        // HLS audio: the tap feeds the meters and the SDI embed, and the stream is ALSO AUDIBLE —
+        // but not through the engine. `AVPlayer` plays it to the default output device itself, and
+        // `HLSAudioTap` simply passes the samples through on their way there.
+        //
+        // ⚠️ AND DELIBERATELY *ONLY* THIS ONE SEAM, WHICH IS THE WHOLE LIST FOR A PULL SOURCE. The
+        // SRT block below warns that a transport wired with `renderer` + `audioTap` alone is
+        // "silently half-connected" because it is missing the other six — that warning is about
+        // PUSH sources, and it does not transfer. `beginLiveAudio`, `mirrorLiveAudio`,
+        // `endLiveAudio` and `liveAudioDrift` all exist to put a pushed stream's audio onto
+        // `LiveClock` and mirror that clock into the synchronizer's timebase. HLS has no LiveClock
+        // — `HLSClient` does not use `LiveDisplayRoute` at all — and needs none, because
+        // AVFoundation already paces both media off the item's own timebase (measured; see
+        // `HLSAudioTap`). Wiring those seams here would be installing a control loop with no
+        // actuator, which is the same mistake the HLS header rejects on the video side.
+        HLSClient.shared.audioTap = engine.audioTap
+        // ── THE MUTE / FADER / SDI-DESTINATION DECISION, ROUTED TO HLS'S SECOND OUTPUT ───────
+        //
+        // HLS is the only transport whose audio does NOT pass through `engine.audioRenderer`, so
+        // it is the only one `applyAudioMute` cannot govern on its own. This hands it the SAME
+        // already-combined decision (`isMuted || offSpeed || deckLinkOwnsAudio`, plus the fader)
+        // rather than a second control — see `FrameEngine.externalAudioOutput`.
+        //
+        // ⚠️ `deckLinkOwnsAudio` IS THE TERM THIS EXISTS FOR. Without it, enabling DeckLink output
+        // with the destination at `.sdi` would silence the engine's renderer and leave the HLS
+        // stream playing from the Mac — the program audible from the card AND the desktop at once,
+        // which is the exact condition `setDeckLinkOwnsAudio` exists to prevent everywhere else.
+        //
+        // Assigning this FIRES IT IMMEDIATELY (`didSet` on the engine side), so the incoming deck's
+        // current mute/volume reaches a stream that is already running — no separate seeding call
+        // to forget, and the same reason `setDeckLinkOwnsAudio` is evaluated eagerly above.
+        engine.externalAudioOutput = { muted, volume in
+            HLSClient.shared.applyAudioOutput(muted: muted, volume: volume)
+        }
         // Tee NDI audio into the SAME PTS-keyed PCM ring the file paths feed, so the clock-anchored
         // SDI output, SDI/Computer routing and mute apply to NDI for free.
         NDIService.shared.audioTap = engine.audioTap

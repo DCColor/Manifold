@@ -24,6 +24,7 @@ public final class AudioTapBuffer: @unchecked Sendable {
     /// whether a line about a session names the transport that actually produced it.
     public enum SourcePath: String, Sendable {
         case avFoundation = "AVF", libav = "libav", ndi = "NDI", whep = "WHEP", srt = "SRT"
+        case hls = "HLS"
     }
 
     /// The normalized capture format. `channelCount` is the SOURCE interleaved channel count (what the

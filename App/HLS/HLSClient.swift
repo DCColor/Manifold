@@ -55,6 +55,7 @@ import AVFoundation
 import Combine
 import CoreMedia
 import CoreVideo
+import ManifoldCore
 import QuartzCore
 
 // MARK: - The retirable half
@@ -76,11 +77,18 @@ private final class HLSPull: @unchecked Sendable {
     let item: AVPlayerItem
     let output: AVPlayerItemVideoOutput
 
+    /// The audio tap for this session, or nil when no `AudioTapBuffer` was wired (no host deck) or
+    /// the tap could not be created. Owned here BECAUSE IT SHARES THIS OBJECT'S LIFETIME — the same
+    /// reason player/item/output are bundled: one `guard let` in the retirement path takes all of
+    /// them, and `retire()` below is the single site that stands them all down in order.
+    let audioTap: HLSAudioTap?
+
     private let retiredLock = NSLock()
     private var _retired = false
     private var retired: Bool { retiredLock.lock(); defer { retiredLock.unlock() }; return _retired }
 
-    init(url: URL, pixelFormat: OSType) {
+    init(url: URL, pixelFormat: OSType, audioSink: AudioTapBuffer?,
+         monitorMuted: Bool, monitorVolume: Float) {
         // ⚠️ NO `AVURLAssetPreferPreciseDurationAndTimingKey`. `AVPlayerScrubProducer` asks for it
         // on FILE urls only, with the note that it "forces a walk an HLS playlist cannot cheaply
         // serve". This is that case, stated from the other side.
@@ -96,7 +104,54 @@ private final class HLSPull: @unchecked Sendable {
         ])
         item.add(output)
         player = AVPlayer(playerItem: item)
-        player.isMuted = true   // stage 1 is VIDEO ONLY — see HLSClient
+
+        // ── ⚠️ NOT MUTED, AND THE MUTE IS THE OPPOSITE OF WHAT IT LOOKS LIKE. MEASURED. ──────
+        //
+        // This line was `player.isMuted = true` while HLS shipped picture-only, where it cost
+        // nothing. IT IS NOT A MUTE IN THE SENSE THAT COMMENT IMPLIED, and leaving it would now
+        // break far more than the speakers: `AVPlayer.isMuted` sits UPSTREAM of an
+        // `MTAudioProcessingTap`, so with it set the callbacks still fire at full rate and every
+        // buffer is ZEROS — measured three times, 238/238 buffers, peak exactly 0.0. It would take
+        // the METERS and the SDI EMBED down with it, silently, while every status line still
+        // reported success.
+        //
+        // `AVPlayer.volume` likewise SCALES what the tap sees (−35.7 dBFS at volume 0.02 against
+        // −1.8 dBFS at 1.0 on the same source buffer), so it is pinned at 1.0 rather than left to
+        // whatever a caller might set: an attenuated player would make the meters read low, which
+        // is a lie told by an instrument.
+        //
+        // So these two lines now serve the tap first and the speakers second. HLS IS AUDIBLE ON
+        // THE DESKTOP, played by AVFoundation's own output — the tap passes its samples through
+        // rather than consuming them.
+        //
+        // ⚠️ AND THEY MUST STAY AT THESE VALUES FOREVER. THE MUTE AND THE FADER DO REACH HLS, BUT
+        // NOT THROUGH HERE. `HLSAudioTap.setMonitor` applies the engine's decision at the TAP'S
+        // OUTPUT, precisely so the tap keeps seeing full-scale signal — routing the mute to
+        // `player.isMuted` would blank the meters and SDI, and routing the fader to
+        // `player.volume` would make the meters follow the monitoring level, which no other source
+        // in this app does. Wiring the controls here instead would look tidier and would be the
+        // bug. The measurements are on `HLSAudioTap.setMonitor`.
+        player.isMuted = false
+        player.volume = 1.0
+
+        // The tap rides on the item's audio mix. Built BEFORE `startPlayback`, and harmless when
+        // `audioSink` is nil (no host deck): `HLSAudioTap` is simply never constructed and the
+        // stream is video-only exactly as it was before this arc.
+        if let audioSink {
+            let tap = HLSAudioTap(output: output, sink: audioSink)
+            // SEEDED BEFORE A SINGLE CALLBACK CAN FIRE. Connecting a stream while the app is
+            // already muted, or with the fader down, or with SDI owning the audio, must not
+            // produce a burst at full volume before the first `externalAudioOutput` push arrives.
+            // The state is cached on `HLSClient` for exactly this moment; see `applyAudioOutput`.
+            tap.setMonitor(muted: monitorMuted, volume: monitorVolume)
+            audioTap = tap
+            // MEASURED to work attached either before or after `.readyToPlay`; here is simply the
+            // point at which the item and the tap are both in hand.
+            item.audioMix = tap.audioMix
+        } else {
+            audioTap = nil
+            NSLog("[HLS-AUDIO] no AudioTapBuffer wired for this deck — stream stays VIDEO ONLY")
+        }
 
         // ── ⚠️ `automaticallyWaitsToMinimizeStalling` IS DELIBERATELY LEFT AT ITS DEFAULT ────
         //
@@ -205,6 +260,13 @@ private final class HLSPull: @unchecked Sendable {
         return .live(behindEdge: max(0, (live - now).seconds))
     }
 
+    /// Push a new monitoring decision at a RUNNING player. MAIN THREAD. No-op on a retired pull,
+    /// and no-op for a stream with no tap (video only) — there is no second output to govern.
+    func setMonitor(muted: Bool, volume: Float) {
+        guard !retired else { return }
+        audioTap?.setMonitor(muted: muted, volume: volume)
+    }
+
     /// Begin playback. MAIN THREAD. Returns false when this pull was already retired — the same
     /// harmless-by-construction check `capture()` makes, for the same reason: `armPlayback` runs
     /// from a KVO hop, so the stream it belongs to can have been swapped away before it lands, and
@@ -231,6 +293,24 @@ private final class HLSPull: @unchecked Sendable {
     /// to race anything. There is deliberately NO join; see the file header.
     func retire() {
         retiredLock.lock(); _retired = true; retiredLock.unlock()
+
+        // ── AUDIO FIRST, AND IN TWO STEPS, BECAUSE THE TWO THREADS DIFFER ───────────────────
+        //
+        // `HLSAudioTap.retire()` sets ITS flag (making an in-flight real-time tap callback
+        // harmless, exactly as this object's flag does for an in-flight display tick) and then
+        // JOINS our drain thread — which we CAN do, because we own that one. After it returns, no
+        // push against `AudioTapBuffer` is in flight, so the ring cannot be written by a stream
+        // that is being torn down.
+        //
+        // ⚠️ THE MIX IS DETACHED ONLY AFTER THAT JOIN, AND THE ORDER MATTERS. Detaching first
+        // would leave the drain thread running against an item AVFoundation is dismantling;
+        // detaching after is what guarantees the data path is already stopped when AVFoundation
+        // stops calling us. The tap callback thread itself is never joined and does not need to
+        // be — the flag is what makes it harmless, which is the same NDI rule this file's header
+        // sets out for the display tick.
+        audioTap?.retire()
+        audioTap?.detach(from: item)
+
         player.rate = 0
         player.cancelPendingPrerolls()
         item.remove(output)
@@ -242,12 +322,30 @@ private final class HLSPull: @unchecked Sendable {
 
 /// HLS receive. One at a time, arbitrated through `LiveSource`.
 ///
-/// ⚠️ VIDEO ONLY, DELIBERATELY, AND SAID OUT LOUD RATHER THAN LEFT TO BE DISCOVERED. The player is
-/// muted and no `audioTap` is wired, so the meters stay still and SDI embeds silence. This is the
-/// same stage-1 position SRT shipped in (tap only, then the renderer), and it is honest for the QC
-/// use — the feature is "put the scopes on the egress feed", and the scopes are visual. Reaching
-/// audio means an `AVAudioMix`/tap on the item feeding `engine.audioTap`, which is a second
-/// mechanism with its own clock question, not a line in this file.
+/// ── AUDIO: METERED, AUDIBLE, AND IN THE RING THAT FEEDS SDI ─────────────────────────────────
+///
+/// This type used to be VIDEO ONLY. It now feeds `AudioTapBuffer` through `HLSAudioTap`, so the
+/// meters move and the SDI path has real PCM to read — and the stream is AUDIBLE on the default
+/// output device, played by AVFoundation itself. (Whether SDI actually transmits it is a separate,
+/// unresolved question about `setCardAudioSilent` that affects every live transport, not just this
+/// one; the reading is written out at the top of `HLSAudioTap`.)
+///
+/// ⚠️ THAT LAST PART COSTS NOTHING HERE AND IS WHY A PULL SOURCE IS THE EASY CASE. WHEP and SRT
+/// have to open `beginLiveAudio`, obtain a `LiveAudioSink`, and mirror `LiveClock`'s mapping into
+/// the synchronizer's timebase before a single sample can be heard. `AVPlayer` ALREADY HAS AN
+/// OUTPUT PATH; the tap reads the samples on their way to it and passes them on. Nothing here
+/// opens `beginLiveAudio`, mirrors `LiveClock` or touches the synchronizer — not because audio is
+/// being withheld, but because none of that machinery is required to play it.
+///
+/// ⚠️ THE AUDIO CONTROLS STILL GOVERN IT, AND THAT TOOK A SEAM. Because the audio never enters
+/// the engine's shared `AVSampleBufferAudioRenderer`, `FrameEngine.applyAudioMute` cannot reach
+/// it directly. The engine therefore publishes its combined decision through
+/// `externalAudioOutput`, which `DeckRegistry` routes to `applyAudioOutput` below and on into the
+/// running pull. The toolbar mute, the volume fader and the SDI/Computer destination all apply.
+///
+/// The clock needs no help either: `AVPlayerItem`'s timebase drives audio and video together and
+/// AVFoundation does the lip-sync. That is measured, and the measurement plus the standing
+/// instruction not to build a control loop over it are in `HLSAudioTap`'s header.
 /// ── MEASURING HLS'S FRAME RATE, BECAUSE NOTHING DECLARES IT ──────────────────────────────────
 ///
 /// An HLS manifest has no frame-rate attribute we can rely on (`FRAME-RATE` is optional on
@@ -377,6 +475,43 @@ final class HLSClient: ObservableObject {
     /// The display path. Owned by `DeckRegistry`, which points it at the host deck's renderer.
     weak var renderer: MetalVideoRenderer?
 
+    /// The engine's shared PCM ring. Weak, and wired by `DeckRegistry` alongside NDI's and SRT's —
+    /// the engine owns it. Nil means no host deck, which this transport treats as "video only"
+    /// rather than as a failure: see `HLSPull.init`.
+    weak var audioTap: AudioTapBuffer?
+
+    // MARK: - Desktop monitoring (the engine's decision, applied to AVPlayer's own output)
+
+    /// The last decision `FrameEngine.externalAudioOutput` handed us. CACHED BECAUSE A CONNECT CAN
+    /// HAPPEN AT ANY POINT IN THE SESSION: the engine pushes only when the decision CHANGES, so a
+    /// stream connected while the app is already muted would otherwise come up at full volume and
+    /// stay there until the user happened to touch a control. `HLSPull.init` seeds the new tap
+    /// from these two before its first callback can fire.
+    private var monitorMuted = false
+    private var monitorVolume: Float = 1.0
+
+    /// ── THE HOOK THAT MAKES A *LATER* CHANGE REACH A *RUNNING* STREAM ────────────────────────
+    ///
+    /// Wired by `DeckRegistry.attachDeviceHooks` to `FrameEngine.externalAudioOutput`, which fires
+    /// from inside `applyAudioMute()` — the single place the app decides what the audio outputs
+    /// should be doing. Every path that can change that decision already funnels through there:
+    /// `toggleMute()`, `setVolume()`, `setShuttleRate()` (off-speed), `setDeckLinkOwnsAudio()`
+    /// (the SDI destination and the DeckLink enable state), plus `beginLiveAudio` and `stop()`.
+    ///
+    /// ⚠️ SO THE HOOK IS ON THE DECISION, NOT ON THE CONNECT. That is the difference between a
+    /// mute that works and one that only works if you set it before connecting: this arrives
+    /// whenever the state moves, and `pull?.setMonitor` walks it into whatever player is running
+    /// at that instant. `didSet` on the engine's property also fires it once at wiring time, so
+    /// adopting a deck mid-session seeds correctly too.
+    ///
+    /// MAIN THREAD — `applyAudioMute` is main-actor and so is everything here.
+    func applyAudioOutput(muted: Bool, volume: Float) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        monitorMuted = muted
+        monitorVolume = volume
+        pull?.setMonitor(muted: muted, volume: volume)
+    }
+
     /// Retire whatever else is driving the display, just before we take it. Installed once by
     /// `DeckRegistry.init` alongside NDI's, WHEP's and SRT's — the deck losing the display gets a
     /// full `stop()` (so no departed file's duration, timecode, aspect, colour tags or clean
@@ -474,7 +609,8 @@ final class HLSClient: ObservableObject {
         // HLS→HLS case — the old pull is already gone, one line up.
         onWillActivateStream?()
 
-        let fresh = HLSPull(url: url, pixelFormat: Self.videoPixelFormat)
+        let fresh = HLSPull(url: url, pixelFormat: Self.videoPixelFormat, audioSink: audioTap,
+                            monitorMuted: monitorMuted, monitorVolume: monitorVolume)
         pull = fresh
         generation &+= 1
         let token = generation
