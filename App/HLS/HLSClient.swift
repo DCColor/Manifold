@@ -389,8 +389,95 @@ private final class HLSPull: @unchecked Sendable {
 ///
 /// Single-threaded by construction — every method is called from the CVDisplayLink tick that owns
 /// `pullFrame`, and from nowhere else.
+/// ── RUNG 1 FOR HLS: `FRAME-RATE` OFF THE MASTER PLAYLIST ─────────────────────────────────────
+///
+/// `EXT-X-STREAM-INF` carries an OPTIONAL `FRAME-RATE` attribute (RFC 8216 §4.3.4.2). When the
+/// packager writes it, it is a declaration and beats anything measured — which matters here more
+/// than on WHEP, because HLS's measurement is quantised by the display tick and cannot reliably
+/// separate 29.97 from 30 (see `FrameRateEstimator.windowSize`).
+///
+/// MEASURED, 2026-09-18:
+///   * Cloudflare Stream:  PRESENT on every variant — `FRAME-RATE=23.976` across all five rungs.
+///   * Apple bipbop:       ABSENT on every variant. No `FRAME-RATE` anywhere in the master.
+/// So this is worth having AND cannot be relied on; the estimator stays as the fallback.
+///
+/// ⚠️ THE SPEC SAYS "MAXIMUM FRAME RATE", NOT AVERAGE (§4.3.4.2). For CFR content those are the
+/// same number. For a variable-rate source they are not, and the declaration would then be an
+/// upper bound rather than a cadence — which is one more reason the estimator keeps running
+/// underneath as a cross-check rather than being switched off.
+enum HLSMasterPlaylist {
+
+    /// Every `FRAME-RATE` value in the master, in variant order. Empty when the attribute is
+    /// absent, or when this is a MEDIA playlist rather than a master (no `EXT-X-STREAM-INF` at
+    /// all) — both are ordinary and both mean "fall through to measurement".
+    static func frameRates(in playlist: String) -> [Double] {
+        var out: [Double] = []
+        for line in playlist.split(whereSeparator: \.isNewline) {
+            guard line.hasPrefix("#EXT-X-STREAM-INF:") else { continue }
+            // Attributes are comma-separated, but quoted values may contain commas (CODECS="a,b"),
+            // so the split has to respect quotes rather than being a plain `split(",")`.
+            var inQuotes = false
+            var field = ""
+            var fields: [String] = []
+            for ch in line.dropFirst("#EXT-X-STREAM-INF:".count) {
+                if ch == "\"" { inQuotes.toggle(); field.append(ch) }
+                else if ch == "," && !inQuotes { fields.append(field); field = "" }
+                else { field.append(ch) }
+            }
+            fields.append(field)
+            for f in fields {
+                let kv = f.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard kv.count == 2, kv[0].trimmingCharacters(in: .whitespaces) == "FRAME-RATE",
+                      let v = Double(kv[1].trimmingCharacters(in: .whitespaces)),
+                      v.isFinite, v > 0 else { continue }
+                out.append(v)
+            }
+        }
+        return out
+    }
+
+    /// The ONE declared rate for this ladder, or nil.
+    ///
+    /// ⚠️ `FRAME-RATE` IS PER-VARIANT, AND DISAGREEMENT MEANS REFUSE — NOT "PICK ONE".
+    /// The ABR ladder switches renditions mid-stream and we are not told which one is playing, so
+    /// if the variants declare different cadences there is no single correct answer to publish. A
+    /// mixed 30/60 ladder is a real configuration, and picking the highest-resolution variant's
+    /// value would set the wrong cadence on the wire for every second the player spends on another
+    /// rung. Exact agreement is required — not "within a tolerance", because the pair this has to
+    /// be careful about (29.97 vs 30) is 0.1% apart and any tolerance wide enough to be useful
+    /// would swallow it. Disagreement falls through to the estimator, which at least measures
+    /// whatever is actually playing.
+    static func declaredFrameRate(in playlist: String) -> (rate: Double?, allValues: [Double]) {
+        let rates = frameRates(in: playlist)
+        guard let first = rates.first else { return (nil, rates) }
+        return (rates.allSatisfy { $0 == first } ? first : nil, rates)
+    }
+}
+
 private struct FrameRateEstimator {
     /// Gaps needed before an estimate is offered. See the window note above.
+    ///
+    /// ⚠️ THIS CONSTANT — NOT THE AVERAGING METHOD — IS WHAT DECIDES WHETHER THE MODE IS STABLE,
+    /// AND AT 120 IT IS NOT. MEASURED across two runs: 458 windows on bipbop split 240x 1080p29.97
+    /// / 218x 1080p30, and 560 windows on a live source split 312x 1080p23.98 / 248x 1080p24. The
+    /// estimate varies +/-0.25% window to window while the pairs it must separate are 0.1% apart,
+    /// so which mode gets picked is decided by whichever window happens to be current at connect
+    /// time and then frozen by the 1% hold.
+    ///
+    /// THE CAUSE IS ENDPOINT QUANTISATION, WHICH NO FORMULA CAN AVERAGE AWAY. Capture instants are
+    /// snapped to the display tick; over a span of N x interval the two endpoints each carry up to
+    /// half a tick, so precision is ~(tick / span) and improves only with a LONGER SPAN.
+    ///
+    /// Modelled against the real beat pattern, windows needed for a single stable mode:
+    ///
+    ///     N=120  4.0s  +/-0.415%  two modes      N=480  16.0s  +/-0.104%  two modes
+    ///     N=240  8.0s  +/-0.208%  two modes      N=600  20.0s  +/-0.083%  ONE MODE
+    ///     N=360 12.0s  +/-0.139%  two modes      N=900  30.0s  +/-0.056%  ONE MODE
+    ///
+    /// So ~600 (20 s at 30 fps, 20 s at 24 fps) is where this becomes reliable. LEFT AT 120
+    /// DELIBERATELY AND NOT RAISED HERE: it trades 4 s to a first answer for 20 s, which is a
+    /// product decision about how long "Follow source" may sit unavailable after a connect, not a
+    /// correctness one. Raising it is a one-line change once that trade is made.
     private static let windowSize = 120
     /// Gaps outside this band, at more than the window's span, are not a cadence — a segment
     /// boundary, a stall, or an app suspension. Sampling stops making sense long before this.
@@ -401,9 +488,69 @@ private struct FrameRateEstimator {
     /// The last value handed out, so the caller can log a CHANGE rather than a stream of samples.
     private(set) var estimate: Double?
 
+    /// ── DIAGNOSTICS ONLY. READ NOTHING HERE INTO A DECISION. ────────────────────────────
+    ///
+    /// Populated on every call that actually COMPUTES an estimate, and set to nil on every call
+    /// that does not, so a caller testing it for non-nil is asking "was a fresh estimate produced
+    /// this frame?" — which is the question the per-estimate log needs and which the `Bool` return
+    /// (deliberately "did the HELD value change?") cannot answer.
+    ///
+    /// ⚠️ THIS EXISTS TO SETTLE ONE QUESTION AND CHANGES NOTHING WHILE IT DOES. The trim below is
+    /// `[0.5x, 2.0x]`, and 2.0 is INCLUSIVE — so the gap left by a single missed display tick,
+    /// which is almost exactly 2x the frame interval, sits on the boundary and may be kept. Kept
+    /// samples at 2x drag the mean up and the fps down: modelled at 30 fps over a 120-sample
+    /// window, ONE surviving 2x gap moves the estimate to 29.752, which snaps to 29.97 rather than
+    /// 30 — a different mode on the wire. `nearDoubleKept` counts exactly those samples. If it is
+    /// reliably 0 on a live playlist the concern is theoretical; if it is not, the trim needs
+    /// tightening, and that is a SEPARATE change with its own justification.
+    struct Diagnostics {
+        let keptCount: Int
+        let discardedCount: Int
+        /// Kept samples between 1.75x and 2.25x of the median — missed-tick intervals that
+        /// survived the filter. THE NUMBER THIS WHOLE BLOCK EXISTS FOR.
+        let nearDoubleKept: Int
+        let medianInterval: Double
+        /// `(max - min) / median` over the KEPT samples — RAW per-sample jitter.
+        ///
+        /// ⚠️ THIS IS NOT THE ESTIMATOR'S PRECISION AND WILL NOT IMPROVE WHEN THE ESTIMATOR DOES.
+        /// It is a property of the SOURCE SAMPLING, not of the arithmetic: a display tick captures
+        /// frames on a 60 Hz grid, the source rate is incommensurate with it, and the capture
+        /// instants therefore beat against the grid by up to half a tick. Modelled, that alone
+        /// produces 50% spread for a 29.97 source and 33% for a 23.98 one — which is exactly the
+        /// 5-50% measured. Read `fitResidual` for confidence in the answer, and the `fps` column
+        /// across successive windows for its stability.
+        let spread: Double
+        /// Worst |gap - multiple x median| / median over the kept samples.
+        ///
+        /// ⚠️ DIAGNOSTIC ONLY ON THIS TRANSPORT. DO NOT MAKE IT A GATE, AND DO NOT UNIFY IT WITH
+        /// WHEP'S — WHEP REFUSES ON THIS NUMBER AND HLS MUST NOT.
+        ///
+        /// MEASURED ~20% here, BY CONSTRUCTION, on a perfectly healthy stream. The cause is
+        /// display-tick sampling: at 23.976 fps against a 60 Hz tick the frame interval is 2.5
+        /// ticks, so capture instants cannot land on a constant gap — they alternate 2 and 3 ticks
+        /// (33.3 ms / 50.0 ms) forever. No integer multiple of any median fits both, so the residual
+        /// is large no matter how clean the source is. Porting WHEP's 2% gate here would refuse
+        /// every HLS stream at every rate whose interval is not a whole number of ticks.
+        ///
+        /// WHEP IS IMMUNE BECAUSE IT MEASURES A DIFFERENT CLOCK. Its samples are the sender's 90 kHz
+        /// RTP timestamps — capture instants from the encoder, never resampled by our display — so
+        /// its gaps genuinely are constant and a 2% fit residual is a real signal there.
+        ///
+        /// The two estimators share a shape and NOT a confidence metric, and that is correct.
+        let fitResidual: Double
+        /// Sum of the assigned integer multiples, and the elapsed time they span.
+        let totalIntervals: Double
+        let span: Double
+        let fps: Double
+    }
+    /// Non-nil only for the frame on which it was computed. See the note above.
+    private(set) var diagnostics: Diagnostics?
+
     /// Feed one captured frame's item time. Returns true when `estimate` changed meaningfully
     /// (first estimate, or a move of more than 1%), which is the caller's cue to log.
     mutating func record(itemTime: CMTime) -> Bool {
+        // Cleared first so that "non-nil" means "computed on THIS call" — see `diagnostics`.
+        diagnostics = nil
         defer { lastItemTime = itemTime }
         guard let lastItemTime else { return false }
         let gap = CMTimeGetSeconds(CMTimeSubtract(itemTime, lastItemTime))
@@ -419,10 +566,66 @@ private struct FrameRateEstimator {
         guard median > 0 else { return false }
         let kept = gaps.filter { $0 >= median * 0.5 && $0 <= median * 2.0 }
         guard !kept.isEmpty else { return false }
-        let mean = kept.reduce(0, +) / Double(kept.count)
-        guard mean > 0 else { return false }
 
-        let fps = 1.0 / mean
+        // ── SPAN MEASUREMENT: FRAME INTERVALS ÷ ELAPSED TIME ────────────────────────────────
+        //
+        // Each gap is rounded to the nearest INTEGER MULTIPLE of the median, and the multiples are
+        // summed rather than the samples counted. A gap left by a dropped frame then contributes
+        // both 2 intervals and 2 intervals' worth of elapsed time, so it cancels exactly instead of
+        // dragging the answer down.
+        //
+        // ⚠️ THIS MAKES THE TRIM QUESTION MOOT, WHICH IS THE POINT. A 2x gap gives the same answer
+        // whether the `[0.5x, 2.0x]` filter keeps it (span += 2 iv, intervals += 2) or discards it
+        // (span += 0, intervals += 0). VERIFIED: 120-sample window at 30 fps with 3 dropped frames
+        // reads 30.0000 either way, against 29.2683 under the old trimmed mean. The trim is
+        // therefore left exactly as it is — the missed-tick concern it was suspected of is refuted
+        // by measurement (nearDbl=0 across 1018 windows on two sources), and this method would not
+        // care if it were not.
+        //
+        // ⚠️ AND IT IS NOT A PRECISION IMPROVEMENT. `span` is the SUM of the kept gaps, not
+        // `last - first`, because a gap rejected above (a stall, a seek) must contribute neither
+        // time nor intervals. In the ordinary case where nothing is rejected the sum telescopes and
+        // the two are identical — which also means the OLD formula was already a span measurement:
+        // `1/mean(gaps)` == `count/sum(gaps)` == `count/span`, identical to 3.5e-15 fps. The
+        // window-to-window variation this was expected to fix comes from somewhere else entirely;
+        // see `windowSize`.
+        var totalIntervals = 0.0
+        var span = 0.0
+        var maxFitResidual = 0.0
+        for g in kept {
+            let m = max(1.0, (g / median).rounded())
+            totalIntervals += m
+            span += g
+            // How far this gap sits from the integer multiple it was assigned, relative to one
+            // interval. Large values mean the multiple assignment is guesswork — a variable-rate
+            // source — and that the answer below should not be trusted.
+            maxFitResidual = max(maxFitResidual, abs(g - m * median) / median)
+        }
+        guard span > 0, totalIntervals > 0 else { return false }
+
+        let fps = totalIntervals / span
+
+        // DIAGNOSTICS, computed from the SAME `median` and `kept` the estimate above used — not
+        // recomputed, so the log cannot describe a different window than the one that produced the
+        // number. Pure observation: nothing below reads any of it.
+        // One pass, no second allocation — `kept` is already an allocated filter result and this
+        // runs on the display tick.
+        var nearDouble = 0
+        var keptMin = Double.greatestFiniteMagnitude, keptMax = 0.0
+        for g in kept {
+            if g >= median * 1.75 && g <= median * 2.25 { nearDouble += 1 }
+            if g < keptMin { keptMin = g }
+            if g > keptMax { keptMax = g }
+        }
+        diagnostics = Diagnostics(keptCount: kept.count,
+                                  discardedCount: gaps.count - kept.count,
+                                  nearDoubleKept: nearDouble,
+                                  medianInterval: median,
+                                  spread: median > 0 ? (keptMax - keptMin) / median : .nan,
+                                  fitResidual: maxFitResidual,
+                                  totalIntervals: totalIntervals,
+                                  span: span,
+                                  fps: fps)
 
         // ⚠️ THE ESTIMATE IS HELD UNTIL IT MOVES MEANINGFULLY, AND THAT IS NOT COSMETIC. A rolling
         // window re-computes every frame and lands a few thousandths of an fps away each time. If
@@ -517,6 +720,21 @@ final class HLSClient: ObservableObject {
     /// full `stop()` (so no departed file's duration, timecode, aspect, colour tags or clean
     /// aperture survive behind the stream) and every other deck merely yields its transport.
     var onWillActivateStream: (() -> Void)?
+
+    /// RUNG 1 — `FRAME-RATE` from the master playlist, or nil when the packager did not write one
+    /// (Apple's bipbop does not; Cloudflare Stream does). Written ONCE by the fetch below, read on
+    /// every display tick, so it needs the lock: `UnfairLock` rather than `NSLock` for the reason
+    /// `LiveDisplaySize` states — the render thread must not block behind a lower-priority holder.
+    private let declaredRateLock = UnfairLock()
+    private var declaredFrameRateStorage: Double?
+    private var declaredFrameRate: Double? {
+        get { declaredRateLock.lock(); defer { declaredRateLock.unlock() }; return declaredFrameRateStorage }
+        set { declaredRateLock.lock(); declaredFrameRateStorage = newValue; declaredRateLock.unlock() }
+    }
+    /// Edge-triggered, like WHEP's: the declared-vs-measured disagreement state.
+    private var rateDisagreementActive = false
+    /// Relative disagreement that counts as real. Same 2% as WHEP, same reasoning.
+    private static let rateDisagreementThreshold = 0.02
 
     /// Cadence measurement for the DeckLink output mode. Display-tick thread only, like `pullFrame`.
     private var frameRateEstimator = FrameRateEstimator()
@@ -614,6 +832,19 @@ final class HLSClient: ObservableObject {
         pull = fresh
         generation &+= 1
         let token = generation
+
+        // RUNG 1: ask the master playlist what cadence it declares. A SECOND fetch of a URL
+        // AVFoundation is also fetching, deliberately — AVPlayer exposes no way to read the
+        // master's attributes, and the alternative is not having the answer. Small, cached by
+        // URLSession, and entirely off the critical path: the estimator runs regardless and the
+        // declaration simply overrides it when it lands.
+        declaredFrameRate = nil
+        rateDisagreementActive = false
+        // ⚠️ `token`, NOT `generation &+ 1`. This read `generation &+ 1` and the completion's
+        // `guard self.generation == token` therefore compared n against n+1 and returned SILENTLY
+        // on every connect — the rung never ran once, and said nothing while not running. The
+        // increment happened ten lines up; `token` is already the value to match.
+        fetchDeclaredFrameRate(from: url, token: token)
 
         frameCount = 0
         lastRateLogCount = 0
@@ -755,6 +986,122 @@ final class HLSClient: ObservableObject {
     /// ⚠️ EVERY GUARD HERE IS THE TEARDOWN CONTRACT, NOT DEFENSIVE PADDING. See the file header:
     /// `pull` may be nil (already retired), and a `pull` captured strongly here may be retired
     /// underneath us mid-call — which `capture()` answers with nil rather than a crash.
+    /// Fetch and parse the master playlist for its declared `FRAME-RATE`. Fire-and-forget: a
+    /// failure, a media playlist, or an absent attribute all mean "fall through to measurement",
+    /// which is the state we are already in.
+    ///
+    /// ⚠️ THE URL IS NEVER LOGGED. An HLS path can carry a stream key — the same rule the connect
+    /// error banner follows.
+    /// ⚠️ EVERY PATH THROUGH THIS FUNCTION LOGS, INCLUDING THE ONES THAT DO NOTHING.
+    ///
+    /// It shipped with a wrong generation token, so the completion's staleness guard rejected its
+    /// own result on every connect — and because that guard was a bare `return`, the rung produced
+    /// no picture of itself at all: no success line, no failure line, nothing to grep for. It read
+    /// exactly like a rung that had never been wired. A silent failure inside the instrument built
+    /// to remove silent failures is the specific mistake this file has spent a day undoing, so the
+    /// rule here is absolute: this function states what it attempted, what came back, what it
+    /// parsed and what it decided, on every path, including "superseded" and "torn down".
+    private func fetchDeclaredFrameRate(from url: URL, token: UInt64) {
+        // ⚠️ REDACTED, DELIBERATELY. An HLS path can carry a stream key — the same rule the connect
+        // error banner follows ("never a full URL"). Scheme, host and the final component are
+        // enough to answer the question this log exists for: "did it fetch the master, or something
+        // else?" Everything between is replaced.
+        let shown = Self.redactedForLog(url)
+        print("[HLS-FORMAT] rung 1: fetching master playlist for FRAME-RATE — \(shown)")
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else {
+                print("[HLS-FORMAT] rung 1: client gone before the playlist returned — no rate")
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let bytes = data?.count ?? 0
+            DispatchQueue.main.async {
+                // Superseded by a later connect: this answer is about a stream we have left. LOGGED,
+                // not silent — this is the exact branch whose silence hid the bug.
+                guard self.generation == token else {
+                    print("[HLS-FORMAT] rung 1: result superseded (token \(token), now "
+                        + "\(self.generation)) — discarding; a newer connect owns this deck")
+                    return
+                }
+                guard error == nil, let data, let text = String(data: data, encoding: .utf8) else {
+                    print("[HLS-FORMAT] rung 1: FAILED — HTTP \(status), \(bytes) byte(s), "
+                        + "\(error?.localizedDescription ?? "body was not UTF-8"). "
+                        + "Falling through to measurement.")
+                    return
+                }
+                let variantLines = text.split(whereSeparator: \.isNewline)
+                    .filter { $0.hasPrefix("#EXT-X-STREAM-INF:") }.count
+                let (declared, all) = HLSMasterPlaylist.declaredFrameRate(in: text)
+                let preamble = "rung 1: HTTP \(status), \(bytes) byte(s), "
+                             + "\(variantLines) EXT-X-STREAM-INF line(s), "
+                             + "\(all.count) with FRAME-RATE"
+                if let declared {
+                    self.declaredFrameRate = declared
+                    print(String(format: "[HLS-FORMAT] %@ → frame rate %.3f fps DECLARED "
+                                         + "(all variants agree) — exact, beats measurement.",
+                                 preamble, declared))
+                } else if all.isEmpty {
+                    print("[HLS-FORMAT] \(preamble) → no FRAME-RATE declared. Falling through to "
+                        + "measurement (ordinary; Apple's bipbop ladder has none either).")
+                } else {
+                    let list = all.map { String(format: "%.3f", $0) }.joined(separator: ", ")
+                    print("[HLS-FORMAT] \(preamble) → variants DISAGREE [\(list)]. No single "
+                        + "declared cadence for this ladder, and the player does not say which rung "
+                        + "it is on. Falling through to measurement.")
+                }
+            }
+        }.resume()
+    }
+
+    /// Scheme + host + final path component, with everything between replaced. See the call site.
+    private static func redactedForLog(_ url: URL) -> String {
+        let scheme = url.scheme ?? "?"
+        let host = url.host ?? "?"
+        let last = url.lastPathComponent
+        let depth = url.pathComponents.count
+        return "\(scheme)://\(host)/…(\(max(0, depth - 2)) segment(s))…/\(last)"
+    }
+
+    /// ── THE CROSS-CHECK, THE SAME SHAPE AS WHEP'S ───────────────────────────────────────────
+    ///
+    /// The declaration wins and the estimator keeps running underneath it as a check. Rationale is
+    /// WHEP's verbatim and it applies here for the same reason: "a publisher declaring one
+    /// configuration while sending another, with every counter clean" is the 5.1-Opus failure in
+    /// docs/BUGS.md, whose conclusion was that a misconfiguration nothing can fix must at least be
+    /// STATED. Here it is detectable and the instrument already exists.
+    ///
+    /// REPORTS, DOES NOT ACT — no override, no fallback. The declaration is the packager's stated
+    /// intent; the measurement is the degradable one (display-tick quantisation alone moves it
+    /// ±0.25%). Edge-triggered so a transient does not leave a stale warning.
+    ///
+    /// ⚠️ 2% IS COMFORTABLY WIDER THAN THIS ESTIMATOR'S OWN NOISE, WHICH IS THE POINT. A declared
+    /// 30 against a measured 29.93 is 0.23% and will NOT trip it — that gap is the quantisation
+    /// described on `windowSize`, not a misconfiguration. 24 vs 25 is 4.2% and always will.
+    private func crossCheckDeclaredRate(declared: Double, measured: Double?) {
+        guard let measured else { return }
+        let disagreement = abs(measured - declared) / declared
+        let nowDisagreeing = disagreement > Self.rateDisagreementThreshold
+        guard nowDisagreeing != rateDisagreementActive else { return }
+        rateDisagreementActive = nowDisagreeing
+        if nowDisagreeing {
+            print(String(format: "[HLS-FORMAT] ⚠️ master playlist declares %.3f fps but measured "
+                                 + "%.3f fps over 120 frames (%.1f%% disagreement) — using the "
+                                 + "declared rate; the publisher may be misconfigured.",
+                         declared, measured, disagreement * 100))
+            let advisory = String(format: "Source declares %.3f fps but is sending %.3f fps — "
+                                          + "output follows the declared rate.", declared, measured)
+            DispatchQueue.main.async { DeckLinkService.shared.setSourceAdvisory(advisory) }
+        } else {
+            print(String(format: "[HLS-FORMAT] declared and measured rates now agree "
+                                 + "(%.3f vs %.3f fps) — earlier disagreement retracted.",
+                         declared, measured))
+            DispatchQueue.main.async { DeckLinkService.shared.setSourceAdvisory(nil) }
+        }
+    }
+
     private func pullFrame() {
         guard let pull, let renderer else { return }
         guard let captured = pull.capture() else { return }
@@ -779,11 +1126,43 @@ final class HLSClient: ObservableObject {
             lastPulledRaster = (width, height)
             frameRateEstimator.resetWindow()
         }
-        if frameRateEstimator.record(itemTime: captured.itemTime), let fps = frameRateEstimator.estimate {
+        let rateChanged = frameRateEstimator.record(itemTime: captured.itemTime)
+        if rateChanged, let fps = frameRateEstimator.estimate {
             print(String(format: "[HLS-FORMAT] frame rate measured %.3f fps over a 120-frame window "
                                  + "(trimmed mean of item-time gaps) — DeckLink Follow source can use it",
                          fps))
         }
+        #if DEBUG
+        // ── PER-ESTIMATE DIAGNOSTICS (DEBUG builds only) ────────────────────────────────────
+        //
+        // EVERY estimate, not only the ones that move the published value — the question is
+        // whether the figure is STABLE or oscillating across the 29.97/30 boundary, and a
+        // log that fires only on change cannot show a value sitting still. Changes NOTHING:
+        // `frameRateEstimator.diagnostics` is pure observation of the window just computed.
+        //
+        // `nearDbl` IS THE NUMBER TO READ. It counts kept samples at ~2x the median — missed-tick
+        // gaps that survived the inclusive `[0.5x, 2.0x]` trim. Modelled, one of them moves a
+        // 30 fps window to 29.752, which resolves to 1080p29.97 instead of 1080p30. `mode` is what
+        // `resolveOutputMode` would actually pick from this window, so the consequence is in the
+        // line rather than left to be worked out.
+        //
+        // ⚠️ OBSERVER EFFECT, STATED SO IT IS NOT DISCOVERED LATER. This prints from the
+        // CVDisplayLink tick — the same thread whose missed ticks are the thing being counted. At
+        // 30 fps it is ~30 lines/s. If `nearDbl` is high here but the stream looks clean, re-check
+        // with a shorter run before concluding the source drops frames: the logging may be causing
+        // some of what it reports.
+        if let d = frameRateEstimator.diagnostics {
+            let mode = DeckLinkService.resolveOutputMode(width: width, height: height,
+                                                         frameRate: d.fps)
+            print(String(format: "[HLS-RATE] %@ kept=%d disc=%d nearDbl=%d · median=%.4fms "
+                                 + "spread=%.2f%% fit=%.2f%% · ivals=%.0f span=%.3fs · "
+                                 + "fps=%.4f → %@",
+                         declaredFrameRate == nil ? "measured" : "declared+check",
+                         d.keptCount, d.discardedCount, d.nearDoubleKept,
+                         d.medianInterval * 1000, d.spread * 100, d.fitResidual * 100,
+                         d.totalIntervals, d.span, d.fps, mode.label))
+        }
+        #endif
 
         // ⚠️ THE SHAPE, PER FRAME, AND FOR HLS THIS IS NOT A FORMALITY. MEASURED: the ABR ladder
         // settled from 4K to 1280×720 inside a 25 s window (docs/BUGS.md). The raster of a live
@@ -802,11 +1181,16 @@ final class HLSClient: ObservableObject {
         //     3840/2160 == 1280/720. It DOES move if a raster percentage is active, because
         //     "100% of source" is a statement about a raster the ladder is entitled to change.
         //
-        // THE MEASURED RATE TRAVELS WITH THE RASTER. nil until the first full window closes, which
-        // is the honest state — "we have a picture and do not yet know its cadence" — and is exactly
-        // when `DeckLinkService` declines to follow and says so in the menu.
+        // THE LADDER: the master playlist's declaration if there is one, else the measurement.
+        // nil until one of them exists, which is the honest state — "we have a picture and do not
+        // yet know its cadence" — and is exactly when `DeckLinkService` declines to follow.
+        //
+        // The estimator has already run this frame regardless (above), because when a declaration
+        // exists the measurement's job becomes CHECKING it. See `crossCheckDeclaredRate`.
+        let declared = declaredFrameRate
+        if let declared { crossCheckDeclaredRate(declared: declared, measured: frameRateEstimator.estimate) }
         LiveDisplaySize.shared.publish(width: width, height: height,
-                                       frameRate: frameRateEstimator.estimate)
+                                       frameRate: declared ?? frameRateEstimator.estimate)
 
         publishColorTagsIfChanged(of: pixelBuffer)
 
@@ -1090,6 +1474,9 @@ final class HLSClient: ObservableObject {
         // as `isConnected` not dipping across a swap.
         frameRateEstimator.reset()
         lastPulledRaster = nil
+        declaredFrameRate = nil
+        rateDisagreementActive = false
+        DeckLinkService.shared.setSourceAdvisory(nil)
         LiveDisplaySize.shared.clear()
         NSLog("[HLS] disconnected")
     }
