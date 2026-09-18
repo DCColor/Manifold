@@ -303,6 +303,32 @@ final class DeckLinkService: ObservableObject {
     /// mismatch scrolled away. See docs/BUGS.md.
     @Published private(set) var rasterMismatch: String?
 
+    /// ── THE ADVISORY CHANNEL: "THE OUTPUT IS FINE, THE SOURCE IS NOT WHAT IT CLAIMS" ────────
+    ///
+    /// One operator-facing sentence about the SOURCE that the operator would otherwise have no way
+    /// to learn, or nil. DISTINCT FROM `rasterMismatch`, which says the wire is carrying black —
+    /// an advisory means the output is working and something upstream deserves a second look.
+    ///
+    /// The first entry is WHEP's declared-vs-measured frame rate disagreement. The shape is
+    /// deliberately general because the class of problem is: docs/BUGS.md records the 5.1-Opus
+    /// case, where a publisher was configured one way and sending another with every counter in
+    /// the pipeline clean, and concluded that a misconfiguration nothing can fix must at least be
+    /// STATED. This is where such statements go.
+    ///
+    /// ⚠️ ADVISORIES DESCRIBE, THEY DO NOT ACT. Nothing here changes output behaviour. If a future
+    /// advisory tempts someone to also "correct" the thing it describes, that is a different
+    /// decision and needs its own justification — see `crossCheckRate`'s note on why the WHEP case
+    /// deliberately publishes the declared rate it is warning about.
+    @Published private(set) var sourceAdvisory: String?
+
+    /// Set or clear the advisory. MAIN THREAD — callers hop (the WHEP one arrives on the decode
+    /// queue). Idempotent, so an edge-triggered producer can call it freely.
+    func setSourceAdvisory(_ message: String?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard sourceAdvisory != message else { return }
+        sourceAdvisory = message
+    }
+
     // MARK: - D4b-2: SDI audio
 
     /// The engine's PCM ring (D4b-1), set by the App at startup alongside `renderer`. The card's audio
@@ -895,6 +921,11 @@ final class DeckLinkService: ObservableObject {
             cancelPendingLiveMode()
             sourceDerivedMode = nil
             followSourceUnavailableReason = "No source is connected."
+            // An advisory describes a SOURCE. With the source gone it cannot still be true, and a
+            // stale one would be the same class of misleading indicator this channel exists to
+            // remove. Cleared centrally here as well as by the transport, so a transport that
+            // forgets cannot leave one on screen.
+            sourceAdvisory = nil
             print("DeckLink D4a: live source gone — holding output mode \(currentMode.label)")
             return
         }

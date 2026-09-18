@@ -197,6 +197,16 @@ final class WHEPClient: ObservableObject {
         // still has both. This is also the only site that touches the unwrapper: once per
         // access unit, in arrival order, on one thread, which is exactly what its state needs.
         session.onVideoAccessUnit = { avcc, sps, pps, parameterSetsChanged, keyframe, rtpTimestamp in
+            // RUNG 1 of the frame-rate ladder, BEFORE the decode: the SPS the depacketizer just
+            // extracted may carry the encoder's declared cadence in its VUI. Only on a parameter-set
+            // change, so this is a handful of bit reads per keyframe interval, not per frame. The
+            // router latches the first valid answer and ignores the rest.
+            //
+            // Same thread and same order as the decode below — the closure runs on
+            // `session.decodeQueue`, serially, which is the isolation the router's rate state wants.
+            if parameterSetsChanged, let sps, sps.count > 0 {
+                WHEPFrameRouter.shared.noteParameterSets(sps: sps)
+            }
             decoder.decode(accessUnit: avcc,
                            sps: sps,
                            pps: pps,

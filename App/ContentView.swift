@@ -2309,6 +2309,14 @@ struct ContentView: View {
                     // colorspace reading is a FALSE statement while the renderer is refusing the
                     // copy and the wire is carrying black. See DeckLinkService.rasterMismatch.
                     Button(deckLink.signalLineOrWarning) {}.disabled(true)
+                    // AN ADDITIONAL ROW, NOT A REPLACEMENT. A raster mismatch says the wire is
+                    // black; an advisory says the wire is fine and the SOURCE is not what it
+                    // claims. Both can be true at once and they are different problems, so the
+                    // advisory sits beside the signal line rather than overwriting it the way the
+                    // mismatch does. See DeckLinkService.sourceAdvisory.
+                    if let advisory = deckLink.sourceAdvisory {
+                        Button("⚠️ \(advisory)") {}.disabled(true)
+                    }
                 }
                 // A below-floor driver enumerates devices perfectly well, so the picker above can look
                 // healthy while output is impossible. State the reason where the picker is.

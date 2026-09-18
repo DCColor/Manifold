@@ -30,3 +30,9 @@
 // subject is build-configuration fragility, the import that needs no build-setting edit is the
 // right one. See App/BuildInfoC.h for why this cannot be answered from Swift.
 #import "../BuildInfoC.h"
+
+// SPS → declared frame rate, for DeckLink "Follow source" on WHEP. Pure C with no dependency on
+// anything but stdint, imported by relative path for the same reason the two above are: App/H264
+// is not on the header search path and adding it would be a build-setting change for one file.
+// See H264SPSTiming.h for why the parse could not live in the existing SPS handling.
+#import "../H264/H264SPSTiming.h"

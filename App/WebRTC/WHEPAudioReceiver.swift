@@ -68,10 +68,12 @@ final class WHEPAudioReceiver {
         return unwrappedTicks
     }
 
-    /// Sender-timeline seconds of the FIRST packet, and the live-clock reading at that moment.
-    /// Together these are the alignment assumption in one place.
-    private var audioEpoch: Double?
-    private var clockEpoch: Double?
+    /// Whether the live clock has anchored yet. A GATE, NOT AN EPOCH — nothing numeric is latched
+    /// from it and no arithmetic reads it. It exists only to preserve the startup behaviour the
+    /// epoch pair used to provide as a side effect: packets that arrive before the first video
+    /// frame are dropped and counted rather than enqueued against a timebase that is still at
+    /// rate 0. See `handle`.
+    private var clockAnchored = false
 
     private var channelCount = 2
     private var established = false
@@ -100,7 +102,7 @@ final class WHEPAudioReceiver {
             self.decoder = WHEPOpusDecoder(channelCount: self.channelCount)
             self.driftProbe = driftProbe
             self.heldBeforeClock = 0
-            self.audioEpoch = nil; self.clockEpoch = nil
+            self.clockAnchored = false
             self.previousTimestamp = nil; self.unwrappedTicks = 0
             self.established = false
             self.packets = 0; self.framesDecoded = 0; self.lastLogFrames = 0
@@ -128,7 +130,7 @@ final class WHEPAudioReceiver {
                       self.packets, Double(self.framesDecoded) / WHEPOpusDecoder.sampleRate)
             }
             self.sink = nil; self.decoder = nil; self.driftProbe = nil
-            self.audioEpoch = nil; self.clockEpoch = nil
+            self.clockAnchored = false
         }
     }
 
@@ -149,38 +151,48 @@ final class WHEPAudioReceiver {
         // Sender timeline, in seconds, unwrapped past the 32-bit rollover.
         let senderSeconds = Double(unwrap(rtpTimestamp)) / WHEPOpusDecoder.sampleRate
 
-        // THE ALIGNMENT ASSUMPTION, in two lines and nowhere else. Stage 2 replaces exactly this.
+        // ── THE AXIS: SENDER TIMELINE, ABSOLUTE, NOT REBASED ────────────────────────────────
         //
-        // ⚠️ THE EPOCH MUST NOT BE LATCHED FROM AN UNANCHORED CLOCK. `LiveClock.now()` returns
-        // `-.infinity` until the first VIDEO frame calls `registerFrame` — a deliberate "never due"
-        // sentinel, not a fault — and audio neither anchors that clock nor can. Latching it anyway
-        // made `clockEpoch = -.infinity`, so EVERY buffer got `presentation = -.infinity + finite
-        // = -.infinity` and the synchronizer could never schedule one. It was latched ONCE, so the
-        // stream never recovered: 1892 packets decoded and enqueued, all unschedulable, silent.
+        // This is the SRT shape (`SRTFrameRouter.deliverAudio`, which uses the program's own 90 kHz
+        // PTS with no clock reading and no epoch) and it is a FIX, not a simplification.
         //
-        // Audio packets typically beat the first decoded video frame, so this window is real and
-        // routinely non-empty. Holding is correct rather than merely safe: video is not presenting
-        // yet either, so there is nothing for this audio to be in sync WITH.
-        if audioEpoch == nil {
-            let reading = clock()
-            guard reading.isFinite else {
+        // ⚠️ WHAT THE EPOCH PAIR DID, AND WHY IT BROKE SDI. It latched `clockEpoch = LiveClock.now()`
+        // on the first packet and expressed every later buffer as `clockEpoch + senderΔ` — i.e. on
+        // the `now()` axis. But `now()` is deliberately held `startupDepth` BEHIND the sender
+        // timeline (`LiveClock.swift:412` writes the cushion into the anchor's hostTime), while the
+        // VIDEO frame the card stages carries a raw sender PTS (`registerFrame` returns `senderPTS`
+        // verbatim). So the tap's ring was keyed 0.400 s behind the `srcT` the card asks it for.
+        // MEASURED: the card asked srcT=92.445s while the newest pts in the ring was 92.020s —
+        // a constant +0.425 s, ~640 underruns, real=0f of 884924 frames scheduled. Every callback
+        // fell into the ring-empty branch.
+        //
+        // `senderSeconds` is already absolute and correct on the sender timeline whether or not
+        // anything is anchored — exactly SRT's situation — so there is nothing to rebase.
+        //
+        // ⚠️ THE DESKTOP PATH MOVED WITH IT, AND HAD TO. The synchronizer timebase is
+        // `senderPTS − cushion` (`FrameEngine.mirrorLiveAudio`), and the old `now()`-axis PTS
+        // cancelled that cushion exactly, which is why desktop lip sync was correct before this
+        // change. `WHEPFrameRouter.startAudio` now passes `cushion: 0`, putting the timebase on the
+        // sender axis too, so the cancellation still holds and the desktop is unchanged. The two
+        // edits are ONE change and neither is correct alone.
+        //
+        // The startup hold survives, and its justification is now the one SRT states rather than
+        // the one this file used to state: not "the PTS is uncomputable" (it no longer is) but
+        // "video is not presenting yet, so there is nothing for this audio to be in sync with, and
+        // the timebase is still at rate 0". Dropped and counted, never silent.
+        if !clockAnchored {
+            guard clock().isFinite else {
                 heldBeforeClock += 1
                 heartbeat(note: "HOLDING — live clock unanchored (no video frame yet), "
                                 + "\(heldBeforeClock) packet(s) dropped")
                 return
             }
-            audioEpoch = senderSeconds
-            clockEpoch = reading
-            // NOTHING IS ANCHORED HERE ANY MORE. The timebase is driven by `LiveClock`'s mapping
-            // callback (`FrameEngine.mirrorLiveAudio`), which tracks every re-anchor, snap and rate
-            // change rather than copying one reading. This latch is now ONLY the sender→video
-            // timeline alignment — the stage-1 "SSRCs start aligned" assumption — and nothing else.
-            NSLog("[WHEP-AUDIO] first packet — anchoring audio at live-clock %.3fs "
-                + "(held %d packet(s) waiting for the clock; SSRCs ASSUMED aligned; stage 1)",
-                  reading, heldBeforeClock)
+            clockAnchored = true
+            NSLog("[WHEP-AUDIO] live clock anchored — audio flowing on the SENDER axis "
+                + "(absolute RTP time, not rebased through now(); held %d packet(s) waiting for "
+                + "the first video frame; SSRCs ASSUMED aligned)", heldBeforeClock)
         }
-        guard let audioEpoch, let clockEpoch else { return }
-        let presentation = clockEpoch + (senderSeconds - audioEpoch)
+        let presentation = senderSeconds
 
         // The heartbeat MUST fire on this path too: "every decode returned nothing" is the single
         // failure this instrumentation exists to name, and returning early without logging is how
@@ -213,8 +225,10 @@ final class WHEPAudioReceiver {
         // timebase is a CONSTANT, visible on buffer one — waiting for the 1 Hz heartbeat is how
         // 1892 buffers were enqueued at −inf before anyone saw the number.
         if enqueued == 0 {
-            NSLog("[WHEP-AUDIO] first pts = %.3fs (clockEpoch=%.3fs, senderΔ=%.3fs) — %@",
-                  presentation, clockEpoch, senderSeconds - audioEpoch,
+            NSLog("[WHEP-AUDIO] first pts = %.3fs (sender axis, absolute RTP) — %@. The card's "
+                + "srcT is on this same axis; if they disagree by roughly the live-clock cushion, "
+                + "the rebase has come back.",
+                  presentation,
                   presentation.isFinite ? "OK" : "NOT FINITE — this will never schedule")
         }
         // A non-finite pts cannot be scheduled and poisons the tap's anchor arithmetic, so it is

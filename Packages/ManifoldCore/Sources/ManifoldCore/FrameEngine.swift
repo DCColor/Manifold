@@ -2123,6 +2123,24 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// LiveAudioSink note below already called that class of mislabel out ("reads as a real
     /// observation and would be believed") and then a defaulted parameter reintroduced it one
     /// layer up. A required argument is what makes a new transport unable to inherit WHEP's name.
+    ///
+    /// ── ⚠️ `cushion` IS NOT THE LIVE CLOCK'S BUFFER DEPTH. THE NAME IS A TRAP. ───────────────
+    ///
+    /// It has exactly two consumers — `mirrorLiveAudio`'s `let target = m.senderPTS - cushion`, and
+    /// `liveAudioDrift`, which adds it back — and in both, what it actually means is:
+    ///
+    ///     HOW FAR BEHIND THE MAPPING'S `senderPTS` DOES THIS TRANSPORT STAMP ITS AUDIO PTS?
+    ///
+    /// It positions the synchronizer timebase on the SAME AXIS as the PTS the caller will feed it.
+    /// A transport that stamps absolute sender time passes 0. A transport that stamps on
+    /// `LiveClock.now()` — which is held `startupDepth` behind the sender timeline — passes that
+    /// depth. Pass the wrong one and desktop audio is early or late by exactly the difference,
+    /// while every log continues to read healthy.
+    ///
+    /// It happened to equal the buffer depth for WHEP only because WHEP's receiver rebased through
+    /// `now()`. It no longer does (it stamps absolute sender time, the SRT shape), so WHEP passes 0.
+    /// The value is per-session state (`mirror.cushion`), so one transport's answer can never reach
+    /// another's.
     public func beginLiveAudio(cushion: Double,
                                path: AudioTapBuffer.SourcePath) -> LiveAudioSink {
         // A live source is not a file: retire any file audio session first so two producers can
@@ -2293,6 +2311,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // This is not a second mechanism beside the funnel — the funnel is still the only writer of
         // the mapping. This is the consumer deciding what to forward, which is the only place the
         // distinction between "the clock moved" and "the controller twitched" can be made.
+        // `cushion` = how far behind `senderPTS` the CALLER stamps its audio (see `beginLiveAudio`),
+        // NOT the clock's buffer depth. This puts the timebase on the caller's PTS axis.
         let target = m.senderPTS - cushion
         mirror.lock.lock()
         let dt = mirror.haveSmoothed ? max(0.0, min(1.0, m.hostTime - mirror.lastHost)) : 0.0

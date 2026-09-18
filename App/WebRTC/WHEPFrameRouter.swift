@@ -49,6 +49,197 @@ import ManifoldCore      // UnfairLock — the priority-donating lock both telem
 import QuartzCore
 import VideoToolbox
 
+/// ── WHEP'S FRAME-RATE LADDER: EXACT, THEN MEASURED, THEN REFUSED ─────────────────────────────
+///
+/// SRT reads `av_guess_frame_rate` from the demuxer and HLS measures item-time gaps. WHEP had
+/// neither and published nothing, so DeckLink "Follow source" was permanently unavailable on it.
+/// This is the third answer, and it is a LADDER because WHEP genuinely has three different
+/// situations and collapsing them would mean guessing in the third.
+///
+/// ── RUNG 1: SPS VUI TIMING (EXACT) ───────────────────────────────────────────────────────
+/// `ManifoldH264ParseSPSTiming` reads `num_units_in_tick` / `time_scale` out of the SPS the
+/// depacketizer already extracts. When present this is the ENCODER'S OWN DECLARATION and nothing
+/// measured can improve on it — 24000/1001 arrives exact, not as 23.9761 with a spread. VUI is
+/// optional in H.264 and `timing_info_present_flag` is very often 0, so absence is ordinary and
+/// falls through rather than failing.
+///
+/// ── RUNG 2: MEASURED FROM RTP TIMESTAMPS ─────────────────────────────────────────────────
+///
+/// ⚠️ THIS FILE USED TO CLAIM RTP TIMESTAMPS "DESCRIBE TRANSMISSION, NOT CAPTURE CADENCE", AND
+/// THAT WAS WRONG. RFC 3550 §5.1 defines the RTP timestamp as the SAMPLING INSTANT, and RFC 6184
+/// §8.2.1 has every NAL of one access unit carry the same one. It is capture time by
+/// specification. This transport has also MEASURED it that way through Cloudflare's SFU — see the
+/// depth-preset block below: *"PTS is correctly RTP-derived, and the sender's clock is real-time
+/// locked (~90,100 tps)"*. Whatever the SFU rewrites (SSRC, sequence numbers, an offset across a
+/// layer switch), it is not corrupting the tick RATE on this path.
+///
+/// The alternative — decoded-frame ARRIVAL intervals — would be unusable here, by this file's own
+/// numbers: arrival lateness measured p50 = 57 ms, p90 = 121 ms, max = 162 ms against a 41.7 ms
+/// frame interval at 23.98 fps. That jitter is three times the quantity being measured, and it is
+/// the entire reason `targetDepth` is 0.400. Sender PTS is clean; arrival is not. So this measures
+/// sender PTS and nothing else.
+///
+/// ── WHAT CHANGED FROM THE HLS ESTIMATOR'S SHAPE, AND WHY ─────────────────────────────────
+///
+/// The shape is borrowed (rolling window → median → trim → mean) but two things had to change,
+/// both because HLS pulls from a local player and WHEP receives over a lossy link:
+///
+///   * HLS trims to [0.5x, 2x] of the median, which ASSUMES every sample is one frame interval.
+///     WHEP drops frames, and a dropped frame makes the next gap an exact INTEGER MULTIPLE — 2x,
+///     3x — of the interval. HLS's window would keep the 2x samples (2.0 is inside [0.5, 2.0])
+///     and inflate the mean. This trims to [0.75x, 1.25x] instead, which admits only single-frame
+///     intervals and discards every multiple, and it counts what it discarded.
+///   * HLS offers an estimate as soon as the window is full. WHEP additionally requires the
+///     surviving samples to be TIGHT (see the spread gate below) before publishing anything.
+///
+/// ── RUNG 3: REFUSAL, WHICH IS THE POINT ──────────────────────────────────────────────────
+///
+/// WHEP may be genuinely variable-rate — screen share, a congested encoder dropping its rate, a
+/// sender changing profile mid-stream. A confident wrong rate sets a wrong cadence on the SDI
+/// wire and LOOKS DELIBERATE, which for a reference tool is worse than stating nothing: the
+/// operator has no way to tell a followed rate from a fabricated one. So when the measurement does
+/// not settle, this publishes nil and the manual picker takes over, exactly as today.
+///
+/// THE THRESHOLD IS 2% RELATIVE SPREAD over the kept samples, measured as
+/// `(max - min) / median`. Why 2%: the tightest pair of standard rates this has to tell apart is
+/// 29.97 and 30, which differ by 0.1%. A spread of 2% is twenty times that gap, so a stream whose
+/// samples fall inside it cannot be ambiguous between two standard rates once
+/// `resolveOutputMode` snaps. It is also comfortably wider than the quantization floor: at 90 kHz,
+/// one tick on a 30 fps interval (3000 ticks) is 0.03%, so a CFR stream measures far tighter than
+/// 2% and passes easily. A VFR stream does not come close.
+private struct WHEPFrameRateEstimator {
+    /// Gaps in the rolling window. 120 matches HLS — ~5 s at 24 fps, ~2 s at 60.
+    private static let windowSize = 120
+    /// Keep only samples this close to the median. Tighter than HLS's [0.5x, 2x] so that a gap
+    /// left by a dropped frame (an exact 2x or 3x) is discarded rather than averaged in.
+    private static let keepLow = 0.75, keepHigh = 1.25
+    /// Publish only when `(max - min) / median` over the kept samples is below this. See above.
+    private static let maxRelativeSpread = 0.02
+    /// A gap longer than this is a freeze, a reconnect or a keyframe stall, not a cadence sample.
+    private static let implausibleGapSeconds = 1.0
+    /// At least this many samples must SURVIVE the trim. A window that is mostly multiples has not
+    /// measured a cadence, it has measured a loss pattern.
+    private static let minKept = 60
+
+    private var lastSenderPTS: Double?
+    private var gaps: [Double] = []
+    /// The published estimate, or nil while unsettled. Held until it moves >1%, for the reason the
+    /// HLS estimator states: a rolling window re-computes every frame and would otherwise fail the
+    /// latch's dedup on every frame.
+    private(set) var estimate: Double?
+    /// Last computed spread, for the refusal log.
+    private(set) var lastSpread: Double = .nan
+    /// Worst fit of a gap to its assigned integer multiple. THE REFUSAL SIGNAL — see `record`.
+    private(set) var lastFitResidual: Double = .nan
+    /// How many samples survived the trim. Read by the refusal log when `lastSpread` is NaN.
+    private(set) var keptCount = 0
+    private(set) var discardedAsMultiples = 0
+
+    /// Feed one decoded frame's sender PTS. Returns true when the published answer CHANGED
+    /// (including settling, or un-settling), which is the caller's cue to log.
+    mutating func record(senderPTS: Double) -> Bool {
+        defer { lastSenderPTS = senderPTS }
+        guard let lastSenderPTS else { return false }
+        let gap = senderPTS - lastSenderPTS
+        // Backwards (a reorder that reached us, or a re-anchor) or implausibly long: not a sample.
+        guard gap.isFinite, gap > 0, gap < Self.implausibleGapSeconds else { return false }
+
+        gaps.append(gap)
+        if gaps.count > Self.windowSize { gaps.removeFirst(gaps.count - Self.windowSize) }
+        guard gaps.count == Self.windowSize else { return false }
+
+        let sorted = gaps.sorted()
+        let median = sorted[sorted.count / 2]
+        guard median > 0 else { return false }
+
+        let kept = gaps.filter { $0 >= median * Self.keepLow && $0 <= median * Self.keepHigh }
+        discardedAsMultiples = gaps.count - kept.count
+        guard kept.count >= Self.minKept, let lo = kept.min(), let hi = kept.max() else {
+            // Too few single-frame intervals survived: this window measured a LOSS PATTERN, not a
+            // cadence. Reported distinctly — `lastSpread` is deliberately left NaN and the caller
+            // reads `keptCount` instead, because inventing a spread for a sample set we rejected
+            // before computing one would be a fabricated number in a refusal message.
+            lastSpread = .nan
+            keptCount = kept.count
+            return demote()
+        }
+        keptCount = kept.count
+
+        // Retained as an OBSERVATION, no longer a gate — see the fitResidual note below.
+        lastSpread = (hi - lo) / median
+
+        // ── SPAN MEASUREMENT, THE SAME SHAPE AS HLS'S ──────────────────────────────────────
+        //
+        // Intervals ÷ elapsed time, with each gap rounded to the nearest integer multiple of the
+        // median, so a dropped frame contributes both its intervals AND its time and cancels
+        // exactly. See the matching note in `FrameRateEstimator` (HLSClient.swift), including the
+        // finding that this is NOT a precision improvement over the trimmed mean it replaces —
+        // `1/mean(gaps)` and `count/span` are the same number — and is worth doing for the
+        // dropped-frame handling alone. On this transport that handling matters more than it does
+        // on HLS: WHEP is a push source over a lossy link and drops are ordinary.
+        var totalIntervals = 0.0
+        var span = 0.0
+        var maxFitResidual = 0.0
+        for g in kept {
+            let m = max(1.0, (g / median).rounded())
+            totalIntervals += m
+            span += g
+            maxFitResidual = max(maxFitResidual, abs(g - m * median) / median)
+        }
+        guard span > 0, totalIntervals > 0 else { return demote() }
+        lastFitResidual = maxFitResidual
+
+        // ⚠️ THE REFUSAL GATE MOVED FROM `spread` TO `fitResidual`, AND IT HAD TO.
+        //
+        // The gate exists to refuse a variable-rate stream rather than publish a confident wrong
+        // cadence. It used to test the raw spread of the gaps — which was coherent while the
+        // estimate was a mean of those gaps, and is INCOHERENT now: a single dropped frame makes
+        // one gap 2x the median, which is a ~100% raw spread, so the old gate would refuse exactly
+        // the case the multiple-rounding above was added to handle correctly.
+        //
+        // `fitResidual` is the right signal for this method: it asks whether each gap landed
+        // cleanly on an integer multiple of one interval. A CFR stream with losses fits perfectly
+        // and passes; a genuinely variable-rate stream does not fit any integer grid and is
+        // refused. The threshold stays 2%, for the reason it always was — twenty times the 0.1%
+        // gap between the closest pair of standard rates this has to separate.
+        //
+        // ⚠️ THIS GATE IS SOUND HERE AND WOULD BE WRONG ON HLS. DO NOT PORT IT THERE.
+        // It works because these samples are the SENDER'S 90 kHz RTP timestamps — capture instants
+        // straight from the encoder, so a CFR stream's gaps really are constant and a poor fit
+        // really does mean variable-rate. HLS measures display-tick capture instants instead, where
+        // a 23.976 fps source against a 60 Hz tick alternates 2- and 3-tick gaps forever and the
+        // residual is ~20% on a perfectly healthy stream. Same arithmetic, different clock,
+        // opposite meaning — see the matching note on `FrameRateEstimator.Diagnostics.fitResidual`.
+        guard maxFitResidual <= Self.maxRelativeSpread else { return demote() }
+
+        let fps = totalIntervals / span
+
+        guard let held = estimate else { estimate = fps; return true }
+        guard abs(fps - held) / held > 0.01 else { return false }
+        estimate = fps
+        return true
+    }
+
+    /// The stream stopped being measurable. Drops the estimate — a rate that was true a minute ago
+    /// is not evidence about a stream that has since gone variable, and continuing to publish it
+    /// would be the confident-wrong-answer this ladder exists to avoid.
+    private mutating func demote() -> Bool {
+        guard estimate != nil else { return false }
+        estimate = nil
+        return true
+    }
+
+    mutating func reset() {
+        gaps.removeAll(keepingCapacity: true)
+        lastSenderPTS = nil
+        estimate = nil
+        lastSpread = .nan
+        lastFitResidual = .nan
+        keptCount = 0
+        discardedAsMultiples = 0
+    }
+}
+
 final class WHEPFrameRouter {
 
     static let shared = WHEPFrameRouter()
@@ -136,12 +327,27 @@ final class WHEPFrameRouter {
             self.stateLock.unlock()
             return c?.now() ?? 0
         }
-        // The cushion is `targetDepth`, not `startupDepth`: startup describes only the first frame,
-        // whereas the steady-state lead a video frame gets is the control loop's SETPOINT, and that
-        // is what audio must match. They are the same number today (LiveDisplayRoute builds the
-        // clock with `startupDepth: config.targetDepth`) — naming the right one keeps it correct if
-        // they ever diverge.
-        guard let sink = begin(Self.targetDepth) else {
+        // ── `cushion: 0` — AND IT IS NOT "NO CUSHION" ───────────────────────────────────────
+        //
+        // ⚠️ READ `FrameEngine.beginLiveAudio`'s parameter note before changing this. Despite the
+        // name, this argument is not the live clock's buffer depth. Its only two consumers are
+        // `mirrorLiveAudio` (`let target = m.senderPTS - cushion`) and `liveAudioDrift`, and in both
+        // its actual meaning is: HOW FAR BEHIND THE MAPPING'S `senderPTS` THIS TRANSPORT STAMPS ITS
+        // AUDIO. It positions the synchronizer timebase on the same axis as the PTS it will be fed.
+        //
+        // This used to pass `targetDepth`, and that was RIGHT for the audio this file used to
+        // produce: `WHEPAudioReceiver` latched `clockEpoch = LiveClock.now()` and stamped on the
+        // `now()` axis, which sits exactly `targetDepth` behind the sender timeline. Timebase and
+        // PTS carried the same offset, it cancelled, and the desktop was in sync.
+        //
+        // The receiver now stamps ABSOLUTE SENDER TIME (the SRT shape — see the axis note there),
+        // so the offset is zero and this must say zero. Passing `targetDepth` against sender-axis
+        // PTS would put the timebase 400 ms behind the audio and play every buffer 400 ms LATE on
+        // the desktop — trading the SDI bug for a lip-sync bug. The two edits are one change.
+        //
+        // ⚠️ THIS IS PER-SESSION AND CANNOT REACH SRT. `mirror.cushion` is set from this argument
+        // inside `beginLiveAudio`, so SRT's own call is untouched and its behaviour is unchanged.
+        guard let sink = begin(0) else {
             NSLog("[WHEP-AUDIO] engine refused a live-audio session"); return
         }
         let receiver = WHEPAudioReceiver(clock: clock)
@@ -524,6 +730,10 @@ final class WHEPFrameRouter {
         // overtaken by a size still hopping in from the decode queue — see LiveDisplaySize's
         // generation counter.
         noRateLogged = false
+        declaredFrameRate = nil
+        frameRateEstimator.reset()
+        rateDisagreementActive = false
+        DispatchQueue.main.async { DeckLinkService.shared.setSourceAdvisory(nil) }
         LiveDisplaySize.shared.clear()
 
         NSLog("[WHEP] display route released — file-playback clock restored")
@@ -619,22 +829,26 @@ final class WHEPFrameRouter {
         // is what the renderer will actually draw. Placed AFTER the active guard so a frame racing
         // teardown cannot publish a shape for a stream that has already released the display.
         //
-        // ⚠️ SQUARE PIXELS ASSUMED, and on this transport that is not merely a default — H.264
-        // signals sample aspect ratio in the SPS VUI and our RTP depacketizer does not parse the
-        // VUI at all, which is the same limitation that makes the colorimetry assumed here.
+        // ⚠️ SQUARE PIXELS STILL ASSUMED — BUT THE REASON HAS CHANGED, AND docs/BUGS.md IS NOW
+        // STALE ON THIS POINT. That entry records the assumption as unfixable "because nothing
+        // parses the VUI". Something does now: `ManifoldH264ParseSPSTiming` walks this exact VUI
+        // to reach the timing fields, and steps over `aspect_ratio_idc` on the way at a named
+        // point — `MDSkipAspectRatio` in App/H264/H264SPSTiming.c. The signal is three lines from
+        // being readable.
         //
-        // ⚠️ AND NO RATE, EXPLICITLY. `frameRate: nil` is written out rather than left to the default
-        // so that this reads as a STATEMENT — "WHEP does not know its cadence" — and not as a call
-        // site somebody forgot to update. H.264 carries timing in the SPS VUI
-        // (`num_units_in_tick` / `time_scale`), our RTP depacketizer does not parse the VUI at all
-        // (the same limitation that makes the colorimetry assumed here), and RTP timestamps are a
-        // 90 kHz media clock that tells you when frames were SENT, not the cadence they were shot
-        // at. Deriving a rate from arrival times would measure the network, not the source. So the
-        // card's "Follow source" is unavailable on WHEP and the operator picks the mode by hand.
+        // It is deliberately NOT read here. Applying SAR means changing `LiveDisplaySize`, the
+        // window aspect lock and the framing guides, which is a separate change needing its own
+        // measurement against a non-square-pixel sender. The colorimetry assumption beside it is
+        // unchanged and genuinely still unparsed.
+        //
+        // THE RATE, from the ladder: SPS VUI if the encoder declared one, else the measurement if
+        // it has settled, else nil. See `WHEPFrameRateEstimator` — including why the old comment
+        // here, which claimed RTP timestamps describe transmission rather than capture, was wrong.
+        // nil is a real answer and reaches the menu as "Follow source — unavailable".
+        let rate = frameRateToPublish(senderPTS: CMTimeGetSeconds(pts))
         LiveDisplaySize.shared.publish(width: CVPixelBufferGetWidth(decoded),
                                        height: CVPixelBufferGetHeight(decoded),
-                                       frameRate: nil)
-        logNoDeclaredRateOnce()
+                                       frameRate: rate)
 
         let senderPTS = CMTimeGetSeconds(pts)
         guard senderPTS.isFinite else { logFlowIfDue(); return }
@@ -965,17 +1179,157 @@ final class WHEPFrameRouter {
     /// LiveClock prints its own `[LIVECLOCK] depth/target/rate/err` line at the same cadence; this
     /// one deliberately repeats depth/count so the producer and consumer sides can be read as a pair
     /// without interleaving two logs. Decode queue only.
-    /// Set once per connection, cleared on teardown beside the other per-connection flags.
+    /// RUNG 1. The exact rate from the SPS VUI, latched the first time an SPS parses with timing
+    /// info. Non-nil wins over the estimator permanently for this connection — the encoder's own
+    /// declaration cannot be improved on by measuring it.
+    private var declaredFrameRate: Double?
+    /// RUNG 2. Decode-queue only, like everything else `deliver` touches.
+    ///
+    /// ⚠️ RUNS EVEN WHEN RUNG 1 HAS ANSWERED. It used to be skipped once the SPS declared a rate,
+    /// on the reasoning that an exact value cannot be improved by measuring it. True, and beside
+    /// the point: the measurement's second job is to CHECK the declaration. See `crossCheckRate`.
+    private var frameRateEstimator = WHEPFrameRateEstimator()
+    /// Whether declared and measured currently disagree beyond the threshold. Edge-triggered, like
+    /// the renderer's raster mismatch — logged and surfaced on entry, retracted on exit.
+    private var rateDisagreementActive = false
+    /// Relative disagreement between the SPS's declared rate and the measured one that counts as
+    /// real. 2%, matching `WHEPFrameRateEstimator.maxRelativeSpread` — see `crossCheckRate`.
+    private static let rateDisagreementThreshold = 0.02
+    /// One "no rate yet" line per connection rather than one per frame.
     private var noRateLogged = false
 
-    /// One line per connection saying the card cannot follow this transport, and why. Once, not per
-    /// frame: the reason cannot change within a session.
-    private func logNoDeclaredRateOnce() {
-        guard !noRateLogged else { return }
-        noRateLogged = true
-        print("[WHEP-FORMAT] no frame rate available (SPS VUI timing is not parsed; RTP timestamps "
-            + "describe transmission, not capture cadence) — publishing no rate; DeckLink "
-            + "Follow source will be unavailable for this stream")
+    /// RUNG 1 — an SPS arrived; try for the encoder's own declared cadence.
+    ///
+    /// Called from `WHEPClient`'s access-unit closure on the decode queue whenever the parameter
+    /// sets change (which includes the first set of the connection). Cheap: a few hundred bits of
+    /// exp-Golomb, and only on parameter-set changes, not per frame.
+    ///
+    /// LATCH-ONCE per connection. A mid-stream SPS change from an SFU layer switch re-sends the
+    /// same timing in practice, and re-parsing to the same answer would only add log noise; a
+    /// genuinely different declared rate is rare enough that inheriting the first is the
+    /// conservative choice, and the estimator is still running underneath as a cross-check.
+    func noteParameterSets(sps: Data) {
+        guard declaredFrameRate == nil else { return }
+        let timing: ManifoldH264SPSTiming = sps.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return ManifoldH264SPSTiming()
+            }
+            return ManifoldH264ParseSPSTiming(base, sps.count)
+        }
+        guard timing.valid else {
+            // Ordinary, not a fault: VUI is optional and timing_info_present_flag is often 0.
+            print("[WHEP-FORMAT] SPS carries no VUI timing info — falling through to measurement")
+            return
+        }
+        declaredFrameRate = timing.framesPerSecond
+        print(String(format: "[WHEP-FORMAT] frame rate %.3f fps from SPS VUI timing (EXACT) — "
+                             + "time_scale=%u / (2 * num_units_in_tick=%u), fixed_frame_rate_flag=%@. "
+                             + "DeckLink Follow source can use it.",
+                     timing.framesPerSecond, timing.timeScale, timing.numUnitsInTick,
+                     timing.fixedFrameRate ? "1" : "0"))
+    }
+
+    /// ── THE CROSS-CHECK: DOES THE SENDER DO WHAT IT SAYS? ───────────────────────────────────
+    ///
+    /// Rung 1 still WINS — the declared rate is what gets published — but the estimator now runs
+    /// underneath it instead of being skipped, and a disagreement is stated.
+    ///
+    /// ⚠️ WHY THIS IS WORTH THE CODE: "A PUBLISHER DECLARING ONE CONFIGURATION WHILE SENDING
+    /// ANOTHER, WITH EVERY COUNTER CLEAN" IS A REPEAT PATTERN IN THIS APP, NOT A HYPOTHETICAL.
+    /// It is exactly the 5.1-Opus failure in docs/BUGS.md: OBS configured for 5.1 while the
+    /// negotiated answer was `opus/48000/2`, nothing in the pipeline wrong, every counter healthy,
+    /// and the only symptom was that the result was not what the operator had set up. That entry's
+    /// conclusion was that an undetectable misconfiguration must at least be STATED IN THE UI.
+    ///
+    /// Here it is not undetectable. The instrument already exists — the estimator was built for
+    /// rung 2 — and running it alongside rung 1 costs one subtraction per frame. Declining to look
+    /// would be choosing not to know something we are already equipped to see.
+    ///
+    /// ⚠️ IT REPORTS, IT DOES NOT ACT. No override, no fallback, no refusal. The declared value is
+    /// the SENDER'S STATED INTENT, and the measurement is the degradable one — packet loss, an SFU
+    /// layer switch, a congested encoder all pull the measured rate down while the declaration
+    /// stays correct. Preferring the measurement would mean letting a bad network silently change
+    /// the cadence on the wire. So: publish the declaration, say the two disagree, let the operator
+    /// decide which to believe.
+    ///
+    /// THE THRESHOLD IS 2%, the same number as the estimator's own spread gate. That is the point
+    /// of choosing it: `measured` is only ever non-nil when its samples fell inside a 2% band, so a
+    /// disagreement WIDER than that band is outside the measurement's own confidence and cannot be
+    /// explained by its noise. 29.97 vs 30 is 0.1% and can never trip it; 24 vs 25 is 4.2% and
+    /// always will.
+    ///
+    /// Edge-triggered — logged and surfaced when it starts, retracted when it stops — so a loss
+    /// burst that resolves does not leave a stale warning on screen.
+    private func crossCheckRate(declared: Double, measured: Double?) {
+        guard let measured else { return }
+        let disagreement = abs(measured - declared) / declared
+        let nowDisagreeing = disagreement > Self.rateDisagreementThreshold
+        guard nowDisagreeing != rateDisagreementActive else { return }
+        rateDisagreementActive = nowDisagreeing
+
+        if nowDisagreeing {
+            let line = String(format: "SPS declares %.3f fps but measured %.3f fps over 120 frames "
+                                      + "(%.1f%% disagreement) — using the declared rate; the "
+                                      + "publisher may be misconfigured.",
+                              declared, measured, disagreement * 100)
+            print("[WHEP-FORMAT] ⚠️ " + line)
+            // The UI half. Short enough for a menu row; the log carries the full sentence.
+            let advisory = String(format: "Source declares %.3f fps but is sending %.3f fps — "
+                                          + "output follows the declared rate.", declared, measured)
+            DispatchQueue.main.async { DeckLinkService.shared.setSourceAdvisory(advisory) }
+        } else {
+            print(String(format: "[WHEP-FORMAT] declared and measured rates now agree "
+                                 + "(%.3f vs %.3f fps) — earlier disagreement retracted.",
+                         declared, measured))
+            DispatchQueue.main.async { DeckLinkService.shared.setSourceAdvisory(nil) }
+        }
+    }
+
+    /// RUNG 2 + 3 — feed the estimator and decide what, if anything, to publish this frame.
+    /// Returns the rate for `LiveDisplaySize`, or nil to refuse. Decode queue only.
+    private func frameRateToPublish(senderPTS: Double) -> Double? {
+        // ⚠️ UNCONDITIONAL, AND THAT IS THE CHANGE. The estimator runs whether or not rung 1 has
+        // answered, because when it has, this is the cross-check instrument rather than the source
+        // of the published value.
+        let changed = frameRateEstimator.record(senderPTS: senderPTS)
+        let measured = frameRateEstimator.estimate
+
+        // Rung 1 still wins outright — but it is now checked rather than merely trusted.
+        if let declaredFrameRate {
+            crossCheckRate(declared: declaredFrameRate, measured: measured)
+            return declaredFrameRate
+        }
+
+        if changed {
+            if let measured {
+                print(String(format: "[WHEP-FORMAT] frame rate %.3f fps MEASURED over a 120-frame "
+                                     + "window of RTP sender timestamps (intervals ÷ span, fit "
+                                     + "residual %.2f%%, raw spread %.2f%%, %d sample(s) outside the "
+                                     + "trim) — estimated, not declared. Follow source can use it.",
+                             measured, frameRateEstimator.lastFitResidual * 100,
+                             frameRateEstimator.lastSpread * 100,
+                             frameRateEstimator.discardedAsMultiples))
+            } else if frameRateEstimator.lastFitResidual.isFinite {
+                print(String(format: "[WHEP-FORMAT] no stable rate (gaps fit no constant interval — "
+                                     + "worst residual %.2f%% exceeds the 2%% threshold; raw spread "
+                                     + "%.2f%%) — REFUSING to publish one. This stream may be "
+                                     + "variable-rate; a guessed cadence on SDI would look "
+                                     + "deliberate. Follow source unavailable, pick a mode by hand.",
+                             frameRateEstimator.lastFitResidual * 100,
+                             frameRateEstimator.lastSpread * 100))
+            } else {
+                print("[WHEP-FORMAT] no stable rate (only "
+                    + "\(frameRateEstimator.keptCount) of 120 samples were single-frame intervals; "
+                    + "\(frameRateEstimator.discardedAsMultiples) were dropped-frame multiples) — "
+                    + "REFUSING to publish one. This window measured packet loss, not cadence. "
+                    + "Follow source unavailable, pick a mode by hand.")
+            }
+        } else if measured == nil && !noRateLogged {
+            noRateLogged = true
+            print("[WHEP-FORMAT] no frame rate yet — SPS declared none and the measurement window "
+                + "is still filling. Follow source unavailable until it settles.")
+        }
+        return measured
     }
 
     private func logFlowIfDue() {
