@@ -5,6 +5,15 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.8.4
+
+- Live streams now carry audio on SDI. SRT, HLS, WHEP and NDI were all silent on the card before this.
+- NDI sources now play audio on the Mac.
+- Fixed: NDI audio was being rebuilt by the receiver instead of passed through. You now hear what the sender is sending.
+- SDI output follows the source's resolution and frame rate on its own — files and all four stream types.
+- You can still choose the output mode by hand, and a source that doesn't state its frame rate now says so.
+- When the output mode doesn't match the source, Manifold tells you the picture is black instead of just showing black.
+
 ## 0.8.3
 
 - DNxHR 4:4:4 files now decode correctly. They previously came up green and magenta — Manifold's

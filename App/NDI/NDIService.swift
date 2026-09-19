@@ -1098,7 +1098,11 @@ final class NDIService: ObservableObject {
 
     /// The Debug menu item's title, carrying the CURRENT state so the menu itself is the readout —
     /// no need to find the log line to know whether the tone is on. Published, main-thread only.
-    @Published private(set) var audioToneTestTitle = "NDI Audio Tone Test: Off"
+    /// ⚠️ BUILT FROM `ToneTest.off.menuTitle`, NOT A LITERAL. A hand-written initial string drifted
+    /// from what `cycleAudioToneTest` writes: the menu opened reading "Off" but, once cycled back to
+    /// off, read "Off (next: 1 kHz 0 dBFS)". A tester meeting the first form cannot tell what
+    /// pressing it will do, which is the whole job of this title.
+    @Published private(set) var audioToneTestTitle = "NDI Audio Tone Test: " + ToneTest.off.menuTitle
 
     /// Debug ▸ NDI Audio Tone Test, and ⌃⌥A — cycle OFF → 0 dBFS → −6 dBFS → OFF. Main thread.
     func cycleAudioToneTest() {
