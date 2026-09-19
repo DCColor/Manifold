@@ -207,7 +207,17 @@ struct ManifoldApp: App {
             // RasterSize.swift for why it is a menu and not another item on the control bar.
             RasterSizeCommands()
             #if DEBUG
-            // ── A TOP-LEVEL "Debug" MENU, AND IT IS A MENU BECAUSE THE KEYSTROKE WAS NOT ENOUGH ──
+            // ── ⚠️ GATED: A MENU BAR ITEM IS A CATEGORICALLY MORE EXPOSED AFFORDANCE ────────────
+            //
+            // Every dev affordance before this one was a hidden keystroke — undiscoverable without
+            // being told the chord, and harmless to someone who was not. A TOP-LEVEL MENU is the
+            // opposite: it is in the menu bar, in front of anyone who looks, and behind it sit a
+            // tone generator that REPLACES PROGRAMME AUDIO and a recorder that WRITES FILES TO THE
+            // DESKTOP. `#if DEBUG` does not cover this — Profile defines DEBUG and every build cut
+            // to date has been Profile, so "DEBUG-gated" means "in front of every tester".
+            //
+            // So the menu is opt-in at launch. Nothing behind it changed; only whether it exists.
+            if DebugMenuGate.isEnabled {
             //
             // The ⌃⌥A binding for this lives in `ContentView.syntheticLiveShortcuts` as a hidden
             // Button, which fires only when that view is mounted AND nothing upstream has already
@@ -225,6 +235,7 @@ struct ManifoldApp: App {
                 NDIAudioLeadCommand()
                 Divider()
                 NDIAudioWAVCaptureCommand()
+            }
             }
             #endif
         }
@@ -265,6 +276,55 @@ struct ManifoldApp: App {
 }
 
 #if DEBUG
+/// ── WHETHER THE DEBUG MENU IS IN THE MENU BAR AT ALL ─────────────────────────────────────────
+///
+/// Two ways in, because the two use cases have opposite ergonomics and the app already has a
+/// precedent for each:
+///
+///   **1. A preference — the primary one.**
+///
+///         defaults write com.graviton.manifold manifold.debugMenu -bool YES
+///
+///      Survives relaunch, works with an ordinary double-click launch, and is turned off with
+///      `defaults delete`. This is the one for the case that has to keep working: somebody on
+///      different hardware checking whether the 250 ms desktop-audio lead is enough for THEIR
+///      output device. That person is listening to a normally-launched app over a session, and
+///      requiring them to run from Terminal to have the ladder would be friction on exactly the
+///      workflow this gate is supposed to preserve. Same shape as
+///      `DeckLinkService.audioTrimKey`, which is already documented as a `defaults write`.
+///
+///   **2. An environment variable — for a single run that leaves nothing behind.**
+///
+///         MANIFOLD_DEBUG_MENU=1 /Applications/Manifold.app/Contents/MacOS/Manifold
+///
+///      Matches `ScrubFrameProducer.stats` (`MANIFOLD_SCRUB_STATS`), and fits the run-from-Terminal-
+///      to-capture-logs workflow. Nothing persists, so it cannot be left on by accident.
+///
+/// ⚠️ LATCHED ONCE, AT FIRST READ. `static let` with an initialiser closure is evaluated exactly
+/// once and is thread-safe. A gate re-read per menu build could change under a running app and
+/// leave half the surface live — a menu that has gone while a keyboard shortcut it owns has not.
+/// The answer is fixed for the process lifetime.
+///
+/// ⚠️ IT SAYS SO WHEN IT IS ON, AND NOTHING WHEN IT IS OFF. A tester who set the preference weeks
+/// ago and forgot needs the log to remind them why there is a Debug menu; someone who never asked
+/// for it should see no trace of the feature at all.
+enum DebugMenuGate {
+    static let defaultsKey = "manifold.debugMenu"
+    static let environmentVariable = "MANIFOLD_DEBUG_MENU"
+
+    static let isEnabled: Bool = {
+        let viaEnvironment = ProcessInfo.processInfo.environment[environmentVariable] == "1"
+        let viaPreference = UserDefaults.standard.bool(forKey: defaultsKey)
+        guard viaEnvironment || viaPreference else { return false }
+        NSLog("[DEBUG-MENU] enabled via %@ — the Debug menu is in the menu bar. It contains a tone "
+            + "generator that REPLACES programme audio and a recorder that writes .wav files to the "
+            + "Desktop. Turn it off with: defaults delete com.graviton.manifold %@",
+              viaEnvironment ? "\(environmentVariable)=1" : "the \(defaultsKey) preference",
+              defaultsKey)
+        return true
+    }()
+}
+
 /// Debug ▸ NDI Audio Tone Test — one item that cycles OFF → 1 kHz 0 dBFS → 1 kHz −6 dBFS → OFF and
 /// names the state it is in.
 ///
