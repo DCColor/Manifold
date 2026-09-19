@@ -41,6 +41,29 @@ runs a dedicated pump thread on connect (regardless of DeckLink), pulls via
 `captureAudioFrameForMaxSamples:`, and pushes interleaved Int32 into the shared `AudioTapBuffer`
 through `pushInterleavedInt32`. **NDI plays audio and meters correctly today.**
 
+> ### ⚠️ ANNOTATION 2026-09-18 — TWO OF THE CLAIMS IN THE PARAGRAPH ABOVE DID NOT SURVIVE
+>
+> The measurement and the reasoning are left exactly as written, because they were an honest record
+> of what was observable on 2026-08-26 with the instruments that existed then. Three corrections,
+> none of which change this document's conclusion (NDI had an audio path and WHEP/SRT did not):
+>
+> 1. **"NDI plays audio and meters correctly today" was not true, and the meters are why it looked
+>    true.** At the time NDI was asking FrameSync for `framesync_audio_queue_depth` samples per pull,
+>    which made it **manufacture up to 82% of them** — 8.1M samples delivered against 1.44M actually
+>    sent. The meters metered the invented audio without complaint, because a level is a level
+>    whoever made it. See `BUGS.md` → *#NDI-AUDIO*. Fixed 2026-09-18.
+> 2. **"Plays" meant "reaches the tap", not "is audible on the Mac."** NDI had no desktop playback
+>    path at all until 2026-09-18 — the ring fed the meters and the SDI embed and stopped there. See
+>    `BUGS.md` → *"FIXED — NDI had no desktop playback path"*.
+> 3. **`captureAudioFrameForMaxSamples:` no longer exists.** It is now
+>    `captureAudioFrameForInterval:`, and the rename is the fix: the argument is the caller's poll
+>    interval, not a ceiling on samples.
+>
+> **The transferable lesson is #1, and it belongs in this document rather than only in `BUGS.md`:**
+> this write-up exists to stop ground being re-litigated, and it recorded a *meter reading* as
+> evidence that audio was correct. It is now one of four instruments in that chain known to have
+> read identically whether or not the fault was present.
+
 It is also not true that `FrameEngine.audioTrack` being nil explains the live gap — the live
 transports do not go through `FrameEngine`'s asset path at all. The gap is per-transport:
 

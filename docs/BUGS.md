@@ -5838,7 +5838,9 @@ carried zero frames on all 259 callbacks.
 
 ---
 
-## NDI has no desktop playback path at all — the pump meters, feeds SDI, and drops the audio
+## FIXED — NDI had no desktop playback path: five stacked defects, each masking the next
+<!-- Original title, kept because other entries cite it: "NDI has no desktop playback path at
+     all — the pump meters, feeds SDI, and drops the audio". -->
 
 **Status:** FIXED 2026-09-18, after **five stacked defects** — see "The chain" immediately below,
 which is the part worth reading. The presentation lead is now **250 ms**, an evidence-backed floor;
@@ -5997,20 +5999,26 @@ with no DeckLink card.
 `NDIService.runAudioPump` pulls with `captureAudioFrameForInterval:`, pushes interleaved Int32
 into the shared `AudioTapBuffer`, and **stops there**. The ring feeds the meters and the SDI embed;
 nothing enqueues into `FrameEngine`'s `audioRenderer`, so **an NDI source is silent on the Mac** no
-matter what the fader says. `WindowDeck` states it plainly at the wiring site: NDI *"feeds the tap
-alone (metered and SDI-capable, but silent on the desktop)"*.
+matter what the fader says. `WindowDeck` stated it plainly at the wiring site: NDI *"feeds the tap
+alone (metered and SDI-capable, but silent on the desktop)"*. ⚠️ **That comment no longer exists** —
+the wiring site now carries the four desktop-audio seams and a note that the tap is the FALLBACK
+route. The quote is the code as it stood before commit `786c0d8`.
 
 **Manifold is a desktop player first, so this is a defect and not a scoping choice.** A colourist
 without a card can see an NDI feed and cannot hear it.
 
-### ⚠️ WHEP AND SRT ARE *NOT* THE SAME SHAPE — NDI IS THE ONLY SILENT ONE
+### ⚠️ AS FOUND (2026-09-17): WHEP AND SRT ARE *NOT* THE SAME SHAPE — NDI IS THE ONLY SILENT ONE
+
+**This section describes the state that motivated the work. NDI is no longer silent** — see the
+chain above. It is kept because the per-transport shapes, and the warning about lumping them
+together, are still correct and still the thing people get wrong.
 
 This is the correction that matters for anyone sizing the work, and it is easy to get wrong because
 all three are "live sources":
 
 | transport | audible on the desktop? | how |
 |---|---|---|
-| **NDI** | **No** | tap only |
+| **NDI** | ~~**No**~~ → **Yes** (2026-09-18) | ~~tap only~~ → `beginLiveAudio` → `LiveAudioSink` → shared `audioRenderer`, with a **250 ms** presentation lead and a direct timebase anchor instead of a LiveClock mirror |
 | **WHEP** | **Yes** | `beginLiveAudio` → `LiveAudioSink` → shared `audioRenderer` |
 | **SRT** | **Yes** | same, since its stage 2 |
 | **HLS** | **Yes** | `AVPlayer`'s own output (a pull source owns one) |
@@ -6030,7 +6038,7 @@ audio pump was broken** — it was drawing 5.6× manufactured samples on a caden
 
 With the pump fixed, measured over 72 s: `cum=48006.6Hz`, `sndR=48015.5Hz` from the sender's own
 timestamps, `dev` +0.01..+1.02 ms, **zero ring re-anchors**. And `monotonicNow()` is
-`CACurrentMediaTime()` (`NDIService.swift:260`) — literally the axis
+`CACurrentMediaTime()` (`NDIService.monotonicNow()`) — literally the axis
 `AVSampleBufferRenderSynchronizer.setRate(_:time:atHostTime:)` takes as `atHostTime`. **NDI's PTS
 axis is not the problem and never needed a resampler.** None of the three options above is the
 decision to make. Strike the question.
@@ -6046,7 +6054,7 @@ produces silence, not drift**, and then drift once it is made to play. Four find
    `LiveClock.Mapping`. **NDI produces no mappings, so NDI audio would never begin.** Not a subtle
    failure — total silence.
 
-2. **NDI cannot even fabricate one.** `LiveClock.Mapping` (`LiveClock.swift:442-446`) declares three
+2. **NDI cannot even fabricate one.** `LiveClock.Mapping` (`LiveClock.swift`, the `Mapping` struct) declares three
    `public let`s and **no explicit `public init`**, so its memberwise initialiser is internal to
    `ManifoldCore`. `NDIService` is in the app module. This is a compile-time wall, not a style
    preference.
@@ -6182,6 +6190,214 @@ output path — and note *why* that works, because it is the same mechanism in a
 `AVPlayerItem`'s timebase source clock **is the audio output device** (measured, printed by the
 probe as `FigClock[AudioDeviceClock(...)]`, `HLSAudioTap.swift:36-37`), so there is no mach-vs-device
 seam to cross at all. NDI is a push source with no player and cannot inherit that.
+
+---
+
+## WHEP SDI audio settles at a +68 ms drift plateau with the corrector saturated
+
+**Status:** OPEN, and **PRE-EXISTING — today's SDI work exposed it, it did not introduce it.**
+**Measured:** 2026-09-18, on the WHEP SDI audio verification run immediately after the sender-axis
+fix landed (the same run that produced `real=1071435f`). **Affects:** WHEP only. SRT and HLS on the
+same path are clean.
+
+### The measurement
+
+`DeckLinkAudio` periodic lines, one run:
+
+| `srcT` | `drift` | `corr` |
+|---|---|---|
+| 5.340 s | +10.37 ms | +2f |
+| 11.433 s | +35.98 ms | +2f |
+| 17.506 s | +54.14 ms | +2f |
+| 23.581 s | +66.97 ms | +2f |
+| 26.605 s | **+67.90 ms** | +2f |
+
+It **ramps and plateaus near +68 ms with `corr` pinned at +2f throughout**. The same path, same
+build: **SRT stayed within ±2.5 ms oscillating around zero, HLS was sub-millisecond.** So this is a
+property of WHEP, not of the SDI audio path.
+
+⚠️ **`corr=+2f` IS THE RAIL, NOT A COINCIDENCE.** `kAudioMaxCorrectionFrames = 2`
+(`DeckLinkBridge.mm`), the per-callback skip/duplicate limit. Pinned there for the whole run means
+**the corrector is saturated**: it has enough authority to ARREST the growth — which is why the ramp
+flattens rather than running away — but none left over to PULL THE OFFSET BACK. A plateau is what a
+saturated corrector looks like, and it is easy to misread as "settled".
+
+### Why WHEP and not the other two
+
+From the same run:
+
+```
+[WHEP-DRIFT] senderRate=90085 tps (+0.094% vs receiver) | clockRate=1.0050 (+0.500%, RAIL)
+             | depthCreep -0.0044 s/s observed vs -0.0041 predicted
+             | REAL DRIFT — creep matches the measured sender rate
+             | need maxSlew ≥ 0.094% + margin
+```
+
+Three facts, and the third is the one that matters:
+
+1. **The sender and receiver clocks genuinely differ** — +0.094%, and the observed depth creep
+   (−0.0044 s/s) matches the creep predicted from that rate (−0.0041 s/s), which is what the
+   `REAL DRIFT` verdict tests. It is a clock offset, not a measurement artefact.
+2. **`LiveClock` is at its rail**: `clockRate=1.0050` against `maxSlew = 0.005`. The control loop has
+   no authority left either.
+3. ⚠️ **THE LOG LINE IS THE CODE ASKING FOR A LARGER `maxSlew`.** `need maxSlew ≥ 0.094% + margin` is
+   emitted by `WHEPFrameRouter` and its own comment says so: *"the slew the loop must be ABLE to reach
+   just to break even. Whatever maxSlew is chosen must exceed this, with margin on top for the loop to
+   have correction authority left over rather than sitting on a new rail."* **That line exists to be
+   read as a request, and nobody had read it.**
+
+### ⚠️ AN ASSUMPTION IN THE CORRECTOR'S OWN COMMENT THAT THIS MEASUREMENT CONTRADICTS
+
+The drift-correction band in `DeckLinkBridge.mm` justifies its authority like this:
+
+> 2 f/callback × 50 Hz ≈ 100 f/s ≈ 2 ms/s of authority — **~40× the ~50 ppm the clocks actually
+> drift**, and each individual correction is a 20–40 µs skip/repeat (inaudible).
+
+**The measured WHEP sender offset is +0.094% = 940 ppm — roughly 19× the ~50 ppm that sizing
+assumed**, and `LiveClock` sitting on its +0.5% rail puts another 5000 ppm into the same budget,
+which is well past the stated ~2000 ppm of authority. That is consistent with the observed
+saturation.
+
+⚠️ **BUT THIS DATA DOES NOT SEPARATE THE TWO CONSTRAINTS.** Whether the binding limit is the
+corrector's ±2-frame authority, `LiveClock`'s ±0.5% rail, or both together is **not** established by
+these five lines — both are provably saturated at the same time. Do not fix one and assume the
+plateau moves. Instrument which one releases first.
+
+### Is it shippable?
+
+**+68 ms is ~1.6 frames at 24p.** That is inside broadcast acceptability, and it is audio LEAD, which
+is the direction a careful ear picks up sooner than lag. It is a real defect and it is not a blocker.
+
+### What it is NOT
+
+⚠️ **NOT introduced by the 2026-09-18 SDI audio work.** That work is what made it *visible*: before
+it, no live transport had ever embedded audio on SDI (see *"FIXED — `applyAudioMute` silenced SDI
+audio for EVERY live source"*), so there was no wire on which a WHEP audio offset could be observed
+at all. The sender/receiver clock offset and the railed `LiveClock` both predate it, and the
+`[WHEP-DRIFT]` accountant that measures them was already in the build, already printing, already
+asking for a bigger `maxSlew`.
+
+---
+
+## 📐 REFERENCE — the four live transports: which clock each one rides, and what `cushion` means
+
+Not a defect. These are the facts that had to be re-derived from source three times during the
+2026-09-18 NDI audio work because they lived only in scattered comments. **If you are about to reason
+about live A/V sync, read this table first.**
+
+### Which clock each transport's audio and video actually ride
+
+| transport | video PTS | audio PTS | audio timebase driver | `cushion` passed to `beginLiveAudio` | desktop lead |
+|---|---|---|---|---|---|
+| **NDI** | `CACurrentMediaTime()` at the display tick | **sample-counted**: `anchorTicks + cumulativeFrames`, on the **sample rate's own timescale**, pinned to the wall clock | `anchorLiveAudio` — a direct anchor, re-anchored by NDI's own closed loop | **0** — it stamps on the axis the timebase sits on | **250 ms** |
+| **WHEP** | `LiveClock.now()` | absolute sender time (`unwrap(rtpTimestamp) / 48000`) | `mirrorLiveAudio` — LiveClock's mapping | **0** — the receiver stamps sender-axis | LiveClock `targetDepth` **400 ms** |
+| **SRT** | `LiveClock.now()` | the mux's 90 kHz PCR (`packet.pts × 1/90000`) | `mirrorLiveAudio` | **0.250** — it stamps on the `now()` axis, a depth behind the sender timeline | LiveClock `targetDepth` **250 ms** |
+| **HLS** | the `AVPlayerItem` timebase | the same item timebase | none — `AVPlayer` owns its output | n/a | n/a |
+
+⚠️ **NDI IS THE ODD ONE AND IT IS NOT AN OVERSIGHT.** It has no `LiveClock`, because FrameSync
+already owns the jitter buffer and rate conversion, so there is no buffer depth to regulate. That is
+why it anchors the audio timebase directly instead of mirroring a mapping — and why it needs its own
+closed loop, since the incidental re-anchoring WHEP and SRT get from LiveClock's slew does not exist
+for it. See the slew-site note in `LiveClock.updateDepthLocked`.
+
+### ⚠️ `cushion` IS NOT A BUFFER DEPTH. THE NAME IS A TRAP.
+
+`FrameEngine.beginLiveAudio(cushion:path:)` has exactly two consumers — `mirrorLiveAudio`'s
+`let target = m.senderPTS - cushion`, and `liveAudioDrift`, which adds it back. In both, what it
+means is:
+
+> **HOW FAR BEHIND THE MAPPING'S `senderPTS` DOES THIS TRANSPORT STAMP ITS AUDIO PTS?**
+
+It puts the synchronizer timebase on the **same axis as the PTS the caller will feed it**. A
+transport stamping absolute sender time passes **0**. One stamping on `LiveClock.now()` — which is
+held `startupDepth` behind the sender timeline — passes that depth.
+
+**Pass the wrong one and desktop audio is early or late by exactly the difference, while every log
+continues to read healthy.** It happened to equal the buffer depth for WHEP only because the receiver
+once rebased through `now()`; when that changed to absolute sender time, WHEP's correct value became
+0 and passing `targetDepth` would have traded the SDI bug for 400 ms of lip-sync error. The value is
+per-session state (`mirror.cushion`), so one transport's answer can never reach another's.
+
+---
+
+## 📐 REFERENCE — the frame-rate ladder, and why NDI alone gets no cross-check
+
+All four transports now declare a rate (2026-09-18). **They do not all declare it the same way, and
+the differences decide how much you can trust each one.**
+
+| transport | source | exactness | cross-checked against |
+|---|---|---|---|
+| **NDI** | the sender's `frame_rate_N`/`frame_rate_D` | **exact rational** — best of the four | ⚠️ **nothing** |
+| **WHEP** | SPS VUI `time_scale / (2 × num_units_in_tick)` | exact | a 120-frame arrival estimator |
+| **HLS** | `FRAME-RATE` in the master playlist | declared, packager-supplied | a 120-frame estimator |
+| **SRT** | `av_guess_frame_rate` | a guess from the demuxer probe | nothing, but it is already a measurement |
+
+Every one of them screens against the same plausible range, `1.0...240.0`, and publishes **nil**
+rather than a garbage rate — deliberately identical refusals, so the card's behaviour does not depend
+on which transport happened to connect.
+
+⚠️ **NDI HAS NO CROSS-CHECK AND THAT IS STRUCTURAL, NOT UNFINISHED WORK.** Frames arrive through
+FrameSync, which buffers, repeats and drops to keep our clock fed — `captureVideoFrame` dedups on
+timestamp, so we do not even see every repeat. Inter-arrival gaps measured on this side describe the
+CVDisplayLink tick and FrameSync's smoothing, **not the sender's cadence**, so an estimator here
+would produce a confident number about the wrong thing and disagreements with it would be
+meaningless. The sender's 100 ns `timestamp` could in principle carry one, but it would be checking
+an exact rational the sender states against a derivative of that same sender's clock — not the
+independent witness HLS's playlist-vs-media or WHEP's VUI-vs-arrival is.
+
+### ⚠️ THE HLS ESTIMATOR HAS A PRECISION FLOOR THAT NO FORMULA CAN AVERAGE AWAY
+
+This is why HLS reads the playlist at all, and why **WHEP's fit gate must never be ported to HLS**.
+
+Capture instants are snapped to the **display tick**. Over a span of N intervals each endpoint
+carries up to half a tick, so precision is `~(tick / span)` and improves **only with a longer span**.
+Modelled against the real beat pattern:
+
+```
+N=120   4.0 s  ±0.415%  two modes      N=480  16.0 s  ±0.104%  two modes
+N=240   8.0 s  ±0.208%  two modes      N=600  20.0 s  ±0.083%  ONE MODE
+N=360  12.0 s  ±0.139%  two modes      N=900  30.0 s  ±0.056%  ONE MODE
+```
+
+~600 samples (20 s) is where a single stable mode appears. **Left at 120 deliberately** — it trades
+4 s to a first answer for 20 s, and the playlist now supplies the declared rate anyway.
+
+**The 60 Hz beat.** At 23.976 fps against a 60 Hz tick the frame interval is **2.5 ticks**, so
+capture instants alternate 2 and 3 ticks (33.3 / 50.0 ms) forever. No integer multiple of any median
+fits both, so `fitResidual` measures **~20% on a perfectly healthy stream, by construction**, and raw
+`spread` runs 33% (23.98) to 50% (29.97). Porting WHEP's 2% gate here would refuse every healthy HLS
+stream. The `[0.5×, 2.0×]` trim was investigated and exonerated on this: `nearDbl=0`, `disc=0` across
+all 1018 windows.
+
+---
+
+## A sticky manual output-mode pick silently overrides a correct auto-detection
+
+**Status:** PARTLY FIXED 2026-09-18 — the UI half is fixed; the persistence question is open.
+**Found:** 2026-09-18, while closing the SDI video table for NDI.
+
+`DeckLinkService.manualMode` is persisted (`manifold.decklink.manualOutputMode`) and **wins over any
+source-derived mode until the operator clears it**. That is correct as designed, and it is also a
+trap: a mode picked by hand during one session to work around a transport that could not state a
+rate is still in force in the next session, against a source that now states one perfectly well. The
+output is then wrong in a way that looks deliberate, and the picker shows it as chosen — because it
+was, once, weeks ago.
+
+**The UI half that WAS fixed:** "Follow source — unavailable" was rendered **checked and selectable**
+while its own subtitle told the operator to pick something else, leaving the card on whatever
+preferences last held — 2160p23.98 against a 1080 source, i.e. a black picture under a checkmark
+saying everything was fine. It is now a disabled `Button` rather than a tagged `Picker` option, and
+the binding reports `currentMode` so the checkmark names the mode the card is **actually** on.
+
+⚠️ **AUTO-ADOPTING THE MODE AS A MANUAL PICK WAS CONSIDERED AND REJECTED**, and the reason generalises:
+**HLS publishes its raster long before its measured rate**, so adopting on "no rate yet" would
+permanently disable follow-source on HLS after every single connect. The selection is therefore
+presentational and reversible — `manualMode` stays nil and the selection returns to Follow source on
+its own once a rate arrives.
+
+**Still open:** nothing expires or re-prompts a stored pick. Options are to scope it to the session,
+to expire it, or to surface it more loudly when it disagrees with an available source-derived mode.
+Not decided.
 
 ---
 
@@ -6505,19 +6721,25 @@ What it costs:
   1280×720 inside 25 s. Each step would stop scheduled playback and restart the card — a visible
   glitch on the wire, several times, during the first seconds of every connect. **This needs a
   latching or hysteresis policy** (settle time, highest-seen rung, or operator pin), and that
-  policy is itself the design work.
-- **Rate availability differs per transport, and one of them has nothing:**
-  - **SRT** — already plumbed. `guessedFrameRate` (`av_guess_frame_rate`, 0 when unknown) at
-    `App/SRT/SRTSession.h:176`, populated at
-    `App/SRT/SRTSession.m:428` and already read by
-    `App/SRT/SRTFrameRouter.swift:584`.
-  - **NDI** — the SDK's `NDIlib_video_frame_v2_t` carries `frame_rate_N`/`frame_rate_D`, but
-    **`NDIBridge` does not surface it**: `NDIVideoFrame` exposes `width`/`height` only
-    (`App/NDI/NDIBridge.h:28-29`), and neither the header nor the
-    implementation mentions a rate. Available upstream, needs plumbing — not available today.
-  - **WHEP** — **nothing.** No rate field anywhere in `App/WebRTC/`. H.264 SPS VUI may carry
-    `num_units_in_tick`/`time_scale`, but nothing parses it; the only fps figures in that code are
-    measured observations in comments.
+  policy is itself the design work. ✅ **DONE** — `DeckLinkService.liveModeSettleSeconds` (2.0 s),
+  with the first mode of a connection applied immediately and every later change held for the settle
+  window. The family test (`height >= 1620`) also absorbs most of a ladder for free: 416×234, 960×540
+  and 1920×1080 all resolve to the same 1080p mode, so that measured ladder now causes **zero**
+  re-establishes once the rate is known.
+- ~~**Rate availability differs per transport, and one of them has nothing.**~~ ⚠️ **SUPERSEDED
+  2026-09-18 — ALL FOUR NOW DECLARE A RATE.** The survey below is kept only as the starting state;
+  every "not available today" in it has since been closed. Current state:
+  - **SRT** — `guessedFrameRate` (`av_guess_frame_rate`, 0 when unknown), screened against
+    `1.0...240.0` and published or refused. Unchanged since this was written.
+  - **NDI** — ✅ **plumbed 2026-09-18.** `NDIVideoFrame` now exposes `frameRateN`/`frameRateD` as the
+    sender's exact rational, divided and plausibility-screened in `NDIService.declaredFrameRate`
+    against the *same* `1.0...240.0` range SRT uses. **The best rate signal of the four** — an exact
+    rational the sender states outright — and the only one with no independent measurement to
+    cross-check it against (see the ladder entry below).
+  - **WHEP** — ✅ **parsed 2026-09-18.** H.264 SPS VUI `time_scale / (2 × num_units_in_tick)`, exact,
+    latched once per connection, with a 120-frame estimator running underneath as a cross-check.
+  - **HLS** — ✅ **read 2026-09-18.** `FRAME-RATE` from the master playlist, cross-checked against the
+    estimator.
   - **HLS** — no declared rate either; `AVPlayerItemVideoOutput` vends buffers, not a cadence.
     It would have to be inferred from presentation timestamps.
 
@@ -6611,7 +6833,8 @@ The header also warns against this exact use of the depth function, in its own w
 
 ### ⚠️ THE OLD COMMENT ASSERTED THE EXACT OPPOSITE OF THE HEADER, AND THAT IS WHY IT SURVIVED
 
-`NDIBridge.mm:563-565` read:
+`NDIBridge.mm`'s pull comment, as it stood before commit `03899dd` (the line numbers it occupied
+have since moved, and the comment itself is gone), read:
 
 > Requesting no more than what's buffered means FrameSync never pads silence; the remainder stays
 > queued (and FrameSync bounds/ages its own queue), and the >nominal cap gives headroom to catch up.
@@ -6744,9 +6967,17 @@ reads 100 lines a second.
 
 ### Not verified
 
-- **Re-measurement after the SECOND fix.** The 44030 Hz run above is post-first-fix, pre-second.
-  **Nothing should be treated as fixed until a run shows `cum` ≈ 48000 flat, `depth` low with no
-  sawtooth, `dev` near zero, re-anchors ~0/s and a large `real=Nf` in the DeckLink summary.**
+- ~~**Re-measurement after the SECOND fix.**~~ ✅ **DONE 2026-09-18, and it passes on every
+  criterion this list set in advance.** Measured over 72 s: **`cum` = 48006.6 Hz**,
+  **`sndR` = 48015.5 Hz** from the sender's own timestamps, **`dev` +0.01..+1.02 ms**, **zero ring
+  re-anchors**. A later run during the desktop-audio work gave `dev` +0.00..+0.00 ms and
+  **`real` = 1068271f with `underruns` = 0** in the DeckLink summary.
+  ⚠️ **BUT READ THE `real=Nf` CRITERION AGAIN — IT DOES NOT MEAN WHAT THIS LIST ASSUMED.** A large
+  `real` and zero underruns prove the ring was READ and the cursor kept up. They say **nothing about
+  what was in it**; they are transaction counters, not content checks. "These samples play cleanly on
+  SDI" rested on exactly this number for most of 2026-09-18 and was never verified by ear. What
+  finally settled it was writing the bytes to a `.wav` and listening — see the four-instrument table
+  in the desktop-audio entry.
 - **Whether the synthesised audio was time-stretched or literally duplicated.** The header's silence
   path ("if no current audio data is present") does not apply — the queue was deep — so dynamic
   resampling is the strong reading, but the two were never distinguished. `sndR` on a *pre-fix*
