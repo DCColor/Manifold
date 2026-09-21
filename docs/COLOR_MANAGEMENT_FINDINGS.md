@@ -343,7 +343,8 @@ stops "Embedded" creeping back in as a concept.
 
 **Phase 0 — measure before building.** A file with real shadow detail, current behaviour vs. no
 declared colorspace, look at the bottom 10%. *Done means:* the γ1.9609 defect has been seen on a
-real display, or established as invisible there.
+real display, or established as invisible there. ✅ **Closed 2026-09-21 — result in §6.5, and it
+changes what Phase 1 has to prove.**
 
 **Phase 1 — settle the destination question (§7.1).** A spike, not an opinion: what does the layer
 do with a colorspace when the shader has already applied the EOTF, and is there a genuine
@@ -372,12 +373,80 @@ stage exists.
 
 ---
 
+### 6.5 Phase 0 — result, measured 2026-09-21
+
+A temporary DEBUG-only spike toggled `CAMetalLayer.colorspace` between the derived value and `nil`
+on a paused frame, alongside a probe that dumped the **destination** display profile through the
+same ICC parser used for the source in §2. The probe's prediction was recorded **before** the
+picture was looked at, on each of two displays.
+
+| Display | Assigned profile rTRC | max abs deviation from source | Predicted | Observed |
+|---|---|---|---|---|
+| LG TV SSCR2 — the reference desktop | `para` ft=0, γ **1.960999** | **1.145e-05** at x=0.601 | nothing to show | no visible change |
+| ASUS PA147 | `curv` count=1024 table; **sRGB to 7.6e-06** | **4.962e-02** at x=0.656 | visible | visible — bypass slightly darker |
+
+Both predictions held. Four findings, in ascending order of how much they matter:
+
+**1. Visibility of the A/B is a property of the destination profile, not the source.** The source
+is identical in both rows — same file, same `kCGColorSpaceCoreMedia709`, same 660 bytes. Everything
+that varies is downstream.
+
+**2. The reference desktop is already BT.1886, by accident.** The LG's assigned profile is a
+parametric encoding of γ1.960999 against the source's `curv` γ1.960938 — the same curve to about
+one hundredth of a 10-bit code. ColorSync's transform is therefore identity in all but name, code
+values reach the panel untouched, and the panel's own calibration LUT — which lives in the display,
+not in any ICC profile macOS can see — applies 2.4. **Manifold has been delivering a reference
+picture on that display for reasons nobody designed, and that no part of the app is aware of.**
+
+**3. Bypass is not Reference, and Phase 0 could not have shown the γ1.9609 defect.** What was
+observed on the ASUS is *colour-managed-to-sRGB* versus *not colour-managed at all*. It is **not**
+γ1.9609 versus 2.4. On the ASUS, OS mode is arguably the correct one — ColorSync compensating an
+sRGB panel to deliver the γ1.9609 intent — and Bypass is the wrong one. What Phase 0 established is
+that **the transform is real, observable, and predictable from the profiles in advance**. Whether
+the γ1.9609 intent itself is wrong *for a reference tool* remains a claim resting on §2 and §4,
+not on anything anyone has seen. No mode in the build applies 2.4, so no A/B in the build can
+test it.
+
+**4. Scopes do not move, and that is correct.** They sample decoded code values upstream of the
+display transform: they measure what is in the file, not what the display emits. This makes them
+the one instrument in the app immune to the mode picker — which is why picture and scopes can
+legitimately disagree, and why the scopes stay trustworthy while the picture sits in Bypass. **This
+belongs in the UI work (§6.3)**, because a user who sees the picture change and the waveform hold
+still will otherwise read it as a bug.
+
+> **Units.** The probe reports "50.76 codes at 10-bit". That is the *linear-light* deviation scaled
+> to 10 bits, not a 50-code step in the picture — roughly 14% relative light at x=0.656. A future
+> reader will misread it as banding-scale otherwise.
+
+**An instrument bug caught by running it, worth recording for the same reason §5's was.** The
+probe's first version compared the two TRCs **as encoding strings**. On the LG that yields
+`curv/count=1/gamma=1.960938` against `para/ft=0/[1.960999]` — two ICC spellings of one curve — and
+the verdict read "TRCs differ, A/B should be visible." Exactly backwards. The shipped version
+evaluates both curves numerically over [0,1]. This is the same failure mode as `recordPTSContinuity`
+comparing Doubles while the CMTimes were off-grid: **an instrument that compares representations
+instead of values reports healthy or reports alarm for reasons unconnected to the thing being
+measured.**
+
+---
+
 ## 7. Open and unverified
 
 1. **The destination question — where the real design work is.** Once the shader owns the transform,
    it must encode to *something*. Whether Reference mode declares a destination colorspace or reads
    the display profile is **undecided**. Nothing in this document answers it. **This is Phase 1
    (§6.4)** and it blocks Phase 3.
+
+   Added 2026-09-21, from §6.5: **a known-answer test case now exists.** On the LG, ColorSync's
+   transform is identity and the display's own LUT applies 2.4, so OS mode already delivers a
+   BT.1886 picture. A correct Reference implementation must therefore leave that display's picture
+   **indistinguishable from today's OS mode**, while changing the ASUS. Any implementation that
+   shifts the LG is double-applying the EOTF. This is a stronger acceptance test than was available
+   before Phase 0 ran, and the Phase 1 spike should check it first.
+
+   It also sharpens the question itself. A destination that ignores the display profile and a
+   destination derived *from* it give the same answer on a display whose profile matches the source
+   curve, and different answers everywhere else — so this test case discriminates between the two
+   candidate designs rather than merely validating one.
 
 2. **Actual display light output was never measured.** §2's ratios are curve arithmetic. No
    photometer, no measured display response. The claim is about what the profile asks for.
@@ -461,6 +530,10 @@ rTRC : curveType 'curv'  count=1  → PURE POWER LAW, gamma=1.960938
 | Match QuickTime ≡ Embedded on SDR | ✅ waveform | ✅ "both defer to ColorSync" | Screen internals |
 | Reference mode needs a declared destination | | | ⚠️ **open — Phase 1, §6.4** |
 | (9,1) Rec.2020-SDR flattens to 709 | | ✅ from code | ⚠️ no fixture — author with Flip |
+| A/B visibility is set by the **destination** profile, not the source | ✅ two displays, predicted then observed | | |
+| LG desktop profile ≡ source curve → ColorSync is a no-op there | ✅ 1.145e-05 | | |
+| That desktop picture is already BT.1886 | | ✅ no-op + display-side 2.4 LUT | ⚠️ panel response not measured |
+| γ1.9609 vs 2.4 visible on real material | | | ⚠️ **not established — Bypass ≠ Reference (§6.5)** |
 | Actual display light output | | | ⚠️ never measured |
 
 ---
