@@ -104,9 +104,21 @@ enum BuildInfo {
 
         // TWO TELEMETRY STATES, REPORTED SEPARATELY, BECAUSE THEY ARE TWO SWITCHES.
         //
-        // APP: gated on DEBUG. App/WebRTC/* and App/Live/SyntheticLiveSource.swift are wrapped in
-        // `#if DEBUG` in their ENTIRETY, so without it the live paths are not merely silent — they
-        // are absent from the binary and ⌃⌥H / ⌃⌥L do nothing.
+        // APP: gated on DEBUG. Without it the per-second rollups ([SRT-FLOW], [WHEP-FLOW], the
+        // decode-rate tick) are compiled out, and the hidden ⌃⌥H / ⌃⌥L shortcuts and the synthetic
+        // live harness are absent from the binary.
+        //
+        // ⚠️ CORRECTED 2026-09-21 BY MEASUREMENT. This previously claimed "App/WebRTC/* and
+        // App/Live/SyntheticLiveSource.swift are wrapped in `#if DEBUG` in their ENTIRETY, so
+        // without it the live paths ... are absent from the binary". **Only SyntheticLiveSource is**
+        // (its `#if DEBUG` is on line 1). The transports ship — measured with nm on the Release
+        // build product: WHEPClient 116 symbols, WHEPFrameRouter 79, SRTClient 166,
+        // LiveDisplayRoute 28, against SyntheticLiveSource 0. `WHEPClient.swift`'s first `#if` is
+        // at line 450 of 802 and gates a log line, not the file.
+        //
+        // The distinction matters for a shipping decision: what DEBUG removes is the TELEMETRY and
+        // the hidden SHORTCUTS. The live transports are product features reached from the ordinary
+        // Stream Sources UI, and they are present in every configuration.
         //
         // CORE: gated on `DEBUG || MANIFOLD_TELEMETRY` inside ManifoldCore, and OBSERVED from the
         // package rather than assumed here — the app has no way to know what the package was
@@ -134,11 +146,20 @@ enum BuildInfo {
                   build configuration by NAME and only "Debug" is .debug.
                   """)
         }
-        // The converse is the known, accepted state of a shipping build: the package-owned switch is
-        // unconditional, so Core's telemetry is compiled into Release. Nothing can reach it there —
-        // no live source is built in — so this is a note, not a warning.
+        // ⚠️ THE CONVERSE IS NOT BENIGN, AND THIS SAID IT WAS. The package-owned switch is
+        // unconditional (see Package.swift), so Core's telemetry is compiled into Release — and it
+        // is REACHABLE, because `LiveDisplayRoute.swift:168` installs a LiveClock and that file
+        // carries no `#if` at all. Every NDI / WHEP / SRT / HLS connection therefore writes
+        // `[LIVECLOCK] depth=… target=… rate=…` to stderr at 1 Hz in a shipping build.
+        //
+        // This comment and the line it printed both used to say "unreachable (no live source in
+        // this configuration)". That was wrong, it was printed into every Release log as
+        // reassurance, and it was measured false on 2026-09-21 — five [LIVECLOCK] format strings
+        // survive in the stripped Release archive. Corrected to say what is true; the fix itself
+        // is Package.swift's "move emission to the App layer" plan.
         if !appTelemetry && coreTelemetry {
-            NSLog("        note: core telemetry is compiled in but unreachable (no live source in this configuration)")
+            NSLog("        note: core telemetry is compiled in AND REACHABLE — [LIVECLOCK] will be "
+                + "emitted at 1 Hz by any live source. See Package.swift (MANIFOLD_TELEMETRY).")
         }
 
         // THE WARNING KEYS ON OPTIMIZATION, NOT ON DEBUG — and on BOTH languages. Profile is

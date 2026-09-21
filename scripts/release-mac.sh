@@ -690,23 +690,48 @@ record "libav linkage:           @rpath + LC_RPATH ../Frameworks (relocatable)"
 # The scheme pins its archive action to Release and we override with -configuration. Rather
 # than trust that, measure the property we actually care about: Profile defines DEBUG, so the
 # `#if DEBUG || MANIFOLD_TELEMETRY` rollups are compiled IN; Release compiles them OUT.
-# Measured: [SRT-FLOW] appears in a DEBUG-defining binary and not in a Release one.
 # Scans any sibling dylib too, in case a future Xcode splits the binary as it does for Debug.
+#
+# ⚠️ THE MARKER IS THE FORMAT STRING, NOT THE TAG, AND THE DIFFERENCE ABORTED EVERY RELEASE.
+#
+# This grepped for the literal `[SRT-FLOW]` on the stated reasoning that it "appears in a
+# DEBUG-defining binary and not in a Release one". MEASURED 2026-09-21, that is false — the tag
+# appears in BOTH, so the Release branch below found 1 hit and killed the build:
+#
+#   App/DiagnosticsExport.swift:846 is an UNGATED prose note in the diagnostics export that
+#   reads "the per-second rollups ([SRT-FLOW], [WHEP-FLOW], …) are compiled out and WILL NOT
+#   APPEAR BELOW". The assertion aborted on the sentence explaining that the thing it was
+#   checking for is absent.
+#
+# It had no discriminating power in either direction and was never noticed, because Release had
+# never been built — it did not compile until the `toneLock` fix. Profile passed for the right
+# reason (its hit IS the real format string) and that was the only case anyone ever ran.
+#
+# So match the FORMAT STRING, which only exists where the emitting code was compiled in.
+# MEASURED on both configurations, same tree:
+#
+#              strings -a … | grep -cF        Release   Profile
+#              '[SRT-FLOW]'        (tag)         1         1      ← no signal
+#              'enqueued=%.1f/s'   (format)      0         2      ← discriminates
+#
+# The 2 in Profile are the SRT and WHEP rollups, which share the format. Prose can quote a tag;
+# it cannot contain a printf conversion, so this marker cannot be tripped by documentation.
 TELEMETRY_HITS=0
 while IFS= read -r macho; do
-    hits=$(strings -a "$macho" 2>/dev/null | grep -cF '[SRT-FLOW]' || true)
+    hits=$(strings -a "$macho" 2>/dev/null | grep -cF 'enqueued=%.1f/s' || true)
     TELEMETRY_HITS=$((TELEMETRY_HITS + hits))
 done < <(find "${APP}/Contents/MacOS" -type f)
 
 if [[ "$CONFIG" == "Profile" ]]; then
     [[ "$TELEMETRY_HITS" -gt 0 ]] || die "this is a Profile build but the telemetry lines are NOT in the
-       binary ([SRT-FLOW] not found). The -configuration override did not take, and a tester's
-       diagnostics export would be missing every per-second rollup. Check schemes.Manifold.archive."
+       binary (the 'enqueued=%.1f/s' rollup format string was not found). The -configuration
+       override did not take, and a tester's diagnostics export would be missing every per-second
+       rollup. Check schemes.Manifold.archive."
     ok "telemetry present (${TELEMETRY_HITS} marker(s)) — diagnostics export will be complete"
     record "telemetry rollups:       PRESENT (correct for a tester build)"
 else
     [[ "$TELEMETRY_HITS" -eq 0 ]] || die "this is a Release build but telemetry markers ARE present
-       (${TELEMETRY_HITS}). DEBUG is defined in a build that should not have it."
+       (${TELEMETRY_HITS} × 'enqueued=%.1f/s'). DEBUG is defined in a build that should not have it."
     ok "telemetry absent — correct for Release"
     record "telemetry rollups:       absent (correct for Release)"
 fi

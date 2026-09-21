@@ -75,12 +75,43 @@ let package = Package(
                 // package-side predicate that separates them — the two are indistinguishable here.
                 //
                 // >>> CONSEQUENCE, STATED PLAINLY: THIS DEFINES MANIFOLD_TELEMETRY IN **RELEASE**
-                // >>> TOO. A shipping archive currently contains the [LIVECLOCK] strings and the
-                // >>> two tuning setters. Nothing in Release can REACH them (SyntheticLiveSource
-                // >>> and the whole WHEP stack are `#if DEBUG` in the app and are not compiled in,
-                // >>> so no code path installs a LiveClock), but the code and its strings are in
-                // >>> the binary. See the archive tripwire discussion in the review notes for how
-                // >>> to catch it, and the "move emission to the App layer" plan for removing it.
+                // >>> TOO. A shipping archive contains the [LIVECLOCK] strings and the two tuning
+                // >>> setters, AND THE TELEMETRY IS REACHABLE AND WILL EMIT.
+                //
+                // ⚠️ CORRECTED 2026-09-21 BY MEASUREMENT. This paragraph previously read "Nothing
+                // in Release can REACH them (SyntheticLiveSource and the whole WHEP stack are
+                // `#if DEBUG` in the app and are not compiled in, so no code path installs a
+                // LiveClock)". **That was false, and it is the kind of false that gets read once
+                // and acted on.** Only `SyntheticLiveSource.swift` is wholly `#if DEBUG` (its
+                // directive is on line 1). The live TRANSPORTS are product features and ship:
+                //
+                //     symbols in the Release build product, measured with nm:
+                //       WHEPClient 116 · WHEPFrameRouter 79 · SRTClient 166 · LiveDisplayRoute 28
+                //       SyntheticLiveSource 0   ← the only one that is actually absent
+                //
+                // `WHEPClient.swift`'s first `#if` is at line 450 of 802 and gates a log line, not
+                // the file. What `#if DEBUG` removes from Release is the hidden ⌃⌥H / ⌃⌥L
+                // SHORTCUTS and the synthetic harness — not the transports, which are reached
+                // from the ordinary Stream Sources UI.
+                //
+                // THE REACHABILITY CHAIN, every link verified ungated:
+                //
+                //     App/Live/LiveDisplayRoute.swift:168   (no #if anywhere in the file)
+                //         → LiveClock(startupDepth:targetDepth:)
+                //     LiveClock.swift:676, :677, :999       (ungated) → emit(_:)
+                //     LiveClock.swift:1067                  #if DEBUG || MANIFOLD_TELEMETRY
+                //                                           ← always true here, because of THIS line
+                //     LiveClock.swift:1069                  FileHandle.standardError.write(…)
+                //
+                // So a Release build writes `[LIVECLOCK] depth=… target=… rate=…` to stderr at
+                // 1 Hz for as long as any NDI / WHEP / SRT / HLS source is connected. Confirmed in
+                // the stripped Release ARCHIVE, not just a build product: five [LIVECLOCK] format
+                // strings survive, including the 1 Hz one.
+                //
+                // This is a defect and it is independent of which configuration ships — Profile and
+                // Release both emit it. The fix is the "move emission to the App layer" plan, or a
+                // Core-side switch that is not MANIFOLD_TELEMETRY. Until then, do not read this
+                // block as saying the telemetry is dormant. It is not.
                 .define("MANIFOLD_TELEMETRY")
             ]
         )
