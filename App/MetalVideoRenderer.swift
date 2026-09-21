@@ -7,6 +7,9 @@ import QuartzCore
 import ImageIO
 import UniformTypeIdentifiers
 import ManifoldCore   // ScrubProducerFlags.stats — gates the [SETTLE] measurement
+#if DEBUG
+import CryptoKit     // ⚠️ SPIKE — SHA-256 for the [CSPROBE] source-vs-dest verdict.
+#endif
 import ManifoldCore      // UnfairLock — priority-donating lock for the live frame queue
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
@@ -1090,7 +1093,8 @@ final class MetalVideoRenderer {
         hasDiagnosedColorForSource = true
 
         #if DEBUG   // ⚠️ TEMPORARY — delete these 3 lines with the dumpColorSpaceDiagnostic block.
-        Self.dumpColorSpaceDiagnostic(cs, primaries: primaries, transfer: transfer, matrix: matrix)
+        Self.dumpColorSpaceDiagnostic(cs, primaries: primaries, transfer: transfer,
+                                      matrix: matrix, layer: metalLayer)
         #endif
     }
 
@@ -1324,12 +1328,41 @@ final class MetalVideoRenderer {
     // no other file, no project.yml entry, no state.
     // ══════════════════════════════════════════════════════════════════════════════════════════
     #if DEBUG
+    /// What one probe run learned, so SOURCE and DESTINATION can be compared. ⚠️ SPIKE.
+    private struct ColorSpaceProbe {
+        var icc: Data?
+        /// The rTRC encoding, for reporting: `curv/count=1/gamma=1.960938`, `para/ft=0/[…]`.
+        /// ⚠️ REPORTING ONLY. The verdict compares `evalR`, never this — see `dumpDestinationColorSpace`.
+        var rTRC: String = "UNREAD"
+        /// The rTRC decoded to a FUNCTION. This is what the verdict compares.
+        var evalR: ((Double) -> Double)?
+    }
+
+    /// Most recent SOURCE probe, so a DISPLAY CHANGE re-verdicts without reopening a file.
+    /// Main-thread only. ⚠️ SPIKE.
+    private static var lastSourceProbe: ColorSpaceProbe?
+    /// Destination ICC hash at the last dump — the SUPPRESSION key, not an annotation. ⚠️ SPIKE.
+    private static var lastDestinationHash: String?
+
     private static func dumpColorSpaceDiagnostic(_ cs: CGColorSpace,
-                                                 primaries: Int?, transfer: Int?, matrix: Int?) {
-        func p(_ s: String) { print("[CSPROBE] " + s) }
+                                                 primaries: Int?, transfer: Int?, matrix: Int?,
+                                                 layer: CAMetalLayer? = nil) {
+        func p(_ s: String) { print("[CSPROBE][SOURCE] " + s) }
         p("──────────────────────────────────────────────────────────────────")
         p("CICP in: primaries=\(primaries.map(String.init) ?? "nil") "
           + "transfer=\(transfer.map(String.init) ?? "nil") matrix=\(matrix.map(String.init) ?? "nil")")
+        let probe = probeAndDump(cs, label: "SOURCE")
+        lastSourceProbe = probe
+        _ = observeDisplayChangesOnce
+        dumpDestinationColorSpace(context: "source load", against: probe, layer: layer)
+    }
+
+    /// The reusable half: read a `CGColorSpace`'s ICC bytes and print them. The destination probe
+    /// is THE SAME PARSING against a different profile, so this is called twice, not written twice.
+    @discardableResult
+    private static func probeAndDump(_ cs: CGColorSpace, label: String) -> ColorSpaceProbe {
+        func p(_ s: String) { print("[CSPROBE][\(label)] " + s) }
+        var out = ColorSpaceProbe()
         p("CGColorSpaceCopyName    : \(cs.name.map { String($0) } ?? "<nil / UNNAMED>")")
         p("isWideGamutRGB=\(cs.isWideGamutRGB)  usesITUR_2100TF=\(CGColorSpaceUsesITUR_2100TF(cs))")
 
@@ -1350,8 +1383,11 @@ final class MetalVideoRenderer {
         p("identity (CFEqual)      : \(hits.isEmpty ? "matches NONE of the tested constants" : hits.joined(separator: ", "))")
 
         guard let icc = cs.copyICCData() as Data? else {
-            p("CGColorSpaceCopyICCData : nil — no ICC representation"); return
+            p("CGColorSpaceCopyICCData : nil — no ICC representation")
+            out.rTRC = "NO-ICC"
+            return out
         }
+        out.icc = icc
         let b = [UInt8](icc)
         func u16(_ o: Int) -> Int { o + 2 <= b.count ? Int(b[o]) << 8 | Int(b[o + 1]) : 0 }
         func u32(_ o: Int) -> UInt32 {
@@ -1374,6 +1410,26 @@ final class MetalVideoRenderer {
             tags[sig(o)] = (Int(u32(o + 4)), Int(u32(o + 8)))
         }
         p("tags (\(n)): \(tags.keys.sorted().joined(separator: ", "))")
+
+        // ⚠️ SPIKE — the rTRC ENCODING as a string, for the report. Derived from the same bytes
+        // the loop below prints. NOT used for the verdict; see `dumpDestinationColorSpace`.
+        out.rTRC = {
+            guard let (o, _) = tags["rTRC"] else { return "ABSENT" }
+            switch sig(o) {
+            case "curv":
+                let c = Int(u32(o + 8))
+                if c == 0 { return "curv/count=0/identity" }
+                if c == 1 { return String(format: "curv/count=1/gamma=%.6f", Double(u16(o + 12)) / 256.0) }
+                return "curv/count=\(c)/table"
+            case "para":
+                let ft = u16(o + 8)
+                let np = [0: 1, 1: 3, 2: 4, 3: 5, 4: 7][ft] ?? 0
+                return "para/ft=\(ft)/[" + (0..<np).map { String(format: "%.6f", s15(o + 12 + 4 * $0)) }
+                    .joined(separator: ",") + "]"
+            default:
+                return "type=\(sig(o))"
+            }
+        }()
 
         if let (o, sz) = tags["desc"] {
             // Two encodings to handle: v2 'desc' is ASCII at +12 after a count; v4 'mluc' is a
@@ -1458,7 +1514,14 @@ final class MetalVideoRenderer {
         }
 
         // Numerical verdict — compare the actual curve against the candidates.
-        guard let f = evalR else { p("──────────────────────────────────────────────────────────────────"); return }
+        // ⚠️ SPIKE — publish the decoded curve BEFORE the guard, so a probe whose curve exists
+        // still hands it back when the candidate comparison below is skipped.
+        out.evalR = evalR
+
+        guard let f = evalR else {
+            p("──────────────────────────────────────────────────────────────────")
+            return out
+        }
         func bt709(_ x: Double) -> Double { x < 0.081 ? x / 4.5 : pow((x + 0.099) / 1.099, 1 / 0.45) }
         let xs = (0...256).map { Double($0) / 256.0 }
         let tests: [(String, (Double) -> Double)] = [
@@ -1483,7 +1546,156 @@ final class MetalVideoRenderer {
                      x, f(x), bt709(x), bt709(x) / max(f(x), 1e-9)))
         }
         p("──────────────────────────────────────────────────────────────────")
+        return out
     }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // ⚠️ PHASE 1 SPIKE — THE DESTINATION HALF. TEMPORARY, DELETE WITH THE REST OF THIS BLOCK.
+    //
+    // Phase 0 established that ⌃⌥⇧B showed nothing on the LG because the display's assigned
+    // profile IS γ1.9609 — ColorSync's transform was identity. This half is the instrument that
+    // says so per machine, so a null A/B is never again mistaken for evidence about γ1.9609.
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+
+    private static func sha256Hex(_ d: Data) -> String {
+        SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The screen the picture is on. ⚠️ **THE ONE RESOLVER** — every name printed anywhere in this
+    /// block comes from here, which is the fix for the original probe's `window moved to "?"`
+    /// header: the notification path resolved a name from the notification's own window while the
+    /// body resolved one from here, and the two disagreed. There is now one path and one name.
+    ///
+    /// Prefers the layer's own view — the renderer is PER-WINDOW, so `NSApp.mainWindow` is the
+    /// wrong answer in a two-window session and, on a two-display desk, the wrong DISPLAY.
+    private static func hostScreen(for layer: CAMetalLayer?) -> NSScreen? {
+        if let view = layer?.delegate as? NSView, let s = view.window?.screen { return s }
+        return NSApp?.mainWindow?.screen ?? NSApp?.windows.first?.screen ?? NSScreen.main
+    }
+
+    /// The layer last probed, so a display-change dump re-probes THE SAME WINDOW rather than
+    /// whichever happens to be key. Weak: the renderer owns the layer. ⚠️ SPIKE.
+    private static weak var lastProbedLayer: CAMetalLayer?
+
+    /// The display's profile, and which API produced it.
+    private static func destinationColorSpace(for screen: NSScreen) -> (CGColorSpace, String)? {
+        if let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            let did = CGDirectDisplayID(num.uint32Value)
+            return (CGDisplayCopyColorSpace(did), "CGDisplayCopyColorSpace(displayID=\(did))")
+        }
+        if let ns = screen.colorSpace?.cgColorSpace {
+            return (ns, "NSScreen.colorSpace (no NSScreenNumber)")
+        }
+        return nil
+    }
+
+    /// Dump the DESTINATION profile through the same parser as the source, and state whether the
+    /// A/B has anything to show on this display. ⚠️ SPIKE.
+    private static func dumpDestinationColorSpace(context: String,
+                                                  against source: ColorSpaceProbe?,
+                                                  layer: CAMetalLayer? = nil) {
+        func p(_ s: String) { print("[CSPROBE][DEST] " + s) }
+        let isSourceLoad = (context == "source load")
+        if isSourceLoad { lastProbedLayer = layer }
+        let probeLayer = layer ?? lastProbedLayer
+
+        // ⚠️ RESOLVED QUIETLY FIRST — NOTHING PRINTS UNTIL WE KNOW THE DUMP IS WORTH PRINTING.
+        // The original probe printed the whole block and then ANNOTATED it with "(destination
+        // profile unchanged)", which is not suppression: a display-change storm produced about a
+        // dozen full dumps and buried the one that had changed. The early return below is the fix.
+        guard let screen = hostScreen(for: probeLayer) else {
+            p("no NSScreen — cannot probe the destination (\(context))"); return
+        }
+        guard let (dstCS, via) = destinationColorSpace(for: screen) else {
+            p("no destination colorspace from either API — \"\(screen.localizedName)\""); return
+        }
+        let hash = (dstCS.copyICCData() as Data?).map { sha256Hex($0) }
+        if !isSourceLoad, let h = hash, h == lastDestinationHash {
+            p("unchanged — \"\(screen.localizedName)\" sha256=\(h.prefix(16))… (\(context)) — dump suppressed")
+            return
+        }
+        lastDestinationHash = hash
+
+        p("──────────────────────────────────────────────────────────────────")
+        p("NSScreen                : \"\(screen.localizedName)\"   (\(context))")
+        p("obtained via            : \(via)")
+        if let ns = screen.colorSpace?.cgColorSpace, !CFEqual(ns, dstCS) {
+            p("⚠️ NSScreen.colorSpace DISAGREES with CGDisplayCopyColorSpace — NSScreen says "
+              + "\(ns.name.map { String($0) } ?? "<unnamed>")")
+        }
+        let dst = probeAndDump(dstCS, label: "DEST")
+
+        // ── THE LINE THIS WHOLE ADDITION EXISTS FOR ──────────────────────────────────────────
+        p("══════════════════════════════════════════════════════════════════")
+        guard let src = source else {
+            p("VERDICT: no source profile probed yet — open a file. (\(context))")
+            p("══════════════════════════════════════════════════════════════════")
+            return
+        }
+        switch (src.icc, dst.icc) {
+        case let (sIcc?, dIcc?):
+            let sh = sha256Hex(sIcc), dh = sha256Hex(dIcc)
+            p("source ICC  : \(sIcc.count) bytes  sha256=\(sh.prefix(16))…   rTRC \(src.rTRC)")
+            p("dest   ICC  : \(dIcc.count) bytes  sha256=\(dh.prefix(16))…   rTRC \(dst.rTRC)")
+            if sh == dh {
+                p("VERDICT: profiles are BYTE-IDENTICAL — ColorSync's transform is IDENTITY.")
+                p("  → Declaring the colorspace and declaring nil are the same operation here.")
+                return
+            }
+            // ⚠️ COMPARED NUMERICALLY, NOT AS STRINGS, AND THAT IS NOT PEDANTRY.
+            //
+            // MEASURED: source `curv/count=1/gamma=1.960938` vs the LG's `para/ft=0/[1.960999]`.
+            // Those strings DIFFER — two ICC encodings — and the curves agree to 1.1e-05, which is
+            // 0.012 of a 10-bit code. A string comparison calls that a real difference and sends
+            // someone hunting a shadow shift that cannot exist. The first draft did exactly that.
+            guard let sf = src.evalR, let df = dst.evalR else {
+                p("VERDICT: no evaluator for the \(src.evalR == nil ? "SOURCE" : "DEST") curve — "
+                  + "cannot answer numerically. The encodings above are all there is.")
+                p("══════════════════════════════════════════════════════════════════")
+                return
+            }
+            var worst = 0.0, worstAt = 0.0
+            for i in 0...1024 {
+                let x = Double(i) / 1024.0
+                let d = abs(sf(x) - df(x))
+                if d > worst { worst = d; worstAt = x }
+            }
+            let codes10 = worst * 1023.0
+            p(String(format: "max |source − dest| = %.3e at x=%.3f   → %.4f codes at 10-bit",
+                     worst, worstAt, codes10))
+            if codes10 < 0.5 {
+                p("VERDICT: bytes differ, TONE CURVES DO NOT (within half a 10-bit code).")
+                p("  → ColorSync's tone transform is effectively IDENTITY. A null A/B result here")
+                p("    is NOT evidence about γ1.9609 — it says this display IS γ1.9609.")
+            } else {
+                p("VERDICT: the TONE CURVES GENUINELY DIFFER.")
+                p(String(format: "  → ColorSync has a real tone transform (%.1f codes at 10-bit).", codes10))
+            }
+        case (nil, _): p("VERDICT: SOURCE has no ICC representation — cannot compare.")
+        case (_, nil): p("VERDICT: DESTINATION has no ICC representation — cannot compare.")
+        }
+        p("══════════════════════════════════════════════════════════════════")
+    }
+
+    /// Re-probe on a display change. Armed lazily from the first source dump. ⚠️ SPIKE.
+    ///
+    /// ⚠️ NEITHER HANDLER RESOLVES A NAME. Both hand the work to `dumpDestinationColorSpace`,
+    /// which resolves through `hostScreen` — the single resolver. That is the fix for the original
+    /// probe's disagreeing header.
+    private static let observeDisplayChangesOnce: Void = {
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                       object: nil, queue: .main) { _ in
+            dumpDestinationColorSpace(context: "display change — screen parameters",
+                                      against: lastSourceProbe)
+        }
+        nc.addObserver(forName: NSWindow.didChangeScreenNotification,
+                       object: nil, queue: .main) { _ in
+            dumpDestinationColorSpace(context: "display change — window changed screen",
+                                      against: lastSourceProbe)
+        }
+    }()
+
     #endif
 
     // MARK: - Frame intake (called from the engine's tap, background queue)
