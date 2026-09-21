@@ -47,6 +47,12 @@ struct ManifoldApp: App {
         // long before a transport exists, which is as early as the app has.
         LiveClock.enableTelemetry()
         #endif
+        // ⚠️ OUTSIDE THE `#if DEBUG` ABOVE, ON PURPOSE. The rate pin is runtime-gated rather than
+        // compile-gated so the same experiment can be run in a Release build — see
+        // `AudioMirrorRatePin` for why that trade was made and what it costs. Touching it here
+        // latches the preference and prints the armed line before any transport exists, rather
+        // than at the first audio buffer.
+        _ = AudioMirrorRatePin.isEnabled
         // FIRST LINE OF EVERY LOG, before anything else can emit. A log that cannot state which
         // build produced it is not evidence — see BuildInfo for why this is derived rather than
         // assumed, and why the "not valid for measurement" warning keys on -Onone and not on DEBUG.

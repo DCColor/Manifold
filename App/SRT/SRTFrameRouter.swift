@@ -504,7 +504,14 @@ final class SRTFrameRouter {
         // presented video frame; that can precede the audio session. Installing here means the
         // first anchor is not missed. The engine side no-ops until a live-audio session is open.
         clock.onMappingChange = { [weak self] mapping in
-            self?.mirrorLiveAudio?(mapping)
+            self?.mirrorLiveAudio?(mapping, false)
+        }
+        // ⚠️ AND THE HEARTBEAT, INSTALLED ON THE SAME SEAM AND FOR THE SAME REASON. The publication
+        // above stops entirely while the P-loop is saturated against its slew clamp, which is when
+        // the audio timebase most needs telling; this one fires at the control cadence regardless.
+        // Same thread contract, same teardown ordering — see `deactivate`.
+        clock.onMappingTick = { [weak self] mapping in
+            self?.mirrorLiveAudio?(mapping, true)
         }
 
         // Open the renderer now, at the SRT cushion. `targetDepth` is 0.250 here, not WHEP's 0.400
@@ -532,6 +539,7 @@ final class SRTFrameRouter {
         // Drop the mapping callback BEFORE releasing the clock: it captures self, and a mapping
         // arriving after teardown would reach a torn-down engine seam.
         liveClock?.onMappingChange = nil
+        liveClock?.onMappingTick = nil
         // Clears the clock's per-STREAM state, freeze-guard arming included, so a reconnect
         // re-disarms the guard for its own startup fill rather than tripping it.
         liveClock?.reset()
@@ -897,8 +905,10 @@ final class SRTFrameRouter {
 
     /// Opens the shared renderer to live audio; returns the sink. Wired in `WindowDeck`.
     var beginLiveAudio: ((Double) -> FrameEngine.LiveAudioSink?)?
-    /// Forwards `LiveClock`'s mapping to the engine's audio timebase.
-    var mirrorLiveAudio: ((LiveClock.Mapping?) -> Void)?
+    /// Forwards `LiveClock`'s mapping to the engine's audio timebase. The `Bool` is `true` for a
+    /// HEARTBEAT (`onMappingTick`) and `false` for a publication (`onMappingChange`) — the engine
+    /// treats both identically and uses it only to keep its change→push ratio readable.
+    var mirrorLiveAudio: ((LiveClock.Mapping?, Bool) -> Void)?
     /// Closes the session. Must be called on teardown or the renderer keeps a dead timebase.
     var endLiveAudio: (() -> Void)?
     /// Publishes the decoded channel count so the meters size their bars.
@@ -916,7 +926,18 @@ final class SRTFrameRouter {
 
     /// Session-thread-owned, exactly like `decoder`. Built in `prepareAudioDecoder` on the session
     /// thread and used by `handleAudioPacket` on that same thread.
-    private var audioDecoder: SRTAudioDecoder?
+    /// ⚠️ THE PROTOCOL, NOT A CONCRETE TYPE — there are two AAC decoders now and the choice is
+    /// per stream. See `SRTAudioDecoding` for which gets used when, and why multichannel does not
+    /// go to libav.
+    private var audioDecoder: (any SRTAudioDecoding)?
+
+    #if DEBUG
+    /// DEBUG-only .wav capture of the exact bytes handed to the tap. Nil unless armed by
+    /// preference before launch — see `LiveAudioWAVCaptureGate`. Built ONCE and outlives a
+    /// reconnect deliberately: the capture is one 10 s window per launch, not per connection.
+    private let audioWAVCapture: LiveAudioWAVCapture? =
+        LiveAudioWAVCaptureGate.isEnabled ? LiveAudioWAVCapture(tag: "SRT") : nil
+    #endif
     private var audioPacketsReceived = 0
     private var audioFramesIngested = 0
     /// Packets discarded because the video anchor had not landed. Reported, never silent.
@@ -1022,17 +1043,82 @@ final class SRTFrameRouter {
             return
         }
 
+        // ── WHICH DECODER, AND WHY ────────────────────────────────────────────────────────
+        //
+        // ⚠️ ONE-LINE REVERT: change this condition to `false` and every stream goes back to
+        // AudioToolbox exactly as before. Nothing in `SRTAudioDecoder` was removed to make room
+        // for this — `parseADTS`, `audioSpecificConfig` and `esds` are all still there, still
+        // correct, and still exercised by the multichannel path below.
+        //
+        // STEREO → libav, because AudioToolbox renders the Cloudflare feed as gravel and libav
+        // renders the same bytes clean. MULTICHANNEL → AudioToolbox, because the channel-ORDER
+        // work only exists on that path and re-deriving it in a hurry is how the 5.1 mislabelling
+        // happened the first time. The reasoning is written out in `SRTAudioDecoderLibav`.
+        let useLibav = Int(format.channelCount) <= 2
+
         // NOTHING IS ASSUMED — rate and channels come from the stream.
-        audioDecoder = SRTAudioDecoder(sampleRate: Double(format.sampleRate),
-                                       channelCount: Int(format.channelCount),
-                                       formatID: formatID,
-                                       extradata: extradata,
-                                       channelMask: format.channelMask,
-                                       channelOrder: format.channelOrder)
+        if useLibav {
+            audioDecoder = SRTAudioDecoderLibav(sampleRate: Double(format.sampleRate),
+                                                channelCount: Int(format.channelCount),
+                                                extradata: extradata,
+                                                channelMask: format.channelMask,
+                                                channelOrder: format.channelOrder)
+        } else {
+            audioDecoder = SRTAudioDecoder(sampleRate: Double(format.sampleRate),
+                                           channelCount: Int(format.channelCount),
+                                           formatID: formatID,
+                                           extradata: extradata,
+                                           channelMask: format.channelMask,
+                                           channelOrder: format.channelOrder)
+        }
+
+        // ⚠️ NAMED, EVERY CONNECTION, WHETHER OR NOT ANYTHING IS WRONG. Two decoders that produce
+        // the same shape of buffer are indistinguishable downstream — the meters, the tap, the
+        // SDI path and every counter read identically either way. A log that only said which one
+        // ran when it failed would leave "which decoder made this sound?" unanswerable for exactly
+        // the sessions worth asking about.
+        NSLog("[SRT-AUDIO] decoder: %@ — %d ch declared (%@). %@",
+              useLibav ? "libavcodec" : "AudioToolbox",
+              format.channelCount,
+              useLibav ? "stereo or mono" : "multichannel",
+              useLibav
+                ? "libav decodes the Cloudflare feed correctly where AudioToolbox does not."
+                : "multichannel stays on AudioToolbox until the channel-order work is redone for "
+                  + "libav — see docs/BUGS.md.")
+
         if audioDecoder == nil {
             NSLog("[SRT-AUDIO] decoder construction FAILED — no audio will reach the tap")
         }
     }
+
+    #if DEBUG
+    /// ⌃⌥U — pin the RUNNING SRT session's clock rate to exactly 1.0, or release it.
+    ///
+    /// ⚠️ ⌃⌥U DID NOT REACH THIS CLOCK BEFORE, AND THE REASON IS WORTH STATING. The shortcut called
+    /// `SyntheticLiveSource.toggleForceUnityRate`, which applies to the SYNTHETIC HARNESS's own
+    /// `LiveClock` — a different instance from the one `activate()` builds for a live stream, and
+    /// one that is not running at all during an SRT session. So the gate existed, was compiled into
+    /// Profile, and was inert for every real transport. This is the forwarder that fixes that.
+    ///
+    /// ⚠️ IT DISABLES THE VIDEO DEPTH LOOP TOO, WHICH IS NOT A SIDE EFFECT — IT IS WHAT THE FLAG
+    /// MEANS. With the loop off nothing drains the buffer, so on a transport that runs deep the
+    /// video latency creeps for as long as this is on. Fine for an A/B of a minute or two; not a
+    /// setting to leave on.
+    func setForceUnityRate(_ on: Bool) {
+        stateLock.lock(); let clock = liveClock; stateLock.unlock()
+        guard let clock else {
+            NSLog("[SRT] ⌃⌥U: no SRT session is running — nothing to pin.")
+            return
+        }
+        clock.setForceUnityRate(on)
+        NSLog("[SRT] ⌃⌥U: LiveClock control loop %@ for the RUNNING SRT session. %@",
+              on ? "DISABLED — rate pinned to exactly 1.0" : "RE-ENABLED",
+              on ? "The audio mirror's smoothedRate is a 30 s EMA of this, so the renderer's rate "
+                 + "converges toward 1.0 over ~30-60 s rather than stepping there — watch "
+                 + "smoothedRate on the [SRT-AUDIO] mirror line come down."
+                 : "The mirror's rate will drift back up over the same ~30 s.")
+    }
+    #endif
 
     /// SESSION THREAD, inline from `onAudioAbsent`.
     func handleAudioAbsent() {
@@ -1101,6 +1187,15 @@ final class SRTFrameRouter {
                 + "— they belong to the content span the anchor discarded, and playing them would "
                 + "put audio against picture that was skipped.", audioPacketsBeforeAnchor)
         }
+
+        #if DEBUG
+        // ⚠️ BEFORE THE HANDOFF, NOT AFTER, AND NOT INSIDE THE SINK. This is the last point at
+        // which the buffer is provably untouched by anything downstream — `LiveAudioSink.enqueue`
+        // tees to the tap AND the renderer, and a capture taken past this line could not tell a
+        // bad decode from something either consumer did to it. No-op (one nil check) unless the
+        // capture was armed by preference before launch.
+        audioWAVCapture?.capture(sb, sampleRate: decoder.sampleRate, channels: decoder.channelCount)
+        #endif
 
         // Tee: tap FIRST, then the renderer — the sink does both, so metering, SDI and mute are
         // unchanged from stage 1 and the speaker is the only new consumer. Falls back to the tap

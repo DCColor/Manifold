@@ -1316,8 +1316,8 @@ final class DeckRegistry {
             engine?.beginLiveAudio(cushion: cushion, path: .whep)
         }
         // Nonisolated on the engine side — fires on whichever thread changed LiveClock's mapping.
-        WHEPFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping in
-            engine?.mirrorLiveAudio(mapping)
+        WHEPFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping, tick in
+            engine?.mirrorLiveAudio(mapping, tick: tick)
         }
         WHEPFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
         WHEPFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in engine?.liveAudioEstablished(channels: ch) }
@@ -1339,8 +1339,8 @@ final class DeckRegistry {
         SRTFrameRouter.shared.beginLiveAudio = { [weak engine] cushion in
             engine?.beginLiveAudio(cushion: cushion, path: .srt)
         }
-        SRTFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping in
-            engine?.mirrorLiveAudio(mapping)
+        SRTFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping, tick in
+            engine?.mirrorLiveAudio(mapping, tick: tick)
         }
         SRTFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
         SRTFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in

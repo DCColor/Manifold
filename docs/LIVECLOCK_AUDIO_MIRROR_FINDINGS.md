@@ -123,9 +123,35 @@ The two transports land on opposite sides of it:
 | **local SRT** | ±0.013 | 0.010 — crosses the rail, never resides | `newRate` differs nearly every tick → ~9/s at `controlHz = 10` |
 | **Cloudflare** | +0.02 … +0.19 | 0.016 … 0.152 — always past it | `newRate == rate` every tick → **zero publications from this site** |
 
-⚠️ **Local SRT is not correct here — it is lucky.** Its error oscillates *through* the 6.25 ms
-boundary rather than sitting past it, so the rate changes often enough to keep the mirror fed. Any
-transport that runs persistently deep will close the same gate.
+⚠️ **Local SRT is not correct here — it is lucky, and the margin is about 2×.** Its error
+oscillates *through* the 6.25 ms boundary rather than sitting past it, so the rate changes often
+enough to keep the mirror fed. Any transport that runs persistently deep will close the same gate.
+
+**Measured 2026-09-21, and it is worse than "lucky" suggests.** A healthy loop does not stay out of
+the dead band — it enters it constantly and escapes before the error accumulates:
+
+```
+local     publication gaps  max 1035 ms · p95  987 ms · over 500 ms: 54
+WHEP      publication gaps  max 1435 ms · p95 1300 ms · over 500 ms: 45
+local9    publication gaps  max  787 ms · p95  464 ms · over 500 ms: 26
+```
+
+Forty-five to fifty-four silences longer than half a second per ninety seconds, with railed spans
+reaching 1.0–1.4 s. The cause is structural: **the healthy error envelope (±13 ms) is roughly 2× the
+rail threshold (6.25 ms)**, so a healthy loop rails on every excursion. It survives only because a
+railed span of ~1 s accumulates ≈5 ms of drift against a 10 ms position tolerance.
+
+⚠️ **The consequence is that this was never a Cloudflare-specific fault.** A factor of two is not a
+safety margin. Any transport that runs slightly deeper, or any session where the error envelope
+widens modestly, tips a path that was clean the day before — with no code change and nothing in any
+log to mark the transition. That is the most plausible account of why 2026-09-18 was clean on the
+same binary (§6).
+
+*(This is also why a 500 ms heartbeat interval was tried and rejected: the premise that a healthy
+path never goes 500 ms without publishing is false by 45–54 events per 90 s, and the longer interval
+cost 2.8× on the saturated case — worst excursion 28.83 ms against 10.22 ms — while buying none of
+the healthy-path invariance it was meant to buy. It also coarsened rate steps from 0.565 to
+1.24–1.47 cents, making the sparser schedule harsher on the timebase, not gentler.)*
 
 **The 1-per-25 s events on Cloudflare are not a slow publication rate; they are zero from the P-loop
 plus occasional coarse re-anchors** (snap, freeze guard, or overflow). Each of those writes
@@ -208,6 +234,12 @@ today.
 `rate=` and `timebase−clock` on a Cloudflare session. It is consistent with everything observed and
 it is the only explanation that fits identical code producing two behaviours — but it is not proven,
 and the thing that would prove it is the root question below.
+
+**What makes it plausible rather than merely possible is the 2× margin measured in §3.** The
+transition from clean to broken does not require the transport to change much. It requires the depth
+error to stop crossing back under 6.25 ms often enough — which, against a healthy envelope of ±13 ms,
+is a small shift. Nothing in any log marks that crossing, which is why a feature verified over 5–7
+minute sessions on 2026-09-18 can fail reproducibly on the same binary three days later.
 
 ---
 

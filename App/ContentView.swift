@@ -1780,7 +1780,14 @@ struct ContentView: View {
                 .keyboardShortcut("p", modifiers: [.control, .option])
             // ⌃⌥U toggles the LiveClock control loop OFF (rate≡1.0) so [LIVECLOCK] reports the MEASURED
             // depth at unity — the setpoint-reality check before tuning. Applies live + to next ⌃⌥L.
-            Button("") { SyntheticLiveSource.shared.toggleForceUnityRate() }
+            // ⚠️ BOTH CLOCKS, because there are two and only one of them is ever running. The
+            // synthetic harness owns its own LiveClock; a live SRT session owns a different one.
+            // This shortcut used to reach only the first, which made it inert during exactly the
+            // sessions worth pinning.
+            Button("") {
+                let on = SyntheticLiveSource.shared.toggleForceUnityRate()
+                SRTFrameRouter.shared.setForceUnityRate(on)
+            }
                 .keyboardShortcut("u", modifiers: [.control, .option])
             // ⌃⌥S runs the automated (targetDepth × jitter) sweep from the loaded file: steps the grid,
             // holds 15s/cell, logs a [SWEEP] verdict per cell + a [SWEEP-SUMMARY] table. Ensures the

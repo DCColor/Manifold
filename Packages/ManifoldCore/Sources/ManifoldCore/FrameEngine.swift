@@ -2068,13 +2068,27 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// have been labelled WHEP in the tap's stats and in its format-change callback — a
         /// mislabel that reads as a real observation and would be believed.
         private let path: AudioTapBuffer.SourcePath
+        #if DEBUG || MANIFOLD_TELEMETRY
+        /// Read-only observer of what this sink hands the renderer. See `LiveAudioRendererProbe`.
+        private let probe: LiveAudioRendererProbe?
+        fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
+                         path: AudioTapBuffer.SourcePath, probe: LiveAudioRendererProbe?) {
+            self.renderer = renderer; self.tap = tap; self.path = path; self.probe = probe
+        }
+        #else
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
                          path: AudioTapBuffer.SourcePath) {
             self.renderer = renderer; self.tap = tap; self.path = path
         }
+        #endif
         /// Tee to the tap, then to the renderer — the SAME order and the same two consumers the
         /// file pump feeds, so metering, SDI embedding, routing and mute all apply unchanged.
         public func enqueue(_ sampleBuffer: CMSampleBuffer) {
+            #if DEBUG || MANIFOLD_TELEMETRY
+            // ⚠️ BEFORE BOTH CONSUMERS, AND IT TOUCHES NEITHER. This reads the buffer's timing and
+            // records it; the tee below is byte-for-byte what it always was.
+            probe?.willEnqueue(sampleBuffer)
+            #endif
             tap.ingest(sampleBuffer, path: path)
             renderer.enqueue(sampleBuffer)
         }
@@ -2160,7 +2174,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.rate = 0      // held until the first mirrored mapping arrives
         applyAudioMute()
         audioPresence = .unknown   // "don't know yet" until the first packet establishes channels
+        #if DEBUG || MANIFOLD_TELEMETRY
+        // Per SESSION, so a reconnect starts a fresh gap accounting rather than carrying the
+        // disconnect across as one enormous hole.
+        liveAudioProbe?.detach()
+        let probe = LiveClock.telemetryIsEnabled
+            ? LiveAudioRendererProbe(tag: path.rawValue.uppercased()) : nil
+        probe?.attach(to: audioRenderer)
+        probe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "beginLiveAudio (hold)")
+        liveAudioProbe = probe
+        setProbeForRateLog(probe)
+        return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path, probe: probe)
+        #else
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path)
+        #endif
     }
 
     /// Mirror state, reachable from the threads `mirrorLiveAudio` runs on (the WHEP source thread
@@ -2194,8 +2221,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var pushedHost: Double = 0
         // Counters — `changes` is mappings received, `pushes` is setRate calls issued. The ratio is
         // the thing that was unmeasurable on the run that motivated this.
+        #if DEBUG || MANIFOLD_TELEMETRY
+        /// The renderer probe for this session, reachable from the nonisolated rate-set sites.
+        /// Guarded by this object's `lock` like everything else here.
+        var probe: LiveAudioRendererProbe?
+        #endif
         var changes = 0
         var pushes = 0
+        /// Heartbeat evaluations — `onMappingTick`, the mapping re-stated at the control cadence
+        /// whether or not it changed. COUNTED SEPARATELY FROM `changes` ON PURPOSE: the ratio the
+        /// stats line exists to produce is change→push, and folding ~10 ticks/second into `changes`
+        /// would destroy exactly the number that diagnosed the dead band. Kept apart, the same line
+        /// now reads the starvation directly — `1 change + 98 ticks` is the failure, stated.
+        var ticks = 0
         var lastStatsHost: Double = 0
     }
 
@@ -2258,6 +2296,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private static let liveAudioPositionTolerance = 0.010
     private let mirror = LiveAudioMirrorState()
 
+    #if DEBUG || MANIFOLD_TELEMETRY
+    /// The renderer-path probe for the CURRENT live session, or nil when telemetry is off.
+    /// Retired in `endLiveAudio` and replaced in `beginLiveAudio`.
+    private var liveAudioProbe: LiveAudioRendererProbe?
+
+    /// ⚠️ A SECOND HANDLE, ON `mirror`, BECAUSE THE RATE SETS HAPPEN OFF THE MAIN ACTOR.
+    /// `mirrorLiveAudio` and `anchorLiveAudio` are `nonisolated` and run on the transport's thread
+    /// or the display tick; `liveAudioProbe` above is main-actor state and cannot be read from
+    /// there. `LiveAudioMirrorState` exists for exactly this reason and already carries the lock
+    /// those functions take, so the handle lives there rather than behind a second lock that would
+    /// have to be ordered against the first.
+    private nonisolated var liveAudioProbeForRateLog: LiveAudioRendererProbe? {
+        mirror.lock.lock(); defer { mirror.lock.unlock() }
+        return mirror.probe
+    }
+    private nonisolated func setProbeForRateLog(_ p: LiveAudioRendererProbe?) {
+        mirror.lock.lock(); mirror.probe = p; mirror.lock.unlock()
+    }
+    #endif
+
     /// Track `LiveClock`'s mapping so the audio timebase reads what `now()` reads, minus the
     /// cushion. THIS REPLACED A ONE-SHOT ANCHOR, and the difference is the whole fix:
     ///
@@ -2280,7 +2338,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// NONISOLATED because it is called from `LiveClock`'s callback, which fires on whichever
     /// thread changed the mapping. `AVSampleBufferRenderSynchronizer` handles its own
     /// thread-safety for `setRate` — the same rationale as `currentSyncTime()` above.
-    public nonisolated func mirrorLiveAudio(_ mapping: LiveClock.Mapping?) {
+    /// ⚠️ `tick` MARKS A HEARTBEAT RATHER THAN A PUBLICATION, AND IT AFFECTS NOTHING BUT COUNTERS.
+    /// `LiveClock.onMappingTick` delivers the same mapping re-expressed at the current instant (a
+    /// different point on the same line, same slope), so every decision below is deliberately
+    /// identical for both. The flag exists so the stats line can keep reporting change→push, which
+    /// is the ratio that diagnosed the dead band and would be destroyed by folding ticks into it.
+    ///
+    /// ⚠️ AND THE HEARTBEAT IS LOAD-BEARING, NOT DIAGNOSTIC. Everything in this function — the EMA,
+    /// the position error, `shouldPush` — runs ONLY inside this call. Before the heartbeat, a clock
+    /// saturated against its slew clamp published nothing, so none of it ran, and the audio timebase
+    /// walked at ~5 ms/s with every counter here reading clean. See
+    /// `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`. Do not "optimise" the tick path away on the
+    /// grounds that the mapping has not changed: the mapping not changing is the failure mode.
+    public nonisolated func mirrorLiveAudio(_ mapping: LiveClock.Mapping?, tick: Bool = false) {
         mirror.lock.lock()
         let active = mirror.active
         let cushion = mirror.cushion
@@ -2296,6 +2366,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
               m.senderPTS.isFinite, m.hostTime.isFinite, m.rate.isFinite, m.rate > 0 else {
             // Un-anchored, or a mapping we cannot represent. Holding is correct: video is not
             // presenting either, and a guessed timebase is what produced the -inf failure before.
+            #if DEBUG || MANIFOLD_TELEMETRY
+            liveAudioProbeForRateLog?.recordRateSet(rate: 0, mediaTime: .nan,
+                                                    origin: "mirrorLiveAudio (un-anchored hold)")
+            #endif
             synchronizer.rate = 0
             return
         }
@@ -2315,6 +2389,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // NOT the clock's buffer depth. This puts the timebase on the caller's PTS axis.
         let target = m.senderPTS - cushion
         mirror.lock.lock()
+        // ⚠️ THE `min(1.0, …)` CLAMP IS KEPT, AND IT IS NO LONGER LOAD-BEARING IN THE CASE THAT
+        // MADE IT VISIBLE. With the heartbeat feeding this at `controlHz`, `dt` is ~0.1 s and the
+        // clamp never binds — the pathology it was caught in (a 25 s gap advancing a τ=30 s filter
+        // as though one second had passed, so `smoothedRate` never converged and the drift restarted
+        // at the same slope after every correction) is now unreachable, because the gap is.
+        //
+        // IT STAYS BECAUSE IT GUARDS A DIFFERENT GAP. Evaluation can still pause for reasons that
+        // are not this defect: the display link stalls, the app is suspended, a source reconnects.
+        // Without the clamp a 60 s hole gives `alpha = 1 - exp(-2) = 0.86`, which effectively SNAPS
+        // `smoothedRate` to whatever single instantaneous rate the clock happened to be carrying on
+        // the first evaluation after the hole — most likely a rail, since 44.6% of samples sit at
+        // one. That is precisely the "seed from one sample" mistake the τ-ramp note above rejects,
+        // arriving by a different door. The clamp bounds one evaluation's authority over the filter,
+        // which is worth having whether or not gaps are expected.
         let dt = mirror.haveSmoothed ? max(0.0, min(1.0, m.hostTime - mirror.lastHost)) : 0.0
         if mirror.haveSmoothed {
             // dt-based EMA so the constant means seconds, not "per callback" — the callback rate
@@ -2330,8 +2418,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             mirror.haveSmoothed = true
             mirror.firstHost = m.hostTime
         }
+        // ⚠️ THE PIN, APPLIED AFTER THE EMA AND BEFORE ANYTHING READS THE RESULT. The filter above
+        // still runs exactly as it always did — it is not bypassed, its state is not frozen, and
+        // releasing the pin would resume from a correctly-tracked value. What is held is the rate
+        // the SYNCHRONIZER is told, which is the variable under test. See `AudioMirrorRatePin`.
+        if AudioMirrorRatePin.isEnabled { mirror.smoothedRate = AudioMirrorRatePin.pinnedRate }
         mirror.lastHost = m.hostTime
-        mirror.changes += 1
+        if tick { mirror.ticks += 1 } else { mirror.changes += 1 }
 
         let predicted = mirror.pushedMedia + (m.hostTime - mirror.pushedHost) * mirror.pushedRate
         let positionError = wasMirrored ? abs(target - predicted) : .infinity
@@ -2346,7 +2439,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             mirror.pushedHost = m.hostTime
             mirror.pushes += 1
         }
-        let changes = mirror.changes, pushes = mirror.pushes
+        let changes = mirror.changes, pushes = mirror.pushes, ticks = mirror.ticks
         let statsDue = m.hostTime - mirror.lastStatsHost >= 10.0
         if statsDue { mirror.lastStatsHost = m.hostTime }
         mirror.lock.unlock()
@@ -2360,14 +2453,23 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // [LIVECLOCK] series over the same run. A throttle that reports only when the throttled
         // thing fires cannot measure what it is throttling.
         if statsDue {
-            NSLog("%@ mirror — %d mapping change(s) → %d setRate call(s) "
-                + "· smoothedRate=%.5f · clockRate=%.5f · posErr=%.1f ms%@",
-                  tag, changes, pushes, smoothedNow, m.rate,
+            NSLog("%@ mirror — %d mapping change(s) + %d heartbeat tick(s) → %d setRate call(s) "
+                + "· smoothedRate=%.5f%@ · clockRate=%.5f · posErr=%.1f ms%@",
+                  tag, changes, ticks, pushes, smoothedNow,
+                  // Stated on every window, not once at launch: a line that reports a rate without
+                  // saying it is held would read as a measurement of the control loop.
+                  AudioMirrorRatePin.isEnabled ? " (PINNED — \(AudioMirrorRatePin.defaultsKey))" : "",
+                  m.rate,
                   positionError.isFinite ? positionError * 1000 : 0,
                   shouldPush ? "" : " · (no push this window)")
         }
 
         guard shouldPush else { return }
+        #if DEBUG || MANIFOLD_TELEMETRY
+        liveAudioProbeForRateLog?.recordRateSet(
+            rate: Float(rateToPush), mediaTime: target,
+            origin: tick ? "mirrorLiveAudio (heartbeat)" : "mirrorLiveAudio (mapping change)")
+        #endif
         synchronizer.setRate(Float(rateToPush),
                              time: CMTime(seconds: target, preferredTimescale: 90_000),
                              atHostTime: CMTime(seconds: m.hostTime, preferredTimescale: 90_000))
@@ -2438,6 +2540,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.lock.unlock()
         guard active else { return }
 
+        #if DEBUG || MANIFOLD_TELEMETRY
+        liveAudioProbeForRateLog?.recordRateSet(rate: 1.0, mediaTime: mediaTime,
+                                                origin: "anchorLiveAudio")
+        #endif
         synchronizer.setRate(1.0,
                              time: CMTime(seconds: mediaTime, preferredTimescale: 90_000),
                              atHostTime: CMTime(seconds: hostTime, preferredTimescale: 90_000))
@@ -2560,6 +2666,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.lock.lock()
         mirror.active = false; mirror.mirrored = false
         mirror.lock.unlock()
+        #if DEBUG || MANIFOLD_TELEMETRY
+        liveAudioProbe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "endLiveAudio")
+        // Writes the final window before the observations go, so the last 10 s are not lost.
+        liveAudioProbe?.detach()
+        liveAudioProbe = nil
+        setProbeForRateLog(nil)
+        #endif
         synchronizer.rate = 0
         audioRenderer.flush()
         audioTap.reset()

@@ -37,7 +37,7 @@ import AudioToolbox
 import AVFoundation
 import ManifoldCore   // AudioChannelLayoutBridge
 
-final class SRTAudioDecoder {
+final class SRTAudioDecoder: SRTAudioDecoding {
 
     /// AAC frames per packet. LC is 1024; SBR (HE-AAC / HE-AACv2) doubles it to 2048.
     /// A CEILING for the output buffer, not an assumption about what arrives — the converter
@@ -197,6 +197,9 @@ final class SRTAudioDecoder {
                 + "NUMBERS rather than an order inferred from the count.", why.reason)
         }
 
+        #if DEBUG
+        probeExtradata = extradata
+        #endif
         if !extradata.isEmpty {
             // libavformat hands AAC extradata as a RAW AudioSpecificConfig, so it needs the same
             // ESDS wrapping the ADTS-derived one does — `setCookie` applies it to whatever it is
@@ -265,6 +268,12 @@ final class SRTAudioDecoder {
     private func setCookie(_ asc: [UInt8], origin: String, objectType: UInt16) -> Bool {
         guard let converter, !asc.isEmpty else { return false }
         var bytes = Self.esds(wrapping: asc)
+        #if DEBUG
+        // The existing lines below summarise this as "a 27-byte ESDS". The probe prints it whole,
+        // because a length cannot be compared between two senders and the bytes can.
+        probeCookieASC = asc
+        probeCookieESDS = bytes
+        #endif
         let status = AudioConverterSetProperty(converter, kAudioConverterDecompressionMagicCookie,
                                                UInt32(bytes.count), &bytes)
         if status == noErr {
@@ -321,7 +330,37 @@ final class SRTAudioDecoder {
         var ptr = base.assumingMemoryBound(to: UInt8.self)
         var size = packet.count
 
+        #if DEBUG
+        // Emitted from a `defer` so EVERY exit path prints — including the two early returns
+        // below. A probe that goes quiet on the refusal paths would be silent about exactly the
+        // packets worth reading.
+        var probe: PacketProbe? = {
+            guard probePacketsLogged < Self.probePacketCount else { return nil }
+            probePacketsLogged += 1
+            return PacketProbe(index: probePacketsLogged,
+                               receivedSize: size,
+                               head: Array(UnsafeBufferPointer(start: ptr, count: min(16, size))))
+        }()
+        if probe != nil {
+            let syncOK = size >= 7 && ptr[0] == 0xFF && (ptr[1] & 0xF0) == 0xF0
+            probe!.syncPresent = syncOK
+            probe!.syncEvidence = String(
+                format: "p[0]=%02X (need FF), p[1]=%02X → p[1]&F0=%02X (need F0), size=%d (need >=7)",
+                size > 0 ? ptr[0] : 0, size > 1 ? ptr[1] : 0,
+                size > 1 ? (ptr[1] & 0xF0) : 0, size)
+            probe!.detail = Self.probeParseDetail(ptr, size)
+        }
+        defer { if let probe { probeEmit(probe) } }
+        #endif
+
         if let adts = Self.parseADTS(ptr, size) {
+            #if DEBUG
+            probe?.branch = "ADTS — header stripped"
+            probe?.branchEvidence = "parseADTS matched: syncword present and size >= 7; "
+                                  + "headerBytes = \(adts.headerBytes) "
+                                  + "(protection_absent = \((ptr[1] & 0x01) != 0 ? 1 : 0))"
+            probe?.headerBytesUsed = adts.headerBytes
+            #endif
             if !haveCookie {
                 // ADTS `profile` is objectType − 1, so LC (objectType 2) arrives here as 1.
                 setCookie(Self.audioSpecificConfig(from: adts), origin: "ADTS header",
@@ -331,13 +370,39 @@ final class SRTAudioDecoder {
             // A rejection on a format the converter cannot infer is fatal to correctness, not to
             // the session: refuse here so the packet is counted undecodable and the failure is
             // visible in the counters instead of arriving as quietly wrong audio.
-            if isUnusable { return nil }
+            if isUnusable {
+                #if DEBUG
+                probe?.outcome = "REFUSED — cookie rejected and the format is not inferable"
+                #endif
+                return nil
+            }
             ptr += adts.headerBytes
             size -= adts.headerBytes
-            guard size > 0 else { return nil }
+            guard size > 0 else {
+                #if DEBUG
+                probe?.outcome = "REFUSED — nothing left after stripping \(adts.headerBytes) bytes"
+                #endif
+                return nil
+            }
         } else {
+            #if DEBUG
+            probe?.branch = "RAW/LATM — passed through whole"
+            probe?.branchEvidence = "parseADTS returned nil: "
+                                  + (size < 7 ? "size \(size) < 7"
+                                     : ptr[0] != 0xFF ? String(format: "p[0]=%02X is not FF", ptr[0])
+                                     : String(format: "p[1]&F0=%02X is not F0", ptr[1] & 0xF0))
+            probe?.headerBytesUsed = 0
+            #endif
             haveCookie = true   // raw AAC: whatever cookie we have (or none) is what we use
         }
+
+        #if DEBUG
+        if probe != nil {
+            probe!.converterOffset = packet.count - size
+            probe!.converterSize = size
+            probe!.converterHead = Array(UnsafeBufferPointer(start: ptr, count: min(8, size)))
+        }
+        #endif
 
         pendingPacket = ptr
         pendingSize = size
@@ -378,8 +443,15 @@ final class SRTAudioDecoder {
         // every successful decode — it must never be reported as a fault.
         guard frames > 0 else {
             if status != noErr && status != Self.noMoreInput { lastStatus = status }
+            #if DEBUG
+            probe?.outcome = "NO FRAMES — AudioConverter status \(status)"
+            #endif
             return nil
         }
+        #if DEBUG
+        probe?.outcome = "decoded \(frames) frame(s) × \(channelCount) ch"
+            + (status == Self.noMoreInput || status == noErr ? "" : " (status \(status))")
+        #endif
         // STEP 3, and deliberately HERE rather than in `init`: the magic cookie may only have been
         // set moments ago, from this very packet's ADTS header, and the converter's idea of its own
         // output layout is not settled until it knows what it is decoding.
@@ -510,6 +582,163 @@ final class SRTAudioDecoder {
         let bits = (objectType << 11) | (UInt16(a.samplingIndex) << 7) | (UInt16(a.channelConfig) << 3)
         return [UInt8(bits >> 8), UInt8(bits & 0xFF)]
     }
+
+#if DEBUG
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // MARK: - Connection-opening packet probe (DIAGNOSTIC — reads state, changes none)
+    //
+    // ⚠️ THIS EXISTS TO ANSWER ONE QUESTION: does this app's framing decision go the same way on a
+    // Cloudflare SRT feed as on a local OBS one? `framing=ADTS-or-raw` on the stream line means the
+    // demuxer told us the stream type but NOT which of the two shapes the bytes actually take, so
+    // the decision is made per packet by `parseADTS` — and if it guesses right for one sender and
+    // wrong for the other, every access unit handed to AudioConverter is offset by the header
+    // length and the audio is garbage while every counter reads clean.
+    //
+    // ⚠️ EVERY PACKET PRINTS THE SAME LINES IN THE SAME ORDER, INCLUDING THE ONES THAT DO NOT
+    // APPLY (they print `—`). That is deliberate and it is the whole point: two logs from two
+    // senders diff line-for-line, and a field that is absent on one side shows up as a changed
+    // line rather than as a missing one that shifts everything below it.
+    //
+    // It costs nothing after the first `probePacketCount` packets — one integer compare per packet
+    // — and it is `#if DEBUG`, so Profile carries it and Release does not.
+
+    private static let probePacketCount = 5
+    private var probePacketsLogged = 0
+
+    /// Kept for the probe only: the demuxer's extradata as handed to `init`, and the exact bytes
+    /// the last `setCookie` built. The existing log lines summarise these; the probe prints them
+    /// whole, because "27-byte ESDS" cannot be compared between two senders and the bytes can.
+    private var probeExtradata: [UInt8] = []
+    private var probeCookieASC: [UInt8] = []
+    private var probeCookieESDS: [UInt8] = []
+
+    /// Every ADTS header field, parsed INDEPENDENTLY of `parseADTS` so the probe can report what
+    /// the header SAYS alongside what the code DID with it. `parseADTS` reads four fields; a
+    /// disagreement between the two is exactly the kind of thing this is here to surface.
+    private struct ADTSDetail {
+        var mpegVersion = 0
+        var layer = 0
+        var protectionAbsent = false
+        var profileMinusOne: UInt8 = 0
+        var samplingIndex: UInt8 = 0
+        var channelConfig: UInt8 = 0
+        var frameLength = 0
+        var bufferFullness = 0
+        var rawDataBlocks = 0
+        var headerBytesFromHeader = 0
+    }
+
+    private struct PacketProbe {
+        let index: Int
+        let receivedSize: Int
+        let head: [UInt8]
+        var syncPresent = false
+        var syncEvidence = ""
+        var detail: ADTSDetail?
+        var headerBytesUsed = -1
+        var branch = "(none)"
+        var branchEvidence = ""
+        var converterOffset = -1
+        var converterSize = -1
+        var converterHead: [UInt8] = []
+        var outcome = "(returned before reaching the converter)"
+    }
+
+    private static func probeHex(_ b: [UInt8]) -> String {
+        b.isEmpty ? "—" : b.map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+
+    /// The MPEG-4 sampling-frequency table, so the index reads as a rate without a lookup.
+    private static let probeRates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+                                     16000, 12000, 11025, 8000, 7350, 0, 0, 0]
+
+    /// Parse every ADTS field the header carries. Read-only; does not touch decoder state.
+    private static func probeParseDetail(_ p: UnsafePointer<UInt8>, _ size: Int) -> ADTSDetail? {
+        guard size >= 7 else { return nil }
+        var d = ADTSDetail()
+        d.mpegVersion      = Int((p[1] >> 3) & 0x01)
+        d.layer            = Int((p[1] >> 1) & 0x03)
+        d.protectionAbsent = (p[1] & 0x01) != 0
+        d.profileMinusOne  = (p[2] >> 6) & 0x03
+        d.samplingIndex    = (p[2] >> 2) & 0x0F
+        d.channelConfig    = ((p[2] & 0x01) << 2) | ((p[3] >> 6) & 0x03)
+        d.frameLength      = (Int(p[3] & 0x03) << 11) | (Int(p[4]) << 3) | (Int(p[5] >> 5) & 0x07)
+        d.bufferFullness   = (Int(p[5] & 0x1F) << 6) | (Int(p[6] >> 2) & 0x3F)
+        d.rawDataBlocks    = Int(p[6] & 0x03)
+        d.headerBytesFromHeader = d.protectionAbsent ? 7 : 9
+        return d
+    }
+
+    private func probeEmit(_ pr: PacketProbe) {
+        func line(_ label: String, _ value: String) {
+            NSLog("[SRT-AUDIO-PROBE] pkt%d %-14@ %@", pr.index, label as NSString, value)
+        }
+        NSLog("[SRT-AUDIO-PROBE] ═══ packet %d of %d ═══════════════════════════════",
+              pr.index, Self.probePacketCount)
+
+        let cookie: String
+        switch cookieState {
+        case .notAttempted:                 cookie = "notAttempted"
+        case .accepted(let o):              cookie = "ACCEPTED from \(o)"
+        case .rejected(let st, let o, let safe):
+            cookie = "REJECTED \(st) from \(o) (inferenceSafe=\(safe))"
+        }
+        line("stream", String(format: "rate=%.0f ch=%d fmt=%@",
+                              sampleRate, channelCount, Self.fourCC(formatID)))
+        line("extradata.len", "\(probeExtradata.count)")
+        line("extradata.hex", Self.probeHex(probeExtradata))
+        line("cookie.state", cookie)
+        line("cookie.asc", Self.probeHex(probeCookieASC))
+        line("cookie.esds", Self.probeHex(probeCookieESDS))
+        line("recv.len", "\(pr.receivedSize)")
+        line("recv.hex16", Self.probeHex(pr.head))
+        line("sync.0xFFF", "\(pr.syncPresent ? "YES" : "NO") — \(pr.syncEvidence)")
+
+        if let d = pr.detail {
+            let rate = Self.probeRates[Int(d.samplingIndex)]
+            let version   = d.mpegVersion == 0 ? "MPEG-4" : "MPEG-2"
+            let layerNote = d.layer == 0 ? " (valid)" : " ⚠️ MUST be 0 — this is not an ADTS header"
+            let crcNote   = d.protectionAbsent ? "" : " (CRC present)"
+            let lcNote    = d.profileMinusOne == 1 ? " (AAC-LC)" : ""
+            let rateNote  = Double(rate) == sampleRate ? ""
+                          : " ⚠️ mux declared \(Int(sampleRate)) Hz"
+            let chanNote  = Int(d.channelConfig) == channelCount ? ""
+                          : " ⚠️ mux declared \(channelCount) ch"
+            let delta     = pr.receivedSize - d.frameLength
+            let lenNote   = delta == 0 ? "MATCH" : "MISMATCH — packet is \(delta) byte(s) longer ⚠️"
+            let blockNote = d.rawDataBlocks == 0 ? ""
+                          : " ⚠️ ONLY THE FIRST IS DECODED — the rest are dropped"
+            let fullNote  = d.bufferFullness == 2047 ? " (0x7FF = VBR)" : ""
+
+            line("adts.mpegver", "\(d.mpegVersion) (\(version))")
+            line("adts.layer", "\(d.layer)\(layerNote)")
+            line("adts.protabs", "\(d.protectionAbsent ? 1 : 0) → header is "
+                               + "\(d.headerBytesFromHeader) bytes\(crcNote)")
+            line("adts.profile", "\(d.profileMinusOne) → objectType "
+                               + "\(d.profileMinusOne + 1)\(lcNote)")
+            line("adts.freqidx", "\(d.samplingIndex) (\(rate) Hz)\(rateNote)")
+            line("adts.chancfg", "\(d.channelConfig)\(chanNote)")
+            line("adts.framelen", "\(d.frameLength) vs packet \(pr.receivedSize) — \(lenNote)")
+            line("adts.rdblocks", "\(d.rawDataBlocks) → \(d.rawDataBlocks + 1) AAC frame(s) "
+                               + "in this ADTS frame\(blockNote)")
+            line("adts.buffull", "\(d.bufferFullness)\(fullNote)")
+        } else {
+            for label in ["adts.mpegver", "adts.layer", "adts.protabs", "adts.profile",
+                          "adts.freqidx", "adts.chancfg", "adts.framelen", "adts.rdblocks",
+                          "adts.buffull"] {
+                line(label, "—")
+            }
+        }
+
+        line("hdrlen.used", pr.headerBytesUsed < 0 ? "— (nothing stripped)" : "\(pr.headerBytesUsed)")
+        line("branch", pr.branch)
+        line("branch.why", pr.branchEvidence)
+        line("conv.offset", pr.converterOffset < 0 ? "—" : "\(pr.converterOffset)")
+        line("conv.len", pr.converterSize < 0 ? "—" : "\(pr.converterSize)")
+        line("conv.hex8", Self.probeHex(pr.converterHead))
+        line("outcome", pr.outcome)
+    }
+#endif
 
     static func fourCC(_ v: AudioFormatID) -> String {
         let b = [UInt8((v >> 24) & 0xff), UInt8((v >> 16) & 0xff),

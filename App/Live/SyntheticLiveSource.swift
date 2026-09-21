@@ -483,11 +483,17 @@ final class SyntheticLiveSource {
     /// read at unity — the setpoint-reality check before tuning the loop. Applies to a RUNNING clock
     /// immediately AND to the next ⌃⌥L start() (mirrors how cyclePreset applies live + next start).
     private var forceUnityRate = false
-    func toggleForceUnityRate() {
+    /// ⚠️ RETURNS THE NEW STATE, because ⌃⌥U now drives TWO clocks. This harness owns its own
+    /// `LiveClock`; a live transport owns a different one, and the toggle has to reach whichever is
+    /// actually running. The caller applies the returned value to the live transport — see
+    /// `SRTFrameRouter.setForceUnityRate`. One piece of state, one keystroke, two destinations.
+    @discardableResult
+    func toggleForceUnityRate() -> Bool {
         forceUnityRate.toggle()
         liveClock?.setForceUnityRate(forceUnityRate)   // lock-clean; live if the harness is running
         NSLog("[SyntheticLive] forceUnityRate → \(forceUnityRate) — control loop "
             + (forceUnityRate ? "DISABLED (rate≡1.0)" : "ENABLED"))
+        return forceUnityRate
     }
 
     // MARK: - Auto-sweep (⌃⌥S) — 2D (targetDepth × jitter) grid, 15s/cell, verdict + summary table

@@ -269,7 +269,7 @@ final class WHEPFrameRouter {
     var beginLiveAudio: ((Double) -> FrameEngine.LiveAudioSink?)?
     /// Forwards `LiveClock`'s mapping to the engine's audio timebase. Set by `WindowDeck`; called
     /// on whichever thread changed the mapping, so the engine side is `nonisolated`.
-    var mirrorLiveAudio: ((LiveClock.Mapping?) -> Void)?
+    var mirrorLiveAudio: ((LiveClock.Mapping?, Bool) -> Void)?
     /// Closes it. Must be called on teardown or the renderer keeps a dead session's timebase.
     var endLiveAudio: (() -> Void)?
     /// Publishes the decoded channel count so the meters size their bars.
@@ -691,7 +691,13 @@ final class WHEPFrameRouter {
         // at activate() means that first anchor is not missed. The engine side no-ops until a
         // live-audio session is open, so an early mapping costs nothing.
         clock.onMappingChange = { [weak self] mapping in
-            self?.mirrorLiveAudio?(mapping)
+            self?.mirrorLiveAudio?(mapping, false)
+        }
+        // ⚠️ AND THE HEARTBEAT, ON THE SAME SEAM. Publication stops entirely while the P-loop is
+        // saturated against its slew clamp; this fires at the control cadence regardless, so the
+        // audio timebase is evaluated whether or not the clock's rate happened to move.
+        clock.onMappingTick = { [weak self] mapping in
+            self?.mirrorLiveAudio?(mapping, true)
         }
 
         NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR",
@@ -717,6 +723,7 @@ final class WHEPFrameRouter {
         // Drop the mapping callback BEFORE releasing the clock: it captures self, and a mapping
         // arriving after teardown would reach a torn-down engine seam.
         liveClock?.onMappingChange = nil
+        liveClock?.onMappingTick = nil
         liveClock = nil
         stateLock.unlock()
         guard wasActive else { return }

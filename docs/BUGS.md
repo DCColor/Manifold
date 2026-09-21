@@ -693,6 +693,74 @@ tripwires guard the code; this failure needed no edit to the code.
 
 ---
 
+## ☐ SRT multichannel AAC is still on AudioToolbox — the libav switch was STEREO ONLY
+
+**Status:** OPEN, **deliberately deferred, not overlooked.** **Raised:** 2026-09-21, as the named
+remaining half of the libav decode switch. **Not a regression:** multichannel behaves exactly as it
+did before that change — it is the path that did NOT move.
+
+### What happened, and what did not
+
+AudioToolbox mis-decodes the Cloudflare SRT feed: clean bytes in, gravel out, with framing and
+timing both independently verified correct first (`[SRT-AUDIO-PROBE]` read a 7-byte ADTS header,
+`frame_length` matching the packet, `rdblocks=0`, 1024 frames × 2 ch; `timebase−clock` held within
+4 ms). libavcodec decodes the same bytes cleanly. So SRT's AAC decode moved to
+`SRTAudioDecoderLibav` — **for streams of two channels or fewer only.** Anything wider still
+constructs `SRTAudioDecoder` and still goes through AudioConverter.
+
+**Which means a multichannel Cloudflare feed is still broken**, if the fault is the bitstream
+property it appears to be rather than something stereo-specific. Nothing has established which.
+
+### ⚠️ WHY THE LINE IS AT TWO CHANNELS, AND WHY WIDENING IT IS NOT A ONE-CHARACTER CHANGE
+
+**The two decoders emit different channel ORDERS, and neither is wrong.**
+
+```
+channel_configuration 6 (5.1)
+  AudioToolbox  →  C L R Ls Rs LFE     (the AAC BITSTREAM order)
+  libav         →  L R C LFE Ls Rs     (libav's native order)
+```
+
+`SRTAudioDecoder` carries an **ask-then-verify** sequence for exactly this: translate the mux's
+mask to CoreAudio positions, REQUEST that order from the converter, then **read the property back**
+and label from what came back — because `AudioConverterSetProperty` returning `noErr` says the
+property was accepted, not that the decoder reordered. That machinery has no libav counterpart
+written yet.
+
+**Attaching the wrong order is the failure mode this codebase has already paid for once:** dialogue
+on Left, LFE on a surround, six correctly-labelled meters, and nothing looking broken anywhere. It
+is the same shape as every other entry in this file where a reading "is a real observation and is
+not". Re-deriving it at speed to fix a stereo bug is how it arrives a second time, so it was not
+attempted.
+
+Stereo needs none of that: one pair, both decoders agree on L R, and the layout is a constant
+(`kAudioChannelLayoutTag_Stereo`). **That is the entire reason the boundary is where it is** — not
+a guess about where libav is trustworthy, but the point at which channel order stops being a
+question.
+
+### What "done" means
+
+libav's output order for each `channel_configuration` established **by measurement, not by reading
+libav's headers**, and mapped to CoreAudio labels with the same read-back-is-authority discipline
+the AudioToolbox path uses — or, if libav offers no equivalent read-back, an explicitly stated
+mapping with a fixture that proves it. Then the `<= 2` test in `SRTFrameRouter.handleAudioFormat`
+widens, and `SRTAudioDecoder` can be deleted rather than kept as a second path.
+
+⚠️ **Until then, the test is load-bearing and the log line names which decoder ran.** Every SRT
+connection now prints `[SRT-AUDIO] decoder: libavcodec` or `AudioToolbox`, because the two produce
+an identical buffer shape and are otherwise indistinguishable downstream — the meters, the tap, the
+SDI path and every counter read the same either way.
+
+### Related, and worth deciding together
+
+`SRTAudioDecoder`'s ADTS machinery (`parseADTS`, `audioSpecificConfig`, `esds`, the whole cookie
+state machine) is **still present and still exercised**, because multichannel still needs it. It
+was left in place deliberately so reverting the switch is one condition, not a restoration. If the
+multichannel half lands and `SRTAudioDecoder` goes, roughly 150 lines of ASC/ESDS synthesis go with
+it — libav needs none of it.
+
+---
+
 ## 🔍 OPEN — the Cloudflare SRT path runs 20–190 ms deep against a 0.250 s target, and nothing explains why
 
 **Status:** OPEN — **UNEXPLAINED. Not investigated.** Measured 2026-09-21 across three Cloudflare

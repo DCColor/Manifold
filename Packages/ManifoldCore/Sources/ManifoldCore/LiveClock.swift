@@ -420,6 +420,21 @@ public final class LiveClock: @unchecked Sendable {
         telemetryOptInLock.unlock()
     }
 
+    /// Whether `enableTelemetry()` has been called — i.e. whether this is a build that emits
+    /// diagnostics at all.
+    ///
+    /// ⚠️ EXPOSED SO OTHER DIAGNOSTICS SHARE THIS ONE SWITCH RATHER THAN INVENTING THEIR OWN.
+    /// `MANIFOLD_TELEMETRY` is defined in every configuration including Release (see
+    /// `Package.swift`), so a compile gate cannot keep package-side diagnostics out of a shipping
+    /// build and a RUNTIME gate is what does it. `ManifoldApp.init` sets this under `#if DEBUG`
+    /// and nothing else calls it, which makes this the app's single answer to "is this a
+    /// diagnostic build". A second switch alongside it could disagree, and then a Release build
+    /// would emit from one subsystem and not another.
+    public static var telemetryIsEnabled: Bool {
+        telemetryOptInLock.lock(); defer { telemetryOptInLock.unlock() }
+        return telemetryOptIn
+    }
+
     /// ⚠️ **CAPTURED ONCE, AT CONSTRUCTION, AND `let` THEREAFTER — WHICH IS THE WHOLE POINT.**
     ///
     /// The emit sites are reached from the frame-registration path, i.e. the source/clock thread.
@@ -504,10 +519,118 @@ public final class LiveClock: @unchecked Sendable {
     /// A consumer must therefore be safe to call from any thread and must not block.
     public var onMappingChange: ((Mapping?) -> Void)?
 
+    /// ── THE HEARTBEAT: THE MAPPING RE-STATED AT THE CONTROL CADENCE, CHANGED OR NOT ──────────
+    ///
+    /// Fires at `controlHz` while anchored, carrying the live mapping **re-expressed at the instant
+    /// it fires**: `senderPTS = now()`, `hostTime = t`, same `rate`. Same thread contract as
+    /// `onMappingChange` — called OUTSIDE `lock`, from whichever thread drained it, must not block.
+    ///
+    /// ⚠️ WHY THIS EXISTS, AND WHY IT IS NOT A LOOSENING OF THE PUBLICATION GATE. The gate above is
+    /// correct and is deliberately untouched: it exists so a SETTLED rate does not churn the anchor
+    /// at 10 Hz, and churning the anchor is a real defect (it was audible pitch wobble). But the
+    /// consumer's job is not "react to rate changes" — it is "keep a SEPARATE timebase, running at a
+    /// DELIBERATELY DIFFERENT rate, from walking away from this one". `FrameEngine.mirrorLiveAudio`
+    /// smooths the rate it mirrors with a 30 s EMA precisely so it does NOT follow the P-loop's
+    /// ±0.5% depth correction — so the two rates differ BY DESIGN, so a position error accrues BY
+    /// DESIGN, and correcting it cannot be conditional on the clock's rate happening to move.
+    ///
+    /// The failure that produced this: while the P-loop is saturated against its slew clamp, every
+    /// recompute yields a bit-identical `Double`, `newRate != rate` is deterministically false, and
+    /// publication stops for as long as saturation lasts. The audio timebase was then left running
+    /// at its own rate with nothing watching, walking at ~5 ms/s until a coarse re-anchor yanked it
+    /// back in one audible step. Full derivation: `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`.
+    ///
+    /// ⚠️ THE TICK AND THE CHANGE DESCRIBE THE SAME TIMEBASE — that is what makes this safe. A
+    /// mapping is a LINE: `(senderPTS, hostTime)` is one point on it and `rate` is its slope. The
+    /// tick hands over a different POINT on the SAME line, so a consumer that anchors from it lands
+    /// on exactly the timebase the anchor form would have produced. The heartbeat cannot change what
+    /// the mapping MEANS; it can only change WHEN the consumer gets to notice it has drifted from
+    /// it. Nothing here writes clock state, so `now()` is bit-identical with the heartbeat installed
+    /// or not, and video cannot be affected by it.
+    ///
+    /// ⚠️ A CONSUMER MUST BE IDEMPOTENT UNDER IT. This fires whether or not anything changed, so a
+    /// consumer that acts unconditionally on every call will act 10×/second. `mirrorLiveAudio` is
+    /// safe because its `shouldPush` gate decides for itself; a new consumer needs the same property.
+    public var onMappingTick: ((Mapping) -> Void)?
+
     /// Set under `lock` by `setMappingLocked`; drained by `publishMappingIfChanged` after unlock.
     private var mappingDirty = false
     /// What was last handed to `onMappingChange` — the tripwire's reference.
     private var lastPublishedMapping: Mapping?
+    /// Host time of the last mirror EVALUATION — a publication or a heartbeat, whichever came last.
+    /// Gates the heartbeat to `controlHz`, and is why a healthily-publishing clock emits almost no
+    /// ticks: every publication re-stamps this, so the heartbeat only fills SILENCE.
+    private var lastMirrorTickHost: Double?
+    /// Host time of the last actual PUBLICATION — the starvation tripwire's reference. Distinct from
+    /// `lastMirrorTickHost` on purpose: the tripwire must measure the gate, not the thing covering
+    /// for it, or it would be silenced by its own remedy.
+    private var lastPublishHost: Double?
+    /// Rate-limits the starvation tripwire. Nil until it has fired once in this anchored run.
+    private var lastStarvationWarnHost: Double?
+
+    /// How long the P-loop may publish nothing before the tripwire says so. Healthy is ~8–9/s, and
+    /// the dead band produces ZERO — so 3 s is ~25 missed control ticks, far outside anything a
+    /// working loop does, and well inside the 15–20 s period of the failure it exists to catch.
+    private static let publicationStarvationSeconds = 3.0
+    /// Re-warn interval once starving, so a stream that sits in the dead band for ten minutes leaves
+    /// a readable trail rather than 6,000 lines.
+    private static let starvationRewarnSeconds = 30.0
+
+    /// ── THE PUBLICATION-GAP DISTRIBUTION ────────────────────────────────────────────────────
+    ///
+    /// Intervals between successive PUBLICATIONS (not evaluations), bucketed. This is the number
+    /// that decides every question about the heartbeat — whether a healthy clock needs one, what
+    /// interval it should run at, whether a given transport is entering the dead band and for how
+    /// long — and it lived in a throwaway bench script until it falsified a design premise. It is
+    /// in the log so the next such question is answered from a session rather than re-derived.
+    ///
+    /// FIXED FIELDS RATHER THAN AN ARRAY OR A SAMPLE BUFFER, because this is accumulated under
+    /// `lock`: adding a gap must not allocate, must not grow, and must not depend on how many gaps
+    /// a window happens to contain. A histogram gives the shape; percentiles over retained samples
+    /// would give two more digits and a heap allocation on the highest-traffic lock in the codebase.
+    private struct GapHistogram {
+        var n = 0
+        var maxMs = 0.0
+        var under50 = 0, under100 = 0, under200 = 0, under500 = 0
+        var under1k = 0, under2k = 0, over2k = 0
+
+        mutating func add(_ ms: Double) {
+            n += 1
+            if ms > maxMs { maxMs = ms }
+            switch ms {
+            case ..<50:    under50  += 1
+            case ..<100:   under100 += 1
+            case ..<200:   under200 += 1
+            case ..<500:   under500 += 1
+            case ..<1000:  under1k  += 1
+            case ..<2000:  under2k  += 1
+            default:       over2k   += 1
+            }
+        }
+    }
+
+    /// Accumulating window. Snapshotted and cleared by `publicationGapsLocked`.
+    private var gaps = GapHistogram()
+    /// Host time the current gap window opened. Nil until the first publication of a stream.
+    private var gapWindowStart: Double?
+
+    /// 10 s, matching `mirrorLiveAudio`'s own stats cadence so the two lines pair up in the log:
+    /// one says what the clock published, the next says what the mirror did about it.
+    private static let gapReportSeconds = 10.0
+
+    /// What the starvation tripwire needs to say. Assembled under `lock`, formatted outside it —
+    /// the same split every other telemetry payload in this file uses, for the same reason.
+    private struct PublicationStarvation {
+        let silentFor: Double
+        let rate: Double
+        let err: Double
+        let railed: Bool
+        /// Whether anyone actually installed `onMappingTick`. The line says what the consequence IS,
+        /// and it cannot know that without asking — a tripwire that assures the reader audio is
+        /// covered when nothing is covering it would be the fourth instrument reading healthy while
+        /// something is wrong, which is the thing this was added to stop.
+        let heartbeatInstalled: Bool
+    }
 
     /// THE ONLY writer of `anchorSenderPTS` / `anchorHostTime` / `rate`. Call under `lock`.
     private func setMappingLocked(senderPTS: Double, hostTime: Double, rate newRate: Double) {
@@ -528,7 +651,17 @@ public final class LiveClock: @unchecked Sendable {
     /// Drain a pending mapping change to `onMappingChange`. MUST be called with `lock` NOT held —
     /// the consumer touches a CMTimebase, which is not work to do under a priority-donating lock.
     /// Cheap and safe to call unconditionally after any unlock.
+    /// ⚠️ IT ALSO DRAINS THE HEARTBEAT, AND THAT IS WHY IT IS STILL ONE LOCK ACQUISITION. The
+    /// heartbeat needs the same three fields under the same lock, on the same call, at the same
+    /// instant. Giving it its own entry point would mean a SECOND acquisition of the highest-traffic
+    /// donating lock in the codebase on every display tick — see the `lock` declaration for why that
+    /// is not a small thing. So the `guard mappingDirty` branch, which is where the mapping is by
+    /// definition NOT being published, is exactly where the heartbeat belongs.
+    ///
+    /// THE PUBLICATION GATE ITSELF IS UNCHANGED, deliberately and completely: same condition, same
+    /// dirty flag, same callback, same tripwire. What follows the `guard` is new; the `guard` is not.
     private func publishMappingIfChanged() {
+        let t = hostNow()
         lock.lock()
         let live: Mapping? = (anchorSenderPTS != nil && anchorHostTime != nil)
             ? Mapping(senderPTS: anchorSenderPTS!, hostTime: anchorHostTime!, rate: rate) : nil
@@ -538,18 +671,138 @@ public final class LiveClock: @unchecked Sendable {
             // If it does not, some site assigned the fields directly instead of going through
             // `setMappingLocked`, and the audio timebase is now silently wrong. Loud on purpose.
             let drifted = live != lastPublishedMapping
+            // Same critical section, no extra acquisition: is a heartbeat due, and has the gate
+            // been silent long enough to report?
+            let tick = mirrorTickLocked(at: t)
+            let starving = starvationLocked(at: t, tickDue: tick != nil)
+            let gapReport = publicationGapsLocked(at: t)
+            let tickCallback = onMappingTick
             lock.unlock()
             if drifted {
                 NSLog("[LIVECLOCK] ⚠️ MAPPING CHANGED WITHOUT setMappingLocked — an anchor/rate "
                     + "write bypassed the funnel; the audio timebase will not be mirrored")
             }
+            // Mirror first, log second — the same ordering `updateDepth` uses, so the audio timebase
+            // is never behind a line describing it.
+            if let tick { tickCallback?(tick) }
+            emit(starving)
+            emit(gapReport)
             return
         }
         mappingDirty = false
         lastPublishedMapping = live
+        // A publication IS an evaluation: the consumer has just been handed the current mapping, so
+        // the heartbeat has nothing to add and its cadence restarts here. The heartbeat fills
+        // SILENCE rather than running alongside publication.
+        //
+        // ⚠️ A HEALTHY CLOCK STILL EMITS TICKS, AND A LONGER INTERVAL DOES NOT FIX THAT — it was
+        // tried and measured. At a 500 ms interval, profiles with a HEALTHY ±13 ms error envelope
+        // still went silent for longer than that 45–54 times per 90 s, with single gaps reaching
+        // 1.0–1.4 s, because an envelope twice the 6.25 ms rail threshold RAILS ON EVERY EXCURSION;
+        // it simply does not stay there. So the dead band is not a condition the healthy path
+        // avoids — it enters it dozens of times a minute and leaves before the ~5 ms/s walk reaches
+        // the mirror's 10 ms tolerance. The margin is about 2×, not immunity.
+        //
+        // The 500 ms trial bought no healthy-path invariance and cost 2.8× on the case the
+        // heartbeat exists for (worst |timebase−clock| 10.22 ms → 28.83 ms over ten minutes), so the
+        // interval is the control cadence. `publicationGapsLocked` below is what measures this, and
+        // it is in the log precisely so the question is never re-argued from a bench script.
+        // The gap this publication closes, recorded before the stamp that would erase it.
+        if let lastPub = lastPublishHost { gaps.add((t - lastPub) * 1000) }
+        if gapWindowStart == nil { gapWindowStart = t }
+        lastMirrorTickHost = t
+        lastPublishHost = t
+        lastStarvationWarnHost = nil     // the gate is alive again; re-arm for the next silence
+        let gapReport = publicationGapsLocked(at: t)
         let callback = onMappingChange
         lock.unlock()
         callback?(live)
+        emit(gapReport)
+    }
+
+    /// The heartbeat's locked half: is one due, and if so, what is the mapping RIGHT NOW?
+    ///
+    /// Returns the live mapping re-expressed at `t` — `senderPTS` is `now()` evaluated at `t` using
+    /// the CURRENT anchor and rate, `hostTime` is `t`. That is the same rebase the P-loop performs
+    /// when it changes rate, minus the part that writes anything: **this function does not touch
+    /// `anchorSenderPTS`, `anchorHostTime` or `rate`, does not call `setMappingLocked`, and does not
+    /// set `mappingDirty`.** It is a read, expressed in a different basis.
+    ///
+    /// ⚠️ THE RE-EXPRESSION IS THE ENTIRE POINT — THE ANCHOR FORM WOULD NOT WORK HERE. A consumer
+    /// evaluating a SATURATED clock repeatedly sees a constant `(anchorSenderPTS, anchorHostTime)`,
+    /// so `mirrorLiveAudio`'s `target` would be constant, its `predicted` would be constant, and its
+    /// position error would read the same value forever while the real divergence grew. Handing over
+    /// the CURRENT point on the line is what makes the accruing error visible to a gate that
+    /// compares "where the mapping says we are" against "where we last said we were".
+    ///
+    /// Call under `lock`.
+    private func mirrorTickLocked(at t: Double) -> Mapping? {
+        guard let aPTS = anchorSenderPTS, let aHost = anchorHostTime else {
+            // Un-anchored: `now()` is the -.infinity sentinel and there is nothing truthful to say.
+            // The mirror is told to hold by the `nil` publication `reset()` already sends.
+            lastMirrorTickHost = nil
+            return nil
+        }
+        guard let last = lastMirrorTickHost else {
+            // First drain after the anchor — seed the cadence rather than fire immediately. The
+            // anchor itself was a publication, so the consumer is already current.
+            lastMirrorTickHost = t
+            return nil
+        }
+        guard t - last >= controlInterval else { return nil }
+        lastMirrorTickHost = t
+        return Mapping(senderPTS: aPTS + (t - aHost) * rate, hostTime: t, rate: rate)
+    }
+
+    /// Snapshot and reset the gap window if it is due. Call under `lock`.
+    ///
+    /// ⚠️ CALLED FROM BOTH BRANCHES OF THE DRAIN, AND THAT IS NOT REDUNDANT. A window driven only by
+    /// publications would stop reporting exactly when publication stops — the failure this whole
+    /// mechanism exists for would erase its own measurement. The tick path is what keeps the window
+    /// turning through silence, so a starved stream still prints `n=0` rather than printing nothing.
+    private func publicationGapsLocked(at t: Double) -> (window: Double, gaps: GapHistogram)? {
+        guard let start = gapWindowStart else { return nil }
+        let window = t - start
+        guard window >= Self.gapReportSeconds else { return nil }
+        let snapshot = gaps
+        gaps = GapHistogram()
+        gapWindowStart = t
+        return (window, snapshot)
+    }
+
+    /// ── THE STARVATION TRIPWIRE ──────────────────────────────────────────────────────────────
+    ///
+    /// The P-loop has published nothing for `publicationStarvationSeconds` while anchored. Say so.
+    ///
+    /// ⚠️ WHY THIS IS NOT COVERED BY THE TRIPWIRES THAT ALREADY EXIST. The slew-site note in
+    /// `updateDepthLocked` enumerates the ways the slew can stop — `forceUnityRate`, `maxSlew = 0`,
+    /// an early return on stable depth — and every one of them is a code change somebody would have
+    /// to make on purpose. The way it actually stopped needed no edit at all: the loop kept running
+    /// and kept computing, but SATURATED, and a railed rate publishes nothing for exactly the same
+    /// reason a settled one does not. A tripwire that watches for the slew pinned at UNITY is blind
+    /// to it pinned at the RAIL, which looks healthier in every log.
+    ///
+    /// ⚠️ IT MEASURES `lastPublishHost`, NOT `lastMirrorTickHost`. The heartbeat now covers this
+    /// condition, so a tripwire keyed to evaluations would be permanently silenced by its own
+    /// remedy — reporting health because the workaround is working. It reports the GATE.
+    ///
+    /// Call under `lock`. `tickDue` keeps the check on the heartbeat's cadence rather than the
+    /// display tick's, so it costs one comparison per tick and nothing else.
+    private func starvationLocked(at t: Double, tickDue: Bool) -> PublicationStarvation? {
+        guard tickDue, let lastPub = lastPublishHost else { return nil }
+        let silentFor = t - lastPub
+        guard silentFor >= Self.publicationStarvationSeconds else { return nil }
+        if let warned = lastStarvationWarnHost, t - warned < Self.starvationRewarnSeconds {
+            return nil
+        }
+        lastStarvationWarnHost = t
+        let err = (smoothedDepth ?? targetDepth) - targetDepth
+        // "Railed" = sitting on the slew clamp, which is the saturation case this was written for.
+        // Stated as a measurement rather than inferred from `err`, so a future change to how the
+        // rate is computed cannot make the label lie.
+        let railed = abs(abs(rate - 1.0) - maxSlew) < 1e-12
+        return PublicationStarvation(silentFor: silentFor, rate: rate, err: err, railed: railed,
+                                     heartbeatInstalled: onMappingTick != nil)
     }
 
     /// Current presentation time, in the SENDER timeline's units — the closure handed to
@@ -1148,6 +1401,48 @@ public final class LiveClock: @unchecked Sendable {
         #endif
     }
 
+    /// ⚠️ GATED ON `telemetryEnabled`, LIKE EVERY OTHER `[LIVECLOCK]` LINE, AND THAT IS A CHOICE.
+    /// The `MAPPING CHANGED WITHOUT setMappingLocked` tripwire above is an UNCONDITIONAL `NSLog`
+    /// because it reports a broken INVARIANT — a code defect that must never occur in any build.
+    /// This one reports a TRANSPORT CONDITION that legitimately occurs on a stream running deep, so
+    /// an unconditional log here would put a recurring line into shipping builds on an ordinary
+    /// session. `MANIFOLD_TELEMETRY` is defined in Release (see `Package.swift`), so `#if` is not
+    /// what keeps it quiet there — the runtime flag is, and this line respects it.
+    private func emit(_ starvation: PublicationStarvation?) {
+        #if DEBUG || MANIFOLD_TELEMETRY
+        guard let starvation, telemetryEnabled else { return }
+        FileHandle.standardError.write(Data(String(
+            format: "[LIVECLOCK] ⚠️ publication starved: no mapping published for %.1fs "
+                  + "(rate=%.4f%@ err=%+.4f) — %@\n",
+            starvation.silentFor, starvation.rate,
+            starvation.railed ? " RAILED" : "", starvation.err,
+            starvation.heartbeatInstalled
+                ? "the mirror is being fed by the heartbeat, so audio is covered; read this as a "
+                + "DEPTH signal, not an audio one."
+                : "AND NO onMappingTick CONSUMER IS INSTALLED, so nothing is mirroring this clock "
+                + "— any audio timebase driven from it is drifting free.").utf8))
+        #endif
+    }
+
+    /// The publication-gap distribution for one window. Gated on `telemetryEnabled` like every
+    /// other `[LIVECLOCK]` line.
+    ///
+    /// Reads as a shape rather than a statistic on purpose: `<100:2 <200:5 <500:12 <1k:25` says
+    /// "this loop rails for half a second at a time, twenty-five times a window", which is the
+    /// sentence that matters. A p95 would have said "987 ms" and hidden that it was 25 separate
+    /// excursions rather than one stall.
+    private func emit(_ report: (window: Double, gaps: GapHistogram)?) {
+        #if DEBUG || MANIFOLD_TELEMETRY
+        guard let report, telemetryEnabled else { return }
+        let g = report.gaps
+        FileHandle.standardError.write(Data(String(
+            format: "[LIVECLOCK] publication gaps (%.1fs): n=%d max=%.0fms · <50:%d <100:%d "
+                  + "<200:%d <500:%d <1k:%d <2k:%d 2k+:%d\n",
+            report.window, g.n, g.maxMs, g.under50, g.under100, g.under200,
+            g.under500, g.under1k, g.under2k, g.over2k).utf8))
+        #endif
+    }
+
     private func emitTargetStep(from: Double, to: Double) {
         #if DEBUG || MANIFOLD_TELEMETRY
         guard telemetryEnabled else { return }
@@ -1183,6 +1478,18 @@ public final class LiveClock: @unchecked Sendable {
         ineligibleTicks = 0
         ineligibleSince = nil
         hasPresentedOnce = false
+        // Mirror-heartbeat state is per-STREAM for the same reason everything above it is.
+        //
+        // These three are BELT AND BRACES, and knowingly so: `clearMappingLocked` above sets
+        // `mappingDirty`, so the `publishMappingIfChanged()` below takes the publication branch and
+        // re-stamps all three on its way out. Clearing them here is what makes `reset()` correct
+        // STANDING ALONE rather than correct-because-of-what-the-next-line-happens-to-do — the same
+        // discipline the freeze-guard flags above are cleared under.
+        lastMirrorTickHost = nil
+        lastPublishHost = nil
+        lastStarvationWarnHost = nil
+        gaps = GapHistogram()
+        gapWindowStart = nil
         lock.unlock()
         publishMappingIfChanged()   // publishes nil — the mirror must un-anchor with us
     }
