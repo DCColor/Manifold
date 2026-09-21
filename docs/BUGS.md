@@ -492,6 +492,106 @@ independently, and for the same reason. Both want a preflight, not a memory.
 
 ---
 
+## ☐ PRE-SHIP: stream bookmarks have no durability story — no backup, no export, one key
+
+**Status:** OPEN, required before public launch. **NOT a blocker** — nothing ships broken, and the
+app does not lose the list on its own. **Raised:** 2026-09-21, after the `streamBookmarks` defaults
+key was erased during LIVECLOCK verification and there was no way back: no snapshots, no Time
+Machine, no store-side backup. **Done means:** a user can get their saved streams out of the app
+and back in — see *What "done" means* below.
+
+### What exists, and what does not
+
+`StreamBookmarkStore` (`App/Preferences.swift`) holds the entire saved-stream collection as one
+JSON blob under a single `UserDefaults` key, `streamBookmarks`, in
+`~/Library/Preferences/com.graviton.manifold.plist`. There is:
+
+- **no backup** — no second copy, anywhere, at any point;
+- **no export** — no way to get the list out of the app, for support, for a move to another Mac,
+  or for a user who just wants their own connection details written down;
+- **no import** — so even a user who has the bytes has nothing to do with them.
+
+**The whole collection lives or dies with that one key**, and `defaults write` replaces a key's
+value wholesale rather than merging into it. One wholesale write — from a script, from a terminal
+one-liner, from a well-meant automation — takes every saved connection at once. That is what
+happened on 2026-09-21. The corresponding rule now lives in `CLAUDE.md`.
+
+### ⚠️ THE STORE'S EXISTING PROTECTION IS REAL AND DOES NOT COVER THIS
+
+This is worth stating precisely, because the code reads as though the problem is already solved.
+`storedDataUnreadable` and the `persist()` guard are a careful piece of work: if the key exists and
+this build cannot decode it, the list shows empty, `add` refuses with `.storeUnreadable`, and
+nothing is written over the original bytes. The write-up on that flag is right about the failure it
+describes.
+
+**But every one of those defenses is against THE APP destroying the list.** The store watches its
+own writes. It has no view of, and no defense against, a write to that key from outside the
+process — which is both the cheaper failure to cause and the one that has actually occurred. The
+bytes it so carefully declines to overwrite are simply gone, and `init` then takes the fresh-install
+branch: no key, empty list, `storedDataUnreadable` false, nothing in the log. **The loss is
+indistinguishable from never having saved anything.**
+
+### The passphrases are a second half, and losing the key ORPHANS them
+
+`migratePassphrasesToKeychain` moves SRT passphrases out of the plist and into the Keychain, keyed
+by `bookmark.id.uuidString`. That is right on its own terms and should not change. It does mean:
+
+- **Losing the defaults key strands the Keychain items.** They survive the erasure intact and are
+  unreachable forever, because the only thing that knew their UUIDs was the list that is gone.
+  Nothing collects them; they sit in the user's keychain as anonymous entries.
+- **An export has two halves with different rules.** The bookmark rows are ordinary data. The
+  passphrases are secrets, and an export file carrying them in cleartext re-creates, on the user's
+  Desktop, exactly the exposure the Keychain migration existed to end. The default should be to
+  export WITHOUT passphrases and to say so plainly in the file and in the UI, with import prompting
+  for the ones it needs. A passphrase-carrying export, if it is ever wanted, is a separate decision
+  and needs encryption, not a checkbox.
+
+### Why this is a pre-ship item and not a nice-to-have
+
+A tester or a customer who loses every saved connection **has no recovery path at all** — not a
+worse one, none. They cannot be talked through a restore, because there is nothing to restore from;
+the best available answer is "re-enter them from memory". For anyone running more than a handful of
+feeds, that answer is a support problem, and the fact that the app had no opinion about their data
+is a trust problem. It is the kind of thing that gets described once, in public, in terms the
+feature list does not recover from.
+
+It is not a blocker because nothing is broken in a shipped build and no user action inside the app
+triggers it. It is on this list because the day it bites, it is unfixable after the fact.
+
+### ⚠️ EXPORT/IMPORT IS THE CHEAPER HALF AND SHOULD GO FIRST
+
+Not just cheaper — **better value per unit of work**, and it should not wait on the backup design.
+
+`StreamBookmark` is already `Codable` and the store already encodes the whole array to JSON on
+every `persist()`. Export is a file writer over bytes that exist; import is a decode, a merge
+decision, and one `persist()`. There is no scheduler, no retention policy, no background task, no
+question of when a restore is safe.
+
+And it answers the three questions a backup does not:
+
+- **Support.** "Send me your export" is a diagnosis; "your list is gone" is not.
+- **Moving Macs.** Today the only migration path is Migration Assistant carrying the whole plist.
+- **The user's own copy.** Some people want their connection details in a file, in a repo, in a
+  team's shared folder, independent of any one machine.
+
+**The backup half is the one with the design questions** — where it lives, how often, how many
+generations, what triggers a restore, and whether restoring merges or replaces (replacing is
+itself a wholesale write, which is how this entry started). It is worth doing. It is not worth
+blocking the export on.
+
+### What "done" means
+
+**For this item, before public launch:** a user can export their saved streams to a file and import
+that file back, on this machine or another one, with everything round-tripping except passphrases,
+which are named but not carried and are re-entered on import. Import states clearly whether it
+merges or replaces, and a replace is confirmed rather than silent.
+
+**Tracked separately, not required for launch:** an automatic backup of the key with at least one
+prior generation, and a restore path that does not depend on the user having thought about this in
+advance.
+
+---
+
 ## Live sources never publish their frame size, so every stream is framed as 16:9
 
 **Status:** FIXED 2026-08-11 (see "What landed" below). **Found:** 2026-08-10, during the

@@ -76,7 +76,17 @@ let package = Package(
                 //
                 // >>> CONSEQUENCE, STATED PLAINLY: THIS DEFINES MANIFOLD_TELEMETRY IN **RELEASE**
                 // >>> TOO. A shipping archive contains the [LIVECLOCK] strings and the two tuning
-                // >>> setters, AND THE TELEMETRY IS REACHABLE AND WILL EMIT.
+                // >>> setters — the code is compiled in and the strings are in the binary.
+                //
+                // ⚠️ EMISSION IS NOW GATED AT RUNTIME, SO THE STRINGS ARE NOT EVIDENCE OF OUTPUT.
+                // `LiveClock` carries a flag that defaults to OFF and is captured per clock at
+                // construction; only `ManifoldApp.init` turns it on, under `#if DEBUG`. So a
+                // Release build compiles the telemetry, ships the format strings, and writes
+                // nothing. Do not read `strings | grep LIVECLOCK` on an archive as proof that a
+                // build emits — it only proves the code is present, which this line guarantees in
+                // every configuration.
+                //
+                // That gate is the reason the paragraph below is written in the PAST tense.
                 //
                 // ⚠️ CORRECTED 2026-09-21 BY MEASUREMENT. This paragraph previously read "Nothing
                 // in Release can REACH them (SyntheticLiveSource and the whole WHEP stack are
@@ -103,15 +113,18 @@ let package = Package(
                 //                                           ← always true here, because of THIS line
                 //     LiveClock.swift:1069                  FileHandle.standardError.write(…)
                 //
-                // So a Release build writes `[LIVECLOCK] depth=… target=… rate=…` to stderr at
-                // 1 Hz for as long as any NDI / WHEP / SRT / HLS source is connected. Confirmed in
+                // So a Release build WROTE `[LIVECLOCK] depth=… target=… rate=…` to stderr at
+                // 1 Hz for as long as any NDI / WHEP / SRT / HLS source was connected. Confirmed in
                 // the stripped Release ARCHIVE, not just a build product: five [LIVECLOCK] format
-                // strings survive, including the 1 Hz one.
+                // strings survive, including the 1 Hz one — and they still do, because the fix was
+                // a runtime gate rather than a recompile.
                 //
-                // This is a defect and it is independent of which configuration ships — Profile and
-                // Release both emit it. The fix is the "move emission to the App layer" plan, or a
-                // Core-side switch that is not MANIFOLD_TELEMETRY. Until then, do not read this
-                // block as saying the telemetry is dormant. It is not.
+                // FIXED 2026-09-21 by `LiveClock.enableTelemetry()` (see above). The reachability
+                // chain is unchanged and still correct — `LiveDisplayRoute` still installs a clock
+                // on every connection — but the clock now decides whether to write, and in Release
+                // nothing ever turns it on. The structural fix (move emission to the App layer, or
+                // a Core-side switch that is not MANIFOLD_TELEMETRY) is still the right end state;
+                // the gate is what stopped the bleeding without touching the timing path.
                 .define("MANIFOLD_TELEMETRY")
             ]
         )

@@ -40,3 +40,9 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   a `.a` reappears in `ThirdParty/ffmpeg/lib`. Do not "optimize" this.
 - The five dylib soname majors are stated in three places. Bumping the pin means changing
   all three.
+- Never write a macOS defaults key without reading it first. `defaults write` REPLACES the
+  value wholesale — for an array or a dictionary it does not merge — so writing one key
+  destroys whatever was already under it. Read and stash the existing value before any
+  write, restore it after. This rule exists because `streamBookmarks` was erased during
+  LIVECLOCK verification and there was no way back: no snapshots, no Time Machine, no
+  store-side backup. See the stream-bookmark durability item in `docs/BUGS.md`.

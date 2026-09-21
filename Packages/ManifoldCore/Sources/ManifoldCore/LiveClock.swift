@@ -394,9 +394,54 @@ public final class LiveClock: @unchecked Sendable {
     ///     Same default as `startupDepth`, independently tunable. FIXED for the life of the clock
     ///     (outside the DEBUG sweep hook): nothing inflates it any more — see the deleted
     ///     safety-valve note above for why the thing that used to is gone.
+    #if DEBUG || MANIFOLD_TELEMETRY
+    // ── WHETHER [LIVECLOCK] IS WRITTEN AT ALL ────────────────────────────────────────────────
+    //
+    // ⚠️ THE `#if` ABOVE EVERY EMIT SITE IS NOT A GATE, AND THAT IS WHY THIS EXISTS.
+    // `MANIFOLD_TELEMETRY` is defined UNCONDITIONALLY in Package.swift (see the long note there:
+    // Xcode maps a package's configuration by NAME, so no package-side predicate can tell Profile
+    // from Release). The condition is therefore ALWAYS TRUE in this module, in every configuration
+    // — so the compile-time gate decides nothing and a shipping Release build wrote
+    // `[LIVECLOCK] depth=…` to stderr at 1 Hz for every live source. Measured 2026-09-21.
+    //
+    // This runtime flag is what actually decides. Default OFF, so Release is silent by omission
+    // rather than by anyone remembering to switch it off. The app opts in, in `#if DEBUG` only.
+    private static let telemetryOptInLock = UnfairLock()
+    private static var telemetryOptIn = false
+
+    /// Turn `[LIVECLOCK]` emission on for clocks created AFTER this call.
+    ///
+    /// ⚠️ **CALL ONCE, AT LAUNCH, BEFORE ANY LIVE SOURCE CAN CONNECT** — see the capture note on
+    /// `telemetryEnabled`. Calling it later is not a race, it simply does not affect clocks that
+    /// already exist, which is the safe direction to fail in.
+    public static func enableTelemetry() {
+        telemetryOptInLock.lock()
+        telemetryOptIn = true
+        telemetryOptInLock.unlock()
+    }
+
+    /// ⚠️ **CAPTURED ONCE, AT CONSTRUCTION, AND `let` THEREAFTER — WHICH IS THE WHOLE POINT.**
+    ///
+    /// The emit sites are reached from the frame-registration path, i.e. the source/clock thread.
+    /// Reading a mutable `static var` there would be a genuine data race against the app's write,
+    /// and taking a lock per emit would put a lock acquisition in a path whose own doc comment
+    /// forbids doing anything slow. Snapshotting into an immutable instance `let` removes both:
+    /// the only synchronised read happens on the constructing thread, and every later read on the
+    /// clock thread touches a `let` that cannot change.
+    ///
+    /// A clock is constructed per connection (`LiveDisplayRoute`, `SyntheticLiveSource`), always
+    /// after launch, so an opt-in at startup is captured by every clock that can ever exist.
+    private let telemetryEnabled: Bool
+    #endif
+
     public init(startupDepth: Double = 0.15, targetDepth: Double = 0.15) {
         self.startupDepth = startupDepth
         self.targetDepth = targetDepth
+        #if DEBUG || MANIFOLD_TELEMETRY
+        Self.telemetryOptInLock.lock()
+        self.telemetryEnabled = Self.telemetryOptIn
+        Self.telemetryOptInLock.unlock()
+        #endif
     }
 
     /// Register a newly-arrived frame's sender-timeline PTS and get back the presentation PTS
@@ -1066,6 +1111,11 @@ public final class LiveClock: @unchecked Sendable {
     private func emit(_ log: PeriodicLog?) {
         #if DEBUG || MANIFOLD_TELEMETRY
         guard let log else { return }
+        // ⚠️ AFTER THE NIL-GUARD, DELIBERATELY. `periodicLogIfDue` has already run under the lock
+        // and advanced the cadence gate, so the timing path is untouched whether this is on or
+        // off — only the write is conditional. It also keeps the check at 1 Hz rather than
+        // per frame.
+        guard telemetryEnabled else { return }
         FileHandle.standardError.write(Data(String(
             format: "[LIVECLOCK] depth=%.3fs target=%.3f rate=%.4f err=%+.4f count=%d\n",
             log.depth, log.target, log.rate, log.depth - log.target, log.count).utf8))
@@ -1077,6 +1127,9 @@ public final class LiveClock: @unchecked Sendable {
     /// print every snap twice.
     private func emit(_ event: Event?) {
         #if DEBUG || MANIFOLD_TELEMETRY
+        // Gated for the same reason as the periodic line above. These are the `[LIVECLOCK]`
+        // freeze-guard and queue-full lines; "no [LIVECLOCK] in Release" means these too.
+        guard telemetryEnabled else { return }
         switch event {
         case .freezeGuard(let fg):
             FileHandle.standardError.write(Data(String(
@@ -1097,6 +1150,7 @@ public final class LiveClock: @unchecked Sendable {
 
     private func emitTargetStep(from: Double, to: Double) {
         #if DEBUG || MANIFOLD_TELEMETRY
+        guard telemetryEnabled else { return }
         FileHandle.standardError.write(Data(String(
             format: "[LIVECLOCK] targetDepth %.3f -> %.3f (manual)\n", from, to).utf8))
         #endif

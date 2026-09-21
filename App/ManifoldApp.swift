@@ -33,6 +33,20 @@ struct ManifoldApp: App {
         // only worth doing if the tap is already listening when that banner is emitted. Installed
         // here rather than in a scene, because a scene body runs after startup logging has begun.
         LogTap.shared.install()
+        #if DEBUG
+        // ⚠️ THE ONLY THING THAT TURNS [LIVECLOCK] ON, AND IT IS `#if DEBUG` ON PURPOSE.
+        //
+        // ManifoldCore cannot gate its own telemetry at compile time: `MANIFOLD_TELEMETRY` is
+        // defined unconditionally in Package.swift because Xcode maps a package's configuration by
+        // NAME, so `#if DEBUG || MANIFOLD_TELEMETRY` is always true there and a Release build was
+        // emitting `[LIVECLOCK]` at 1 Hz for every live source. The decision has to be made HERE,
+        // in the app, which is the only layer that can tell the configurations apart.
+        //
+        // ORDERING IS LOAD-BEARING: `LiveClock` captures this at CONSTRUCTION, so it must be set
+        // before any live source can connect. This is app `init`, before any scene body has run and
+        // long before a transport exists, which is as early as the app has.
+        LiveClock.enableTelemetry()
+        #endif
         // FIRST LINE OF EVERY LOG, before anything else can emit. A log that cannot state which
         // build produced it is not evidence — see BuildInfo for why this is derived rather than
         // assumed, and why the "not valid for measurement" warning keys on -Onone and not on DEBUG.

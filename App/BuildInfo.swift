@@ -146,20 +146,26 @@ enum BuildInfo {
                   build configuration by NAME and only "Debug" is .debug.
                   """)
         }
-        // ⚠️ THE CONVERSE IS NOT BENIGN, AND THIS SAID IT WAS. The package-owned switch is
-        // unconditional (see Package.swift), so Core's telemetry is compiled into Release — and it
-        // is REACHABLE, because `LiveDisplayRoute.swift:168` installs a LiveClock and that file
-        // carries no `#if` at all. Every NDI / WHEP / SRT / HLS connection therefore writes
-        // `[LIVECLOCK] depth=… target=… rate=…` to stderr at 1 Hz in a shipping build.
+        // ⚠️ `core=ON` MEANS COMPILED IN, NOT EMITTING — AND THE GAP BETWEEN THOSE IS THE WHOLE
+        // HISTORY OF THIS LINE. `ManifoldCoreBuild.telemetryEnabled` reports a COMPILE-TIME fact
+        // and reports it correctly: `MANIFOLD_TELEMETRY` is defined unconditionally in
+        // Package.swift, so Core's telemetry code is in every configuration including Release.
         //
-        // This comment and the line it printed both used to say "unreachable (no live source in
-        // this configuration)". That was wrong, it was printed into every Release log as
-        // reassurance, and it was measured false on 2026-09-21 — five [LIVECLOCK] format strings
-        // survive in the stripped Release archive. Corrected to say what is true; the fix itself
-        // is Package.swift's "move emission to the App layer" plan.
+        // Whether it WRITES is now a separate, runtime decision — `LiveClock.enableTelemetry()`,
+        // called from `ManifoldApp.init` under `#if DEBUG` and captured by each clock at
+        // construction. Default OFF, so Release is silent.
+        //
+        // TWO EARLIER VERSIONS OF THIS NOTE WERE WRONG IN OPPOSITE DIRECTIONS, which is why it now
+        // states the runtime state explicitly rather than inferring anything:
+        //   • It first said "unreachable (no live source in this configuration)". False — the live
+        //     transports ship; only SyntheticLiveSource is `#if DEBUG`.
+        //   • It was then corrected to "compiled in AND REACHABLE — [LIVECLOCK] will be emitted at
+        //     1 Hz", which was true on 2026-09-21 and was made false the same day by the gate.
+        // A note that describes emission has to be rewritten whenever the gating moves. This one
+        // now reads the flag rather than asserting a conclusion about it.
         if !appTelemetry && coreTelemetry {
-            NSLog("        note: core telemetry is compiled in AND REACHABLE — [LIVECLOCK] will be "
-                + "emitted at 1 Hz by any live source. See Package.swift (MANIFOLD_TELEMETRY).")
+            NSLog("        note: core telemetry is compiled in but emission is GATED OFF at runtime "
+                + "— no [LIVECLOCK] will be written. (LiveClock.enableTelemetry is DEBUG-only.)")
         }
 
         // THE WARNING KEYS ON OPTIMIZATION, NOT ON DEBUG — and on BOTH languages. Profile is
