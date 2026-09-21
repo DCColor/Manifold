@@ -592,6 +592,154 @@ advance.
 
 ---
 
+## 🔴 LiveClock's audio mirror stops evaluating when the P-loop saturates — WHEP and SRT audio drifts
+
+**Status:** OPEN — mechanism CONFIRMED from the code and measured on three runs, 2026-09-21. Not
+started. **NOT a regression:** the gate and the constants are byte-identical at `7a630c8` and the
+behaviour reproduces there — what changed is the transport, not the app. **Affects:** WHEP and SRT,
+the two transports that mirror a `LiveClock` mapping to the audio timebase. **NDI and HLS do not** —
+neither drives the mirror (NDI uses `anchorLiveAudio`; HLS holds its own clock).
+
+⚠️ **FULL MECHANISM, MEASUREMENTS AND ARITHMETIC: `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`.** Read
+that before planning a fix — including its §5, which rules out the obvious fix. This entry states
+what is wrong and how bad it is; it does not restate the derivation, and it will not be kept in sync
+with one. The findings document is canonical.
+
+### Severity — filed at the head of the defect entries, deliberately
+
+**It makes a SHIPPED, PREVIOUSLY-VERIFIED feature unreliable.** WHEP/SRT desktop audio was closed as
+✅ FIXED (*"WHEP and SRT carry no audio at all"*, below) and verified on real sessions. It is not
+reliable today on the Cloudflare path, and the failure is **audible** — a step discontinuity in the
+audio timebase, repeating every 15–20 s.
+
+Three things compound it:
+
+- **Every counter in the audio path reads clean while it happens.** `underruns=0`, `short=0`,
+  `resyncs=0`, and the `[LIVECLOCK]` line looks healthier during the failure than outside it. See
+  §8 of the findings document for the full list of instruments that lie here.
+- **It is transport-dependent, so it will reach testers before it reaches us.** A local source does
+  not reproduce it. The path that does is the one an outside tester actually uses.
+- **It is inverted.** Audio correction stops *precisely* when the video clock is working hardest.
+
+### The gate
+
+`publishMappingIfChanged` fires only on `mappingDirty` (`LiveClock.swift:535`), which only
+`setMappingLocked` sets. Of its seven call sites, six are coarse or one-shot; **the only continuous
+setter is the P-loop** (`LiveClock.swift:900-921`):
+
+```swift
+let error = depth - targetDepth
+let proposed = 1.0 + k * error
+let newRate = min(1.0 + maxSlew, max(1.0 - maxSlew, proposed))
+…
+if newRate != rate {
+    let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate
+    setMappingLocked(senderPTS: mappedNow, hostTime: t, rate: newRate)
+}
+```
+
+**A clamped rate is bit-identical to the previously clamped one.** `min(1.0 + maxSlew, max(…))` maps
+every out-of-range error onto the same expression, so once saturated, `newRate != rate` is
+deterministically false — not approximately, not usually. Publication stops for as long as
+saturation lasts, and the gate is doing exactly what it was written to do: *"Gated to ACTUAL changes
+so a settled rate doesn't churn the anchor every 10Hz tick."* A railed rate is indistinguishable
+from a settled one at this test.
+
+### The dead band
+
+**No site publishes a mapping between 6.25 ms and 200 ms of depth error.**
+
+- **Lower edge, `maxSlew / k` = 0.005 / 0.8 = 6.25 ms** — above this the P-loop is railed and its
+  gate is shut.
+- **Upper edge, `snapThreshold` = 200 ms sustained `snapDebounce` 0.75 s** (`LiveClock.swift:809`;
+  SRT opts in at `SRTFrameRouter.swift:288-294`) — below this the snap does not fire.
+
+Between the two, the six coarse sites are all quiet and the one continuous site is gated off. The
+band is wide, it is the normal operating range of a stream that is merely *somewhat* too deep, and
+nothing in the design anticipated it.
+
+### The consequence
+
+**The mirror is edge-driven.** Every part of `mirrorLiveAudio` — the rate EMA, the position error,
+the push decision — runs inside the `onMappingChange` callback (`FrameEngine.swift:2283-2372`). No
+publication means no evaluation, however far the audio has already walked. Measured on the
+Cloudflare SRT path:
+
+```
+timebase−clock walks −5 ms/s to −113 ms, then steps back to ~0, then walks again
+mirror: 1 mapping change in 20 s      (healthy rate is ~8–9/s, at controlHz = 10)
+local SRT, same build, minutes apart:  ±4 ms for the whole session
+```
+
+⚠️ **And the step correction re-installs a stale rate, so the walk restarts at the same slope.** The
+push sends `mirror.smoothedRate`, not the clock's rate, and the EMA's timestep is clamped to 1 s
+(`FrameEngine.swift:2318`) — so a change arriving every 20 s advances a τ=30 s filter as though one
+second had passed. Position is corrected; rate is not. The cycle is stable and self-repeating rather
+than convergent. Arithmetic in §4 of the findings document.
+
+### ⚠️ THE REUSABLE PART — this was PREDICTED, and the prediction missed the case that happened
+
+The NDI entry below (*"NDI had no desktop playback path"*, its section **"WHICH MEANS WHEP AND SRT
+ARE ONE 'OPTIMISATION' AWAY FROM THE SAME DEFECT"**) stated this failure exactly, down to the
+symptom: *"If `LiveClock` ever stops slewing, WHEP and SRT silently become unbounded too."* It then
+enumerated three ways the slew could stop — `forceUnityRate`, `maxSlew = 0`, an early return on
+stable depth. **All three are code changes somebody would have to make on purpose. None of them
+happened.**
+
+The fourth way is that the slew never stops at all — it saturates, and a railed rate publishes
+nothing for the same reason a settled one does not. **A correct enumeration of the ways a mechanism
+can be disabled by a future edit is not an enumeration of the ways it can stop working.** The
+tripwires guard the code; this failure needed no edit to the code.
+
+---
+
+## 🔍 OPEN — the Cloudflare SRT path runs 20–190 ms deep against a 0.250 s target, and nothing explains why
+
+**Status:** OPEN — **UNEXPLAINED. Not investigated.** Measured 2026-09-21 across three Cloudflare
+runs against one local control run. **Filed separately on purpose** — see the boundary below.
+
+### The measurement
+
+| | depth error vs `targetDepth` 0.250 s | P-loop rate |
+|---|---|---|
+| local SRT source | within **±13 ms** | modulates freely, 0.9950…1.0050 |
+| Cloudflare SRT | **+20 ms to +190 ms**, continuously | pinned at 1.0050 on nearly every line |
+
+Packet arrival is **equally steady on both**. The depth is not explained by anything the clock can
+see, and `[SRT-FLOW] depth` still swings 0.21 → 0.47 within a second while arrivals stay even.
+
+### ⚠️ THE BOUNDARY, AND IT IS THE REASON THIS IS NOT FOLDED INTO THE ENTRY ABOVE
+
+**Fixing the publication gate does not fix this, and must not be recorded as having done so.** The
+gate fix makes the *audio symptom* impossible. The transport still runs deeper than it should, which
+is a latency cost on its own terms and may be a defect of its own. Two changes, two verifications.
+
+The relationship runs one way: this is the **root**, the dead band is the **mechanism**, the audio
+drift is the **consequence**. That ordering is what makes them separable — a stream that sat within
+±13 ms would never enter the dead band, and a stream that never left the dead band would drift even
+with a perfect transport.
+
+### Candidates, none investigated
+
+Carried from §7 of `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`, which is where any evidence should
+accumulate:
+
+- **Access-unit-level pacing** rather than packet-level — steady arrivals, uneven presentation units.
+- **The reorder budget against `pts − dts`.** Every Cloudflare run logs *"reorder delay 0.208 s is
+  within 75% of targetDepth 0.250 s — the margin protecting the PTS-ordered insert is thin."* The
+  local path does not carry that warning in the same terms.
+- **The queue never draining to setpoint after the connect burst** — the startup anchor discards
+  2.1–3.2 s, and `[SRT-BACKLOG]` shows the surplus persisting all session within its stated bound.
+- **Cloudflare's SRT egress is a TRANSCODE of the WHIP/WebRTC ingest, not a passthrough** — so the
+  pacing is its encoder's, not the sender's. The local test bypasses that stage entirely, which is
+  exactly why it is a weak control for this question.
+
+⚠️ **The local run is a good control for the CLOCK and a poor one for the TRANSPORT.** It settled
+which half of the system was at fault, and that was worth having. It cannot tell us anything about
+what Cloudflare's transcoder does to pacing, because it never touches it.
+
+---
+
 ## Live sources never publish their frame size, so every stream is framed as 16:9
 
 **Status:** FIXED 2026-08-11 (see "What landed" below). **Found:** 2026-08-10, during the
