@@ -126,3 +126,4 @@ docs/mxf-fixtures/vtdnxprobe
 # caller, so this covers only the two the README's examples use.
 docs/mxf-fixtures/mixed/
 docs/mxf-fixtures/op1a/
+.build-rel/
