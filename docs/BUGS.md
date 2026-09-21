@@ -49,6 +49,11 @@ grown by hundreds of lines.
 are where the evidence for it accumulated. Each item states what "done" means, so it can be closed
 rather than left open by default.
 
+⚠️ **ONE ITEM HERE IS A BLOCKER RATHER THAN A CHECKLIST LINE — *"the Release configuration does
+not compile"* below.** It is not "work that must happen before launch" in the ordinary sense; it is
+a **configuration that has never been exercised and does not currently build**, which removes an
+option people assume exists. Read it before planning anything that says the words "Release build".
+
 ---
 
 ## ☐ PRE-SHIP: American English — a RECURRING DRIFT, not a one-time sweep
@@ -276,14 +281,140 @@ they are noise in a gate, and gating on them is how a useful check gets disabled
 
 ---
 
-## ☐ PRE-SHIP: dev-path audit — the ungated debug triggers
+## 🚧 PRE-SHIP BLOCKER: the Release configuration does not compile — and the dev-path audit is outstanding. ONE ROOT CAUSE.
 
-**Status:** OPEN, required before public launch. **Raised:** 2026-08-27, out of the
-`MANIFOLD_CONFIG_DEBUG` gating work. **RE-AUDITED 2026-09-21: still true, with one trigger pair
-since gated and a FOURTH SURFACE that did not exist when this was written.** See
-*"⚠️ THE FOURTH SURFACE"* at the end of this entry — the audit's scope was incomplete, which
-matters more than any single trigger, because an audit that names five things and misses the sixth
-reads as finished.
+**Status:** 🚧 **BLOCKER — raised from checklist item to blocker 2026-09-21.** **Raised:**
+2026-08-27 as the dev-path audit, out of the `MANIFOLD_CONFIG_DEBUG` gating work. **Release
+breakage found:** 2026-09-21, by running `xcodebuild -configuration Release` — which, as far as
+anyone can tell, had not been done.
+
+**These were two items and they are one item**, because they have a single cause: **Profile defines
+`DEBUG=1`, Profile is what every build to date has been, and so the Release configuration has never
+been exercised — not for gating, and not even for compilation.** Splitting them would have two
+entries proposing two fixes to the same untested configuration.
+
+---
+
+### 🚧 THE BLOCKING HALF: there is no working Release path today
+
+**`xcodebuild -configuration Release` FAILS.** Six errors, all the same, all in one file:
+
+```
+App/NDI/NDIService.swift:814:9:  error: cannot find 'toneLock' in scope
+App/NDI/NDIService.swift:822:9:  error: cannot find 'toneLock' in scope
+App/NDI/NDIService.swift:1838:9: error: cannot find 'toneLock' in scope
+App/NDI/NDIService.swift:1842:9: error: cannot find 'toneLock' in scope
+App/NDI/NDIService.swift:1906:9: error: cannot find 'toneLock' in scope
+App/NDI/NDIService.swift:1910:9: error: cannot find 'toneLock' in scope
+```
+
+**The cause, exactly.** `private let toneLock = UnfairLock()` is declared at
+`App/NDI/NDIService.swift:1082`, **inside a `#if DEBUG` block that opens at `:1012`**. Its uses
+split cleanly:
+
+| use sites | enclosing directive | Release |
+|---|---|---|
+| `:1109`, `:1112`, `:1123` | `#if DEBUG` at `:1012` | compiled out with the decl — fine |
+| `:1216`, `:1219` | `#if DEBUG` at `:1168` | fine |
+| `:1326` | `#if DEBUG` at `:1276` | fine |
+| `:2064` | `#if DEBUG` at `:2063` | fine |
+| **`:814`, `:822`, `:1838`, `:1842`, `:1906`, `:1910`** | **none — ungated** | **the six errors** |
+
+**Present at HEAD.** It predates the colour-bypass spike and is unrelated to it; the spike touched
+`MetalVideoRenderer.swift` and `ContentView.swift` only, and that Release run reported no errors in
+either.
+
+### ⚠️ AND THE FOUR UNGATED SITES ARE NOT DEBUG AFFORDANCES. THEY ARE THE SHIPPING NDI AUDIO PATH.
+
+This is the part that makes it more than a build break. The six failing uses live in three
+functions, and two of them are production code:
+
+- **`serviceDesktopAudioAnchor(mediaNow:wallNow:)`** (`:1906`, `:1910`) — the desktop-audio
+  timebase anchor. Reads `desktopAudioLead` under the lock *"per call rather than captured"*.
+  Without it NDI is silent, not merely drifting — its own comment says so.
+- **`reportRendererStateIfDue(now:)`** (`:1838`, `:1842`) — the renderer-state diagnostic, whose
+  doc comment is *"A DIAGNOSTIC THAT CAN BE SUPPRESSED BY THE THING IT IS DIAGNOSING IS NOT A
+  DIAGNOSTIC."*
+- **`cycleDesktopAudioLead()`** (`:814`, `:822`) — this one *is* a debug affordance (Debug ▸
+  Desktop Audio Lead), and it is the one that explains how the shape arose.
+
+⚠️ **THE STATE IS UNGATED; ONLY THE LOCK IS NOT.** Checked rather than assumed —
+`desktopAudioLead` (`:793`), `desktopAudioLeadChanged` (`:795`), `desktopAudioLeadLadder` (`:800`)
+and `rendererForceReport` (`:1795`) are **all declared outside any `#if`**. So the situation is:
+**cross-thread-shared production state, guarded by a lock that only exists in debug builds.**
+
+**That means "move the declaration out of the `#if DEBUG`" is the correct fix and must not be
+mistaken for a mechanical one.** It is restoring thread safety that Release does not currently
+have, to a path where main writes the lead and the pump thread reads it. A build fix that made
+Release compile by deleting the lock calls would produce a *silently* racy audio anchor instead of
+a loud compile error — strictly worse.
+
+### The consequence, stated plainly
+
+**There is currently no working Release path, so "cut Release for the paid build" is not an option
+that exists today.** It is not a switch that has been left unflipped; it is a configuration that
+does not build. Anyone scoping a public build on the assumption that Release is available — for
+stripping dev affordances, for the telemetry gate, or for anything else — is scoping against
+something that has to be *made to work first*.
+
+**And it cannot be assumed to be six lines of work.** The compile stopped at these six errors; it
+is **unmeasured** whether fixing them reveals more. Swift type-checks a module as a unit and this
+one has never been type-checked with `DEBUG` undefined, so the honest position is "at least this,
+and the next error is unknown until the first fix lands". ⚠️ **Do not quote a Release cut as a small task
+on the strength of this entry.**
+
+### Why it went unnoticed, which is the reusable part
+
+Per `CLAUDE.md`: *"`Profile` is the default build configuration and it has `DEBUG=1` — dev
+affordances are reachable by keystroke. Every build cut to date has been Profile."* So Release was
+never compiled, by anyone, as a matter of routine. **A configuration nobody builds is a
+configuration that rots**, and it rots silently because there is no signal — exactly the
+instrument-that-stopped-reporting shape this file records three times over in the DeckLink
+enumeration entry.
+
+**The cheap standing fix is a build, not a rule:** add `xcodebuild -configuration Release` as a
+preflight in `scripts/release-mac.sh`, alongside the check that fails when a `.a` reappears in
+`ThirdParty/ffmpeg/lib`. It needs to build, not ship — compiling the configuration is the whole of
+what is being asked, and it would have caught this the day it landed.
+
+### Related, and part of the same untested-configuration story
+
+`docs/Manifold-BUILD.md` → *"Known gaps"* already pairs these two, and its telemetry note belongs
+with this entry: **`MANIFOLD_TELEMETRY` is defined unconditionally in
+`Packages/ManifoldCore/Package.swift`**, so Core-layer strings like `[LIVECLOCK]` and two tuning
+setters are present in a Release archive, and the release script's assertion greps for
+`[SRT-FLOW]` — an App-layer string gated on `DEBUG` — so **the check is true but incomplete.**
+
+⚠️ **THAT CHECK IS ALSO A CHECK NOBODY HAS BEEN ABLE TO RUN**, for the reason above: it asserts
+against a Release archive, and Release does not build. The `#if DEBUG || MANIFOLD_TELEMETRY` gates
+across `App/Live/LiveDepthTelemetry.swift`, `App/SRT/SRTSession.m`, `App/DiagnosticsExport.swift`
+and `App/BuildInfo.swift` have therefore never been evaluated in the configuration they exist for.
+**Fix the compile first; the telemetry question cannot even be asked until then.**
+
+*(There is no separate MANIFOLD_TELEMETRY entry in this file — it is documented in
+`docs/Manifold-BUILD.md` under "Known gaps", and is folded in here rather than filed separately,
+same root cause.)*
+
+**Done means, for this half:** `xcodebuild -configuration Release` completes, a Release preflight
+exists in `scripts/release-mac.sh`, and the telemetry assertion has been re-checked against an
+archive it can actually inspect.
+
+---
+
+### ☐ THE CHECKLIST HALF: the dev-path audit
+
+**RE-AUDITED 2026-09-21: still true, with one trigger pair since gated and a FOURTH SURFACE that
+did not exist when this was written.** See *"⚠️ THE FOURTH SURFACE"* at the end of this entry —
+the audit's scope was incomplete, which matters more than any single trigger, because an audit that
+names five things and misses the sixth reads as finished.
+
+⚠️ **AND NOTE WHAT THE HALF ABOVE DOES TO THIS ONE.** Much of the reasoning below turns on
+"`#if DEBUG` does not gate anything because Profile defines DEBUG". That is true, and the Release
+breakage adds a second edge to it: **the `#if DEBUG` blocks in this codebase have never been
+compiled in the configuration where they are FALSE.** Gating something behind `#if DEBUG` has, to
+date, been an untested claim in both directions — it does not remove the affordance from a Profile
+build, and nobody has confirmed the remaining code still builds without it. `toneLock` is that
+second failure, and there is no reason to think it is the only one.
 
 Every trigger that reaches a `LiveClock` setpoint mutator is now behind `#if
 MANIFOLD_CONFIG_DEBUG` — ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S, ⌃⌥[ and ⌃⌥] — and that was done because
