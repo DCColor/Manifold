@@ -794,6 +794,24 @@ final class NDIService: ObservableObject {
     /// Set on main when the lead changes; consumed by the pump, which re-anchors immediately.
     private var desktopAudioLeadChanged = false
 
+    /// The lock guarding the desktop-audio state above (`desktopAudioLead`,
+    /// `desktopAudioLeadChanged`) and `rendererForceReport` — main writes, the pump thread reads.
+    /// `UnfairLock` for the same reason `LiveDisplaySize` uses one: the reader is latency-sensitive
+    /// and must never block behind an unboosted holder. Also guards `toneMode`, which is
+    /// DEBUG-only; the lock is not, and must not be.
+    ///
+    /// ⚠️ **UNCONDITIONAL, AND THAT IS THE POINT — IT WAS DECLARED INSIDE `#if DEBUG`.** It moved
+    /// here because the state it protects has always been ungated and the lock was not, so Release
+    /// could not compile: `serviceDesktopAudioAnchor` and `reportRendererStateIfDue` are ordinary
+    /// production paths that take it, and `cannot find 'toneLock' in scope` was the only reason
+    /// anyone noticed. **The compile error was the mild symptom.** A lock that exists in only one
+    /// configuration is not a lock — had the call sites been gated to silence the error instead,
+    /// Release would have carried an unsynchronised main→pump hand-off in the NDI audio path, and
+    /// nothing would have said so. Declaring it next to the state is what keeps the two in step.
+    ///
+    /// **Do not move this back inside a `#if`, and do not gate a caller to quieten a build.**
+    private let toneLock = UnfairLock()
+
     /// The ladder the Debug menu steps through. Spans the two known-good live leads (SRT's 250 ms,
     /// WHEP's 400 ms) and brackets the measured 291 ms render-ahead, with the current 40 ms at the
     /// bottom so the first step reproduces today's behaviour exactly.
@@ -1076,10 +1094,9 @@ final class NDIService: ObservableObject {
     }
 
     private static let toneFrequency = 1000.0
-    /// Toggled on MAIN by the keystroke, read on the PUMP THREAD once per pull — hence the lock.
-    /// `UnfairLock` for the same reason `LiveDisplaySize` uses one: the reader is latency-sensitive
-    /// and must never block behind an unboosted holder.
-    private let toneLock = UnfairLock()
+    /// Toggled on MAIN by the keystroke, read on the PUMP THREAD once per pull — under `toneLock`,
+    /// which is declared beside the desktop-audio state it also guards (see there for why it is
+    /// unconditional while this is not).
     private var toneMode: ToneTest = .off
     /// Pump-thread only. Radians, wrapped to [0, 2π) so it cannot lose precision over a long run —
     /// at 48 kHz an unwrapped accumulator reaches 3e8 radians in an hour and the per-sample
