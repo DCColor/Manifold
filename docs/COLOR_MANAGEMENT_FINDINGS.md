@@ -391,12 +391,25 @@ Both predictions held. Four findings, in ascending order of how much they matter
 is identical in both rows — same file, same `kCGColorSpaceCoreMedia709`, same 660 bytes. Everything
 that varies is downstream.
 
-**2. The reference desktop is already BT.1886, by accident.** The LG's assigned profile is a
-parametric encoding of γ1.960999 against the source's `curv` γ1.960938 — the same curve to about
-one hundredth of a 10-bit code. ColorSync's transform is therefore identity in all but name, code
-values reach the panel untouched, and the panel's own calibration LUT — which lives in the display,
-not in any ICC profile macOS can see — applies 2.4. **Manifold has been delivering a reference
-picture on that display for reasons nobody designed, and that no part of the app is aware of.**
+**2. The reference desktop lands on BT.1886 — half by design, half by nothing.** The panel is set
+to the display's built-in **Rec.709 preset**, deliberately, as the base for calibration. That part
+is a considered choice and not luck. What is *not* chosen is the other half: macOS's default
+profile for that display is a parametric encoding of **γ1.960999**, against the source's `curv`
+**γ1.960938** — the same curve to about one hundredth of a 10-bit code. That makes ColorSync's
+transform identity in all but name, which is what lets the code values reach the panel untouched so
+the chosen preset can do its job.
+
+So two independent decisions compose correctly: one the colourist made in the display's menu, one
+Apple made on his behalf in an EDID-derived profile he never opened. **Manifold is aware of
+neither, and would not notice if either changed.**
+
+⚠️ **The fragility is the point.** A firmware revision that alters the EDID, a macOS update that
+assigns a different default, or one stray click in System Settings → Displays → Colour Profile, and
+ColorSync stops being a no-op. The picture shifts, the chosen preset is no longer receiving raw code
+values, and nothing in the app says so — the scopes will not move (finding 4), and the source-side
+diagnostics will read exactly as they do today. This is §5's design consequence restated as a
+concrete failure: **correctness contingent on the destination profile is a coincidence even when
+half of it was chosen deliberately.**
 
 **3. Bypass is not Reference, and Phase 0 could not have shown the γ1.9609 defect.** What was
 observed on the ASUS is *colour-managed-to-sRGB* versus *not colour-managed at all*. It is **not**
@@ -442,6 +455,11 @@ measured.**
    **indistinguishable from today's OS mode**, while changing the ASUS. Any implementation that
    shifts the LG is double-applying the EOTF. This is a stronger acceptance test than was available
    before Phase 0 ran, and the Phase 1 spike should check it first.
+
+   That configuration — a display's built-in Rec.709 preset as the calibration base, on the default
+   macOS profile — is a deliberate and unremarkable choice a working colourist would make, not a
+   quirk of one machine. The test case is therefore **representative**, and a Reference mode that
+   fails it fails for a meaningful share of the intended audience.
 
    It also sharpens the question itself. A destination that ignores the display profile and a
    destination derived *from* it give the same answer on a display whose profile matches the source
