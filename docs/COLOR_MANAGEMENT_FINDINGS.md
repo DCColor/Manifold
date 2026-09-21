@@ -284,6 +284,32 @@ why "Embedded" was the wrong name.
 - **Bypass on HDR is dramatic and useful**: PQ code values with no transform look spectacularly
   wrong, which is precisely what they look like in a player that ignores the tag.
 
+**How this is stated to the user is not parallel with SDR, and shouldn't pretend to be.** Added
+2026-09-21. For SDR you can name a target and ask the user to hit it once — *align your display to
+Rec.709 with a 2.4 EOTF* — and it stays true until they change something. For HDR you cannot, because
+the variable is headroom and headroom moves at runtime: it tracks display brightness, responds to
+ambient light, and can change with what else is on screen. There is no calibrate-once equivalent,
+because the ceiling is not a property of the display but of the display *right now*.
+
+So the SDR statement is an **instruction** and the HDR statement is a **report**: *be in an HDR mode
+your Mac recognises, and judge within the headroom shown — content above it clips, and that is
+deliberate.* The second sentence is only honest because of the no-tone-map decision below. If the
+picture were quietly squeezed to fit available headroom, the display's state would become invisible
+and the user could not distinguish the file from the compensation.
+
+**A precondition the app can see only by its effect.** Desktop HDR requires the macOS HDR switch for
+that display — user-set, invisible to the app except through EDR headroom. HDR content arriving at a
+display in SDR mode should say so in the chain readout (§6.3) rather than showing a flat picture with
+no explanation; `PQ (tagged) → display is in SDR mode` is a complete answer in one line. **Open for
+Phase 5:** whether the app can distinguish *capable but switched off* from *not capable*. Those want
+different sentences — one is actionable, one is not — and the EDR values may collapse both to
+`potential=1.0`.
+
+That mode is also hand-set state that takes seconds to change, which makes it the kind of state that
+gets forgotten. A display left in HDR mode from yesterday looks like an ordinary SDR session until
+the picture is wrong. Same reasoning as the momentary-compare decision in §6.3: cheap-to-change state
+needs to be visible, not because changing it is risky but because forgetting is easy.
+
 ⚠️ **This must not reopen the 2026-08-28 decision that the desktop picture is the reference and does
 not tone-map.** Showing the user what their display's headroom *is* is information. Mapping the
 picture to fit it is a different thing and was decided against. Keep them separate, or the mode
@@ -349,7 +375,8 @@ changes what Phase 1 has to prove.**
 **Phase 1 — settle the destination question (§7.1).** A spike, not an opinion: what does the layer
 do with a colorspace when the shader has already applied the EOTF, and is there a genuine
 "no further conversion" path? *Done means:* a measured answer written into §7 the way §2 was
-written.
+written. ✅ **Closed 2026-09-21 — result in §6.6. The question was malformed; the answer shrinks
+Phase 3 and moves all validation to the ASUS.**
 
 **Phase 2 — infrastructure, with OS and Bypass only.** Mode enum, per-window state, pulldown,
 chain readout, momentary shortcut, diagnostics line. OS is today's behaviour made explicit; Bypass
@@ -360,7 +387,10 @@ real files and nothing changed for anyone who does not touch the control.
 > hard part is written**, and what it shows informs Reference.
 
 **Phase 3 — Reference.** The shader EOTF, against a settled destination. The only phase that is
-real engineering.
+real engineering. *Amended 2026-09-21 from §6.6:* the destination is settled — declare the source
+and let ColorSync convert, exactly as today. What remains is the transform itself, plus the policy
+question in §6.6, and **every correctness check must run on the ASUS.** The LG is structurally
+blind to this class of bug.
 
 **Phase 4 — primaries.** Handle primaries and transfer independently instead of as enumerated
 pairs, closing §7.3. *Blocked on* a Rec.2020-SDR fixture — **author one with Flip** rather than
@@ -442,29 +472,159 @@ measured.**
 
 ---
 
+### 6.6 Phase 1 — result, measured 2026-09-21
+
+**Closed. The destination question as §7.1 posed it turns out to be malformed, and answering it
+shrinks Phase 3 considerably.**
+
+**Method.** Nine patches blitted directly to the drawable — no shader, no sampling — and read back
+from the composited framebuffer, on both displays, under four colorspace conditions. The probe was
+rebuilt first and re-verified against the two known deviations (LG 1.145e-05, ASUS 4.962e-02) before
+any of this was trusted. Everything below is **8-bit**; the capture path is 32BGRA.
+
+**1. `colorspace = nil` performs no conversion.** The LG discriminates here, because sRGB and the
+display profile genuinely differ on it — and `nil` tracked the display profile, not sRGB. A
+no-conversion model predicts the LG captures to ≤0.37 codes across all nine patches: 139.2 predicted
+against 139.0 measured at code 128, with the sRGB round-trip control at 0.00.
+
+> ⚠️ **Inference, not measurement.** "Performs no conversion" and "substitutes the display's own
+> profile" are indistinguishable in principle — declaring the destination as the source *is* an
+> identity transform, so both models predict every observation. What is settled is that `nil`
+> substitutes nothing *else*; sRGB, the plausible candidate, is ruled out. §6.5's pass-through
+> assumption is now measured to the limit it can be measured.
+
+**2. Declaring the display's own profile is exact identity** — byte-for-byte with `nil` on both
+displays, all nine patches, no rounding drift. Declaring anything else is a real conversion:
+declaring γ2.4 on the LG moved the framebuffer by up to 10 codes, ColorSync decoding 2.4 and
+re-encoding to the display's 1.961.
+
+> ⚠️ **The trap that follows, and it is the likeliest way to get Phase 3 wrong: a shader that applies
+> BT.1886 2.4 and then declares γ2.4 has its work undone.** ColorSync converts straight back to
+> display encoding and the net light is as if nothing had happened. It will look like a Reference
+> mode that simply does nothing, which is much harder to notice than one that looks broken.
+
+**3. Shader-side encoding and ColorSync conversion are the same operation.** Simulating the
+mechanism properly — decode the 709 source, re-encode to the display's own TRC (inverting the ASUS's
+1024-entry table numerically), declare `nil` — gives **max |Δ| = 0.0 on both displays** against
+today's path. Because capture was requested in sRGB, equal captures mean equal requested
+*colorimetry*, not merely equal code values: the two paths ask the display for the same light.
+
+**So the destination question dissolves.** Declaring the source and letting ColorSync convert, versus
+encoding in the shader and declaring the destination, are not two designs — they are one operation
+written two ways. **Reference mode's value cannot lie in the encoding step.** It lies entirely in
+what transform runs *before* it: applying BT.1886 2.4 instead of the source's 1.961. That is a
+Phase 3 question, and Phase 3 can keep today's declaration untouched.
+
+---
+
+#### The LG is a policy test, not a correctness test — correcting §7.1
+
+The acceptance criterion written into §7.1 this morning — *Reference must leave the LG picture
+unchanged* — **does not discriminate**, and the measurement shows why. The double-apply failure was
+induced deliberately (shader-encoded values with `CoreMedia709` still declared):
+
+| | ASUS | LG |
+|---|---|---|
+| today − broken | **11.0 codes** (8-bit) | **0.0 codes** |
+
+**The LG cannot show this class of bug at all**, because the second application is identity there.
+A correct implementation and a doubly-applied one look the same on that display. The criterion
+passes either way, which makes it useless as a check even though the reasoning behind it was sound.
+
+What the LG criterion actually encodes is the **policy** choice, not correctness: it says *this
+display is calibrated to a standard and its profile does not describe it, so leave the numbers
+alone.* That remains a real requirement. It is simply not a test of whether the transform is built
+right.
+
+**All mechanism validation must therefore run on the ASUS**, whose profile matches sRGB to 7.6e-06
+and which consequently responds to every error the LG absorbs.
+
+---
+
+#### The policy question survives — and it is a user declaration, not an inference
+
+Phase 1 settled the mechanism. It did not settle *which interpretation of the display is correct*,
+and cannot, because every measurement above assumes the display honours its profile. The LG is
+exactly the case where that assumption is false by deliberate choice.
+
+Trace a display set to a preset its profile does not describe — say an Adobe RGB panel presented
+with a Rec.709 profile:
+
+| Profile's relationship to the panel | Pass-through | Profile-derived |
+|---|---|---|
+| Honestly describes it — factory-profiled laptop, most customers | wrong | **correct** |
+| A deliberate stand-in for a calibrated target — the LG, and the reference-monitor convention | **correct** | wrong |
+| Neither — Adobe RGB panel, Rec.709 profile | wrong | wrong, **identically** |
+
+In the third row the error is **conserved**: the entire discrepancy lives in the gap between what
+the profile claims and what the panel does, and no software policy closes it. The destination policy
+does not rescue a lying profile — it only decides behaviour in the two rows where the profile is
+*not* lying, and those two rows want opposite answers.
+
+**The two domains are separated by a fact the app cannot detect**: whether the display was calibrated
+to a standard target or is merely described by its profile. So it is a declaration, not an inference
+— a single statement in the Color preferences (*my display is calibrated to a standard target* versus
+*use the display profile*), stated once, with pass-through following from the first and
+profile-derived from the second.
+
+⚠️ **One setting, not a fourth entry in the per-window mode picker** — §6.2 already warns about that
+picker growing, and this is a property of the user's room, not of the clip in the window.
+
+---
+
+#### Incidental, and worth writing down before it alarms somebody
+
+The LG profile's `wtpt` reads xy=(0.3457, 0.3585). That is **D50, the ICC v4 PCS illuminant**, with
+the adaptation carried in `chad`, against the v2.1 source profile's D65. It is a convention
+difference, not a white-point difference, and it will look alarming in probe output to anyone who
+has not been told.
+
+---
+
+#### Still open after Phase 1
+
+- **8-bit only.** The capture path is 32BGRA, so the LG's 0.0117-codes-at-10-bit deviation sits below
+  measurement. "Identity" on the LG means identity *to 8 bits*.
+- **No light was measured.** No colorimeter in the loop. "Correct light" here means the framebuffer
+  requests the correct colorimetry *assuming the display honours its profile*. Whether the LG's panel
+  preset actually applies 2.4 is a stated configuration, not a measurement — and it is precisely the
+  step that decides whether the LG's γ1.9609 profile is honest.
+- **SDR only.** EDR was inert on the LG for this run; PQ and HLG sources untested, and the EDR opt-in
+  changes layer configuration.
+- **One source space.** `CoreMedia709` only.
+- **Window configuration.** Tested in a fullscreen `.screenSaver`-level opaque window. Whether an
+  ordinary windowed layer composites identically is untested.
+- **A black-point anomaly.** The γ2.4 declaration model matches to ≤0.5 codes from patch 3 upward but
+  diverges at the bottom — 4.3 predicted against 13.0 measured at code 16. Probably black-point
+  compensation in `CGColorSpace(calibratedRGBWhitePoint:…)`. Unexplained. It affects only the
+  synthetic γ2.4 condition and none of the conclusions above, but it is unexplained behaviour in a
+  path Phase 3 will touch.
+
+---
+
 ## 7. Open and unverified
 
-1. **The destination question — where the real design work is.** Once the shader owns the transform,
-   it must encode to *something*. Whether Reference mode declares a destination colorspace or reads
-   the display profile is **undecided**. Nothing in this document answers it. **This is Phase 1
-   (§6.4)** and it blocks Phase 3.
+1. ~~**The destination question.**~~ ✅ **Answered by Phase 1 — see §6.6.** Recorded here because
+   this item drove the phasing and the correction matters.
 
-   Added 2026-09-21, from §6.5: **a known-answer test case now exists.** On the LG, ColorSync's
-   transform is identity and the display's own LUT applies 2.4, so OS mode already delivers a
-   BT.1886 picture. A correct Reference implementation must therefore leave that display's picture
-   **indistinguishable from today's OS mode**, while changing the ASUS. Any implementation that
-   shifts the LG is double-applying the EOTF. This is a stronger acceptance test than was available
-   before Phase 0 ran, and the Phase 1 spike should check it first.
+   The question was *whether Reference mode declares a destination colorspace or reads the display
+   profile*. **It was malformed.** Those are the same operation: shader-side encoding to the
+   display's TRC and ColorSync's own conversion measured byte-for-byte identical on both displays.
+   Reference mode should keep today's declaration and change only the transform that runs before it.
 
-   That configuration — a display's built-in Rec.709 preset as the calibration base, on the default
-   macOS profile — is a deliberate and unremarkable choice a working colourist would make, not a
-   quirk of one machine. The test case is therefore **representative**, and a Reference mode that
-   fails it fails for a meaningful share of the intended audience.
+   ⚠️ **The acceptance test written here on 2026-09-21 was wrong and is retracted.** It said a
+   correct Reference must leave the LG picture unchanged, and that anything shifting the LG is
+   double-applying. The second half is backwards: the double-apply bug measures **0.0 codes on the
+   LG** and 11.0 on the ASUS, because the second application is identity on a display whose profile
+   matches the source curve. The LG cannot detect this class of bug at all. It remains a valid
+   statement of *policy* — leave a calibrated display's numbers alone — but it is not a correctness
+   check, and **correctness must be validated on the ASUS**.
 
-   It also sharpens the question itself. A destination that ignores the display profile and a
-   destination derived *from* it give the same answer on a display whose profile matches the source
-   curve, and different answers everywhere else — so this test case discriminates between the two
-   candidate designs rather than merely validating one.
+   **What is still genuinely open** is the policy underneath it: whether a given display is
+   calibrated to a standard or merely described by its profile. The app cannot detect this, the two
+   answers require opposite behaviour, and on a display that is neither the error is conserved
+   regardless. §6.6 records the reasoning and proposes a single stated preference rather than an
+   inference. **That is now the open item, not the destination.**
 
 2. **Actual display light output was never measured.** §2's ratios are curve arithmetic. No
    photometer, no measured display response. The claim is about what the profile asks for.
@@ -546,11 +706,15 @@ rTRC : curveType 'curv'  count=1  → PURE POWER LAW, gamma=1.960938
 | Two-era system-profile lineage | | ✅ from versions/dates | |
 | 1.9609 = inverted 709 OETF, dim-surround | | | ⚠️ published refs only |
 | Match QuickTime ≡ Embedded on SDR | ✅ waveform | ✅ "both defer to ColorSync" | Screen internals |
-| Reference mode needs a declared destination | | | ⚠️ **open — Phase 1, §6.4** |
+| Shader encoding ≡ ColorSync conversion — the destination question dissolves | ✅ 0.0 codes, both displays | | |
+| `colorspace = nil` performs no conversion | ✅ to the limit it can be | ✅ vs. "substitutes the display profile" — indistinguishable | |
+| Shader 2.4 + declared γ2.4 undoes itself | ✅ 10 codes on the LG | | |
+| Double-apply bug is invisible on the LG, 11 codes on the ASUS | ✅ | | |
+| Which displays are calibrated vs. merely described | | | ⚠️ **open — undetectable, needs a stated preference (§6.6)** |
 | (9,1) Rec.2020-SDR flattens to 709 | | ✅ from code | ⚠️ no fixture — author with Flip |
 | A/B visibility is set by the **destination** profile, not the source | ✅ two displays, predicted then observed | | |
 | LG desktop profile ≡ source curve → ColorSync is a no-op there | ✅ 1.145e-05 | | |
-| That desktop picture is already BT.1886 | | ✅ no-op + display-side 2.4 LUT | ⚠️ panel response not measured |
+| That desktop picture lands on BT.1886 | | ✅ chosen 709 panel preset + unchosen no-op ColorSync | ⚠️ panel response not measured |
 | γ1.9609 vs 2.4 visible on real material | | | ⚠️ **not established — Bypass ≠ Reference (§6.5)** |
 | Actual display light output | | | ⚠️ never measured |
 
