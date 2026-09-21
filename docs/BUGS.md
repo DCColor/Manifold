@@ -12,6 +12,37 @@ not a defect — and the numbered defect entries follow it.
 
 ---
 
+## ⚠️ 2026-09-21 — AN ENTRY IS ONLY AS GOOD AS ITS LAST VERIFICATION DATE. READ THIS BEFORE PLANNING FROM THIS FILE.
+
+**Every OPEN / PARTLY FIXED / UNCONFIRMED / RECORDED-NOT-FIXED / BANKED entry was audited against
+the source on 2026-09-21.** The result is worth recording as a property of the file rather than as a
+list of corrections, because the same thing will happen again:
+
+- **Nine entries claimed "not built" / "not fixed" / "nothing changed in the app" for work that had
+  already shipped** — the audio track selector (both halves), WHEP and SRT audio, the live SDI
+  output mode, the DeckLink enumeration diagnostics, the `AVPlayerItemVideoOutput` scrub route, HLS
+  as a source, the clean-aperture crop, the pro-workflow plug-in registration, and the narrow MXF
+  decode plan. Several had been closed for three to four weeks.
+- **The unreliable entries cluster in one window: 2026-08-26 to 2026-09-09.** Everything recorded
+  from 2026-09-17 onward checked out accurate, including the two that were already honestly marked
+  PARTLY FIXED.
+
+**The mechanism is not carelessness, it is ordinary.** An entry is written at the moment of
+diagnosis, when it is most valuable and most detailed. The fix lands days later in a different
+session, and the code is what gets updated. Nothing in the workflow walks back to the status line.
+The richer the entry, the less likely anyone rewrites it — and the entries here are very rich.
+
+**The consequence is specific to this file: it is PLANNED FROM.** A feature-freeze push scoped off
+these status lines would have carried nine phantom items. A stale FIXED is a missed regression; a
+stale OPEN is wasted work, and it is the more expensive of the two here.
+
+**So: a status line carries a date, and a date that predates the last touch of the code it
+describes is a claim, not a fact.** When an entry matters to a decision, re-read the source before
+acting on it. Line references rot too — several in this file pointed into files that had since
+grown by hundreds of lines.
+
+---
+
 # Pre-ship checklist
 
 **Not defects.** Work that must happen before public launch, kept here because the entries below
@@ -20,13 +51,66 @@ rather than left open by default.
 
 ---
 
-## ☐ PRE-SHIP: American English sweep across all user-facing text
+## ☐ PRE-SHIP: American English — a RECURRING DRIFT, not a one-time sweep
 
-**Status:** OPEN, required before public launch. **Raised:** 2026-08-27. **Scope:** user-facing
-strings are **REQUIRED**; internal docs and comments are **PREFERRED**, for consistency.
+**Status:** OPEN, required before public launch. **Raised:** 2026-08-27 as a sweep.
+**REFRAMED 2026-09-21, after re-scanning: this is not a task, it is a leak.** **Scope:**
+user-facing strings are **REQUIRED**; internal docs and comments are **PREFERRED**, for
+consistency.
 
-British spellings have crept into the docs and **have reached shipping strings — confirmed, not
-suspected.** Scanned 2026-08-27 across `App/` and `Packages/` (excluding `ThirdParty/`):
+### ⚠️ THE 2026-09-21 RE-SCAN — THE SWEEP WORKED AND THE PROBLEM CAME BACK
+
+Both halves of that sentence are load-bearing, and the second is why this entry changed shape.
+
+**Every one of the seven named user-facing hits below was fixed.** That part is done and verified —
+see the strikethroughs in *"The confirmed user-facing hits"*.
+
+**And British spellings have landed in user-facing strings since**, in code written after the
+original scan. The clearest is the DNxHR picture caveat from the 2026-09-09 MXF work:
+
+```
+"Colour unreliable — needs Pro Video Formats"          ManifoldCore/DNxHRVideoToolboxDecoder.swift:77
+"…renders with the wrong colour…"                      ManifoldCore/DNxHRVideoToolboxDecoder.swift:80-82
+```
+
+Also `ManifoldCore/FrameEngine.swift:1378` (a refusal message), and several `NSLog`/`print`
+diagnostics that testers read — `App/MetalVideoRenderer.swift:1725`, `:1730`;
+`App/HLS/HLSClient.swift:1262`, `:1279`; `App/NDI/NDIService.swift:507`;
+`ManifoldCore/LibavFrameSource.swift:264`.
+
+**And the prose counts have roughly DOUBLED**, which is the real finding: the codebase grew by
+several features and every one of them was written in British English.
+
+### ⚠️ SO A MANUAL PASS WILL NOT HOLD. THIS WANTS A CHECK IN THE RELEASE SCRIPT.
+
+A one-time sweep is the wrong instrument for a defect whose rate of arrival is "every time anyone
+writes a string". It was swept once, on 2026-08-27, and by 2026-09-21 there were new hits in
+shipping strings — including one, `DNxHRVideoToolboxDecoder.PictureCaveat`, in a message written
+specifically to be shown to users.
+
+**What to build instead, and it is small:** a preflight check in `scripts/release-mac.sh` that
+fails the build on a British spelling inside a user-facing construct. It already has the right
+shape for this — the preflight that fails when a `.a` reappears in `ThirdParty/ffmpeg/lib` is the
+precedent, and it is there for the same reason: a rule nobody can be relied on to remember by hand.
+
+Three things it must get right, all of them derived from the work below rather than invented:
+
+1. **Scan user-facing constructs, not the whole file.** The REQUIRED set is `Text`, `Label`,
+   `Button`, `Toggle`, `Picker`, `.help(…)`, `navigationTitle`, `alert`, `confirmationDialog`, and
+   the string constants they are built from (`PictureCaveat` is a `static let`, not an inline
+   `Text`, and a construct-only scan would have missed it — so also flag British spellings in any
+   `static let` whose value is a sentence).
+2. **It must be MULTI-LINE AWARE.** See the ⚠️ below: the 2026-08-27 scan could not see inside
+   `"""` blocks and undercounted. A single-line grep is not evidence.
+3. **It must not touch identifiers, paths or third-party names.** See *"DO NOT BLANKET-REPLACE"*
+   below — the codebase is full of correctly-American identifiers, and `App/LicenseManager.swift`
+   is an American filename wrapping British prose.
+
+Comments and docs stay PREFERRED, not required, and should not fail a build.
+
+### The original 2026-08-27 scan, kept for the method
+
+Scanned 2026-08-27 across `App/` and `Packages/` (excluding `ThirdParty/`):
 
 | where | line hits | verdict |
 |---|---|---|
@@ -43,6 +127,25 @@ one**, which is why a `colour`-only sweep would miss most of it:
 `licence` 82 · `colour` 64 · `behaviour` 30 · `centre` 26 · `honour` 22 · `grey` 17 ·
 `recognis*` 14 · `optimis*` 7 · `analys*` 6 · `defence` 3 · `normalis*` 2 · `serialis*` 2 ·
 `synchronis*` 2 · `minimis*` 1 · `initialis*` 1 · `artefact` 1
+
+**RE-MEASURED 2026-09-21**, same corpus, case-insensitive occurrence count over `*.swift` in `App/`
+and `Packages/` excluding build products (`grep -rio <word> App Packages --include="*.swift"`):
+
+`colour` **159** · `behaviour` **47** · `centre` **43** · `licence` **62** · `grey` **31** ·
+`honour` **25** · `recognis*` **22** · `optimis*` **11** · `initialis*` **7** · `normalis*` **6** ·
+`analys*` **4** · `serialis*` **3** · `artefact` **2** · `defence` **2** · `synchronis*` **2** ·
+`minimis*` **1**
+
+⚠️ **READ THE TWO ROWS TOGETHER — THEY SAY TWO DIFFERENT THINGS, AND BOTH MATTER.**
+
+- **`licence` FELL, 82 → 62.** That is the sweep working. It was the word with the user-facing
+  hits, it got attention, and the count moved in the right direction.
+- **Everything else ROSE, most of it sharply** — `colour` 64 → 159, `behaviour` 30 → 47, `centre`
+  26 → 43, `grey` 17 → 31. Nobody re-introduced these; they arrived with new code, in new files
+  written between 2026-08-27 and 2026-09-21.
+
+**That is the whole argument for automating it.** A word that gets swept stays swept. A word that
+is simply how the author writes comes back at the rate new code is written, and the rate is high.
 
 ### ⚠️ THE COUNTS ABOVE ARE UNDERCOUNTS — the 2026-08-27 scan could not see inside `"""` blocks
 
@@ -84,19 +187,29 @@ is in play — `recognise`, `organise`, `optimise`, `customise`, `serialise`, `v
 `synchronise` — plus `-our` words (`honour`, `favour`, `flavour`) and `defence`. This file's own
 introduction contains `recognisable`.
 
-### The confirmed user-facing hits
+### ✅ The confirmed user-facing hits — ALL SEVEN FIXED, verified 2026-09-21
 
-Required. These are what a customer reads:
+Required. These are what a customer reads. **Every one of them is now American**, which is the
+half of this entry that worked:
 
-- `App/AboutWindow.swift:586` — `Text("Licences").tag(Tab.licences)` — an About-panel **tab name**
-- `App/AboutWindow.swift:642` — `Text("Full licence texts are under “Licences” above.")`
-- `App/AboutWindow.swift:699` — `Text("All licences")` — a picker entry
-- `App/AboutWindow.swift:619` — the missing-licence-text warning
-- `App/LicenseManager.swift:826` — `Label("Your licence couldn’t be read", …)` — an **error state**
-- `App/LicenseManager.swift:618` — *"Your stored **licence** key could not be verified. Please
-  re-enter it, or contact support."* — an **error message**, and the most visible of the lot
-- `App/DiagnosticsExport.swift:689,692` — `"no colour profile"` / `"      colour profile: …"`,
-  which land in every diagnostics report a tester sends
+- ~~`App/AboutWindow.swift:586` — `Text("Licences").tag(Tab.licences)`~~ → now
+  `Text("Licenses")`. ⚠️ **The `Tab.licences` case name is still British and that is CORRECT** —
+  it is an identifier, not prose. This one line is the entry's own "do not blanket-replace" rule in
+  miniature: the string changed, the symbol did not.
+- ~~`App/AboutWindow.swift:642` — `Text("Full licence texts are under “Licences” above.")`~~ → gone
+- ~~`App/AboutWindow.swift:699` — `Text("All licences")`~~ → gone
+- ~~`App/AboutWindow.swift:619` — the missing-licence-text warning~~ → gone
+- ~~`App/LicenseManager.swift:826` — `Label("Your licence couldn’t be read", …)`~~ → gone
+- ~~`App/LicenseManager.swift:618`~~ → now `App/LicenseManager.swift:811`, reading *"Your stored
+  **license** key could not be verified. Please re-enter it, or contact support."* — the most
+  visible of the lot, and fixed.
+- ~~`App/DiagnosticsExport.swift:689,692` — `"no colour profile"` / `"      colour profile: …"`~~
+  → gone from the diagnostics export.
+
+⚠️ **AND THE LIST IS NOW OUT OF DATE IN THE OTHER DIRECTION.** Fixing these seven did not close
+the entry, because new hits arrived behind them — see the 2026-09-21 re-scan at the top. **Do not
+read a fully-struck list as "done".** That is exactly the reading this file's 2026-09-21 staleness
+note warns about.
 
 ### ⚠️ DO NOT BLANKET-REPLACE. The identifiers are already American and must not move.
 
@@ -132,20 +245,45 @@ inspector labels · the manual, when it exists.
 
 ### Known doc hits to fix with it
 
-`docs/BUGS.md` alone: **"centre channel" in the downmix entry → "center channel"** (`:1015`,
-`:1053`, `:1094`), plus `colourist` (`:863`) and `re-centred` (`:61`).
+⚠️ **THE LINE NUMBERS THIS SECTION CARRIED WERE STALE AND HAVE BEEN RE-DERIVED 2026-09-21.** It
+cited `:1015`, `:1053`, `:1094`, `:863` and `:61` in this file; `docs/BUGS.md` has since grown by
+thousands of lines and every one of those pointed somewhere else. **Search for the text, not the
+line** — which is the general lesson, not a note about this section.
 
-**Done means:** a MULTI-LINE-AWARE scan (see the ⚠️ above — a single-line one is not evidence)
-returns zero hits in user-facing strings, and the remaining source and doc hits have been
-converted or consciously left with a reason. Re-run the scan to confirm rather than declaring
-it finished.
+`docs/BUGS.md` alone, re-measured 2026-09-21:
+
+- **"centre channel" in the downmix entry → "center channel"** — one occurrence, now in the
+  *"BANKED: an OPTIONAL stereo fold"* entry (search `centre channel`).
+- **`colourist`** — **13** occurrences, up from the single one originally cited.
+- **`re-centred`** — one occurrence, in the raster-size discussion.
+
+**Done means** — **REDEFINED 2026-09-21, because the old definition was unachievable:**
+
+The old wording was *"a scan returns zero hits in user-facing strings, and the remaining hits have
+been converted or consciously left"*. That describes a **state**, and this defect does not hold a
+state — it was reached on 2026-08-27 and lost again by 2026-09-21 without anyone doing anything
+wrong.
+
+So done means **a MECHANISM, not a scan result**:
+
+1. A multi-line-aware check in `scripts/release-mac.sh` **fails the build** on a British spelling
+   inside a user-facing construct or a sentence-valued `static let`.
+2. The identifier/path/third-party exclusions below are encoded in that check, not remembered.
+3. The current hits are cleared so the check passes on first run.
+
+Comments and docs remain PREFERRED and are explicitly **out of scope for the build failure** —
+they are noise in a gate, and gating on them is how a useful check gets disabled.
 
 ---
 
 ## ☐ PRE-SHIP: dev-path audit — the ungated debug triggers
 
 **Status:** OPEN, required before public launch. **Raised:** 2026-08-27, out of the
-`MANIFOLD_CONFIG_DEBUG` gating work.
+`MANIFOLD_CONFIG_DEBUG` gating work. **RE-AUDITED 2026-09-21: still true, with one trigger pair
+since gated and a FOURTH SURFACE that did not exist when this was written.** See
+*"⚠️ THE FOURTH SURFACE"* at the end of this entry — the audit's scope was incomplete, which
+matters more than any single trigger, because an audit that names five things and misses the sixth
+reads as finished.
 
 Every trigger that reaches a `LiveClock` setpoint mutator is now behind `#if
 MANIFOLD_CONFIG_DEBUG` — ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S, ⌃⌥[ and ⌃⌥] — and that was done because
@@ -166,6 +304,60 @@ for why, and do not "simplify" it back.
 **Also on this list:** `LiveClock.setDepths(startup:target:)` is `public` and documented *"NOT for
 production paths"*. It is now only reachable from the gated ⌃⌥S, but nothing in the type system
 says so.
+
+### ✅ VERIFIED 2026-09-21 — what moved, and what did not
+
+**The six ungated triggers are all still ungated**, inside `#if DEBUG` only — which, as this entry
+says, is no gate at all in a Profile build:
+
+| trigger | site | state |
+|---|---|---|
+| ⌃⌥W — libdatachannel link smoke test | `App/ContentView.swift:1831` | still ungated |
+| ⌃⌥H / ⌃⌥⇧H — WHEP connect / retire | `App/ContentView.swift:1857`, `:1859` | still ungated |
+| ⌃⌥⇧E — export next WHEP frame to PNG | `App/ContentView.swift:1866` | still ungated |
+| ⌃⌥D / ⌃⌥⇧D — SRT connect / retire | `App/ContentView.swift:1928`, `:1930` | still ungated |
+
+**One pair WAS gated since this was written:** ⌃⌥[ and ⌃⌥] now sit inside
+`#if MANIFOLD_CONFIG_DEBUG` at `App/ContentView.swift:1895-1899`. The entry's line *"The ⌃⌥[ / ⌃⌥]
+block further down is the one that was not"* is therefore **out of date and the block is now
+gated.**
+
+### ⚠️ THE FOURTH SURFACE — THE DEBUG MENU, WHICH THIS AUDIT PREDATES ENTIRELY
+
+**This entry was written on 2026-08-27, when every dev affordance was a hidden keystroke. It is no
+longer true that they all are.** A top-level **Debug** menu shipped in build 18, sitting in the
+menu bar between View and Window, and it is a categorically more exposed affordance than a chord
+nobody can find by accident. Behind it:
+
+- a **tone generator that REPLACES programme audio** (⌃⌥A, which the menu item now solely owns),
+- a **recorder that writes `.wav` files to the Desktop**,
+- a **renderer-input A/B**,
+- the **desktop-audio lead ladder**.
+
+**It is now gated, and the gate is the right shape** — `DebugMenuGate`,
+`App/ManifoldApp.swift:279-325`, consulted at `App/ManifoldApp.swift:220`:
+
+- `defaults write com.graviton.manifold manifold.debugMenu -bool YES` — the primary, because it
+  survives relaunch and works with an ordinary double-click launch. Same shape as
+  `DeckLinkService.audioTrimKey`.
+- `MANIFOLD_DEBUG_MENU=1` — a single run that leaves nothing behind. Same shape as
+  `ScrubFrameProducer.stats`.
+- **Latched once at first read** (`static let` with an initialiser closure), so a menu cannot
+  disappear while a keyboard shortcut it owns stays live.
+- It announces itself in the log when on, and is silent when off.
+
+Commit `4114995`, *"fix: gate the Debug menu behind an explicit opt-in"*.
+
+⚠️ **SO WHAT IS LEFT FOR THIS ENTRY IS THE DECISION, NOT THE GATING.** The Debug menu is handled.
+The four hidden-keystroke triggers in the table above are not, and the pre-launch question is
+unchanged and still unanswered: **should a public build carry them at all?** Note that ⌃⌥⇧E
+(writes a PNG) and ⌃⌥H / ⌃⌥D (open network connections from saved bookmarks) have side effects of
+the same kind that justified gating the menu — they are just harder to trigger.
+
+⚠️ **AND THE GENERAL LESSON, WHICH IS THE REUSABLE PART:** this entry enumerated a closed set and
+was then overtaken by a surface that did not exist when it was written. **A dev-path audit is not a
+list, it is a recurring check** — the same conclusion the American English entry above reached
+independently, and for the same reason. Both want a preflight, not a memory.
 
 ---
 
@@ -303,15 +495,60 @@ seen to matter on a display with headroom.
 
 ---
 
-## ⚠️ UNCONFIRMED: scrub release jumps the picture once, on ProRes
+## ⚠️ UNMEASURED: scrub release jumps the picture once, on ProRes — and the fix that closed it no longer exists
 
-**Status:** **FIXED 2026-08-27, awaiting confirmation from Joey — not reproduced in-house, so
-the fix is verified against the MECHANISM, not against the report.** Tolerance mechanism REFUTED by
-measurement 2026-08-27; staleness mechanism matches the report in full — magnitude and sign — and
-is what was fixed.
-**Reported:** 2026-08-27 by Joey on 0.6.2; **direction corrected by him the same day.** **Not
-seen** on the build Mac. **Blocks:** nothing; it is a trust problem — a
-colourist who sees the picture move after they let go stops believing the scrub.
+**Status:** ⚠️ **UNMEASURED ON CURRENT CODE. Do not read this entry as "fixed, awaiting
+confirmation" — it was, and that is no longer what it is.** **Reported:** 2026-08-27 by Joey on
+0.6.2; **direction corrected by him the same day.** **Never reproduced** on the build Mac.
+**Blocks:** nothing; it is a trust problem — a colourist who sees the picture move after they let
+go stops believing the scrub.
+
+> ### ⚠️ RESTATED 2026-09-21 — THE ENTRY WAS DESCRIBING A MECHANISM THAT HAS BEEN DELETED
+>
+> **What happened, in order:**
+>
+> 1. **2026-08-27** — the tolerance mechanism was REFUTED by measurement; the staleness mechanism
+>    matched the report in magnitude and sign; a two-part fix was built in `ContentView`
+>    (`requestScrubPreview(at:final:)` plus a handoff that held the overlay until the seeked-to
+>    frame was on screen). Status became "FIXED, awaiting confirmation from Joey".
+> 2. **2026-08-30** — Stages 3 and 4 of *"two producers, one destination"* **deleted the entire
+>    mechanism that fix lived in.** `scrubPreviewImage`, `requestScrubPreview`,
+>    `beginScrubHandoff`, `holdScrubOverlayUntilPresented`, `previewImage`, `LibavThumbnailSource`
+>    and `onFirstPresentAfterFlush` are all gone. A grep for `scrubPreview` across `App/` and
+>    `Packages/` returns **nothing**. There is no `CGImage` in the scrub path at all.
+> 3. **Nobody re-asked the question.** The status line stayed at "FIXED 2026-08-27, awaiting
+>    confirmation" for three weeks, describing a fix to code that no longer exists.
+>
+> **So the honest state is: the original report has never been confirmed, and the current code has
+> never been tested against it.** The 2026-08-27 fix is not "still in"; it is not anywhere. What
+> replaced it is a different mechanism with different failure modes.
+>
+> ⚠️ **AND THIS IS NOT MERELY BOOKKEEPING — THE ENTRY ITSELF PREDICTED A SURVIVING RESIDUE.**
+> Read *"A RELEASE SETTLE THEREFORE SURVIVES THE OVERLAY'S DELETION, ON LONG-GOP ONLY"* below,
+> written before the deletion: the scrub producer seeks at infinite tolerance and `exactSeek` does
+> not, so the seek's first frame can differ from the frame the drag was showing — **zero on MXF by
+> construction, effectively zero on ProRes, up to 10.4 frames on 4K H.264.** That is a *prediction*
+> about the current code and it has never been checked against the gesture.
+>
+> **Joey's report was on ProRes**, which is the case that prediction says should be clean. That is
+> encouraging and it is not evidence.
+>
+> ### What would settle it — and it is cheap
+>
+> 1. **Ask Joey to re-test on a current build.** The report is 0.6.2; the scrub path has been
+>    rewritten twice since. This costs one message and is the single highest-value action here.
+> 2. **Run the `[SETTLE]` instrument on ProRes.** It was kept deliberately
+>    (`MetalVideoRenderer.reportSettleIfArmed`) and it is exactly the measurement this needs —
+>    Stage 3 used it to report **+0.00 frames across 7 consecutive releases on MXF**. The same run
+>    on a ProRes fixture either closes this entry or reopens it with a number.
+> 3. **If it is non-zero on long-GOP, the deferred way out is already scoped**: seek playback to the
+>    frame the producer actually DELIVERED rather than to `scrubValue`. See §2 of the
+>    two-producers entry.
+>
+> **Everything below this line is the 2026-08-27 investigation**, kept in full: the measurements are
+> sound, the three measurement traps are reusable, and the refutation of the tolerance mechanism is
+> still a correct result about a real mechanism. Read *"The fix, as BUILT 2026-08-27"* as history —
+> it already carries its own strike, added 2026-08-30.
 
 **The report:** scrubbing a ProRes file, on release the picture jumps once — *"almost backs up a
 frame"*. Timecode matches the picture after the jump.
@@ -333,7 +570,7 @@ single change was proposed to fix both — routing scrub preview through the rea
 it is REJECTED on four grounds recorded in that entry.** Read them before proposing it again.
 
 ⚠️ **THE AVPlayerItemVideoOutput SPIKE PASSED 2026-08-29 AND IT DOES NOT CLOSE THIS ENTRY. Do not
-mark this fixed when that route is built.** See *"⏸ BANKED: feed the scrub gesture from
+mark this fixed when that route is built.** See *"✅ BUILT 2026-08-30 — feed the scrub gesture from
 `AVPlayerItemVideoOutput`"* below. What it removes is the **disagreement between two decoders** —
 with one decoder there is nothing left to disagree, so the mismatch CLASS goes away. What it does
 NOT remove is **tolerance**, which is this entry's other half. Measured on that route: the delivered
@@ -350,7 +587,7 @@ measured 0.5 mean / 1.0 max on every fixture), effectively zero on ProRes, **up 
 4K H.264**. There is a deferred way out — seek playback to the frame the producer actually
 DELIVERED rather than to `scrubValue` — and it is a **Stage 3 decision requiring its own
 measurement**, not an assumption, because it changes which frame a release lands on and therefore
-interacts with this entry directly. See *"📐 SCOPED, NOT BUILT: two producers, one destination"*
+interacts with this entry directly. See *"📐 two producers, one destination"*
 §2 below.
 
 ### The reading that SURVIVED measurement: PREVIEW ACCURACY, not a seek bug
@@ -726,7 +963,7 @@ still tone-mapped. All three parts are needed for full coverage:
    raster** — for 11.4 ms at 4K, inside the drag budget. See *"✅ THE MXF HALF, MEASURED
    2026-08-30"* under the `AVPlayerItemVideoOutput` entry below. **Part 3 as scoped here — a float
    path feeding the same overlay — would be building a second producer for a surface that route
-   deletes.** It closes at **Stage 3** of *"📐 SCOPED, NOT BUILT: two producers, one destination"*,
+   deletes.** It closes at **Stage 3** of *"📐 two producers, one destination"*,
    by deleting the 8-bit RGBA path rather than giving it a float variant.
 
 Parts 1 and 2 cover ProRes/H.264 (the AVFoundation path). Part 3 is separable and can be deferred
@@ -1351,7 +1588,7 @@ Do not reopen the PROPERTY question without reading why each was eliminated:
    a preview whose job is "which frame am I on". The played picture — the one being judged — is
    correct and is the reference. Cost: a visible brightness step at grab and release on HDR files.
 2. **⚠️ OPTION E — feed the scrub frame into the EXISTING display path. RE-OPENED 2026-08-28, AND
-   MOVED TO ITS OWN ENTRY:** *"⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput` —
+   MOVED TO ITS OWN ENTRY:** *"✅ BUILT 2026-08-30 — feed the scrub gesture from `AVPlayerItemVideoOutput` —
    one decoder, one display path"* below. **Do not plan from this paragraph — the reasoning, the
    risks and the spike gate are all there.**
 
@@ -1536,14 +1773,36 @@ holding across all five of play / pause / scrub / export / SDI).
 
 ---
 
-## ⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput` — one decoder, one display path
+## ✅ BUILT 2026-08-30 — feed the scrub gesture from `AVPlayerItemVideoOutput` — one decoder, one display path
 
-**Status:** **✅ SPIKE PASSED 2026-08-29 — on all three uses. Still BANKED and NOT BUILT.** The
-gate is cleared; the work is not scheduled. **Raised:** 2026-08-28, out of the HDR scrub
-investigation. **Spiked:** 2026-08-29 with `docs/scrub-fixtures/avpvomeas.swift` — see *"✅ SPIKE
-RESULT 2026-08-29"* below.
+**Status:** ✅ **BUILT 2026-08-30. No longer banked.** **Spiked:** 2026-08-29 with
+`docs/scrub-fixtures/avpvomeas.swift`; **implemented** across Stages 0–4 of *"📐 two producers, one
+destination — deleting the scrub overlay"* below. **Raised:** 2026-08-28, out of the HDR scrub
+investigation. **Closed in the audit of 2026-09-21**, which found the status line still reading
+"BANKED and NOT BUILT" three weeks after the work landed.
 
-⚠️ **THE IMPLEMENTATION IS NOW SCOPED — see *"📐 SCOPED, NOT BUILT: two producers, one
+> ### ✅ WHAT CLOSED IT
+>
+> The producer is selected on the decode path and both halves exist:
+>
+> ```swift
+> let producer: ScrubFrameProducer = useLibav
+>     ? LibavScrubProducer(url: url, pixelFormat: videoPixelFormat)
+>     : AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
+> ```
+>
+> — `ManifoldCore/FrameEngine.swift:1229-1231`, with
+> `ManifoldCore/AVPlayerScrubProducer.swift` and `ManifoldCore/LibavScrubProducer.swift` behind the
+> `ScrubFrameProducer` protocol. **The `CGImage` overlay no longer exists**: `scrubPreviewImage`,
+> `requestScrubPreview`, `previewImage`, `holdScrubOverlayUntilPresented` and
+> `LibavThumbnailSource` are all deleted, and a grep for `scrubPreview` across `App/` and
+> `Packages/` returns nothing.
+>
+> **Everything below this line is the reasoning as it stood before the work**, kept because the
+> three-uses argument is what justified the cost and is the part worth re-reading if the route is
+> ever revisited. Per-stage results are in *"✅ MEASURED 2026-08-30 — Stage 3"* below.
+
+⚠️ **THE IMPLEMENTATION IS NOW SCOPED — see *"📐 two producers, one
 destination — deleting the scrub overlay"* below.** ⚠️ **Read it before starting: it corrects the
 seam this entry names.** `renderPixelBuffer` is private and render-thread-only; the public seam is
 `enqueue`, selection is `pts <= clock()`, and during a paused drag that clock is pinned at the
@@ -1561,7 +1820,7 @@ cannot be deleted on the strength of either one alone.** ⚠️ **The numbers ar
 the comparison against the `exactSeek` figures is what turns "it might be fast enough" into a
 decision. **Precondition for:** the colour-management mode work
 (`docs/COLOR_MANAGEMENT_FINDINGS.md` §6) — see the last section here, this is NOT a parallel task —
-**and for HLS as a source**, see *"⏸ BANKED: HLS as a source"* below.
+**and for HLS as a source**, see *"✅ SHIPPED — HLS as a source"* below.
 
 ⚠️ **THIS SPIKE IS NOT ABOUT THE SCRUB PREVIEW ALONE. It is the same mechanism three features
 need**, and its result should be read as a decision about all three rather than one: (1) the scrub
@@ -1597,7 +1856,7 @@ buried inside the HDR argument it would read as a colour fix, which is the least
    puts the scrub frame through the shader fixes it for free.
 
 ⚠️ **AND A FOURTH THING DEPENDS ON THE SAME MECHANISM, THOUGH IT IS NOT A PROBLEM THIS FIXES:**
-**HLS as a source** — see *"⏸ BANKED: HLS as a source — a VIEWER/QC feature on the egress side"*
+**HLS as a source** — see *"✅ SHIPPED — HLS as a source — a VIEWER/QC feature on the egress side"*
 below. `AVPlayer` plays HLS natively, so that feature is almost entirely "get the frames out of
 `AVPlayer` and into the offscreen ring", which is exactly what this route does. **Note it stresses
 the two risks DIFFERENTLY and more gently: no drag, so per-seek latency does not matter, and the
@@ -2150,7 +2409,7 @@ reasoning written before any code — with the outcome appended. Per-stage resul
 *"✅ MEASURED 2026-08-30 — Stage 3: the libav scrub producer, and the end of the CGImage path"*
 below; the AVFoundation stages' numbers are in the Stage 1 and Stage 2 checkpoints as annotated.
 **There is now ONE scrub mechanism and one destination.** Both measurement gates had passed — see
-*"⏸ BANKED: feed the scrub gesture from `AVPlayerItemVideoOutput`"* above for the AVFoundation half
+*"✅ BUILT 2026-08-30 — feed the scrub gesture from `AVPlayerItemVideoOutput`"* above for the AVFoundation half
 (spiked 2026-08-29) and *"✅ THE MXF HALF, MEASURED 2026-08-30"* inside it for the libav half. This
 entry is the **implementation shape and the reasoning behind it**, written before any code so the
 decisions are arguable rather than archaeological.
@@ -2782,23 +3041,30 @@ race was reasoned about, not tested.**
 
 ---
 
-## ⏸ BANKED: HLS as a source — a VIEWER/QC feature on the egress side, gated on the AVPlayer spike
+## ✅ SHIPPED — HLS as a source — a VIEWER/QC feature on the egress side
 
-**Status:** BANKED, not built. **✅ THE GATE IS PASSED — 2026-08-29, and this is the use it passed
-most cleanly.** **Raised:** 2026-08-28. **Was gated on:** *"⏸ BANKED: feed the scrub gesture from
-`AVPlayerItemVideoOutput` — one decoder, one display path"* above — see "Why this is now coupled",
-and the result immediately below.
+**Status:** ✅ **SHIPPED.** Picture, audio, metering, SDI and frame-rate detection all landed across
+2026-09-08 → 2026-09-18. **Raised:** 2026-08-28. **Was gated on:** *"feed the scrub gesture from
+`AVPlayerItemVideoOutput`"* above — the gate passed 2026-08-29 and the route was built 2026-08-30.
+**Closed in the audit of 2026-09-21**, which found this entry still reading "BANKED, not built…
+There is no HLS code beyond that" against roughly 148 KB of shipping HLS source.
 
-**What exists today:** `StreamType.hls` in `App/Preferences.swift` — detection only. A URL whose
-path contains `.m3u8` is recognised, saved, listed, and shown **disabled** with an honest reason:
-
-```swift
-var isSupported: Bool { self == .web || self == .srt }
-case .hls: return "HLS — not yet supported"
-```
-
-`type` has been stored per bookmark from the beginning precisely so this line can change without a
-migration, exactly as it did for `.srt` in stage 3e. There is no HLS code beyond that.
+> ### ✅ WHAT CLOSED IT
+>
+> - `App/HLS/HLSClient.swift` — the client, on `AVPlayer` exactly as "Why this is now coupled"
+>   below argued it would be, with frames pulled out into the app's own shader/offscreen/scopes/SDI
+>   path rather than left on an `AVPlayerLayer`.
+> - `App/HLS/HLSAudioTap.swift` — audio metered, embedded on SDI and monitored on the item's own
+>   clock; see *"✅ WHAT LANDED, 2026-09-17 — HLS audio"* below.
+> - `App/Preferences.swift:309` — the gate this entry named is now `var isSupported: Bool { true }`,
+>   and the honest-refusal seam is deliberately kept for a fourth transport
+>   (`App/Preferences.swift:304` records why). The `"HLS — not yet supported"` string survives
+>   nowhere but in that comment, describing its own removal.
+> - `App/HLS/HLSClient.swift:1262` — the `[HLS] colour signalling` line, which is what exposed the
+>   CICP primaries entry below.
+>
+> **The SRT-vs-HLS table below is the part still worth reading** — it is about what each transport
+> is FOR, which shipping one of them did not settle. It is kept verbatim.
 
 ### ⚠️ WHAT THIS IS FOR — QC ON EGRESS, AND IT IS NOT A SUBSTITUTE FOR SRT
 
@@ -3164,10 +3430,28 @@ is the next entry, *"DeckLink enumeration diagnostics cannot distinguish two dif
 
 ---
 
-## DeckLink enumeration diagnostics cannot distinguish two different failures
+## ✅ FIXED — DeckLink enumeration diagnostics cannot distinguish two different failures
 
-**Status:** OPEN. **Found:** 2026-08-27, while diagnosing the entry above. **Blocks:** nothing at
-runtime — it costs diagnosis time, and it cost a full code read this week.
+**Status:** ✅ **FIXED — both recommendations, implemented as written.** **Found:** 2026-08-27,
+while diagnosing the entry above. **Closed in the audit of 2026-09-21.** **Blocked:** nothing at
+runtime — it cost diagnosis time, and it cost a full code read the week it was found.
+
+> ### ✅ WHAT CLOSED IT
+>
+> - **The raw iterator count is now carried out of the loop.** `NSInteger total = 0` at
+>   `App/DeckLink/DeckLinkBridge.mm:985`, incremented on every `Next()` at `:997` regardless of the
+>   output filter, and returned alongside the usable list in a `DeckLinkEnumerationResult`.
+> - **Every rejected device carries its `HRESULT` and its model name.** `App/DeckLink/DeckLinkBridge.mm:1027-1031`
+>   builds a `DeckLinkRejectedDeviceInfo`; the model is read from `IDeckLink` *before* the
+>   `QueryInterface`, on both branches, precisely because "the device worth naming is the one whose
+>   output interface is not reachable" — the bridge comment at `:1000-1006` states that reasoning.
+> - **Both counts are printed in one line, always, even when they agree.**
+>   `App/DiagnosticsExport.swift:744-752` — `"N enumerated, M usable"`, with `"none enumerated (no
+>   device returned by the driver)"` reserved for a genuine zero; `:759-762` appends one
+>   `rejected …` line per filtered device.
+>
+> That is exactly the `"3 device(s) seen, 0 output-capable"` shape this entry asked for, plus the
+> `E_NOINTERFACE`-against-a-known-model line that is the whole diagnosis at a glance.
 
 Two messages describe the DeckLink device state, and they read **the same filtered array**, so
 they cannot tell apart two genuinely different faults:
@@ -3200,7 +3484,7 @@ So these two states are indistinguishable in every log and every diagnostics exp
 
 The `HRESULT` that would have named the difference is read into `hr`, tested, and thrown away.
 
-### The fix, when it is done
+### The fix, as it was scoped — and it is what was built
 
 - **Report the raw iterator count alongside the output-capable count.** `"3 device(s) seen, 0
   output-capable"` names the fault on sight; `"none enumerated"` actively misdirects toward cabling
@@ -3208,6 +3492,8 @@ The `HRESULT` that would have named the difference is read into `hr`, tested, an
 - **Log the `HRESULT` when the filter rejects a device**, with the model name, which is readable
   from `IDeckLink` before the `QueryInterface`. `E_NOINTERFACE` against a known model is the whole
   diagnosis in one line.
+
+**Both landed.** See "WHAT CLOSED IT" at the top of this entry for the file:line evidence.
 
 ### ⚠️ THE PATTERN, which is worth more than this instance: three instruments this week
 
@@ -3243,10 +3529,46 @@ commit `0b6a91c`; the drift-readout fix is documented on `FrameEngine.liveAudioD
 
 ---
 
-## A failed WHEP connect puts the server's entire HTML error page into the UI and the diagnostics file
+## PARTLY FIXED — A failed WHEP connect puts the server's entire HTML error page into the UI and the diagnostics file
 
-**Status:** OPEN. **Found:** 2026-08-24, during Run C of the Wi-Fi streaming tests
-(`docs/WHEP_LOADED_NETWORK_FINDINGS.md` §8).
+**Status:** **PARTLY FIXED — the cap landed, the HTML detection did not.** **Found:** 2026-08-24,
+during Run C of the Wi-Fi streaming tests (`docs/WHEP_LOADED_NETWORK_FINDINGS.md` §8).
+**Re-audited 2026-09-21.**
+
+> ### ✅ WHAT LANDED — the generalising half, at the right place
+>
+> This entry argued that the cap *"belongs at the point the message is stored, not at each display
+> site"*. **That is where it is.**
+>
+> - `App/WebRTC/WHEPClient.swift:495-511` — `serverMessage(fromBody:)` caps at **200 characters**
+>   with an ellipsis, and it is the single funnel: `:559-561` is where `lastError` is assigned, so
+>   the banner and the diagnostics export inherit the cap without either knowing about it.
+> - **JSON is handled better than the entry asked for.** A JSON body is parsed for a known human
+>   field (`errorDescription`, `error`, `message`, `detail`, `reason`) and, failing that, returns
+>   `nil` rather than dumping raw JSON at the user — `App/WebRTC/WHEPClient.swift:501-509`.
+> - The log is separately capped at 500 characters (`:556`), and the doc comment records that the
+>   body is the server's own text and is never concatenated with our endpoint URL.
+>
+> The 241 KB diagnostics file and the 78 KB banner cannot recur. **That was correctly identified as
+> the half that matters more, and it is done.**
+>
+> ### ❌ WHAT REMAINS — HTML detection, and 200 characters of markup is not an error message
+>
+> **There is no `Content-Type: text/html` check and no `<!DOCTYPE` / `<html` body sniff anywhere in
+> `App/WebRTC/WHEPClient.swift`.** So the Slack case now produces a banner that is **200 characters
+> of `<div>`** instead of 78 KB of it.
+>
+> ⚠️ **THAT IS A SMALLER FAILURE OF THE SAME KIND, NOT A FIX.** The cap solved *legibility of the
+> file*; it did not solve *legibility of the message*. A user who pastes a Slack permalink still
+> gets a wall of markup where a sentence should be — shorter, and no more actionable. The original
+> recommendation stands unchanged and is now the entire remaining scope:
+>
+> > Say *"this URL returned a web page, not a WHEP endpoint; check that you pasted the
+> > publish/playback URL"* and discard the body.
+>
+> It is a few lines at the same site the cap already occupies (`serverMessage(fromBody:)` sees the
+> body; the response's `Content-Type` is available at `:555`), and it is worth doing precisely
+> because pasting the wrong URL is the most likely first-run mistake a new user makes.
 
 The first WHEP connect of that session failed with **HTTP 403**, because the URL pasted was a
 Slack permalink rather than the WHEP endpoint. That much is user error and the right outcome.
@@ -3270,24 +3592,31 @@ which nobody files a bug about; they just paste the right URL the second time.
 
 **The fix has two halves, and the second one matters more.**
 
-- **Detect an HTML response and do not show it.** A `Content-Type` of `text/html` (or a body
+- ❌ **Detect an HTML response and do not show it.** A `Content-Type` of `text/html` (or a body
   starting `<!DOCTYPE`/`<html`) means the endpoint is not a WHEP server. Say that — "this URL
   returned a web page, not a WHEP endpoint; check that you pasted the publish/playback URL" — and
-  discard the body.
-- **Cap what any transport error can put into a banner or the diagnostics file**, independently of
-  the HTML check. HTML is the case that turned up; a server returning a large JSON blob or a
+  discard the body. **NOT DONE — this is the whole of what is left.**
+- ✅ **Cap what any transport error can put into a banner or the diagnostics file**, independently
+  of the HTML check. HTML is the case that turned up; a server returning a large JSON blob or a
   plain-text stack trace would do the same thing. A few hundred bytes is more than enough for any
   message a user can act on, and the cap belongs at the point the message is stored, not at each
-  display site.
+  display site. **DONE — 200 characters, at the storage point.** See the status block above.
 
 The second half is the one that generalises. Fixing only the HTML detection leaves the same defect
 one unusual server response away.
+
+⚠️ **THE ORDER THEY LANDED IN IS WORTH NOTING, BECAUSE IT READS AS DONE AND IS NOT.** The
+generalising half went in first, which was the right call — it is the one that protects against
+responses nobody has seen yet. But it also removed the *visible* symptom, and a 200-character
+banner of markup is quiet enough that the remaining half can sit indefinitely. **A cap is not a
+diagnosis.**
 
 ---
 
 ## The vendored libdatachannel has no provenance chain, and it now carries a required patch
 
-**Status:** OPEN. **Found:** 2026-08-25, during the WHEP NACK work.
+**Status:** OPEN — **still true, and the README the fix called for now exists and states the gap
+itself.** **Found:** 2026-08-25, during the WHEP NACK work. **Re-audited 2026-09-21.**
 
 `scripts/build_libdatachannel.sh` is supposed to be the reproducible recipe for
 `ThirdParty/libdatachannel/`. **It does not currently complete on this machine** — the submodule
@@ -3323,8 +3652,40 @@ script run, which is exactly the gap this entry is about.
 checkout, and a `ThirdParty/libdatachannel/README.md` that records the resulting artifact
 hashes the way the FFmpeg one records its own.
 
+### ⚠️ RE-AUDITED 2026-09-21 — HALF THE ARTIFACT EXISTS, AND IT DOCUMENTS ITS OWN ABSENCE
+
+**`ThirdParty/libdatachannel/README.md` now exists**, and it is a good document: it records the tag
+(`v0.24.5`, MPL-2.0, arm64), the archive inventory, the patch and why it is load-bearing, and a
+verified C++ dialect match against the app target including the `CMAKE_CXX_EXTENSIONS=OFF` detail
+that makes `-std=c++17` rather than `-std=gnu++17`.
+
+**What it does NOT contain is the thing this entry is about.** Its own *Provenance* section,
+`ThirdParty/libdatachannel/README.md:65-70`, says so in as many words:
+
+> ⚠️ **There is no provenance chain for this directory.** `scripts/build_libdatachannel.sh`
+> does not currently complete on this machine (submodule fetch fails), so the archives here
+> were produced by a hand-driven build rather than by the script. Unlike `ThirdParty/ffmpeg/`,
+> nothing in the repo establishes what is actually in them. See the entry in `docs/BUGS.md`.
+
+**No hashes are recorded** — a search of that README for `sha256` / `shasum` / `hash` returns
+only that Provenance heading.
+
+⚠️ **SO THE TWO DOCUMENTS NOW POINT AT EACH OTHER AND NEITHER CLOSES ANYTHING.** That is not
+useless — a documented gap is better than a silent one, and anyone who opens the README learns the
+truth immediately. But it is worth being exact about what changed: **the gap is now discoverable,
+and it is the same size it was.**
+
+**The remaining work is unchanged and both halves are still required:**
+
+1. A `build_libdatachannel.sh` run that completes end to end on a clean checkout — the submodule
+   fetch is the blocker and has not been touched.
+2. Artifact hashes recorded in that README, the way `ThirdParty/ffmpeg/README.md` records its own.
+
 **Blocks:** nothing today. It blocks *confidence* — specifically the ability to answer "is the
-NACK patch in the library this DMG shipped with?" from anything other than a live test.
+NACK patch in the library this DMG shipped with?" from anything other than a live test. The three
+guards listed above (the script's own assertion, the bridge's refusal log line, and the
+`nacks built / toWire / refused` split in the session summary) are what stands in for it, and none
+of them is a provenance chain.
 
 ---
 
@@ -3451,10 +3812,36 @@ buffer, and a provable tightening of the head-loss over-drop):
 
 ---
 
-## WHEP and SRT carry no audio at all, so a remote stream cannot be monitored or metered
+## ✅ FIXED — WHEP and SRT carry no audio at all, so a remote stream cannot be monitored or metered
 
-**Status:** OPEN. **Found:** 2026-08-26, during the audio-meter audit. **Blocks:** audio
-monitoring and metering on the two remote-contribution paths.
+**Status:** ✅ **FIXED on both transports.** **Found:** 2026-08-26, during the audio-meter audit.
+**Closed in the audit of 2026-09-21**, which found the status line still reading OPEN long after
+both decoders shipped. **Blocked:** audio monitoring and metering on the two remote-contribution
+paths — which, as "Why it matters more than it looks" below argues, is where metering matters most.
+
+> ### ✅ WHAT CLOSED IT
+>
+> **WHEP decodes Opus via AudioToolbox, exactly as the DECIDED section below specifies** — the
+> libopus-vs-libavcodec question was never reopened and the vendored dylibs were never rebuilt.
+>
+> - `App/WebRTC/WHEPAudioDecoder.swift:93` — `WHEPOpusDecoder(channelCount:)`, an
+>   `AudioConverter` over `kAudioFormatOpus`.
+> - `App/WebRTC/WHEPAudioReceiver.swift:43` holds it; `:102` constructs it at negotiation; `:112`
+>   logs `"no Opus decoder — audio disabled for this session"` when the platform declines.
+> - `ManifoldWHEPDiscardMessage` is gone — packets are delivered to `receive(_:rtpTimestamp:)`
+>   (`App/WebRTC/WHEPAudioReceiver.swift:138`) rather than dropped.
+>
+> **SRT decodes its audio elementary stream.**
+>
+> - `App/SRT/SRTAudioDecoder.swift:40` — the decoder; `App/SRT/SRTFrameRouter.swift:1026`
+>   constructs it from the demuxed format.
+> - The log line this entry quoted as evidence of the gap —
+>   `"stream %u: %s / %s (ignored — audio is a later arc)"` — **no longer exists anywhere in the
+>   tree.**
+>
+> **NDI was correctly excluded from this entry and still is**, though its audio path turned out to
+> have a defect of its own — see *"⚠️ #NDI-AUDIO — FrameSync was asked for the queue depth"* below,
+> which is a different failure and not a reopening of this one.
 
 ⚠️ **This is not a meter limitation.** The meters will correctly report "NO AUDIO TRACK" on these
 sources, and that report is accurate — there is no audio to meter, because these transports
@@ -3692,10 +4079,57 @@ is §14 of `docs/WHEP_LOADED_NETWORK_FINDINGS.md`.
 
 ## SDI carries the monitored track's channels discretely, in FILE order, and never states the mapping
 
-**Status:** OPEN. **Found:** 2026-08-26, during the DeckLink audio-path audit that preceded the
-track selector. **Blocks:** trustworthy surround monitoring over SDI. (It does **not** block
-stereo monitoring over SDI — that is an optional capability, not a defect; see the BANKED entry
-below.)
+**Status:** OPEN — **still true at the wire, and one of its consequences has gone from
+hypothetical to LIVE.** **Found:** 2026-08-26, during the DeckLink audio-path audit that preceded
+the track selector. **Re-audited 2026-09-21.** **Blocks:** trustworthy surround monitoring over SDI.
+(It does **not** block stereo monitoring over SDI — that is an optional capability, not a defect;
+see the BANKED entry below.)
+
+> ### ⚠️ RE-AUDITED 2026-09-21 — what moved, and the one thing that changed status
+>
+> **The defect itself is untouched.** The mapping is still `d[c] = s[c]` at
+> `App/DeckLink/DeckLinkBridge.mm:585` — source channels to wire channels 1..n in file order, no
+> role table, no stated mapping. `IDeckLinkProfileAttributes` / `BMDDeckLinkMaximumAudioChannels`
+> are still never queried, and `bmdVideoConnectionUnspecified` is still passed
+> (`App/DeckLink/DeckLinkBridge.mm:296`, `:1135`), so the app still cannot tell SDI from HDMI.
+>
+> **But half the groundwork this entry scoped has landed on its own.** The work item was *"publish
+> the role derivation, carry the role array on `AudioTapBuffer.Format`, and replace `d[c] = s[c]`
+> with a role→wire-index table"* — **the first two are done:**
+>
+> - `ManifoldCore/AudioTapBuffer.swift:54` — `public var roles: [String] = []` on `Format`, with
+>   the contract stated at `:256-262`: the producer's DECLARED per-channel roles in interleave
+>   order, empty when it declares none.
+> - `ManifoldCore/AudioChannelLayoutBridge.swift` — the derivation, extracted and published, fed
+>   at `ManifoldCore/AudioTapBuffer.swift:237-243`.
+>
+> **So what remains is the third step alone: a role→wire-index table in `RenderAudioSamples`.** The
+> roles are already at the seam; nothing consumes them on the DeckLink side yet — `roles` does not
+> appear anywhere in `App/DeckLink/`.
+>
+> ### ⚠️ AND THE "PHASE-1 CONSEQUENCE" BELOW IS NOW LIVE, NOT HYPOTHETICAL
+>
+> The last section of this entry reads *"One phase-1 consequence to fold in"* and describes the SDI
+> monitor blinking when a track switch changes the channel count. **It was written in the future
+> tense because the track selector did not exist yet. It ships now** — see
+> *"✅ FIXED — A file's second and third audio tracks are unreachable"* below, closed in this same
+> audit.
+>
+> **Which means a user can reach it today:** open a file whose tracks differ in width (the
+> `MONO_STEREO_51.mov` fixture is exactly this — mono, stereo, 5.1), have SDI output running, and
+> switch tracks. The count change fires `AudioTapBuffer.onFormatChange` →
+> `DeckLinkService.audioFormatChanged`, the card re-establishes, **and the stop/start takes the SDI
+> VIDEO with it.** The monitor blinks.
+>
+> **The fix is already stated below and has not changed:** enable at a count sized to the file's
+> **widest** track and pad the narrower ones, after which no track switch changes the enabled
+> format and SDI never re-establishes. It belongs here rather than in the track-selector entry,
+> because the card's rate and channel count are fixed at `EnableAudioOutput` and genuinely cannot
+> change under a running stream.
+>
+> ⚠️ **This is the ordinary shape of a dependency closing: the blocking entry got fixed and its
+> consequence landed in THIS entry without anyone editing this entry.** Worth noting as a pattern —
+> a "gated on X" note becomes live the day X closes, and nothing announces it.
 
 ⚠️ **Two things that sound like this bug are NOT true, and were checked in the code before this
 entry was written.** Getting them wrong points the fix in the wrong direction:
@@ -3792,10 +4226,45 @@ with the measurements and the test-file recipe, is `docs/AUDIO_PATH_FINDINGS.md`
 
 ---
 
-## A file's second and third audio tracks are unreachable, while the inspector reports all of them
+## ✅ FIXED — A file's second and third audio tracks are unreachable, while the inspector reports all of them
 
-**Status:** OPEN. **Found:** 2026-08-26, during the audio-meter audit. **Blocks:** monitoring any
-audio track but the first — which for a mixed-deliverable file is most of them.
+**Status:** ✅ **FIXED — BOTH halves, AVFoundation and libav.** **Found:** 2026-08-26, during the
+audio-meter audit. **Closed in the audit of 2026-09-21**, which found the status line still reading
+OPEN with the plan marked "not yet implemented". **Blocked:** monitoring any audio track but the
+first — which for a mixed-deliverable file is most of them.
+
+> ### ✅ WHAT CLOSED IT
+>
+> **The phase-1 plan below was built essentially as written**, including the two entry points and
+> the rebuild-at-the-playhead switch.
+>
+> - **One shared selection.** `ManifoldCore/FrameEngine.swift:325` —
+>   `@Published private(set) var selectedAudioTrackIndex`, deliberately NOT branched per path, with
+>   the invariant *row N is decoded stream N* stated on the declaration.
+> - **The AVFoundation half.** `ManifoldCore/FrameEngine.swift:355` resolves the monitored
+>   `AVAssetTrack` from that index; `:2607` builds the reader from it. `loadTracks(…).first` is
+>   gone. `selectAudioTrack(_:)` at `:1066` rebuilds the audio reader **at the playhead, not at
+>   zero** — exactly the cost of a seek to the current position, as predicted.
+> - **The libav half.** `ManifoldCore/LibavAudioSource.swift:203-214` makes **one pass over
+>   `nb_streams` collecting every audio stream rather than breaking at the first** — the comment
+>   says so in those words. `selectStream` (`:435`) and `rebindOnPump` (`:481`) rebind the decoder
+>   to a different `AVStream` of the same file, positioned at the playhead, with the demuxer, video
+>   source, video renderer and `synchronizer.rate` all untouched.
+>   `ManifoldCore/FrameEngine.swift:1110` translates the UI's array POSITION through
+>   `streams[N].streamIndex`, inside the engine, so no UI carries a libav detail.
+> - **Failure is handled rather than assumed away.** `revertLibavAudioSelection`
+>   (`ManifoldCore/FrameEngine.swift:1147`) puts the selection back when a stream has no usable
+>   decoder — a real state, because `open()` enumerates from `codecpar` and never asks whether a
+>   decoder exists.
+> - **Both entry points, mirrored.** Toolbar picker:
+>   `App/ContentView.swift:2026` (`audioTrackBinding` → `engine.selectAudioTrack`). Inspector:
+>   `App/InspectorPanel.swift:147-152`, which marks the monitored row and gates row selectability on
+>   `engine.audioTrackCount` — deliberately NOT on `metadata.audioTracks.count`, so the inspector's
+>   list stays COMPLETE even where the engine can bind nothing.
+> - **The app no longer disagrees with itself**, which this entry correctly identified as the actual
+>   defect: `audioTrackCount` (`ManifoldCore/FrameEngine.swift:349-352`) counts what a decoder can
+>   be BOUND TO, per path, and the inspector reports what the file CONTAINS. Two questions, two
+>   numbers, neither pretending to be the other.
 
 `FrameEngine` takes `loadTracks(withMediaType: .audio).first` and builds a single
 `AVAssetReaderTrackOutput` from it. A file carrying mono, stereo and 5.1 mixes plays the first;
@@ -3852,9 +4321,20 @@ AudioTap[AVF]: format → 48000Hz · 1ch (→ 2ch on SDI)
   `startReading` is all-or-nothing, and one malformed track would take the others down with it.
   The existing retry (see the ARRI ALEXA `0xFFFF0000` note in `beginReading`) drops *all* audio on
   failure and would need to degrade per-track instead.
-- **The libav path cannot offer the choice.** MXF/DNxHR files hold no `AVAssetTrack` list, so a
+- ~~**The libav path cannot offer the choice.** MXF/DNxHR files hold no `AVAssetTrack` list, so a
   multi-track MXF still cannot be switched. That is a separate implementation, not a wiring gap,
-  and the UI must say so rather than offering a control it cannot honour.
+  and the UI must say so rather than offering a control it cannot honour.~~
+  ⚠️ **STRUCK — THIS WAS CORRECT AS A SCOPING NOTE AND IS FALSE AS A STATEMENT ABOUT THE CODE.**
+  It was right that the libav path is a *separate implementation* rather than a wiring gap. It was
+  wrong to conclude that the choice therefore could not be offered: the separate implementation was
+  **built**. `LibavAudioSource` selects by `AVStream` index
+  (`ManifoldCore/LibavAudioSource.swift:435`) and the engine translates array position to stream
+  index at `ManifoldCore/FrameEngine.swift:1110`, so **a multi-track MXF switches today** and the
+  UI honours the control on both paths. The residual truth in the original bullet is narrower and
+  still worth knowing: the counts come from different sources per path
+  (`FrameEngine.audioTrackCount` branches on `useLibav` because counting `audioTracks` reported 0
+  while four MXF streams were selectable), and the `.mov`-DNxHR sub-path takes AVFoundation's rows
+  with a nil `sourceStreamIndex`.
 
 **Related:** the SDI half of this is *"SDI carries the monitored track's channels discretely…"*
 above; the chain that found it is `docs/AUDIO_PATH_FINDINGS.md`.
@@ -4223,14 +4703,35 @@ will land.
 
 ---
 
-## ⚠️ CAUSE CONFIRMED 2026-09-08 — the clean aperture is applied to the window's SHAPE and never to the PIXELS, so every ARRI open-gate file draws 1.1% narrow
+## ✅ FIXED — the clean aperture was applied to the window's SHAPE and never to the PIXELS, so every ARRI open-gate file drew 1.1% narrow
 
-**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-08, by measurement.** **FIX DECIDED** (Option A, below)
-**and NOT YET LANDED.** **Found:** 2026-09-07, while chasing black bars that appeared after the
-pixel-aspect fix. **NOT a regression from that fix** — the defect is as old as clean-aperture
-support; the fix only changed the drawable's shape and made it visible. **Blocks:** nothing
-user-facing hard-stops, but every instrument in the app mis-reports on any file with a cropping
-`clap`, silently, and has done since before anyone looked.
+**Status:** ✅ **FIXED — Option A LANDED.** Cause confirmed 2026-09-08 by measurement; the fix is in
+the tree. **Found:** 2026-09-07, while chasing black bars that appeared after the pixel-aspect fix.
+**NOT a regression from that fix** — the defect was as old as clean-aperture support; the fix only
+changed the drawable's shape and made it visible. **Closed in the audit of 2026-09-21**, which found
+the status line still reading "FIX DECIDED … and NOT YET LANDED". **Blocked:** nothing
+user-facing hard-stopped, but every instrument in the app mis-reported on any file with a cropping
+`clap`, silently, and had done since before anyone looked.
+
+> ### ✅ WHAT CLOSED IT — the crop reached the PIXELS
+>
+> - **A `CropRect` is applied to the sampled texture**, derived from the declared `clap` against the
+>   encoded raster — `App/MetalVideoRenderer.swift:2068-2073`, with `CropRect.identity` as the
+>   explicit no-crop case for "a source that declares no cropping `clap`, which is nearly all of
+>   them".
+> - **The offscreen ring is now the clean-aperture raster, not the encoded one.**
+>   `App/MetalVideoRenderer.swift:530` records the new invariant directly: a 2880×2160 offscreen
+>   "is the CORRECT state on every `clap` file, and the old form" is not. Since the waveform,
+>   parade, vectorscope, CIE plot, v210 SDI convert and ⌃⌥E export all read that ring, **every
+>   instrument inherited the fix at once** — which is the shape the defect had in reverse.
+> - **The declaration and the transform are kept separate**, which is what stops this recurring:
+>   `ManifoldCore/VideoMetadata.swift:342` holds the `clap` atom as declared,
+>   `:437 cleanApertureCrops` answers whether it actually crops anything, and the inspector reports
+>   the declaration rather than the result (`:324-326`).
+> - Producers that have already cropped are handled rather than double-cropped —
+>   `App/MetalVideoRenderer.swift:849`, `:870`: a bare `CVPixelBuffer` carries no `clap`, so the
+>   raster the `clap` was declared against is passed explicitly. A LIVE source, which has no `clap`
+>   to declare, clears it (`:1125`).
 
 ### The defect
 
@@ -4552,13 +5053,37 @@ reinterpretation rather than a bug fix. Left open on purpose.
 
 ---
 
-## ⚠️ CAUSE CONFIRMED 2026-09-08 — VideoToolbox plug-in codecs and MediaToolbox plug-in format readers are OPT-IN PER PROCESS, and Manifold never opts in. "AVFoundation cannot open MXF" is false.
+## ✅ BUILT — VideoToolbox plug-in codecs and MediaToolbox plug-in format readers are OPT-IN PER PROCESS, and Manifold never opted in. "AVFoundation cannot open MXF" is false.
 
-**Status:** ⚠️ **CAUSE CONFIRMED 2026-09-08, by measurement, from a plain unsigned CLI.**
-**NOTHING DECIDED AND NOTHING BUILT.** **Found:** 2026-09-08, while investigating why
-`Mixed Captions.mxf` (DNxHR 444 12-bit) renders green and magenta. **Blocks:** nothing today,
-because nothing depends on it yet. **Invalidates:** the premise under the entire libav/MXF path —
-see the site list below, and re-read those comments before trusting them.
+**Status:** ✅ **BUILT.** Cause confirmed 2026-09-08 by measurement from a plain unsigned CLI;
+**Manifold now opts in.** **Found:** 2026-09-08, while investigating why `Mixed Captions.mxf`
+(DNxHR 444 12-bit) renders green and magenta. **Closed in the audit of 2026-09-21**, which found the
+status line still reading "NOTHING DECIDED AND NOTHING BUILT". **Invalidated:** the premise under
+the entire libav/MXF path — see the site list below, and re-read those comments before trusting
+them, because the finding itself has not been undone by the fix.
+
+> ### ✅ WHAT CLOSED IT
+>
+> **`App/ProVideoWorkflow.swift`** — a small type whose entire job is this entry. Both registrations
+> are called once, at launch:
+>
+> ```swift
+> VTRegisterProfessionalVideoWorkflowVideoDecoders()      // ProVideoWorkflow.swift:101
+> MTRegisterProfessionalVideoWorkflowFormatReaders()      // ProVideoWorkflow.swift:102
+> ```
+>
+> ⚠️ **AND IT DOES NOT CONFUSE ASKING WITH HAVING**, which is the trap this finding sets. Both
+> functions return `void`, cannot fail, and succeed identically on a machine without Pro Video
+> Formats installed. So presence is **probed** separately — `ProVideoWorkflow.Availability` is a
+> three-state `unknown / installed(bundles:) / notInstalled`, with `.unknown` meaning *the probe has
+> not finished* rather than *absent*, and the file's own header says `.installed` is a gate and
+> never a guarantee that a decode will succeed.
+>
+> The measured cost the entry was owed: **7.4–10.0 ms** for the decoder registration and
+> **4.1–5.0 ms** for the format readers, **12–15 ms combined** (`ProVideoWorkflow.swift:86-87`).
+>
+> **What this enabled:** the narrow MXF decode route — see *"✅ MEASURED 2026-09-09 — the narrow MXF
+> plan is VIABLE"* below, which is now also built.
 
 ### The finding
 
@@ -5129,15 +5654,40 @@ provides it.
 
 ---
 
-## ✅ MEASURED 2026-09-09 — the narrow MXF plan is VIABLE. libav's `AVdh` packets decode through a hand-built `VTDecompressionSession`, bit-identically, and ONE ATOM is what makes it work
+## ✅ BUILT — the narrow MXF plan was VIABLE and SHIPPED. libav's `AVdh` packets decode through a hand-built `VTDecompressionSession`, bit-identically, and ONE ATOM is what makes it work
 
-**Status:** ✅ **MEASURED 2026-09-09, two fixtures, bit-exact.** **NOTHING BUILT AND NOTHING
-CHANGED IN THE APP** — this is the design record for the work that follows, not a report of work
-done. **Found:** by re-running the `vtdnx.c` probe from the 2026-09-08 registration investigation
-with `VTRegisterProfessionalVideoWorkflowVideoDecoders()` called first. **Closes:** the open
-question left by *"⚠️ CAUSE CONFIRMED 2026-09-08 — VideoToolbox plug-in codecs … are OPT-IN PER
-PROCESS"* above, which recorded the cause and deliberately proposed no route. **Blocks:** nothing
-today.
+**Status:** ✅ **MEASURED 2026-09-09, two fixtures, bit-exact — AND BUILT.** **Found:** by
+re-running the `vtdnx.c` probe from the 2026-09-08 registration investigation with
+`VTRegisterProfessionalVideoWorkflowVideoDecoders()` called first. **Closed:** the open question
+left by *"VideoToolbox plug-in codecs … are OPT-IN PER PROCESS"* above, which recorded the cause and
+deliberately proposed no route. **Corrected in the audit of 2026-09-21**, which found this entry
+still reading "NOTHING BUILT AND NOTHING CHANGED IN THE APP" against a shipping decoder.
+
+> ### ✅ WHAT SHIPPED — the narrow plan, built as designed
+>
+> **The plan was: keep the MXF path exactly as it is and route ONLY the decode step.** That is what
+> landed, and the narrowness held.
+>
+> - **`ManifoldCore/DNxHRVideoToolboxDecoder.swift`** — the hand-built `VTDecompressionSession`,
+>   including the synthesised 28-byte `ADHR` atom the measurement identified as the one thing that
+>   makes it work (libav reports 0 bytes of `extradata` and a `0x00000000` `codec_tag` on every MXF
+>   fixture, so both are supplied).
+> - **Engaged only for the profile libav cannot handle** —
+>   `ManifoldCore/LibavFrameSource.swift:254-256` constructs it behind
+>   `DNxHRVideoToolboxDecoder.isProfile444(codecID:profile:)`. Everything else stays on libav.
+> - **libav still demuxes, and the rest of the path is untouched** — range detection, captions,
+>   audio streams and geometry are all where they were.
+> - **The absent-plug-in case is stated to the user rather than rendered wrong in silence.**
+>   `DNxHRVideoToolboxDecoder.PictureCaveat` carries a standing inspector row and a one-shot banner
+>   (`ManifoldCore/LibavFrameSource.swift:337-338`, `:485`, `:503`;
+>   `ManifoldCore/FrameEngine.swift:1917-1931`), worded as capability and never as error — nothing
+>   is the user's doing and nothing is wrong with their file.
+>
+> ⚠️ **One user-facing string from this work is British and is on the American-English sweep's
+> list** — `"Colour unreliable — needs Pro Video Formats"`,
+> `ManifoldCore/DNxHRVideoToolboxDecoder.swift:77`, plus the banner at `:80-82`. It is a *new* hit,
+> landed after the 2026-08-27 scan, and it is the clearest single illustration of why that entry has
+> been reframed from a one-time sweep to recurring drift.
 
 ### The narrow plan, and the finding
 
@@ -5570,10 +6120,17 @@ who never touch NDI.
 
 ### What happens
 
-[`ContentView.swift:2442`](../App/ContentView.swift#L2442) calls `NDIBridge.loadRuntime()` directly,
-inside `ndiSourceListItems`. That `@ViewBuilder` is reached from the **empty state's stream menu**,
-which is what every launch renders — so the call runs during the FIRST `ContentView.body`, on the
-main thread, inside `main`. **MEASURED**, backtrace at first load:
+[`ContentView.swift:2548`](../App/ContentView.swift#L2548) calls `NDIBridge.loadRuntime()` directly,
+inside `ndiSourceListItems` (the `@ViewBuilder` begins at
+[`ContentView.swift:2542`](../App/ContentView.swift#L2542)). That builder is reached from the
+**empty state's stream menu**, which is what every launch renders — so the call runs during the
+FIRST `ContentView.body`, on the main thread, inside `main`. **MEASURED**, backtrace at first load:
+
+> ⚠️ **LINE REFERENCE CORRECTED 2026-09-21: this entry said `:2442`, and `ContentView.swift` has
+> since grown past it.** The call site itself is **unchanged** — same builder, same direct bridge
+> call, same comment describing it as an ordering-safe fallback — so the entry is still accurate;
+> only the coordinate had rotted. Re-verified: `NDIBridge.loadRuntime()` has five call sites, four
+> of them inside `NDIService` (`:295`, `:331`, `:386`, `:431`) and this one.
 
 ```
 main → ContentView.body → videoRegion → emptyState → Menu → ndiSourceListItems
@@ -5627,7 +6184,7 @@ current behaviour is at least self-consistent, and nothing depends on changing i
 ## ✅ WHAT LANDED, 2026-09-17 — HLS audio: metered, SDI-fed, audible, and on the item's own clock
 
 **Status:** LANDED, built and verified against Apple's `bipbop_16x9` ladder on macOS 26.5.1 (25F80).
-**Preceded by:** *"⏸ BANKED: HLS as a source"* above, whose picture half shipped in 0.8.2.
+**Preceded by:** *"✅ SHIPPED — HLS as a source"* above, whose picture half shipped in 0.8.2.
 
 HLS was picture-only: `player.isMuted = true`, no tap, meters flat, SDI silent. It now feeds the
 shared `AudioTapBuffer`, and the stream is audible on the default output device.
@@ -6584,11 +7141,36 @@ run" line. See the instrumentation notes in `App/DeckLink/DeckLinkBridge.mm` (`l
 
 ---
 
-## Live SDI output carries NEUTRAL at a stale or default display mode — ALL FOUR live transports, not just HLS
+## ✅ FIXED 2026-09-18 — Live SDI output carries NEUTRAL at a stale or default display mode — ALL FOUR live transports, not just HLS
 
-**Status:** OPEN. **Found:** 2026-09-17, while tracing why HLS SDI behaviour did not match
-expectations. **Affects:** NDI, WHEP, SRT and HLS equally. **Blocks:** SDI monitoring of any live
-source — which is most of the point of a broadcast output on a QC tool.
+**Status:** ✅ **FIXED 2026-09-18.** **Found:** 2026-09-17, while tracing why HLS SDI behaviour did
+not match expectations. **Affected:** NDI, WHEP, SRT and HLS equally. **Blocked:** SDI monitoring of
+any live source — which is most of the point of a broadcast output on a QC tool. **Re-confirmed
+closed in the audit of 2026-09-21**, which found the status line still reading OPEN.
+
+> ### ✅ WHAT CLOSED IT — the call that did not exist now exists
+>
+> - **`DeckLinkService.liveFormatChanged(_:)`** — `App/DeckLink/DeckLinkService.swift:922`. Its own
+>   doc comment at `:908-914` states the diagnosis this entry reached, in the same terms: *"THIS IS
+>   THE CALL THAT DID NOT EXIST, AND ITS ABSENCE WAS THE BUG… One missing call, black picture AND
+>   silence."*
+> - **Routed from the one place that already knows which deck owns the stream** —
+>   `WindowDeck.liveDisplayFormatChanged(_:)` at `App/WindowDeck.swift:593-597`, which feeds both
+>   consumers from a single published value (`hostDeck?.engine?.setLiveDisplaySize` and the card),
+>   so the transports still publish once; also `App/WindowDeck.swift:1367`.
+> - **The nil-rate case is handled deliberately rather than by guessing.**
+>   `App/DeckLink/DeckLinkService.swift:916-921`: a raster without a rate updates *nothing* except
+>   the reason string the menu shows, because setting a broadcast output to a cadence no source has
+>   would be worse than a stale mode — it would look deliberate.
+> - Commit `264929b`, *"feat(decklink): follow live source format for output mode selection"*.
+>
+> ⚠️ **The CADENCE half below closed with it**, since the mode is now a (family, rate) pair derived
+> from the live source. The related audio-side failure this entry describes — the ring failing its
+> anchor with *"no staged video PTS to anchor to"* — closed at the same time and for the same
+> reason.
+>
+> **Not closed by this:** the stale-manual-pick trap, which is its own entry — *"A sticky manual
+> output-mode pick silently overrides a correct auto-detection"* above, still PARTLY FIXED.
 
 **A live source never sets the DeckLink output mode.** The card is enabled at whatever mode the
 last FILE established, or at the built-in default if no file has been opened this session, and the
@@ -6717,7 +7299,7 @@ What it costs:
 
 - ⚠️ **HLS ABR MOVES THE RASTER MID-STREAM, SO "MODE FOLLOWS SOURCE" MEANS RE-ESTABLISHING THE SDI
   OUTPUT ON EVERY RENDITION STEP.** The 2026-09-17 run stepped **416×234 → 960×540 → 1920×1080**;
-  the earlier measurement in *"⏸ BANKED: HLS as a source"* recorded a 4K ladder settling to
+  the earlier measurement in *"✅ SHIPPED — HLS as a source"* recorded a 4K ladder settling to
   1280×720 inside 25 s. Each step would stop scheduled playback and restart the card — a visible
   glitch on the wire, several times, during the first seconds of every connect. **This needs a
   latching or hysteresis policy** (settle time, highest-seen rung, or operator pin), and that
@@ -6775,11 +7357,46 @@ root cause.
 
 ## ⚠️ #NDI-AUDIO — FrameSync was asked for the queue depth, so it MANUFACTURED audio: 8.1M samples delivered against 1.44M sent, and the meters read levels off the difference
 
-**Status:** CAUSE CONFIRMED by measurement and by the SDK header; **first fix landed 2026-09-18 and
-was MEASURED — it made the audio authentic but left an 8.3% rate deficit, fixed in turn the same
-day (see "The second defect" below). The second fix is NOT yet re-measured.** **Found:** 2026-09-18, while diagnosing why the DeckLink audio
-callback underran on ~99% of callbacks. **Affects:** NDI only — SRT, HLS and WHEP are measured
-working on the wire and share none of this code.
+**Status:** **BOTH FIXES ARE IN THE CODE. ONE OF THEM HAS NEVER BEEN RE-MEASURED.** Cause confirmed
+by measurement and by the SDK header. First fix landed 2026-09-18 and **was** measured — it made
+the audio authentic but left an 8.3% rate deficit; the second fix landed the same day (see "The
+second defect" below) and **has not been measured.** **Found:** 2026-09-18, while diagnosing why the
+DeckLink audio callback underran on ~99% of callbacks. **Affects:** NDI only — SRT, HLS and WHEP
+are measured working on the wire and share none of this code. **Re-audited 2026-09-21.**
+
+> ### ⚠️ THE DISTINCTION THIS ENTRY NEEDS, MADE EXPLICIT — 2026-09-21
+>
+> **What is open here is a MEASUREMENT, not a code state.** Those are different things and this
+> entry was readable as either. Source audit:
+>
+> **Fix 1 — stop asking FrameSync to manufacture audio. PRESENT.**
+> `captureAudioFrameForMaxSamples:` is gone. The API is now
+> `-[NDIBridge captureAudioFrameForInterval:]` (`App/NDI/NDIBridge.h:241`), sized from elapsed real
+> time rather than from the queue depth. The queue depth survives as a **diagnostic only**, and the
+> header says so at `App/NDI/NDIBridge.h:94-95`: *"deliberately not used to size anything (it was,
+> and that was the defect)"*.
+>
+> **Fix 2 — the 8.3% rate deficit. PRESENT.**
+> `_audioLastPullTime` and `_audioSampleCarry` (`App/NDI/NDIBridge.mm:287-289`) carry the
+> sub-sample remainder across pulls *"so that truncation cannot accumulate into a rate error"*.
+>
+> **And the authenticity check that would catch a regression is built in**, which is the part worth
+> keeping: `App/NDI/NDIBridge.h:86-92` documents the sender timestamp as the one quantity FrameSync
+> cannot invent — across consecutive pulls it must advance by `frameCount / sampleRate`, and the
+> `[NDI-AUDIO]` trace prints exactly that ratio.
+>
+> ### ❌ So the only thing outstanding is: RUN IT.
+>
+> A 30 s NDI run, reading the `[NDI-AUDIO]` push trace, checking that `cum` sits at **48000 Hz**
+> rather than the ~270000 Hz that started this, and that sent-vs-delivered sample counts agree.
+> That is the whole of it.
+>
+> ⚠️ **AND DO NOT ACCEPT `real=Nf` / `underruns=0` AS THE ANSWER.** The entry's own closing
+> section already makes this point and it applies directly here: those are transaction counters,
+> they prove the ring was read and the cursor kept up, and they say **nothing about what was in
+> it**. This defect's entire character was that every counter read healthy while the audio was
+> synthesised. **What settled it the first time was writing the bytes to a `.wav` and listening.**
+> Settle it the same way.
 
 **The SDI underrun was the symptom that got this looked at. It is not the serious half.** The
 serious half is that **the meters and the shared `AudioTapBuffer` have been fed synthesised audio
@@ -6989,3 +7606,157 @@ reads 100 lines a second.
   render latency, with `audioDepth` 180 ms against a `videoDepth` of 125–167 ms from a 4-frame pool.
   That may resolve itself once the ring stops being wiped, or it may not. **Re-measure before
   touching the DeckLink side.**
+
+
+---
+
+## Preferences are declared in twelve files, and eight keys are declared more than once
+
+**Status:** OPEN — **latent, not live. Nothing is broken today and the shape is how it breaks.**
+**Found:** 2026-09-21, during the board audit, while confirming whether "the unified preferences
+system" had shipped. **Blocks:** nothing. **Costs:** the ability to answer "what are this app's
+preferences, and what are their defaults" from one place.
+
+`App/Preferences.swift` looks like the answer to that question — a single `Preferences:
+ObservableObject` with `@AppStorage` properties and a `SettingsView`. **It is about half of it.**
+
+**Measured 2026-09-21**, counting distinct `@AppStorage` keys across `App/`:
+
+| | count |
+|---|---|
+| distinct keys in the app | **63** |
+| declared in `Preferences.swift` | 33 |
+| **declared only OUTSIDE `Preferences.swift`** | **30** |
+| `@AppStorage` declarations outside `Preferences.swift` | 118, across 12 files |
+
+Where the outside declarations live: `FramingGuide.swift` 31 · `WaveformScope.swift` 17 ·
+`ContentView.swift` 14 · `VectorscopeScope.swift` 13 · `LicenseManager.swift` 9 · `CIEScope.swift` 9 ·
+`ParadeScope.swift` 7 · `WindowChrome.swift` 6 · `AudioMeterScope.swift` 6 · `WindowDeck.swift` 2 ·
+`DeckLink/DeckLinkService.swift` 2 · `Captions/CaptionOverlay.swift` 2.
+
+### ⚠️ SOME OF THIS SPLIT IS DELIBERATE AND MUST NOT BE "TIDIED" INTO `Preferences.swift`
+
+Read this before consolidating anything — three of the twelve files are outside on purpose, and
+each has its reasoning written at the site:
+
+- **`WindowChrome.swift` (6 keys, including `showTray`) — PER-WINDOW BY DESIGN.** These were
+  `@AppStorage` on `ContentView` and that was the bug: opening the scopes tray in one window opened
+  it in every window. The class exists to finish that split, with last-writer-wins seeding
+  documented in its header. **Centralising these would re-create the defect it was written to
+  remove.** The keys are deliberately unchanged from the `@AppStorage` era so an existing install's
+  arrangement survives upgrade.
+- **`DeckLinkService.swift` (2 keys) — `defaults write` affordances**, `manifold.decklink.manualOutputMode`
+  and the audio trim key. They are operator escape hatches, documented as such, and not Settings
+  rows.
+- **`LicenseManager.swift` (5 `license.*` keys) — licence state, not user preference.** It is
+  stored the same way and it is not the same kind of thing. Worth leaving where it is; worth
+  knowing it is not in the preferences inventory.
+
+### ❌ And some of it looks accidental
+
+The **scope instrument settings** are the bulk of it: waveform and parade guide lines, vectorscope
+targets, graticule and box amplitude, CIE gamut toggles, meter markers, and the shared
+`manifold.scope.verticalScale`. Plus `FramingGuide.swift`'s 31 declarations and the caption position
+preset. Nothing at those sites argues for being outside; they read as having been written where they
+were needed.
+
+### ⚠️ THE ACTUAL HAZARD: EIGHT KEYS ARE DECLARED IN MORE THAN ONE PLACE
+
+This is the part worth acting on, and it is **not** a tidiness complaint. `@AppStorage` carries its
+own default at each declaration site, so N declarations of one key are N independent statements of
+what that preference defaults to — and nothing checks that they agree.
+
+| key | declarations |
+|---|---|
+| `scopeScale` | **4** — `ParadeScope.swift:178`, `Preferences.swift:94`, `Preferences.swift:1308`, `WaveformScope.swift:734` |
+| `guideMode` | **3** — `FramingGuide.swift:38`, `FramingGuide.swift:150`, `Preferences.swift:99` |
+| `manifold.scope.verticalScale` | **3** — `ParadeScope.swift:180`, `WaveformScope.swift:736`, `WaveformScope.swift:1261` |
+| `autoplayOnLoad` | 2 — `Preferences.swift:70`, `Preferences.swift:1305` |
+| `globalScopeIntensity` | 2 — `Preferences.swift:90`, `Preferences.swift:1307` |
+| `manifold.caption.positionPreset` | 2 — `ContentView.swift:408`, `Captions/CaptionOverlay.swift:34` |
+| `manifold.vectorscope.boxAmplitude` | 2 — `VectorscopeScope.swift:348`, `ContentView.swift:391` |
+| `manifold.vectorscope.graticule` | 2 — `VectorscopeScope.swift:344`, `ContentView.swift:388` |
+
+✅ **CHECKED 2026-09-21: ALL EIGHT AGREE TODAY.** Every declaration of every one of these keys
+states the same default and the same type. **There is no defect in the build.** That is why this is
+recorded as latent, and it is the reason to write it down now rather than after it breaks.
+
+**How it breaks, concretely:** someone changes `scopeScale`'s default from `.bit10` to `.bit12` in
+`Preferences.swift`, because that is where preferences obviously live. `ParadeScope.swift:178` and
+`WaveformScope.swift:734` still say `.bit10`. The key is unset on a fresh install, so **whichever
+view constructs first wins**, and the parade and the waveform can disagree about the scale they are
+drawing at — on a QC tool, where the whole point is that the instruments agree. Nothing logs it and
+both views look internally consistent.
+
+⚠️ **THAT FAILURE SHAPE IS ALREADY RECORDED TWICE IN THIS FILE**, which is why it is worth
+pre-empting a third time: *"an unrecognised CICP primaries code … the fallback is written twice"*
+above makes exactly this argument about two colour-table copies (*"a file with an unusual transfer
+would render one way while playing and another way while scrubbing, and nothing would say so"*),
+and `VectorscopeScopeModel.plotPoint` was extracted at its second caller for the same reason. **The
+established pattern in this codebase is to extract at the second copy, and these keys are at four.**
+
+### What would close it
+
+**Not a rewrite.** Two cheap steps, in order:
+
+1. **Single-source the DEFAULTS.** `Preferences.swift` already does this internally for the
+   broadcast-safe values (`Preferences.defaultBroadcastActionPct` and friends, `:120-137`) — the
+   pattern exists and is documented as existing so *"the `@AppStorage` declarations at every site"*
+   cannot drift. Extend it to the eight keys above. This removes the hazard without moving a single
+   preference or changing any behaviour.
+2. **Then decide, separately, whether the scope-instrument keys belong in `Preferences.swift`** — a
+   presentation question with no correctness content, and not urgent.
+
+**Do not do step 2 first**, and do not touch the three deliberate exclusions above while doing
+either.
+
+---
+
+## ❌ DROPPED: borderless window with square corners — considered, not built
+
+**Status:** **DROPPED — decided 2026-09-21. Not awaiting a fix; see the reopen condition below.**
+**Raised:** during the window-chrome work. **Blocks:** nothing.
+
+macOS rounds the corners of a standard titled window **unconditionally**. There is no API to opt
+out: the rounding is applied by the window server to the frame, not drawn by us, so no amount of
+work inside the content view reaches it. **A picture displayed at native resolution therefore has
+its four corner pixels masked**, and on a QC tool that is a real observation rather than a cosmetic
+one — the app's whole claim is that what is on screen is what is in the file.
+
+**The only way to get true square corners is a `.borderless` `styleMask`.** That is not a flag, it
+is a different kind of window, and it takes the rest of the titled window's behaviour with it:
+
+- **The traffic lights go.** They would have to be re-added by hand, and then drawn into both
+  control modes — the floating HUD and the docked bar — because the window has two arrangements.
+- **`canBecomeKey` and `canBecomeMain` must be overridden.** A borderless window returns `false`
+  from both by default, so without the overrides the window cannot take focus or become main at
+  all.
+- **⌘W and ⌘M need menu backstops.** Close and minimise are behaviours of the title bar's buttons
+  as much as of the menu; losing the frame loses the standard handling and each has to be
+  re-established and then kept working.
+
+**Against that cost: nobody has ever mentioned it.** Three to four months of testing, by people who
+look at pictures professionally and are paid to notice exactly this class of thing, produced **not
+one report** about corner pixels being masked. That is the strongest evidence available and it
+points one way.
+
+**So the trade is: a meaningful amount of window-management machinery, permanently, against a defect
+that the target audience has demonstrably not noticed over months of real use.** Declined.
+
+⚠️ **THE REASONING IS RECORDED BECAUSE THE CONCLUSION IS NOT OBVIOUS FROM THE OUTSIDE.** "Just
+make the window borderless" reads like a one-line change, and it is the kind of thing that gets
+proposed, scoped, and half-built before the three overrides above surface. Anyone reaching for it
+should reach this entry first.
+
+**What would reopen it:**
+
+- **A user reports it.** One report changes the evidence this was decided on, which was the absence
+  of any.
+- **A use case appears where the corner pixels are load-bearing** — a fixture, a test pattern, or a
+  QC procedure that puts information in the extreme corners of the frame. That would move this from
+  a cosmetic question to a correctness one, and the cost calculation changes with it.
+
+**Not related to:** the docked-vs-overlay control mode (`WindowChrome.controlMode`,
+`App/WindowChrome.swift:151-158`), which shipped and is a different thing entirely. The audit of
+2026-09-21 could not tell from source whether "borderless" named that shipped work or something
+else; this entry exists so the next reader does not have to ask.

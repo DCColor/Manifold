@@ -232,20 +232,168 @@ does not, and `makeColorSpace`'s enumerated-pair structure does not either (see 
 
 ---
 
+### 6.1 What the modes are *for* — decided 2026-09-21
+
+*Design decisions, not measurements. Recorded here because the mode set above is meaningless
+without them, and because "are we only doing this to be like Screen?" is a question that deserves a
+written answer.*
+
+**The modes are a comparison instrument, not a preference.** Each answers a different question, and
+the *delta between them* is the output:
+
+| Mode | The question it answers |
+|---|---|
+| **OS** | What will my client see? |
+| **Reference** | What is actually in this file? |
+| **Bypass** | What are the numbers, with nothing interpreting them? |
+
+If OS and Reference agree, the file survives the trip to a viewer who is not colour-managed the way
+you are. If Reference holds shadow detail that OS lifts, that difference **is** the risk — and on a
+mistagged file it can be dramatic. This is the original "QuickTime gamma bump" diagnostic, correctly
+understood: it is ColorSync-wide (§4), not a QuickTime quirk.
+
+**Bypass is the mode with no opinion, and that is its job.** OS and Reference both trust the file's
+tags, so a mistagged file gets a confidently wrong transform in both and neither will say so. Bypass
+is the only path where nothing interprets anything — which makes it the control condition. When OS
+and Reference disagree, Bypass tells you which one moved.
+
+⚠️ **Bypass is never *correct*, only diagnostic**, and on a display already calibrated to 709/2.4 it
+is close to Reference by coincidence. It needs a standing indicator so nobody judges a picture in it
+three days after leaving it there.
+
+**Why this is not Screen's feature.** Screen's mode set was rejected above on naming grounds; the
+justification here is independent of Screen entirely. §2 and §3 establish that a tool calling itself
+a reference player currently **cannot produce a reference transform on SDR**. Reference mode is how
+that claim becomes true.
+
+**On the IDT → working space → ODT framing.** It does not fit a player and should not be forced to.
+A working space earns its keep when the image is being *modified* — a player modifies nothing. There
+are two stages, not three: how the source is interpreted, and what is sent to the display. **The
+mode picker governs only the second.** Interpretation is identical in every mode, which is exactly
+why "Embedded" was the wrong name.
+
+---
+
+### 6.2 HDR — the structure extends, the varying axis does not
+
+- **On SDR the modes differ on transfer function** (γ1.9609 vs 2.4). That is the defect.
+- **On HDR they should converge.** PQ and HLG get v4 profiles declaring transfer exactly (§3), so
+  the OS already does the right thing. `OS ≈ Reference` on PQ is the **expected** result. If they
+  diverge, that is a finding worth chasing, not a feature working.
+- **What varies on HDR is headroom** — how much of the range the display can show. Different axis.
+- **Bypass on HDR is dramatic and useful**: PQ code values with no transform look spectacularly
+  wrong, which is precisely what they look like in a player that ignores the tag.
+
+⚠️ **This must not reopen the 2026-08-28 decision that the desktop picture is the reference and does
+not tone-map.** Showing the user what their display's headroom *is* is information. Mapping the
+picture to fit it is a different thing and was decided against. Keep them separate, or the mode
+picker grows a fourth entry nobody asked for.
+
+---
+
+### 6.3 UI — decided 2026-09-21
+
+**Scope: per window.** Multi-window shipped, and comparing "what the client sees" against "what the
+file is" side by side is arguably the feature itself. Per-window like `WindowChrome`. Retrofitting
+this later is the expensive direction.
+
+**Progressive disclosure, four tiers.** The transform chain is the clearest possible explanation and
+also the one most likely to put off a buyer who does not want to think about transfer functions. So
+it is available, not prominent:
+
+1. **Always visible, small** — the mode name in the control bar. Bypass carries a warning marker.
+2. **The pulldown** — plain language, with *meaning* as the subtitle rather than mechanism:
+
+   ```
+   As macOS shows it     what your client will see
+   Reference             correct for grading
+   ──────────────────
+   Bypass                no colour management
+   ```
+
+   The separator before Bypass says "different kind of thing" before anyone reads a word.
+3. **One line inside the popover** — the chain, for people who want it:
+
+   ```
+   Rec.709 (tagged)  →  BT.1886 2.4      →  display
+   PQ (tagged)       →  PQ, no tone-map  →  display · headroom 4.48
+   ```
+
+   This carries the existing three-state honesty model (`tagged` / `assumed` / `overridden`) on the
+   left of the first arrow, so interpretation and transform read as two visibly separate stages.
+4. **Inspector and Export Diagnostics** — full detail, where the people who need it already look.
+
+**The subtitles do the teaching.** *"What your client will see"* versus *"correct for grading"*
+explains the entire feature to someone who never wants to know what an EOTF is, and is more honest
+than "OS" and "Reference", which mean nothing until you already know.
+
+**Momentary compare, not only a sticky mode.** If the modes are an instrument, the gesture is
+hold-to-compare. A sticky toggle stays, but the hold is what gets used — and it avoids the failure
+mode of the sticky output-mode pick (2026-09-18): a control that can be left in a non-default state
+and forgotten.
+
+**Home:** the existing Color control, two labelled sections — *Interpretation* (source tags + the
+override) and *Display transform* (the three modes). §6's "Custom belongs with the
+colour-interpretation control" lands in the first section. Keeping them visibly separate is what
+stops "Embedded" creeping back in as a concept.
+
+---
+
+### 6.4 Phasing — decided 2026-09-21
+
+**Phase 0 — measure before building.** A file with real shadow detail, current behaviour vs. no
+declared colorspace, look at the bottom 10%. *Done means:* the γ1.9609 defect has been seen on a
+real display, or established as invisible there.
+
+**Phase 1 — settle the destination question (§7.1).** A spike, not an opinion: what does the layer
+do with a colorspace when the shader has already applied the EOTF, and is there a genuine
+"no further conversion" path? *Done means:* a measured answer written into §7 the way §2 was
+written.
+
+**Phase 2 — infrastructure, with OS and Bypass only.** Mode enum, per-window state, pulldown,
+chain readout, momentary shortcut, diagnostics line. OS is today's behaviour made explicit; Bypass
+is *removing* an assignment. Neither needs colour science. *Done means:* the defect can be A/B'd on
+real files and nothing changed for anyone who does not touch the control.
+
+> This is the strategically important phase: **the diagnostic instrument exists before any of the
+> hard part is written**, and what it shows informs Reference.
+
+**Phase 3 — Reference.** The shader EOTF, against a settled destination. The only phase that is
+real engineering.
+
+**Phase 4 — primaries.** Handle primaries and transfer independently instead of as enumerated
+pairs, closing §7.3. *Blocked on* a Rec.2020-SDR fixture — **author one with Flip** rather than
+hunting for one, as the HDR10 validation fixtures were authored.
+
+**Phase 5 — HDR headroom readout, and Custom.** Both informational rather than structural.
+
+LUT loading sits after Phase 3 — same shader pipeline, same seam, much easier once the transform
+stage exists.
+
+---
+
 ## 7. Open and unverified
 
 1. **The destination question — where the real design work is.** Once the shader owns the transform,
    it must encode to *something*. Whether Reference mode declares a destination colorspace or reads
-   the display profile is **undecided**. Nothing in this document answers it.
+   the display profile is **undecided**. Nothing in this document answers it. **This is Phase 1
+   (§6.4)** and it blocks Phase 3.
 
 2. **Actual display light output was never measured.** §2's ratios are curve arithmetic. No
    photometer, no measured display response. The claim is about what the profile asks for.
 
 3. **`makeColorSpace` flattens (9, 1) — Rec.2020 SDR — to `kCGColorSpaceCoreMedia709`**, silently
    dropping 2020 primaries, because the `switch` enumerates *pairs* and (9,1) falls to the default
-   arm. **Banked, not fixed:** verifying it needs a 2020-SDR fixture the corpus does not have. It
-   belongs with a colour-correctness pass that handles primaries and transfer **independently**
+   arm. **Banked, not fixed:** verifying it needs a 2020-SDR fixture the corpus does not have.
+   It belongs with a colour-correctness pass that handles primaries and transfer **independently**
    rather than through enumerated pairs — the same structural problem as the Custom note in §6.
+
+   Added 2026-09-21: **(9,1) is not HLG** — HLG is (9,18,9) and takes the v4 path correctly. As an
+   intentional delivery format (9,1) is uncommon; where it actually occurs is **mistagging**, a file
+   written with 2020 primaries whose transfer was left at the default. That is exactly the case this
+   tool exists to catch, and today it is rendered with 709 primaries with no indication. The defect
+   is also **structural, not specific to that pair** — any combination absent from the enumerated
+   list falls to the same default arm.
 
 4. **The `[EDR]` log has been blind to P3 all along.** Because the P3 space is unnamed
    (§3), the log line at `MetalVideoRenderer.swift:534` prints `<unnamed>` for every P3 source.
@@ -257,30 +405,6 @@ does not, and `makeColorSpace`'s enumerated-pair structure does not either (see 
 
 7. **The provenance of 1.9609 (§4) is documentation, not measurement.** The two derivations agree
    and the number matches to 1.17e-05, which is strong, but no primary Apple source was read.
-
-8. **Still images are BLOCKED ON THIS DOCUMENT, not on decoding effort — banked post-1.0.**
-   Decoding a PNG is trivial. Showing one honestly is not, and it is the same open question as §7.1.
-
-   A video file declares its colour through NCLC/CICP codes drawn from a **small closed set** —
-   enumerated primaries, transfer functions and matrices — and every path in this app is built on
-   picking from that set: the shader's conversion, the layer's colorspace, the scopes' math, the
-   inspector's readout. A still can carry an **embedded ICC profile**: an arbitrary primaries
-   triangle and an arbitrary tone curve, which must be *converted* rather than looked up.
-
-   Doing that correctly means **the shader owns the display transform** instead of handing the layer
-   a colorspace and letting ColorSync convert — which is exactly Reference mode, and therefore
-   exactly the destination question in §7.1, currently blocked on the MacBook Air measurement
-   (`docs/AIR-COLOUR-TEST.md`).
-
-   **So the order is: settle Reference mode, then stills.** Adding stills first would mean either
-   drawing them through the video path with their profile ignored — a picture this app cannot stand
-   behind — or standing up a second colour path beside the one being rebuilt.
-
-   Until then a still is **refused by name**, through the same path as any other file that cannot be
-   played (`FrameEngine.loadAsset` → `abandonLoad` → the one banner), with a message that says what
-   is actually true — "Manifold plays video — still images aren't supported" — rather than the
-   unreadable-video-track wording, which would blame the file. The refusal site carries this
-   reasoning in full; this entry exists so it is also findable from the colour side.
 
 ---
 
@@ -335,9 +459,8 @@ rTRC : curveType 'curv'  count=1  → PURE POWER LAW, gamma=1.960938
 | Two-era system-profile lineage | | ✅ from versions/dates | |
 | 1.9609 = inverted 709 OETF, dim-surround | | | ⚠️ published refs only |
 | Match QuickTime ≡ Embedded on SDR | ✅ waveform | ✅ "both defer to ColorSync" | Screen internals |
-| Reference mode needs a declared destination | | | ⚠️ **open — the real work** |
-| Stills are gated on that same destination question (§7.8) | | ✅ from the ICC/NCLC difference | |
-| (9,1) Rec.2020-SDR flattens to 709 | | ✅ from code | ⚠️ no fixture |
+| Reference mode needs a declared destination | | | ⚠️ **open — Phase 1, §6.4** |
+| (9,1) Rec.2020-SDR flattens to 709 | | ✅ from code | ⚠️ no fixture — author with Flip |
 | Actual display light output | | | ⚠️ never measured |
 
 ---
