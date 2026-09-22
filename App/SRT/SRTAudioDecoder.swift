@@ -27,6 +27,31 @@
 //    4. SURFACE. The vendored FFmpeg stays demux-only, which is where its LGPL and size discipline
 //       already is.
 //
+//  ── ⚠️ THIS WAS OVERTURNED FOR ONE EVENING AND THEN PUT BACK. READ THIS BEFORE DOING IT AGAIN. ─
+//
+//  On 2026-09-21 a second decoder, `SRTAudioDecoderLibav`, was added and stereo was routed to it.
+//  The reasoning was not careless: the Cloudflare SRT feed sounded like gravel, a WAV captured at
+//  the handoff to the renderer was clean, the framing probe read every packet as well-formed, and
+//  the same bytes decoded cleanly through the ffmpeg CLI. "Clean bytes in, gravel out, and the
+//  other decoder is fine" points at the decoder, and it pointed there for hours.
+//
+//  **It was the wrong stage.** The distortion was the sender's PTS grid — Cloudflare's muxer
+//  quantised the audio PTS to 1 ms, which cannot express a 1024-frame step at 48 kHz, so the
+//  renderer was handed a 16-to-32-sample discontinuity 47 times a second. That sits UPSTREAM of
+//  every decoder and is unaffected by which one runs. See `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`
+//  §9, and `SRTFrameRouter.audioPTSTicks` for the sample-counted axis that fixed it.
+//
+//  With the grid fixed, AudioToolbox was measured on the same Cloudflare feed and on local SRT:
+//  **clean on both, 471/471 and 164/164 contiguous buffers, `axisRePins=0`.** So the premise that
+//  put libav here was retired by measurement rather than by preference, the second decoder and its
+//  protocol were deleted, and the four reasons above stand unchanged.
+//
+//  ⚠️ THE ONE THING THAT WOULD JUSTIFY REVISITING libav IS NOT THIS. The vendored build carries an
+//  `aac_latm` decoder and this router refuses LATM/LOAS outright (`SRTFrameRouter.handleAudioFormat`).
+//  That is a real capability gap and a real reason to reopen the question — but it is a DIFFERENT
+//  reason, and it needs its own measurement and its own channel-order work rather than riding
+//  along on a swap made for something else.
+//
 //  ── ⚠️ NOTHING HERE ASSUMES A CHANNEL COUNT, AT ANY LAYER ──────────────────────────────────────
 //
 //  Rate, channel count and frames-per-packet all come from the stream's AVCodecParameters. There
@@ -37,7 +62,7 @@ import AudioToolbox
 import AVFoundation
 import ManifoldCore   // AudioChannelLayoutBridge
 
-final class SRTAudioDecoder: SRTAudioDecoding {
+final class SRTAudioDecoder {
 
     /// AAC frames per packet. LC is 1024; SBR (HE-AAC / HE-AACv2) doubles it to 2048.
     /// A CEILING for the output buffer, not an assumption about what arrives — the converter

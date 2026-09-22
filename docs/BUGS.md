@@ -686,11 +686,16 @@ built to find a fault that this paragraph had described in advance.
   triggered it, which is why local SRT sounded clean — see the open question below about whether
   local was contiguous all along or merely quantised more kindly.
 
-### ⚠️ STILL TO CONFIRM
+### ✅ CONFIRMED IN A REAL SESSION, 2026-09-21 (was: STILL TO CONFIRM)
 
-Neither fix has been through a real session. The renderer probe is still attached and its histogram
-is the acceptance test: **`EXACTLY ZERO (contiguous)` for essentially every buffer, with no sign
-alternations.** The probe's own gap comparison was corrected to use `CMTimeCompare` rather than
+The renderer probe's histogram was the stated acceptance test — **`EXACTLY ZERO (contiguous)` for
+essentially every buffer, with no sign alternations** — and it passed on both transports and on
+both decoders then in the tree: **471/471 contiguous on Cloudflare and 164/164 on local SRT, with
+`axisRePins=0`**, measured on a signed Profile build. The PTS fix is decoder-independent, which is
+what made the same histogram usable as the instrument that exonerated AudioToolbox — see the
+decoder-reversion entry below.
+
+The probe's own gap comparison was corrected to use `CMTimeCompare` rather than
 `Double` seconds — measured in `Double`, a perfectly tiled 48 kHz stream at a ~36 s PTS shows
 residuals of ~3.4e-10 samples, which would have reported a correct fix as 467 non-contiguous
 buffers.
@@ -718,94 +723,125 @@ tripwires guard the code; this failure needed no edit to the code.
 
 ---
 
-## ☐ SRT AAC decode is SPLIT between two decoders — stereo on libavcodec, multichannel still on AudioToolbox
+## ✅ CLOSED BY REVERSION 2026-09-21 — SRT AAC decode went to libavcodec on a premise that turned out to be wrong, and is back on AudioToolbox
 
-**Status:** OPEN, **deliberately deferred, not overlooked.** **Raised:** 2026-09-21, as the named
-remaining half of the libav decode switch. **Not a regression:** multichannel behaves exactly as it
-did before that change — it is the path that did NOT move.
+**Status:** CLOSED — **one decoder again, `SRTAudioDecoder` (AudioToolbox / AudioConverter), for
+every channel count.** **Raised and closed the same day, 2026-09-21.** This entry replaced one
+titled *"SRT AAC decode is SPLIT between two decoders"*, which described the split as deliberately
+deferred work. It is not deferred; it is undone. **Kept as a record rather than deleted,
+because the reasoning that produced the split was sound and will reproduce.**
 
-### The shipping state, stated plainly
+⚠️ **THE POINT OF THIS ENTRY IS THE INFERENCE, NOT THE CODE.** The code is a small revert. What is
+worth a future reader's time is that a correct-looking chain of measurements pointed confidently at
+the wrong stage, and nothing in the evidence said so.
 
-**Two AAC decoders are in the tree and the choice is made per stream**, at
-`SRTFrameRouter.handleAudioFormat`, on one test — `Int(format.channelCount) <= 2`:
+### What was built, and why it was reasonable
 
-| stream | decoder | why |
-|---|---|---|
-| **≤ 2 channels** | `SRTAudioDecoderLibav` (libavcodec + libswresample) | the default |
-| **> 2 channels** | `SRTAudioDecoder` (AudioToolbox / AudioConverter) | channel order is not done for libav |
+For part of one evening the tree carried two AAC decoders behind a protocol:
 
-Both conform to `SRTAudioDecoding`, so `handleAudioPacket` does not know which it is talking to, and
-every connection logs which one it got (`[SRT-AUDIO] decoder: libavcodec` / `AudioToolbox`) because
-the two produce an identical buffer shape and are otherwise indistinguishable downstream.
+| stream | decoder |
+|---|---|
+| ≤ 2 channels | `SRTAudioDecoderLibav` (libavcodec + libswresample) |
+| > 2 channels | `SRTAudioDecoder` (AudioToolbox / AudioConverter) |
 
-⚠️ **THE SWITCH WAS MADE FOR A REASON THAT NO LONGER FULLY HOLDS, AND THAT IS WORTH KNOWING BEFORE
-PLANNING FROM IT.** libav was adopted because AudioToolbox appeared to mis-decode the Cloudflare
-feed — clean bytes in, gravel out. The gravel turned out to be the PTS grid (see the SRT audio
-distortion entry above), which was upstream of both decoders and affected neither's output. **So it
-is no longer established that AudioToolbox mis-decodes anything.** What IS established: libav
-decodes this stream correctly, the switch is in place, and it has not been shown to be worse. Do not
-plan the multichannel work on the premise that AudioConverter is broken — that premise is now
-untested, and re-testing it is cheaper than the channel-order work below.
+The case for the swap, as it stood at the time:
 
-### ⚠️ WHY THE LINE IS AT TWO CHANNELS, AND WHY WIDENING IT IS NOT A ONE-CHARACTER CHANGE
+- The Cloudflare SRT feed was audibly gravel, immediately on connect, continuously.
+- A WAV captured at the handoff to the renderer was **clean** — peak, RMS, sample-to-sample
+  continuity and spectrum all matching a known-good local capture to within 1 dB below 20 kHz.
+- `[SRT-AUDIO-PROBE]` read every packet as well-formed: 7-byte ADTS header, `frame_length` matching
+  the packet, `rdblocks = 0`, 1024 frames × 2 ch.
+- The **same bytes decoded cleanly through the ffmpeg CLI**, which is libavcodec.
+- Local SRT was clean on identical code; only the transport with a third party's muxer failed.
 
-**The two decoders emit different channel ORDERS, and neither is wrong.**
+Clean bytes in, gravel out, and a different decoder handling the same bytes correctly. That is a
+decoder fault by every reading available at the time, and the swap was measured to help.
 
-```
-channel_configuration 6 (5.1)
-  AudioToolbox  →  C L R Ls Rs LFE     (the AAC BITSTREAM order)
-  libav         →  L R C LFE Ls Rs     (libav's native order)
-```
+### Why it was wrong
 
-`SRTAudioDecoder` carries an **ask-then-verify** sequence for exactly this: translate the mux's
-mask to CoreAudio positions, REQUEST that order from the converter, then **read the property back**
-and label from what came back — because `AudioConverterSetProperty` returning `noErr` says the
-property was accepted, not that the decoder reordered. That machinery has no libav counterpart
-written yet.
+**The distortion was upstream of both decoders.** Cloudflare's muxer quantised the audio PTS to a
+1 ms grid, which cannot express a 1024-frame step at 48 kHz (21.3333 ms). The renderer was handed a
+16-to-32-sample discontinuity 47 times a second and resolved every one. See the SRT audio
+distortion entry above, and `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md` §9 for the full mechanism —
+including §10 on why seven instruments read healthy throughout.
 
-**Attaching the wrong order is the failure mode this codebase has already paid for once:** dialogue
-on Left, LFE on a surround, six correctly-labelled meters, and nothing looking broken anywhere. It
-is the same shape as every other entry in this file where a reading "is a real observation and is
-not". Re-deriving it at speed to fix a stereo bug is how it arrives a second time, so it was not
-attempted.
+⚠️ **The libav swap appeared to help because it was measured against ears, over a path that also
+changed.** It never addressed the PTS grid, and could not have: no decoder sees it.
 
-Stereo needs none of that: one pair, both decoders agree on L R, and the layout is a constant
-(`kAudioChannelLayoutTag_Stereo`). **That is the entire reason the boundary is where it is** — not
-a guess about where libav is trustworthy, but the point at which channel order stops being a
-question.
+### The measurement that closed it
 
-### What "done" means
+After the sample-counted PTS axis (`SRTFrameRouter.audioPTSTicks`) landed, two signed Profile
+builds were cut from the same tree, differing only in the selection line, both Developer ID signed,
+and run against the same sources:
 
-**All four, and the first is the cheap one that may cancel the rest:**
+| build | decoder | Cloudflare | local SRT |
+|---|---|---|---|
+| A | libavcodec (`useLibav = channelCount <= 2`) | contiguous | contiguous |
+| B | **AudioToolbox (`useLibav = false`)** | **471/471 contiguous, `axisRePins=0`** | **164/164 contiguous, `axisRePins=0`** |
 
-1. **Re-test whether AudioToolbox actually mis-decodes multichannel AAC from this sender**, now that
-   the PTS grid is out of the way. If it does not, the honest outcome may be to revert to one
-   decoder rather than to finish the second — which would close this item by deletion.
-2. **libav's output order for each `channel_configuration` established BY MEASUREMENT**, not by
-   reading libav's headers, on a fixture with identifiable content per channel.
-3. **Mapped to CoreAudio labels with the same read-back-is-authority discipline the AudioToolbox
-   path uses** — or, if libav offers no equivalent read-back, an explicitly stated mapping with the
-   fixture from (2) proving it, because a mapping asserted from documentation is what this codebase
-   has already been bitten by.
-4. **Then the `<= 2` test widens and ONE decoder is deleted.** Whichever survives, the end state is
-   a single path: two decoders behind a protocol is a correct way to run an experiment and a poor
-   way to ship, because the untaken branch is the one that rots.
+**Build B was clean on Cloudflare and on local, by ear and by histogram.** The premise that put
+libav in the tree — that AudioToolbox mis-decodes this feed — is therefore not merely unproven but
+**tested and false**.
 
-**Until all four are done the `<= 2` test is load-bearing**, and widening it without (2) and (3)
-re-introduces a defect that reads as correct in every log and every meter.
+### What was removed
 
-⚠️ **Until then, the test is load-bearing and the log line names which decoder ran.** Every SRT
-connection now prints `[SRT-AUDIO] decoder: libavcodec` or `AudioToolbox`, because the two produce
-an identical buffer shape and are otherwise indistinguishable downstream — the meters, the tap, the
-SDI path and every counter read the same either way.
+- `App/SRT/SRTAudioDecoderLibav.swift` — deleted, and with it the `[SRT-AUDIO-PROBE] pkt%d libav.*`
+  packet probe that lived in it.
+- `App/SRT/SRTAudioDecoding.swift` — the protocol, deleted. `SRTFrameRouter.audioDecoder` is the
+  concrete `SRTAudioDecoder?` again, with no `any` existential and no selection branch.
+- The `[SRT-AUDIO] decoder: …` log line — deleted. It existed to name which of two indistinguishable
+  decoders ran; with one decoder it reports a compile-time constant, and the `[SRT-AUDIO] stream …`
+  line already carries the rate, channel count and framing.
 
-### Related, and worth deciding together
+`SRTAudioDecoder`'s ADTS machinery (`parseADTS`, `audioSpecificConfig`, `esds`, the cookie state
+machine) was never removed and is now the only path again.
 
-`SRTAudioDecoder`'s ADTS machinery (`parseADTS`, `audioSpecificConfig`, `esds`, the whole cookie
-state machine) is **still present and still exercised**, because multichannel still needs it. It
-was left in place deliberately so reverting the switch is one condition, not a restoration. If the
-multichannel half lands and `SRTAudioDecoder` goes, roughly 150 lines of ASC/ESDS synthesis go with
-it — libav needs none of it.
+### ⚠️ What did NOT get closed by this, and must not be read as closed
+
+The superseded entry carried a channel-order section that looked like new work created by the
+split. **It was not new.** The split added a second, libav-specific channel-order question, and
+that question died with the libav decoder. What survives is the **original 2026-08-26 item, which
+predates all of this and is untouched by it**:
+
+> **SDI carries the monitored track's channels discretely, in FILE order, and never states the
+> mapping** — see that entry below. `d[c] = s[c]` at `App/DeckLink/DeckLinkBridge.mm:585`, no role
+> table, roles published at the seam (`AudioTapBuffer.Format.roles`) and consumed by nothing in
+> `App/DeckLink/`.
+
+**That was true before tonight and is still true.** It is a property of the SDI output path, not of
+the AAC decoder, and reverting the decoder neither helped nor hurt it.
+
+Within `SRTAudioDecoder` itself the ask-then-verify sequence for AAC channel order is intact and is
+the thing to trust: translate the mux's mask to CoreAudio positions, REQUEST that order from the
+converter, **read the property back**, and label from what came back — because
+`AudioConverterSetProperty` returning `noErr` says the property was accepted, not that the decoder
+reordered. Any failure at any step means no layout at all and channel numbers on the meters.
+
+### 📌 NOTED, NOT ACTIONED — the one argument for libav that this evening did not test
+
+libavcodec has an **`aac_latm`** decoder (confirmed in the vendored build's decoder enumeration:
+`aac aac_latm dnxhd pcm_* prores`), and `SRTFrameRouter.handleAudioFormat` **refuses LATM/LOAS
+outright** — an MPEG-TS feed with PMT stream type 0x11 gets a loud refusal and no audio.
+
+**That is a real capability gap and a legitimate reason to revisit libav later.** It is recorded
+here so it is not lost, and deliberately not folded into this entry as work:
+
+⚠️ **It must not ride along on the swap that was just reverted.** A LATM decoder is a different
+justification, it would need its own measurement, and — if it were ever to handle more than stereo
+— its own channel-order derivation, established by measurement on a fixture with identifiable
+content per channel rather than read out of libav's headers. Re-deriving channel order at speed is
+how the 5.1 mislabelling arrives: dialogue on Left, LFE on a surround, six correctly-labelled
+meters, nothing looking broken anywhere.
+
+### The transferable part
+
+**A decoder swap that "fixes" an audible fault is not evidence that the decoder was broken**, when
+the swap was evaluated by listening and the real fault is a timing property that no decoder can
+see. The A/B that settled it took two signed builds differing in one line, run against a
+per-event instrument (the renderer gap histogram) rather than against ears — and it was only
+possible to state the result cleanly because the histogram measures each buffer boundary instead of
+aggregating. The instrument that exonerated AudioToolbox is the same one that convicted the PTS
+grid.
 
 ---
 

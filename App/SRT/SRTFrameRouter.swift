@@ -926,10 +926,12 @@ final class SRTFrameRouter {
 
     /// Session-thread-owned, exactly like `decoder`. Built in `prepareAudioDecoder` on the session
     /// thread and used by `handleAudioPacket` on that same thread.
-    /// ⚠️ THE PROTOCOL, NOT A CONCRETE TYPE — there are two AAC decoders now and the choice is
-    /// per stream. See `SRTAudioDecoding` for which gets used when, and why multichannel does not
-    /// go to libav.
-    private var audioDecoder: (any SRTAudioDecoding)?
+    ///
+    /// ⚠️ THE CONCRETE TYPE, DELIBERATELY. This was briefly `(any SRTAudioDecoding)` with a
+    /// libavcodec sibling behind it; that experiment is reverted and the protocol is deleted. See
+    /// `SRTAudioDecoder`'s header for why, and do not re-introduce the seam without a reason of
+    /// its own — the one it had turned out to be aimed at the wrong stage.
+    private var audioDecoder: SRTAudioDecoder?
 
     #if DEBUG
     /// DEBUG-only .wav capture of the exact bytes handed to the tap. Nil unless armed by
@@ -1058,49 +1060,30 @@ final class SRTFrameRouter {
             return
         }
 
-        // ── WHICH DECODER, AND WHY ────────────────────────────────────────────────────────
+        // ── ONE DECODER, NO SELECTION ─────────────────────────────────────────────────────
         //
-        // ⚠️ ONE-LINE REVERT: change this condition to `false` and every stream goes back to
-        // AudioToolbox exactly as before. Nothing in `SRTAudioDecoder` was removed to make room
-        // for this — `parseADTS`, `audioSpecificConfig` and `esds` are all still there, still
-        // correct, and still exercised by the multichannel path below.
+        // ⚠️ THERE WAS A BRANCH HERE (2026-09-21, for part of one evening): `channelCount <= 2`
+        // routed stereo to a libavcodec decoder and left multichannel on AudioToolbox. It was
+        // adopted because AudioToolbox appeared to mis-decode the Cloudflare feed, and that
+        // premise was wrong — the distortion was the sender's PTS grid, upstream of both decoders.
+        // AudioToolbox was then measured clean on the same feed and the branch was reverted. The
+        // full account is in `SRTAudioDecoder`'s header and in docs/BUGS.md; the point of writing
+        // it down is that the inference looked correct at the time, so it will look correct again.
         //
-        // STEREO → libav, because AudioToolbox renders the Cloudflare feed as gravel and libav
-        // renders the same bytes clean. MULTICHANNEL → AudioToolbox, because the channel-ORDER
-        // work only exists on that path and re-deriving it in a hurry is how the 5.1 mislabelling
-        // happened the first time. The reasoning is written out in `SRTAudioDecoderLibav`.
-        let useLibav = Int(format.channelCount) <= 2
-
         // NOTHING IS ASSUMED — rate and channels come from the stream.
-        if useLibav {
-            audioDecoder = SRTAudioDecoderLibav(sampleRate: Double(format.sampleRate),
-                                                channelCount: Int(format.channelCount),
-                                                extradata: extradata,
-                                                channelMask: format.channelMask,
-                                                channelOrder: format.channelOrder)
-        } else {
-            audioDecoder = SRTAudioDecoder(sampleRate: Double(format.sampleRate),
-                                           channelCount: Int(format.channelCount),
-                                           formatID: formatID,
-                                           extradata: extradata,
-                                           channelMask: format.channelMask,
-                                           channelOrder: format.channelOrder)
-        }
+        audioDecoder = SRTAudioDecoder(sampleRate: Double(format.sampleRate),
+                                       channelCount: Int(format.channelCount),
+                                       formatID: formatID,
+                                       extradata: extradata,
+                                       channelMask: format.channelMask,
+                                       channelOrder: format.channelOrder)
 
-        // ⚠️ NAMED, EVERY CONNECTION, WHETHER OR NOT ANYTHING IS WRONG. Two decoders that produce
-        // the same shape of buffer are indistinguishable downstream — the meters, the tap, the
-        // SDI path and every counter read identically either way. A log that only said which one
-        // ran when it failed would leave "which decoder made this sound?" unanswerable for exactly
-        // the sessions worth asking about.
-        NSLog("[SRT-AUDIO] decoder: %@ — %d ch declared (%@). %@",
-              useLibav ? "libavcodec" : "AudioToolbox",
-              format.channelCount,
-              useLibav ? "stereo or mono" : "multichannel",
-              useLibav
-                ? "libav decodes the Cloudflare feed correctly where AudioToolbox does not."
-                : "multichannel stays on AudioToolbox until the channel-order work is redone for "
-                  + "libav — see docs/BUGS.md.")
-
+        // ⚠️ NO `[SRT-AUDIO] decoder: …` LINE ANY MORE, ON PURPOSE. It existed to name which of two
+        // decoders ran, because both produced an identical buffer shape and were otherwise
+        // indistinguishable downstream. With one decoder it would report a compile-time constant,
+        // and the `[SRT-AUDIO] stream …` line above already carries the rate, channel count and
+        // framing that were the only variable parts of it. The failure line below is what remains
+        // worth saying.
         if audioDecoder == nil {
             NSLog("[SRT-AUDIO] decoder construction FAILED — no audio will reach the tap")
         }

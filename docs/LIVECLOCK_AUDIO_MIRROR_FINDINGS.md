@@ -382,6 +382,49 @@ consecutive windows, on both transports.
 > defending. It closed with *"SRT's audio is measured working on the wire and is left alone"* — and
 > the wire was never the broken part.
 
+### ⚠️ THE CASUALTY: a decoder swap made on this evidence, and reverted the same night
+
+**While this was being chased, the AAC decoder was swapped from AudioToolbox to libavcodec, and
+that swap has been reverted.** It is recorded here rather than quietly undone, because the
+inference behind it was reasonable and will look reasonable again.
+
+**The case for it, as it stood:** the feed was gravel; the WAV captured at the handoff to the
+renderer was clean to within 1 dB below 20 kHz; `[SRT-AUDIO-PROBE]` read every packet as well-formed
+ADTS with `rdblocks = 0`; and the **same bytes decoded cleanly through the ffmpeg CLI**, which is
+libavcodec. Clean bytes in, gravel out, and a different decoder handling the identical bytes
+correctly. Every one of those observations is true and was correctly measured.
+
+**Why it was wrong:** the fault is the PTS grid, which sits **upstream of every decoder**. No
+decoder can see it, none of them caused it, and swapping one for the other could not have fixed it.
+The swap appeared to help only because it was judged **by ear**, against a path that was changing
+underneath the test.
+
+**The measurement that settled it, after the sample-counted axis landed:** two Profile builds from
+one tree, differing in the single selection line, both Developer ID signed, run against the same
+sources.
+
+| build | decoder | Cloudflare | local SRT |
+|---|---|---|---|
+| A | libavcodec | contiguous | contiguous |
+| B | **AudioToolbox, all channel counts** | **471/471 contiguous, `axisRePins=0`** | **164/164 contiguous, `axisRePins=0`** |
+
+Clean on both, by ear and by histogram. So AudioToolbox was never shown to mis-decode anything, the
+second decoder and its protocol are deleted, and SRT audio is on one decoder again.
+
+⚠️ **THE GENERALISATION, WHICH IS THE PART WORTH CARRYING.** §10 below is about instruments that
+aggregate. This is the companion failure: **a remedy that appears to work is not evidence for the
+diagnosis that motivated it, when the remedy was judged by the same sense that reported the
+symptom.** The decoder swap and the PTS fix were both in flight; the ears could not separate them,
+and only a per-event instrument could. Note that the gap histogram — built during this
+investigation to convict the PTS grid — is also what exonerated the decoder. Once a per-event
+instrument exists, use it to re-test what was concluded without one.
+
+📌 **And one thing that is NOT a reason to re-adopt libav, recorded so it is not confused with
+one:** libavcodec has an `aac_latm` decoder and `SRTFrameRouter.handleAudioFormat` refuses
+LATM/LOAS outright. That is a real capability gap and a possible reason to revisit libav later —
+but it is a **different justification**, needing its own measurement and its own channel-order
+work, and it must not ride along on the swap that was just reverted.
+
 ---
 
 ## 10. Why every instrument missed it — the transferable part
@@ -412,7 +455,8 @@ Seven instruments read healthy or actively misled during this investigation:
 
 Four hypotheses were also eliminated by test and are recorded so nobody re-runs them: ADTS framing
 (probe-verified correct), the AAC decoder (switched to libavcodec — the same library `ffmpeg` uses,
-which decodes the stream cleanly — still gravelly), the renderer's rate (pinned to exactly 1.0 —
+which decodes the stream cleanly — still gravelly; **that switch has since been reverted, see §9's
+"THE CASUALTY"**), the renderer's rate (pinned to exactly 1.0 —
 still gravelly), and debug-build overhead (Release with `DEBUG=0` — still gravelly).
 
 ### The rules this produces

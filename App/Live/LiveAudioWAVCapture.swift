@@ -14,8 +14,10 @@
 //    * THE TRANSPORT IS FINE — the same stream plays clean in another client.
 //    * THE FRAMING IS FINE — `[SRT-AUDIO-PROBE]` read the packets as received: 7-byte ADTS header,
 //      `frame_length` matching the packet, `rdblocks = 0`, 1024 frames × 2 ch.
-//    * THE DECODER IS FINE, OR AT LEAST IS THE ONE THAT WORKS ELSEWHERE — decode is libavcodec
-//      now, the same library the ffmpeg CLI uses to decode this stream cleanly.
+//    * THE DECODER IS FINE — and this line once read "decode is libavcodec now", because the
+//      decoder swap was in force while this file was written. It was reverted: the fault was the
+//      sender's PTS grid, upstream of every decoder, and AudioToolbox was then measured clean on
+//      the same feed. See `SRTAudioDecoder`'s header.
 //    * THE TIMING IS FINE — `timebase−clock` holds within 5 ms, with frame counts and PTS agreeing
 //      to the sample.
 //    * THE LEVEL IS IRRELEVANT — this is not quiet or loud audio, it is wrong audio.
