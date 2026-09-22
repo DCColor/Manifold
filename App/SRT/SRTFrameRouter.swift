@@ -984,6 +984,12 @@ final class SRTFrameRouter {
     func prepareAudioDecoder(format: ManifoldSRTAudioFormat) {
         audioPacketsReceived = 0; audioFramesIngested = 0
         audioPacketsUndecodable = 0; audioPacketsWithoutPTS = 0
+        // The axis is per-STREAM. Carrying an anchor across a format change or a reconnect would
+        // stamp the new stream's first buffer from the old stream's count — the same reasoning
+        // NDIService resets its counter under.
+        audioAnchorTicks = nil; audioCumulativeFrames = 0
+        audioAxisRate = 0; audioAxisChannels = 0
+        audioAxisResyncCount = 0; audioAxisFirstDivergenceLogged = false
         audioLoggedFirstFrames = false
 
         let codec = withUnsafePointer(to: format.codecName) {
@@ -1022,11 +1028,20 @@ final class SRTFrameRouter {
             extradata = Array(UnsafeBufferPointer(start: ptr, count: Int(format.extradataSize)))
         }
 
+        // ⚠️ THE TIME BASE IS ON THIS LINE BECAUSE IT DECIDES WHETHER THE SENDER'S PTS CAN TILE AT
+        // ALL. `1/90000` can express a 1024-frame step at 48 kHz exactly (1920 ticks); `1/1000`
+        // cannot express it at all (21.3333 ms), and every buffer boundary is then rounded before
+        // this app ever sees it. Comparing this field between two senders is what separates "that
+        // transport was always contiguous" from "it was quantised and merely sounded acceptable".
         NSLog("[SRT-AUDIO] stream %d pid=0x%x codec=%@ profile=%@ %d Hz %d ch layout=%@ "
-            + "framing=%@ extradata=%d B",
+            + "framing=%@ extradata=%d B timeBase=%d/%d (%.6f s/tick — %@)",
               format.streamIndex, UInt32(bitPattern: format.pid), codec, profile,
               format.sampleRate, format.channelCount, layout.isEmpty ? "?" : layout,
-              isLATM ? "LATM/LOAS" : "ADTS-or-raw", format.extradataSize)
+              isLATM ? "LATM/LOAS" : "ADTS-or-raw", format.extradataSize,
+              format.timeBaseNum, format.timeBaseDen,
+              format.timeBaseDen > 0 ? Double(format.timeBaseNum) / Double(format.timeBaseDen) : 0,
+              Self.timeBaseVerdict(num: format.timeBaseNum, den: format.timeBaseDen,
+                                   sampleRate: Double(format.sampleRate)))
 
         guard !isLATM else {
             audioDecoder = nil
@@ -1136,6 +1151,114 @@ final class SRTFrameRouter {
             + "will read NO AUDIO TRACK.")
     }
 
+    // MARK: - The audio PTS axis: SAMPLE-COUNTED, not read off the source PTS per buffer
+
+    /// Anchor of the sample axis, IN SAMPLE TICKS on the sample rate's own timescale, and the
+    /// count of frames delivered since it was set. `ptsTicks = anchorTicks + cumulative` — an
+    /// integer add, which is the whole fix.
+    private var audioAnchorTicks: Int64?
+    private var audioCumulativeFrames: Int64 = 0
+    private var audioAxisRate = 0.0
+    private var audioAxisChannels = 0
+    private var audioAxisResyncCount = 0
+    private var audioAxisFirstDivergenceLogged = false
+
+    /// How far the sample axis may drift from the SOURCE PTS before it is re-pinned.
+    ///
+    /// 25 ms — deliberately HALF of `AudioTapBuffer.append`'s 50 ms PTS/sample disagreement
+    /// threshold, the same value and the same reasoning as `NDIService.audioAxisResyncTolerance`.
+    /// The tap re-anchor DROPS the retained window, which is what DeckLink reads from, so an axis
+    /// that only corrected at the tap's own threshold would trade a renderer glitch for an SDI
+    /// dropout.
+    private static let audioAxisResyncTolerance = 0.025
+
+    /// ── ⚠️ WHY THE PTS IS COUNTED IN SAMPLES AND NOT CONVERTED FROM THE SOURCE PTS ────────────
+    ///
+    /// THIS REPLACED `CMTime(seconds: packet.pts × timeBase, preferredTimescale: 90_000)`, AND
+    /// THAT CONVERSION WAS THE DISTORTION BUG. `AVSampleBufferAudioRenderer` schedules by PTS
+    /// exactly, so buffer n+1 must begin where buffer n ended TO THE SAMPLE. MEASURED on the
+    /// Cloudflare feed, before the fix:
+    ///
+    ///     PTS 36.263000, 36.284000, 36.306000 …   — a 1 ms grid
+    ///     true buffer duration 1024/48000         = 21.3333 ms
+    ///     → steps of 21 ms and 22 ms, alternating
+    ///     → gaps of −16 and +32 samples, alternating, cumulative ≈ 0
+    ///     → ZERO contiguous buffers out of 468
+    ///
+    /// The renderer must splice every single buffer, ~47 times a second, which is continuous
+    /// distortion rather than clicks. 1 ms is 48 samples at 48 kHz; rounding 21.3333 ms down loses
+    /// 16 and rounding up gains 32, which is exactly the pair observed.
+    ///
+    /// ⚠️ THE ROUNDING IS NOT NECESSARILY OURS, AND THE FIX DOES NOT DEPEND ON WHOSE IT IS. Either
+    /// the stream declares a millisecond `time_base` (so `packet.pts` cannot express a sample) or
+    /// the sender's muxer quantised its own PTS to milliseconds before we ever saw it. In both
+    /// cases the per-buffer source PTS is incapable of tiling, and in both cases counting samples
+    /// fixes it — which is why this does not try to distinguish them.
+    ///
+    /// ⚠️ AND IT IS STILL PINNED TO THE SOURCE TIMELINE, WHICH IS NOT OPTIONAL. SRT's VIDEO is
+    /// paced from the same sender PTS axis, so a sample axis allowed to free-run would take
+    /// lip-sync with it. Sample-exact in the small, source-pinned in the large — the same contract
+    /// NDI's axis has with the wall clock, with the sender's timeline in place of `monotonicNow()`
+    /// because that is what SRT's video actually uses.
+    ///
+    /// The old comment block in `makeAudioSampleBuffer` predicted this exactly ("the desktop would
+    /// crackle exactly as NDI's did — with the tap, the meters and SDI all still perfect, because
+    /// only the renderer uses per-buffer timing") and concluded "SRT's audio is measured working on
+    /// the wire and is left alone". The wire was never the part that was broken.
+    private func audioPTSTicks(forFrames frames: Int, sampleRate: Double, channels: Int,
+                               sourcePTS: Double) -> Int64 {
+        // (Re)anchor: first buffer of a session, or the format moved under us. A rate change makes
+        // `cumulative / sampleRate` meaningless — the divisor is no longer the one the frames were
+        // counted at — so the counter restarts rather than being converted.
+        if audioAnchorTicks == nil || sampleRate != audioAxisRate || channels != audioAxisChannels {
+            if audioAnchorTicks != nil {
+                NSLog("[SRT-AUDIO] audio format moved %.0fHz·%dch → %.0fHz·%dch — sample axis "
+                    + "restarted and re-anchored to the source PTS",
+                      audioAxisRate, audioAxisChannels, sampleRate, channels)
+            }
+            // The ONE conversion from seconds in the whole axis. Rounded to the nearest sample
+            // tick, because a tick is the finest thing the axis can express and a fractional
+            // anchor would reintroduce exactly the rounding this replaced.
+            audioAnchorTicks = Int64((sourcePTS * sampleRate).rounded())
+            audioCumulativeFrames = 0
+            audioAxisRate = sampleRate
+            audioAxisChannels = channels
+        }
+
+        var ticks = audioAnchorTicks! + audioCumulativeFrames
+        let divergence = Double(ticks) / sampleRate - sourcePTS
+
+        // ⚠️ REPORTED ONCE, EARLY, BECAUSE IT IS THE MEASUREMENT THAT NAMES THE SENDER. A source
+        // whose PTS tiles exactly diverges by 0; one quantising to milliseconds diverges by up to
+        // half a grid step immediately. This is what distinguishes "this transport was always
+        // contiguous" from "it was quantised and merely sounded acceptable".
+        if !audioAxisFirstDivergenceLogged && audioCumulativeFrames > 0 {
+            audioAxisFirstDivergenceLogged = true
+            NSLog("[SRT-AUDIO] sample axis: after 1 buffer the source PTS is %+.4f ms from the "
+                + "sample-counted axis (%.0f samples). ZERO means the sender's PTS already tiled "
+                + "exactly; anything else is the sender's own quantisation, which the axis now "
+                + "absorbs.", divergence * 1000, divergence * sampleRate)
+        }
+
+        if abs(divergence) > Self.audioAxisResyncTolerance {
+            audioAxisResyncCount += 1
+            // Re-pin so THIS buffer lands on the source PTS, keeping the running count intact —
+            // the axis moves, the counter does not restart. Still an integer tick, so the grid
+            // property survives a re-pin.
+            audioAnchorTicks = Int64((sourcePTS * sampleRate).rounded()) - audioCumulativeFrames
+            ticks = audioAnchorTicks! + audioCumulativeFrames
+            NSLog("[SRT-AUDIO] sample axis RE-PINNED — it had run %+.1f ms %@ the source PTS "
+                + "(tolerance %.0f ms) · re-pin #%d. A one-off is a sender discontinuity; a steady "
+                + "cadence means the declared sample rate is not the rate the sender is producing "
+                + "at, and the fault is upstream of this axis.",
+                  divergence * 1000, divergence > 0 ? "AHEAD OF" : "BEHIND",
+                  Self.audioAxisResyncTolerance * 1000, audioAxisResyncCount)
+        }
+
+        audioCumulativeFrames += Int64(frames)
+        return ticks
+    }
+
     /// SESSION THREAD, inline, per packet. The hot path — no hop, exactly like `handleAccessUnit`.
     func handleAudioPacket(_ packet: ManifoldSRTAudioPacket) {
         audioPacketsReceived += 1
@@ -1151,12 +1274,15 @@ final class SRTFrameRouter {
         let frameCount = frames.count / decoder.channelCount
         guard frameCount > 0 else { return }
 
-        // The stream's own time base — 1/90000 for MPEG-TS, natively and always, the same value
-        // and the same reasoning as the video path. NOT rescaled.
+        // The stream's own time base. Used to PIN the sample axis, never as the per-buffer stamp —
+        // see `audioPTSTicks` for why the conversion that used to happen here was the bug.
         let pts = Double(packet.pts) * audioTimeBase
+        let ptsTicks = audioPTSTicks(forFrames: frameCount, sampleRate: decoder.sampleRate,
+                                     channels: decoder.channelCount, sourcePTS: pts)
         guard let sb = Self.makeAudioSampleBuffer(frames, frames: frameCount,
                                                   channels: decoder.channelCount,
-                                                  sampleRate: decoder.sampleRate, pts: pts,
+                                                  sampleRate: decoder.sampleRate,
+                                                  ptsTicks: ptsTicks,
                                                   layout: decoder.channelLayoutData)
         else { audioPacketsUndecodable += 1; return }
 
@@ -1281,7 +1407,7 @@ final class SRTFrameRouter {
     /// NUMBERS on the meters. Do not add a "sensible default for 6 channels" here.
     private static func makeAudioSampleBuffer(_ pcm: UnsafeBufferPointer<Int32>,
                                               frames: Int, channels: Int,
-                                              sampleRate: Double, pts: Double,
+                                              sampleRate: Double, ptsTicks: Int64,
                                               layout: Data?) -> CMSampleBuffer? {
         var asbd = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
@@ -1324,26 +1450,26 @@ final class SRTFrameRouter {
                                             dataLength: byteCount) == noErr else { return nil }
 
         var sb: CMSampleBuffer?
-        // ⚠️ A 90 kHz AUDIO PTS IS SAFE HERE BY TWO COINCIDENCES, NOT BY DESIGN. AUDIT BOTH BEFORE
-        // CHANGING THE CODEC OR THE SAMPLE RATE.
+        // ── ⚠️ THE PTS IS AN INTEGER SAMPLE COUNT ON THE SAMPLE RATE'S OWN TIMESCALE ──────────
         //
-        //   1. `pts` is `packet.pts × 1/90000` — it IS a 90 kHz value, so the conversion back to a
-        //      90 kHz CMTime recovers `packet.pts` exactly. Nothing is rounded on the way in.
-        //   2. Consecutive buffers still have to ABUT: PTS must advance by exactly
-        //      `frameSize × 90000 / sampleRate` ticks. At 48 kHz that is integral when `frameSize`
-        //      is a multiple of 8 — AAC-LC's 1024 → 1920 ticks ✓, HE-AAC's 2048 → 3840 ✓.
+        // This block used to read `CMTime(seconds: pts, preferredTimescale: 90_000)`, above a
+        // comment arguing that a 90 kHz audio PTS was safe "by two coincidences" at 48 kHz, and
+        // predicting that at 44.1 kHz "every buffer boundary would be rounded and the desktop
+        // would crackle exactly as NDI's did". The prediction was right and the premise was wrong:
+        // the rounding did not need 44.1 kHz, because the SOURCE PTS was already quantised to a
+        // 1 ms grid before it reached that line, so `preferredTimescale: 90_000` was faithfully
+        // preserving a value that could not tile. It also closed with "SRT's audio is measured
+        // working on the wire and is left alone" — and the wire was never the broken part.
         //
-        // ⚠️ AT 44.1 kHz IT IS NOT: 1024 × 90000/44100 = 2089.79… ticks, so every buffer boundary
-        // would be rounded and the desktop would crackle exactly as NDI's did — with the tap, the
-        // meters and SDI all still perfect, because only the renderer uses per-buffer timing.
-        //
-        // **An audio CMTime belongs on the sample rate's own timescale**
-        // (`CMTime(value: ticks, timescale: CMTimeScale(sampleRate))`), which is exact for any frame
-        // size and any rate. See `NDIService.makeAudioSampleBuffer` and docs/BUGS.md #NDI-AUDIO.
-        // Comment-only note: SRT's audio is measured working on the wire and is left alone.
+        // Ticks and this timescale make consecutive buffers abut BY CONSTRUCTION, for any frame
+        // size and any rate, because the PTS *is* the running sample count. `duration` is one
+        // sample on the same timescale and `sampleCount` multiplies it, so the buffer's total
+        // duration is exactly `frames` ticks and the next buffer's tick is exactly this one plus
+        // `frames`. Nothing rounds anywhere. See `audioPTSTicks`, `NDIService.audioPTSTicks` and
+        // docs/BUGS.md #NDI-AUDIO.
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
-            presentationTimeStamp: CMTime(seconds: pts, preferredTimescale: 90_000),
+            presentationTimeStamp: CMTime(value: ptsTicks, timescale: CMTimeScale(sampleRate)),
             decodeTimeStamp: .invalid)
         // BYTES PER SAMPLE (one interleaved frame), not the frame count — see the WHEP note.
         var sampleSize = channels * MemoryLayout<Int32>.size
@@ -1355,12 +1481,29 @@ final class SRTFrameRouter {
         return sb
     }
 
+    /// Can a 1024-frame AAC step be expressed exactly on this time base? Stated as a verdict on
+    /// the discovery line so the answer does not have to be recomputed from two integers at 1am.
+    ///
+    /// ⚠️ A "cannot" here is NOT a fault this app can fix at the source, and it is no longer a
+    /// fault it suffers from either — `audioPTSTicks` counts samples precisely so the sender's grid
+    /// stops mattering. The verdict is diagnostic, not a gate.
+    private static func timeBaseVerdict(num: Int32, den: Int32, sampleRate: Double) -> String {
+        guard num > 0, den > 0, sampleRate > 0 else { return "no time base declared" }
+        let ticksPerFrame = Double(den) / Double(num) / sampleRate   // ticks per audio sample
+        let step = 1024.0 * ticksPerFrame
+        return step == step.rounded()
+            ? "a 1024-frame step is \(Int(step)) ticks, EXACT"
+            : String(format: "a 1024-frame step is %.4f ticks, NOT EXACT — the sender's PTS is "
+                   + "quantised and cannot tile; the sample-counted axis absorbs it", step)
+    }
+
     /// Retire the decode side. SESSION THREAD, from the same place the video decoder is torn down.
     func teardownAudio() {
         if audioPacketsReceived > 0 || audioDecoder != nil {
-            NSLog("[SRT-AUDIO] session end — packets=%d framesIngested=%d undecodable=%d noPTS=%d",
+            NSLog("[SRT-AUDIO] session end — packets=%d framesIngested=%d undecodable=%d noPTS=%d "
+                + "axisRePins=%d",
                   audioPacketsReceived, audioFramesIngested,
-                  audioPacketsUndecodable, audioPacketsWithoutPTS)
+                  audioPacketsUndecodable, audioPacketsWithoutPTS, audioAxisResyncCount)
         }
         audioDecoder = nil
     }

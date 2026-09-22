@@ -97,7 +97,14 @@ public final class LiveAudioRendererProbe: @unchecked Sendable {
     private var events: [RendererEvent] = []
 
     private var bufferIndex = 0
-    private var previousEndSeconds: Double?
+    /// ⚠️ A `CMTime`, NOT SECONDS, AND THE DIFFERENCE DECIDES WHETHER THIS INSTRUMENT CAN ANSWER
+    /// ITS OWN QUESTION. "Contiguous" means the next PTS EQUALS the previous PTS plus its duration
+    /// — an exact statement about rational numbers. Measured in `Double` seconds it is not exact:
+    /// at a PTS around 36 s, a perfectly tiled 48 kHz stream shows residuals of ~3.4e-10 samples,
+    /// which is floating-point noise and nothing else, but which lands in the `<1 sample` bucket
+    /// and reads as 467 non-contiguous buffers. An instrument that reports a correct stream as
+    /// broken is worse than no instrument. `CMTimeCompare` on the rationals is exact.
+    private var previousEnd: CMTime?
     private var cumulativeGap = 0.0
     private var windowStartHost: Double?
     private var sampleRate = 0.0
@@ -117,10 +124,11 @@ public final class LiveAudioRendererProbe: @unchecked Sendable {
         var signAlternations = 0
         var total = 0
 
-        mutating func add(_ samples: Double) {
+        /// `exact` comes from `CMTimeCompare`, never from `samples == 0` — see `previousEnd`.
+        mutating func add(_ samples: Double, exact: Bool) {
             total += 1
             let m = abs(samples)
-            if samples == 0 { exactlyZero += 1; return }
+            if exact { exactlyZero += 1; return }
             if samples > 0 {
                 maxHoleSamples = max(maxHoleSamples, samples)
                 switch m {
@@ -266,36 +274,44 @@ public final class LiveAudioRendererProbe: @unchecked Sendable {
     /// reserved capacity — no formatting, no I/O, no allocation in the steady state.
     public func willEnqueue(_ sb: CMSampleBuffer) {
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        let dur = CMSampleBufferGetDuration(sb)
         let samples = CMSampleBufferGetNumSamples(sb)
+        var duration = CMSampleBufferGetDuration(sb)
         let ptsSeconds = CMTimeGetSeconds(pts)
-        // Duration can be missing on a buffer that carries a per-sample size array; derive it from
-        // the sample count in that case rather than treating the gap as unmeasurable.
-        var durationSeconds = CMTimeGetSeconds(dur)
 
         lock.lock()
-        if sampleRate == 0, samples > 0, durationSeconds > 0 {
-            sampleRate = Double(samples) / durationSeconds
+        if sampleRate == 0, samples > 0, duration.isValid, CMTimeGetSeconds(duration) > 0 {
+            sampleRate = Double(samples) / CMTimeGetSeconds(duration)
         }
-        if !durationSeconds.isFinite || durationSeconds <= 0 {
-            durationSeconds = sampleRate > 0 ? Double(samples) / sampleRate : 0
+        // Duration can be missing on a buffer that carries a per-sample size array; derive it from
+        // the sample count rather than treating the gap as unmeasurable. Built on the sample rate's
+        // own timescale so the exact comparison below still has rationals to work with.
+        if !duration.isValid || duration.value == 0 {
+            duration = sampleRate > 0
+                ? CMTime(value: Int64(samples), timescale: CMTimeScale(sampleRate))
+                : .zero
         }
         if windowStartHost == nil {
             windowStartHost = CACurrentMediaTime()
             rows.reserveCapacity(1024)
         }
 
-        let isFirst = previousEndSeconds == nil
-        let gap = previousEndSeconds.map { ptsSeconds - $0 } ?? 0
-        if !isFirst {
+        let isFirst = previousEnd == nil
+        var gap = 0.0
+        var exact = false
+        if let prevEnd = previousEnd {
+            // ⚠️ THE EXACTNESS TEST IS `CMTimeCompare`, AND THE MAGNITUDE IS A SEPARATE QUESTION.
+            // Equality is decided on the rationals; only once it has failed is anything converted
+            // to a Double, and then only to choose a bucket — where 1e-10 either way is harmless.
+            exact = CMTimeCompare(pts, prevEnd) == 0
+            gap = exact ? 0 : CMTimeGetSeconds(CMTimeSubtract(pts, prevEnd))
             cumulativeGap += gap
             let gapSamples = sampleRate > 0 ? gap * sampleRate : 0
-            histogram.add(gapSamples)
-            let sign = gap == 0 ? 0 : (gap > 0 ? 1 : -1)
+            histogram.add(gapSamples, exact: exact)
+            let sign = exact ? 0 : (gap > 0 ? 1 : -1)
             if sign != 0 && lastGapSign != 0 && sign != lastGapSign { histogram.signAlternations += 1 }
             if sign != 0 { lastGapSign = sign }
         }
-        previousEndSeconds = ptsSeconds + durationSeconds
+        previousEnd = CMTimeAdd(pts, duration)
         bufferIndex += 1
 
         // ⚠️ `isFirst` rather than a gap of 0 for buffer 1. Zero MEANS contiguous here, and the
@@ -303,7 +319,7 @@ public final class LiveAudioRendererProbe: @unchecked Sendable {
         // spurious "perfectly contiguous" row at the head of every log and, worse, at the head of
         // every reconnect.
         rows.append(Row(index: bufferIndex, ptsSeconds: ptsSeconds,
-                        durationSeconds: durationSeconds, samples: samples,
+                        durationSeconds: CMTimeGetSeconds(duration), samples: samples,
                         gapSeconds: gap, isFirst: isFirst,
                         cumulativeGapSeconds: cumulativeGap))
 
