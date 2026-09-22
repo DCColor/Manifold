@@ -2418,11 +2418,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             mirror.haveSmoothed = true
             mirror.firstHost = m.hostTime
         }
-        // ⚠️ THE PIN, APPLIED AFTER THE EMA AND BEFORE ANYTHING READS THE RESULT. The filter above
-        // still runs exactly as it always did — it is not bypassed, its state is not frozen, and
-        // releasing the pin would resume from a correctly-tracked value. What is held is the rate
-        // the SYNCHRONIZER is told, which is the variable under test. See `AudioMirrorRatePin`.
-        if AudioMirrorRatePin.isEnabled { mirror.smoothedRate = AudioMirrorRatePin.pinnedRate }
         mirror.lastHost = m.hostTime
         if tick { mirror.ticks += 1 } else { mirror.changes += 1 }
 
@@ -2454,12 +2449,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // thing fires cannot measure what it is throttling.
         if statsDue {
             NSLog("%@ mirror — %d mapping change(s) + %d heartbeat tick(s) → %d setRate call(s) "
-                + "· smoothedRate=%.5f%@ · clockRate=%.5f · posErr=%.1f ms%@",
-                  tag, changes, ticks, pushes, smoothedNow,
-                  // Stated on every window, not once at launch: a line that reports a rate without
-                  // saying it is held would read as a measurement of the control loop.
-                  AudioMirrorRatePin.isEnabled ? " (PINNED — \(AudioMirrorRatePin.defaultsKey))" : "",
-                  m.rate,
+                + "· smoothedRate=%.5f · clockRate=%.5f · posErr=%.1f ms%@",
+                  tag, changes, ticks, pushes, smoothedNow, m.rate,
                   positionError.isFinite ? positionError * 1000 : 0,
                   shouldPush ? "" : " · (no push this window)")
         }
