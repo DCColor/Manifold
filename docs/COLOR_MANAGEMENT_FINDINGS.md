@@ -402,6 +402,11 @@ Split into two on delivery:
   gesture, and `didChangeScreenProfileNotification` is wired but untested live (exercising it means
   changing a macOS display setting). §6.8 also raises a design question the placement created — the
   standing indicator inherits the control bar's auto-hide in overlay mode.
+- **Phase 2c part 1 — the title marker, the profile-change path, and the metric question.**
+  Recorded inside §6.8. The HDR toggle was performed by the operator and the readout follows it; the
+  Bypass marker now also appears in the window title, which does not auto-hide (full screen has no
+  marker at all, by decision). It also found three things measured false: the pulldown's subtitles,
+  the Color control's amber, and the Source line's tier on any stream.
 
 **Phase 3 — Reference.** The shader EOTF, against a settled destination. The only phase that is
 real engineering. *Amended 2026-09-21 from §6.6:* the destination is settled — declare the source
@@ -705,6 +710,13 @@ it does break it.** With HDR ON for the LG:
 **the same transfer curve as the ASUS**, and the delta becomes the ASUS's delta. The ICC bytes still
 differ (primaries and white point), but the TRC does not.
 
+> ⚠️ **WHICH METRIC `7.648334e-06` IS.** `max |curve(x) − sRGB(x)|` over [0,1], sampled at
+> **`i/256`, 257 points** — `parse_icc.py`'s grid, which `[CSPROBE]` shares. The shipping readout
+> reports the same quantity on a **1025-point** grid and prints one significant figure, so the same
+> profile reads **9.1e-06** there. Both are lower bounds on the same supremum (≈9.52e-06) and
+> neither is a different definition of sRGB. §6.8's "Which metric each number uses" has the
+> arithmetic.
+
 **Bypass is invariant across the switch** — the same 149 in both states, which is what "performs no
 conversion" predicts and is a second, independent confirmation of §6.6's finding. **It is OS that
 moves**, 149 → 170.
@@ -873,6 +885,11 @@ Display    ASUS PA147 — sampled table, 1024 entries — matches sRGB to 9.1e-0
            macOS is converting this picture for this display.
 ```
 
+⚠️ **`9.1e-06` is `max |curve(x) − sRGB(x)|` over [0,1] on a 1025-point grid, printed to one
+significant figure.** §6.7 records `7.648334e-06` for the same curve; that is the same metric on
+`parse_icc.py`'s 257-point grid. See "Which metric each number uses" below — the two numbers are
+not a disagreement.
+
 **On the LG, mode Bypass** (no verdict line: the question only applies in OS):
 
 ```
@@ -907,6 +924,13 @@ changing a display's assigned profile — a macOS display setting — and this w
 explicit instruction not to touch any. It is the path §6.5's "one stray click in System Settings ▸
 Displays ▸ Colour Profile" arrives on, and §6.7 measured the macOS HDR switch doing exactly that to
 the LG, so it is worth exercising deliberately at some point. **Not claimed as working.**
+
+> **AMENDED 2026-09-22 by 2c part 1 § C below.** It was exercised, on a real macOS HDR toggle, and
+> the readout follows a profile change with the window stationary. But the toggle also posts
+> `didChangeScreenNotification` — macOS replaces the `NSScreen` objects — and both names route to
+> one `refresh()`, so **this specific notification is still not individually demonstrated.** The
+> heading above should be read as "profile change — the READOUT is tested, the notification is
+> not isolable".
 
 #### Three defects that rendered as something plausible
 
@@ -950,15 +974,188 @@ pulldown names its own deck. The pulldown is physically inside one window, so it
 question, and naming it removes any dependence on what `NSApp.keyWindow` reports while an `NSMenu`
 is tracking. **One mutator, two callers** — which is what §6.7's constraint requires.
 
-#### Still open after Phase 2b
+---
 
-- **`didChangeScreenProfileNotification` untested live.** Above.
-- **The auto-hide interaction with the standing indicator.** Above.
+#### Phase 2c part 1 — measured 2026-09-22, after 2b closed
+
+Three pieces of work, recorded here because each one lands directly on something §6.8 left open:
+the Bypass marker moves out of the auto-hiding control bar and into the window title, the
+profile-change path is finally exercised on a real macOS HDR toggle, and the two different numbers
+this document prints for one curve are reconciled. It also carries **two corrections to the section
+above** and one defect in the Source line, all found while reporting on the colorimetry pulldown
+that shares the control-bar section with the display-transform one.
+
+##### B — the Bypass marker in the window title
+
+**What changed.** `WindowDeck.windowTitle` gained a fourth case: whatever the name resolves to,
+Bypass appends `" — Bypass"`. `DeckRegistry.setDisplayTransform` — still the one mutator, §6.7's
+constraint intact — calls `applyWindowTitle()` after writing the mode. **Synchronously, and
+deliberately not through `setNeedsWindowTitle()`:** that hop exists because `@Published` fires from
+`willSet`, so a title derived inside such a sink reads the previous value. This is not a sink; the
+assignment has already completed. The control-bar badge is unchanged.
+
+**Why the title.** §6.8 records the standing indicator inheriting the overlay HUD's auto-hide, so
+the "standing" marker is visible only while the bar is awake. The Window menu and Mission Control do
+not auto-hide. And the constraint this placement was chosen under is that **nothing may be drawn
+over the picture** — the title bar is hidden (`.hiddenTitleBar`), so nothing is.
+
+MEASURED, two windows in different modes at the same instant, read from `kCGWindowName`:
+
+| stream window | file window |
+|---|---|
+| `MAC-STUDIO (Manifold Colour Test) — Bypass` | `wedge.mov` |
+| `MAC-STUDIO (Manifold Colour Test)` | `wedge.mov — Bypass` |
+
+Both directions, both windows, and the Window menu lists both spellings at once. **Nothing new is
+drawn over the picture, measured rather than asserted:** the same window captured in Bypass and in
+OS differs by **0 pixels above the control bar**, and all **11 431** differing pixels lie inside the
+bar. (0 in the picture is also the §6.5 prediction for the LG in SDR, so that half of the capture is
+a null result twice over; the point here is the *location* of the differences, not their count.)
+
+> ⚠️ **FULL SCREEN HAS NO BYPASS MARKER AT ALL, AND THAT IS ACCEPTED.** The title bar is hidden, the
+> control bar auto-hides, and the only remaining surface is the picture. **Decided: nothing goes
+> over the picture.** So in full screen a window can be in Bypass with no standing indication
+> anywhere — a known, accepted limit, not an oversight. It narrows §6.1's requirement rather than
+> satisfying it: the marker now survives the HUD's auto-hide in windowed mode, and is absent in full
+> screen.
+
+##### C — `didChangeScreenProfileNotification`, exercised on a real macOS HDR toggle
+
+§6.8 records this path as wired and untested, because exercising it means changing a macOS display
+setting. It was exercised: HDR was switched **on and then off for the LG**, by the operator, with
+`wedge.mov` on the LG and the chain readout open. No display setting was changed by the tooling.
+
+MEASURED — the window stayed on the LG throughout (macOS nudged its origin, 60,1120 → 22,1221 →
+168,1187; it never changed display):
+
+| | Display line | verdict |
+|---|---|---|
+| HDR **off** (before) | `LG TV SSCR2 — pure power law, gamma 1.961` | passing through unchanged |
+| HDR **on** | `LG TV SSCR2 — sampled table, 1024 entries — matches sRGB to 9.1e-06` | **converting** |
+| HDR **off** (return) | `LG TV SSCR2 — pure power law, gamma 1.961` | passing through unchanged |
+
+**The readout matches itself.** The HDR-on LG prints `matches sRGB to 9.1e-06` — character for
+character the ASUS's line, captured minutes earlier on the second window. §6.7's "in HDR mode macOS
+hands the LG the same transfer curve as the ASUS" now reproduces through the shipping readout, on a
+different code path from the probe that first found it.
+
+**And the probe agreed at the same instant**, from the log: profile sha `3527727a…` → `2e0f5927…`,
+`para ft=0 γ1.960999` → `curv count=1024`, `sRGB max err = 7.648e-06`, verdict flipping from
+"TONE CURVES DO NOT [differ]" to "max |source − dest| = 4.962e-02 at x=0.656 → 50.7623 codes at
+10-bit". `maxPotentialEDR` for the LG read **8.965394** with HDR on and **1.0** with it off —
+§6.7's figure to every digit. The return leg restored all of it exactly.
+
+⚠️ **WHAT THIS DOES *NOT* ESTABLISH, AND THE TEMPTING CLAIM IS THAT IT DOES.** Two things.
+
+1. **The popover does not stay open across the toggle**, so "updates live while open" was not
+   demonstrated for this trigger. Measured separately: the popover survives a menu-bar interaction
+   (Control Center was opened and closed with it open and it stayed) but **not another application
+   becoming active** — and the HDR switch lives in System Settings. This is the same limitation
+   §6.8 already records for a real window drag, arrived at from a different direction. The readout
+   was reopened **without moving the window**, which is what the table above is.
+2. **`didChangeScreenProfileNotification` still cannot be isolated.** The log shows the toggle
+   posting `didChangeScreenParameters` *and* **three `NSWindow.didChangeScreenNotification`** —
+   macOS replaces the `NSScreen` objects on a display reconfiguration, so the *screen* notification
+   fires although no window changed display. `DisplayChainModel` observes both names into the same
+   `refresh()`. So the honest status changes from **"untested"** to **"covered but
+   indistinguishable"**: the model's observer set demonstrably covers the HDR trigger, and which of
+   the two names carried it is not decidable from this evidence. Telling them apart needs a log line
+   inside `refresh()` naming the notification, which was not added.
+
+Not re-measured this round: the OS-vs-Bypass **code-value** A/B under HDR on. §6.7's 21 codes and
+Bypass's invariance across the switch stand on that section's measurement, not on this one.
+
+##### D — which metric each number uses
+
+The ASUS reads `matches sRGB to 9.1e-06` in the readout while §6.7 records `7.648334e-06` for the
+same curve. **Same profile, same sRGB definition, same metric — only the sampling grid differs**,
+and the readout additionally prints one significant figure. Reproduced on the ASUS's live profile
+(`CGDisplayCopyColorSpace`, `curv count=1024`), `max |curve(x) − sRGB(x)|` over [0,1]:
+
+| grid | used by | max err | at x |
+|---|---|---|---|
+| `i/256`, 257 points | `parse_icc.py`, `[CSPROBE]` | **7.648334e-06** | 0.035156 |
+| `i/1024`, 1025 points | `ICCTransferCurve.bestMatch` (shipping readout) | **9.062397e-06** → printed `9.1e-06` | 0.032227 |
+| `i/65536` | neither — the supremum, for reference | 9.524365e-06 | 0.032272 |
+
+Both are lower bounds on one supremum; the denser grid is the tighter one. The sRGB definition is
+byte-identical in both implementations (`x ≤ 0.04045 ? x/12.92 : ((x+0.055)/1.055)^2.4`), and both
+interpolate the 1024-entry table linearly, as the ICC spec prescribes. **Neither number is wrong and
+they are not in conflict** — but a document that prints both without saying which grid produced
+which invites exactly the reading that they are, which is why §6.7 and this section now both name
+the metric at the point of use.
+
+##### ⚠️ Two claims in "Three defects that rendered as something plausible" do not survive re-measurement
+
+Both were re-checked on the live build while capturing the control bar for the report above, by the
+same method that caught them originally — sampling the rendered pixels, not looking at the menu.
+
+1. **The pulldown's subtitles are still not rendering.** §6.8 says the `Toggle` + second-`Text` form
+   fixed them. It did not. A luminance scan across the open menu shows the rows are **two-line
+   height** — AppKit reserved the space — but the subtitle band is background only: title text peaks
+   at **227**, the band beneath it at **75**, which is the menu's own gradient. So the fix bought
+   the row height and not the text. **§6.3 is explicit that "the subtitles do the teaching"**, so
+   the control is still missing its point while looking deliberate — which is precisely what that
+   defect entry warns about, reintroduced by its own fix.
+2. **The Color control does not turn amber on an override**, and this one was never a 2b claim — it
+   is `ContentView.colorControl`'s own documented behaviour ("an override turns the control amber:
+   something on screen is a human assertion, not a reading"). With `2020 PQ (ST 2084) · Overridden`
+   on screen, **max(r − b) = 0 across the whole face region**: not one non-neutral pixel. The cause
+   is §6.8's defect 2 verbatim — `.foregroundStyle(…)` wraps an `HStack` whose children are two
+   `Menu`s with `.menuStyle(.borderlessButton)`, which strips a label's foreground and lets the
+   control bar's own white win. The same failure, in the control next door, found by the same
+   measurement. **Neither is fixed here** — this was a read-only report.
+
+##### ⚠️ The Source line reports the wrong tier on every STREAM
+
+§6.8 lists the Source line as exercised only on an untagged **file**. Exercised on an NDI stream it
+is wrong, in both directions:
+
+```
+stream declares nothing, override Auto →  Source  Rec. 709 · Rec. 709 · CICP 1/1 — tagged
+override = Rec.2020 PQ              →  Source  PQ (ST 2084) · Rec. 2020 · CICP 9/16 — tagged
+```
+
+The log for the same stream reads `color signaling (NOT declared — assuming SDR Rec.709)` and then
+`primaries=Rec.2020 code 9 (OVERRIDE)`. The cause: the NDI path resolves before it publishes, so
+`renderer.setSourceColorSpace` always receives **non-nil** codes, and `DisplayChainModel`'s
+`(pCode, tCode)` switch therefore always lands on `case let (pc?, tc?)` → `— tagged`. **§6's
+three-tier honesty model — `tagged` / `assumed` / `overridden` — collapses to one tier the moment
+the source is a stream**, and a *user assertion* is printed as a *sender's declaration*. The same
+line is correct for a file, because a file's absent CICP arrives as nil. The renderer's codes cannot
+carry the distinction; the tier has to come from `NDIColorInfo.tier`, which already exists and is
+already on screen two controls away. Not fixed here.
+
+Incidentally, the **third verdict case is now exercised live**: overriding to PQ produced
+`Source declares its transfer outside the rTRC (PQ/HLG); no curve comparison is possible.` §6.8
+lists it as written-but-unseen.
+
+**And the Source line does not follow a colorimetry change while the readout is open.** `refresh()`
+runs on popover open, on a mode change, and on the two screen notifications; nothing observes the
+renderer's source codes. Measured: the override changed the tags and the layer immediately (the log
+proves it), and the open readout did not move until it was closed and reopened.
+
+---
+
+#### Still open after Phase 2b — amended after 2c part 1
+
+- ~~**`didChangeScreenProfileNotification` untested live.**~~ **Amended:** the path was exercised on
+  a real macOS HDR toggle and the readout follows a profile change with the window stationary. What
+  remains is narrower and different: `didChangeScreenNotification` fires at the same toggle, both
+  route to one `refresh()`, and **which name carried it is not decidable** without a log line inside
+  `refresh()`. See 2c part 1 § C.
+- **The auto-hide interaction with the standing indicator** — **partly answered.** The window title
+  now carries the marker and does not auto-hide (2c part 1 § B). **Full screen still has no marker
+  at all, by decision.** The control-bar badge's own auto-hide is unchanged.
 - **§6.3's momentary compare (hold-to-compare) is not built.** It is named in §6.3 as the gesture
   that actually gets used, and in §6.4's 2b list. Only the sticky modes exist.
-- **The Source line has only been exercised on an UNTAGGED file.** Both the `— tagged` and the
-  `— partly assumed` spellings, and the whole PQ/HLG path — where the parser correctly reports
-  "profile declares no rTRC" and the verdict falls to its third case — are written but unseen.
+- ~~**The Source line has only been exercised on an UNTAGGED file.**~~ **Exercised on a stream, and
+  it is WRONG** — every stream prints `— tagged`, including an assumption and including a user
+  override. 2c part 1 has the measurement and the cause. The PQ/HLG verdict case is now seen and is
+  correct. The `— partly assumed` spelling is still unseen.
+- **The Source line does not follow a colorimetry change while the readout is open.** New, 2c part 1.
+- **The pulldown's subtitles do not render, and the Color control does not turn amber.** Both
+  measured false in 2c part 1; both were believed fixed / believed working.
 - **One fixture, one session.** No colorimeter, 8-bit captures, as everywhere else here.
 
 ---

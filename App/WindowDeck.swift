@@ -277,8 +277,9 @@ final class WindowDeck: ObservableObject {
     /// menu and Mission Control — which is where multi-window navigation actually happens, and
     /// where every window reading "Manifold" made comparing two files harder than it needed to be.
     ///
-    /// Three cases, in priority order, and the order matters because the first two can never both
-    /// hold: a live takeover UNLOADS the file (that is why `displayName` is documented FILE ONLY).
+    /// Three cases for the NAME, in priority order — and the order matters because the first two
+    /// can never both hold: a live takeover UNLOADS the file (that is why `displayName` is
+    /// documented FILE ONLY). Then one suffix, which is orthogonal to all three.
     ///
     ///   1. A file        → its name, e.g. "shot_042_v3.mov".
     ///   2. A live stream OWNED BY THIS DECK → what the user called it: the NDI source name, or
@@ -289,13 +290,27 @@ final class WindowDeck: ObservableObject {
     ///      reading the same thing is exactly as informative as it should be — there is nothing
     ///      to tell them apart by.
     ///
+    ///   4. **And whatever the name is, Bypass appends " — Bypass" to it.** §6.1 requires a
+    ///      standing marker so nobody judges a picture in Bypass three days after leaving it there,
+    ///      and §6.8 found the control-bar badge inheriting the overlay HUD's auto-hide — it is
+    ///      only visible while the bar is awake. The Window menu and Mission Control do not
+    ///      auto-hide, and **nothing here is drawn over the picture**, which is the constraint this
+    ///      placement was chosen under. It is an addition to the badge, not a replacement.
+    ///
+    ///      ⚠️ Full screen has no marker at all: the title bar is hidden, the control bar
+    ///      auto-hides, and the alternative is drawing over the picture. Accepted limit, §6.8.
+    ///
     /// ⚠️ NEVER A URL, for a stream. A stream path can carry the stream key, and this string goes
     /// into the Window menu, into Mission Control, and into any screenshot of either. That is the
     /// same rule the bookmark rows and the standing message already follow.
     var windowTitle: String {
-        if let name = displayName { return name }
-        if let live = DeckRegistry.shared.liveLabel(for: self) { return live }
-        return "Manifold"
+        let base: String
+        if let name = displayName { base = name }
+        else if let live = DeckRegistry.shared.liveLabel(for: self) { base = live }
+        else { base = "Manifold" }
+        // `chrome` is weak and nil before the window is configured; a nil chrome is the default
+        // mode, so an absent marker is the right answer during that gap rather than a guess.
+        return chrome?.displayTransform == .bypass ? base + " — Bypass" : base
     }
 
     /// Push `windowTitle` at the window, if there is one yet.
@@ -686,6 +701,12 @@ final class DeckRegistry {
         // docs/BUGS.md for why a re-present rather than a redraw is what is required.
         deck.renderer?.setDisplayTransform(mode)
         DisplayTransformMenuState.shared.setNeedsRefresh()
+        // The Bypass marker in the window title — `windowTitle` case 4. SYNCHRONOUS, and
+        // deliberately NOT `setNeedsWindowTitle()`: that hop exists because `@Published` fires from
+        // `willSet`, so a title derived inside such a sink reads the PREVIOUS value. This is not a
+        // sink — the assignment above has already completed and `chrome.displayTransform` reads the
+        // new mode here. Coalescing it would only delay the marker by a runloop turn.
+        deck.applyWindowTitle()
     }
 
     // MARK: - Opening a file
