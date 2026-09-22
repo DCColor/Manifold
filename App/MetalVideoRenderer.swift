@@ -1266,11 +1266,27 @@ final class MetalVideoRenderer {
         logEDRHeadroom(context: "startup")
     }()
 
-    /// Log the display's EDR headroom. 1.0 means NO headroom — EDR is inert and PQ content
-    /// cannot lift above SDR white no matter how the layer is configured (check macOS
-    /// Settings ▸ Displays ▸ High Dynamic Range for the target display). Values >1.0 are the
-    /// multiple of SDR white the display can currently reach; this is the number a future
-    /// EDRMetadata / tone-mapping stage has to map into.
+    /// Log the display's EDR headroom. Values >1.0 are the multiple of SDR white the display can
+    /// reach; this is the number a future EDRMetadata / tone-mapping stage has to map into.
+    ///
+    /// ── ⚠️ READ `potential` BEFORE `current`, AND DO NOT COLLAPSE THEM ──────────────────────
+    ///
+    /// They answer different questions and only one of them is about the DISPLAY:
+    ///
+    ///   * `potential` — can this display do EDR AT ALL right now? `1.0` means no, and it is the
+    ///     macOS HDR switch for that display that moves it (Settings ▸ Displays ▸ High Dynamic
+    ///     Range). Nothing about any layer can be inferred while it reads 1.0.
+    ///   * `current` — has anything actually been GRANTED headroom? A layer that never asked, or
+    ///     asked and lost, reads 1.0 here on a display whose `potential` is 8.9654.
+    ///
+    /// ⚠️ **THIS LINE USED TO GET THAT WRONG, AND IT WAS THE EXACT MISREADING `docs/BUGS.md`'s EDR
+    /// MEASUREMENT HAZARD EXISTS TO PREVENT.** It appended "NO HEADROOM — EDR is inert on this
+    /// display" whenever `current <= 1.0001`, ignoring `potential` — a claim about the DISPLAY made
+    /// from a number about the LAYER. Measured 2026-09-22 (§6.7): with the LG in macOS HDR mode it
+    /// printed that sentence while `potential = 8.9654`, which is the opposite of the truth. The
+    /// hazard section records the same error costing a working instrument once already, in the
+    /// other direction — "the metric is inert on this machine" concluded while the display sat in
+    /// SDR mode the whole time. Three states, stated separately, is what stops it recurring.
     private static func logEDRHeadroom(context: String) {
         // Prefer the screen actually hosting the app; fall back to main.
         let screen = NSApp?.mainWindow?.screen ?? NSApp?.windows.first?.screen ?? NSScreen.main
@@ -1278,9 +1294,19 @@ final class MetalVideoRenderer {
         let cur = s.maximumExtendedDynamicRangeColorComponentValue
         let pot = s.maximumPotentialExtendedDynamicRangeColorComponentValue
         let ref = s.maximumReferenceExtendedDynamicRangeColorComponentValue
+        // THE DISPLAY'S ANSWER FIRST, THEN THE LAYER'S. Each branch names which of the two it is
+        // talking about, so the line cannot be read as a verdict on the other one.
+        let verdict: String
+        if pot <= 1.0001 {
+            verdict = String(format: "   <<< display offers no EDR headroom (potential %.1f)", pot)
+        } else if cur <= 1.0001 {
+            verdict = String(format: "   <<< headroom available (potential %.4f) but not granted "
+                                   + "to this layer (current %.1f)", pot, cur)
+        } else {
+            verdict = String(format: "   <<< headroom granted (current %.4f of potential %.4f)", cur, pot)
+        }
         print(String(format: "[EDR] headroom (%@) on \"%@\": current=%.4f potential=%.4f reference=%.4f%@",
-                     context, s.localizedName, cur, pot, ref,
-                     cur <= 1.0001 ? "   <<< NO HEADROOM — EDR is inert on this display" : ""))
+                     context, s.localizedName, cur, pot, ref, verdict))
     }
 
     /// Build a CoreVideo nclc attachments dict from MediaInspector's authoritative

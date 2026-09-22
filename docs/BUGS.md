@@ -1801,6 +1801,14 @@ was observed during a drag** on the same machine.
    failures. The CARenderer route to reading rendered pixel values is closed; the NSScreen route is
    open whenever the display is in HDR mode.
 
+⚠️ **The app's OWN `[EDR] headroom` line made exactly this misreading, and is FIXED (2026-09-22).**
+It appended `<<< NO HEADROOM — EDR is inert on this display` whenever `current <= 1.0001`, ignoring
+`potential` — a claim about the DISPLAY made from a number about the LAYER — and was observed
+printing it on the LG in macOS HDR mode while `potential = 8.9654`. `logEDRHeadroom` now reports
+three separate states (no headroom / available but not granted / granted), so rule 1 above is
+enforced by the instrument instead of relying on whoever reads it. See
+`docs/COLOR_MANAGEMENT_FINDINGS.md` §6.7.
+
 ---
 
 #### On the earlier "not the deprecated property" note
