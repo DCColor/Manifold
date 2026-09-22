@@ -49,10 +49,13 @@ grown by hundreds of lines.
 are where the evidence for it accumulated. Each item states what "done" means, so it can be closed
 rather than left open by default.
 
-⚠️ **ONE ITEM HERE IS A BLOCKER RATHER THAN A CHECKLIST LINE — *"the Release configuration does
-not compile"* below.** It is not "work that must happen before launch" in the ordinary sense; it is
-a **configuration that has never been exercised and does not currently build**, which removes an
-option people assume exists. Read it before planning anything that says the words "Release build".
+⚠️ **NOTHING HERE IS A BLOCKER AS OF 2026-09-21.** This paragraph used to promote one item —
+*"the Release configuration does not compile"* — on the grounds that it removed an option people
+assume exists. `d76bb21` fixed that the same afternoon and both configurations have built
+repeatedly since, so the item is back to being a checklist line and the audit half of it is what
+remains open. The promotion is recorded rather than deleted because raising an item to blocker was
+the right call at the time and the mechanism is worth reading before touching any `#if DEBUG`
+declaration.
 
 ---
 
@@ -281,23 +284,43 @@ they are noise in a gate, and gating on them is how a useful check gets disabled
 
 ---
 
-## 🚧 PRE-SHIP BLOCKER: the Release configuration does not compile — and the dev-path audit is outstanding. ONE ROOT CAUSE.
+## ☐ PRE-SHIP: the dev-path audit is outstanding. (The Release compile half is FIXED.)
 
-**Status:** 🚧 **BLOCKER — raised from checklist item to blocker 2026-09-21.** **Raised:**
-2026-08-27 as the dev-path audit, out of the `MANIFOLD_CONFIG_DEBUG` gating work. **Release
-breakage found:** 2026-09-21, by running `xcodebuild -configuration Release` — which, as far as
-anyone can tell, had not been done.
+**Status:** ☐ **OPEN as a checklist item — NO LONGER A BLOCKER, lowered 2026-09-21.** The blocking
+half is fixed and verified; the audit half is untouched and stays open. **Raised:** 2026-08-27 as
+the dev-path audit, out of the `MANIFOLD_CONFIG_DEBUG` gating work.
 
 **These were two items and they are one item**, because they have a single cause: **Profile defines
-`DEBUG=1`, Profile is what every build to date has been, and so the Release configuration has never
+`DEBUG=1`, Profile is what every build to date has been, and so the Release configuration had never
 been exercised — not for gating, and not even for compilation.** Splitting them would have two
-entries proposing two fixes to the same untested configuration.
+entries proposing two fixes to the same untested configuration. That is still true of the half that
+remains.
 
 ---
 
-### 🚧 THE BLOCKING HALF: there is no working Release path today
+### ✅ THE BLOCKING HALF IS FIXED — `d76bb21`, verified 2026-09-21
 
-**`xcodebuild -configuration Release` FAILS.** Six errors, all the same, all in one file:
+**`xcodebuild -configuration Release` SUCCEEDS.** `d76bb21`, *"fix: make Release compile by ungating
+`toneLock` declaration"*, moved the declaration out of the `#if DEBUG` block that its Release-side
+uses sat outside of. Both configurations have been built repeatedly through the evening of
+2026-09-21 — Profile and Release, signed, from a clean `-derivedDataPath` — as a side effect of the
+SRT audio work, so this is not one green run.
+
+⚠️ **THE FIX LANDED THE SAME AFTERNOON AND THE STATUS LINE DID NOT MOVE WITH IT.** The blocker was
+raised at 14:59 and `d76bb21` was committed at 15:07 — eight minutes — yet this entry went on saying
+"there is no working Release path today" for the rest of the day while every build in the room
+disagreed. That is the shape the banner at the top of this file describes, arriving inside one
+session rather than over weeks, which makes it worse rather than better: nothing about a slow-moving
+file explains it. The original diagnosis is kept below because the *mechanism* is still the thing to
+understand before touching any `#if DEBUG` declaration; only the claim about today's state was
+wrong.
+
+---
+
+### The original diagnosis, kept for the mechanism
+
+**At the time it was found, `xcodebuild -configuration Release` FAILED.** Six errors, all the same,
+all in one file:
 
 ```
 App/NDI/NDIService.swift:814:9:  error: cannot find 'toneLock' in scope
@@ -592,92 +615,94 @@ advance.
 
 ---
 
-## 🔴 LiveClock's audio mirror stops evaluating when the P-loop saturates — WHEP and SRT audio drifts
+## ✅ FIXED 2026-09-21 — SRT audio distortion. TWO defects, one symptom, and the loud one was not the cause.
 
-**Status:** OPEN — mechanism CONFIRMED from the code and measured on three runs, 2026-09-21. Not
-started. **NOT a regression:** the gate and the constants are byte-identical at `7a630c8` and the
-behaviour reproduces there — what changed is the transport, not the app. **Affects:** WHEP and SRT,
-the two transports that mirror a `LiveClock` mapping to the audio timebase. **NDI and HLS do not** —
-neither drives the mirror (NDI uses `anchorLiveAudio`; HLS holds its own clock).
+**Status:** ✅ **BOTH FIXED, 2026-09-21. Not yet through a real session** — the entry stays until it
+has been. **Affects:** WHEP and SRT, the two transports that mirror a `LiveClock` mapping to the
+audio timebase. **NDI and HLS do not** — neither drives the mirror (NDI uses `anchorLiveAudio`; HLS
+holds its own clock). The PTS half is SRT-only.
 
-⚠️ **FULL MECHANISM, MEASUREMENTS AND ARITHMETIC: `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`.** Read
-that before planning a fix — including its §5, which rules out the obvious fix. This entry states
-what is wrong and how bad it is; it does not restate the derivation, and it will not be kept in sync
-with one. The findings document is canonical.
+### ⚠️ READ THIS BEFORE REUSING ANY OF IT: the investigation found TWO defects and closed both
 
-### Severity — filed at the head of the defect entries, deliberately
+They are separate, they were fixed separately, and conflating them re-tells the story wrong.
 
-**It makes a SHIPPED, PREVIOUSLY-VERIFIED feature unreliable.** WHEP/SRT desktop audio was closed as
-✅ FIXED (*"WHEP and SRT carry no audio at all"*, below) and verified on real sessions. It is not
-reliable today on the Cloudflare path, and the failure is **audible** — a step discontinuity in the
-audio timebase, repeating every 15–20 s.
+**1. THE MIRROR STOPPED EVALUATING WHEN THE P-LOOP SATURATED.** Publication is gated on the rate
+*changing*; a clamped rate is bit-identical to the previously clamped one, so while the loop sat on
+its ±0.5% rail nothing was published and `mirrorLiveAudio` — which is edge-driven — stopped running
+entirely. Audio walked at ~5 ms/s to −113 ms, then got yanked back in one step, every 15–20 s.
+**Fixed by `LiveClock.onMappingTick`**, a heartbeat at the control cadence that re-states the mapping
+at the current instant whether or not it changed; the publication gate is untouched. A starvation
+tripwire and a publication-gap histogram were added so the same silence cannot recur unnoticed.
 
-Three things compound it:
+⚠️ **FULL MECHANISM, MEASUREMENTS AND ARITHMETIC FOR THIS HALF: `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`**,
+including its §5, which rules out the obvious fix. That document is canonical for defect 1 and this
+entry does not restate it.
 
-- **Every counter in the audio path reads clean while it happens.** `underruns=0`, `short=0`,
-  `resyncs=0`, and the `[LIVECLOCK]` line looks healthier during the failure than outside it. See
-  §8 of the findings document for the full list of instruments that lie here.
-- **It is transport-dependent, so it will reach testers before it reaches us.** A local source does
-  not reproduce it. The path that does is the one an outside tester actually uses.
-- **It is inverted.** Audio correction stops *precisely* when the video clock is working hardest.
+**2. THE AUDIBLE DISTORTION WAS SOMETHING ELSE ENTIRELY — the sender's PTS grid.** Defect 1 was real,
+measurable and worth fixing, and fixing it **did not stop the gravel**. The renderer probe then found
+**ZERO contiguous buffers out of 468**: every audio `CMSampleBuffer` PTS was quantised to a 1 ms grid
+while a 1024-frame buffer is 21.3333 ms, so consecutive buffers stepped 21 or 22 ms and missed by −16
+or +32 samples in a repeating three-phase cycle, cumulative ≈ 0.
+`AVSampleBufferAudioRenderer` schedules by PTS exactly, so it spliced **every single buffer, ~47
+times a second** — continuous distortion rather than clicks.
 
-### The gate
+**Fixed by sample-counting the PTS axis** (`SRTFrameRouter.audioPTSTicks`), following
+`NDIService.audioPTSTicks` rather than inventing a second approach to the same problem: one
+conversion from seconds at the anchor, then `ptsTicks = anchorTicks + cumulativeFrames`, stamped as
+`CMTime(value: ticks, timescale: CMTimeScale(sampleRate))`. Buffers then tile **by construction** for
+any frame size and any rate. The axis is pinned to the SOURCE PTS (not the wall clock, as NDI's is)
+because SRT's video is paced from that same sender timeline, with the same 25 ms tolerance and
+re-pin-without-restarting-the-counter shape.
 
-`publishMappingIfChanged` fires only on `mappingDirty` (`LiveClock.swift:535`), which only
-`setMappingLocked` sets. Of its seven call sites, six are coarse or one-shot; **the only continuous
-setter is the P-loop** (`LiveClock.swift:900-921`):
+⚠️ **FULL MECHANISM FOR THIS HALF: `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md` §9**, with §10 on why
+every instrument missed it. Note that document's own banner: **§1–§8 were written mid-investigation,
+while the dead band was believed to be the cause of the audible distortion, and it was not.** Read §9
+first if you are here about distorted live audio. `SRTFrameRouter.audioPTSTicks` carries the same
+reasoning at the code; `NDIService.audioPTSTicks` carries the precedent.
 
-```swift
-let error = depth - targetDepth
-let proposed = 1.0 + k * error
-let newRate = min(1.0 + maxSlew, max(1.0 - maxSlew, proposed))
-…
-if newRate != rate {
-    let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate
-    setMappingLocked(senderPTS: mappedNow, hostTime: t, rate: newRate)
-}
-```
+### ⚠️ THE REUSABLE PART, AND IT IS NOT THE FIX
 
-**A clamped rate is bit-identical to the previously clamped one.** `min(1.0 + maxSlew, max(…))` maps
-every out-of-range error onto the same expression, so once saturated, `newRate != rate` is
-deterministically false — not approximately, not usually. Publication stops for as long as
-saturation lasts, and the gate is doing exactly what it was written to do: *"Gated to ACTUAL changes
-so a settled rate doesn't churn the anchor every 10Hz tick."* A railed rate is indistinguishable
-from a settled one at this test.
+**The comment block that predicted this was already sitting on the broken line.** `makeAudioSampleBuffer`
+carried a note arguing a 90 kHz audio PTS was safe "by two coincidences" at 48 kHz, warning that at
+44.1 kHz "every buffer boundary would be rounded and the desktop would crackle exactly as NDI's did —
+with the tap, the meters and SDI all still perfect, because only the renderer uses per-buffer
+timing", and closing: *"SRT's audio is measured working on the wire and is left alone."*
 
-### The dead band
+The prediction was exactly right and the premise was wrong. **It never needed 44.1 kHz**, because the
+rounding did not happen on that line — it happened in the sender's muxer, before the value arrived,
+and `preferredTimescale: 90_000` then faithfully preserved a number that could not tile. And "working
+on the wire" was true and irrelevant: the wire was never the broken part, which is precisely what the
+comment's own list of unaffected consumers should have suggested.
 
-**No site publishes a mapping between 6.25 ms and 200 ms of depth error.**
+**A correct prediction filed under the wrong trigger reads as a hazard already handled.** This one
+cost the evening: the WAV capture, the decoder swap to libavcodec and the renderer probe were all
+built to find a fault that this paragraph had described in advance.
 
-- **Lower edge, `maxSlew / k` = 0.005 / 0.8 = 6.25 ms** — above this the P-loop is railed and its
-  gate is shut.
-- **Upper edge, `snapThreshold` = 200 ms sustained `snapDebounce` 0.75 s** (`LiveClock.swift:809`;
-  SRT opts in at `SRTFrameRouter.swift:288-294`) — below this the snap does not fire.
+### What each fix is worth on its own
 
-Between the two, the six coarse sites are all quiet and the one continuous site is gated off. The
-band is wide, it is the normal operating range of a stream that is merely *somewhat* too deep, and
-nothing in the design anticipated it.
+- **Defect 1 was not wasted work.** It is a real starvation bug, it affects WHEP as well as SRT, and
+  the drift it produced was measured. It simply was not what was audible.
+- **Defect 2 is the one that was heard.** A stream whose sender emits sample-exact PTS never
+  triggered it, which is why local SRT sounded clean — see the open question below about whether
+  local was contiguous all along or merely quantised more kindly.
 
-### The consequence
+### ⚠️ STILL TO CONFIRM
 
-**The mirror is edge-driven.** Every part of `mirrorLiveAudio` — the rate EMA, the position error,
-the push decision — runs inside the `onMappingChange` callback (`FrameEngine.swift:2283-2372`). No
-publication means no evaluation, however far the audio has already walked. Measured on the
-Cloudflare SRT path:
+Neither fix has been through a real session. The renderer probe is still attached and its histogram
+is the acceptance test: **`EXACTLY ZERO (contiguous)` for essentially every buffer, with no sign
+alternations.** The probe's own gap comparison was corrected to use `CMTimeCompare` rather than
+`Double` seconds — measured in `Double`, a perfectly tiled 48 kHz stream at a ~36 s PTS shows
+residuals of ~3.4e-10 samples, which would have reported a correct fix as 467 non-contiguous
+buffers.
 
-```
-timebase−clock walks −5 ms/s to −113 ms, then steps back to ~0, then walks again
-mirror: 1 mapping change in 20 s      (healthy rate is ~8–9/s, at controlHz = 10)
-local SRT, same build, minutes apart:  ±4 ms for the whole session
-```
+### Superseded: the gate, the dead band and the consequence
 
-⚠️ **And the step correction re-installs a stale rate, so the walk restarts at the same slope.** The
-push sends `mirror.smoothedRate`, not the clock's rate, and the EMA's timestep is clamped to 1 s
-(`FrameEngine.swift:2318`) — so a change arriving every 20 s advances a τ=30 s filter as though one
-second had passed. Position is corrected; rate is not. The cycle is stable and self-repeating rather
-than convergent. Arithmetic in §4 of the findings document.
+These were written out here while defect 1 was open and are now in
+`docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md` §2–§4, which is canonical for them. They are removed
+rather than left in place because this entry now says it does not restate the derivation, and a
+copy that says so while carrying one is the thing this file keeps warning about.
 
-### ⚠️ THE REUSABLE PART — this was PREDICTED, and the prediction missed the case that happened
+### ⚠️ AND DEFECT 1 WAS PREDICTED TOO — by an enumeration that missed the case that happened
 
 The NDI entry below (*"NDI had no desktop playback path"*, its section **"WHICH MEANS WHEP AND SRT
 ARE ONE 'OPTIMISATION' AWAY FROM THE SAME DEFECT"**) stated this failure exactly, down to the
@@ -693,23 +718,34 @@ tripwires guard the code; this failure needed no edit to the code.
 
 ---
 
-## ☐ SRT multichannel AAC is still on AudioToolbox — the libav switch was STEREO ONLY
+## ☐ SRT AAC decode is SPLIT between two decoders — stereo on libavcodec, multichannel still on AudioToolbox
 
 **Status:** OPEN, **deliberately deferred, not overlooked.** **Raised:** 2026-09-21, as the named
 remaining half of the libav decode switch. **Not a regression:** multichannel behaves exactly as it
 did before that change — it is the path that did NOT move.
 
-### What happened, and what did not
+### The shipping state, stated plainly
 
-AudioToolbox mis-decodes the Cloudflare SRT feed: clean bytes in, gravel out, with framing and
-timing both independently verified correct first (`[SRT-AUDIO-PROBE]` read a 7-byte ADTS header,
-`frame_length` matching the packet, `rdblocks=0`, 1024 frames × 2 ch; `timebase−clock` held within
-4 ms). libavcodec decodes the same bytes cleanly. So SRT's AAC decode moved to
-`SRTAudioDecoderLibav` — **for streams of two channels or fewer only.** Anything wider still
-constructs `SRTAudioDecoder` and still goes through AudioConverter.
+**Two AAC decoders are in the tree and the choice is made per stream**, at
+`SRTFrameRouter.handleAudioFormat`, on one test — `Int(format.channelCount) <= 2`:
 
-**Which means a multichannel Cloudflare feed is still broken**, if the fault is the bitstream
-property it appears to be rather than something stereo-specific. Nothing has established which.
+| stream | decoder | why |
+|---|---|---|
+| **≤ 2 channels** | `SRTAudioDecoderLibav` (libavcodec + libswresample) | the default |
+| **> 2 channels** | `SRTAudioDecoder` (AudioToolbox / AudioConverter) | channel order is not done for libav |
+
+Both conform to `SRTAudioDecoding`, so `handleAudioPacket` does not know which it is talking to, and
+every connection logs which one it got (`[SRT-AUDIO] decoder: libavcodec` / `AudioToolbox`) because
+the two produce an identical buffer shape and are otherwise indistinguishable downstream.
+
+⚠️ **THE SWITCH WAS MADE FOR A REASON THAT NO LONGER FULLY HOLDS, AND THAT IS WORTH KNOWING BEFORE
+PLANNING FROM IT.** libav was adopted because AudioToolbox appeared to mis-decode the Cloudflare
+feed — clean bytes in, gravel out. The gravel turned out to be the PTS grid (see the SRT audio
+distortion entry above), which was upstream of both decoders and affected neither's output. **So it
+is no longer established that AudioToolbox mis-decodes anything.** What IS established: libav
+decodes this stream correctly, the switch is in place, and it has not been shown to be worse. Do not
+plan the multichannel work on the premise that AudioConverter is broken — that premise is now
+untested, and re-testing it is cheaper than the channel-order work below.
 
 ### ⚠️ WHY THE LINE IS AT TWO CHANNELS, AND WHY WIDENING IT IS NOT A ONE-CHARACTER CHANGE
 
@@ -740,11 +776,23 @@ question.
 
 ### What "done" means
 
-libav's output order for each `channel_configuration` established **by measurement, not by reading
-libav's headers**, and mapped to CoreAudio labels with the same read-back-is-authority discipline
-the AudioToolbox path uses — or, if libav offers no equivalent read-back, an explicitly stated
-mapping with a fixture that proves it. Then the `<= 2` test in `SRTFrameRouter.handleAudioFormat`
-widens, and `SRTAudioDecoder` can be deleted rather than kept as a second path.
+**All four, and the first is the cheap one that may cancel the rest:**
+
+1. **Re-test whether AudioToolbox actually mis-decodes multichannel AAC from this sender**, now that
+   the PTS grid is out of the way. If it does not, the honest outcome may be to revert to one
+   decoder rather than to finish the second — which would close this item by deletion.
+2. **libav's output order for each `channel_configuration` established BY MEASUREMENT**, not by
+   reading libav's headers, on a fixture with identifiable content per channel.
+3. **Mapped to CoreAudio labels with the same read-back-is-authority discipline the AudioToolbox
+   path uses** — or, if libav offers no equivalent read-back, an explicitly stated mapping with the
+   fixture from (2) proving it, because a mapping asserted from documentation is what this codebase
+   has already been bitten by.
+4. **Then the `<= 2` test widens and ONE decoder is deleted.** Whichever survives, the end state is
+   a single path: two decoders behind a protocol is a correct way to run an experiment and a poor
+   way to ship, because the untaken branch is the one that rots.
+
+**Until all four are done the `<= 2` test is load-bearing**, and widening it without (2) and (3)
+re-introduces a defect that reads as correct in every log and every meter.
 
 ⚠️ **Until then, the test is load-bearing and the log line names which decoder ran.** Every SRT
 connection now prints `[SRT-AUDIO] decoder: libavcodec` or `AudioToolbox`, because the two produce

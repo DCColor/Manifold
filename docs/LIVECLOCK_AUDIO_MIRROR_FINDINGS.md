@@ -6,6 +6,17 @@ on the Cloudflare path and not on a local one**
 *Measured fact, inference, and open question are labelled separately throughout. Companion to
 `AUDIO_PATH_FINDINGS.md`, which covers the August meter audit; this document is about the clock.*
 
+> ## ⚠️ READ §9 FIRST IF YOU ARE HERE ABOUT DISTORTED LIVE AUDIO
+>
+> §1–§8 were written **mid-investigation**, while the dead band was believed to be the cause of the
+> audible distortion on the Cloudflare SRT path. **It was not.** The dead band is a real defect, was
+> real, is fixed, and its record below stands — but the gravel had an unrelated cause, found four
+> hours later and recorded in **§9**.
+>
+> **If the symptom is gritty or gravelly live audio with the programme intelligible underneath, and
+> every counter in the path reads clean: go straight to §9.** That is the shape of a PTS that does
+> not tile, and it has now happened twice — NDI on 2026-09-18, SRT on 2026-09-21.
+
 ---
 
 ## TL;DR
@@ -287,3 +298,144 @@ list is now long enough to be a pattern rather than an anecdote:
 Every one of those is a correct measurement of the thing it measures. None of them measures the
 thing that was wrong. The number that did was `timebase−clock`, which is printed on a line that says
 nothing else alarming.
+
+---
+
+## 9. What the gravel actually was — the SRT PTS did not tile
+
+**Found and fixed 2026-09-21, about four hours after §1–§8 were written.** The dead band above is
+real and is fixed, and fixing it changed `timebase−clock` from −113 ms to ±4 ms — and the audio was
+still gravelly. This is the cause.
+
+### The measurement
+
+A probe on every buffer enqueued to the `AVSampleBufferAudioRenderer`, reporting
+`gap = this PTS − (previous PTS + previous duration)`:
+
+```
+══ GAP HISTOGRAM ══ 468 gaps over 469 buffers @ 48000 Hz
+    EXACTLY ZERO (contiguous) : 0          ← not one
+    overlap 10…100 samples    : 312
+    hole    10…100 samples    : 156
+    worst hole +32.000 · worst overlap −16.000
+    SIGN ALTERNATIONS         : 312
+    cumulative gap this session: +0.000 ms
+```
+
+**Zero contiguous buffers out of 468**, and a cumulative error of exactly zero.
+
+### The cause
+
+The raw PTS values are quantised to **one millisecond**:
+
+```
+pts=36.263000   36.284000   36.306000   36.327000   36.348000   36.370000
+deltas:            21 ms       22 ms       21 ms       21 ms       22 ms
+```
+
+A 1024-frame AAC buffer at 48 kHz is **21.3333 ms**. A millisecond grid can only express 21 or 22,
+so the error runs on a three-phase cycle — 21, 21, 22 → **−16, −16, +32 samples** — which is why the
+histogram shows 156 holes against 312 overlaps rather than an even split, and why it sums to zero.
+
+The audio PTS was built from the sender's value converted through the stream's declared
+`AVStream.time_base`. That conversion was faithful; the information had already been destroyed
+upstream, by Cloudflare's muxer.
+
+**The renderer was handed a 16-to-32-sample discontinuity forty-seven times a second, forever.** It
+resolved every one. That is the gravel: immediate on connect, continuous, programme intact
+underneath.
+
+### Why local SRT was clean on identical code
+
+Measured after the fix, from the first buffer of each connection:
+
+| Source | declared `time_base` | source PTS vs sample-counted axis |
+|---|---|---|
+| OBS direct (local) | `1/90000` — EXACT | **−0 samples** — tiled exactly, always had |
+| Cloudflare | `1/90000` — EXACT | **−32 samples** after one buffer |
+
+⚠️ **The declared timebase is not evidence.** One earlier Cloudflare session declared `1/1000`;
+this one declared `1/90000` and still failed to tile. What matters is whether the *values* land on
+sample boundaries, and only a sample-counted axis can tell you.
+
+This also answers the question that dominated the day — *"we fixed this on Friday, how can both be
+true?"* Both were true. The code was correct on 2026-09-18 and unchanged on 2026-09-21. What changed
+was the sender's PTS grid. The one transport with a third party's muxer in the middle is the one
+that broke, on a day when nothing in the repository moved.
+
+### The fix
+
+A **sample-counted axis**, following `NDIService.audioPTSTicks` rather than inventing a second
+approach to the same problem: one conversion from seconds at the anchor, then
+`ptsTicks = anchorTicks + cumulativeFrames`, an integer add, with
+`CMTime(value: ticks, timescale: CMTimeScale(sampleRate))`. Consecutive buffers are contiguous **by
+construction** rather than by rounding. The axis re-pins to the sender PTS at a 25 ms tolerance
+without restarting the counter, and resets on format change and per stream.
+
+Measured after: **470/470 contiguous, zero holes, zero overlaps, zero sign alternations**, on four
+consecutive windows, on both transports.
+
+> ⚠️ **A code comment at the old site predicted this exact symptom and dismissed it.** It described
+> the desktop crackling "exactly as NDI's did — with the tap, the meters and SDI all still perfect,
+> because only the renderer uses per-buffer timing," and then ruled it out on the premise that it
+> required 44.1 kHz. It did not: the rounding happened upstream of the line the comment was
+> defending. It closed with *"SRT's audio is measured working on the wire and is left alone"* — and
+> the wire was never the broken part.
+
+---
+
+## 10. Why every instrument missed it — the transferable part
+
+This is the section worth reading if you are debugging something else.
+
+**The defect summed to exactly zero, and every instrument in the path aggregated over a window.**
+An alternating ±16/+32-sample error with a cumulative value of zero is invisible to a mean, a total,
+a drift figure, a rate, or any per-second rollup. It is visible only to a per-event measurement.
+
+Seven instruments read healthy or actively misled during this investigation:
+
+1. **`undecodable=0`, `noPTS=0`** — correct. The samples were always perfect.
+2. **`timebase−clock`** — flat within ±4 ms after the dead-band fix. It measures the mirror's
+   position error, not whether consecutive buffers abut.
+3. **`[SRT-JITTER] worst deficit 0.000s`** — arrival jitter was genuinely fine.
+4. **`[SRT-BACKLOG] residual` within bound** — every window, all session.
+5. **A 10-second WAV capture at `LiveAudioSink`'s input** — matched the known-good local capture to
+   within 1 dB in every band below 20 kHz, zero repeated blocks, zero samples at the rails. The
+   samples *were* clean; only their timestamps were wrong, and a content capture cannot see that.
+6. **A system-audio recording of playback** — measured clean, RMS-matched, with *fewer*
+   discontinuities than the known-good local capture. A capture concatenates submitted samples; it
+   does not observe delivery.
+7. **The gap probe itself, in its first version** — it measured gaps in `Double` seconds, which on a
+   perfectly tiled 48 kHz stream produces ~3.4e-10-sample residuals. It would have reported 467
+   non-contiguous buffers *for a correct fix*. Contiguity is an exact statement about rationals and
+   is now decided with `CMTimeCompare(pts, previousEnd) == 0`.
+
+Four hypotheses were also eliminated by test and are recorded so nobody re-runs them: ADTS framing
+(probe-verified correct), the AAC decoder (switched to libavcodec — the same library `ffmpeg` uses,
+which decodes the stream cleanly — still gravelly), the renderer's rate (pinned to exactly 1.0 —
+still gravelly), and debug-build overhead (Release with `DEBUG=0` — still gravelly).
+
+### The rules this produces
+
+- **A defect that sums to zero is invisible to every aggregate.** When a symptom is continuous but
+  every total reads clean, measure per event, not per window.
+- **Report distributions, not means.** The histogram that found this prints sign alternations
+  explicitly, because 312 alternations and a mean of zero are the same number to a summary line.
+- **A content capture cannot diagnose a timing fault.** Neither a WAV of the samples nor a
+  system-audio recording observes *when* anything was delivered. Both read clean here, and both
+  were correct.
+- **Verify the instrument against a known-good case before trusting it on the broken one.** Two of
+  the seven above would have lied in the direction of a false positive.
+- **When someone says "this feels like something we already fixed", go and read that fix.** That was
+  said three times during this investigation, about the NDI PTS work of 2026-09-18, and answered
+  each time by addressing the literal words rather than the substance. It was the correct signal and
+  it was correct from the first hour.
+
+### Symptom-first index
+
+**Gritty, gravelly or crackly live audio, programme intelligible underneath, immediate on connect,
+every counter in the path reading clean →** check whether consecutive audio buffer PTSes tile
+exactly at the renderer. Do not trust the declared `time_base`; measure the divergence of the
+source PTS from a sample-counted axis over the first buffer.
+
+Seen twice: **NDI, 2026-09-18** and **SRT (Cloudflare), 2026-09-21**. Both fixed the same way.
