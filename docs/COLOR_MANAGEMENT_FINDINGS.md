@@ -752,6 +752,14 @@ current (rule 1).
 > cannot be represented, so every 255 above is clipped *in the capture*. That is evidence about the
 > composite, not about the panel. No colorimeter has been in the loop at any point in this document.
 
+#### ⚠️ Scope of the HDR-on run
+
+**Scope of the HDR-on run:** switching macOS HDR on also moves the LG into its HDR hardware preset,
+which has not been calibrated or validated. The measurements above are framebuffer code values set
+by the profile macOS assigns and are independent of the panel preset. They stand as mechanism
+findings. Nothing here says anything about how the LG looks in HDR mode; on that path the LG is an
+unvalidated display, equivalent to the ASUS: mechanism only, never accuracy.
+
 #### ⚠️ A constraint Phase 2b must honour
 
 **Every change of mode must go through `DeckRegistry.setDisplayTransform`.** That function writes
