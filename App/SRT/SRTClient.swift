@@ -803,6 +803,27 @@ final class SRTClient: ObservableObject {
         // produce "no video is arriving" about a stream nobody had finished looking at yet.
         haveVideoStream = true
         videoIdentifiedAtHost = CACurrentMediaTime()
+
+        // ── ⚠️ THE MEDIA-STALL BASELINE IS RE-TAKEN HERE, BECAUSE THE COUNTER IT WATCHES WAS
+        //    ZEROED HERE — AND THE TWO USED TO HAPPEN AT DIFFERENT TIMES ────────────────────
+        //
+        // `SRTFrameRouter` is a PROCESS-LIFETIME SINGLETON, so `picturesDecoded` outlives the
+        // session. It is zeroed in `prepareDecoder`, which the C layer calls inline on the session
+        // thread immediately before hopping here (see the `onVideoFormat` callback in `connect`),
+        // so by this line the counter is provably THIS session's and reads 0 or a few frames.
+        //
+        // The baseline used to be taken in `startStatsTimer` at CONNECT instead — seconds earlier,
+        // while the counter still held the PREVIOUS session's total. The watchdog armed on that
+        // stale number, and this session's count then had to climb past a high-water mark it had
+        // never set. Measured 2026-09-22: three consecutive Cloudflare reconnects after a 95 s
+        // session were killed at +16–17 s with "the stream stopped sending video" while bytes,
+        // access units and pictures were all still advancing. See docs/BUGS.md.
+        //
+        // Re-taking it HERE also covers a MID-SESSION re-identification: `prepareDecoder` runs
+        // again on a format change and zeroes the counter again, which would otherwise reproduce
+        // the same stale comparison inside one connection.
+        watchdogLastPictures = 0
+        watchdogSinceHost = 0
         announcedProbeWait = false
         retireError()   // phase 1 is over; retire its banner if it showed
 
@@ -963,7 +984,16 @@ final class SRTClient: ObservableObject {
         // and the teardown are outside every `#if`, exactly as the WHEP media watchdog was
         // restructured out of its logging block. Only `logStatsIfDue` at the bottom is compiled out
         // of Release, and it is pure narration.
-        if pictures > 0 {
+        // ⚠️ `haveVideoStream` GATES THE ARMING, AND IT IS NOT REDUNDANT WITH `pictures > 0`.
+        // `picturesDecoded` belongs to a singleton router, so before this session identifies its
+        // stream the counter still holds the PREVIOUS session's total — a number greater than
+        // zero that says nothing about this connection. Reading it here is what killed three
+        // Cloudflare reconnects at +16–17 s on 2026-09-22 (docs/BUGS.md). `haveVideoStream` is
+        // set in `handleVideoFormat`, which AppKit-hops from the same `onVideoFormat` callback
+        // that zeroes the counter inline first, so this condition is exactly "the counter is
+        // ours now". It also restores what the comment below already claimed: a connection that
+        // has not produced a picture is left to the graces, not killed here.
+        if haveVideoStream, pictures > 0 {
             // A picture is the definitive success signal — it retires any banner a picture
             // DISPROVES. Not the ones a picture is compatible with (the reorder shortfall, the
             // ignored-parameter notice); `retireError` itself honours that distinction now, so the

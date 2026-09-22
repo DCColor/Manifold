@@ -615,6 +615,111 @@ advance.
 
 ---
 
+## ✅ FIXED 2026-09-22 — SRT killed a healthy stream ~17 s after reconnecting, blaming the broadcaster
+
+**Status:** ✅ **FIXED 2026-09-22. Not yet through a real session** — the entry stays until it has
+been. **Affects:** SRT only. **WHEP does not have it** and the reason is structural, below.
+
+### The symptom
+
+Connect to an SRT source, watch it for a while, disconnect, reconnect — and about **17 seconds**
+later the stream dies with
+
+> The stream stopped sending video (the broadcaster may have ended it).
+
+Picture and audio are perfect for those 17 seconds. The broadcaster has not stopped. Reconnecting
+again reproduces it, and again, until eventually one session survives and runs indefinitely.
+
+### What was actually happening — measured 2026-09-22
+
+Three consecutive Cloudflare reconnects were killed at **+17.00 s, +17.04 s and +16.01 s**. In every
+one, at the instant of the teardown:
+
+- **bytes were still arriving** — the final second of the first session delivered 697 KB
+- **access units were still arriving** — 378 → 401 in that same second
+- **pictures were still being decoded** — the session totals read `AUs=401 → 401 pictures`
+- `recvTimeouts` was flat, and `[LIVECLOCK]` reported healthy depth 0.4 s before the kill
+
+Nothing had stalled. The watchdog was wrong.
+
+### The cause: two resets at two different times, on one counter that outlives the session
+
+`SRTClient`'s media-stall watchdog compares `SRTFrameRouter.shared.picturesDecoded` against a
+high-water mark, and tears down when the count fails to advance for `mediaStallWindow` (15 s). Both
+halves are sound. The pairing was not:
+
+| what | where it was reset | when that is |
+|---|---|---|
+| the watchdog's high-water mark | `startStatsTimer()` | **at connect** |
+| `picturesDecoded` itself | `prepareDecoder()` | **at stream identification**, 2.9–5.4 s later |
+
+`SRTFrameRouter` is a **process-lifetime singleton**, so between those two moments `picturesDecoded`
+still holds the *previous* session's total. The 1 Hz tick at +1 s therefore saw a large non-zero
+count, armed the watchdog on it, and stamped the clock. Identification then zeroed the counter, and
+this session's pictures had to climb past a high-water mark **they had never set**. They never did,
+the 15 s ran out, and the banner blamed the broadcaster.
+
+The arithmetic fits every session in the log to the tick:
+
+| session | inherited mark | new session's final count | outcome |
+|---|---|---|---|
+| local `127.0.0.1`, 95 s | **0** — first SRT session of the process | 2269 | survived |
+| Cloudflare #1 | 2269 | 401 | killed +17.00 s |
+| Cloudflare #2 | 401 | 375 | killed +17.04 s |
+| Cloudflare #3 | 375 | 322 | killed +16.01 s |
+| Cloudflare #4 | 322 | 2712 | **survived** — overtook 322 about a second before the deadline |
+
+### ⚠️ Why it looked intermittent, and why nobody caught it sooner
+
+**It is not intermittent. It is a race between two counters, and the loser is decided by how long
+the previous session ran.**
+
+A session survives only if the new count overtakes the inherited mark before the 15 s expires —
+roughly `identify_delay + previous_count / fps < 16 s`. So:
+
+- The **first** SRT session after launch always survives: nothing is inherited.
+- A reconnect after a **short** session usually survives: the mark is small.
+- A reconnect after a **long** session is always killed: at ~24 fps, anything over ~360 pictures
+  (≈15 s of previous viewing) cannot be overtaken in time.
+- Cloudflare #4 above survived by **under a second**, which is exactly the kind of margin that makes
+  a deterministic bug present as a flaky one.
+
+It also hid behind a plausible story. The banner names the broadcaster, the timing is consistent,
+and on a real remote stream "the sender dropped out" is a perfectly ordinary thing to believe —
+especially when reconnecting sometimes works.
+
+### The fix
+
+Both changes are in `App/SRT/SRTClient.swift`; neither touches `mediaStallWindow`, `firstPictureGrace`
+or the 1 Hz tick.
+
+1. **The baseline is re-taken in `handleVideoFormat`**, at the same instant and for the same reason
+   the counter is zeroed. `prepareDecoder` runs inline on the session thread immediately before the
+   main-thread hop into `handleVideoFormat`, so by that line the counter is provably this session's.
+   This also covers a **mid-session re-identification**: a format change calls `prepareDecoder`
+   again and zeroes the counter again, which would otherwise reproduce the same stale comparison
+   *inside* one connection.
+2. **The watchdog will not arm before `haveVideoStream`.** The stale count is never read at all,
+   rather than read and then corrected. This restores what the code's own comment already claimed —
+   *"a connection that never delivers one is left to the graces below, not killed here"* — which
+   a non-zero inherited count had quietly made false.
+
+### ⚠️ WHEP DOES NOT HAVE THIS, and the line that proves it
+
+`WHEPClient` runs the identical watchdog shape (`WHEPClient.swift:421-431`) but reads
+`decoder.snapshot().framesDecoded` from a **per-connection object**: `WHEPClient.swift:189` builds
+`LiveVideoDecoder(logTag: "WHEP-DECODE")` fresh on every connect and `WHEPClient.swift:794` drops it
+at teardown, so the counter starts at 0 with the baseline and there is no window in which a previous
+session's total is visible. `logDecodeStatsTick` also opens with `guard let decoder else { return }`,
+so the watchdog cannot run before that object exists.
+
+**The difference is ownership, not logic.** SRT's counter lives on a singleton router; WHEP's lives
+on an object whose lifetime *is* the connection. Any future transport that watches a counter it does
+not own inherits this bug — the question to ask is not "is the watchdog right" but "does the counter
+die with the session".
+
+---
+
 ## ✅ FIXED 2026-09-21 — SRT audio distortion. TWO defects, one symptom, and the loud one was not the cause.
 
 **Status:** ✅ **BOTH FIXED, 2026-09-21. Not yet through a real session** — the entry stays until it

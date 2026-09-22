@@ -126,4 +126,9 @@ docs/mxf-fixtures/vtdnxprobe
 # caller, so this covers only the two the README's examples use.
 docs/mxf-fixtures/mixed/
 docs/mxf-fixtures/op1a/
-.build-rel/
+
+# Every throwaway derived-data folder, in one line. A/B runs and no-regression checks build HEAD
+# (or a stash) into a scratch path beside the real one — .build-verify/, .build-A-head/ — and a
+# 400 MB untracked folder in `git status` at the moment you are about to commit is exactly when
+# you least want to be reading past it. Covers .build-rel/ and the .build-cc* set above.
+.build-*/
