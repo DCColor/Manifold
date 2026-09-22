@@ -218,8 +218,14 @@ final class WindowDeck: ObservableObject {
     ///
     /// `fileprivate(set)` on `engine` rather than `fileprivate`: the View menu's mirror
     /// (`RasterMenuState`) has to ask the key deck whether it has a source, and that is a read.
+    ///
+    /// `renderer` was widened to `fileprivate(set)` for the same reason in Phase 2b: the chain
+    /// readout (`DisplayChainModel`) reports the SOURCE colour state, and the renderer is where
+    /// that state lives — it is what the layer was actually configured from. Reading it there
+    /// rather than re-deriving from the inspector is what stops the readout and the picture
+    /// disagreeing. Still a read; the write side is unchanged.
     fileprivate(set) weak var engine: FrameEngine?
-    fileprivate weak var renderer: MetalVideoRenderer?
+    fileprivate(set) weak var renderer: MetalVideoRenderer?
 
     /// THIS WINDOW'S CHROME STATE, reachable from outside the view that owns it.
     ///
@@ -666,8 +672,14 @@ final class DeckRegistry {
     /// ⚠️ KEY WINDOW, NOT ALL WINDOWS. §6.3 chose per-window precisely so "what the client sees"
     /// and "what the file is" can sit side by side, and an app-wide write would delete the
     /// comparison this control exists to make.
-    func setDisplayTransform(_ mode: DisplayTransformMode) {
-        guard let deck = keyDeck, let chrome = deck.chrome else { return }
+    /// - Parameter deck: the window to act on. **nil means the key deck**, which is what the Color
+    ///   menu wants — a menu command has no window in scope. The control-bar pulldown passes its
+    ///   own deck instead: it is physically inside one window, so the target is not in question,
+    ///   and naming it removes any dependence on what `NSApp.keyWindow` reports while an `NSMenu`
+    ///   is tracking. Both routes still land here, which is what the §6.7 constraint requires —
+    ///   the constraint is that there is ONE mutator, not that it can only ever mean the key deck.
+    func setDisplayTransform(_ mode: DisplayTransformMode, on deck: WindowDeck? = nil) {
+        guard let deck = deck ?? keyDeck, let chrome = deck.chrome else { return }
         chrome.displayTransform = mode
         // The renderer re-presents the current frame itself, so this reaches a PAUSED picture —
         // see `MetalVideoRenderer.setDisplayTransform`, and the 2026-08-11 first-frame entry in

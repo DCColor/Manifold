@@ -396,6 +396,12 @@ Split into two on delivery:
   chain readout, the momentary-compare gesture, the diagnostics line, and the standing Bypass
   indicator §6.1 requires. ⚠️ **Read §6.7's constraint before starting**: every change of mode must
   go through `DeckRegistry.setDisplayTransform`.
+  ✅ **Closed 2026-09-22 — result in §6.8.** Pulldown, standing Bypass indicator and chain readout
+  are live; both control surfaces agree in both directions and OS is still 0 codes against `c34a17c`.
+  **Two items from the list above did NOT ship and are carried forward:** the momentary-compare
+  gesture, and `didChangeScreenProfileNotification` is wired but untested live (exercising it means
+  changing a macOS display setting). §6.8 also raises a design question the placement created — the
+  standing indicator inherits the control bar's auto-hide in overlay mode.
 
 **Phase 3 — Reference.** The shader EOTF, against a settled destination. The only phase that is
 real engineering. *Amended 2026-09-21 from §6.6:* the destination is settled — declare the source
@@ -807,6 +813,153 @@ WRONG; the display was in SDR mode for the entire probe*"), now emitted by the a
 - **8-bit, and no light measured.** Unchanged from §6.6.
 - **Why macOS assigns an sRGB-TRC profile in HDR mode** is observed, not explained.
 - **The HDR-on measurements are one session on one machine**, with the switch toggled by hand.
+
+---
+
+### 6.8 Phase 2b — result, measured 2026-09-22
+
+**Closed. The pulldown, the standing Bypass indicator and the chain readout are live, both control
+surfaces agree in both directions, and OS is still byte-identical to Phase 2a.**
+
+**What shipped.** `DisplayTransformControl` — §6.3's tiers 1–3 — in the per-window control bar,
+beside the existing Color control and deliberately *not* merged with it (§6.3: "keeping them
+visibly separate is what stops 'Embedded' creeping back in as a concept"). Its own file, its own
+`View` structs, and **no new modifiers on `ContentView`'s body**, which §6.7 records as being at the
+type-checker's limit. Plus `ICCTransferCurve`, a shipping ICC rTRC parser, and `DisplayChainModel`,
+one per window.
+
+⚠️ **Still no Reference, not even disabled.** Phase 3. A greyed row advertising a mode that cannot
+be chosen is a support question, and a placeholder is how a stub gets written.
+
+#### MEASURED
+
+All captures `screencapture -o -l <windowID>`; every window identified by the NSScreen **name** it
+was on, never inferred from coordinates. Fixture `docs/color-fixtures/wedge.mov`. HDR off on both
+displays throughout, verified before and after.
+
+| what | screen | result |
+|---|---|---|
+| **OS vs Bypass, switched via the PULLDOWN** | ASUS PA147 | **21 codes, 93.69 %**, worst **170 → 149** |
+| **Color menu checkmark after the pulldown set Bypass** | — | followed — OS unchecked, Bypass ✓ |
+| **Pulldown after the COLOR MENU set OS** | ASUS PA147 | followed — badge cleared (**0 amber px**), label back to "macOS" |
+| **OS vs the Phase 2a build `c34a17c`** | ASUS PA147 | **0 codes, 0.00 %** |
+| **OS → Bypass → OS round trip** | ASUS PA147 | **0 codes** against the original OS capture |
+| **Bypass across relaunch** | — | resets to OS, through the new write path too |
+
+The 21 codes and the worst point reproduce §6.7's numbers exactly, from a different control surface
+— which is the check that the pulldown reaches the layer rather than merely redrawing itself.
+
+> ⚠️ **ASUS = MECHANISM, NEVER ACCURACY**, as §6.6 and §6.7 both require. That display is
+> uncalibrated and in its built-in Rec.709 preset; these numbers say the transform is applied, once,
+> in the right place, and say nothing about whether any picture is correct.
+
+#### The chain readout, as it actually prints
+
+**On the LG (`LG TV SSCR2`), mode OS:**
+
+```
+Source     Rec. 709 · Rec. 709 · no CICP — assumed
+Transform  As macOS shows it — source colorspace declared to the layer
+Display    LG TV SSCR2 — pure power law, gamma 1.961
+           macOS is passing this picture through unchanged.
+```
+
+**On the ASUS (`ASUS PA147`), mode OS:**
+
+```
+Source     Rec. 709 · Rec. 709 · no CICP — assumed
+Transform  As macOS shows it — source colorspace declared to the layer
+Display    ASUS PA147 — sampled table, 1024 entries — matches sRGB to 9.1e-06
+           macOS is converting this picture for this display.
+```
+
+**On the LG, mode Bypass** (no verdict line: the question only applies in OS):
+
+```
+Source     Rec. 709 · Rec. 709 · no CICP — assumed
+Transform  Bypass — no colorspace declared, no conversion
+Display    LG TV SSCR2 — pure power law, gamma 1.961
+```
+
+Both readings are the right way round against this document: the LG's profile IS the source curve
+(§6.5), so "passing through unchanged"; the ASUS's is sRGB, so "converting".
+
+**`Rec. 709 · Rec. 709 · no CICP — assumed` is correct, and the wedge really is untagged.** The
+renderer publishes `primaries=nil transfer=nil matrix=nil` for it. The line names the curve the
+renderer is USING — `makeColorSpace` resolves absent codes to the full 709 set — while carrying the
+provenance separately, which is §6's honesty model. An earlier version printed `—` for the curve;
+that was wrong, because the picture is emphatically not being rendered through a dash, and §2
+measured the untagged fallback as byte-identical to the 709 profile.
+
+#### Screen change — tested. Profile change — NOT tested, and why
+
+**The window was moved from the LG to the ASUS with the chain readout OPEN, and the readout updated
+live**: the Display line changed to the ASUS's sampled table and the verdict flipped from "passing
+through unchanged" to "converting". That is `NSWindow.didChangeScreenNotification` working.
+
+A **real mouse drag** from the ASUS back to the LG was also performed, and the readout is correct
+afterwards — but the popover **dismisses** during a genuine window drag (ordinary AppKit behaviour),
+so the live-update-while-open demonstration is the programmatic move, which posts the same
+notification. Both are recorded rather than the stronger one implied.
+
+⚠️ **`NSWindow.didChangeScreenProfileNotification` is wired and UNTESTED LIVE.** Exercising it means
+changing a display's assigned profile — a macOS display setting — and this work was done under an
+explicit instruction not to touch any. It is the path §6.5's "one stray click in System Settings ▸
+Displays ▸ Colour Profile" arrives on, and §6.7 measured the macOS HDR switch doing exactly that to
+the LG, so it is worth exercising deliberately at some point. **Not claimed as working.**
+
+#### Three defects that rendered as something plausible
+
+Recorded because each one *looked* fine and was caught only by measuring the rendered result — the
+same class as §6.5's probe comparing ICC encodings as strings.
+
+1. **Both menu rows drew a checkmark, and neither subtitle rendered.** The first version drew its
+   own `Image(systemName: "checkmark")` at `.opacity(checked ? 1 : 0)` with the subtitle in a
+   `VStack`. AppKit does not honour a zero-opacity image in a menu item, and a `VStack` label is
+   flattened to its first `Text`. **§6.3 is explicit that "the subtitles do the teaching"**, so this
+   removed the point of the control while leaving it apparently working. Fixed by using `Toggle`
+   (AppKit draws a real checkmark — the mechanism `RasterSizeCommands` and the Color menu already
+   use) with a second `Text` for the subtitle.
+2. **The Bypass badge rendered as plain white text.** It was inside the `Menu`'s label;
+   `.menuStyle(.borderlessButton)` strips a label's background and foreground, so the amber capsule
+   and black text were discarded and the control bar's own white won. Caught by sampling the capture
+   — **zero non-grey pixels in the indicator region** — not by looking, because bold white
+   "⚠ BYPASS" looks deliberate. Fixed by making the badge a sibling of the menu; it now measures
+   **1041 amber pixels** when Bypass is active and **0** when it is not.
+3. **"Show Transform Chain…" did nothing.** Setting the popover's presentation flag synchronously
+   inside a menu action loses the race with the menu's own dismissal. Deferred one runloop turn.
+
+#### ⚠️ The standing indicator inherits the control bar's auto-hide, and §6.1 should be read again
+
+The indicator is on the control bar, which is where it was asked for — but this window's control
+bar defaults to the **overlay** HUD, which auto-hides. **So in overlay mode the "standing" marker
+hides with the bar**, and is visible only while the HUD is awake. In **docked** mode
+(`WindowChrome.controlMode == .docked`) the bar is permanent and so is the marker.
+
+§6.1 wants the indicator "so nobody judges a picture in it three days after leaving it there", and a
+marker that disappears after a few seconds of no mouse movement does not obviously satisfy that.
+**Not changed here** — the placement was specified, and moving it would be a design decision, not an
+implementation one. Flagged as the open question it is.
+
+#### The 2b constraint was honoured, and extended rather than bypassed
+
+Every mode change still goes through `DeckRegistry.setDisplayTransform`; there are **no writes to
+`chrome.displayTransform`** anywhere in the new control. The function gained an optional
+`on deck:` parameter — nil still means the key deck, which is what the Color menu needs, while the
+pulldown names its own deck. The pulldown is physically inside one window, so its target is not in
+question, and naming it removes any dependence on what `NSApp.keyWindow` reports while an `NSMenu`
+is tracking. **One mutator, two callers** — which is what §6.7's constraint requires.
+
+#### Still open after Phase 2b
+
+- **`didChangeScreenProfileNotification` untested live.** Above.
+- **The auto-hide interaction with the standing indicator.** Above.
+- **§6.3's momentary compare (hold-to-compare) is not built.** It is named in §6.3 as the gesture
+  that actually gets used, and in §6.4's 2b list. Only the sticky modes exist.
+- **The Source line has only been exercised on an UNTAGGED file.** Both the `— tagged` and the
+  `— partly assumed` spellings, and the whole PQ/HLG path — where the parser correctly reports
+  "profile declares no rTRC" and the verdict falls to its third case — are written but unseen.
+- **One fixture, one session.** No colorimeter, 8-bit captures, as everywhere else here.
 
 ---
 

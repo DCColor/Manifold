@@ -863,7 +863,10 @@ final class MetalVideoRenderer {
     /// handed straight to `pendingColorState`. Keeping the derivation itself untouched is what
     /// makes the OS path byte-identical to the pre-Phase-2a behaviour BY CONSTRUCTION rather than
     /// by test: in `.os` the value installed is the same object the old code installed.
-    private var sourceDerivedColorSpace: CGColorSpace?
+    /// `private(set)` since Phase 2b: the chain readout reports the SOURCE curve, and it must read
+    /// the same value the layer is fed rather than re-deriving it from the CICP codes. Two
+    /// derivations of one thing is how a readout starts disagreeing with the picture.
+    private(set) var sourceDerivedColorSpace: CGColorSpace?
 
     /// This window's display-transform mode, mirrored onto the renderer. Seeded to the same
     /// default `WindowChrome` uses, so a renderer that is never told is in OS.

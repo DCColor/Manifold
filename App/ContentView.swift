@@ -3184,6 +3184,24 @@ struct ContentView: View {
                     colorControl
                 }
 
+                // Display transform (§6.3 tiers 1–3) — Phase 2b. Next to the Color control because
+                // they are the two halves §6.3 names: that one is INTERPRETATION (what the source
+                // is), this one is the DISPLAY TRANSFORM (what is sent to the screen). Kept as two
+                // adjacent controls rather than merged, because "keeping them visibly separate is
+                // what stops 'Embedded' creeping back in as a concept."
+                //
+                // ⚠️ NOT GATED ON `activeLiveSource` the way `colorControl` is. That gate exists
+                // because the interpretation control has nothing to say about a FILE yet; this one
+                // has everything to say about a file — §6.5 and §6.6 were measured on file
+                // playback, and gating it to NDI would put the mode out of reach of its main case.
+                // Gated on `hasSource` only, matching when the Color menu's items are enabled.
+                //
+                // ⚠️ ONE ELEMENT, NO MODIFIERS — see DisplayTransformControl.swift's header and
+                // §6.7: this file's body is at the type-checker's limit.
+                if hasSource {
+                    DisplayTransformControl(deck: deck, chrome: chrome)
+                }
+
                 Spacer()
 
                 if showPin {
