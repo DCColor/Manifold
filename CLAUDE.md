@@ -46,3 +46,4 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   write, restore it after. This rule exists because `streamBookmarks` was erased during
   LIVECLOCK verification and there was no way back: no snapshots, no Time Machine, no
   store-side backup. See the stream-bookmark durability item in `docs/BUGS.md`.
+- Never add Co-Authored-By or any AI authorship trailer to commit messages or PR descriptions.
