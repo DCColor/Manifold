@@ -706,6 +706,12 @@ struct ContentView: View {
                 chrome.rasterSize = .custom
             }
             RasterMenuState.shared.setNeedsRefresh()
+            // Phase 2a (§6.4): the renderer starts in the same mode this window's chrome does, so
+            // the two cannot be out of step before the first user action. `displayTransform` is
+            // session-scoped and always `.os` at construction (see `WindowChrome`), which makes
+            // this a no-op today — it is here so it stays true if that ever stops being the case.
+            metalRenderer?.setDisplayTransform(chrome.displayTransform)
+            DisplayTransformMenuState.shared.setNeedsRefresh()
         }
         .onDisappear {
             // Before the engine goes: a closed window must stop inspecting keystrokes.
@@ -735,7 +741,20 @@ struct ContentView: View {
         }
         // 3. THE SOURCE CHANGED. A percentage is a percentage OF something; the View menu is dead
         //    until this window has a raster to take one of.
-        .onChange(of: engine.displaySize) { _, _ in RasterMenuState.shared.setNeedsRefresh() }
+        //    Both menus that describe the key deck are re-derived here: a display transform is a
+        //    transform OF something, so the Color menu is dead until this window has a picture,
+        //    exactly as the View menu is. One trigger, because it is one event.
+        .onChange(of: engine.displaySize) { _, _ in
+            RasterMenuState.shared.setNeedsRefresh()
+            DisplayTransformMenuState.shared.setNeedsRefresh()
+        }
+        // ⚠️ NO `.onChange(of: chrome.displayTransform)` HERE, AND THAT IS FORCED, NOT PREFERRED.
+        // This chain is at the type-checker's limit (see the note in `.onAppear` below, and the
+        // currentURL observer): adding one more modifier fails the build outright with "unable to
+        // type-check this expression in reasonable time". So the forward to the renderer lives in
+        // `DeckRegistry.setDisplayTransform`, which already holds both this window's chrome and
+        // its renderer. READ THAT FUNCTION BEFORE ADDING A SECOND CONTROL SURFACE — it is the one
+        // mutator, and a Phase 2b pulldown must call it rather than writing `chrome` directly.
         // A slot's selection changed → start newly-active scopes, stop ones that left the tray.
         .onChange(of: activeKinds) { _, _ in updateScopeSampling() }
         .onChange(of: engine.effectiveIsFullRange) { _, _ in

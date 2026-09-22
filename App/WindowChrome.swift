@@ -148,6 +148,30 @@ final class WindowChrome: ObservableObject {
     @Published var slot1: ScopeKind { didSet { defaults.set(slot1.rawValue, forKey: Key.slot1) } }
     @Published var slot2: ScopeKind { didSet { defaults.set(slot2.rawValue, forKey: Key.slot2) } }
 
+    /// ── THE DISPLAY TRANSFORM FOR THIS WINDOW — AND THE ONE MEMBER HERE THAT IS NOT PERSISTED ──
+    ///
+    /// Per window for the reason §6.3 gives: multi-window shipped, and comparing "what the client
+    /// sees" against "what the file is" SIDE BY SIDE is arguably the feature itself. Retrofitting
+    /// per-window later is the expensive direction.
+    ///
+    /// ⚠️ **NO `didSet` WRITE AND NO SEED IN `init`, DELIBERATELY. DO NOT "FIX" THIS.** Every other
+    /// property on this class persists last-writer-wins, so an omission looks exactly like an
+    /// oversight — which is why it is spelled out here rather than left to be inferred.
+    ///
+    /// **Every launch and every new window starts in `.os`.** The reason is §6.1: Bypass is never
+    /// *correct*, only diagnostic, and on a display already calibrated to 709/2.4 it is close to
+    /// Reference *by coincidence* — so it is the textbook control to be left on and forgotten, and
+    /// then to judge a picture in three days later. Persisting it would make a window open in a
+    /// mode nobody chose for the source now in it. The §6.3 reasoning is the same one that made
+    /// the output-mode pick a mistake on 2026-09-18: a control that can be left in a non-default
+    /// state and forgotten needs the forgetting to be cheap, and starting from a known state every
+    /// time is how that is bought.
+    ///
+    /// This is NOT the `.custom` case on `rasterSize` above, which declines to persist ONE value
+    /// of a property that otherwise persists. Here the whole property is session-scoped, so there
+    /// is no key, nothing in `Key`, and nothing to read at startup.
+    @Published var displayTransform: DisplayTransformMode = DisplayTransformMode.defaultMode
+
     /// Overlay (floating auto-hide HUD) vs docked (fixed bar). Stored per window like the rest —
     /// but see `adoptExternalControlMode` below: it has no per-window control surface YET, so today
     /// it still tracks the app-wide Settings picker in every open window.

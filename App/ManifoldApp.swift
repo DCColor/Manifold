@@ -220,6 +220,15 @@ struct ManifoldApp: App {
             // percentage of the source raster. The app's first real menu of window commands; see
             // RasterSize.swift for why it is a menu and not another item on the control bar.
             RasterSizeCommands()
+            // The Color menu: the display transform (OS / Bypass) for the key window — Phase 2a of
+            // docs/COLOR_MANAGEMENT_FINDINGS.md §6.4. A NEW top-level menu because there was no
+            // Color menu to extend, and because the existing Color CONTROL on the control bar is
+            // gated to NDI sources and governs INTERPRETATION rather than the display transform —
+            // §6.3 keeps those two visibly separate on purpose. See DisplayTransform.swift.
+            //
+            // ⚠️ NOT `#if DEBUG`. This ships. It is the user-facing half of the colour-management
+            // work, not a dev affordance — the gated Debug menu below is a different thing.
+            DisplayTransformCommands()
             #if DEBUG
             // ── ⚠️ GATED: A MENU BAR ITEM IS A CATEGORICALLY MORE EXPOSED AFFORDANCE ────────────
             //

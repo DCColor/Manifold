@@ -841,10 +841,38 @@ final class MetalVideoRenderer {
     ///
     /// See the threading note on `setSourceColorSpace` for why the layer is not written on main.
     private struct PendingColorState {
-        let colorSpace: CGColorSpace
+        /// ⚠️ OPTIONAL SINCE PHASE 2a, AND `nil` IS A VALUE HERE — NOT "NOTHING TO DO".
+        /// `nil` is Bypass: it is installed on the layer exactly as a real colorspace is, and
+        /// means "perform no conversion" (measured, §6.6). "Nothing to do" is `pendingColorState`
+        /// itself being nil, one level up. Collapsing the two would make Bypass unreachable.
+        let colorSpace: CGColorSpace?
         let wantsEDR: Bool
     }
     private var pendingColorState: PendingColorState?
+
+    /// ── THE TWO INPUTS THE INSTALLED COLOUR STATE IS COMPUTED FROM. MAIN THREAD ONLY. ────────
+    ///
+    /// Phase 2a (§6.4) makes what reaches the layer a function of TWO things rather than one: the
+    /// source's declared colorspace, and this window's display-transform mode. They arrive from
+    /// different places at unrelated times — a source load vs. a menu pick — and in either order,
+    /// so each is stored and `publishColorState()` recomputes from both. Deriving the mode's
+    /// effect at the park site instead would mean a mode set before the first source load was
+    /// silently dropped.
+    ///
+    /// `sourceDerivedColorSpace` is the OUTPUT of `makeColorSpace`, i.e. exactly what used to be
+    /// handed straight to `pendingColorState`. Keeping the derivation itself untouched is what
+    /// makes the OS path byte-identical to the pre-Phase-2a behaviour BY CONSTRUCTION rather than
+    /// by test: in `.os` the value installed is the same object the old code installed.
+    private var sourceDerivedColorSpace: CGColorSpace?
+
+    /// This window's display-transform mode, mirrored onto the renderer. Seeded to the same
+    /// default `WindowChrome` uses, so a renderer that is never told is in OS.
+    private var displayTransform: DisplayTransformMode = DisplayTransformMode.defaultMode
+
+    /// The EDR opt-in the current source asks for — `transfer == 16 || transfer == 18`, computed
+    /// in `setSourceColorSpace` and stored for the same reason as `sourceDerivedColorSpace`: a
+    /// mode change has to be able to re-publish the colour state without a source load.
+    private var sourceWantsEDR = false
 
     /// ── THE SOURCE'S DECLARED GEOMETRY, HANDED FROM MAIN TO THE RENDER THREAD ────────────
     ///
@@ -983,6 +1011,65 @@ final class MetalVideoRenderer {
     /// otherwise sit installed and invisible until the next frame — which, paused, means until
     /// the user hits play. That is precisely the bug this whole change exists to remove, and the
     /// re-render is what closes it for the mid-session case as well as the load case.
+    /// ── THE DISPLAY TRANSFORM FOR THIS WINDOW — Phase 2a, §6.4 ──────────────────────────────
+    ///
+    /// Call from MAIN. Mirrors `WindowChrome.displayTransform` onto the renderer and re-publishes
+    /// the colour state, so the change reaches a frame that is ALREADY on screen.
+    ///
+    /// ⚠️ **THE RE-PRESENT IS THE WHOLE POINT, AND IT IS NOT OPTIONAL.** A `CAMetalLayer` applies
+    /// its colorspace AT PRESENT TIME. Installing a new one with nothing to draw leaves it sitting
+    /// on the layer, invisible, until the next present — which on a paused deck means until the
+    /// user hits play. That is the 2026-08-11 first-frame bug exactly (`docs/BUGS.md`, "A file's
+    /// first frame is presented before the layer knows what colour it is"), and it is worth
+    /// knowing that A WINDOW NUDGE DOES NOT REPAIR IT: re-compositing a window is not re-presenting
+    /// its drawable. `publishColorState` sets `pendingRefresh`, which is the only thing that does.
+    ///
+    /// Comparing this control against a paused reference frame is the primary way it will be used
+    /// (§6.1 — the modes are a comparison instrument), so "works only during playback" would not
+    /// be a rough edge, it would be the feature failing in its main case.
+    func setDisplayTransform(_ mode: DisplayTransformMode) {
+        // ⚠️ NOT GUARDED BY `hasQueuedColorState`, and deliberately separate from the re-assert
+        // no-op in `setSourceColorSpace`. That guard compares CICP CODES, which a mode change does
+        // not touch — routing a mode change through it would compare it against the wrong thing
+        // and swallow it. This guard compares the mode.
+        guard displayTransform != mode else { return }
+        displayTransform = mode
+        print("[EDR] display transform → \(mode.logLabel)"
+            + (mode == .bypass ? "  ⚠️ DIAGNOSTIC — no colour management, never correct (§6.1)" : ""))
+        publishColorState()
+    }
+
+    /// Park the colour state computed from BOTH inputs, for the render thread to install.
+    ///
+    /// The one place the display-transform mode is applied, so there is exactly one answer to
+    /// "what reaches the layer" no matter which input changed. MAIN THREAD ONLY.
+    ///
+    /// ⚠️ **`.os` MUST STAY BYTE-IDENTICAL TO THE PRE-PHASE-2a PATH** — that is the no-regression
+    /// guarantee for everyone who never touches this control, and it is bought here by installing
+    /// the *same object* `makeColorSpace` returned, with the *same* EDR flag, exactly as the old
+    /// code did. The mode is a choice between that value and `nil`, and nothing else in the colour
+    /// path is conditional on it. Anything that makes `.os` compute rather than pass through has
+    /// broken the guarantee.
+    private func publishColorState() {
+        guard let cs = sourceDerivedColorSpace else { return }
+
+        // ⚠️ `nil` IS THE PAYLOAD IN BYPASS, NOT AN ERROR. Measured in Phase 1 (§6.6): a layer with
+        // `colorspace = nil` performs NO CONVERSION. The LG discriminates there — sRGB and its
+        // display profile genuinely differ — and `nil` tracked the display profile, not sRGB.
+        //
+        // Stated to the limit it was actually measured: "performs no conversion" and "substitutes
+        // the display's own profile" are indistinguishable IN PRINCIPLE, because declaring the
+        // destination as the source IS an identity transform, so both models predict every
+        // observation. What is settled is that `nil` substitutes nothing ELSE — sRGB, the
+        // plausible candidate, is ruled out.
+        let installed: CGColorSpace? = (displayTransform == .os) ? cs : nil
+
+        refreshLock.lock()
+        pendingColorState = PendingColorState(colorSpace: installed, wantsEDR: sourceWantsEDR)
+        pendingRefresh = true
+        refreshLock.unlock()
+    }
+
     func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?) {
         // A RE-ASSERT OF THE SAME CODES IS A NO-OP. The metadata observer now arrives second with
         // the values the load path already published; without this it would re-post the state,
@@ -1023,10 +1110,9 @@ final class MetalVideoRenderer {
         // HAND OFF; DO NOT ASSIGN. The layer's colour properties are written on the render thread
         // only — see the threading note above. `pendingRefresh` rides along so a frame already on
         // screen is re-presented under the new state rather than waiting for the next one.
-        refreshLock.lock()
-        pendingColorState = PendingColorState(colorSpace: cs, wantsEDR: isHDRTransfer)
-        pendingRefresh = true
-        refreshLock.unlock()
+        sourceDerivedColorSpace = cs
+        sourceWantsEDR = isHDRTransfer
+        publishColorState()
 
         // NOTE: edrMetadata (CAEDRMetadata) is deliberately NOT set — E3. This stage tests
         // whether colorspace + the opt-in alone lift the image. If PQ content does not display
@@ -1069,7 +1155,16 @@ final class MetalVideoRenderer {
         print("[EDR] source tags: primaries=\(primaries.map(String.init) ?? "nil") "
             + "transfer=\(transfer.map(String.init) ?? "nil") "
             + "matrix=\(matrix.map(String.init) ?? "nil")\(origin)")
-        print("[EDR] layer colorspace = \(csName)  (wideGamut=\(cs.isWideGamutRGB))")
+        // ⚠️ REPORTS WHAT REACHES THE LAYER, NOT WHAT THE SOURCE DERIVED TO. In Bypass the layer
+        // gets `nil` and this line would otherwise name a colorspace the picture is not being
+        // drawn through — the exact class of instrument bug §6.5 records twice (the probe that
+        // compared ICC encodings as strings, and `recordPTSContinuity` comparing Doubles): a log
+        // that describes the intent instead of the installed state sends someone hunting a shift
+        // that is not where the line says it is.
+        print("[EDR] layer colorspace = "
+            + (displayTransform == .os
+               ? "\(csName)  (wideGamut=\(cs.isWideGamutRGB))"
+               : "nil — BYPASS, no conversion  (source derived \(csName))"))
         print("[EDR] wantsExtendedDynamicRangeContent = \(isHDRTransfer)"
             + (isHDRTransfer ? "  (HDR transfer \(transfer!) → EDR ON)" : "  (SDR source → EDR OFF, unchanged path)"))
 
@@ -1919,6 +2014,10 @@ final class MetalVideoRenderer {
         if let colorState {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            // ⚠️ A `nil` HERE IS BYPASS BEING INSTALLED, NOT A MISSING VALUE — see
+            // `PendingColorState.colorSpace`. Do not add a `??` fallback: substituting 709 (or
+            // anything else) would silently turn Bypass into a fourth transform nobody asked for,
+            // and it would look like it was working.
             metalLayer.colorspace = colorState.colorSpace
             metalLayer.wantsExtendedDynamicRangeContent = colorState.wantsEDR
             CATransaction.commit()
@@ -3198,10 +3297,22 @@ final class MetalVideoRenderer {
         }
         let (bytes, width, height, bytesPerRow) = frame
 
-        // CRITICAL: tag with the layer's source-derived colorspace (CoreMedia709),
-        // NOT deviceRGB/sRGB — so the consumer reads the raw code values under the
-        // file's real colorspace. Fall back to 709 only if the layer has none.
-        let cs = metalLayer.colorspace ?? CGColorSpace(name: CGColorSpace.itur_709)!
+        // CRITICAL: tag with the SOURCE-derived colorspace (CoreMedia709), NOT deviceRGB/sRGB —
+        // so the consumer reads the raw code values under the file's real colorspace.
+        //
+        // ⚠️ READS `sourceDerivedColorSpace`, NOT `metalLayer.colorspace`, AND THE DIFFERENCE IS
+        // A BUG THAT PHASE 2a WOULD OTHERWISE HAVE INTRODUCED. This line used to be
+        // `metalLayer.colorspace ?? itur_709`, which was correct only while the two could not
+        // disagree. In Bypass the layer holds `nil` by design, that `??` would fire, and a P3 or
+        // PQ file would export TAGGED 709 — a wrong tag on a written file, produced by a display
+        // setting, with nothing saying so.
+        //
+        // The export is not a display path: it reads the offscreen (`readbackRenderedFrame`),
+        // which is UPSTREAM of the layer and identical in every mode, so the pixels it writes do
+        // not depend on the display transform and its tag must not either. Same boundary the
+        // scopes and SDI sit on. The 709 fallback is kept for its original case — no source
+        // loaded yet — where it remains what `makeColorSpace` would have produced anyway.
+        let cs = sourceDerivedColorSpace ?? CGColorSpace(name: CGColorSpace.itur_709)!
         // E1: the readback is now rgba16Float (4 × half). Unpack to 16-bit RGBA with the SAME
         // ENCODING the rgb10a2 path used (10-bit code in the high bits) — same format, but not
         // bit-identical values: legal-range content lands ±1 code off on ~8.8% of pixels (the

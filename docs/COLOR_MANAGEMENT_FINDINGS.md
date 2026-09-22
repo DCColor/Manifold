@@ -386,6 +386,17 @@ real files and nothing changed for anyone who does not touch the control.
 > This is the strategically important phase: **the diagnostic instrument exists before any of the
 > hard part is written**, and what it shows informs Reference.
 
+Split into two on delivery:
+
+- **Phase 2a — the mode reaches the layer.** Mode enum, per-window state, a plain menu item.
+  ✅ **Closed 2026-09-22 — result in §6.7.** The A/B is live on real files and OS is measured
+  byte-identical to the build before it. It also produced a finding nobody was looking for: the
+  LG's no-op status is **conditional on the macOS HDR switch**, which §6.7 records.
+- **Phase 2b — the control-bar surface.** The pulldown with §6.3's meaning-carrying subtitles, the
+  chain readout, the momentary-compare gesture, the diagnostics line, and the standing Bypass
+  indicator §6.1 requires. ⚠️ **Read §6.7's constraint before starting**: every change of mode must
+  go through `DeckRegistry.setDisplayTransform`.
+
 **Phase 3 — Reference.** The shader EOTF, against a settled destination. The only phase that is
 real engineering. *Amended 2026-09-21 from §6.6:* the destination is settled — declare the source
 and let ColorSync convert, exactly as today. What remains is the transform itself, plus the policy
@@ -539,6 +550,24 @@ right.
 **All mechanism validation must therefore run on the ASUS**, whose profile matches sRGB to 7.6e-06
 and which consequently responds to every error the LG absorbs.
 
+> ⚠️ **Added 2026-09-22 — the ASUS validates mechanism, never accuracy.** The ASUS is in its
+> built-in Rec.709 preset and is otherwise **uncalibrated**. "Its profile matches sRGB to 7.6e-06" is
+> a statement about the *profile*, not about the *panel*: whether that profile describes what the
+> panel actually emits is unknown, and earlier text in this document that called it "a display
+> whose profile is honest" overstated what was measured.
+>
+> That does not weaken its use here, because the two kinds of validation need different things:
+>
+> | Question | Measured in | Needs |
+> |---|---|---|
+> | **Mechanism** — is the transform applied, applied once, in the right place? | framebuffer code values | any display whose profile *differs from the source curve*, so ColorSync performs a real conversion |
+> | **Accuracy** — does the emitted light match the standard? | light, with a probe | a calibrated display, measured |
+>
+> The ASUS qualifies for the first and not the second. It is the stand-in for **other people's
+> monitors** — the uncalibrated, vendor-profiled case most customers are in — which is exactly what
+> mechanism testing should be aimed at. **No colour-accuracy conclusion may be drawn from it.**
+> Accuracy belongs to the LG, and even there it has never been measured with a probe (§7.2).
+
 ---
 
 #### The policy question survives — and it is a user declaration, not an inference
@@ -599,6 +628,177 @@ has not been told.
   compensation in `CGColorSpace(calibratedRGBWhitePoint:…)`. Unexplained. It affects only the
   synthetic γ2.4 condition and none of the conclusions above, but it is unexplained behaviour in a
   path Phase 3 will touch.
+
+---
+
+### 6.7 Phase 2a — result, measured 2026-09-22
+
+**Closed. The mode reaches the layer, OS is byte-identical to the build before it, and the LG's
+no-op status turns out to be conditional on a switch nobody had varied.**
+
+**What shipped.** A per-window `DisplayTransformMode` with two cases — `os` and `bypass`, no
+Reference case, because an unreachable arm invites a stub. State on `WindowChrome`; a new top-level
+`CommandMenu("Color")`; the mode applied in one place, `MetalVideoRenderer.publishColorState()`,
+which is the only thing that decides what reaches the layer. `PendingColorState.colorSpace` became
+optional, and **`nil` is a value there, not an absence** — it is Bypass being installed.
+
+#### MEASURED
+
+Every capture below is `screencapture -o -l <windowID>` — window-id, never a region grab. All 8-bit;
+the capture path is 32BGRA. Fixture `docs/color-fixtures/wedge.mov` unless stated.
+
+| what | result | why it is the check |
+|---|---|---|
+| **LG, OS vs Bypass** (HDR off) | **0 codes, 0.00 % of pixels** | ColorSync is identity there (§6.5), so identical is the *prediction*, not a pass |
+| **ASUS, OS vs Bypass** | **21 codes, 93.69 %**, worst **170 → 149** at x≈0.667 | §6.5 predicted the worst deviation at **x = 0.656**. The mode reaches the layer |
+| **OS vs the PRE-CHANGE build**, ASUS | **0 codes, 0.00 %** | the no-regression guarantee, measured rather than argued |
+| **Bypass across relaunch** | resets to OS | §6.1 — Bypass must not be left on and forgotten |
+| **Two windows, different modes, same display, same instant** | **21 codes apart** | §6.3's side-by-side comparison is the feature; per-window is real |
+
+**The no-regression test is the one worth describing, because "byte-identical" is the kind of claim
+that is usually asserted.** The work was stashed, `HEAD` was built into a separate derived-data
+path, the same fixture was captured at the same window geometry **on the ASUS** — the display that
+responds to every error the LG absorbs — and compared. 0 codes. The baseline binary has no Color
+menu, which is what confirms the right binary was measured.
+
+> ⚠️ **The ASUS numbers are MECHANISM, NEVER ACCURACY**, exactly as the 2026-09-22 note in §6.6
+> requires. That display is in its built-in Rec.709 preset and is otherwise uncalibrated; whether
+> its panel emits what its profile claims is unknown and unmeasured. 21 codes says the transform is
+> applied, applied once, and in the right place. **It says nothing whatever about whether any of
+> these pictures is correct.** No colour-accuracy conclusion may be drawn from this table.
+
+#### Occlusion immunity — proved, because the first attempt at proving it was broken
+
+Captures were contaminated by a window left over the app early on, so the method was changed to
+window-id capture and then **tested rather than trusted**: an opaque window was parked over the
+Manifold window and confirmed present (a region grab of that rect returned the occluder's colour),
+and the `-l` capture taken at that moment came back **0 codes** against the unoccluded one, with
+**0 occluder pixels** in it.
+
+⚠️ **The first version of that test proved nothing and looked like it had passed.** The occluder had
+no run loop, so it never rendered; the capture matched because there was nothing on top. Same
+failure as §6.5's probe comparing ICC encodings as strings — *an instrument that is not doing what
+its name says reports success for reasons unconnected to the thing being measured.* The value above
+is from the fixed version, with the occluder verified on screen first.
+
+Independently: the contaminated-era OS capture is **0 codes** against a clean re-run, so the earlier
+figures were never affected.
+
+#### ⚠️ The LG stops being a no-op when macOS HDR is switched ON — and this was not being looked for
+
+§6.5 warned that the LG's identity transform is "a coincidence even when half of it was chosen
+deliberately", and listed the ways it could break. **One of them is a toggle in System Settings, and
+it does break it.** With HDR ON for the LG:
+
+| LG display profile | rTRC | OS vs Bypass on the SDR wedge |
+|---|---|---|
+| HDR **off** (§6.5) | `para` ft=0, γ **1.960999** | **0 codes** |
+| HDR **on** (measured 2026-09-22) | `curv` count=1024 table, **sRGB to 7.648334e-06** | **21 codes, 93.71 %**, worst 170 → 149 |
+
+`7.648334e-06` is the ASUS's number to every digit — in HDR mode macOS hands the LG a profile with
+**the same transfer curve as the ASUS**, and the delta becomes the ASUS's delta. The ICC bytes still
+differ (primaries and white point), but the TRC does not.
+
+**Bypass is invariant across the switch** — the same 149 in both states, which is what "performs no
+conversion" predicts and is a second, independent confirmation of §6.6's finding. **It is OS that
+moves**, 149 → 170.
+
+> ⚠️ **THE CONSEQUENCE FOR THE REFERENCE DESKTOP, STATED PLAINLY.** §6.5 described two independent
+> decisions composing correctly — a chosen Rec.709 panel preset, and an unchosen EDID-derived
+> γ1.9609 profile that makes ColorSync a no-op. **Turning on macOS HDR destroys the second one**,
+> ColorSync starts doing real work, and the code values the chosen preset is there to receive no
+> longer arrive. The picture shifts by 21 codes and **nothing in the app says so** — the scopes will
+> not move (§6.5 finding 4) and the source-side diagnostics read exactly as before. This is no
+> longer a hypothesised fragility; it is a reproducible one with a known trigger.
+>
+> ⚠️ It also means **§6.5's "the LG is a policy test, not a correctness test" holds only in SDR
+> mode.** In HDR mode the LG discriminates mechanism exactly as the ASUS does. Phase 3's rule —
+> validate on the ASUS — is unaffected, but the *reason* given for it now has a stated precondition.
+
+#### HDR on: what `colorspace = nil` does under an EDR opt-in
+
+`docs/color-fixtures/edr_bypass_probe.swift`, four conditions, patches blitted straight to the
+drawable. EDR read from **the window's own screen** (§BUGS.md's hazard rule 3), potential before
+current (rule 1).
+
+- **`maxPotentialEDR = 8.965394`** with HDR on — the display genuinely offers headroom. (It reads
+  **1.0** with HDR off, which is why the first run of this probe could establish nothing about EDR.)
+- **`colorspace = nil` with `wantsExtendedDynamicRangeContent = true` is ACCEPTED.** Both properties
+  read back exactly as set, in every condition, on a display that is actually offering headroom.
+  The layer does not reject the nil, and does not silently clear the opt-in.
+- **Bypass shows raw PQ code values, uninterpreted**, and identically with HDR on or off:
+
+  | PQ code | PQ declared | **Bypass** |
+  |---|---|---|
+  | 0.50 | 245 | **127** |
+  | 0.58 | 255 | **148** |
+  | 0.75 | 255 | **191** |
+  | 1.00 | 255 | **255** |
+
+  0.58 × 255 = 147.9. That is §6.2's requirement met: PQ diffuse white shows as 58 % grey rather
+  than white — "precisely what they look like in a player that ignores the tag".
+
+- **In the real app on a PQ file, HDR on: OS vs Bypass = 127 codes over 97.40 % of pixels**, worst
+  **255 → 128**. §6.2's "dramatic and useful" is not an overstatement.
+
+> ⚠️ **WHAT THIS DOES NOT ESTABLISH, AND THE TEMPTATION IS TO SAY IT DOES.** `maxEDR(now)` read
+> **1.0 in every condition**, including the known-good `PQ + EDR` control, and also in the shipping
+> app on a PQ source with HDR on. **No layer in any of these runs won a headroom grant**, so nothing
+> here measures what the EDR opt-in does when it is actually granted headroom — only that a nil
+> colorspace does not prevent it being requested. Why no grant was won is unexplained and is the
+> first thing to chase in Phase 5.
+>
+> ⚠️ **And a capture is not light.** These are 8-bit SDR-referred captures; values above SDR white
+> cannot be represented, so every 255 above is clipped *in the capture*. That is evidence about the
+> composite, not about the panel. No colorimeter has been in the loop at any point in this document.
+
+#### ⚠️ A constraint Phase 2b must honour
+
+**Every change of mode must go through `DeckRegistry.setDisplayTransform`.** That function writes
+the owning `WindowChrome` *and* forwards to that deck's renderer.
+
+This is deliberately unlike every other per-window value, which reaches its consumer by `ContentView`
+observing the `@Published`. That route is **not available**: `ContentView`'s modifier chain is at
+the Swift type-checker's limit, and adding one more `.onChange` fails the build outright with
+*"unable to type-check this expression in reasonable time"* — hit twice while building this, and the
+same constraint that file already documents on `transportKeys.attach`.
+
+**So a write to `chrome.displayTransform` that does not go through that function moves the menu
+checkmark and not the picture, and there is no observer to catch it.** If 2b's pulldown writes the
+property directly, it will look like it works. The fix, should it ever be needed, is to break up
+`ContentView`'s body far enough to afford the `.onChange` — **not** to add a second forwarding path.
+
+#### Shipped alongside, because Bypass would have made it a bug
+
+**`MetalVideoRenderer.swift:3303` — the PNG export tagged its output from the LAYER.** It read
+`metalLayer.colorspace ?? itur_709`, which was correct only while those two could not disagree. In
+Bypass the layer holds `nil` by design, that fallback fires, and **a P3 or PQ file exports tagged
+709** — a wrong tag on a written file, caused by a display setting, with nothing saying so. It now
+reads the source-derived colorspace.
+
+The export reads the offscreen, which is upstream of the layer, so its pixels never depended on the
+mode and its tag must not either. **Same boundary the scopes and SDI sit on**, and both were
+verified to need no change: the scopes sample the offscreen ring (§6.5 finding 4), and SDI tags from
+the source's primaries through `BMDColorspaceForPrimaries`, a path that never touches a
+`CGColorSpace` or reads the layer. Stated in the code at each boundary rather than left as a
+coincidence.
+
+#### Incidental, and it will mislead somebody during Phase 5
+
+**The app's own `[EDR] headroom` line asserts the wrong thing on an HDR display.** It appends
+`<<< NO HEADROOM — EDR is inert on this display` whenever `current <= 1.0001`, ignoring `potential`
+entirely — so with HDR on it printed that sentence while `potential = 8.9654`. That is precisely the
+inference `docs/BUGS.md`'s EDR measurement hazard was written to prevent ("*that conclusion was
+WRONG; the display was in SDR mode for the entire probe*"), now emitted by the app's own diagnostic.
+**Not fixed here** — out of scope for 2a — but it should key on `potential`, and say "no grant" when
+`potential` is high rather than "inert on this display".
+
+#### Still open after Phase 2a
+
+- **No grant was ever won**, so the EDR opt-in's actual effect remains unmeasured. Above.
+- **8-bit, and no light measured.** Unchanged from §6.6.
+- **Why macOS assigns an sRGB-TRC profile in HDR mode** is observed, not explained.
+- **The HDR-on measurements are one session on one machine**, with the switch toggled by hand.
 
 ---
 

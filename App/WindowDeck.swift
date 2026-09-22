@@ -641,6 +641,41 @@ final class DeckRegistry {
         chrome.rasterSize = size
     }
 
+    /// ── THE ONE MUTATOR OF A WINDOW'S DISPLAY TRANSFORM — Phase 2a, §6.4 ────────────────────
+    ///
+    /// The Color menu's action, and the function a Phase 2b control-bar pulldown must call too.
+    ///
+    /// ⚠️ **IT WRITES BOTH THE STATE AND THE RENDERER, WHICH IS NOT HOW `setRasterSize` ABOVE
+    /// WORKS — AND THE ASYMMETRY IS FORCED.** Every other per-window value reaches its consumer by
+    /// `ContentView` observing the `@Published` and forwarding it. That is the better pattern and
+    /// it is not available here: `ContentView`'s modifier chain is AT the Swift type-checker's
+    /// limit, and adding one more `.onChange` fails the build with "unable to type-check this
+    /// expression in reasonable time" — measured, twice, while building this. The same constraint
+    /// is already documented on `transportKeys.attach` in that file's `.onAppear`.
+    ///
+    /// So the forward happens here, where this deck's `chrome` and `renderer` are both already in
+    /// hand. `chrome` remains the single OWNER — the menu's checkmark and any future readout
+    /// derive from it, never from the renderer's mirror.
+    ///
+    /// ⚠️ **THE CONSEQUENCE, AND IT IS THE THING TO GET RIGHT:** a write to
+    /// `chrome.displayTransform` that does not come through this function will change the
+    /// checkmark and NOT the picture. There is no observer to catch it. If that ever becomes
+    /// likely, the fix is to break up `ContentView`'s body far enough to afford the `.onChange`,
+    /// not to add a second forwarding path.
+    ///
+    /// ⚠️ KEY WINDOW, NOT ALL WINDOWS. §6.3 chose per-window precisely so "what the client sees"
+    /// and "what the file is" can sit side by side, and an app-wide write would delete the
+    /// comparison this control exists to make.
+    func setDisplayTransform(_ mode: DisplayTransformMode) {
+        guard let deck = keyDeck, let chrome = deck.chrome else { return }
+        chrome.displayTransform = mode
+        // The renderer re-presents the current frame itself, so this reaches a PAUSED picture —
+        // see `MetalVideoRenderer.setDisplayTransform`, and the 2026-08-11 first-frame entry in
+        // docs/BUGS.md for why a re-present rather than a redraw is what is required.
+        deck.renderer?.setDisplayTransform(mode)
+        DisplayTransformMenuState.shared.setNeedsRefresh()
+    }
+
     // MARK: - Opening a file
 
     /// ── THE ONE PLACE A USER-INITIATED OPEN DECIDES WHICH WINDOW GETS THE FILE ──────────────
@@ -1055,6 +1090,10 @@ final class DeckRegistry {
         // function from ContentView. It reads current facts and writes no state back; see
         // `RasterMenuState`.
         RasterMenuState.shared.setNeedsRefresh()
+        // THE COLOR MENU DESCRIBES THE KEY DECK TOO, and by the same three events — so it is
+        // re-derived here alongside the View menu rather than from a second, differently-timed
+        // trigger. Its own two ContentView triggers mirror the raster ones exactly.
+        DisplayTransformMenuState.shared.setNeedsRefresh()
 
         // ONLY WHEN THE PICTURE ACTUALLY CHANGED. Passes are cheap and frequent — the four service
         // subscriptions mean NDI's ~1 Hz discovery republish alone triggers one — and a line per
