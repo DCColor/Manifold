@@ -154,6 +154,19 @@ struct NDIColorInfo: Equatable {
         return isDeclared ? "Declared" : "Assumed"
     }
 
+    /// The same fact in the renderer's vocabulary, so the chain readout and this type cannot
+    /// drift apart. `isDeclared` is true when ANY axis was declared, so a partly-declared sender
+    /// resolves to `.partlyAssumed` rather than claiming the whole triple was stated.
+    var sourceProvenance: SourceColorProvenance {
+        if isOverridden { return .overridden }
+        let declared = [primaries, transfer, matrix].filter(\.isDeclared).count
+        switch declared {
+        case 0:  return .assumed
+        case 3:  return .tagged
+        default: return .partlyAssumed
+        }
+    }
+
     // MARK: - Resolve (declared/assumed vs user assertion)
 
     /// The three-layer resolution, and the ONLY place an override meets a declaration:

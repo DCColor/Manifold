@@ -69,11 +69,17 @@ final class LiveDisplayRoute {
         var matrix: Int?
         /// Range is a SEPARATE axis from colorimetry — legal/video vs full swing.
         var isFullRange: Bool
+        /// ⚠️ **WHERE THE CODES ABOVE CAME FROM, AND IT CANNOT BE READ OFF THEM.** `assumedRec709SDR`
+        /// carries 1/1/1 — three non-nil codes stating an assumption — so a nil-test on the codes
+        /// calls WHEP's honest default a declaration. That was the shipped defect §6.8's Phase 2c
+        /// part 1 measured. SRT passes nil for an undeclared axis and can be read either way; it
+        /// states its tier anyway, so the two transports answer the same question the same way.
+        var provenance: SourceColorProvenance
 
         /// 709 SDR, video range. The honest default for a source that declares nothing, and the
         /// value WHEP passes because it cannot read what the stream actually declared.
         static let assumedRec709SDR = Colorimetry(primaries: 1, transfer: 1, matrix: 1,
-                                                  isFullRange: false)
+                                                  isFullRange: false, provenance: .assumed)
     }
 
     // MARK: - Config
@@ -212,7 +218,8 @@ final class LiveDisplayRoute {
         let color = config.colorimetry
         renderer.setSourceColorSpace(primaries: color.primaries,
                                      transfer: color.transfer,
-                                     matrix: color.matrix)
+                                     matrix: color.matrix,
+                                     provenance: color.provenance)
         renderer.isFullRangeProvider = { [isFullRange = color.isFullRange] in isFullRange }
 
         return clock

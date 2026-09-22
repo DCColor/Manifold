@@ -231,12 +231,24 @@ final class SRTFrameRouter {
             isFullRange = format.colorRange == 2
         }
 
+        /// Which of the honesty tiers this stream's colorimetry sits in, from the axes' own
+        /// `declared` flags rather than from the codes. SRT has no user override, so `.overridden`
+        /// cannot arise here.
+        var sourceProvenance: SourceColorProvenance {
+            switch [primaries, transfer, matrix].filter(\.declared).count {
+            case 0:  return .assumed
+            case 3:  return .tagged
+            default: return .partlyAssumed
+            }
+        }
+
         /// What the renderer is told. Undeclared axes go through as nil — see point 1 above.
         var routeColorimetry: LiveDisplayRoute.Colorimetry {
             LiveDisplayRoute.Colorimetry(primaries: primaries.codeIfDeclared,
                                          transfer: transfer.codeIfDeclared,
                                          matrix: matrix.codeIfDeclared,
-                                         isFullRange: isFullRange)
+                                         isFullRange: isFullRange,
+                                         provenance: sourceProvenance)
         }
 
         /// What gets stamped on every pixel buffer. Cannot be nil — see point 2 above. Reuses

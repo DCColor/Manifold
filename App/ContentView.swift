@@ -761,6 +761,10 @@ struct ContentView: View {
             // Range override changed: decode is unchanged (always 420v), so just
             // re-render the current frame with the new shader flag (covers paused).
             metalRenderer?.setNeedsRefresh()
+            // …and the chain readout's Source line names the range, so it has to hear about it.
+            // NO NEW MODIFIER — this is one more line inside an observer that already exists,
+            // which is the only shape this file can afford (§6.7).
+            metalRenderer?.sourceColorStateChanged()
         }
         .onChange(of: engine.metadata) { _, meta in
             // ⚠️ FIRST, AND UNRELATED TO THE COLORSPACE WORK BELOW — it is here because publishing
@@ -778,7 +782,13 @@ struct ContentView: View {
                 metalRenderer?.setSourceColorSpace(
                     primaries: meta.colorPrimariesCode,
                     transfer: meta.transferFunctionCode,
-                    matrix: meta.colorMatrixCode
+                    matrix: meta.colorMatrixCode,
+                    // A file's absent CICP is nil here too — same rule as the engine's own tag
+                    // callback in `WindowDeck`, and the two must agree or the readout flickers
+                    // between tiers as the second one lands.
+                    provenance: .fromCodes(primaries: meta.colorPrimariesCode,
+                                           transfer: meta.transferFunctionCode,
+                                           matrix: meta.colorMatrixCode)
                 )
                 // D5: if DeckLink output is running, re-tag its colorspace from the new primaries
                 // (the encoding matrix follows the matrix code automatically, per converted frame).
@@ -2168,15 +2178,38 @@ struct ContentView: View {
         // label's leading edge with only empty, harmlessly-clipped space after it — which is exactly
         // why the streaming / DeckLink chevrons render. Both halves open the SAME presets, so the
         // whole face stays clickable; the readout half also reads the effective colorimetry + tier.
+        //
+        // ⚠️ THE AMBER IS APPLIED TO THE LEAF `Text`s, AND `Image` IS WRAPPED IN ONE — MEASURED.
+        //
+        // `.foregroundStyle(…)` on this HStack is what the code used to do, and §6.8 measured the
+        // result: **max(r − b) = 0 across the whole face** while the label read "Overridden".
+        // `.menuStyle(.borderlessButton)` strips a LABEL's foreground, exactly as it strips a
+        // label's background (§6.8's Bypass-badge defect), and the control bar's own white wins.
+        //
+        // Five alternatives were measured in an isolated harness before this one was written:
+        // `.foregroundStyle` inside the label (STRIPPED — white), `.foregroundColor` on the
+        // leaves (the `Text` colours, the `Image` does NOT — a half-orange control), `.tint` on
+        // the Menu (colours both — but it also repaints the menu's own SELECTION HIGHLIGHT, which
+        // is the system accent's job), `HStack { Text(Image); Text }` (colours both and then
+        // **SWALLOWS THE TEXT ENTIRELY** — see below), and ONE CONCATENATED `Text`, which is what
+        // is here: it colours, it keeps its sizes, and it leaves the menu's accent alone.
+        //
+        // ⚠️ THE SWALLOWED-TEXT TRAP IS THE ONE ALREADY DOCUMENTED ABOVE, FROM THE OTHER SIDE.
+        // The note on the chevron says a borderless menu "reserves and clips a trailing region
+        // for its disclosure indicator", so a chevron at a rich label's trailing edge disappears.
+        // Wrapping the symbol in a `Text` turns this label into a MIXED one — a text-like element
+        // beside a view — and the same clip then eats the READOUT instead. Measured: the face
+        // dropped from 214 pt wide to 28, the glyph alone. A single `Text` is not a mixed label,
+        // so it is not clipped; the per-run `.font` keeps the glyph at its old size and the
+        // readout in the same monospaced caption.
         HStack(spacing: 2) {
             Menu {
                 colorStreamColorimetrySection
             } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "paintpalette")
-                    Text(ndiColorimetryFaceLabel)
-                        .font(.system(.caption, design: .monospaced))
-                }
+                (Text(Image(systemName: "paintpalette")).font(.system(size: 13))
+                 + Text("  ")
+                 + Text(ndiColorimetryFaceLabel).font(.system(.caption, design: .monospaced)))
+                    .foregroundColor(colorControlTint)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -2191,14 +2224,20 @@ struct ContentView: View {
                 // when files gain those modes. Nothing is stubbed today (an inert row would read as
                 // broken); the structure is simply ready.
             } label: {
-                Image(systemName: "chevron.down").font(.system(size: 8))
+                Text(Image(systemName: "chevron.down")).font(.system(size: 8))
+                    .foregroundColor(colorControlTint)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
         }
-        .foregroundStyle(ndi.colorInfo.isOverridden ? Color.orange : .white.opacity(0.9))
         .help("Color interpretation — Auto trusts the stream; a preset asserts it (⌃⌥C cycles)")
+    }
+
+    /// Amber when something on screen is a human assertion rather than a reading, the control
+    /// bar's own white otherwise. Applied per leaf — see the note on `colorControl`.
+    private var colorControlTint: Color {
+        ndi.colorInfo.isOverridden ? Color.orange : .white.opacity(0.9)
     }
 
     /// The live stream's colorimetry override — the one color-interpretation section with content

@@ -858,7 +858,7 @@ final class HLSClient: ObservableObject {
         // Start on the ASSUMED default (709 SDR), replaced from the buffer's own CICP on the first
         // frame that carries any. Same rule and same reason as NDI's: a "set it once at connect"
         // hardcode would hand the NEXT stream the previous one's colorimetry.
-        renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1)
+        renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1, provenance: .assumed)
 
         // x420 is 10-bit VIDEO range by definition, so the shader expands legal range. Pinned here
         // rather than read from the file transport's override, which describes a file that may not
@@ -1257,7 +1257,11 @@ final class HLSClient: ObservableObject {
         lastPublishedCICP = codes
         DispatchQueue.main.async { [weak self] in
             guard let self, self.pull != nil else { return }
-            self.renderer?.setSourceColorSpace(primaries: codes.0, transfer: codes.1, matrix: codes.2)
+            // `Self.cicp(of:)` returns nil for an attachment the buffer does not carry, so the
+            // codes are the resolution here — the file rule, not NDI's.
+            self.renderer?.setSourceColorSpace(
+                primaries: codes.0, transfer: codes.1, matrix: codes.2,
+                provenance: .fromCodes(primaries: codes.0, transfer: codes.1, matrix: codes.2))
         }
         NSLog("%@", "[HLS] colour signalling: primaries=\(codes.0.map(String.init) ?? "—") "
             + "transfer=\(codes.1.map(String.init) ?? "—") matrix=\(codes.2.map(String.init) ?? "—")"

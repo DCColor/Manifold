@@ -119,6 +119,48 @@ private func ycbcrKrKb(forMatrixCode code: Int?) -> (kr: Float, kb: Float) {
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
 /// nothing about FrameEngine, only a clock closure returning the current time.
+/// Where the source colour codes the renderer is using CAME FROM — §6's three-tier honesty model,
+/// carried NEXT TO the codes rather than inferred from them.
+///
+/// ⚠️ **INFERRING IT FROM THE CODES IS WRONG FOR HALF THE SOURCES, AND WAS A SHIPPED DEFECT.**
+/// §6.8's Phase 2c part 1 measured it: NDI and WHEP **resolve before they publish**, so the
+/// renderer receives non-nil codes for an assumption and for a user override alike, and a
+/// nil-test calls both "tagged". An assumed 709 stream read `CICP 1/1 — tagged` and a user
+/// assertion read `CICP 9/16 — tagged`, which is the one thing the readout exists to prevent.
+///
+/// Only a source whose UNDECLARED AXES ARRIVE AS nil can be read from the codes — a file (absent
+/// CICP is absent), SRT (`codeIfDeclared` passes nil through), HLS-from-buffer. That is what
+/// `fromCodes` is for, and why it names the condition instead of being the default.
+enum SourceColorProvenance: Equatable {
+    /// The source declared it.
+    case tagged
+    /// Nobody declared it; these are Manifold's defaults.
+    case assumed
+    /// Some axes declared, some not.
+    case partlyAssumed
+    /// The user asserted it, over whatever the source said or didn't.
+    case overridden
+
+    /// ⚠️ **ONLY FOR A SOURCE WHOSE UNDECLARED AXES ARRIVE AS `nil`.** See the type's note.
+    static func fromCodes(primaries: Int?, transfer: Int?, matrix: Int?) -> SourceColorProvenance {
+        switch [primaries, transfer, matrix].filter({ $0 != nil }).count {
+        case 0:  return .assumed
+        case 3:  return .tagged
+        default: return .partlyAssumed
+        }
+    }
+
+    /// The one word the chain readout prints.
+    var label: String {
+        switch self {
+        case .tagged:        return "tagged"
+        case .assumed:       return "assumed"
+        case .partlyAssumed: return "partly assumed"
+        case .overridden:    return "overridden"
+        }
+    }
+}
+
 final class MetalVideoRenderer {
 
     // E1 (was M3b): float render target. rgba16Float — the EDR container Apple specifies for
@@ -836,6 +878,29 @@ final class MetalVideoRenderer {
     /// STRICTLY from this field (never inferred from primaries). nil/2/unknown → 709.
     private(set) var sourceMatrixCode: Int?
 
+    /// Where the three codes above came from. Stated by the caller, **never derived here** — see
+    /// `SourceColorProvenance`. Seeded to `.assumed`, which is what a renderer with no source is.
+    private(set) var sourceColorProvenance: SourceColorProvenance = .assumed
+
+    /// The range the shader is actually applying, or **nil when no source has stated one**.
+    ///
+    /// Read from `isFullRangeProvider` — the same closure the shader reads — rather than from a
+    /// second copy, so the readout cannot disagree with the picture. nil is NOT "limited": a
+    /// renderer with no provider has no answer, and a readout that prints "limited" there is
+    /// guessing. Every live path sets it at activation (NDI and HLS pin legal, WHEP and SRT state
+    /// the stream's), and the file path sets it at deck setup from the engine's resolved range —
+    /// which already folds in the user's range override.
+    var sourceIsFullRange: Bool? { isFullRangeProvider.map { $0() } }
+
+    /// Posted on the **main thread** when the source colour state a readout describes has moved —
+    /// the codes, their provenance, or the range. `object` is the renderer, so a per-window
+    /// observer can filter to its own.
+    ///
+    /// ⚠️ **THIS EXISTS BECAUSE `ContentView` CANNOT AFFORD ANOTHER `.onChange`** — the same
+    /// constraint §6.7 records and that `DeckRegistry.setDisplayTransform` already works around.
+    /// A notification costs that file nothing and reaches a per-window observer directly.
+    static let sourceColorStateDidChange = Notification.Name("ManifoldSourceColorStateDidChange")
+
     /// The colour state waiting to be installed on the layer, handed from MAIN to the RENDER
     /// THREAD. Guarded by `refreshLock`, like every other main→render one-shot on this type.
     ///
@@ -1073,12 +1138,37 @@ final class MetalVideoRenderer {
         refreshLock.unlock()
     }
 
-    func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?) {
+    /// - Parameter provenance: **where these codes came from, stated by the caller.** Required,
+    ///   and deliberately without a default: `SourceColorProvenance` records why deriving it here
+    ///   was wrong for NDI and WHEP, and a default would let the next source in re-introduce the
+    ///   same defect silently. A source whose undeclared axes arrive as nil passes
+    ///   `.fromCodes(...)`, which says so at the call site.
+    /// Announce that the source colour state a readout describes has moved.
+    ///
+    /// Called from `setSourceColorSpace` for the codes, and from the **range** observer in
+    /// `ContentView` — a range override changes no CICP code but does change the Source line, and
+    /// there is no other edge that would carry it.
+    ///
+    /// Main thread; hops if it has to, because a live source's publish site is not always main.
+    func sourceColorStateChanged() {
+        let post = { NotificationCenter.default.post(
+            name: Self.sourceColorStateDidChange, object: self) }
+        if Thread.isMainThread { post() } else { DispatchQueue.main.async(execute: post) }
+    }
+
+    func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?,
+                             provenance: SourceColorProvenance) {
         // A RE-ASSERT OF THE SAME CODES IS A NO-OP. The metadata observer now arrives second with
         // the values the load path already published; without this it would re-post the state,
         // re-render a frame and print the [EDR] block a second time per source.
+        //
+        // ⚠️ THE PROVENANCE IS PART OF THE COMPARISON. An NDI override to the preset the stream
+        // was already assumed to be — Auto 709 → Rec.709 (SDR) — moves no code at all, and
+        // without this term it would be swallowed here and the readout would keep saying
+        // "assumed" about a user assertion.
         if hasQueuedColorState, sourcePrimariesCode == primaries,
-           sourceTransferCode == transfer, sourceMatrixCode == matrix {
+           sourceTransferCode == transfer, sourceMatrixCode == matrix,
+           sourceColorProvenance == provenance {
             return
         }
         hasQueuedColorState = true
@@ -1087,6 +1177,16 @@ final class MetalVideoRenderer {
         sourcePrimariesCode = primaries
         sourceTransferCode = transfer
         sourceMatrixCode = matrix
+        sourceColorProvenance = provenance
+        // ⚠️ `defer`, AND NOT A CALL HERE — MEASURED, BECAUSE THE WRONG ORDER RENDERS AS SOMETHING
+        // PLAUSIBLE. Announcing at this point publishes the new CICP codes while
+        // `sourceDerivedColorSpace` still holds the PREVIOUS source's colorspace, and the chain
+        // readout recomputes from both: its Source line said `PQ … CICP 9-16-9 — overridden` and
+        // its VERDICT, which compares the source curve against the display's, still said "passing
+        // this picture through unchanged" — the 709 answer, under a PQ heading. Deferring puts the
+        // announcement after `sourceDerivedColorSpace` is installed on EVERY exit path, including
+        // the `makeColorSpace` guard below.
+        defer { sourceColorStateChanged() }
         // Never assign nil — makeColorSpace guarantees non-nil, but guard anyway.
         guard let cs = Self.makeColorSpace(primaries: primaries, transfer: transfer, matrix: matrix) else { return }
 

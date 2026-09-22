@@ -469,7 +469,7 @@ final class NDIService: ObservableObject {
         // is never left carrying the PREVIOUS source's colorimetry, which is what a "set it once at
         // connect" hardcode would do on a second connect.
         resetColorimetry()
-        renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1)
+        renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1, provenance: .assumed)
 
         // Range is a SEPARATE axis from colorimetry and NDI does not signal it: UYVY is video-range
         // by definition. Pin the shader to legal-range expansion rather than letting it read the
@@ -2417,9 +2417,15 @@ final class NDIService: ObservableObject {
             guard let self else { return }
             self.colorInfo = effective
             self.declaredColorInfo = declared
+            // ⚠️ THE PROVENANCE COMES FROM `effective`, NOT FROM THE CODES. This is the site
+            // §6.8's Phase 2c part 1 names: `resolve` has already turned an absence into a
+            // default and an override into a triple, so by the time the codes get here they are
+            // all non-nil and say nothing about where they came from. `NDIColorInfo` kept the
+            // answer the whole time — it just was not being passed on.
             self.renderer?.setSourceColorSpace(primaries: effective.primaries.code,
                                                transfer: effective.transfer.code,
-                                               matrix: effective.matrix.code)
+                                               matrix: effective.matrix.code,
+                                               provenance: effective.sourceProvenance)
         }
         return effective
     }

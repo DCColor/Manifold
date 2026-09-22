@@ -85,6 +85,21 @@ final class DisplayChainModel: ObservableObject {
                 }
             })
         }
+
+        // ⚠️ THE THIRD EVENT, AND IT IS THE SOURCE SIDE RATHER THAN THE DISPLAY SIDE.
+        // Without it the Source line only moved when something re-opened the popover, so a
+        // colorimetry override made with the readout OPEN changed the tags, the layer and the
+        // picture and left the line reading the old value — measured, §6.8 Phase 2c part 1.
+        // Filtered on the renderer the same way the two above filter on the window.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: MetalVideoRenderer.sourceColorStateDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let r = note.object as? MetalVideoRenderer,
+                      r === self.deck?.renderer else { return }
+                self.refresh()
+            }
+        })
         refresh()
     }
 
@@ -110,34 +125,46 @@ final class DisplayChainModel: ObservableObject {
         let pCode = renderer?.sourcePrimariesCode
         let tCode = renderer?.sourceTransferCode
         let sourceCS = renderer?.sourceDerivedColorSpace
+        let mCode = renderer?.sourceMatrixCode
         let sourceLine: String
-        if sourceCS == nil && pCode == nil && tCode == nil {
+        if sourceCS == nil && pCode == nil && tCode == nil && mCode == nil {
             sourceLine = "no source"
         } else {
-            // ⚠️ NAMES THE CURVE THE RENDERER IS ACTUALLY USING, NOT THE TAG. An untagged file has
+            // ⚠️ NAMES THE CODES THE RENDERER IS ACTUALLY USING, NOT THE TAG. An untagged file has
             // no CICP, but it is not being rendered through "—": `makeColorSpace` resolves absent
             // and unknown codes to the full 709 set (§3, and §2 measured the untagged fallback as
             // BYTE-IDENTICAL to the 709 profile). Printing a dash for the curve would be the one
             // thing this readout exists to prevent — a line that says less than the app knows.
+            // So an absent axis prints the resolved value, and the TIER carries the absence.
             //
-            // The provenance is carried separately, which is the §6 honesty model: what the picture
-            // is being interpreted as, and how confident that is, are two different facts, and the
-            // untagged case is exactly where conflating them hides a mistagged file.
-            let t = MediaInspector.transferName(forCode: tCode ?? 1)
+            // ── THE ORDER IS CICP'S OWN: PRIMARIES, TRANSFER, MATRIX ───────────────────────
+            //
+            // Names first in that order, then range, then the numeric triple in the SAME order
+            // with the same separator the codes are written with everywhere else, then the tier:
+            //
+            //   Rec. 709 · Rec. 709 · Rec. 709 · limited — CICP 1-1-1 — assumed
+            //
+            // The earlier form printed transfer first and primaries second while calling the
+            // numbers "CICP p/t", so the words and the numbers disagreed about which axis was
+            // which — readable only if you already knew the answer.
             let p = MediaInspector.primariesName(forCode: pCode ?? 1)
-            let provenance: String
-            switch (pCode, tCode) {
-            case (nil, nil):
-                provenance = "no CICP — assumed"
-            case let (pc, tc) where pc == nil || tc == nil:
-                provenance = "CICP \(pc.map(String.init) ?? "absent")/\(tc.map(String.init) ?? "absent")"
-                           + " — partly assumed"
-            case let (pc?, tc?):
-                provenance = "CICP \(pc)/\(tc) — tagged"
-            default:
-                provenance = "—"
-            }
-            sourceLine = "\(t) · \(p) · \(provenance)"
+            let t = MediaInspector.transferName(forCode: tCode ?? 1)
+            let m = MediaInspector.matrixName(forCode: mCode ?? 1)
+
+            // ⚠️ RANGE IS A SEPARATE AXIS AND IT CAN BE GENUINELY UNKNOWN. nil from the renderer
+            // means no source has stated one — print that rather than "limited", which would be a
+            // guess wearing a fact's clothes. Everything else here is measured or resolved.
+            let range = renderer?.sourceIsFullRange.map { $0 ? "full" : "limited" } ?? "range unknown"
+
+            // ⚠️ THE TIER COMES FROM THE SOURCE'S OWN RESOLUTION, NEVER FROM WHETHER THE CODES ARE
+            // nil. §6.8's Phase 2c part 1: NDI and WHEP resolve before they publish, so a nil-test
+            // here called an assumption and a user override alike "tagged". `SourceColorProvenance`
+            // carries the answer from the site that actually knows it.
+            let tier = (renderer?.sourceColorProvenance ?? .assumed).label
+
+            sourceLine = "\(p) · \(t) · \(m) · \(range)"
+                       + " — CICP \(pCode ?? 1)-\(tCode ?? 1)-\(mCode ?? 1)"
+                       + " — \(tier)"
         }
 
         // ── TRANSFORM ───────────────────────────────────────────────────────────────────────

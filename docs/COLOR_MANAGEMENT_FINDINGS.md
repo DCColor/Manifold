@@ -944,6 +944,16 @@ same class as §6.5's probe comparing ICC encodings as strings.
    removed the point of the control while leaving it apparently working. Fixed by using `Toggle`
    (AppKit draws a real checkmark — the mechanism `RasterSizeCommands` and the Color menu already
    use) with a second `Text` for the subtitle.
+
+   > ⚠️ **THE SECOND HALF OF THAT IS WRONG, AND THIS ENTRY IS THE REASON IT MATTERS.** The
+   > checkmark was fixed. **The subtitle was not** — the second `Text` silently drew nothing, and
+   > this document recorded it as fixed for a day because the fix was verified by LOOKING at the
+   > menu, where a row with no subtitle looks like a row that was never meant to have one. A
+   > glyph-edge scan of the subtitle band finds **0 text pixels**. Measured and fixed in 2c part 2
+   > below, which also records the three other constructions that drew nothing.
+   >
+   > An entry about defects that render as something plausible, whose own fix rendered as something
+   > plausible. The lesson it already states was not applied to it.
 2. **The Bypass badge rendered as plain white text.** It was inside the `Menu`'s label;
    `.menuStyle(.borderlessButton)` strips a label's background and foreground, so the amber capsule
    and black text were discarded and the control bar's own white won. Caught by sampling the capture
@@ -1085,7 +1095,7 @@ they are not in conflict** — but a document that prints both without saying wh
 which invites exactly the reading that they are, which is why §6.7 and this section now both name
 the metric at the point of use.
 
-##### ⚠️ Two claims in "Three defects that rendered as something plausible" do not survive re-measurement
+##### ⚠️ Two claims in "Three defects that rendered as something plausible" do not survive re-measurement — BOTH FIXED IN PART 2
 
 Both were re-checked on the live build while capturing the control bar for the report above, by the
 same method that caught them originally — sampling the rendered pixels, not looking at the menu.
@@ -1106,7 +1116,7 @@ same method that caught them originally — sampling the rendered pixels, not lo
    control bar's own white win. The same failure, in the control next door, found by the same
    measurement. **Neither is fixed here** — this was a read-only report.
 
-##### ⚠️ The Source line reports the wrong tier on every STREAM
+##### ⚠️ The Source line reports the wrong tier on every STREAM — FIXED IN PART 2
 
 §6.8 lists the Source line as exercised only on an untagged **file**. Exercised on an NDI stream it
 is wrong, in both directions:
@@ -1137,7 +1147,217 @@ proves it), and the open readout did not move until it was closed and reopened.
 
 ---
 
-#### Still open after Phase 2b — amended after 2c part 1
+#### Phase 2c part 2 — the five defects, fixed and measured 2026-09-22
+
+Part 1 was a read-only report and left five things broken. All five are fixed; each one below is
+stated with the measurement that proves it, because **three of the five rendered as something
+plausible while being wrong**, and one of them had already been recorded as fixed once.
+
+##### 1 · The provenance tier now comes from the source's own resolution
+
+`DisplayChainModel` inferred the tier from whether the CICP codes were nil. That is correct for a
+file, SRT and HLS-from-buffer — their undeclared axes genuinely arrive as nil — and **wrong for NDI
+and WHEP, which resolve before they publish**: an assumption and a user override both arrive as
+three non-nil codes and both read "tagged".
+
+A `SourceColorProvenance` (`tagged` / `assumed` / `partlyAssumed` / `overridden`) is now carried on
+the renderer beside the codes, and `setSourceColorSpace` takes it as a **required** parameter with
+no default — a default is how the next source in would re-introduce this silently. Every one of the
+seven call sites states its own answer: the two file sites and HLS-from-buffer pass `.fromCodes(…)`,
+which names the condition under which reading the codes is legitimate; NDI passes
+`NDIColorInfo.sourceProvenance`, which existed the whole time and simply was not being passed on;
+WHEP's `assumedRec709SDR` and both connect-time defaults pass `.assumed`; SRT derives from its
+axes' own `declared` flags.
+
+MEASURED, all four tiers:
+
+| source | Source line |
+|---|---|
+| `wedge.mov`, untagged | `Rec. 709 · Rec. 709 · Rec. 709 · limited — CICP 1-1-1 — assumed` |
+| `wedge-pq-24track.mov`, tagged | `Rec. 2020 · PQ (ST 2084) · Rec. 2020 · limited — CICP 9-16-9 — tagged` |
+| NDI, declares nothing, Auto | `Rec. 709 · Rec. 709 · Rec. 709 · limited — CICP 1-1-1 — assumed` |
+| NDI, overridden to HDR10 | `Rec. 2020 · PQ (ST 2084) · Rec. 2020 · limited — CICP 9-16-9 — overridden` |
+
+##### 2 · The Source line is live
+
+`refresh()` ran on popover open, on a mode change and on the two screen notifications. Nothing
+watched the source. The renderer now posts `sourceColorStateDidChange` (object: the renderer) and
+`DisplayChainModel` observes it, filtered on its own renderer exactly as the screen observers filter
+on their own window. `ContentView`'s existing `effectiveIsFullRange` observer gained one line so a
+**range** override reaches the line too — no new modifier, which is the only shape that file can
+take (§6.7).
+
+MEASURED: with the readout OPEN and never reopened, ⌃⌥C from Auto to Rec.2020 PQ moved the Source
+line from the `1-1-1 — assumed` spelling to the `9-16-9 — overridden` one, and the verdict with it.
+
+> ⚠️ **AND THE FIRST VERSION OF THIS FIX RENDERED AS SOMETHING PLAUSIBLE.** The notification was
+> posted where the codes are stored, which is **before** `sourceDerivedColorSpace` is rebuilt. The
+> readout then recomputed from a new source line and a stale colorspace: it said
+> `PQ (ST 2084) … CICP 9-16-9 — overridden` above the verdict *"macOS is passing this picture
+> through unchanged"* — the 709 answer, under a PQ heading, with nothing on screen to suggest a
+> problem. Caught by reading the whole popover instead of the line that had just been changed.
+> The post is now a `defer`, so it fires after the colorspace is installed on every exit path.
+
+##### 3 · The subtitles draw — and §6.8's claim that they already did was wrong
+
+**The "Three defects that rendered as something plausible" entry above records the subtitle fix as
+made. It was not.** The second-`Text` form is the documented way to give a menu item a subtitle and
+it silently drew nothing. That claim stood in this document for a day because the fix was verified
+by *looking at* the menu, where a row with no subtitle looks like a row that was never meant to have
+one — the same mistake the entry it belongs to is about.
+
+**How it was caught:** not by looking, but by scanning the rendered menu while capturing the control
+bar for part 1's report. Text has hard horizontal edges; the menu's vibrancy gradient does not.
+Counting pixel pairs with |Δ| ≥ 25 across the subtitle band separates them completely:
+
+| band | 2b's second-`Text` form | 2c's `AttributedString` form |
+|---|---|---|
+| row 1 subtitle, "what your client will see" | **0 glyph edges**, strongest Δ = 3 | **337 glyph edges**, strongest Δ = 53 |
+| row 2 subtitle, "no colour management" | **0 glyph edges**, strongest Δ = 3 | **331 glyph edges**, strongest Δ = 54 |
+| row 1 TITLE — the control, text known present | 589 | 587 |
+
+The control row is what makes the zeros mean something: the same scan finds ~588 edges in the title
+band of both captures, so it detects text where text is known to be, and found none at all where the
+subtitle was supposed to be.
+
+**Four constructions were measured in an isolated harness before anything was written here** — a
+second `Text`, a `Label` with two `Text`s, a plain `"\n"` inside one `Text`, and an
+`AttributedString`. Both two-`Text` forms drew nothing. The newline drew both lines but in one
+style, so the subtitle read as a second title. Only the `AttributedString` drew a real subtitle —
+smaller, secondary-coloured — and it keeps `Toggle`'s own checkmark, which §6.8 chose deliberately.
+**Nothing reserved-but-empty ships**: the failing forms left the row at single-line height, so there
+was not even blank space to mistake for a near miss.
+
+##### 4 · The Color control turns amber on an override
+
+`.foregroundStyle(…)` wrapped the `HStack` containing the two `Menu`s, and
+`.menuStyle(.borderlessButton)` strips a label's foreground exactly as it strips its background —
+§6.8's Bypass-badge defect, one control to the left.
+
+Five constructions measured in the harness: `.foregroundStyle` inside the label (stripped),
+`.foregroundColor` on the leaves (the `Text` colours, the `Image` does **not** — a half-orange
+control), `.tint` on the `Menu` (colours both, but also repaints the menu's own **selection
+highlight**, which is the system accent's job), `HStack { Text(Image); Text }` (colours both and
+then **swallows the readout entirely**), and one concatenated `Text` with a per-run font, which is
+what shipped.
+
+> ⚠️ **THE SWALLOWED-TEXT TRAP IS THE ONE `colorControl` ALREADY DOCUMENTED, FROM THE OTHER SIDE.**
+> Its own comment warns that a borderless menu "reserves and clips a trailing region for its
+> disclosure indicator", so a chevron at a rich label's trailing edge disappears. Wrapping the
+> symbol in a `Text` makes the label a MIXED one — a text-like element beside a view — and the same
+> clip then eats the READOUT instead. **This was shipped into a build and measured**: the face
+> dropped from 214 pt wide to 28, the palette glyph alone, with the label gone. A single `Text` is
+> not a mixed label and is not clipped.
+
+MEASURED on the face region, same rect both times:
+
+| state | max(r − b) | pixels with r − b > 30 |
+|---|---|---|
+| Auto | **1**, on a pixel reading (237, 236, 236) — a neutral antialiased edge, not colour | **0** |
+| Overridden to Rec.2020 PQ | **208**, peak pixel (255, 146, 47) | **637** |
+
+And the control bar was captured before and after the change at identical window geometry: the
+face occupies the same span, and the display-transform control beside it stays white. **No layout
+change.**
+
+##### 5 · The Source line format
+
+Full CICP, in CICP's own order, with the words in the same order as the numbers:
+
+```
+Rec. 709 · Rec. 709 · Rec. 709 · limited — CICP 1-1-1 — assumed
+Rec. 2020 · PQ (ST 2084) · Rec. 2020 · limited — CICP 9-16-9 — overridden
+```
+
+The earlier form printed **transfer first and primaries second** while calling the numbers
+"CICP p/t", so the words and the numbers disagreed about which axis was which — readable only by
+someone who already knew the answer. Matrix was absent entirely, and so was range.
+
+Matrix and range come from the same resolution as primaries and transfer: `sourceMatrixCode` is the
+code the DeckLink encoding matrix is already chosen from, and range is read from
+`isFullRangeProvider` — **the same closure the shader reads**, so the readout cannot disagree with
+the picture, and it already folds in the user's range override. **`nil` prints "range unknown"**
+rather than "limited": a renderer with no provider has no answer, and printing one would be a guess
+wearing a fact's clothes.
+
+An absent axis still prints the code the renderer is USING rather than a dash — §6.8's existing
+rule, and why the untagged wedge reads `CICP 1-1-1` and not `CICP ---`. The tier carries the
+absence, which is the whole point of separating them.
+
+##### Byte identity against the commit before it — measured, and this is the strong form
+
+§6.7 and §6.8 both establish `.os` as **0 codes** against the build before them, by stashing,
+building `HEAD` into a separate derived-data path and capturing at matched geometry. That was done
+again here, against `2443151` (2c part 1), on the **same fixture, same window geometry, both
+displays**, with the pointer warped off the window so the HUD bar auto-hides and the frame is
+picture only.
+
+| comparison | result |
+|---|---|
+| **CONTROL** — HEAD, LG, OS vs itself 5 s later | **0 codes** |
+| **CONTROL** — tree, LG, OS vs itself 5 s later | **0 codes** |
+| **HEAD vs tree — LG TV SSCR2, OS** | **0 codes, 0.00 %** (1500×844) |
+| **HEAD vs tree — ASUS PA147, OS** | **0 codes, 0.00 %** (924×520) |
+| **HEAD vs tree — ASUS PA147, Bypass** | **0 codes, 0.00 %** (924×520) |
+| **SANITY** — tree, ASUS, OS vs Bypass | **21 codes, 93.69 %**, worst **170 → 149** |
+
+The two controls are what make the zeros mean something: the picture is stable across time in both
+builds, so a 0 is "nothing moved" rather than "nothing was measured". And the sanity row reproduces
+§6.7's **21 codes, 93.69 %, worst 170 → 149** to the digit, three phases later, from a build with a
+rewritten source path — so the instrument still sees a difference when there is one.
+
+The two binaries differ in size and SHA-256, which is the check that two different builds were
+actually compared rather than one twice.
+
+> ⚠️ **AN EARLIER, SLOPPIER RUN OF THIS CHECK GAVE 12 CODES / 91.41 % AND IS SUPERSEDED.** That one
+> was captured with the control bar PINNED, so the HUD was composited over the bottom of the
+> picture and the window was a different size. The bar is chrome, not picture; including it makes
+> the number describe the capture rather than the transform. The table above is the corrected run.
+
+##### ⚠️ The ONE behaviour change outside the readout, and it is in the no-op guard
+
+`setSourceColorSpace` compares the incoming values against the stored ones and returns early when
+nothing moved. **The provenance is now part of that comparison**, and it has to be: without it, an
+override to the preset the stream was already assumed to be — **Auto → Rec.709 (SDR) on an untagged
+709 stream** — moves no code at all, is swallowed by the guard, and the readout goes on calling a
+user assertion "assumed". The `defer` that announces the change is after the guard, so the guard
+term is load-bearing for the fix.
+
+The consequence, measured on exactly that transition:
+
+```
+[NDI] colorimetry override → Rec.709 (SDR)
+[NDI] colorimetry CHANGED (Assumed → Overridden): … code 1 (OVERRIDE) …      ← pre-existing
+[EDR] source tags: primaries=1 transfer=1 matrix=1 (MID-SOURCE CHANGE …)      ← NEW
+[EDR] layer colorspace = kCGColorSpaceCoreMedia709  (wideGamut=false)         ← NEW
+[EDR] wantsExtendedDynamicRangeContent = false  (SDR source → EDR OFF …)      ← NEW
+[EDR] colour state installed on the layer after 276 present(s) of this source ← NEW
+      — ⚠️ AFTER a frame was already on screen … Re-rendering to repair it.
+```
+
+So that one transition now does a **redundant republish**: the same `CGColorSpace` object, the same
+EDR flag, and one re-present of the current frame. **No pixel changes** — it installs what was
+already installed, and the byte-identity table above covers the rendered result. The NDI-side lines
+are not new; `NDIColorInfo` is `Equatable` over its axes' provenance, so the receive path always saw
+Assumed → Overridden as a change and always re-tagged. Only the renderer used to swallow it.
+
+⚠️ **The new `[EDR]` block carries a warning line that will mislead somebody**: "AFTER a frame was
+already on screen; that frame was drawn through the previous colour state. Re-rendering to repair
+it." In this case there is nothing to repair — the previous and new colour states are identical.
+Left as-is rather than special-cased, because a guard that decides which republishes are "real" is
+how the swallowing comes back; but it is worth knowing before it turns up in a log during Phase 3.
+
+##### ⚠️ One gap this format makes visible, NOT fixed here
+
+`Rec.2020 SDR` (transfer code **14**) has no entry in `MediaInspector.transferName`, so that preset
+prints `Rec. 2020 · — · Rec. 2020 · limited — CICP 9-14-9 — overridden`. **Measured.** The hole is
+pre-existing — the old format had it in the same axis — and it is in ManifoldCore, shared with the
+inspector, so it is left alone here rather than widened into a change nobody asked for. The number
+is right; the word is missing.
+
+---
+
+#### Still open after Phase 2b — amended after 2c parts 1 and 2
 
 - ~~**`didChangeScreenProfileNotification` untested live.**~~ **Amended:** the path was exercised on
   a real macOS HDR toggle and the readout follows a profile change with the window stationary. What
@@ -1149,13 +1369,16 @@ proves it), and the open readout did not move until it was closed and reopened.
   at all, by decision.** The control-bar badge's own auto-hide is unchanged.
 - **§6.3's momentary compare (hold-to-compare) is not built.** It is named in §6.3 as the gesture
   that actually gets used, and in §6.4's 2b list. Only the sticky modes exist.
-- ~~**The Source line has only been exercised on an UNTAGGED file.**~~ **Exercised on a stream, and
-  it is WRONG** — every stream prints `— tagged`, including an assumption and including a user
-  override. 2c part 1 has the measurement and the cause. The PQ/HLG verdict case is now seen and is
-  correct. The `— partly assumed` spelling is still unseen.
-- **The Source line does not follow a colorimetry change while the readout is open.** New, 2c part 1.
-- **The pulldown's subtitles do not render, and the Color control does not turn amber.** Both
-  measured false in 2c part 1; both were believed fixed / believed working.
+- ~~**The Source line has only been exercised on an UNTAGGED file.**~~ ~~**Exercised on a stream,
+  and it is WRONG.**~~ **FIXED in 2c part 2** — all four tiers measured, on a file and on a stream.
+  The `partly assumed` spelling is still unseen: no source in hand declares some axes and not
+  others.
+- ~~**The Source line does not follow a colorimetry change while the readout is open.**~~ **FIXED
+  in 2c part 2**, measured with the readout open and never reopened.
+- ~~**The pulldown's subtitles do not render, and the Color control does not turn amber.**~~ **BOTH
+  FIXED in 2c part 2**, each proven by a pixel scan rather than by looking.
+- **`Rec.2020 SDR` (transfer 14) has no name in `MediaInspector`**, so that one preset prints a dash
+  where the transfer word goes. Pre-existing, now visible, deliberately not fixed. 2c part 2.
 - **One fixture, one session.** No colorimeter, 8-bit captures, as everywhere else here.
 
 ---

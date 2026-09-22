@@ -914,7 +914,11 @@ final class DeckRegistry {
         // main, before it starts reading, so the layer knows what it is looking at before a frame
         // can exist. See `FrameEngine.onSourceColorTags`.
         engine.onSourceColorTags = { [weak renderer] primaries, transfer, matrix in
-            renderer?.setSourceColorSpace(primaries: primaries, transfer: transfer, matrix: matrix)
+            // `.fromCodes` is CORRECT HERE and the type says when it is: a file's undeclared axis
+            // arrives as nil from the format description, so the codes are the resolution.
+            renderer?.setSourceColorSpace(
+                primaries: primaries, transfer: transfer, matrix: matrix,
+                provenance: .fromCodes(primaries: primaries, transfer: transfer, matrix: matrix))
         }
         // THE SOURCE'S DECLARED GEOMETRY — `clap` and `pasp` — at the same site and per-window for
         // the same reason: this deck's engine describes this deck's file to this deck's renderer.

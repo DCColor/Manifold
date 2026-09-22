@@ -139,13 +139,11 @@ struct DisplayTransformControl: View {
     @ViewBuilder
     private var menuContent: some View {
         Toggle(isOn: binding(for: .os)) {
-            Text("As macOS Shows It")
-            Text("what your client will see")
+            Text(Self.rowLabel("As macOS Shows It", "what your client will see"))
         }
         Divider()
         Toggle(isOn: binding(for: .bypass)) {
-            Text("Bypass")
-            Text("no colour management")
+            Text(Self.rowLabel("Bypass", "no colour management"))
         }
         Divider()
         // Tier 3 lives behind one more step, per §6.3's progressive disclosure: "available, not
@@ -160,20 +158,40 @@ struct DisplayTransformControl: View {
         }
     }
 
-    /// ⚠️ **`Toggle` WITH A TWO-`Text` LABEL, AND BOTH HALVES OF THAT ARE MEASURED CHOICES.**
+    /// ⚠️ **THE SUBTITLE IS ONE `AttributedString` IN ONE `Text`, AND THAT IS THE THIRD ATTEMPT.**
     ///
-    /// The first version drew its own `Image(systemName: "checkmark")` at `.opacity(checked ? 1 : 0)`
-    /// inside an `HStack`, with the subtitle in a `VStack`. **Both failed in the rendered menu, and
-    /// neither failed in a way the code suggests:** the screenshot showed a checkmark on BOTH rows
-    /// (AppKit does not honour a zero-opacity image in a menu item) and NO subtitles at all
-    /// (a `VStack` label is flattened to its first `Text`).
+    /// Attempt 1 drew its own `Image(systemName: "checkmark")` at `.opacity(checked ? 1 : 0)` with
+    /// the subtitle in a `VStack`: a checkmark on BOTH rows (AppKit does not honour a zero-opacity
+    /// image in a menu item) and no subtitles (a `VStack` label is flattened to its first `Text`).
     ///
-    /// So the checkmark comes from `Toggle`, which makes AppKit draw a real one — the same
-    /// mechanism `RasterSizeCommands` and the Color menu already use, which is also what keeps this
-    /// pulldown and the Color menu looking identical rather than merely agreeing in state. And the
-    /// subtitle comes from a second `Text` in the label, which is the documented way to give a menu
-    /// item a subtitle. §6.3 is explicit that "the subtitles do the teaching", so losing them
-    /// silently would have removed the point of the control while leaving it apparently working.
+    /// Attempt 2 — §6.8's recorded fix — moved to `Toggle` for a real checkmark and put the
+    /// subtitle in a **second `Text`** in the label, which is the documented form. **§6.8 recorded
+    /// that as fixed and it was not.** A luminance scan of the rendered menu shows the row at
+    /// single-line height with no subtitle pixels anywhere: title text peaks at 227, the band
+    /// beneath it never leaves the menu's own gradient. The second `Text` was silently dropped.
+    ///
+    /// Attempt 3, measured against four alternatives in an isolated harness before it was written
+    /// here (a second `Text`, a `Label`, a plain `"\n"` in one `Text`, and an `AttributedString`):
+    /// **a plain newline draws both lines but in one style, and only the `AttributedString` draws a
+    /// real subtitle** — smaller, secondary-coloured, and still under `Toggle`'s own checkmark.
+    /// §6.3 is explicit that "the subtitles do the teaching", so this is the difference between a
+    /// control that explains itself and one that merely looks like it does.
+    ///
+    /// ⚠️ **AND IT IS ONLY EVER TRUE IF IT IS MEASURED.** Two of the three attempts above rendered
+    /// as something plausible. Anything that changes this construction gets a luminance scan of the
+    /// subtitle band, not a look.
+    static func rowLabel(_ title: String, _ subtitle: String) -> AttributedString {
+        var t = AttributedString(title)
+        t.font = .system(size: 13)
+        var s = AttributedString("\n" + subtitle)
+        s.font = .system(size: 11)
+        s.foregroundColor = .secondaryLabelColor
+        return t + s
+    }
+
+    /// `Toggle` is what makes AppKit draw a REAL checkmark — the same mechanism `RasterSizeCommands`
+    /// and the Color menu already use, which is also what keeps this pulldown and the Color menu
+    /// looking identical rather than merely agreeing in state.
     private func binding(for m: DisplayTransformMode) -> Binding<Bool> {
         Binding(
             get: { mode == m },
