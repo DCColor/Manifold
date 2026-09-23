@@ -698,7 +698,7 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 - **SRT through MediaMTX.** Configured on 8890, never connected. The SRT path already has local OBS
   as a non-vendor reference, so this is lower value than the WHIP/WHEP half — but it is the only way
   to get a non-OBS, non-Cloudflare SRT sender, and **Cloudflare's SRT egress term has never been
-  measured** (`AV_SYNC_FINDINGS.md` §6).
+  measured** (`AV_SYNC_FINDINGS.md` §7).
 - **A second machine.** Everything here is loopback. Nothing has been run across a real link.
 - **Nothing is measured yet.** This entry establishes that the server works, not that any number
   taken from it means anything.
@@ -1304,7 +1304,7 @@ only thing here that catches that term. It applies to **all four transports**, n
   `AV_SYNC_FINDINGS.md` §5.1 measured **every** rate write muting the renderer **19/19**, ~63 ms
   core, whether or not the rate value changes. A continuously-corrected version of this feature
   would audibly gate the programme. Install once, log the residual, do not chase it.
-- **The detector lives outside the repo** (`~/Desktop/manifold-avsync/`, deliberately, per §7). It
+- **The detector lives outside the repo** (`~/Desktop/manifold-avsync/`, deliberately, per §8). It
   would have to come in under test, with the injected-offset gate as its unit test — a gate that
   passes only because it was written before the answer was known.
 - **What counts as a detection.** The capture analyser's gates (beep count against duration, fit to

@@ -561,11 +561,173 @@ build step 6 (moving NDI onto the resampler's loop) became urgent, because NDI r
 
 ---
 
-## 6. What is not answered here
+## 6. WHEP RTCP sender reports — measured on two servers, and they fail in OPPOSITE directions
 
-* **WHEP's per-session offset has no fix in this document.** It needs RTCP sender-report handling,
-  which is a change to the WHEP receive path, not to the audio mirror, and it needs its own
-  measurement. Two sessions are not a distribution.
+**Measured 2026-09-23 19:12–19:24, six sessions, to decide whether §3.3's defect is fixable the way
+RTP says it should be — before designing the fix around the answer.**
+
+### 6.1 The instrument
+
+A log-only probe in `App/WebRTC/DataChannelBridge.m`. It parses the Sender Reports that already
+arrive and were previously counted and dropped, and computes — never applies — the per-session
+offset:
+
+```
+Δ = [ ntp_a + (T_a0 − rtp_a)/48000 ] − [ ntp_v + (T_v0 − rtp_v)/90000 ]
+```
+
+In words: **the sender-clock time of the first audio packet minus the sender-clock time of the first
+video frame.** Those are the two instants the receiver currently treats as simultaneous —
+`RTPTimestampUnwrapper` rebases video to zero at its first access unit and `WHEPAudioReceiver.unwrap`
+rebases audio to zero at its first packet — so Δ *is* the error §3.3 describes, expressed in numbers
+the app can read about itself.
+
+Three disciplines, all of them load-bearing:
+
+* **The NTP difference is taken in the wire's own 32.32 fixed point, as `int64`, before anything
+  becomes a `double`.** NTP seconds-since-1900 is ~3.9e9; a double has about 1 µs of resolution left
+  at that magnitude, which is the same order as the quantity §6.4 reads.
+* **`T_a0` and `T_v0` are captured where Swift sees them**, not where the packets arrive — past the
+  `!sink` guard for audio and past the backpressure shed for video. Either shortcut latches an
+  origin that never defined an axis.
+* **Nothing is applied.** Presentation is identical to shipping. A behaviour change measured at the
+  same time as the measurement justifying it is not evidence.
+
+Six sessions, ~60 s each, disconnecting between them so every session draws fresh SSRCs and fresh
+origins. No recorder, no fixture analysis, no per-player control — this measurement lives entirely
+inside the process, which is the first time anything in §4's terms has been able to say so.
+
+⚠️ **THE VIDEO HALF REQUIRED TEMPORARILY UNCHAINING `RtcpReceivingSession`**, because libdatachannel
+absorbs video RTCP inside itself and exposes no C API for the pair it records
+(`RtcpReceivingSession::getSyncTimestamps`). That disables PLI and stops our Receiver Reports.
+Measured cost over six one-minute runs on clean links: **none** — `errors=0`, `noFmt=0`, a keyframe
+every second from both servers. It is not acceptable in a shipping build and is behind a macro that
+returns it.
+
+### 6.2 The six sessions
+
+Positive Δ = the first audio packet sits LATER on the sender's clock than the first video frame.
+"drift" is a least-squares slope of the residual against session time; "per-pair sd" is the scatter
+about that line.
+
+**MediaMTX — relay, no transcode**
+
+| # | Δ first pair | Δ mean | drift | per-pair sd | pairs | CNAME in RTCP |
+|---|---|---|---|---|---|---|
+| 1 | **−51.772 ms** | −49.769 | **+66.3 ± 1.5 ppm** | 424 µs | 160 | absent |
+| 2 | **−13.823 ms** | −11.592 | **+57.7 ± 1.6 ppm** | 359 µs | 134 | absent |
+| 3 | **−15.025 ms** | −12.694 | **+59.2 ± 2.0 ppm** | 429 µs | 132 | absent |
+
+**Cloudflare — transcodes the WHIP ingest**
+
+| # | Δ first pair | Δ mean | drift | per-pair sd | pairs | CNAME in RTCP |
+|---|---|---|---|---|---|---|
+| 1 | **+6.390 ms** | +8.251 | −14.3 ± 24.9 ppm | 6333 µs | 146 | absent |
+| 2 | **−53.939 ms** | −58.088 | +27.7 ± 27.6 ppm | 6035 µs | 132 | absent |
+| 3 | **−25.458 ms** | −22.297 | −12.7 ± 26.2 ppm | 5484 µs | 130 | absent |
+
+📌 **Δ DIFFERS BETWEEN SESSIONS ON BOTH SERVERS — spread 37.9 ms on MediaMTX, 60.3 ms on
+Cloudflare.** §3.3 established the per-session error from outside the process, with a camera, a
+recorder and a per-player control, and could only say "≥136 ms of spread". **This says the same
+thing from inside the binary, on two independent servers, in six minutes, with no instrument outside
+the app at all** — and it is the answer to §4's rule that A/V sync is not measurable from inside one
+half of the pipeline. It is not: it is measurable from inside *both* halves, which is what an SR
+gives you and what nothing in the app had ever read.
+
+### 6.3 They fail in opposite ways, and the NTP fields say why
+
+* **MediaMTX — a clean RATE error.** ~60 ppm, >30σ on every session, but the residuals sit within
+  **±0.5 ms of a straight line**. Not wander. A slope.
+* **Cloudflare — no rate error, but NOISE.** No drift distinguishable from zero on any session
+  (every slope is inside ~1σ). But a **single SR pair carries ~6 ms of scatter**, fifteen times
+  MediaMTX's. Take Δ from one pair and you are ±6 ms; average a minute of them and you reach ~0.5 ms.
+
+📌 **AND THE MECHANISM IS VISIBLE IN THE NTP FIELD ITSELF.** Cloudflare stamps the audio and video
+SRs with a **bit-identical** NTP value — `0xee5edd71cd23dfff` on both SSRCs, all three sessions.
+One clock read, both streams. MediaMTX stamps each SR at its own send time: 52, 14 and 15 ms apart
+on the three sessions. **That single design difference is the whole result.** Cloudflare's choice
+makes relative drift structurally impossible and puts all the information in the RTP fields, which
+are the noisy part. MediaMTX's choice is more faithful and therefore exposes whatever rate
+difference genuinely exists between the two streams' RTP clocks.
+
+⚠️ **THE PAIRING IS NOT THE ARTEFACT, AND THIS WAS CHECKED BEFORE THE RESULT WAS BELIEVED.** The
+probe pairs "latest SR of each", which could in principle manufacture a slope. The residual's
+dependence on *which* SR arrived last measures that directly: **66 µs, 0, 0 on MediaMTX and 21, 98,
+16 µs on Cloudflare**, against a drift that accumulates 4–5 ms across a session. A pairing artefact
+is bounded by the inter-SR gap and cannot accumulate; this does.
+
+### 6.4 CNAME is absent from RTCP on both servers
+
+**All twelve SSRCs, six sessions, two vendors: no SDES, no CNAME, ever.** Both answer with
+`a=rtcp-rsize` (RFC 5506 reduced-size RTCP), which permits a non-compound packet carrying the SR
+alone, and both take it.
+
+📌 **So the CNAME finding in §3.3 is an SDP finding and can never be corroborated on the wire on
+either of these servers.** Cloudflare declares different CNAMEs and different msids in its answer;
+MediaMTX declares one of each. Neither says anything at all in RTCP. The probe reports this as
+`UNKNOWN` rather than "different", which is the honest reading and was worth building in.
+
+### 6.5 The audio hold costs far less than predicted
+
+The fix must hold the first audio buffers until an SR pair exists. Predicted from the 1 Hz SR
+cadence: **~1 s.** Measured, transport-up to first computable Δ:
+
+| | session 1 | 2 | 3 |
+|---|---|---|---|
+| MediaMTX | **23 ms** | 19 ms | 35 ms |
+| Cloudflare | **956 ms** | 952 ms | 928 ms |
+
+Video already holds `targetDepth` = 400 ms before presenting, so **on MediaMTX the hold is free**
+and on Cloudflare it is about half a second of audio-only startup against a picture that is already
+up. The prediction was right about Cloudflare and wrong about the class.
+
+### 6.6 What this does to the fix — the latched Δ is dead
+
+The design sketched before these runs was: compute Δ once at the first SR pair, install it, log the
+residual, do not chase it — on the §5.1 grounds that **every** `setRate` write mutes the renderer.
+**Both halves of that are now measurably wrong:**
+
+1. **"Latch Δ once" fails on MediaMTX.** At ~60 ppm a latched Δ is **215–240 ms out after an hour** —
+   worse than the defect it replaces.
+2. **"One pair is enough" fails on Cloudflare.** One pair is ±6 ms.
+
+**Both are answered by the same construction: a running least-squares fit of OFFSET AND RATE over a
+window of SR pairs.** The fit averages Cloudflare's noise down by √N and tracks MediaMTX's slope,
+and it needs no branch on which server is at the other end — each server simply lands in a different
+part of the same two-parameter space. That is what the `CLAUDE.md` server-agnostic rule asks for,
+arrived at from measurement rather than from principle.
+
+📌 **AND THE RATE HALF OF THAT FIT IS AN INPUT THE RESAMPLER ALREADY WANTS.** Correcting a 60 ppm
+rate by position writes would mean a `setRate` every few seconds, i.e. §5.1's mute, forever. A
+resampler absorbs it in the ratio it is already computing, with no rate write at all. **The WHEP SR
+alignment and `docs/AUDIO_RESAMPLER_DESIGN.md` are one piece of work, not two.** Folded in there as
+the resampler's WHEP input.
+
+### 6.7 Open question — is the ~60 ppm OBS's own two clocks?
+
+**Unresolved, and it needs one specific run.** MediaMTX relays OBS's RTP timestamps; Cloudflare
+re-encodes and re-stamps both streams from one clock read. So the most likely reading is that the
+~60 ppm **is OBS's audio clock against its video clock**, faithfully passed through by the relay and
+erased by the transcode. Two things sit awkwardly with that and are recorded rather than smoothed:
+
+* **66.3 vs 57.7 ppm is ~4σ apart**, so it is not one fixed ratio between two crystals.
+* **§5.2 measured this machine's audio device at +6.8 to +7.3 ppm against mach time** — the same
+  order as the −7.8 ppm on another machine, and about a tenth of this.
+
+**What would settle it: a NON-OBS sender through MediaMTX** — `ffmpeg` publishing the same fixture
+over WHIP, or the SRT ingest path on the same server. If the ~60 ppm follows OBS, it is a sender
+property and every WHEP receiver on earth has it. If it follows MediaMTX, it is that server's SR
+generation. Either answer is worth having before the fit's window length is chosen, because the
+window is a trade between averaging noise and tracking rate.
+
+---
+
+## 7. What is not answered here
+
+* ✅ **WHEP's per-session offset was unmeasured from inside the app — §6 now measures it**, six
+  sessions across two servers, and settles the shape the fix has to take (a running offset-and-rate
+  fit, not a latched Δ). **It is still not FIXED**: §6 is log-only and changes no presentation.
+  What remains open there is §6.7 — whether the ~60 ppm belongs to OBS or to MediaMTX.
 * ✅ **The residuals between arithmetic and measurement vary by path** (−42, −80, −95 ms) — **this
   was listed as unexplained and now has a cause.** Part is the bounded frame-grid bias; the rest is
   the sender's own audio-vs-video error, which is **not** a property of the path but of the session:
@@ -581,7 +743,7 @@ build step 6 (moving NDI onto the resampler's loop) became urgent, because NDI r
 
 ---
 
-## 7. Reproducing this
+## 8. Reproducing this
 
 ```
 # fixture (regenerates identically; verify its own offset before trusting it)

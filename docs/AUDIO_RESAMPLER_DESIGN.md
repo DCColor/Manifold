@@ -316,6 +316,70 @@ is why §6.3 criterion 12 is a device-level A/V measurement and not a number fro
 
 ---
 
+### 2.6 The WHEP input — an SR-derived line, not an assumption
+
+⚠️ **ADDED 2026-09-23, FROM MEASUREMENT. THIS SUBSECTION EXISTS BECAUSE §2.1's `target` LINE IS
+WRONG ON WHEP TODAY, AND NOTHING IN THE APP COULD SEE IT.**
+
+`target = mapping.senderPTS + (t1 − mapping.hostTime) * mapping.rate − cushion` evaluates the VIDEO
+LiveClock mapping, and `cushion` is a **constant** — 0 for WHEP (`WHEPFrameRouter.swift:350`). That
+is correct only if the audio buffers being compared against it are stamped on the same axis as
+`senderPTS`. On WHEP they are not: video PTS is the video SSRC's RTP timestamp rebased at its first
+access unit, audio PTS is the audio SSRC's rebased at its first packet, and **the two SSRCs have
+independent random bases** (`AV_SYNC_FINDINGS.md` §3.3).
+
+`AV_SYNC_FINDINGS.md` §6 measured the gap. It is **not a constant**, in two different ways depending
+on the server:
+
+| | offset per session | rate | per-SR-pair noise |
+|---|---|---|---|
+| MediaMTX | spread **37.9 ms** over 3 sessions | **~60 ppm**, significant | 0.4 ms |
+| Cloudflare | spread **60.3 ms** over 3 sessions | none measurable | **6 ms** |
+
+**So the WHEP input to this loop is a LINE, fitted from RTCP Sender Reports, and both of its
+parameters are needed:**
+
+```
+  offset(t), rate      = least-squares fit of Δ over a sliding window of SR pairs
+  Δ(pair)              = [ ntp_a + (T_a0 − rtp_a)/48000 ] − [ ntp_v + (T_v0 − rtp_v)/90000 ]
+
+  target  =  mapping.senderPTS + (t1 − mapping.hostTime) * mapping.rate  −  offset(t1)
+  r_ff    =  (1 / smoothedRate) * (1 + srRate)
+```
+
+* **The OFFSET replaces `cushion` on this transport** — same slot, same sign convention, no longer a
+  constant. `beginLiveAudio`'s parameter note already defines `cushion` as *"how far behind the
+  mapping's senderPTS does this transport stamp its audio PTS?"*, which is exactly what the fit
+  measures. The note needs no rewriting; the value simply stops being a guess.
+* **The RATE joins the feed-forward term**, where a 60 ppm correction costs nothing. Correcting it
+  by position instead would mean a `setRate` every few seconds — §5.1's mute, forever — which is the
+  single strongest argument for doing this here rather than in the mirror.
+
+**Three properties this buys, and one it does not:**
+
+1. **Server-agnostic by construction.** Nothing branches on the vendor; the two servers simply land
+   in different parts of the same two-parameter space. Required by `CLAUDE.md`'s server-agnostic
+   rule, and reached from measurement rather than from principle.
+2. **Noise and drift are handled by one mechanism.** The fit averages Cloudflare's 6 ms scatter down
+   by √N and tracks MediaMTX's slope.
+3. **No latched Δ, ever.** §6.6: latching at the first SR pair is 215–240 ms out after an hour on a
+   ~60 ppm server.
+4. ❌ **It does NOT remove the startup hold.** Audio still waits for the first SR pair before it can
+   be stamped at all. Measured: **19–35 ms on MediaMTX, 928–956 ms on Cloudflare** (§6.5), against
+   the 400 ms `targetDepth` the picture is already holding.
+
+⚠️ **THE WINDOW LENGTH IS NOT CHOSEN AND SHOULD NOT BE GUESSED HERE.** It is a direct trade between
+averaging Cloudflare's noise and tracking MediaMTX's rate, and it depends on §6.7 — whether that
+~60 ppm belongs to OBS or to the relay. Pick it from a measurement, with a non-OBS sender through
+MediaMTX, not from this document.
+
+⚠️ **AND THE OTHER THREE TRANSPORTS HAVE NO SUCH INPUT AND NEED NONE.** SRT, NDI and HLS each carry
+audio and video on ONE timeline already — that is exactly why §3.1's SRT fix was a single argument.
+This subsection is WHEP-only, and the fit must be absent rather than neutral on the others: a
+degenerate fit over a stream that never reports would be a silent source of noise.
+
+---
+
 ## 3. How it resamples
 
 ### 3.1 The requirement that eliminates most of the field
@@ -598,6 +662,14 @@ got where it is.
 | sender vs pull, NDI | `cum = 48006.6 Hz` against `sndR = 48015.5 Hz` over 72 s → **≈ 185 ppm**; pull vs nominal **+137 ppm** | BUGS.md, "the pump's clock is fine" |
 | audio device crystal vs mach | **−7.8 ppm** (≈ 28 ms/hour), explicitly *"a property of the output device, not a constant"* | `HLSAudioTap.swift:48` |
 | LiveClock rail | **±5000 ppm** | `maxSlew = 0.005`, `LiveClock.swift:93` |
+| **WHEP audio SSRC vs video SSRC, via MediaMTX** | **+57.7 to +66.3 ppm**, >30σ, residuals within ±0.5 ms of the line | `AV_SYNC_FINDINGS.md` §6.2, three sessions |
+| **WHEP audio SSRC vs video SSRC, via Cloudflare** | **no drift distinguishable from zero** (±25 ppm standard errors), but **~6 ms per-pair scatter** | `AV_SYNC_FINDINGS.md` §6.2, three sessions |
+
+⚠️ **THE LAST TWO ROWS ARE A DIFFERENT PAIR FROM EVERY ROW ABOVE THEM, AND THAT IS THE POINT.**
+Everything else here is *sender against receiver* — one programme timeline against this machine's
+clock. Those two are **one sender's audio clock against its own video clock**, which no instrument in
+this app could read until §6's probe existed, and which the resampler must absorb separately because
+it is not shared by the two streams it is trying to align.
 
 ### 5.2 The design bound, and what is deliberately excluded
 
