@@ -22,6 +22,11 @@ on the Cloudflare path and not on a local one**
 > a ~50 ms mute performed silently by the renderer, and the step that provokes it is the product of
 > two constants neither of whose own justification considers it. §11 is also where the depth
 > question left open in §7 is finally measured.
+>
+> **⚠️ BEFORE PROPOSING ANY FIX FOR THAT, READ §11.11.** `AVSampleBufferAudioRenderer` mutes on
+> EVERY write to the synchronizer's rate — including the bare `synchronizer.rate = r` property set,
+> and including a `setRate(time:atHostTime:)` carrying a deliberately ZERO position step. The
+> obvious fix is measured dead.
 
 ---
 
@@ -721,12 +726,13 @@ happened** — the largest number in an unfiltered run, and pure artefact.
 deliberately does not follow the P-loop's depth correction, and position/anchor mirroring is what
 holds `timebase−clock` near zero. Any fix must preserve that separation.
 
-1. **Do not move the timebase when only the rate changed.** Call `synchronizer.rate = r` instead of
-   `setRate(_:time:atHostTime:)` when `positionError` is small, so a rate-threshold push stops being
-   a position re-anchor. *Trade:* the re-anchor is currently the **only** thing correcting the
-   audio-device-vs-mach crystal divergence — the slew-site note is explicit that nobody designed a
-   drift corrector and one fell out of this. Removing it needs the closed-loop re-anchor NDI also
-   needs, or WHEP and SRT become unbounded exactly as that note warns.
+1. ~~**Do not move the timebase when only the rate changed.**~~ **❌ DEAD — MEASURED FALSE, see
+   §11.11.** The proposal was to call `synchronizer.rate = r` instead of
+   `setRate(_:time:atHostTime:)` when `positionError` is small. `synchronizer.rate = r` **mutes just
+   as reliably, and for ~20% longer**: 18/19 and 19/19 across two cases, against `setRate`'s 19/19.
+   A `setRate` with a deliberately ZERO position step also mutes 19/19, so the jump was never the
+   cause — the rate write is. It would also have lost the crystal-drift correction the slew-site
+   note warns about: a known cost for a benefit that does not exist.
 2. **Raise `liveAudioRateThreshold` toward the position tolerance.** The step is `threshold × τ`, so
    0.00033 × 30 s = 10 ms would make the rate branch fire no more often than the position branch —
    one gate instead of two. *Trade:* fewer, larger mutes. It reduces the count and not the audibility
@@ -744,9 +750,140 @@ holds `timebase−clock` near zero. Any fix must preserve that separation.
    rate bias, absorbed over ~1 s, so the timebase is never discontinuous. *Trade:* a new mechanism
    between the clock and the renderer, and it must not become a second rate loop fighting the first.
    This is the only candidate that removes the discontinuity rather than rationing it.
+   ⚠️ **AND §11.11 SHARPENS IT INTO THE ONLY SURVIVOR, WITH A HARD CONSTRAINT.** "A small temporary
+   rate bias" applied to `synchronizer.rate` would mute on **every** adjustment — that is exactly
+   what cases C and D measure. The ramp must therefore leave `synchronizer.rate` **untouched** and
+   be absorbed upstream of the renderer: in the material, or in the PTS the enqueued buffers carry.
+   Anything that writes the renderer's rate to correct position is this defect with more steps.
 
 ⚠️ **WHATEVER IS CHOSEN, THE ACCEPTANCE TEST IS ALREADY WRITTEN**, and it is not ears: the
 device-output capture with mutes/min per transport, against these three numbers — **4.95 / 11.08 /
 7.32 per minute**, and **3.0 / 7.7 / 4.5 per minute in steady state**. A fix that does not move
 those has not been demonstrated to do anything, and a fix judged by listening is the mistake §9's
 "THE CASUALTY" is about.
+
+### 11.11 The speed-only mute test — every rate change mutes, including the bare property set
+
+**Measured 2026-09-22, a standalone harness using the same two AVFoundation objects as the app,
+captured at the device output.** Run for §11.10's candidates 1 and 5, and it kills candidate 1.
+
+> **The result.** `AVSampleBufferAudioRenderer` mutes for ~50–60 ms on **every** change to the
+> synchronizer's rate, by **any** call, with or without a position step. `synchronizer.rate = r`
+> — the "speed only, no re-anchor" fix — mutes just as reliably as
+> `setRate(_:time:atHostTime:)`, and for slightly **longer**. There is no cheap call.
+
+#### The harness
+
+`~/Desktop/manifold-audible-events/harness/` — not in this repo, and deliberately: it is a probe of
+AVFoundation, not of Manifold. `AVSampleBufferRenderSynchronizer` + `AVSampleBufferAudioRenderer`,
+48 kHz stereo, fed a continuous broadband reference. Faithful where it matters: same two classes
+wired the same way; buffers built exactly as `SRTFrameRouter.makeAudioSampleBuffer` builds them
+(Int32 interleaved, `duration` one tick and `presentationTimeStamp` an integer sample count on the
+sample rate's own timescale, so §9's fault cannot creep back in); enqueued **unconditionally** from
+a pacing thread, never via `requestMediaDataWhenReady`, because `LiveAudioSink.enqueue` pushes
+unconditionally. No LiveClock, no mirror, no EMA, no push gate — the point is to isolate the call
+from everything that decides when to make it.
+
+#### The measurement
+
+Six cases, 60 s each, one change every 3 s, 19 changes per case:
+
+| case | what it does | changes | **muted** | mute core, ms | envelope, ms |
+|---|---|---|---|---|---|
+| **A** | `setRate(r, time:atHostTime:)`, ±6 ms media step | 19 | **19** | 52 (41–63) | 73 |
+| **M+** | same, monotonic +6 ms step | 19 | **19** | 53 (41–64) | 72 |
+| **B** | same call, **ZERO** position step | 19 | **19** | 53 (42–64) | 81 |
+| **C** | `synchronizer.rate = r`, 1.0000↔1.0002 | 19 | **18** | 62 (51–63) | 89 |
+| **D** | `synchronizer.rate = r`, 1.0000↔1.0010 | 19 | **19** | 62 (51–73) | 93 |
+| **E** | nothing at all | 0 | **0** | — | — |
+
+94 of 98 detected mutes land within 150 ms of a change, median lag 6 ms. Case E — the floor — is
+**silent-free for its whole 60 s**, and was heard as clean in the room. The renderer reported
+**zero** events across every run: no `FLUSHED AUTOMATICALLY`, nothing. Same silence as §11.3.
+
+#### What each case settles
+
+- **A reproduces the live symptom.** 19/19, core 52 ms against §11.3's 50 ms. The harness is
+  faithful, so the rest of the table means something.
+- **M+ shows the step's SIGN and accumulation are irrelevant.** Monotonic and alternating are
+  indistinguishable (53 vs 52 ms).
+- **B is the important one: the position step is NOT what mutes.** A `setRate(time:atHostTime:)`
+  whose media time is projected forward so the timebase is *continuous across the call* still mutes
+  19/19, at the same size. **It is the rate change, not the jump.**
+- **C and D kill candidate 1.** The bare property set — the whole basis of "don't move the timebase
+  when only the rate changed" — mutes 18/19 and 19/19, with a core ~20% LONGER than `setRate`'s.
+  Setting `synchronizer.rate` is not a cheap operation; it is the same operation.
+- **D also rules out magnitude.** 0.1% behaves as 0.02% does. The threshold is not a size threshold.
+
+⚠️ **SO THE 6 ms PRODUCT OF §11.2 IS THE CADENCE, NOT THE CAUSE.** `threshold × τ` still sets how
+OFTEN a push happens, and §11's measured mutes/min still follow from it. But it does not set
+whether a push is audible: **any** rate write is. A fix that shrinks the step buys nothing; only a
+fix that reduces the NUMBER of rate writes, or removes them, can help.
+
+#### The reader, for candidate 5
+
+`synchronizer.currentTime()` sampled in case E, 1 Hz for 60 s plus a burst of 500 back-to-back reads:
+
+```
+1 Hz series   slope 1.001006711  (= the 1.0010 case D left set, not a clock fault)
+              residual to the line   sd 83.0 us   max 524.8 us
+              host read spread       median 11.5 us  max 1132.6 us   <- scheduling, not the timebase
+burst (500 reads over 0.79 ms)
+              residual sd            0.969 us  = 0.047 samples at 48 kHz
+              peak-to-peak           20.7 us
+              finest distinct value   1.292 us  = 0.062 samples
+```
+
+**Yes, comfortably.** Read tightly, `currentTime()` is good to **0.97 µs — 0.097% of a 1 ms
+tolerance**, and quantises at 0.062 samples. The 83 µs residual on the 1 Hz series is *sampling*
+jitter (the host read spread reaches 1.1 ms on a sleeping thread), not timebase noise: pair the two
+reads tightly and the noise is two orders of magnitude under 1 ms. **Nothing about the reader
+prevents closing a position loop at 1 ms.** What prevents it is everything above — the corrections
+that loop would issue are themselves the audible events.
+
+#### What this does to §11.10's candidates
+
+- **Candidate 1 (rate-only re-anchor) is DEAD.** Measured, twice, on two independent captures.
+  It also loses the crystal-drift correction the slew-site note warns about, so it was paying a
+  known cost for a benefit that does not exist.
+- **Candidate 5 (ramp the correction) is now the only structurally sound one**, and case B sharpens
+  what it must do: it is not enough to make the *position* continuous — the **rate** must not be
+  written at the renderer at all during the ramp. A correction absorbed by varying the rate would
+  mute on every adjustment. It has to be absorbed upstream of the renderer, in the material or in
+  the PTS the buffers carry, leaving `synchronizer.rate` untouched for long stretches.
+- **Candidates 2 and 3 are re-scoped, not dead.** Raising the threshold or shortening τ changes how
+  often a rate write happens, which is now the only lever either of them has. Their cost/benefit
+  should be recomputed in mutes-per-minute, not in milliseconds of step.
+- **Candidate 4 (fix the depth signal, §11.8) gains.** It is now the only candidate that reduces the
+  rate-write rate without touching the audio path at all.
+
+#### ⚠️ THE METHOD FAILURES, WHICH COST THREE RECORDINGS AND ARE THE TRANSFERABLE PART
+
+Four runs were made; **three were void**, and neither cause was in the code under test.
+
+1. **A SECOND COPY OF THE HARNESS WAS PLAYING OVER THE FIRST.** Audio Hijack **launches the target
+   application itself** when recording starts; a second copy was then launched from the terminal.
+   Two instances played the same reference from different positions, and the second one **filled in
+   every mute the first one made** — so the control case read clean and the experiment reported the
+   exact opposite of the truth. It was caught by correlating the capture against the reference and
+   finding **two peaks of equal height, r = 0.704 and 0.702**, where two equal uncorrelated sources
+   give 1/√2 = 0.707. A single-source capture reads 1.000.
+   ⚠️ **The tell was audible before it was measurable** — the room got louder (two sources, +3 dB)
+   and the image collapsed toward mono. That was reported and not acted on for two more runs.
+   The harness now takes an `O_EXLOCK` lockfile and refuses to start if another copy holds it.
+2. **THE CAPTURE TOOL STARTED ADDING NOISE.** Audio Hijack's trial mode injects noise after ~10
+   minutes per launch, and the session had exceeded it. Caught because the reference is **brick-
+   walled at 14 kHz by construction, so 0.00% of its energy is above 15 kHz** — and the affected
+   captures carried **5.6% and 9.9%** there. That check was only possible because the reference was
+   built band-limited; a full-band reference would have hidden it completely.
+   ⚠️ **It was verified that this did NOT touch §11.** Every §11 capture reads **0.00%** above
+   15 kHz. The §11 results stand unmodified.
+3. **The affected run was still salvageable**, because the injected noise is broadband and the
+   reference is not: taking the ratio of in-band (200 Hz–12 kHz) to out-of-band (15.5–20 kHz)
+   energy recovers the mutes exactly, and that salvage agreed with the later clean run case for case.
+
+**The rule.** §10 says verify the instrument against a known-good case. This adds the other half:
+**verify the SUBJECT is singular.** Every instrument here was working correctly the whole time.
+What was wrong was that two copies of the thing under test were running, and nothing in a
+per-event detector can tell you that — only a correlation against what you believe you sent, and a
+capture that carries a band the source cannot occupy.
