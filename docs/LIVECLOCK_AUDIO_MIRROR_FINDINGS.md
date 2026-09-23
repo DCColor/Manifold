@@ -16,6 +16,12 @@ on the Cloudflare path and not on a local one**
 > **If the symptom is gritty or gravelly live audio with the programme intelligible underneath, and
 > every counter in the path reads clean: go straight to §9.** That is the shape of a PTS that does
 > not tile, and it has now happened twice — NDI on 2026-09-18, SRT on 2026-09-21.
+>
+> **If the symptom is a SLIGHT PERIODIC STUTTER every few seconds that sounds like the settling
+> blips at connect: go to §11.** Different fault, different half of the path. Every mirror push is
+> a ~50 ms mute performed silently by the renderer, and the step that provokes it is the product of
+> two constants neither of whose own justification considers it. §11 is also where the depth
+> question left open in §7 is finally measured.
 
 ---
 
@@ -483,3 +489,264 @@ exactly at the renderer. Do not trust the declared `time_base`; measure the dive
 source PTS from a sample-counted axis over the first buffer.
 
 Seen twice: **NDI, 2026-09-18** and **SRT (Cloudflare), 2026-09-21**. Both fixed the same way.
+
+**A slight periodic stutter every few seconds that sounds like the settling blips at initial
+connection, on any transport that mirrors `LiveClock` →** it is not a splice and not the PTS grid.
+Count `[*-RENDERER] setRate` rows in the log: each one is a ~50 ms mute performed silently by
+`AVSampleBufferAudioRenderer`, and the connect burst is the same event at a denser spacing because
+τ is still ramping. The step handed over is `liveAudioRateThreshold × liveAudioRateTau` = 6 ms,
+regardless of how far the clock is railed; the rail sets only the cadence. **See §11.** Do not
+reach for the WAV tap — it is upstream of the renderer and cannot contain this. Seen on **local
+SRT, Cloudflare SRT and WHEP, 2026-09-22** — at 3.0, 7.7 and 4.5 events per minute in steady state,
+i.e. on every live transport, including the one that had been used as the clean control.
+
+---
+
+## 11. The periodic stutter — every mirror push is a 50 ms mute, and two constants set its size
+
+**Measured 2026-09-22, three captures of the DEVICE OUTPUT with Robbie streaming from OBS.**
+Different symptom from §9, different cause, same file because it is the same mirror.
+
+> **The one-line version.** `liveAudioRateThreshold × liveAudioRateTau = 0.0002 × 30 s = 6 ms`.
+> That product — which nothing in the code names, and which neither constant's own justification
+> considers — is the media-time step delivered to the audio renderer at **every** rate-threshold
+> push. `AVSampleBufferAudioRenderer` resolves each one by **muting for ~50 ms**, silently, with
+> no notification of any kind. Measured: **100% of audible events land on a `setRate` push**, on
+> all three transports, 67 of 67.
+
+### 11.1 The symptom, and why it is not §9
+
+Reported as "a slight periodic stutter, it sounds like the settling blips at initial connection,
+repeating every few seconds", on Cloudflare SRT and WHEP, with local SRT thought clean. It is not
+§9: the renderer gap histogram read **`EXACTLY ZERO (contiguous)` 468–501 of 468–501 buffers on
+every window of every run, on both transports**. The sample-counted axis is holding, `axisRePins=0`
+in all three runs, and nothing in this section is a regression of that fix.
+
+### 11.2 The mechanism, in closed form
+
+`mirrorLiveAudio` pushes when either gate opens (`FrameEngine.swift:2427`):
+
+```swift
+shouldPush = positionError > 0.010  ||  rateMoved > 0.0002
+```
+
+Take the rate branch. A push occurs when `smoothedRate` has moved `liveAudioRateThreshold` from
+what was last pushed. The EMA moves at `(clockRate − smoothed)/τ`, so the interval between pushes
+is `threshold·τ / (clockRate − smoothed)`. Over that interval the position error accrues at exactly
+`(clockRate − smoothed)`. The residual cancels:
+
+```
+media step at every rate-threshold push  =  threshold × τ  =  0.0002 × 30 s  =  6.0 ms  =  288 samples
+push interval                            =  6 ms / (clockRate − smoothedRate)
+```
+
+**The step does not depend on how far the clock is railed.** The rail sets only the cadence.
+
+⚠️ **AND THAT IS WHY NEITHER CONSTANT'S OWN REASONING CATCHES IT.** `liveAudioRateThreshold`'s
+comment justifies 0.0002 on the *rate* step: *"As a STEP it is 0.35 cents, far under the ~5-cent
+pitch JND, so each push is individually inaudible."* True, and about the wrong quantity. Every push
+also carries a **position** jump, and `setRate(_:time:atHostTime:)` is — in this file's own words at
+the slew site — *"an ABSOLUTE re-anchor: it restates 'media time T at host time H' and so WIPES
+whatever error had accumulated"*. The two constants were each chosen carefully, separately, and
+correctly. **Their product was never anybody's number.**
+
+### 11.3 What the renderer does with it, which is the part nobody had looked at
+
+At **every** push, in the captured device output:
+
+```
+  -60ms  -55ms  -50ms  -45ms  -40ms  -35ms  -30ms … +5ms      (5 ms RMS windows)
+  0.0881 0.0779 0.0618 0.0362 0.0182 0.0058 0.0000 … 0.0000
+                 └── ~20 ms fade ──┘ └── ~50 ms of EXACT DIGITAL ZERO ──┘
+```
+
+| | measured, across all three runs |
+|---|---|
+| core of exact digital silence | **median 50 ms** (range 31–62 ms; 1,655–2,865 samples at bit-zero) |
+| full envelope, fade-down to recovery | **median 78 ms** (range 57–99 ms) |
+| net content shift across the mute | **±35 samples** — the media position is essentially *preserved* |
+
+So it is **not** a splice and **not** a resample. The renderer ramps to silence, holds bit-zero for
+about a frame and a half of video, and ramps back, losing almost nothing of the programme. The core
+duration is a property of the **renderer**, not the transport — it is the same on local SRT,
+Cloudflare SRT and WHEP.
+
+⚠️ **AN EIGHTH INSTRUMENT READS HEALTHY, AND IT IS THE RENDERER'S OWN.**
+`AVSampleBufferAudioRendererWasFlushedAutomatically` — whose SDK header says *"To the listener, this
+will sound similar to muting the audio for a short period of time"*, a description that matches this
+exactly — **never fired once.** `[*-RENDERER] event` count across all three runs: **zero.** The
+renderer does this, does it audibly, and reports nothing. Add it to §10's list.
+
+### 11.4 The measurement
+
+Three runs, 3 minutes each, OBS sending a broadband reference, capture taken at the **device
+output** via Audio Hijack (Application → Recorder → Output Device), correlated block-by-block
+against the signal sent.
+
+| | mutes/min overall | first 15 s | after 15 s | `setRate` pushes | mute ↔ push |
+|---|---|---|---|---|---|
+| local SRT | **4.95** | 20.0/min | 3.0/min | 13 | **11/11 (100%)**, lag +1 ms, spread 3 ms |
+| Cloudflare SRT | **11.08** | 48.0/min | 7.7/min | 36 | **33/33 (100%)**, lag +103 ms, spread 18 ms |
+| WHEP | **7.32** | 40.0/min | 4.5/min | 27 | **23/23 (100%)**, lag +2 ms, spread 4 ms |
+
+Logged media step per push, in samples, **against the predicted 288**:
+
+```
+local SRT        median 240   p10  44   p90 326   max 342
+Cloudflare SRT   median 269   p10  56   p90 446   max 494
+WHEP             median 287   p10  31   p90 355   max 402
+```
+
+**The prediction held.** The p90/max excursions above ~350 are the *other* branch firing — the
+10 ms position tolerance, i.e. 480 samples — which on Cloudflare SRT it does twice.
+
+⚠️ **LOCAL SRT WAS NEVER CLEAN.** It was *quieter*: 3.0 mutes/min in steady state against
+Cloudflare's 7.7. Every earlier session that called it "the clean control" was judging by ear a
+difference of a factor of 2.6 in the rate of a 78 ms event. Robbie heard all three on this run.
+
+**Content holes, distinct from the mutes, on the Cloudflare paths only:**
+`+837, +676, +439, +85, +76` samples plus several of `+4…+6`, on SRT; `+432, +6, +0` on WHEP; **none
+on local**. These do not coincide with pushes and are not this defect — they are transport-side and
+are recorded here only so they are not swept into the count.
+
+### 11.5 The connect burst and the steady state are the same event
+
+Question asked directly: does gap-end recovery take the same code path as initial lock? **Yes —
+literally the same line**, `FrameEngine.swift:2464`; `origin` differs only as a probe string. Two
+things make the burst denser rather than different: `wasMirrored == false` forces
+`positionError = .infinity` on the first push, and τ ramps 2 s → 30 s over the first 10 s
+(`liveAudioRateRamp`), so `smoothedRate` moves fast and re-crosses the threshold repeatedly.
+
+Measured: the mute envelope in the connect burst is indistinguishable from the steady-state one
+(same 50 ms core, same 78 ms envelope). Only the **spacing** differs — 20–48/min in the first 15 s
+against 3.0–7.7/min after. **Robbie's description was the mechanism stating itself**, and it was
+right before any instrument existed.
+
+### 11.6 Why the P-loop rails, and why that is the tuning and not the transport
+
+The rail is reached at `maxSlew / k = 0.005 / 0.8 = 6.25 ms` of depth error. The depth signal is a
+sawtooth of peak-to-peak one frame interval — **41.7 ms at 23.976 fps**
+(`MetalVideoRenderer.swift:2273`). **The linear region of the controller is ±6.25 ms inside a signal
+whose raw ripple is ±20.8 ms.**
+
+⚠️ **SO THIS IS NOT A P-LOOP THAT OCCASIONALLY SATURATES. IT IS A RELAY CONTROLLER THAT
+OCCASIONALLY GOES LINEAR.** Rails alternating sign is the *normal output* of a bang-bang loop, not a
+symptom of anything. §3's "local SRT is not correct here — it is lucky, and the margin is about 2×"
+is right about the margin and wrong about the character: there is no regime in which this loop
+spends most of its time in proportional control.
+
+### 11.7 The heartbeat trade, stated
+
+The heartbeat (2026-09-21, `167f7fe`) is not undone by this and should not be. It fixed a real
+failure: publication stopping entirely while railed, the timebase walking ~5 ms/s, and one ~113 ms
+yank every 15–20 s. **What it changed is the shape of the cost.** Before, the mirror could not push
+during a railed span because it did not run; now it runs at 10 Hz and pushes whenever `smoothedRate`
+has crept 0.0002.
+
+⚠️ **AND IT REACHED WHEP THE SAME DAY.** `git show 167f7fe -- App/WebRTC/WHEPFrameRouter.swift` adds
+`clock.onMappingTick` on WHEP's seam. WHEP's transport, decoder and PTS path were untouched; its
+audio-timebase feed went from "only when the clock's rate changed" — against a measured baseline of
+`max 1435 ms · p95 1300 ms · 45 gaps over 500 ms per 90 s` — to **every 100 ms**. If WHEP's stutter
+is newer than its transport work, that commit is where it came from.
+
+### 11.8 The depth signal on Cloudflare — the reorder-inflation candidate is ALIVE
+
+§7 and `BUGS.md` both leave open *why* Cloudflare sits 20–190 ms deep. `depth` is
+`newestQueuedPTS − now()` — the **PTS extent** of the queue, not its display-order occupancy. For a
+queue of `count` frames spaced `D`, the `+D/2` correction makes the expected value exactly
+`count × D`. So `depth / (count × D)` is a direct test, and it runs on any log already on disk.
+
+```
+local SRT        RATIO median 0.967   range 0.919-1.098    reorder max 0.000 s
+Cloudflare SRT   RATIO median 1.301   range 0.905-1.912    reorder max 0.208 s
+
+excess (depth − count×D):  local  median  −8 ms  p90  +18 ms
+                           Cloudflare median +51 ms  p90 +135 ms  max +152 ms
+```
+
+**Cloudflare's queue holds FEWER frames (median count 4 vs local's 6) while reporting MORE depth.**
+That is PTS extent exceeding frame count, which is what reorder looks like, and the excess sits
+inside the 0.208 s reorder delay every Cloudflare run already warns about. The starvation line from
+run 2 is the same fact from the other end: `rate=1.0050 RAILED err=+0.1120`.
+
+⚠️ **ALIVE, NOT PROVEN.** This is one session, one sender, and a correlation between two numbers in
+the same log. It predicts that `targetDepth` on Cloudflare is being asked to absorb the reorder
+window twice — once as reorder budget, once as regulated depth — and that a depth signal computed
+from display-order occupancy would not rail. Neither of those has been tested. What *is* settled is
+the local half: the signal is truthful there, so this is a property of the Cloudflare stream and not
+of the measurement.
+
+### 11.9 The instrument
+
+`~/Desktop/manifold-audible-events/`. A broadband aperiodic reference is played by OBS, the device
+output is captured, and the two are aligned block-by-block into an **offset track**: a step is a
+splice in absolute samples, a step in its slope is a tempo step, and a run of silence is a mute.
+
+⚠️ **THE EXISTING WAV TAP CANNOT SEE THIS, AND IT IS NOT A MATTER OF DEGREE.**
+`LiveAudioWAVCapture` copies the bytes handed to `AudioTapBuffer` — **upstream of the renderer**.
+The mute is performed *by* the renderer, downstream of every byte that file contains. A renderer
+splice or mute **cannot be in that file at any sample rate, for any duration, under any
+conditions.** It is §10 item 5 exactly, and it read clean again on 2026-09-22.
+
+Three things this instrument got wrong first, all caught by its own gates before any real capture
+was read — recorded because §10's rule is that the instrument is verified before it is believed:
+
+1. **A tone detector cannot do this.** Phase is modulo one period: a 48-sample splice is exactly one
+   cycle at 1 kHz and is invisible. Caught by the injected-fault gate, which it failed. Replaced by
+   correlation against broadband noise, which has no modulo.
+2. **A 4096-sample correlation block manufactures dropouts.** A sustained 6-cent rate offset smears
+   the block enough to drop the peak from 0.97 to ~0.4, and the instrument reported **14 spurious
+   dropouts** over the 25 s after a rate step it had correctly detected. Block is 2048.
+3. **Skipping a block you cannot correlate is how you walk through the fault.** A digitally silent
+   block has no correlation peak, so the tracker skipped it — and a mute therefore left a *hole* in
+   the offset track rather than an event in it. Silence is now found directly on the capture,
+   never inferred from the track. **This is §10 item 7 happening a second time**: an instrument that
+   drops the samples it cannot explain reports a clean run over the thing it was built to find.
+
+Validated end to end before the live runs — a 130 s local file played through Manifold and captured
+through the whole chain: **median correlation 1.000, zero drift, zero events, per-block noise
+0.0005 samples.** The floor is 0.003 samples; a 4-sample splice is unmissable.
+
+⚠️ **AND ONE INSTRUMENT GAP IN THE TREE, FOUND WHILE DOING THIS.**
+`LiveAudioRendererProbe.recordRateSet` takes `(rate, mediaTime, origin)` and stamps
+`CACurrentMediaTime()` **itself** — it is never given the mapping's `hostTime`, which is what
+`setRate(atHostTime:)` actually anchors to. For heartbeats and P-loop rebases those coincide. For
+the **first anchor** they do not, because `registerFrame` pins the host anchor `startupDepth` into
+the future, so reconstructing the step from the probe row invents a **−249 ms jump that never
+happened** — the largest number in an unfiltered run, and pure artefact.
+
+### 11.10 Candidate fixes — NONE APPLIED, and the trade-offs are the point
+
+⚠️ **Read §5 first.** It rules out the obvious one and its reasoning is unchanged: the smoothed rate
+deliberately does not follow the P-loop's depth correction, and position/anchor mirroring is what
+holds `timebase−clock` near zero. Any fix must preserve that separation.
+
+1. **Do not move the timebase when only the rate changed.** Call `synchronizer.rate = r` instead of
+   `setRate(_:time:atHostTime:)` when `positionError` is small, so a rate-threshold push stops being
+   a position re-anchor. *Trade:* the re-anchor is currently the **only** thing correcting the
+   audio-device-vs-mach crystal divergence — the slew-site note is explicit that nobody designed a
+   drift corrector and one fell out of this. Removing it needs the closed-loop re-anchor NDI also
+   needs, or WHEP and SRT become unbounded exactly as that note warns.
+2. **Raise `liveAudioRateThreshold` toward the position tolerance.** The step is `threshold × τ`, so
+   0.00033 × 30 s = 10 ms would make the rate branch fire no more often than the position branch —
+   one gate instead of two. *Trade:* fewer, larger mutes. It reduces the count and not the audibility
+   of each, and 10 ms is already what the position branch delivers.
+3. **Shorten τ.** 30 s was chosen from the measured sender clock (σ = 0.021%, 1.1 cents) against a
+   control loop swinging 17.3 cents, and that derivation is sound. τ = 10 s would make the step 2 ms.
+   *Trade:* the filter then passes more of the P-loop's depth correction into the audio rate, which
+   is the pitch wobble §5 says the smoothing exists to stop. This trades a mute for a warble.
+4. **Fix the depth signal (§11.8).** If the Cloudflare rail is an artefact of reorder inflation, a
+   depth measured from display-order occupancy would keep the loop off the rail, `smoothedRate`
+   would track, and the push rate would fall to something near local's. *Trade:* it does not fix the
+   mechanism, it only stops provoking it — local SRT still ran 3.0 mutes/min — and it is a change to
+   the video control loop made for an audio symptom, which is how §9's decoder swap happened.
+5. **Ramp the correction instead of stepping it.** Feed the position error in as a small temporary
+   rate bias, absorbed over ~1 s, so the timebase is never discontinuous. *Trade:* a new mechanism
+   between the clock and the renderer, and it must not become a second rate loop fighting the first.
+   This is the only candidate that removes the discontinuity rather than rationing it.
+
+⚠️ **WHATEVER IS CHOSEN, THE ACCEPTANCE TEST IS ALREADY WRITTEN**, and it is not ears: the
+device-output capture with mutes/min per transport, against these three numbers — **4.95 / 11.08 /
+7.32 per minute**, and **3.0 / 7.7 / 4.5 per minute in steady state**. A fix that does not move
+those has not been demonstrated to do anything, and a fix judged by listening is the mistake §9's
+"THE CASUALTY" is about.
