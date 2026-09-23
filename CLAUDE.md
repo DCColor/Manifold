@@ -46,4 +46,11 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   write, restore it after. This rule exists because `streamBookmarks` was erased during
   LIVECLOCK verification and there was no way back: no snapshots, no Time Machine, no
   store-side backup. See the stream-bookmark durability item in `docs/BUGS.md`.
+- Manifold is server-agnostic. Implement the protocol standard, never a specific server's
+  behaviour: no code path may branch on which server or vendor it is talking to. Where a
+  server deviates from the standard, fall back to the pre-existing behaviour and log the
+  deviation; never special-case it. Cloudflare is one test target, not the target: every
+  streaming fix is verified against at least one non-Cloudflare server (local OBS SRT, NDI,
+  or MediaMTX for WHIP/WHEP) before it is committed. Constants must not be tuned from a
+  single server's traces.
 - Never add Co-Authored-By or any AI authorship trailer to commit messages or PR descriptions.

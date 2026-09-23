@@ -615,6 +615,30 @@ advance.
 
 ---
 
+## ☐ PRE-SHIP: set up MediaMTX locally as a second WHIP/WHEP and SRT test server
+
+**Status:** OPEN, required before public launch. **Not a defect** — it is the missing half of the
+server-agnostic rule in `CLAUDE.md`. **Raised:** 2026-09-23.
+
+**Every WHIP/WHEP figure in the repo comes from one vendor.** `docs/AV_SYNC_FINDINGS.md`,
+`docs/WHEP_LOADED_NETWORK_FINDINGS.md` and the WHEP depth preset (`WHEPFrameRouter.targetDepth`,
+0.400 s) were all measured against Cloudflare. SRT has a local OBS sender and NDI is on-machine, so
+those two paths already have a non-vendor reference; **WHIP/WHEP has none at all.**
+
+**Done means:** MediaMTX running locally, publishing the flash-beep fixture over WHIP and re-serving
+it over WHEP, plus SRT listener mode on the same box, with the connect procedure written down
+somewhere a second machine can follow. That is enough to answer, without leaving the building:
+whether a constant is a property of the protocol or of one CDN; whether an SDP shape we rely on is
+standard or Cloudflare's; and whether a fix works on a server that is not transcoding.
+
+**What it would already have caught:** Cloudflare's answer gives the audio and video m-sections
+**different CNAMEs and different msids**, which is what RFC 3550 uses to declare two streams
+synchronisable. Nothing establishes whether that is normal WHEP or one server's choice, and the
+RTCP sender-report fix — see *"WHEP lip-sync is ARBITRARY PER SESSION"* below — is being planned on
+top of it.
+
+---
+
 ## ✅ FIXED 2026-09-22 — SRT killed a healthy stream ~17 s after reconnecting, blaming the broadcaster
 
 **Status:** ✅ **FIXED 2026-09-22. Not yet through a real session** — the entry stays until it has
