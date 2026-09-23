@@ -1166,6 +1166,72 @@ a constant that could be compensated — it is different every time you connect.
 
 ---
 
+## 🏦 BANKED 2026-09-23 — "Sync calibration mode": the sender plays the flash-beep fixture, Manifold sets the per-session A/V offset itself
+
+**Status:** BANKED — designed here, **not built, not scheduled.** Not a defect. It is the fallback
+for the entry above and the general instrument for every transport's residual.
+**Depends on nothing** — it is independent of the RTCP sender-report work, and the two are **not**
+alternatives. See "what it measures that RTCP cannot" below.
+
+**What it is.** At session start the sender plays the flash-and-beep fixture for a few seconds — one
+full-white frame and one 40 ms 1 kHz beep at each whole second (`docs/AV_SYNC_FINDINGS.md` §1.1).
+Manifold runs the flash detector over its own decoded frames and the beep detector over its own
+decoded PCM, pairs the onsets, takes the median delta, and installs it as this session's A/V offset.
+**A digital 2-pop**: the same thing a leader does on a reel, done by the receiver, with no human
+reading it.
+
+**Robbie's requirement, and it is the design constraint, not a nicety.** SEAMLESS. No OBS sync
+slider, no numeric field in Manifold, no operator judging a photograph. The sender plays the
+fixture; everything after that is automatic. **If no fixture is detected the mode does nothing and
+the session runs exactly as it does today** — that is what makes it safe to leave armed.
+
+**It reuses today's detector.** `~/Desktop/manifold-avsync/avsync.py` — `flash_times()` is a
+per-frame mean-luma outlier test (`signalstats` YAVG, MAD threshold, first frame of each run);
+`beep_times()` is a 1 kHz narrowband envelope onset. Both are short, both are already validated by
+the injected-offset gate (0 / +250 / −120 ms in → −0.0 / +250.0 / −120.0 out, sd 0.0,
+`AV_SYNC_FINDINGS.md` §1.5), and the fixture's own intrinsic offset is measured rather than assumed
+(+0.0417 ms, sd 0.0000).
+
+⚠️ **AND IN-APP IT IS A BETTER INSTRUMENT THAN THE CAPTURE-BASED ONE IT COMES FROM, NOT A WORSE
+ONE.** The Python version reads a screen-and-speaker recording, so it carries the display
+compositor, the output device, the recorder's own A/V alignment and the 25→30 frame-grid bias — the
+terms §1.3's per-player controls and §1.4 exist to cancel. **Inside Manifold both inputs already
+arrive stamped**: the decoded `CVPixelBuffer` carries the video sender PTS and the decoded PCM
+carries the audio PTS. Subtracting two PTS on the paths' own axes removes every one of those terms
+structurally. No capture, no control run, no second OBS instance.
+
+**What it measures that RTCP cannot, which is why banking both is right.** Sender-report mapping
+fixes the RECEIVER's alignment of two SSRCs. It cannot see **the sender's own audio-versus-video
+error**, which §1.2b measured at **−82.0 ms on OBS local SRT** and which **moved across an output
+restart on the same route** — it is a property of the session, not of the path. Calibration mode
+measures sender + transport + receiver as one number, on the path actually in use, and it is the
+only thing here that catches that term. It applies to **all four transports**, not just WHEP.
+
+**What is NOT designed, and is the part that will cost the time.**
+
+- **How the offset is installed.** It must be applied ONCE, before audio starts, the same way the
+  SR fix holds the first buffer. Moving audio against a running timebase is a `setRate` write, and
+  `AV_SYNC_FINDINGS.md` §5.1 measured **every** rate write muting the renderer **19/19**, ~63 ms
+  core, whether or not the rate value changes. A continuously-corrected version of this feature
+  would audibly gate the programme. Install once, log the residual, do not chase it.
+- **The detector lives outside the repo** (`~/Desktop/manifold-avsync/`, deliberately, per §7). It
+  would have to come in under test, with the injected-offset gate as its unit test — a gate that
+  passes only because it was written before the answer was known.
+- **What counts as a detection.** The capture analyser's gates (beep count against duration, fit to
+  a free-phase 1.000 Hz grid, one burst per beep) exist because a second audio source ADDS onsets.
+  In-app the audio is single-source by construction, so the gate shape changes — but "the sender is
+  playing real programme that happens to flash and beep" still has to be refused rather than
+  averaged in.
+- **Nothing decides where the fixture comes from.** Shipping it, or documenting how to generate it
+  (the `ffmpeg` recipe in §1.1 regenerates it identically), is a product question.
+
+**What would schedule it:** a WHEP session whose lip-sync is still wrong after the sender-report fix
+lands, or the first time anyone needs an absolute A/V number on Cloudflare's SRT egress — whose
+transcode carries a sender term that **has never been measured** and which no amount of receiver
+work can recover.
+
+---
+
 ## Live sources never publish their frame size, so every stream is framed as 16:9
 
 **Status:** FIXED 2026-08-11 (see "What landed" below). **Found:** 2026-08-10, during the
