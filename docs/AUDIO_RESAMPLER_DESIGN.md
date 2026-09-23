@@ -2,7 +2,8 @@
 
 **Design only. No code in this document is in the tree.**
 Companion to `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`, whose §11.11 is the constraint every choice
-here answers to. Written 2026-09-23.
+here answers to, and to `docs/AV_SYNC_FINDINGS.md`, which answers open questions 1, 2 and 4 of this
+document by measurement (2026-09-23) and adds three lip-sync defects the design has to account for. Written 2026-09-23.
 
 *Measured fact, inference and open question are labelled separately throughout, as in the findings
 document. Where a number is carried over from there it is cited to its section rather than
@@ -279,6 +280,42 @@ Three properties, all of which matter:
 
 ---
 
+### 2.5 ⚠️ THE TARGET LEAD IS NOT ALLOWED TO BE AN A/V OFFSET
+
+**This is a hard requirement, and it is here because the app has shipped this mistake twice.**
+
+The resampler holds a target lead — some amount of enqueued-but-unplayed audio sitting in the
+renderer, because a renderer with no queue crackles (the 40/150/250 ms ladder in `BUGS.md`). That
+lead is a queue depth. **It must not also delay the audio against the picture.**
+
+Measured 2026-09-23 (`docs/AV_SYNC_FINDINGS.md`), both of these are live in the shipping build:
+
+* **NDI** anchors its timebase `lead` behind the audio sample axis, while video is stamped on the
+  same clock and presented at the next display tick. The queue depth and the lip-sync offset are
+  **the same 250 ms**. `NDIService.swift:732` states this correctly; `BUGS.md` shipped it as
+  "monitoring latency", which it is not. **Measured +230.1 ms of audio lag.**
+* **SRT** gets ~500 ms of renderer queue as a side effect of a cushion that should be 0, and pays
+  ~250 ms of it in lip-sync. **Measured +203.9 ms (local), +165.8 ms (Cloudflare).**
+
+In both cases the queue was obtained by **moving the audio timebase backwards**, which buys depth
+and lip-sync error in one move at a fixed exchange rate of 1:1.
+
+**The rule for this design: the lead is obtained by starting the axis early, never by holding the
+timebase late.** At connect, the output PTS axis is anchored so that the first buffer's media time
+is `lead` AHEAD of the timebase — the renderer receives `lead` seconds of audio before any of it is
+due, and the steady-state relationship between an audio sample's source time and the video frame
+carrying the same source time is **zero**. The lead lives in how far the enqueued frontier runs
+ahead of `currentTime()`, which is exactly the quantity §2.1's error term already measures, and
+nowhere else.
+
+⚠️ **AND THE INSTRUMENT THAT WOULD CATCH A REGRESSION HERE DOES NOT EXIST IN THE APP.**
+`liveAudioDrift` returns `(timebase + cushion) − clock`, so it cancels the cushion and reads a clean
+±4 ms whether the lead is an A/V offset or not — it read +3.40 to +4.00 ms across four sessions and
+three separate lip-sync defects. **A lead that became an offset would not appear in any log.** That
+is why §6.3 criterion 12 is a device-level A/V measurement and not a number from inside the process.
+
+---
+
 ## 3. How it resamples
 
 ### 3.1 The requirement that eliminates most of the field
@@ -513,13 +550,20 @@ same two fields the card keys on. A relabel must not cost a splice.
 resampler. Untouched, and the volume fader, the off-speed shuttle gate, `deckLinkOwnsAudio` and
 `externalAudioOutput` all reach the same decision by the same path.
 
-⚠️ **ONE THING TO VERIFY BEFORE RELYING ON IT.** The loop's premise is that the renderer keeps
-consuming media data while muted, so `currentTime()` keeps advancing and the error stays valid. That
-is the documented behaviour of a muted renderer and the current code already assumes it (SDI
-sessions mute the renderer for whole sessions with the mirror still pushing) — but it has not been
-measured, and if `isMuted` ever gated consumption the integrator would wind up and unmute with a
-large correction. **Suspend the integrator while `isMuted` is true** unless and until the measurement
-says otherwise. Cheap insurance; see open question 2.
+✅ **MEASURED 2026-09-23, AND THE PROPOSED INSURANCE IS NOT NEEDED.** This section previously said
+to suspend the integrator while `isMuted` is true, pending a measurement. The measurement has been
+made (`docs/AV_SYNC_FINDINGS.md` §5.2) and the loop stays valid through a mute:
+
+| segment | timebase slope | vs mach | buffers consumed/s |
+|---|---|---|---|
+| before a 20 s `isMuted` window | 1.000007300 | +7.3 ppm | 46.89 |
+| **while muted** | 1.000006948 | **+6.9 ppm** | **46.86** |
+| after | 1.000006804 | +6.8 ppm | 46.93 |
+
+Slope change **−0.4 ppm**; media time projected across the mute from the 5 s before it is continuous
+to **0.023 ms**; `isReadyForMoreMediaData` false on **0 of 1200** samples. A muted renderer keeps
+advancing its timebase and keeps consuming at the same rate. **No suspension, no wind-up, no
+correction on unmute — the integrator runs straight through.**
 
 ### 4.6 Connect and disconnect
 
@@ -642,6 +686,35 @@ is not known whether that mutes (see open question 1). Measure it before step 6,
 | 9 | **Meters unchanged**: peak and clip-run readings match a pre-change capture on identical material | `AudioTapBuffer.peaksOfNewest` |
 | 10 | **CPU**: total process CPU increase < 2% at 16 channels, 48 kHz | Instruments, NDI 16 ch source |
 | 11 | **HLS control**: unchanged on every instrument above that applies to it | — |
+| 12 | **A/V SYNC, at the device, per transport** — see below | flash-and-beep fixture + two-instance OBS capture |
+
+#### Criterion 12, stated in full, because it is the one the app cannot measure itself
+
+Method and instrument: `docs/AV_SYNC_FINDINGS.md` §1. The fixture puts one white frame and one
+40 ms 1 kHz beep on each whole second, coincident to **+0.0417 ms, sd 0.0000**; a second OBS
+instance records Display Capture + macOS Audio Capture into one container on one clock; the
+analyser passes an injected-offset gate at **0 / +250 / −120 ms → −0.0 / +250.0 / −120.0, sd 0.0**.
+
+| | requirement |
+|---|---|
+| **control** | Manifold playing the fixture from disk, in the same session, as that run's zero |
+| **file playback** | unchanged from the pre-resampler control, within ±5 ms |
+| **local SRT, Cloudflare SRT, WHEP, NDI** | **within ±20 ms of the file control**, median over 30 s |
+| **stability** | sd ≤ 20 ms, and no trend over 30 minutes |
+| **frame rate** | **23.976 throughout** — see §1.4 of the findings; 30 fps is a different experiment and cannot be compared with §11's baselines |
+| **gates** | beep count vs duration, 1.000 Hz grid fit, one burst per beep, digital silence between beeps — all four, every run |
+
+⚠️ **THE PRE-RESAMPLER BASELINE FOR THIS CRITERION IS ALREADY MEASURED AND IT IS NOT ZERO**
+(`AV_SYNC_FINDINGS.md` §2): local SRT **+203.9 ms**, Cloudflare SRT **+165.8 ms**, NDI
+**+230.1 ms**, WHEP **−98.9 / +36.7 ms** on two sessions. So this criterion is not "did the
+resampler avoid breaking lip-sync" — three transports are already broken, and the resampler is where
+the lead is finally owned in one place. A run that leaves any transport outside ±20 ms has not met
+§2.5.
+
+📌 **WHEP CANNOT PASS THIS UNTIL ITS OWN DEFECT IS FIXED, AND THAT IS NOT THE RESAMPLER'S JOB.** Its
+offset varies by ≥136 ms between sessions because no RTCP sender-report mapping exists (BUGS.md,
+2026-09-23). Until that lands, WHEP's criterion 12 is **reported and not gated**, and the run must
+record which ingest it used.
 
 ⚠️ **Criterion 1 alone is not sufficient and that is deliberate.** A resampler that simply stopped
 enqueueing would pass it. Criteria 3, 4 and 5 are what distinguish "no mutes" from "no audio
@@ -704,9 +777,16 @@ raised to 250 ms so only a coarse event can still trigger a `setRate`.
 `setRate` rows with non-zero rate fall to 1 + (coarse events); mutes/min falls to the coarse-event
 count; pitch trace (criterion 7).
 
-⚠️ **Open question 4 blocks this step.** If SRT's `cushion` is wrong, the loop will null the error
-against the wrong target and hold a constant offset forever — and `liveAudioDrift` cannot see it.
-See §8.
+⚠️ **THE TARGET THIS LOOP NULLS AGAINST MUST BE CORRECTED FIRST — open question 4 is now answered
+and the answer is that it was wrong.** Measured 2026-09-23: SRT's cushion of 0.250 puts desktop
+audio ~200 ms behind its picture, and `liveAudioDrift` cannot see it because it adds the cushion
+back. So this step carries the one-line cushion fix (`SRTFrameRouter.swift:532` → `0`) as a
+prerequisite, not as a follow-up: a loop that nulls its error against the wrong target holds the
+wrong offset forever and reports zero. §2.5, `docs/AV_SYNC_FINDINGS.md` §3.1.
+
+**Also measured at this step:** criterion 12, against the pre-resampler baselines
+(local SRT +203.9 ms, Cloudflare SRT +165.8 ms, NDI +230.1 ms). This is the first step at which the
+lead is owned by the resampler, so it is the first step at which those numbers should move.
 
 ### Step 5 — the splice branch
 
@@ -761,44 +841,87 @@ Then a multi-hour run on one transport for the drift bound.
 
 ## 8. Open questions — only Robbie can answer these
 
-1. **Does a `setRate` carrying the SAME rate value mute?** §11.11's six cases all *changed* the rate;
-   none held it constant. NDI re-anchors at `setRate(1.0, …)` on every correction with the value
-   never moving, so the answer decides whether NDI is already clean, and it decides whether build
-   step 6 is required or merely tidy. **One extra harness case answers it** — case F, `setRate(1.0,
-   time: projected, atHostTime:)` every 3 s with the rate held at 1.0 — and the harness already
-   exists.
+1. ✅ **ANSWERED 2026-09-23 — YES, IT MUTES. A same-valued rate write is not free.**
+   Measured (`docs/AV_SYNC_FINDINGS.md` §5.1), device-output capture, gates passed
+   (0.0000% out of band, correlation 1.000):
 
-2. **Does a muted `AVSampleBufferAudioRenderer` keep consuming and keep advancing the timebase?**
-   The design assumes yes and the current code already assumes yes (whole SDI sessions run with
-   `isMuted = true` and the mirror pushing). If it is no, the integrator must be suspended while
-   muted — which §4.5 proposes doing anyway as insurance, at the cost of a small correction on
-   unmute. Measurable in the same harness.
+   | case | | changes | **muted** | core |
+   |---|---|---|---|---|
+   | A control | rate **changes** 1.0000↔1.0002, ±6 ms step | 10 | **10** | 63 ms |
+   | **F** | **rate HELD at 1.0**, ZERO position step | 19 | **19** | 63 ms |
+   | **F+** | **rate HELD at 1.0**, +6 ms position step | 19 | **19** | 63 ms |
+   | E floor | nothing at all | 0 | **0** | — |
+
+   §11.11 showed every rate *change* mutes; F and F+ hold the value constant and mute just as
+   reliably, with and without a position step. **It is the write, not the change.** The design's
+   premise — that the only lever is the NUMBER of `setRate` calls — now has two independent proofs.
+
+   ⚠️ **AND A CORRECTION TO WHAT WAS INFERRED FROM IT ON THE DAY.** It was claimed that this makes
+   build step 6 urgent, because NDI re-anchors with `setRate(1.0, …)`. The NDI log says otherwise:
+   **0 re-anchors in 40 s, 3 `setRate` rows all session.** At this machine's ~7 ppm against a 10 ms
+   tolerance that is one re-anchor per ~21 minutes — about 3 mutes an hour. **Step 6 is right for
+   correctness and is not urgent.**
+
+2. ✅ **ANSWERED 2026-09-23 — YES TO BOTH, so no suspension is needed and §4.5 has been changed.**
+   20 s `isMuted` window, no rate writes at all, clock sampled at 20 Hz with the read pair recorded:
+
+   | segment | slope | vs mach | buffers/s |
+   |---|---|---|---|
+   | before | 1.000007300 | +7.3 ppm | 46.89 |
+   | **muted** | 1.000006948 | **+6.9 ppm** | **46.86** |
+   | after | 1.000006804 | +6.8 ppm | 46.93 |
+
+   Slope change **−0.4 ppm**; media time continuous across the mute to **0.023 ms**;
+   `isReadyForMoreMediaData` false on **0 of 1200** samples; renderer events **0**. `isMuted` does
+   silence the output (20.00 s core, 960,135 samples at exact bit-zero) without affecting the clock
+   or the queue. **The integrator runs straight through a mute.**
+
+   📌 Incidental: this machine's device crystal reads **+6.8 to +7.3 ppm** against mach time, where
+   the HLS work measured **−7.8 ppm** on another — opposite sign, same order. Second data point for
+   `HLSAudioTap.swift`'s warning that this is a property of the output device, and it is inside
+   §5.2's ±0.1% bound by a factor of 140.
 
 3. **What A/V offset is acceptable for this tool?** §5.3 proposes ±15 ms p99 on the healthy paths
    and ±60 ms on Cloudflare. That is a product judgement about what a colourist will accept, not a
    measurement, and it sets `k_p`, the splice threshold and the pass/fail line for criterion 3. A
    tighter answer makes the loop faster and the ratio noisier; a looser one makes it gentler.
 
-4. ⚠️ **Is SRT's `cushion` correct? Because the arithmetic says it may not be, and the diagnostic
-   that would catch it cancels it out.** `SRTFrameRouter.swift:532` passes `cushion:
-   Self.targetDepth` (0.250) under a comment that predates the WHEP correction — *"the cushion must
-   match the transport whose clock is being mirrored"*. But `beginLiveAudio`'s own parameter note
-   retracts exactly that framing: the cushion means *how far behind the mapping's `senderPTS` this
-   transport stamps its audio PTS*, and *"a transport that stamps absolute sender time passes 0"*.
-   Since §9, SRT stamps its sample axis pinned to the program's own absolute `sourcePTS` — the same
-   shape WHEP moved to when it changed from `targetDepth` to `0`.
+4. ✅ **ANSWERED 2026-09-23 — NO, IT IS NOT CORRECT. SRT desktop audio lags its picture by ~200 ms.**
+   Full write-up `docs/AV_SYNC_FINDINGS.md` §3.1; BUGS.md entry opened the same day. Three
+   independent lines agree:
 
-   If that reading is right, `target = senderPTS − 0.250` puts the timebase a quarter-second below
-   the axis SRT's buffers are stamped on, and **SRT desktop audio plays ~250 ms late against its
-   picture**.
+   | line | local SRT | Cloudflare SRT |
+   |---|---|---|
+   | flash-and-beep, against a file-playback control | **+203.9 ms** | **+165.8 ms** |
+   | arithmetic `cushion − (timebase−clock)`, each session's own log | **+246.2 ms** | **+246.0 ms** |
+   | predicted from source | +250 ms | +250 ms |
 
-   ⚠️ **AND `liveAudioDrift` CANNOT SEE IT.** It returns `(timebase + cushion) − clockSeconds`
-   (`FrameEngine.swift:2641`), so the cushion cancels and `timebase−clock` reads clean whether the
-   cushion is right or wrong. That is §10's shape exactly: a correct measurement of the wrong
-   quantity. A clap test, or a flash-and-tone fixture, settles it in one run.
+   Measured figures read low by up to 33 ms of a known one-sided frame-grid bias plus the sender's
+   own audio-vs-video encode delay. **No sender-side term is a fifth of a second.**
 
-   **This blocks build step 4.** A loop that nulls its error against the wrong target holds the
-   wrong offset forever and reports zero.
+   **The fix is one argument** — `beginLiveAudio?(Self.targetDepth)` → `beginLiveAudio?(0)` at
+   `SRTFrameRouter.swift:532`, plus rewriting the stale comment — and it is **safe on the axis that
+   looks risky**: SRT's renderer currently holds ≈500 ms of queue, and removing the cushion leaves
+   ≈250 ms, still well above the ~150 ms crackle threshold the NDI lead ladder measured.
+
+   **NOT APPLIED, deliberately.** It is held for this design, because §2.5 is where the lead is
+   finally owned in one place and shipping the cushion fix alone would leave the same class of
+   mistake live on NDI.
+
+   ⚠️ **AND THE WARNING IN THE ORIGINAL QUESTION WAS RIGHT, WHICH IS THE PART WORTH CARRYING.**
+   `liveAudioDrift` returns `(timebase + cushion) − clock`, so the cushion cancels and the number
+   reads clean whether the value is right or wrong. It measured **+3.40, +3.45, +3.80, +4.00 ms**
+   across four sessions covering **three separate lip-sync defects**, one of them 99 ms. An
+   instrument that subtracts a term cannot test that term.
+
+   📌 **TWO DEFECTS WERE FOUND BY THE SAME MEASUREMENT AND NEITHER WAS PREDICTED:**
+   - **NDI is +230 ms and working as designed.** `NDIService.swift:732` describes the cost
+     correctly; `BUGS.md` shipped it as "monitoring latency", which it is not. Corrected in place.
+     This is the direct evidence behind §2.5.
+   - **WHEP's lip-sync is arbitrary per session** — −98.9 ms on one ingest, +36.7 ms on the next,
+     while Chrome on that same ingest reads −10.5 ms. Cause: no RTCP sender-report handling exists,
+     so the audio and video RTP bases are never mapped to a common clock. **Not the resampler's
+     job**, and it is why criterion 12 reports WHEP rather than gating it.
 
 5. **Is an audible splice acceptable at snap cadence?** §2.4 proposes a 5–10 ms cross-faded
    drop/insert for coarse events, against today's 78 ms mute. The alternative is to absorb a snap at

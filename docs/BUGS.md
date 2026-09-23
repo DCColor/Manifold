@@ -997,6 +997,128 @@ what Cloudflare's transcoder does to pacing, because it never touches it.
 
 ---
 
+## 🔍 OPEN 2026-09-23 — SRT desktop audio lags its picture by ~200 ms, because the cushion is a stale argument
+
+**Status:** OPEN, measured, one-line fix identified and NOT applied.
+**Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.1.
+
+`SRTFrameRouter.swift:532` passes `beginLiveAudio?(Self.targetDepth)` — 0.250 s — under a comment
+reading *"the cushion must match the transport whose clock is being mirrored."*
+
+**That reasoning is explicitly retracted by `beginLiveAudio`'s own parameter note**, which defines
+the cushion as *"HOW FAR BEHIND THE MAPPING'S `senderPTS` DOES THIS TRANSPORT STAMP ITS AUDIO
+PTS?"* and states that *"a transport that stamps absolute sender time passes 0."* WHEP was corrected
+from `targetDepth` to `0` for exactly this reason when its receiver moved to absolute sender time.
+**SRT stamps absolute sender time too** — since the §9 fix its sample axis is pinned to the
+program's own `sourcePTS` — and its call site was never revisited.
+
+**Measured three ways, all agreeing:**
+
+| | local SRT | Cloudflare SRT |
+|---|---|---|
+| flash-and-beep, against a file-playback control | **+203.9 ms** | **+165.8 ms** |
+| arithmetic `cushion − (timebase−clock)`, from each session's own log | **+246.2 ms** | **+246.0 ms** |
+| predicted from source | +250 ms | +250 ms |
+
+Measured figures read low by up to 33 ms of a known one-sided frame-grid bias plus the sender's own
+audio-vs-video encode delay. **No sender-side encode term is a fifth of a second.**
+
+**The fix, not applied:** `beginLiveAudio?(Self.targetDepth)` → `beginLiveAudio?(0)`, plus rewriting
+the stale comment. `mirror.cushion` has exactly two consumers, so it is genuinely one line.
+
+⚠️ **AND IT IS SAFE ON THE AXIS THAT LOOKS RISKY.** The NDI lead ladder in this file measured this
+renderer crackling below ~150 ms of lead. SRT's renderer currently holds ≈500 ms (`now()` runs
+`targetDepth` behind the sender's live edge, and the cushion adds another 250 ms). Removing the
+cushion leaves ≈250 ms, still well above the threshold and equal to NDI's deliberate lead.
+
+**Held rather than shipped alone**, because the adaptive resampler
+(`docs/AUDIO_RESAMPLER_DESIGN.md`) has to own the target lead anyway and this is the evidence for
+why a lead must never become an A/V offset.
+
+**Blocks:** nothing structurally — it is audible now, on every SRT session.
+
+---
+
+## 🔍 OPEN 2026-09-23 — the NDI 250 ms presentation lead IS a 250 ms lip-sync error, and it ships
+
+**Status:** OPEN by decision, not by ignorance. Working exactly as designed.
+**Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.2. See also the ⚠️ CORRECTION added to the
+"NDI had no desktop playback path" entry, whose justification for the constant was wrong.
+
+**Measured 2026-09-23: +230.1 ms of audio lag**, against a designed 250 ms, on the cleanest of five
+transport captures (grid residual 0.04 ms, equal to the file-playback control, because NDI's sender
+is on this machine and essentially uncompressed).
+
+This is **not** the same defect as the SRT cushion above. `NDIService.swift:732-742` describes it
+correctly and in capitals: the lead exists to keep `lead` seconds of audio queued in the renderer —
+without it the renderer crackles, which the 40/150/250/300/400/600 ms ladder measured — and NDI
+video is stamped `monotonicNow()` at pull and presented at the next display tick, so it is **not**
+delayed to match. The file says outright that desktop audio therefore *"lands `lead` LATE against
+the picture."*
+
+**What was wrong was this file**, which shipped the constant as *"250 ms of desktop monitoring
+latency that a QC operator will not notice."* Corrected in place.
+
+**What a real fix looks like:** delay the VIDEO by the same amount, or remove the need for the lead
+altogether by holding the renderer's queue some other way. The adaptive resampler holds a target
+lead of its own and must not repeat this — see `AUDIO_RESAMPLER_DESIGN.md` §2.5.
+
+> **Inference, not measurement:** that ~250 ms is objectionable in use. It is far outside every
+> published detectability bound for audio-late (ITU-R BT.1359 puts detectability near 125 ms), so
+> the inference is strong — but nobody has been asked to judge it by ear.
+
+**Blocks:** lip-sync judgement on an NDI source monitored on the desktop. SDI is unaffected — that
+path reads the tap keyed to video PTS and never consults this timebase.
+
+---
+
+## 🔍 OPEN 2026-09-23 — WHEP lip-sync is ARBITRARY PER SESSION: no RTCP sender-report mapping exists
+
+**Status:** OPEN, cause identified in source, no fix attempted.
+**Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.3.
+
+**Measured on two Cloudflare ingests within one hour, same binary, same fixture:**
+
+| | A/V offset vs a file-playback control | `timebase−clock` that session |
+|---|---|---|
+| Manifold, ingest A | **−98.9 ms** (audio EARLY) | +3.40 ms |
+| Manifold, ingest B | **+36.7 ms** (audio LATE) | +3.45 ms |
+
+**A 136 ms swing between sessions while the app's own number moved by 0.05 ms.**
+
+**Attributed by a reference player, on the SAME ingest as run B, minutes apart:**
+
+| player | vs its own file control |
+|---|---|
+| **Chrome (WebRTC)** | **−10.5 ms** |
+| **Manifold** | **+36.7 ms** |
+
+So the stream as delivered is fine, and the sender is fine.
+
+**The cause, from source.** The only RTCP anywhere in the WHEP path is `a=rtcp-fb` parsing for PLI
+(`WHEPClient.swift:654-669`). **There is no sender-report handling at all.** Video PTS is the video
+SSRC's unwrapped RTP timestamp ÷ 90000; audio PTS is the audio SSRC's ÷ 48000. Two independent
+random bases, related by nothing. `WHEPAudioReceiver` says so in its own log line, every session:
+*"SSRCs ASSUMED aligned"*.
+
+RTCP sender reports are exactly the mechanism RTP provides for this: each carries an NTP wall-clock
+time paired with that stream's RTP timestamp, and a receiver maps both streams onto the common
+clock. Chrome's WebRTC stack consumes them. Manifold does not.
+
+⚠️ **THE SPREAD IS NOT BOUNDED BY ANYTHING MEASURED.** Two sessions gave −99 and +37 ms. Nothing in
+the mechanism limits it to that range — the offset is whatever the two RTP bases happen to differ by
+after the CDN, on the day. A session could be worse, and there is no counter anywhere that would say
+so.
+
+**What a fix needs:** consume RTCP SRs in the WHEP receive path and rebase both media onto the
+common wall clock. That is a change to `WHEPClient` / `WHEPAudioReceiver`, **not** to the audio
+mirror, and it needs its own measurement across many sessions — two are not a distribution.
+
+**Blocks:** any lip-sync judgement on a WHEP source. Unlike the two entries above, this one is not
+a constant that could be compensated — it is different every time you connect.
+
+---
+
 ## Live sources never publish their frame size, so every stream is framed as 16:9
 
 **Status:** FIXED 2026-08-11 (see "What landed" below). **Found:** 2026-08-10, during the
@@ -7091,10 +7213,30 @@ Shipped default: **250 ms**, which is SRT's `targetDepth` — the smallest lead 
 measured clean through this same renderer. **An evidence-backed floor, not a measured optimum.**
 
 **The true threshold is between 40 and 150 ms on this machine, and was deliberately not narrowed**,
-because nothing depends on the exact value: 250 ms is comfortably above it, matches a lead already
-proven in this app, and costs 250 ms of desktop monitoring latency that a QC operator will not
-notice. Narrowing it would have bought precision nobody can spend — and the figure would be specific
-to this output device anyway.
+because nothing depends on the exact value: 250 ms is comfortably above it and matches a lead already
+proven in this app. Narrowing it would have bought precision nobody can spend — and the figure would
+be specific to this output device anyway.
+
+> ### ⚠️ CORRECTION 2026-09-23 — THIS ENTRY CALLED THE COST "MONITORING LATENCY". IT IS NOT.
+>
+> The sentence struck from the paragraph above read: *"costs 250 ms of desktop monitoring latency
+> that a QC operator will not notice."* **That is wrong, and it is the sentence that shipped the
+> constant.**
+>
+> Monitoring latency means picture **and** sound arrive late *together*, which is harmless. The lead
+> delays **only the audio**: NDI video is stamped `monotonicNow()` at pull and presented at the next
+> display tick, so it is not delayed to match. The cost is a **quarter-second lip-sync error**.
+>
+> **`NDIService.swift:732-742` had this right the whole time** and says so in capitals — *"THIS IS A
+> LIP-SYNC OFFSET AND IT IS NOT FREE … desktop audio lands `lead` LATE against the picture."* The
+> code knew; this entry did not; and **this entry is what anyone planning from this file reads.**
+>
+> **Measured 2026-09-23: +230.1 ms of audio lag on NDI**, against a designed 250 ms, on the cleanest
+> capture of five transports. See `docs/AV_SYNC_FINDINGS.md` §3.2 and the OPEN entry below.
+>
+> 📌 The transferable part: an entry that restates a code comment in *looser* words can invert its
+> meaning, and the looser version is the one that gets planned from. "Latency" and "lip-sync offset"
+> are not synonyms.
 
 ⚠️ **DO NOT DERIVE THIS FROM THE +291 ms RENDER-AHEAD THE HLS WORK MEASURED.** That was the leading
 hypothesis for the mechanism and **150 ms being clean refutes it** — the threshold is nowhere near
