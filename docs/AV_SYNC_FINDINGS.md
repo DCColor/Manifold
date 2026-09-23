@@ -408,6 +408,29 @@ RTCP sender reports are the mechanism RTP provides for exactly this: each report
 wall-clock time paired with that stream's RTP timestamp, and a receiver maps both streams onto the
 common wall clock. Chrome's WebRTC stack consumes them. Manifold does not.
 
+⚠️ **ADDED 2026-09-23, LATER THE SAME DAY: THE CHROME COMPARISON IS WEAKER THAN IT READS ABOVE, AND
+A SECOND SERVER IS WHAT SHOWED IT.** Cloudflare's answer gives the two m-sections **different
+CNAMEs and different msid stream ids** (`PxgkpBsC` / `CfFlPcUE`). CNAME is what RFC 3550 uses to
+declare two streams synchronisable, and Chrome pairs streams for A/V sync by MediaStream — so
+**Chrome most likely was not synchronising these two either**, and run 7's −10.5 ms may be one
+session's luck rather than evidence that SR consumption fixes the problem. By this document's own
+rule, two sessions of the same transport are not a repeat measurement; one session of a second
+player is not a mechanism.
+
+**This is not a reason to doubt the defect, and it is a reason to doubt the attribution.** The
+defect is established from source and from the 136 ms swing, neither of which involves Chrome. What
+is NOT established is that a receiver doing the RTCP work correctly ends up in sync **on this
+ingest** — and if Cloudflare's two SRs turn out to be on unrelated clocks, the fix would need
+something else. **Cheap test before building anything:** compute the implied offset from several
+successive SR pairs; stable to well under a millisecond over a minute means one sender clock and the
+alignment is sound.
+
+📌 **AND THE DIFFERENT CNAMEs ARE CLOUDFLARE'S CHOICE, NOT NORMAL WHEP — MEASURED, NOT ASSUMED.**
+The local MediaMTX server set up the same day (`docs/BUGS.md`, *"MediaMTX is set up locally as the
+second WHIP/WHEP test server"*) answers with **one CNAME and one MediaStream** across both
+m-sections. It also produces the **same 1.0/s sender-report cadence**, so the mechanism the fix
+depends on exists on both servers.
+
 ⚠️ **THE SPREAD IS NOT BOUNDED BY ANYTHING WE MEASURED.** Two sessions gave −99 and +37 ms. Nothing
 in the mechanism limits it to that range; the offset is whatever the two senders' RTP bases happen to
 differ by after the CDN, on the day. A session could be worse.

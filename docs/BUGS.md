@@ -615,27 +615,93 @@ advance.
 
 ---
 
-## ☐ PRE-SHIP: set up MediaMTX locally as a second WHIP/WHEP and SRT test server
+## ✅ DONE 2026-09-23 — MediaMTX is set up locally as the second WHIP/WHEP test server
 
-**Status:** OPEN, required before public launch. **Not a defect** — it is the missing half of the
-server-agnostic rule in `CLAUDE.md`. **Raised:** 2026-09-23.
+**Status:** ✅ **WHIP/WHEP built and verified end to end, 2026-09-23.** SRT is configured on the
+same server and **not yet exercised** — see *What is still untested*. **Raised and closed the same
+day**, as the missing half of the server-agnostic rule in `CLAUDE.md`.
 
-**Every WHIP/WHEP figure in the repo comes from one vendor.** `docs/AV_SYNC_FINDINGS.md`,
-`docs/WHEP_LOADED_NETWORK_FINDINGS.md` and the WHEP depth preset (`WHEPFrameRouter.targetDepth`,
-0.400 s) were all measured against Cloudflare. SRT has a local OBS sender and NDI is on-machine, so
-those two paths already have a non-vendor reference; **WHIP/WHEP has none at all.**
+**Why it existed.** `docs/AV_SYNC_FINDINGS.md`, `docs/WHEP_LOADED_NETWORK_FINDINGS.md` and the WHEP
+depth preset (`WHEPFrameRouter.targetDepth`, 0.400 s) were all measured against Cloudflare. SRT had
+a local OBS sender and NDI is on-machine; **WHIP/WHEP had no non-vendor reference at all.**
 
-**Done means:** MediaMTX running locally, publishing the flash-beep fixture over WHIP and re-serving
-it over WHEP, plus SRT listener mode on the same box, with the connect procedure written down
-somewhere a second machine can follow. That is enough to answer, without leaving the building:
-whether a constant is a property of the protocol or of one CDN; whether an SDP shape we rely on is
-standard or Cloudflare's; and whether a fix works on a server that is not transcoding.
+### The runbook
 
-**What it would already have caught:** Cloudflare's answer gives the audio and video m-sections
-**different CNAMEs and different msids**, which is what RFC 3550 uses to declare two streams
-synchronisable. Nothing establishes whether that is normal WHEP or one server's choice, and the
-RTCP sender-report fix — see *"WHEP lip-sync is ARBITRARY PER SESSION"* below — is being planned on
-top of it.
+```sh
+~/Desktop/mediamtx/            # outside the repo, deliberately — it is a test rig, not a dependency
+  mediamtx                     # v1.21.1 darwin_arm64, official GitHub release, no Homebrew
+  mediamtx.yml                 # minimal: WHIP/WHEP + SRT only, everything else off
+  mediamtx.yml.dist            # the shipped 38 KB reference, kept for looking keys up
+
+cd ~/Desktop/mediamtx && ./mediamtx mediamtx.yml
+```
+
+| | | |
+|---|---|---|
+| `127.0.0.1:8889` TCP | WHIP ingest + WHEP playback | OBS → `http://127.0.0.1:8889/live/whip` |
+| | | Manifold → `http://127.0.0.1:8889/live/whep` |
+| `*:8189` UDP | WebRTC media (ICE needs a real interface) | |
+| `127.0.0.1:8890` UDP | SRT | `?streamid=publish:live` / `read:live` |
+| `127.0.0.1:9997` TCP | API — `curl -s localhost:9997/v3/paths/list` | names publisher, tracks, readers |
+
+⚠️ **SRT IS ON 8890, NOT 9000** — OBS's own SRT server owns 9000 on this machine.
+⚠️ **NO AUTH, AND THAT IS ONLY SAFE BECAUSE SIGNALLING IS BOUND TO LOOPBACK.** Do not move these
+addresses to `:8889` / `:8890` without adding auth. MoQ is on by default in v1.21 and binds
+`:8892`/`:8893` on **every** interface; it is explicitly disabled for that reason.
+
+### The verification, 2026-09-23 18:57
+
+OBS 32.2.2 (profile "MediaMTX") → WHIP → MediaMTX → WHEP → Manifold, flash-beep fixture at
+23.976, 1920×1080. **Picture and audio both confirmed by eye and ear, not just by counters.**
+
+| | MediaMTX | Cloudflare, same fixture, same afternoon |
+|---|---|---|
+| ICE + DTLS | **0.10 s** | 1.58 s |
+| decode | 1920×1080 `x420`, errors=0 | same |
+| dropped `noFmt` | **0** | 26 / 6 |
+| PLI sent | **0** | 1 (+25 suppressed) |
+| seqGaps / lost / nacks | **0 / 0 / 0** | 1 / 1 / 3 |
+| `timebase−clock` | +2.3 to +5.6 ms | +3.40 / +3.45 ms |
+| LiveClock | depth 0.397 vs 0.400, rate 0.9992 | — |
+
+⚠️ **DO NOT READ THOSE HEALTH NUMBERS AS A RESULT.** This link is loopback with zero loss, so it
+cannot justify anything about `targetDepth` or the NACK policy. `cushion needed >= 0.000s` here
+means "there is no network", not "0.400 s is too large".
+
+### What it caught on day one
+
+📌 **THE OPEN QUESTION THIS ENTRY WAS WRITTEN AROUND IS NOW ANSWERED, AND THE ANSWER IS
+"CLOUDFLARE'S CHOICE".** Cloudflare's WHEP answer gives the audio and video m-sections **different
+CNAMEs and different msids** (`PxgkpBsC` / `CfFlPcUE`). MediaMTX gives **one CNAME and one
+MediaStream** for both:
+
+```
+a=ssrc:1979694597 cname:mediamtx   msid:mediamtx video
+a=ssrc:3498350393 cname:mediamtx   msid:mediamtx audio
+```
+
+CNAME is what RFC 3550 uses to declare two streams synchronisable. **So Cloudflare is the deviation,
+not the norm** — which changes what the Chrome-versus-Manifold comparison in
+`docs/AV_SYNC_FINDINGS.md` §3.3 is evidence of. Recorded there too.
+
+📌 **AND THE SENDER-REPORT CADENCE IS NOT A CLOUDFLARE ARTEFACT.** Manifold's audio RTCP counter
+read **58 RTCP in 57.1 s — 1.0/s**, the same as Cloudflare's 66-in-66. The planned SR fix has a
+source on both servers. Still counted and dropped at `DataChannelBridge.m:1175` on both.
+
+📌 **Two harmless deviations, logged rather than special-cased**, which is what the rule asks for.
+MediaMTX answers `profile-level-id=42e01f` (constrained baseline 3.1) while relaying **High 4.0** —
+the SDP does not describe the stream, and VideoToolbox decoded it with `noFmt=0 errors=0`. It also
+drops `goog-remb` from the answer, where Cloudflare keeps it.
+
+### What is still untested
+
+- **SRT through MediaMTX.** Configured on 8890, never connected. The SRT path already has local OBS
+  as a non-vendor reference, so this is lower value than the WHIP/WHEP half — but it is the only way
+  to get a non-OBS, non-Cloudflare SRT sender, and **Cloudflare's SRT egress term has never been
+  measured** (`AV_SYNC_FINDINGS.md` §6).
+- **A second machine.** Everything here is loopback. Nothing has been run across a real link.
+- **Nothing is measured yet.** This entry establishes that the server works, not that any number
+  taken from it means anything.
 
 ---
 
