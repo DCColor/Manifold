@@ -997,9 +997,10 @@ what Cloudflare's transcoder does to pacing, because it never touches it.
 
 ---
 
-## 🔍 OPEN 2026-09-23 — SRT desktop audio lags its picture by ~200 ms, because the cushion is a stale argument
+## ✅ FIXED 2026-09-23 — SRT desktop audio lagged its picture by ~200 ms, because the cushion was a stale argument
 
-**Status:** OPEN, measured, one-line fix identified and NOT applied.
+**Status:** FIXED and verified the same day, by the same method that found it. Applied, **not yet
+committed**. Entry kept per this file's rule until the fix has been through a real session.
 **Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.1.
 
 `SRTFrameRouter.swift:532` passes `beginLiveAudio?(Self.targetDepth)` — 0.250 s — under a comment
@@ -1023,19 +1024,65 @@ program's own `sourcePTS` — and its call site was never revisited.
 Measured figures read low by up to 33 ms of a known one-sided frame-grid bias plus the sender's own
 audio-vs-video encode delay. **No sender-side encode term is a fifth of a second.**
 
-**The fix, not applied:** `beginLiveAudio?(Self.targetDepth)` → `beginLiveAudio?(0)`, plus rewriting
-the stale comment. `mirror.cushion` has exactly two consumers, so it is genuinely one line.
+**The fix:** `beginLiveAudio?(Self.targetDepth)` → `beginLiveAudio?(0)`, plus rewriting the stale
+comment. `mirror.cushion` has exactly two consumers, so it is genuinely one line.
+
+### After — measured, not assumed
+
+Local SRT, 30 fps, same fixture and recorder. Figures restricted to the single SRT session the
+capture covers (the log held three; pooling them gave a wrong `setRate` rate on the first pass):
+
+| | before | **after** |
+|---|---|---|
+| `timebase−clock` median | +3.40 ms | **+1.30 ms** |
+| **arithmetic A/V** | **+246.6 ms** | **−1.3 ms** |
+| renderer lead | 495 ms | **249 ms** |
+| `setRate` / min | 7.1 | **7.1** |
+| contiguity | 3571/3572 | **2840/2841** |
+| automatic renderer flushes | 0 | **0** |
+
+**Flash-and-beep, with the sender's own error measured and removed:** the raw reading was −122.2 ms
+against the file control, but a 40 s `ffmpeg -c copy` probe of the stream measured **OBS itself
+sending audio 82.0 ms early (sd 0.0)**. Subtracting that and the recorder's frame-grid bias leaves
+**Manifold at −7 to −40 ms — within one video frame of zero**, against an arithmetic prediction of
+−1.3 ms. Before the fix it was ~250 ms.
+
+**No crackle or distortion**, four ways: heard clean; 0 automatic flushes; 2840/2841 contiguous; and
+the renderer lead is **249 ms**, above the ~150 ms floor the NDI lead ladder in this file measured
+for this same renderer.
+
+**`setRate`/min unchanged, and it could not have changed** — `positionError` compares
+`target = senderPTS − cushion` against a `predicted` built from a previous `target`, so both shift
+by the same constant and the push gate is algebraically invariant to this argument.
+
+⚠️ **THE CHAIN WAS RE-VALIDATED BEFORE ANY OF IT WAS BELIEVED.** A 78 ms shift in the residual
+appeared first and could have been the measurement drifting. NDI — untouched by this fix — was
+re-measured at **+217.4 ms against the morning's +230.1 ms**, a 12.7 ms difference inside the
+frame-grid band. The chain was stable; the shift was the sender, and the probe then measured it.
+
+### ⚠️ Cloudflare SRT: FIXED BY CONSTRUCTION, NOT RE-MEASURED
+
+Recorded explicitly so a missing number is not later read as a missing fix. The cushion is one
+argument on the one code path both SRT routes share — `SRTFrameRouter` has a single `beginLiveAudio`
+call site — and both routes measured **+246.2 ms and +246.0 ms** by arithmetic before the change,
+i.e. identically. There is no per-route term in the quantity that was wrong.
+
+What is **not** established for Cloudflare is its own **sender term**: its SRT egress is a transcode
+of the WHIP ingest and carries an audio-versus-video error that has never been measured. That is a
+property of Cloudflare, not of this fix; characterise it with the sender probe against the egress
+URL if the absolute number is ever wanted.
 
 ⚠️ **AND IT IS SAFE ON THE AXIS THAT LOOKS RISKY.** The NDI lead ladder in this file measured this
 renderer crackling below ~150 ms of lead. SRT's renderer currently holds ≈500 ms (`now()` runs
 `targetDepth` behind the sender's live edge, and the cushion adds another 250 ms). Removing the
 cushion leaves ≈250 ms, still well above the threshold and equal to NDI's deliberate lead.
 
-**Held rather than shipped alone**, because the adaptive resampler
-(`docs/AUDIO_RESAMPLER_DESIGN.md`) has to own the target lead anyway and this is the evidence for
-why a lead must never become an A/V offset.
+**Shipped on its own** rather than held for the adaptive resampler
+(`docs/AUDIO_RESAMPLER_DESIGN.md`), because it is one argument, it is measured safe, and SRT is in
+sync now rather than at the end of that build plan. §2.5 of the design still owns the general rule —
+a target lead must never become an A/V offset — and NDI is still ~230 ms out against it.
 
-**Blocks:** nothing structurally — it is audible now, on every SRT session.
+**Blocks:** nothing. Was audible on every SRT session until 2026-09-23.
 
 ---
 

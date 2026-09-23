@@ -526,10 +526,37 @@ final class SRTFrameRouter {
             self?.mirrorLiveAudio?(mapping, true)
         }
 
-        // Open the renderer now, at the SRT cushion. `targetDepth` is 0.250 here, not WHEP's 0.400
-        // — the cushion must match the transport whose clock is being mirrored, because it is the
-        // steady-state lead the control loop holds for THIS route.
-        audioSink = beginLiveAudio?(Self.targetDepth)
+        // ── `cushion: 0` — AND IT IS NOT "NO CUSHION" ───────────────────────────────────────
+        //
+        // ⚠️ READ `FrameEngine.beginLiveAudio`'s parameter note before changing this. Despite the
+        // name, this argument is not the live clock's buffer depth. Its only two consumers are
+        // `mirrorLiveAudio` (`let target = m.senderPTS - cushion`) and `liveAudioDrift`, and in
+        // both its actual meaning is: HOW FAR BEHIND THE MAPPING'S `senderPTS` DOES THIS TRANSPORT
+        // STAMP ITS AUDIO PTS?
+        //
+        // This used to pass `targetDepth`, under a comment saying "the cushion must match the
+        // transport whose clock is being mirrored, because it is the steady-state lead the control
+        // loop holds for THIS route." That is the reasoning `beginLiveAudio`'s note explicitly
+        // retracts, and it was wrong for the audio this file produces: since the sample-counted
+        // axis landed, `audioPTSTicks` pins to the program's own absolute `sourcePTS`, so SRT
+        // stamps ABSOLUTE SENDER TIME and the offset is zero. WHEP took this identical edit when
+        // its receiver moved to the same axis; SRT's call site was never revisited.
+        //
+        // ⚠️ MEASURED BEFORE THE CHANGE, THREE WAYS AGREEING: desktop audio ran ~200 ms BEHIND the
+        // picture — flash-and-beep against a file-playback control read +203.9 ms on local SRT and
+        // +165.8 ms on Cloudflare, and the arithmetic `cushion − (timebase−clock)` read +246 ms on
+        // both from their own logs. See `docs/AV_SYNC_FINDINGS.md` §3.1.
+        //
+        // ⚠️ AND `timebase−clock` CANNOT CATCH A REGRESSION OF THIS. `liveAudioDrift` returns
+        // `(timebase + cushion) − clock`, so the cushion cancels and the line reads a healthy ±4 ms
+        // whichever value is passed. It read +3.8/+4.0 ms across the broken sessions. The instrument
+        // for this argument is a device-level A/V measurement, not any number in this log.
+        //
+        // THE RENDERER'S QUEUE IS NOT WHAT THIS BUYS, and removing it does not starve the renderer:
+        // `now()` already runs `targetDepth` behind the sender's live edge, so the renderer still
+        // holds ~250 ms of audio — above the ~150 ms floor the NDI lead ladder measured for this
+        // same `AVSampleBufferAudioRenderer` (docs/BUGS.md). It was ~500 ms before.
+        audioSink = beginLiveAudio?(0)
 
         NSLog("[SRT] display route ACTIVE — LiveClock target=%.3fs, maxQueued=%d",
               Self.targetDepth, config.maxQueued)

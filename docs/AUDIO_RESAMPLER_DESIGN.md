@@ -777,12 +777,12 @@ raised to 250 ms so only a coarse event can still trigger a `setRate`.
 `setRate` rows with non-zero rate fall to 1 + (coarse events); mutes/min falls to the coarse-event
 count; pitch trace (criterion 7).
 
-⚠️ **THE TARGET THIS LOOP NULLS AGAINST MUST BE CORRECTED FIRST — open question 4 is now answered
-and the answer is that it was wrong.** Measured 2026-09-23: SRT's cushion of 0.250 puts desktop
-audio ~200 ms behind its picture, and `liveAudioDrift` cannot see it because it adds the cushion
-back. So this step carries the one-line cushion fix (`SRTFrameRouter.swift:532` → `0`) as a
-prerequisite, not as a follow-up: a loop that nulls its error against the wrong target holds the
-wrong offset forever and reports zero. §2.5, `docs/AV_SYNC_FINDINGS.md` §3.1.
+✅ **THE TARGET THIS LOOP NULLS AGAINST IS NOW CORRECT ON SRT.** Open question 4 was answered on
+2026-09-23 — the cushion put desktop audio ~200 ms behind its picture — and the one-line fix
+(`SRTFrameRouter.swift:532` → `0`) was applied and verified the same day, leaving SRT's arithmetic
+A/V at −1.3 ms. This step no longer carries it as a prerequisite. **The principle still stands and
+still applies to NDI, which is ~230 ms out:** a loop that nulls its error against the wrong target
+holds the wrong offset forever and reports zero. §2.5, `docs/AV_SYNC_FINDINGS.md` §3.1.
 
 **Also measured at this step:** criterion 12, against the pre-resampler baselines
 (local SRT +203.9 ms, Cloudflare SRT +165.8 ms, NDI +230.1 ms). This is the first step at which the
@@ -904,9 +904,16 @@ Then a multi-hour run on one transport for the drift bound.
    looks risky**: SRT's renderer currently holds ≈500 ms of queue, and removing the cushion leaves
    ≈250 ms, still well above the ~150 ms crackle threshold the NDI lead ladder measured.
 
-   **NOT APPLIED, deliberately.** It is held for this design, because §2.5 is where the lead is
-   finally owned in one place and shipping the cushion fix alone would leave the same class of
-   mistake live on NDI.
+   ✅ **APPLIED 2026-09-23 and verified.** After: arithmetic **−1.3 ms**; renderer lead
+   **495 → 249 ms** (above the ~150 ms crackle floor); `setRate`/min **unchanged at 7.1**;
+   2840/2841 buffers contiguous; 0 automatic flushes. Flash-and-beep read −122.2 ms raw, but a
+   40 s `ffmpeg -c copy` probe measured **OBS itself sending audio 82.0 ms early**, leaving
+   **Manifold within one video frame of zero**. Cloudflare SRT is fixed by construction (one
+   argument, one shared call site, both routes +246 ms by arithmetic before) and was not
+   re-measured. `docs/AV_SYNC_FINDINGS.md` §3.1.
+
+   **NDI is still ~230 ms out**, so §2.5 remains the general rule this design owns; only SRT's
+   instance of it has been closed.
 
    ⚠️ **AND THE WARNING IN THE ORIGINAL QUESTION WAS RIGHT, WHICH IS THE PART WORTH CARRYING.**
    `liveAudioDrift` returns `(timebase + cushion) − clock`, so the cushion cancels and the number

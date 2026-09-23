@@ -15,7 +15,7 @@ Three separate defects, on three transports, all of them lip-sync, all of them s
 
 | | what it is | size |
 |---|---|---|
-| **SRT** | `beginLiveAudio(cushion:)` is passed `targetDepth` at a call site whose own comment predates the correction that says it should be 0 | **audio ~200 ms LATE**, constant |
+| **SRT** | `beginLiveAudio(cushion:)` was passed `targetDepth` at a call site whose own comment predated the correction that says it should be 0 | **audio ~200 ms LATE**, constant — ✅ **FIXED 2026-09-23**, see §3.1 |
 | **NDI** | the 250 ms presentation lead is real, deliberate and correctly described in `NDIService`; it was shipped on a `BUGS.md` justification that calls it "monitoring latency", which it is not | **audio ~230 ms LATE**, constant, by design |
 | **WHEP** | no RTCP sender-report handling anywhere, so the audio and video RTP clocks are never mapped to a common wall clock — `SSRCs ASSUMED aligned` | **arbitrary per session**, ≥136 ms of spread measured |
 
@@ -77,6 +77,40 @@ audio timeline is **compressed** and its alignment to the video is destroyed. It
 because the fixture is a 1 Hz train and a gate checked for that — beeps arrived 0.851 s apart. An
 offset measured from such a capture walks, with nothing else reading unhealthy.
 
+### 1.2b The sender probe — the term the player controls cannot remove
+
+⚠️ **ADDED 2026-09-23, AFTER IT WAS NEEDED. Every raw stream figure in §2 carries an unmeasured
+sender term, and this is how to remove it.**
+
+A player control (§1.3) subtracts the *player's* compositor and output latency. It cannot subtract
+the **sender's own audio-versus-video error**, which is a property of OBS's encoder and mux — or, on
+Cloudflare, of its transcoder — and which differs per path and, as measured below, per session.
+
+The probe needs no player, no display, no recorder and no control:
+
+```sh
+ffmpeg -y -i "<the stream URL>" -t 40 -c copy ~/Desktop/sender_probe.mkv
+```
+
+then measure the fixture's flash-to-beep offset **inside that file, on its own PTS**. What comes out
+is the sender's A/V error, full stop.
+
+⚠️ **READ BOTH STREAMS ON THE CONTAINER TIMELINE, WITH `-copyts`.** The probe measured here reported
+`Stream #0:0: … start 0.044000` for video against audio at 0. Extracting the two separately without
+`-copyts` rebases each to zero and puts that 44 ms straight into the answer. Video PTS come from
+`signalstats` under `-copyts`; the audio's first PTS comes from `ashowinfo` and the sample index is
+offset by it.
+
+**Measured, OBS local SRT, 2026-09-23 16:45: −82.0 ms, sd 0.0** — OBS sends audio 82 ms *early*.
+
+📌 **AND IT IS NOT A CONSTANT OF THE PATH.** Applying −82.0 ms to the same route's 14:53 run predicts
+≈ +131 ms where +203.9 ms was measured, so OBS's local-SRT A/V genuinely differed across an output
+restart. The morning's value cannot be recovered. **This is the whole reason §3's conclusions rest
+on the arithmetic rather than on the raw measurements** — the arithmetic is computed from Manifold's
+own logged quantities and does not contain a sender term at all.
+
+---
+
 ### 1.3 Per-player controls
 
 Every player has its own compositor and audio-output latency, and OBS's own capture adds a constant.
@@ -129,6 +163,17 @@ singular). Every run in §2 passed all of them.
 | **level between beeps** | anything else sounding in the capture | **−240 dBFS, exact digital silence** |
 | **injected-offset gate on the analyser** | the analyser itself | 0 / +250 / −120 ms injected → **−0.0 / +250.0 / −120.0, sd 0.0** |
 
+⚠️ **AFTER EVERY MANIFOLD RELAUNCH, RE-PICK MANIFOLD IN THE RECORDER'S APPLICATION AUDIO CAPTURE.**
+The recorder's macOS Audio Capture source is scoped to the Manifold *application*, and every run
+relaunches Manifold with a new PID. A stale PID gives a **silent audio track while the source's
+meter in OBS keeps moving**, because the meter follows the source and the recording follows the
+mixer. It cost one full run here, and it presents as "the fix broke audio" — the app's own log read
+perfect throughout (2.88 M frames enqueued, `status → rendering`, buffers contiguous).
+
+App-scoped capture is nonetheless the right choice: it makes "nothing else audible" structural
+rather than procedural, so a notification sound cannot contaminate a capture.
+
+
 ⚠️ **THE FIRST VERSION OF THE PERIODICITY GATE ASKED THE WRONG QUESTION AND FAILED A GOOD RUN.** It
 required 90% of inter-beep **spacings** within 10 ms of 1.000 s — a test of transport jitter, not of
 provenance. Cloudflare SRT failed it at exactly 90.0% while its beep **count** was exactly right and
@@ -161,6 +206,15 @@ Stream runs carry up to **+33 ms** of one-sided frame-grid bias (§1.4), always 
 **Runs 7 and 8 are the same Cloudflare ingest, minutes apart, same recorder** — designed that way so
 the only variable between them is the player.
 
+⚠️ **EVERY "vs own control" FIGURE IN THIS TABLE CARRIES AN UNMEASURED SENDER TERM, AND THAT IS WHY
+THE CONCLUSIONS IN §3 REST ON THE ARITHMETIC COLUMN.** The control subtracts the player's latency;
+it does not subtract the sender's own audio-versus-video error (§1.2b), which differs per path and
+per session — measured at **−82.0 ms** on OBS local SRT afterwards, and demonstrably different on
+the same route ninety minutes earlier. This is exactly the "residuals vary by path (−42, −80,
+−95 ms)" noted below, and it has a cause rather than a mystery. The arithmetic column is computed
+from Manifold's own logged quantities and contains no sender term, so it is the column that carries
+the argument; the measurements corroborate it once the sender is removed, as §3.1 now does.
+
 **"arithmetic"** is the independent cross-check available without touching app code:
 
 ```
@@ -186,7 +240,7 @@ Cloudflare's SRT egress is a **transcode** (§9), each with its own relative aud
 
 ## 3. The three defects
 
-### 3.1 SRT — the cushion is a stale value, and audio lags picture by ~200 ms
+### 3.1 SRT — the cushion was a stale value, and audio lagged picture by ~200 ms  ✅ FIXED
 
 `SRTFrameRouter.swift:532`:
 
@@ -214,7 +268,70 @@ Three independent lines agree:
 
 **No sender-side encode term is a fifth of a second.** OBS's encoder delays are tens of milliseconds.
 
-#### The smallest fix — NOT APPLIED
+#### ✅ FIXED 2026-09-23 — applied, and verified the same way
+
+```swift
+audioSink = beginLiveAudio?(Self.targetDepth)   →   audioSink = beginLiveAudio?(0)
+```
+
+One functional line at `SRTFrameRouter.swift:532`; the rest of the diff is the comment, rewritten to
+`beginLiveAudio`'s parameter note and carrying the before-numbers and the reason `timebase−clock`
+cannot catch a regression of it.
+
+**Verified on local SRT, 30 fps, same fixture and recorder as the before-runs.** Figures are
+restricted to the single SRT session the capture covers — the log contained three, and pooling them
+gave a wrong `setRate` rate on the first pass:
+
+| | before | **after** |
+|---|---|---|
+| `timebase−clock` median | +3.40 ms | **+1.30 ms** |
+| **arithmetic A/V** (`cushion − (timebase−clock)`) | **+246.6 ms** | **−1.3 ms** |
+| renderer lead (`depth + cushion − L`) | 495 ms | **249 ms** |
+| `setRate` / min | 7.1 | **7.1** |
+| buffer contiguity | 3571/3572 | **2840/2841** |
+| automatic renderer flushes | 0 | **0** |
+| `[LIVECLOCK] depth` | 0.249 s | 0.250 s |
+
+**And the flash-and-beep, with the sender's own error measured and removed:**
+
+```
+measured vs control   =  Manifold  +  sender  +  recorder grid
+     −122.2 ms        =  Manifold  +  (−82.0) +  (0 … −33.3)
+  →  Manifold ≈ −7 to −40 ms,  against an arithmetic prediction of −1.3 ms
+```
+
+**Manifold's own A/V error after the fix is within one video frame of zero, where before it was
+~250 ms.** The −122 ms raw reading was almost entirely OBS sending audio 82 ms early.
+
+**No crackle or distortion**, on four independent checks: heard clean in the room; **0** automatic
+renderer flushes; 2840/2841 buffers contiguous; and the renderer lead is **249 ms**, comfortably
+above the ~150 ms floor the NDI lead ladder measured for this same renderer. The lead arithmetic
+`depth + cushion − (timebase−clock)` is exact, and both terms are logged — so this is measured, not
+argued.
+
+**`setRate`/min is unchanged, and it could not have changed.** `positionError` compares
+`target = senderPTS − cushion` against a `predicted` built from a previously-pushed `target`; both
+shift by the same constant, so the push gate is algebraically invariant to the cushion, and
+`rateMoved` never mentions it.
+
+⚠️ **THE MEASUREMENT CHAIN WAS RE-VALIDATED BEFORE ANY OF THIS WAS BELIEVED.** An 78 ms shift in the
+residual appeared first and could have been the chain drifting. **NDI — untouched by this fix — was
+re-measured and read +217.4 ms against the morning's +230.1 ms**, a 12.7 ms difference inside the
+frame-grid band. The chain was stable; the shift was the sender, and the probe then measured it.
+
+#### Cloudflare SRT — FIXED BY CONSTRUCTION, NOT RE-MEASURED
+
+📌 **Recorded as such deliberately, so nobody later reads a missing number as a missing fix.** The
+cushion is a single argument on the one code path both SRT routes share — `SRTFrameRouter` has one
+`beginLiveAudio` call site — and both routes measured **+246.2 ms and +246.0 ms** by arithmetic
+before the change, i.e. identically. There is no per-route term in the quantity that was wrong.
+
+What is *not* established for Cloudflare is its **sender term**: its SRT egress is a transcode of the
+WHIP ingest and will have its own audio-versus-video error, which has never been measured. That is a
+property of Cloudflare, not of this fix, and it is characterised with the §1.2b probe against the
+egress URL whenever someone wants the absolute number.
+
+#### The fix as it stood before it was applied
 
 One argument, plus rewriting the stale comment above it:
 
@@ -337,6 +454,17 @@ three defects, one of them 99 ms, and the spread of the instrument is 0.6 ms.
   establish zeros. Without them the other five are unattributable.
 * **A second player is the cheapest attribution there is.** One Chrome run split "Manifold is wrong"
   from "the stream is wrong" in forty seconds, after an hour of reasoning could not.
+* **Measure the sender, do not model it.** The residual between prediction and measurement was
+  written up as "the sender's own encode delay, which cannot be separated from inside Manifold" —
+  true about Manifold, and wrong about the problem. `ffmpeg -c copy` of the stream and a
+  flash-to-beep measurement on its own PTS gives that term directly, with no player, no display and
+  no control to subtract. It took one command and it turned an 78 ms mystery into −82.0 ms with
+  sd 0.0. **When a term is called unseparable, check whether it is merely unseparable from where you
+  happen to be standing.**
+* **Re-validate the chain before believing a surprise.** The 78 ms shift could have been the
+  instrument drifting. Re-measuring NDI — untouched by the change under test — against its own
+  earlier value settled that in one run, before any effort went into explaining a number that might
+  not have been real.
 * **Two readings of the same transport on different sessions are not a repeat measurement** — as
   runs 4 and 8 show, they can differ by 136 ms. Same-ingest back-to-back is what makes a comparison
   mean anything.
@@ -415,10 +543,16 @@ build step 6 (moving NDI onto the resampler's loop) became urgent, because NDI r
 * **WHEP's per-session offset has no fix in this document.** It needs RTCP sender-report handling,
   which is a change to the WHEP receive path, not to the audio mirror, and it needs its own
   measurement. Two sessions are not a distribution.
-* **The residuals between arithmetic and measurement vary by path** (−42, −80, −95 ms). Part is the
-  bounded frame-grid bias; the rest is the sender's own audio-vs-video encode delay, which cannot be
-  separated from inside Manifold. A reference-player run per transport, as done for WHEP, is what
-  would separate it.
+* ✅ **The residuals between arithmetic and measurement vary by path** (−42, −80, −95 ms) — **this
+  was listed as unexplained and now has a cause.** Part is the bounded frame-grid bias; the rest is
+  the sender's own audio-vs-video error, which is **not** a property of the path but of the session:
+  measured at **−82.0 ms** on OBS local SRT, and demonstrably different on the same route ninety
+  minutes earlier. The §1.2b sender probe removes it in forty seconds and needs nothing but ffmpeg.
+  **The per-run sender terms behind the eight-run table were never captured and cannot be
+  recovered**, which is why §3 argues from the arithmetic column.
+* **Cloudflare SRT's sender term has never been measured.** Its SRT egress is a transcode of the
+  WHIP ingest and will carry its own A/V error. Not needed for the cushion conclusion (§3.1), and
+  required for any absolute Cloudflare figure.
 * **Nothing here re-measures §11's mutes-per-minute**, and the 30 fps runs must not be read as if it
   did — see §1.4.
 
@@ -438,6 +572,12 @@ python3 avsync.py gate_250.mkv       # must report +250.0 ms, sd 0.0
 # the AVFoundation harness (cases A, F, F+, G, E)
 ~/Desktop/manifold-audible-events/harness-fg/MuteTestFG.app     # launched BY Audio Hijack
 ~/Desktop/manifold-audible-events/harness-fg/analyse_fg.py --capture <recording.wav>
+```
+
+```
+# the sender's own A/V error — no player, no display, no control
+ffmpeg -y -i "<stream URL>" -t 40 -c copy ~/Desktop/sender_probe.mkv
+# then measure flash-to-beep INSIDE it, both streams read with -copyts (see §1.2b)
 ```
 
 The minimal WHEP reference player used for runs 6–7 is at
