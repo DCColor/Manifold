@@ -1128,6 +1128,11 @@ final class WHEPFrameRouter {
             // [WHEP-BACKLOG] shows surplus going flat.
             NSLog("[WHEP] queue-full re-anchor: over-buffered at count=%d — flushed %.3fs (depth %.3f → %.3f)",
                   ov.queued, ov.jumped, ov.depthBefore, ov.target)
+        case .startupRealign(let sr):
+            // Before the first presentation only — the anchor's offset removed by position rather
+            // than by 20+ s of rail. One to a few per connect. See LiveClock's startup-fill block.
+            NSLog("[WHEP] startup realign: moved %+.1f ms (depth %.4f → %.3f), before first presentation",
+                  sr.jumped * 1e3, sr.depthBefore, sr.target)
         }
         #endif
     }

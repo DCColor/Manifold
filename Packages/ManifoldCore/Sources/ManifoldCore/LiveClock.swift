@@ -228,6 +228,42 @@ public final class LiveClock: @unchecked Sendable {
     /// Per-STREAM: cleared by `reset()`, so a reconnect re-disarms for its own fill.
     private var hasPresentedOnce = false
 
+    #if DEBUG || MANIFOLD_TELEMETRY
+    // ── STARTUP TELEMETRY: depth at the first presentation, and arrivals either side of it ──────
+    //
+    // `docs/AUDIO_RESAMPLER_DESIGN.md` §10.9: the connect-time rail is an offset created at the
+    // anchor, partly by frames that arrive in a burst straight after it. These answer the two
+    // questions that analysis could only infer from 1 Hz lines: what depth the stream actually
+    // had when the picture started, and whether any burst frame arrived AFTER that.
+    //
+    // ⚠️ THE ORIGIN IS THE FIRST FRAME'S (senderPTS, arrival host), NOT THE MAPPING. The mapping is
+    // re-anchored during startup; the arrival schedule is not. `lead` = how early a frame arrived
+    // against the first frame's schedule — a burst frame has a large positive lead; an on-time
+    // frame has ≈ 0 plus network jitter.
+    private var startupOriginPTS: Double?
+    private var startupOriginHost: Double?
+    private var startupPresentHost: Double?
+    private var startupPreMaxLead = -Double.infinity
+    private var startupPostMaxLead = -Double.infinity
+    private var startupPostFrames = 0
+    private var startupPostMinErr = Double.infinity
+    private var startupPostMaxErr = -Double.infinity
+    private var startupRealigns = 0
+    private var startupRealignNet = 0.0
+    private var startupSummaryDone = false
+    /// Payloads captured under `lock`, formatted after it — the same discipline as `PeriodicLog`.
+    private var pendingStartupPresent: StartupPresentLog?
+    private var pendingStartupSummary: StartupSummaryLog?
+    /// How long after the first presentation arrivals are still watched for a late burst. Two
+    /// seconds is ~48 frame intervals: a decoder backlog drains in milliseconds, so anything still
+    /// arriving early after this is network jitter, not startup.
+    private static let startupWatchSeconds = 2.0
+    #endif
+
+    /// Smallest startup-fill offset worth a re-anchor. See the startup-fill block in
+    /// `updateDepthLocked`.
+    private static let startupRealignFloor = 0.001
+
     /// Consecutive ineligible ticks required before the guard may fire. A floor against a
     /// single-tick blip; the wall-time hold below is what actually discriminates.
     public var freezeGuardTicks = 3
@@ -260,6 +296,10 @@ public final class LiveClock: @unchecked Sendable {
         /// The queue hit its bound — by definition excess buffer — and the clock was re-anchored
         /// to `newest − targetDepth` so the surplus drains through normal selection.
         case overflowReanchor(OverflowEvent)
+        /// During the startup fill (before the first presentation), the anchor's depth offset was
+        /// corrected by position at rate 1.0 instead of by rate. Either sign. See
+        /// `updateDepthLocked`'s startup-fill block.
+        case startupRealign(StartupRealignEvent)
 
         /// Seconds of presentation time the clock jumped FORWARD, for whichever action fired.
         /// This is the quantity a surplus accountant must sum as "flushed": every one of these
@@ -269,6 +309,7 @@ public final class LiveClock: @unchecked Sendable {
             case .snapped(let e):          return e.excess
             case .freezeGuard(let e):      return e.jumped
             case .overflowReanchor(let e): return e.jumped
+            case .startupRealign(let e):   return e.jumped
             }
         }
     }
@@ -311,6 +352,17 @@ public final class LiveClock: @unchecked Sendable {
         /// Queue count at the moment the bound was hit.
         public let queued: Int
         /// Depth (`newest − now`) immediately before the re-anchor.
+        public let depthBefore: Double
+        /// The target it was re-anchored to.
+        public let target: Double
+    }
+
+    public struct StartupRealignEvent: Sendable {
+        /// Seconds the presentation clock moved — FORWARD if positive (the fill was too deep),
+        /// BACKWARD if negative (too shallow). Negative is legitimate here and only here: nothing
+        /// has been presented yet, so there is no shown position to go back past.
+        public let jumped: Double
+        /// Smoothed depth immediately before the re-anchor.
         public let depthBefore: Double
         /// The target it was re-anchored to.
         public let target: Double
@@ -478,6 +530,25 @@ public final class LiveClock: @unchecked Sendable {
             // before the first frame comes due. The audio mirror inherits this for free now that it
             // tracks the mapping rather than copying now()'s value once.
             setMappingLocked(senderPTS: senderPTS, hostTime: hostNow() + startupDepth, rate: rate)
+            #if DEBUG || MANIFOLD_TELEMETRY
+            startupOriginPTS = senderPTS
+            startupOriginHost = hostNow()
+            #endif
+        } else {
+            #if DEBUG || MANIFOLD_TELEMETRY
+            if let oPTS = startupOriginPTS, let oHost = startupOriginHost, !startupSummaryDone {
+                let h = hostNow()
+                let lead = (senderPTS - oPTS) - (h - oHost)
+                if let p = startupPresentHost {
+                    if h - p <= Self.startupWatchSeconds {
+                        startupPostMaxLead = max(startupPostMaxLead, lead)
+                        startupPostFrames += 1
+                    }
+                } else {
+                    startupPreMaxLead = max(startupPreMaxLead, lead)
+                }
+            }
+            #endif
         }
         lock.unlock()
         publishMappingIfChanged()
@@ -963,6 +1034,10 @@ public final class LiveClock: @unchecked Sendable {
         let (event, periodic) = updateDepthLocked(spanSeconds: spanSeconds, count: count,
                                                   oldestPTS: oldestPTS, newestPTS: newestPTS,
                                                   presented: presented)
+        #if DEBUG || MANIFOLD_TELEMETRY
+        let startupPresent = pendingStartupPresent, startupSummary = pendingStartupSummary
+        pendingStartupPresent = nil; pendingStartupSummary = nil
+        #endif
         lock.unlock()
         // The mapping mirror goes FIRST: a snap or rate change must reach the audio timebase before
         // the line describing it reaches the log, so the two cannot be read in the wrong order.
@@ -973,6 +1048,9 @@ public final class LiveClock: @unchecked Sendable {
         // a snap still reads as following the depth line whose value it just changed.
         emit(periodic)
         emit(event)
+        #if DEBUG || MANIFOLD_TELEMETRY
+        emit(startupPresent, startupSummary)
+        #endif
         return event
     }
 
@@ -1038,6 +1116,19 @@ public final class LiveClock: @unchecked Sendable {
         lastCount = count
 
         let t = hostNow()
+
+        #if DEBUG || MANIFOLD_TELEMETRY
+        if let p = startupPresentHost, !startupSummaryDone, let d = smoothedDepth {
+            startupPostMinErr = min(startupPostMinErr, d - targetDepth)
+            startupPostMaxErr = max(startupPostMaxErr, d - targetDepth)
+            if t - p >= Self.startupWatchSeconds {
+                startupSummaryDone = true
+                pendingStartupSummary = StartupSummaryLog(
+                    window: t - p, postFrames: startupPostFrames, postMaxLead: startupPostMaxLead,
+                    minErr: startupPostMinErr, maxErr: startupPostMaxErr)
+            }
+        }
+        #endif
 
         // ── FREEZE GUARD ────────────────────────────────────────────────────────────────────
         //
@@ -1150,6 +1241,51 @@ public final class LiveClock: @unchecked Sendable {
         // Pinning the rate is therefore a change to the AUDIO contract as well as the video one. If
         // you pin it, WHEP and SRT need a real closed-loop re-anchor first — the one NDI needs.
         let depth = smoothedDepth ?? spanSeconds
+
+        // ── STARTUP FILL: CORRECT THE ANCHOR'S OFFSET BY POSITION, NOT BY RATE ────────────────
+        //
+        // `registerFrame` anchors on ONE frame's arrival, and on a cold decoder that frame is
+        // LATE: the frames queued behind it during ~100 ms of hardware session setup land as a
+        // burst straight after it, so the fill starts ~100 ms too deep (+88.7 ms measured at first
+        // presentation against 87 ms of setup). The slew below can only remove an offset D by
+        // integrating ∫(rate − 1)dt = D, at 5 ms/s: 20+ s on the rail, which the audio mirror
+        // follows for 1–2.5 minutes. `docs/AUDIO_RESAMPLER_DESIGN.md` §10.9–§10.10.
+        //
+        // Until the first frame is presented, nothing is on screen and the audio is waiting on
+        // this same anchor, so the offset can be removed by POSITION, in EITHER direction, for
+        // free. Same re-anchor as the snap — evaluate the old mapping at `t`, restart the segment
+        // there shifted by the excess, at unity — gated to the fill window. The EMA is shifted by
+        // the same amount (every depth sample moves by −excess), which lands it on `targetDepth`;
+        // that is a shift of its state, not a reset of it.
+        //
+        // ⚠️ GATED ON THE QUEUE EDGES BEING PRESENT, SO THE SYNTHETIC HARNESS STAYS INERT. It
+        // passes no edges, and `docs/LIVECLOCK_PRESETS.md`'s grid was swept with no coarse
+        // intervention in the loop — the same reason the freeze guard needs edges. Live transports
+        // pass them whenever the queue is non-empty, which the fill always is.
+        //
+        // ⚠️ NOTHING CHANGES AFTER THE FIRST PRESENTATION. `hasPresentedOnce` is set by the freeze
+        // guard the first tick a frame is eligible and cleared only by `reset()`; from then on this
+        // block is unreachable and the slew is exactly what it was.
+        //
+        // Reported as an `Event` so the surplus ledger's `recordClockJump` sees it — an unreported
+        // +100 ms re-anchor would put the ledger's residual outside its maxSlew × elapsed bound.
+        if newestPTS != nil, !hasPresentedOnce {
+            let excess = depth - targetDepth
+            // Below 1 ms there is nothing worth publishing a mapping for: it is under a
+            // fortieth of a frame and a tenth of the audio mirror's position tolerance.
+            guard abs(excess) >= Self.startupRealignFloor else { return (nil, periodicLogIfDue(t)) }
+            let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate
+            setMappingLocked(senderPTS: mappedNow + excess, hostTime: t, rate: 1.0)
+            smoothedDepth = targetDepth
+            #if DEBUG || MANIFOLD_TELEMETRY
+            startupRealigns += 1
+            startupRealignNet += excess
+            #endif
+            return (.startupRealign(StartupRealignEvent(jumped: excess, depthBefore: depth,
+                                                        target: targetDepth)),
+                    periodicLogIfDue(t))
+        }
+
         let error = depth - targetDepth
         // Proportional slew, hard-clamped to ±maxSlew so `rate` stays in ~0.995…1.005.
         // P-LAW UNCHANGED — the computed value is byte-identical to before; it is merely routed
@@ -1194,6 +1330,16 @@ public final class LiveClock: @unchecked Sendable {
         guard let oldestPTS, let newestPTS else { return nil }
 
         if presented {
+            #if DEBUG || MANIFOLD_TELEMETRY
+            if !hasPresentedOnce, let oHost = startupOriginHost {
+                startupPresentHost = t
+                pendingStartupPresent = StartupPresentLog(
+                    sinceFirstFrame: t - oHost, depth: smoothedDepth ?? .nan, target: targetDepth,
+                    count: count, rate: rate,
+                    preMaxLead: startupPreMaxLead, realigns: startupRealigns,
+                    realignNet: startupRealignNet)
+            }
+            #endif
             // A frame reached the screen. That both ARMS the guard for the rest of the stream and
             // clears any run in progress — this is the only place `hasPresentedOnce` is set.
             hasPresentedOnce = true
@@ -1337,6 +1483,27 @@ public final class LiveClock: @unchecked Sendable {
         let count: Int
     }
 
+    #if DEBUG || MANIFOLD_TELEMETRY
+    private struct StartupPresentLog {
+        let sinceFirstFrame: Double
+        let depth: Double
+        let target: Double
+        let count: Int
+        let rate: Double
+        let preMaxLead: Double
+        let realigns: Int
+        let realignNet: Double
+    }
+
+    private struct StartupSummaryLog {
+        let window: Double
+        let postFrames: Int
+        let postMaxLead: Double
+        let minErr: Double
+        let maxErr: Double
+    }
+    #endif
+
     /// ~1 Hz telemetry gate: watch `depth` settle to `target` and `rate` settle to the sender's true
     /// ratio under injected drift. Called UNDER `lock`; it only reads state and advances the cadence
     /// gate, returning the payload for the caller to emit once unlocked. Returns nil when not due.
@@ -1375,9 +1542,31 @@ public final class LiveClock: @unchecked Sendable {
         #endif
     }
 
-    /// The coarse actions LiveClock reports itself. `.snapped` is deliberately absent: the transport
-    /// layer logs that one with its own context (see WHEPFrameRouter), and duplicating it here would
-    /// print every snap twice.
+    #if DEBUG || MANIFOLD_TELEMETRY
+    /// The two `[LIVECLOCK] startup:` lines — once per stream each. §10.9/§10.10.
+    private func emit(_ present: StartupPresentLog?, _ summary: StartupSummaryLog?) {
+        guard telemetryEnabled else { return }
+        if let p = present {
+            FileHandle.standardError.write(Data(String(
+                format: "[LIVECLOCK] startup: first presentation +%.3fs after first frame · "
+                      + "depth=%.4fs target=%.3f err=%+.1f ms count=%d rate=%.4f · "
+                      + "max arrival lead before=%+.1f ms · startup realigns=%d net %+.1f ms\n",
+                p.sinceFirstFrame, p.depth, p.target, (p.depth - p.target) * 1e3, p.count, p.rate,
+                p.preMaxLead.isFinite ? p.preMaxLead * 1e3 : 0, p.realigns, p.realignNet * 1e3).utf8))
+        }
+        if let s = summary {
+            FileHandle.standardError.write(Data(String(
+                format: "[LIVECLOCK] startup: %.1fs after first presentation · %d frame(s) arrived, "
+                      + "max arrival lead=%+.1f ms · smoothed err min %+.1f / max %+.1f ms\n",
+                s.window, s.postFrames, s.postMaxLead.isFinite ? s.postMaxLead * 1e3 : 0,
+                s.minErr * 1e3, s.maxErr * 1e3).utf8))
+        }
+    }
+    #endif
+
+    /// The coarse actions LiveClock reports itself. `.snapped` and `.startupRealign` are deliberately
+    /// absent: the transport layer logs those with its own context (see WHEPFrameRouter), and
+    /// duplicating them here would print each twice.
     private func emit(_ event: Event?) {
         #if DEBUG || MANIFOLD_TELEMETRY
         // Gated for the same reason as the periodic line above. These are the `[LIVECLOCK]`
@@ -1395,7 +1584,7 @@ public final class LiveClock: @unchecked Sendable {
                 format: "[LIVECLOCK] queue-full: over-buffered at count=%d — re-anchored "
                       + "(depth %.3f → target %.3f, jumped +%.3fs)\n",
                 ov.queued, ov.depthBefore, ov.target, ov.jumped).utf8))
-        case .snapped, .none:
+        case .snapped, .startupRealign, .none:
             break
         }
         #endif
@@ -1478,6 +1667,13 @@ public final class LiveClock: @unchecked Sendable {
         ineligibleTicks = 0
         ineligibleSince = nil
         hasPresentedOnce = false
+        #if DEBUG || MANIFOLD_TELEMETRY
+        startupOriginPTS = nil; startupOriginHost = nil; startupPresentHost = nil
+        startupPreMaxLead = -.infinity; startupPostMaxLead = -.infinity; startupPostFrames = 0
+        startupPostMinErr = .infinity; startupPostMaxErr = -.infinity
+        startupRealigns = 0; startupRealignNet = 0; startupSummaryDone = false
+        pendingStartupPresent = nil; pendingStartupSummary = nil
+        #endif
         // Mirror-heartbeat state is per-STREAM for the same reason everything above it is.
         //
         // These three are BELT AND BRACES, and knowingly so: `clearMappingLocked` above sets

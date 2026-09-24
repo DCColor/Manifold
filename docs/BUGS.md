@@ -705,6 +705,68 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 
 ---
 
+## 🔍 PARTLY FIXED 2026-09-24 — live audio mirror swings 1300–4000 ppm off nominal for the first 1–2.5 minutes of every WHEP connect. NOT the seed.
+
+**Status:** the suspected cause was changed, **measured to change nothing, and reverted** the same
+day; the excursion itself is open. No code change stands.
+**Full write-up:** `docs/AUDIO_RESAMPLER_DESIGN.md` §10.3 (corrected) and §10.8.
+
+**Symptom.** `mirror.smoothedRate` peaks at +3834 ppm (§10.3) on connect and takes 40–160 s to
+come back inside ±250 ppm. Harmless today, because the mirror is supposed to follow the clock, but
+it is 2–4× the resampler's proposed ratio bound `B`.
+
+**The suspected cause, tried:** `mirrorLiveAudio` seeds its EMA from the first mapping's rate
+(`smoothedRate = m.rate`), which §10.3 took to be on the ±5000 ppm rail about half the time. It was
+changed to seed at nominal 1.0 — the value the τ-ramp note was written around — measured, and
+reverted.
+
+⚠️ **AND IT WAS NOT THE CAUSE.** On a fresh connection the first mapping is exactly 1.0 —
+`registerFrame` anchors at `rate`, which a constructed or `reset()` clock holds at 1.0 — so the old
+seed already was 1.0. **Verified on 6 of 6 connects, WHEP via MediaMTX, before and after:**
+
+| | peak \|smoothed\| ≤ 100 s | settled inside ±250 ppm | setRate ≤ 120 s |
+|---|---|---|---|
+| before ×3 | +3885 / −1331 / −1935 ppm | 130–140 / 40–50 / 60–70 s | 35 / 16 / 18 |
+| after ×3 | +3972 / +2552 / +2073 ppm | 150–160 / 70–80 / 90–100 s | 36 / 23 / 17 |
+
+Same code path on both builds; the spread is session to session. §10.3's diagnosis came from
+reading the probe's `inst` in window 1, which is the rate at the END of the window, not at the
+first mapping.
+
+**The real mechanism:** the P-loop rails within ~0.1 s of the first mapping (connect-burst depth
+correction; sign varies by session), and the τ = 2 s end of the τ ramp follows it **by design**, so
+the mirror doesn't accrue 4 ms/s of position error. The excursion is the ramp doing its job.
+
+**CAUSE FOUND, 2026-09-24 — the startup anchor (`AUDIO_RESAMPLER_DESIGN.md` §10.9).** The P-loop
+rails because of an offset created at the anchor: (1) on the first connect after launch, the ~100 ms
+cold hardware-decoder setup queues frames behind the anchor keyframe, and they land as a burst
+straight after it — +103/+135 ms of depth against 104/101 ms of setup; (2) on every connect, the
+anchor pins depth at the top of the per-frame sawtooth, so the start is up to half a frame low. The
+loop can only remove it at 5 ms/s. (The "(2) half-frame low" mechanism above was retracted by
+measurement — see §10.9 item 2.)
+
+**PARTLY FIXED, 2026-09-24, not committed — §10.10.** During the startup fill (before the first
+presentation), `LiveClock` now removes the depth offset by re-anchoring position at rate 1.0, in
+either direction, instead of by rate. It is reported as `Event.startupRealign`, so the ledger sees
+it. **Cold connects are fixed:** on MediaMTX, error at first presentation +88.7 → −1.1 ms, setRates
+34 → 9, peak +3734 → +356 ppm, settle ~135 s → ~15 s. No burst arrived after presentation on any
+run. Picture and audio start were normal by eye and ear. **Not fixed:** warm connects and Cloudflare
+cold still reach ±550–2133 ppm and 6–21 setRates. That comes from the relay after presentation (§11.6)
+followed through the mirror's τ = 2 s start; there is no anchor offset left to remove. SRT is inert by
+construction (its own startup anchor presents in 4–6 ms).
+
+**Also fixed:** `mirror.ticks` was not reset in `beginLiveAudio`, so reconnects' stats lines carried
+the previous session's heartbeat count (stats only).
+
+**What stays open:** the post-presentation relay transient (up to 2133 ppm), and how the resampler
+handles it — saturate the ratio at `B` during the ramp,
+feed it only from the settled filter, or size `B` for it. That belongs to resampler step 3/4
+(§10.5 item 1), not to the mirror.
+**Also unverified:** whether any path starts the mirror against a clock that is already running
+(SRT, audio-only restart). That is the only case in which a 1.0 seed would differ from `m.rate`.
+
+---
+
 ## ☐ PRE-SHIP: `DataChannelBridge.m` writes ~2 diagnostic lines per second to stderr in RELEASE, for the life of every WHEP session
 
 **Status:** OPEN, pre-existing, **not a regression** — it has been true for as long as the file has

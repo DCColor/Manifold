@@ -2177,7 +2177,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.smoothedRate = 1.0; mirror.haveSmoothed = false
         mirror.lastHost = 0; mirror.firstHost = 0
         mirror.pushedRate = 1.0; mirror.pushedMedia = 0; mirror.pushedHost = 0
-        mirror.changes = 0; mirror.pushes = 0; mirror.lastStatsHost = 0
+        mirror.changes = 0; mirror.pushes = 0; mirror.ticks = 0; mirror.lastStatsHost = 0
         mirror.lock.unlock()
         audioRenderer.flush()
         synchronizer.rate = 0      // held until the first mirrored mapping arrives

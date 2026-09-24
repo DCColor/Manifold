@@ -1276,7 +1276,7 @@ threads are. The gate is doing real work and its cost is known.
 `B = 0.001` is ±1000 ppm. Both of these exceeded it, on the two quietest links available — one
 loopback, one localhost.
 
-**1. Startup seeding — +3834 ppm (MediaMTX), +3775 ppm (Cloudflare), decaying with τ ≈ 32 s.**
+**1. Connect-time rail — +3834 ppm (MediaMTX), +3775 ppm (Cloudflare), decaying with τ ≈ 32 s.**
 
 ```
 +10s +3377   +40s +2184   +70s  +809   +100s +372
@@ -1284,13 +1284,17 @@ loopback, one localhost.
 +30s +3033   +60s +1149   +90s  +523   +120s +226   ← settled
 ```
 
-The cause is in the code, at `FrameEngine.swift`'s smoothing block: on the first mapping,
-`mirror.smoothedRate = m.rate` — **seeded from a single sample**. Window 1 on both WHEP runs shows
-`inst +5000.0`, i.e. the first mapping landed on the rail, and the τ=30 s filter then spent ~90 s
-decaying to the true value. The comment twenty lines above already names this hazard in another
-context and records that **44.6% of samples sit at a rail**, so it is roughly a coin flip per
-connect. Both SRT runs happened to seed near unity (+164 ppm) and showed nothing — luck, not a
-property of the transport.
+⚠️ **THIS WAS FIRST ATTRIBUTED TO THE SEED, AND THAT ATTRIBUTION IS RETRACTED — §10.8.** The
+first pass read window 1's `inst +5000.0` as the first mapping landing on the rail and blamed
+`mirror.smoothedRate = m.rate`. But `inst` is the clock's rate at the END of the 10 s window, not
+at the first mapping. On a fresh connection the first mapping is always exactly 1.0 (`registerFrame`
+anchors at `rate`, which is 1.0 on a constructed or `reset()` clock), so the old seed already WAS
+1.0. Measured on 6 of 6 connects. What actually happens: **the P-loop rails within the first
+~0.1–2 s, following the connect burst, and the fast end of the τ ramp (τ = 2 s at t = 0) follows the
+rail by design** — the ramp note in `FrameEngine.swift` exists precisely so the mirror tracks the
+startup rail rather than accruing 4 ms/s of position error. The peak is set by how long the rail
+lasts (6 connects: 1331–3972 ppm, both signs), not by the seed. The "SRT seeded near unity (+164
+ppm)" remark rests on the same window-1 misreading and is withdrawn with it.
 
 **2. Jitter recovery — −1776 ppm (SRT, t ≈ 380 s).** A one-second arrival deficit
 (`[SRT-JITTER] window arrivals min=22 max=25` against 23.98) drained the depth 0.233 → 0.156 s
@@ -1346,13 +1350,14 @@ it does not bind. `k_p = 0.1` (T = 10 s) is the aggressive end and still fits.
 **`B` — 0.001 is right for steady state and is NOT enough for the transients. Two options, and they
 are not alternatives:**
 
-1. ✅ **Fix the seed, first and regardless.** Seeding `smoothedRate` from one sample is what produced
-   +3834 ppm, and this document's own τ-ramp note already rejects "seed from one sample" as a
-   mistake. Seeding from 1.0, or from a short median, removes the largest excursion in the entire
-   data set at no cost and independently of the resampler. **It is also a live defect today**, not
-   only a resampler concern: it means every WHEP connect spends ~90 s pushing a rate that is up to
-   0.4% wrong.
-2. ⚠️ **Then `B` still has to cover jitter recovery, and 0.001 does not.** Measured −1776 ppm from an
+1. ~~✅ **Fix the seed, first and regardless.**~~ **Tried, measured to change nothing on the
+   connect path, and reverted — §10.8.** The old seed already was 1.0 on every fresh connection, so the +3834 ppm excursion is untouched. **It is the τ ramp following a real
+   connect-time rail, and it is a `B` question like item 2, not a defect:** 6 connects put the
+   startup peak at **1331–3972 ppm**, 4.0× `B = 0.001` at worst and still 2.0× the proposed
+   `B = 0.002`. Options, none taken here: let the ratio saturate at `B` during the first ~2 min and
+   leave the residual to position error; or feed the resampler from the τ = 30 s filter only after
+   the ramp; or size `B` for it (0.004). Choosing among them belongs to step 3/4.
+2. ⚠️ **`B` has to cover jitter recovery, and 0.001 does not.** Measured −1776 ppm from an
    ordinary 16 s rail on a loopback link. **Proposal: `B = 0.002`** — 1.1× the worst measured
    excursion, and in pitch terms ±3.5 cents against ±1.7 at 0.001. Both are inaudible on programme.
 
@@ -1390,3 +1395,183 @@ now two array copies; everything else is off-thread.
   before-figure to be judged against.
 * **One session per transport.** Two of the four excursions here were single events; §10.3's
   jitter-recovery figure in particular is n=1 and its 1.8×-outside-`B` conclusion rests on it.
+
+### 10.8 The seed fix — measured before and after, 2026-09-24
+
+**Change tested, then REVERTED the same day because it fixed no measured problem:**
+`mirrorLiveAudio`'s first-mapping branch seeded `smoothedRate = 1.0` instead of `= m.rate`. The
+code is back to `= m.rate`; this section is the record. **Why 1.0 rather than a short average excluding railed samples:** it is the value the
+τ-ramp note was written around; every measured steady state is within ±250 ppm of it, so its worst
+error is 20× smaller than a railed sample's; and it adds no state and no threshold. A rail-excluding
+average would need both, and — as the result shows — would have had nothing to exclude, because
+the first sample is not railed.
+
+**Method:** WHEP via MediaMTX (OBS → WHIP → MediaMTX → WHEP), Profile build, telemetry on, one app
+launch per build, 3 connects each, 190 s per connect timed from the first mapping, ~15 s between.
+Session origin is the first `[WHEP-AUDIO] mirror` line (it fires on the first mapping); setRate
+times are the renderer probe's own host stamps. **Settle** = the first 10 s paired-probe window
+whose whole `smoothed` range sits inside ±250 ppm; the crossing lies in the window before, so each
+figure is a 10 s bracket.
+
+| | seed (`clockRate` at 1st mapping) | peak \|smoothed\| ≤ 100 s | settled inside ±250 ppm | setRate ≤ 120 s |
+|---|---|---|---|---|
+| before 1 | 1.00000 | **+3885** ppm | (130, 140] s | 35 |
+| before 2 | 1.00000 | **−1331** ppm | (40, 50] s | 16 |
+| before 3 | 1.00000 | **−1935** ppm | (60, 70] s | 18 |
+| after 1 | 1.00000 | **+3972** ppm | (150, 160] s | 36 |
+| after 2 | 1.00000 | **+2552** ppm | (70, 80] s | 23 |
+| after 3 | 1.00000 | **+2073** ppm | (90, 100] s | 17 |
+
+📌 **THE CHANGE IS BIT-IDENTICAL ON THIS PATH, SO THE SPREAD ABOVE IS SESSION-TO-SESSION, NOT
+BEFORE-VERSUS-AFTER.** With `m.rate == 1.0` at the first mapping, both versions store 1.0. The after
+column is higher only because its three connects railed positive and longer; the before set had
+two negative ones. The first-30 s push traces show the mechanism directly: the first push is at
++0 ppm on all six, then pushes step out by ~200–250 ppm each, 0.1 s apart at first, as the τ = 2 s
+end of the ramp follows a rail that is already on.
+
+**What it would have done:** removed a latent hazard on any path where the mirror begins against
+a clock that is already running — `beginLiveAudio` after the clock has anchored and moved. Not
+observed on WHEP. **Not measured on SRT or on an audio-only restart**; whether those paths exist is
+unverified.
+
+**One real steady-state number from this run:** after the decay, `smoothed` stayed within
+±250 ppm on 5 of 6 connects out to 185 s (worst 249); after-1 touched +268 ppm at ~180 s. Consistent with §10.2.
+
+### 10.9 Why LiveClock rails at connect — the startup anchor, not the gain (2026-09-24)
+
+**Read-only analysis of the six §10.8 WHEP/MediaMTX sessions and `step2-srt-local.log`.** The
+excursion §10.8 left open is the P-loop railing within ~0.1 s of the first mapping. Every rail traces
+to an offset CREATED AT THE ANCHOR, which the loop can then only remove by rate.
+
+**Depth at the first control tick, and ~1 s later** (target 0.400 s WHEP, 0.250 s SRT; the first
+`[LIVECLOCK]` line is the first `updateDepth` call after the anchor):
+
+| session | decoder setup before the anchor frame | first tick | ~1 s later | mirror peak |
+|---|---|---|---|---|
+| WHEP before-1 (cold) | **104 ms** | −0.6 ms, 1 frame | **+103 ms, 13 frames** | +3885 ppm |
+| WHEP after-1 (cold) | **101 ms** | +37 ms, 2 frames | **+135 ms, 13 frames** | +3972 ppm |
+| WHEP 2 & 3, both builds (warm) | 2–6 ms | −5.2…−5.6 ms, 1 frame | −12…+10 ms, 9–10 frames | ±1331…2552 ppm |
+| SRT local (cold) | 87 ms | +17.8 ms, 6 frames | −6.0 ms | −290 ppm |
+
+"Decoder setup" = `format description built` → `session created` / `keyframe acquired`. "Cold" = the
+first connect after app launch.
+
+**Three mechanisms, in order of size:**
+
+1. **Arrival burst behind a late anchor frame — the large excursions.** `registerFrame` anchors on
+   the keyframe's arrival. On the first connect after launch, creating the hardware decode session
+   takes ~100 ms; frames received meanwhile queue behind the keyframe and are delivered in a burst
+   straight after it. The anchor is pinned to the one late frame, so depth lands at target + the
+   setup time: **+103/+135 ms against 104/101 ms of setup.** Warm (2–6 ms of setup) there is no
+   burst. At `maxSlew` the loop drains 5 ms/s, so this is 20–27 s on the rail, then the τ = 30 s
+   decay: +3900 ppm peak, 130–160 s to settle, 35–36 setRates in 2 min.
+2. ~~**Anchor phase — every connect.**~~ ⚠️ **RETRACTED BY §10.10's MEASUREMENT.** This claimed the
+   anchor pins depth at the top of the per-frame sawtooth, starting every connect up to half a frame
+   low. Two things were wrong with it. The renderer already adds Δ/2 to the depth span
+   (`MetalVideoRenderer.swift`, "STRUCTURAL-OFFSET CORRECTION") once the frame interval is seeded, so
+   there is no persistent half-frame bias. And the instrumented before-build shows warm connects
+   were ALREADY at target when the picture started (−1.9 and −0.1 ms): the small warm offset is
+   slewed out inside the 0.4 s fill. **The warm-connect excursions happen AFTER presentation** —
+   see item 3 and §10.10.
+3. **Gain — why it is ALWAYS the rail, and on warm connects the whole story.** k = 0.8 rails at 6.25 ms of error
+   (§11.6), smaller than either offset. But removing an offset D by rate needs ∫(rate − 1) dt = D
+   whatever k is: a lower k trades height for duration with the same area and a longer settle.
+   Retuning the loop moves the excursion; it does not remove it. **On warm connects there is no
+   anchor offset left to remove** (item 2): the ±800–1400 ppm comes from the relay running
+   one-sided for 1–3 s on the 5–17 ms of post-presentation sawtooth error, which the mirror's
+   τ ramp (τ = 2 s at the start) then follows almost in full.
+
+**SRT has the same mechanisms at smaller scale:** +18 ms with 6 frames already queued at the first
+tick, self-cancelling within ~1 s, so the relay ran two-sided and the mirror peaked at −290 ppm with
+4 setRates in 2 min. n = 1.
+
+**Steady state is quiet on every WHEP run** — 0–1 setRate in 120–180 s — so nearly all of the 16–36
+setRates in the first 2 minutes are this startup offset being removed by rate.
+
+**The fix at the cause — correct the offset by POSITION during the startup fill.** Until the first
+frame is presented (`!hasPresentedOnce`, with queue edges present), nothing is on screen and the
+audio is waiting on the same anchor, so the clock can be re-anchored in EITHER direction invisibly.
+The snap's arithmetic (`setMappingLocked(mappedNow + (depth − target), t, 1.0)`), both signs, gated
+to the fill window; the slew is untouched from the first presentation on. The synthetic harness
+passes no queue edges and stays inert. Predicted: the connect blips go, connect setRates fall to about
+steady-state plus the fill-window position pushes, and `B` no longer has to cover connect. **Stated
+risk:** a burst that lands AFTER the first presentation would still be drained by rate. **Measured
+in §10.10: true for COLD connects only.** Warm connects are unchanged, for the reason item 2's
+retraction gives.
+
+📌 **Aside, stats only:** `mirror.ticks` was not reset in `beginLiveAudio`, so reconnects printed
+"533 / 599 / 998 heartbeat tick(s)" on their first mapping line.
+
+### 10.10 The startup-fill realign — measured, 2026-09-24
+
+**Change:** `LiveClock.updateDepthLocked` — while `!hasPresentedOnce` and queue edges are present,
+the depth offset is removed by re-anchoring position at rate 1.0 (either sign, at `controlHz`,
+≥ 1 ms), instead of by slewing. It is reported as a new `Event.startupRealign`, so the surplus
+ledger's `recordClockJump` sees it, and both routers log it. The slew is untouched after the first
+presentation. The synthetic harness passes no edges, so it is inert there. **Also:** `mirror.ticks`
+is now reset in `beginLiveAudio` (a stats fix). **Instrument (both builds):** two `[LIVECLOCK]
+startup:` lines per stream, giving depth at first presentation and the arrival lead of every frame
+against the first frame's arrival schedule, before and for 2 s after presentation.
+
+**Protocol:** as §10.8 — Profile, telemetry on, 190 s per connect from the first mapping. Per build:
+a fresh launch, then 1 cold connect (the first decoder session in the process) and warm reconnects.
+The before build is the same tree minus the fix (instrument and ticks fix included). "Settled" uses
+10 s brackets.
+
+| run | decoder setup | realigns (net) | err at 1st presentation | setRate ≤ 120 s | mirror peak ≤ 100 s | settled ±250 ppm |
+|---|---|---|---|---|---|---|
+| MediaMTX before, cold | 87 ms | — | **+88.7 ms** | **34** | **+3734** | (130, 140] s |
+| MediaMTX before, warm | 4 ms | — | −1.9 ms | 8 | −760 | (30, 40] s |
+| MediaMTX before, warm | 5 ms | — | −0.1 ms | 5 | +234 | (0, 10] s |
+| MediaMTX **after**, cold | 83 ms | 4 (+84.3 ms) | **−1.1 ms** | **9** | **+356** | **(10, 20] s** |
+| MediaMTX after, warm | 6 ms | 4 (+8.8 ms) | −0.5 ms | 9 | +790 | (70, 80] s |
+| MediaMTX after, warm | 3 ms | 4 (+32.5 ms) | −1.3 ms | 14 | −1377 | (50, 60] s |
+| SRT local after, cold | 82 ms | **0** | +17.2 ms | 5 | +449 | (20, 30] s |
+| SRT local after, warm | 4 ms | **0** | +15.1 ms | 10 | −1098 | (60, 70] s |
+| Cloudflare after, cold | 99 ms | 3 (+96.1 ms) | +8.2 ms | 21 | +2133 | (70, 80] s |
+| Cloudflare after, warm | 6 ms | 3 (+19.4 ms) | +2.0 ms | 6 | +549 | (30, 40] s |
+
+The setRate count includes the fill-window position pushes: 2–5 in the first 0.5 s on every run.
+
+✅ **COLD CONNECT, WHICH WAS THE DOMINANT CASE, IS FIXED.** On MediaMTX the first-presentation error
+drops from +88.7 to −1.1 ms, setRates from 34 to 9, the peak from +3734 to +356 ppm, and settle from
+~135 s to ~15 s. The cold decoder's ~100 ms burst was fully present before the picture started on
+all three WHEP cold runs (the pre-presentation arrival lead was +98.9 / +118.9 ms), and the realign
+absorbed it: +98.0 ms on MediaMTX, +78.7 + 19.6 ms on Cloudflare.
+
+✅ **THE STATED RISK DID NOT MATERIALISE.** No burst frame arrived after the first presentation on any
+run. Arrival-lead growth over the 2 s after presentation was +1.9 / −0.3 / +2.8 ms (MediaMTX after),
++3.4 / +1.8 ms (Cloudflare) and +11–15 ms (MediaMTX before, SRT). The before build's warm runs, which
+had no burst at all, set the jitter floor at +11–12 ms, and every figure is well under one frame
+interval.
+
+⚠️ **WARM CONNECTS ARE NOT IMPROVED, AND COULD NOT HAVE BEEN.** The before build's warm connects were
+already at target at presentation (−1.9 / −0.1 ms). Their excursions — and the after build's, of the
+same size (+790, −1377, +549 ppm; 6–14 setRates) — come from the relay after presentation (§10.9
+item 3). n = 2 per build is too few to call the after-build's warm spread worse than the before's;
+the mechanism is identical.
+
+⚠️ **CLOUDFLARE COLD STILL REACHED +2133 ppm.** The realign removed 96 ms, but the picture came due
+between two 10 Hz ticks with +8.2 ms still outstanding. The relay then rode the + rail for ~2 s
+(pushes 1.1–3.1 s), and the τ = 2 s end of the mirror's ramp followed it to +2050 ppm. That is the
+warm-connect mechanism, starting from a slightly larger residual.
+
+**SRT: INERT BY CONSTRUCTION.** SRT's own startup anchor (`SRTFrameRouter`, "startup anchor: GAP")
+anchors on the first network-bound frame with the decode backlog already queued, and backlog frames
+are immediately eligible. The first presentation is 4–6 ms after the anchor, so the fill window closes
+on the first tick and there were 0 realigns on both runs. SRT's +15–17 ms offset is still slewed as
+before. On the warm SRT run you reported "maybe a small glitch at connect, could have been where I
+came in"; there was no realign on that run, and the only startup action was SRT's existing backlog
+discard (77 frames), the same as on the cold run.
+
+**Picture and audio start: normal on every after-build run, by eye and ear** — MediaMTX cold and
+warm, SRT cold, Cloudflare cold (with the SRT warm caveat above). No snap, freeze-guard or queue-full
+event on any run.
+
+**What this does to `B`.** The cold-decoder excursion (+3700–4000 ppm) is gone. The connect transient
+that remains is the relay after presentation, followed through the fast start of the τ ramp:
+**up to 2133 ppm (Cloudflare cold), 1377 (MediaMTX warm), 1098 (SRT warm)**. That is 1.07× the
+proposed B = 0.002 at worst, so B = 0.002 still does not cover the connect transient on its own. The
+next cause at the source is the relay (§11.6: a 6.25 ms linear range inside a ±20 ms sawtooth) or
+the mirror's τ = 2 s start, not the anchor.
+
