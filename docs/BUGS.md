@@ -705,6 +705,63 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 
 ---
 
+## ☐ PRE-SHIP: `DataChannelBridge.m` writes ~2 diagnostic lines per second to stderr in RELEASE, for the life of every WHEP session
+
+**Status:** OPEN, pre-existing, **not a regression** — it has been true for as long as the file has
+existed. **Raised:** 2026-09-24, while gating the new RTCP sender-report probe, which is when
+somebody finally looked for the gate and found there wasn't one.
+
+**Measured, in `App/WebRTC/DataChannelBridge.m`:**
+
+- **45 `NSLog` call sites. 12 are gated** — all of them the 2026-09-23 SR probe, behind
+  `MD_SR_LOG` / `#if DEBUG || MANIFOLD_TELEMETRY`. **The other 33 are unconditional.**
+- `startRTPStatsTimer` arms a **1 Hz** `dispatch_source` (`NSEC_PER_SEC` interval) with no
+  configuration check, and `logRTPStatsTick` emits at least two lines per tick —
+  `[WHEP-AUDIO] rtp — …` and `[WHEP-RTP] +Ns …`, the latter several hundred characters wide — plus
+  conditional extras on loss, skipped frames and payload-type mismatches.
+- **Confirmed in the built Release binary**, not inferred from the source:
+
+  ```
+  Release   WHEP-AUDIO=17  WHEP-RTP=9   WHEP-BRIDGE=6   WHEP-SR=0
+  Profile   WHEP-AUDIO=17  WHEP-RTP=11  WHEP-BRIDGE=6   WHEP-SR=1
+  ```
+
+  The two configurations are nearly identical, which is the finding.
+
+⚠️ **AND THE REST OF THE WHEP STACK ALREADY FOLLOWS THE RIGHT RULE, WHICH IS WHY THIS READS AS AN
+OVERSIGHT RATHER THAN A POLICY.** `WHEPClient.swift` gates its **periodic** diagnostics — its own
+header says so, *"Only the in-file [WHEP-*] diagnostics stay behind `#if DEBUG || MANIFOLD_TELEMETRY`
+— see `logDecodeStatsTick` and `disconnect()`"* — while letting one-shot connect lines ship, which
+is a defensible split: a handful of lines per connection is useful in a support log; a per-second
+heartbeat is not. **The bridge does not make that split at all.**
+
+📌 **THIS IS THE SAME SHAPE AS THE `[LIVECLOCK]`-IN-RELEASE FINDING**, recorded at length in
+`Packages/ManifoldCore/Package.swift`, where a Release build was writing `[LIVECLOCK] depth=… …` to
+stderr at 1 Hz for as long as any live source was connected. That one was found by reading the
+reachability chain, and closed with a runtime gate. **Two independent instances of the same mistake
+in the same subsystem is a pattern, not a coincidence** — and the second was found only because an
+unrelated change happened to ask the question.
+
+**Why it is not a blocker.** Nothing is wrong with the output and nothing crashes. `NSLog` on a
+shipping Mac app goes to the unified log and to stderr; the cost is log-volume pollution for anyone
+diagnosing an unrelated problem, a small amount of string formatting per second on the main queue,
+and the disclosure of internal counter names and stream identifiers in a customer's log archive.
+
+**Done means:** the **periodic** emitters in `DataChannelBridge.m` are behind
+`#if DEBUG || MANIFOLD_TELEMETRY`, matching `WHEPClient.swift`. The one-shot connect/teardown lines
+are a separate decision and are probably worth keeping.
+
+⚠️ **AND THE ONE THING NOT TO DO IS "grep the archive and declare victory".** `Package.swift` is
+explicit that the `[LIVECLOCK]` strings survive in a stripped Release archive even though the fix
+works, because the fix was a runtime gate rather than a recompile. **Strings present is not evidence
+of emission, and strings absent is not the acceptance test either** — the test is a Release run with
+a WHEP source connected and stderr captured.
+
+**Scope check before anyone widens this:** only `DataChannelBridge.m` was audited. `SRTClient` /
+`SRTFrameRouter`, `NDIService` and the HLS path have not been checked and may be in the same state.
+
+---
+
 ## ✅ FIXED 2026-09-22 — SRT killed a healthy stream ~17 s after reconnecting, blaming the broadcaster
 
 **Status:** ✅ **FIXED 2026-09-22. Not yet through a real session** — the entry stays until it has
