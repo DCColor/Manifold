@@ -2071,9 +2071,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         #if DEBUG || MANIFOLD_TELEMETRY
         /// Read-only observer of what this sink hands the renderer. See `LiveAudioRendererProbe`.
         private let probe: LiveAudioRendererProbe?
+        /// Step 2's paired (target, timebase) read. See `LiveAudioPairedProbe`.
+        private let paired: LiveAudioPairedProbe?
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
-                         path: AudioTapBuffer.SourcePath, probe: LiveAudioRendererProbe?) {
-            self.renderer = renderer; self.tap = tap; self.path = path; self.probe = probe
+                         path: AudioTapBuffer.SourcePath, probe: LiveAudioRendererProbe?,
+                         paired: LiveAudioPairedProbe?) {
+            self.renderer = renderer; self.tap = tap; self.path = path
+            self.probe = probe; self.paired = paired
         }
         #else
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
@@ -2088,6 +2092,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // ⚠️ BEFORE BOTH CONSUMERS, AND IT TOUCHES NEITHER. This reads the buffer's timing and
             // records it; the tee below is byte-for-byte what it always was.
             probe?.willEnqueue(sampleBuffer)
+            // ⚠️ THIS IS §2.1's "PER INPUT BUFFER, ON THE ENQUEUE THREAD" — and this seam is the
+            // ONE place all three push transports already share, so SRT, WHEP and NDI are
+            // instrumented by one call rather than three copies that could drift apart. It reads
+            // two clocks and returns; it enqueues nothing and defers nothing.
+            paired?.sample()
             #endif
             tap.ingest(sampleBuffer, path: path)
             renderer.enqueue(sampleBuffer)
@@ -2184,7 +2193,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         probe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "beginLiveAudio (hold)")
         liveAudioProbe = probe
         setProbeForRateLog(probe)
-        return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path, probe: probe)
+        // `synchronizer` is `nonisolated(unsafe)` and the closure only reads it, so the probe can
+        // sample from the transport's own thread without a main-actor hop — which is the whole
+        // point of measuring on the enqueue thread.
+        let paired = LiveClock.telemetryIsEnabled
+            ? LiveAudioPairedProbe(tag: "[\(path.rawValue.uppercased())-PAIRED]",
+                                   readTimebaseSeconds: { [synchronizer] in
+                                       CMTimeGetSeconds(synchronizer.currentTime())
+                                   })
+            : nil
+        liveAudioPairedProbe = paired
+        setPairedProbe(paired)
+        return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
+                             probe: probe, paired: paired)
         #else
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path)
         #endif
@@ -2225,6 +2246,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// The renderer probe for this session, reachable from the nonisolated rate-set sites.
         /// Guarded by this object's `lock` like everything else here.
         var probe: LiveAudioRendererProbe?
+        /// Step 2's paired-read probe, reachable from `mirrorLiveAudio` / `anchorLiveAudio` for
+        /// the same reason `probe` is: those are nonisolated and cannot see main-actor state.
+        var pairedProbe: LiveAudioPairedProbe?
         #endif
         var changes = 0
         var pushes = 0
@@ -2314,6 +2338,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private nonisolated func setProbeForRateLog(_ p: LiveAudioRendererProbe?) {
         mirror.lock.lock(); mirror.probe = p; mirror.lock.unlock()
     }
+
+    /// Step 2's paired probe for the current session. Same two-handle arrangement, same reason.
+    private var liveAudioPairedProbe: LiveAudioPairedProbe?
+    private nonisolated var pairedProbeForReference: LiveAudioPairedProbe? {
+        mirror.lock.lock(); defer { mirror.lock.unlock() }
+        return mirror.pairedProbe
+    }
+    private nonisolated func setPairedProbe(_ p: LiveAudioPairedProbe?) {
+        mirror.lock.lock(); mirror.pairedProbe = p; mirror.lock.unlock()
+    }
     #endif
 
     /// Track `LiveClock`'s mapping so the audio timebase reads what `now()` reads, minus the
@@ -2388,6 +2422,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // `cushion` = how far behind `senderPTS` the CALLER stamps its audio (see `beginLiveAudio`),
         // NOT the clock's buffer depth. This puts the timebase on the caller's PTS axis.
         let target = m.senderPTS - cushion
+
         mirror.lock.lock()
         // ⚠️ THE `min(1.0, …)` CLAMP IS KEPT, AND IT IS NO LONGER LOAD-BEARING IN THE CASE THAT
         // MADE IT VISIBLE. With the heartbeat feeding this at `controlHz`, `dt` is ~0.1 s and the
@@ -2438,6 +2473,29 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let statsDue = m.hostTime - mirror.lastStatsHost >= 10.0
         if statsDue { mirror.lastStatsHost = m.hostTime }
         mirror.lock.unlock()
+
+        #if DEBUG || MANIFOLD_TELEMETRY
+        // ── STEP 2's REFERENCE LINE, PUSHED RATHER THAN PULLED ────────────────────────────
+        //
+        // §2.1's target is `senderPTS + (t1 - hostTime) * rate - cushion`, which is exactly
+        // (`target`, `m.hostTime`, `m.rate`) evaluated at t1. Handing it to the probe means the
+        // audio thread never calls `LiveClock.now()` and so never waits behind the 10 Hz video
+        // control loop for a measurement.
+        //
+        // ⚠️ `m.rate` FOR THE TARGET, `smoothedNow` ALONGSIDE IT, AND THE PAIR IS THE POINT.
+        // `m.rate` is what the clock currently believes and is what §2.1's formula asks for.
+        // `smoothedNow` is what the mirror would actually PUSH, and it is what the resampler's
+        // ratio would have to produce — so it is what sizes `B`. The first smoke run showed why
+        // both are needed: the instantaneous rate swung ±3400 ppm across 80 s, which swamped a
+        // per-window fit of `err` and would have been read as a clock ratio.
+        //
+        // AFTER the unlock, not before: `noteReference` takes the probe's own lock, and nesting
+        // it inside the mirror's would create a second lock order for no benefit. Before the
+        // `shouldPush` gate, because the reference describes where the audio should be — true on
+        // every mapping whether or not this one produces a `setRate`.
+        pairedProbeForReference?.noteReference(media: target, host: m.hostTime,
+                                               rate: m.rate, smoothed: smoothedNow)
+        #endif
 
         // ⚠️ EMITTED BEFORE THE PUSH GUARD, AND THAT ORDERING IS THE WHOLE POINT OF THIS LINE.
         // It used to sit after `guard shouldPush`, while `lastStatsHost` was advanced before it —
@@ -2534,6 +2592,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         #if DEBUG || MANIFOLD_TELEMETRY
         liveAudioProbeForRateLog?.recordRateSet(rate: 1.0, mediaTime: mediaTime,
                                                 origin: "anchorLiveAudio")
+        // ⚠️ RATE 1.0, AND THAT IS NOT A PLACEHOLDER — IT IS WHAT MAKES NDI's NUMBER DIFFERENT.
+        // This transport has no mapping and no rate to mirror: the timebase is set once and left,
+        // so the target advances at exactly mach time. The error the probe then accumulates is the
+        // audio device crystal against mach — §5.1's "-7.8 ppm, a property of the output device" —
+        // and NOT a sender-vs-receiver figure like SRT's and WHEP's. Do not pool them.
+        // `smoothed: 1.0` because there is nothing to smooth: this path never computes a rate.
+        pairedProbeForReference?.noteReference(media: mediaTime, host: hostTime,
+                                               rate: 1.0, smoothed: 1.0)
         #endif
         synchronizer.setRate(1.0,
                              time: CMTime(seconds: mediaTime, preferredTimescale: 90_000),
@@ -2663,6 +2729,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioProbe?.detach()
         liveAudioProbe = nil
         setProbeForRateLog(nil)
+        // Same discipline: write the final window before the observations go.
+        liveAudioPairedProbe?.finish()
+        liveAudioPairedProbe = nil
+        setPairedProbe(nil)
         #endif
         synchronizer.rate = 0
         audioRenderer.flush()

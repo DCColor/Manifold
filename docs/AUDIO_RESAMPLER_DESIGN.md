@@ -1226,3 +1226,167 @@ sample agreeing is not the same as the two runs agreeing.
 * **No real programme material.** Sweeps and noise, not decoded Opus or AAC.
 * **16 channels is a CPU figure, not a correctness one.** Channel handling at 16 has been timed,
   not audited against a real layout.
+
+---
+
+## 10. Step 2 results — the paired error and the real ppm, measured 2026-09-24
+
+**Instrument built, four transports traced, nothing audible changed.**
+`Packages/ManifoldCore/Sources/ManifoldCore/LiveAudioPairedProbe.swift`, called from
+`LiveAudioSink.enqueue` — the one seam SRT, WHEP and NDI already share, so all three are
+instrumented by one call rather than three copies that could drift apart. Behind
+`DEBUG || MANIFOLD_TELEMETRY`, created only when `LiveClock.telemetryIsEnabled`.
+
+**10 minutes per transport, not 30.** The 30-minute soaks stay in step 8 as the acceptance test;
+what step 2 needs is the ppm range and whether there is a trend, and §10.4 shows 10 minutes settled
+that on every transport — including NDI, which was the one expected to need a longer lever arm.
+
+### 10.1 What each transport measures — and they are NOT the same quantity
+
+| | reference line | what `err`'s slope is |
+|---|---|---|
+| SRT, WHEP | `(senderPTS − cushion, hostTime, rate)`, refreshed at 10 Hz | a **sawtooth**: accumulates between rate pushes, reset by them. Its slope is the instantaneous mismatch, not a clock ratio. |
+| NDI | `(mediaTime, hostTime, 1.0)`, set once and left | the **audio device crystal against mach**, accumulating freely |
+
+Do not pool them. The code says so at both push sites.
+
+### 10.2 Steady state — t ≥ 200 s, which is >5τ past the EMA seed
+
+| | smoothed ppm min/med/max | err median ms | err p99 max | trend ppm/min |
+|---|---|---|---|---|
+| **SRT local** | −1776 / **+60** / +144 | −3.4 / −0.0 / +7.8 | +11.0 | +24.1 ± 33.9 (0.7σ) |
+| **WHEP MediaMTX** | −137 / **+106** / +226 | −2.8 / +0.2 / +8.1 | +10.7 | +6.9 ± 4.7 (1.5σ) |
+| **WHEP Cloudflare** | −155 / **−81** / −9 | −8.1 / −4.4 / −0.1 | +1.7 | −1.3 ± 2.1 (0.6σ) |
+| **NDI** | n/a — no mapping | accumulates +0.03 → +4.11 ms | — | **+6.680 ± 0.003 ppm** |
+
+**Steady-state smoothed rate is inside ±250 ppm on all three mirrored transports**, which vindicates
+§5.2's "absorb ±500 ppm steady state" — for steady state. The SRT −1776 ppm is one excursion (§10.3),
+not the distribution.
+
+📌 **CLOUDFLARE IS THE TIGHTEST OF THE THREE, WHICH IS NOT WHAT ANYONE WOULD HAVE GUESSED.** Its
+p99 never leaves +1.7 ms and its error envelope is half the other two's, on the longest path in the
+set. Worth remembering the next time a figure is attributed to "the CDN" without measurement.
+
+**The pairing gate discarded 3.90–4.06% on the mirrored transports and 0.021% on NDI** — 57,585
+samples with 12 discards. NDI's pump thread is simply not preempted the way the network transports'
+threads are. The gate is doing real work and its cost is known.
+
+### 10.3 TWO regimes take the smoothed rate outside `B`, for two different reasons
+
+`B = 0.001` is ±1000 ppm. Both of these exceeded it, on the two quietest links available — one
+loopback, one localhost.
+
+**1. Startup seeding — +3834 ppm (MediaMTX), +3775 ppm (Cloudflare), decaying with τ ≈ 32 s.**
+
+```
++10s +3377   +40s +2184   +70s  +809   +100s +372
++20s +3834   +50s +1613   +80s  +580   +110s +287
++30s +3033   +60s +1149   +90s  +523   +120s +226   ← settled
+```
+
+The cause is in the code, at `FrameEngine.swift`'s smoothing block: on the first mapping,
+`mirror.smoothedRate = m.rate` — **seeded from a single sample**. Window 1 on both WHEP runs shows
+`inst +5000.0`, i.e. the first mapping landed on the rail, and the τ=30 s filter then spent ~90 s
+decaying to the true value. The comment twenty lines above already names this hazard in another
+context and records that **44.6% of samples sit at a rail**, so it is roughly a coin flip per
+connect. Both SRT runs happened to seed near unity (+164 ppm) and showed nothing — luck, not a
+property of the transport.
+
+**2. Jitter recovery — −1776 ppm (SRT, t ≈ 380 s).** A one-second arrival deficit
+(`[SRT-JITTER] window arrivals min=22 max=25` against 23.98) drained the depth 0.233 → 0.156 s
+against its 0.250 target. LiveClock pinned the rate at **0.9950 — `maxSlew`, the −5000 ppm rail —
+for 16 seconds continuously**, and the τ=30 s filter dragged `smoothedRate` to −1776 ppm, recovering
+over ~60 s. `underruns=0`, no content lost, nothing audible.
+
+⚠️ **THIS IS THE ONE THAT MATTERS, BECAUSE IT IS NOT A STARTUP ARTEFACT AND CANNOT BE DESIGNED
+AWAY.** The rail is legitimate control action against a real buffer excursion. §5.2 says the rail
+must not be absorbed and "reaches the ratio only through the τ=30 s feed-forward, attenuated exactly
+as today" — but attenuated is not eliminated: 16 seconds of rail is 1.8× outside `B`.
+
+### 10.4 The trend question, and a retraction
+
+**No transport shows a resolved trend.** 10 minutes was sufficient everywhere, including NDI.
+
+⚠️ **THE FIRST PASS REPORTED CLOUDFLARE AT −14.27 ± 2.87 ppm/min, 5.0σ, "RESOLVED". THAT WAS AN
+ARTEFACT OF MY OWN WINDOW SELECTION AND IT IS RETRACTED.** Steady state had been selected by VALUE
+(`|smoothed| ≤ 300 ppm`) rather than by TIME, so the tail of the τ≈32 s startup decay — which
+crosses 300 ppm at ~90 s and keeps falling — was inside the "steady" set and looked exactly like a
+drift. Excluding by time instead:
+
+| from | ppm/min | σ |
+|---|---|---|
+| 0 s | −14.27 ± 2.87 | **5.0** |
+| 150 s | −4.21 ± 1.84 | 2.3 |
+| 200 s | −1.32 ± 2.08 | 0.6 |
+| 300 s | +1.74 ± 2.87 | 0.6 |
+
+It evaporates monotonically, which a real trend does not. **The transferable rule: a settling
+transient selected on its own value is indistinguishable from a trend. Exclude on time, and state
+the time.** Same failure shape as §9.2's change-instant scatter, one section apart.
+
+📌 **NDI's "trend" IS the measurement, and 10 minutes resolved it at 2326σ.** The accumulated error
+ran +0.029 → +4.105 ms over 609 s in a line with **4 µs of residual scatter**:
+**+6.680 ± 0.003 ppm**. An independent estimate from the per-window slopes gives **+6.80 ppm**
+(sd 0.61, median r² 0.829), and `AV_SYNC_FINDINGS.md` §5.2 measured this machine at **+6.8 to
++7.3 ppm**. Three methods, one answer. §5.1's row for the device crystal is no longer a figure
+borrowed from another investigation.
+
+**NDI re-anchored once in ten minutes** (0.10/min), exactly the ~1-per-21-minutes that
+`AV_SYNC_FINDINGS.md` predicted from 7 ppm against a 10 ms tolerance.
+
+### 10.5 What this says about `B` and `k_p` in §2.2
+
+**`k_p` — propose 0.05 s⁻¹, derived rather than chosen.** Steady-state position error to be nulled
+is **≤ 11 ms p99 on every mirrored transport** (§5.3's bound is ±15 ms, so the existing mirror is
+already inside its own target). `k_p` has units of 1/time: a 10 ms error closed over T seconds needs
+a ratio offset of `0.010/T`. At T = 20 s that is **500 ppm of ratio authority, half of `B`**, and
+`k_p = 1/T = 0.05`. The §2.2 slew limit (2 ppm per 10 ms = 200 ppm/s) reaches 500 ppm in 2.5 s, so
+it does not bind. `k_p = 0.1` (T = 10 s) is the aggressive end and still fits.
+
+**`B` — 0.001 is right for steady state and is NOT enough for the transients. Two options, and they
+are not alternatives:**
+
+1. ✅ **Fix the seed, first and regardless.** Seeding `smoothedRate` from one sample is what produced
+   +3834 ppm, and this document's own τ-ramp note already rejects "seed from one sample" as a
+   mistake. Seeding from 1.0, or from a short median, removes the largest excursion in the entire
+   data set at no cost and independently of the resampler. **It is also a live defect today**, not
+   only a resampler concern: it means every WHEP connect spends ~90 s pushing a rate that is up to
+   0.4% wrong.
+2. ⚠️ **Then `B` still has to cover jitter recovery, and 0.001 does not.** Measured −1776 ppm from an
+   ordinary 16 s rail on a loopback link. **Proposal: `B = 0.002`** — 1.1× the worst measured
+   excursion, and in pitch terms ±3.5 cents against ±1.7 at 0.001. Both are inaudible on programme.
+
+⚠️ **AND §6.3 CRITERION 7 HAS TO MOVE WITH IT, OR BE RESTATED.** It requires "ratio within ±0.1%",
+which is `B = 0.001` by another name. Steady state measures **±250 ppm = ±0.025%**, comfortably
+inside — so the criterion should be rewritten to bound the **steady state** at ±0.1% and allow the
+transient to reach `B`, rather than bounding an instantaneous value the loop is deliberately allowed
+to swing during a recovery. Bounding the instantaneous ratio at 0.1% and setting `B` at 0.2% would
+be a criterion the design is built to violate.
+
+### 10.6 Nothing audible changed
+
+`setRate`/min, the only in-app proxy (mutes are not measurable from inside the process — §4, and
+§5.2 measured a muted renderer advancing its timebase and consuming buffers normally):
+**2.37/min local SRT · 3.82 MediaMTX · 3.38 Cloudflare**, against §11.4's 4.3/min baseline for local
+SRT at 23.976. Lower, not higher, and the spread between transports is larger than any effect a
+read-only probe could have. **Stated no more strongly than that**: the real argument is structural —
+the probe takes only its own lock, reads two clocks, and returns — and this measurement is
+consistent with it rather than proof of it. The mute count itself comes from the device capture in
+§10.7.
+
+⚠️ **ONE INSTRUMENT DEFECT WAS FOUND AND FIXED BEFORE ANY RUN.** The first version called `NSLog`,
+and ran a sort and a least-squares fit, **on the enqueue thread**. `LiveAudioRendererProbe` already
+states the rule — *"an `NSLog` there is a syscall on the exact path whose timing is under
+investigation"* — and hops to `qos: .utility` for exactly this reason. An instrument that perturbs
+its own measurement is the failure this whole line of work exists to avoid. The critical section is
+now two array copies; everything else is off-thread.
+
+### 10.7 Still outstanding from step 2
+
+* **The NDI mute baseline (§6.2) is NOT measured.** It needs a device-output capture through Audio
+  Hijack with the §11.9 offset-track harness and all three §6.1 preconditions, against the broadband
+  reference — **not** the flash-beep fixture, because a tone detector cannot see a splice (phase is
+  modulo one period, §11.9 item 1). Until it exists, §6.2's NDI row stays empty and step 6 has no
+  before-figure to be judged against.
+* **One session per transport.** Two of the four excursions here were single events; §10.3's
+  jitter-recovery figure in particular is n=1 and its 1.8×-outside-`B` conclusion rests on it.
