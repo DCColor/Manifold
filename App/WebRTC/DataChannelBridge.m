@@ -592,6 +592,156 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
             s->controlRecoveredUsMax];
 }
 
+#pragma mark - TEMPORARY INSTRUMENT: RTCP sender-report validation
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// ⚠️⚠️  EVERYTHING UNDER `[WHEP-SR]` IS AN INSTRUMENT, NOT A FEATURE.  ⚠️⚠️
+//
+// It answers one question before any fix is designed around the answer: do a WHEP server's
+// audio and video Sender Reports behave as ONE sender clock? If they do, the per-session
+// lip-sync error recorded in docs/BUGS.md ("WHEP lip-sync is ARBITRARY PER SESSION") is
+// fixable by mapping both SSRCs onto the SRs' common NTP axis. If they do not, it is not,
+// and the fix would need something else.
+//
+// IT CHANGES NO PRESENTATION. Delta is computed and logged and is never applied: audio PTS
+// is still `senderSeconds` as WHEPAudioReceiver has always stamped it. A log-only run is
+// the whole point — a behaviour change measured at the same time as the measurement that
+// justifies it is not evidence of anything.
+//
+// TWO HALVES, WITH DIFFERENT LIFETIMES:
+//
+//   * The AUDIO half (`MANIFOLD_WHEP_SR_PROBE`) is KEPT. It parses RTCP that already lands
+//     in our audio callback and was previously counted and dropped, so it costs nothing and
+//     it is the start of the real fix.
+//
+//   * The VIDEO half (`MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP`) is TEMPORARY AND MUST BE
+//     REVERTED. Video RTCP is normally absorbed inside libdatachannel by RtcpReceivingSession,
+//     which is also what makes `rtcRequestKeyframe` work. Unchaining it to see the video SRs
+//     therefore DISABLES PLI and stops the Receiver Reports we send back to the server. That
+//     is acceptable for a 60 s diagnostic against a sender that emits an IDR every second and
+//     is NOT acceptable in a shipping build. Setting it to 0 restores normal behaviour
+//     completely; the audio half keeps working.
+//
+// The permanent fix does not need the unchaining at all: RtcpReceivingSession ALREADY records
+// the pair (rtcpreceivingsession.hpp, `getSyncTimestamps`), it is simply unreachable through
+// libdatachannel's C API. Exposing it is a ~15-line patch alongside the one in
+// scripts/patches/libdatachannel-recvonly-rtcp.patch. This probe exists to decide whether that
+// patch is worth writing.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+#define MANIFOLD_WHEP_SR_PROBE 1
+
+// ── THE LOGGING GATE ────────────────────────────────────────────────────────────────────
+//
+// `[WHEP-SR]` output is a diagnostic and must not reach a shipping build. It goes through this
+// macro rather than NSLog directly.
+//
+// ⚠️ THIS FILE HAD NO SUCH GATE BEFORE, AND THAT IS WORTH KNOWING RATHER THAN COPYING. The
+// bridge's existing `[WHEP-RTP]` / `[WHEP-AUDIO]` heartbeats are unconditional NSLog and DO ship
+// in Release. That is a pre-existing question about those lines, not a licence for new ones —
+// and it is the same shape as the `[LIVECLOCK]`-in-Release finding recorded in ManifoldCore's
+// Package.swift, which was fixed with a runtime gate after it had already shipped.
+//
+// DEBUG reaches this file in Debug and Profile and is absent in Release (project.yml sets
+// GCC_PREPROCESSOR_DEFINITIONS `DEBUG=1` for those two configs only). MANIFOLD_TELEMETRY is the
+// package's switch and is not defined for the app target, so it is here for symmetry with the
+// Swift side's condition rather than because it currently fires.
+#if DEBUG || MANIFOLD_TELEMETRY
+#define MD_SR_LOG(...) NSLog(__VA_ARGS__)
+#else
+#define MD_SR_LOG(...) do { } while (0)
+#endif
+#define MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP 0     // ⚠️ TEMPORARY. 1 unchains; see below.
+//
+// REVERTED TO 0 ON 2026-09-23, once the six sessions in AV_SYNC_FINDINGS.md §6 were captured.
+// PLI and Receiver Reports are back. The audio half above stays on: it parses SRs that already
+// arrive and were previously dropped, and it is the start of the real fix. Setting this to 1
+// again is a DIAGNOSTIC BUILD ONLY — it disables keyframe requests for the whole session.
+
+#if MANIFOLD_WHEP_SR_PROBE
+
+/// What one compound RTCP packet told us. `ntp` is kept in the WIRE format — 32.32 fixed
+/// point seconds since 1900 — deliberately: two NTP values subtracted as int64 are exact,
+/// while converting each to a double first throws away ~1 us at that magnitude.
+typedef struct {
+    BOOL     haveSR;
+    uint32_t ssrc;
+    uint64_t ntp;
+    uint32_t rtp;
+    BOOL     haveCNAME;
+    char     cname[256];
+} ManifoldWHEPSRInfo;
+
+/// Walk a compound RTCP packet (RFC 3550 §6.1), recording the first SR and the first SDES
+/// CNAME. Returns YES if an SR was present.
+///
+/// ⚠️ SDES IS OFTEN ABSENT AND THAT IS LEGAL, NOT A FAULT. Both servers tested answer with
+/// `a=rtcp-rsize` (RFC 5506 reduced-size RTCP), which permits a non-compound packet carrying
+/// the SR alone. `haveCNAME` is therefore reported, never assumed.
+static BOOL ManifoldWHEPParseRTCP(const uint8_t *p, size_t len, ManifoldWHEPSRInfo *out) {
+    memset(out, 0, sizeof(*out));
+    size_t offset = 0;
+    while (offset + 4 <= len) {
+        if ((p[offset] >> 6) != 2) break;                       // version must be 2
+        const uint8_t  rc      = p[offset] & 0x1Fu;             // report/chunk count
+        const uint8_t  pt      = p[offset + 1];
+        const size_t   words   = (size_t)((p[offset + 2] << 8) | p[offset + 3]);
+        const size_t   pktLen  = (words + 1u) * 4u;             // header included
+        if (pktLen < 4 || offset + pktLen > len) break;
+
+        if (pt == 200 && !out->haveSR && pktLen >= 28) {        // SR: 4 hdr + 24 sender info
+            const uint8_t *b = p + offset + 4;
+            out->ssrc = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16)
+                      | ((uint32_t)b[2] << 8)  | (uint32_t)b[3];
+            uint64_t ntp = 0;
+            for (int i = 0; i < 8; i++) ntp = (ntp << 8) | b[4 + i];
+            out->ntp = ntp;
+            out->rtp = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16)
+                     | ((uint32_t)b[14] << 8)  | (uint32_t)b[15];
+            out->haveSR = YES;
+        } else if (pt == 202 && !out->haveCNAME) {              // SDES
+            size_t c = offset + 4;
+            for (uint8_t chunk = 0; chunk < rc && c + 4 <= offset + pktLen; chunk++) {
+                size_t item = c + 4;                            // past the chunk SSRC
+                while (item + 1 < offset + pktLen) {
+                    const uint8_t type = p[item];
+                    if (type == 0) { item++; break; }           // end of this chunk's items
+                    const uint8_t itemLen = p[item + 1];
+                    if (item + 2 + itemLen > offset + pktLen) { item = offset + pktLen; break; }
+                    if (type == 1 && !out->haveCNAME) {         // CNAME
+                        const size_t n = itemLen < sizeof(out->cname) - 1
+                                       ? itemLen : sizeof(out->cname) - 1;
+                        memcpy(out->cname, p + item + 2, n);
+                        out->cname[n] = '\0';
+                        out->haveCNAME = YES;
+                    }
+                    item += 2 + itemLen;
+                }
+                c = (item + 3) & ~(size_t)3;                    // chunks are 32-bit aligned
+            }
+        }
+        offset += pktLen;
+    }
+    return out->haveSR;
+}
+
+/// 32.32 NTP as it appears on the wire -> a readable wall clock, for the one line per SSRC
+/// that prints it in full. The NTP epoch is 1900; Unix is 1970, 2208988800 s later.
+///
+/// Behind the logging gate with its only caller — otherwise it is an unused function in Release,
+/// which the compiler says out loud and which is the right complaint.
+#if DEBUG || MANIFOLD_TELEMETRY
+static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
+    const double secs = (double)(ntp >> 32) + (double)(ntp & 0xFFFFFFFFu) / 4294967296.0;
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:secs - 2208988800.0];
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"HH:mm:ss.SSS";
+    return [f stringFromDate:date];
+}
+#endif
+
+#endif // MANIFOLD_WHEP_SR_PROBE
+
 @implementation ManifoldWHEPSession {
     int  _pc;
     BOOL _closed;
@@ -647,6 +797,37 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     unsigned int _consecutiveNackSendFailures;
     BOOL     _nackSendGivenUp;              // stop calling after a run of refusals; logged once
     BOOL     _loggedFirstNack;
+
+#if MANIFOLD_WHEP_SR_PROBE
+    // ── TEMPORARY INSTRUMENT: RTCP SR validation. See the block above @implementation. ──
+    //
+    // Written from libdatachannel's track threads (audio and video are DIFFERENT threads)
+    // and read on main at close, so unlike the plain statistic counters above this state
+    // genuinely needs a lock: the delta arithmetic reads six fields that must agree with
+    // each other, and a torn read there produces a plausible wrong number rather than a
+    // wrong log line.
+    os_unfair_lock _srLock;
+    BOOL     _srHaveAudio, _srHaveVideo;
+    uint32_t _srAudioSSRC, _srVideoSSRC;
+    uint64_t _srAudioNTP,  _srVideoNTP;        // 32.32 fixed point, wire format
+    uint32_t _srAudioRTP,  _srVideoRTP;
+    char     _srAudioCNAME[256], _srVideoCNAME[256];
+    BOOL     _srAudioHaveCNAME, _srVideoHaveCNAME;
+    uint64_t _srAudioCount, _srVideoCount;
+    uint64_t _videoRTCPSeen;                   // only non-zero while the video half is unchained
+
+    // T_a0 / T_v0 — the RAW RTP timestamps the two Swift unwrappers rebase to zero. They are
+    // what makes delta expressible: video PTS 0 is T_v0 and audio PTS 0 is T_a0, so the
+    // sender-clock distance between those two instants IS the per-session A/V offset.
+    BOOL     _srHaveTa0, _srHaveTv0;
+    uint32_t _srTa0, _srTv0;
+
+    BOOL     _srFirstPairLogged;
+    double   _srDeltaFirst;                    // delta at the first SR pair, seconds
+    // Residual = delta(now) - delta(first pair). Zero if the two SRs share one clock.
+    uint64_t _srResidualCount;
+    double   _srResidualMin, _srResidualMax, _srResidualSum;
+#endif
 }
 
 @synthesize decodeQueue = _decodeQueue;
@@ -689,6 +870,11 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     ManifoldWHEPSession *session = [[self alloc] init];
     session->_pc = pc;
     session->_rtpLock = OS_UNFAIR_LOCK_INIT;
+#if MANIFOLD_WHEP_SR_PROBE
+    session->_srLock = OS_UNFAIR_LOCK_INIT;
+    session->_srResidualMin =  INFINITY;
+    session->_srResidualMax = -INFINITY;
+#endif
 
     NSLock *lock = ManifoldWHEPSessionsLock();
     [lock lock];
@@ -722,11 +908,36 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     // sender's NTP↔RTP mapping is tracked for later A/V sync), and it is what
     // `rtcRequestKeyframe` pushes a PLI through. Without it, RTCP compound packets would
     // land in our RTP callback and every keyframe request would be a no-op.
+#if MANIFOLD_WHEP_SR_PROBE && MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP
+    // ⚠️⚠️ TEMPORARY — INSTRUMENT ONLY. REVERT BEFORE ANY RELEASE. ⚠️⚠️
+    //
+    // RtcpReceivingSession is deliberately NOT chained, so that video RTCP falls through to
+    // `-ingestRTP:` where the SR probe can read the Sender Reports. libdatachannel offers no
+    // way to see them with the handler in place: it records the pair internally
+    // (`RtcpReceivingSession::getSyncTimestamps`) and exposes no C API for it.
+    //
+    // WHAT THIS COSTS, STATED SO A LOG FROM ONE OF THESE RUNS IS NOT MISREAD:
+    //   * PLI STOPS WORKING. `Track::requestKeyframe` requires a media handler, so every
+    //     `rtcRequestKeyframe` is now a no-op. `[WHEP-DECODE] PLI sent=N` counts intent, not
+    //     packets on the wire. Tolerable only because both servers under test emit an IDR
+    //     about once a second on their own.
+    //   * WE STOP SENDING RECEIVER REPORTS. The server loses its view of our loss and jitter.
+    //     Nothing in Manifold reads them either way, but a server that adapts bitrate to RR
+    //     will behave differently during these runs.
+    //
+    // Set MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP to 0 to restore normal behaviour fully.
+    int chained = -1;
+    NSLog(@"[WHEP-BRIDGE] ⚠️ TEMPORARY SR PROBE ACTIVE — RtcpReceivingSession NOT chained on "
+          @"track %d, so video RTCP reaches our own code. PLI IS DISABLED and no Receiver "
+          @"Reports are sent for the duration. This build is a diagnostic, not a release.",
+          videoTrack);
+#else
     int chained = rtcChainRtcpReceivingSession(videoTrack);
     if (chained < 0) {
         NSLog(@"[WHEP-BRIDGE] WARNING: rtcChainRtcpReceivingSession failed (%d) — expect RTCP "
               @"in the RTP stream and no working keyframe requests", chained);
     }
+#endif
 
     // ⚠️ STATE THE WHOLE CHAIN, INCLUDING WHAT IS NOT IN IT.
     //
@@ -1149,7 +1360,219 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     }
 }
 
+#if MANIFOLD_WHEP_SR_PROBE
+
+/// One Sender Report, from either track's network thread. Records it, and once BOTH SSRCs
+/// have reported and both rebase origins are known, computes the per-session A/V offset.
+///
+///     delta = [ ntp_a + (T_a0 - rtp_a)/48000 ] - [ ntp_v + (T_v0 - rtp_v)/90000 ]
+///
+/// In words: the sender-clock time of the first audio packet minus the sender-clock time of
+/// the first video frame. Those two instants are what the receiver currently treats as
+/// simultaneous — `RTPTimestampUnwrapper` rebases video to zero at its first access unit and
+/// `WHEPAudioReceiver.unwrap` rebases audio to zero at its first packet — so delta IS the
+/// error, and nothing in the app measures it today.
+///
+/// ⚠️ NOT APPLIED. Logged only. See the block above @implementation.
+///
+/// ⚠️ THE NTP DIFFERENCE IS TAKEN IN FIXED POINT, BEFORE ANY CONVERSION TO DOUBLE. NTP
+/// seconds-since-1900 is ~3.9e9; a double holds that with about 1 us of resolution left, so
+/// converting each value first and subtracting afterwards would put microseconds of noise
+/// into the very residual this probe exists to read at sub-millisecond scale. Subtracted as
+/// int64 in the wire's own 32.32 format the difference is exact.
+///
+/// ⚠️ THE TWO SRs ARE PAIRED "LATEST OF EACH", NOT BY ARRIVAL. They arrive a few hundred
+/// milliseconds apart and each one re-states its own stream's mapping, so pairing the newest
+/// of each is correct for a sender whose two RTP clocks are one clock — which is exactly the
+/// hypothesis under test. If the residual walks, that is the finding, not a pairing artefact:
+/// a pairing artefact would be bounded by the inter-SR gap and would not accumulate.
+- (void)srProbeNoteSR:(const ManifoldWHEPSRInfo *)info isAudio:(BOOL)isAudio {
+    os_unfair_lock_lock(&_srLock);
+
+    if (isAudio) {
+        _srAudioSSRC = info->ssrc; _srAudioNTP = info->ntp; _srAudioRTP = info->rtp;
+        _srAudioCount++;
+        if (info->haveCNAME && !_srAudioHaveCNAME) {
+            strlcpy(_srAudioCNAME, info->cname, sizeof(_srAudioCNAME));
+            _srAudioHaveCNAME = YES;
+        }
+    } else {
+        _srVideoSSRC = info->ssrc; _srVideoNTP = info->ntp; _srVideoRTP = info->rtp;
+        _srVideoCount++;
+        if (info->haveCNAME && !_srVideoHaveCNAME) {
+            strlcpy(_srVideoCNAME, info->cname, sizeof(_srVideoCNAME));
+            _srVideoHaveCNAME = YES;
+        }
+    }
+
+    if (!isAudio) _srHaveVideo = YES; else _srHaveAudio = YES;
+
+    const BOOL ready = _srHaveAudio && _srHaveVideo && _srHaveTa0 && _srHaveTv0;
+    double delta = 0, residual = 0;
+
+    // ── LOG-ONLY SNAPSHOT ──────────────────────────────────────────────────────────────
+    //
+    // Everything below to the matching #endif exists solely to feed the lines at the bottom of
+    // this method, so it is compiled out with them. Declaring these unconditionally cost 15
+    // -Wunused-variable warnings in Release, which is the compiler correctly pointing out that
+    // the work had no consumer.
+    //
+    // It is taken UNDER THE LOCK on purpose: the other track's thread can overwrite its half
+    // between here and the log call, and the one line that documents how Δ was derived must show
+    // the values Δ was actually derived from.
+#if DEBUG || MANIFOLD_TELEMETRY
+    const BOOL     firstForThisSSRC = isAudio ? (_srAudioCount == 1) : (_srVideoCount == 1);
+    const uint64_t aCount  = _srAudioCount, vCount = _srVideoCount;
+    const uint32_t ssrc    = info->ssrc,    rtp    = info->rtp;
+    const uint64_t ntp     = info->ntp;
+    const BOOL     haveTa0 = _srHaveTa0,    haveTv0 = _srHaveTv0;
+    const uint32_t aSSRC = _srAudioSSRC, vSSRC = _srVideoSSRC;
+    const uint32_t aRTP  = _srAudioRTP,  vRTP  = _srVideoRTP;
+    const uint64_t aNTP  = _srAudioNTP,  vNTP  = _srVideoNTP;
+    const uint32_t Ta0   = _srTa0,       Tv0   = _srTv0;
+    char   aCname[256] = {0}, vCname[256] = {0};
+    BOOL   aHaveCname = _srAudioHaveCNAME, vHaveCname = _srVideoHaveCNAME;
+    strlcpy(aCname, _srAudioCNAME, sizeof(aCname));
+    strlcpy(vCname, _srVideoCNAME, sizeof(vCname));
+    BOOL   firstPair = NO;
+#endif
+
+    if (ready) {
+        const int64_t ntpDiffFixed = (int64_t)(_srAudioNTP - _srVideoNTP);
+        const double  ntpDiff = (double)ntpDiffFixed / 4294967296.0;
+        const double  aOff = (double)(int32_t)(_srTa0 - _srAudioRTP) / 48000.0;
+        const double  vOff = (double)(int32_t)(_srTv0 - _srVideoRTP) / 90000.0;
+        delta = ntpDiff + aOff - vOff;
+
+        if (!_srFirstPairLogged) {
+            _srFirstPairLogged = YES;
+            _srDeltaFirst = delta;
+#if DEBUG || MANIFOLD_TELEMETRY
+            firstPair = YES;
+#endif
+        } else {
+            residual = delta - _srDeltaFirst;
+            _srResidualCount++;
+            _srResidualSum += residual;
+            if (residual < _srResidualMin) _srResidualMin = residual;
+            if (residual > _srResidualMax) _srResidualMax = residual;
+        }
+    }
+    os_unfair_lock_unlock(&_srLock);
+
+#if DEBUG || MANIFOLD_TELEMETRY
+    if (firstForThisSSRC) {
+        MD_SR_LOG(@"[WHEP-SR] %@ SR #1 — ssrc=%u  ntp=0x%016llx (%@)  rtp=%u  cname=%@",
+              isAudio ? @"AUDIO" : @"VIDEO", ssrc, ntp, ManifoldWHEPFormatNTP(ntp), rtp,
+              info->haveCNAME ? [NSString stringWithFormat:@"\"%s\"", info->cname]
+                              : @"(absent — legal under a=rtcp-rsize)");
+    }
+
+    if (firstPair) {
+        MD_SR_LOG(@"[WHEP-SR] ✅ FIRST PAIR — Δ = %+.3f ms   ⚠️ COMPUTED, NOT APPLIED (presentation "
+              @"unchanged). This is how far the first audio packet sits from the first video "
+              @"frame on the SENDER's clock, i.e. the per-session lip-sync error.",
+              delta * 1000.0);
+        MD_SR_LOG(@"[WHEP-SR]    audio ssrc=%u T_a0=%u rtp_a=%u ntp_a=0x%016llx | "
+              @"video ssrc=%u T_v0=%u rtp_v=%u ntp_v=0x%016llx",
+              aSSRC, Ta0, aRTP, aNTP, vSSRC, Tv0, vRTP, vNTP);
+        MD_SR_LOG(@"[WHEP-SR]    cnames: audio=%@ video=%@ → %@",
+              aHaveCname ? [NSString stringWithFormat:@"\"%s\"", aCname] : @"(none)",
+              vHaveCname ? [NSString stringWithFormat:@"\"%s\"", vCname] : @"(none)",
+              (aHaveCname && vHaveCname)
+                  ? (strcmp(aCname, vCname) == 0
+                        ? @"SAME — RFC 3550 declares these two streams synchronisable"
+                        : @"DIFFERENT — the sender does NOT declare these synchronisable")
+                  : @"UNKNOWN (no SDES seen; reduced-size RTCP)");
+    } else if (ready) {
+        MD_SR_LOG(@"[WHEP-SR] a#%llu v#%llu  Δ = %+.3f ms  residual = %+.3f ms vs first pair",
+              aCount, vCount, delta * 1000.0, residual * 1000.0);
+    } else if (!haveTa0 || !haveTv0) {
+        MD_SR_LOG(@"[WHEP-SR] %@ SR #%llu — holding: %@ not seen yet",
+              isAudio ? @"AUDIO" : @"VIDEO", isAudio ? aCount : vCount,
+              !haveTa0 ? (!haveTv0 ? @"T_a0 and T_v0" : @"T_a0") : @"T_v0");
+    }
+#endif
+}
+
+/// Session verdict, printed on the way out. This is the line the probe exists to produce.
+- (void)srProbeLogSummary {
+    // Logging end to end: in a configuration that cannot emit, there is nothing here to do and
+    // the lock is not taken at all.
+#if DEBUG || MANIFOLD_TELEMETRY
+    os_unfair_lock_lock(&_srLock);
+    const uint64_t aCount = _srAudioCount, vCount = _srVideoCount, n = _srResidualCount;
+    const double   first  = _srDeltaFirst;
+    const double   rmin   = _srResidualMin, rmax = _srResidualMax;
+    const double   rmean  = n ? _srResidualSum / (double)n : 0.0;
+    const BOOL     paired = _srFirstPairLogged;
+    const uint64_t vRtcp  = _videoRTCPSeen;
+    char aCname[256] = {0}, vCname[256] = {0};
+    strlcpy(aCname, _srAudioCNAME, sizeof(aCname));
+    strlcpy(vCname, _srVideoCNAME, sizeof(vCname));
+    const BOOL bothCnames = _srAudioHaveCNAME && _srVideoHaveCNAME;
+    os_unfair_lock_unlock(&_srLock);
+
+    if (aCount == 0 && vCount == 0) {
+        MD_SR_LOG(@"[WHEP-SR] session summary — NO SENDER REPORTS SEEN AT ALL (audio 0, video 0). "
+              @"That is the finding, not a missing instrument.");
+        return;
+    }
+    if (!paired) {
+#if !MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP
+        // EXPECTED, NOT A FAULT, and said so explicitly: with RtcpReceivingSession chained —
+        // the normal configuration — libdatachannel absorbs video RTCP before this code can see
+        // it, so the video half of the pair cannot exist. A line reading "NEVER A PAIR" with no
+        // explanation would look like a defect on every healthy session, which is how an
+        // instrument costs somebody an afternoon.
+        MD_SR_LOG(@"[WHEP-SR] session summary — %llu audio SR seen and parsed. No Δ: video SRs are "
+              @"absorbed by RtcpReceivingSession and never reach us, which is the NORMAL build. "
+              @"Reading them needs either the diagnostic macro or a C API for "
+              @"RtcpReceivingSession::getSyncTimestamps. See AV_SYNC_FINDINGS.md §6.", aCount);
+#else
+        MD_SR_LOG(@"[WHEP-SR] session summary — %llu audio SR, %llu video SR, but NEVER A PAIR with "
+              @"both rebase origins known, so no Δ was computable.", aCount, vCount);
+#endif
+        return;
+    }
+    const double spread = (n ? (rmax - rmin) : 0.0) * 1000.0;
+    MD_SR_LOG(@"[WHEP-SR] session summary — Δ(first pair) = %+.3f ms | %llu audio SR, %llu video SR "
+          @"(video RTCP packets seen: %llu) | residual over %llu later pair(s): "
+          @"min %+.3f max %+.3f mean %+.3f ms, SPREAD %.3f ms | cnames %@ | VERDICT: %@",
+          first * 1000.0, aCount, vCount, vRtcp, n,
+          n ? rmin * 1000.0 : 0.0, n ? rmax * 1000.0 : 0.0, rmean * 1000.0, spread,
+          bothCnames ? (strcmp(aCname, vCname) == 0 ? @"SAME" : @"DIFFERENT") : @"unknown",
+          n == 0 ? @"NOT ENOUGH PAIRS — one pair cannot show drift"
+                 : (spread < 1.0
+                        ? @"the two SRs behave as ONE SENDER CLOCK (spread < 1 ms) — an "
+                           "NTP-based alignment is sound on this server"
+                        : @"⚠️ the two SRs DO NOT hold a common clock at sub-millisecond scale — "
+                           "an NTP-based alignment would drift; read the per-pair lines"));
+#endif
+}
+
+#endif // MANIFOLD_WHEP_SR_PROBE
+
 - (void)ingestRTP:(const uint8_t *)packet length:(size_t)length {
+#if MANIFOLD_WHEP_SR_PROBE && MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP
+    // ⚠️ TEMPORARY. With RtcpReceivingSession unchained, video RTCP is no longer absorbed
+    // inside libdatachannel and arrives here instead. The depacketizer would count it in
+    // `packetsRTCP` and drop it (H264Depacketizer.c:899); take it first so the SRs are read.
+    //
+    // Deliberately OUTSIDE `_rtpLock`: this touches no depacketizer state, and the probe must
+    // never hold the RTP lock across an NSLog.
+    if (length >= 2 && (packet[0] >> 6) == 2) {
+        const uint8_t pt = packet[1] & 0x7Fu;
+        if (pt >= 72 && pt <= 76) {
+            _videoRTCPSeen++;
+            ManifoldWHEPSRInfo info;
+            if (ManifoldWHEPParseRTCP(packet, length, &info)) {
+                [self srProbeNoteSR:&info isAudio:NO];
+            }
+            return;
+        }
+    }
+#endif
     // libdatachannel's track thread. See the callback comment above: no hop, no logging.
     os_unfair_lock_lock(&_rtpLock);
     if (_depacketizer) ManifoldH264DepacketizerSubmitRTP(_depacketizer, packet, length);
@@ -1172,7 +1595,19 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     // field falling in 72–76. The audio track has no RtcpReceivingSession chained to absorb it,
     // so it lands here and must be counted separately rather than parsed as a media packet.
     const uint8_t payloadType = packet[1] & 0x7F;
-    if (payloadType >= 72 && payloadType <= 76) { _audioRTCP++; return; }
+    if (payloadType >= 72 && payloadType <= 76) {
+        _audioRTCP++;
+#if MANIFOLD_WHEP_SR_PROBE
+        // Previously this line was the end of the road for every Sender Report the server
+        // sent us — counted, and dropped unparsed. The counter is kept (the stats line reads
+        // it); what is new is that the SR's contents now reach the probe.
+        ManifoldWHEPSRInfo info;
+        if (ManifoldWHEPParseRTCP(packet, length, &info)) {
+            [self srProbeNoteSR:&info isAudio:YES];
+        }
+#endif
+        return;
+    }
 
     const BOOL marker = (packet[1] & 0x80) != 0;
     const uint16_t seq = (uint16_t)((packet[2] << 8) | packet[3]);
@@ -1212,6 +1647,16 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
 
     void (^sink)(NSData *, uint32_t, uint16_t, BOOL) = self.onAudioPacket;   // atomic read
     if (!sink) return;
+#if MANIFOLD_WHEP_SR_PROBE
+    // T_a0 — captured HERE, past the `!sink` guard, because this is the first packet the
+    // Swift receiver will actually see and therefore the one its unwrapper rebases to zero.
+    // Capturing before the guard would latch a packet that never reached the axis it defines.
+    if (!_srHaveTa0) {
+        os_unfair_lock_lock(&_srLock);
+        if (!_srHaveTa0) { _srTa0 = timestamp; _srHaveTa0 = YES; }
+        os_unfair_lock_unlock(&_srLock);
+    }
+#endif
     sink([NSData dataWithBytes:packet + headerLength length:end - headerLength],
          timestamp, seq, marker);
 }
@@ -1250,6 +1695,17 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
     const BOOL     changed   = accessUnit->parameterSetsChanged;
     const BOOL     keyframe  = accessUnit->keyframe;
     const uint32_t timestamp = accessUnit->rtpTimestamp;
+
+#if MANIFOLD_WHEP_SR_PROBE
+    // T_v0 — the first access unit HANDED OFF, not the first RTP packet seen. The Swift
+    // unwrapper rebases on what it receives, and the shed above can discard an access unit
+    // before it ever gets there, so this is the only point where the two agree.
+    if (!_srHaveTv0) {
+        os_unfair_lock_lock(&_srLock);
+        if (!_srHaveTv0) { _srTv0 = timestamp; _srHaveTv0 = YES; }
+        os_unfair_lock_unlock(&_srLock);
+    }
+#endif
 
     _accessUnitsHandedOff++;
     atomic_fetch_add_explicit(&_pendingAccessUnits, 1, memory_order_relaxed);
@@ -1640,6 +2096,11 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
         dispatch_source_cancel(_statsTimer);
         _statsTimer = nil;
     }
+
+#if MANIFOLD_WHEP_SR_PROBE
+    // Before the tracks are torn down, while the counters still mean something.
+    [self srProbeLogSummary];
+#endif
 
     if (_videoTrack > 0) {
         // Unregister BEFORE freeing anything the callbacks touch.
