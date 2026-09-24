@@ -446,12 +446,12 @@ list**, because nothing is discontinuous and nothing sums wrong. It is exactly �
 ### 3.6 RECOMMENDED — our own polyphase windowed-sinc ASRC, vDSP inner product
 
 ```
-ratio r (output frames per input frame), P = 512 polyphase branches, N = 64 taps
+ratio r (output frames per input frame), P = 1024 polyphase branches, N = 64 taps
 
   phase accumulator:  Q32.32 fixed point, 64-bit, incremented by round(2^32 / r)
   per output frame:   idx  = acc >> 32                     (integer input index)
                       frac = acc & 0xFFFFFFFF              (fractional position)
-                      p    = frac >> 23                    (branch, 0..511)
+                      p    = frac >> 22                    (branch, 0..1023)
                       µ    = remaining bits                (inter-branch fraction)
                       h    = table[p] + µ * dtable[p]      64 taps, ONCE per output frame
                       out[c] = dot(h, history[c] + idx)    once per CHANNEL
@@ -472,14 +472,29 @@ part *is* the input sample index with no rounding rule to get wrong. The output 
 by counting output frames, never from the accumulator — same discipline as
 `NDIService.audioPTSTicks` and `SRTFrameRouter.audioPTSTicks`.
 
-**Quality.** Kaiser-windowed sinc prototype, cutoff at 0.45·fs (21.6 kHz at 48 kHz), β chosen for a
-−100 dB stopband, N = 64, P = 512 with linear inter-branch interpolation.
+**Quality.** Kaiser-windowed sinc prototype, **cutoff at 0.5·fs (Nyquist)**, β chosen for a
+−100 dB stopband, N = 64, **P = 1024** with linear inter-branch interpolation.
 
-| property | design target | why it is achievable here |
-|---|---|---|
-| passband ripple to 20 kHz | **≤ ±0.02 dB** | the ratio is within ±0.1% of unity, so the filter is being asked to do near-identity work; the transition band has 2.4 kHz of room |
-| alias / image rejection | **≥ 95 dB** | 512 branches + inter-branch interpolation puts the interpolation error floor well below the 64-tap stopband |
-| effective resolution | **> 20 bits** | above the ~24 bits the AAC/Opus decode chain actually carries, and above the Int32 path's existing int16→int32 widening |
+⚠️ **BOTH OF THOSE NUMBERS WERE CORRECTED BY THE STEP-1 MEASUREMENT, 2026-09-24. This paragraph
+previously read "cutoff at 0.45·fs (21.6 kHz)" and "P = 512", and each of those cost one acceptance
+target.** Full numbers in §9.3 and §9.4; the reasons in one line each:
+
+* **Cutoff 0.5, not 0.45.** This resampler never decimates — §5.2 bounds the ratio at ±500 ppm — so
+  it is a fractional-delay interpolator and there is nothing to buy below Nyquist. At N = 64 and
+  A = 100 dB the Kaiser transition width is 4.8 kHz, so a cutoff at 21.6 kHz puts the passband edge
+  at **19.2 kHz** and 20 kHz lands inside the transition band. **And only an exactly-Nyquist cutoff
+  makes branch 0 a unit impulse** (`sinc(n) = 0` at every non-zero integer), which is the identity
+  property at ratio 1.0. Measured at 0.45: identity error **0.56**, ripple at 20 kHz **0.113 dB**.
+* **P = 1024, not 512.** The binding constraint on resolution is the linear interpolation BETWEEN
+  branches, whose error falls as 1/P² — 12 dB per doubling — not the prototype's stopband. Measured:
+  512 → 19.6 bits (misses), 1024 → **21.5 bits**. The per-frame cost is identical; only the table
+  doubles.
+
+| property | design target | **measured, step 1 (§9.1)** | why it is achievable here |
+|---|---|---|---|
+| passband ripple to 20 kHz | **≤ ±0.02 dB** | **0.0000 dB** | the ratio is within ±0.1% of unity, so the filter is being asked to do near-identity work; at a Nyquist cutoff the passband edge is 21.6 kHz and 20 kHz is well inside it |
+| alias / image rejection | **≥ 95 dB** | **103.6 dB** | for content below 20 kHz the nearest image is at fs − f ≥ 28 kHz, above the 26.4 kHz stopband edge |
+| effective resolution | **> 20 bits** | **21.5 bits** | 1024 branches with linear inter-branch interpolation; the 1/P² law and the P sweep that measured it are in §9.3 |
 
 **CPU at 16 channels.** Per output frame: one 64-tap coefficient build (≈192 flops, shared across
 channels because the phase is common) plus one 64-tap dot product per channel (128 flops).
@@ -488,7 +503,14 @@ channels because the phase is common) plus one 64-tap dot product per channel (1
 16 ch:  192 + 16 × 128  = 2240 flops/frame  ×  48000  ≈  107 Mflop/s
 ```
 
-Under 1% of one performance core on any machine this app ships to, and comparable to the scalar
+⚠️ **MEASURED AT 1.84% OF ONE CORE AT 16 CHANNELS, NOT THE "under 1%" THIS PARAGRAPH CLAIMED**
+(§9.4). 0.383 µs per output frame at 16 ch; 0.013 / 0.022 / 0.155 µs at 1 / 2 / 8 ch. The flop count
+is right and it is not what dominates: the per-channel pointer and call overhead inside the frame
+loop is, which is what the 2 ch → 8 ch step shows (7× for 4× the channels). Still comfortably
+affordable, and recoverable at step 3 by hoisting one deinterleaved scratch block out of the frame
+loop.
+
+Comparable to the scalar
 per-sample conversion loops `AudioTapBuffer.ingest` already runs on the same thread. Deinterleave
 once per buffer into per-channel float scratch (vDSP), process contiguous, re-interleave and clamp
 to Int32 with the same clamp `ingest` uses. **Do not run the dot product strided over interleaved
@@ -1029,3 +1051,178 @@ Then a multi-hour run on one transport for the drift bound.
    Scarlett 18i20, and `HLSAudioTap.swift` is explicit that such figures are properties of the
    output device. The ±0.1% bound has enormous headroom over it, so this does not block anything —
    but a second reading would turn an assumption into a range.
+
+---
+
+## 9. Step 1 results — the ASRC, measured offline, 2026-09-24
+
+**Built and measured, nothing wired in.** `Packages/ManifoldCore/Sources/AudioResample/` — a leaf
+target with no dependencies — plus `Tests/AudioResampleTests`, run with `swift test -c release`.
+Nothing in the app references it.
+
+📌 **ITS OWN TARGET RATHER THAN A FILE IN `ManifoldCore`, FOR A LINKING REASON.** A test bundle
+LINKS the targets it depends on, and `ManifoldCore` resolves libav symbols that `project.yml` links
+into the app binary rather than the package. A test target depending on it cannot link here at all.
+Depending on a leaf target is what makes `swift test` possible; it is the same shape as
+`ScopeCompute`, and for the same reason it carries the same `-O`.
+
+### 9.1 Results against targets
+
+**Final parameters: N = 64 taps, P = 1024 branches, cutoff 0.5·fs, Kaiser β for a −100 dB
+stopband.** Two of those differ from §3.6 as first written, and §9.3 / §9.4 are why.
+
+| # | measurement | target | measured | |
+|---|---|---|---|---|
+| 1 | identity at ratio 1.0 | out[n] = in[n−32] to float rounding | **max error 0.000e+00** over 8160 frames, delay exactly 32 | ✅ |
+| 2 | passband ripple to 20 kHz | ≤ ±0.02 dB | **0.0000 dB** worst over 20 Hz–20 kHz | ✅ |
+| 3 | alias / image rejection | ≥ 95 dB | **103.6 dB** worst over ±0.1% and 1–20 kHz | ✅ |
+| 4 | effective resolution, full-scale sweep | > 20 bits | **21.5 bits** (SNR 131.3 dB) | ✅ |
+| 5 | **GATE** — ratio-change continuity | residual at the floor, no spikes at change points | **change-instant RMS / overall = 1.013**; per floor 1.012 and 1.041 | ✅ **PASSED** |
+| 6 | accumulator exactness, 8.64e7 increments | integer index matches the exact rational | **exact, all four ratios** | ✅ |
+| 7 | CPU, µs per output frame | (reported, no target) | 1 ch 0.013 · 2 ch 0.022 · 8 ch 0.155 · **16 ch 0.383** | — |
+
+**Seven of seven.** `swift test -c release`, 7 tests, 0 failures.
+
+### 9.2 The gate — passed, and what "at the arithmetic floor" turned out to mean
+
+200 ratio writes, one every 10 ms, along a ±0.1% ramp with random steps, nulled against a reference
+built by **direct windowed-sinc evaluation in Double** — no branch table, no inter-branch
+interpolation, every coefficient recomputed at the exact fractional delay. A reference sharing the
+table would only have proved the table is self-consistent.
+
+```
+residual vs direct-sinc reference : max 7.294e-07   RMS 1.426e-07   (131.0 dB below signal)
+residual AT the 200 change points : max 5.690e-07   RMS 1.444e-07
+change-instant RMS / overall RMS  : 1.013
+```
+
+**A ratio write is not merely small in its effect; it is not detectable at all.** The single worst
+residual in the run is **not** at a change point, and the change-instant RMS matches the whole-run
+RMS to 1.3%.
+
+⚠️ **AND 1.013 IS NOT "SLIGHTLY WORSE THAN 1.000" — IT IS 1.000 AT THIS SAMPLE COUNT.** The
+change-instant figure is an RMS over 200 × 5 = 1000 samples against 95,000 for the whole run, and
+an RMS estimated from *n* samples carries a relative spread of about 1/√(2n) — **2.2% here**. So
+1.013 is 0.6σ and the per-floor 1.041 is 1.8σ. At P = 512 the same three numbers came out at 0.948,
+0.951 and 0.983, i.e. the same distance *below* 1.0. **Reading either sign of that scatter as a
+result would be reading the noise**, which is why the threshold is 1.15 and not 1.00.
+
+§3.6's claim that continuity is a property of the structure rather than a result to re-verify is
+now measured as well as argued.
+
+⚠️ **BUT THE GATE'S WORDING HAS TWO CLAUSES AND ONLY ONE OF THEM IS ACHIEVABLE AGAINST THAT
+REFERENCE.** "The residual must sit at the arithmetic floor" cannot be met by *any* polyphase
+implementation compared against direct evaluation, because the two differ by the branch
+interpolation error at **every** sample, change or no change. Decomposing the residual by running
+the same table and the same branch arithmetic in Double separates them:
+
+| floor | max | RMS | below signal |
+|---|---|---|---|
+| branch quantisation + linear inter-branch interpolation | 7.196e-07 | 1.383e-07 | 131.3 dB |
+| Float arithmetic (64-tap dot product) | 2.017e-07 | 3.473e-08 | 143.3 dB |
+
+So the total residual sits **12 dB above** the arithmetic floor, and it is the static interpolation
+floor — present uniformly, not produced by ratio changes. The clause that actually tests continuity
+was therefore applied to **each floor separately**, and neither is disturbed: change-instant /
+overall is **1.012** on the interpolation floor and **1.041** on the arithmetic floor, both inside
+the 2.2% sampling spread above.
+
+📌 **THE GAP NARROWED FROM 24 dB TO 12 dB WHEN P DOUBLED, WHICH IS THE POINT OF §9.3.** The Float
+arithmetic floor did not move — 143.3 dB before and after, as it must, since the dot product is
+unchanged. Only the interpolation floor moved, by the 12 dB the 1/P² law predicts. Two independent
+measurements of the same step.
+
+📌 **RECORDED BECAUSE THE WORDING WILL BE READ AGAIN.** "Null against a reference and demand the
+arithmetic floor" is the right instinct and the wrong bound when the reference is a *different
+algorithm*. The bound that means something is "indistinguishable at a change point", per floor.
+
+### 9.3 ✅ Target 4 — resolved by P = 1024, after a measured miss at 512
+
+**The design's P = 512 missed the > 20-bit target at 19.6 bits.** It was reported as a miss rather
+than tuned around, characterised, and then fixed by a decision — which is the order that matters.
+
+The floor is the branch interpolation measured in §9.2, and it is a pure function of the branch
+count: linear interpolation between branches has an error falling as 1/P², i.e. **12 dB per
+doubling**. Measured rather than assumed, on the same full-scale sweep:
+
+| P | SNR | effective bits | table size | |
+|---|---|---|---|---|
+| 512 (§3.6 as first written) | 119.5 dB | **19.6** | 128 KB | ❌ misses > 20 bits |
+| **1024 (adopted)** | **131.3 dB** | **21.5** | 256 KB | ✅ |
+| 2048 | 140.7 dB | 23.1 | 512 KB | — |
+
+512 → 1024 gains 11.8 dB, which is the 1/P² law to within the measurement. 1024 → 2048 gains only
+9.4 dB because it is starting to run into the 143 dB Float-arithmetic floor from §9.2 — so **P =
+2048 is roughly the point past which more branches stop buying bits in a Float pipeline**, and that
+is worth knowing before anyone reaches for it.
+
+**What §3.6 got wrong.** It justified > 20 bits with *"512 branches + inter-branch interpolation
+puts the interpolation error floor well below the 64-tap stopband"*. The stopband is not the binding
+constraint; the inter-branch interpolation is, and it is 12 dB per doubling of P regardless of how
+good the prototype is. Corrected in place.
+
+**What P = 1024 costs.** Nothing per frame: the branch index is a shift of the phase accumulator,
+not a search, and the coefficient build is still one `vDSP_vsma` over 64 taps. Measured CPU is
+unchanged within run-to-run scatter (16 ch: 0.385 µs/frame at P = 512, 0.383 at P = 1024). What
+doubles is the table — **256 KB plus a 256 KB difference table**, against 128 + 128 KB. Both are
+built once at construction and are read-only thereafter.
+
+📌 **The option deliberately NOT taken: cubic inter-branch interpolation**, whose error falls as
+1/P⁴. It would reach the same place with a smaller table and triple the per-frame coefficient build.
+Against a 512 KB table on a machine with tens of gigabytes, that is the wrong trade — but it is the
+right answer if this component is ever asked to run somewhere small.
+
+### 9.4 Two corrections to §3.6, both forced by measurement
+
+**The cutoff is 0.5, not 0.45.** §3.6 specifies *"cutoff at 0.45·fs (21.6 kHz)"*, carried over from
+general rate conversion where the filter must also suppress what decimation would fold. **This
+resampler never decimates** — §5.2 bounds the ratio at ±500 ppm — so it is a fractional-delay
+interpolator and the cutoff belongs at Nyquist. At 0.45, two targets are unreachable for one
+arithmetic reason: a Kaiser design of length N has transition width Δf ≈ (A − 8)/(2.285·2π·N), which
+at N = 64 and A = 100 dB is 0.100 cycles/sample = **4.8 kHz**. Centred on 21.6 kHz that puts the
+passband edge at **19.2 kHz**, so 20 kHz sits inside the transition band. Both measured:
+
+| | cutoff 0.50 | cutoff 0.45 |
+|---|---|---|
+| identity at ratio 1.0 | **0.000e+00** | **5.6e-01** — branch 0 is a lowpass, not an impulse |
+| passband ripple at 20 kHz | **0.0000 dB** | **0.1126 dB** |
+
+The identity property is the decisive one and it is structural: `sinc(n)` is zero at every non-zero
+integer **only** when the cutoff is exactly Nyquist, which is what makes branch 0 an exact unit
+impulse. At 0.45 there is no ratio at which this resampler is a pass-through.
+
+**CPU is 1.84% of a core at 16 channels, not "under 1%".** §3.6 estimates 107 Mflop/s and calls it
+*"under 1% of one performance core"*. Measured **0.383 µs/frame at 16 channels = 1.84%**
+(1 ch 0.013 · 2 ch 0.022 · 8 ch 0.155 µs). The
+estimate counted flops and not the per-channel pointer and call overhead in the inner loop, which is
+what the 2 ch → 8 ch step (0.022 → 0.155 µs, 7.0× for 4× the channels) is showing. It is still
+comfortably affordable and it is not the figure the design claims. A single deinterleaved scratch
+block with one `withUnsafeBufferPointer` outside the frame loop would recover most of it; that is
+step-3 work and is not done here.
+
+### 9.5 One real defect, found by a test that nearly wasn't written
+
+The streaming path retained a tail **shorter than `taps`** (the loop stops at the first `idx` with
+`idx + taps > scratchCount`, so the leftover is always `< taps`), while `process` computed
+`scratchCount = taps + inCount` from the constant. The claimed buffer was therefore one frame longer
+than the real one, the loop ran one extra iteration per call, and its `vDSP_dotpr` **read one
+element past the end of the array through an unsafe pointer**.
+
+It did not crash — the overrun lands in allocation slack — and the extra output frame was
+numerically plausible. It was caught only by the streaming-vs-one-shot equivalence check, which
+compared **frame counts as well as samples**: 8202 frames against 8192, with every compared sample
+matching to 0.000e+00. A test that compared only the overlap would have passed it, and the bug would
+have shipped into step 3 as an occasional one-frame surplus.
+
+📌 **The transferable part: when a test compares two runs, compare their LENGTHS first.** Every
+sample agreeing is not the same as the two runs agreeing.
+
+### 9.6 What step 1 does NOT establish
+
+* **Nothing has been heard.** §6's "NOT EARS" rule applies in both directions: these are offline
+  numbers against synthesised material, and they say nothing about the renderer, the tap, the
+  meters or the SDI path.
+* **The ratio has only ever been driven by a test.** Step 4's control loop is untouched.
+* **No real programme material.** Sweeps and noise, not decoded Opus or AAC.
+* **16 channels is a CPU figure, not a correctness one.** Channel handling at 16 has been timed,
+  not audited against a real layout.

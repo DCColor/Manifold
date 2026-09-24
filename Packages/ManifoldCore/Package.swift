@@ -46,6 +46,36 @@ let package = Package(
                 .unsafeFlags(["-O"])
             ]
         ),
+        // The polyphase ASRC (docs/AUDIO_RESAMPLER_DESIGN.md §3.6). Pure arithmetic over arrays
+        // plus Accelerate — no media types, no libav, no app state.
+        //
+        // ⚠️ ITS OWN TARGET, NOT A FILE IN ManifoldCore, AND THE REASON IS TESTABILITY RATHER THAN
+        // TIDINESS. A test bundle LINKS the targets it depends on, and ManifoldCore resolves libav
+        // symbols that are linked into the app binary by project.yml, not by this package — so a
+        // test target depending on ManifoldCore cannot link here. Depending on a leaf target with
+        // no dependencies is what makes `swift test` work at all. Same shape as ScopeCompute
+        // above, and same -O for the same reason: the hot loop is ~100x slower under -Onone, which
+        // would make the CPU figures meaningless and the test run glacial.
+        //
+        // NOTHING DEPENDS ON THIS TARGET YET — build step 1 is deliberately offline. ManifoldCore
+        // picks it up at step 3, when the resampler enters the path at ratio 1.0.
+        .target(
+            name: "AudioResample",
+            path: "Sources/AudioResample",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-O"])
+            ]
+        ),
+        .testTarget(
+            name: "AudioResampleTests",
+            dependencies: ["AudioResample"],
+            path: "Tests/AudioResampleTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-O"])
+            ]
+        ),
         .target(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute"],
