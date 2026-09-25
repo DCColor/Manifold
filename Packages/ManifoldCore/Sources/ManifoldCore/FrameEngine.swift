@@ -3,6 +3,8 @@ import Combine
 // UTType, for the still-image refusal in `loadAsset` — the engine has to answer "can I play this"
 // for every entry point, so the type question is asked here rather than in a view.
 import UniformTypeIdentifiers
+// The ASRC stage at the live-audio seam — `LiveAudioSink` is its only caller.
+import LiveAudioResample
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -2062,6 +2064,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public final class LiveAudioSink: @unchecked Sendable {
         private let renderer: AVSampleBufferAudioRenderer
         private let tap: AudioTapBuffer
+        /// The ASRC (docs/AUDIO_RESAMPLER_DESIGN.md §7 step 3, ratio pinned at 1.0). One per
+        /// session: `beginLiveAudio` constructs it, `endLiveAudio` retires it. Reachable ONLY from
+        /// here, and only a live transport ever obtains a sink — which is what keeps file playback
+        /// and HLS out of it by construction (§1.3, §1.4).
+        private let resample: LiveAudioResampleStage
         /// ⚠️ THE PATH IS A CONSTRUCTION PARAMETER, NOT A CONSTANT, AND THAT IS A CORRECTION.
         /// `enqueue` hardcoded `.whep`, which was true while WHEP was the only live source
         /// reaching this sink and silently wrong the moment a second one did: SRT audio would
@@ -2074,32 +2081,48 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// Step 2's paired (target, timebase) read. See `LiveAudioPairedProbe`.
         private let paired: LiveAudioPairedProbe?
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
-                         path: AudioTapBuffer.SourcePath, probe: LiveAudioRendererProbe?,
-                         paired: LiveAudioPairedProbe?) {
-            self.renderer = renderer; self.tap = tap; self.path = path
+                         path: AudioTapBuffer.SourcePath, resample: LiveAudioResampleStage,
+                         probe: LiveAudioRendererProbe?, paired: LiveAudioPairedProbe?) {
+            self.renderer = renderer; self.tap = tap; self.path = path; self.resample = resample
             self.probe = probe; self.paired = paired
         }
         #else
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
-                         path: AudioTapBuffer.SourcePath) {
-            self.renderer = renderer; self.tap = tap; self.path = path
+                         path: AudioTapBuffer.SourcePath, resample: LiveAudioResampleStage) {
+            self.renderer = renderer; self.tap = tap; self.path = path; self.resample = resample
         }
         #endif
-        /// Tee to the tap, then to the renderer — the SAME order and the same two consumers the
-        /// file pump feeds, so metering, SDI embedding, routing and mute all apply unchanged.
+        /// The tap gets the ORIGINAL buffer; the renderer gets the RESAMPLED one.
+        ///
+        /// ⚠️ THE ORDER IS LOAD-BEARING, AND NOT FOR THE REASON THIS COMMENT USED TO GIVE. It read
+        /// "tee to the tap, then to the renderer — the SAME order and the same two consumers the
+        /// file pump feeds". With the resampler in the path the two consumers are on DIFFERENT
+        /// CLOCKS and must receive DIFFERENT AUDIO (docs/AUDIO_RESAMPLER_DESIGN.md §1.2, §4.2):
+        ///
+        ///   * the TAP feeds DeckLink, which reads it by the staged VIDEO frame's source PTS and
+        ///     plays it out on the card's own crystal. Resampled audio there would stamp this Mac's
+        ///     headphone-crystal offset onto a broadcast signal. It also feeds the meters, which
+        ///     must show the source's levels and clips, not a filter's intersample overshoot (§4.3).
+        ///     So the tap sees the transport's samples on the transport's axis — unchanged.
+        ///   * the RENDERER plays on the Mac's audio device, and it is the only consumer whose
+        ///     clock the resampler exists to track. It sees the stage's output axis.
+        ///
+        /// Mute, the fader, the shuttle gate and `deckLinkOwnsAudio` all act on the renderer,
+        /// downstream of both, and are unchanged (§4.5).
         public func enqueue(_ sampleBuffer: CMSampleBuffer) {
+            tap.ingest(sampleBuffer, path: path)
+            let out = resample.process(sampleBuffer)
+            guard !out.isEmpty else { return }
             #if DEBUG || MANIFOLD_TELEMETRY
-            // ⚠️ BEFORE BOTH CONSUMERS, AND IT TOUCHES NEITHER. This reads the buffer's timing and
-            // records it; the tee below is byte-for-byte what it always was.
-            probe?.willEnqueue(sampleBuffer)
-            // ⚠️ THIS IS §2.1's "PER INPUT BUFFER, ON THE ENQUEUE THREAD" — and this seam is the
-            // ONE place all three push transports already share, so SRT, WHEP and NDI are
-            // instrumented by one call rather than three copies that could drift apart. It reads
-            // two clocks and returns; it enqueues nothing and defers nothing.
+            // ⚠️ ON THE RESAMPLER'S OUTPUT SIDE, AND THAT IS §4.1 ITEM 1. These used to sit before the
+            // tee, reading the transport's buffer — which, once the stage is in the path, is no
+            // longer what the renderer receives. The gap histogram would then read perfect about a
+            // stream the renderer never sees. They now read exactly what is enqueued: one probe row
+            // per renderer buffer, one paired sample per sink call (§2.1's cadence).
+            for sb in out { probe?.willEnqueue(sb) }
             paired?.sample()
             #endif
-            tap.ingest(sampleBuffer, path: path)
-            renderer.enqueue(sampleBuffer)
+            for sb in out { renderer.enqueue(sb) }
         }
     }
 
@@ -2183,6 +2206,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         synchronizer.rate = 0      // held until the first mirrored mapping arrives
         applyAudioMute()
         audioPresence = .unknown   // "don't know yet" until the first packet establishes channels
+        // ── THE RESAMPLER IS PER SESSION, CONSTRUCTED HERE ─────────────────────────────────────
+        // A superseded session's stage is retired first, so a transport still holding the old sink
+        // cannot feed the renderer once the new session owns it. Its axis state (anchor, filter
+        // history, phase) must not survive the `teardownAudioReading()` + `flush()` boundary above
+        // (§4.4), and a fresh object is the only way that is true by construction.
+        liveAudioResample?.retire()
+        let resample = LiveAudioResampleStage(
+            tag: "[\(path.rawValue.uppercased())-RESAMPLE]",
+            reportsWindows: LiveClock.telemetryIsEnabled,
+            log: { NSLog("%@", $0) })
+        liveAudioResample = resample
         #if DEBUG || MANIFOLD_TELEMETRY
         // Per SESSION, so a reconnect starts a fresh gap accounting rather than carrying the
         // disconnect across as one enormous hole.
@@ -2205,9 +2239,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioPairedProbe = paired
         setPairedProbe(paired)
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
-                             probe: probe, paired: paired)
+                             resample: resample, probe: probe, paired: paired)
         #else
-        return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path)
+        return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
+                             resample: resample)
         #endif
     }
 
@@ -2306,6 +2341,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private static let liveAudioRateRamp = 10.0
 
     /// Push the rate only once it has moved this far from what the synchronizer was last told.
+    ///
+    /// ⚠️ DORMANT SINCE RESAMPLER STEP 3 — NOTHING READS IT. The mirror's rate branch is disabled
+    /// (see `mirrorLiveAudio`): the synchronizer runs at exactly 1.0 for the whole session and the
+    /// resampler's ratio will carry the rate from step 4. Kept, with its derivation, until step 7
+    /// removes it with the rest of the dead gate (docs/AUDIO_RESAMPLER_DESIGN.md §7).
     ///
     /// 0.02% ≈ the sender ratio's own σ (0.0206%): below this we would be chasing measurement noise
     /// rather than clock. As a STEP it is 0.35 cents, far under the ~5-cent pitch JND, so each push
@@ -2456,12 +2496,29 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.lastHost = m.hostTime
         if tick { mirror.ticks += 1 } else { mirror.changes += 1 }
 
+        // ── RESAMPLER STEP 3: THE RATE BRANCH IS DISABLED; THE POSITION BRANCH IS NOT ──────────
+        //
+        // `AVSampleBufferAudioRenderer` mutes for ~50 ms on EVERY rate write, whatever the step
+        // (docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md §11.11), so the rate is no longer mirrored: the
+        // synchronizer is set to exactly 1.0 at the first anchor and never re-rated. From step 4
+        // the resampler's ratio carries `smoothedRate` (still computed above, and still reported,
+        // because it is that ratio's feed-forward — docs/AUDIO_RESAMPLER_DESIGN.md §2.2).
+        //
+        // ⚠️ THE POSITION BRANCH STAYS, AT ITS 10 ms TOLERANCE, SO THE SESSION CANNOT DRIFT
+        // CATASTROPHICALLY WHILE THE LOOP IS OPEN (§7 step 3). It still lands snaps, freeze-guard
+        // corrections and re-anchors, and it now also catches the sender↔device offset the rate
+        // used to absorb: that accrues at the smoothed ppm until it crosses 10 ms. Each of those is
+        // a `setRate(1.0, time:atHostTime:)` — a position write, rate unchanged — and still mutes;
+        // step 3 measures exactly that residue. Steps 4–5 remove it.
+        //
+        // With the rate pinned, `predicted` advances at exactly 1.0 from the last push, so
+        // `positionError` is now the accumulated divergence of the clock's line from a unity line —
+        // the quantity §7 step 3 says must drift at step 2's measured ppm.
         let predicted = mirror.pushedMedia + (m.hostTime - mirror.pushedHost) * mirror.pushedRate
         let positionError = wasMirrored ? abs(target - predicted) : .infinity
-        let rateMoved = abs(mirror.smoothedRate - mirror.pushedRate)
-        let shouldPush = positionError > Self.liveAudioPositionTolerance
-                      || rateMoved > Self.liveAudioRateThreshold
-        let rateToPush = mirror.smoothedRate
+        let tolerance = Self.liveAudioPositionTolerance
+        let shouldPush = positionError > tolerance
+        let rateToPush = 1.0
         let smoothedNow = mirror.smoothedRate
         if shouldPush {
             mirror.pushedRate = rateToPush
@@ -2515,17 +2572,25 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         guard shouldPush else { return }
         #if DEBUG || MANIFOLD_TELEMETRY
+        // The origin names WHICH write this is, because §6's criterion counts them apart: the first
+        // anchor is the session's one rate write (rate 0 → 1.0); every later row is the position
+        // branch, at the same rate, and is the residue step 3 exists to measure.
         liveAudioProbeForRateLog?.recordRateSet(
             rate: Float(rateToPush), mediaTime: target,
-            origin: tick ? "mirrorLiveAudio (heartbeat)" : "mirrorLiveAudio (mapping change)")
+            origin: !wasMirrored ? "mirrorLiveAudio (FIRST ANCHOR — the session's rate write)"
+                  : String(format: "mirrorLiveAudio (position branch, %@, err %.1f ms)",
+                           tick ? "heartbeat" : "mapping change", positionError * 1000))
         #endif
         synchronizer.setRate(Float(rateToPush),
                              time: CMTime(seconds: target, preferredTimescale: 90_000),
                              atHostTime: CMTime(seconds: m.hostTime, preferredTimescale: 90_000))
         if !wasMirrored {
             NSLog("%@ timebase MIRRORED — first mapping: senderPTS=%.3fs host=%.3fs "
-                + "rate=%.5f (smoothed %.5f) cushion=%.3fs → timebase=%.3fs",
-                  tag, m.senderPTS, m.hostTime, m.rate, rateToPush, cushion, target)
+                + "clockRate=%.5f → synchronizer rate %.1f, PINNED for the session (resampler "
+                + "step 3: rate branch off, position branch at %.0f ms) cushion=%.3fs → "
+                + "timebase=%.3fs",
+                  tag, m.senderPTS, m.hostTime, m.rate, rateToPush,
+                  tolerance * 1000, cushion, target)
         }
     }
 
@@ -2734,11 +2799,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioPairedProbe = nil
         setPairedProbe(nil)
         #endif
+        // Destroyed here (§4.6). After `retire()` returns, no call on this session's sink can reach
+        // the renderer; the 32-frame tail the filter still holds goes with the flush below.
+        liveAudioResample?.retire()
+        liveAudioResample = nil
         synchronizer.rate = 0
         audioRenderer.flush()
         audioTap.reset()
         audioPresence = .unknown
     }
+
+    /// The current live session's resampler stage. Main-actor state; the sink holds its own
+    /// reference and the transport thread only ever reaches the stage through the sink.
+    private var liveAudioResample: LiveAudioResampleStage?
 
     private var liveAudioAnchor: Double?
     /// A live-audio session is open. DISTINCT from `liveAudioAnchor`, which is only set once the

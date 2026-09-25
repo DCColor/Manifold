@@ -4,11 +4,12 @@
 //
 //  Polyphase windowed-sinc asynchronous sample-rate converter.
 //
-//  ⚠️ NOTHING IN THE APP CALLS THIS YET. Build step 1 of docs/AUDIO_RESAMPLER_DESIGN.md §7 is
-//  deliberately offline: the structure is measured against synthesised material before a line of
-//  it is wired into a live path, because §3.1's requirement — a mid-stream ratio change with no
-//  discontinuity, at any ratio, at any instant — is a yes/no property and the whole design rests
-//  on it.
+//  Build step 1 of docs/AUDIO_RESAMPLER_DESIGN.md §7 measured this offline, against synthesised
+//  material, before a line of it was wired into a live path, because §3.1's requirement — a
+//  mid-stream ratio change with no discontinuity, at any ratio, at any instant — is a yes/no
+//  property and the whole design rests on it. Step 3 wires it in, at ratio 1.0, through
+//  `LiveAudioResampleStage` (target LiveAudioResample), whose only caller is
+//  `FrameEngine.LiveAudioSink.enqueue`.
 //
 //  ── THE STRUCTURE, AND WHY A RATIO CHANGE IS FREE BY CONSTRUCTION ──────────────────────────
 //

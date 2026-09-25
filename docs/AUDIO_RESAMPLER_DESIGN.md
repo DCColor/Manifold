@@ -1575,3 +1575,137 @@ proposed B = 0.002 at worst, so B = 0.002 still does not cover the connect trans
 next cause at the source is the relay (§11.6: a 6.25 ms linear range inside a ±20 ms sawtooth) or
 the mirror's τ = 2 s start, not the anchor.
 
+## 11. Step 3 results — the resampler in the path at ratio 1.0, measured 2026-09-25
+
+⚠️ **Unqualified §11.x references elsewhere in this document mean `LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`
+§11, as the header says, and they still do.** This section refers to its own subsections without the
+§ sign ("11.3 below"), so neither can be read as the other.
+
+**Built:** `LiveAudioResampleStage` (`Packages/ManifoldCore/Sources/LiveAudioResample/`, its own leaf
+target so a test bundle can link it), inserted in `LiveAudioSink.enqueue` between the tap and the
+renderer. Ratio pinned at exactly 1.0; the resampler's 32-frame delay compensated so input sample
+k lands on output tick k; input holes and overlaps up to 1 s bridged with silence or dropped, larger
+jumps treated as an axis break; one stage per session, retired at `endLiveAudio`. The mirror calls
+`setRate(1.0, time:atHostTime:)` once at the first anchor, the rate branch is off, and the position
+branch stays at 10 ms. `smoothedRate` is still computed and logged. NDI's `anchorLiveAudio` is
+unchanged. `swift test`: 12 of 12.
+
+**Protocol:** the Profile build, unsigned (`.build-cc/step3-Profile`), telemetry on, a fresh launch
+per transport, the flash-beep fixture. Each run: connect, 3 min, disconnect, reconnect, 60 s, quit,
+timed from the first-mapping row. OBS on this Mac for every sender. Logs:
+`~/Desktop/step3-{srt,whep-mediamtx,whep-cloudflare,ndi}.log`, and after the WHEP fix (11.3 below)
+`~/Desktop/step3-whepfix-{mediamtx,cloudflare}.log`.
+
+### 11.1 Results against step 3's measured list
+
+| | SRT local | WHEP MediaMTX | WHEP Cloudflare | NDI (DistroAV "OBS PGM") |
+|---|---|---|---|---|
+| Heard and seen | smooth, no distortion | normal | clean | fine |
+| First anchor per connect | 1 + 1 | 1 + 1 | 1 + 1 | 1 + 1 (`anchorLiveAudio`) |
+| Position writes, first 3 s | 0 | 3 + 0 | 3 + 1 | — |
+| Position writes, steady state | **0** | **1 at +123 s; 1 at +74 s** | **0** | **0 re-anchors** |
+| Clamps / passthrough / build failures | **0 / 0 / 0** | **0 / 0 / 0** | **0 / 0 / 0** | **0 / 0 / 0** |
+| Format resets / axis breaks | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| Real input holes / overlaps | 0 | one 2.5 ms startup hole per session | the same | 0 |
+| One-frame holes / overlaps | 0 | **943 pairs** (11.3) | **878 pairs** (11.3) | 0 |
+| Renderer gap histogram, contiguous | 11 954 | 13 355 | 12 728 | 23 875 |
+| Renderer holes / overlaps / cumulative gap | 0 / 0 / +0.000 ms | the same | the same | the same |
+
+✅ **The output axis is exact.** 61 912 buffers reached the renderer across eight sessions with no
+hole and no overlap, and the cumulative gap stayed at +0.000 ms throughout. Clamps were zero on every
+window; a non-zero clamp at ratio 1.0 would mean a plumbing defect.
+
+✅ **Mutes per minute dropped to the position branch's rate alone,** as the plan required. Step 2
+measured 2.37 / 3.82 / 3.38 `setRate` a minute on SRT / MediaMTX / Cloudflare (§10.6). In steady
+state here it was 0 / ~0.5 / 0, and each write was at 1.0.
+
+**The 2.5 ms (120-frame) hole** is at the start of every WHEP session and nowhere else. It is most
+likely the first Opus packet decoding short (pre-skip). The stage fills it with silence, so every
+later sample stays at its original time.
+
+**Not measured here:** the SDI counters (the plan's DeckLink check, over HDMI to the ATEM), the
+meters (checked by eye only), and mutes by device capture. There was one session and one reconnect
+per transport.
+
+### 11.2 The drift criterion — met, but against the clocks, not against §10.2's `smoothed`
+
+The plan says the A/V offset should now drift at the ppm step 2 predicted, and that a mismatch means
+the plumbing is wrong. Taken literally against §10.2's `smoothed` medians, **three of four
+transports miss.** Against the physical clock pairs, all four match.
+
+With the rate pinned, `err` (timebase − mapping) is no longer a sawtooth (§10.1). It accumulates
+freely between position writes. So the change in its median across windows, excluding the first
+20 s and any window containing a write, is the realised drift:
+
+| | realised drift (step 3) | §10.2 `smoothed` median | independent clock figure |
+|---|---|---|---|
+| **NDI** | **+7.1 ppm** (both sessions, r² ≈ 0.85 per window) | n/a | **+6.680 ± 0.003 ppm**, device crystal vs mach (§10.4) |
+| **SRT local** | **+5 ppm** (+10 on the 50 s reconnect) | +60 | audio and video share one TS clock, so only the device term: **≈ +7** |
+| **WHEP MediaMTX** | **−65 ppm** (−59 on the reconnect) | +106 | audio vs video SSRC **+57.7 to +66.3 ppm** (`AV_SYNC_FINDINGS.md` §6.2), plus the device term |
+| **WHEP Cloudflare** | **+14 ppm** | −81 | SSRC drift **indistinguishable from zero** (±25 ppm), plus the device term |
+
+The first and last columns agree on every transport. The magnitude on MediaMTX matches §6.2, but its
+sign convention (audio − video) has not been re-derived against `err`'s here, so the agreement is
+stated in magnitude only. **The audio side carries exactly one clock, the device crystal.** NDI
+isolates it and reproduces §10.4 to within 0.4 ppm, and the pinned stage adds nothing to it. Where
+the mirrored transports differ, the difference is in the reference, which step 3 does not touch.
+
+**So the plumbing passes, and the prediction was the wrong quantity.** On SRT the prediction was
+most clearly wrong: sender and receiver share a clock, the realised drift is +5 ppm, and `smoothed`
+read +60 to +130 throughout. That is item 1 of 11.4, and it matters more for step 4 than anything
+else here.
+
+### 11.3 One defect found, and fixed: WHEP audio PTS truncation
+
+On both WHEP servers the stage logged a steady stream of **one-frame** overlaps, each followed one
+buffer later by a one-frame hole, about 6 a second, while RTP reported no loss. The per-window counts
+ran 35, 35, 14, 54, 33, … identically in both Cloudflare sessions and the MediaMTX reconnect, so they
+were deterministic, not network.
+
+**Cause:** `WHEPAudioReceiver` stamped its PTS as
+`CMTime(seconds: ticks / 48000, preferredTimescale: 90_000)`. That call truncates, so about 7% of
+960-multiple timestamps came out one 90 kHz tick low (701 of 10 000, reproduced in isolation). The
+renderer absorbed that as an 11 µs jitter, but the stage keys its axis on the sample tick and made
+each one a dropped real sample plus an inserted zero. **Fix:** stamp the integer RTP count on the
+48 kHz timescale. Full entry in `docs/BUGS.md`.
+
+**Verified the same day,** one 2-minute connect per server:
+
+| | before | after |
+|---|---|---|
+| MediaMTX | 943 pairs in 4.5 min | **holes 1, overlaps 0** in 125 s — the 2.5 ms startup hole; 6252 contiguous, 0 / 0 |
+| Cloudflare | 878 pairs in 4.2 min | **holes 1, overlaps 0** in 125 s — the same startup hole; 6236 contiguous, 0 / 0 |
+
+The rest of 11.1 was measured before the fix. Nothing else in it depends on the WHEP PTS: the
+renderer axis was exact either way, and the drift in 11.2 is a median over thousands of samples.
+
+### 11.4 For step 4 — four things this run established
+
+1. **`smoothed` is not a usable feed-forward ratio.** It disagreed with the realised drift on all
+   three mirrored transports (11.2 above): +60 to +130 against +5 on SRT, and a swing from +1073 to −123
+   within one 3-minute Cloudflare session, still moving past the first minute. Driving the resampler
+   with it would add tens of ppm of error rather than remove it. It is the τ = 30 s filter of
+   LiveClock's rate field. That field is the depth controller's output (§10.3), and over minutes it
+   is not the slope of the mapping that `err` is measured against. Step 4's feed-forward needs a
+   different estimator, for example the fitted slope of the paired `err` itself. Alternatively it
+   can drop the feed-forward and let `k_p` carry the steady ppm, which at ≤ 70 ppm is well inside
+   the §10.5 authority.
+2. **Hold WHEP's first anchor until the mapping settles.** On every WHEP connect the mirror anchored
+   on the first mapping, and then 1–3 position writes followed within 2.6 s. The first write was
+   the largest, at 67.9–110.5 ms across six connects (the two after the fix included), and each was a "mapping change". **They are §10.10's startup
+   realigns reaching the mirror after it had already anchored.** On the Cloudflare first connect
+   the realigns moved +78.6 and +17.6 ms, and the first two position writes carried err 78.6 and
+   17.6 ms, identical to the tenth of a millisecond. A later 10 ms write at ~2.6 s came after the
+   first presentation, so that one is the relay (§10.10). None were heard, but each one is a
+   renderer position jump. The first anchor belongs after the first presentation, when the realign
+   window closes, rather than on the first mapping. SRT (0 realigns by construction, §10.10) and
+   NDI showed none.
+3. **NDI's +7 ppm is uncorrected.** With nothing in the NDI path correcting it, the error grew in a
+   straight line (+1.36 ms by 194 s) and would reach the 10 ms re-anchor in about 24 minutes. That is
+   §10.4's figure and the reason step 6 exists. It is recorded here because step 3 is the first
+   build where no other mechanism was going to mask it.
+4. **SRT starts each connect with a different ±3–4 ms offset.** Session 1 settled at −1.7 to
+   −2.5 ms and the reconnect at +3.8 to +4.2 ms, both inside the 10 ms branch, so nothing acted on
+   them. A closed loop with `k_p = 0.05` will null this in about 20 s. That is the right behaviour,
+   provided the offset is an error and not the startup depth being deliberately carried. Check
+   which before step 4 treats it as something to null.

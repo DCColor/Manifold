@@ -57,8 +57,8 @@ let package = Package(
         // above, and same -O for the same reason: the hot loop is ~100x slower under -Onone, which
         // would make the CPU figures meaningless and the test run glacial.
         //
-        // NOTHING DEPENDS ON THIS TARGET YET — build step 1 is deliberately offline. ManifoldCore
-        // picks it up at step 3, when the resampler enters the path at ratio 1.0.
+        // Step 1 built this offline. Step 3 puts it in the live path, through LiveAudioResample
+        // below — never directly from ManifoldCore.
         .target(
             name: "AudioResample",
             path: "Sources/AudioResample",
@@ -76,9 +76,36 @@ let package = Package(
                 .unsafeFlags(["-O"])
             ]
         ),
+        // The ASRC at the live-audio seam (docs/AUDIO_RESAMPLER_DESIGN.md §7 step 3): CMSampleBuffer
+        // in, CMSampleBuffers out on a contiguous output axis. `FrameEngine.LiveAudioSink` is its
+        // only caller.
+        //
+        // ⚠️ A LEAF TARGET FOR THE SAME LINKING REASON AS AudioResample. The axis arithmetic this
+        // holds — anchor, group-delay compensation, format reset, drain, hole/overlap — is the
+        // highest-risk part of the design (§4.1), and it can only be tested by `swift test` if it
+        // does not live in ManifoldCore. CoreMedia and Accelerate are system frameworks and link.
+        // Same -O as its siblings: the per-sample interleave loop is on the audio path.
+        .target(
+            name: "LiveAudioResample",
+            dependencies: ["AudioResample"],
+            path: "Sources/LiveAudioResample",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-O"])
+            ]
+        ),
+        .testTarget(
+            name: "LiveAudioResampleTests",
+            dependencies: ["LiveAudioResample"],
+            path: "Tests/LiveAudioResampleTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-O"])
+            ]
+        ),
         .target(
             name: "ManifoldCore",
-            dependencies: ["CFFmpeg", "ScopeCompute"],
+            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.
