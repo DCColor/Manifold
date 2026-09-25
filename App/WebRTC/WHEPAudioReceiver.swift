@@ -148,8 +148,10 @@ final class WHEPAudioReceiver {
             return
         }
 
-        // Sender timeline, in seconds, unwrapped past the 32-bit rollover.
-        let senderSeconds = Double(unwrap(rtpTimestamp)) / WHEPOpusDecoder.sampleRate
+        // Sender timeline, unwrapped past the 32-bit rollover. The INTEGER tick count is what gets
+        // stamped (`makeSampleBuffer`); the seconds are for the clock gate and the log lines only.
+        let senderTicks = unwrap(rtpTimestamp)
+        let senderSeconds = Double(senderTicks) / WHEPOpusDecoder.sampleRate
 
         // ── THE AXIS: SENDER TIMELINE, ABSOLUTE, NOT REBASED ────────────────────────────────
         //
@@ -216,7 +218,7 @@ final class WHEPAudioReceiver {
         framesDecoded += frames
         guard frames > 0,
               let sb = Self.makeSampleBuffer(pcm, frames: frames, channels: channelCount,
-                                             pts: presentation) else {
+                                             ptsTicks: senderTicks) else {
             sampleBufferFailures += 1
             heartbeat()
             return
@@ -267,27 +269,24 @@ final class WHEPAudioReceiver {
               note.map { " · \($0)" } ?? "")
     }
 
-    /// Interleaved Int32 → a CMSampleBuffer the shared renderer accepts, stamped on the live
-    /// timeline. Timescale 90 kHz to match the video clock's grid exactly.
+    /// Interleaved Int32 → a CMSampleBuffer the shared renderer accepts, stamped on the sender
+    /// timeline as an INTEGER tick count on the sample rate's own timescale — exact for any frame
+    /// size, the same shape as `NDIService.makeAudioSampleBuffer` (docs/BUGS.md #NDI-AUDIO).
     ///
-    /// ⚠️ THIS COMMENT USED TO SAY 48 kHz FRAMES LAND ON INTEGER 90 kHz TICKS "only every 15
-    /// samples". THAT NUMBER IS WRONG — IT IS EVERY **8**. 90000/48000 = 1.875, so `n/48000` is a
-    /// whole number of 90 kHz ticks exactly when `n` is a multiple of 8. The correction matters
-    /// because the wrong number is what made this timescale look safe to copy: NDI reused it, its
-    /// per-pull counts are 480..530 with an arbitrary running total, seven buffers in eight were
-    /// silently rounded, and the desktop audio crackled until it was traced back here.
-    ///
-    /// ⚠️ AND WHEP IS EXACT BY COINCIDENCE, NOT BY DESIGN. Opus at 48 kHz is **960 samples** per
-    /// packet, 960 is a multiple of 8, and the PTS is a running multiple of 960 — so every value
-    /// lands on the grid and the rounding never fires. Change the packetisation to anything whose
-    /// frame count is not a multiple of 8 and this line starts corrupting audio with no other
-    /// symptom. **An audio CMTime belongs on the SAMPLE RATE's timescale** (`CMTime(value: ticks,
-    /// timescale: CMTimeScale(sampleRate))`), which is exact for any frame size; see
-    /// `NDIService.makeAudioSampleBuffer` and docs/BUGS.md #NDI-AUDIO. Comment-only change here —
-    /// WHEP's behaviour is measured working and is deliberately left alone.
+    /// ⚠️ THIS USED TO BE `CMTime(seconds: ticks / 48000, preferredTimescale: 90_000)`, AND THE
+    /// COMMENT HERE CALLED IT "EXACT BY COINCIDENCE" BECAUSE 960 IS A MULTIPLE OF 8. THE GRID
+    /// ARGUMENT WAS RIGHT AND THE CONCLUSION WAS WRONG: `CMTime(seconds:preferredTimescale:)`
+    /// TRUNCATES, so a product like 1447199.9999… lands one 90 kHz tick LOW. Measured in isolation,
+    /// 701 of 10 000 running multiples of 960 came back one sample early after conversion to
+    /// 48 kHz. The renderer absorbed that as an 11 µs jitter, which is why it was never heard;
+    /// resampler step 3's input stage cannot — it keys a contiguous sample axis on the PTS and
+    /// turned every such buffer into a one-sample overlap followed by a one-sample hole, ~6 content
+    /// edits a second on MediaMTX and Cloudflare alike (docs/BUGS.md, WHEP audio PTS truncation).
+    /// **Never route an audio PTS through a `Double`.**
     private static func makeSampleBuffer(_ pcm: UnsafeBufferPointer<Int32>,
                                          frames: Int, channels: Int,
-                                         pts: Double) -> CMSampleBuffer? {
+                                         ptsTicks: Int64) -> CMSampleBuffer? {
+        let timescale = CMTimeScale(WHEPOpusDecoder.sampleRate)
         var asbd = AudioStreamBasicDescription(
             mSampleRate: WHEPOpusDecoder.sampleRate,
             mFormatID: kAudioFormatLinearPCM,
@@ -318,8 +317,8 @@ final class WHEPAudioReceiver {
 
         var sb: CMSampleBuffer?
         var timing = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: CMTimeScale(WHEPOpusDecoder.sampleRate)),
-            presentationTimeStamp: CMTime(seconds: pts, preferredTimescale: 90_000),
+            duration: CMTime(value: 1, timescale: timescale),
+            presentationTimeStamp: CMTime(value: ptsTicks, timescale: timescale),
             decodeTimeStamp: .invalid)
         // sampleSize is BYTES PER SAMPLE (one interleaved frame), not the frame count. Passing the
         // count here builds a buffer claiming frames×frames bytes and the renderer reads past the

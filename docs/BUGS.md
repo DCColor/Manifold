@@ -705,6 +705,72 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 
 ---
 
+## ✅ FIXED 2026-09-25 — WHEP audio PTS truncated one 90 kHz tick low on ~7% of buffers; resampler step 3 turned it into ~6 sample edits a second
+
+**Status:** ✅ **FIXED 2026-09-25, verified the same day** on MediaMTX and Cloudflare (below).
+**Affects:** WHEP audio, every server. Not SRT, whose `Double` → 90 kHz audio PTS was replaced
+by a sample count earlier (`SRTFrameRouter.swift`, "WHY THE PTS IS COUNTED IN SAMPLES"), and not
+NDI (#NDI-AUDIO).
+
+### The symptom
+
+Nothing audible, before or after resampler step 3. Found by the step 3 quick connects
+(`docs/AUDIO_RESAMPLER_DESIGN.md`, "11. Step 3 results"): on both WHEP servers the new input stage logged a steady
+stream of **one-frame** input-axis events, always paired — an `OVERLAP 0.02 ms` then a
+`HOLE 0.02 ms` one buffer later — about 60 of each per 10 s window. RTP showed `seqGaps=0
+declaredLost=0` on MediaMTX, so no packet was missing.
+
+The per-window counts ran **35, 35, 14, 54, 33, …** identically in both Cloudflare sessions and in
+the MediaMTX reconnect. A network effect cannot repeat itself window for window across two servers;
+a deterministic function of the tick count since connect can.
+
+### The cause
+
+`WHEPAudioReceiver.makeSampleBuffer` stamped each buffer as
+
+```swift
+CMTime(seconds: Double(unwrappedTicks) / 48000, preferredTimescale: 90_000)
+```
+
+and its own comment called that **"exact by coincidence"**: 960-sample Opus packets make every PTS
+a multiple of 8 samples, which is a whole number of 90 kHz ticks. The grid argument is right. The
+conclusion is not, because **`CMTime(seconds:preferredTimescale:)` truncates**: a product that the
+`Double` holds as 1447199.9999… becomes 1447199, one 90 kHz tick (0.53 samples) low. Measured in
+isolation: **701 of 10 000** running multiples of 960 came back one sample early after conversion
+to 48 kHz.
+
+Before step 3 the renderer took that as an 11 µs jitter, which is why nothing was ever heard. Step 3's
+`LiveAudioResampleStage` keys a contiguous sample axis on the PTS rounded to the sample rate, so each
+early buffer is a one-sample **overlap** (a real sample dropped) and the next buffer a one-sample
+**hole** (a zero inserted) — ~6 content edits a second at a pinned ratio of 1.0, which step 3 must
+not make.
+
+### The fix
+
+Stamp the **integer** unwrapped RTP count on the sample rate's own timescale:
+`CMTime(value: senderTicks, timescale: 48000)`. That is what the file's comment already prescribed
+and what NDI and SRT already do. The `Double` seconds remain only for the clock gate and the log
+lines. Nothing downstream assumed 90 kHz: `AudioTapBuffer` reads the PTS through
+`CMTimeGetSeconds`. The fix follows the RTP standard (Opus clock rate 48 kHz, RFC 7587) and has no
+server-specific code path.
+
+### Verified 2026-09-25 — one 2-minute connect per server, same build otherwise
+
+| | before (step 3 quick connects) | after |
+|---|---|---|
+| **MediaMTX** | 943 one-frame hole/overlap pairs in 4.5 min | **holes 1, overlaps 0** in 125 s — the one hole is the 2.5 ms startup hole |
+| **Cloudflare** | 878 pairs in 4.2 min | **holes 1, overlaps 0** in 125 s — the same startup hole; the one lost RTP packet was video (no 20 ms audio hole) |
+
+Renderer gap histogram 100% contiguous both before and after: the stage kept the output axis exact
+either way, and the fix removes the content edits it was making to do so.
+
+### The transferable rule
+
+**Never route an audio PTS through a `Double`.** This is the third time in this codebase (NDI, SRT,
+now WHEP) — each time the grid arithmetic was checked and the conversion's rounding mode was not.
+
+---
+
 ## 🔍 PARTLY FIXED 2026-09-24 — live audio mirror swings 1300–4000 ppm off nominal for the first 1–2.5 minutes of every WHEP connect. NOT the seed.
 
 **Status:** the suspected cause was changed, **measured to change nothing, and reverted** the same
