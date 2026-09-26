@@ -705,6 +705,79 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 
 ---
 
+## 🔍 OPEN 2026-09-25 — DeckLink card start: the SDI audio cursor snaps ~110–130 ms about one second after output is enabled, when a video frame is already staged
+
+**Status:** 🔍 **OPEN.** Not fixed, and nothing about it is audible on the ATEM by ear. **Existed before
+resampler step 3:** reproduced on `4ef1254`, the commit before step 3 went in. **Affects:** DeckLink
+output started while a live source is running. Seen on SRT; the other transports weren't tested.
+
+### The symptom
+
+About one second after DeckLink output starts, once per card start:
+
+    DeckLinkAudio: !! RESYNC — smoothed error -100.6 ms exceeds 100 ms; snapping source cursor 22.837s → 22.705s
+
+That snap moves the SDI audio by **−132 ms** in that case (−113 ms in the other), then everything
+settles: `drift` sits within ±5 ms with ±2-frame trims for the rest of the session. `underruns`,
+`short`, `shortSchedules`, late and dropped video frames all stay at 0. The first `DeckLinkAudio:
+buffered` window already shows the error (`drift=-82.08ms`, `-69.24ms`) before the snap.
+
+It breaks design criterion 8 (`AUDIO_RESAMPLER_DESIGN.md` §6.3: `resyncs=0` for a full session with
+DeckLink on) without anything in the steady state being wrong.
+
+### What decides it — measured, 8 card starts, 2026-09-25
+
+The `DeckLinkAudio: branch #1` line records the card's first audio callback. There are two outcomes:
+either a converted video frame is already staged (`PCM · read from the ring`, so the cursor anchors
+at once) or none is (`SILENCE · no staged video PTS to anchor to`, 9600 frames of preroll silence,
+then an anchor on a later callback).
+
+| run | build | card mode before → at start | `branch #1` | first `drift` | resyncs |
+|---|---|---|---|---|---|
+| SRT, run 1 | HEAD `b3d194d` | 30p → 23.98 (per Robbie; not in the log) | **staged → PCM** | **−82.1 ms** | **1** (−100.6 ms) |
+| MediaMTX, run 2 | HEAD | 23.98 → 23.98 | none → silence | +7.1 ms | 0 |
+| control S1 | `4ef1254` | 23.98 → 23.98 | none → silence | +10.0 ms | 0 |
+| control S2 | `4ef1254` | 23.98 → **30p** | **staged → PCM** | **−69.2 ms** | **1** (−100.2 ms) |
+| control S3 | `4ef1254` | 30p → 23.98 | none → silence | +1.1 ms | 0 |
+| HEAD S1 | HEAD | 23.98 → 23.98 | none → silence | +9.5 ms | 0 |
+| HEAD S2 | HEAD | 23.98 → **30p** | none → silence | −0.7 ms | 0 |
+| HEAD S3 | HEAD | 30p → 23.98 | none → silence | −11.1 ms | 0 |
+
+**Staged frame at the first callback → snap, 2 of 2. No staged frame → no snap, 6 of 6.**
+
+**Robbie's hypothesis, a card mode change, is not sufficient:** 3 of the 5 mode-change starts didn't
+snap (control S3, HEAD S2, HEAD S3). Both snaps did follow a mode change, if run 1's prior 30p is
+right, so a mode change may make the staged frame more likely to win the race. n = 2 can't separate
+"necessary" from "coincidence".
+
+**Not step 3:** the stage isn't in this path at all. `ideal` is built from the staged video PTS and the
+card's own audio and video queue depths; the cursor advances only by frames scheduled to the card;
+and the tap that the card reads is fed before the resampler stage. The control reproduces the snap.
+
+### Mechanism — inference, not yet instrumented
+
+`DeckLinkBridge.mm`, the anchor loop: the first unanchored callback snaps the cursor to
+`ideal = stagedPts + (audioDepth − videoDepth) + trim`. When that callback lands during
+`BeginAudioPreroll`, before the card's video queue has reached steady state, `videoDepth` is too
+small. As the queue fills to `vq=4f`, `ideal` moves roughly 3 frames earlier (the snaps were 132 ms
+at 23.98 and 113 ms at 30p, about 3.2 and 3.4 frame durations), the 1 s EMA crosses the 100 ms band,
+and it snaps. When no frame is staged yet, the anchor waits for a later callback, by which time the
+queue is full, so the error starts small and the ±2-frame trims absorb it.
+
+To confirm, log `bufferedVideo` and `audioDepth − videoDepth` on the anchoring callback of each start.
+
+### Direction, not a decision
+
+Don't take the first anchor until the card's video preroll has completed (after
+`StartScheduledPlayback`, or once `bufferedVideo` reaches the preroll depth). Alternatively, anchor
+against the preroll depth the card is about to reach rather than the depth it has now. Either would
+turn the ~1 s snap into the same small trimmed start the other six starts had.
+
+Logs: `~/Desktop/step3-decklink-srt.log`, `step3-decklink-mediamtx.log`, `step3-ctl-4ef1254.log`,
+`step3-head-modes.log`.
+
+---
+
 ## ✅ FIXED 2026-09-25 — WHEP audio PTS truncated one 90 kHz tick low on ~7% of buffers; resampler step 3 turned it into ~6 sample edits a second
 
 **Status:** ✅ **FIXED 2026-09-25, verified the same day** on MediaMTX and Cloudflare (below).
