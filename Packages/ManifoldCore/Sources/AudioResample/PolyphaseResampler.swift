@@ -126,6 +126,11 @@ public final class PolyphaseResampler {
     /// The absolute reconstruction instant, in input frames, of the next output frame.
     public var nextInputPosition: Double { Double(absolutePhase) / Double(Self.one) }
 
+    /// The same instant as `nextInputPosition`, exact: Q32.32, wrapping modulo 2^64 like the
+    /// accumulator itself. `LiveAudioResampleStage`'s output→input map is built from this, so that
+    /// at ratio 1.0 its offset is an exact integer zero rather than a Double that happens to be.
+    public var nextAbsolutePhase: UInt64 { absolutePhase }
+
     /// Resample one block.
     ///
     /// - Parameters:

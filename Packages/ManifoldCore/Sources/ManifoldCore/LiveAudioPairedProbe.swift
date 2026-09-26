@@ -69,6 +69,11 @@ public final class LiveAudioPairedProbe: @unchecked Sendable {
 
     private let tag: String
     private let readTimebaseSeconds: @Sendable () -> Double
+    /// Output time → content time (`LiveAudioResampleStage.inputTime(atOutputTime:)`), step 4a.
+    /// ⚠️ APPLIED AFTER `t1`, NEVER INSIDE THE PAIR: it takes the stage's lock, and the pair must
+    /// bracket the timebase read and nothing else. At ratio 1.0 it returns its argument exactly,
+    /// so every figure step 3 logged is unchanged.
+    private let contentTime: (@Sendable (Double) -> Double)?
 
     private let lock = UnfairLock()
 
@@ -108,9 +113,11 @@ public final class LiveAudioPairedProbe: @unchecked Sendable {
     private var windowIndex = 0
     private var sessionStart = 0.0
 
-    public init(tag: String, readTimebaseSeconds: @escaping @Sendable () -> Double) {
+    public init(tag: String, readTimebaseSeconds: @escaping @Sendable () -> Double,
+                contentTime: (@Sendable (Double) -> Double)? = nil) {
         self.tag = tag
         self.readTimebaseSeconds = readTimebaseSeconds
+        self.contentTime = contentTime
     }
 
     /// Push the reference line. Called from `mirrorLiveAudio` (10 Hz plus mapping changes) and
@@ -136,8 +143,10 @@ public final class LiveAudioPairedProbe: @unchecked Sendable {
     /// Everything after `t1` is arithmetic on values already in hand.
     public func sample() {
         let t0 = CACurrentMediaTime()
-        let actual = readTimebaseSeconds()
+        let timebase = readTimebaseSeconds()
         let t1 = CACurrentMediaTime()
+        // §2.1 REVISED: `actual` is the content being heard, not the output timebase.
+        let actual = contentTime?(timebase) ?? timebase
 
         lock.lock()
         if sessionStart == 0 { sessionStart = t1; windowStart = t1 }

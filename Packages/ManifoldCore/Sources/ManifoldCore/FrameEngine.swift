@@ -2234,6 +2234,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             ? LiveAudioPairedProbe(tag: "[\(path.rawValue.uppercased())-PAIRED]",
                                    readTimebaseSeconds: { [synchronizer] in
                                        CMTimeGetSeconds(synchronizer.currentTime())
+                                   },
+                                   // Step 4a: `actual` on content time. The identity while the
+                                   // ratio is pinned at 1.0.
+                                   contentTime: { [resample] in
+                                       resample.inputTime(atOutputTime: $0)
                                    })
             : nil
         liveAudioPairedProbe = paired

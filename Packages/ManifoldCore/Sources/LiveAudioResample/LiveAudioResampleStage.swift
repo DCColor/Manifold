@@ -89,8 +89,10 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
 
     // MARK: - Configuration
 
-    /// ⚠️ PINNED. Step 3 puts the resampler in the path with the loop open (§7). There is no setter
-    /// on purpose: step 4 adds the control law, and until then the only honest value is 1.0.
+    /// ⚠️ PINNED IN THE LIVE PATH. Step 3 put the resampler in the path with the loop open (§7), and
+    /// step 4d is what connects the controller. Until then nothing outside this module can move
+    /// the ratio: the only way to set one is `rho` below, which is `internal`. Step 4a's inversion
+    /// tests use it to ramp the ratio, and ManifoldCore cannot reach it.
     public static let ratio = 1.0
 
     /// The largest input-axis step bridged by silence-fill or drop rather than treated as an axis
@@ -150,8 +152,15 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         let timescale: CMTimeScale
         let channels: Int
         let resampler: PolyphaseResampler
+        /// Input tick of the resampler's input frame 0. Every frame fed afterwards is at
+        /// `inputOrigin + (frames fed so far)`, because fills feed the hole's ticks and drops skip
+        /// ticks already fed. That is what lets the content-time map name an INPUT tick.
+        let inputOrigin: Int64
         /// Output tick of this session's first emitted frame.
         let outAnchor: Int64
+        /// Primer frames discarded at construction: 0 at session start, `latencyFrames` after a
+        /// reset. Emitted frame e is resampler output frame `e + initialPrimer`.
+        let initialPrimer: Int
         /// Output frames emitted since `outAnchor`.
         var emitted: Int64 = 0
         /// Input tick the next buffer should start at if the input axis is contiguous.
@@ -166,6 +175,57 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     private var session: Session?
     private var retired = false
     private var passthroughLogged = false
+
+    // MARK: - Content time (§2.1, step 4a)
+    //
+    // ⚠️ ONCE THE RATIO MOVES, `synchronizer.currentTime()` IS NO LONGER THE CONTENT BEING HEARD.
+    // The timebase counts OUTPUT seconds on the device clock, and under a working loop it is meant
+    // to drift from the target by exactly the ppm the loop absorbs. The quantity to null is the
+    // input-axis time of the sample being heard, and only this stage knows the relationship.
+    //
+    // It is kept as one BREAKPOINT per resampled block: the ratio is constant within a block, so
+    // (first output tick, input position of that tick, increment) is the whole map across it,
+    // exactly — not an approximation of it. The input position is held as an OFFSET from the
+    // output tick in Q32.32, which is an exact integer zero at ratio 1.0. That makes
+    // `inputTime(atOutputTime:)` return its argument bit for bit at 1.0, so step 3's PAIRED
+    // figures carry over unchanged (step 4a's first regression test).
+
+    /// ρ — input seconds consumed per output second (§2.2). The resampler's increment IS ρ in
+    /// Q32.32, so it is written directly rather than through `ratio`'s 1/x. Applied to every
+    /// block from the next `process` on; a block never changes ratio part-way.
+    ///
+    /// ⚠️ INTERNAL, AND 1.0 IN THE APP. Step 4d wires the controller; until then this exists for
+    /// the ramped-ratio inversion tests only.
+    var rho: Double {
+        get { lock.lock(); defer { lock.unlock() }; return Double(rhoIncrement) / 4294967296.0 }
+        set {
+            precondition(newValue.isFinite && newValue > 0.5 && newValue < 2.0, "ρ out of range")
+            lock.lock(); rhoIncrement = UInt64((newValue * 4294967296.0).rounded()); lock.unlock()
+        }
+    }
+    private var rhoIncrement: UInt64 = 1 << 32
+
+    private struct Breakpoint {
+        /// Output tick of the block's first frame, on `sampleRate`'s timescale.
+        var outTick: Int64 = 0
+        var frames: Int64 = 0
+        var sampleRate: Double = 1
+        /// (input position − output tick) at `outTick`, input frames in Q32.32. 0 at ratio 1.0.
+        var offsetQ: Int64 = 0
+        /// Input frames per output frame, Q32.32 — ρ exactly as the resampler applied it.
+        var increment: UInt64 = 1 << 32
+    }
+
+    /// History the lookup needs is the renderer's queue: at most ~0.5 s ahead of what is heard,
+    /// at up to 100 blocks/s. 512 blocks is ≥ 5 s. Preallocated, so recording never allocates.
+    private static let breakpointCapacity = 512
+    private var breakpoints = [Breakpoint](repeating: Breakpoint(), count: breakpointCapacity)
+    private var breakpointHead = 0     // next slot to write
+    private var breakpointCount = 0
+
+    /// Step 1's warp fixture, reached through the stage: when set, each new session's resampler
+    /// records the absolute phase of every output frame. Tests only; it allocates per frame.
+    var capturesPhaseForTesting = false
 
     private var window = Stats()
     private var total = Stats()
@@ -248,6 +308,54 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     public var totals: Stats {
         lock.lock(); defer { lock.unlock() }
         return total
+    }
+
+    /// The input-axis time, in seconds, of the content at output time `outputSeconds` — §2.1's
+    /// `actual`. Pass `CMTimeGetSeconds(synchronizer.currentTime())`.
+    ///
+    /// Picks the block whose output span contains the instant; failing that (the timebase is ahead
+    /// of everything enqueued, or behind the oldest block kept), the newest block starting at or
+    /// before it, else the oldest, extrapolated at that block's ratio. With no block yet — or after
+    /// a passthrough, whose buffers are not resampled — it is the identity, which is the
+    /// pre-existing behaviour.
+    ///
+    /// Takes this stage's lock, which only `process` and `retire` also take. Call it AFTER a paired
+    /// read, never between the two host reads.
+    public func inputTime(atOutputTime outputSeconds: Double) -> Double {
+        guard outputSeconds.isFinite else { return outputSeconds }
+        lock.lock(); defer { lock.unlock() }
+        guard breakpointCount > 0 else { return outputSeconds }
+        let cap = Self.breakpointCapacity
+        var chosen = -1, fallback = -1
+        for k in 0..<breakpointCount {
+            let idx = (breakpointHead - 1 - k + cap) % cap
+            let b = breakpoints[idx]
+            let x = outputSeconds * b.sampleRate - Double(b.outTick)
+            if x >= 0 {
+                if x < Double(b.frames) { chosen = idx; break }
+                if fallback < 0 { fallback = idx }
+            }
+        }
+        if chosen < 0 { chosen = fallback >= 0 ? fallback
+                                               : (breakpointHead - breakpointCount + cap) % cap }
+        let b = breakpoints[chosen]
+        // inputSeconds = outputSeconds + (offset + x·(ρ − 1)) / rate. Both terms are exact zeros at
+        // ratio 1.0, so the result is the argument bit for bit — not merely within rounding.
+        let x = outputSeconds * b.sampleRate - Double(b.outTick)
+        let rhoMinusOne = Double(Int64(bitPattern: b.increment &- (1 << 32))) / 4294967296.0
+        let offsetFrames = Double(b.offsetQ) / 4294967296.0 + x * rhoMinusOne
+        return outputSeconds + offsetFrames / b.sampleRate
+    }
+
+    /// The current session's phase trace and the constants that place it on the two axes: output
+    /// tick `outAnchor + e` was reconstructed at absolute phase `trace[e + initialPrimer]`, which is
+    /// input tick `inputOrigin + phase / 2^32 − 1 − latency`. Tests only.
+    func phaseTraceForTesting() -> (trace: [UInt64], inputOrigin: Int64, outAnchor: Int64,
+                                    initialPrimer: Int, latency: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let s = session else { return nil }
+        return (s.resampler.phaseTrace, s.inputOrigin, s.outAnchor, s.initialPrimer,
+                s.resampler.latencyFrames)
     }
 
     // MARK: - The seam
@@ -410,10 +518,13 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
                              discardPrimer: Bool) -> Session {
         let r = PolyphaseResampler(channels: channels, ratio: Self.ratio,
                                    prototype: Self.sharedPrototype)
+        r.capturesPhase = capturesPhaseForTesting
         let latency = r.latencyFrames
         return Session(sampleRate: rate, timescale: timescale, channels: channels, resampler: r,
+                       inputOrigin: firstInputTicks,
                        outAnchor: discardPrimer ? firstInputTicks
                                                 : firstInputTicks - Int64(latency),
+                       initialPrimer: discardPrimer ? latency : 0,
                        nextInputTicks: firstInputTicks,
                        primerToDiscard: discardPrimer ? latency : 0,
                        formatDescription: fd)
@@ -433,6 +544,10 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     private func runLocked(_ planar: [[Float]]) -> CMSampleBuffer? {
         guard var s = session else { return nil }
         let ch = s.channels
+        // ρ for this whole block. At 1.0 this writes the value the resampler was built with.
+        s.resampler.phaseIncrement = rhoIncrement
+        let increment = rhoIncrement
+        let phaseAtFirstOutput = s.resampler.nextAbsolutePhase
         let capacity = s.resampler.maximumOutputFrames(for: planar[0].count)
         var output = [[Float]](repeating: [Float](repeating: 0, count: capacity), count: ch)
         let produced = s.resampler.process(input: planar, output: &output)
@@ -465,6 +580,21 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         session = s
         bump { $0.clamps += clamped }
 
+        // The block's breakpoint. Output tick `ticks` was reconstructed at absolute phase
+        // `phaseAtFirstOutput + discard·increment`, which is input tick
+        // `inputOrigin + phase/2^32 − 1 − latency` (the resampler's phase starts at one frame and
+        // its group delay is `latency`). Stored as the offset from `ticks`, in WRAPPING Q32.32:
+        // the phase wraps after 2^32 frames (~25 h) and a naive Int64 of it after ~12 h, but the
+        // offset itself is small, so arithmetic modulo 2^64 lands on it exactly.
+        let phase = phaseAtFirstOutput &+ UInt64(discard) &* increment
+        let offsetTicks = s.inputOrigin &- 1 &- Int64(s.resampler.latencyFrames) &- ticks
+        let offsetQ = Int64(bitPattern: phase &+ (UInt64(bitPattern: offsetTicks) &<< 32))
+        breakpoints[breakpointHead] = Breakpoint(outTick: ticks, frames: Int64(n),
+                                                 sampleRate: s.sampleRate, offsetQ: offsetQ,
+                                                 increment: increment)
+        breakpointHead = (breakpointHead + 1) % Self.breakpointCapacity
+        breakpointCount = min(breakpointCount + 1, Self.breakpointCapacity)
+
         guard let built = Self.makeSampleBuffer(interleaved, frames: n, channels: ch,
                                                 timescale: s.timescale, ptsTicks: ticks,
                                                 format: s.formatDescription) else {
@@ -481,6 +611,8 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         // not be measured against an axis this one never advanced.
         bump { $0.passthroughs += 1 }
         session = nil
+        // The renderer now gets un-resampled audio, whose content time IS its output time.
+        breakpointCount = 0
         if !passthroughLogged {
             passthroughLogged = true
             lines.append(.passthrough(reason()))

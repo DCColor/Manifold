@@ -1020,6 +1020,9 @@ separately testable:
 `inputTime(atOutputTime:)`, and the paired probe's `actual` switches to it. *Test:* identity at
 ratio 1.0 (step 3's PAIRED figures reproduce), and exact inversion under a ramped ratio, using
 step 1's warp fixture in `swift test`.
+✅ **The paired probe now reports content time** (2026-09-26): `[*-PAIRED]` `err` is
+`inputTime(atOutputTime: timebase) − target`, mapped after the second host read, never inside the
+pair. It is the identity while the ratio is pinned at 1.0, so step 3's figures are unchanged.
 
 **4b. First anchor at first presentation**, and at the first SR pair on WHEP. *Measured:* startup
 position writes on WHEP go from 1–3 per connect to **0**, over cold and warm connects on MediaMTX and
@@ -1028,7 +1031,10 @@ Cloudflare. Audio-start delay is logged and must stay under the 400 ms `targetDe
 **4c. The controller as a pure function** (`e` → `ρ`, with clamp, slew and anti-windup), in the
 `LiveAudioResample` target so it tests without ManifoldCore. *Tests* replay §2.2's three disturbances
 and assert its table: 0 steady error at 65 ppm, a 10 ms relay settled within 20 s, and the jitter
-peak ≤ 60 ms. A windup test holds 60 s at the rail, then releases, with no overshoot over 2 ms.
+peak ≤ 60 ms. A windup test holds 60 s at the rail, then releases: **≤ 4 ms overshoot after the
+release, with the integrator held (≤ 500 ppm)** (REVISED 2026-09-26 from "no overshoot over 2 ms";
+measured 3.65 ms and 448 ppm, against 68.9 ms and 9379 ppm without anti-windup). The residual is the
+critically damped loop's recovery from B/k_p = 20 ms, where it leaves the rail, not windup.
 
 **4d. Wire it.** The ratio goes into the stage per buffer. One coarse branch on `e` (level 250 ms,
 step 50 ms) replaces the mirror's position branch and NDI's `serviceDesktopAudioAnchor`. Its action
