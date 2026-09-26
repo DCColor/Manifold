@@ -145,6 +145,12 @@ public final class LiveAudioPairedProbe: @unchecked Sendable {
         let t0 = CACurrentMediaTime()
         let timebase = readTimebaseSeconds()
         let t1 = CACurrentMediaTime()
+        sample(t0, timebase, t1)
+    }
+
+    /// The same, from a read someone else already took. Step 4d: the steering's read, so the
+    /// timebase is read once per buffer, and the loop and this instrument see the SAME read.
+    public func sample(_ t0: Double, _ timebase: Double, _ t1: Double) {
         // §2.1 REVISED: `actual` is the content being heard, not the output timebase.
         let actual = contentTime?(timebase) ?? timebase
 

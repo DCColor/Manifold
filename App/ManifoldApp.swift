@@ -46,6 +46,12 @@ struct ManifoldApp: App {
         // before any live source can connect. This is app `init`, before any scene body has run and
         // long before a transport exists, which is as early as the app has.
         LiveClock.enableTelemetry()
+        // Resampler step 4d's back-out switch: pin the ratio at 1.0 (step 3 behaviour) without a
+        // rebuild. An environment variable rather than a preference, so it cannot persist past the
+        // launch that asked for it. Debug ▸ Resampler Ratio flips it too, from the next connect.
+        if ProcessInfo.processInfo.environment["MANIFOLD_PIN_RESAMPLER_RATIO"] == "1" {
+            FrameEngine.setLiveAudioRatioPinned(true)
+        }
         #endif
         // FIRST LINE OF EVERY LOG, before anything else can emit. A log that cannot state which
         // build produced it is not evidence — see BuildInfo for why this is derived rather than
@@ -257,6 +263,8 @@ struct ManifoldApp: App {
                 NDIAudioGroupedCommand()
                 NDIAudioLeadCommand()
                 Divider()
+                ResamplerRatioCommand()
+                Divider()
                 NDIAudioWAVCaptureCommand()
             }
             }
@@ -405,6 +413,20 @@ private struct NDIAudioLeadCommand: View {
     @ObservedObject private var ndi = NDIService.shared
     var body: some View {
         Button(ndi.audioLeadTitle) { NDIService.shared.cycleDesktopAudioLead() }
+    }
+}
+
+/// Debug ▸ Resampler Ratio — flips between step 4d's loop and step 3's pinned 1.0, from the next
+/// connect (the mode is captured per session). Not persisted; `MANIFOLD_PIN_RESAMPLER_RATIO=1` sets
+/// the same switch at launch.
+private struct ResamplerRatioCommand: View {
+    @State private var pinned = FrameEngine.liveAudioRatioPinned
+    var body: some View {
+        Button(pinned ? "Resampler Ratio: PINNED 1.0 (step 3) — next connect"
+                      : "Resampler Ratio: LOOP (step 4d) — next connect") {
+            pinned.toggle()
+            FrameEngine.setLiveAudioRatioPinned(pinned)
+        }
     }
 }
 

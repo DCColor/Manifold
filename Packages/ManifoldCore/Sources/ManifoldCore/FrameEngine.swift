@@ -2064,11 +2064,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public final class LiveAudioSink: @unchecked Sendable {
         private let renderer: AVSampleBufferAudioRenderer
         private let tap: AudioTapBuffer
-        /// The ASRC (docs/AUDIO_RESAMPLER_DESIGN.md §7 step 3, ratio pinned at 1.0). One per
-        /// session: `beginLiveAudio` constructs it, `endLiveAudio` retires it. Reachable ONLY from
-        /// here, and only a live transport ever obtains a sink — which is what keeps file playback
-        /// and HLS out of it by construction (§1.3, §1.4).
+        /// The ASRC (docs/AUDIO_RESAMPLER_DESIGN.md §7 step 3). One per session: `beginLiveAudio`
+        /// constructs it, `endLiveAudio` retires it. Reachable ONLY from here, and only a live
+        /// transport ever obtains a sink — which is what keeps file playback and HLS out of it by
+        /// construction (§1.3, §1.4).
         private let resample: LiveAudioResampleStage
+        /// The loop that moves the stage's ratio (step 4d, §2.2). Sampled once per input buffer,
+        /// here, on the transport's enqueue thread. In EVERY configuration: this is the product's
+        /// drift correction now, not an instrument.
+        private let steering: LiveAudioResampleSteering
         /// ⚠️ THE PATH IS A CONSTRUCTION PARAMETER, NOT A CONSTANT, AND THAT IS A CORRECTION.
         /// `enqueue` hardcoded `.whep`, which was true while WHEP was the only live source
         /// reaching this sink and silently wrong the moment a second one did: SRT audio would
@@ -2082,14 +2086,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         private let paired: LiveAudioPairedProbe?
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
                          path: AudioTapBuffer.SourcePath, resample: LiveAudioResampleStage,
+                         steering: LiveAudioResampleSteering,
                          probe: LiveAudioRendererProbe?, paired: LiveAudioPairedProbe?) {
             self.renderer = renderer; self.tap = tap; self.path = path; self.resample = resample
-            self.probe = probe; self.paired = paired
+            self.steering = steering; self.probe = probe; self.paired = paired
         }
         #else
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
-                         path: AudioTapBuffer.SourcePath, resample: LiveAudioResampleStage) {
+                         path: AudioTapBuffer.SourcePath, resample: LiveAudioResampleStage,
+                         steering: LiveAudioResampleSteering) {
             self.renderer = renderer; self.tap = tap; self.path = path; self.resample = resample
+            self.steering = steering
         }
         #endif
         /// The tap gets the ORIGINAL buffer; the renderer gets the RESAMPLED one.
@@ -2113,14 +2120,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             tap.ingest(sampleBuffer, path: path)
             let out = resample.process(sampleBuffer)
             guard !out.isEmpty else { return }
+            // AFTER the stage, so this buffer's block is in the content-time map; the ratio it sets
+            // applies from the next block. One paired read per sink call (§2.1's cadence).
+            let read = steering.sample()
             #if DEBUG || MANIFOLD_TELEMETRY
             // ⚠️ ON THE RESAMPLER'S OUTPUT SIDE, AND THAT IS §4.1 ITEM 1. These used to sit before the
             // tee, reading the transport's buffer — which, once the stage is in the path, is no
             // longer what the renderer receives. The gap histogram would then read perfect about a
             // stream the renderer never sees. They now read exactly what is enqueued: one probe row
-            // per renderer buffer, one paired sample per sink call (§2.1's cadence).
+            // per renderer buffer, and the step-2 paired figures from the steering's own read, so
+            // the timebase is read once per buffer rather than twice.
             for sb in out { probe?.willEnqueue(sb) }
-            paired?.sample()
+            if let read { paired?.sample(read.t0, read.timebase, read.t1) }
             #endif
             for sb in out { renderer.enqueue(sb) }
         }
@@ -2230,6 +2241,33 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             reportsWindows: LiveClock.telemetryIsEnabled,
             log: { NSLog("%@", $0) })
         liveAudioResample = resample
+        // ── THE LOOP (step 4d), PER SESSION, IN EVERY CONFIGURATION ───────────────────────────
+        // It owns every timebase write this session makes after the hold above, so the count it
+        // logs is the session's `setRate` count. The mode is captured here: flipping the switch
+        // mid-session takes effect at the next connect, never under a running loop.
+        let mode: LiveAudioResampleSteering.Mode = Self.liveAudioRatioPinned ? .pinned : .loop
+        let steering = LiveAudioResampleSteering(
+            tag: "[\(path.rawValue.uppercased())-RESAMPLE]", mode: mode, stage: resample,
+            reportsWindows: LiveClock.telemetryIsEnabled,
+            readTimebase: { [synchronizer] in CMTimeGetSeconds(synchronizer.currentTime()) },
+            hostNow: { CACurrentMediaTime() },
+            write: { [synchronizer, mirror] outputSeconds, host, origin in
+                #if DEBUG || MANIFOLD_TELEMETRY
+                mirror.lock.lock(); let probe = mirror.probe; mirror.lock.unlock()
+                probe?.recordRateSet(rate: 1.0, mediaTime: outputSeconds, origin: origin.label)
+                #endif
+                synchronizer.setRate(1.0,
+                                     time: CMTime(seconds: outputSeconds, preferredTimescale: 90_000),
+                                     atHostTime: CMTime(seconds: host, preferredTimescale: 90_000))
+            },
+            log: { NSLog("%@", $0) })
+        mirror.lock.lock(); mirror.steering = steering; mirror.lock.unlock()
+        NSLog("[%@-RESAMPLE] steering %@ — %@", path.rawValue.uppercased(), mode.rawValue,
+              mode == .loop
+                ? "ratio carries the correction (§2.2); coarse branch at 250 ms level / 50 ms step "
+                  + "on content time; the 10 ms position branch is OFF"
+                : "ratio held at 1.0, controller idle, coarse branch off; step 3's 10 ms position "
+                  + "branch is ON (debug back-out switch)")
         #if DEBUG || MANIFOLD_TELEMETRY
         // Per SESSION, so a reconnect starts a fresh gap accounting rather than carrying the
         // disconnect across as one enormous hole.
@@ -2257,10 +2295,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioPairedProbe = paired
         setPairedProbe(paired)
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
-                             resample: resample, probe: probe, paired: paired)
+                             resample: resample, steering: steering, probe: probe, paired: paired)
         #else
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
-                             resample: resample)
+                             resample: resample, steering: steering)
         #endif
     }
 
@@ -2303,6 +2341,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// the same reason `probe` is: those are nonisolated and cannot see main-actor state.
         var pairedProbe: LiveAudioPairedProbe?
         #endif
+        /// The session's loop (step 4d). Every timebase write after the hold goes through it; the
+        /// mirror hands it the target line on every evaluation.
+        var steering: LiveAudioResampleSteering?
         var changes = 0
         var pushes = 0
         /// Heartbeat evaluations — `onMappingTick`, the mapping re-stated at the control cadence
@@ -2336,6 +2377,34 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var heldMapping: LiveClock.Mapping?
         /// Mirror evaluations suppressed by the gate — reported on the first-anchor line.
         var heldEvaluations = 0
+    }
+
+    // ── THE BACK-OUT SWITCH (step 4d): PIN THE RATIO AT 1.0, i.e. STEP 3 ─────────────────────────
+    //
+    // Process-wide, default OFF (the loop runs). Set only by the app, under `#if DEBUG` — a launch
+    // argument or Debug ▸ Resampler Ratio — so Release cannot reach it. Read once per session in
+    // `beginLiveAudio`. Pinned restores step 3 exactly: ratio 1.0, controller idle, coarse branch
+    // off, and the two 10 ms position branches (the mirror's, and NDI's re-anchor) back on.
+    private nonisolated static let ratioPinLock = NSLock()
+    private nonisolated(unsafe) static var ratioPinned = false
+
+    public nonisolated static var liveAudioRatioPinned: Bool {
+        ratioPinLock.lock(); defer { ratioPinLock.unlock() }
+        return ratioPinned
+    }
+
+    /// Takes effect at the next `beginLiveAudio`.
+    public nonisolated static func setLiveAudioRatioPinned(_ pinned: Bool) {
+        ratioPinLock.lock(); ratioPinned = pinned; ratioPinLock.unlock()
+        NSLog("[RESAMPLE] ratio %@ from the next connect (debug switch)",
+              pinned ? "PINNED at 1.0 — step 3 behaviour" : "on the LOOP — step 4")
+    }
+
+    /// Whether the CURRENT session runs pinned. NDI asks this to decide whether its own 10 ms
+    /// re-anchor is live (pinned) or retired into the coarse branch (loop).
+    public nonisolated var liveAudioSessionPinsRatio: Bool {
+        mirror.lock.lock(); defer { mirror.lock.unlock() }
+        return mirror.steering?.mode == .pinned
     }
 
     /// How long past the first presentation audio waits for a first Sender Report before
@@ -2548,6 +2617,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let wasMirrored = mirror.mirrored
         // The transport's own tag — read under the same lock as everything else this session owns.
         let tag = "[\(mirror.path.rawValue)-AUDIO]"
+        let steering = mirror.steering
         // ⚠️ `mirrored` IS NO LONGER SET HERE ON THE FIRST MAPPING. It means "the first anchor has
         // been pushed", and since step 4b that waits for the gate below; it is set where the push
         // is decided. An un-anchor (`nil`, the clock's `reset()`) re-arms the gate for its stream.
@@ -2566,6 +2636,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             liveAudioProbeForRateLog?.recordRateSet(rate: 0, mediaTime: .nan,
                                                     origin: "mirrorLiveAudio (un-anchored hold)")
             #endif
+            steering?.hold()
             synchronizer.rate = 0
             return
         }
@@ -2652,28 +2723,27 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                          mirror.senderReportHost, mirror.heldEvaluations, mirror.awaitsSenderReport)
         }
 
-        // ── RESAMPLER STEP 3: THE RATE BRANCH IS DISABLED; THE POSITION BRANCH IS NOT ──────────
+        // ── STEP 4d: THE LOOP HOLDS POSITION; THE MIRROR ONLY ANCHORS AND FEEDS IT THE LINE ─────
         //
-        // `AVSampleBufferAudioRenderer` mutes for ~50 ms on EVERY rate write, whatever the step
-        // (docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md §11.11), so the rate is no longer mirrored: the
-        // synchronizer is set to exactly 1.0 at the first anchor and never re-rated. From step 4
-        // the resampler's ratio carries `smoothedRate` (still computed above, and still reported,
-        // because it is that ratio's feed-forward — docs/AUDIO_RESAMPLER_DESIGN.md §2.2).
+        // `AVSampleBufferAudioRenderer` mutes for ~50 ms on EVERY rate write (docs/
+        // LIVECLOCK_AUDIO_MIRROR_FINDINGS.md §11.11). Since step 3 the synchronizer runs at exactly
+        // 1.0 from the first anchor; since step 4d the resampler's ratio carries the correction,
+        // steered per buffer on CONTENT time against the line handed to it below (§2.1, §2.2).
         //
-        // ⚠️ THE POSITION BRANCH STAYS, AT ITS 10 ms TOLERANCE, SO THE SESSION CANNOT DRIFT
-        // CATASTROPHICALLY WHILE THE LOOP IS OPEN (§7 step 3). It still lands snaps, freeze-guard
-        // corrections and re-anchors, and it now also catches the sender↔device offset the rate
-        // used to absorb: that accrues at the smoothed ppm until it crosses 10 ms. Each of those is
-        // a `setRate(1.0, time:atHostTime:)` — a position write, rate unchanged — and still mutes;
-        // step 3 measures exactly that residue. Steps 4–5 remove it.
+        // ⚠️ THE 10 ms POSITION BRANCH IS OFF ON THE LOOP. It compared this open-loop `predicted`
+        // with the mapping, and under a working loop the timebase drifts from the target BY DESIGN
+        // (§2.1): it would fire on a correct loop. Its job — snaps, freeze guard, re-anchors — is
+        // now the steering's coarse branch (§2.4: 250 ms level, 50 ms step, on content time), which
+        // sees them as a moved line. It survives only behind the pinned (step 3) back-out switch.
         //
-        // With the rate pinned, `predicted` advances at exactly 1.0 from the last push, so
-        // `positionError` is now the accumulated divergence of the clock's line from a unity line —
-        // the quantity §7 step 3 says must drift at step 2's measured ppm.
+        // With the rate pinned, `predicted` advances at exactly 1.0 from the last push, so on the
+        // pinned path `positionError` is the accumulated divergence of the clock's line from a
+        // unity line — step 3's quantity.
+        let pinned = steering?.mode == .pinned
         let predicted = mirror.pushedMedia + (m.hostTime - mirror.pushedHost) * mirror.pushedRate
         let positionError = wasMirrored ? abs(target - predicted) : .infinity
         let tolerance = Self.liveAudioPositionTolerance
-        let shouldPush = positionError > tolerance
+        let shouldPush = !wasMirrored || (pinned && positionError > tolerance)
         let rateToPush = 1.0
         let smoothedNow = mirror.smoothedRate
         if shouldPush {
@@ -2709,6 +2779,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         pairedProbeForReference?.noteReference(media: target, host: m.hostTime,
                                                rate: m.rate, smoothed: smoothedNow)
         #endif
+        // The loop's target line (§2.8): the mapping minus cushion, on every evaluation. A snap or
+        // re-anchor moves it, and the steering sees that as a step (§2.4).
+        steering?.setReference(media: target, host: m.hostTime, rate: m.rate)
 
         // ⚠️ EMITTED BEFORE THE PUSH GUARD, AND THAT ORDERING IS THE WHOLE POINT OF THIS LINE.
         // It used to sit after `guard shouldPush`, while `lastStatsHost` was advanced before it —
@@ -2722,31 +2795,30 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             NSLog("%@ mirror — %d mapping change(s) + %d heartbeat tick(s) → %d setRate call(s) "
                 + "· smoothedRate=%.5f · clockRate=%.5f · posErr=%.1f ms%@",
                   tag, changes, ticks, pushes, smoothedNow, m.rate,
-                  positionError.isFinite ? positionError * 1000 : 0,
-                  shouldPush ? "" : " · (no push this window)")
+                  positionError.isFinite && pinned ? positionError * 1000 : .nan,
+                  pinned ? (shouldPush ? "" : " · (no push this window)")
+                         : " · LOOP: posErr not used — the steering line carries the error")
         }
 
         guard shouldPush else { return }
-        #if DEBUG || MANIFOLD_TELEMETRY
-        // The origin names WHICH write this is, because §6's criterion counts them apart: the first
-        // anchor is the session's one rate write (rate 0 → 1.0); every later row is the position
-        // branch, at the same rate, and is the residue step 3 exists to measure.
-        liveAudioProbeForRateLog?.recordRateSet(
-            rate: Float(rateToPush), mediaTime: target,
-            origin: !wasMirrored ? "mirrorLiveAudio (FIRST ANCHOR — the session's rate write)"
-                  : String(format: "mirrorLiveAudio (position branch, %@, err %.1f ms)",
-                           tick ? "heartbeat" : "mapping change", positionError * 1000))
-        #endif
-        synchronizer.setRate(Float(rateToPush),
-                             time: CMTime(seconds: target, preferredTimescale: 90_000),
-                             atHostTime: CMTime(seconds: m.hostTime, preferredTimescale: 90_000))
+        // Through the steering, the session's one writer: it places the timebase on content time,
+        // counts the write, and logs its origin to the rate probe. The first anchor is the
+        // session's rate write (rate 0 → 1.0); a later one is the pinned position branch, or the
+        // gate re-opening after a clock reset (`mapping == nil` re-arms it).
+        steering?.anchor(media: target, host: m.hostTime, rate: m.rate,
+                         reason: !wasMirrored ? "anchor after a clock reset"
+                             : String(format: "pinned position branch, %@, err %.1f ms",
+                                      tick ? "heartbeat" : "mapping change",
+                                      positionError * 1000))
         if !wasMirrored {
             NSLog("%@ timebase MIRRORED — first anchor: senderPTS=%.3fs host=%.3fs "
-                + "clockRate=%.5f → synchronizer rate %.1f, PINNED for the session (resampler "
-                + "step 3: rate branch off, position branch at %.0f ms) cushion=%.3fs → "
+                + "clockRate=%.5f → synchronizer rate %.1f for the session; %@ cushion=%.3fs → "
                 + "timebase=%.3fs",
                   tag, m.senderPTS, m.hostTime, m.rate, rateToPush,
-                  tolerance * 1000, cushion, target)
+                  pinned ? String(format: "PINNED (step 3): position branch at %.0f ms.",
+                                  tolerance * 1000)
+                         : "LOOP (step 4d): no position branch, coarse branch in the steering.",
+                  cushion, target)
             if let g = gateTimes {
                 // ── STEP 4b's STARTUP LINE ─────────────────────────────────────────────────────
                 // Every time is ms after `beginLiveAudio`. `+added` is what the gate cost against
@@ -2834,6 +2906,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let active = mirror.active
         let first = active && !mirror.mirrored
         let tag = "[\(mirror.path.rawValue)-AUDIO]"
+        let steering = mirror.steering
         if active {
             // `mirrored` is what `liveAudioDrift` keys its readiness on, so a directly-anchored
             // session reports drift exactly as a mirrored one does.
@@ -2850,8 +2923,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         guard active else { return }
 
         #if DEBUG || MANIFOLD_TELEMETRY
-        liveAudioProbeForRateLog?.recordRateSet(rate: 1.0, mediaTime: mediaTime,
-                                                origin: "anchorLiveAudio")
         // ⚠️ RATE 1.0, AND THAT IS NOT A PLACEHOLDER — IT IS WHAT MAKES NDI's NUMBER DIFFERENT.
         // This transport has no mapping and no rate to mirror: the timebase is set once and left,
         // so the target advances at exactly mach time. The error the probe then accumulates is the
@@ -2861,13 +2932,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         pairedProbeForReference?.noteReference(media: mediaTime, host: hostTime,
                                                rate: 1.0, smoothed: 1.0)
         #endif
-        synchronizer.setRate(1.0,
-                             time: CMTime(seconds: mediaTime, preferredTimescale: 90_000),
-                             atHostTime: CMTime(seconds: hostTime, preferredTimescale: 90_000))
+        // Through the steering, the session's one writer (step 4d). The anchor line — `mediaTime`
+        // at `hostTime`, rate 1.0 — is also NDI's TARGET line for the loop (§2.8): set here and
+        // left, so the error the loop nulls is the device crystal against mach, the +7 ppm.
+        steering?.anchor(media: mediaTime, host: hostTime, rate: 1.0,
+                         reason: "NDI caller re-anchor")
         if first {
             NSLog("%@ timebase ANCHORED DIRECTLY (no LiveClock) — media=%.3fs at host=%.3fs, "
-                + "rate 1.0. Re-anchors from here are the caller's closed loop.",
-                  tag, mediaTime, hostTime)
+                + "rate 1.0. %@",
+                  tag, mediaTime, hostTime,
+                  steering?.mode == .pinned
+                    ? "PINNED (step 3): re-anchors from here are the caller's 10 ms closed loop."
+                    : "LOOP (step 4d): this line is the steering's target; the caller's 10 ms "
+                      + "re-anchor is retired into the coarse branch.")
         }
     }
 
@@ -2958,8 +3035,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let ready = mirror.active && mirror.mirrored
         mirror.lock.unlock()
         guard ready, clockSeconds.isFinite else { return nil }
-        let timebase = CMTimeGetSeconds(synchronizer.currentTime())
-        guard timebase.isFinite else { return nil }
+        let raw = CMTimeGetSeconds(synchronizer.currentTime())
+        guard raw.isFinite else { return nil }
+        // ⚠️ ON CONTENT TIME (step 4d, §2.1). Under the loop the raw timebase drifts from the clock
+        // BY DESIGN, by exactly the ppm the ratio absorbs; compared raw, this would report the
+        // correction as an error. The identity while the ratio is at 1.0.
+        let timebase = liveAudioResample?.inputTime(atOutputTime: raw) ?? raw
         // The timebase deliberately runs `cushion` behind the live clock (see `mirrorLiveAudio`),
         // so that offset is removed here. What remains is the MIRROR ERROR — how far the audio
         // timebase has slipped from the mapping it is tracking — which is what this is read for.
@@ -2982,7 +3063,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioAnchor = nil
         mirror.lock.lock()
         mirror.active = false; mirror.mirrored = false
+        let steering = mirror.steering
+        mirror.steering = nil
         mirror.lock.unlock()
+        steering?.finish()
         #if DEBUG || MANIFOLD_TELEMETRY
         liveAudioProbe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "endLiveAudio")
         // Writes the final window before the observations go, so the last 10 s are not lost.

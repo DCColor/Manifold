@@ -2071,3 +2071,198 @@ complete first beep that starts late.
 
 **Limits:** n = 1 cold and 1 warm connect per transport, judged by ear and eye, with no device
 capture. NDI was not run, because it does not go through the mirror.
+
+---
+
+## 13. Step 4d results — the loop closed, measured 2026-09-26
+
+**Built:** `LiveAudioResampleSteering` (`Packages/ManifoldCore/Sources/LiveAudioResample/`), one per
+session.
+- **Per input buffer**, in `LiveAudioSink.enqueue` after the stage:
+  - one paired read of the timebase, gated at 200 µs;
+  - `actual` mapped to content time (4a), against the session's target line (§2.8);
+  - one controller step (4c), and ρ into the stage for the next block.
+- **It is the session's only timebase writer.** The first anchor, a coarse event and a re-anchor
+  all go through it, so its count IS the `setRate` count.
+- **Replaced:**
+  - the mirror's 10 ms position branch and NDI's `serviceDesktopAudioAnchor` re-anchor are off;
+  - the mirror now only anchors and hands the steering the mapping line.
+- **The coarse branch (§2.4):**
+  - triggers: `|e_f| > 250 ms` (level) or `|e_k − e_(k−1)| > 50 ms` (step), both on content time;
+  - `e_f` reset and `i` held after each event.
+- **In every configuration.** This is the product's drift correction now, not an instrument.
+
+**Three departures from §2.4, stated so they are not read as the design:**
+1. **The coarse action moves the timebase only.** It places the timebase at
+   `outputTime(atInputTime: target)`, a new inverse of the content-time map, so the content heard
+   is the target. It does not drain the stage or re-anchor its axis: re-anchoring the output axis
+   would restart it at the next input tick while the renderer still holds buffers on the old one,
+   overlapping or gapping them by the offset the loop has accumulated. The result is the same
+   single write step 3's position branch made.
+2. **A 0.25 s settle window after every write.** `setRate` updates the timebase asynchronously, so
+   the reads just after a write see the old axis and then the new. Without the window, the first
+   stale read seeds `e_f` at the old error and fires a second, LEVEL event on the write's own
+   step. A test shows exactly that at settle 0. The 0.25 s is a bound, not a measurement.
+3. **`liveAudioDrift` reads content time.** Compared raw, it would report the ratio's correction
+   as drift (§2.1).
+
+**Back-out switch** (DEBUG only, absent from the Release binary):
+- how to set it: `MANIFOLD_PIN_RESAMPLER_RATIO=1` at launch, or Debug ▸ Resampler Ratio, taking
+  effect from the next connect;
+- what "pinned" is: exactly step 3 — ratio 1.0, controller idle, coarse off, and both 10 ms
+  branches back on;
+- no defaults key is written.
+
+`swift test`: 29 of 29. The new steering tests cover:
+- the step trigger (±49 ms does not fire, ±51 ms does);
+- the level trigger (a 5000 ppm drift fires once; a 240 ms offset does not);
+- one write per session over 10 min at each of the four measured drifts, with `i` landing on
+  +5 / −60 / +14 / +7 ppm;
+- a 200 ms snap as exactly one step event, with `i` held;
+- pinned mode never moving the ratio;
+- the inverse map round-tripping on the real stage.
+
+Profile and Release build clean.
+
+**Protocol:** the Profile build, unsigned (`.build-cc/step4d`), telemetry on, OBS on this Mac as
+the sender, the flash-beep fixture. A fresh launch per transport: connect, about 3 min, quit. Run
+order MediaMTX, Cloudflare, NDI, SRT, with SRT last because disconnecting local SRT hangs OBS.
+Logs: `~/Desktop/step4d-{mediamtx,cloudflare,ndi,srt}.log`.
+
+### 13.1 Results
+
+| | Local SRT | WHEP MediaMTX | WHEP Cloudflare | NDI (DistroAV "OBS PGM") |
+|---|---|---|---|---|
+| Session length | 193 s | 194 s | 192 s | 183 s |
+| **`i` at end** (realised drift, 11.2) | +8.4 ppm; wandered +1 … +65, ≈ +12 over the last 100 s (**+5**) | **−58.5 ppm**; −48 … −63 from 70 s (**−65**, −59 on the reconnect) ✅ | **−63.5 ppm**; −43 … −63 from 140 s (**+14**) ❌ | **+6.48 ppm**, settled by ~100 s (**+7.1**; §10.4 +6.68) ✅ |
+| `e` per 10 s window, whole session | −2.3 … +3.8 ms | −3.2 … +3.0 ms | −3.7 … +7.3 ms (first window); ±3.7 after | −0.16 … +0.07 ms |
+| §5.3 bound | ±15 ms ✅ | ±15 ms ✅ | ±15 ms ✅ | ±10 ms ✅ |
+| `e` p-p within a window | 2.3–4.7 ms | 1.9–3.6 ms | 1.9–9.0 ms (the 9 in the first window) | ≈ 0.03 ms |
+| Max \|ρ − 1\| | 259 ppm (first window) | 195 ppm | **613 ppm** (first 10 s) = 1.06 cents | 7.9 ppm |
+| Slew max | 200 ppm/s — the limit — in almost every window | 200 ppm/s, the same | 200 ppm/s, the same | 86.5 ppm/s in the first window, ≤ 8.2 after |
+| Controller saturated | 0 | 0 | 0 | 0 |
+| **`setRate` rows with a non-zero rate** | **1** (first anchor) | **1** | **1** | **1** |
+| Coarse events | 0 | 0 | 0 | 0 |
+| NDI `RE-ANCHORED` | — | — | — | **0** |
+| Heard and seen (Robbie) | picture and audio slightly late at connect, not objectionable | fine; the connect landed on the fixture's black gap | no problems | no problems |
+
+- **The write criterion is met on every transport.** Each session has exactly three rate rows —
+  the hold, the first anchor, the end — so non-zero writes = 1 = 1 + COARSE (0).
+- **NDI's retired re-anchor did not come back.** 0 `RE-ANCHORED` lines, and the loop held `e`
+  within ±0.16 ms.
+- **The plant model holds where there is no depth loop.** NDI's integrator settled on +6.48 ppm,
+  within 0.2 ppm of §10.4's independent device-crystal figure. MediaMTX landed on its step-3 drift.
+- **SRT's startup offset (11.4 item 4) is now nulled.** The first window's median `e` was
+  +2.2 ms; it was gone within ~20 s. Whether that offset was error or deliberately carried depth
+  is still the open question 11.4 asked.
+- **The late start on SRT and MediaMTX is connect latency, not an A/V offset.** Picture and audio
+  were late *together*. Audio started 0 ms (SRT) and 7 ms (MediaMTX) after the picture, and the
+  first-window median `e` was +2.2 and +1.3 ms. §12.3's start question is unchanged by this step.
+- **The first-anchor gate behaved as in §12:**
+
+  | | first mapping | first presentation | first SR | anchor |
+  |---|---|---|---|---|
+  | MediaMTX | +506 | +822 | +7 | +829 |
+  | Cloudflare | +894 | +1185 | +1096 | +1192 |
+  | SRT | +294 | +296 | no RTCP | +296 |
+
+  All times are ms after `beginLiveAudio`. No fallback fired.
+- **The pairing gate discarded about 4%** of reads on the mirrored transports (18–21 per window)
+  and none on NDI.
+
+### 13.2 ⚠️ The ratio ripple is 5–10× the simulation's, and S = 200 ppm/s is binding
+
+§2.2's simulation put the steady ratio ripple at **24 ppm p-p**. On the three mirrored transports
+the measured ρ swung **50–250 ppm within a 10 s window**, and the slew limiter hit 200 ppm/s in
+almost every window. On NDI the ripple was ≈ 1 ppm and the slew stayed under 8.2 ppm/s after the
+first window.
+
+**Cause:**
+- The measured disturbance is the picture's own depth wobble. Within a window, `e` spans 2–4 ms on
+  SRT and WHEP against 0.03 ms on NDI, which has no depth loop.
+- The simulation modelled that as a ±1.5 ms sawtooth at 1 Hz. The amplitude was about right, but
+  the real wobble is slower and passes the τ_e = 2 s filter instead of being averaged out.
+- At `k_p` = 0.1 s⁻¹, each 1 ms of filtered error commands 100 ppm. The command then moves faster
+  than 200 ppm/s, so the slew limit, not the gain, sets how fast ρ follows.
+
+**This is the audio following the picture, not a fight.** It is the movement §2.3 item 3 says
+audio has to follow.
+
+Correlation per 10 s window, from the third window on:
+
+| | LiveClock rate vs ρ − 1 | LiveClock rate vs `i` | depth error vs median `e` |
+|---|---|---|---|
+| SRT | −0.12 | −0.17 | +0.21 |
+| MediaMTX | +0.13 | 0.00 | −0.32 |
+| Cloudflare | **+0.47** | +0.11 | **−0.58** |
+
+The integrator never follows LiveClock's rate (|r| ≤ 0.17). The controller never saturated, and
+`e` never grew; nothing ran away.
+
+**It is inaudible, and was not heard:**
+- 250 ppm is 0.43 cents, and 200 ppm/s is 0.35 cents/s;
+- the largest excursion, 613 ppm, was 1.06 cents, in Cloudflare's first 10 s.
+
+**What it changes:** S = 200 ppm/s is not headroom. It is a binding constraint in steady state on
+every LiveClock transport. §2.2's ripple figure and its reasoning for τ_e are therefore
+understated for those transports.
+
+⚠️ **Do not retune from these runs.** Three minutes per transport cannot separate a better τ_e
+(more filtering, more lag) from a lower `k_p`. Criterion 7 needs to be read against a real ratio
+trace. Step 8's 30-minute runs are where τ_e and S get decided, with this section's ripple as the
+number to beat.
+
+### 13.3 ⚠️ UNRESOLVED — Cloudflare's integrator settled near −60 ppm, not +14
+
+§7 step 4 says a settled integrator away from the realised drift "means `target` or `actual` is
+wrong". Cloudflare's `i` fell from +135 ppm (20 s) through 0 (60 s) to −43 … −63 ppm over the last
+50 s, and ended at −63.5. Step 3 measured +14 ppm on the same path (11.2).
+
+**Two hypotheses, neither established:**
+
+1. **The target line's position moved, not a clock.**
+   - Over a 3-minute session the integrator learns the *net slope of the target*. That includes
+     any net movement of the mapping's position by the depth loop, not just clocks.
+   - On Cloudflare the depth is the least settled: §11.8's +51 ms median / +135 ms p90 excess, and
+     the reorder inflation behind it. A net mapping creep of ≈ 13 ms over 3 minutes would read as
+     −75 ppm.
+   - Cloudflare is also where the loop tracks the depth loop most: +0.47 against LiveClock's rate,
+     −0.58 between depth error and `e`.
+   - If this is it, the value is right for this session and would average toward +14 over longer
+     runs.
+2. **A real audio↔video slope on this session.**
+   - `AV_SYNC_FINDINGS.md` §6.2 measured Cloudflare's SSRC drift as indistinguishable from zero,
+     but with ±25 ppm standard errors, over three sessions.
+   - A session-specific slope, or one that belongs to the OBS sender rather than the relay (§6.7),
+     would move `d` directly.
+   - Until 4e puts the SR line into the target (§2.6), the loop cannot tell that slope from the
+     video's.
+
+**Against a WHEP plumbing error:** MediaMTX, on the same `target` and `actual` code, landed on its
+step-3 drift. **Against reading the value as settled at all:** `i` was still moving at 140 s and
+swung ±10 ppm window to window after that.
+
+**Settle it with:**
+- a 30-minute Cloudflare run, with `i` read over the last 20 minutes against the mapping's net
+  position change over the same span (hypothesis 1 predicts they account for each other);
+- and/or the SR slope logged beside it once 4e's fit exists (hypothesis 2 predicts `i` tracks it).
+
+### 13.4 Still unmeasured at step 4d
+
+These runs were 3-minute quick connects, n = 1 per transport, judged by ear. Not measured:
+- **device-output mutes/min** with the §11.9 harness, using 11.5's protocol (connect, reconnect,
+  measure the reconnect). "Mutes = COARSE count" is shown by the rate rows, not by device capture;
+- **criterion 12**, the device-level A/V offset, against the pre-resampler baselines (SRT
+  +203.9 ms, Cloudflare SRT +165.8 ms, NDI +230.1 ms). This is the first step at which those
+  numbers should move, and it is not yet known whether they did;
+- **the 30-minute p99 and zero-trend checks** against §5.3. The bounds above are per-window
+  minima and maxima over 3 minutes, not p99 over 30;
+- **criterion 7 against a real ratio trace**, which §13.2 makes the more important of the open
+  criteria;
+- **any coarse event in the field.** None fired, so the step and level triggers, the settle
+  window and the inverse-map write are verified only by `swift test`, not against a real snap,
+  freeze guard or axis break;
+- **the pinned back-out switch in the app.** It was not exercised in these runs;
+- **a reconnect.** Every run was a single connect, so the steering's per-session construction and
+  teardown across a reconnect were not observed;
+- **the SDI counters and the meters.** Not checked at this step.

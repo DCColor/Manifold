@@ -89,10 +89,8 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
 
     // MARK: - Configuration
 
-    /// ⚠️ PINNED IN THE LIVE PATH. Step 3 put the resampler in the path with the loop open (§7), and
-    /// step 4d is what connects the controller. Until then nothing outside this module can move
-    /// the ratio: the only way to set one is `rho` below, which is `internal`. Step 4a's inversion
-    /// tests use it to ramp the ratio, and ManifoldCore cannot reach it.
+    /// The ratio every session's resampler is BUILT at. From step 4d the controller moves it per
+    /// block through `rho` below, which is `internal`: nothing outside this module can set one.
     public static let ratio = 1.0
 
     /// The largest input-axis step bridged by silence-fill or drop rather than treated as an axis
@@ -131,6 +129,9 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         public var passthroughs = 0
         /// Output buffers that could not be built, so their audio was lost.
         public var buildFailures = 0
+        /// Blocks resampled at a ratio other than exactly 1.0. A clamp in a window where this is 0
+        /// is still a plumbing defect; with the ratio moving it can be real intersample overshoot.
+        public var offUnityBlocks = 0
         public init() {}
 
         /// Anything that is not the nominal path. A window with any of these is always reported.
@@ -194,8 +195,8 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     /// Q32.32, so it is written directly rather than through `ratio`'s 1/x. Applied to every
     /// block from the next `process` on; a block never changes ratio part-way.
     ///
-    /// ⚠️ INTERNAL, AND 1.0 IN THE APP. Step 4d wires the controller; until then this exists for
-    /// the ramped-ratio inversion tests only.
+    /// ⚠️ INTERNAL. The only writer in the app is `LiveAudioResampleSteering` (step 4d), in this
+    /// module, so ManifoldCore cannot move the ratio except through the control law.
     var rho: Double {
         get { lock.lock(); defer { lock.unlock() }; return Double(rhoIncrement) / 4294967296.0 }
         set {
@@ -296,12 +297,13 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         retired = true
         session = nil
         let w = window, t = total
+        let r = Double(rhoIncrement) / 4294967296.0
         let suppressed = max(0, eventLinesThisWindow - Self.eventLinesPerWindow)
         window = Stats()
         lock.unlock()
         guard !wasRetired else { return }
         let tag = self.tag
-        emit { Self.windowLine(tag, w, total: t, final: true, suppressed: suppressed) }
+        emit { Self.windowLine(tag, w, total: t, rho: r, final: true, suppressed: suppressed) }
     }
 
     /// Cumulative counters since construction.
@@ -347,6 +349,39 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         return outputSeconds + offsetFrames / b.sampleRate
     }
 
+    /// The output time at which the content at input-axis time `inputSeconds` is heard — the
+    /// inverse of `inputTime(atOutputTime:)`, over the same breakpoints, with the same selection
+    /// rule and the same identity when there is no block. Step 4d's coarse branch uses it to place
+    /// the timebase so that the content heard is the target (§2.4).
+    ///
+    /// Within a block, input·rate = outTick + offset + x·ρ, so x = (input·rate − outTick − offset)/ρ.
+    public func outputTime(atInputTime inputSeconds: Double) -> Double {
+        guard inputSeconds.isFinite else { return inputSeconds }
+        lock.lock(); defer { lock.unlock() }
+        guard breakpointCount > 0 else { return inputSeconds }
+        let cap = Self.breakpointCapacity
+        func x(_ b: Breakpoint) -> Double {
+            let rho = Double(b.increment) / 4294967296.0
+            return (inputSeconds * b.sampleRate - Double(b.outTick)
+                    - Double(b.offsetQ) / 4294967296.0) / rho
+        }
+        var chosen = -1, fallback = -1
+        for k in 0..<breakpointCount {
+            let idx = (breakpointHead - 1 - k + cap) % cap
+            let xb = x(breakpoints[idx])
+            if xb >= 0 {
+                if xb < Double(breakpoints[idx].frames) { chosen = idx; break }
+                if fallback < 0 { fallback = idx }
+            }
+        }
+        if chosen < 0 { chosen = fallback >= 0 ? fallback
+                                               : (breakpointHead - breakpointCount + cap) % cap }
+        let b = breakpoints[chosen]
+        // At ratio 1.0 the offset is an exact zero and ρ exactly 1, so this is the argument back.
+        if b.offsetQ == 0 && b.increment == 1 << 32 { return inputSeconds }
+        return (Double(b.outTick) + x(b)) / b.sampleRate
+    }
+
     /// The current session's phase trace and the constants that place it on the two axes: output
     /// tick `outAnchor + e` was reconstructed at absolute phase `trace[e + initialPrimer]`, which is
     /// input tick `inputOrigin + phase / 2^32 − 1 − latency`. Tests only.
@@ -373,12 +408,13 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         if retired { lock.unlock(); return [] }
         var lines: [Line] = []
         let out = processLocked(sampleBuffer, lines: &lines)
-        var windowReport: (Stats, Stats, Int)?
+        var windowReport: (Stats, Stats, Int, Double)?
         let now = DispatchTime.now().uptimeNanoseconds
         if windowStartNanos == 0 { windowStartNanos = now }
         if now &- windowStartNanos >= Self.windowNanos {
             if reportsWindows || window.isEventful {
-                windowReport = (window, total, max(0, eventLinesThisWindow - Self.eventLinesPerWindow))
+                windowReport = (window, total, max(0, eventLinesThisWindow - Self.eventLinesPerWindow),
+                                Double(rhoIncrement) / 4294967296.0)
             }
             window = Stats()
             eventLinesThisWindow = 0
@@ -388,7 +424,7 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         let tag = self.tag
         for l in lines { emit { l.render(tag) } }
         if let r = windowReport {
-            emit { Self.windowLine(tag, r.0, total: r.1, final: false, suppressed: r.2) }
+            emit { Self.windowLine(tag, r.0, total: r.1, rho: r.3, final: false, suppressed: r.2) }
         }
         return out
     }
@@ -578,7 +614,7 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         let ticks = s.outAnchor + s.emitted
         s.emitted += Int64(n)
         session = s
-        bump { $0.clamps += clamped }
+        bump { $0.clamps += clamped; if increment != 1 << 32 { $0.offUnityBlocks += 1 } }
 
         // The block's breakpoint. Output tick `ticks` was reconstructed at absolute phase
         // `phaseAtFirstOutput + discard·increment`, which is input tick
@@ -628,16 +664,16 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     @inline(__always)
     private func bump(_ f: (inout Stats) -> Void) { f(&window); f(&total) }
 
-    private static func windowLine(_ tag: String, _ w: Stats, total t: Stats, final: Bool,
-                                   suppressed: Int) -> String {
-        String(format: "%@ %@ — in=%d out=%d buf / %lld frames · ratio %.6f (pinned) · holes %d "
+    private static func windowLine(_ tag: String, _ w: Stats, total t: Stats, rho: Double,
+                                   final: Bool, suppressed: Int) -> String {
+        String(format: "%@ %@ — in=%d out=%d buf / %lld frames · ρ %.6f now, %d block(s) off 1.0 · holes %d "
                + "(%lld fr silence) · overlaps %d (%lld fr dropped) · format resets %d · axis breaks "
                + "%d · clamps %d%@ · passthrough %d · build failures %d · session totals: out %lld fr, "
                + "holes %d, overlaps %d, resets %d, breaks %d, clamps %d%@",
                tag, final ? "session END" : "window",
-               w.inputBuffers, w.outputBuffers, w.outputFrames, ratio,
+               w.inputBuffers, w.outputBuffers, w.outputFrames, rho, w.offUnityBlocks,
                w.fills, w.fillFrames, w.drops, w.dropFrames, w.formatResets, w.axisBreaks,
-               w.clamps, w.clamps > 0 ? " ⚠️ NON-ZERO AT RATIO 1.0 — PLUMBING DEFECT" : "",
+               w.clamps, w.clamps > 0 && w.offUnityBlocks == 0 ? " ⚠️ NON-ZERO AT RATIO 1.0 — PLUMBING DEFECT" : "",
                w.passthroughs, w.buildFailures,
                t.outputFrames, t.fills, t.drops, t.formatResets, t.axisBreaks, t.clamps,
                suppressed > 0 ? " · \(suppressed) event line(s) suppressed this window" : "")

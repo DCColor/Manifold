@@ -1363,6 +1363,9 @@ final class DeckRegistry {
             guard let engine else { return .nan }
             return CMTimeGetSeconds(engine.currentSyncTime())
         }
+        NDIService.shared.liveAudioRatioPinned = { [weak engine] in
+            engine?.liveAudioSessionPinsRatio ?? false
+        }
         NDIService.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
         // Readiness / status / error / measured synchronizer rate. Diagnostic only — nothing acts
         // on it yet — but the live path has never read ANY of it, and a renderer in `.failed` would

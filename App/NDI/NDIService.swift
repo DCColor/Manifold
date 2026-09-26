@@ -199,6 +199,11 @@ final class NDIService: ObservableObject {
     /// pump thread. This is the closed half of the loop and the reason it is a loop at all: it is
     /// the only quantity in the system that is on the AUDIO DEVICE's clock rather than on mach time.
     var liveAudioTimebase: (() -> Double)?
+    /// `FrameEngine.liveAudioSessionPinsRatio` — whether this session runs step 3 (ratio pinned at
+    /// 1.0, so the 10 ms re-anchor below is the only drift correction) or step 4d (the resampler's
+    /// loop owns drift, and the re-anchor is retired into its coarse branch). Unwired reads as the
+    /// loop, which is the engine's own default.
+    var liveAudioRatioPinned: (() -> Bool)?
     /// `FrameEngine.liveAudioRendererState()` — readiness, status, error and the MEASURED
     /// synchronizer rate. Nothing on the live path has ever read any of it; see the reporting note
     /// on `reportRendererState`.
@@ -1934,14 +1939,22 @@ final class NDIService: ObservableObject {
             lastAnchorCheck = wallNow
             lastAnchorHost = wallNow
             anchorCount = 1
+            let pinned = liveAudioRatioPinned?() ?? false
             NSLog("%@", String(format: "[NDI-AUDIO] desktop timebase anchored %.0f ms behind the "
-                               + "pull clock — closed loop armed (tolerance %.1f ms, checked every "
-                               + "%.1f s)",
+                               + "pull clock — %@",
                                lead * 1000,
-                               Self.desktopAudioAnchorTolerance * 1000,
-                               Self.desktopAudioCheckInterval))
+                               pinned
+                                ? String(format: "PINNED (step 3): 10 ms re-anchor armed, checked "
+                                         + "every %.1f s", Self.desktopAudioCheckInterval)
+                                : "LOOP (step 4d): the resampler's loop holds this line; the "
+                                  + "10 ms re-anchor is retired into its coarse branch"))
             return
         }
+        // ⚠️ RETIRED ON THE LOOP (step 4d, docs/AUDIO_RESAMPLER_DESIGN.md §2.8). This compares the
+        // RAW timebase, which under a working loop keeps drifting from the line at the device's
+        // +7 ppm BY DESIGN — the ratio absorbs it on content time — so left on, it would fire about
+        // every 24 min on a loop that is working. Only the pinned (step 3) back-out runs it.
+        guard liveAudioRatioPinned?() ?? false else { return }
         guard wallNow - lastAnchorCheck >= Self.desktopAudioCheckInterval else { return }
         lastAnchorCheck = wallNow
         guard let readTimebase = liveAudioTimebase else { return }
