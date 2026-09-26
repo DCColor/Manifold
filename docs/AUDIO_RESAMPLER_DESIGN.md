@@ -1623,9 +1623,10 @@ state here it was 0 / ~0.5 / 0, and each write was at 1.0.
 likely the first Opus packet decoding short (pre-skip). The stage fills it with silence, so every
 later sample stays at its original time.
 
-**Not measured here:** the SDI counters (the plan's DeckLink check, over HDMI to the ATEM), the
-meters (checked by eye only), and mutes by device capture. There was one session and one reconnect
-per transport.
+**Measured separately:** mutes by device capture are in 11.5 below. The SDI counters were checked
+over HDMI to the ATEM on SRT and MediaMTX. Step 3 did not change them, and the one start-up resync
+is older than step 3 (`docs/BUGS.md`, "DeckLink card start"). The meters were checked by eye only.
+There was one session and one reconnect per transport.
 
 ### 11.2 The drift criterion — met, but against the clocks, not against §10.2's `smoothed`
 
@@ -1709,3 +1710,85 @@ renderer axis was exact either way, and the drift in 11.2 is a median over thous
    them. A closed loop with `k_p = 0.05` will null this in about 20 s. That is the right behaviour,
    provided the offset is an error and not the startup depth being deliberately carried. Check
    which before step 4 treats it as something to null.
+
+### 11.5 Device-output mutes — measured 2026-09-25, against §6.2
+
+**Method:** §6.2 and `LIVECLOCK_AUDIO_MIRROR_FINDINGS.md` §11.9, on the HEAD build:
+- **Source:** OBS played `ref-300s.wav` as its only audio source, with Mic/Aux muted and monitoring off.
+- **Capture:** Audio Hijack, Application (Manifold) → Recorder, at the device output.
+- **Detector:** `reference_track.py`, unmodified.
+- **Counting and matching:** `summarise_runs.py`'s rules and its mute ↔ `setRate` offset solve. Before
+  any live capture was read, this reproduced the 09-22 local SRT result exactly (11 mutes, 11/11
+  matched).
+
+**All three §6.1 gates held:**
+- **Injected-fault gate:** passed at 20:48, before run 1 (5 of 5 injected faults found, zero false
+  events).
+- **Single instance:** one Manifold PID was confirmed at every connect.
+- **Out-of-band energy:** ≤ 0.0015% above 15 kHz on every capture.
+
+The single-source test is the tracker's median block correlation (0.979–1.000; two sources read
+~0.707). The `analyse_fg` peak-r gate only searches the first 120 s of the reference, so it can fail
+on a clean capture that starts later in the file. It read r = 0.103 on the 09-22 local capture,
+which begins 230 s into the reference.
+
+**Two protocol constraints this instrument imposes, found on the first attempt:**
+
+1. **Audio Hijack starts its file on the first non-silent audio, and records only while Manifold is
+   producing audio.** The first connect after pressing Record is therefore never captured, and a
+   16 s disconnect came out as 2.4 s of silence. Every run below is a **connect, then a disconnect
+   and reconnect while recording**, and the reconnect session is the one measured. A renderer mute
+   still delivers zero-valued buffers, so it is captured; that is how §11.4 saw its 50 ms mutes.
+2. **The disconnect gap breaks tracker lock,** because the reference jumps by the silence Audio
+   Hijack dropped. Each capture was split at the gap and the reconnect session tracked on its own:
+   100% of blocks locked on all four.
+
+**The baselines, recomputed.** `summarise_runs.py` divides by the time of the *last event*, not the
+capture length. That overstates every §11.4 rate, and most of all on the quietest run. The same
+captures, divided by programme time with "first 15 s" counted from the first audible sample:
+
+| | §11.4 as published | recomputed |
+|---|---|---|
+| local SRT | 4.95 / 20.0 / 3.0 | **3.45 / 24.0 / 1.70** |
+| Cloudflare SRT | 11.08 / 48.0 / 7.7 | **9.92 / 44.0 / 7.06** |
+| WHEP (Cloudflare) | 7.32 / 40.0 / 4.5 | not recomputable: the 09-22 capture does not align with `ref-300s` (coarse r = 0.10) |
+
+**Results — mutes/min overall / first 15 s / after 15 s, reconnect session, ~3 min each:**
+
+| | step 3 | baseline (§11.4) | §6.2 target | every mute ↔ `setRate` |
+|---|---|---|---|---|
+| **local SRT** | **0 / 0 / 0** (184 s) | 4.95 / 20.0 / 3.0 | 0.0 / 0.0 | none to match; the only row is the FIRST ANCHOR |
+| **WHEP MediaMTX** | **0.65 / 4.0 / 0.35** (185 s, 2 mutes) | none (§11.4's WHEP row is Cloudflare) | 0.0 / 0.0 | **2/2**: both are 10 ms position-branch writes (err 10.1 ms), lag +0 and +2 ms |
+| **WHEP Cloudflare** | **0 / 0 / 0** renderer mutes (183 s) | 7.32 / 40.0 / 4.5 | 0.0 / 0.0 | no `setRate` after the FIRST ANCHOR |
+| **NDI** | **0 / 0 / 0** (184 s) | **none; this is the first NDI measurement** | 0.0 / 0.0 | the only row is `anchorLiveAudio` at connect |
+
+No splices on any run.
+
+**Heard vs detected.** Every event Robbie heard matched a detected event, and nothing he didn't hear
+was detected:
+- **MediaMTX:** a glitch "a few seconds after the reconnect", which is the 60 ms mute at +2.8 s from
+  the startup position write (step-4 note 2 in 11.4). The blip "right at the end" is the 71 ms mute
+  at +181 s from a steady-state position write.
+- **Cloudflare:** two quick glitches about 1:47 into the recording. These are **not renderer mutes.**
+  They are two 20 ms silences 0.32 s apart, matching `input axis HOLE 20.00 ms` at 21:28:01.342 and
+  .657 (RTP `seqGaps=5 declaredLost=7` in that window): two Opus packets the path lost, filled with
+  silence by the stage exactly as designed (11.1). Before step 3 the renderer played the same loss
+  as a PTS gap. They are transport loss and are kept out of the mute count, as §11.4 kept its
+  content holes out.
+
+**What this establishes:**
+1. **The periodic stutter is gone** wherever the position branch stayed quiet: SRT, Cloudflare WHEP
+   and NDI all read 0.0 / 0.0, against 3.0–4.5 mutes/min steady state before.
+2. **What remains is the position branch, one mute per write, 2 of 2.** Step 3 keeps that branch on
+   purpose (§7), so this is the expected residue, not a defect. On MediaMTX it fired twice in 3 min:
+   once at startup and once from the ~−60 ppm drift of 11.2 reaching 10 ms. Step 4's loop removes
+   the steady one; the startup one is 11.4 note 2.
+3. **The first anchor, the session's one rate write, produced no separable mute on any transport.**
+   It lands before the renderer's first audible sample, so this is "not separable", not "proved
+   silent". §11.4's filter excluded the same 0.2 s.
+4. **NDI now has a figure: 0.0 / 0.0 over 184 s.** It does **not** answer §8 open question 1
+   (whether an `anchorLiveAudio` re-anchor mutes), because at +7 ppm the first re-anchor is ~24 min
+   away (11.4 note 3). That needs a run long enough to reach one.
+
+**Limits:** n = 1 session per transport, 3 minutes each. The captures are in
+`~/Desktop/manifold-audible-events/step3/`, and the logs are `~/Desktop/step3-mutes-*.log`.
