@@ -270,6 +270,12 @@ final class WHEPFrameRouter {
     /// Forwards `LiveClock`'s mapping to the engine's audio timebase. Set by `WindowDeck`; called
     /// on whichever thread changed the mapping, so the engine side is `nonisolated`.
     var mirrorLiveAudio: ((LiveClock.Mapping?, Bool) -> Void)?
+    /// The clock's first presentation, with the mapping the picture started on — opens the first
+    /// audio anchor's gate (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Called from the display tick.
+    var liveAudioPresented: ((LiveClock.Mapping) -> Void)?
+    /// The session's first audio RTCP Sender Report — the gate's other half on RTP audio. Called
+    /// from the network thread, once per session.
+    var liveAudioSenderReport: (() -> Void)?
     /// Closes it. Must be called on teardown or the renderer keeps a dead session's timebase.
     var endLiveAudio: (() -> Void)?
     /// Publishes the decoded channel count so the meters size their bars.
@@ -699,6 +705,11 @@ final class WHEPFrameRouter {
         clock.onMappingTick = { [weak self] mapping in
             self?.mirrorLiveAudio?(mapping, true)
         }
+        // ⚠️ AND THE FIRST PRESENTATION, SAME SEAM, SAME REASON: the audio's first anchor waits for
+        // it (§2.7), and the picture can present before or after the answer is applied.
+        clock.onFirstPresentation = { [weak self] mapping in
+            self?.liveAudioPresented?(mapping)
+        }
 
         NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR",
               Self.targetDepth)
@@ -724,6 +735,7 @@ final class WHEPFrameRouter {
         // arriving after teardown would reach a torn-down engine seam.
         liveClock?.onMappingChange = nil
         liveClock?.onMappingTick = nil
+        liveClock?.onFirstPresentation = nil
         liveClock = nil
         stateLock.unlock()
         guard wasActive else { return }

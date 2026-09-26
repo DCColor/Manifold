@@ -624,6 +624,22 @@ public final class LiveClock: @unchecked Sendable {
     /// safe because its `shouldPush` gate decides for itself; a new consumer needs the same property.
     public var onMappingTick: ((Mapping) -> Void)?
 
+    /// ── THE FIRST PRESENTATION: ONCE PER STREAM, WITH THE MAPPING THE PICTURE STARTED ON ──────
+    ///
+    /// Fires once, the first display tick a frame reaches the screen — the instant `hasPresentedOnce`
+    /// becomes true, which is also the instant §10.10's startup-realign window closes. Carries the
+    /// live mapping at that moment, so a consumer that anchors from it anchors on the line the
+    /// picture actually uses rather than on one the realigns are about to move
+    /// (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Re-armed by `reset()`.
+    ///
+    /// Same thread contract as `onMappingChange`: called OUTSIDE `lock`, from the display tick,
+    /// must not block. Drained by `publishMappingIfChanged`, after the mapping itself, so a realign
+    /// on the same tick reaches the consumer first. It writes no clock state; `now()` is identical
+    /// with or without a consumer.
+    public var onFirstPresentation: ((Mapping) -> Void)?
+    /// Set under `lock` where `hasPresentedOnce` flips; drained by `publishMappingIfChanged`.
+    private var firstPresentationPending = false
+
     /// Set under `lock` by `setMappingLocked`; drained by `publishMappingIfChanged` after unlock.
     private var mappingDirty = false
     /// What was last handed to `onMappingChange` — the tripwire's reference.
@@ -748,6 +764,7 @@ public final class LiveClock: @unchecked Sendable {
             let starving = starvationLocked(at: t, tickDue: tick != nil)
             let gapReport = publicationGapsLocked(at: t)
             let tickCallback = onMappingTick
+            let presentation = takeFirstPresentationLocked(live)
             lock.unlock()
             if drifted {
                 NSLog("[LIVECLOCK] ⚠️ MAPPING CHANGED WITHOUT setMappingLocked — an anchor/rate "
@@ -756,6 +773,7 @@ public final class LiveClock: @unchecked Sendable {
             // Mirror first, log second — the same ordering `updateDepth` uses, so the audio timebase
             // is never behind a line describing it.
             if let tick { tickCallback?(tick) }
+            if let presentation { presentation.callback(presentation.mapping) }
             emit(starving)
             emit(gapReport)
             return
@@ -786,9 +804,20 @@ public final class LiveClock: @unchecked Sendable {
         lastStarvationWarnHost = nil     // the gate is alive again; re-arm for the next silence
         let gapReport = publicationGapsLocked(at: t)
         let callback = onMappingChange
+        let presentation = takeFirstPresentationLocked(live)
         lock.unlock()
         callback?(live)
+        if let presentation { presentation.callback(presentation.mapping) }
         emit(gapReport)
+    }
+
+    /// The first-presentation drain's locked half. Consumes the pending flag only when there is a
+    /// mapping to hand over and someone to hand it to; otherwise the flag waits for the next drain.
+    private func takeFirstPresentationLocked(_ live: Mapping?)
+        -> (callback: (Mapping) -> Void, mapping: Mapping)? {
+        guard firstPresentationPending, let live, let callback = onFirstPresentation else { return nil }
+        firstPresentationPending = false
+        return (callback, live)
     }
 
     /// The heartbeat's locked half: is one due, and if so, what is the mapping RIGHT NOW?
@@ -1342,6 +1371,7 @@ public final class LiveClock: @unchecked Sendable {
             #endif
             // A frame reached the screen. That both ARMS the guard for the rest of the stream and
             // clears any run in progress — this is the only place `hasPresentedOnce` is set.
+            if !hasPresentedOnce { firstPresentationPending = true }
             hasPresentedOnce = true
             ineligibleTicks = 0
             ineligibleSince = nil
@@ -1667,6 +1697,7 @@ public final class LiveClock: @unchecked Sendable {
         ineligibleTicks = 0
         ineligibleSince = nil
         hasPresentedOnce = false
+        firstPresentationPending = false
         #if DEBUG || MANIFOLD_TELEMETRY
         startupOriginPTS = nil; startupOriginHost = nil; startupPresentHost = nil
         startupPreMaxLead = -.infinity; startupPostMaxLead = -.infinity; startupPostFrames = 0

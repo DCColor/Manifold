@@ -822,6 +822,9 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     BOOL     _srHaveTa0, _srHaveTv0;
     uint32_t _srTa0, _srTv0;
 
+    // `onAudioSenderReport` has fired. Audio track thread only — the only writer and reader.
+    BOOL     _srAudioNotified;
+
     BOOL     _srFirstPairLogged;
     double   _srDeltaFirst;                    // delta at the first SR pair, seconds
     // Residual = delta(now) - delta(first pair). Zero if the two SRs share one clock.
@@ -1604,6 +1607,12 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
         ManifoldWHEPSRInfo info;
         if (ManifoldWHEPParseRTCP(packet, length, &info)) {
             [self srProbeNoteSR:&info isAudio:YES];
+            // The first audio SR opens the anchor gate's SR half (§2.7). Behaviour, not logging,
+            // so it is outside the telemetry gate: this block is compiled into Release.
+            if (!_srAudioNotified) {
+                void (^srSink)(void) = self.onAudioSenderReport;       // atomic read
+                if (srSink) { _srAudioNotified = YES; srSink(); }
+            }
         }
 #endif
         return;
@@ -2135,6 +2144,7 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     // tears the decoder down with `decodeQueue.async`, behind them, rather than inline.
     self.onVideoAccessUnit = nil;
     self.onAudioPacket = nil;   // same reason: the network thread must not reach a torn-down sink
+    self.onAudioSenderReport = nil;
 
     // A message callback may be running RIGHT NOW on the track thread, already past the
     // unregister above. Detach the depacketizer under the lock so that callback either

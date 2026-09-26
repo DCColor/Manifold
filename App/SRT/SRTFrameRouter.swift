@@ -525,6 +525,12 @@ final class SRTFrameRouter {
         clock.onMappingTick = { [weak self] mapping in
             self?.mirrorLiveAudio?(mapping, true)
         }
+        // ⚠️ AND THE FIRST PRESENTATION: the audio's first anchor waits for it (§2.7). SRT has no
+        // startup realigns by construction (§10.10), so here the gate costs only the few ms between
+        // the first mapping and the first presentation — this transport is its no-regression check.
+        clock.onFirstPresentation = { [weak self] mapping in
+            self?.liveAudioPresented?(mapping)
+        }
 
         // ── `cushion: 0` — AND IT IS NOT "NO CUSHION" ───────────────────────────────────────
         //
@@ -579,6 +585,7 @@ final class SRTFrameRouter {
         // arriving after teardown would reach a torn-down engine seam.
         liveClock?.onMappingChange = nil
         liveClock?.onMappingTick = nil
+        liveClock?.onFirstPresentation = nil
         // Clears the clock's per-STREAM state, freeze-guard arming included, so a reconnect
         // re-disarms the guard for its own startup fill rather than tripping it.
         liveClock?.reset()
@@ -948,6 +955,9 @@ final class SRTFrameRouter {
     /// HEARTBEAT (`onMappingTick`) and `false` for a publication (`onMappingChange`) — the engine
     /// treats both identically and uses it only to keep its change→push ratio readable.
     var mirrorLiveAudio: ((LiveClock.Mapping?, Bool) -> Void)?
+    /// The clock's first presentation, with the mapping the picture started on — opens the first
+    /// audio anchor's gate (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Called from the display tick.
+    var liveAudioPresented: ((LiveClock.Mapping) -> Void)?
     /// Closes the session. Must be called on teardown or the renderer keeps a dead timebase.
     var endLiveAudio: (() -> Void)?
     /// Publishes the decoded channel count so the meters size their bars.

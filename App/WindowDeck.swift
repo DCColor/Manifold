@@ -1352,7 +1352,7 @@ final class DeckRegistry {
         // See `FrameEngine.anchorLiveAudio`, the slew-site note in `LiveClock.updateDepthLocked`,
         // and docs/BUGS.md "NDI has no desktop playback path at all".
         NDIService.shared.beginLiveAudio = { [weak engine] cushion in
-            engine?.beginLiveAudio(cushion: cushion, path: .ndi)
+            engine?.beginLiveAudio(cushion: cushion, path: .ndi, awaitsSenderReport: false)
         }
         NDIService.shared.anchorLiveAudio = { [weak engine] media, host in
             engine?.anchorLiveAudio(mediaTime: media, hostTime: host)
@@ -1389,11 +1389,19 @@ final class DeckRegistry {
         // silent on the desktop). Same injection pattern as the renderer above: the router has no
         // engine handle and must not acquire one.
         WHEPFrameRouter.shared.beginLiveAudio = { [weak engine] cushion in
-            engine?.beginLiveAudio(cushion: cushion, path: .whep)
+            // RTP audio: its sender owes us RTCP Sender Reports (RFC 3550 §6.4.1), so the first
+            // anchor waits for the first one too. A protocol property, not a server one.
+            engine?.beginLiveAudio(cushion: cushion, path: .whep, awaitsSenderReport: true)
         }
         // Nonisolated on the engine side — fires on whichever thread changed LiveClock's mapping.
         WHEPFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping, tick in
             engine?.mirrorLiveAudio(mapping, tick: tick)
+        }
+        WHEPFrameRouter.shared.liveAudioPresented = { [weak engine] mapping in
+            engine?.liveAudioPresented(mapping)
+        }
+        WHEPFrameRouter.shared.liveAudioSenderReport = { [weak engine] in
+            engine?.liveAudioSenderReport()
         }
         WHEPFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
         WHEPFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in engine?.liveAudioEstablished(channels: ch) }
@@ -1413,10 +1421,13 @@ final class DeckRegistry {
         // to end, over numbers that were entirely real. The default is gone; the argument is
         // required, and a fifth transport cannot inherit WHEP's name by omission.
         SRTFrameRouter.shared.beginLiveAudio = { [weak engine] cushion in
-            engine?.beginLiveAudio(cushion: cushion, path: .srt)
+            engine?.beginLiveAudio(cushion: cushion, path: .srt, awaitsSenderReport: false)
         }
         SRTFrameRouter.shared.mirrorLiveAudio = { [weak engine] mapping, tick in
             engine?.mirrorLiveAudio(mapping, tick: tick)
+        }
+        SRTFrameRouter.shared.liveAudioPresented = { [weak engine] mapping in
+            engine?.liveAudioPresented(mapping)
         }
         SRTFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
         SRTFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in

@@ -1979,3 +1979,95 @@ was detected:
 
 **Limits:** n = 1 session per transport, 3 minutes each. The captures are in
 `~/Desktop/manifold-audible-events/step3/`, and the logs are `~/Desktop/step3-mutes-*.log`.
+
+## 12. Step 4b results — the first anchor at first presentation, measured 2026-09-26
+
+**Built:** the session's one `setRate(1.0)` now waits for LiveClock's first presentation on every
+mirrored transport (SRT, WHEP), and on RTP audio (WHEP) also for the first audio RTCP Sender Report.
+It takes the later of the two (§2.7).
+- **The presentation signal** is `LiveClock.onFirstPresentation`, fired once per stream where
+  `hasPresentedOnce` flips, carrying the mapping the picture started on.
+- **The SR signal** is the bridge's one-shot `onAudioSenderReport`. The SR parse was already
+  compiled into Release, so the gate behaves the same in every configuration.
+- **Keyed on the protocol, not the transport or server.** `beginLiveAudio(awaitsSenderReport:)` is
+  true for WHEP because RFC 3550 §6.4.1 requires SRs of RTP senders. Nothing branches on the server.
+- **Two fallbacks, each logged:**
+  - no SR within 2 s of the first presentation → anchor on today's constant offset and log a sender
+    deviation; an SR that comes later is logged as LATE;
+  - no presentation within 5 s of the first mapping → anchor on the pre-4b first-mapping rule.
+- **Unchanged:** the controller is not wired (4d), the 10 ms position branch stays, and NDI's
+  `anchorLiveAudio` is untouched.
+- `swift test`: 21 of 21. Profile and Release build clean.
+
+**Protocol:** the Profile build, unsigned (`.build-cc/step4b`), telemetry on, OBS on this Mac as the
+sender. A fresh launch per transport. Each run: cold connect, 60 s, disconnect, 5 s, warm reconnect,
+60 s, quit. Logs: `~/Desktop/step4b-{whep-mediamtx,whep-cloudflare,srt-local}.log`. Every time below
+is from the `[*-AUDIO] FIRST-ANCHOR GATE` line, in ms after `beginLiveAudio`.
+
+### 12.1 Results
+
+| | MediaMTX cold | MediaMTX warm | CF cold | CF warm | SRT cold | SRT warm |
+|---|---|---|---|---|---|---|
+| Startup realigns before the picture | 2 | 4 | 2 | 4 | 0 | 0 |
+| **Startup position writes** (step 3: WHEP 1–3) | **0** | **0** | **0** | **0** | **0** | **0** |
+| `setRate` rows per session | hold, anchor, end | same | same | same | same | same |
+| First mapping | +496 | +998 | +1292 | +706 | +300 | +215 |
+| First presentation | +787 | +1395 | +1597 | +1104 | +302 | +221 |
+| First audio SR | +9 | +16 | +1097 | +1127 | no RTCP | no RTCP |
+| Anchor (audio starts) | +794 | +1403 | +1604 | +1131 | +302 | +222 |
+| What opened the gate | picture | picture | picture | **SR** | picture | picture |
+| **Audio start after the first picture** | 7 ms | 8 ms | 7 ms | 27 ms | 0 ms | 1 ms |
+| Added against the first-mapping rule | 298 ms | **405 ms** | 311 ms | **425 ms** | 2 ms | 7 ms |
+| Fallback fired | no | no | no | no | no | no |
+| Mirror `posErr` after the anchor, max | 5.3 ms | 8.0 ms | 4.8 ms | 7.4 ms | 0.9 ms | 3.3 ms |
+| Heard and seen at start (Robbie) | clean; flash then beep | same | clean | clean, tight | picture slightly first | same |
+
+- **The target is met.** Startup position writes on WHEP went from 1–3 per connect to **0** on all
+  four WHEP connects. Every realign fell before the anchor, so the mirror anchored once on the
+  settled line, and `posErr` stayed inside the 10 ms branch for the rest of each session.
+- **SRT did not regress.** It has no startup realigns (§10.10), so the gate cost 2–7 ms there.
+- **Audio-start delay against `targetDepth`: at the limit on warm WHEP connects.** Both warm WHEP
+  connects added about 0.4 s, over §2.7's "up to about 0.35 s". The cause is the video startup fill:
+  first frame to first presentation took 397–398 ms on both. Audio then followed the picture within
+  27 ms on every connect, so the extra is the picture's wait, not the audio gate's. §2.7's estimate
+  came from realign timing, which does not bound the fill.
+
+### 12.2 The SR gate
+
+- **Once, the SR was the last thing awaited.** On the Cloudflare warm connect the first SR arrived
+  23 ms after the first presentation. The gate held for it, and audio started 27 ms after the picture.
+- **Otherwise the SR arrived first.** MediaMTX sent its first SR within 16 ms of the session opening,
+  long before any picture. Cloudflare took ~1.1 s on both connects, which is about as long as the
+  picture takes, so on the cold connect the SR still came 500 ms early. **The prediction that
+  Cloudflare's SR would add 0.3–0.6 s after the picture was wrong.** It had used
+  `AV_SYNC_FINDINGS.md` §6.5's 928–956 ms without the picture's own startup time beside it.
+- **Neither fallback has been exercised.** The 2 s SR bound is a limit on silence, not a measured
+  figure. It cannot tell a sender that never sends SRs from one that is merely slow, and RFC 3550
+  §6.2 allows ~6 s between compliant reports. Re-derive it at 4e, when the SR is applied rather
+  than only waited for.
+- **The gate fixes the start only.** WHEP's running A/V offset is still arbitrary per session (§2.6,
+  `BUGS.md`) until 4e puts the SR line into the target. "Tight" on the Cloudflare warm connect is
+  therefore a heard start, not a measured offset.
+
+### 12.3 ⚠️ UNRESOLVED — the picture reads slightly first at the start
+
+**Heard on SRT and MediaMTX:** the picture appears a little before the audio at connect. "Right
+after the first beep everything was spot on." Nothing else was seen or heard.
+
+**The log does not explain it.** Audio started 0–8 ms after the picture on those connects. On SRT,
+4b moved the anchor by only 2–7 ms, so whatever was seen there at the start was already there in
+step 3.
+
+**Two candidate causes, neither visible from inside the process:**
+1. **The first beep is clipped.** At the anchor the renderer discards audio that is already late.
+   If the fixture's first beep straddles the anchor, its onset is lost and it is heard late.
+2. **The output starts late.** The device takes some time to produce sound after the synchronizer
+   goes from rate 0 to 1, and no in-app timestamp includes that.
+
+Both are inference. **Settle it with the criterion-12 device capture (§6.3):** record a connect at
+the device output (Audio Hijack, as in 11.5) and measure the flash-to-beep offset of the FIRST beep
+against later ones. Cause 1 shows a truncated first beep at the correct time. Cause 2 shows a
+complete first beep that starts late.
+
+**Limits:** n = 1 cold and 1 warm connect per transport, judged by ear and eye, with no device
+capture. NDI was not run, because it does not go through the mirror.

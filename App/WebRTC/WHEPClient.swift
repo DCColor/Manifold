@@ -701,6 +701,11 @@ final class WHEPClient: ObservableObject {
             session.onAudioPacket = { opus, rtpTimestamp, _, _ in
                 WHEPFrameRouter.shared.audioReceiver?.receive(opus, rtpTimestamp: rtpTimestamp)
             }
+            // The first audio Sender Report: the first anchor waits for it as well as for the
+            // picture (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Network thread, once per session.
+            session.onAudioSenderReport = {
+                WHEPFrameRouter.shared.liveAudioSenderReport?()
+            }
         } else {
             WHEPFrameRouter.shared.declareNoAudio()
         }

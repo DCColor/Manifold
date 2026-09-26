@@ -192,6 +192,14 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
                                                  uint16_t sequenceNumber,
                                                  BOOL marker);
 
+/// Fires ONCE per session, on the first RTCP Sender Report that arrives on the audio track —
+/// the second half of the first audio anchor's gate (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Carries
+/// nothing: the SR's contents stay with the log-only probe until step 4e applies them.
+///
+/// ⚠️ NETWORK THREAD, like `onAudioPacket`; must not block. Only consumed once a block is set, so an
+/// SR that arrives before it is assigned is reported by the next one rather than lost.
+@property (copy, nullable) void (^onAudioSenderReport)(void);
+
 /// Whether the negotiated answer actually accepted the audio m-section — i.e. whether audio can
 /// be expected at all on this connection. NO means the server declined it (port 0, or the section
 /// absent), and a receiver should say "this stream carries no audio" rather than wait forever.

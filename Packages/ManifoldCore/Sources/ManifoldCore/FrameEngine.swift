@@ -2187,8 +2187,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// `now()`. It no longer does (it stamps absolute sender time, the SRT shape), so WHEP passes 0.
     /// The value is per-session state (`mirror.cushion`), so one transport's answer can never reach
     /// another's.
+    ///
+    /// ── `awaitsSenderReport` — THE AUDIO IS RTP ─────────────────────────────────────────────
+    ///
+    /// True when this session's audio arrives over RTP, whose senders RFC 3550 §6.4.1 requires to
+    /// send RTCP Sender Reports: the first anchor then waits for the first one as well as for the
+    /// picture (docs/AUDIO_RESAMPLER_DESIGN.md §2.7), reported through `liveAudioSenderReport()`.
+    /// It states a property of the protocol, not of any server. Required, for the reason `path` is.
     public func beginLiveAudio(cushion: Double,
-                               path: AudioTapBuffer.SourcePath) -> LiveAudioSink {
+                               path: AudioTapBuffer.SourcePath,
+                               awaitsSenderReport: Bool) -> LiveAudioSink {
         // A live source is not a file: retire any file audio session first so two producers can
         // never feed the renderer at once.
         teardownAudioReading()
@@ -2201,6 +2209,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.lastHost = 0; mirror.firstHost = 0
         mirror.pushedRate = 1.0; mirror.pushedMedia = 0; mirror.pushedHost = 0
         mirror.changes = 0; mirror.pushes = 0; mirror.ticks = 0; mirror.lastStatsHost = 0
+        mirror.sessionHost = CACurrentMediaTime()
+        mirror.firstMappingHost = nil; mirror.presentedHost = nil
+        mirror.awaitsSenderReport = awaitsSenderReport
+        mirror.senderReportHost = nil; mirror.senderReportAbandoned = false
+        mirror.heldMapping = nil; mirror.heldEvaluations = 0
         mirror.lock.unlock()
         audioRenderer.flush()
         synchronizer.rate = 0      // held until the first mirrored mapping arrives
@@ -2299,7 +2312,42 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// now reads the starvation directly — `1 change + 98 ticks` is the failure, stated.
         var ticks = 0
         var lastStatsHost: Double = 0
+
+        // ── THE FIRST-ANCHOR GATE (docs/AUDIO_RESAMPLER_DESIGN.md §2.7, step 4b) ─────────────
+        //
+        // `mirrored` stays false, and the synchronizer at rate 0, until the gate opens: at the
+        // clock's first presentation, and on a transport that carries RTCP, also at the first audio
+        // Sender Report — the later of the two. Keyed on the clock's event and on the SR's
+        // presence, never on which transport or server it is.
+        /// Host time `beginLiveAudio` opened the session: the origin every startup figure is from.
+        var sessionHost: Double = 0
+        /// Host time the first mapping arrived — where the pre-4b code anchored.
+        var firstMappingHost: Double?
+        /// Host time of the clock's first presentation, once `liveAudioPresented` has run.
+        var presentedHost: Double?
+        /// The session's audio is RTP, so RFC 3550 §6.4.1 requires Sender Reports of its sender.
+        var awaitsSenderReport = false
+        /// Host time of the first audio Sender Report.
+        var senderReportHost: Double?
+        /// Set when the gate opened without one — the deviation is logged once.
+        var senderReportAbandoned = false
+        /// The newest mapping seen while held, so an SR that arrives after the presentation can
+        /// anchor at once instead of waiting for the next heartbeat.
+        var heldMapping: LiveClock.Mapping?
+        /// Mirror evaluations suppressed by the gate — reported on the first-anchor line.
+        var heldEvaluations = 0
     }
+
+    /// How long past the first presentation audio waits for a first Sender Report before
+    /// anchoring without one (the pre-existing constant offset) and logging the deviation.
+    ///
+    /// ⚠️ A BOUND ON SILENCE, NOT A MEASURED FIGURE, AND IT CANNOT TELL "NEVER" FROM "SLOW". Measured
+    /// first-SR arrival is 19–35 ms (MediaMTX) and 928–956 ms (Cloudflare) after audio starts
+    /// (AV_SYNC_FINDINGS.md §6.5). But RFC 3550 §6.2 lets a compliant sender at the 5 s minimum
+    /// interval space reports up to ~6.2 s apart, and holding audio that long on every connect is
+    /// worse than the offset the SR would correct. Until step 4e APPLIES the SR, anchoring without
+    /// it changes nothing audible; the figure is re-derived when it does.
+    private nonisolated static let senderReportWaitSeconds = 2.0
 
     /// EMA time constant for the mirrored rate, in seconds.
     ///
@@ -2430,14 +2478,83 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`. Do not "optimise" the tick path away on the
     /// grounds that the mapping has not changed: the mapping not changing is the failure mode.
     public nonisolated func mirrorLiveAudio(_ mapping: LiveClock.Mapping?, tick: Bool = false) {
+        mirrorLiveAudio(mapping, origin: tick ? .heartbeat : .change)
+    }
+
+    /// What delivered a mirror evaluation. `.gate` is the first-anchor gate opening on an event
+    /// (the first presentation, or the first Sender Report) — neither a mapping change nor a tick,
+    /// so it is counted as neither.
+    private enum MirrorOrigin { case change, heartbeat, gate }
+
+    /// The clock's first presentation (`LiveClock.onFirstPresentation`). Opens the first-anchor
+    /// gate's presentation half and, if nothing else is awaited, anchors NOW on the mapping the
+    /// picture started on rather than at the next heartbeat. §2.7, step 4b.
+    ///
+    /// ⚠️ RELIES ON THE SESSION BEING OPEN BEFORE THE PICTURE PRESENTS, which both mirrored
+    /// transports guarantee: SRT opens it at `activate`, WHEP when the answer is applied, and both
+    /// precede any media. A presentation that arrived with no session open is dropped here, and the
+    /// gate's presentation fallback (`presentationWaitSeconds`) is what keeps that from being
+    /// silent audio.
+    public nonisolated func liveAudioPresented(_ mapping: LiveClock.Mapping) {
+        mirror.lock.lock()
+        guard mirror.active, mirror.presentedHost == nil else { mirror.lock.unlock(); return }
+        mirror.presentedHost = CACurrentMediaTime()
+        mirror.lock.unlock()
+        mirrorLiveAudio(mapping, origin: .gate)
+    }
+
+    /// The session's first audio RTCP Sender Report arrived. Called from the network thread, once
+    /// per session. If the picture has already presented, anchors now on the newest held mapping
+    /// (a point on the same line the clock is using — the heartbeat's argument).
+    public nonisolated func liveAudioSenderReport() {
+        mirror.lock.lock()
+        guard mirror.active, mirror.senderReportHost == nil else { mirror.lock.unlock(); return }
+        let now = CACurrentMediaTime()
+        mirror.senderReportHost = now
+        let pending = (!mirror.mirrored && mirror.presentedHost != nil) ? mirror.heldMapping : nil
+        let late = mirror.senderReportAbandoned
+        let sinceSession = now - mirror.sessionHost
+        let tag = "[\(mirror.path.rawValue)-AUDIO]"
+        mirror.lock.unlock()
+        if late {
+            NSLog("%@ first audio SR arrived LATE, +%.0f ms after the session opened — after the "
+                + "gate gave up on it. The sender is slow rather than absent.", tag, sinceSession * 1000)
+        }
+        if let pending { mirrorLiveAudio(pending, origin: .gate) }
+    }
+
+    /// Bound on waiting for a first presentation once a mapping exists. The picture presents within
+    /// the startup fill (0.4 s target) plus a frame; five seconds without one is a video path that
+    /// is not presenting at all, and holding audio hostage to it would turn a video fault into
+    /// silence as well. Anchors on the first-mapping rule (pre-4b behaviour) and says so.
+    private nonisolated static let presentationWaitSeconds = 5.0
+
+    /// The gate's decision. Call under `mirror.lock`.
+    private nonisolated func firstAnchorGateLocked(now: Double)
+        -> (open: Bool, withoutPresentation: Bool, withoutSenderReport: Bool) {
+        guard let presented = mirror.presentedHost else {
+            let waited = mirror.firstMappingHost.map { now - $0 } ?? 0
+            return (waited >= Self.presentationWaitSeconds, true, false)
+        }
+        guard mirror.awaitsSenderReport, mirror.senderReportHost == nil else { return (true, false, false) }
+        return (now - presented >= Self.senderReportWaitSeconds, false, true)
+    }
+
+    private nonisolated func mirrorLiveAudio(_ mapping: LiveClock.Mapping?, origin: MirrorOrigin) {
+        let tick = origin == .heartbeat
         mirror.lock.lock()
         let active = mirror.active
         let cushion = mirror.cushion
         let wasMirrored = mirror.mirrored
         // The transport's own tag — read under the same lock as everything else this session owns.
         let tag = "[\(mirror.path.rawValue)-AUDIO]"
-        if active, mapping != nil { mirror.mirrored = true }
-        if mapping == nil { mirror.mirrored = false }
+        // ⚠️ `mirrored` IS NO LONGER SET HERE ON THE FIRST MAPPING. It means "the first anchor has
+        // been pushed", and since step 4b that waits for the gate below; it is set where the push
+        // is decided. An un-anchor (`nil`, the clock's `reset()`) re-arms the gate for its stream.
+        if mapping == nil {
+            mirror.mirrored = false
+            mirror.presentedHost = nil; mirror.firstMappingHost = nil; mirror.heldMapping = nil
+        }
         mirror.lock.unlock()
         guard active else { return }
 
@@ -2499,7 +2616,41 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             mirror.firstHost = m.hostTime
         }
         mirror.lastHost = m.hostTime
-        if tick { mirror.ticks += 1 } else { mirror.changes += 1 }
+        switch origin {
+        case .heartbeat: mirror.ticks += 1
+        case .change: mirror.changes += 1
+        case .gate: break
+        }
+
+        // ── THE FIRST-ANCHOR GATE (§2.7, step 4b) ─────────────────────────────────────────────
+        //
+        // The session's one rate write waits for the clock's FIRST PRESENTATION — when §10.10's
+        // realign window closes — and, where the audio is RTP, for its first Sender Report too.
+        // Anchoring on the first mapping put the mirror on a line the startup realigns then moved
+        // by 68–110 ms, and each move reached the renderer as a position write (§11.4 note 2).
+        //
+        // While held, the synchronizer stays at rate 0 and enqueued audio waits in the renderer;
+        // at the anchor, `setRate(1.0, time: target)` starts it at the target and the renderer
+        // discards what is already late. Everything above (the EMA) runs as before.
+        var gateNote: (withoutPresentation: Bool, withoutSenderReport: Bool)?
+        var gateTimes: (session: Double, firstMapping: Double?, presented: Double?,
+                        senderReport: Double?, held: Int, awaitsSR: Bool)?
+        if !wasMirrored {
+            let now = CACurrentMediaTime()
+            if mirror.firstMappingHost == nil { mirror.firstMappingHost = now }
+            let gate = firstAnchorGateLocked(now: now)
+            guard gate.open else {
+                mirror.heldMapping = m
+                mirror.heldEvaluations += 1
+                mirror.lock.unlock()
+                return
+            }
+            mirror.mirrored = true
+            gateNote = (gate.withoutPresentation, gate.withoutSenderReport)
+            if gate.withoutSenderReport { mirror.senderReportAbandoned = true }
+            gateTimes = (mirror.sessionHost, mirror.firstMappingHost, mirror.presentedHost,
+                         mirror.senderReportHost, mirror.heldEvaluations, mirror.awaitsSenderReport)
+        }
 
         // ── RESAMPLER STEP 3: THE RATE BRANCH IS DISABLED; THE POSITION BRANCH IS NOT ──────────
         //
@@ -2590,12 +2741,51 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                              time: CMTime(seconds: target, preferredTimescale: 90_000),
                              atHostTime: CMTime(seconds: m.hostTime, preferredTimescale: 90_000))
         if !wasMirrored {
-            NSLog("%@ timebase MIRRORED — first mapping: senderPTS=%.3fs host=%.3fs "
+            NSLog("%@ timebase MIRRORED — first anchor: senderPTS=%.3fs host=%.3fs "
                 + "clockRate=%.5f → synchronizer rate %.1f, PINNED for the session (resampler "
                 + "step 3: rate branch off, position branch at %.0f ms) cushion=%.3fs → "
                 + "timebase=%.3fs",
                   tag, m.senderPTS, m.hostTime, m.rate, rateToPush,
                   tolerance * 1000, cushion, target)
+            if let g = gateTimes {
+                // ── STEP 4b's STARTUP LINE ─────────────────────────────────────────────────────
+                // Every time is ms after `beginLiveAudio`. `+added` is what the gate cost against
+                // the pre-4b rule (anchor at the first mapping); `after picture` is the audio-start
+                // delay the picture sees. Same line on every mirrored transport, so SRT's reads as
+                // the no-regression check.
+                let now = CACurrentMediaTime()
+                func ms(_ h: Double?) -> String {
+                    h.map { String(format: "+%.0f", ($0 - g.session) * 1000) } ?? "—"
+                }
+                let srText: String = g.awaitsSR
+                    ? (g.senderReport != nil ? ms(g.senderReport) : "NONE")
+                    : "n/a (no RTCP)"
+                NSLog("%@ FIRST-ANCHOR GATE — opened on %@ · first mapping %@ ms · first presentation "
+                    + "%@ ms · first audio SR %@ ms · anchor %@ ms · +added %.0f ms vs first mapping · "
+                    + "audio after picture %@ ms · %d evaluation(s) held",
+                      tag,
+                      gateNote?.withoutPresentation == true ? "the PRESENTATION FALLBACK"
+                        : gateNote?.withoutSenderReport == true ? "the SR FALLBACK"
+                        : origin == .gate ? "the event" : "a mapping evaluation",
+                      ms(g.firstMapping), ms(g.presented), srText, ms(now),
+                      g.firstMapping.map { (now - $0) * 1000 } ?? .nan,
+                      g.presented.map { String(format: "%.0f", (now - $0) * 1000) } ?? "—",
+                      g.held)
+                if gateNote?.withoutPresentation == true {
+                    NSLog("%@ ⚠️ NO FIRST PRESENTATION within %.1f s of the first mapping — the "
+                        + "picture is not presenting. Anchored on the first-mapping rule (the "
+                        + "pre-4b behaviour) rather than hold audio hostage to a video fault.",
+                          tag, Self.presentationWaitSeconds)
+                }
+                if gateNote?.withoutSenderReport == true {
+                    NSLog("%@ ⚠️ SENDER DEVIATION: no audio RTCP Sender Report within %.1f s of the "
+                        + "first presentation. RFC 3550 §6.4.1 requires them of an active sender "
+                        + "(one that is merely slow is compliant up to ~6 s, §6.2 — this cannot tell "
+                        + "the two apart). Anchored without it, on the constant offset in use before "
+                        + "SRs were read; nothing about the server is special-cased.",
+                          tag, Self.senderReportWaitSeconds)
+                }
+            }
         }
     }
 

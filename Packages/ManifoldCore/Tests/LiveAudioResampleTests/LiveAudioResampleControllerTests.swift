@@ -124,18 +124,18 @@ final class LiveAudioResampleControllerTests: XCTestCase {
 
     // MARK: - 4. Anti-windup: 60 s at the rail, then release
 
-    /// dm = +3000 ppm for 60 s (an uncorrected error slope of −3000 ppm): 1000 ppm past the authority, so the loop sits at the rail for the whole
-    /// hold (and past it, while it walks the accumulated error back down).
+    /// dm = +3000 ppm for 60 s (an uncorrected error slope of −3000 ppm): 1000 ppm past the
+    /// authority, so the loop sits at the rail for the whole hold (and past it, while it walks the
+    /// accumulated error back down).
     ///
-    /// ⚠️ §7 ASKS FOR "NO OVERSHOOT OVER 2 ms" AND THE ADOPTED GAINS DO NOT MEET IT: 3.65 ms. That is
-    /// not windup. The integrator is held at 448 ppm through the hold, where integrating
-    /// unconditionally takes it to 9379 ppm and the overshoot to 68.9 ms (loop_sim.py, same
-    /// scenario, anti-windup removed). What remains is the critically damped loop's own response
-    /// from where it leaves the rail: |u| = B at e = B/k_p = 20 ms, closing at 2 ms/s, which in the
-    /// linear loop undershoots by 20 ms · e⁻² = 2.7 ms before the EMA and slew add their lag. Any
-    /// rail recovery at these gains overshoots by about that, whatever the hold length. The test
-    /// therefore pins the simulated figure and asserts the held integrator directly; the 2 ms
-    /// criterion is for §7 to restate, not for this test to pretend to meet.
+    /// §7 4c's criterion (REVISED 2026-09-26): ≤ 4 ms overshoot after a 60 s rail hold, with the
+    /// integrator held at ≤ 500 ppm. Measured 3.65 ms and 448 ppm; integrating unconditionally takes
+    /// them to 68.9 ms and 9379 ppm (loop_sim.py, same scenario, anti-windup removed).
+    ///
+    /// The 3.65 ms is not windup. It is the critically damped loop's own recovery from where it
+    /// leaves the rail: |u| = B at e = B/k_p = 20 ms, closing at 2 ms/s, which in the linear loop
+    /// undershoots by 20 ms · e⁻² = 2.7 ms before the EMA and slew add their lag. Any rail recovery
+    /// at these gains overshoots by about that, whatever the hold length.
     func testAntiWindupHoldsTheIntegratorAtTheRail() {
         let holdStart = 20.0, hold = 60.0
         let rows = Self.replay(Self.rail(ppm: 3000, from: holdStart, for: hold), seconds: 600)
@@ -155,13 +155,13 @@ final class LiveAudioResampleControllerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(railSeconds, hold, "the loop must be held at the rail for the whole 60 s")
         XCTAssertEqual(railSeconds, 79.3, accuracy: 0.05)           // loop_sim.py
         XCTAssertEqual(maxIntegral * 1e6, 448, accuracy: 1)         // loop_sim.py; 9379 without anti-windup
-        XCTAssertLessThan(maxIntegral, C.Gains.adopted.bound / 4,
-                          "the integrator must not store what the rail could not deliver")
+        XCTAssertLessThanOrEqual(maxIntegral, 500e-6,
+                                 "§7 4c: the integrator held (≤ 500 ppm) — it must not store what the rail could not deliver")
         XCTAssertEqual(overshoot * 1e3, 3.647, accuracy: 0.001)     // loop_sim.py; 68.872 without
-        XCTAssertLessThan(overshoot, 0.005, "an order of magnitude under the 69 ms windup would cost")
+        XCTAssertLessThanOrEqual(overshoot, 0.004, "§7 4c: ≤ 4 ms overshoot after a 60 s rail hold")
         XCTAssertLessThan(abs(tail), 10e-6, "and the loop still nulls afterwards")
         print(String(format: "[4c] anti-windup: %.1f s at the rail, |i| ≤ %.0f ppm (9379 without), "
-                     + "overshoot %.3f ms after release (68.9 without; §7's 2 ms NOT met — see note)",
+                     + "overshoot %.3f ms after release (68.9 without; §7 criterion ≤ 4 ms, ≤ 500 ppm)",
                      railSeconds, maxIntegral * 1e6, overshoot * 1e3))
     }
 
