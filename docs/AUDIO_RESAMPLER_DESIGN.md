@@ -23,12 +23,14 @@ sample-rate converter in `LiveAudioSink.enqueue`, between the tap and the render
 ratio the thing the control loop moves. `synchronizer.setRate` is then called exactly once per
 session, at the first anchor, and never again for the life of the connection.
 
-The ratio is **the same signal the synchronizer is given today** — `mirror.smoothedRate`, the τ=30 s
-EMA whose derivation from the measured sender clock (§11.10 candidate 3, `FrameEngine.swift:2242`)
-is sound and is not being reopened — plus a slow feedback trim that finally closes the loop the
-slew-site note in `LiveClock.updateDepthLocked` says is open. **Nothing about the control law's
-bandwidth changes. Only the place the multiply happens changes.** That is what keeps §5's separation
-intact rather than merely "similar".
+The ratio is steered by **the measured position error**: the paired read of §2.1, taken per
+buffer on the audio thread and fed through a slow PI loop (§2.2). The closed loop's time constant is
+10 s, 100× slower than LiveClock's 0.1 s P-loop update, and that separation is what keeps §5 intact.
+
+⚠️ **REVISED 2026-09-25 from steps 2–3.** This paragraph used to make the ratio `1 / smoothedRate`
+plus a trim. Step 3 measured that `smoothedRate` is not the slope of the line the audio has to
+follow: +60…+130 ppm against +5 realised on SRT, and +1073 → −123 within one Cloudflare session
+(11.2). It no longer reaches the ratio at all.
 
 A ratio change in a polyphase resampler is one addend in a phase accumulator. It is glitch-free
 **by construction**, not by measurement — which is the one property this whole fix depends on, and
@@ -159,36 +161,71 @@ Evaluation cadence is **per input buffer**: 21.3 ms (AAC 1024), 20 ms (Opus 960)
 That is 47–100 Hz, against the current 10 Hz heartbeat — more samples, tighter pairing, and on the
 thread that already owns the audio.
 
-### 2.2 The control law
+⚠️ **REVISED 2026-09-25 — ONCE THE RATIO MOVES, `actual` IS CONTENT TIME, NOT THE TIMEBASE.** Through
+step 3 the ratio was pinned at 1.0 and the stage compensated its own delay, so output tick k carried
+input sample k and `synchronizer.currentTime()` *was* the content time being heard. At any other
+ratio the timebase counts OUTPUT seconds on the device clock, and it is *meant* to drift from the
+target by exactly the ppm the loop is absorbing: about 60 ppm on MediaMTX, which is 250 ms in about
+70 minutes. The quantity to null is the input-axis time of the sample being heard:
 
 ```
-ratio = clamp( r_ff * (1 + k_p * e_f + i) ,  1 - B ,  1 + B )
-
-  r_ff = 1 / smoothedRate          feed-forward, τ = 30 s EMA, UNCHANGED from today
-  e_f  = EMA(err, τ_e = 5 s)       filtered position error, seconds
-  i    = integrator, di/dt = k_i * e_f, clamped to ±B/2
-  B    = 0.001                     ±0.1% = ±17.3 cents
+actual = stage.inputTime(atOutputTime: CMTimeGetSeconds(synchronizer.currentTime()))
 ```
 
-Plus a hard **slew limit on `ratio` itself** of 2 ppm per 10 ms of host time, so no control action
-can produce a glide faster than 0.035 cents/s regardless of what the terms above compute.
+The stage already owns the output↔input relationship (anchor, emitted count, phase accumulator). It
+keeps a short ring of (output tick, input position) breakpoints, one per buffer because the ratio is
+constant within a buffer, and answers by linear interpolation. At ratio 1.0 it returns its argument,
+so step 3's measurements carry over unchanged, and that identity is step 4's first regression test.
+**Anything that still compares the raw timebase with a target after step 4 is measuring the
+correction, not the error.** Both existing position branches do exactly that (§2.4).
 
-#### Why the ratio is `1 / smoothedRate` and not something new
+### 2.2 The control law — REVISED 2026-09-25 from steps 2–3
 
-`mirrorLiveAudio` today calls `synchronizer.setRate(Float(rateToPush), …)` with
-`rateToPush = mirror.smoothedRate` (`FrameEngine.swift:2464`). Setting the *renderer's* rate to `s`
-and resampling the *material* by `1/s` are the same operation applied at two ends of the same
-pipeline: in both cases one media second of source content occupies `1/s` seconds of renderer
-media time. **The bandwidth of the correction is bit-identical, because it is the same filter
-output.**
+```
+e    = actual − target                   §2.1 (content time) and §2.8 (target per transport),
+                                          per input buffer, 47–100 Hz
+e_f  = EMA(e, τ_e)
+u    = k_p · e_f + i                      di/dt = k_i · e_f, integrated only while |u| < B
+ρ    = slew( clamp(1 − u, 1 − B, 1 + B), S )     ρ = input seconds consumed per output second
 
-That matters more than it sounds. §5's constraint is *"position/anchor mirroring is what holds
-`timebase−clock` near zero; the smoothed rate deliberately does not follow the depth-correction
-signal"*, and the τ=30 s derivation (`FrameEngine.swift:2242-2252`) rests on a measured
-decomposition: `[WHEP-DRIFT]` puts the genuine sender ratio at **σ = 0.021%, 1.1 cents total
-spread**, against a control loop swinging the full **±0.5%, 17.3 cents peak-to-peak** at 10 Hz — so
-~94% of the rate signal is buffer-depth correction, not clock tracking. Reusing the same filter
-output means that decomposition is preserved exactly and does not have to be re-argued.
+k_p = 0.1 s⁻¹   k_i = 0.0025 s⁻²   τ_e = 2 s   B = 0.002 (±3.5 cents)   S = 200 ppm/s (0.35 cents/s)
+```
+
+The sign: `e > 0` means the audio content is ahead of the picture, and `ρ < 1` consumes content more
+slowly so the picture catches up. `i` does not integrate while `u` is at the clamp (anti-windup),
+and it is held across a coarse event (§2.4).
+
+**There is no feed-forward term.** The superseded law was
+`ratio = clamp(r_ff · (1 + k_p·e_f + i))` with `r_ff = 1 / smoothedRate`. Step 3 removed its premise:
+
+| | realised drift at ratio 1.0 (11.2) | `smoothedRate`: step 2 median / step 3 range |
+|---|---|---|
+| NDI | +7.1 ppm | none (no mapping) |
+| SRT local | +5 | +60 / +60 … +130 |
+| WHEP MediaMTX | −60 | +106 / +80 … +250 |
+| WHEP Cloudflare | +14 | −81 / +1073 → −123 within one session |
+
+`smoothedRate` is the τ = 30 s EMA of LiveClock's *rate field*, which is the depth controller's output
+(§10.3). Over minutes, that field is not the slope of the mapping. The mapping also moves by position
+(realigns, snaps, re-anchors), and the filter still carries the relay. Fed forward, it would inject
+tens to hundreds of ppm of error for the feedback to cancel at the loop's own speed.
+
+**Why no feed-forward is needed, not merely why it is risky.** The plant is an integrator,
+`de/dt = (ρ − 1) − d`, where `d` is the net slope of the target against the device clock (§2.8). A PI
+controller on an integrating plant is a type-2 loop, so a constant `d` is nulled with **zero**
+steady-state error by the integrator alone, without the loop being told `d`. Every drift steps 2 and 3
+measured is constant on the loop's timescale. The largest is 65 ppm, 3% of B.
+
+**What survives of feed-forward: nothing in the ratio.** The one quantity that looked like
+feed-forward, the WHEP audio↔video slope from RTCP Sender Reports, moves into the **target** (§2.6).
+It describes what the picture is doing, not how fast audio should be consumed, and the type-2 loop
+nulls a sloped target the same way it nulls a constant `d`. `smoothedRate` is still computed and
+logged as the comparison figure for steps 2–3, but it has no path to the ratio. If a feed-forward is
+ever reintroduced, it has three conditions:
+- it must be a *measured slope of the target line* (the SR fit's rate is the only candidate)
+- it is gated on that fit's standard error being under 10 ppm
+- it is clamped to **±150 ppm** (2.3× the largest measured drift), so a bad estimate costs at most
+  150 ppm for the integrator to cancel
 
 #### What the feedback term adds, and why it is new capability rather than a knob
 
@@ -199,29 +236,53 @@ The slew-site note at `LiveClock.swift:1110-1150` states the gap plainly:
 > the audio path detects it. Nothing corrects it. […] **Nobody designed a drift corrector; one fell
 > out of the video path.** WHEP and SRT are bounded by ACCIDENT.
 
-The divergence in question is the audio device crystal against mach time, measured at **−7.8 ppm**
-on one machine (`HLSAudioTap.swift:48`) and explicitly *"a property of the output device, not a
-constant"*. The feedback term measures it directly, on the only reading in the system taken on that
-clock. **This is the first closed loop on the SRT and WHEP audio paths.** NDI already has one —
-`serviceDesktopAudioAnchor` (`NDIService.swift:1918`) — and step 6 of the build plan folds it into
-this one rather than leaving two.
+The feedback term measures that divergence directly, on the only reading in the system taken on the
+device clock. **It is the first closed loop on the SRT and WHEP audio paths, and it replaces NDI's
+open-loop re-anchor rather than sitting beside it (§2.8).**
 
-#### The numbers, and what each is derived from
+#### The numbers, from a simulation of this loop against the measured disturbances
 
-| quantity | value | derivation |
+A discrete simulation at one update per 20 ms (the Opus buffer). The measured error is the true
+error plus the ±1.5 ms sawtooth seen within step 3's PAIRED windows. Each disturbance is one
+§10 or §11 measured:
+
+| disturbance (where measured) | superseded gains: k_p 0.05, k_i 0.002, τ_e 5 s | **adopted** |
 |---|---|---|
-| ratio bound `B` | **±0.001 (±0.1%, 17.3 cents)** | 2.4× the worst measured sender offset (§5, 420 ppm). Below LiveClock's own ±0.5% rail by 5×, so the resampler can never chase a railed clock. |
-| ratio slew limit | **2 ppm/s (0.035 cents/s)** | A continuous glide, not a step. §11.2's `liveAudioRateThreshold` comment correctly notes 0.35 cents is far under the ~5-cent pitch JND *as a step*; a glide three orders slower than that is not a candidate for audibility at all. |
-| `k_p` | **0.05 s⁻¹** | Closed-loop position time constant 1/k_p = **20 s**. 200× slower than the P-loop's 0.1 s update and ~20× slower than the ~1 s depth wobble — the same separation-of-timescales argument τ=30 s already rests on. At 20 ms of error the P term alone reaches the rail. |
-| `k_i` | **0.002 s⁻²** | Integrator time constant ~500 s. Removes the residual droop the feed-forward does not cover (δ ≈ 10 ppm / k_p ≈ 0.2 ms). Slow enough that it cannot participate in any transient. |
-| `τ_e` | **5 s** | Above the depth sawtooth's fundamental (one frame interval, 41.7 ms p-p at 23.976 fps — §11.6) and above the ~1 s depth wobble, below the loop's own 20 s. |
-| splice threshold | **50 ms** (see §2.4) | An order above the healthy error envelope (±13 ms local, §3) and an order below the coarse events it exists to catch (snap fires at `targetDepth + 0.2`). |
+| steady −65 ppm (MediaMTX, 11.2) | 0 steady error | **0 steady error**; ratio ripple 24 ppm p-p (0.04 cents) |
+| post-presentation relay: mapping at +5000 ppm for 2 s, a 10 ms move (§10.10) | peak 9.9 ms; settles below 2 ms in **76 s** (ζ = 0.56) | peak 9.8 ms; **settles in 14 s** |
+| jitter recovery: mapping at −5000 ppm for 16 s, an 80 ms move (§10.3, n = 1) | peak 60–69 ms; 118–158 s | **peak 59 ms; 92 s** |
 
-⚠️ **RESPONSE TIME IS DELIBERATELY SLOW AND THAT IS THE POINT.** At the rail the loop absorbs
-1 ms of position error per second. A 6 ms error — today's typical push step (§11.2) — takes 6 s. A
-10 ms error takes 10 s. **Those stop being events.** The entire class of correction that §11
-measures as a 78 ms mute becomes a bias so small and so slow that no instrument other than the log
-can see it happen.
+**Why each gain has the value it has:**
+* **`k_p` = 0.1 s⁻¹** is §10.5's "aggressive end, still fits". The closed-loop time constant is
+  10 s: still 100× slower than the P-loop's update and 10× slower than the ~1 s depth wobble.
+* **`k_i` = k_p²/4** makes the loop critically damped. The superseded 0.002 against 0.05 gave
+  ζ = 0.56 and a 76 s tail on a 10 ms relay.
+* **`τ_e` = 2 s** keeps the sawtooth's ratio ripple at 24 ppm while `k_p·τ_e` = 0.2 adds little lag.
+* **B = 0.002** (±2000 ppm). The steady need is ≤ 65 ppm; B exists only for transients, and §10.10
+  changed which transients those are:
+  - §10.10's startup realign removed the cold-connect excursion (+3700–4000 ppm) at its source.
+  - What remains is the post-presentation relay: up to 2133 ppm in the smoothed rate, but only about
+    10 ms of actual movement. At `k_p` = 0.1 it asks for 1000 ppm and never reaches B.
+  - Jitter recovery also remains. It moves the picture at 5 ms/s, faster than any bound this design
+    would call inaudible can follow, so B only sets how much of it becomes lip-sync error: peak
+    **59 ms** at 0.002, **47 ms** at 0.003 (with S = 500 ppm/s), and 80 ms uncorrected.
+  - B is still 2.5× under LiveClock's own ±0.5% rail, so the resampler cannot chase a railed clock
+    at full depth.
+* **S = 200 ppm/s** (0.35 cents/s) is the original text's "2 ppm per 10 ms"; the table here used to
+  say 2 ppm/s, which contradicted it. At 100 ppm/s a 10 ms relay settles in 15 s; at 29 ppm/s
+  (criterion 7's old 0.05 cents/s) it takes 67 s, and the jitter peak reaches 76 ms. Above 200 ppm/s,
+  S only matters for jitter recovery.
+
+⚠️ **ONE TRADE FOR ROBBIE: lip-sync during jitter recovery against pitch.** B 0.002 with S 200 ppm/s
+peaks at 59 ms of audio *lead* during a 16 s rail. B 0.003 with S 500 ppm/s peaks at 47 ms, at
+5.2 cents and 0.87 cents/s. The usual detectability threshold for audio lead is about 45 ms, so
+neither is clean, but 0.003 nearly is. The event is n = 1 (once in 10 min, loopback SRT, §10.3).
+**Adopted: 0.002 / 200**, the conservative pitch choice, to be revisited with step 8's multi-hour
+data.
+
+⚠️ **RESPONSE TIME IS DELIBERATELY SLOW, AND THAT IS STILL THE POINT.** A 10 ms error closes in
+about 20 s with the ratio never past 1000 ppm (1.7 cents). The whole class of correction that §11
+measured as a 78 ms mute becomes a glide too slow for anything but the log to see.
 
 ### 2.3 How this avoids fighting the LiveClock P-loop
 
@@ -233,12 +294,13 @@ Four independent reasons, in descending order of how much they would survive a r
    change can reach the P-loop's error. Compare candidate 4 in §11.10, which the findings correctly
    flag as *"a change to the video control loop made for an audio symptom, which is how §9's decoder
    swap happened"*.
-2. **Timescale separation, stated in numbers.** P-loop: 0.1 s update, ±0.5% authority. Resampler:
-   20 s closed-loop time constant, ±0.1% authority, 2 ppm/s slew limit. The resampler's fastest
-   possible action is 500× slower than the P-loop's update interval and its authority is 5× smaller.
+2. **Timescale separation, stated in numbers.** P-loop: 0.1 s update, ±0.5% authority. Resampler
+   (REVISED 2026-09-25): 10 s closed-loop time constant, ±0.2% authority, 200 ppm/s slew limit. The
+   resampler's time constant is 100× the P-loop's update interval and its authority is 2.5× smaller.
    Even if it *were* coupled, it could not participate in the P-loop's dynamics.
-3. **The feed-forward is the existing filter, not a second one.** There is one τ=30 s EMA and it
-   remains the only thing that decides how much of the depth correction reaches audio.
+3. **There is no feed-forward (REVISED 2026-09-25).** LiveClock's rate field has no path to the
+   ratio. The depth correction reaches audio only as movement of the mapping's *position*, seen
+   through a 10 s loop, and that movement is the picture's, so audio has to follow it.
 4. **The rail is benign here, and §3's lesson does not transfer.** §3's dead band was catastrophic
    because a *gate* closed at the rail and publication stopped. The resampler has no gate: at the
    rail it applies its maximum correction continuously, and the consequence is a bounded residual
@@ -272,6 +334,28 @@ Three properties, all of which matter:
   `[SRT] snap-to-live:` / freeze-guard / queue-full line, or with an `axis RE-PINNED` line. A splice
   with no matching event is a defect, and that cross-check is only possible because both sides
   already log.
+
+⚠️ **REVISED 2026-09-25 — WHAT REPLACES THE 10 ms POSITION BRANCH AT STEP 4, BEFORE THE SPLICE
+EXISTS.** Two branches write the rate today, and both compare the **timebase**, not content time:
+- the mirror's position branch (10 ms, `FrameEngine.mirrorLiveAudio`)
+- NDI's `serviceDesktopAudioAnchor` (10 ms, `NDIService.swift:1954`)
+
+Under a working loop the timebase drifts from the target by design (§2.1), so both would fire on a
+correct loop: every ~70 min at 250 ms on MediaMTX, and every ~24 min at 10 ms on NDI. **Both are
+replaced by one coarse branch, keyed on content-time `e`, with two triggers:**
+
+* **level:** `|e_f| > 250 ms`, §7's figure;
+* **step:** `|e_k − e_(k−1)| > 50 ms` between consecutive evaluations, which is this section's splice
+  trigger.
+
+The step trigger is needed at step 4, not only at step 5. A LiveClock snap discards at least 200 ms
+(it fires at `targetDepth + 0.2`), which is under the 250 ms level. At B = 0.002 the loop would
+absorb it at 2 ms/s: **100 s of lip-sync error.**
+
+At step 4, either trigger takes the existing action: drain the stage, then re-anchor its axis and the
+timebase with one `setRate(1.0, time:atHostTime:)`. That is one mute per coarse event, logged as
+`[*-RESAMPLE] COARSE` with its size and trigger, and counted. `e_f` is reset and `i` is held. Step 5
+replaces the action with the splice and removes the write; the triggers stay the same.
 
 > **Inference, not measurement:** that a 5–10 ms cross-faded splice at snap cadence is preferable to
 > a 78 ms mute. It is strongly implied — the mute is 8–15× longer and is *exact digital zero*, while
@@ -344,16 +428,24 @@ parameters are needed:**
   Δ(pair)              = [ ntp_a + (T_a0 − rtp_a)/48000 ] − [ ntp_v + (T_v0 − rtp_v)/90000 ]
 
   target  =  mapping.senderPTS + (t1 − mapping.hostTime) * mapping.rate  −  offset(t1)
-  r_ff    =  (1 / smoothedRate) * (1 + srRate)
+  offset(t) = a + b · (t − t_fit)          a, b from the fit; b is the audio↔video rate
 ```
 
 * **The OFFSET replaces `cushion` on this transport** — same slot, same sign convention, no longer a
   constant. `beginLiveAudio`'s parameter note already defines `cushion` as *"how far behind the
   mapping's senderPTS does this transport stamp its audio PTS?"*, which is exactly what the fit
   measures. The note needs no rewriting; the value simply stops being a guess.
-* **The RATE joins the feed-forward term**, where a 60 ppm correction costs nothing. Correcting it
-  by position instead would mean a `setRate` every few seconds — §5.1's mute, forever — which is the
-  single strongest argument for doing this here rather than in the mirror.
+* **The RATE enters through the target's slope, not the ratio** (REVISED 2026-09-25; this bullet
+  used to put it in the feed-forward term, which no longer exists). §2.2's loop is type 2, so the
+  ~60 ppm MediaMTX slope is nulled with zero steady error by the integrator, and nothing multiplies
+  the ratio. The reason for doing it here rather than in the mirror still stands: correcting it by
+  position would mean a `setRate` every few seconds, §5.1's mute forever.
+* **Each new SR pair moves the fit**, so `offset(t)` steps by roughly the per-pair noise over √N
+  (Cloudflare: 6 ms / √N). That is well under the 50 ms step trigger (§2.4), so the loop absorbs it
+  as ordinary position error: a noisy fit costs a slow glide toward the new line, never a write.
+* **A WHEP sender that sends no SRs is a deviation from the standard** (RFC 3550 §6.4.1 requires
+  them of active senders). Fall back to the pre-existing behaviour, offset = 0 (today's rebased-axis
+  assumption), log the deviation once, and never branch on which server it is.
 
 **Three properties this buys, and one it does not:**
 
@@ -373,10 +465,64 @@ averaging Cloudflare's noise and tracking MediaMTX's rate, and it depends on §6
 ~60 ppm belongs to OBS or to the relay. Pick it from a measurement, with a non-OBS sender through
 MediaMTX, not from this document.
 
+**Where it enters the build:** step 4e (§7), after a measurement run picks the fit window. Until then
+WHEP runs step 4 with today's constant offset. The integrator still absorbs the slope; only the
+absolute lip-sync stays as arbitrary per session as it is today (`BUGS.md`, "WHEP lip-sync is
+ARBITRARY PER SESSION").
+
 ⚠️ **AND THE OTHER THREE TRANSPORTS HAVE NO SUCH INPUT AND NEED NONE.** SRT, NDI and HLS each carry
 audio and video on ONE timeline already — that is exactly why §3.1's SRT fix was a single argument.
 This subsection is WHEP-only, and the fit must be absent rather than neutral on the others: a
 degenerate fit over a stream that never reports would be a silent source of noise.
+
+### 2.7 The first anchor waits for the first presentation — ADDED 2026-09-25
+
+**Measured (11.4 note 2; 11.5).** On every WHEP connect the mirror anchored on the first mapping.
+§10.10's startup realigns then moved the mapping by **67.9–110.5 ms** before the picture started, and
+each move reached the mirror as a position write: 1–3 per connect, with the first two equal to the
+realigns to 0.1 ms. One was audible as a 60 ms mute on MediaMTX. Under the step-4 loop they would
+stop being writes, but they would become 70–110 ms of error to absorb at ≤ 2 ms/s, which is a minute
+of lip-sync error at every connect.
+
+**Rule: the session's one rate write happens at LiveClock's first presentation, not at its first
+mapping.** That is exactly when §10.10's realign window closes (`hasPresentedOnce`), so the mapping
+the audio anchors to is the one the picture actually uses.
+- On WHEP, the anchor also waits for the first SR pair (§2.6 item 4) and takes the later of the two.
+- The rule is keyed on LiveClock's own event and on the SR's presence, never on the transport or the
+  server.
+- SRT has 0 realigns by construction (§10.10), so there the rule costs only the 4–6 ms between the
+  anchor and the first presentation.
+
+Audio enqueued before the anchor waits in the renderer at rate 0. At the anchor,
+`setRate(1.0, time: target)` starts playback at the target, and the renderer discards whatever is
+already late, with no second write. **Cost to measure at step 4b:** in the logs from 11.1 and 11.5
+every realign fell within 0.35 s of the first mapping, so WHEP audio should start up to about 0.35 s
+later than today. That is inside the 400 ms `targetDepth` the picture is already holding.
+
+### 2.8 The target, per transport — and NDI's +7 ppm — ADDED 2026-09-25
+
+With no feed-forward, every transport runs the identical law and differs only in its target line,
+and so in the net slope `d` the integrator learns:
+
+| transport | `target(t)` | what `d` is | measured `d` at ratio 1.0 (11.2) |
+|---|---|---|---|
+| SRT | the video mapping line; cushion 0 (§3.1) | device crystal against the video sender | +5 ppm |
+| WHEP | the video mapping line − SR `offset(t)` (§2.6) | the above, plus the audio↔video SSRC slope | MediaMTX −60; Cloudflare +14 |
+| NDI | the anchor line `mediaNow − lead` on the pull clock, the same axis `serviceDesktopAudioAnchor` checks today | device crystal against mach | **+7.1** (+6.680 ± 0.003, §10.4) |
+
+**NDI's +7 ppm is covered.**
+- **Today** it is corrected only by `serviceDesktopAudioAnchor`: a 10 ms re-anchor about every
+  24 min, each one a rate write and so a mute (§8 Q1).
+- **Under this loop** it is 0.35% of B. The integrator settles to it within about 40 s (four
+  closed-loop time constants), `e` is held at zero in steady state (type 2), and nothing is left for
+  the coarse branch to catch.
+- NDI's 10 ms re-anchor is retired into the coarse branch (§2.4). It has to be: it compares the
+  timebase, which under the loop keeps drifting at the device's +7 ppm by design, so left alone it
+  would keep firing every 24 min on a loop that is working.
+
+**This folds build step 6 into step 4.** Step 6 was separate because NDI was "the one path where the
+feedback term can be measured without the feed-forward confounding it". With no feed-forward
+anywhere, that reason no longer exists.
 
 ---
 
@@ -701,8 +847,10 @@ measured on this app's transports.
 
 **Do NOT absorb: the ±5000 ppm rail.** That is the video depth corrector, it is bang-bang
 (§11.6: *"a relay controller that occasionally goes linear"*), and feeding it into a resampler is
-the 17-cent warble at 10 Hz that §5 says the smoothing exists to stop. It reaches the ratio only
-through the τ=30 s feed-forward, attenuated exactly as today.
+the 17-cent warble at 10 Hz that §5 says the smoothing exists to stop. ~~It reaches the ratio only
+through the τ=30 s feed-forward, attenuated exactly as today.~~ **REVISED 2026-09-25:** there is no
+feed-forward any more. The rail reaches audio only as movement of the mapping's position, through
+the 10 s closed loop and the ±0.2% bound (§2.2).
 
 ⚠️ **AND THE CLOUDFLARE DEPTH EXCESS IS NEITHER OF THESE.** §11.8 measures `depth − count×D` at
 **+51 ms median, +135 ms p90, +152 ms max** on Cloudflare against **−8 ms median** locally. That is a
@@ -775,7 +923,7 @@ is not known whether that mutes (see open question 1). Measure it before step 6,
 | 4 | **Gap histogram 100% `EXACTLY ZERO (contiguous)`** on the resampler's output, all windows, all transports; `axisRePins = 0` | `LiveAudioRendererProbe`, **moved to the output side** (§4.1) |
 | 5 | **No new content holes.** Local must stay at zero. Cloudflare's existing `+837, +676, +439, +85, +76` samples and WHEP's `+432, +6, +0` must not grow in count or size | offset-track step events, §11.4 |
 | 6 | **Splice events ≤ the count of LiveClock coarse events**, each matched to a `snap-to-live` / freeze-guard / queue-full / `axis RE-PINNED` line | new splice log line, cross-referenced |
-| 7 | **Pitch: ratio within ±0.1% and rate-of-change under 0.05 cents/s** | steady tone from OBS, FFT of the device capture in 5 s windows |
+| 7 | **Pitch (REVISED 2026-09-25): steady-state ratio within ±0.1%; transient within ±B (±0.2%); rate of change ≤ 0.35 cents/s (the 200 ppm/s slew limit).** The old wording, "within ±0.1% and under 0.05 cents/s", is a loop that takes 67 s to follow a 10 ms relay (§2.2) | steady tone from OBS, FFT of the device capture in 5 s windows |
 | 8 | **SDI unchanged**: `underruns=0, short=0, resyncs=0` for a full session with DeckLink output on | existing `DeckLinkAudio` counters |
 | 9 | **Meters unchanged**: peak and clip-run readings match a pre-change capture on identical material | `AudioTapBuffer.peaksOfNewest` |
 | 10 | **CPU**: total process CPU increase < 2% at 16 channels, 48 kHz | Instruments, NDI 16 ch source |
@@ -862,14 +1010,47 @@ unchanged; mutes/min dropped to the position branch's rate alone; and — the co
 correcting it. A drift that does not match step 2's prediction means the plumbing is wrong, and that
 is worth more than a clean run.
 
-### Step 4 — close the loop
+### Step 4 — close the loop (REVISED 2026-09-25)
 
-Feed-forward `1/smoothedRate` plus the PI trim, clamped, slew-limited. Position branch tolerance
-raised to 250 ms so only a coarse event can still trigger a `setRate`.
+The law in §2.2, on content time (§2.1), with the first-anchor hold (§2.7), one coarse branch
+(§2.4) and every transport including NDI (§2.8). No feed-forward. Built in this order, each part
+separately testable:
 
-**Measured:** `timebase − clock` bounded over 30 min with zero trend, per path, against §5.3;
-`setRate` rows with non-zero rate fall to 1 + (coarse events); mutes/min falls to the coarse-event
-count; pitch trace (criterion 7).
+**4a. Content-time error.** The stage keeps (output tick, input position) breakpoints and answers
+`inputTime(atOutputTime:)`, and the paired probe's `actual` switches to it. *Test:* identity at
+ratio 1.0 (step 3's PAIRED figures reproduce), and exact inversion under a ramped ratio, using
+step 1's warp fixture in `swift test`.
+
+**4b. First anchor at first presentation**, and at the first SR pair on WHEP. *Measured:* startup
+position writes on WHEP go from 1–3 per connect to **0**, over cold and warm connects on MediaMTX and
+Cloudflare. Audio-start delay is logged and must stay under the 400 ms `targetDepth`.
+
+**4c. The controller as a pure function** (`e` → `ρ`, with clamp, slew and anti-windup), in the
+`LiveAudioResample` target so it tests without ManifoldCore. *Tests* replay §2.2's three disturbances
+and assert its table: 0 steady error at 65 ppm, a 10 ms relay settled within 20 s, and the jitter
+peak ≤ 60 ms. A windup test holds 60 s at the rail, then releases, with no overshoot over 2 ms.
+
+**4d. Wire it.** The ratio goes into the stage per buffer. One coarse branch on `e` (level 250 ms,
+step 50 ms) replaces the mirror's position branch and NDI's `serviceDesktopAudioAnchor`. Its action
+is drain plus re-anchor, logged as `[*-RESAMPLE] COARSE`. NDI's target is its anchor line. The rate
+branch is already off.
+
+**4e. The WHEP SR line into the target** (§2.6), after one measurement run picks the fit window
+(a non-OBS sender through MediaMTX, §2.6's open item). The SR parse already exists, log-only
+(`af4ebe0`). Until 4e lands, WHEP runs with today's constant offset.
+
+**Measured, 30 minutes per transport (local SRT, MediaMTX, Cloudflare WHEP, NDI):**
+- `e_f` p99 within §5.3's per-path bounds, with zero trend. It is now measured on content time,
+  which is what §5.3 meant by `timebase − clock`.
+- **The integrator's settled value confirms the plant model:** about the realised drift of 11.2
+  (SRT +5, MediaMTX −60, Cloudflare +14, NDI +7 ppm, with §2.2's sign). A different value means
+  `target` or `actual` is wrong.
+- `setRate` rows with a non-zero rate: 1 + COARSE count.
+- Device-output mutes/min equal the COARSE count, measured with the §11.9 harness using 11.5's
+  protocol (connect, reconnect, measure the reconnect).
+- The ratio trace meets criterion 7 as restated.
+- NDI `RE-ANCHORED` count: 0.
+- Criterion 12, per transport.
 
 ✅ **THE TARGET THIS LOOP NULLS AGAINST IS NOW CORRECT ON SRT.** Open question 4 was answered on
 2026-09-23 — the cushion put desktop audio ~200 ms behind its picture — and the one-line fix
@@ -893,20 +1074,14 @@ track shows a step of the expected size **with no run of silence in it**.
 
 This is the step that makes criterion 1 and criterion 2 true. Everything before it is scaffolding.
 
-### Step 6 — NDI onto the same loop
+### Step 6 — NDI onto the same loop — FOLDED INTO STEP 4 (2026-09-25)
 
-Retire `serviceDesktopAudioAnchor`'s periodic re-anchor into the resampler's feedback term. NDI has
-no LiveClock, so feed-forward is 1.0 and the loop is pure feedback — which makes this the cleanest
-possible validation of the feedback term in isolation.
-
-**Measured:** `[NDI-AUDIO] desktop timebase RE-ANCHORED` count → 0 over 30 min; device-output
-mutes/min → 0 against step 2's baseline; the crystal ppm the loop settles at agrees with the ppm
-those re-anchor lines used to report (they already print it — *"the implied ppm says by how much"*).
-
-⚠️ **If open question 1 comes back "a same-valued `setRate` does not mute", this step is optional
-rather than required** — but it is still worth doing, because it removes the last open-loop
-re-anchor in the app and it is the one path where the feedback term can be measured without the
-feed-forward confounding it.
+With no feed-forward, NDI runs the same law as every other transport against its own target line,
+and its 10 ms re-anchor must go at step 4 anyway, because it would fire on a working loop (§2.8).
+What this step used to measure moves to step 4's list:
+- the `RE-ANCHORED` count → 0
+- device-output mutes/min → 0 against the NDI figure from 11.5 (0.0 / 0.0)
+- the settled integrator agreeing with the +7 ppm those re-anchor lines used to imply
 
 ### Step 7 — remove what is now dead, and re-point the tripwires
 
@@ -921,6 +1096,12 @@ Hz regardless of whether the clock publishes. The heartbeat's remaining job is t
 `mirror.smoothedRate` fed at a steady cadence so the τ=30 s EMA's `dt` stays small — which is real
 and load-bearing, and is not the reason written in the comment today. **A comment that states a
 reason which has stopped being true is how §9's PTS defect survived for three days.**
+
+⚠️ **REVISED 2026-09-25: AND AFTER STEP 4 THAT REASON LAPSES TOO.** `smoothedRate` no longer reaches the
+ratio (§2.2); it is a logged comparison figure. The heartbeat's remaining job is whatever the mirror
+still needs a steady cadence for: publishing the mapping the paired probe evaluates. Re-derive it at
+this step from the code as it then stands, and write down that reason, not either of the two
+above.
 
 Likewise the slew-site tripwires, which §5 records as having watched *"for the slew pinned at unity,
 not pinned at the rail"*: re-point them at the quantity that now matters, which is the resampler's

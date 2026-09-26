@@ -705,6 +705,63 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 
 ---
 
+## ☐ OPEN 2026-09-25 — a lost Opus packet plays as 20 ms of digital silence; use packet-loss concealment
+
+**Status:** ☐ **OPEN, follow-up.** Nothing is broken relative to before step 3; the loss sounds the
+same as it did then. **Affects:** WHEP audio on any path that loses packets. **Heard:** Cloudflare,
+2026-09-25, "a couple quick glitches around 1:47".
+
+### Measured
+
+The resampler step 3 mute captures (`AUDIO_RESAMPLER_DESIGN.md` 11.5, Cloudflare WHEP reconnect
+session) contain **two 20 ms runs of exact digital zero, 0.32 s apart**, 85 s after the reconnect. They
+match two stage events exactly:
+
+    21:28:01.342 [WHEP-RESAMPLE] input axis HOLE 20.00 ms … filled with silence
+    21:28:01.657 [WHEP-RESAMPLE] input axis HOLE 20.00 ms … filled with silence
+
+RTP reported `seqGaps=5 declaredLost=7` in that window. Each hole is one 960-sample Opus packet that
+never arrived in time. Robbie heard both.
+
+### Why it is silence
+
+The step 3 stage fills a forward input-axis step with silence, which keeps every later sample at its
+original time (11.1, and the stage header). **That is the right thing for the axis and the wrong
+thing for the content.** Before step 3, the renderer played the same loss as a PTS gap, also
+silence. Opus has a decoder-side answer to exactly this, and the app doesn't use it.
+
+### What to do — options, not a decision
+
+The decoder is Apple's `AudioConverter` (`WHEPAudioDecoder.swift`), not libopus, and it exposes no
+packet-loss concealment (PLC) or forward-error-correction (FEC) call.
+
+1. **Measure first whether `AudioConverter` conceals when given an empty packet** (a zero-byte packet
+   description in the missing slot). libopus conceals on a null packet. Whether Apple's wrapper passes
+   that through is unknown, and it costs one test to find out.
+2. **Vendor libopus** (BSD-3, the reference decoder). That gives `opus_decode(NULL)` for PLC and
+   `decode_fec = 1` for in-band FEC. **The SDP already offers `useinbandfec=1`**
+   (`DataChannelBridge.m:337`), so a sender that honours it is already sending the redundancy that
+   would recover a single lost packet *exactly*, and the app throws it away.
+3. **Conceal in the stage**: a cross-faded repeat of the previous packet. It is codec-agnostic and
+   the worst-sounding of the three; a fallback only.
+
+**Where it goes:** `WHEPAudioReceiver`, which already sees the RTP timestamp step (960 per packet)
+before the stage does. The stage's silence fill stays as the backstop for gaps concealment can't
+cover.
+
+⚠️ **Interaction with NACK.** That same window shows `recovered=7`: late originals arrive after a
+retransmission request. Concealment has to commit at a playout deadline, not on the first gap it
+sees. An original that arrives after its slot was concealed must be dropped, and the stage already
+drops input overlaps (11.1).
+
+### Verification
+
+The §11.9 device-output harness, with loss injected (Network Link Conditioner) on **MediaMTX and
+Cloudflare**, because the fix is standard-codec behaviour, not a server's. Pass condition: the 20 ms
+exact-zero runs disappear from the capture, with no new offset-track steps.
+
+---
+
 ## 🔍 OPEN 2026-09-25 — DeckLink card start: the SDI audio cursor snaps ~110–130 ms about one second after output is enabled, when a video frame is already staged
 
 **Status:** 🔍 **OPEN.** Not fixed, and nothing about it is audible on the ATEM by ear. **Existed before
