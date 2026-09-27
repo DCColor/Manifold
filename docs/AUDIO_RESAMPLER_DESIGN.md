@@ -852,7 +852,8 @@ through the τ=30 s feed-forward, attenuated exactly as today.~~ **REVISED 2026-
 feed-forward any more. The rail reaches audio only as movement of the mapping's position, through
 the 10 s closed loop and the ±0.2% bound (§2.2).
 
-⚠️ **AND THE CLOUDFLARE DEPTH EXCESS IS NEITHER OF THESE.** §11.8 measures `depth − count×D` at
+⚠️ **AND THE CLOUDFLARE SRT DEPTH EXCESS IS NEITHER OF THESE.** It is an SRT figure. Cloudflare WHEP
+has no reorder and an excess of −12 ms median, flat over 30 min (§13.3). §11.8 measures `depth − count×D` at
 **+51 ms median, +135 ms p90, +152 ms max** on Cloudflare against **−8 ms median** locally. That is a
 position offset caused by reorder inflation, not a rate, and no resampler can or should absorb it:
 absorbing it would mean varispeeding the programme to chase a measurement artefact. It remains §7's
@@ -2212,7 +2213,7 @@ understated for those transports.
 trace. Step 8's 30-minute runs are where τ_e and S get decided, with this section's ripple as the
 number to beat.
 
-### 13.3 ⚠️ UNRESOLVED — Cloudflare's integrator settled near −60 ppm, not +14
+### 13.3 ✅ RESOLVED 2026-09-26 — Cloudflare's integrator settled near −60 ppm, not +14: a real audio↔video slope
 
 §7 step 4 says a settled integrator away from the realised drift "means `target` or `actual` is
 wrong". Cloudflare's `i` fell from +135 ppm (20 s) through 0 (60 s) to −43 … −63 ppm over the last
@@ -2224,7 +2225,9 @@ wrong". Cloudflare's `i` fell from +135 ppm (20 s) through 0 (60 s) to −43 …
    - Over a 3-minute session the integrator learns the *net slope of the target*. That includes
      any net movement of the mapping's position by the depth loop, not just clocks.
    - On Cloudflare the depth is the least settled: §11.8's +51 ms median / +135 ms p90 excess, and
-     the reorder inflation behind it. A net mapping creep of ≈ 13 ms over 3 minutes would read as
+     the reorder inflation behind it. ⚠️ **Miscited:** §11.8 measured Cloudflare **SRT**. This
+     session is Cloudflare WHEP, which logs `reorder=0`, and its excess is **−12 ms median**, flat
+     over the 30-min soak below. A net mapping creep of ≈ 13 ms over 3 minutes would read as
      −75 ppm.
    - Cloudflare is also where the loop tracks the depth loop most: +0.47 against LiveClock's rate,
      −0.58 between depth error and `e`.
@@ -2237,6 +2240,12 @@ wrong". Cloudflare's `i` fell from +135 ppm (20 s) through 0 (60 s) to −43 …
      would move `d` directly.
    - Until 4e puts the SR line into the target (§2.6), the loop cannot tell that slope from the
      video's.
+   - ⚠️ **CORRECTED 2026-09-26 — the two bullets above are wrong about what `i` can see.** With no SR
+     offset in the target, `target` is the video mapping line and `actual` is audio content time
+     consumed at ρ × the device clock. So `i` settles on **the video clock against the device
+     clock**, plus any mapping creep: `i = δd − δv − c`. The audio clock does not appear in it.
+     An audio↔video slope moves `i` only through its video half. Its audio half appears as a
+     **drift of the audio lead**: audio arrives at its own rate but is consumed at the video's.
 
 **Against a WHEP plumbing error:** MediaMTX, on the same `target` and `actual` code, landed on its
 step-3 drift. **Against reading the value as settled at all:** `i` was still moving at 140 s and
@@ -2247,6 +2256,80 @@ swung ±10 ppm window to window after that.
   position change over the same span (hypothesis 1 predicts they account for each other);
 - and/or the SR slope logged beside it once 4e's fit exists (hypothesis 2 predicts `i` tracks it).
 
+#### ✅ SETTLED 2026-09-26 by a 30-minute soak — a real audio↔video slope of ~65 ppm, not creep
+
+**Protocol:**
+- **Build:** HEAD `e8f822e`, Profile, unsigned (`.build-cc/soak-e8f822e`), rebuilt from the clean
+  tree rather than reusing `.build-cc/step4d`, which predates the commit.
+- **Run:** OBS → Cloudflare WHIP → Manifold WHEP, flash-beep fixture, unattended, 1902 s, ended by
+  `kill -TERM` at 32 min, so the END lines are absent. Log: `~/Desktop/soak133-cloudflare.log`.
+- **Analysis:** `~/Desktop/soak133_analyse.py`, log only, with nothing added to HEAD's logging.
+- **Span:** t ≥ 600 s, excluding the +1565–1770 s event (§13.4).
+
+**The decomposition.** In ppm against mach, `i = δd − δv − c`:
+- `δd` is the device crystal, +6.48 ppm from step 4d's NDI run (§13.1);
+- `δv` is the video RTP clock, the mean of `[WHEP-DRIFT] senderRate`. It is a per-window
+  minimum-offset difference, so the mean telescopes;
+- `c` is mapping creep against arrivals, `−D·d(count)/dt` from the `[LIVECLOCK] depth= … count=`
+  lines, equivalently `d(excess − depth)/dt`.
+
+The same decomposition was first checked against step 4d's 3-minute MediaMTX log. It gives
+`δv` +69, which predicts `i` ≈ −62; the measured `i` was −58.5 (step 3: −65). So the sign
+convention holds.
+
+| term | value | source |
+|---|---|---|
+| `i` | **−59.9 ppm**; trend −0.11 ± 0.34 ppm/min; 5-min blocks −58.5 / −61.9 / −57.6 / −58.8 | steering windows |
+| `δv` | **+61.9 ppm** (220 windows) | `[WHEP-DRIFT]` |
+| `c` | **+4.1 ± 1.8 ppm**; count·D flat at 392–401 ms per 5-min block | `[LIVECLOCK]` count |
+| excess `depth − count·D` | **−12 ms median**, trend −0.2 ± 1.5 ppm | `[LIVECLOCK]` |
+| `δd − δv − c` | **−59.5 ppm**, within 0.4 ppm of `i` | |
+| audio lead drift | **−70 ± 2 ppm** over the span; **−142 ms over the 1902 s session** | resampler `out` frames against the device clock, wall-timed |
+
+**Hypothesis 1 (creep) is ruled out.**
+- To carry −60 ppm for 16 min, the queue would have had to lose about 112 ms, or 2.7 frames. It
+  moved about 6 ms.
+- `i` did not relax toward +14. It held at −60 in every 5-min block.
+- The reorder mechanism behind hypothesis 1 is absent on WHEP (above).
+
+**Hypothesis 2, as corrected, is what happened:**
+- **The video RTP clock runs about +62 ppm against mach, and that is what `i` learned.**
+- **Audio does not share it.** The lead drains at −70 ppm. With ρ − 1 ≈ +60 ppm and
+  `δd` +6.5, that puts audio arrival within a few ppm of mach. Precision is limited by the lead
+  being wall-clock timed, so the Mac's NTP frequency correction enters it.
+- **The audio↔video slope is therefore about 65 ppm**, the same size as MediaMTX's (§6.2 of
+  `AV_SYNC_FINDINGS.md`; step 4d's MediaMTX gave `δv` +69).
+- The video-SR probe build was not needed. The decomposition closed without it.
+
+**What it means:**
+- **The loop is right, and real lip-sync still drifts.** The loop holds audio content time on
+  the video RTP line. Those two timelines run about 65 ppm apart, so audio gains roughly
+  **117 ms on the picture per 30 min** while `e` shows zero trend. `e` cannot see this. Only 4e's
+  SR line in the target (§2.6) removes it. See `BUGS.md`, "WHEP lip-sync drifts with the sender's
+  audio/video clock slope; e cannot see it".
+- **The same slope eats the audio queue:** −142 ms over this session. The queue's absolute depth
+  is not logged, so how long a session runs before the renderer starves is unknown. No
+  starvation was seen here.
+- **Step 3's +14 ppm on Cloudflare is now the outlier.** Both 4d-era Cloudflare sessions settled
+  near −60, as MediaMTX does. That leans toward §6.7's reading, that the ~60 ppm belongs to the OBS
+  sender rather than to the relay. **n = 1 soak; a lean, not a result.** A non-OBS sender through
+  both servers would settle it.
+
+**§5.3 on this run (WHEP, ±15 ms p99, zero trend):**
+- **p99 over the full 30 min fails.** 8 of 190 windows have p99 > 15 ms, peaking at +106.6 ms,
+  all in the §13.4 event. Pooled p99 is about +70 ms or more.
+- **Excluding the event:** worst window p99 **+7.25 ms** (median +1.39); worst p01 −4.41 ms
+  (−7.1 in the first window).
+- **Trend passes:** −0.11 ± 0.10 ppm, event excluded. This is blind to the audio↔video slope
+  above.
+
+**Other figures:**
+- max |ρ−1| **2000 ppm**, at B, during the event; 8 windows saturated;
+- the slew limit binds in 154 of 190 windows, which confirms §13.2;
+- `setRate`: 1 non-zero write, the first anchor;
+- COARSE: 0 (level 0, step 0);
+- pairing discards: 4.0%.
+
 ### 13.4 Still unmeasured at step 4d
 
 These runs were 3-minute quick connects, n = 1 per transport, judged by ear. Not measured:
@@ -2256,7 +2339,9 @@ These runs were 3-minute quick connects, n = 1 per transport, judged by ear. Not
   +203.9 ms, Cloudflare SRT +165.8 ms, NDI +230.1 ms). This is the first step at which those
   numbers should move, and it is not yet known whether they did;
 - **the 30-minute p99 and zero-trend checks** against §5.3. The bounds above are per-window
-  minima and maxima over 3 minutes, not p99 over 30;
+  minima and maxima over 3 minutes, not p99 over 30. *Since measured for Cloudflare WHEP only,
+  by the 2026-09-26 soak (§13.3): trend passes, and p99 fails on the event below.* Still unmeasured
+  on SRT, MediaMTX and NDI;
 - **criterion 7 against a real ratio trace**, which §13.2 makes the more important of the open
   criteria;
 - **any coarse event in the field.** None fired, so the step and level triggers, the settle
@@ -2266,3 +2351,44 @@ These runs were 3-minute quick connects, n = 1 per transport, judged by ear. Not
 - **a reconnect.** Every run was a single connect, so the steering's per-session construction and
   teardown across a reconnect were not observed;
 - **the SDI counters and the meters.** Not checked at this step.
+
+#### ⚠️ The first field case of jitter recovery under the loop — the 2026-09-26 soak, +1572 s
+
+Seen in the 30-minute Cloudflare WHEP soak (§13.3), unattended, so nobody was there to hear it.
+
+**What happened.** At +1572 s (20:25:28 wall time), **both streams under-delivered for about 3 s**:
+- video arrived at 23/22 frames per s and audio at 48/45 packets per s;
+- there were zero sequence gaps and zero reorder, so the shortfall came from the sender or
+  Cloudflare, not the network;
+- `[WHEP-BACKLOG]` content fell about 0.17 s behind wall time and stayed there;
+- depth dropped 0.372 → 0.253 s (count 9 → 6).
+
+LiveClock pinned at **−0.5% for about 30 s** to rebuild depth, and logged `publication starved` for
+3 s. The picture was genuinely running slow for that time.
+
+**What the loop did.**
+- **Peak:** `e` rose to **+106.6 ms (audio ahead)**. The mapping slowed at 5000 ppm, and the
+  resampler can follow at only B = 2000 ppm.
+- **Recovery:** ρ sat at the bound for about 70 s. `e_f` was back near zero about 85 s after onset,
+  and every sample was inside ±5 ms by about 100 s.
+- **The integrator:** `i` was held at +54.8 ppm while saturated, overshot to +330 ppm on release,
+  and was back near −60 within about 2 min.
+
+**No coarse trigger fired, correctly by the rules as written.**
+- The move was a ramp, so no step between consecutive evaluations reached 50 ms.
+- The level never reached 250 ms.
+- The rate rows show one write for the session.
+
+**This exceeds what §2.2 simulated.** §2.2's jitter-recovery case was an 80 ms move over 16 s at
+−5000 ppm, with a predicted peak of 59 ms. This one moved about 150 ms and peaked at 106.6 ms,
+well past the ~45 ms threshold for audible audio lead, for about a minute.
+- It is the §2.2 "one trade for Robbie" (B 0.002 / S 200 against lip-sync during recovery) arriving
+  in the field.
+- It also produced every window of this soak that failed §5.3.
+
+**Revisit at the step 8 soak.** Decide there, with multi-hour data:
+- B and S;
+- whether a sustained LiveClock rail should reach the coarse branch (a splice at step 5) rather than
+  be glided through.
+
+The event count and size per hour are what that decision needs. n = 1 so far.

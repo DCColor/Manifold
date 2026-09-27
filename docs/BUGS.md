@@ -705,6 +705,56 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 
 ---
 
+## ☐ OPEN 2026-09-26 — OBS hangs on every Manifold disconnect from local SRT when OBS is the listener
+
+**Pattern:** hang or crash on every disconnect when OBS is the SRT listener (its own server, `:9000`)
+and Manifold is the caller. It has not happened when OBS is the caller (Cloudflare, MediaMTX). OBS is
+external, but Manifold's disconnect triggers it. Resampler runs order local SRT last because of it.
+**Discriminating test (not yet run):** disconnect an ffmpeg SRT caller from the same OBS listener,
+with the same latency and passphrase as the Manifold bookmark. If OBS also hangs, OBS's listener is
+the defect. If it does not, check Manifold's disconnect path: does `srt_close`
+(`App/SRT/SRTSession.m:1019`) do a proper close and shutdown, or does OBS see an abrupt socket drop?
+Run the ffmpeg caller twice: once exiting normally, once `kill -9`.
+**Workaround:** OBS → MediaMTX SRT (`127.0.0.1:8890`, `streamid=publish:live`) → Manifold
+(`streamid=read:live`) keeps OBS out of listener mode. The MediaMTX SRT leg has not yet been connected
+(see the MediaMTX entry above).
+
+---
+
+## ☐ OPEN 2026-09-26 — WHEP lip-sync drifts with the sender's audio/video clock slope; e cannot see it
+
+**Status:** ☐ **OPEN.** The fix is resampler step 4e: put the RTCP SR line into the target
+(`AUDIO_RESAMPLER_DESIGN.md` §2.6). **Affects:** WHEP, on both servers tried. **Measured:**
+30-minute Cloudflare soak, 2026-09-26 (`AUDIO_RESAMPLER_DESIGN.md` §13.3).
+
+**What is wrong:**
+- The step-4d loop holds audio content time on the video RTP line.
+- The sender's two RTP clocks run about **65 ppm apart**: video +62 ppm against mach, audio within
+  a few ppm of it.
+- So the loop keeps the two timelines level while the material they carry separates. **Audio gains
+  about 117 ms on the picture per 30 min**, and grows without bound.
+
+**Why nothing sees it:** the steering error `e` compares the two RTP timelines, so it shows zero
+trend (−0.11 ± 0.10 ppm) while real lip-sync drifts. The same class as §2.5's warning: the in-app
+instrument cannot see this defect. Only a device-level A/V measurement (criterion 12) or the SR
+fit can.
+
+**The second symptom:** the renderer's audio queue drains at the same rate, **−142 ms over the 1902 s
+session**, because audio is consumed at the video's rate. Its absolute depth is not logged, so the
+session length at which the renderer starves is unknown. No starvation was seen in 30 min.
+
+**Where seen:**
+- **Cloudflare:** this soak, and step 4d's 3-minute session (`i` −63.5).
+- **MediaMTX:** step 3 (−65), step 4d (`i` −58.5, `δv` +69), and `AV_SYNC_FINDINGS.md` §6.2's
+  SR-measured +57.7 to +66.3 ppm.
+- Cloudflare step 3's +14 ppm session is the exception. The shared figure leans toward the slope
+  being the OBS sender's (§6.7), but that is unconfirmed without a non-OBS sender.
+
+Related: "WHEP lip-sync is ARBITRARY PER SESSION" below. That entry is the offset; this one is its
+slope.
+
+---
+
 ## ☐ OPEN 2026-09-25 — a lost Opus packet plays as 20 ms of digital silence; use packet-loss concealment
 
 **Status:** ☐ **OPEN, follow-up.** Nothing is broken relative to before step 3; the loss sounds the
