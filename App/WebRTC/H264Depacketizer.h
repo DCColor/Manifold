@@ -100,7 +100,7 @@ typedef struct {
     // ── Packets ──────────────────────────────────────────────────────────────
     uint64_t packetsReceived;          ///< Everything handed to Submit, including rejects below.
     uint64_t packetsAccepted;          ///< Passed PT/SSRC/header validation and was depacketized.
-    uint64_t packetsRTCP;              ///< PT 72–76: RTCP that leaked through rtcp-mux. Expected to be 0.
+    uint64_t packetsRTCP;              ///< PT 72–76: RTCP the bridge failed to intercept. Expected to be 0.
     uint64_t packetsWrongPayloadType;  ///< Not the negotiated H.264 PT — RTX, audio, a second codec.
     uint64_t packetsWrongSSRC;         ///< A different source than the one we latched (RTX/simulcast).
     uint64_t packetsMalformed;         ///< Truncated, bad version, or a header that overruns the packet.
@@ -577,6 +577,23 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *depacketizer,
 /// Emits any access unit still open (i.e. whose marker bit never arrived).
 /// Call at end of stream. Producer thread only.
 void ManifoldH264DepacketizerFlush(ManifoldH264Depacketizer *depacketizer);
+
+/// What a Receiver Report says about this source (RFC 3550 §6.4.1), read from the sequence and
+/// loss accounting the NACK requester already keeps — no second tracker.
+typedef struct {
+    bool     haveSSRC;
+    uint32_t ssrc;
+    bool     haveSeq;
+    uint32_t extendedHighestSeq;   ///< Wrap cycles in the high 16 bits (RFC 3550 A.1).
+    uint32_t expected;             ///< RFC 3550 A.3: extended highest − base + 1. 0 before any packet.
+    int32_t  cumulativeLost;       ///< packetsLost − packetsRecovered − packetsLateAfterGiveUp.
+    uint32_t jitter;               ///< RFC 3550 A.8, 90 kHz units.
+} ManifoldH264DepacketizerReception;
+
+/// Cheap: a handful of fields, not the whole stats struct. Caller must serialize against the
+/// producer thread, as for CopyStats.
+void ManifoldH264DepacketizerCopyReception(const ManifoldH264Depacketizer *depacketizer,
+                                           ManifoldH264DepacketizerReception *out);
 
 /// Copies the counters out. Caller must serialize against the producer thread.
 void ManifoldH264DepacketizerCopyStats(const ManifoldH264Depacketizer *depacketizer,

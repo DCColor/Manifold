@@ -2469,3 +2469,95 @@ well past the ~45 ms threshold for audible audio lead, for about a minute.
   be glided through.
 
 The event count and size per hour are what that decision needs. n = 1 so far.
+
+## 14. Step 4e-1 results — Manifold owns the video RTCP, measured 2026-09-27
+
+**No presentation change.** The SR fit stays log-only. This step moves who sends and reads the video
+track's RTCP, so the video SR is available on every session for step 4e.
+
+**What changed:**
+- **`RtcpReceivingSession` is no longer chained** on the video track. The
+  `MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP` macro and its dead branch are deleted. Video RTCP now
+  reaches `-ingestRTP:` and is taken before the depacketizer.
+- **Our own PLI** (RFC 4585 §6.3.1) replaces the one `rtcRequestKeyframe` call site, sent through
+  `rtcSendMessage` like NACK. Every trigger and the 1 s throttle are unchanged.
+- **Our own RR** (RFC 3550 §6.4.2), one per received video SR, sent immediately. That is the
+  library's cadence, restricted to SRs for the video SSRC.
+  - LSR from that SR; DLSR measured.
+  - Extended highest sequence and cumulative loss from the depacketizer's existing NACK accounting
+    (wrap cycles and base sequence added).
+  - Interarrival jitter per RFC 3550 A.8, 90 kHz.
+- **SRs are selected by SSRC** on both tracks. Under BUNDLE libdatachannel hands a compound packet
+  to every track whose SSRC appears in it, so "the first SR in the packet" could be the other
+  stream's. Audio latches its SSRC from its first RTP packet.
+- **The video SR parse is always on** and feeds the log-only Δ probe.
+- **The steering window line gains `renderer depth ms min/med/max`**: enqueued output end minus the
+  timebase, per accepted read. Measurement only.
+- The builders and the SR parser are a leaf C target, `RTCPWire`, with 14 byte-layout tests
+  written from the RFC diagrams (`swift test`: 43 of 43).
+
+**Step 0's finding — nothing was lost by unchaining.** In v0.24.5 `RtcpReceivingSession` sent
+exactly three things: an RR per received SR, a PLI per `rtcRequestKeyframe`, and a REMB only after
+`rtcRequestBitrate`. Manifold has never called `rtcRequestBitrate`, so **REMB was never sent**. The
+library's RR was also largely wrong:
+- **jitter and DLSR were always 0**;
+- **the sequence fields were swapped** — 0 in the highest-sequence field, `mMaxSeq` in the cycles
+  field;
+- its base sequence stayed 0 (the probation path that sets it never ran), so cumulative loss was
+  meaningless;
+- it answered **every** SR on the track, including audio SRs carried in a BUNDLEd compound packet,
+  reporting against whichever SSRC it had latched last.
+
+### 14.1 Results
+
+Four ~3-minute runs, loopback MediaMTX and real Cloudflare. The 4e-1 runs had a debug trigger
+sending a PLI every 5 s (`MANIFOLD_DEBUG_PLI_EVERY_S`). The publishers used long keyframe intervals
+(ffmpeg 20 s, OBS 20 s) so that an IDR within 3 s of a PLI would read as an answer.
+
+**PLI:**
+
+| | ffmpeg → MediaMTX | OBS → Cloudflare |
+|---|---|---|
+| HEAD `9692f90` (`rtcRequestKeyframe`) | join PLIs unanswered; first IDR on the 20 s schedule | join PLIs unanswered; first IDR on the 19 s schedule |
+| 4e-1 (own PLI) | 52 sent, 0 refused; every IDR on the 20 s schedule | 56 sent, 0 refused; every IDR on the 19 s schedule |
+
+Neither build ever got a PLI-driven IDR. MediaMTX's API shows our PLIs arriving (the reader's
+`rtcpPacketsReceived` rose by 12 per 10 s: 10 RR + 2 PLI), and its RTCP to the ffmpeg publisher held
+at 25 per 10 s before, during and after — it does not forward a reader's PLI. On Cloudflare the
+IDRs followed OBS's schedule only. Tracked in `docs/BUGS.md` ("Keyframe requests (PLI) are not
+honoured…").
+
+**RR and SR selection (4e-1):** MediaMTX 206 video SRs, 206 RRs sent; Cloudflare 222 and 222. None
+refused, and no SR for the other stream's SSRC on either track.
+
+**A/V and steering against HEAD:**
+
+| | MediaMTX HEAD | MediaMTX 4e-1 | Cloudflare HEAD | Cloudflare 4e-1 |
+|---|---|---|---|---|
+| `FAILED` / `REFUSED` | 0 | 0 | 0 | 0 |
+| steering windows, coarse | 19, 0 | 19, 0 | 19, 0 | 20, 0 |
+| timebase writes | 1 | 1 | 1 | 1 |
+| per-window `e` median range | −0.98 … +3.08 ms | −0.71 … +1.21 ms | −2.08 … +6.11 ms | −3.80 … +2.23 ms |
+| max \|ρ−1\| | 362.2 ppm | 168.6 ppm | 734.3 ppm | 462.1 ppm |
+| `timebase−clock` at end | −1.2 / −2.0 ms | −1.1 / −0.8 ms | −1.0 / −0.5 ms | +0.1 / −0.2 ms |
+| audio decode failures | 0 | 0 | 0 | 0 |
+| Δ probe | no Δ (video SRs absorbed) | Δ −12.592 ms, spread 0.340 ms | no Δ | Δ +17.996 ms, spread 41.2 ms |
+
+The differences are within session-to-session variation (n = 1 per cell) and none leans against
+4e-1. The Cloudflare spread is §13.3's OBS audio↔video slope, not this step.
+
+**First renderer-depth figures:** MediaMTX about **403–439 ms** (median ~422); Cloudflare about
+**373–403 ms** (median ~387).
+
+### 14.2 The PLI acceptance criterion, as replaced
+
+The brief's criterion — every PLI we send is followed by an IDR — cannot be met by either publisher
+under test, and HEAD fails it identically. **It was replaced by:**
+1. **byte-identical to the library's PLI** — PT 206, FMT 1, length 2, the video SSRC in both SSRC
+   fields — pinned by the `RTCPWire` tests;
+2. **never refused** by `rtcSendMessage` (0 of 108);
+3. **arrival confirmed** on MediaMTX's reader counters;
+4. **downstream behaviour identical to HEAD** on both servers.
+
+A publisher that honours PLI (Chrome over WHIP is the untested candidate) is still needed to see a
+PLI-driven IDR at all.

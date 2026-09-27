@@ -18,7 +18,10 @@ let package = Package(
         .macOS(.v15)
     ],
     products: [
-        .library(name: "ManifoldCore", targets: ["ManifoldCore"])
+        .library(name: "ManifoldCore", targets: ["ManifoldCore"]),
+        // Linked by the APP target directly (project.yml), for App/WebRTC's bridge and
+        // depacketizer. ManifoldCore does not use it.
+        .library(name: "RTCPWire", targets: ["RTCPWire"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -101,6 +104,23 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 .unsafeFlags(["-O"])
+            ]
+        ),
+        // The video track's own RTCP (step 4e-1): PLI, Receiver Report, interarrival jitter, and
+        // SR selection by SSRC. Pure C, no dependencies. A LEAF TARGET FOR THE SAME REASON AS
+        // AudioResample: the byte layouts are only observable at test time, and a test bundle
+        // cannot link anything that depends on ManifoldCore. The app reaches it through the
+        // RTCPWire product; nothing in this package does.
+        .target(
+            name: "RTCPWire",
+            path: "Sources/RTCPWire"
+        ),
+        .testTarget(
+            name: "RTCPWireTests",
+            dependencies: ["RTCPWire"],
+            path: "Tests/RTCPWireTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
             ]
         ),
         .target(

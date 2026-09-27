@@ -615,6 +615,63 @@ advance.
 
 ---
 
+## ☐ PRE-SHIP: WHEP RR and PLI name the SERVER's SSRC as their sender — switch to our own
+
+**Status:** OPEN, required before public launch. **Raised:** 2026-09-27, step 4e-1 (uncommitted at
+the time of writing), when Manifold took over the video track's RTCP from libdatachannel.
+
+**The claim.** Every RTCP packet Manifold sends on the WHEP video track — Receiver Report, PLI, and
+the NACK that predates 4e-1 — puts the **media sender's** SSRC in the "SSRC of packet sender" field.
+RFC 3550 §6.4.2 (RR) and RFC 4585 §6.1 (PLI, NACK) define that field as the SSRC of the
+**originator of the packet**, i.e. ours. Reusing the sender's is an SSRC collision in the sense of
+RFC 3550 §8.2, which a strict server may act on.
+
+**Why it is this way.** Inherited, not chosen. libdatachannel's `RtcpReceivingSession` did it for
+RR and PLI (`preparePacket(mSsrc, …)` with the remote SSRC), and `RTCPNack.c` copied it for NACK. A
+recvonly offer has no SSRC of its own — `kManifoldWHEPVideoMSection` deliberately advertises none —
+so there was no local value to hand. 4e-1 kept it so that changing who owns the RTCP and changing
+what it says were not tested at the same time. Cloudflare and MediaMTX both accept it today.
+
+**The fix.** A random 32-bit local SSRC per session (RFC 3550 §8.1: random, not derived), chosen
+when the session is created, never equal to either remote SSRC, passed as `senderSSRC` to
+`ManifoldRTCPBuildReceiverReport`, `ManifoldRTCPBuildPli` and `ManifoldRTCPBuildNack`. The builders
+already take it as a parameter; this is the call sites only. It does not need to appear in the SDP.
+
+**Done means:** an A/B on **both** Cloudflare (OBS sender) and MediaMTX, old SSRC vs local SSRC,
+with PLI→IDR answer times, NACK recovery counts and the server's view of the session (MediaMTX's
+API; Cloudflare's session health) unchanged or better. Any server that stops answering PLI or
+NACK with a local SSRC is a finding to record, not a reason to special-case it (`CLAUDE.md`).
+
+---
+
+## ☐ PRE-SHIP: remove the step 4e-1 PLI debug trigger and `scripts/verify-4e1.sh`
+
+**Status:** OPEN, required before public launch. **Raised:** 2026-09-27, step 4e-1 (uncommitted at
+the time of writing). Verification scaffolding, added only to trigger a PLI on demand.
+
+**What to remove:**
+- `DataChannelBridge.m`: the `MANIFOLD_DEBUG_PLI_EVERY_S` reader in `+sessionWithStunServer:error:`,
+  the `_debugPliEverySeconds` / `_debugPliTicks` ivars, and the `DEBUG trigger` block in
+  `-logRTPStatsTick`. All three are marked `⚠️ DEBUG-ONLY VERIFICATION CONTROL — REMOVE BEFORE SHIP`.
+- `scripts/verify-4e1.sh`, whose `new` mode exists only to set that variable.
+- **The PLI↔IDR pairing counter goes with it.** `-resolvePendingPli`, the `_pliPending*` /
+  `_pliAnswered` / `_pliUnanswered` / `_pliAnswerMs*` ivars, `_lastKeyframeAtNs` and its stamp in
+  `-enqueueAccessUnit:`, and the `[WHEP-PLI] … answered / UNANSWERED` lines are LOG-ONLY: nothing
+  reads them but the log and the `[WHEP-RTCP]` session summary. They exist to verify PLI, and they
+  pair by time, not cause, so outside a long-GOP test they mislead. Keep the `PLI #N sent` line and
+  the sent/refused counts.
+
+**Why pre-ship even though it is `#if DEBUG`.** Release excludes it (verified: the variable name is
+absent from the Release binary and present in Profile). But every tester build to date has been
+Profile, which defines `DEBUG=1` (`CLAUDE.md`). An environment variable that makes a tester build
+send a PLI every N seconds should not ride along on the build testers run.
+
+**Done means:** `grep -rn MANIFOLD_DEBUG_PLI_EVERY_S App scripts` returns nothing. The Profile
+binary no longer contains the string. The real PLI triggers (decode error, gap too wide, no
+keyframe yet) still send, and still log `[WHEP-PLI] PLI #N sent`.
+
+---
+
 ## ✅ DONE 2026-09-23 — MediaMTX is set up locally as the second WHIP/WHEP test server
 
 **Status:** ✅ **WHIP/WHEP built and verified end to end, 2026-09-23.** SRT is configured on the
@@ -702,6 +759,73 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 - **A second machine.** Everything here is loopback. Nothing has been run across a real link.
 - **Nothing is measured yet.** This entry establishes that the server works, not that any number
   taken from it means anything.
+
+---
+
+## ☐ OPEN 2026-09-27 — Keyframe requests (PLI) are not honoured by ffmpeg→MediaMTX or OBS→Cloudflare
+
+**Status:** OPEN. Not a Manifold defect as far as measured. HEAD `9692f90` and step 4e-1 show it
+identically. **Found:** the step 4e-1 verification runs (`AUDIO_RESAMPLER_DESIGN.md` §14.1).
+
+**What was seen.** The publishers used 20 s keyframe intervals so that an IDR within 3 s of a PLI
+would read as an answer. None ever came:
+- **ffmpeg → MediaMTX:** every IDR fell on ffmpeg's 20 s schedule. MediaMTX's API shows our PLIs
+  arriving (reader `rtcpPacketsReceived` +12 per 10 s: 10 RR + 2 PLI), while its RTCP to the ffmpeg
+  publisher held at 25 per 10 s before, during and after the session. **MediaMTX does not forward a
+  reader's PLI to an ffmpeg publisher.**
+- **OBS → Cloudflare:** every IDR fell on OBS's schedule (19–20 s apart), with a PLI going out every
+  5 s from the 4e-1 debug trigger and every second during the join from both builds.
+
+**Consequence.** Manifold's only fast recovery for a missing keyframe does nothing on these paths.
+**Join time and recovery from unrepaired loss both equal the sender's keyframe interval**: with a
+20 s interval the join showed about **15 s of black screen** (slices arriving, nothing decodable),
+and a loss that NACK cannot repair freezes the picture until the next scheduled IDR.
+
+**Mitigation.** The user guide should tell senders to use a **short keyframe interval — 1 s is
+Robbie's standard**. That bounds both join and recovery at about a second on any server, whether or
+not it forwards PLI. Not written yet.
+
+**Untested:**
+- **Chrome as a WHIP publisher.** Its encoder honours PLI, so it is the case that would show whether
+  MediaMTX forwards PLI to a WebRTC publisher that can act on it.
+- Which half of OBS → Cloudflare drops it: Cloudflare not forwarding, or OBS's WHIP output not
+  acting on it. Both are external.
+- Other servers and senders.
+
+---
+
+## ☐ OPEN 2026-09-27 — the libdatachannel recvonly RTCP patch may no longer be needed
+
+**Status:** OPEN, a decision, not a defect. Nothing is broken either way. **Raised:** 2026-09-27,
+step 4e-1 (uncommitted at the time of writing).
+
+**The claim.** `scripts/patches/libdatachannel-recvonly-rtcp.patch` exists because stock v0.24.5
+types outgoing RTCP on a recvonly track as `Message::Control` only when **no media handler is
+chained**, and Manifold chained `RtcpReceivingSession` on the video track so that
+`rtcRequestKeyframe` worked — which left NACK refused (`ThirdParty/libdatachannel/README.md`,
+`WHEP_LOADED_NETWORK_FINDINGS.md` §10.3). Since 4e-1 **no handler is chained on either track**:
+Manifold sends its own PLI and RR, like its NACK, through `rtcSendMessage`. Upstream's
+`if (!handler && IsRtcp(*message))` is then true for every packet we send, so an unpatched archive
+should pass NACK, RR and PLI alike, and the patch would be dead code.
+
+**The evidence so far.** Source reading only: `impl::Track::outgoing` and `Track::incoming` in the
+v0.24.5 tree at `~/manifold-webrtc-build/libdatachannel` (the patched copy; `git diff` shows the one
+hunk), and the 4e-1 bridge, which no longer calls `rtcChainRtcpReceivingSession` (confirmed absent
+from the Profile binary's undefined symbols). **Not tested against an unpatched archive.**
+
+**The verification it would need, before retiring it:**
+1. Build `ThirdParty/libdatachannel` from `v0.24.5` WITHOUT the patch. `build_libdatachannel.sh`
+   does not complete on this machine (see the provenance note in that README), so this is a
+   hand build, and it needs the patch-assert step in the script removed or bypassed.
+2. On MediaMTX and on Cloudflare: `[WHEP-RTP] first NACK accepted`, `[WHEP-RR] first Receiver
+   Report sent`, `[WHEP-PLI] PLI #N sent` with answers, and **zero** `REFUSED`/`FAILED` lines, under
+   loss so that NACK actually fires (a loopback MediaMTX session sends none).
+3. Only then: drop the patch, its apply-and-assert step in the build script, and the README
+   section; rewrite the NACK-refusal comment in `DataChannelBridge.m` to match.
+
+**Why keep it until then.** It costs nothing while it is there, and retiring it makes the archive
+the only thing between us and the silent NACK failure it was written for — which should not happen
+on reasoning alone. It also must be re-derived, not dropped, if a handler is ever chained again.
 
 ---
 

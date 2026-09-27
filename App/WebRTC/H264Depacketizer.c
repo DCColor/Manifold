@@ -38,6 +38,7 @@
 //
 
 #include "H264Depacketizer.h"
+#include "RTCPWire.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -271,6 +272,13 @@ struct ManifoldH264Depacketizer {
 
     bool     haveSeq;
     uint16_t highestSeq;           // highest sequence number seen (RFC 3550 s_max)
+    /// RFC 3550 A.1 `cycles`: sequence-number wraps, SHIFTED (a multiple of 65536), so the extended
+    /// highest sequence number is `seqCycles + highestSeq`. Advanced only where `highestSeq` moves
+    /// forward — a late packet from before a wrap must not count one.
+    uint32_t seqCycles;
+    uint16_t baseSeq;              // RFC 3550 A.1 base_seq: the first sequence number seen
+    /// RFC 3550 A.8 interarrival jitter, for the Receiver Report. See ManifoldRTCPJitterUpdate.
+    ManifoldRTCPJitter jitter;
 
     // Declared-missing sequence numbers awaiting a verdict. See LOSS ACCOUNTING above.
     MDOutstanding outstanding[MD_OUTSTANDING_CAP];
@@ -893,9 +901,10 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
     const uint8_t payloadType = packet[1] & 0x7Fu;
 
     // RTCP multiplexed onto the same 5-tuple (RFC 5761 §4 reserves 64–95 for the
-    // RTCP packet types 200–206 mapped down). We chain an RtcpReceivingSession,
-    // which should consume these before we ever see them — so a non-zero count
-    // here means that handler is not in the chain.
+    // RTCP packet types 200–206 mapped down). The bridge takes the video track's
+    // RTCP in -ingestRTP: before it reaches this function (step 4e-1: no
+    // RtcpReceivingSession is chained any more) — so a non-zero count here means
+    // that interception has been bypassed.
     if (payloadType >= 72 && payloadType <= 76) { dp->stats.packetsRTCP++; return; }
 
     if (dp->payloadType < 0) {
@@ -942,9 +951,14 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
     // ── Sequence accounting (detect only — no reordering, see the file header) ─
     const uint64_t nowNs = MDNowNs();
     MDSweepOutstanding(dp, nowNs);
+    // RFC 3550 A.8, per received packet of this source, 90 kHz (RFC 6184 §8.2.1 fixes the H.264
+    // clock). Arrival is the monotonic clock scaled into the same units; only differences are used,
+    // so its origin is irrelevant.
+    ManifoldRTCPJitterUpdate(&dp->jitter, (uint32_t)(nowNs * 9u / 100000u), timestamp);
     if (!dp->haveSeq) {
         dp->haveSeq    = true;
         dp->highestSeq = seq;
+        dp->baseSeq    = seq;
     } else {
         const int16_t delta = (int16_t)(seq - dp->highestSeq);   // wraps correctly at 65535
         if (delta > 1) {
@@ -970,6 +984,7 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
             // A gap mid-NAL means the reassembled NAL would be silently corrupt.
             // Throwing it away is the only honest option without a jitter buffer.
             MDAbandonFragment(dp);
+            if (seq < dp->highestSeq) dp->seqCycles += 65536u;   // advanced across the wrap
             dp->highestSeq = seq;
         } else if (delta <= 0) {
             dp->stats.packetsReordered++;
@@ -981,6 +996,7 @@ void ManifoldH264DepacketizerSubmitRTP(ManifoldH264Depacketizer *dp, const uint8
             // duplicate. We still depacketize it — for a single-NAL packet that
             // is a win, and for FU-A the start/end bits keep it self-consistent.
         } else {
+            if (seq < dp->highestSeq) dp->seqCycles += 65536u;   // advanced across the wrap
             dp->highestSeq = seq;
         }
     }
@@ -1122,6 +1138,26 @@ void ManifoldH264DepacketizerFlush(ManifoldH264Depacketizer *dp) {
     ManifoldH264AccessUnitBuilderFlush(dp->builder);
     dp->tsRunValid          = false;
     dp->tsRunClosedByMarker = false;
+}
+
+void ManifoldH264DepacketizerCopyReception(const ManifoldH264Depacketizer *dp,
+                                           ManifoldH264DepacketizerReception *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!dp) return;
+    out->haveSSRC = dp->haveSSRC;
+    out->ssrc     = dp->ssrc;
+    out->haveSeq  = dp->haveSeq;
+    out->extendedHighestSeq = dp->seqCycles + dp->highestSeq;
+    out->expected = dp->haveSeq ? out->extendedHighestSeq - dp->baseSeq + 1u : 0;
+    // RFC 3550's expected − received, from the loss accounting this file already keeps: every
+    // sequence number declared missing, less the ones that turned up — inside the recovery window
+    // or after it. Outstanding ones count as lost until they arrive, exactly as they would in A.3.
+    const int64_t lost = (int64_t)dp->stats.packetsLost
+                       - (int64_t)dp->stats.packetsRecovered
+                       - (int64_t)dp->stats.packetsLateAfterGiveUp;
+    out->cumulativeLost = lost > INT32_MAX ? INT32_MAX : (lost < INT32_MIN ? INT32_MIN : (int32_t)lost);
+    out->jitter = ManifoldRTCPJitterValue(&dp->jitter);
 }
 
 void ManifoldH264DepacketizerCopyStats(const ManifoldH264Depacketizer *dp,

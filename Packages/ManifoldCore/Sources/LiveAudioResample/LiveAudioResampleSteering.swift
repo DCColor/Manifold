@@ -158,6 +158,10 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private static let capacity = 4096
     private var errs = [Double](repeating: 0, count: capacity)
     private var count = 0
+    /// Renderer queue depth per accepted read: enqueued output frontier − timebase, seconds.
+    /// MEASUREMENT ONLY — nothing reads it but the window line.
+    private var depths = [Double](repeating: 0, count: capacity)
+    private var depthCount = 0
     private var overflowed = 0
     private var discarded = 0
     private var settling = 0
@@ -247,8 +251,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     ///
     /// Returns the paired read if one was taken, for the step-2 probe. Nothing is read before the
     /// first anchor: the timebase is held at rate 0 and there is no line to compare it with.
+    ///
+    /// `enqueuedFrontier` is the output-axis END of what the renderer will hold once this call's
+    /// buffers are enqueued (the caller enqueues them immediately after). `frontier − timebase` is
+    /// the renderer queue's absolute depth, logged per window and never acted on.
     @discardableResult
-    public func sample() -> PairedRead? {
+    public func sample(enqueuedFrontier: Double? = nil) -> PairedRead? {
         lock.lock()
         let live = anchored
         lock.unlock()
@@ -273,6 +281,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             lock.unlock()
             if let w = windowLine { emit(w) }
             return read
+        }
+        if let f = enqueuedFrontier, f.isFinite, depthCount < Self.capacity {
+            depths[depthCount] = f - timebase; depthCount += 1
         }
         let target = refMedia + (t1 - refHost) * refRate
         let e = content - target
@@ -406,6 +417,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             resetWindowLocked(now: now); return nil
         }
         let e = Array(errs[0..<n])
+        let d = Array(depths[0..<depthCount])
         let snap = (n: n, disc: discarded, settle: settling, over: overflowed,
                     sat: saturatedSteps, rho: state.rho, rhoMin: rhoMin, rhoMax: rhoMax,
                     slew: slewMax, i: state.integral, ef: state.filteredError,
@@ -420,6 +432,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                 ? String(format: "min %+.2f med %+.2f max %+.2f", sorted[0] * 1e3,
                          sorted[snap.n / 2] * 1e3, sorted[snap.n - 1] * 1e3)
                 : "no reads"
+            var sortedDepth = d
+            sortedDepth.sort()
+            let depthText = sortedDepth.isEmpty
+                ? "—"
+                : String(format: "min %.1f med %.1f max %.1f", sortedDepth[0] * 1e3,
+                         sortedDepth[sortedDepth.count / 2] * 1e3, sortedDepth[sortedDepth.count - 1] * 1e3)
             let rhoRange = snap.rhoMin.isFinite
                 ? String(format: "%+.1f … %+.1f", (snap.rhoMin - 1) * 1e6, (snap.rhoMax - 1) * 1e6)
                 : "—"
@@ -427,7 +445,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                           + "slew max %.1f ppm/s) · i %+.2f ppm · e_f %+.2f ms · e ms %@ · n=%d "
                           + "discarded=%d settling=%d%@ · saturated %d · coarse this window %d · "
                           + "writes this window %d · session: writes %d = first %d + coarse %d "
-                          + "(level %d, step %d) + re-anchor %d, max |ρ−1| %.1f ppm",
+                          + "(level %d, step %d) + re-anchor %d, max |ρ−1| %.1f ppm · "
+                          + "renderer depth ms %@",
                           tag, final ? "END" : "window", snap.elapsed, mode.rawValue,
                           (snap.rho - 1) * 1e6, rhoRange, snap.slew * 1e6, snap.i * 1e6,
                           snap.ef * 1e3, errText, snap.n, snap.disc, snap.settle,
@@ -435,12 +454,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                           snap.sat, snap.coarse, snap.writes, snap.total.writes,
                           snap.total.firstAnchors, snap.total.coarseLevel + snap.total.coarseStep,
                           snap.total.coarseLevel, snap.total.coarseStep, snap.total.reanchors,
-                          snap.total.maxAbsRhoMinusOne * 1e6)
+                          snap.total.maxAbsRhoMinusOne * 1e6, depthText)
         }
     }
 
     private func resetWindowLocked(now: Double?) {
-        count = 0; overflowed = 0; discarded = 0; settling = 0; saturatedSteps = 0
+        count = 0; depthCount = 0; overflowed = 0; discarded = 0; settling = 0; saturatedSteps = 0
         rhoMin = .infinity; rhoMax = -.infinity; slewMax = 0
         windowCoarse = 0; windowWrites = 0
         if let now { windowStart = now }

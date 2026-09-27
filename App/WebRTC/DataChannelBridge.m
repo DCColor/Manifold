@@ -25,6 +25,7 @@
 
 #import "H264Depacketizer.h"
 #import "RTCPNack.h"
+#import "RTCPWire.h"
 
 #import <os/lock.h>
 #include <stdatomic.h>
@@ -121,6 +122,12 @@ BOOL ManifoldWebRTCLinkSmokeTest(NSString *_Nullable *_Nullable outMessage) {
 - (void)logAudioTrackBinding;
 - (void)startRTPStatsTimer;
 - (void)logRTPStatsTick;
+- (void)ingestVideoRTCP:(const uint8_t *)packet length:(size_t)length;
+- (void)sendReceiverReportForSR:(const ManifoldRTCPSenderReport *)sr
+                      reception:(const ManifoldH264DepacketizerReception *)rx
+                    srArrivalNs:(uint64_t)srArrivalNs;
+- (void)resolvePendingPli;
+- (void)logVideoRTCPSummary;
 - (ManifoldH264DepacketizerStats)snapshotStats;
 @end
 
@@ -410,8 +417,8 @@ static void ManifoldWHEPTrackMessage(int tr, const char *message, int size, void
 /// discarding explicitly and consuming. This consumes.
 ///
 /// ⚠️ RTCP ARRIVES HERE TOO, and must be distinguished rather than parsed as RTP. `rtcp-mux`
-/// puts both on one transport, and the audio track has no `RtcpReceivingSession` chained to
-/// absorb it (only video does — see `rtcChainRtcpReceivingSession` below). RTP payload types
+/// puts both on one transport, and no media handler is chained on either track to absorb it
+/// (the video track's RtcpReceivingSession was removed in step 4e-1). RTP payload types
 /// 72–76 are the RTCP range as seen through the RTP header's PT field, which is the standard
 /// demultiplexing rule (RFC 5761 §4). Counted separately so the stats line cannot mistake RTCP
 /// for audio that arrived.
@@ -608,25 +615,23 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
 // the whole point — a behaviour change measured at the same time as the measurement that
 // justifies it is not evidence of anything.
 //
-// TWO HALVES, WITH DIFFERENT LIFETIMES:
+// BOTH HALVES ARE NOW PERMANENT (step 4e-1):
 //
-//   * The AUDIO half (`MANIFOLD_WHEP_SR_PROBE`) is KEPT. It parses RTCP that already lands
-//     in our audio callback and was previously counted and dropped, so it costs nothing and
-//     it is the start of the real fix.
+//   * AUDIO: RTCP already landed in our audio callback and was counted and dropped; the SRs in it
+//     are now parsed.
 //
-//   * The VIDEO half (`MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP`) is TEMPORARY AND MUST BE
-//     REVERTED. Video RTCP is normally absorbed inside libdatachannel by RtcpReceivingSession,
-//     which is also what makes `rtcRequestKeyframe` work. Unchaining it to see the video SRs
-//     therefore DISABLES PLI and stops the Receiver Reports we send back to the server. That
-//     is acceptable for a 60 s diagnostic against a sender that emits an IDR every second and
-//     is NOT acceptable in a shipping build. Setting it to 0 restores normal behaviour
-//     completely; the audio half keeps working.
+//   * VIDEO: libdatachannel's RtcpReceivingSession is NO LONGER CHAINED on the video track, so its
+//     RTCP reaches -ingestRTP: like the audio track's does. It used to be the only way to get a PLI
+//     onto the wire and it sent our Receiver Reports, and unchaining it for the original six-session
+//     diagnostic cost both. Manifold now sends both itself (RTCPWire: PLI per RFC 4585 §6.3.1, RR
+//     per RFC 3550 §6.4.2), so owning the video RTCP costs nothing, and the video SR is read on
+//     every session. In v0.24.5 RtcpReceivingSession sent exactly three things: an RR per received
+//     SR, a PLI per rtcRequestKeyframe, and a REMB only after rtcRequestBitrate — which Manifold
+//     has never called. Nothing it did is lost.
 //
-// The permanent fix does not need the unchaining at all: RtcpReceivingSession ALREADY records
-// the pair (rtcpreceivingsession.hpp, `getSyncTimestamps`), it is simply unreachable through
-// libdatachannel's C API. Exposing it is a ~15-line patch alongside the one in
-// scripts/patches/libdatachannel-recvonly-rtcp.patch. This probe exists to decide whether that
-// patch is worth writing.
+// Both halves select the SR BY SSRC (ManifoldRTCPFindSenderReport): under BUNDLE a compound packet
+// carrying both streams' SRs is delivered whole to both tracks, so "the first SR in the packet"
+// could be the other stream's.
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
 #define MANIFOLD_WHEP_SR_PROBE 1
@@ -651,79 +656,20 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
 #else
 #define MD_SR_LOG(...) do { } while (0)
 #endif
-#define MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP 0     // ⚠️ TEMPORARY. 1 unchains; see below.
-//
-// REVERTED TO 0 ON 2026-09-23, once the six sessions in AV_SYNC_FINDINGS.md §6 were captured.
-// PLI and Receiver Reports are back. The audio half above stays on: it parses SRs that already
-// arrive and were previously dropped, and it is the start of the real fix. Setting this to 1
-// again is a DIAGNOSTIC BUILD ONLY — it disables keyframe requests for the whole session.
+
+// `[WHEP-PLI]` / `[WHEP-RR]` — the video track's own feedback (step 4e-1). Same gate, same reason.
+#if DEBUG || MANIFOLD_TELEMETRY
+#define MD_RTCP_LOG(...) NSLog(__VA_ARGS__)
+#else
+#define MD_RTCP_LOG(...) do { } while (0)
+#endif
+
+/// Monotonic nanoseconds, the same clock H264Depacketizer.c stamps arrivals with.
+static uint64_t ManifoldWHEPNowNs(void) {
+    return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+}
 
 #if MANIFOLD_WHEP_SR_PROBE
-
-/// What one compound RTCP packet told us. `ntp` is kept in the WIRE format — 32.32 fixed
-/// point seconds since 1900 — deliberately: two NTP values subtracted as int64 are exact,
-/// while converting each to a double first throws away ~1 us at that magnitude.
-typedef struct {
-    BOOL     haveSR;
-    uint32_t ssrc;
-    uint64_t ntp;
-    uint32_t rtp;
-    BOOL     haveCNAME;
-    char     cname[256];
-} ManifoldWHEPSRInfo;
-
-/// Walk a compound RTCP packet (RFC 3550 §6.1), recording the first SR and the first SDES
-/// CNAME. Returns YES if an SR was present.
-///
-/// ⚠️ SDES IS OFTEN ABSENT AND THAT IS LEGAL, NOT A FAULT. Both servers tested answer with
-/// `a=rtcp-rsize` (RFC 5506 reduced-size RTCP), which permits a non-compound packet carrying
-/// the SR alone. `haveCNAME` is therefore reported, never assumed.
-static BOOL ManifoldWHEPParseRTCP(const uint8_t *p, size_t len, ManifoldWHEPSRInfo *out) {
-    memset(out, 0, sizeof(*out));
-    size_t offset = 0;
-    while (offset + 4 <= len) {
-        if ((p[offset] >> 6) != 2) break;                       // version must be 2
-        const uint8_t  rc      = p[offset] & 0x1Fu;             // report/chunk count
-        const uint8_t  pt      = p[offset + 1];
-        const size_t   words   = (size_t)((p[offset + 2] << 8) | p[offset + 3]);
-        const size_t   pktLen  = (words + 1u) * 4u;             // header included
-        if (pktLen < 4 || offset + pktLen > len) break;
-
-        if (pt == 200 && !out->haveSR && pktLen >= 28) {        // SR: 4 hdr + 24 sender info
-            const uint8_t *b = p + offset + 4;
-            out->ssrc = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16)
-                      | ((uint32_t)b[2] << 8)  | (uint32_t)b[3];
-            uint64_t ntp = 0;
-            for (int i = 0; i < 8; i++) ntp = (ntp << 8) | b[4 + i];
-            out->ntp = ntp;
-            out->rtp = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16)
-                     | ((uint32_t)b[14] << 8)  | (uint32_t)b[15];
-            out->haveSR = YES;
-        } else if (pt == 202 && !out->haveCNAME) {              // SDES
-            size_t c = offset + 4;
-            for (uint8_t chunk = 0; chunk < rc && c + 4 <= offset + pktLen; chunk++) {
-                size_t item = c + 4;                            // past the chunk SSRC
-                while (item + 1 < offset + pktLen) {
-                    const uint8_t type = p[item];
-                    if (type == 0) { item++; break; }           // end of this chunk's items
-                    const uint8_t itemLen = p[item + 1];
-                    if (item + 2 + itemLen > offset + pktLen) { item = offset + pktLen; break; }
-                    if (type == 1 && !out->haveCNAME) {         // CNAME
-                        const size_t n = itemLen < sizeof(out->cname) - 1
-                                       ? itemLen : sizeof(out->cname) - 1;
-                        memcpy(out->cname, p + item + 2, n);
-                        out->cname[n] = '\0';
-                        out->haveCNAME = YES;
-                    }
-                    item += 2 + itemLen;
-                }
-                c = (item + 3) & ~(size_t)3;                    // chunks are 32-bit aligned
-            }
-        }
-        offset += pktLen;
-    }
-    return out->haveSR;
-}
 
 /// 32.32 NTP as it appears on the wire -> a readable wall clock, for the one line per SSRC
 /// that prints it in full. The NTP epoch is 1900; Unix is 1970, 2208988800 s later.
@@ -798,6 +744,42 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     BOOL     _nackSendGivenUp;              // stop calling after a run of refusals; logged once
     BOOL     _loggedFirstNack;
 
+    // ── Video RTCP, ours since step 4e-1 (see the block above @implementation) ──────────
+    //
+    // Video track thread only, written without a lock — plain statistics, read on main at close,
+    // the same trade the counters above make. The RR interval priors are read and written on that
+    // thread alone.
+    uint64_t _videoRTCPSeen;                // every RTCP packet the video track delivered
+    uint64_t _videoSRMatched;               // an SR for the video SSRC was in it
+    uint64_t _videoSRNotOurs;               // SR(s) present, none for the video SSRC (audio's, via BUNDLE)
+    uint64_t _videoSRBeforeSSRC;            // SR(s) present before any RTP latched the video SSRC
+    uint32_t _rrExpectedPrior;              // RFC 3550 A.3 expected_prior
+    int32_t  _rrLostPrior;                  // cumulative lost at the previous RR
+    uint64_t _rrSent, _rrSendFailures;
+    BOOL     _loggedFirstRR;
+
+    // PLI — main thread only, like the throttle it sits behind — except `_lastKeyframeAtNs`,
+    // which the network thread stamps when a keyframe access unit is emitted.
+    uint64_t _pliSendFailures, _pliAnswered, _pliUnanswered;
+    uint64_t _pliPendingSinceNs;            // 0 = no PLI awaiting its IDR
+    int      _pliPendingNumber;
+    uint64_t _pliAnswerMsMax, _pliAnswerMsTotal;
+    _Atomic(uint64_t) _lastKeyframeAtNs;
+
+#if DEBUG
+    // ⚠️ DEBUG-ONLY VERIFICATION CONTROL — REMOVE BEFORE SHIP. MANIFOLD_DEBUG_PLI_EVERY_S=<n> in the
+    // environment sends a PLI every n seconds from the stats tick, through -requestKeyframe (so the
+    // 1 s throttle and the real send path are what is exercised). 0 / unset = off.
+    int _debugPliEverySeconds;
+    int _debugPliTicks;
+#endif
+
+    // Audio track thread only: the SSRC the audio SRs are matched against, latched from the first
+    // audio RTP packet exactly as the depacketizer latches video's.
+    uint32_t _audioSSRC;
+    BOOL     _audioHaveSSRC;
+    uint64_t _audioSRNotOurs;
+
 #if MANIFOLD_WHEP_SR_PROBE
     // ── TEMPORARY INSTRUMENT: RTCP SR validation. See the block above @implementation. ──
     //
@@ -814,7 +796,6 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     char     _srAudioCNAME[256], _srVideoCNAME[256];
     BOOL     _srAudioHaveCNAME, _srVideoHaveCNAME;
     uint64_t _srAudioCount, _srVideoCount;
-    uint64_t _videoRTCPSeen;                   // only non-zero while the video half is unchained
 
     // T_a0 / T_v0 — the RAW RTP timestamps the two Swift unwrappers rebase to zero. They are
     // what makes delta expressible: video PTS 0 is T_v0 and audio PTS 0 is T_a0, so the
@@ -873,6 +854,16 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     ManifoldWHEPSession *session = [[self alloc] init];
     session->_pc = pc;
     session->_rtpLock = OS_UNFAIR_LOCK_INIT;
+#if DEBUG
+    {
+        const char *every = getenv("MANIFOLD_DEBUG_PLI_EVERY_S");
+        session->_debugPliEverySeconds = every ? atoi(every) : 0;
+        if (session->_debugPliEverySeconds > 0) {
+            NSLog(@"[WHEP-PLI] ⚠️ DEBUG PLI TRIGGER ON — a PLI every %d s (MANIFOLD_DEBUG_PLI_EVERY_S). "
+                  @"Verification control; remove before ship.", session->_debugPliEverySeconds);
+        }
+    }
+#endif
 #if MANIFOLD_WHEP_SR_PROBE
     session->_srLock = OS_UNFAIR_LOCK_INIT;
     session->_srResidualMin =  INFINITY;
@@ -905,43 +896,14 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     // ── Inbound video plumbing (step 3a) ─────────────────────────────────────────────
     session->_videoTrack = videoTrack;
 
-    // RtcpReceivingSession is libdatachannel's INBOUND media handler. It is not a
-    // depacketizer — it does not touch the RTP payload at all — but it does two things we
-    // need. It absorbs the RTCP that rtcp-mux delivers on this same track (SR, so the
-    // sender's NTP↔RTP mapping is tracked for later A/V sync), and it is what
-    // `rtcRequestKeyframe` pushes a PLI through. Without it, RTCP compound packets would
-    // land in our RTP callback and every keyframe request would be a no-op.
-#if MANIFOLD_WHEP_SR_PROBE && MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP
-    // ⚠️⚠️ TEMPORARY — INSTRUMENT ONLY. REVERT BEFORE ANY RELEASE. ⚠️⚠️
+    // NO MEDIA HANDLER IS CHAINED ON THIS TRACK, deliberately and permanently (step 4e-1).
     //
-    // RtcpReceivingSession is deliberately NOT chained, so that video RTCP falls through to
-    // `-ingestRTP:` where the SR probe can read the Sender Reports. libdatachannel offers no
-    // way to see them with the handler in place: it records the pair internally
-    // (`RtcpReceivingSession::getSyncTimestamps`) and exposes no C API for it.
-    //
-    // WHAT THIS COSTS, STATED SO A LOG FROM ONE OF THESE RUNS IS NOT MISREAD:
-    //   * PLI STOPS WORKING. `Track::requestKeyframe` requires a media handler, so every
-    //     `rtcRequestKeyframe` is now a no-op. `[WHEP-DECODE] PLI sent=N` counts intent, not
-    //     packets on the wire. Tolerable only because both servers under test emit an IDR
-    //     about once a second on their own.
-    //   * WE STOP SENDING RECEIVER REPORTS. The server loses its view of our loss and jitter.
-    //     Nothing in Manifold reads them either way, but a server that adapts bitrate to RR
-    //     will behave differently during these runs.
-    //
-    // Set MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP to 0 to restore normal behaviour fully.
-    int chained = -1;
-    NSLog(@"[WHEP-BRIDGE] ⚠️ TEMPORARY SR PROBE ACTIVE — RtcpReceivingSession NOT chained on "
-          @"track %d, so video RTCP reaches our own code. PLI IS DISABLED and no Receiver "
-          @"Reports are sent for the duration. This build is a diagnostic, not a release.",
-          videoTrack);
-#else
-    int chained = rtcChainRtcpReceivingSession(videoTrack);
-    if (chained < 0) {
-        NSLog(@"[WHEP-BRIDGE] WARNING: rtcChainRtcpReceivingSession failed (%d) — expect RTCP "
-              @"in the RTP stream and no working keyframe requests", chained);
-    }
-#endif
-
+    // libdatachannel's RtcpReceivingSession used to be, for two jobs: absorbing the video RTCP
+    // that rtcp-mux delivers here, and being the only route `rtcRequestKeyframe` had to the wire.
+    // It absorbed the video SRs along with everything else, with no C API to read them. Manifold
+    // now owns this track's RTCP: -ingestRTP: takes it before the depacketizer, reads the video SR,
+    // and answers it with a Receiver Report; -requestKeyframe sends its own PLI. Both go out
+    // through rtcSendMessage, the NACK's door. See the block above @implementation.
     // ⚠️ STATE THE WHOLE CHAIN, INCLUDING WHAT IS NOT IN IT.
     //
     // This line exists because "is NACK actually installed?" has been asked of a diagnostics
@@ -957,10 +919,10 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     // H264Depacketizer.c, the RFC 4585 encoding in RTCPNack.c, and the arming
     // in -configureDepacketizerFromNegotiatedDescription, which prints its own policy line once
     // the answer says whether the server agreed to `nack` at all.
-    NSLog(@"[WHEP-BRIDGE] RTCP chain on track %d: RtcpReceivingSession=%@ "
-          @"| NACK generator: Manifold's own (libdatachannel has no receive-side requester to "
-          @"chain in any version) | keyframe requests: PLI via rtcRequestKeyframe",
-          videoTrack, chained < 0 ? @"FAILED" : @"installed");
+    NSLog(@"[WHEP-BRIDGE] RTCP on track %d: no media handler chained — Manifold owns the video "
+          @"RTCP | SR: read, matched by SSRC | RR: Manifold's own, one per video SR (RFC 3550 "
+          @"§6.4.2) | PLI: Manifold's own (RFC 4585 §6.3.1) | NACK generator: Manifold's own "
+          @"(libdatachannel has no receive-side requester to chain in any version)", videoTrack);
 
     session->_depacketizer = ManifoldH264DepacketizerCreate();
     if (!session->_depacketizer) {
@@ -1301,10 +1263,10 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 
     // ⚠️ REENTRANCY: this calls INTO libdatachannel from one of its own track callbacks, which
     // the note above the callbacks in this file warns against. It is safe here, and the reason is
-    // specific rather than general: RtcpReceivingSession does exactly this. Its `incoming` is
-    // handed a send callback wired straight to the transport and uses it to push RR, REMB and
-    // PLI from inside the receive path, on this same thread. We are reentering the same door the
-    // library reenters itself.
+    // specific rather than general: libdatachannel's RtcpReceivingSession, chained here until
+    // step 4e-1, did exactly this — its `incoming` pushed RR and PLI straight to the transport
+    // from inside the receive path, on this same thread. Our own RR (-sendReceiverReportFor…)
+    // now reenters the same door the same way.
     const int rc = rtcSendMessage(_videoTrack, (const char *)packet, (int)size);
 
     if (rc >= 0) {
@@ -1324,33 +1286,17 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     _consecutiveNackSendFailures++;
     if (!_loggedFirstNack) {
         _loggedFirstNack = YES;
-        // ⚠️ THE MOST LIKELY CAUSE IS A STALE libdatachannel ARCHIVE, not a fault in the code
-        // above. VERIFIED against the v0.24.5 sources:
-        //
-        //   impl::Track::outgoing (src/impl/track.cpp) refuses any message on a RecvOnly track
-        //   unless its type is Message::Control, and UPSTREAM guards the exemption that marks
-        //   outgoing RTCP as Control with `if (!handler && IsRtcp(*message))` — so it applies
-        //   only when the track has no media handler chained.
-        //
-        // We chain RtcpReceivingSession, because that is what makes `rtcRequestKeyframe` work.
-        // Upstream, therefore, the exemption is disabled precisely BECAUSE PLI is enabled, and
-        // the C API has no way to mark a message as Control. (`rtcRequestKeyframe` reaches the
-        // wire only because Track::requestKeyframe calls transportSend directly, bypassing this
-        // check. No public C or C++ entry point gets a NACK past it: the id→Track lookup a
-        // custom MediaHandler would need lives in an anonymous namespace in capi.cpp.)
-        //
-        // Manifold's vendored build removes the `!handler` half of that guard —
-        // scripts/patches/libdatachannel-recvonly-rtcp.patch, applied by
-        // scripts/build_libdatachannel.sh. If this line is printing, the archive in
-        // ThirdParty/libdatachannel was almost certainly built without it.
-        NSLog(@"[WHEP-RTP] NACK REFUSED BY THE TRANSPORT (rc %d). A recvonly track drops "
-              @"outgoing RTCP unless the message is typed Control, and stock libdatachannel only "
-              @"types it that way when NO media handler is chained — we chain "
-              @"RtcpReceivingSession so that PLI works. Manifold's build patches that out, so "
-              @"this almost certainly means ThirdParty/libdatachannel was built WITHOUT "
-              @"scripts/patches/libdatachannel-recvonly-rtcp.patch: re-run "
-              @"scripts/build_libdatachannel.sh. The requester and every counter below keep "
-              @"measuring; nothing is reaching the wire.", rc);
+        // ⚠️ NOT THE RECVONLY GUARD ANY MORE. impl::Track::outgoing (src/impl/track.cpp) refuses a
+        // message on a RecvOnly track unless it is typed Message::Control, and stock v0.24.5 types
+        // outgoing RTCP that way only when NO media handler is chained. Until step 4e-1 one was
+        // (RtcpReceivingSession, for PLI), which is what scripts/patches/libdatachannel-recvonly-
+        // rtcp.patch exists to work around. Since 4e-1 the video track has no handler, so even an
+        // unpatched archive passes NACK, RR and PLI. A refusal here now means the track or its
+        // DTLS-SRTP transport is not open — rtcSendMessage's own failure, not the direction rule.
+        NSLog(@"[WHEP-RTP] NACK REFUSED BY THE TRANSPORT (rc %d). No media handler is chained on "
+              @"the video track, so libdatachannel's recvonly rule does not apply; the track or its "
+              @"transport is not open. The requester and every counter below keep measuring; "
+              @"nothing is reaching the wire.", rc);
     }
 
     // A requester that cannot reach the wire should cost one log line, not one refused call per
@@ -1389,7 +1335,7 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 /// of each is correct for a sender whose two RTP clocks are one clock — which is exactly the
 /// hypothesis under test. If the residual walks, that is the finding, not a pairing artefact:
 /// a pairing artefact would be bounded by the inter-SR gap and would not accumulate.
-- (void)srProbeNoteSR:(const ManifoldWHEPSRInfo *)info isAudio:(BOOL)isAudio {
+- (void)srProbeNoteSR:(const ManifoldRTCPSenderReport *)info isAudio:(BOOL)isAudio {
     os_unfair_lock_lock(&_srLock);
 
     if (isAudio) {
@@ -1522,20 +1468,9 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
         return;
     }
     if (!paired) {
-#if !MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP
-        // EXPECTED, NOT A FAULT, and said so explicitly: with RtcpReceivingSession chained —
-        // the normal configuration — libdatachannel absorbs video RTCP before this code can see
-        // it, so the video half of the pair cannot exist. A line reading "NEVER A PAIR" with no
-        // explanation would look like a defect on every healthy session, which is how an
-        // instrument costs somebody an afternoon.
-        MD_SR_LOG(@"[WHEP-SR] session summary — %llu audio SR seen and parsed. No Δ: video SRs are "
-              @"absorbed by RtcpReceivingSession and never reach us, which is the NORMAL build. "
-              @"Reading them needs either the diagnostic macro or a C API for "
-              @"RtcpReceivingSession::getSyncTimestamps. See AV_SYNC_FINDINGS.md §6.", aCount);
-#else
-        MD_SR_LOG(@"[WHEP-SR] session summary — %llu audio SR, %llu video SR, but NEVER A PAIR with "
-              @"both rebase origins known, so no Δ was computable.", aCount, vCount);
-#endif
+        MD_SR_LOG(@"[WHEP-SR] session summary — %llu audio SR, %llu video SR (video RTCP packets "
+              @"seen: %llu), but NEVER A PAIR with both rebase origins known, so no Δ was "
+              @"computable.", aCount, vCount, vRtcp);
         return;
     }
     const double spread = (n ? (rmax - rmin) : 0.0) * 1000.0;
@@ -1556,26 +1491,106 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 
 #endif // MANIFOLD_WHEP_SR_PROBE
 
+/// One video RTCP packet, on the video track thread. Reads the SR for OUR SSRC, answers it with a
+/// Receiver Report, and feeds the log-only Δ probe. Everything else in the packet (the server's
+/// own RR, SDES, BYE, feedback) is counted with it and otherwise ignored, as RtcpReceivingSession
+/// ignored it.
+- (void)ingestVideoRTCP:(const uint8_t *)packet length:(size_t)length {
+    const uint64_t arrivalNs = ManifoldWHEPNowNs();
+    _videoRTCPSeen++;
+
+    ManifoldH264DepacketizerReception rx;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerCopyReception(_depacketizer, &rx);
+    os_unfair_lock_unlock(&_rtpLock);
+
+    ManifoldRTCPSenderReport sr;
+    if (!rx.haveSSRC) {
+        // Nothing to match against until the first RTP packet latches the SSRC. Counted, not
+        // guessed: taking an unmatched SR here is exactly the "first SR wins" bug.
+        ManifoldRTCPFindSenderReport(packet, length, 0, &sr);
+        if (sr.senderReportsSeen > 0) _videoSRBeforeSSRC++;
+        return;
+    }
+    if (!ManifoldRTCPFindSenderReport(packet, length, rx.ssrc, &sr)) {
+        if (sr.senderReportsSeen > 0) _videoSRNotOurs++;
+        return;
+    }
+    _videoSRMatched++;
+
+    [self sendReceiverReportForSR:&sr reception:&rx srArrivalNs:arrivalNs];
+
+#if MANIFOLD_WHEP_SR_PROBE
+    // Deliberately after the RR: the probe logs, and the RR's DLSR should not include a log call.
+    [self srProbeNoteSR:&sr isAudio:NO];
+#endif
+}
+
+/// RFC 3550 §6.4.2, one report block about the video source, sent through rtcSendMessage.
+///
+/// CADENCE MATCHES WHAT libdatachannel DID: one RR per received video SR, sent immediately.
+/// RtcpReceivingSession::incoming called pushRR on every SR it saw — which, on a BUNDLEd track,
+/// included the AUDIO SRs a compound packet carried, reported against whichever SSRC it had
+/// latched last. This sends one per SR for the video SSRC only.
+///
+/// What changed in the block itself, field by field, against the library's:
+///   * extended highest seq — real (cycles + highest). The library wrote 0 into the sequence
+///     field and its `mMaxSeq` into the cycles field.
+///   * cumulative lost / fraction — from the depacketizer's loss accounting. The library's base
+///     sequence number stayed 0 unless its probation path ran, which it never entered.
+///   * jitter — RFC 3550 A.8 at 90 kHz. The library sent 0.
+///   * LSR — middle 32 bits of this SR's NTP, as before. DLSR — measured. The library sent 0.
+- (void)sendReceiverReportForSR:(const ManifoldRTCPSenderReport *)sr
+                      reception:(const ManifoldH264DepacketizerReception *)rx
+                    srArrivalNs:(uint64_t)srArrivalNs {
+    if (_videoTrack <= 0 || !rx->haveSeq) return;
+
+    // RFC 3550 A.3, interval since the previous RR.
+    const uint32_t expectedInterval = rx->expected - _rrExpectedPrior;
+    const int64_t  lostInterval     = (int64_t)rx->cumulativeLost - (int64_t)_rrLostPrior;
+    _rrExpectedPrior = rx->expected;
+    _rrLostPrior     = rx->cumulativeLost;
+
+    ManifoldRTCPReportBlock block = {
+        .ssrc               = rx->ssrc,
+        .fractionLost       = ManifoldRTCPFractionLost(expectedInterval, lostInterval),
+        .cumulativeLost     = rx->cumulativeLost,
+        .extendedHighestSeq = rx->extendedHighestSeq,
+        .jitter             = rx->jitter,
+        .lastSR             = ManifoldRTCPCompactNTP(sr->ntp),
+        .delaySinceLastSR   = 0,
+    };
+    uint8_t rr[MANIFOLD_RTCP_RR_ONE_BLOCK_BYTES];
+    // DLSR last, as close to the send as the build allows.
+    block.delaySinceLastSR = ManifoldRTCPDelaySinceSR(ManifoldWHEPNowNs() - srArrivalNs);
+    const size_t size = ManifoldRTCPBuildReceiverReport(rr, sizeof(rr), rx->ssrc, &block);
+    if (size == 0) return;
+
+    // Reentrancy: the same door, and the same reasoning, as -sendNackForSequences:.
+    const int rc = rtcSendMessage(_videoTrack, (const char *)rr, (int)size);
+    if (rc >= 0) _rrSent++; else _rrSendFailures++;
+
+    if (!_loggedFirstRR) {
+        _loggedFirstRR = YES;
+        MD_RTCP_LOG(@"[WHEP-RR] first Receiver Report %@ — ssrc 0x%08x, ext seq %u, lost %d "
+                    @"(fraction %u/256), jitter %u (90 kHz), LSR 0x%08x, DLSR %u/65536 s%@",
+                    rc >= 0 ? @"sent" : @"REFUSED", rx->ssrc, block.extendedHighestSeq,
+                    block.cumulativeLost, block.fractionLost, block.jitter, block.lastSR,
+                    block.delaySinceLastSR,
+                    rc >= 0 ? @"" : [NSString stringWithFormat:@" (rc %d)", rc]);
+    }
+}
+
 - (void)ingestRTP:(const uint8_t *)packet length:(size_t)length {
-#if MANIFOLD_WHEP_SR_PROBE && MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP
-    // ⚠️ TEMPORARY. With RtcpReceivingSession unchained, video RTCP is no longer absorbed
-    // inside libdatachannel and arrives here instead. The depacketizer would count it in
-    // `packetsRTCP` and drop it (H264Depacketizer.c:899); take it first so the SRs are read.
-    //
-    // Deliberately OUTSIDE `_rtpLock`: this touches no depacketizer state, and the probe must
-    // never hold the RTP lock across an NSLog.
+    // THE VIDEO TRACK'S RTCP, taken before the depacketizer (which would count it in
+    // `packetsRTCP` and drop it). RFC 5761 §4: PT 72–76 in the RTP header position is RTCP.
     if (length >= 2 && (packet[0] >> 6) == 2) {
         const uint8_t pt = packet[1] & 0x7Fu;
         if (pt >= 72 && pt <= 76) {
-            _videoRTCPSeen++;
-            ManifoldWHEPSRInfo info;
-            if (ManifoldWHEPParseRTCP(packet, length, &info)) {
-                [self srProbeNoteSR:&info isAudio:NO];
-            }
+            [self ingestVideoRTCP:packet length:length];
             return;
         }
     }
-#endif
     // libdatachannel's track thread. See the callback comment above: no hop, no logging.
     os_unfair_lock_lock(&_rtpLock);
     if (_depacketizer) ManifoldH264DepacketizerSubmitRTP(_depacketizer, packet, length);
@@ -1595,8 +1610,8 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     if (version != 2) { _audioMalformed++; return; }
 
     // RFC 5761 §4: RTCP multiplexed onto the same transport is told apart by the payload-type
-    // field falling in 72–76. The audio track has no RtcpReceivingSession chained to absorb it,
-    // so it lands here and must be counted separately rather than parsed as a media packet.
+    // field falling in 72–76. No media handler is chained on this track to absorb it, so it lands
+    // here and must be counted separately rather than parsed as a media packet.
     const uint8_t payloadType = packet[1] & 0x7F;
     if (payloadType >= 72 && payloadType <= 76) {
         _audioRTCP++;
@@ -1604,15 +1619,23 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
         // Previously this line was the end of the road for every Sender Report the server
         // sent us — counted, and dropped unparsed. The counter is kept (the stats line reads
         // it); what is new is that the SR's contents now reach the probe.
-        ManifoldWHEPSRInfo info;
-        if (ManifoldWHEPParseRTCP(packet, length, &info)) {
-            [self srProbeNoteSR:&info isAudio:YES];
-            // The first audio SR opens the anchor gate's SR half (§2.7). Behaviour, not logging,
-            // so it is outside the telemetry gate: this block is compiled into Release.
-            if (!_srAudioNotified) {
-                void (^srSink)(void) = self.onAudioSenderReport;       // atomic read
-                if (srSink) { _srAudioNotified = YES; srSink(); }
-            }
+        //
+        // MATCHED BY SSRC (step 4e-1). Under BUNDLE a compound carrying the video SR reaches this
+        // callback too, and before 4e-1 the first SR in the packet was taken whatever its SSRC.
+        // Until the first audio RTP packet latches the SSRC there is nothing to match, and the SR
+        // is skipped: RFC 3550 senders only report after sending, so that is a reordering case.
+        ManifoldRTCPSenderReport info;
+        if (!_audioHaveSSRC) return;
+        if (!ManifoldRTCPFindSenderReport(packet, length, _audioSSRC, &info)) {
+            if (info.senderReportsSeen > 0) _audioSRNotOurs++;
+            return;
+        }
+        [self srProbeNoteSR:&info isAudio:YES];
+        // The first audio SR opens the anchor gate's SR half (§2.7). Behaviour, not logging,
+        // so it is outside the telemetry gate: this block is compiled into Release.
+        if (!_srAudioNotified) {
+            void (^srSink)(void) = self.onAudioSenderReport;       // atomic read
+            if (srSink) { _srAudioNotified = YES; srSink(); }
         }
 #endif
         return;
@@ -1622,6 +1645,12 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     const uint16_t seq = (uint16_t)((packet[2] << 8) | packet[3]);
     const uint32_t timestamp = ((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16)
                              | ((uint32_t)packet[6] << 8)  | (uint32_t)packet[7];
+    if (!_audioHaveSSRC) {
+        // First SSRC wins, as for video. It is the key the audio SRs are matched against.
+        _audioSSRC = ((uint32_t)packet[8] << 24) | ((uint32_t)packet[9] << 16)
+                   | ((uint32_t)packet[10] << 8) | (uint32_t)packet[11];
+        _audioHaveSSRC = YES;
+    }
 
     // Header length: fixed 12 + 4 per CSRC + the extension block when X is set.
     const uint8_t csrcCount = packet[0] & 0x0F;
@@ -1704,6 +1733,7 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     const BOOL     changed   = accessUnit->parameterSetsChanged;
     const BOOL     keyframe  = accessUnit->keyframe;
     const uint32_t timestamp = accessUnit->rtpTimestamp;
+    if (keyframe) atomic_store_explicit(&_lastKeyframeAtNs, ManifoldWHEPNowNs(), memory_order_relaxed);
 
 #if MANIFOLD_WHEP_SR_PROBE
     // T_v0 — the first access unit HANDED OFF, not the first RTP packet seen. The Swift
@@ -1756,6 +1786,18 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     const ManifoldH264DepacketizerStats now = [self snapshotStats];
     const ManifoldH264DepacketizerStats was = _previousStats;
     _previousStats = now;
+
+    // Before the early return below: a PLI's verdict must not wait for video to resume.
+    [self resolvePendingPli];
+#if DEBUG
+    // ⚠️ DEBUG-ONLY VERIFICATION CONTROL — REMOVE BEFORE SHIP. See `_debugPliEverySeconds`.
+    if (_debugPliEverySeconds > 0 && ++_debugPliTicks % _debugPliEverySeconds == 0) {
+        if ([self requestKeyframe]) {
+            NSLog(@"[WHEP-PLI] DEBUG trigger — PLI #%d requested (MANIFOLD_DEBUG_PLI_EVERY_S=%d)",
+                  _pliRequests, _debugPliEverySeconds);
+        }
+    }
+#endif
 
     // ── STAGE 1 OF THE AUDIO CHAIN: ARE OPUS PACKETS ARRIVING AT ALL? ────────────────────
     //
@@ -1978,12 +2020,80 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     if (_lastPliRequestedAt > 0 && (now - _lastPliRequestedAt) < kMinPliInterval) {
         return NO;   // a recent PLI is still outstanding — suppress this one
     }
+    // The media source is the SSRC the depacketizer latched. Before the first RTP packet there is
+    // nothing to name in the PLI — and nothing to be missing a keyframe of either.
+    ManifoldH264DepacketizerReception rx;
+    os_unfair_lock_lock(&_rtpLock);
+    ManifoldH264DepacketizerCopyReception(_depacketizer, &rx);
+    os_unfair_lock_unlock(&_rtpLock);
+    if (!rx.haveSSRC) return NO;
+
     _lastPliRequestedAt = now;
     _pliRequests++;
 
-    if (rtcRequestKeyframe(_videoTrack) >= 0) return YES;
-    NSLog(@"[WHEP] PLI request %d FAILED — rtcRequestKeyframe rejected", _pliRequests);
-    return NO;
+    // RFC 4585 §6.3.1, through rtcSendMessage — the NACK's door. Until step 4e-1 this was
+    // `rtcRequestKeyframe`, which needs a chained media handler; there is none any more.
+    uint8_t pli[MANIFOLD_RTCP_PLI_BYTES];
+    const size_t size = ManifoldRTCPBuildPli(pli, sizeof(pli), rx.ssrc, rx.ssrc);
+    const int rc = size ? rtcSendMessage(_videoTrack, (const char *)pli, (int)size) : -1;
+    if (rc < 0) {
+        _pliSendFailures++;
+        NSLog(@"[WHEP] PLI request %d FAILED — rtcSendMessage rejected it (rc %d)", _pliRequests, rc);
+        return NO;
+    }
+
+    const uint64_t sentNs = ManifoldWHEPNowNs();
+    if (_pliPendingSinceNs) {
+        // Throttle passed but the last one never saw an IDR: it is unanswered, not merged.
+        _pliUnanswered++;
+        MD_RTCP_LOG(@"[WHEP-PLI] PLI #%d UNANSWERED — no IDR in %.0f ms; superseded by PLI #%d",
+                    _pliPendingNumber, (double)(sentNs - _pliPendingSinceNs) / 1e6, _pliRequests);
+    }
+    _pliPendingSinceNs = sentNs;
+    _pliPendingNumber  = _pliRequests;
+    MD_RTCP_LOG(@"[WHEP-PLI] PLI #%d sent — %zu bytes, media ssrc 0x%08x", _pliRequests, size, rx.ssrc);
+    return YES;
+}
+
+/// Main, from the 1 Hz tick: pair the outstanding PLI with the first keyframe emitted after it.
+/// The network thread only stamps `_lastKeyframeAtNs`; the verdict and the log line are made here.
+///
+/// ⚠️ PAIRING IS BY TIME, NOT CAUSE. A sender's periodic IDR landing after the PLI counts as its
+/// answer. Against a sender with a GOP of a second or two that says little; verify with a long GOP.
+- (void)resolvePendingPli {
+    if (!_pliPendingSinceNs) return;
+    static const uint64_t kPliAnswerTimeoutNs = 3000000000ull;
+    const uint64_t keyframeNs = atomic_load_explicit(&_lastKeyframeAtNs, memory_order_relaxed);
+    // Inside the window only. The tick runs at 1 Hz, so a keyframe landing between the 3 s mark and
+    // the next tick would otherwise be counted as an answer it is too late to be.
+    if (keyframeNs >= _pliPendingSinceNs && keyframeNs - _pliPendingSinceNs < kPliAnswerTimeoutNs) {
+        const uint64_t ms = (keyframeNs - _pliPendingSinceNs) / 1000000u;
+        _pliAnswered++;
+        _pliAnswerMsTotal += ms;
+        if (ms > _pliAnswerMsMax) _pliAnswerMsMax = ms;
+        MD_RTCP_LOG(@"[WHEP-PLI] PLI #%d answered — IDR emitted %llu ms after the PLI was sent",
+                    _pliPendingNumber, ms);
+        _pliPendingSinceNs = 0;
+        return;
+    }
+    if (ManifoldWHEPNowNs() - _pliPendingSinceNs >= kPliAnswerTimeoutNs) {
+        _pliUnanswered++;
+        MD_RTCP_LOG(@"[WHEP-PLI] PLI #%d UNANSWERED — no IDR within 3 s", _pliPendingNumber);
+        _pliPendingSinceNs = 0;
+    }
+}
+
+/// Session totals for the video track's own RTCP, printed at close.
+- (void)logVideoRTCPSummary {
+    MD_RTCP_LOG(@"[WHEP-RTCP] session summary — video RTCP packets %llu | SR for our ssrc %llu, "
+                @"SR for another ssrc only %llu, SR before ssrc known %llu | RR sent %llu, refused "
+                @"%llu | PLI sent %d, refused %llu, answered by IDR %llu (avg %llu ms, max %llu ms), "
+                @"unanswered %llu%@ | audio SR for another ssrc only %llu",
+                _videoRTCPSeen, _videoSRMatched, _videoSRNotOurs, _videoSRBeforeSSRC,
+                _rrSent, _rrSendFailures, _pliRequests - (int)_pliSendFailures, _pliSendFailures,
+                _pliAnswered, _pliAnswered ? _pliAnswerMsTotal / _pliAnswered : 0, _pliAnswerMsMax,
+                _pliUnanswered, _pliPendingSinceNs ? @" (+1 pending at close)" : @"",
+                _audioSRNotOurs);
 }
 
 - (nullable NSString *)arrivalLatencySummary {
@@ -2106,6 +2216,8 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
         _statsTimer = nil;
     }
 
+    [self resolvePendingPli];
+    [self logVideoRTCPSummary];
 #if MANIFOLD_WHEP_SR_PROBE
     // Before the tracks are torn down, while the counters still mean something.
     [self srProbeLogSummary];

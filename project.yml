@@ -146,6 +146,10 @@ targets:
         group: DeckLink/SDK
     dependencies:
       - package: ManifoldCore
+      # The video track's own RTCP builders (PLI, RR, jitter, SR selection) — a leaf C target in
+      # the package so `swift test` can reach them. Used by App/WebRTC only.
+      - package: ManifoldCore
+        product: RTCPWire
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,
@@ -350,6 +354,9 @@ targets:
           - $(SRCROOT)/ThirdParty/libsrt/include
           # Bridge header, so the bridging header can #import "DataChannelBridge.h" from App/WebRTC.
           - $(SRCROOT)/App/WebRTC
+          # RTCPWire.h, for DataChannelBridge.m and H264Depacketizer.c (a plain .c cannot @import).
+          # The package product above supplies the object code; this supplies the header.
+          - $(SRCROOT)/Packages/ManifoldCore/Sources/RTCPWire/include
           # Shared H.264 bitstream code (App/H264/H264AccessUnitBuilder.h), included by BOTH
           # App/WebRTC/H264Depacketizer.h and — from Stage 3c — the SRT path in App/SRT. It is
           # transport-agnostic by design, so it belongs in neither directory and needs a path.

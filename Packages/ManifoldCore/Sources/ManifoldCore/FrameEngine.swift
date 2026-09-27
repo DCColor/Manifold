@@ -2122,7 +2122,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             guard !out.isEmpty else { return }
             // AFTER the stage, so this buffer's block is in the content-time map; the ratio it sets
             // applies from the next block. One paired read per sink call (§2.1's cadence).
-            let read = steering.sample()
+            // The renderer queue's absolute depth is measured against the END of what is about to
+            // be enqueued — log-only (the steering window line); nothing acts on it.
+            let read = steering.sample(enqueuedFrontier: Self.outputEnd(of: out.last))
             #if DEBUG || MANIFOLD_TELEMETRY
             // ⚠️ ON THE RESAMPLER'S OUTPUT SIDE, AND THAT IS §4.1 ITEM 1. These used to sit before the
             // tee, reading the transport's buffer — which, once the stage is in the path, is no
@@ -2134,6 +2136,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             if let read { paired?.sample(read.t0, read.timebase, read.t1) }
             #endif
             for sb in out { renderer.enqueue(sb) }
+        }
+
+        /// Output-axis end of `sb`: its PTS plus its frames at the format's sample rate. nil when
+        /// either is unavailable, which the steering records as "no depth for this read".
+        private static func outputEnd(of sb: CMSampleBuffer?) -> Double? {
+            guard let sb,
+                  let fmt = CMSampleBufferGetFormatDescription(sb),
+                  let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee,
+                  asbd.mSampleRate > 0 else { return nil }
+            let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb))
+            guard pts.isFinite else { return nil }
+            return pts + Double(CMSampleBufferGetNumSamples(sb)) / asbd.mSampleRate
         }
     }
 
