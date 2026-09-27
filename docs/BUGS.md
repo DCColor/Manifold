@@ -761,16 +761,16 @@ session length at which the renderer starves is unknown. No starvation was seen 
 - RFC 3550's SRs exist so that a receiver can map two independent RTP clocks onto one timeline.
 - A receiver that ignores them drifts. The fix is still 4e.
 
-⚠️ **Open question: does Cloudflare's SR carry the slope?**
-- §6.2 measured Cloudflare's SR slope at about 0 (±25 ppm, 3 × 60 s).
-- Tonight's soak measured 62 ppm by arrival timing.
-- If OBS's slope varies between sessions, both can be true.
-- If Cloudflare's SRs do not carry the slope its RTP timestamps do, the SR line will not fix
-  Cloudflare, and 4e needs another input there. That input would still be a protocol quantity,
-  never a server branch.
-
-**Next measurement:** OBS → Cloudflare for 30 min on the probe build (`.build-cc/srprobe`,
-measurement only), comparing the SR Δ slope with the arrival slope from the same log.
+~~⚠️ **Open question: does Cloudflare's SR carry the slope?**~~ **✅ Closed 2026-09-26: it does.**
+- **The run:** OBS → Cloudflare, 31 min, on the probe build (`AV_SYNC_FINDINGS.md` §6.7).
+- **The measurement:** SR slope **+69.2 ± 0.3 ppm**, against +66.5 by arrival from the same log. The
+  SR Δ grew 129 ms, and the audio queue drained 119 ms.
+- **Why §6.2 read about 0 on Cloudflare:** OBS's slope varies per session, from about 0 to 70 ppm.
+  That is inferred across sessions, not seen within one.
+- **So the SRs carry the slope on both servers, and step 4e fixes this on both.** The fit is done
+  fresh each session. The window is chosen and the design decisions are recorded in
+  `AUDIO_RESAMPLER_DESIGN.md` §2.6.
+- **The entry stays OPEN until 4e ships and a soak shows the lead flat.**
 
 Related: "WHEP lip-sync is ARBITRARY PER SESSION" below. That entry is the offset; this one is its
 slope.

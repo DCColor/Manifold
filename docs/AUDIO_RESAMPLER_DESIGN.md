@@ -484,13 +484,53 @@ the window is noise-limited, not wander-limited.**
   - Both window lengths are sized from the fit's own measured residual sd, so a noisier sender gets a
     longer window. That adapts to a measured protocol quantity. **The window is never selected by
     which server it is**, as `CLAUDE.md`'s server-agnostic rule requires.
-- ⚠️ **The window is still not chosen.** Before it is, the OBS → Cloudflare comparison on the probe
-  build has to show whether Cloudflare's SRs carry the slope its RTP timestamps do:
-  - §6.2 read ~0 from Cloudflare's SRs;
-  - the §13.3 soak read 62 ppm by arrival timing.
+- ~~⚠️ **The window is still not chosen.** Before it is, the OBS → Cloudflare comparison on the probe
+  build has to show whether Cloudflare's SRs carry the slope its RTP timestamps do.~~ Done; see
+  below.
 
-  If Cloudflare's SRs do not carry it, no window length fixes Cloudflare. That is a different
-  problem.
+**✅ FIT WINDOW CHOSEN, 2026-09-26, after the OBS → Cloudflare probe run (`AV_SYNC_FINDINGS.md` §6.7).**
+That run found Cloudflare's SRs carry OBS's slope (+69.2 ± 0.3 ppm, against +66.5 by arrival).
+- **Offset: about 60 s.**
+  - Cloudflare's residual is not white. Block means fall from 4.2 ms at 10 s to 2.0 ms at 60 s,
+    then level off at **1.7–1.9 ms out to 300 s**, where white noise would give 0.55 ms.
+  - That ~2 ms wander floor is why a longer offset window buys nothing.
+  - ffmpeg → MediaMTX (6.7 µs, white) is far inside it.
+- **Slope: 300 s or longer.** Cloudflare gave ±3–5 ppm per 5-min block (per-pair sd 9.5 ms).
+- **Both are sized from the fit's own measured residual sd, never by server.** A clean sender meets
+  its target sooner, and a noisy one gets the full length.
+- **Fitted fresh each session; no prior is carried over.**
+  - OBS's slope varies between sessions, from about 0 to 70 ppm (§6.7), so any carried value would
+    be wrong in some sessions.
+  - Until the slope window fills, the integrator absorbs the remainder, as it does today.
+
+**4e DECISION (a) — the video RTCP path: option c2.**
+- **We own the video PLI and RR on the C API.** `RtcpReceivingSession` comes off the video chain.
+- **libdatachannel is unmodified.** PLI and RR are sent through `rtcSendMessage`, the path NACK
+  already uses. `rtcRequestKeyframe`'s one call site becomes our own PLI.
+- **The video SR is parsed in the video message callback,** on the same receive thread as the audio
+  SR. That is the path the probe build ran on both servers.
+- **SRs are parsed by matching SSRC.** A compound packet can reach both tracks, and today's parser
+  takes the first SR regardless of SSRC.
+- **Rejected:**
+  - (a) needs the bridge ported to the C++ API;
+  - (b) needs a second patch to a library with no provenance chain;
+  - the C API's media interceptor is broken at v0.24.5 (it forwards moved-from messages).
+
+**4e DECISION (b) — CNAME: apply the SR line whenever both streams send SRs.**
+- **When the SDP CNAMEs differ,** log one line per session. Cloudflare does this, while stamping
+  bit-identical NTP in both SRs.
+- **Fall back to offset 0, with a logged line, if the fit is unstable.** "Unstable" means a residual
+  or jump bound derived from the fit's own measured sd.
+- **Keyed on stream behaviour, never on the server.**
+
+**For the post-4e soak: an unexplained ~15 ppm.** On the OBS → Cloudflare run, the audio lead
+drained at −84 ± 2 ppm, while the SR audio↔video slope was 69.2 ± 0.3.
+- The lead is reconstructed from wall-clock-timed frame counts, so the Mac's NTP frequency correction
+  is one candidate.
+- Check it with 4e's queue-depth log line (absolute enqueued frontier − `currentTime()` per steering
+  window). It removes the wall-clock reconstruction.
+- After 4e the lead should be flat. A residual drift near 15 ppm would mean something beyond the SR
+  slope moves the queue.
 
 **Where it enters the build:** step 4e (§7), after a measurement run picks the fit window. Until then
 WHEP runs step 4 with today's constant offset. The integrator still absorbs the slope; only the

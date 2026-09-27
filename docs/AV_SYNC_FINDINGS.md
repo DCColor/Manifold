@@ -762,14 +762,52 @@ and sd fitted offline, as in §6.2):
   and a slope ten times the audio device's own drift, are now properties of OBS to be explained,
   not of the relay.
 
-⚠️ **Not answered for Cloudflare.**
-- §6.2 measured Cloudflare's SR slope at about 0 (±25 ppm, 3 × 60 s).
-- Yet the 2026-09-26 Cloudflare soak (`AUDIO_RESAMPLER_DESIGN.md` §13.3) saw OBS's video run
-  **62 ppm** against audio, by arrival timing.
-- Either OBS's slope varies between OBS sessions, or Cloudflare's SRs do not carry the slope its
-  RTP timestamps do. The second would mean the SR line does not fix Cloudflare.
-- **Next measurement:** 30 min of OBS → Cloudflare on the same probe build, comparing the SR Δ slope
-  with the arrival slope from the same log.
+#### ✅ ANSWERED FOR CLOUDFLARE, 2026-09-26 — OBS's slope varies per session, and Cloudflare's SRs carry it
+
+**The question.** §6.2 read Cloudflare's SR slope at about 0 (±25 ppm, 3 × 60 s). The 2026-09-26
+soak (`AUDIO_RESAMPLER_DESIGN.md` §13.3) saw OBS's video run 62 ppm against audio by arrival timing.
+Either OBS's slope varies between sessions, or Cloudflare's SRs do not carry the slope its RTP
+timestamps do.
+
+**The run.** OBS → Cloudflare WHIP → Manifold WHEP, 31 min, the same probe build as the ffmpeg run.
+Log: `~/Desktop/srprobe-obs-cloudflare.log`. Both slopes come from this one log.
+
+| | SR Δ (Cloudflare's own reports, 3,802 pairs) | arrival timing (no SRs; t ≥ 600 s) |
+|---|---|---|
+| audio↔video slope | **+69.2 ± 0.3 ppm** | video `δv` **+66.5 ± 22 ppm** (trimmed; median +66.7) |
+| per 5-min block | 60.3 / 68.6 / 65.1 / 67.3 / 71.9 / 70.4 ppm (±3–5 each) | `i` −58.5 / −60.5 / −60.1 / −59.0 / −58.9 ppm |
+| over the session | Δ +17 → **+146 ms** (129 ms in 1,900 s = 68 ppm) | audio lead **−84 ± 2 ppm**, −119 ms |
+| loop | — | `i` −59.5 ppm, closing against `δd − δv − c` = −54.5 to within 5 ppm (`c` −4.9 ± 1.6) |
+
+**Noise against window length.** The per-pair residual sd is **9.5 ms** (|residual| p99 22 ms),
+noisier than §6.2's ~6 ms. W-second block means about the full-run line:
+
+| W | block-mean sd | white-noise prediction |
+|---|---|---|
+| 10 s | 4.2 ms | 3.0 ms |
+| 30 s | 2.5 ms | 1.7 ms |
+| 60 s | 2.0 ms | 1.2 ms |
+| 120 s | 1.7 ms | 0.9 ms |
+| 300 s | 1.9 ms | 0.55 ms |
+
+**Unlike ffmpeg → MediaMTX, it is not white.** About 2 ms of wander sets a floor from ~60 s on.
+
+**Reading:**
+- **Cloudflare's SRs carry the slope.** The SR slope (69.2) matches the arrival slope (66.5 ± 22),
+  and the SR Δ grew by about as much as the audio queue drained (129 against 119 ms).
+- **OBS's slope varies per session, from about 0 to 70 ppm.**
+  - About 0: §6.2's three Cloudflare sessions (−14, +28, −13 ± 25 ppm) are each 3–4σ below 69,
+    and the step-3 Cloudflare session realised +14.
+  - About 60–70: MediaMTX §6.2, the soak, and this run.
+- **What drives it is unknown.** Candidates are OBS restarts, the audio device, or something else.
+  It is an OBS property, not a relay one.
+
+⚠️ **Caveat: the variation is inferred across sessions on different days, not seen within one.**
+Every session measured so far holds one slope from start to finish.
+
+⚠️ **One gap not explained.** The lead implies an audio↔video difference of about 84 ppm, 15 ppm
+more than the SR slope. The lead is wall-clock timed, so the Mac's NTP frequency correction enters
+it. The SR figure is taken as the reference.
 
 ⚠️ **A harness artefact to discount in any looped-fixture run.**
 - **What it looks like:** at every `-stream_loop` point, once a minute with this 60 s fixture,
@@ -790,7 +828,8 @@ and sd fitted offline, as in §6.2):
   sessions across two servers, and settles the shape the fix has to take (a running offset-and-rate
   fit, not a latched Δ). **It is still not FIXED**: §6 is log-only and changes no presentation.
   What remains open there is §6.7 — whether the ~60 ppm belongs to OBS or to MediaMTX. *Answered for
-  MediaMTX on 2026-09-26: it is OBS's. Still open for Cloudflare (§6.7).*
+  MediaMTX on 2026-09-26: it is OBS's. Answered for Cloudflare the same day: OBS's slope varies per
+  session, and Cloudflare's SRs carry it (§6.7).*
 * ✅ **The residuals between arithmetic and measurement vary by path** (−42, −80, −95 ms) — **this
   was listed as unexplained and now has a cause.** Part is the bounded frame-grid bias; the rest is
   the sender's own audio-vs-video error, which is **not** a property of the path but of the session:
