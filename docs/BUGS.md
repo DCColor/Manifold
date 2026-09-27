@@ -750,6 +750,28 @@ session length at which the renderer starves is unknown. No starvation was seen 
 - Cloudflare step 3's +14 ppm session is the exception. The shared figure leans toward the slope
   being the OBS sender's (§6.7), but that is unconfirmed without a non-OBS sender.
 
+**UPDATED 2026-09-26 — the slope is the sender's, and the sender is OBS.**
+- **The run:** ffmpeg → MediaMTX over WHIP, 31 min, on the probe build (`AV_SYNC_FINDINGS.md` §6.7).
+- **SR slope:** +0.003 ± 0.001 ppm.
+- **Arrival cross-check:** integrator `i` +4.0 ppm, and the audio lead flat at −2.8 ± 1.0 ppm.
+- **So MediaMTX adds nothing.** OBS's audio clock runs about 60 ppm against its own video clock.
+
+**It is still a Manifold bug to fix:**
+- Every OBS user sends this slope.
+- RFC 3550's SRs exist so that a receiver can map two independent RTP clocks onto one timeline.
+- A receiver that ignores them drifts. The fix is still 4e.
+
+⚠️ **Open question: does Cloudflare's SR carry the slope?**
+- §6.2 measured Cloudflare's SR slope at about 0 (±25 ppm, 3 × 60 s).
+- Tonight's soak measured 62 ppm by arrival timing.
+- If OBS's slope varies between sessions, both can be true.
+- If Cloudflare's SRs do not carry the slope its RTP timestamps do, the SR line will not fix
+  Cloudflare, and 4e needs another input there. That input would still be a protocol quantity,
+  never a server branch.
+
+**Next measurement:** OBS → Cloudflare for 30 min on the probe build (`.build-cc/srprobe`,
+measurement only), comparing the SR Δ slope with the arrival slope from the same log.
+
 Related: "WHEP lip-sync is ARBITRARY PER SESSION" below. That entry is the offset; this one is its
 slope.
 

@@ -465,6 +465,33 @@ averaging Cloudflare's noise and tracking MediaMTX's rate, and it depends on §6
 ~60 ppm belongs to OBS or to the relay. Pick it from a measurement, with a non-OBS sender through
 MediaMTX, not from this document.
 
+**UPDATED 2026-09-26 — the non-OBS run is in (`AV_SYNC_FINDINGS.md` §6.7): the ~60 ppm is OBS's, and
+the window is noise-limited, not wander-limited.**
+- **What the run measured:** ffmpeg → MediaMTX, 31 min, 3,728 SR pairs.
+  - Slope +0.003 ± 0.001 ppm.
+  - Per-pair sd 6.7 µs.
+  - W-second block means about the full-run line scale like white noise out to 300 s: 7.8 µs at
+    10 s, 3.3 at 60 s, 1.6 at 300 s. There is no wander to trade against, at least on this path.
+- **So the window is set by per-pair noise**, of which the worst measured is Cloudflare's ~6 ms
+  (§6.3). A least-squares fit over W seconds at one pair per second gives:
+  - **offset:** sd ≈ σ/√W. 1 ms needs W ≈ 36 s; 0.5 ms needs W ≈ 144 s.
+  - **slope:** SE ≈ σ·√12 / W^1.5. 5 ppm needs W ≈ 260 s; 2 ppm needs W ≈ 475 s.
+
+  At OBS's 0.4 ms (§6.2) both are met within a minute.
+- **Proposal: two timescales.**
+  - The offset comes from a short window, so a step in Δ is tracked quickly.
+  - The slope comes from a long one, so the ~60 ppm OBS slope is known to a few ppm.
+  - Both window lengths are sized from the fit's own measured residual sd, so a noisier sender gets a
+    longer window. That adapts to a measured protocol quantity. **The window is never selected by
+    which server it is**, as `CLAUDE.md`'s server-agnostic rule requires.
+- ⚠️ **The window is still not chosen.** Before it is, the OBS → Cloudflare comparison on the probe
+  build has to show whether Cloudflare's SRs carry the slope its RTP timestamps do:
+  - §6.2 read ~0 from Cloudflare's SRs;
+  - the §13.3 soak read 62 ppm by arrival timing.
+
+  If Cloudflare's SRs do not carry it, no window length fixes Cloudflare. That is a different
+  problem.
+
 **Where it enters the build:** step 4e (§7), after a measurement run picks the fit window. Until then
 WHEP runs step 4 with today's constant offset. The integrator still absorbs the slope; only the
 absolute lip-sync stays as arbitrary per session as it is today (`BUGS.md`, "WHEP lip-sync is
@@ -2212,6 +2239,16 @@ understated for those transports.
 (more filtering, more lag) from a lower `k_p`. Criterion 7 needs to be read against a real ratio
 trace. Step 8's 30-minute runs are where τ_e and S get decided, with this section's ripple as the
 number to beat.
+
+**ADDED 2026-09-26 — the binding does not come from the sender.**
+- **The run:** ffmpeg → MediaMTX, the cleanest sender measured: 6.7 µs SR scatter, loopback, zero
+  loss, 31 min (`AV_SYNC_FINDINGS.md` §6.7).
+- **The result:** the slew limit still hit 200 ppm/s in **185 of 185** windows, and max |ρ−1| was
+  269 ppm. The Cloudflare soak (§13.3) hit it in 154 of 190.
+- **So the binding comes from LiveClock's own depth wobble,** passed through the τ_e filter, as the
+  cause list above says. It is not network or sender noise.
+- **What follows:** a quieter link or sender will not relieve S. Only τ_e, `k_p`, S itself, or the
+  depth loop can.
 
 ### 13.3 ✅ RESOLVED 2026-09-26 — Cloudflare's integrator settled near −60 ppm, not +14: a real audio↔video slope
 

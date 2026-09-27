@@ -720,6 +720,68 @@ property and every WHEP receiver on earth has it. If it follows MediaMTX, it is 
 generation. Either answer is worth having before the fit's window length is chosen, because the
 window is a trade between averaging noise and tracking rate.
 
+#### ✅ ANSWERED FOR MEDIAMTX, 2026-09-26 — the ~60 ppm is OBS's
+
+**The run:**
+- **Sender:** ffmpeg 8.1.1 publishing the fixture over WHIP to MediaMTX v1.21.1 on this Mac.
+  The fixture was looped (`-stream_loop -1`), paced with `-re`, and re-encoded to H.264 baseline
+  with no B-frames, a 1 s GOP, and Opus 48 kHz stereo. Both RTP clocks therefore come from one file
+  timeline paced by one wall clock.
+- **Receiver:** Manifold HEAD `d815b66` plus `MANIFOLD_WHEP_SR_PROBE_UNCHAIN_VIDEO_RTCP = 1`, a
+  measurement build only, so PLI was disabled and no RRs were sent. Loopback, zero loss.
+- **Length:** 31 min, one session. Log: `~/Desktop/srprobe-ffmpeg-mediamtx.log`.
+
+**The SR measurement** (3,728 distinct pairs; per-pair `[WHEP-SR] a#N v#M Δ` lines, with the slope
+and sd fitted offline, as in §6.2):
+
+| | ffmpeg → MediaMTX | OBS → MediaMTX (§6.2) |
+|---|---|---|
+| Δ slope | **+0.003 ± 0.001 ppm** | +57.7 to +66.3 ppm |
+| per-5-min slopes | all within ±0.04 ppm | — |
+| per-pair sd about the line | **6.7 µs** in every 5-min block from 300 s on; 34.7 µs overall, from a few ≤ 2 ms outliers in the first 300 s | 359–429 µs |
+| Δ | −19.99 ms, flat for 31 min | walks 4–5 ms per minute |
+
+**The arrival cross-check** uses the same log and no SRs, by the method of
+`AUDIO_RESAMPLER_DESIGN.md` §13.3, with `i = δd − δv − c` over t ≥ 600 s:
+- **The integrator:** `i` = **+4.0 ppm**, trend −0.04 ± 0.08 ppm/min. With OBS through either
+  server it is about −60.
+- **The video clock:** `δv` = +2.5 ± 11.6 ppm (trimmed mean; median 0.0).
+- **Creep:** `c` = +1.0 ± 2.8 ppm.
+- **Closure:** `δd − δv − c` = **+3.0 ppm against `i` = +4.0**.
+- **The audio lead:** −2.8 ± 1.0 ppm, or −2.5 ms over the span. With OBS on Cloudflare it drained
+  at −70 ppm.
+
+**Reading:**
+- **MediaMTX's SR generation and relay add no slope.** Its SRs track the RTP timestamps a sender
+  writes.
+- **The ~60 ppm follows OBS.** With OBS as the sender, OBS's audio clock runs against its own video
+  clock, and every WHEP receiver sees it.
+- **The per-pair noise is also mostly the sender's.** ffmpeg gives 6.7 µs, about 60 times cleaner
+  than OBS through the same relay.
+- **The two awkward facts above do not change.** The 57.7 vs 66.3 ppm spread across OBS sessions,
+  and a slope ten times the audio device's own drift, are now properties of OBS to be explained,
+  not of the relay.
+
+⚠️ **Not answered for Cloudflare.**
+- §6.2 measured Cloudflare's SR slope at about 0 (±25 ppm, 3 × 60 s).
+- Yet the 2026-09-26 Cloudflare soak (`AUDIO_RESAMPLER_DESIGN.md` §13.3) saw OBS's video run
+  **62 ppm** against audio, by arrival timing.
+- Either OBS's slope varies between OBS sessions, or Cloudflare's SRs do not carry the slope its
+  RTP timestamps do. The second would mean the SR line does not fix Cloudflare.
+- **Next measurement:** 30 min of OBS → Cloudflare on the same probe build, comparing the SR Δ slope
+  with the arrival slope from the same log.
+
+⚠️ **A harness artefact to discount in any looped-fixture run.**
+- **What it looks like:** at every `-stream_loop` point, once a minute with this 60 s fixture,
+  `[WHEP-DRIFT]` shows a **±0.5 s arrival excursion**: one 5 s window reads about +100,000 ppm and
+  the next about −100,000.
+- **What it is:** ffmpeg's loop and `-re` pacing, not the relay or the receiver. The pair cancels,
+  so the minimum-offset method still telescopes. The SR Δ, LiveClock and the steering loop did not
+  react: no snaps and no coarse events.
+- **Its one effect:** it swamps a plain mean of `senderRate`, which read +341 ppm until the
+  excursions were trimmed.
+- **The fix:** a fixture longer than the session, so the sender never loops mid-run.
+
 ---
 
 ## 7. What is not answered here
@@ -727,7 +789,8 @@ window is a trade between averaging noise and tracking rate.
 * ✅ **WHEP's per-session offset was unmeasured from inside the app — §6 now measures it**, six
   sessions across two servers, and settles the shape the fix has to take (a running offset-and-rate
   fit, not a latched Δ). **It is still not FIXED**: §6 is log-only and changes no presentation.
-  What remains open there is §6.7 — whether the ~60 ppm belongs to OBS or to MediaMTX.
+  What remains open there is §6.7 — whether the ~60 ppm belongs to OBS or to MediaMTX. *Answered for
+  MediaMTX on 2026-09-26: it is OBS's. Still open for Cloudflare (§6.7).*
 * ✅ **The residuals between arithmetic and measurement vary by path** (−42, −80, −95 ms) — **this
   was listed as unexplained and now has a cause.** Part is the bounded frame-grid bias; the rest is
   the sender's own audio-vs-video error, which is **not** a property of the path but of the session:
