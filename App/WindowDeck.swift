@@ -1241,6 +1241,7 @@ final class DeckRegistry {
         // `setDeckLinkOwnsAudio` → `applyAudioMute`, which is the engine's one mute rule; not a
         // second mechanism.
         deck.engine?.setDeckLinkOwnsAudio(false)
+        NDIService.shared.setDeckLinkOwnsAudio(false)
 
         NDIService.shared.renderer = nil
         NDIService.shared.audioTap = nil
@@ -1272,11 +1273,15 @@ final class DeckRegistry {
         // and the engine folds that into its existing applyAudioMute rule.
         DeckLinkService.shared.systemAudioRouting = { [weak engine] owns in
             engine?.setDeckLinkOwnsAudio(owns)
+            // NDI holds its picture by the desktop audio lead only while the desktop plays the
+            // programme (§2.5), so it needs the same decision, at the same moment.
+            NDIService.shared.setDeckLinkOwnsAudio(owns)
         }
         // …and evaluate it NOW for the incoming engine, from DeckLinkService's own rule rather than
         // a copy of it. Without this the new owner would not learn the card's state until the next
         // start/stop/destination change — which, if output is already running, is never.
         engine.setDeckLinkOwnsAudio(DeckLinkService.shared.ownsSystemAudio)
+        NDIService.shared.setDeckLinkOwnsAudio(DeckLinkService.shared.ownsSystemAudio)
         // The card must be ENABLED with a fixed rate/channel count before playback starts, so a
         // file whose audio format differs re-establishes the output (this is also what lets you
         // enable output BEFORE loading a file and still get audio).

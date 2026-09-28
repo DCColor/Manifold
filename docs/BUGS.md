@@ -697,6 +697,22 @@ lists no Force Video Jump items.
 
 ---
 
+## ☐ PRE-SHIP: review the NDI frame-wait diagnostic (`[NDI-PICTURE]`, `onFrameSelected`)
+
+**Added 2026-09-28** to measure whether NDI's picture delay holds the picture for the full desktop
+audio lead (it does: 256 ms median against 250 + one refresh; see the NDI lead entry).
+
+- **What it is:** `MetalVideoRenderer.onFrameSelected`, a measurement-only callback fired on the
+  display-link thread when a queued frame is selected; and NDIService's once-a-second
+  `[NDI-PICTURE] frame wait pull→selection ms: min / med / max · skipped unseen` line.
+- **Gating:** both are `#if DEBUG`, so absent from Release, present in Profile (tester) builds.
+- **Cost when present:** one closure call and one array append per displayed frame (~24/s), one
+  sort of ~24 values and one log line per second.
+- **Decide before ship:** keep as Profile telemetry (it is the only instrument for the NDI picture
+  hold), or remove both. Nothing else reads it.
+
+---
+
 ## ☐ PRE-SHIP: remove the resampler's pinned back-out switch (step 3 behaviour on demand)
 
 **Status:** OPEN. It goes out with the other debug tools, after step 8. **Raised:** 2026-09-27, resampler
@@ -728,6 +744,75 @@ step 8 soak it has no job.
 **Done means:** `grep -rn "Pinned\|pinned\|PIN_RESAMPLER\|desktopAudioAnchorTolerance" App
 Packages/ManifoldCore/Sources` returns only unrelated uses. The Debug menu has no Resampler Ratio
 item. `swift test` passes. A local SRT session still logs exactly one non-zero `setRate`.
+
+---
+
+## ☐ OPEN 2026-09-28 — NDI and HLS leave the renderer's clock installed after disconnect; a file played afterwards runs its picture ~195 ms ahead of its audio
+
+**Status:** ☐ **OPEN — fix written 2026-09-28 and VERIFIED FOR NDI the same day; HLS not yet
+measured.** Uncommitted. **Affects:** any file played in a window after an NDI or HLS session in the
+same launch. **Age:** since NDI's first
+receiver, `6952b98` (2026-07-14); HLS copied the pattern. Not a resampler regression.
+
+### The defect
+
+`NDIService.start(with:)` (`App/NDI/NDIService.swift:482-484` before the fix) replaces three of the
+window renderer's providers:
+
+    renderer.isFullRangeProvider = { false }
+    renderer.clock = { Self.monotonicNow() }      // host time since boot
+    renderer.isPausedProvider = { false }
+
+`disconnect()` and `tearDownReceiver()` restore none of them; they clear only `onDisplayTick`. The
+file path installs its providers once, at window setup (`WindowDeck.configure`, `WindowDeck.swift:903`),
+and nothing reinstalls them when a file loads. So the next file runs against NDI's leftovers.
+`HLSClient.connect` sets the same three (`App/HLS/HLSClient.swift:868-870` before the fix) and its
+`disconnect`/`retirePull` restore nothing either — the same defect, found by reading, not measured.
+
+SRT and WHEP do not have it: `LiveDisplayRoute` saves the clock and the paused provider at activate
+and restores them at deactivate. It did not save the range provider, so a full-range file played
+after SRT or WHEP was also expanded as video range.
+
+### What it does
+
+- **Picture ahead of audio, ~195 ms.** The display tick shows "the newest frame with pts ≤ now"
+  (`MetalVideoRenderer.swift:2234`). With `now` = seconds since boot, every queued file frame is due,
+  so each tick shows the newest one the reader has delivered: the picture runs ahead by the reader's
+  queue (bound 12 frames, 480 ms at 25p) and lands on whichever display tick follows its arrival —
+  the flash timing flips between two 60 Hz phases (sd 6–7 ms against 0.1 ms on a clean control).
+  Audio is scheduled by the synchronizer as normal.
+- **The paused view after a seek reads "playing"** (`isPausedProvider` stuck at `{ false }`).
+- **A full-range file is expanded as video range** (`isFullRangeProvider` stuck at `{ false }`).
+- Render-perf lines are unchanged throughout, so no log shows it.
+
+### The evidence — flash-beep file controls, 2026-09-28, same fixture, same chain, 60 fps recorder
+
+| | build | state | A/V, mean over loops |
+|---|---|---|---|
+| A | `base-Profile` (pre-resampler) | fresh launch | **+27.0 ms** |
+| B | `step8-Profile` (`be983a0`) | fresh launch | **+24.2 ms** |
+| C | `step8-Profile` | same launch as B, after 60 s of NDI | **+219.4 ms**, sd 6–7 |
+| — | `step8-Profile` | resampler step 8 NDI run, after an NDI session | +218.6 ms |
+| — | 09-23 controls (30 fps recorder) | fresh / after three SRT sessions | +29.6 / +24.6 ms |
+
+A = B within 2.8 ms: file playback did not regress across resampler steps 3–7. C reproduces the
++218 ms the step 8 NDI run's control read; that control is void.
+
+### The fix (2026-09-28, uncommitted)
+
+`SavedDisplayProviders` (`Packages/ManifoldCore/Sources/DisplayProviders/`, a leaf target so
+`swift test` can reach it) saves the three providers from a renderer and restores them verbatim onto
+that same renderer. A second save while holding is a no-op, so NDI's source switch and HLS's swap —
+which re-enter their start path still connected — cannot capture the stream's own providers as the
+file's. `LiveDisplayRoute` now uses it (and so gains the range restore), and NDI and HLS use it
+directly: save before installing their providers, restore in `disconnect()` only, after the pull
+hook is off. Tests: `DisplayProvidersTests`, including an NDI-shaped session. The DEBUG-only
+`SyntheticLiveSource` keeps its own copy and still does not restore range.
+
+**Verified for NDI, 2026-09-28, build `.build-cc/ndifix-Profile`:** fresh launch, file control →
+NDI connect → disconnect → file control again, twice. The second control read **+0.7 ms** and
+**+2.7 ms** from the first (+24.8 → +25.5; +23.8 → +26.5), against +195 ms before the fix. Pass
+(±5 ms). **Still to verify:** the same for HLS, which has not been measured.
 
 ---
 
@@ -1798,7 +1883,46 @@ a target lead must never become an A/V offset — and NDI is still ~230 ms out a
 
 ## 🔍 OPEN 2026-09-23 — the NDI 250 ms presentation lead IS a 250 ms lip-sync error, and it ships
 
-**Status:** OPEN by decision, not by ignorance. Working exactly as designed.
+**Status:** OPEN — **fix written 2026-09-28, not yet verified in a real session.** Re-measured before
+the fix on 2026-09-28 against a valid file control: **+252 to +262 ms** (resampler step 8 NDI run).
+
+**The fix (uncommitted):** the audio side is unchanged — the timebase still runs `lead` behind the
+pull clock, so the renderer still holds `lead` (250 ms) of audio. The PICTURE now runs the same
+`lead` behind the pull clock (`NDIService.pictureDelay`, rule in
+`Packages/ManifoldCore/Sources/DisplayProviders/PullSourcePictureDelay.swift`), so the A/V offset is
+zero by construction (`AUDIO_RESAMPLER_DESIGN.md` §2.5). §2.5's "start the axis early" cannot be met
+on the audio side of a pull source: FrameSync hands out audio for now, so there is no earlier audio.
+**Only while the Mac's renderer plays the programme.** While the DeckLink card owns audio the picture
+is not held, so SDI is exactly as before; switching ownership mid-session moves the picture by the
+lead once (decided 2026-09-28). The renderer's queue bound is raised to hold the delay (34 frames at
+250 ms, sized for up to 120 fps; a bound, not an allocation). The Debug lead ladder moves the picture
+with the audio at every rung.
+
+**First measurement, 2026-09-28 — PARTIAL.** NDI minus a same-launch file control: **+38.6 ms as
+written, +58.6 ms grid-corrected**, against +252…+262 ms before. The capture began 35 s after connect;
+before the fix an early capture read ~10 ms higher than a late one, so a settled reading is ~+29 ms.
+Either way it FAILS criterion 12 (±20 ms), and it removed ~215 ms where the design removes 250:
+before the fix NDI read only +2…+12 ms beyond its 250 ms lead. Unexplained. Logs are clean: picture
+23.6–24.5 fps, no drops, audio queue +259 ms, one non-zero `setRate`, steering e within ±0.04 ms.
+**The picture hold, measured 2026-09-28 (`[NDI-PICTURE]`, DEBUG):** 2028 frames over 83 s, pull to
+selection **250.2–262.4 ms, median 256.0**, 0 skipped — the design value (250 ms plus at most one
+120 Hz refresh and tick jitter). The fix does what it says. **Manifold's own A/V is now ≈ −6 ms**
+(audio heard 250 ms after pull, picture shown 256 ms after).
+
+**So the residual is not the picture path.** It is ≈ +30…+40 ms, from two terms outside it:
+- **NDI FrameSync's audio queue.** `framesync_audio_queue_depth` (logged as `depth=` on the
+  `[NDI-AUDIO]` push lines) is audio received but not yet pulled, so pulled audio is that much
+  behind the picture FrameSync returns as current. It differs per connection: **36.1 ms** (the
+  pre-fix step 8 session), **46.6 ms** (the +38.6 ms post-fix session), **28.1 ms** (the frame-wait
+  session). Not compensated. It accounts for ~10 ms of the gap between the pre- and post-fix sessions.
+- **An unmeasured sender term.** ~22 ms of that gap is unexplained with n = 1 session each side.
+  OBS's own A/V is known to change across an output restart (`AV_SYNC_FINDINGS.md` §1.2b) and cannot
+  be probed on NDI here.
+
+**Next:** compensate FrameSync's depth at pull (NDI SDK behaviour, not sender-specific), then the
+full 30-min NDI soak with the depth trace against the offset.
+
+**Before the fix — status was:** OPEN by decision, not by ignorance. Working exactly as designed.
 **Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.2. See also the ⚠️ CORRECTION added to the
 "NDI had no desktop playback path" entry, whose justification for the constant was wrong.
 

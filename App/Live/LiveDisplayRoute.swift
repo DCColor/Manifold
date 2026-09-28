@@ -39,14 +39,20 @@
 //
 //  ── THREADING ──────────────────────────────────────────────────────────────────────────
 //
-//  MAIN THREAD ONLY, both methods, asserted. `savedClock` / `savedIsPaused` are touched
-//  nowhere else. The closures this INSTALLS run on other threads (onDepthSample on the
-//  CVDisplayLink render thread, onQueueOverflow on the source's own thread) — they touch none
-//  of this type's state, only the captured clock and the owner's hook.
+//  MAIN THREAD ONLY, both methods, asserted. `saved` is touched nowhere else. The closures this
+//  INSTALLS run on other threads (onDepthSample on the CVDisplayLink render thread,
+//  onQueueOverflow on the source's own thread) — they touch none of this type's state, only the
+//  captured clock and the owner's hook.
 //
 
 import Foundation
 import ManifoldCore   // LiveClock
+import DisplayProviders
+
+/// The renderer's three file-path providers are what every live source saves and restores —
+/// here, and directly in NDI and HLS. The type and its tests live in the DisplayProviders
+/// package target, because `swift test` cannot reach app code.
+extension MetalVideoRenderer: DisplayProviderHost {}
 
 final class LiveDisplayRoute {
 
@@ -124,27 +130,26 @@ final class LiveDisplayRoute {
 
     // MARK: - Saved renderer state (main thread only)
 
-    /// Renderer providers saved at activate, restored VERBATIM at deactivate — the discipline the
-    /// synthetic harness uses rather than NDI's (NDI leaves its clock installed on disconnect).
-    /// We restore because a file may be sitting behind us and can resume the moment the live
-    /// source goes away.
-    private var savedClock: (() -> Double)?
-    private var savedIsPaused: (() -> Bool)?
-
-    /// WHICH RENDERER THE PROVIDERS ABOVE CAME FROM. Weak: this is an identity record, not an
-    /// ownership claim, and a closed window's renderer must not be kept alive by it.
+    /// Renderer providers saved at activate, restored VERBATIM at deactivate onto the renderer
+    /// they came from. We restore because a file may be sitting behind us and can resume the
+    /// moment the live source goes away. NDI and HLS use the same type since 2026-09-28; before
+    /// that they restored nothing (docs/BUGS.md, "NDI and HLS leave the renderer's clock
+    /// installed after disconnect").
     ///
-    /// ⚠️ THIS IS A CORRECTNESS GUARD, NOT BOOKKEEPING, and the bug it closes does not crash.
-    /// `savedClock` / `savedIsPaused` capture a SPECIFIC window's engine, while the save and the
+    /// ⚠️ THE RESTORE TARGET IS A CORRECTNESS GUARD, NOT BOOKKEEPING, and the bug it closes does
+    /// not crash. The saved closures capture a SPECIFIC window's engine, while the save and the
     /// restore both happen on whatever renderer the singleton router points at AT THE TIME. With
     /// one renderer per window, a claim and a release that straddle a change of host would restore
     /// window A's engine closures onto window B's renderer — B's picture clocked by A's
     /// synchronizer. Silent, non-crashing, and presents as "window B stutters sometimes".
     ///
     /// Two defences, and this is the second: `DeckRegistry` never re-points an ACTIVE router's
-    /// renderer, and this type restores onto the renderer it took the providers FROM rather than
-    /// onto the one it is handed.
-    private weak var savedRenderer: MetalVideoRenderer?
+    /// renderer, and `saved` restores onto the renderer it took the providers FROM rather than
+    /// onto the one `deactivate` is handed.
+    ///
+    /// Range is saved too. This route used to restore the clock and the paused state only, so a
+    /// full-range file played after SRT or WHEP was expanded as video range.
+    private let saved = SavedDisplayProviders<MetalVideoRenderer>()
 
     // MARK: - Activate
 
@@ -173,9 +178,7 @@ final class LiveDisplayRoute {
 
         let clock = LiveClock(startupDepth: config.targetDepth, targetDepth: config.targetDepth)
 
-        savedClock = renderer.clock
-        savedIsPaused = renderer.isPausedProvider
-        savedRenderer = renderer
+        saved.save(from: renderer)
 
         // The three live-path seams. now() is "never due" until the first frame anchors it, so
         // nothing renders until the source pushes. onDisplayTick is nil'd because this is a PUSH
@@ -234,9 +237,9 @@ final class LiveDisplayRoute {
     /// in and has nothing to restore. Callers must be idempotent-safe — this is written to be
     /// harmless if called twice, and the caller's own "was I active" check is what gates it.
     ///
-    /// ── THE RESTORE TARGET IS `savedRenderer`, NOT THE ARGUMENT ────────────────────────────
+    /// ── THE RESTORE TARGET IS THE SAVED RENDERER, NOT THE ARGUMENT ─────────────────────────
     ///
-    /// See the field comment on `savedRenderer`. Providers go back to the renderer they were taken
+    /// See the field comment on `saved`. Providers go back to the renderer they were taken
     /// from, so a claim/release that straddles a change of host cannot cross-wire one window's
     /// picture to another window's synchronizer. When the caller hands us a DIFFERENT renderer we
     /// still strip OUR OWN seams off it — the depth sample, the overflow hook and the queue bound
@@ -250,20 +253,14 @@ final class LiveDisplayRoute {
     func deactivate(renderer: MetalVideoRenderer?) {
         dispatchPrecondition(condition: .onQueue(.main))
 
-        guard let saved = savedRenderer else {
-            // Not active — nothing was taken, so there is nothing to give back and nothing to wipe.
-            savedClock = nil
-            savedIsPaused = nil
-            return
-        }
+        // Not active — nothing was taken, so there is nothing to give back and nothing to wipe.
+        guard let host = saved.restore() else { return }
 
-        saved.clock = savedClock
-        saved.isPausedProvider = savedIsPaused
-        saved.onDepthSample = nil
-        saved.onQueueOverflow = nil   // must not outlive the clock it re-anchors
-        saved.maxQueuedOverride = nil
+        host.onDepthSample = nil
+        host.onQueueOverflow = nil   // must not outlive the clock it re-anchors
+        host.maxQueuedOverride = nil
 
-        if let renderer, renderer !== saved {
+        if let renderer, renderer !== host {
             NSLog("[LIVE-ROUTE] renderer changed while the route was active — restoring the saved "
                 + "providers onto the renderer they came from, and stripping this route's seams "
                 + "off the current one. Neither window is cross-wired.")
@@ -274,10 +271,6 @@ final class LiveDisplayRoute {
 
         // The stream was on screen HERE — wipe the last streamed frame (there is usually nothing
         // behind us). The current renderer if we still have it, else the one we saved from.
-        (renderer ?? saved).clearToBlack()
-
-        savedClock = nil
-        savedIsPaused = nil
-        savedRenderer = nil
+        (renderer ?? host).clearToBlack()
     }
 }

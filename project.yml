@@ -150,6 +150,10 @@ targets:
       # the package so `swift test` can reach them. Used by App/WebRTC only.
       - package: ManifoldCore
         product: RTCPWire
+      # The save/restore of the renderer's file-path providers around a live session — a leaf
+      # target so `swift test` can reach it. Used by App/Live/LiveDisplayRoute, NDI and HLS.
+      - package: ManifoldCore
+        product: DisplayProviders
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,

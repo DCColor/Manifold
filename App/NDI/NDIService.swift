@@ -4,6 +4,7 @@ import CoreMedia
 import VideoToolbox
 import QuartzCore
 import ManifoldCore
+import DisplayProviders
 
 /// STEP A: minimal NDI receive — prove NDI integrates and that frames reach Manifold's Metal
 /// display path. Discovery, a receiver on the first source found, a FrameSync pull on the display
@@ -164,6 +165,28 @@ final class NDIService: ObservableObject {
 
     /// The display path. Set once at startup (ContentView.onAppear), same instance DeckLink uses.
     weak var renderer: MetalVideoRenderer?
+
+    /// The file path's clock, paused and range providers, taken when a session opens and put back
+    /// when it ends — the same save/restore LiveDisplayRoute uses for SRT and WHEP.
+    ///
+    /// ⚠️ UNTIL 2026-09-28 NDI RESTORED NOTHING. `start(with:)` installed host time as the clock and
+    /// disconnect left it there, so the next file ran against seconds-since-boot: every queued
+    /// frame was "due", the picture ran ahead of its audio by the reader's queue (+195 ms at the
+    /// device), paused-after-seek read "playing" and a full-range file was expanded as video range.
+    /// docs/BUGS.md, "NDI and HLS leave the renderer's clock installed after disconnect".
+    private let savedProviders = SavedDisplayProviders<MetalVideoRenderer>()
+
+    /// How far the picture runs behind the pull clock: the desktop audio lead while the Mac's
+    /// renderer plays the programme, zero while the DeckLink card owns audio
+    /// (`PullSourcePictureDelay`, docs/AUDIO_RESAMPLER_DESIGN.md §2.5). Written on main, read by
+    /// the renderer's clock on the display-link thread, so under its own lock and nothing else.
+    private var pictureDelaySeconds = 0.0
+    private let pictureDelayLock = UnfairLock()
+
+    /// DeckLink output is enabled AND owns the programme audio — the same decision the engine's
+    /// mute rule receives (`FrameEngine.setDeckLinkOwnsAudio`), from the same routing hook in
+    /// WindowDeck. Main thread.
+    private var deckLinkOwnsAudio = false
 
     /// Called on the main thread just before a stream becomes the active source, to retire whatever
     /// else was driving the display (a loaded file). Set once by ContentView — NDIService has no
@@ -479,9 +502,23 @@ final class NDIService: ObservableObject {
         // Range is a SEPARATE axis from colorimetry and NDI does not signal it: UYVY is video-range
         // by definition. Pin the shader to legal-range expansion rather than letting it read the
         // file transport's override (which describes a file that may not even be loaded).
+        // Save the file path's providers first. A no-op on a source SWITCH, which re-enters here
+        // still connected with NDI's own providers installed: saving those would make disconnect
+        // restore host time, the leak this closes.
+        savedProviders.save(from: renderer)
         renderer.isFullRangeProvider = { false }
-        renderer.clock = { Self.monotonicNow() }
+        // The picture runs `pictureDelay()` behind the pull clock, so a frame stamped `t` shows at
+        // `t + delay` — the same moment desktop audio stamped `t` is heard (§2.5). Zero while the
+        // card owns audio, which leaves SDI exactly as it was.
+        applyPictureDelay()
+        renderer.clock = { [weak self] in Self.monotonicNow() - (self?.pictureDelay() ?? 0) }
         renderer.isPausedProvider = { false }
+        #if DEBUG
+        resetFrameWait()
+        renderer.onFrameSelected = { [weak self] pts, skipped in
+            self?.noteFrameSelected(pts: pts, skipped: skipped)
+        }
+        #endif
 
         // Pull VIDEO on the display tick: FrameSync hands us the current frame on OUR clock.
         renderer.onDisplayTick = { [weak self] in self?.pullFrame() }
@@ -616,6 +653,16 @@ final class NDIService: ObservableObject {
         // behind it, the renderer would otherwise leave its final drawable frozen behind the empty
         // state. A file still playing repaints over the black on its next frame.
         renderer?.clearToBlack()
+        // Give the file path its clock, paused and range providers back, onto the renderer they
+        // came from. HERE AND NOT IN `tearDownReceiver`: that is also the source-switch path, which
+        // keeps NDI's providers installed for the receiver it is about to start.
+        savedProviders.restore()
+        // The queue bound is NDI's, sized for the picture delay; the file path runs on the default.
+        renderer?.maxQueuedOverride = nil
+        loggedPictureDelay = false
+        #if DEBUG
+        renderer?.onFrameSelected = nil
+        #endif
         // No picture, so no shape: the window must not stay locked to the departed source's aspect.
         // HERE AND NOT IN `tearDownReceiver`, deliberately — the source-SWITCH path goes through
         // that one, and clearing there would drop the window to the 16:9 fallback for the few
@@ -740,10 +787,15 @@ final class NDIService: ObservableObject {
     /// BEHIND the stamp axis, which makes a buffer stamped `t` due at `t + lead` and leaves the
     /// renderer exactly `lead` of audio in hand.
     ///
-    /// ⚠️ THIS IS A LIP-SYNC OFFSET AND IT IS NOT FREE: NDI video is stamped on the same clock and
-    /// presented at the next display tick, so desktop audio lands `lead` LATE against the picture.
-    /// SDI is unaffected — that path reads the tap keyed to video PTS and never consults this
-    /// timebase.
+    /// ⚠️ ON ITS OWN THIS IS A LIP-SYNC OFFSET, AND UNTIL 2026-09-28 IT WAS ONE. NDI video is
+    /// stamped on the same clock, and was presented at the next display tick, so desktop audio
+    /// landed `lead` LATE against the picture: +252…+262 ms at the device, 2026-09-28. The picture
+    /// now runs the same `lead` behind the pull clock while the desktop plays the programme
+    /// (`pictureDelay`, `PullSourcePictureDelay`), so the queue stays `lead` and the offset is zero
+    /// — §2.5, which on a pull source can only be met on the picture side: FrameSync hands out the
+    /// audio for NOW, so there is no earlier audio to start the axis with. SDI is unaffected either
+    /// way — that path reads the tap keyed to video PTS and never consults this timebase — and
+    /// while the card owns audio the picture is not held at all.
     ///
     /// 40 ms, CHOSEN FROM THE PUMP'S OWN MEASURED BEHAVIOUR rather than from feel: the pull period
     /// measured ~10.9 ms against a nominal 10 ms, and the `[NDI-AUDIO]` trace's per-push deviation
@@ -822,6 +874,55 @@ final class NDIService: ObservableObject {
     /// bottom so the first step reproduces today's behaviour exactly.
     private static let desktopAudioLeadLadder = [0.040, 0.150, 0.250, 0.300, 0.400, 0.600]
 
+    /// The routing hook: DeckLink output enabled AND the destination SDI. Called by WindowDeck
+    /// beside `FrameEngine.setDeckLinkOwnsAudio`, with the same value. Main thread.
+    ///
+    /// ⚠️ A CHANGE MID-SESSION MOVES THE PICTURE BY THE LEAD, ONCE: taking the card drops the delay
+    /// to zero (the queued frames become due and the picture skips ahead), giving it back holds the
+    /// last frame for the lead. Accepted 2026-09-28, against making SDI later whenever NDI plays.
+    func setDeckLinkOwnsAudio(_ owns: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard deckLinkOwnsAudio != owns else { return }
+        deckLinkOwnsAudio = owns
+        applyPictureDelay()
+    }
+
+    /// Read by the renderer's clock on the display-link thread.
+    private func pictureDelay() -> Double {
+        pictureDelayLock.lock(); defer { pictureDelayLock.unlock() }
+        return pictureDelaySeconds
+    }
+
+    /// Recompute the picture delay from the lead and the routing, and size the renderer's queue to
+    /// hold it. Main thread; called on connect, on a lead change and on a routing change.
+    private func applyPictureDelay() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        toneLock.lock()
+        let lead = desktopAudioLead
+        toneLock.unlock()
+        let delay = PullSourcePictureDelay.seconds(desktopAudioLead: lead,
+                                                   cardOwnsAudio: deckLinkOwnsAudio)
+        pictureDelayLock.lock()
+        let previous = pictureDelaySeconds
+        pictureDelaySeconds = delay
+        pictureDelayLock.unlock()
+        // Only while a receiver holds the display: disconnected, the renderer is the file's.
+        guard bridge != nil, let renderer else { return }
+        renderer.maxQueuedOverride = PullSourcePictureDelay.queueBound(delay: delay,
+                                                                      floor: renderer.defaultMaxQueued)
+        if previous != delay || !loggedPictureDelay {
+            loggedPictureDelay = true
+            NSLog("%@", String(format: "[NDI] picture held %.0f ms behind the pull clock (%@) · "
+                               + "desktop audio lead %.0f ms · renderer queue bound %d",
+                               delay * 1000,
+                               deckLinkOwnsAudio ? "DeckLink owns audio — SDI unchanged, not held"
+                                                 : "desktop plays the programme — A/V 0 by construction",
+                               lead * 1000, renderer.maxQueuedOverride ?? renderer.defaultMaxQueued))
+        }
+    }
+    /// So the first connect always states its delay, even when it equals the previous session's.
+    private var loggedPictureDelay = false
+
     /// Debug ▸ Desktop Audio Lead — cycle the ladder. Main thread.
     ///
     /// ⚠️ RE-ANCHORS RATHER THAN REQUIRING A RECONNECT. The lead is only ever expressed as the
@@ -844,6 +945,8 @@ final class NDIService: ObservableObject {
         rendererForceReport = true
         toneLock.unlock()
         audioLeadTitle = String(format: "Desktop Audio Lead: %.0f ms", next * 1000)
+        // The picture follows the lead at every rung, or the rung is an A/V offset again.
+        applyPictureDelay()
         NSLog("%@", String(format: "[NDI-AUDIO] desktop audio lead → %.0f ms (was %.0f ms) — "
                            + "re-anchoring the timebase on the next pull, no reconnect. For "
                            + "reference: SRT runs 250 ms and WHEP 400 ms through this same renderer, "
@@ -1944,8 +2047,8 @@ final class NDIService: ObservableObject {
             anchorCount = 1
             let pinned = liveAudioRatioPinned?() ?? false
             NSLog("%@", String(format: "[NDI-AUDIO] desktop timebase anchored %.0f ms behind the "
-                               + "pull clock — %@",
-                               lead * 1000,
+                               + "pull clock; picture held %.0f ms (A/V %+.0f ms by construction) — %@",
+                               lead * 1000, pictureDelay() * 1000, (lead - pictureDelay()) * 1000,
                                pinned
                                 ? String(format: "PINNED (step 3): 10 ms re-anchor armed, checked "
                                          + "every %.1f s", Self.desktopAudioCheckInterval)
@@ -2531,6 +2634,48 @@ final class NDIService: ObservableObject {
                 sampleBufferOut: &sampleBuffer) == noErr else { return nil }
         return sampleBuffer
     }
+
+    #if DEBUG
+    // ── FRAME WAIT: HOW LONG A PICTURE ACTUALLY SITS BETWEEN PULL AND DISPLAY ────────────────
+    //
+    // Measurement only. A frame is stamped `monotonicNow()` at pull and selected for display on the
+    // tick where the renderer's clock, `pull − pictureDelay`, reaches it — so the wait should read
+    // the picture delay plus at most one display refresh. Added 2026-09-28 because the picture delay
+    // removed ~215 ms of NDI's A/V offset where it should remove 250 (docs/BUGS.md, the NDI lead
+    // entry). Written on the display-link thread, reset on main, so under its own lock.
+    private let frameWaitLock = UnfairLock()
+    private var frameWaitsMs: [Double] = []
+    private var frameWaitSkipped = 0
+    private var frameWaitLastLog = 0.0
+
+    private func resetFrameWait() {
+        frameWaitLock.lock()
+        frameWaitsMs.removeAll(keepingCapacity: true)
+        frameWaitSkipped = 0
+        frameWaitLastLog = Self.monotonicNow()
+        frameWaitLock.unlock()
+    }
+
+    /// Display-link thread. One sorted array of ~24 values a second; nothing else.
+    private func noteFrameSelected(pts: Double, skipped: Int) {
+        let now = Self.monotonicNow()
+        frameWaitLock.lock()
+        frameWaitsMs.append((now - pts) * 1000)
+        frameWaitSkipped += skipped
+        guard now - frameWaitLastLog >= 1.0 else { frameWaitLock.unlock(); return }
+        let waits = frameWaitsMs.sorted()
+        let skippedTotal = frameWaitSkipped
+        frameWaitsMs.removeAll(keepingCapacity: true)
+        frameWaitSkipped = 0
+        frameWaitLastLog = now
+        frameWaitLock.unlock()
+        guard let lo = waits.first, let hi = waits.last else { return }
+        NSLog("%@", String(format: "[NDI-PICTURE] frame wait pull→selection ms: min %.1f med %.1f "
+                           + "max %.1f over %d frames · skipped unseen %d · intended %.0f ms + ≤1 refresh",
+                           lo, waits[waits.count / 2], hi, waits.count, skippedTotal,
+                           pictureDelay() * 1000))
+    }
+    #endif
 
     /// Once a second: prove frames are LIVE, not one frozen frame. A steady rate here is the
     /// difference between "NDI connected" and "NDI is actually streaming".

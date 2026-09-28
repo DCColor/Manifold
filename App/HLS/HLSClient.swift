@@ -56,6 +56,7 @@ import Combine
 import CoreMedia
 import CoreVideo
 import ManifoldCore
+import DisplayProviders
 import QuartzCore
 
 // MARK: - The retirable half
@@ -678,6 +679,12 @@ final class HLSClient: ObservableObject {
     /// The display path. Owned by `DeckRegistry`, which points it at the host deck's renderer.
     weak var renderer: MetalVideoRenderer?
 
+    /// The file path's clock, paused and range providers, taken at connect and put back at
+    /// disconnect — the same save/restore LiveDisplayRoute uses for SRT and WHEP, and NDI uses.
+    /// Until 2026-09-28 HLS restored nothing and left host time installed as the file's clock
+    /// (docs/BUGS.md, "NDI and HLS leave the renderer's clock installed after disconnect").
+    private let savedProviders = SavedDisplayProviders<MetalVideoRenderer>()
+
     /// The engine's shared PCM ring. Weak, and wired by `DeckRegistry` alongside NDI's and SRT's —
     /// the engine owns it. Nil means no host deck, which this transport treats as "video only"
     /// rather than as a failure: see `HLSPull.init`.
@@ -865,6 +872,10 @@ final class HLSClient: ObservableObject {
         // x420 is 10-bit VIDEO range by definition, so the shader expands legal range. Pinned here
         // rather than read from the file transport's override, which describes a file that may not
         // even be loaded.
+        // Save the file path's providers first. A no-op on a SWAP, which arrives here still
+        // connected with this client's own providers installed: saving those would make disconnect
+        // restore host time, the leak this closes.
+        savedProviders.save(from: renderer)
         renderer.isFullRangeProvider = { false }
         renderer.clock = { Self.monotonicNow() }
         renderer.isPausedProvider = { false }
@@ -1468,8 +1479,12 @@ final class HLSClient: ObservableObject {
         // connect that failed before a pull existed — can never leave `isConnected` stuck true.
         // Same ordering rule as WHEP's and SRT's.
         isConnected = false
-        guard pull != nil else { return }
+        // Give the file path its providers back on BOTH exits, after the pull hook is off, so a
+        // held save is always released. A no-op when nothing is held. Not in `retirePull`: that is
+        // also the swap path, which keeps this client's providers for the pull it starts next.
+        guard pull != nil else { savedProviders.restore(); return }
         retirePull()
+        savedProviders.restore()
         // Wipe the last streamed frame: with the source gone and (usually) no file behind it, the
         // renderer would otherwise leave its final drawable frozen behind the empty state.
         renderer?.clearToBlack()

@@ -246,6 +246,15 @@ final class MetalVideoRenderer {
     /// Nil for push sources (file playback), which are unaffected by this.
     var onDisplayTick: (() -> Void)?
 
+    #if DEBUG
+    /// Measurement only, DEBUG only (pre-ship review: docs/BUGS.md). Called on the CVDisplayLink
+    /// thread each time a queued frame is selected for display, with its PTS and how many older due
+    /// frames were discarded unseen on the same tick. NDI installs it to log how long its pictures
+    /// actually wait between pull and display — the quantity its picture delay is supposed to set.
+    /// Must not block. Nil otherwise.
+    var onFrameSelected: ((_ pts: Double, _ skipped: Int) -> Void)?
+    #endif
+
     /// One display tick's view of the frame queue, as the live control loop needs to see it.
     ///
     /// Every field is captured in ONE `queueLock` critical section (the same one that performs
@@ -406,7 +415,7 @@ final class MetalVideoRenderer {
     private var cachedFrameInterval: Double = 0
     /// Default queue bound (file/NDI path). Shallow on purpose — a file rides the synchronizer, not
     /// this buffer. A live source raises it via `maxQueuedOverride` for control-loop headroom.
-    private let defaultMaxQueued = 12   // bounded buffer
+    let defaultMaxQueued = 12   // bounded buffer; NDI sizes its picture-delay bound from it
     /// Live-path override for the queue bound. nil → `defaultMaxQueued`. Set on main by the live
     /// source's start() (e.g. 30) to give the LiveClock control loop room above the shallow file
     /// default; restored to nil on stop(). Evaluated inside `enqueue` under `queueLock`.
@@ -2298,6 +2307,9 @@ final class MetalVideoRenderer {
             // card preroll) for free, because the delay is what the pipeline IS, not something we model.
             renderPixelBuffer(pb, pts: chosenPts)
             tickPresentedFPS(chosenPts)
+            #if DEBUG
+            onFrameSelected?(chosenPts, dropCount)
+            #endif
             // A frame satisfied the strict gate — the post-seek one-shot is moot. Clear it
             // so a seek that resolves normally (incl. seek-and-play) never touches the
             // relaxed branch below.

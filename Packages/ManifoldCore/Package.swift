@@ -21,7 +21,8 @@ let package = Package(
         .library(name: "ManifoldCore", targets: ["ManifoldCore"]),
         // Linked by the APP target directly (project.yml), for App/WebRTC's bridge and
         // depacketizer. ManifoldCore does not use it.
-        .library(name: "RTCPWire", targets: ["RTCPWire"])
+        .library(name: "RTCPWire", targets: ["RTCPWire"]),
+        .library(name: "DisplayProviders", targets: ["DisplayProviders"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -119,6 +120,26 @@ let package = Package(
             name: "RTCPWireTests",
             dependencies: ["RTCPWire"],
             path: "Tests/RTCPWireTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The save/restore of a video renderer's file-path providers (clock, paused, range) around a
+        // live source's session. A leaf target so `swift test` can replay an NDI-shaped session: the
+        // renderer and the sources are app code. The app links it through the DisplayProviders
+        // product; nothing in this package does. docs/BUGS.md, "NDI and HLS leave the renderer's
+        // clock installed after disconnect".
+        .target(
+            name: "DisplayProviders",
+            path: "Sources/DisplayProviders",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "DisplayProvidersTests",
+            dependencies: ["DisplayProviders"],
+            path: "Tests/DisplayProvidersTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
