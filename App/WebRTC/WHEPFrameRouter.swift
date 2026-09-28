@@ -703,9 +703,10 @@ final class WHEPFrameRouter {
         clock.onMappingChange = { [weak self] mapping in
             self?.mirrorLiveAudio?(mapping, false)
         }
-        // ⚠️ AND THE HEARTBEAT, ON THE SAME SEAM. Publication stops entirely while the P-loop is
-        // saturated against its slew clamp; this fires at the control cadence regardless, so the
-        // audio timebase is evaluated whether or not the clock's rate happened to move.
+        // ⚠️ AND THE HEARTBEAT, ON THE SAME SEAM. Publication stops while the clock is settled or
+        // railed; this fires at the control cadence regardless. On WHEP it is what keeps the audio
+        // loop's target following the SR line's offset, and it runs the first-anchor gate's time
+        // fallbacks (re-derived at resampler step 7 — see `LiveClock.onMappingTick`).
         clock.onMappingTick = { [weak self] mapping in
             self?.mirrorLiveAudio?(mapping, true)
         }

@@ -697,6 +697,40 @@ lists no Force Video Jump items.
 
 ---
 
+## ☐ PRE-SHIP: remove the resampler's pinned back-out switch (step 3 behaviour on demand)
+
+**Status:** OPEN. It goes out with the other debug tools, after step 8. **Raised:** 2026-09-27, resampler
+step 7 (`AUDIO_RESAMPLER_DESIGN.md` §17). It pins the ratio at 1.0 and restores step 3's 10 ms
+position re-anchors, as a back-out if the loop misbehaves. Step 7 kept it by decision; after the
+step 8 soak it has no job.
+
+**What to remove:**
+- `App/ManifoldApp.swift`:
+  - the `MANIFOLD_PIN_RESAMPLER_RATIO` reader in `init`;
+  - `ResamplerRatioCommand` and its line in the Debug `CommandMenu`.
+- `FrameEngine.swift`:
+  - `ratioPinLock`, `ratioPinned`, `liveAudioRatioPinned`, `setLiveAudioRatioPinned` and
+    `liveAudioSessionPinsRatio`;
+  - `pinnedPositionBranchTolerance`;
+  - the pinned position branch in `mirrorLiveAudio` (`predicted`, `positionError`, the pinned half
+    of `shouldPush`, the posErr text on the stats line) and `mirror.pushedMedia` / `pushedHost`,
+    which only it reads;
+  - the mode choice in `beginLiveAudio`.
+- `LiveAudioResampleSteering`: `Mode.pinned` and its branches (the steering is then loop-only).
+- `App/NDI/NDIService.swift`:
+  - the pinned re-anchor in `serviceDesktopAudioAnchor` (everything after the pinned guard);
+  - `desktopAudioAnchorTolerance`, `desktopAudioCheckInterval`, `lastAnchorCheck`;
+  - the `liveAudioRatioPinned` and `liveAudioTimebase` seams, whose only reader is that re-anchor;
+  - their wiring in `App/WindowDeck.swift`.
+  - The first anchor and the Desktop Audio Lead re-anchor stay: they run in loop mode too.
+- `LiveAudioResampleSteeringTests.testPinnedModeNeverMovesTheRatioAndNeverFiresCoarse`.
+
+**Done means:** `grep -rn "Pinned\|pinned\|PIN_RESAMPLER\|desktopAudioAnchorTolerance" App
+Packages/ManifoldCore/Sources` returns only unrelated uses. The Debug menu has no Resampler Ratio
+item. `swift test` passes. A local SRT session still logs exactly one non-zero `setRate`.
+
+---
+
 ## ✅ DONE 2026-09-23 — MediaMTX is set up locally as the second WHIP/WHEP test server
 
 **Status:** ✅ **WHIP/WHEP built and verified end to end, 2026-09-23.** SRT is configured on the

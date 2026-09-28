@@ -2247,7 +2247,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.path = path
         mirror.smoothedRate = 1.0; mirror.haveSmoothed = false
         mirror.lastHost = 0; mirror.firstHost = 0
-        mirror.pushedRate = 1.0; mirror.pushedMedia = 0; mirror.pushedHost = 0
+        mirror.pushedMedia = 0; mirror.pushedHost = 0
         mirror.changes = 0; mirror.pushes = 0; mirror.ticks = 0; mirror.lastStatsHost = 0
         mirror.sessionHost = CACurrentMediaTime()
         mirror.firstMappingHost = nil; mirror.presentedHost = nil
@@ -2396,12 +2396,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var lastHost: Double = 0
         /// Host time of the first mapping, for the τ ramp. 0 until the first mapping lands.
         var firstHost: Double = 0
-        // What the synchronizer was last actually told.
-        var pushedRate: Double = 1.0
+        // Where the timebase was last anchored — always at rate 1.0 (step 3). Read only by the
+        // pinned back-out switch's position branch.
         var pushedMedia: Double = 0
         var pushedHost: Double = 0
-        // Counters — `changes` is mappings received, `pushes` is setRate calls issued. The ratio is
-        // the thing that was unmeasurable on the run that motivated this.
+        // Counters — `changes` is mappings received, `pushes` is timebase writes (the first anchor,
+        // and on the pinned switch its position branch).
         #if DEBUG || MANIFOLD_TELEMETRY
         /// The renderer probe for this session, reachable from the nonisolated rate-set sites.
         /// Guarded by this object's `lock` like everything else here.
@@ -2508,6 +2508,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// EMA time constant for the mirrored rate, in seconds.
     ///
+    /// ⚠️ SINCE RESAMPLER STEP 3 THIS EMA REACHES NOTHING BUT LOG LINES — the mirror's 10 s stats
+    /// line and the paired probe's comparison figure (§2.2 keeps it as that). Nothing pushes it as a
+    /// rate and nothing feeds it to the ratio. The derivations below, here and on the ramp
+    /// constants, are why it was chosen when it WAS the rate pushed to the renderer; they are kept
+    /// as the provenance of the logged figure, not as a live constraint on audio pitch.
+    ///
     /// ⚠️ CHOSEN FROM THE MEASURED SENDER CLOCK, NOT PICKED FOR FEEL. `[WHEP-DRIFT]` puts the real
     /// sender/receiver ratio at σ = 0.021%, |err| max 0.042% — a total spread of **1.1 cents**. The
     /// control loop meanwhile swings the full ±0.5% rail, **17.3 cents peak-to-peak**, at up to
@@ -2550,24 +2556,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// place well before the steady-state regime the constraint protects begins.
     private static let liveAudioRateRamp = 10.0
 
-    /// Push the rate only once it has moved this far from what the synchronizer was last told.
+    /// ⚠️ PART OF THE PINNED BACK-OUT SWITCH (Debug ▸ Resampler Ratio), AND NOTHING ELSE READS IT.
     ///
-    /// ⚠️ DORMANT SINCE RESAMPLER STEP 3 — NOTHING READS IT. The mirror's rate branch is disabled
-    /// (see `mirrorLiveAudio`): the synchronizer runs at exactly 1.0 for the whole session and the
-    /// resampler's ratio will carry the rate from step 4. Kept, with its derivation, until step 7
-    /// removes it with the rest of the dead gate (docs/AUDIO_RESAMPLER_DESIGN.md §7).
-    ///
-    /// 0.02% ≈ the sender ratio's own σ (0.0206%): below this we would be chasing measurement noise
-    /// rather than clock. As a STEP it is 0.35 cents, far under the ~5-cent pitch JND, so each push
-    /// is individually inaudible. And it bounds the position error the rate alone can accumulate:
-    /// at 0.02% residual, a full minute between pushes costs 12 ms — under a third of a frame.
-    private static let liveAudioRateThreshold = 0.0002
-
-    /// Push regardless of rate when the timebase would be this far from `LiveClock`'s position.
-    /// This is what makes a snap, a freeze-guard correction or the first anchor land IMMEDIATELY
-    /// and exactly — they arrive as a large position error, not as a rate change — and it is why
-    /// smoothing the rate does not weaken the anchor mirroring that removed the 190 ms drift.
-    private static let liveAudioPositionTolerance = 0.010
+    /// Step 3's position branch: with the ratio pinned at 1.0 nothing else corrects position, so a
+    /// pinned session re-anchors the timebase when the clock's line has moved this far from the
+    /// last push. The loop has no position branch at all (step 4d: the steering's coarse branch took
+    /// its job, on content time). Step 7 removed the product gate this value used to belong to
+    /// (`liveAudioPositionTolerance`, beside `liveAudioRateThreshold`, whose reader went at step 3);
+    /// the value lives on here only so the back-out switch still behaves exactly as step 3 did. It
+    /// goes with the switch in the pre-ship pass.
+    private nonisolated static let pinnedPositionBranchTolerance = 0.010
     private let mirror = LiveAudioMirrorState()
 
     #if DEBUG || MANIFOLD_TELEMETRY
@@ -2600,15 +2598,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
     #endif
 
-    /// Track `LiveClock`'s mapping so the audio timebase reads what `now()` reads, minus the
-    /// cushion. THIS REPLACED A ONE-SHOT ANCHOR, and the difference is the whole fix:
+    /// Hand `LiveClock`'s mapping, minus the cushion or the SR line, to the resampler's loop as its
+    /// target, and take the session's one timebase write at the first anchor.
     ///
-    ///   * `LiveClock` rewrites its mapping from SEVEN places (first anchor, target retarget, the
-    ///     unity-rate pin, the snap, the P-loop rate change, the freeze guard, the overflow
-    ///     re-anchor) and slews `rate` within ±0.5% continuously.
-    ///   * Video follows all of it for free because it reads `now()` per frame. A timebase pinned
-    ///     once at rate 1.0 follows none of it. Measured on two saved runs, that divergence reached
-    ///     **190 ms** within 3–4 minutes — about 4.5 frames at 24 fps.
+    /// ⚠️ SINCE RESAMPLER STEP 3 THIS NO LONGER MOVES THE TIMEBASE TO FOLLOW THE CLOCK. It used to:
+    /// `LiveClock` rewrites its mapping from seven places and slews `rate` within ±0.5%, a timebase
+    /// pinned once at 1.0 followed none of it (190 ms in 3–4 minutes), and re-anchoring on every
+    /// mapping was the fix — at one ~50 ms mute per write (§11.11). Now the timebase is written
+    /// once, and the audio follows the clock through the resampler's ratio and splices, steered per
+    /// buffer against the line this function supplies (`LiveAudioResampleSteering`).
     ///
     /// ⚠️ THE CUSHION GOES ON THE HOST ANCHOR, NOT THE MEDIA STAMPS. Video's anchor is pinned
     /// `startupDepth` into the future (`registerFrame`), and the loop then holds the buffer at
@@ -2628,12 +2626,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// identical for both. The flag exists so the stats line can keep reporting change→push, which
     /// is the ratio that diagnosed the dead band and would be destroyed by folding ticks into it.
     ///
-    /// ⚠️ AND THE HEARTBEAT IS LOAD-BEARING, NOT DIAGNOSTIC. Everything in this function — the EMA,
-    /// the position error, `shouldPush` — runs ONLY inside this call. Before the heartbeat, a clock
-    /// saturated against its slew clamp published nothing, so none of it ran, and the audio timebase
-    /// walked at ~5 ms/s with every counter here reading clean. See
-    /// `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`. Do not "optimise" the tick path away on the
-    /// grounds that the mapping has not changed: the mapping not changing is the failure mode.
+    /// ⚠️ THE HEARTBEAT IS STILL LOAD-BEARING, FOR A NARROWER REASON THAN IT WAS INSTALLED FOR. The
+    /// loop no longer depends on this function being called — it evaluates per audio buffer. What
+    /// does run only in here: WHEP's SR-line offset reaching the loop's target, and the first-anchor
+    /// gate's two time fallbacks (and, on the pinned back-out switch, step 3's position branch).
+    /// A settled or railed clock publishes nothing, so without the tick those stop. The full
+    /// re-derivation is at `LiveClock.onMappingTick`. Do not "optimise" the tick path away on the
+    /// grounds that the mapping has not changed.
     public nonisolated func mirrorLiveAudio(_ mapping: LiveClock.Mapping?, tick: Bool = false) {
         mirrorLiveAudio(mapping, origin: tick ? .heartbeat : .change)
     }
@@ -2776,18 +2775,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             synchronizer.rate = 0
             return
         }
-        // ── ANCHOR FAITHFULLY, RATE SLOWLY ────────────────────────────────────────────────
+        // ── THE TARGET LINE ───────────────────────────────────────────────────────────────
         //
-        // Position is mirrored exactly; only the RATE the synchronizer sees is smoothed. The two
-        // are separated by asking what our timebase would read right now given what we last pushed:
-        // a pure P-loop rate change leaves position continuous (LiveClock sets the new anchor to
-        // the old mapping evaluated at the same instant), so it shows up as ~zero position error
-        // and is allowed to be throttled. A snap, freeze-guard correction or first anchor shows up
-        // as a LARGE position error and is pushed immediately, unsmoothed.
-        //
-        // This is not a second mechanism beside the funnel — the funnel is still the only writer of
-        // the mapping. This is the consumer deciding what to forward, which is the only place the
-        // distinction between "the clock moved" and "the controller twitched" can be made.
+        // (This block used to be "anchor faithfully, rate slowly": position pushed exactly, the
+        // rate smoothed and throttled. Step 3 stopped the rate pushes and step 4d the position
+        // pushes; the loop now does both jobs on content time, and this only supplies its line.)
         // `cushion` = how far behind `senderPTS` the CALLER stamps its audio (see `beginLiveAudio`),
         // NOT the clock's buffer depth. This puts the timebase on the caller's PTS axis.
         //
@@ -2885,18 +2877,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // now the steering's coarse branch (§2.4: 250 ms level, 50 ms step, on content time), which
         // sees them as a moved line. It survives only behind the pinned (step 3) back-out switch.
         //
-        // With the rate pinned, `predicted` advances at exactly 1.0 from the last push, so on the
-        // pinned path `positionError` is the accumulated divergence of the clock's line from a
-        // unity line — step 3's quantity.
+        // Every timebase write is at rate 1.0 (step 3), so `predicted` advances at exactly 1.0 from
+        // the last push, and on the pinned path `positionError` is the accumulated divergence of
+        // the clock's line from a unity line — step 3's quantity.
         let pinned = steering?.mode == .pinned
-        let predicted = mirror.pushedMedia + (m.hostTime - mirror.pushedHost) * mirror.pushedRate
+        let predicted = mirror.pushedMedia + (m.hostTime - mirror.pushedHost)
         let positionError = wasMirrored ? abs(target - predicted) : .infinity
-        let tolerance = Self.liveAudioPositionTolerance
+        let tolerance = Self.pinnedPositionBranchTolerance
         let shouldPush = !wasMirrored || (pinned && positionError > tolerance)
-        let rateToPush = 1.0
         let smoothedNow = mirror.smoothedRate
         if shouldPush {
-            mirror.pushedRate = rateToPush
             mirror.pushedMedia = target
             mirror.pushedHost = m.hostTime
             mirror.pushes += 1
@@ -2916,10 +2906,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         //
         // ⚠️ `m.rate` FOR THE TARGET, `smoothedNow` ALONGSIDE IT, AND THE PAIR IS THE POINT.
         // `m.rate` is what the clock currently believes and is what §2.1's formula asks for.
-        // `smoothedNow` is what the mirror would actually PUSH, and it is what the resampler's
-        // ratio would have to produce — so it is what sizes `B`. The first smoke run showed why
-        // both are needed: the instantaneous rate swung ±3400 ppm across 80 s, which swamped a
-        // per-window fit of `err` and would have been read as a clock ratio.
+        // `smoothedNow` was what the mirror would PUSH, and the step-2 candidate for the ratio's
+        // feed-forward; since step 4 it reaches neither and is a logged comparison figure only
+        // (§2.2). The first smoke run showed why both were logged: the instantaneous rate swung
+        // ±3400 ppm across 80 s, which swamped a per-window fit of `err` and would have been read as
+        // a clock ratio.
         //
         // AFTER the unlock, not before: `noteReference` takes the probe's own lock, and nesting
         // it inside the mirror's would create a second lock order for no benefit. Before the
@@ -2964,7 +2955,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             NSLog("%@ timebase MIRRORED — first anchor: senderPTS=%.3fs host=%.3fs "
                 + "clockRate=%.5f → synchronizer rate %.1f for the session; %@ offset=%+.3f ms (%@), "
                 + "slope %+.2f ppm → timebase=%.3fs",
-                  tag, m.senderPTS, m.hostTime, m.rate, rateToPush,
+                  tag, m.senderPTS, m.hostTime, m.rate, 1.0,
                   pinned ? String(format: "PINNED (step 3): position branch at %.0f ms.",
                                   tolerance * 1000)
                          : "LOOP (step 4d): no position branch, coarse branch in the steering.",
@@ -3020,31 +3011,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Sets the audio timebase to `mediaTime` at `hostTime`, at rate 1.0, unconditionally. It is the
     /// sibling of `mirrorLiveAudio` for a caller that produces no `LiveClock.Mapping` — today, NDI.
     ///
-    /// ⚠️ WHY THIS EXISTS RATHER THAN A `public init` ON `LiveClock.Mapping`. That was the obvious
-    /// smaller change and it does not work. `mirrorLiveAudio`'s push gate is
-    ///
-    ///     predicted     = pushedMedia + (hostTime - pushedHost) * pushedRate
-    ///     positionError = abs(target - predicted)
-    ///
-    /// For a transport whose media timeline IS the host timeline at rate 1.0, an identity mapping
-    /// makes `predicted == target` BY CONSTRUCTION, forever. `positionError` is 0 at every call,
-    /// `rateMoved` is 0 because the rate never moves, so `shouldPush` is false for every mapping
-    /// after the first. Such a caller would anchor ONCE and never re-anchor — which is precisely the
-    /// unbounded drift the caller came here to fix. The mirror cannot serve a transport that does
-    /// not slew; that is a property of its gate, not an oversight.
+    /// ⚠️ WHY THIS EXISTS RATHER THAN A `public init` ON `LiveClock.Mapping`. NDI owns no LiveClock,
+    /// so it has no mapping to mirror. Its target is its own anchor line, `mediaNow − lead` on the
+    /// pull clock (docs/AUDIO_RESAMPLER_DESIGN.md §2.8): set here, and then held by the resampler's
+    /// loop, which evaluates it per buffer. (The original argument was about the mirror's rate/
+    /// position push gate, which could never have re-anchored a transport running at rate 1.0.
+    /// That gate is gone — step 7 — and on the loop nothing re-anchors at all.)
     ///
     /// ⚠️ AND IT WOULD HAVE BEEN A LIE ABOUT PROVENANCE. A `LiveClock.Mapping` fabricated by a
     /// transport that owns no `LiveClock` is a value of a type named after a clock that does not
     /// exist for it. The mapping type stays what it says it is.
     ///
-    /// ── WHY UNCONDITIONAL, WHEN THE MIRROR THROTTLES ─────────────────────────────────────────
+    /// ── WHY UNCONDITIONAL ───────────────────────────────────────────────────────────────────
     ///
-    /// The mirror throttles because it is fed by a control loop running at `controlHz` and most of
-    /// what that loop emits is twitch rather than clock. This is fed by a CALLER'S OWN CLOSED LOOP,
-    /// which has already decided a correction is warranted by measuring `currentSyncTime()` against
-    /// its own axis. Throttling a decision that was made from a measurement would just be second-
-    /// guessing it with less information. **The policy — how far is too far, how often to look —
-    /// belongs to the caller; the mechanism belongs here.**
+    /// Every call is a write, by the caller's decision: the first anchor, a Desktop Audio Lead change
+    /// (Debug ▸ Desktop Audio Lead, in either mode), and — only with the ratio pinned (the back-out
+    /// switch) — NDI's own 10 ms re-anchor. On the loop, with the lead left alone, NDI calls it once
+    /// per session and the resampler holds the line from there. **The
+    /// policy — how far is too far, how often to look — belongs to the caller; the mechanism
+    /// belongs here.** (It used to be contrasted with the mirror's throttled rate pushes; the mirror
+    /// pushes no rate since step 3.)
     ///
     /// ⚠️ NOTHING IN WHEP'S OR SRT'S PATH REACHES THIS. They mirror; `mirrorLiveAudio` is unchanged
     /// and does not call this. A transport uses one or the other, never both.
@@ -3068,7 +3054,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // Keep the mirror's own model in step even though nothing reads it on this path: if a
             // mapping ever did arrive for this session, it must not compute `predicted` from a
             // stale anchor that predates every direct push.
-            mirror.pushedRate = 1.0
             mirror.pushedMedia = mediaTime
             mirror.pushedHost = hostTime
             mirror.pushes += 1

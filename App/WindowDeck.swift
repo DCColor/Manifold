@@ -1339,18 +1339,16 @@ final class DeckRegistry {
         // WHEP and SRT wire `beginLiveAudio` / `mirrorLiveAudio` / `liveAudioDrift` / `endLiveAudio`.
         // NDI wires `beginLiveAudio` / **`anchorLiveAudio`** / `liveAudioTimebase` / `endLiveAudio`.
         //
-        // ⚠️ THE SUBSTITUTION IS THE WHOLE DESIGN AND IT IS NOT A SHORTCUT. `mirrorLiveAudio` takes
-        // a `LiveClock.Mapping`, and NDI owns no LiveClock — it stamps `CACurrentMediaTime()` at
-        // pull and runs at a true rate 1.0. Feeding the mirror an identity mapping would not work
-        // even if the type allowed it: the mirror's push gate computes `predicted` from what it last
-        // pushed, so an identity mapping yields `positionError == 0` forever and it would anchor
-        // once and never again. WHEP and SRT get their re-anchors incidentally, from LiveClock
-        // slewing rate for VIDEO depth; NDI has no slew and so needs the loop to be closed
-        // explicitly. `liveAudioTimebase` is the closing half — `currentSyncTime()` is the only
-        // reading in the system taken on the audio DEVICE's clock rather than on mach time.
+        // ⚠️ THE SUBSTITUTION IS NOT A SHORTCUT. `mirrorLiveAudio` takes a `LiveClock.Mapping`, and
+        // NDI owns no LiveClock — it stamps `CACurrentMediaTime()` at pull and runs at a true rate
+        // 1.0. So NDI anchors its own line (`mediaNow − lead`) through `anchorLiveAudio`, and the
+        // resampler's loop holds it on content time, exactly as it holds WHEP's and SRT's mirrored
+        // lines (AUDIO_RESAMPLER_DESIGN.md §2.8). `liveAudioTimebase` is read only by NDI's 10 ms
+        // re-anchor, which runs on the pinned back-out switch alone.
         //
-        // See `FrameEngine.anchorLiveAudio`, the slew-site note in `LiveClock.updateDepthLocked`,
-        // and docs/BUGS.md "NDI has no desktop playback path at all".
+        // (Until resampler step 4d this note explained why NDI needed its own closed loop while WHEP
+        // and SRT were re-anchored incidentally by LiveClock's slew. Since 4d every transport runs
+        // the same loop.) See `FrameEngine.anchorLiveAudio`.
         NDIService.shared.beginLiveAudio = { [weak engine] cushion in
             engine?.beginLiveAudio(cushion: cushion, path: .ndi, awaitsSenderReport: false)
         }

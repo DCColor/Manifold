@@ -67,6 +67,21 @@
 //  afresh. The figure is a bound on that window, not a measurement of it; the reads it discards are
 //  counted. A splice writes nothing and takes no settle window.
 //
+//  ── THE RAIL TRIPWIRE (step 7) ────────────────────────────────────────────────────────────────
+//
+//  The slew-site tripwires in `LiveClock` used to watch for the video slew pinned at unity, because
+//  that slew was audio's drift corrector. Since step 4d this ratio is, and what matters is ρ sitting
+//  at its own ±B rail: the target is then moving faster than the audio may follow, and lip-sync
+//  error grows (up to 3 ms/s against LiveClock's ±0.5% rail) until the rail releases or the 250 ms
+//  level trigger splices. Measured three times so far, 20–70 s at the rail each (§13.4, §15.3,
+//  §16.6). The loop is doing all it may, so this is a log, not an action:
+//
+//    * `⚠️ RATIO AT ITS RAIL` once |ρ−1| has been at B for `railDwellSeconds` (5 s) without a break;
+//    * `ratio OFF its rail` when it leaves, if the first was logged, with the time and peak |e|;
+//    * at most one ENTER line per `railRewarnSeconds` (60 s): an episode inside that is counted, not
+//      logged. So two lines per minute at most, and none for a touch shorter than 5 s.
+//  Episodes, suppressed episodes and seconds at the rail are on the session END line.
+//
 //  ── PINNED MODE — THE BACK-OUT SWITCH ─────────────────────────────────────────────────────────
 //
 //  `.pinned` is step 3, exactly: the ratio stays at 1.0, the controller is never stepped, and the
@@ -159,6 +174,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     public static let matchWindowSeconds = 1.5
     /// A drop may take at most the renderer queue less its fade and this margin — one late buffer.
     static let dropQueueMarginSeconds = 0.050
+    /// The rail tripwire (see the header): how long ρ must sit at ±B before it is logged, and the
+    /// shortest interval between two ENTER lines. 5 s is a quarter of the shortest measured field
+    /// episode, and long enough that ρ merely touching B on its way elsewhere does not log.
+    static let railDwellSeconds = 5.0
+    static let railRewarnSeconds = 60.0
 
     public let mode: Mode
     private let tag: String
@@ -197,6 +217,16 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var splicedSeconds = 0.0
     private var spliceFallbacks = 0
     private var unmatched = 0
+
+    // The rail tripwire, session-long.
+    private var railSince: Double?
+    private var railCounted = false         // this episode reached the dwell and was counted
+    private var railLogged = false          // …and its ENTER line was logged
+    private var railPeakAbsError = 0.0
+    private var lastRailLogHost = -Double.infinity
+    private var railEpisodes = 0            // episodes that reached the dwell
+    private var railSuppressed = 0          // of those, not logged because of the rewarn interval
+    private var railSeconds = 0.0           // time at the rail, all episodes, closed ones only
 
     /// Content-moving events reported by the callers, newest last. A splice consumes the one it
     /// matches, so one event cannot account for two splices.
@@ -402,6 +432,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         }
         rhoMin = min(rhoMin, state.rho); rhoMax = max(rhoMax, state.rho)
         maxAbsRhoMinusOne = max(maxAbsRhoMinusOne, abs(state.rho - 1))
+        let railLine = mode == .loop ? railTripwireLocked(host: t1, error: e) : nil
 
         var filteredAtEvent = 0.0
         if let c = coarse {
@@ -416,6 +447,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         lock.unlock()
 
         if let r = newRho { clock.rho = r }
+        if let railLine { emit(railLine) }
         if let (trigger, e, target) = coarse {
             let depth = enqueuedFrontier.flatMap { $0.isFinite ? $0 - timebase : nil }
             coarseAction(trigger: trigger, error: e, filtered: filteredAtEvent, target: target,
@@ -510,6 +542,50 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         }
     }
 
+    /// The rail tripwire's state machine, per accepted read (see the header). Returns the line to
+    /// log, formatted off the lock by `emit`, or nil. Loop mode only.
+    private func railTripwireLocked(host t: Double, error e: Double) -> (() -> String)? {
+        let atRail = abs(state.rho - 1) >= gains.bound * (1 - 1e-9)
+        guard atRail else {
+            guard let since = railSince else { return nil }
+            let duration = t - since
+            railSeconds += duration
+            railSince = nil
+            defer { railCounted = false; railLogged = false }
+            guard railLogged else { return nil }
+            let tag = self.tag, peak = railPeakAbsError, i = state.integral
+            return {
+                String(format: "%@ ratio OFF its rail after %.1f s — peak |e| %.1f ms while on it, "
+                       + "e %+.1f ms now · i %+.2f ppm", tag, duration, peak * 1000, e * 1000,
+                       i * 1e6)
+            }
+        }
+        if railSince == nil { railSince = t; railPeakAbsError = 0 }
+        railPeakAbsError = max(railPeakAbsError, abs(e))
+        guard let since = railSince, t - since >= Self.railDwellSeconds, !railCounted else {
+            return nil
+        }
+        // Reached the dwell: count the episode once, and log it unless one was logged recently.
+        railCounted = true
+        railEpisodes += 1
+        guard t - lastRailLogHost >= Self.railRewarnSeconds else {
+            railSuppressed += 1        // counted, not logged — and so no OFF line either
+            return nil
+        }
+        railLogged = true
+        lastRailLogHost = t
+        let tag = self.tag, rho = state.rho, bound = gains.bound, ef = state.filteredError
+        let i = state.integral, level = thresholds.level, n = railEpisodes, dwell = t - since
+        return {
+            String(format: "%@ ⚠️ RATIO AT ITS RAIL — ρ−1 %+.0f ppm (B = ±%.0f ppm) for %.1f s: the "
+                   + "target is moving faster than the audio may follow, so lip-sync error grows "
+                   + "until it lets go. e %+.1f ms, e_f %+.1f ms, i %+.2f ppm (held) · the level "
+                   + "trigger splices at %.0f ms · rail episode #%d this session",
+                   tag, (rho - 1) * 1e6, bound * 1e6, dwell, e * 1000, ef * 1000, i * 1e6,
+                   level * 1000, n)
+        }
+    }
+
     /// Counters for the session, for the END line and for tests.
     public struct Totals: Sendable, Equatable {
         public var firstAnchors = 0
@@ -531,6 +607,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         public var integral = 0.0
         public var filteredError = 0.0
         public var maxAbsRhoMinusOne = 0.0
+        /// The rail tripwire: episodes that reached the 5 s dwell, how many of those were not
+        /// logged (inside the 60 s rewarn), and seconds at ±B over the session so far.
+        public var railEpisodes = 0
+        public var railSuppressed = 0
+        public var railSeconds = 0.0
     }
 
     public var totals: Totals {
@@ -550,11 +631,13 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             String(format: "%@ steering session END — mode %@ · timebase writes %d (first anchor %d + "
                    + "coarse %d [splice fallbacks] + re-anchor %d) · coarse events %d [level %d, step %d] · "
                    + "splices %d (drop %d, insert %d), %.1f ms spliced, unmatched %d · ρ−1 at end "
-                   + "%+.1f ppm, max |ρ−1| %.1f ppm · i %+.2f ppm",
+                   + "%+.1f ppm, max |ρ−1| %.1f ppm · i %+.2f ppm · ρ at its rail %.1f s, %d "
+                   + "episode(s) ≥ 5 s (%d not logged)",
                    tag, mode.rawValue, t.writes, t.firstAnchors, t.spliceFallbacks, t.reanchors,
                    t.coarseLevel + t.coarseStep, t.coarseLevel, t.coarseStep,
                    t.splices, t.spliceDrops, t.spliceInserts, t.splicedSeconds * 1000, t.unmatched,
-                   (t.rho - 1) * 1e6, t.maxAbsRhoMinusOne * 1e6, t.integral * 1e6)
+                   (t.rho - 1) * 1e6, t.maxAbsRhoMinusOne * 1e6, t.integral * 1e6,
+                   t.railSeconds, t.railEpisodes, t.railSuppressed)
         }
     }
 
@@ -568,6 +651,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         t.spliceDrops = spliceDrops; t.spliceInserts = spliceInserts
         t.splicedSeconds = splicedSeconds; t.spliceFallbacks = spliceFallbacks
         t.unmatched = unmatched
+        t.railEpisodes = railEpisodes; t.railSuppressed = railSuppressed
+        t.railSeconds = railSeconds + (railSince.map { max(0, lastEvaluationHost - $0) } ?? 0)
         return t
     }
 

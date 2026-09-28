@@ -1201,6 +1201,11 @@ Likewise the slew-site tripwires, which §5 records as having watched *"for the 
 not pinned at the rail"*: re-point them at the quantity that now matters, which is the resampler's
 ratio sitting at its own rail.
 
+✅ **DONE 2026-09-27 — §17.** The dead gate is gone, the heartbeat's reason is re-derived from the
+code, and the tripwire now watches ρ at ±B. One deviation, by decision: the 10 ms survives as
+`pinnedPositionBranchTolerance`, owned by the pinned back-out switch, which goes in the pre-ship pass
+(`BUGS.md`).
+
 ### Step 8 — soak and the full matrix
 
 30 minutes per transport, the full §6.3 criteria list, all three §6.1 preconditions verified per run.
@@ -2964,3 +2969,88 @@ samples (`adelay`, and `atrim` for a negative one). Both are in the §11.9 runbo
   step-5 differences (+0.7 / +0.3 ms) are measured.
 - **The splice's cost (§16.4)** is a design fact, not a defect. If snaps become frequent in the field,
   the 200 ms per event and the half-second of transient offset are what to weigh against them.
+
+## 17. Step 7 results — dead code out, the heartbeat re-derived, the tripwire re-pointed, 2026-09-27
+
+**No behaviour change on the loop.** `swift test` 77 of 77 (3 new). Profile and Release build; a
+clean Release build shows no new warnings.
+
+### 17.1 Removed
+
+| removed | where (pre-step-7 lines) | dead since |
+|---|---|---|
+| `liveAudioRateThreshold` (0.0002) | `FrameEngine.swift:2553–2564` | step 3: the rate branch was disabled; nothing read it |
+| `liveAudioPositionTolerance` (0.010) | `FrameEngine.swift:2566–2570` | step 4d: the loop has no position branch. Its only reader was the pinned back-out switch, so the value moved to `pinnedPositionBranchTolerance`, documented as part of that switch |
+| `mirror.pushedRate` | declared :2400; set :2250, :2899, :3071; read :2892 | step 3: 1.0 at every assignment |
+| `rateToPush` | :2896, and the first-anchor log :2967 | step 3: a constant 1.0 |
+
+- `predicted` is now `pushedMedia + (host − pushedHost)`, bit-identical to the old form (× 1.0 is
+  exact).
+- **Kept:**
+  - `smoothedRate` and its τ constants, as §2.2's logged comparison figure (the paired probe and the
+    mirror's stats line). Their docs now say they feed logs only.
+  - `pushedMedia` / `pushedHost`, which the pinned switch reads.
+- No debug tool was removed (the pinned switch, the PLI trigger, Force Video Jump, the probes, ⌃⌥U).
+
+### 17.2 The heartbeat's reason, re-derived from the code
+
+Written at `LiveClock.onMappingTick`, with pointers in both routers and in `mirrorLiveAudio`.
+- **The original reason is gone.** It was installed because the mirror did all its work only inside
+  a callback. Since step 4d the loop evaluates per audio buffer, against a line.
+- **The step 7 note's guess is gone too.** `smoothedRate` reaches only logs.
+- **What still runs only when the mirror is called:**
+  - **WHEP's SR-line offset reaching the loop's target.** This is the load-bearing one: a settled or
+    railed clock publishes nothing.
+  - The first-anchor gate's 5 s and 1.5 s fallbacks (§2.7).
+  - The pinned switch's position branch.
+  - Log cadence.
+- On SRT and NDI in loop mode, only the gate fallback and the logs depend on it.
+
+### 17.3 Comments that stated a dead reason, corrected
+
+- `mirrorLiveAudio`'s header ("the timebase reads what now() reads") and its "anchor faithfully, rate
+  slowly" block.
+- `anchorLiveAudio`'s two rationale paragraphs, argued from the removed gate.
+- The `smoothedNow` note ("what sizes B"), and the paired probe's "the rate the mirror would PUSH"
+  (two places).
+- NDI's "the one thing that is actually closed", and its tolerance note, which cited both removed
+  constants.
+- WindowDeck's NDI-substitution note.
+- The ⌃⌥U message ("the renderer's rate converges"; it has run at 1.0 since step 3).
+- LiveClock's `publication starved` message. It said "audio is covered", false while railed, and
+  "drifting free", false now.
+- LiveClock's `maxSlew`, `forceUnityRate` and slew-site notes (§17.4).
+
+### 17.4 The rail tripwire
+
+- **The comments:** the slew-site notes used to warn that pinning the video slew would leave WHEP and
+  SRT audio uncorrected. They now say the slew no longer corrects audio, and point at ρ at ±B.
+- **The runtime line**, in `LiveAudioResampleSteering`, loop mode:
+  - `⚠️ RATIO AT ITS RAIL`, once |ρ−1| has been at B for **5 s** without a break, with ρ−1, e, e_f,
+    i and the episode number;
+  - `ratio OFF its rail after N s`, with peak |e|, when it leaves — only if the ENTER line was logged.
+- **Rate limit:** at most **one ENTER line per 60 s**; an episode inside that is counted, not logged.
+  So two lines a minute at most, and none for a touch under 5 s.
+- **Totals:** the session END line adds seconds at the rail, episodes ≥ 5 s and how many were not
+  logged. The window line is unchanged, so `step4e2_analyse.py` still parses it.
+- 5 s is a quarter of the shortest field episode measured (§13.4, §15.3, §16.6: 20–70 s).
+
+⚠️ **Exercised by unit tests only so far.** Three tests: one episode gives one ENTER line (at 5.0 s)
+and one OFF line, with no action; a touch under 5 s and a drift inside B log nothing; the 60 s rewarn
+holds. No rail occurred in the live check, so the first field reading will be step 8's.
+
+### 17.5 Live check — local SRT, 2026-09-27
+
+The step 7 Profile build, one ~150 s session, Force Video Jump BACK then FORWARD.
+
+| | step 7 | step 5 (§16) |
+|---|---|---|
+| non-zero `setRate` rows / timebase writes | **1 / 1** | 1 / 1 |
+| splices | INSERT 9634 fr / 200.7 ms, DROP 9603 fr / 200.1 ms; both matched to their target-steps | the same shape |
+| unmatched / WARNING / fallback / abandoned | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| renderer queue at insert / drop | 318.5 / 521.8 ms | 317–322 / 518–525 ms |
+| stage holes / overlaps / breaks / clamps | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| heartbeat | ticking: 300 ticks and 1200 mapping changes by the last stats line, 15 stats lines | — |
+| rail tripwire | 0 lines, 0.0 s at the rail (none occurred); max \|ρ−1\| 178 ppm | — |
+
+Log: `~/Desktop/step7-srt.log`. The build is `.build-cc/step7-Profile`.

@@ -95,10 +95,10 @@ public final class LiveAudioPairedProbe: @unchecked Sendable {
     // any clock ratio: the smoke run produced -1886, -278, +83, +239 ppm with r² from 0.03 to
     // 0.70. Those numbers are real and they are not the quantity `B` has to cover.
     //
-    // §5.2 is explicit that the rail must NOT be absorbed and reaches the ratio only through the
-    // τ=30 s feed-forward. **The rate the resampler actually has to produce is therefore the
-    // SMOOTHED one**, which is what `mirrorLiveAudio` already computes and pushes. It is tracked
-    // here so the report can state both, and never pool them.
+    // At step 2 the design fed the ratio forward from the τ = 30 s SMOOTHED rate, so that was the
+    // rate the resampler would have to produce, and it is tracked here so the report states both
+    // and never pools them. ⚠️ Since step 4 there is no feed-forward (§2.2): `smoothedRate` reaches
+    // nothing but this report and the mirror's stats line. It stays as the comparison figure.
     private var smoothedRate = 1.0
     private var smoothedMin = Double.infinity
     private var smoothedMax = -Double.infinity
@@ -122,8 +122,8 @@ public final class LiveAudioPairedProbe: @unchecked Sendable {
 
     /// Push the reference line. Called from `mirrorLiveAudio` (10 Hz plus mapping changes) and
     /// from `anchorLiveAudio` (rarely). Cheap and non-blocking; never called from the audio thread.
-    /// - Parameter smoothed: the rate the mirror would PUSH — `mirror.smoothedRate` on a mirrored
-    ///   transport, and 1.0 on an anchored one (NDI never smooths; its timebase is set and left).
+    /// - Parameter smoothed: the logged comparison figure — `mirror.smoothedRate` on a mirrored
+    ///   transport (the rate the mirror USED to push, before step 3), and 1.0 on an anchored one.
     public func noteReference(media: Double, host: Double, rate: Double, smoothed: Double) {
         guard media.isFinite, host.isFinite, rate.isFinite, rate > 0 else { return }
         lock.lock()

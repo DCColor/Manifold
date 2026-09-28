@@ -858,13 +858,15 @@ final class NDIService: ObservableObject {
     /// How far the timebase may sit from where it should be before an absolute re-anchor is worth
     /// the discontinuity it costs.
     ///
-    /// 10 ms, WHICH IS THE NUMBER THIS CODEBASE ALREADY USES FOR EXACTLY THIS DECISION —
-    /// `FrameEngine.liveAudioPositionTolerance` is 0.010 and governs when the LiveClock mirror stops
-    /// smoothing and pushes position immediately. Adopting it means the two live-audio paths correct
-    /// at the same threshold rather than at two numbers nobody can compare. It also sits under the
-    /// ~12 ms that `liveAudioRateThreshold`'s own note already accepts as a tolerable standing error
-    /// ("a full minute between pushes costs 12 ms — under a third of a frame"), and under one frame
-    /// at every rate this app outputs (16.7 ms at 60p).
+    /// ⚠️ READ ONLY WITH THE RATIO PINNED (the step-3 back-out switch, Debug ▸ Resampler Ratio). On
+    /// the loop this re-anchor is retired (step 4d, `serviceDesktopAudioAnchor`); it goes with the
+    /// switch in the pre-ship pass.
+    ///
+    /// 10 ms, the same value as the mirror's pinned position branch
+    /// (`FrameEngine.pinnedPositionBranchTolerance`), so the two pinned paths correct at one
+    /// threshold. It is under one frame at every rate this app outputs (16.7 ms at 60p). (It was
+    /// first justified by two product constants, `liveAudioPositionTolerance` and
+    /// `liveAudioRateThreshold`; step 7 removed both.)
     ///
     /// ⚠️ THE CORRECTION RATE IS DELIBERATELY NOT A CONSTANT AND MUST NOT BECOME ONE. This is a
     /// tolerance on a MEASURED offset, so how often it trips is whatever this machine's two crystals
@@ -1892,13 +1894,12 @@ final class NDIService: ObservableObject {
     /// tolerance. Both readings are taken as close together as they can be, because the quantity
     /// being measured is the difference between the two clocks they each run on.
     ///
-    /// ⚠️ THIS IS THE ONE THING IN THE LIVE-AUDIO PATH THAT IS ACTUALLY CLOSED. `mirrorLiveAudio`'s
-    /// gate computes its `predicted` from what it last pushed plus host time — both mach-axis — so
-    /// it is blind to the audio device crystal by construction, and WHEP and SRT are corrected only
-    /// incidentally, by LiveClock's video-depth slew forcing absolute re-anchors. NDI has no slew,
-    /// so nothing would correct it. Reading `currentSyncTime()` is what closes it, and it is why
-    /// this is a loop rather than a one-shot anchor. See docs/BUGS.md, "NDI has no desktop playback
-    /// path at all", and the slew-site note in LiveClock.
+    /// ⚠️ SINCE RESAMPLER STEP 4d THIS IS NO LONGER NDI'S CORRECTOR; the resampler's loop is, on
+    /// content time, for every transport, and this re-anchor runs only on the pinned back-out
+    /// switch (see the guard below). It was written as the one closed loop in the live-audio path,
+    /// when WHEP and SRT were corrected only incidentally by LiveClock's slew forcing re-anchors;
+    /// that history is `AUDIO_RESAMPLER_DESIGN.md` §2.8 and docs/BUGS.md, "NDI has no desktop
+    /// playback path at all".
     ///
     /// ── ⚠️ A SAMPLE-COUNTED PTS AXIS DOES NOT MAKE THIS REDUNDANT. IT MAKES IT NECESSARY. ────
     ///

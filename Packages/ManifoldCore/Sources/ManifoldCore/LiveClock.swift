@@ -88,8 +88,10 @@ public final class LiveClock: @unchecked Sendable {
     /// Hard cap on rate deviation from 1.0. TIGHT — ±0.5% keeps `now()` in 0.995…1.005 so the
     /// correction is invisible on video. The loop can only recover senders within this ratio.
     ///
-    /// ⚠️ SETTING THIS TO 0 IS NOT "DISABLE THE VIDEO LOOP" — it also silently removes WHEP's and
-    /// SRT's only audio-drift correction. Read the slew-site note in `updateDepthLocked` first.
+    /// Since resampler step 4d this no longer carries audio-drift correction (the resampler's loop
+    /// does). ⚠️ What it still sets for audio: anything past the resampler's ±0.2% authority, held
+    /// for long, pins the ratio at its rail and lets lip-sync error grow — `[*-RESAMPLE] ⚠️ RATIO
+    /// AT ITS RAIL`. Read the slew-site note in `updateDepthLocked` first.
     public var maxSlew: Double = 0.005
 
     /// EMA weight on each incoming depth sample (0…1). Low-passes the per-tick span so the loop
@@ -375,10 +377,10 @@ public final class LiveClock: @unchecked Sendable {
     /// would otherwise chase). `private(set)` + the locked setter below keep read (in `updateDepth`,
     /// under `lock`) and write (cross-thread, from the App harness) consistently guarded. Default OFF.
     ///
-    /// ⚠️ DIAGNOSTIC-ONLY FOR A REASON BEYOND THE MEASUREMENT IT SERVES: while pinned, WHEP's and
-    /// SRT's desktop audio has NO drift correction at all (the slew is what supplies it — see the
-    /// note at the slew site in `updateDepthLocked`). Fine for a short depth reading, which is all
-    /// this is for. NOT a mechanism to promote to a shipping low-latency mode as it stands.
+    /// ⚠️ DIAGNOSTIC-ONLY. Until resampler step 4d, pinning this also removed WHEP's and SRT's only
+    /// audio-drift correction; it no longer does — the resampler's loop follows whatever line this
+    /// clock publishes (see the slew-site note in `updateDepthLocked`). With the loop off, video
+    /// depth is uncorrected, which is the point of the measurement and not a shipping mode.
     public private(set) var forceUnityRate = false
     /// Lock-clean cross-thread write for `forceUnityRate` — same `lock` `updateDepth` reads it under,
     /// so the pin is applied with no window of ambiguity near the steady-state depth measurement.
@@ -596,20 +598,31 @@ public final class LiveClock: @unchecked Sendable {
     /// it fires**: `senderPTS = now()`, `hostTime = t`, same `rate`. Same thread contract as
     /// `onMappingChange` — called OUTSIDE `lock`, from whichever thread drained it, must not block.
     ///
-    /// ⚠️ WHY THIS EXISTS, AND WHY IT IS NOT A LOOSENING OF THE PUBLICATION GATE. The gate above is
-    /// correct and is deliberately untouched: it exists so a SETTLED rate does not churn the anchor
-    /// at 10 Hz, and churning the anchor is a real defect (it was audible pitch wobble). But the
-    /// consumer's job is not "react to rate changes" — it is "keep a SEPARATE timebase, running at a
-    /// DELIBERATELY DIFFERENT rate, from walking away from this one". `FrameEngine.mirrorLiveAudio`
-    /// smooths the rate it mirrors with a 30 s EMA precisely so it does NOT follow the P-loop's
-    /// ±0.5% depth correction — so the two rates differ BY DESIGN, so a position error accrues BY
-    /// DESIGN, and correcting it cannot be conditional on the clock's rate happening to move.
+    /// ── WHAT IT IS FOR NOW — RE-DERIVED AT RESAMPLER STEP 7 (docs/AUDIO_RESAMPLER_DESIGN.md §7) ──
     ///
-    /// The failure that produced this: while the P-loop is saturated against its slew clamp, every
-    /// recompute yields a bit-identical `Double`, `newRate != rate` is deterministically false, and
-    /// publication stops for as long as saturation lasts. The audio timebase was then left running
-    /// at its own rate with nothing watching, walking at ~5 ms/s until a coarse re-anchor yanked it
-    /// back in one audible step. Full derivation: `docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`.
+    /// It was installed (`167f7fe`) because the audio mirror did all of its work — the rate EMA,
+    /// the position error, the push decision — ONLY inside a mapping callback, and a clock
+    /// saturated against its slew clamp published nothing, so the audio timebase walked at ~5 ms/s
+    /// unwatched (`docs/LIVECLOCK_AUDIO_MIRROR_FINDINGS.md`). **That reason is gone.** Since
+    /// resampler step 4d the audio loop evaluates per audio buffer, 47–100 Hz, whether or not
+    /// this clock publishes, and it evaluates the target LINE, so a stale anchor point on an
+    /// unchanged line costs nothing. The step-4 guess that the heartbeat's job had become feeding
+    /// `smoothedRate` is gone too: that EMA reaches only log lines.
+    ///
+    /// What `FrameEngine.mirrorLiveAudio` still does only when it is called, and so still needs a
+    /// steady cadence for:
+    ///   * **WHEP's target follows the SR line.** `offset(senderPTS)` from `SenderReportLineFit` is
+    ///     read at each evaluation and handed to the loop as the target. A clock that is settled or
+    ///     railed publishes nothing, and without the tick the target would stop taking the SR line's
+    ///     re-levelling (one pair per second). This is the load-bearing one.
+    ///   * **The first-anchor gate's two fallbacks** (§2.7): no presentation within 5 s of the first
+    ///     mapping, no SR pair within 1.5 s of the presentation. Both are time checks made only at
+    ///     an evaluation; without the tick a quiet clock could hold the audio silent past them.
+    ///   * **The pinned back-out switch's 10 ms position branch** (debug only): step 3's corrector,
+    ///     evaluated only here — the original reason, alive only behind that switch.
+    ///   * Log cadence: the `smoothedRate` comparison figure, the paired probe's reference, and the
+    ///     mirror's 10 s stats line.
+    /// On SRT and NDI in loop mode only the gate fallback and the logs depend on it.
     ///
     /// ⚠️ THE TICK AND THE CHANGE DESCRIBE THE SAME TIMEBASE — that is what makes this safe. A
     /// mapping is a LINE: `(senderPTS, hostTime)` is one point on it and `rate` is its slope. The
@@ -773,9 +786,10 @@ public final class LiveClock: @unchecked Sendable {
         let err: Double
         let railed: Bool
         /// Whether anyone actually installed `onMappingTick`. The line says what the consequence IS,
-        /// and it cannot know that without asking — a tripwire that assures the reader audio is
-        /// covered when nothing is covering it would be the fourth instrument reading healthy while
-        /// something is wrong, which is the thing this was added to stop.
+        /// and it cannot know that without asking — a tripwire that reassures the reader when
+        /// nothing is covering the gap would be the fourth instrument reading healthy while
+        /// something is wrong, which is the thing this was added to stop. (Its wording was
+        /// re-derived at resampler step 7, with the heartbeat's job; see `onMappingTick`.)
         let heartbeatInstalled: Bool
     }
 
@@ -1297,47 +1311,28 @@ public final class LiveClock: @unchecked Sendable {
         #endif
 
         // ══════════════════════════════════════════════════════════════════════════════════
-        // ⚠️ THE SLEW IS LOAD-BEARING FOR **AUDIO DRIFT CORRECTION**, NOT ONLY FOR VIDEO DEPTH.
-        // ⚠️ DO NOT PIN `rate` AT UNITY WITHOUT READING THIS. IT LOOKS FREE. IT IS NOT.
+        // ⚠️ THIS SLEW USED TO BE AUDIO'S ONLY DRIFT CORRECTOR. SINCE RESAMPLER STEP 4d IT IS NOT.
         // ══════════════════════════════════════════════════════════════════════════════════
         //
-        // Everything below reads as a VIDEO control loop, and that is all it was written to be.
-        // It is also, entirely by accident, the only thing keeping WHEP's and SRT's DESKTOP AUDIO
-        // from drifting out of lip-sync over a long session. The chain is not visible from here,
-        // which is exactly why this comment is here and not only in the docs:
+        // Until resampler step 3, every mapping the slew published became a
+        // `setRate(_:time:atHostTime:)` on the audio synchronizer — an absolute re-anchor that wiped
+        // the device-crystal drift nothing else could see. Nobody designed that corrector; it fell
+        // out of the video loop, and this note warned that pinning the rate at unity would silently
+        // leave WHEP and SRT audio unbounded. Its tripwires watched for the slew pinned at UNITY.
         //
-        //   * `FrameEngine.mirrorLiveAudio` forwards every mapping change to the audio
-        //     synchronizer as `setRate(_:time:atHostTime:)`, which is an ABSOLUTE re-anchor: it
-        //     restates "media time T at host time H" and so WIPES whatever error had accumulated.
-        //   * The synchronizer's timebase is driven by the AUDIO DEVICE's clock, not by mach time
-        //     (`AVSampleBufferRenderSynchronizer.h`: "this timebase will be driven by the clock of
-        //     an added AVSampleBufferAudioRenderer"; `FrameEngine` adds one unconditionally at
-        //     init). The PTS fed to it are on the mach axis. Two crystals — they diverge, measured
-        //     at −7.8 ppm on one machine (≈28 ms/hour), and that figure is a property of the
-        //     output device, not a constant.
-        //   * `mirrorLiveAudio`'s push gate is OPEN-LOOP — its `predicted` comes from what it last
-        //     pushed plus host time, never from `synchronizer.currentTime()` — so it CANNOT SEE
-        //     that divergence. Nothing in the audio path detects it. Nothing corrects it.
+        // That is no longer how audio works. The timebase is written once per session; the
+        // resampler's loop (`LiveAudioResampleSteering`) measures the content being heard against
+        // this clock's line, per audio buffer, and corrects through its ratio within ±B (0.2%), with
+        // splices for jumps. Pinning this rate at unity, `maxSlew = 0`, or an early return now
+        // changes VIDEO depth only; audio follows whatever line this clock publishes.
         //
-        // What actually corrects it is the line below moving `rate`. Each move publishes a mapping,
-        // which becomes a `setRate(atHostTime:)`, which re-anchors, which wipes the drift. **Nobody
-        // designed a drift corrector; one fell out of the video path.** WHEP and SRT are bounded by
-        // ACCIDENT.
-        //
-        // ⚠️ SO IF THE SLEW EVER STOPS — pinned at unity for a low-latency mode, `maxSlew` set to 0,
-        // an early return because "depth is stable, stop correcting" — WHEP AND SRT SILENTLY BECOME
-        // UNBOUNDED TOO. The failure is the worst shape available: slow lip-sync drift over a long
-        // session, with EVERY COUNTER READING CLEAN, because every counter in the audio path is
-        // measured on the mach axis and the mach axis is not where the error lives.
-        //
-        // This is not hypothetical — it is the state NDI is in TODAY, and it is the reason NDI has
-        // no desktop audio path. NDI genuinely runs at rate 1.0, so its mapping never changes, so
-        // it would anchor once and integrate the crystal offset forever. Full reasoning, the source
-        // citations, and what a REAL corrector would have to look like: docs/BUGS.md, "NDI has no
-        // desktop playback path at all".
-        //
-        // Pinning the rate is therefore a change to the AUDIO contract as well as the video one. If
-        // you pin it, WHEP and SRT need a real closed-loop re-anchor first — the one NDI needs.
+        // ⚠️ WHAT TO WATCH INSTEAD: THE RESAMPLER'S RATIO AT ITS OWN ±B RAIL. This loop's ±0.5% is
+        // 2.5× the resampler's authority, so whenever this rate sits at a rail for long (a delivery
+        // shortfall, §13.4 / §15.3 / §16.6 of docs/AUDIO_RESAMPLER_DESIGN.md), the audio cannot keep
+        // up and lip-sync error grows at up to 3 ms/s until the rail releases or the 250 ms level
+        // trigger splices. The steering logs that as `[*-RESAMPLE] ⚠️ RATIO AT ITS RAIL` once ρ has
+        // sat at ±B for 5 s, and `ratio OFF its rail` when it leaves. The starvation tripwire below
+        // is the same event seen from this side.
         let depth = smoothedDepth ?? spanSeconds
 
         // ── STARTUP FILL: CORRECT THE ANCHOR'S OFFSET BY POSITION, NOT BY RATE ────────────────
@@ -1706,10 +1701,12 @@ public final class LiveClock: @unchecked Sendable {
             starvation.silentFor, starvation.rate,
             starvation.railed ? " RAILED" : "", starvation.err,
             starvation.heartbeatInstalled
-                ? "the mirror is being fed by the heartbeat, so audio is covered; read this as a "
-                + "DEPTH signal, not an audio one."
-                : "AND NO onMappingTick CONSUMER IS INSTALLED, so nothing is mirroring this clock "
-                + "— any audio timebase driven from it is drifting free.").utf8))
+                ? "the heartbeat keeps the audio loop's target current. A DEPTH signal first; if "
+                + "RAILED, the resampler can follow only ±0.2% of it — see [*-RESAMPLE] RATIO AT "
+                + "ITS RAIL."
+                : "AND NO onMappingTick CONSUMER IS INSTALLED, so an SR-line offset or a "
+                + "first-anchor gate fallback that depends on this clock is not being re-evaluated."
+                ).utf8))
         #endif
     }
 

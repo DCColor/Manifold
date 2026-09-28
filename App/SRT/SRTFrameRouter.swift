@@ -518,10 +518,12 @@ final class SRTFrameRouter {
         clock.onMappingChange = { [weak self] mapping in
             self?.mirrorLiveAudio?(mapping, false)
         }
-        // ⚠️ AND THE HEARTBEAT, INSTALLED ON THE SAME SEAM AND FOR THE SAME REASON. The publication
-        // above stops entirely while the P-loop is saturated against its slew clamp, which is when
-        // the audio timebase most needs telling; this one fires at the control cadence regardless.
-        // Same thread contract, same teardown ordering — see `deactivate`.
+        // ⚠️ AND THE HEARTBEAT, INSTALLED ON THE SAME SEAM. Publication stops while the clock is
+        // settled or railed; this fires at the control cadence regardless. On SRT's loop it runs the
+        // first-anchor gate's time fallback and the mirror's log cadence — the audio loop itself
+        // evaluates per buffer and does not need it (re-derived at resampler step 7 — see
+        // `LiveClock.onMappingTick`). Same thread contract, same teardown ordering — see
+        // `deactivate`.
         clock.onMappingTick = { [weak self] mapping in
             self?.mirrorLiveAudio?(mapping, true)
         }
@@ -1169,10 +1171,10 @@ final class SRTFrameRouter {
         clock.setForceUnityRate(on)
         NSLog("[SRT] ⌃⌥U: LiveClock control loop %@ for the RUNNING SRT session. %@",
               on ? "DISABLED — rate pinned to exactly 1.0" : "RE-ENABLED",
-              on ? "The audio mirror's smoothedRate is a 30 s EMA of this, so the renderer's rate "
-                 + "converges toward 1.0 over ~30-60 s rather than stepping there — watch "
-                 + "smoothedRate on the [SRT-AUDIO] mirror line come down."
-                 : "The mirror's rate will drift back up over the same ~30 s.")
+              on ? "Audio follows the pinned line through the resampler's loop; the renderer's rate "
+                 + "is 1.0 either way. smoothedRate on the [SRT-AUDIO] mirror line (a logged "
+                 + "30 s EMA of this rate) will come down to 1.0 over ~30-60 s."
+                 : "smoothedRate will drift back up over the same ~30 s.")
     }
     #endif
 

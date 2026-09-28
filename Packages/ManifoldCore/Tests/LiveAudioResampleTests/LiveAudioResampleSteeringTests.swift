@@ -396,6 +396,104 @@ final class LiveAudioResampleSteeringTests: XCTestCase {
         XCTAssertTrue(end.contains("timebase writes 1"), end)
     }
 
+    // MARK: - 3c. The rail tripwire (step 7)
+
+    final class Lines: @unchecked Sendable {
+        let lock = NSLock(); var all: [String] = []
+        func add(_ l: String) { lock.lock(); all.append(l); lock.unlock() }
+        var snapshot: [String] { lock.lock(); defer { lock.unlock() }; return all }
+        /// `emit` is asynchronous: wait for the END line, which `finish()` emits last.
+        func settle() {
+            let deadline = Date().addingTimeInterval(2)
+            while !snapshot.contains(where: { $0.contains("steering session END") }), Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+    }
+
+    func makeLogged(_ p: SimPlant, _ lines: Lines) -> S {
+        S(tag: "[TEST-STEER]", mode: .loop, clock: p, gains: .adopted, thresholds: .adopted,
+          reportsWindows: false, readTimebase: { p.timebase }, hostNow: { p.host },
+          write: { o, h, why in p.write(o, h, why) }, log: { lines.add($0) })
+    }
+
+    /// LiveClock railed at +0.5% for 40 s — past B = 0.2% — then back to 1.0. ρ reaches its rail,
+    /// sits there, and leaves once the error has been worked off. Exactly one ENTER line, 5 s after ρ
+    /// reached B, and one OFF line; no coarse event (the error stays under 250 ms); no write.
+    func testRailTripwireLogsOnceOnEnteringAndOnceOnLeaving() {
+        let p = SimPlant()
+        let lines = Lines()
+        let s = makeLogged(p, lines)
+        // Target: slope 1 to t = 10, 1.005 to t = 50, then slope 1 again (continuous in position).
+        let target: (Double) -> Double = { h in
+            10 + h + 0.005 * max(0, min(h, 50) - 10)
+        }
+        anchor(s, p, target: target(0), at: 0)
+        run(s, p, from: 0, to: 200, targetAt: target)
+        s.finish()
+        lines.settle()
+        let enter = lines.snapshot.filter { $0.contains("⚠️ RATIO AT ITS RAIL") }
+        let leave = lines.snapshot.filter { $0.contains("ratio OFF its rail") }
+        XCTAssertEqual(enter.count, 1, "one ENTER line for one episode")
+        XCTAssertEqual(leave.count, 1, "one OFF line for one logged episode")
+        XCTAssertTrue(enter.first?.contains("ρ−1 +2000 ppm (B = ±2000 ppm) for 5.0 s") ?? false,
+                      enter.first ?? "no ENTER line")
+        let t = s.totals
+        XCTAssertEqual(t.railEpisodes, 1); XCTAssertEqual(t.railSuppressed, 0)
+        // 40 s of rail plus the time to work the ~85 ms of accumulated error back down.
+        XCTAssertGreaterThan(t.railSeconds, 40); XCTAssertLessThan(t.railSeconds, 120)
+        XCTAssertEqual(t.coarseLevel + t.coarseStep, 0, "under 250 ms: no coarse event")
+        XCTAssertEqual(p.writes, [.firstAnchor], "a log, never an action")
+        print("[step 7] rail tripwire:", enter.first ?? "", "|", leave.first ?? "")
+    }
+
+    /// A touch under 5 s is not an episode; a drift inside B never reaches the rail at all.
+    func testRailTripwireIgnoresATouchAndADriftInsideB() {
+        for (label, slope, from, to) in [("inside B", 0.0015, 10.0, 200.0),
+                                          ("brief", 0.005, 10.0, 13.0)] {
+            let p = SimPlant()
+            let lines = Lines()
+            let s = makeLogged(p, lines)
+            let target: (Double) -> Double = { h in 10 + h + slope * max(0, min(h, to) - from) }
+            anchor(s, p, target: target(0), at: 0)
+            run(s, p, from: 0, to: 250, targetAt: target)
+            s.finish()
+            lines.settle()
+            XCTAssertEqual(lines.snapshot.filter { $0.contains("RAIL") || $0.contains("rail after") }.count,
+                           0, label)
+            XCTAssertEqual(s.totals.railEpisodes, 0, label)
+        }
+    }
+
+    /// Two episodes 30 s apart: both counted, only the first logged (60 s rewarn), and the second
+    /// gets no OFF line because its ENTER was not logged. A third, past 60 s, is logged again.
+    func testRailTripwireLogsAtMostOneEnterPerMinute() {
+        let p = SimPlant()
+        let lines = Lines()
+        let s = makeLogged(p, lines)
+        // Three 12 s bursts at +0.5% then −0.5% (so each is worked off quickly by the next), at
+        // t = 10, 40 and 130. Each drives ρ to a rail for well over 5 s.
+        func burst(_ h: Double, _ at: Double, _ sign: Double) -> Double {
+            sign * 0.005 * max(0, min(h, at + 12) - at)
+        }
+        let target: (Double) -> Double = { h in
+            10 + h + burst(h, 10, 1) + burst(h, 40, -1) + burst(h, 130, 1)
+        }
+        anchor(s, p, target: target(0), at: 0)
+        run(s, p, from: 0, to: 260, targetAt: target)
+        s.finish()
+        lines.settle()
+        let t = s.totals
+        let enter = lines.snapshot.filter { $0.contains("⚠️ RATIO AT ITS RAIL") }
+        let leave = lines.snapshot.filter { $0.contains("ratio OFF its rail") }
+        XCTAssertGreaterThanOrEqual(t.railEpisodes, 3)
+        XCTAssertGreaterThanOrEqual(t.railSuppressed, 1, "an episode inside 60 s of a logged one")
+        XCTAssertEqual(enter.count, t.railEpisodes - t.railSuppressed, "logged = counted − suppressed")
+        XCTAssertEqual(leave.count, enter.count, "an OFF line only for a logged ENTER")
+        XCTAssertLessThanOrEqual(enter.count, Int((260.0 / 60).rounded(.up)), "≤ 1 ENTER per minute")
+        XCTAssertEqual(p.writes, [.firstAnchor])
+    }
+
     // MARK: - 4. Pinned: step 3's behaviour
 
     func testPinnedModeNeverMovesTheRatioAndNeverFiresCoarse() {
