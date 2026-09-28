@@ -747,6 +747,31 @@ item. `swift test` passes. A local SRT session still logs exactly one non-zero `
 
 ---
 
+## ☐ OPEN 2026-09-28 — the NDI ~+22 ms residual: verify it is the sender with a non-OBS NDI sender
+
+**Status:** OPEN, provisional attribution. **Measured:** the resampler step 8 NDI soak, 2026-09-28 —
++21.3 / +22.9 ms grid-corrected (+1.3 / +2.9 ms as written) against a same-launch file control, with
+Manifold's own contribution ≈ 0: the picture hold measured lead + FrameSync depth to within one
+refresh (`[NDI-PICTURE]`), and the audio axis, steering and renderer were clean.
+
+**Provisional reading:** the sender's own audio-versus-video error — OBS with DistroAV. OBS's A/V is
+known to move across an output restart (`AV_SYNC_FINDINGS.md` §1.2b), and nothing in Manifold's
+path measured here accounts for 22 ms. Not proven: NDI has no container to probe.
+
+**To settle it:** the same protocol with a non-OBS NDI sender playing the flash-beep fixture — NDI
+Tools' Test Patterns or ffmpeg with NDI output, if either is available — and, if possible, two OBS
+output restarts to see whether the residual moves with them. A residual that stays at ~+22 ms on a
+different sender would be Manifold's, and reopens the picture-hold arithmetic.
+
+**Also found on this soak — SENDER DELIVERY GAPS AT THE DEVICE, NOT MANIFOLD:** 3 mutes (102, 68,
+10 ms) and 4 dropouts in 20 min of reference noise, each on a second where FrameSync's audio queue
+fell to 0–4 ms (normally ≥ 25 ms) while OBS reported 77 delayed frames. FrameSync pads silence when
+its queue is empty. Manifold's pump ran 87–89 pulls/s with normal sizes and its axis stayed
+contiguous. The same class appeared on the morning NDI run with NDI video dipping to 22 fps. Not a
+Manifold defect; a deeper FrameSync queue would only trade latency for it.
+
+---
+
 ## ☐ OPEN 2026-09-28 — NDI and HLS leave the renderer's clock installed after disconnect; a file played afterwards runs its picture ~195 ms ahead of its audio
 
 **Status:** ☐ **OPEN — fix written 2026-09-28 and VERIFIED FOR NDI the same day; HLS not yet
@@ -1919,8 +1944,32 @@ selection **250.2–262.4 ms, median 256.0**, 0 skipped — the design value (25
   OBS's own A/V is known to change across an output restart (`AV_SYNC_FINDINGS.md` §1.2b) and cannot
   be probed on NDI here.
 
-**Next:** compensate FrameSync's depth at pull (NDI SDK behaviour, not sender-specific), then the
-full 30-min NDI soak with the depth trace against the offset.
+**FrameSync compensation, written 2026-09-28 (uncommitted, not yet measured):** the picture is now
+held `lead + mean FrameSync audio depth` while the desktop plays the programme. The mean is
+`AudioQueueDepthEstimate` (DisplayProviders): time-weighted over a session's first second, then an
+EMA with τ 10 s, republished only when it moves ≥ 2 ms, clamped at 200 ms. It is fed once per pull on
+the pump and reaches the PICTURE only — never the pull size (the #NDI-AUDIO defect) or the audio
+stamps. Still zero while the card owns audio, so SDI is unchanged — and SDI therefore still carries
+the FrameSync term (its audio is read from the tap by the frame's PTS, and the tap's audio is
+`depth` old); pre-existing, not addressed here. The DEBUG `[NDI-AUDIO] pushes=` line now logs the
+per-second mean depth.
+
+**MEASURED 2026-09-28 — the 30-min NDI soak (resampler step 8), build `.build-cc/ndifix-Profile`:**
+NDI minus a same-launch file control (+24.3 ms): **+1.3 ms at +3 min, +2.9 ms at +26 min, as written
+— PASS (±20); start → end +1.6 ms — PASS (±10).** Grid-corrected +21.3 / +22.9 ms (the ~20 ms 23.976
+render-grid term removed): just outside ±20, and the same size as the ~22 ms sender term left
+unexplained above. FrameSync depth held 38.8–40.7 ms all session; the hold followed it in seven 2 ms
+steps (286.3 → 292.3 ms), and the frame wait read 290–303 ms throughout, 0 skipped.
+
+**✅ ACCEPTED 2026-09-28 (Robbie). NDI is recorded as +1.3 / +2.9 ms as written, +21.3 / +22.9 ms
+grid-corrected.** From here on criterion 12 is GATED ON THE GRID-CORRECTED FIGURE
+(`AUDIO_RESAMPLER_DESIGN.md` §6.3, §18). The ~+22 ms grid-corrected residual is **provisionally a
+sender term (OBS / DistroAV)**, not Manifold: Manifold's own contribution is measured at ≈ 0 (the
+hold equals lead + depth to within one refresh). It stays OPEN until verified with a non-OBS NDI
+sender — see "the NDI ~+22 ms residual" below. The soak's device-level mutes were sender delivery
+gaps, not Manifold: each landed on a second where FrameSync's audio queue ran to 0 (or 4 ms) while
+OBS reported 77 delayed frames of render lag; Manifold's pump, stage and renderer axis were clean
+throughout. **Remaining to close this entry: commit the FrameSync compensation.**
 
 **Before the fix — status was:** OPEN by decision, not by ignorance. Working exactly as designed.
 **Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.2. See also the ⚠️ CORRECTION added to the

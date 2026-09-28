@@ -182,6 +182,13 @@ final class NDIService: ObservableObject {
     /// the renderer's clock on the display-link thread, so under its own lock and nothing else.
     private var pictureDelaySeconds = 0.0
     private let pictureDelayLock = UnfairLock()
+    /// FrameSync's mean audio queue depth, the second term of the hold (`AudioQueueDepthEstimate`).
+    /// Written by the audio pump when the estimate publishes, read by `applyPictureDelay` on main;
+    /// under `pictureDelayLock`. Zero until the first second of a session has been averaged.
+    private var frameSyncDepthSeconds = 0.0
+    /// Pump-thread only. Reset on main in `start(with:)` before the pump exists, like the anchor state.
+    private var depthEstimate = AudioQueueDepthEstimate()
+    private var lastDepthPull = Double.nan
 
     /// DeckLink output is enabled AND owns the programme audio — the same decision the engine's
     /// mute rule receives (`FrameEngine.setDeckLinkOwnsAudio`), from the same routing hook in
@@ -535,6 +542,8 @@ final class NDIService: ObservableObject {
         // owns it exclusively once it is running.
         anchoredDesktopAudio = false
         anchorCount = 0
+        depthEstimate = AudioQueueDepthEstimate()
+        lastDepthPull = .nan
         audioFormatCache = nil
         audioAnchorTicks = nil; audioCumulativeFrames = 0
         audioAxisRate = 0; audioAxisChannels = 0
@@ -660,6 +669,8 @@ final class NDIService: ObservableObject {
         // The queue bound is NDI's, sized for the picture delay; the file path runs on the default.
         renderer?.maxQueuedOverride = nil
         loggedPictureDelay = false
+        // The next session measures its own FrameSync; until its first second, the hold is the lead.
+        pictureDelayLock.lock(); frameSyncDepthSeconds = 0; pictureDelayLock.unlock()
         #if DEBUG
         renderer?.onFrameSelected = nil
         #endif
@@ -887,6 +898,17 @@ final class NDIService: ObservableObject {
         applyPictureDelay()
     }
 
+    /// Audio pump thread, once per pull. When the slow mean of FrameSync's depth moves (the first
+    /// second of a session, then ≥ 2 ms), the picture hold follows on main.
+    private func noteFrameSyncDepth(samples: Int, sampleRate: Double, now: Double) {
+        defer { lastDepthPull = now }
+        guard sampleRate > 0, lastDepthPull.isFinite else { return }
+        guard let depth = depthEstimate.add(depthSeconds: Double(samples) / sampleRate,
+                                            interval: now - lastDepthPull) else { return }
+        pictureDelayLock.lock(); frameSyncDepthSeconds = depth; pictureDelayLock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.applyPictureDelay() }
+    }
+
     /// Read by the renderer's clock on the display-link thread.
     private func pictureDelay() -> Double {
         pictureDelayLock.lock(); defer { pictureDelayLock.unlock() }
@@ -900,7 +922,11 @@ final class NDIService: ObservableObject {
         toneLock.lock()
         let lead = desktopAudioLead
         toneLock.unlock()
+        pictureDelayLock.lock()
+        let depth = frameSyncDepthSeconds
+        pictureDelayLock.unlock()
         let delay = PullSourcePictureDelay.seconds(desktopAudioLead: lead,
+                                                   frameSyncAudioDepth: depth,
                                                    cardOwnsAudio: deckLinkOwnsAudio)
         pictureDelayLock.lock()
         let previous = pictureDelaySeconds
@@ -912,12 +938,14 @@ final class NDIService: ObservableObject {
                                                                       floor: renderer.defaultMaxQueued)
         if previous != delay || !loggedPictureDelay {
             loggedPictureDelay = true
-            NSLog("%@", String(format: "[NDI] picture held %.0f ms behind the pull clock (%@) · "
-                               + "desktop audio lead %.0f ms · renderer queue bound %d",
+            NSLog("%@", String(format: "[NDI] picture held %.1f ms behind the pull clock (%@) · "
+                               + "desktop audio lead %.0f ms + FrameSync audio depth %.1f ms · "
+                               + "renderer queue bound %d",
                                delay * 1000,
                                deckLinkOwnsAudio ? "DeckLink owns audio — SDI unchanged, not held"
                                                  : "desktop plays the programme — A/V 0 by construction",
-                               lead * 1000, renderer.maxQueuedOverride ?? renderer.defaultMaxQueued))
+                               lead * 1000, depth * 1000,
+                               renderer.maxQueuedOverride ?? renderer.defaultMaxQueued))
         }
     }
     /// So the first connect always states its delay, even when it equals the previous session's.
@@ -2047,8 +2075,9 @@ final class NDIService: ObservableObject {
             anchorCount = 1
             let pinned = liveAudioRatioPinned?() ?? false
             NSLog("%@", String(format: "[NDI-AUDIO] desktop timebase anchored %.0f ms behind the "
-                               + "pull clock; picture held %.0f ms (A/V %+.0f ms by construction) — %@",
-                               lead * 1000, pictureDelay() * 1000, (lead - pictureDelay()) * 1000,
+                               + "pull clock; picture held %.0f ms (the lead, plus FrameSync's audio "
+                               + "depth once its first second is averaged) — %@",
+                               lead * 1000, pictureDelay() * 1000,
                                pinned
                                 ? String(format: "PINNED (step 3): 10 ms re-anchor armed, checked "
                                          + "every %.1f s", Self.desktopAudioCheckInterval)
@@ -2143,6 +2172,11 @@ final class NDIService: ObservableObject {
                     // Stamped ONCE into a local so the trace below reports the value the ring
                     // actually received, not a second, later reading of the same clock.
                     let wallNow = Self.monotonicNow()
+                    // FrameSync's audio queue depth, read before this pull, into the slow mean that
+                    // holds the picture. Never into the pull size or these stamps (see
+                    // `PullSourcePictureDelay`).
+                    noteFrameSyncDepth(samples: Int(audio.queueDepthAtPull),
+                                       sampleRate: Double(audio.sampleRate), now: wallNow)
                     // ⚠️ NOT `wallNow` — THE PTS IS THE RUNNING SAMPLE COUNT. A per-pull clock read
                     // here is what made the desktop distort; see `audioPTS`. `wallNow` still pins
                     // that axis and still drives the timebase loop, and the tap gets the same
@@ -2342,6 +2376,7 @@ final class NDIService: ObservableObject {
         private var deltaMin = Double.infinity, deltaMax = -Double.infinity
         private var framesMin = Int.max, framesMax = 0
         private var depthMin = Int.max, depthMax = 0
+        private var depthSum = 0, depthCount = 0
         /// Sender-clock rate accumulated over the window, so the aggregate line reports the ratio
         /// over a second rather than one jittery pull's worth of it.
         private var windowSenderSeconds = 0.0
@@ -2434,6 +2469,7 @@ final class NDIService: ObservableObject {
             if delta.isFinite { deltaMin = min(deltaMin, delta); deltaMax = max(deltaMax, delta) }
             framesMin = min(framesMin, frames); framesMax = max(framesMax, frames)
             depthMin = min(depthMin, queueDepth); depthMax = max(depthMax, queueDepth)
+            depthSum += queueDepth; depthCount += 1
 
             if pushes <= Self.burst {
                 print(String(format:
@@ -2463,17 +2499,19 @@ final class NDIService: ObservableObject {
             }
             print(String(format:
                 "[NDI-AUDIO] pushes=%d (+%d in %.2fs) · n=[%d..%d]f · \u{0394}=[%.2f..%.2f]ms · "
-                + "cum=%.1fHz over %.1fs · sndR=%@ · depth=[%d..%d]f · dev=[%+.2f..%+.2f]ms · "
-                + "re-anchors=+%d (total %d)",
+                + "cum=%.1fHz over %.1fs · sndR=%@ · depth=[%d..%d]f mean %.0ff · "
+                + "dev=[%+.2f..%+.2f]ms · re-anchors=+%d (total %d)",
                 pushes, windowPushes, pts - windowStartPTS, framesMin, framesMax,
                 deltaMin * 1000.0, deltaMax * 1000.0, cumulative, elapsed, sndR,
                 depthMin == .max ? 0 : depthMin, depthMax,
+                depthCount > 0 ? Double(depthSum) / Double(depthCount) : 0,
                 devMin * 1000.0, devMax * 1000.0, windowReanchors, reanchors))
             windowStartPTS = pts; windowPushes = 0; windowReanchors = 0
             devMin = .infinity; devMax = -.infinity
             deltaMin = .infinity; deltaMax = -.infinity
             framesMin = .max; framesMax = 0
             depthMin = .max; depthMax = 0
+            depthSum = 0; depthCount = 0
             windowSenderSeconds = 0; windowSenderFrames = 0; windowSenderDropped = 0
         }
     }

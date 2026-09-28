@@ -1029,6 +1029,12 @@ analyser passes an injected-offset gate at **0 / +250 / −120 ms → −0.0 / +
 | **frame rate** | **23.976 throughout** — see §1.4 of the findings; 30 fps is a different experiment and cannot be compared with §11's baselines |
 | **gates** | beep count vs duration, 1.000 Hz grid fit, one burst per beep, digital silence between beeps — all four, every run |
 
+📌 **FROM 2026-09-28 THE ±20 ms IS GATED ON THE GRID-CORRECTED FIGURE** (decided by Robbie, §18.3).
+The 25p fixture rendered by a 23.976 sender reaches the stream up to one frame late, uniformly, so a
+live capture averaged over whole 41.7 s grid periods reads **20.0 ms** more audio-early than the
+file control (the mean delay of a caught 40 ms flash). "As written" includes that sender artefact;
+grid-corrected (whole-period mean + 20.0 ms) does not. Both are reported; the corrected one gates.
+
 ⚠️ **THE PRE-RESAMPLER BASELINE FOR THIS CRITERION IS ALREADY MEASURED AND IT IS NOT ZERO**
 (`AV_SYNC_FINDINGS.md` §2): local SRT **+203.9 ms**, Cloudflare SRT **+165.8 ms**, NDI
 **+230.1 ms**, WHEP **−98.9 / +36.7 ms** on two sessions. So this criterion is not "did the
@@ -1210,6 +1216,9 @@ code, and the tripwire now watches ρ at ±B. One deviation, by decision: the 10
 
 30 minutes per transport, the full §6.3 criteria list, all three §6.1 preconditions verified per run.
 Then a multi-hour run on one transport for the drift bound.
+
+**IN PROGRESS — §18.** NDI accepted 2026-09-28, after two NDI fixes the run itself found. Local SRT,
+MediaMTX WHEP, HLS, Cloudflare WHEP, Cloudflare SRT and the overnight run are to follow.
 
 ---
 
@@ -3054,3 +3063,70 @@ The step 7 Profile build, one ~150 s session, Force Video Jump BACK then FORWARD
 | rail tripwire | 0 lines, 0.0 s at the rail (none occurred); max \|ρ−1\| 178 ppm | — |
 
 Log: `~/Desktop/step7-srt.log`. The build is `.build-cc/step7-Profile`.
+
+## 18. Step 8 results — the soak and the full matrix, from 2026-09-28
+
+Plan and order as approved on 2026-09-28: NDI first, then local SRT, MediaMTX WHEP (+ a 5-min HLS log
+check), Cloudflare WHEP, Cloudflare SRT, and an overnight MediaMTX run with DeckLink on. Each run: a
+same-launch file control, flash-beep captures at +3 and +26 min (recorder at 60 fps, sender 23.976),
+and 20 min of reference noise at the device from +5:30 (Audio Hijack) for mutes and pitch.
+
+### 18.1 The instrument, and what it found before any transport was judged
+
+- **Test sources are pinned:** `~/Desktop/Manifold-Test-Sources/` holds copies (same SHA-256) of the
+  flash-beep fixture and `ref-1200s.wav`, with a README. The fixture is unchanged since 2026-09-23
+  14:01, so every control since then played the same bytes.
+- **Grid correction (§6.3):** mean over the largest whole number of 41.7 s grid periods, + 20.0 ms.
+  The flash timing is a staircase quantised by the 60 Hz display, not a smooth sawtooth; a free-slope
+  fit does not model it and was dropped.
+- **A file control has a few ms of loop-to-loop spread** (each loop of the 60 s fixture lands its 25p
+  frames at a new phase against the display), so a control is the mean over its loops.
+- **⚠️ The first NDI run's control read +218 ms and was VOID.** A/B/C controls: pre-resampler build
+  fresh launch +27.0, step 8 build fresh launch +24.2, step 8 build after 60 s of NDI **+219.4**. So no
+  regression across steps 3–7, and a pre-existing leak: NDI (and HLS, by reading) left the renderer's
+  clock set to host time after disconnect, running the next file's picture ~195 ms ahead. Fixed
+  2026-09-28, verified for NDI twice (+0.7, +2.7 ms between controls). docs/BUGS.md, "NDI and HLS
+  leave the renderer's clock installed after disconnect".
+- **Every file control must still come first in a fresh launch** until HLS is verified.
+
+### 18.2 NDI — the two fixes the run required
+
+1. **The 250 ms desktop audio lead was the lip-sync error** (§2.5; +252…+262 ms against a valid
+   control). §2.5's "start the axis early" cannot be met on the audio side of a pull source —
+   FrameSync hands out audio for NOW — so the PICTURE is held by the lead instead, while the desktop
+   plays the programme. Zero while DeckLink owns audio, so SDI is unchanged. Measured hold: 250.2–262.4
+   ms pull → display, median 256.0, 0 skipped.
+2. **FrameSync's audio queue** (`framesync_audio_queue_depth`, 28–47 ms, different per connection)
+   makes every pulled sample that much older than its stamp. The picture is held by `lead + mean
+   depth` (`AudioQueueDepthEstimate`: 1 s warm-up, then τ 10 s, republished at ≥ 2 ms). The depth
+   never reaches the pull size (the #NDI-AUDIO defect) or the audio stamps.
+
+### 18.3 NDI soak, 2026-09-28 15:40:38–16:09:08 (28.5 min) — ✅ ACCEPTED
+
+Build `.build-cc/ndifix-Profile` (be983a0 + the two NDI fixes). Log `~/Desktop/step8-ndi-soak.log`;
+timeline `soak-ndi-timeline.json` (scratchpad). Run automated over obs-websocket (sender 4455,
+recorder relaunched with `--websocket_port 4456`).
+
+| | result |
+|---|---|
+| **criterion 12, as written** (vs file control +24.3 ms) | **+1.3 ms** (+3 min), **+2.9 ms** (+26 min) |
+| **criterion 12, grid-corrected — gates from here on** | **+21.3 / +22.9 ms** — accepted; the ~+22 ms is provisionally a sender (OBS/DistroAV) term, open until a non-OBS NDI sender is measured (BUGS.md) |
+| start → end | **+1.6 ms** (±10) |
+| FrameSync depth vs hold | depth 38.8–40.7 ms all session; hold followed in seven 2 ms steps, 286.3 → 292.3 ms; frame wait 290–303 ms, 0 skipped |
+| criterion 1, mutes at the device (20 min) | 3 mutes (102, 68, 10 ms) and 4 dropouts — **sender delivery gaps, not Manifold**: each on a second where FrameSync's queue fell to 0–4 ms while OBS reported 77 delayed frames; pump 87–89 pulls/s, axis contiguous |
+| criterion 2, non-zero `setRate` | 1 (the first anchor) |
+| criterion 3, e (±10 ms, trend) | e −0.18…+0.07 ms; PAIRED p99 ≤ 0.066 ms; trend −0.002 ± 0.0005 ppm |
+| criterion 4, gap histograms | 172 of 172 contiguous |
+| criteria 5–6 | stage holes / overlaps / resets / breaks / clamps 0; coarse 0, splices 0, rail episodes 0 |
+| criterion 7, pitch | ρ−1 within 8.1 ppm; heard rate −6.0 ppm median (event windows excluded), p1/p99 −173/+190 ppm, max 550; fastest change 0.197 cents/s (≤ 0.35) |
+| integrator | +6.37 ppm, sd 0.14 (plant model: the device crystal, as §13.1) |
+| criterion 10, CPU (2 ch) | Manifold mean 23.7 %, max 30.7 % |
+| §6.1 gates | one PID; out-of-band 0.11 %; beep-count, grid, one-burst and silence gates passed |
+
+**Not measured on this run:** a second control after NDI (the operator had quit), so the control is
+the pre-connect one only — 29 beeps, since the fixture stopped once; its +24.3 ms matches every
+fresh-launch control of the day (+23.8…+27.0).
+
+**Carried forward:** the ±4–17-sample steps the tracker sees on NDI (137 in 20 min this morning, ~90
+here) are an NDI-path trait not yet explained; they set the pitch spread above and are inaudible.
+
