@@ -273,6 +273,8 @@ final class WHEPFrameRouter {
     /// The clock's first presentation, with the mapping the picture started on — opens the first
     /// audio anchor's gate (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Called from the display tick.
     var liveAudioPresented: ((LiveClock.Mapping) -> Void)?
+    /// The clock's discontinuous moves, to the engine's splice matcher (step 5). Any thread.
+    var liveAudioPositionJump: ((LiveClock.PositionJump) -> Void)?
     /// Every RTCP Sender Report for the session's audio or video SSRC, to the engine's SR line
     /// (step 4e-2); its first pair is the gate's other half on RTP audio. Network threads.
     var liveAudioSenderReport: ((ManifoldWHEPSenderReport) -> Void)?
@@ -712,6 +714,11 @@ final class WHEPFrameRouter {
         clock.onFirstPresentation = { [weak self] mapping in
             self?.liveAudioPresented?(mapping)
         }
+        // ⚠️ AND EVERY POSITION JUMP, for the audio splice it causes to be matched against
+        // (resampler step 5, §2.4). Fired before the moved mapping is published.
+        clock.onPositionJump = { [weak self] jump in
+            self?.liveAudioPositionJump?(jump)
+        }
 
         NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR",
               Self.targetDepth)
@@ -738,6 +745,7 @@ final class WHEPFrameRouter {
         liveClock?.onMappingChange = nil
         liveClock?.onMappingTick = nil
         liveClock?.onFirstPresentation = nil
+        liveClock?.onPositionJump = nil
         liveClock = nil
         stateLock.unlock()
         guard wasActive else { return }
@@ -799,6 +807,12 @@ final class WHEPFrameRouter {
     /// The resulting clock jump is fed into the ledger: a target RAISE re-anchors backward, which is
     /// a negative coarse clock action, and leaving it out would trip the residual's OVER flag on a
     /// deliberate keypress. See `LiveDepthTelemetry.recordClockJump`.
+    /// Whether this router's LiveClock is live. Debug ▸ Force Video Jump asks each push router.
+    var hasLiveClock: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return liveClock != nil
+    }
+
     func adjustTargetDepth(by delta: Double) {
         dispatchPrecondition(condition: .onQueue(.main))
         stateLock.lock()

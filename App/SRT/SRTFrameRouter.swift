@@ -531,6 +531,12 @@ final class SRTFrameRouter {
         clock.onFirstPresentation = { [weak self] mapping in
             self?.liveAudioPresented?(mapping)
         }
+        // ⚠️ AND EVERY POSITION JUMP (snap, freeze guard, queue-full, target step), for the audio
+        // splice each one causes to be matched against (resampler step 5, §2.4). The clock fires it
+        // before publishing the moved mapping, so the event is on record first.
+        clock.onPositionJump = { [weak self] jump in
+            self?.liveAudioPositionJump?(jump)
+        }
 
         // ── `cushion: 0` — AND IT IS NOT "NO CUSHION" ───────────────────────────────────────
         //
@@ -586,6 +592,7 @@ final class SRTFrameRouter {
         liveClock?.onMappingChange = nil
         liveClock?.onMappingTick = nil
         liveClock?.onFirstPresentation = nil
+        liveClock?.onPositionJump = nil
         // Clears the clock's per-STREAM state, freeze-guard arming included, so a reconnect
         // re-disarms the guard for its own startup fill rather than tripping it.
         liveClock?.reset()
@@ -958,6 +965,8 @@ final class SRTFrameRouter {
     /// The clock's first presentation, with the mapping the picture started on — opens the first
     /// audio anchor's gate (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Called from the display tick.
     var liveAudioPresented: ((LiveClock.Mapping) -> Void)?
+    /// The clock's discontinuous moves, to the engine's splice matcher (step 5). Any thread.
+    var liveAudioPositionJump: ((LiveClock.PositionJump) -> Void)?
     /// Closes the session. Must be called on teardown or the renderer keeps a dead timebase.
     var endLiveAudio: (() -> Void)?
     /// Publishes the decoded channel count so the meters size their bars.
@@ -1279,6 +1288,8 @@ final class SRTFrameRouter {
             // property survives a re-pin.
             audioAnchorTicks = Int64((sourcePTS * sampleRate).rounded()) - audioCumulativeFrames
             ticks = audioAnchorTicks! + audioCumulativeFrames
+            // On record before the re-pinned buffer reaches the sink (step 5's splice matcher).
+            audioSink?.noteInputAxisRePin(divergenceSeconds: divergence)
             NSLog("[SRT-AUDIO] sample axis RE-PINNED — it had run %+.1f ms %@ the source PTS "
                 + "(tolerance %.0f ms) · re-pin #%d. A one-off is a sender discontinuity; a steady "
                 + "cadence means the declared sample rate is not the rate the sender is producing "
@@ -1830,6 +1841,12 @@ final class SRTFrameRouter {
     /// The resulting clock jump is fed into the ledger: a target RAISE re-anchors backward, which
     /// is a negative coarse clock action, and leaving it out would trip the residual's OVER flag on
     /// a deliberate keypress.
+    /// Whether this router's LiveClock is live. Debug ▸ Force Video Jump asks each push router.
+    var hasLiveClock: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return liveClock != nil
+    }
+
     func adjustTargetDepth(by delta: Double) {
         dispatchPrecondition(condition: .onQueue(.main))
         stateLock.lock()

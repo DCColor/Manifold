@@ -1403,6 +1403,9 @@ final class DeckRegistry {
         WHEPFrameRouter.shared.liveAudioPresented = { [weak engine] mapping in
             engine?.liveAudioPresented(mapping)
         }
+        WHEPFrameRouter.shared.liveAudioPositionJump = { [weak engine] jump in
+            engine?.liveAudioPositionJump(jump)
+        }
         WHEPFrameRouter.shared.liveAudioSenderReport = { [weak engine] r in
             engine?.liveAudioSenderReport(isAudio: r.isAudio.boolValue, ntp: r.ntp, rtp: r.rtp,
                                           audioOrigin: r.haveAudioOrigin.boolValue ? r.audioOrigin : nil,
@@ -1436,6 +1439,9 @@ final class DeckRegistry {
         }
         SRTFrameRouter.shared.liveAudioPresented = { [weak engine] mapping in
             engine?.liveAudioPresented(mapping)
+        }
+        SRTFrameRouter.shared.liveAudioPositionJump = { [weak engine] jump in
+            engine?.liveAudioPositionJump(jump)
         }
         SRTFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
         SRTFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in

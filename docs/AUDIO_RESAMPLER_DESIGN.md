@@ -325,11 +325,18 @@ axis contiguous. Reset `e_f`, hold the integrator.
 Three properties, all of which matter:
 
 * **No rate write.** The output axis never breaks, so §9's invariant holds and the renderer never
-  mutes. Cost is a few ms of cross-faded material, once, against today's 78 ms of digital silence.
+  mutes. ~~Cost is a few ms of cross-faded material, once, against today's 78 ms of digital
+  silence.~~ **CORRECTED 2026-09-27 by measurement (§16.4):** a splice costs **the jump's size in
+  programme**, 200 ms dropped or replayed, and it is different content from what the picture drops,
+  because the splice acts at the stage's input, one renderer queue ahead of what is heard. Until the
+  splice is heard there are **~0.3–0.5 s of transient offset**. It still writes nothing to the
+  renderer: splicing at the output would need a flush (silence until refilled) or a timebase write
+  (a mute, §11.11).
 * **Transport-agnostic.** It keys off the measured error step, not off `LiveClock.Event`, so it
   works for NDI — which produces no events — and for an input-axis re-pin
   (`SRTFrameRouter.audioPTSTicks`'s 25 ms tolerance), which is the same class of step arriving by a
-  different door.
+  different door. **CORRECTED 2026-09-27 (§16.1):** a re-pin under 1 s never steps the error; the
+  stage bridges it with its timing kept. See §4.1 item 2.
 * **Countable and correlatable.** Each splice logs its size and host time, and must line up with a
   `[SRT] snap-to-live:` / freeze-guard / queue-full line, or with an `axis RE-PINNED` line. A splice
   with no matching event is a defect, and that cross-check is only possible because both sides
@@ -357,10 +364,15 @@ timebase with one `setRate(1.0, time:atHostTime:)`. That is one mute per coarse 
 `[*-RESAMPLE] COARSE` with its size and trigger, and counted. `e_f` is reset and `i` is held. Step 5
 replaces the action with the splice and removes the write; the triggers stay the same.
 
-> **Inference, not measurement:** that a 5–10 ms cross-faded splice at snap cadence is preferable to
+> ~~**Inference, not measurement:** that a 5–10 ms cross-faded splice at snap cadence is preferable to
 > a 78 ms mute. It is strongly implied — the mute is 8–15× longer and is *exact digital zero*, while
 > a cross-fade preserves envelope — but it has not been captured. The instrument to settle it exists
-> (§11.9) and step 5 of the build plan does.
+> (§11.9) and step 5 of the build plan does.~~
+>
+> **MEASURED 2026-09-27 (§16).** The splice produced **0 mutes** and **no digital-silence run** at the
+> device across six forced 200 ms splices, and lip-sync returned to within +0.7 ms of its pre-splice
+> value after each direction. The premise of the inference was wrong on cost, though: see the
+> corrected bullet above.
 
 ---
 
@@ -770,6 +782,9 @@ Three consequences to act on:
    `audioPTSTicks` re-pinning at 25 ms silently hands the renderer a stepped PTS. With the
    resampler it arrives as a 25 ms step in `err`, which §2.4's branch handles explicitly and logs.
    The re-pin logic itself is unchanged.
+   **CORRECTED 2026-09-27 (§16.1):** it does not. Since step 3 the stage bridges an input step of up
+   to 1 s with a silence fill or a drop and keeps its timing, so `err` never steps and no splice
+   results. Only a re-pin past 1 s (a stage axis BREAK) can reach the coarse branch.
 3. **Format change resets both.** A rate or channel change already restarts the input axis; it must
    also reset the resampler's history, accumulator and integrator, and re-anchor the output axis —
    **as a state reset only, never as a rate write.**
@@ -1147,6 +1162,11 @@ events counted, sized, and each one correlated with a LiveClock coarse-event log
 track shows a step of the expected size **with no run of silence in it**.
 
 This is the step that makes criterion 1 and criterion 2 true. Everything before it is scaffolding.
+
+✅ **DONE 2026-09-27 — §16.** Local SRT, forced ±200 ms video jumps: 0 mutes, 1 non-zero `setRate`
+per session, every splice matched to its event, device splices equal to the logged frame counts, and
+A/V back to within ±1 ms of pre-splice. What was not measured: a splice caused by a real snap, freeze
+guard or queue-full (none fired), and any transport but local SRT.
 
 ### Step 6 — NDI onto the same loop — FOLDED INTO STEP 4 (2026-09-25)
 
@@ -2756,3 +2776,191 @@ same interval would have drifted about **−115 ms** (68 ppm × 1700 s, audio ga
 - **The §13.4 rail event, n = 2** (§15.3): B, S, and the coarse branch.
 - **MediaMTX verification of the SR line is pending.** Both runs here are Cloudflare; `CLAUDE.md`
   requires every streaming fix verified against a non-Cloudflare server. Folded into the step 8 soak.
+
+## 16. Step 5 results — the splice, measured 2026-09-27
+
+**Built:** the coarse branch's action is now a splice in the material (§2.4). The triggers are
+unchanged: level |e_f| > 250 ms, step |Δe| > 50 ms.
+- **`LiveAudioSplicer`** (`Packages/ManifoldCore/Sources/LiveAudioResample/`), one per stage session,
+  in front of the resampler. It jumps the stage's INPUT read position by ±N frames across an
+  equal-power fade and keeps ~1 s of history for inserts.
+- **The output axis is untouched,** because it counts output frames. A splice changes only which
+  content those frames carry. **No rate write**, ever; the session's only non-zero `setRate` is the
+  first anchor. `e_f` is reset and `i` held, as before.
+- **The content-time map follows the splice.** A block whose fed span crosses a splice is recorded as
+  two breakpoints, so `inputTime(atOutputTime:)` reports the splice when it is heard, not when it is
+  requested. The steering reads `content + spliceCorrectionAhead`, which is continuous across the
+  moment it is heard, so a splice needs no settle window and cannot fire a reverse event on itself.
+- **Matching (§2.4: an unmatched splice is a defect).** `LiveClock.onPositionJump` reports every
+  snap-to-live, freeze-guard, queue-full and target step, **before** it publishes the moved mapping.
+  The transports report `axis RE-PINNED`, the stage reports its own `axis BREAK`, and WHEP reports a
+  first SR pair that arrived after the gate gave up on it. Each splice takes the newest unused event
+  from the 1.5 s before it; with none, its line says `WARNING: UNMATCHED`.
+- **Logging:** one `[*-RESAMPLE] SPLICE #n` line per splice: direction, frames and ms, trigger with
+  e and e_f, host time, fade, renderer queue depth, and the matched event with its own figures. The
+  steering window and END lines add splices (drop / insert), ms spliced, fallbacks and unmatched. The
+  `session: writes N = first N + coarse N` prefix is kept, so `step4e2_analyse.py` still parses it;
+  `coarse` now counts fallback re-anchors only.
+- **Debug-only, pre-ship removal (`BUGS.md`):** Debug ▸ Force Video Jump steps the live push source's
+  LiveClock target by ±0.2 s through `adjustTargetDepth`, which re-anchors the mapping as a snap does.
+  It is a real video-timeline jump, not an injected error step.
+- `swift test`: 74 of 74 (9 splice tests and 4 steering tests new). Profile builds clean.
+
+### 16.1 The decisions
+
+**Which events produce which splice** — from the code and every saved log since step 3 (~5 h):
+
+| event | direction | size | reaches the coarse branch? | seen in the saved logs |
+|---|---|---|---|---|
+| snap-to-live | forward → **drop** | ≥ 200 ms (fires at target + 0.2 s) | yes | 0 |
+| freeze guard | forward → **drop** | to `newest − target` | yes | 0 |
+| queue-full | forward → **drop** | depth before − target | yes | 0 |
+| target step (⌃⌥[ ⌃⌥], Force Video Jump) | either | ±50 ms / ±200 ms | yes | — |
+| late first SR pair (WHEP) | either | the first SR offset | yes | 0 |
+| startup realign | either | 2–143 ms | **no**: always before the first anchor (§2.7); not recorded for matching | many |
+| SRT/NDI axis re-pin | either | ≥ 25 ms | **no** while under 1 s: the stage's bridge keeps its timing (§11) | SRT 0, NDI 2 (startup) |
+| WHEP lost packet | hole | 20/40/60 ms | no: bridged as silence, a content hole | up to 10 per session |
+
+A re-pin is **not** a splice, contrary to §2.4 and §4.1 item 2 as written. Since step 3 the stage
+bridges every input step up to 1 s with a silence fill or a drop and keeps the timing, so the
+content-time error never steps. The stage cannot tell a re-pin from a lost packet, so step 5 leaves
+the bridge as it is; its hard edges are an open follow-up in `BUGS.md`. A re-pin past 1 s is a stage
+axis BREAK, which can step the error, so it is on record for matching.
+
+**How each splice is done:**
+
+| decision | choice | why |
+|---|---|---|
+| what an insert contains | **replayed material**: the read position jumps back \|N\| and replays from history | Cross-faded silence at 50–300 ms is a run of digital zero up to 2.5× the 78 ms mute this step removes, and the §11.9 harness counts it as a mute. Replay keeps level and envelope; its cost is that \|N\| of programme is heard twice (a repeated syllable on speech at 200 ms). Time-stretching (WSOLA) was rejected: material-dependent, and not correct by construction |
+| fade | **10 ms equal-power** (cos/sin), 480 frames at 48 kHz | The long end of §2.4's 5–10 ms: half the edge slope of 5 ms. Its costs are small here: 10 ms of two positions overlapping, under the ~20 ms where an overlap reads as a doubled onset, and 10 ms of waiting for material before an insert, against a 250–520 ms renderer queue. Equal-power because at ≥ 50 ms the two positions are uncorrelated on programme; on a steady tone the fade can dip or rise up to +3 dB for its 10 ms |
+| too large: \|e\| > 1 s | **fall back to the step-4 re-anchor**, logged `COARSE RE-ANCHOR` and counted | A 1 s replay is a sentence heard twice. The same 1 s sizes the history (3.4 MB at 48 kHz × 16) |
+| too large: drop + fade + 50 ms > renderer queue | **fall back**, the same way | A drop feeds nothing while its material arrives, about its own length, and the renderer plays that out of its queue. If the queue runs dry, the output axis falls behind the timebase, every later buffer arrives late, and the loop, which reads what was enqueued, cannot see it. The events that cause drops over-fill the queue by the same amount, so this should not fire |
+
+**Measured in `swift test`:**
+- frame counts exact for ±9600 and ±2401-frame splices; outside the fade every sample is input
+  tick + N, bit for bit;
+- the output axis contiguous through both directions, across 256-frame buffers and back-to-back
+  splices;
+- cos² + sin² = 1 within 1e-6 at every frame of the fade;
+- a 1 kHz sine at A = 0.5 through a drop and an insert landing 82° and 36° out of phase: largest
+  sample step **0.087**, against a bound of 1.5 × the sine's own largest step (0.098). A hard cut at
+  the same points would step 0.561.
+
+### 16.2 Session A — device output, local SRT (OBS listener), 2026-09-27
+
+**Protocol:** §11.5, with two changes. Audio Hijack was started **after** connecting, so no
+disconnect was needed (OBS hangs when Manifold disconnects from its listener, `BUGS.md`). Debug ▸
+Force Video Jump alternated BACK and FORWARD every 30 s, six jumps in 211.5 s of capture.
+
+**Gates:**
+- Injected-fault gate: PASS, both gates.
+- Out-of-band energy above 15 kHz: **0.0000%**.
+- One Manifold instance; median block correlation 0.983.
+
+| | result |
+|---|---|
+| mutes / digital-silence runs | **0** (0.00 / min) |
+| dropouts, tempo steps | 0 |
+| splices at the device | **6**, 3 of each sign |
+| **device vs log, samples** | −9625.0 / +9525.9 / −9651.1 / +9520.9 / −9638.1 / +9555.9 against INSERT 9625 / DROP 9526 / INSERT 9651 / DROP 9521 / INSERT 9638 / DROP 9556 fr. **Equal to the frame** |
+| non-zero `setRate` rows | **1**, the first anchor |
+| SPLICE lines | 6, 198.4–201.1 ms, each matched to its `target-step` 10–40 ms after it |
+| WARNING / fallback / abandoned | 0 / 0 / 0 |
+| e across each splice | one ±200 ms trigger read, ±3 ms otherwise; no second coarse event |
+| ρ around the splices | within ±220 ppm |
+
+Drops are heard about 0.19 s later than inserts, relative to their requests: the drop waits for its
+material to arrive, as designed.
+
+### 16.3 Session B — flash-beep, local SRT (OBS listener), 2026-09-27
+
+**Protocol:** §15.4's. Recorder at 60 fps, beeps −27.9 dB on the preflight, sender at 23.976.
+Force Video Jump BACK at 53.0 s and FORWARD at 102.4 s into a 152.1 s capture. The capture was cut
+into three windows of **exactly 41.7 s**, one frame-grid period each, so §15.4's ~40 ms sawtooth
+averages out. Each post-splice window starts 3 s after its jump.
+
+| window | A/V mean | Δ vs pre | median | sd | pairs |
+|---|---|---|---|---|---|
+| pre (3.0–44.7 s) | −50.3 ms | — | −51.0 | 12.3 | 40 |
+| after BACK (56.0–97.7 s) | −49.6 ms | **+0.7 ms** | −50.7 | 12.6 | 39 |
+| after FORWARD (105.5–147.2 s) | −50.0 ms | **+0.3 ms** | −50.9 | 13.1 | 41 |
+
+**Pass: both within ±10 ms.**
+
+**Gates:**
+- Analyser injected-offset gate: pre's −50.3 read **+199.7** with +250 injected and **−170.3** with −120,
+  sd unchanged.
+- Beep count and 1 Hz grid: PASS in every window, residual ≤ 0.58 ms.
+- One burst per beep: 0 doubled of 151.
+- Level between beeps: exact digital zero.
+
+**Log:** 1 non-zero `setRate` row; SPLICE #1 INSERT 9603 fr / 200.1 ms and SPLICE #2 DROP 9572 fr /
+199.4 ms, matched 14 and 34 ms after their target steps; 0 WARNING, fallback or abandoned;
+max |ρ−1| 104 ppm.
+
+**At the splices, in the full capture:**
+- BACK: the beeps and the flashes each show one 1.2 s gap.
+- FORWARD: the flashes show one 0.8 s gap, but the beeps show **1.8 s**. One beep is missing. §16.4
+  says why.
+
+### 16.4 ⚠️ CORRECTED — what a splice costs
+
+§2.4 inferred that a splice costs "a few ms of cross-faded material". **Measured, it costs 200 ms of
+programme, and briefly the lip-sync:**
+- **The programme:** a 200 ms splice drops or replays 200 ms of sound. It is **different content
+  from what the picture drops**. The picture jumps at its playhead; the splice acts at the stage's
+  input, one renderer queue ahead of what is being heard (317–322 ms at the inserts here, 518–525 ms
+  at the drops). Session B's FORWARD drop removed a beep whose flash the picture kept. On programme, a
+  forward splice removes 200 ms of sound the picture did not remove, and a backward one repeats
+  200 ms the picture merely held on.
+- **The lip-sync:** until the splice is heard, about one renderer queue later, the audio is still
+  off by the jump: **~0.3–0.5 s of transient offset**, 200 ms at these sizes. The windows in §16.3
+  start 3 s after each jump and measure the settled state.
+
+**Why it cannot be done at the output.** Only the material not yet enqueued can be spliced. Removing
+or repeating what the renderer already holds means flushing its queue, which is a silence until it
+refills, or moving the timebase, which is a rate write, and every rate write mutes (§11.11, 19 of 19).
+Either is the mute this step removes. Splicing at the input is the only splice available that writes
+nothing to the renderer, and its cost is the queue's depth in delay.
+
+### 16.5 The detector, changed for this step, and its gates
+
+Both changes were gated before any capture was read with them.
+1. **Search window ±24000 samples (500 ms), not the default ±6000.**
+   - A 200 ms splice is 9600 samples, past the default window. The tracker lost lock at the first
+     splice and reported a 27 s dropout and seven "tempo steps" from −1850 to +1271 cents.
+   - The runbook's injected-fault gate only goes up to 480 samples, so it could not show this.
+   - **Gate:** the same failure on six synthetic ±9600-sample splices at ±6000. At ±24000, all six
+     found at exactly ±9600.0, and 0 events on the known-good control.
+2. **A self-concatenated reference** (`ref-300s` twice, 600 s), aligned on the single reference and
+   tracked on the doubled one.
+   - Ref was looping in OBS, so the reference wrapped from 300 s to 0 about 88 s into the capture.
+     The tracker cannot follow a −300 s jump.
+   - The doubled reference has two identical copies, so coarse alignment on it can pick the second.
+     Hence aligning on the single reference and passing that offset in.
+   - **Gate:** six synthetic splices across a looped play from 211 s, all six at ±9600.0; the
+     known-good looped control, 0 events.
+
+The analyser's own gate also needed fixing: `-itsoffset` with `-c copy` applied no shift, and the
++250 ms file read exactly the same as the unshifted one. The shift is now baked into the audio
+samples (`adelay`, and `atrim` for a negative one). Both are in the §11.9 runbook.
+
+### 16.6 For step 8
+
+- **The startup rail, now seen on local SRT — n = 3** with §13.4 and §15.3. About 20 s after the
+  session-A connect:
+  - LiveClock's depth fell 0.250 → 0.205 s, and the clock pinned at −0.5% with `publication starved`
+    for 3.0 s;
+  - ρ sat at the −2000 ppm bound for ~20 s; `e` peaked at **+46.7 ms** (audio ahead);
+  - `i` overshot to +386.6 ppm on release, and `e` was back inside ±5 ms ~50 s after onset.
+  No coarse trigger, correctly. It was before the recording and unrelated to the splices. It is the
+  first case on a local, non-Cloudflare path, so it is not a Cloudflare delivery artefact. Session B
+  had none (max |ρ−1| 104 ppm). Carried to the step 8 decision on B, S, and whether a sustained
+  LiveClock rail should reach the coarse branch.
+- **Criterion 12: the absolute A/V figures disagree.** Local SRT read **−50 ms** here (audio early);
+  Cloudflare WHEP read **+28 ms** in §15.4. Neither run had a same-session file control, so
+  neither is interpretable alone: both include the capture chain's constant. Step 8 needs a
+  same-session file control on each transport before any absolute figure means anything. Only the
+  step-5 differences (+0.7 / +0.3 ms) are measured.
+- **The splice's cost (§16.4)** is a design fact, not a defect. If snaps become frequent in the field,
+  the 200 ms per event and the half-second of transient offset are what to weigh against them.

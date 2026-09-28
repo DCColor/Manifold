@@ -637,6 +637,66 @@ public final class LiveClock: @unchecked Sendable {
     /// on the same tick reaches the consumer first. It writes no clock state; `now()` is identical
     /// with or without a consumer.
     public var onFirstPresentation: ((Mapping) -> Void)?
+
+    /// ── EVERY DISCONTINUOUS MOVE OF THE PRESENTATION TIMELINE, NAMED ─────────────────────────
+    ///
+    /// A snap, a freeze guard, a queue-full re-anchor, a manual target step or a startup realign:
+    /// the kind, the signed jump (+ = `now()` moved FORWARD, content discarded) and the host time.
+    /// Resampler step 5 uses it to match each audio splice to the video event that caused it
+    /// (docs/AUDIO_RESAMPLER_DESIGN.md §2.4: an unmatched splice is a defect).
+    ///
+    /// ⚠️ FIRED BEFORE THE MOVED MAPPING IS PUBLISHED, AND THE ORDER IS THE CONTRACT. The audio
+    /// thread sees the jump only through the mapping, so a consumer that records the event here has
+    /// recorded it before any splice it causes can be requested — the match needs a look-back window
+    /// only. Same thread contract as `onMappingChange`: outside `lock`, any thread, must not block.
+    /// It writes no clock state.
+    public var onPositionJump: ((PositionJump) -> Void)?
+
+    public struct PositionJump: Sendable {
+        public enum Kind: String, Sendable {
+            case snap = "snap-to-live"
+            case freezeGuard = "freeze-guard"
+            case queueFull = "queue-full"
+            case targetStep = "target-step"
+            case startupRealign = "startup-realign"
+        }
+        public let kind: Kind
+        /// Seconds; + = the presentation clock moved FORWARD.
+        public let jumped: Double
+        /// `CACurrentMediaTime()` when the move was made.
+        public let host: Double
+        /// The event's own figures, as the transport's log line states them.
+        public let detail: String
+    }
+
+    private func firePositionJump(_ event: Event?) {
+        guard let event else { return }
+        let host = hostNow()
+        let jump: PositionJump
+        switch event {
+        case .snapped(let e):
+            jump = PositionJump(kind: .snap, jumped: e.excess, host: host,
+                                detail: String(format: "flushed %.3fs excess (depth %.3f → %.3f) after "
+                                               + "%.2fs sustained overfill",
+                                               e.excess, e.depthBefore, e.depthAfter, e.sustainedFor))
+        case .freezeGuard(let e):
+            jump = PositionJump(kind: .freezeGuard, jumped: e.jumped, host: host,
+                                detail: String(format: "no eligible frame for %d ticks / %.3fs, queue=%d "
+                                               + "— re-anchored +%.3fs (depth %.3f → %.3f)",
+                                               e.ticks, e.heldFor, e.queued, e.jumped,
+                                               e.depthBefore, e.target))
+        case .overflowReanchor(let e):
+            jump = PositionJump(kind: .queueFull, jumped: e.jumped, host: host,
+                                detail: String(format: "over-buffered at count=%d — flushed %.3fs "
+                                               + "(depth %.3f → %.3f)",
+                                               e.queued, e.jumped, e.depthBefore, e.target))
+        case .startupRealign(let e):
+            jump = PositionJump(kind: .startupRealign, jumped: e.jumped, host: host,
+                                detail: String(format: "moved %+.1f ms (depth %.4f → %.3f)",
+                                               e.jumped * 1e3, e.depthBefore, e.target))
+        }
+        onPositionJump?(jump)
+    }
     /// Set under `lock` where `hasPresentedOnce` flips; drained by `publishMappingIfChanged`.
     private var firstPresentationPending = false
 
@@ -975,6 +1035,13 @@ public final class LiveClock: @unchecked Sendable {
         lock.lock()
         let change = adjustTargetDepthLocked(by: delta)
         lock.unlock()
+        // Before the mapping: see `onPositionJump`. A zero jump (unanchored) moved nothing.
+        if let change, change.jumped != 0 {
+            onPositionJump?(PositionJump(kind: .targetStep, jumped: change.jumped, host: hostNow(),
+                                         detail: String(format: "targetDepth %.3f -> %.3f (manual), "
+                                                        + "now() moved %+.3fs",
+                                                        change.from, change.to, change.jumped)))
+        }
         publishMappingIfChanged()                                           // outside the lock
         if let change { emitTargetStep(from: change.from, to: change.to) }   // outside the lock
         return change
@@ -1068,6 +1135,8 @@ public final class LiveClock: @unchecked Sendable {
         pendingStartupPresent = nil; pendingStartupSummary = nil
         #endif
         lock.unlock()
+        // Before the mapping: see `onPositionJump`.
+        firePositionJump(event)
         // The mapping mirror goes FIRST: a snap or rate change must reach the audio timebase before
         // the line describing it reaches the log, so the two cannot be read in the wrong order.
         publishMappingIfChanged()
@@ -1469,6 +1538,7 @@ public final class LiveClock: @unchecked Sendable {
         lock.lock()
         let event = overflowReanchorLocked(newestPTS: newestPTS, count: count)
         lock.unlock()
+        firePositionJump(event)     // before the mapping: see `onPositionJump`
         publishMappingIfChanged()   // outside the lock — see the `lock` declaration
         emit(event)                 // outside the lock — see the `lock` declaration
         return event

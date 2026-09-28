@@ -264,6 +264,7 @@ struct ManifoldApp: App {
                 NDIAudioLeadCommand()
                 Divider()
                 ResamplerRatioCommand()
+                ForcedVideoJumpCommand()
                 Divider()
                 NDIAudioWAVCaptureCommand()
             }
@@ -426,6 +427,39 @@ private struct ResamplerRatioCommand: View {
                       : "Resampler Ratio: LOOP (step 4d) — next connect") {
             pinned.toggle()
             FrameEngine.setLiveAudioRatioPinned(pinned)
+        }
+    }
+}
+
+/// Debug ▸ Force Video Jump — resampler step 5 verification ONLY. ⚠️ REMOVE BEFORE SHIP.
+///
+/// Snaps, freeze guards and queue-fulls almost never fire on their own (none in ~5 h of the saved
+/// step-4 sessions), so the splice needs a real video-timeline jump on demand. This is one: it
+/// steps the live push source's LiveClock target by ±0.2 s through `adjustTargetDepth`, which
+/// re-anchors the clock's mapping exactly as a snap does — `now()` moves, the picture holds or
+/// discards 200 ms, and audio learns of it only through the moved mapping. It is not an injected
+/// error step.
+///
+/// Order matters: BACK first (target 0.25 → 0.45 on SRT: `now()` −0.2 s, the audio INSERTS 200 ms),
+/// then FORWARD (0.45 → 0.25: +0.2 s, the audio DROPS 200 ms). Forward first would hit the 0.10
+/// floor and move 150 ms, and a drop needs the renderer queue the backward step builds.
+private struct ForcedVideoJumpCommand: View {
+    var body: some View {
+        Button("Force Video Jump: BACK 200 ms (audio inserts) — target +0.2 s") { Self.jump(0.2) }
+        Button("Force Video Jump: FORWARD 200 ms (audio drops) — target −0.2 s") { Self.jump(-0.2) }
+    }
+
+    @MainActor static func jump(_ delta: Double) {
+        let direction = delta > 0 ? "BACK (now() −0.2 s)" : "FORWARD (now() +0.2 s)"
+        if SRTFrameRouter.shared.hasLiveClock {
+            NSLog("[DEBUG-SPLICE] forced video jump %@ on SRT — LiveClock target %+.3f s", direction, delta)
+            SRTFrameRouter.shared.adjustTargetDepth(by: delta)
+        } else if WHEPFrameRouter.shared.hasLiveClock {
+            NSLog("[DEBUG-SPLICE] forced video jump %@ on WHEP — LiveClock target %+.3f s", direction, delta)
+            WHEPFrameRouter.shared.adjustTargetDepth(by: delta)
+        } else {
+            NSLog("[DEBUG-SPLICE] no live SRT or WHEP clock — connect a push source first "
+                + "(NDI and HLS have no LiveClock)")
         }
     }
 }

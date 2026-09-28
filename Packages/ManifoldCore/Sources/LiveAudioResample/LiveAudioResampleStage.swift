@@ -65,9 +65,26 @@
 //      output step exactly as the input did. That is the pre-existing behaviour for a jump too
 //      large to be a packet, and it is logged.
 //
-//  Every fill, drop and break is COUNTED and reported. Step 5 replaces the fill/drop with the
-//  cross-faded splice; this is the scaffolding that keeps step 3's measurements about the
-//  plumbing rather than about packet loss.
+//  Every fill, drop and break is COUNTED and reported.
+//
+//  ⚠️ STEP 5 LEFT THESE AS THEY ARE, ON PURPOSE. This note used to say step 5 would replace the
+//  fill/drop with the cross-faded splice. It does not, because the stage cannot tell a lost packet
+//  from a re-pin — both are the same input-axis step — and they need different things: a lost WHEP
+//  packet is MISSING content (criterion 5 counts it as a hole), a re-pin is relabelled content.
+//  Either way the timing is kept here, so neither steps the content-time error and neither reaches
+//  the coarse branch. Cross-fading these edges is a separate change with its own measurement.
+//
+//  ── THE SPLICE (§2.4, step 5) ─────────────────────────────────────────────────────────────────
+//
+//  The coarse branch's action. `requestSplice` queues a jump of the input read head — forward
+//  (drop) or back (insert, repeated material) — across a 10 ms equal-power fade; `LiveAudioSplicer`
+//  does it, in front of the resampler. The output axis never notices: it counts output frames, and a
+//  splice changes only WHICH content those frames carry. So there is no timebase write, ever.
+//
+//  The content-time map follows: a block whose fed span crosses a splice is recorded as two
+//  breakpoints, the second offset by the splice. `inputTime(atOutputTime:)` therefore reports the
+//  splice when it is HEARD, a renderer-queue later than it was requested, and
+//  `spliceCorrectionAhead(ofOutputTime:)` is what the loop adds for the part not heard yet.
 //
 //  ── WHAT IT NEVER DOES ────────────────────────────────────────────────────────────────────────
 //
@@ -104,6 +121,21 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     /// function of normalised frequency only and does not depend on the sample rate.
     public static let sharedPrototype = PolyphasePrototype()
 
+    /// The splice's equal-power fade (§2.4 says 5–10 ms). 10 ms, the long end:
+    ///   * a shorter fade is a steeper edge, so more of the splice is heard as a transient; a hard
+    ///     cut is the limit, and 10 ms halves the edge slope of 5 ms;
+    ///   * what the longer fade costs is small here — two positions overlapping for 10 ms, still
+    ///     under the ~20 ms where an overlap starts to read as a doubled onset, and 10 ms of waiting
+    ///     for the fade-out's material before an insert, against a renderer queue of 250–420 ms.
+    /// Time, not frames: 480 at 48 kHz, 441 at 44.1 kHz.
+    public static let crossfadeSeconds = 0.010
+
+    /// The largest splice, either direction; past it the coarse branch re-anchors instead. The same
+    /// second as `maximumBridgeSeconds`, for the same reason: a jump past it is not one the material
+    /// should hide. An insert that size replays a whole second — a sentence heard twice — and it
+    /// sizes the history ring (1 s + fade + one 4096-frame chunk: 3.4 MB at 48 kHz × 16).
+    public static let maximumSpliceSeconds = 1.0
+
     // MARK: - Stats
 
     /// Counters for one reporting window, or cumulative since construction.
@@ -132,12 +164,21 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         /// Blocks resampled at a ratio other than exactly 1.0. A clamp in a window where this is 0
         /// is still a plumbing defect; with the ratio moving it can be real intersample overshoot.
         public var offUnityBlocks = 0
+        /// Splices executed (step 5), and the content frames each direction moved by.
+        public var spliceDrops = 0
+        public var spliceDropFrames: Int64 = 0
+        public var spliceInserts = 0
+        public var spliceInsertFrames: Int64 = 0
+        /// Splices requested and never executed — a format reset, axis break, passthrough or retire
+        /// arrived first, or the history no longer held the material.
+        public var splicesAbandoned = 0
         public init() {}
 
         /// Anything that is not the nominal path. A window with any of these is always reported.
         var isEventful: Bool {
             fills > 0 || drops > 0 || formatResets > 0 || axisBreaks > 0 || clamps > 0
                 || passthroughs > 0 || buildFailures > 0
+                || spliceDrops > 0 || spliceInserts > 0 || splicesAbandoned > 0
         }
     }
 
@@ -171,6 +212,14 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         /// The latest input format description. Output carries it, so a roles-only relabel reaches
         /// the renderer; a drain goes out in the one the drained audio arrived with.
         var formatDescription: CMFormatDescription
+        /// Step 5. Every frame the resampler is fed comes through it; the fed index it counts is the
+        /// resampler's input frame index.
+        let splicer: LiveAudioSplicer
+        /// Splices executed but not yet crossed by an emitted block, in fed order.
+        var marks: [LiveAudioSplicer.Mark] = []
+        /// Content offset (input frames) of everything fed past the marks already crossed: fed frame
+        /// j is input tick `inputOrigin + j + mapBase` once j is past them.
+        var mapBase: Int64 = 0
     }
 
     private var session: Session?
@@ -228,6 +277,36 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     /// records the absolute phase of every output frame. Tests only; it allocates per frame.
     var capturesPhaseForTesting = false
 
+    // MARK: - Splices (step 5)
+
+    /// What a splice request was granted: signed content frames (+ = drop, content forward) at the
+    /// session's rate.
+    public struct SpliceGrant: Sendable, Equatable {
+        public let id: Int
+        public let frames: Int64
+        public let sampleRate: Double
+        public let crossfadeFrames: Int
+        public var seconds: Double { Double(frames) / sampleRate }
+    }
+
+    /// One requested splice until it has certainly been heard. `outTick` is set when the emitted
+    /// block containing its mark is recorded; until then it is pending in full.
+    private struct SpliceRecord {
+        let id: Int
+        let frames: Int64
+        let sampleRate: Double
+        var outTick: Int64?
+    }
+    private var spliceRecords: [SpliceRecord] = []
+    private var nextSpliceID = 1
+    /// Set by `processLocked` when this call hit an axis break: its size, ms. Read after unlock.
+    private var breakThisCall: Double?
+
+    /// Told about every input axis BREAK, after the lock is released — the way an input re-pin past
+    /// the bridge reaches the content-time error, so the splice it causes can be matched to it. Set
+    /// once, before the first `process`.
+    public var onAxisBreak: (@Sendable (_ milliseconds: Double) -> Void)?
+
     private var window = Stats()
     private var total = Stats()
     private var windowStartNanos: UInt64 = 0
@@ -244,9 +323,14 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         case formatReset(fromRate: Double, fromChannels: Int, toRate: Double, toChannels: Int,
                          contiguous: Bool)
         case passthrough(String)
+        case spliceAbandoned(id: Int, ms: Double, reason: String)
 
         func render(_ tag: String) -> String {
             switch self {
+            case let .spliceAbandoned(id, ms, reason):
+                return String(format: "%@ SPLICE #%d ABANDONED (%+.1f ms of content) — %@. Its "
+                              + "correction was not applied; the loop sees the error again and the "
+                              + "coarse branch decides afresh.", tag, id, ms, reason)
             case let .step(hole, ms, inTicks):
                 return String(format: "%@ input axis %@ %.2f ms at in-tick %lld — %@; output axis "
                               + "contiguous, every sample kept at its original time",
@@ -295,7 +379,14 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         lock.lock()
         let wasRetired = retired
         retired = true
+        var abandoned: [Line] = []
+        if let s = session {
+            var discard = [[Float]](repeating: [], count: s.channels)
+            abandoned = settleLocked(s.splicer.abandonAll(reason: "session ended", into: &discard),
+                                     rate: s.sampleRate)
+        }
         session = nil
+        spliceRecords = []
         let w = window, t = total
         let r = Double(rhoIncrement) / 4294967296.0
         let suppressed = max(0, eventLinesThisWindow - Self.eventLinesPerWindow)
@@ -303,6 +394,7 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         lock.unlock()
         guard !wasRetired else { return }
         let tag = self.tag
+        for l in abandoned { emit { l.render(tag) } }
         emit { Self.windowLine(tag, w, total: t, rho: r, final: true, suppressed: suppressed) }
     }
 
@@ -382,6 +474,50 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         return (Double(b.outTick) + x(b)) / b.sampleRate
     }
 
+    /// Queue a splice that moves the content by `contentSeconds` (+ = forward, a drop; − = back,
+    /// an insert of repeated material). It is executed at the input read position as soon as the
+    /// material for its fade has arrived — immediately, or ~`contentSeconds` later for a drop.
+    ///
+    /// nil when there is nothing to splice (no session, a passthrough, a retired stage), when it
+    /// rounds to zero frames, or when it is larger than `maximumSpliceSeconds`. The caller then
+    /// keeps its pre-existing action.
+    public func requestSplice(contentSeconds: Double) -> SpliceGrant? {
+        guard contentSeconds.isFinite,
+              abs(contentSeconds) <= Self.maximumSpliceSeconds else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        guard !retired, let s = session else { return nil }
+        let frames = Int64((contentSeconds * s.sampleRate).rounded())
+        guard frames != 0 else { return nil }
+        let id = nextSpliceID
+        nextSpliceID += 1
+        s.splicer.enqueue(id: id, delta: frames)
+        spliceRecords.append(SpliceRecord(id: id, frames: frames, sampleRate: s.sampleRate))
+        return SpliceGrant(id: id, frames: frames, sampleRate: s.sampleRate,
+                           crossfadeFrames: s.splicer.crossfade)
+    }
+
+    /// Seconds of content correction requested but not yet heard at output time `outputSeconds`:
+    /// splices still queued or waiting for material, and executed ones whose mark lies after it.
+    /// `inputTime(atOutputTime:)` + this is the content the listener WILL be hearing once the
+    /// renderer's queue plays out — continuous across the moment a splice is heard, because the
+    /// map and this switch at the same output tick.
+    public func spliceCorrectionAhead(ofOutputTime outputSeconds: Double) -> Double {
+        guard outputSeconds.isFinite else { return 0 }
+        lock.lock(); defer { lock.unlock() }
+        guard !spliceRecords.isEmpty else { return 0 }
+        // Heard well in the past: nothing will read it again.
+        spliceRecords.removeAll { r in
+            r.outTick.map { Double($0) / r.sampleRate + 2.0 < outputSeconds } ?? false
+        }
+        var ahead = 0.0
+        for r in spliceRecords {
+            // The breakpoint lookup's own test (`x >= 0`), so the two switch on the same read.
+            if let t = r.outTick, outputSeconds * r.sampleRate - Double(t) >= 0 { continue }
+            ahead += Double(r.frames) / r.sampleRate
+        }
+        return ahead
+    }
+
     /// The current session's phase trace and the constants that place it on the two axes: output
     /// tick `outAnchor + e` was reconstructed at absolute phase `trace[e + initialPrimer]`, which is
     /// input tick `inputOrigin + phase / 2^32 − 1 − latency`. Tests only.
@@ -407,7 +543,9 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         lock.lock()
         if retired { lock.unlock(); return [] }
         var lines: [Line] = []
+        breakThisCall = nil
         let out = processLocked(sampleBuffer, lines: &lines)
+        let breakMs = breakThisCall
         var windowReport: (Stats, Stats, Int, Double)?
         let now = DispatchTime.now().uptimeNanoseconds
         if windowStartNanos == 0 { windowStartNanos = now }
@@ -426,6 +564,8 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         if let r = windowReport {
             emit { Self.windowLine(tag, r.0, total: r.1, rho: r.3, final: false, suppressed: r.2) }
         }
+        // Outside the lock: the observer takes the steering's.
+        if let ms = breakMs { onAxisBreak?(ms) }
         return out
     }
 
@@ -510,7 +650,8 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
                 // output step exactly as the input did.
                 bump { $0.axisBreaks += 1 }
                 note(.axisBreak(ms: Double(delta) / rate * 1000, inTicks: inTicks), into: &lines)
-                out.append(contentsOf: drainLocked())
+                breakThisCall = Double(delta) / rate * 1000
+                out.append(contentsOf: endSessionLocked(reason: "input axis break", lines: &lines))
                 session = makeSession(rate: rate, timescale: timescale, channels: ch, fd: fd,
                                       firstInputTicks: inTicks, discardPrimer: true)
             }
@@ -521,7 +662,7 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
                                            CMTime(value: inTicks, timescale: timescale)) == 0
             note(.formatReset(fromRate: s.sampleRate, fromChannels: s.channels, toRate: rate,
                               toChannels: ch, contiguous: contiguous), into: &lines)
-            out.append(contentsOf: drainLocked())
+            out.append(contentsOf: endSessionLocked(reason: "format reset", lines: &lines))
             session = makeSession(rate: rate, timescale: timescale, channels: ch, fd: fd,
                                   firstInputTicks: inTicks, discardPrimer: true)
         } else {
@@ -544,8 +685,51 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
                 }
             }
         }
-        if let built = runLocked(planar) { out.append(built) }
+        // Through the splicer (step 5): usually exactly `planar`; less while a drop waits for its
+        // material, more when an insert replays.
+        if let s = session {
+            var toFeed = [[Float]](repeating: [], count: ch)
+            for c in 0..<ch { toFeed[c].reserveCapacity(fed + s.splicer.crossfade) }
+            let r = s.splicer.process(planar, count: fed, into: &toFeed)
+            session?.marks.append(contentsOf: r.marks)
+            lines += settleLocked(r.outcomes, rate: rate)
+            if !toFeed[0].isEmpty, let built = runLocked(toFeed) { out.append(built) }
+        }
         session?.nextInputTicks = inTicks + Int64(frames)
+        return out
+    }
+
+    /// Count what became of splices, and drop the records of abandoned ones: their correction will
+    /// never be heard, so it must stop being reported as ahead.
+    private func settleLocked(_ outcomes: [LiveAudioSplicer.Outcome], rate: Double) -> [Line] {
+        var lines: [Line] = []
+        for o in outcomes {
+            switch o {
+            case let .executed(_, delta):
+                if delta > 0 { bump { $0.spliceDrops += 1; $0.spliceDropFrames += delta } }
+                else { bump { $0.spliceInserts += 1; $0.spliceInsertFrames += -delta } }
+            case let .abandoned(id, delta, reason):
+                bump { $0.splicesAbandoned += 1 }
+                spliceRecords.removeAll { $0.id == id }
+                lines.append(.spliceAbandoned(id: id, ms: Double(delta) / rate * 1000, reason: reason))
+            }
+        }
+        return lines
+    }
+
+    /// The current session ends (format reset, axis break): pending splices are abandoned, the
+    /// content they held back is fed, and the resampler's tail is drained. The caller replaces
+    /// `session`.
+    private func endSessionLocked(reason: String, lines: inout [Line]) -> [CMSampleBuffer] {
+        guard let s = session else { return [] }
+        var out: [CMSampleBuffer] = []
+        if !s.splicer.isIdle {
+            var held = [[Float]](repeating: [], count: s.channels)
+            lines += settleLocked(s.splicer.abandonAll(reason: reason, into: &held),
+                                  rate: s.sampleRate)
+            if !held[0].isEmpty, let built = runLocked(held) { out.append(built) }
+        }
+        out.append(contentsOf: drainLocked())
         return out
     }
 
@@ -556,6 +740,10 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
                                    prototype: Self.sharedPrototype)
         r.capturesPhase = capturesPhaseForTesting
         let latency = r.latencyFrames
+        let splicer = LiveAudioSplicer(
+            channels: channels,
+            crossfade: max(2, Int((Self.crossfadeSeconds * rate).rounded())),
+            maximumSplice: Int((Self.maximumSpliceSeconds * rate).rounded(.up)))
         return Session(sampleRate: rate, timescale: timescale, channels: channels, resampler: r,
                        inputOrigin: firstInputTicks,
                        outAnchor: discardPrimer ? firstInputTicks
@@ -563,7 +751,7 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
                        initialPrimer: discardPrimer ? latency : 0,
                        nextInputTicks: firstInputTicks,
                        primerToDiscard: discardPrimer ? latency : 0,
-                       formatDescription: fd)
+                       formatDescription: fd, splicer: splicer)
     }
 
     /// Feed `latencyFrames` of silence so the resampler emits the real tail it is holding, at its
@@ -613,23 +801,50 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
 
         let ticks = s.outAnchor + s.emitted
         s.emitted += Int64(n)
-        session = s
         bump { $0.clamps += clamped; if increment != 1 << 32 { $0.offUnityBlocks += 1 } }
 
         // The block's breakpoint. Output tick `ticks` was reconstructed at absolute phase
-        // `phaseAtFirstOutput + discard·increment`, which is input tick
-        // `inputOrigin + phase/2^32 − 1 − latency` (the resampler's phase starts at one frame and
-        // its group delay is `latency`). Stored as the offset from `ticks`, in WRAPPING Q32.32:
-        // the phase wraps after 2^32 frames (~25 h) and a naive Int64 of it after ~12 h, but the
-        // offset itself is small, so arithmetic modulo 2^64 lands on it exactly.
-        let phase = phaseAtFirstOutput &+ UInt64(discard) &* increment
-        let offsetTicks = s.inputOrigin &- 1 &- Int64(s.resampler.latencyFrames) &- ticks
-        let offsetQ = Int64(bitPattern: phase &+ (UInt64(bitPattern: offsetTicks) &<< 32))
-        breakpoints[breakpointHead] = Breakpoint(outTick: ticks, frames: Int64(n),
-                                                 sampleRate: s.sampleRate, offsetQ: offsetQ,
-                                                 increment: increment)
-        breakpointHead = (breakpointHead + 1) % Self.breakpointCapacity
-        breakpointCount = min(breakpointCount + 1, Self.breakpointCapacity)
+        // `phaseAtFirstOutput + discard·increment`, which is fed frame `phase/2^32 − 1 − latency`
+        // (the resampler's phase starts at one frame and its group delay is `latency`), and fed
+        // frame j is input tick `inputOrigin + j + mapBase`. Stored as the offset from `ticks`, in
+        // WRAPPING Q32.32: the phase wraps after 2^32 frames (~25 h) and a naive Int64 of it after
+        // ~12 h, but the offset itself is small, so arithmetic modulo 2^64 lands on it exactly.
+        //
+        // STEP 5: a splice mark inside the block's fed span splits it. Output frame f is past mark
+        // m when its phase reaches `(m.fed + 1 + latency)·2^32`; from there on the offset carries
+        // m.delta, and m's output tick is where the splice is heard.
+        let phase0 = phaseAtFirstOutput &+ UInt64(discard) &* increment
+        let latency = Int64(s.resampler.latencyFrames)
+        var f0 = 0
+        while f0 < n {
+            var fEnd = n
+            while let m = s.marks.first {
+                let markPhase = UInt64(bitPattern: m.fed &+ 1 &+ latency) &<< 32
+                let d = Int64(bitPattern: markPhase &- (phase0 &+ UInt64(f0) &* increment))
+                if d <= 0 {
+                    s.mapBase &+= m.delta
+                    s.marks.removeFirst()
+                    if let k = spliceRecords.firstIndex(where: { $0.id == m.id }) {
+                        spliceRecords[k].outTick = ticks + Int64(f0)
+                    }
+                    continue
+                }
+                let inc = Int64(increment)
+                fEnd = min(n, f0 + Int((d + inc - 1) / inc))
+                break
+            }
+            let segTick = ticks + Int64(f0)
+            let segPhase = phase0 &+ UInt64(f0) &* increment
+            let offsetTicks = s.inputOrigin &+ s.mapBase &- 1 &- latency &- segTick
+            let offsetQ = Int64(bitPattern: segPhase &+ (UInt64(bitPattern: offsetTicks) &<< 32))
+            breakpoints[breakpointHead] = Breakpoint(outTick: segTick, frames: Int64(fEnd - f0),
+                                                     sampleRate: s.sampleRate, offsetQ: offsetQ,
+                                                     increment: increment)
+            breakpointHead = (breakpointHead + 1) % Self.breakpointCapacity
+            breakpointCount = min(breakpointCount + 1, Self.breakpointCapacity)
+            f0 = fEnd
+        }
+        session = s
 
         guard let built = Self.makeSampleBuffer(interleaved, frames: n, channels: ch,
                                                 timescale: s.timescale, ptsTicks: ticks,
@@ -646,7 +861,14 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
         // The pre-existing behaviour, and a fresh session afterwards: a later supported buffer must
         // not be measured against an axis this one never advanced.
         bump { $0.passthroughs += 1 }
+        if let s = session, !s.splicer.isIdle {
+            var discard = [[Float]](repeating: [], count: s.channels)
+            lines += settleLocked(s.splicer.abandonAll(reason: "passthrough buffer", into: &discard),
+                                  rate: s.sampleRate)
+        }
         session = nil
+        // The breakpoints go below, so no executed splice's mark can be crossed any more either.
+        spliceRecords = []
         // The renderer now gets un-resampled audio, whose content time IS its output time.
         breakpointCount = 0
         if !passthroughLogged {
@@ -668,14 +890,18 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
                                    final: Bool, suppressed: Int) -> String {
         String(format: "%@ %@ — in=%d out=%d buf / %lld frames · ρ %.6f now, %d block(s) off 1.0 · holes %d "
                + "(%lld fr silence) · overlaps %d (%lld fr dropped) · format resets %d · axis breaks "
-               + "%d · clamps %d%@ · passthrough %d · build failures %d · session totals: out %lld fr, "
-               + "holes %d, overlaps %d, resets %d, breaks %d, clamps %d%@",
+               + "%d · clamps %d%@ · passthrough %d · build failures %d · splices: drop %d (%lld fr), "
+               + "insert %d (%lld fr), abandoned %d · session totals: out %lld fr, "
+               + "holes %d, overlaps %d, resets %d, breaks %d, clamps %d, splices %d, abandoned %d%@",
                tag, final ? "session END" : "window",
                w.inputBuffers, w.outputBuffers, w.outputFrames, rho, w.offUnityBlocks,
                w.fills, w.fillFrames, w.drops, w.dropFrames, w.formatResets, w.axisBreaks,
                w.clamps, w.clamps > 0 && w.offUnityBlocks == 0 ? " ⚠️ NON-ZERO AT RATIO 1.0 — PLUMBING DEFECT" : "",
                w.passthroughs, w.buildFailures,
+               w.spliceDrops, w.spliceDropFrames, w.spliceInserts, w.spliceInsertFrames,
+               w.splicesAbandoned,
                t.outputFrames, t.fills, t.drops, t.formatResets, t.axisBreaks, t.clamps,
+               t.spliceDrops + t.spliceInserts, t.splicesAbandoned,
                suppressed > 0 ? " · \(suppressed) event line(s) suppressed this window" : "")
     }
 

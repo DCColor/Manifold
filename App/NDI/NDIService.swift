@@ -1599,6 +1599,8 @@ final class NDIService: ObservableObject {
             // case the fault is in the pump's request sizing, not here, and this line is where it
             // becomes visible instead of silently costing lip-sync.
             let ppm = sinceLast > 0 ? divergence / sinceLast * 1e6 : 0
+            // On record before the re-pinned buffer reaches the sink (step 5's splice matcher).
+            liveAudioSink?.noteInputAxisRePin(divergenceSeconds: divergence)
             NSLog("%@", String(format: "[NDI-AUDIO] sample axis RE-PINNED — it had run %+.1f ms "
                                + "%@ the wall clock (tolerance %.0f ms) after %.1f s → %.0f ppm "
                                + "· re-pin #%d. A one-off is a stall past the 250 ms pull clamp; "

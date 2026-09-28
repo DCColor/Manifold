@@ -2138,6 +2138,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             for sb in out { renderer.enqueue(sb) }
         }
 
+        /// The transport re-pinned its sample axis to the source (`audioPTSTicks`'s 25 ms tolerance).
+        /// Recorded for splice matching (step 5, §2.4) — call it BEFORE enqueueing the re-pinned
+        /// buffer. A re-pin within the stage's 1 s bridge keeps its timing there and never steps the
+        /// error; past it, it is an axis BREAK and can. Either way the line is on record.
+        public func noteInputAxisRePin(divergenceSeconds: Double) {
+            steering.noteEvent("axis RE-PINNED", host: CACurrentMediaTime(), jumped: nil,
+                               detail: String(format: "the sample axis had run %+.1f ms from the "
+                                              + "source", divergenceSeconds * 1000))
+        }
+
         /// Output-axis end of `sb`: its PTS plus its frames at the format's sample rate. nil when
         /// either is unavailable, which the steering records as "no depth for this read".
         private static func outputEnd(of sb: CMSampleBuffer?) -> Double? {
@@ -2296,6 +2306,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             log: { NSLog("%@", $0) },
             windowCompanion: srFit.map { fit in { fit.windowLine() } })
         mirror.lock.lock(); mirror.steering = steering; mirror.srFit = srFit; mirror.lock.unlock()
+        // An input jump past the stage's bridge is the one input event that can step the content
+        // error (§4.1 item 2), so it is on record for the splice it may cause. Set before the sink
+        // exists, so before any `process`.
+        resample.onAxisBreak = { [weak steering] ms in
+            steering?.noteEvent("axis BREAK", host: CACurrentMediaTime(), jumped: nil,
+                                detail: String(format: "input axis BREAK %+.1f ms — the stage drained "
+                                               + "and re-anchored its output axis", ms))
+        }
         NSLog("[%@-RESAMPLE] steering %@ — %@", path.rawValue.uppercased(), mode.rawValue,
               mode == .loop
                 ? "ratio carries the correction (§2.2); coarse branch at 250 ms level / 50 ms step "
@@ -2485,7 +2503,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// ⚠️ STILL A BOUND ON SILENCE, AND IT STILL CANNOT TELL "NEVER" FROM "SLOW": a compliant sender
     /// at the 5 s minimum interval may take up to 7.5 s. Missing the bound costs little now: audio
     /// starts at offset 0, and the late pair starts the fit — the target moves by the first Δ, which
-    /// the loop absorbs as error, or the coarse step branch takes in one write if it is > 50 ms.
+    /// the loop absorbs as error, or the coarse step branch takes as one splice if it is > 50 ms.
     private nonisolated static let senderReportWaitSeconds = 1.5
 
     /// EMA time constant for the mirrored rate, in seconds.
@@ -2642,6 +2660,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirrorLiveAudio(mapping, origin: .gate)
     }
 
+    /// A discontinuous move of the picture's timeline (`LiveClock.onPositionJump`): snap, freeze
+    /// guard, queue-full, target step, startup realign. Put on record for the splice it causes
+    /// (step 5, §2.4). Any thread; the clock calls it BEFORE publishing the moved mapping, which
+    /// is what lets the match look only backwards. No session open → dropped.
+    public nonisolated func liveAudioPositionJump(_ jump: LiveClock.PositionJump) {
+        // A startup realign precedes the first presentation, so precedes the session's first anchor
+        // (§2.7): it cannot cause a splice, and on record it could only be mis-matched to one.
+        guard jump.kind != .startupRealign else { return }
+        mirror.lock.lock()
+        let steering = mirror.steering
+        mirror.lock.unlock()
+        steering?.noteEvent(jump.kind.rawValue, host: jump.host, jumped: jump.jumped,
+                            detail: jump.detail)
+    }
+
     /// One RTCP Sender Report, audio or video, already matched to its stream by SSRC. Network
     /// thread, every SR. `audioOrigin` / `videoOrigin` are the raw RTP timestamps the receivers
     /// rebase to zero (T_a0 / T_v0), once the bridge has seen them. Dropped when the session has no
@@ -2677,12 +2710,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let late = mirror.senderReportAbandoned
         let sinceSession = now - mirror.sessionHost
         let tag = "[\(mirror.path.rawValue)-AUDIO]"
+        let steering = mirror.steering
         mirror.lock.unlock()
         if late {
+            // The one SR event that moves the target by more than a re-levelling: on record for the
+            // splice it may cause (step 5).
+            steering?.noteEvent("late SR pair", host: now, jumped: nil,
+                                detail: String(format: "first SR pair +%.0f ms after the session "
+                                               + "opened, after the gate fell back to offset 0",
+                                               sinceSession * 1000))
             NSLog("%@ first SR PAIR arrived LATE, +%.0f ms after the session opened — after the gate "
                 + "gave up on it. The sender is slow rather than absent. The SR line applies from the "
                 + "next evaluation: the target moves by the first offset, absorbed by the loop as "
-                + "error (or one coarse write if > 50 ms).", tag, sinceSession * 1000)
+                + "error (or one splice if > 50 ms).", tag, sinceSession * 1000)
         }
         if let pending { mirrorLiveAudio(pending, origin: .gate) }
     }

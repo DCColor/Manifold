@@ -11,10 +11,10 @@
 //  ── THE ONE WRITER ────────────────────────────────────────────────────────────────────────────
 //
 //  Every `setRate` a live-audio session makes after `beginLiveAudio`'s hold goes through `write`
-//  here: the first anchor, a coarse event, and — with the ratio pinned — step 3's position branch
-//  and NDI's re-anchor. So the count this object logs IS the session's rate-write count, and §7
-//  step 4's "setRate rows with a non-zero rate: 1 + COARSE count" can be read off one line rather
-//  than reconstructed from several.
+//  here: the first anchor, a coarse event the splice cannot take (below), and — with the ratio
+//  pinned — step 3's position branch and NDI's re-anchor. So the count this object logs IS the
+//  session's rate-write count, and §7 step 5's "setRate rows with a non-zero rate == 1 per session"
+//  can be read off one line rather than reconstructed from several.
 //
 //  ── THE COARSE BRANCH (§2.4, REVISED 2026-09-25) ──────────────────────────────────────────────
 //
@@ -25,23 +25,47 @@
 //    * level: |e_f| > 250 ms
 //    * step:  |e_k − e_(k−1)| > 50 ms between consecutive accepted evaluations
 //
-//  Action until step 5: one timebase write, placed so the content heard is the target
-//  (`outputTime(atInputTime: target)`), then `e_f` reset and `i` held. ⚠️ THE STAGE'S AXIS IS NOT
-//  DRAINED OR RE-ANCHORED. §2.4 says "drain the stage, then re-anchor its axis and the timebase";
-//  re-anchoring the output axis would restart it at the next input tick while the renderer still
-//  holds buffers on the old one, which overlaps or gaps them by the offset the loop has
-//  accumulated. Inverting the content-time map moves the timebase alone, which is exactly the
-//  write step 3's position branch made — one write, one mute, the renderer discarding or waiting
-//  exactly as it did then. Step 5 replaces the write with a splice; the triggers stay.
+//  ACTION (step 5): a SPLICE, never a rate write. The content moves by −e — a drop when the audio
+//  is behind (a snap, freeze guard or queue-full moved the picture forward), an insert of repeated
+//  material when it is ahead — across the stage's 10 ms equal-power fade, at the stage's input.
+//  The output axis stays contiguous. `e_f` is reset and `i` held, exactly as before.
+//
+//  The splice is heard a renderer-queue later than it is requested. Until then the content heard
+//  still carries the old error, so every read adds the stage's `spliceCorrectionAhead` — the part
+//  requested and not yet heard. `content + ahead` is continuous through the moment the splice is
+//  heard, so no settle window is needed after a splice: nothing was written.
+//
+//  ⚠️ TWO CASES STILL RE-ANCHOR, LOGGED AND COUNTED, WITH THE PRE-STEP-5 WRITE:
+//    * |e| > `maximumSpliceSeconds` (1 s) — past it the material cannot hide the jump;
+//    * a DROP larger than the renderer queue can cover (drop + fade + 50 ms > queue depth). A drop
+//      feeds nothing for about its own length while the material it jumps to arrives; the renderer
+//      plays that out of its queue. If the queue is shorter, the output axis falls behind the
+//      timebase, every later buffer arrives late, and the loop — which reads what was ENQUEUED —
+//      cannot see it. The events that cause drops over-fill the queue by the drop, so this is a
+//      guard, not an expected path.
+//  The write is placed so the content heard is the target (`outputTime(atInputTime: target)`),
+//  moving the timebase alone, as step 4 did.
+//
+//  ── MATCHING (§2.4: an unmatched splice is a defect) ──────────────────────────────────────────
+//
+//  Callers report the events that move content: LiveClock's position jumps (snap-to-live,
+//  freeze-guard, queue-full, target-step), an input axis RE-PINNED, the stage's own axis BREAK,
+//  and on RTP audio a first SR pair that arrived after the gate gave up on it (the target moves by
+//  the first offset).
+//  Each splice or fallback takes the newest unconsumed one from the `matchWindowSeconds` before it,
+//  and its line names it; with none it says WARNING. LiveClock reports a jump BEFORE it publishes
+//  the moved mapping, so the event always precedes the step it causes; the window only has to
+//  cover the time from the event to the read that sees it.
 //
 //  ── THE SETTLE WINDOW ─────────────────────────────────────────────────────────────────────────
 //
 //  `setRate(_:time:atHostTime:)` updates the rate synchronously and the TIMEBASE asynchronously
 //  (see `FrameEngine.LiveAudioRendererState`). A read taken in between still sees the old axis, and
 //  the next one the new — which is a step, and would fire a second, reverse coarse event on the
-//  write the first one made. So after every write the loop ignores `settleSeconds` of reads: no
-//  controller step, no trigger, and the first read after it seeds `e_f` afresh. The figure is a
-//  bound on that window, not a measurement of it; the reads it discards are counted.
+//  write the first one made. So after every WRITE (the anchor, a fallback) the loop ignores
+//  `settleSeconds` of reads: no controller step, no trigger, and the first read after it seeds `e_f`
+//  afresh. The figure is a bound on that window, not a measurement of it; the reads it discards are
+//  counted. A splice writes nothing and takes no settle window.
 //
 //  ── PINNED MODE — THE BACK-OUT SWITCH ─────────────────────────────────────────────────────────
 //
@@ -60,6 +84,8 @@ protocol LiveAudioContentClock: AnyObject {
     func inputTime(atOutputTime outputSeconds: Double) -> Double
     func outputTime(atInputTime inputSeconds: Double) -> Double
     var rho: Double { get set }
+    func requestSplice(contentSeconds: Double) -> LiveAudioResampleStage.SpliceGrant?
+    func spliceCorrectionAhead(ofOutputTime outputSeconds: Double) -> Double
 }
 
 extension LiveAudioResampleStage: LiveAudioContentClock {}
@@ -93,7 +119,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     public enum WriteOrigin: Sendable, Equatable {
         /// The session's first anchor (the gate, or NDI's first pull).
         case firstAnchor
-        /// §2.4's coarse branch.
+        /// §2.4's coarse branch, on the one path a splice cannot take (see the header).
         case coarse(Trigger, errorSeconds: Double)
         /// A deliberate re-anchor by the caller: a pinned-mode position branch, NDI's pinned
         /// re-anchor or a Desktop Audio Lead change, or the anchor after a clock reset.
@@ -103,7 +129,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             switch self {
             case .firstAnchor: return "FIRST ANCHOR — the session's rate write"
             case let .coarse(t, e):
-                return String(format: "COARSE (%@, e %+.1f ms)", t.rawValue, e * 1000)
+                return String(format: "COARSE RE-ANCHOR — splice fallback (%@, e %+.1f ms)",
+                              t.rawValue, e * 1000)
             case let .reanchor(why): return "re-anchor (\(why))"
             }
         }
@@ -123,6 +150,15 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// Longest `dt` one evaluation may claim. A stalled pump must not hand the integrator or the
     /// slew limiter a second of authority in one step.
     static let maximumStepSeconds = 0.25
+
+    /// How far back from a splice its event may lie. The longest legitimate path from an event to
+    /// the read that sees it: a preceding drop, which feeds nothing — so takes no reads — for up to
+    /// its own length (≤ 1 s, `maximumSpliceSeconds`); then a settle window if a fallback wrote
+    /// (0.25 s); then one input buffer, with room for a bursty one (0.25 s). Events are rare — none
+    /// fired in ~5 h of the saved step-4 sessions — so a wide window costs no false matches.
+    public static let matchWindowSeconds = 1.5
+    /// A drop may take at most the renderer queue less its fade and this margin — one late buffer.
+    static let dropQueueMarginSeconds = 0.050
 
     public let mode: Mode
     private let tag: String
@@ -156,6 +192,23 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var coarseStep = 0
     private var reanchors = 0
     private var maxAbsRhoMinusOne = 0.0
+    private var spliceDrops = 0
+    private var spliceInserts = 0
+    private var splicedSeconds = 0.0
+    private var spliceFallbacks = 0
+    private var unmatched = 0
+
+    /// Content-moving events reported by the callers, newest last. A splice consumes the one it
+    /// matches, so one event cannot account for two splices.
+    private struct NotedEvent {
+        let label: String
+        let host: Double
+        let jumped: Double?
+        let detail: String
+        var consumed = false
+    }
+    private var events: [NotedEvent] = []
+    private static let eventCapacity = 32
 
     // Window. Preallocated: 10 s at 100 Hz is 1000 reads.
     private static let capacity = 4096
@@ -172,6 +225,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var rhoMin = Double.infinity, rhoMax = -Double.infinity
     private var slewMax = 0.0
     private var windowCoarse = 0
+    private var windowSplices = 0
     private var windowWrites = 0
     private var windowStart = 0.0
 
@@ -241,6 +295,31 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         write(clock.outputTime(atInputTime: media), host, origin)
     }
 
+    /// Record an event that moves content — a LiveClock position jump, an input axis re-pin, a stage
+    /// axis break — for the next splice to be matched against. Any thread; takes only this lock.
+    ///
+    /// - Parameters:
+    ///   - label: the event's log name: `snap-to-live`, `freeze-guard`, `queue-full`,
+    ///     `target-step`, `axis RE-PINNED`, `axis BREAK`, `late SR pair`.
+    ///   - jumped: signed seconds the PICTURE moved (+ = forward), when the event has one.
+    ///   - detail: the event's own figures, carried onto the SPLICE line.
+    public func noteEvent(_ label: String, host: Double, jumped: Double?, detail: String) {
+        lock.lock()
+        events.append(NotedEvent(label: label, host: host, jumped: jumped, detail: detail))
+        if events.count > Self.eventCapacity { events.removeFirst(events.count - Self.eventCapacity) }
+        lock.unlock()
+    }
+
+    /// The newest unconsumed event in the window before `host`, consumed. A small forward slack
+    /// covers two threads' reads of one host clock; ordering is otherwise guaranteed (see header).
+    private func matchEventLocked(host: Double) -> NotedEvent? {
+        guard let k = events.lastIndex(where: {
+            !$0.consumed && $0.host <= host + 0.005 && host - $0.host <= Self.matchWindowSeconds
+        }) else { return nil }
+        events[k].consumed = true
+        return events[k]
+    }
+
     /// The clock un-anchored (`LiveClock.reset()`): the synchronizer is being held at rate 0, so
     /// there is nothing to steer until the next `anchor`. The ratio and `i` are kept.
     public func hold() {
@@ -272,8 +351,10 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         let timebase = readTimebase()
         let t1 = hostNow()
         let read = PairedRead(t0: t0, timebase: timebase, t1: t1)
-        // After the pair, never inside it: this takes the stage's lock.
+        // After the pair, never inside it: these take the stage's lock. `ahead` is splice correction
+        // requested and not yet heard (step 5): 0 whenever no splice is in the renderer's queue.
         let content = clock.inputTime(atOutputTime: timebase)
+            + clock.spliceCorrectionAhead(ofOutputTime: timebase)
 
         var newRho: Double?
         var coarse: (Trigger, Double, Double)?     // trigger, e, target
@@ -327,31 +408,106 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             filteredAtEvent = state.filteredError
             if c.0 == .level { coarseLevel += 1 } else { coarseStep += 1 }
             windowCoarse += 1
-            windowWrites += 1
+            // e_f reset, i held; the next read seeds the step comparison afresh.
             state = LiveAudioResampleController.coarseEvent(state)
-            restartAfterWriteLocked(host: t1)
+            previousError = nil
         }
-        let integralPpm = state.integral * 1e6
-        let writes = firstAnchors + coarseLevel + coarseStep + reanchors
         windowLine = windowIfDueLocked(now: t1)
         lock.unlock()
 
         if let r = newRho { clock.rho = r }
         if let (trigger, e, target) = coarse {
-            // Place the timebase so the content heard now is the target: one write (§2.4).
-            write(clock.outputTime(atInputTime: target), t1, .coarse(trigger, errorSeconds: e))
-            let tag = self.tag
-            let threshold = trigger == .level ? thresholds.level : thresholds.step
-            emit {
-                String(format: "%@ COARSE — %@ trigger: e %+.1f ms (e_f %+.1f ms, threshold %.0f ms) "
-                       + "· action: one timebase re-anchor (step 5 makes it a splice) · e_f reset, "
-                       + "i held at %+.2f ppm · session writes %d",
-                       tag, trigger.rawValue.uppercased(), e * 1000, filteredAtEvent * 1000,
-                       threshold * 1000, integralPpm, writes)
-            }
+            let depth = enqueuedFrontier.flatMap { $0.isFinite ? $0 - timebase : nil }
+            coarseAction(trigger: trigger, error: e, filtered: filteredAtEvent, target: target,
+                         host: t1, queueDepth: depth)
         }
         if let w = windowLine { emitWindow(w) }
         return read
+    }
+
+    /// §2.4's action: splice the content by −e, or — past the bound, or a drop the renderer queue
+    /// cannot cover — the pre-step-5 re-anchor. Either way one line, naming the event it matched.
+    /// Called without the lock.
+    private func coarseAction(trigger: Trigger, error e: Double, filtered: Double, target: Double,
+                              host t1: Double, queueDepth: Double?) {
+        // + = the content moves forward: a drop. The audio is behind the picture by −e.
+        let move = -e
+        let fade = LiveAudioResampleStage.crossfadeSeconds
+        var refusal: String?
+        if abs(move) > LiveAudioResampleStage.maximumSpliceSeconds {
+            refusal = String(format: "|e| %.0f ms is past the %.0f ms splice bound", abs(e) * 1000,
+                             LiveAudioResampleStage.maximumSpliceSeconds * 1000)
+        } else if move > 0, let d = queueDepth, move + fade + Self.dropQueueMarginSeconds > d {
+            refusal = String(format: "a %.1f ms drop needs %.0f ms of renderer queue (drop + %.0f ms "
+                             + "fade + %.0f ms margin) and the queue holds %.1f ms",
+                             move * 1000, (move + fade + Self.dropQueueMarginSeconds) * 1000,
+                             fade * 1000, Self.dropQueueMarginSeconds * 1000, d * 1000)
+        }
+        let grant = refusal == nil ? clock.requestSplice(contentSeconds: move) : nil
+        if refusal == nil, grant == nil {
+            refusal = "the stage refused it (no resampled session, or under one frame)"
+        }
+
+        lock.lock()
+        let matched = matchEventLocked(host: t1)
+        if matched == nil { unmatched += 1 }
+        if let g = grant {
+            if g.frames > 0 { spliceDrops += 1 } else { spliceInserts += 1 }
+            splicedSeconds += abs(g.seconds)
+            windowSplices += 1
+        } else {
+            spliceFallbacks += 1
+            windowWrites += 1
+            restartAfterWriteLocked(host: t1)
+        }
+        let number = spliceDrops + spliceInserts
+        let integralPpm = state.integral * 1e6
+        let writes = firstAnchors + spliceFallbacks + reanchors
+        lock.unlock()
+
+        // The fallback: place the timebase so the content heard now is the target, as step 4 did.
+        if grant == nil {
+            write(clock.outputTime(atInputTime: target), t1, .coarse(trigger, errorSeconds: e))
+        }
+
+        let tag = self.tag
+        let threshold = trigger == .level ? thresholds.level : thresholds.step
+        let triggerText = String(format: "trigger %@: e %+.1f ms (e_f %+.1f ms, threshold %.0f ms)",
+                                 trigger.rawValue.uppercased(), e * 1000, filtered * 1000,
+                                 threshold * 1000)
+        let queueText = queueDepth.map { String(format: "%.1f ms", $0 * 1000) } ?? "unknown"
+        let matchText: String
+        if let m = matched {
+            matchText = String(format: "matched: %@%@ at host %.3f s (%.0f ms before) — %@",
+                               m.label,
+                               m.jumped.map { String(format: " %+.3f s", $0) } ?? "",
+                               m.host, (t1 - m.host) * 1000, m.detail)
+        } else {
+            matchText = String(format: "⚠️ WARNING: UNMATCHED — no snap-to-live / freeze-guard / "
+                               + "queue-full / target-step / axis RE-PINNED / axis BREAK / late SR pair in the %.1f s "
+                               + "before it; §2.4 calls an unmatched splice a defect",
+                               Self.matchWindowSeconds)
+        }
+        if let g = grant {
+            emit {
+                String(format: "%@ SPLICE #%d %@ %lld fr / %.1f ms (content %@) · %@ · host %.3f s · "
+                       + "%d fr (%.1f ms) equal-power cross-fade · renderer queue %@ · %@ · no rate "
+                       + "write (session writes %d) · e_f reset, i held at %+.2f ppm",
+                       tag, number, g.frames > 0 ? "DROP" : "INSERT", abs(g.frames),
+                       abs(g.seconds) * 1000, g.frames > 0 ? "forward" : "back, repeated material",
+                       triggerText, t1, g.crossfadeFrames,
+                       Double(g.crossfadeFrames) / g.sampleRate * 1000, queueText, matchText,
+                       writes, integralPpm)
+            }
+        } else {
+            let why = refusal ?? "—"
+            emit {
+                String(format: "%@ COARSE RE-ANCHOR — no splice: %@ · %@ · host %.3f s · renderer "
+                       + "queue %@ · %@ · action: one timebase write (session writes %d) · e_f reset, "
+                       + "i held at %+.2f ppm",
+                       tag, why, triggerText, t1, queueText, matchText, writes, integralPpm)
+            }
+        }
     }
 
     /// Counters for the session, for the END line and for tests.
@@ -360,7 +516,17 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         public var coarseLevel = 0
         public var coarseStep = 0
         public var reanchors = 0
-        public var writes: Int { firstAnchors + coarseLevel + coarseStep + reanchors }
+        /// Coarse events taken as splices, by direction, and the content they moved in total.
+        public var spliceDrops = 0
+        public var spliceInserts = 0
+        public var splicedSeconds = 0.0
+        /// Coarse events the splice could not take, re-anchored instead — each one a write.
+        public var spliceFallbacks = 0
+        /// Splices and fallbacks with no event in the window before them.
+        public var unmatched = 0
+        public var splices: Int { spliceDrops + spliceInserts }
+        /// `coarseLevel + coarseStep == splices + spliceFallbacks`.
+        public var writes: Int { firstAnchors + spliceFallbacks + reanchors }
         public var rho = 1.0
         public var integral = 0.0
         public var filteredError = 0.0
@@ -382,11 +548,13 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         let tag = self.tag, mode = self.mode
         emit {
             String(format: "%@ steering session END — mode %@ · timebase writes %d (first anchor %d + "
-                   + "coarse %d [level %d, step %d] + re-anchor %d) · ρ−1 at end %+.1f ppm, max "
-                   + "|ρ−1| %.1f ppm · i %+.2f ppm",
-                   tag, mode.rawValue, t.writes, t.firstAnchors, t.coarseLevel + t.coarseStep,
-                   t.coarseLevel, t.coarseStep, t.reanchors, (t.rho - 1) * 1e6,
-                   t.maxAbsRhoMinusOne * 1e6, t.integral * 1e6)
+                   + "coarse %d [splice fallbacks] + re-anchor %d) · coarse events %d [level %d, step %d] · "
+                   + "splices %d (drop %d, insert %d), %.1f ms spliced, unmatched %d · ρ−1 at end "
+                   + "%+.1f ppm, max |ρ−1| %.1f ppm · i %+.2f ppm",
+                   tag, mode.rawValue, t.writes, t.firstAnchors, t.spliceFallbacks, t.reanchors,
+                   t.coarseLevel + t.coarseStep, t.coarseLevel, t.coarseStep,
+                   t.splices, t.spliceDrops, t.spliceInserts, t.splicedSeconds * 1000, t.unmatched,
+                   (t.rho - 1) * 1e6, t.maxAbsRhoMinusOne * 1e6, t.integral * 1e6)
         }
     }
 
@@ -397,6 +565,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         t.firstAnchors = firstAnchors; t.coarseLevel = coarseLevel; t.coarseStep = coarseStep
         t.reanchors = reanchors; t.rho = state.rho; t.integral = state.integral
         t.filteredError = state.filteredError; t.maxAbsRhoMinusOne = maxAbsRhoMinusOne
+        t.spliceDrops = spliceDrops; t.spliceInserts = spliceInserts
+        t.splicedSeconds = splicedSeconds; t.spliceFallbacks = spliceFallbacks
+        t.unmatched = unmatched
         return t
     }
 
@@ -427,7 +598,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         let snap = (n: n, disc: discarded, settle: settling, over: overflowed,
                     sat: saturatedSteps, rho: state.rho, rhoMin: rhoMin, rhoMax: rhoMax,
                     slew: slewMax, i: state.integral, ef: state.filteredError,
-                    coarse: windowCoarse, writes: windowWrites,
+                    coarse: windowCoarse, splices: windowSplices, writes: windowWrites,
                     total: totalsLocked(), elapsed: (now ?? lastEvaluationHost) - sessionStart)
         resetWindowLocked(now: now)
         let tag = self.tag, mode = self.mode
@@ -449,17 +620,21 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                 : "—"
             return String(format: "%@ steering %@ +%.0fs · mode %@ · ρ−1 %+.1f ppm (window %@, "
                           + "slew max %.1f ppm/s) · i %+.2f ppm · e_f %+.2f ms · e ms %@ · n=%d "
-                          + "discarded=%d settling=%d%@ · saturated %d · coarse this window %d · "
-                          + "writes this window %d · session: writes %d = first %d + coarse %d "
-                          + "(level %d, step %d) + re-anchor %d, max |ρ−1| %.1f ppm · "
+                          + "discarded=%d settling=%d%@ · saturated %d · coarse this window %d "
+                          + "(splices %d) · writes this window %d · session: writes %d = first %d + "
+                          + "coarse %d (splice fallbacks) + re-anchor %d · coarse events %d (level %d, "
+                          + "step %d) · "
+                          + "splices %d, %.1f ms, unmatched %d · max |ρ−1| %.1f ppm · "
                           + "renderer depth ms %@",
                           tag, final ? "END" : "window", snap.elapsed, mode.rawValue,
                           (snap.rho - 1) * 1e6, rhoRange, snap.slew * 1e6, snap.i * 1e6,
                           snap.ef * 1e3, errText, snap.n, snap.disc, snap.settle,
                           snap.over > 0 ? String(format: " OVERFLOW=%d", snap.over) : "",
-                          snap.sat, snap.coarse, snap.writes, snap.total.writes,
-                          snap.total.firstAnchors, snap.total.coarseLevel + snap.total.coarseStep,
-                          snap.total.coarseLevel, snap.total.coarseStep, snap.total.reanchors,
+                          snap.sat, snap.coarse, snap.splices, snap.writes, snap.total.writes,
+                          snap.total.firstAnchors, snap.total.spliceFallbacks, snap.total.reanchors,
+                          snap.total.coarseLevel + snap.total.coarseStep,
+                          snap.total.coarseLevel, snap.total.coarseStep, snap.total.splices,
+                          snap.total.splicedSeconds * 1000, snap.total.unmatched,
                           snap.total.maxAbsRhoMinusOne * 1e6, depthText)
         }
     }
@@ -467,7 +642,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private func resetWindowLocked(now: Double?) {
         count = 0; depthCount = 0; overflowed = 0; discarded = 0; settling = 0; saturatedSteps = 0
         rhoMin = .infinity; rhoMax = -.infinity; slewMax = 0
-        windowCoarse = 0; windowWrites = 0
+        windowCoarse = 0; windowSplices = 0; windowWrites = 0
         if let now { windowStart = now }
     }
 

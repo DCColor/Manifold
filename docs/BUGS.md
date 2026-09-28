@@ -672,6 +672,31 @@ keyframe yet) still send, and still log `[WHEP-PLI] PLI #N sent`.
 
 ---
 
+## ☐ PRE-SHIP: remove the resampler step 5 forced-video-jump control
+
+**Status:** OPEN, required before public launch. **Raised:** 2026-09-27, resampler step 5
+(`AUDIO_RESAMPLER_DESIGN.md` §16). Verification scaffolding: snaps, freeze guards and queue-fulls
+almost never fire, so the splice needed a real video-timeline jump on demand.
+
+**What to remove:**
+- `App/ManifoldApp.swift`: `ForcedVideoJumpCommand` (the struct, marked `⚠️ REMOVE BEFORE SHIP`) and
+  its `ForcedVideoJumpCommand()` line in the Debug `CommandMenu`.
+- `hasLiveClock` in `App/SRT/SRTFrameRouter.swift` and `App/WebRTC/WHEPFrameRouter.swift`. Nothing
+  else reads it.
+
+**What stays:** everything the splice itself uses. That is `LiveClock.onPositionJump`, the routers'
+`liveAudioPositionJump` seams, `FrameEngine.liveAudioPositionJump`, `noteInputAxisRePin`, and the
+matching in `LiveAudioResampleSteering`. `adjustTargetDepth` stays too: ⌃⌥[ / ⌃⌥] use it.
+
+**Why pre-ship even though it is `#if DEBUG` behind `DebugMenuGate`.** Every tester build to date has
+been Profile, which defines `DEBUG=1` (`CLAUDE.md`). A menu item that jumps a live transport's
+presentation clock by 200 ms should not ride along on the build testers run.
+
+**Done means:** `grep -rn "ForcedVideoJump\|hasLiveClock" App` returns nothing, and the Debug menu
+lists no Force Video Jump items.
+
+---
+
 ## ✅ DONE 2026-09-23 — MediaMTX is set up locally as the second WHIP/WHEP test server
 
 **Status:** ✅ **WHIP/WHEP built and verified end to end, 2026-09-23.** SRT is configured on the
@@ -913,6 +938,41 @@ session length at which the renderer starves is unknown. No starvation was seen 
 
 Related: "WHEP lip-sync is ARBITRARY PER SESSION" below. That entry is the offset; this one is its
 slope.
+
+---
+
+## ☐ OPEN 2026-09-27 — the resampler stage's input-step bridge has hard edges: a re-pin or a lost packet is a click and a silence
+
+**Status:** ☐ **OPEN, follow-up.** Unchanged since step 3, and left as it is by step 5 on purpose
+(`AUDIO_RESAMPLER_DESIGN.md` §16.1). **Affects:** every live transport, at each input-axis step up to
+1 s: an SRT/NDI re-pin (≥ 25 ms), a WHEP lost packet (20/40/60 ms), and the 2.5 ms hole at every
+WHEP start.
+
+**What it does.** `LiveAudioResampleStage` keeps the timing of an input step by feeding silence into
+a hole, or dropping the overlapping frames of an overlap. Both edges are hard cuts. A hole is a run of
+exact digital zero as long as the step, with a step discontinuity at each end; an overlap is one
+discontinuity. The step-5 splice has a 10 ms equal-power fade; this bridge has none.
+
+**Measured.** In the saved sessions since step 3: SRT 0 re-pins; NDI 2 re-pins plus 2 more overlaps,
+all within the first 90 ms after the anchor; WHEP up to 10 lost-packet holes per session, and one
+2.5 ms hole at every start.
+
+**Why step 5 did not take it.** The stage cannot tell a re-pin from a lost packet: both are the same
+input-axis step. They need different fills. A lost packet is **missing** content: the timing is right
+and the question is concealment (the Opus PLC entry below). A re-pin is **relabelled** content, which
+the splice's replayed material would suit. Folding both into the splice would also flood the log with
+unmatched SPLICE warnings on every lost packet.
+
+**Options:**
+- Fade the bridge's edges only: fade out into a hole and in out of it, and cross-fade an overlap's
+  drop. This keeps the timing and the hole/overlap accounting exactly as they are. It is the smallest
+  change and is transport-agnostic.
+- Let the transport say what the step is. `noteInputAxisRePin` already reaches the steering before
+  the re-pinned buffer; a re-pin could take the splice (replay), and a hole with no note stays a
+  content hole for PLC.
+
+**Done means:** the §11.9 harness sees no discontinuity at an NDI startup re-pin, and criterion 5's
+content-hole counts are unchanged.
 
 ---
 
