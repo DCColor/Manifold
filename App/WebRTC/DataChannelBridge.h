@@ -88,6 +88,19 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
     ManifoldWHEPIceStateClosed       = 6,
 };
 
+/// One RTCP Sender Report (RFC 3550 §6.4.1) for this session's audio or video SSRC, with the raw RTP
+/// timestamps the receivers rebase to zero — T_a0 (the first audio packet handed to the sink) and
+/// T_v0 (the first access unit handed off) — once each has been seen. `ntp` is the 32.32 wire value.
+typedef struct {
+    BOOL     isAudio;
+    uint64_t ntp;
+    uint32_t rtp;
+    BOOL     haveAudioOrigin;
+    uint32_t audioOrigin;
+    BOOL     haveVideoOrigin;
+    uint32_t videoOrigin;
+} ManifoldWHEPSenderReport;
+
 /// One WHEP playback session's WebRTC half: a receive-only PeerConnection that produces an
 /// offer and consumes an answer. It does NO networking of its own beyond ICE/DTLS — the
 /// SDP exchange is plain HTTP and belongs to the caller (see WHEPClient.swift).
@@ -192,13 +205,15 @@ typedef NS_ENUM(int32_t, ManifoldWHEPIceState) {
                                                  uint16_t sequenceNumber,
                                                  BOOL marker);
 
-/// Fires ONCE per session, on the first RTCP Sender Report that arrives on the audio track —
-/// the second half of the first audio anchor's gate (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Carries
-/// nothing: the SR's contents stay with the log-only probe until step 4e applies them.
+/// Fires on EVERY RTCP Sender Report for this session's audio or video SSRC (selected by SSRC, not
+/// by position in the compound packet), with the stream's NTP/RTP pair and the two rebase origins
+/// seen so far. Step 4e-2 fits the audio↔video line from these (docs/AUDIO_RESAMPLER_DESIGN.md
+/// §2.6); the first pair also opens the first audio anchor's gate (§2.7).
 ///
-/// ⚠️ NETWORK THREAD, like `onAudioPacket`; must not block. Only consumed once a block is set, so an
-/// SR that arrives before it is assigned is reported by the next one rather than lost.
-@property (copy, nullable) void (^onAudioSenderReport)(void);
+/// ⚠️ NETWORK THREAD — the audio track's or the video track's, which are different threads — like
+/// `onAudioPacket`; must not block. An SR that arrives before a block is set is not replayed: the
+/// next one, a second later, carries the same information.
+@property (copy, nullable) void (^onSenderReport)(ManifoldWHEPSenderReport report);
 
 /// Whether the negotiated answer actually accepted the audio m-section — i.e. whether audio can
 /// be expected at all on this connection. NO means the server declined it (port 0, or the section

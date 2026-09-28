@@ -814,6 +814,8 @@ final class HLSClient: ObservableObject {
             return
         }
         lastError = nil
+        // Step 4e-2's session-start line: HLS is one timeline, so no SR line fit exists (§2.6).
+        FrameEngine.logSingleTimelineSession(.hls)
 
         // ── THE SWAP, IN ONE TURN ────────────────────────────────────────────────────────────
         // Retire the OLD pull without touching `isConnected`. Ordered before the takeover below so

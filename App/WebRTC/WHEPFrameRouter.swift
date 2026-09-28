@@ -273,9 +273,11 @@ final class WHEPFrameRouter {
     /// The clock's first presentation, with the mapping the picture started on — opens the first
     /// audio anchor's gate (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Called from the display tick.
     var liveAudioPresented: ((LiveClock.Mapping) -> Void)?
-    /// The session's first audio RTCP Sender Report — the gate's other half on RTP audio. Called
-    /// from the network thread, once per session.
-    var liveAudioSenderReport: (() -> Void)?
+    /// Every RTCP Sender Report for the session's audio or video SSRC, to the engine's SR line
+    /// (step 4e-2); its first pair is the gate's other half on RTP audio. Network threads.
+    var liveAudioSenderReport: ((ManifoldWHEPSenderReport) -> Void)?
+    /// The negotiated SDP answer, for the SR line's CNAME note (§2.6 decision b).
+    var liveAudioAnswerSDP: ((String) -> Void)?
     /// Closes it. Must be called on teardown or the renderer keeps a dead session's timebase.
     var endLiveAudio: (() -> Void)?
     /// Publishes the decoded channel count so the meters size their bars.

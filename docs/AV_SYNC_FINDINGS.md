@@ -66,6 +66,42 @@ move the beep relative to the flash.
   one file. Video and audio in one container on **one clock**, which is the only property the
   measurement actually needs.
 
+**UPDATED 2026-09-27 — the recorder protocol, after a void run (`AUDIO_RESAMPLER_DESIGN.md` §15.4).**
+On this Mac the recorder is OBS profile **"Recorder"** with scene collection **"AV Capture"**,
+launched as a second instance:
+
+```sh
+open -n -a OBS --args --multi --profile "Recorder" --collection "AV Capture"
+```
+
+1. **Recorder at 60 fps** (Settings → Video → Common FPS Values → 60). The sender stays at 23.976.
+   - At 60 the recorder samples every refresh of a 60 Hz display, so each flash is timed to < 17 ms.
+   - At 23.976 it would miss flashes: a 23.976 frame is on screen for 33 or 50 ms, and a recorder
+     sampling every 41.7 ms, not locked to the display, can skip a 33 ms one. Its rounding would
+     also beat slowly against the sender and not average out within a 2-minute capture.
+   - 30 fps (the §2 runs) works, at twice 60's rounding.
+2. **Manifold's own volume is up and it is not muted** before anything is recorded. The capture
+   records what Manifold renders, after its mute and volume.
+3. **Re-pick Manifold** in the recorder's macOS Audio Capture (double-click → Application → Manifold
+   → OK) after every Manifold launch (§1.5).
+4. **5-second audio preflight, before the first real capture.** Start Recording, wait 5 s, Stop,
+   then:
+
+   ```sh
+   ffmpeg -hide_banner -i "$(ls -t ~/Movies/*.mov | head -1)" -map 0:a -af volumedetect -f null - 2>&1 | grep max_volume
+   rm "$(ls -t ~/Movies/*.mov | head -1)"
+   ```
+
+   The fixture's beeps must read **about −28 dB or louder** (−27.8 dB on 2026-09-27). **−91 dB is
+   digital silence:** the capture is recording nothing, whatever OBS's meter shows.
+5. **If it stays silent after a re-pick, quit and relaunch the recorder instance** with the command
+   above, re-pick Manifold, and repeat the preflight. Do not start a timed run on a silent preflight.
+
+⚠️ **WHY THIS IS HERE.** On 2026-09-27 both captures of a 37-minute session came back at −91.0 dB
+throughout: the audio source still named a previous Manifold PID. Manifold's log showed 2224 s of
+audio decoded and rendering, so nothing inside the app could have flagged it. The session had to be
+run again. The preflight costs 5 seconds.
+
 ⚠️ **THE MONITORING SWITCH IS LOAD-BEARING.** If instance 1 monitors the file it is sending, the
 recorder captures the source *and* the player, two sources summing — §11.11's method failure 1,
 which voided three recordings and inverted an answer. Verified per run (§1.5).
@@ -163,7 +199,9 @@ singular). Every run in §2 passed all of them.
 | **level between beeps** | anything else sounding in the capture | **−240 dBFS, exact digital silence** |
 | **injected-offset gate on the analyser** | the analyser itself | 0 / +250 / −120 ms injected → **−0.0 / +250.0 / −120.0, sd 0.0** |
 
-⚠️ **AFTER EVERY MANIFOLD RELAUNCH, RE-PICK MANIFOLD IN THE RECORDER'S APPLICATION AUDIO CAPTURE.**
+⚠️ **AFTER EVERY MANIFOLD RELAUNCH, RE-PICK MANIFOLD IN THE RECORDER'S APPLICATION AUDIO CAPTURE,
+THEN RUN THE 5-SECOND PREFLIGHT (§1.2).** It happened again on 2026-09-27 and voided a 37-minute
+session; the preflight is what catches it before the run rather than after.
 The recorder's macOS Audio Capture source is scoped to the Manifold *application*, and every run
 relaunches Manifold with a new PID. A stale PID gives a **silent audio track while the source's
 meter in OBS keeps moving**, because the meter follows the source and the recording follows the
@@ -851,6 +889,9 @@ it. The SR figure is taken as the reference.
 # fixture (regenerates identically; verify its own offset before trusting it)
 ~/Desktop/manifold-avsync/flash-beep-25p-60s.mov
 ~/Desktop/manifold-avsync/avsync.py <capture.mov> --label "..."
+
+# the recorder: second OBS instance, 60 fps, then the 5-second volumedetect preflight (§1.2)
+open -n -a OBS --args --multi --profile "Recorder" --collection "AV Capture"
 
 # the analyser's own gate, which must pass before any run is read
 ffmpeg -i flash-beep-25p-60s.mov -af "adelay=250|250" -c:v copy gate_250.mkv

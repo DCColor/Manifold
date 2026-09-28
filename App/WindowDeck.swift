@@ -1403,8 +1403,13 @@ final class DeckRegistry {
         WHEPFrameRouter.shared.liveAudioPresented = { [weak engine] mapping in
             engine?.liveAudioPresented(mapping)
         }
-        WHEPFrameRouter.shared.liveAudioSenderReport = { [weak engine] in
-            engine?.liveAudioSenderReport()
+        WHEPFrameRouter.shared.liveAudioSenderReport = { [weak engine] r in
+            engine?.liveAudioSenderReport(isAudio: r.isAudio.boolValue, ntp: r.ntp, rtp: r.rtp,
+                                          audioOrigin: r.haveAudioOrigin.boolValue ? r.audioOrigin : nil,
+                                          videoOrigin: r.haveVideoOrigin.boolValue ? r.videoOrigin : nil)
+        }
+        WHEPFrameRouter.shared.liveAudioAnswerSDP = { [weak engine] sdp in
+            engine?.liveAudioAnswerSDP(sdp)
         }
         WHEPFrameRouter.shared.endLiveAudio = { [weak engine] in engine?.endLiveAudio() }
         WHEPFrameRouter.shared.liveAudioEstablished = { [weak engine] ch in engine?.liveAudioEstablished(channels: ch) }

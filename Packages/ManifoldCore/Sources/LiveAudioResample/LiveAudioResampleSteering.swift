@@ -135,6 +135,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private let write: @Sendable (_ outputSeconds: Double, _ hostSeconds: Double,
                                   _ origin: WriteOrigin) -> Void
     private let log: (@Sendable (String) -> Void)?
+    /// A line printed right after each window line, on the same utility-queue block so the two stay
+    /// adjacent: WHEP's `[WHEP-SRFIT]` fit state (step 4e-2). nil on every other transport.
+    private let windowCompanion: (@Sendable () -> String?)?
 
     private let lock = UnfairLockBox()
 
@@ -183,10 +186,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                             readTimebase: @escaping @Sendable () -> Double,
                             hostNow: @escaping @Sendable () -> Double,
                             write: @escaping @Sendable (Double, Double, WriteOrigin) -> Void,
-                            log: (@Sendable (String) -> Void)?) {
+                            log: (@Sendable (String) -> Void)?,
+                            windowCompanion: (@Sendable () -> String?)? = nil) {
         self.init(tag: tag, mode: mode, clock: stage, gains: .adopted, thresholds: .adopted,
                   reportsWindows: reportsWindows, readTimebase: readTimebase, hostNow: hostNow,
-                  write: write, log: log)
+                  write: write, log: log, windowCompanion: windowCompanion)
     }
 
     init(tag: String, mode: Mode, clock: LiveAudioContentClock,
@@ -195,10 +199,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
          readTimebase: @escaping @Sendable () -> Double,
          hostNow: @escaping @Sendable () -> Double,
          write: @escaping @Sendable (Double, Double, WriteOrigin) -> Void,
-         log: (@Sendable (String) -> Void)?) {
+         log: (@Sendable (String) -> Void)?,
+         windowCompanion: (@Sendable () -> String?)? = nil) {
         self.tag = tag; self.mode = mode; self.clock = clock; self.gains = gains
         self.thresholds = thresholds; self.reportsWindows = reportsWindows
         self.readTimebase = readTimebase; self.hostNow = hostNow; self.write = write; self.log = log
+        self.windowCompanion = windowCompanion
     }
 
     // MARK: - The target line
@@ -279,7 +285,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             discarded += 1
             windowLine = windowIfDueLocked(now: t1)
             lock.unlock()
-            if let w = windowLine { emit(w) }
+            if let w = windowLine { emitWindow(w) }
             return read
         }
         if let f = enqueuedFrontier, f.isFinite, depthCount < Self.capacity {
@@ -344,7 +350,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                        threshold * 1000, integralPpm, writes)
             }
         }
-        if let w = windowLine { emit(w) }
+        if let w = windowLine { emitWindow(w) }
         return read
     }
 
@@ -372,7 +378,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         let w = windowLocked(final: true)
         let t = totalsLocked()
         lock.unlock()
-        if let w { emit(w) }
+        if let w { emitWindow(w) }
         let tag = self.tag, mode = self.mode
         emit {
             String(format: "%@ steering session END — mode %@ · timebase writes %d (first anchor %d + "
@@ -469,6 +475,18 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         guard let log else { return }
         let box = UncheckedLine(make: line)
         DispatchQueue.global(qos: .utility).async { log(box.make()) }
+    }
+
+    /// A window line, then its companion's, in one block so nothing interleaves between them. The
+    /// companion is read on the utility queue, never on the enqueue thread that closed the window.
+    private func emitWindow(_ line: @escaping () -> String) {
+        guard let log else { return }
+        let box = UncheckedLine(make: line)
+        let companion = windowCompanion
+        DispatchQueue.global(qos: .utility).async {
+            log(box.make())
+            if let c = companion?() { log(c) }
+        }
     }
 }
 

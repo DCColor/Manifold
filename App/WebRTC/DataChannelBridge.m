@@ -636,6 +636,14 @@ static NSString *ManifoldWHEPDescribeNackBenefit(const ManifoldH264DepacketizerS
 
 #define MANIFOLD_WHEP_SR_PROBE 1
 
+// ⚠️ NO LONGER ONLY AN INSTRUMENT (step 4e-2). The SR parse, T_a0 and T_v0 now feed the SR line that
+// sets WHEP's audio target (`-deliverSenderReport:isAudio:`), in every configuration. What stays
+// instrument is the `[WHEP-SR]` logging, which is behind MD_SR_LOG. Turning this macro off would
+// silently remove the fit's input, so it cannot be.
+#if !MANIFOLD_WHEP_SR_PROBE
+#error "Step 4e-2 applies the SR line: the SR parse and T_a0/T_v0 are behaviour, not a probe."
+#endif
+
 // ── THE LOGGING GATE ────────────────────────────────────────────────────────────────────
 //
 // `[WHEP-SR]` output is a diagnostic and must not reach a shipping build. It goes through this
@@ -802,9 +810,6 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     // sender-clock distance between those two instants IS the per-session A/V offset.
     BOOL     _srHaveTa0, _srHaveTv0;
     uint32_t _srTa0, _srTv0;
-
-    // `onAudioSenderReport` has fired. Audio track thread only — the only writer and reader.
-    BOOL     _srAudioNotified;
 
     BOOL     _srFirstPairLogged;
     double   _srDeltaFirst;                    // delta at the first SR pair, seconds
@@ -1489,6 +1494,19 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 #endif
 }
 
+/// Every SR matched to our SSRC, to the Swift fit (step 4e-2). The origins are read under the probe's
+/// lock — they are written on the two track threads — and the block is called outside it.
+- (void)deliverSenderReport:(const ManifoldRTCPSenderReport *)info isAudio:(BOOL)isAudio {
+    void (^sink)(ManifoldWHEPSenderReport) = self.onSenderReport;   // atomic read
+    if (!sink) return;
+    ManifoldWHEPSenderReport report = { .isAudio = isAudio, .ntp = info->ntp, .rtp = info->rtp };
+    os_unfair_lock_lock(&_srLock);
+    report.haveAudioOrigin = _srHaveTa0; report.audioOrigin = _srTa0;
+    report.haveVideoOrigin = _srHaveTv0; report.videoOrigin = _srTv0;
+    os_unfair_lock_unlock(&_srLock);
+    sink(report);
+}
+
 #endif // MANIFOLD_WHEP_SR_PROBE
 
 /// One video RTCP packet, on the video track thread. Reads the SR for OUR SSRC, answers it with a
@@ -1523,6 +1541,7 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 #if MANIFOLD_WHEP_SR_PROBE
     // Deliberately after the RR: the probe logs, and the RR's DLSR should not include a log call.
     [self srProbeNoteSR:&sr isAudio:NO];
+    [self deliverSenderReport:&sr isAudio:NO];
 #endif
 }
 
@@ -1631,12 +1650,9 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
             return;
         }
         [self srProbeNoteSR:&info isAudio:YES];
-        // The first audio SR opens the anchor gate's SR half (§2.7). Behaviour, not logging,
-        // so it is outside the telemetry gate: this block is compiled into Release.
-        if (!_srAudioNotified) {
-            void (^srSink)(void) = self.onAudioSenderReport;       // atomic read
-            if (srSink) { _srAudioNotified = YES; srSink(); }
-        }
+        // To the SR line (step 4e-2), whose first pair opens the anchor gate's SR half (§2.7).
+        // Behaviour, not logging, so it is outside the telemetry gate: compiled into Release.
+        [self deliverSenderReport:&info isAudio:YES];
 #endif
         return;
     }
@@ -2256,7 +2272,7 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
     // tears the decoder down with `decodeQueue.async`, behind them, rather than inline.
     self.onVideoAccessUnit = nil;
     self.onAudioPacket = nil;   // same reason: the network thread must not reach a torn-down sink
-    self.onAudioSenderReport = nil;
+    self.onSenderReport = nil;
 
     // A message callback may be running RIGHT NOW on the track thread, already past the
     // unregister above. Detach the depacketizer under the lock so that callback either

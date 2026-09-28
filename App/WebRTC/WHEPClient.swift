@@ -701,11 +701,14 @@ final class WHEPClient: ObservableObject {
             session.onAudioPacket = { opus, rtpTimestamp, _, _ in
                 WHEPFrameRouter.shared.audioReceiver?.receive(opus, rtpTimestamp: rtpTimestamp)
             }
-            // The first audio Sender Report: the first anchor waits for it as well as for the
-            // picture (docs/AUDIO_RESAMPLER_DESIGN.md §2.7). Network thread, once per session.
-            session.onAudioSenderReport = {
-                WHEPFrameRouter.shared.liveAudioSenderReport?()
+            // Every Sender Report, audio and video, to the session's SR line (step 4e-2,
+            // docs/AUDIO_RESAMPLER_DESIGN.md §2.6); its first pair also opens the first anchor's gate
+            // (§2.7). Network threads, every SR.
+            session.onSenderReport = { report in
+                WHEPFrameRouter.shared.liveAudioSenderReport?(report)
             }
+            // The answer's CNAMEs, for the fit's one decision-(b) line. Never gates anything.
+            WHEPFrameRouter.shared.liveAudioAnswerSDP?(answer)
         } else {
             WHEPFrameRouter.shared.declareNoAudio()
         }

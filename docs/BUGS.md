@@ -845,9 +845,24 @@ Run the ffmpeg caller twice: once exiting normally, once `kill -9`.
 
 ---
 
-## ☐ OPEN 2026-09-26 — WHEP lip-sync drifts with the sender's audio/video clock slope; e cannot see it
+## ☐ OPEN 2026-09-26 — WHEP lip-sync drifts with the sender's audio/video clock slope; e cannot see it — FIXED AND MEASURED ON CLOUDFLARE 2026-09-27
 
-**Status:** ☐ **OPEN.** The fix is resampler step 4e: put the RTCP SR line into the target
+**Status:** ☐ **OPEN — fixed and measured on Cloudflare (step 4e-2, `AUDIO_RESAMPLER_DESIGN.md`
+§15); MediaMTX verification pending, folded into the step 8 soak.** Kept open until a non-Cloudflare
+server confirms it, as `CLAUDE.md` requires.
+
+**UPDATED 2026-09-27 — the fix, measured.** Step 4e-2 puts the RTCP SR line into the target: the
+fitted offset replaces the constant cushion and the fitted slope enters the reference rate.
+- **Two ~37-min OBS → Cloudflare runs:** fitted slope **+67.66 ± 1.94** and **+68.04 ± 1.82 ppm**.
+- **The integrator** settled at **+4.8** and **+6.3 ppm**, against −60 before: it now learns the audio
+  clock, not the video one.
+- **The renderer queue no longer drains:** **+1.7** and **+1.1 ms** over ~2100 s, against −142 ms over
+  1902 s before.
+- **Device-level lip-sync (criterion 12):** start against end of one session, about 1700 s apart:
+  **+0.69 ± 1.69 ms**. Without the fix that interval would have drifted about −115 ms.
+- 1 timebase write and 0 coarse events per session.
+
+**Original status:** the fix is resampler step 4e: put the RTCP SR line into the target
 (`AUDIO_RESAMPLER_DESIGN.md` §2.6). **Affects:** WHEP, on both servers tried. **Measured:**
 30-minute Cloudflare soak, 2026-09-26 (`AUDIO_RESAMPLER_DESIGN.md` §13.3).
 
@@ -1720,9 +1735,25 @@ path reads the tap keyed to video PTS and never consults this timebase.
 
 ---
 
-## 🔍 OPEN 2026-09-23 — WHEP lip-sync is ARBITRARY PER SESSION: no RTCP sender-report mapping exists
+## 🔍 OPEN 2026-09-23 — WHEP lip-sync is ARBITRARY PER SESSION: no RTCP sender-report mapping exists — FIXED AND MEASURED ON CLOUDFLARE 2026-09-27
 
-**Status:** OPEN, cause identified in source, no fix attempted.
+**Status:** 🔍 **OPEN — fixed and measured on Cloudflare (step 4e-2, `AUDIO_RESAMPLER_DESIGN.md`
+§15); MediaMTX verification pending, folded into the step 8 soak.** Kept open until a non-Cloudflare
+server confirms it, as `CLAUDE.md` requires.
+
+**UPDATED 2026-09-27 — the mapping exists now.** Every WHEP session fits the audio↔video line from
+both streams' Sender Reports, and its offset positions the audio on the picture's timeline.
+- The first offset comes from the first SR pair: −41.7 ms and −69.3 ms on the two runs. That is the
+  per-session value this entry found arbitrary, now measured and applied.
+- The anchor waits for that pair (gate 1.5 s after the first presentation). If no pair arrives, it
+  anchors at offset 0 and logs the missing stream.
+- **Measured at the device:** +27.75 and +28.44 ms (start and end of one session), on the
+  `AV_SYNC_FINDINGS.md` §1 flash-beep method.
+- **Not yet measured:** the absolute value against a same-session file control, and whether it
+  repeats across sessions (this entry's 136 ms swing was between sessions). The +28 ms is
+  suggestive only; it sits near the +29.6 ms file control of 2026-09-23.
+
+**Original status:** OPEN, cause identified in source, no fix attempted.
 **Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.3.
 
 **Measured on two Cloudflare ingests within one hour, same binary, same fixture:**

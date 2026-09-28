@@ -2561,3 +2561,198 @@ under test, and HEAD fails it identically. **It was replaced by:**
 
 A publisher that honours PLI (Chrome over WHIP is the untested candidate) is still needed to see a
 PLI-driven IDR at all.
+
+## 15. Step 4e-2 results — the WHEP SR line in the target, measured 2026-09-27
+
+**Built:** `SenderReportLineFit` (`Packages/ManifoldCore/Sources/LiveAudioResample/`), one per WHEP
+session, fitted fresh with no prior.
+- **Input:** every Sender Report for the audio or video SSRC, selected by SSRC, with T_a0 and T_v0.
+  The bridge now sends them all to Swift instead of firing once on the first audio SR.
+- **Δ per pair as the probe computes it:** the NTP difference in 32.32, then the RTP difference as one
+  exact integer ratio over 48000 × 90000, both before any double. Each SR is used in one pair only
+  (both streams fresh), not re-paired on every SR as the probe does. The formula is unchanged.
+- **The abscissa is video content time,** `(rtp_v − T_v0)/90000`, the axis of the mapping's
+  `senderPTS`. No host clock enters the fit.
+- **Into the target** (`FrameEngine.mirrorLiveAudio`):
+  - `target = senderPTS − offset(senderPTS)`, in `cushion`'s slot with its sign convention;
+  - the slope enters the reference rate as `rate · (1 − b)`, never the ratio;
+  - no line (before the first pair, or the gate's fallback) → the constant, 0 on WHEP;
+  - `liveAudioDrift` adds back the applied offset, as it added the cushion.
+- **The sign of b, derived** at `SenderReportLineFit.reference`: dΔ/dp = 1 − (1+ε_a)/(1+ε_v) ≈
+  ε_v − ε_a. b > 0 means the audio belonging with the picture advances slower than the picture.
+  - A test pins it: +69 ppm of Δ slope gives < 20 µs of audio↔video drift over 600 s, on a frozen
+    line and through a 600 s SR outage; the opposite sign fails by > 80 ms.
+  - The line is frozen in that test on purpose. While pairs arrive every second the offset is
+    re-levelled, so even the wrong sign would only saw-tooth by 138 ppm × 1 s.
+- **Absent, not neutral,** on SRT and NDI: no fit object is constructed. Every session logs one
+  `[*-SRFIT] session:` line naming its case; HLS logs its line at connect.
+- **Logging:** a `[WHEP-SRFIT] window` line after every steering window, and a session summary on
+  close.
+- `swift test`: 62 of 62 (19 new). Profile and Release build clean.
+
+### 15.1 The derived numbers
+
+| | value | where it comes from |
+|---|---|---|
+| slope window / offset window | **600 s / 60 s** | "≥ 300 s" (§2.6); 60 s from Cloudflare's wander floor (§2.6) |
+| **slope SE bound** | **10 ppm**; released above 20; clamp ±150 ppm | The slope reaches lip-sync only by extrapolating the offset from its window's centre: ≤ 30 s plus one SR interval (≤ 7.5 s, RFC 3550 §6.3.1). 2σ × 10 ppm × 37.5 s = 0.75 ms, under half of Cloudflare's ~2 ms wander floor and 1/20 of §5.3's ±15 ms. Also §2.2's condition for a measured slope |
+| slope SE | white-noise OLS SE × √v, v the batch-means ratio of the residuals in 30 s batches, ≥ 4 batches | Cloudflare's residual is not white (§2.6); a white-noise SE would claim precision the data does not have |
+| **outliers** | rejected beyond **5 × max(s, 1/48000 s)** once 10 pairs are in the fit; counted | Gaussian false rejection 5.7e-7 per pair, ~1 per 20 days at 1 pair/s. The floor is one audio sample |
+| a step in Δ | **8 consecutive** rejections whose own sd is within the bound → the fit restarts on the new level | |
+| **unstable** | offset SE > **5 ms**, or ≥ **5 scattered** rejections in the last 20, or 8 consecutive rejections that disagree with each other → the **last good line** (verified by ≥ 10 pairs), **else 0** | 5 ms is a third of §5.3's ±15 ms; Cloudflare measures ~1.2 ms |
+| gap | no pair for **10 s** of video content time → logged; the line extrapolates on its slope | beyond the 7.5 s longest compliant SR interval |
+| **SR gate** | **1.5 s** after the first presentation (was 2 s, §12.2) | below |
+
+**The gate, re-derived now that it needs both streams.**
+- Measured over eight earlier WHEP connects:
+  - both servers send SRs on both streams at exactly 1.0 per second;
+  - the first pair was computable +27 … +37 ms after the session opened on MediaMTX, +1106 … +1108 ms
+    on Cloudflare (which sends both SRs in one compound packet);
+  - the latest first SR against the first presentation was +23 ms.
+- A sender at a 1 s interval randomised ×1.5 reports within 1.5 s of starting a stream, and each
+  stream starts ≥ 0.29 s before the first presentation. The two streams run in parallel, so waiting
+  for both does not lengthen it.
+- The fallback logs the missing stream(s) against RFC 3550 §6.4.1 and anchors at offset 0. A late
+  pair then starts the fit, and the target moves by the first offset: loop error, or one coarse
+  write if it is > 50 ms.
+
+**The largest single update step on Cloudflare's noise.**
+- **Predicted before the runs**, by replaying the recorded 30-min OBS → Cloudflare Δ series through
+  this code: 4.2 ms at pair 2, 2.2 ms after the first 60 s (the slope switching into use), p99
+  0.65 ms. In theory pair 2's step has sd 6.7 ms (≈ 20 ms at 3σ); once the offset window is full a
+  step is bounded by 2 × 5 × s / 60 ≈ 1.6 ms.
+- **Measured:** 2.4 ms (run 1) and **5.6 ms** (run 2, inside the first 60 s); 2.4 and 2.3 ms after
+  60 s. Median per window 0.37 and 0.35 ms. All far below the 50 ms step trigger. 0 coarse events.
+- **The replay found one defect before any run.** On the 4e-1 MediaMTX log, a real 0.3 ms shift in Δ
+  was called "unstable" (5 of 20 rejected) before the step test could see 8 consecutive. The rate
+  check now excludes the current consecutive run.
+- **A unit test found another:** the SDP CNAME parser never split lines. SDP ends lines in CRLF, and
+  Swift reads `"\r\n"` as one `Character`.
+
+**Known cost:** until the slope qualifies (191–220 s on Cloudflare here; ~90 s on a clean sender) the
+offset lags a 69 ppm line by ≤ 69 ppm × 30 s ≈ 2 ms. The integrator absorbs the rest.
+
+### 15.2 Two OBS → Cloudflare WHEP runs
+
+**Protocol:** Profile build, unsigned (`.build-cc/step4e2-Profile`), telemetry on. OBS on this Mac at
+23.976 ("24 NTSC") over WHIP to Cloudflare, looping the flash-beep fixture. One connect, about 37 min,
+disconnect, quit. Logs: `~/Desktop/step4e2-cloudflare.log` (run 1, 2225 s),
+`~/Desktop/step4e2-cloudflare-2.log` (run 2, 2209 s). Analysis:
+`~/Desktop/manifold-avsync/step4e2_analyse.py`. Tail figures are t ≥ 600 s.
+
+| | run 1 | run 2 | before 4e-2 (§13.3) |
+|---|---|---|---|
+| **fitted slope** (session end) | **+67.66 ± 1.94 ppm** | **+68.04 ± 1.82 ppm** | +69.2 ± 0.3 (probe, §2.6) |
+| slope in use from | video t = 220 s | 191 s | — |
+| pairs accepted / rejected | 601 / 0 | 600 / 0 | — |
+| steps · unstable · gaps | 0 · 0 · 0 | 0 · 0 · 0 | — |
+| offset, start → end | −41.7 → +115.3 ms | −69.3 → +88.1 ms | — (not applied) |
+| **integrator `i`** | **+4.8 ppm** (median +5.0), event excluded; 5-min blocks +11.2 / +2.0 / +6.6 / −2.7 / −3.2 / +13.0 | **+6.3 ppm** (−39 … +60) | **−59.9** |
+| **renderer depth** | **+1.7 ms over 2122 s** (+0.78 ± 0.16 ppm), event excluded; −4.0 ms whole session | **+1.1 ms over 2149 s** (+0.53 ± 0.10 ppm); 418.5 … 423.3 ms | −142 ms over 1902 s |
+| **`e` p99 (§5.3: ±15 ms)** | 6 windows fail, **all in the event**; otherwise max +14.46, p01 min −11.29 ms | **max +10.16 ms**, p01 min −3.91; none fail | worst window +7.25, event excluded |
+| writes · coarse · non-zero `setRate` | 1 · 0 · 1 | 1 · 0 · 1 | 1 · 0 · 1 |
+| slew limit binding | 211 of 222 windows | 207 of 220 | 154 of 190 |
+
+- **Every log criterion passes on run 2**, and on run 1 outside its one event.
+- **OBS did not send ~0 ppm on either run** (+67.7 and +68.0), so both exercised the fix.
+- **The offset moved 157 ms (run 1) and 157 ms (run 2) over the session.** That is 67–68 ppm × ~2200 s:
+  the lip-sync drift §13.3 found uncorrected, now carried in the target.
+- **The integrator now settles where the plant says.** With the SR line, `i = δd − ε_a − c`
+  (§13.3's decomposition with the video half cancelled). +4.8 and +6.3 ppm fall in the predicted
+  +5 … +10, against −60 before.
+- **SDP CNAMEs differed on both runs** ("DIpWmpWy" / "TrzVKtzp", "SDGkBGCW" / "VwMYQWtN"). Logged
+  once, applied anyway (§2.6 decision b).
+
+**The ~15 ppm gap (§2.6, "for the post-4e soak") is resolved, by inference.**
+- The absolute renderer depth, which uses no wall clock, drifts **0.78 and 0.53 ppm**.
+- The −84 ppm lead drain against the +69.2 ppm SR slope came from the lead *reconstructed* from
+  wall-clock-timed frame counts. That reconstruction carries the Mac's NTP frequency correction.
+- So the ~15 ppm was most likely a wall-clock artefact of the old instrument, not something moving
+  the queue. Inference: the depth figure removes the wall clock; it does not measure the correction.
+
+**Startup gate:**
+
+| | run 1 | run 2 |
+|---|---|---|
+| first mapping | +607 ms | +1290 |
+| first presentation | +921 | +1577 |
+| first SR pair | +1108 | +1079 |
+| anchor | +1115 | +1584 |
+| opened on | **the SR pair** | the presentation |
+| **audio after picture** | **194 ms** | 7 ms |
+| first offset | −41.737 ms | −69.300 ms |
+
+- **Run 1 is the first measured connect on which the SR pair was the last thing awaited by more than
+  a few ms:** it came 187 ms after the first presentation, so audio started 194 ms after the picture.
+  The previous worst was +23 ms (§12.2). Still 8× inside the 1.5 s bound. No fallback fired.
+- Run 2 opened on the picture, with the pair already 498 ms old.
+
+### 15.3 ⚠️ Run 1's +1652 s event — the second field case of §13.4
+
+The same class as §13.4's 2026-09-26 case, and unrelated to the SR line (the fit logged 0 rejections,
+0 unstable, and no offset step over 2.4 ms in the session).
+- **What happened:** depth fell from ~420 to 306 ms; LiveClock pinned at −0.5% with `publication
+  starved` for 3.0 s.
+- **What the loop did:** ρ at the −2000 ppm bound for ~50 s (6 saturated windows); `e` peaked at
+  **+81.8 ms** (audio ahead); every window was inside ±5.7 ms from +1722 s, ~70 s after onset. `i`
+  was held at +133.8 ppm while saturated and overshot to +413.6 ppm on release, back near +40 about
+  80 s after release.
+- **No coarse trigger fired**, correctly by the rules: a ramp, not a step, and under the 250 ms level.
+- **It caused every window of run 1 that failed §5.3.**
+
+**n = 2 now** (§13.4: peak +106.6 ms; this one: +81.8 ms), in about 106 min of Cloudflare WHEP
+across the three long runs. Carried to the step 8 decision on B, S, and whether a sustained
+LiveClock rail should reach the coarse branch.
+
+### 15.4 Criterion 12 — device-level A/V, start against end of the same session
+
+**Protocol (run 2):** the §1.2 recorder (OBS profile "Recorder", collection "AV Capture"), Display
+Capture + macOS Audio Capture scoped to Manifold, at **60 fps**. Two 120 s captures, started at about
++6 min and +34 min, about 1700 s apart. Analysed with `avsync.py`; the two gates it does not print
+(one burst per beep, level between beeps) computed with its own functions. The analyser's
+injected-offset gate passed first: 0 / +250 / −120 ms → −0.0 / +250.0 / −120.0, sd 0.0.
+
+| | start | end |
+|---|---|---|
+| audio present | max −27.8 dB | max −27.8 dB |
+| gate: beep count | 124 in 124.5 s ✅ | 125 in 124.7 s ✅ |
+| gate: 1 Hz grid | median residual 0.35 ms ✅ | 1.02 ms ✅ (one step, below) |
+| gate: one burst per beep | 0 of 124 doubled ✅ | 0 of 125 doubled ✅ |
+| gate: level between beeps | −105.6 dB RMS, peak −90.8 ✅ | the same ✅ |
+| usable pairs | 119 | 113 (6 excluded, below) |
+| **A/V offset, mean** | **+27.75 ± 1.13 ms** | **+28.44 ± 1.26 ms** |
+
+**Start → end: +0.69 ± 1.69 ms (mean), +1.5 ms (median). Pass (≤ 10 ms).** Without the SR line the
+same interval would have drifted about **−115 ms** (68 ppm × 1700 s, audio gaining on the picture).
+
+- **Why the mean, not the median.** Within each capture the offset is a ~40 ms sawtooth with a ~41 s
+  period (10 s means in the end capture: +7, +18, +41, +31, +20, +14, +44, …). That is §1.4's
+  frame-grid term: the 25p fixture's whole-second flash slides through the 23.976 stream's frame grid
+  by 0.024 frame per second, one 41.7 ms frame every 41.7 s. A 124 s capture spans 2.97 periods, so
+  the mean averages it out; the median is pulled ~6 ms low by the sawtooth's shape. Both captures
+  carry it identically.
+- **Excluded: one recorder-side audio step.** About 5 s into the end capture one beep spacing is
+  1021.3 ms and the rest are 1000.0 — a single step of 1024 samples, the recorder's AAC frame, not
+  Opus's 960. Manifold's renderer axis was contiguous through it (every buffer `gap=+0.0 µs`,
+  cumulative 0, no coarse event, no axis break). The 6 beeps before it are excluded. Included, the
+  result is −0.8 ms: a pass either way.
+- **What this does not measure:** the absolute ±20 ms against a same-session file control. The
+  absolute **+28 ms is suggestive only.** It sits near the +29.6 ms file control of 2026-09-23
+  (`AV_SYNC_FINDINGS.md` §1.3), but that was another day with a 30 fps recorder, and every absolute
+  figure here carries the capture chain's constant.
+- **A first attempt at this capture (run 1) was void:** both audio tracks were digital silence
+  (−91.0 dB) because the recorder's audio source still named a previous Manifold PID (§1.5's known
+  failure). Manifold's log showed 2224 s of audio decoded and rendering. The protocol now has a
+  preflight for it (`AV_SYNC_FINDINGS.md` §1.2).
+
+### 15.5 For step 8
+
+- **The integrator is noisier than before 4e-2.** Window-to-window sd of `i`: **31 ppm** (run 1,
+  event excluded) and **18 ppm** (run 2), against about ±10 ppm on the pre-4e soak (§13.3).
+  - Cause, by inference: each re-levelling of the offset (median 0.35 ms per window) reaches the loop
+    as error, and the integrator follows it.
+  - Inaudible at these sizes. It is a tuning figure, alongside §13.2's slew binding, which rose from
+    154 of 190 windows to 207–211 of ~220.
+- **The §13.4 rail event, n = 2** (§15.3): B, S, and the coarse branch.
+- **MediaMTX verification of the SR line is pending.** Both runs here are Cloudflare; `CLAUDE.md`
+  requires every streaming fix verified against a non-Cloudflare server. Folded into the step 8 soak.

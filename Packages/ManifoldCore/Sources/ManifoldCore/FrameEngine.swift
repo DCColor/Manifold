@@ -2215,10 +2215,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     ///
     /// ── `awaitsSenderReport` — THE AUDIO IS RTP ─────────────────────────────────────────────
     ///
-    /// True when this session's audio arrives over RTP, whose senders RFC 3550 §6.4.1 requires to
-    /// send RTCP Sender Reports: the first anchor then waits for the first one as well as for the
-    /// picture (docs/AUDIO_RESAMPLER_DESIGN.md §2.7), reported through `liveAudioSenderReport()`.
-    /// It states a property of the protocol, not of any server. Required, for the reason `path` is.
+    /// True when this session's audio and video arrive as separate RTP streams, whose senders RFC 3550
+    /// §6.4.1 requires to send RTCP Sender Reports. Two things follow, both keyed on this and never on
+    /// a server:
+    ///   * the session gets a `SenderReportLineFit` (step 4e-2, §2.6): its `offset(t)` replaces
+    ///     `cushion` and its slope enters the reference rate. False → no fit object exists at all.
+    ///   * the first anchor waits for the first SR PAIR (an audio and a video SR) as well as for the
+    ///     picture (§2.7), so the first offset comes from the first pair.
+    /// SRs reach the fit through `liveAudioSenderReport(_:ntp:rtp:audioOrigin:videoOrigin:)`.
+    /// Required, for the reason `path` is.
     public func beginLiveAudio(cushion: Double,
                                path: AudioTapBuffer.SourcePath,
                                awaitsSenderReport: Bool) -> LiveAudioSink {
@@ -2239,7 +2244,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.awaitsSenderReport = awaitsSenderReport
         mirror.senderReportHost = nil; mirror.senderReportAbandoned = false
         mirror.heldMapping = nil; mirror.heldEvaluations = 0
+        mirror.appliedOffset = cushion; mirror.appliedSlope = 0
         mirror.lock.unlock()
+        // ── THE SR LINE (step 4e-2, §2.6), PER SESSION, WHERE AND ONLY WHERE THE AUDIO IS RTP ──────
+        // Fresh every session: no prior is carried over (OBS's slope varies 0–70 ppm between
+        // sessions, §6.7). On SRT and NDI `make` returns nil — absent, not neutral — and the one line
+        // below says which case the session is in.
+        let timeline: LiveAVTimeline = awaitsSenderReport
+            ? .rtpSenderReports : .oneTimeline(Self.oneTimelineReason(path))
+        let fitTag = "[\(path.rawValue.uppercased())-SRFIT]"
+        let srFit = SenderReportLineFit.make(timeline: timeline, tag: fitTag,
+                                             reportsWindows: LiveClock.telemetryIsEnabled,
+                                             log: { NSLog("%@", $0) })
+        NSLog("%@", SenderReportLineFit.sessionLine(tag: fitTag, timeline: timeline))
+        // The gate's SR half opens on the first PAIR, which is also the first line (§2.7).
+        srFit?.onFirstLine = { [weak self] in self?.liveAudioSenderReportPair() }
         audioRenderer.flush()
         synchronizer.rate = 0      // held until the first mirrored mapping arrives
         applyAudioMute()
@@ -2274,8 +2293,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                      time: CMTime(seconds: outputSeconds, preferredTimescale: 90_000),
                                      atHostTime: CMTime(seconds: host, preferredTimescale: 90_000))
             },
-            log: { NSLog("%@", $0) })
-        mirror.lock.lock(); mirror.steering = steering; mirror.lock.unlock()
+            log: { NSLog("%@", $0) },
+            windowCompanion: srFit.map { fit in { fit.windowLine() } })
+        mirror.lock.lock(); mirror.steering = steering; mirror.srFit = srFit; mirror.lock.unlock()
         NSLog("[%@-RESAMPLE] steering %@ — %@", path.rawValue.uppercased(), mode.rawValue,
               mode == .loop
                 ? "ratio carries the correction (§2.2); coarse branch at 250 ms level / 50 ms step "
@@ -2314,6 +2334,23 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
                              resample: resample, steering: steering)
         #endif
+    }
+
+    /// Why a transport's audio and video already share one timeline — the text of its session line.
+    /// Log wording only; the decision is `awaitsSenderReport` (RTP or not), never this.
+    private nonisolated static func oneTimelineReason(_ path: AudioTapBuffer.SourcePath) -> String {
+        switch path {
+        case .srt: return "MPEG-TS over SRT: audio and video PTS are on the one program clock"
+        case .ndi: return "NDI: audio and video are both stamped on this host's clock at pull"
+        case .hls: return "HLS: AVPlayer presents audio and video from one media timeline"
+        default: return "\(path.rawValue): audio and video are on one timeline"
+        }
+    }
+
+    /// HLS never opens a live-audio session (AVPlayer owns its audio), so it names its case here.
+    public nonisolated static func logSingleTimelineSession(_ path: AudioTapBuffer.SourcePath) {
+        NSLog("%@", SenderReportLineFit.sessionLine(tag: "[\(path.rawValue.uppercased())-SRFIT]",
+                                                    timeline: .oneTimeline(oneTimelineReason(path))))
     }
 
     /// Mirror state, reachable from the threads `mirrorLiveAudio` runs on (the WHEP source thread
@@ -2358,6 +2395,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// The session's loop (step 4d). Every timebase write after the hold goes through it; the
         /// mirror hands it the target line on every evaluation.
         var steering: LiveAudioResampleSteering?
+        /// The session's SR line (step 4e-2, §2.6). Non-nil only where audio and video are separate
+        /// RTP streams; nil — not a neutral object — on SRT and NDI.
+        var srFit: SenderReportLineFit?
+        /// The offset and slope the last evaluation applied: `cushion` and 0 without a fit. The
+        /// offset is what `liveAudioDrift` adds back, as it used to add the constant cushion.
+        var appliedOffset: Double = 0
+        var appliedSlope: Double = 0
         var changes = 0
         var pushes = 0
         /// Heartbeat evaluations — `onMappingTick`, the mapping re-stated at the control cadence
@@ -2382,7 +2426,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var presentedHost: Double?
         /// The session's audio is RTP, so RFC 3550 §6.4.1 requires Sender Reports of its sender.
         var awaitsSenderReport = false
-        /// Host time of the first audio Sender Report.
+        /// Host time of the first SR PAIR — an audio and a video SR, and so the first line (4e-2).
         var senderReportHost: Double?
         /// Set when the gate opened without one — the deviation is logged once.
         var senderReportAbandoned = false
@@ -2421,16 +2465,28 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return mirror.steering?.mode == .pinned
     }
 
-    /// How long past the first presentation audio waits for a first Sender Report before
-    /// anchoring without one (the pre-existing constant offset) and logging the deviation.
+    /// How long past the first presentation audio waits for the first SR PAIR (an audio and a video
+    /// Sender Report) before anchoring at offset 0 and logging which stream is missing.
     ///
-    /// ⚠️ A BOUND ON SILENCE, NOT A MEASURED FIGURE, AND IT CANNOT TELL "NEVER" FROM "SLOW". Measured
-    /// first-SR arrival is 19–35 ms (MediaMTX) and 928–956 ms (Cloudflare) after audio starts
-    /// (AV_SYNC_FINDINGS.md §6.5). But RFC 3550 §6.2 lets a compliant sender at the 5 s minimum
-    /// interval space reports up to ~6.2 s apart, and holding audio that long on every connect is
-    /// worse than the offset the SR would correct. Until step 4e APPLIES the SR, anchoring without
-    /// it changes nothing audible; the figure is re-derived when it does.
-    private nonisolated static let senderReportWaitSeconds = 2.0
+    /// ── RE-DERIVED AT STEP 4e-2, NOW THAT THE GATE NEEDS BOTH STREAMS: 1.5 s (was 2 s) ─────────
+    ///
+    /// Measured, eight WHEP connects on two servers (steps 4b, 4d, 4e-1 and the SR probe runs):
+    ///   * both servers send SRs on both streams at exactly 1.0 per second;
+    ///   * the first pair was computable +27 … +37 ms after the session opened on MediaMTX and
+    ///     +1106 … +1108 ms on Cloudflare, which sends both SRs in one compound packet;
+    ///   * against the first presentation, the latest first SR was +23 ms (Cloudflare, warm connect,
+    ///     step 4b); every other connect had its pair BEFORE the picture.
+    /// A sender at a 1.0 s interval that RFC 3550 §6.3.1 randomises over [0.5, 1.5] reports within
+    /// 1.5 s of starting a stream, and each stream started ≥ 0.29 s before the first presentation
+    /// (the startup fill). Waiting for BOTH does not lengthen that — the two run in parallel. So
+    /// 1.5 s covers a first report a full randomised interval late even had the stream started at the
+    /// presentation, which is 65× the latest measured.
+    ///
+    /// ⚠️ STILL A BOUND ON SILENCE, AND IT STILL CANNOT TELL "NEVER" FROM "SLOW": a compliant sender
+    /// at the 5 s minimum interval may take up to 7.5 s. Missing the bound costs little now: audio
+    /// starts at offset 0, and the late pair starts the fit — the target moves by the first Δ, which
+    /// the loop absorbs as error, or the coarse step branch takes in one write if it is > 50 ms.
+    private nonisolated static let senderReportWaitSeconds = 1.5
 
     /// EMA time constant for the mirrored rate, in seconds.
     ///
@@ -2586,10 +2642,33 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirrorLiveAudio(mapping, origin: .gate)
     }
 
-    /// The session's first audio RTCP Sender Report arrived. Called from the network thread, once
-    /// per session. If the picture has already presented, anchors now on the newest held mapping
-    /// (a point on the same line the clock is using — the heartbeat's argument).
-    public nonisolated func liveAudioSenderReport() {
+    /// One RTCP Sender Report, audio or video, already matched to its stream by SSRC. Network
+    /// thread, every SR. `audioOrigin` / `videoOrigin` are the raw RTP timestamps the receivers
+    /// rebase to zero (T_a0 / T_v0), once the bridge has seen them. Dropped when the session has no
+    /// fit — which is every session whose audio is not RTP.
+    public nonisolated func liveAudioSenderReport(isAudio: Bool, ntp: UInt64, rtp: UInt32,
+                                                  audioOrigin: UInt32?, videoOrigin: UInt32?) {
+        mirror.lock.lock()
+        let fit = mirror.active ? mirror.srFit : nil
+        mirror.lock.unlock()
+        fit?.noteSenderReport(isAudio ? .audio : .video, ntp: ntp, rtp: rtp,
+                              audioOrigin: audioOrigin, videoOrigin: videoOrigin)
+    }
+
+    /// The negotiated answer, for the fit's CNAME note (§2.6 decision b). Logged once; never gates.
+    public nonisolated func liveAudioAnswerSDP(_ sdp: String) {
+        mirror.lock.lock()
+        let fit = mirror.active ? mirror.srFit : nil
+        mirror.lock.unlock()
+        guard let fit else { return }
+        let names = SenderReportLineFit.sdpCNAMEs(sdp)
+        fit.noteSDPCNAMEs(audio: names.audio, video: names.video)
+    }
+
+    /// The session's first SR pair made the first line (the fit's `onFirstLine`, network thread,
+    /// once). Opens the gate's SR half; if the picture has already presented, anchors now on the
+    /// newest held mapping (a point on the same line the clock is using — the heartbeat's argument).
+    private nonisolated func liveAudioSenderReportPair() {
         mirror.lock.lock()
         guard mirror.active, mirror.senderReportHost == nil else { mirror.lock.unlock(); return }
         let now = CACurrentMediaTime()
@@ -2600,8 +2679,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let tag = "[\(mirror.path.rawValue)-AUDIO]"
         mirror.lock.unlock()
         if late {
-            NSLog("%@ first audio SR arrived LATE, +%.0f ms after the session opened — after the "
-                + "gate gave up on it. The sender is slow rather than absent.", tag, sinceSession * 1000)
+            NSLog("%@ first SR PAIR arrived LATE, +%.0f ms after the session opened — after the gate "
+                + "gave up on it. The sender is slow rather than absent. The SR line applies from the "
+                + "next evaluation: the target moves by the first offset, absorbed by the loop as "
+                + "error (or one coarse write if > 50 ms).", tag, sinceSession * 1000)
         }
         if let pending { mirrorLiveAudio(pending, origin: .gate) }
     }
@@ -2632,6 +2713,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // The transport's own tag — read under the same lock as everything else this session owns.
         let tag = "[\(mirror.path.rawValue)-AUDIO]"
         let steering = mirror.steering
+        let srFit = mirror.srFit
         // ⚠️ `mirrored` IS NO LONGER SET HERE ON THE FIRST MAPPING. It means "the first anchor has
         // been pushed", and since step 4b that waits for the gate below; it is set where the push
         // is decided. An un-anchor (`nil`, the clock's `reset()`) re-arms the gate for its stream.
@@ -2668,9 +2750,22 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // distinction between "the clock moved" and "the controller twitched" can be made.
         // `cushion` = how far behind `senderPTS` the CALLER stamps its audio (see `beginLiveAudio`),
         // NOT the clock's buffer depth. This puts the timebase on the caller's PTS axis.
-        let target = m.senderPTS - cushion
+        //
+        // ── STEP 4e-2: ON RTP A/V THE OFFSET IS THE SR LINE, NOT A CONSTANT (§2.6) ─────────────────
+        // `offset(senderPTS)` takes `cushion`'s slot with its sign convention, and the line's slope
+        // enters the REFERENCE RATE as rate·(1 − b) — never the ratio. The sign is derived at
+        // `SenderReportLineFit.reference`. Evaluated outside the mirror lock: the fit has its own.
+        // No line yet (before the first pair, or the gate's fallback) → the constant, 0 on WHEP.
+        // An updated line reaches the loop as a moved target, i.e. ordinary error — never a write.
+        let fitted = srFit?.evaluate(atVideoTime: m.senderPTS)
+        let offset = fitted?.offset ?? cushion
+        let slope = fitted?.slope ?? 0
+        let reference = SenderReportLineFit.reference(videoMedia: m.senderPTS, rate: m.rate,
+                                                      offset: offset, slope: slope)
+        let target = reference.media
 
         mirror.lock.lock()
+        mirror.appliedOffset = offset; mirror.appliedSlope = slope
         // ⚠️ THE `min(1.0, …)` CLAMP IS KEPT, AND IT IS NO LONGER LOAD-BEARING IN THE CASE THAT
         // MADE IT VISIBLE. With the heartbeat feeding this at `controlHz`, `dt` is ~0.1 s and the
         // clamp never binds — the pathology it was caught in (a 25 s gap advancing a τ=30 s filter
@@ -2791,11 +2886,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // `shouldPush` gate, because the reference describes where the audio should be — true on
         // every mapping whether or not this one produces a `setRate`.
         pairedProbeForReference?.noteReference(media: target, host: m.hostTime,
-                                               rate: m.rate, smoothed: smoothedNow)
+                                               rate: reference.rate, smoothed: smoothedNow)
         #endif
-        // The loop's target line (§2.8): the mapping minus cushion, on every evaluation. A snap or
-        // re-anchor moves it, and the steering sees that as a step (§2.4).
-        steering?.setReference(media: target, host: m.hostTime, rate: m.rate)
+        // The loop's target line (§2.8): the mapping minus the offset, on every evaluation, at the
+        // mapping's rate times (1 − SR slope). A snap or re-anchor moves it, and the steering sees
+        // that as a step (§2.4).
+        steering?.setReference(media: target, host: m.hostTime, rate: reference.rate)
 
         // ⚠️ EMITTED BEFORE THE PUSH GUARD, AND THAT ORDERING IS THE WHOLE POINT OF THIS LINE.
         // It used to sit after `guard shouldPush`, while `lastStatsHost` was advanced before it —
@@ -2819,20 +2915,23 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // counts the write, and logs its origin to the rate probe. The first anchor is the
         // session's rate write (rate 0 → 1.0); a later one is the pinned position branch, or the
         // gate re-opening after a clock reset (`mapping == nil` re-arms it).
-        steering?.anchor(media: target, host: m.hostTime, rate: m.rate,
+        steering?.anchor(media: target, host: m.hostTime, rate: reference.rate,
                          reason: !wasMirrored ? "anchor after a clock reset"
                              : String(format: "pinned position branch, %@, err %.1f ms",
                                       tick ? "heartbeat" : "mapping change",
                                       positionError * 1000))
         if !wasMirrored {
             NSLog("%@ timebase MIRRORED — first anchor: senderPTS=%.3fs host=%.3fs "
-                + "clockRate=%.5f → synchronizer rate %.1f for the session; %@ cushion=%.3fs → "
-                + "timebase=%.3fs",
+                + "clockRate=%.5f → synchronizer rate %.1f for the session; %@ offset=%+.3f ms (%@), "
+                + "slope %+.2f ppm → timebase=%.3fs",
                   tag, m.senderPTS, m.hostTime, m.rate, rateToPush,
                   pinned ? String(format: "PINNED (step 3): position branch at %.0f ms.",
                                   tolerance * 1000)
                          : "LOOP (step 4d): no position branch, coarse branch in the steering.",
-                  cushion, target)
+                  offset * 1000,
+                  srFit == nil ? "the transport's constant cushion"
+                      : fitted == nil ? "NO SR LINE — offset 0 until the first pair"
+                      : "the SR line", slope * 1e6, target)
             if let g = gateTimes {
                 // ── STEP 4b's STARTUP LINE ─────────────────────────────────────────────────────
                 // Every time is ms after `beginLiveAudio`. `+added` is what the gate cost against
@@ -2847,7 +2946,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     ? (g.senderReport != nil ? ms(g.senderReport) : "NONE")
                     : "n/a (no RTCP)"
                 NSLog("%@ FIRST-ANCHOR GATE — opened on %@ · first mapping %@ ms · first presentation "
-                    + "%@ ms · first audio SR %@ ms · anchor %@ ms · +added %.0f ms vs first mapping · "
+                    + "%@ ms · first SR pair %@ ms · anchor %@ ms · +added %.0f ms vs first mapping · "
                     + "audio after picture %@ ms · %d evaluation(s) held",
                       tag,
                       gateNote?.withoutPresentation == true ? "the PRESENTATION FALLBACK"
@@ -2864,12 +2963,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                           tag, Self.presentationWaitSeconds)
                 }
                 if gateNote?.withoutSenderReport == true {
-                    NSLog("%@ ⚠️ SENDER DEVIATION: no audio RTCP Sender Report within %.1f s of the "
-                        + "first presentation. RFC 3550 §6.4.1 requires them of an active sender "
-                        + "(one that is merely slow is compliant up to ~6 s, §6.2 — this cannot tell "
-                        + "the two apart). Anchored without it, on the constant offset in use before "
-                        + "SRs were read; nothing about the server is special-cased.",
-                          tag, Self.senderReportWaitSeconds)
+                    NSLog("%@ ⚠️ SENDER DEVIATION: no SR pair within %.1f s of the first presentation "
+                        + "— %@. RFC 3550 §6.4.1 requires Sender Reports of every active sender (one "
+                        + "that is merely slow is compliant up to 7.5 s, §6.3.1 — this cannot tell the "
+                        + "two apart). Anchored at offset 0; a late SR pair starts the fit then. "
+                        + "Nothing about the server is special-cased.",
+                          tag, Self.senderReportWaitSeconds,
+                          srFit?.missingForFirstPair ?? "no fit")
                 }
             }
         }
@@ -3062,10 +3162,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return (timebase + liveAudioCushionValue) - clockSeconds
     }
 
-    /// Cushion, readable on the main actor for `liveAudioDrift`.
+    /// The offset the mirror last applied — the constant cushion, or on RTP A/V the SR line's
+    /// offset (step 4e-2) — readable on the main actor for `liveAudioDrift`.
     private var liveAudioCushionValue: Double {
         mirror.lock.lock(); defer { mirror.lock.unlock() }
-        return mirror.cushion
+        return mirror.appliedOffset
     }
 
     public func endLiveAudio() {
@@ -3079,8 +3180,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.active = false; mirror.mirrored = false
         let steering = mirror.steering
         mirror.steering = nil
+        let srFit = mirror.srFit
+        mirror.srFit = nil
         mirror.lock.unlock()
         steering?.finish()
+        srFit?.finish()
         #if DEBUG || MANIFOLD_TELEMETRY
         liveAudioProbe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "endLiveAudio")
         // Writes the final window before the observations go, so the last 10 s are not lost.
