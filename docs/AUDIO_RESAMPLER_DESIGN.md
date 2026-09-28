@@ -3130,3 +3130,89 @@ fresh-launch control of the day (+23.8…+27.0).
 **Carried forward:** the ±4–17-sample steps the tracker sees on NDI (137 in 20 min this morning, ~90
 here) are an NDI-path trait not yet explained; they set the pitch spread above and are inaudible.
 
+### 18.4 Local SRT soak, 2026-09-28 16:24:32–16:53:02 (28.5 min) — PASS, at a margin the control limits
+
+OBS "SRT Local" as the listener, streamed and stopped by the orchestrator (the sender stops first).
+Same build as §18.3. Log `~/Desktop/step8-srt-soak.log`. Controls before AND after, same launch.
+
+| | result |
+|---|---|
+| file controls | before **+24.6** (loops +27.9 / +23.6 / +20.6), after **+17.5** (loops +22.5 / +17.9 / +15.9); zero used = their mean, **+21.1** |
+| **criterion 12, grid-corrected (gates)** | **+17.2 ms** (+3 min), **+15.6 ms** (+26 min) — PASS (±20) |
+| criterion 12, as written | −2.8 / −4.4 ms |
+| start → end | **−1.6 ms** (±10) |
+| criterion 1, mutes at the device (20 min) | **0**: 0 mutes, 0 dropouts, 0 steps of any size, r 0.983 (the only two exact-zero runs are the noise segment's own edges) |
+| criterion 2, non-zero `setRate` | 1 (the first anchor) |
+| criterion 3, e (±15 ms, trend) | e −4.84…+5.44 ms; PAIRED p99 ≤ 5.38 ms, 0 windows past ±15; trend +0.04 ± 0.08 ppm |
+| criterion 4, gap histograms | 171 of 171 contiguous |
+| criteria 5–6 | stage holes / overlaps / resets / breaks / clamps 0; coarse 0, splices 0; no snap, freeze guard, queue-full or starved publication |
+| criterion 7, pitch | ρ−1 max 411.6 ppm (first window, the startup relay), slew limit binding in 170 of 170 windows (as §13.2); heard rate −9.3 ppm median, p1/p99 −177/+107, max 257; fastest change 0.091 cents/s |
+| startup rail (§16.6, n = 3 before) | **none**: first window ρ −371 ppm, never at B; rail episodes 0 |
+| integrator | +7.47 ppm median, window sd 17.3 (no SR line on SRT; §13.1 saw +1…+65) |
+| criterion 10, CPU (2 ch) | Manifold mean 16.7 %, max 22.2 % |
+| §6.1 gates | one PID; out-of-band 0.11 %; all beep gates passed |
+
+⚠️ **THE CONTROL NOW LIMITS THE VERDICT.** The two same-launch controls differ by 7.1 ms, and both
+step down ~4.3 ms per loop of the fixture: each 60 s loop restarts its 25p frames at a new phase
+against the 60 Hz display, so a 130 s control samples only 2–3 phases of a 16.7 ms cycle. Against the
+after-control alone, capture A reads +20.8 ms grid-corrected — 0.8 ms over. The fix is in the
+instrument, not the app: controls long enough to cover the display cycle (≥ 5 loops), or the mean of
+both controls, which is what is used above. It also means the ±5 ms "controls agree" check is at
+the instrument's floor.
+
+**Both OBS transports now read positive grid-corrected** (NDI ≈ +22, local SRT ≈ +16) with
+Manifold's own terms ≈ 0 on each, which fits the provisional OBS sender term of §18.3.
+
+### 18.5 MediaMTX WHEP soak, 2026-09-28 17:11:54–17:40:24 — ❌ FAILS start → end (−89 ms)
+
+OBS "MediaMTX Local" → MediaMTX v1.21.1 (config = the plain one + RTSP/HLS on) → Manifold WHEP. 1 s
+keyframes (confirmed on a 40 s RTSP probe). Log `~/Desktop/step8-whep-soak.log`. 5-min controls.
+
+| | result |
+|---|---|
+| file controls | before **+27.9**, after **+25.3** (Δ 2.6 ms — the 5-min controls work); zero +26.6 |
+| criterion 12, grid-corrected | **+1.6 ms** (+3 min) ✅, **−87.6 ms** (+26 min) ❌ |
+| criterion 12, as written | −18.4 / −107.6 ms |
+| **start → end** | **−89 ms** ❌ (±10) — audio gains on the picture at ≈ −64 ppm |
+| sender's own A/V (RTSP probe, no player) | −13.1 ms as written, ≈ +6.9 ms grid-corrected at +1 min |
+| criterion 1, mutes (20 min) | **0** (only the noise segment's edges) |
+| criterion 3 | e −4.9…+25.0 ms; p99 past ±15 in 2 windows, both in the rail event below; trend −0.17 ± 0.28 ppm |
+| criteria 2, 4–6 | 1 non-zero `setRate`; 172/172 contiguous; 1 stage hole (2.5 ms, at connect); coarse 0, splices 0 |
+| criterion 7, pitch | heard median +58.5 ppm (the loop following video's clock); transient to 1586 ppm in the rail event (inside ±B); fastest change 0.321 cents/s |
+| **rail event** (§13.4 class, **n = 4, first on a local server**) | +430 s: LiveClock railed −0.5 %, publication starved 3.0 s; ρ at B for 2.4 s (under the 5 s tripwire); e peak **+25 ms**, recovered in ~20 s |
+
+**Cause, settled 2026-09-28 by two A/B tests and the raw SR pairs:**
+- **Not the MediaMTX config** (test 1: plain config, OBS Advanced → SR fit flat, +0.01 ppm, 7 µs) and
+  **not the OBS output mode** (test 2: plain config, OBS Simple → flat, 0.00 ppm, 7 µs). OBS 32.2.2 and
+  MediaMTX v1.21.1 are unchanged since before 2026-09-23.
+- **The media clocks diverge as always:** video RTP +53.6 ppm vs mach, renderer depth −61.8 ppm
+  (423 → 328 ms), `i` −58.7 ppm — §13.3's pre-4e-2 decomposition, unchanged.
+- **MediaMTX's SRs carry that slope as a STAIRCASE.** The raw per-pair Δ is flat to 7 µs between
+  steps, then jumps: 54 steps of +0.3…+3.5 ms, all positive, +72 ms over 1715 s (≈ +42 ppm).
+  §6.2's "±0.5 ms of a straight line" was over shorter sessions; its 4–5 ms/min walk is the same
+  staircase seen coarsely.
+- **The fit (4e-2) cannot see a staircase.** Its step rule treats each jump as a new level and
+  restarts with zero slope in every flat; after five steps it declared UNSTABLE and FROZE on the last
+  good line (slope 0) for the rest of the session, rejecting 1416 of 1472 pairs. So on MediaMTX the
+  SR line never carried the slope, and nothing else corrected it.
+
+**For the design discussion (Robbie, 2026-09-28):**
+1. **Freeze vs restart.** A freeze after small steps is worse than a restart — but here a restart
+   refits flat too. What would work: fit the slope across steps (a long-window regression that
+   treats steps as data, not as level resets), or treat a run of same-signed steps as slope.
+2. **An in-app signal besides the SRs:** the renderer-depth slope read −61.8 ppm, matching `i` and
+   the video RTP clock within a few ppm. It is standards-free and server-agnostic.
+3. **⚠️ Consequence:** at −62 ppm the WHEP audio queue drains ~98 ms / 27 min and would run dry in
+   ≈ 1.9 h from 420 ms. **The overnight run cannot be on MediaMTX WHEP until this is fixed.**
+4. CLAUDE.md: whatever the fix, it must follow the standard (an SR's NTP↔RTP mapping), log the
+   deviation, and never branch on the server.
+
+### 18.6 HLS check, 2026-09-28 17:54–18:07 — leak fix ✅; playback deferred
+
+Manifold could not open MediaMTX's HLS (`connect failed: Cannot Open` after MediaMTX served an
+fMP4 muxer with **H.264 + Opus**, behind a `Secure` cookie-check redirect over plain http). Not a
+step 8 finding; criterion 11 is deferred to an HLS source Manifold can open. **The HLS leak fix is
+verified:** the connect ran through the provider install and the disconnect restored them — file
+controls +23.0 before, **+20.3 after (Δ −2.7 ms, ±5)**. docs/BUGS.md's leak entry: both NDI and HLS
+now verified.
+

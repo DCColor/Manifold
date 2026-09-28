@@ -747,6 +747,29 @@ item. `swift test` passes. A local SRT session still logs exactly one non-zero `
 
 ---
 
+## ☐ OPEN 2026-09-28 — WHEP via MediaMTX: the SR line fit cannot follow a staircase of SR steps, so lip-sync drifts ~−64 ppm and the audio queue drains
+
+**Status:** OPEN — design decision needed, no code yet. **Found by:** resampler step 8, the MediaMTX
+WHEP soak (`AUDIO_RESAMPLER_DESIGN.md` §18.5). **Affects:** WHEP from any server whose Sender Reports
+carry the audio↔video slope as discrete jumps rather than a smooth line — MediaMTX measured.
+
+- **Measured:** −89 ms of A/V drift between +3 and +26 min (grid-corrected +1.6 → −87.6 ms against a
+  same-launch control), and the renderer's audio queue draining −61.8 ppm (423 → 328 ms) — empty in
+  ≈ 1.9 h.
+- **Mechanism:** MediaMTX's per-pair SR Δ is flat to 7 µs, then steps: 54 positive steps of
+  +0.3…+3.5 ms, +72 ms over 1715 s. The 4e-2 fit treats every step as a new level, restarts at zero
+  slope, and after five steps declared UNSTABLE and froze on a flat line for 25 min.
+- **Ruled out by A/B the same evening:** MediaMTX's RTSP/HLS config and OBS's output mode (both flat).
+  OBS 32.2.2 and MediaMTX v1.21.1 are unchanged since 2026-09-23.
+- **Design notes (Robbie):** a restart beats a freeze, but would refit flat here too; fit the slope
+  across steps, or treat same-signed step runs as slope; and the renderer-depth slope is an in-app,
+  server-agnostic signal that saw the drift (−61.8 ppm, matching `i` within a few ppm). No
+  server-specific branch (CLAUDE.md).
+- **Blocks:** the overnight drift run on MediaMTX WHEP; step 4e-2's non-Cloudflare verification.
+  Cloudflare WHEP is skipped until this is resolved.
+
+---
+
 ## ☐ OPEN 2026-09-28 — the NDI ~+22 ms residual: verify it is the sender with a non-OBS NDI sender
 
 **Status:** OPEN, provisional attribution. **Measured:** the resampler step 8 NDI soak, 2026-09-28 —
@@ -837,7 +860,9 @@ hook is off. Tests: `DisplayProvidersTests`, including an NDI-shaped session. Th
 **Verified for NDI, 2026-09-28, build `.build-cc/ndifix-Profile`:** fresh launch, file control →
 NDI connect → disconnect → file control again, twice. The second control read **+0.7 ms** and
 **+2.7 ms** from the first (+24.8 → +25.5; +23.8 → +26.5), against +195 ms before the fix. Pass
-(±5 ms). **Still to verify:** the same for HLS, which has not been measured.
+(±5 ms). **HLS verified 2026-09-28:** a connect/disconnect (the stream itself would not open, but
+the provider install and restore both ran) left the next control at −2.7 ms from the first
+(+23.0 → +20.3). Pass. **Remaining to close this entry: nothing but a release build in the field.**
 
 ---
 
