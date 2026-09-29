@@ -3668,3 +3668,61 @@ glass (from the drawable's presented time).
 - **A repro artefact, and a real gap:** the first attempt served with ffmpeg's default MPEG-TS
   muxing, about six AAC frames per PES. Manifold's SRT audio decoded none of it (BUGS.md). That
   attempt is void.
+
+### 18.12 Test 3: live Cloudflare SRT with `[AV-LAG]` and a parallel stream capture, 2026-09-29 16:36–17:20 — the drift is in THIS session's stream; Manifold reproduces it
+
+**Protocol.**
+- Build `.build-cc/avlag-Profile`. `go.sh cloudflare-srt` with `SOAK_PREFIX=avlag`.
+- Connected by ⌃⌥D through `MANIFOLD_SRT_DEBUG_URL` (no keychain prompt).
+- For the whole live window (16:41:53–17:10:41), ffmpeg recorded Cloudflare's SRT playback in
+  parallel, with no re-encode and `-copyts` (`~/Desktop/manifold-soak/cfsrt-probe-avlag.ts`).
+- Log `~/Desktop/avlag-srt-cloudflare.log`.
+
+**The three-way read, A/V change from capture A (16:45:02) to capture B (17:08:02):**
+
+| instrument | A → B | trend |
+|---|---|---|
+| **stream** (ffmpeg file, flash/beep on its own timestamps, same wall-clock windows) | **−20.3 ms** (+2.50 → −17.84) | −12 ppm over 12 whole grid periods (beeps are muted during the noise segment) |
+| **in-app** (`[AV-LAG]`, audio at the glass − picture PTS) | **−0.6 ms** (+24.62 → +24.05) | −1.1 ppm after 180 s; frame choice, audio − clock and tick → glass all flat |
+| **device** (captures, grid-corrected) | **−23.9 ms** (−53.64 → −77.49) | |
+
+- **Device ≈ stream + in-app, within ~3.5 ms. The drift was in the stream this session, and Manifold
+  reproduced it faithfully.**
+- The stream's timestamps are self-consistent here too: audio PTS = the sample count, and video on
+  the 1 ms grid with no rate error. One 167 ms video gap sits at the file's last frame, where the
+  capture stopped.
+- **So OBS → Cloudflare's A/V slope varies by session:** 0.00 ppm in the §18.10 probe session and
+  about −15 ppm here. The §18.10 soak's −29 ppm session was not probed, so its split cannot be
+  shown. With §18.11 (off-network replay holds within 1.5 ppm) and this run, the likeliest reading
+  is that it was in that session's stream as well.
+- Which of OBS and Cloudflare introduces the slope is not separated. That needs a local recording of
+  OBS's own output in the same session.
+
+**Other results:**
+- **Control 2 is VOID.** The disconnect prompt came while the operator was away. Manifold stayed
+  connected until OBS stopped at 17:19:56, so "control 2" recorded the live stream (no loop gaps,
+  −93.4 ms).
+  - The orchestrator waited 120 s twice, then recorded anyway.
+  - **Fixed:** the end-of-session waits have no deadline now and repeat the prompt every 2 min.
+  - The zero is control 1 alone, +5.49 ms.
+- **criterion 12, grid-corrected:** −59.1 ms (+3 min), −83.0 ms (+26 min). ❌ ±20.
+  - The absolute offset is not explained by the stream: the stream's own A/V at capture A is +2.5
+    ms as written.
+  - The §18.10 soak was similar: −50.5 against a +7.9 ms stream in another session.
+  - Not investigated; the absolute gate is open for Cloudflare SRT.
+- **start → end:** A → B −23.9 ms, which is the stream's drift. The new criterion's log term,
+  −44.6 ms, is contaminated by the connect rail event below and was only derived for WHEP. It is
+  reported, not gated.
+- **Rail event at connect:** LiveClock at +0.5 % with publication starved 3.0 s. ρ was at B for
+  **90.8 s**, peak |e| 123 ms, recovered at +91 s, before capture A. The largest connect event
+  in the §13.4 tally.
+- **LiveClock at ±0.5 %:** 80 % of lines, as in every SRT run today, live or replayed.
+- **criterion 1: 9 mutes in 3 clusters, all exact digital zero** (BUGS.md). None is in the
+  stream: its decoded audio has no zero run ≥ 5 ms in the noise segment. The resampler logged 0
+  holes and 0 overlaps, and the renderer's buffers were contiguous.
+
+| time | mutes | nearby |
+|---|---|---|
+| 16:56:23 | 6 short zeros (24–106 ms) within 0.5 s | a delivery burst: 19–28 frames/s, a video underrun at 16:56:25 |
+| 16:57:29 | 1 × 156 ms | video queue underruns at 16:57:31 (64 ms empty) |
+| 17:07:29 | 2 × 18 / 10 ms | nothing logged |

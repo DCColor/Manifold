@@ -4,7 +4,7 @@ decode once, pair each beep with its flash as c12.py does, report 130 s windows 
 +1260 s (whole grid periods) and the trend over every whole 41.7 s period. Do NOT cut segments with
 stream copy first: a copy cut starts video at a keyframe and audio anywhere, which scrambles the
 offset. Needs avsync.py ($AVSYNC_DIR) and numpy (the audible-events venv).
-Usage: probe_av.py <file.ts|.mov>"""
+Usage: probe_av.py <file.ts|.mov> [window start s …, default 180 1260]"""
 import sys, os
 sys.path.insert(0, os.environ.get('AVSYNC_DIR', os.path.expanduser('~/Desktop/manifold-avsync')))
 import numpy as np
@@ -24,8 +24,8 @@ def win(a, span=130):
     sel = (tb >= a) & (tb < a + span); tt = tb[sel]
     n = int((tt[-1] - tt[0]) // PERIOD); s2 = (tb >= tt[0]) & (tb < tt[0] + n * PERIOD)
     return d[s2].mean(), n
-for a in (180, 1260):
-    m, n = win(a); print(f"window +{a}–{a+130} s: mean over {n} whole periods {m:+.2f} ms (grid-corrected {m+20:+.2f})")
+for a in (list(map(float, sys.argv[2:])) or [180, 1260]):
+    m, n = win(a); print(f"window +{a:.0f}–{a+130:.0f} s: mean over {n} whole periods {m:+.2f} ms (grid-corrected {m+20:+.2f})")
 # per-period means over the whole file, and their trend
 k = np.floor((tb - tb[0]) / PERIOD).astype(int)
 pm = np.array([(tb[k == i].mean(), d[k == i].mean()) for i in range(k.max()) if (k == i).sum() >= 35])

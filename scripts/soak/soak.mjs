@@ -309,11 +309,24 @@ mark('end', { pids: manifoldPids() });
 const endPos = logText().length;
 if (TR.stopFirst) { await sender.call('StopStream'); mark('sender stopped streaming'); await sleep(2); }
 alert(TR.endMsg);
-const endedPos = await waitForLog(TR.endedLog, 'live session ended', endPos, 120);
+// NO DEADLINE: a control recorded while the stream is still up is a live capture, not a control
+// (2026-09-29: the operator was away, both waits timed out, and "control 2" recorded the stream).
+// Repeat the prompt every 2 min instead.
+let endedPos;
+for (;;) {
+  endedPos = await waitForLog(TR.endedLog, 'live session ended', endPos, 120);
+  if (endedPos !== endPos) break;
+  alert(`Still connected. ${TR.endMsg}`);
+}
 // Wait for the live source to release the deck, THEN for playback, so a live-session
 // `[Play] presented` line cannot start the control early. The release line is common to every
 // transport; NDI also reloads the file, SRT does not (2026-09-28).
-const releasedPos = await waitForLog(/\[ARBITER\] (exclusive device released|released )/, 'deck released', endedPos, 120);
+let releasedPos;
+for (;;) {
+  releasedPos = await waitForLog(/\[ARBITER\] (exclusive device released|released )/, 'deck released', endedPos, 120);
+  if (releasedPos !== endedPos) break;
+  mark('deck not yet released; still waiting');
+}
 await fileControl('control 2', releasedPos);
 if (TR.stream && !TR.stopFirst && !TR.keepStreaming) { await sender.call('StopStream'); mark('sender stopped streaming'); }
 alert(TR.quitMsg);

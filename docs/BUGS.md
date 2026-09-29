@@ -955,7 +955,21 @@ failures:
 
 ---
 
-## ☐ OPEN 2026-09-29 — SRT: lip-sync drifts ~−29 ppm (−40 ms in 23 min) live on Cloudflare SRT, but not when the same stream is replayed locally; cause not established
+## 🔍 ATTRIBUTED 2026-09-29 — SRT: lip-sync drifts live on Cloudflare SRT because THAT SESSION'S STREAM carries the A/V slope; Manifold reproduces the stream faithfully
+
+**Resolution (test 3, `AUDIO_RESAMPLER_DESIGN.md` §18.12):** ffmpeg recorded Cloudflare's playback
+in parallel with a live Manifold session. Capture A → capture B:
+- the stream moved −20.3 ms;
+- Manifold's in-app A/V (`[AV-LAG]`) moved −0.6 ms;
+- the device moved −23.9 ms.
+
+**Device ≈ stream: not a Manifold defect.** The slope varies by session (0.00 ppm, about −15 ppm and
+presumably −29 ppm in the first soak). Whether OBS or Cloudflare adds it is not separated.
+Server-agnostic (CLAUDE.md): nothing to special-case. An MPEG-TS source's A/V is what its
+timestamps say. Still open, and separate: Cloudflare SRT's **absolute** criterion 12 (−50 … −83 ms,
+§18.12) and the device mutes (next entry).
+
+## (history) ☐ OPEN 2026-09-29 — SRT: lip-sync drifts ~−29 ppm (−40 ms in 23 min) live on Cloudflare SRT, but not when the same stream is replayed locally
 
 **Status:** OPEN, cause not established. **Found by:** the Cloudflare SRT soak,
 `AUDIO_RESAMPLER_DESIGN.md` §18.10. **Affects:** SRT, and possibly any push source whose video PTS are
@@ -1003,6 +1017,31 @@ quantised (Cloudflare's SRT output stamps video on a 1 ms grid). Measured on Clo
 
 ---
 
+
+## ☐ OPEN 2026-09-29 — SRT via Cloudflare: device-output mutes (exact zero) that are not in the stream, at video delivery disturbances
+
+**Status:** OPEN, cause not established. **Found by:** test 3 (`AUDIO_RESAMPLER_DESIGN.md` §18.12).
+Not seen on the §18.10 Cloudflare SRT soak (0 mutes).
+
+- **Measured:** 9 mutes in 20 min of reference noise, in 3 clusters: 6 × 24–106 ms within 0.5 s at
+  16:56:23, 1 × 156 ms at 16:57:29, and 2 × 18 / 10 ms at 17:07:29. All exact digital zero.
+- **Not in the stream:** the parallel ffmpeg capture's decoded audio has no zero run ≥ 5 ms in the
+  noise segment, and its audio PTS equal the sample count (no missing packets).
+- **Not at the resampler's input:** 0 holes and 0 overlaps in every window, and the renderer's
+  buffers were contiguous (`gap=+0.0 µs`).
+- **Coincides with video delivery disturbances** within the ±2 s of the time mapping: a 19–28
+  frames/s burst window with a 32 ms video underrun, and 15 / 64 ms video underruns. The 17:07 pair
+  has nothing logged.
+- **Candidates:**
+  - the audio renderer starving after a delivery stall (not visible to the resampler's input
+    counters);
+  - a mapping step from LiveClock's underrun handling reaching the audio target;
+  - the device path.
+- **Next:** log the audio renderer's own queue (`hasSufficientMediaDataForReliablePlaybackStart`,
+  or a ready-for-more stall counter) and any LiveClock mapping step at underrun. Then reproduce with
+  the local repro plus induced delivery stalls (e.g. pausing the ffmpeg server's socket).
+
+---
 
 ## ☐ OPEN 2026-09-29 — WHEP via Cloudflare: the stream paused ~4 s upstream (sender or SFU); a 400 ms audio queue plays it as 4 s of silence
 
