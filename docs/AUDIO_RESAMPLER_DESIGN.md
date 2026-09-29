@@ -1035,6 +1035,13 @@ live capture averaged over whole 41.7 s grid periods reads **20.0 ms** more audi
 file control (the mean delay of a caught 40 ms flash). "As written" includes that sender artefact;
 grid-corrected (whole-period mean + 20.0 ms) does not. Both are reported; the corrected one gates.
 
+📌 **FROM 2026-09-29 THE SESSION'S DRIFT IS GATED FROM THE SESSION START** (decided by Robbie, §18.9).
+Lip-sync at +26 min relative to the session start must be within **±10 ms**. It is measured as
+(capture B − capture A) + (the log's median queue depth at capture A − its median at 60–120 s after
+the connect). The ±20 ms above still gates each capture. Capture A → B is reported, not gated: on
+SRs that lag the media, lip-sync has already walked by capture A, and a correction that restores
+the session start would fail A → B by exactly that head start.
+
 ⚠️ **THE PRE-RESAMPLER BASELINE FOR THIS CRITERION IS ALREADY MEASURED AND IT IS NOT ZERO**
 (`AV_SYNC_FINDINGS.md` §2): local SRT **+203.9 ms**, Cloudflare SRT **+165.8 ms**, NDI
 **+230.1 ms**, WHEP **−98.9 / +36.7 ms** on two sessions. So this criterion is not "did the
@@ -3454,6 +3461,17 @@ The SRs are right here, so the unforced run is the reference and the difference 
 
 **The condition is not met on either input. A stays; no code change.**
 
+**✅ DECIDED 2026-09-29 (Robbie), for this release:**
+- **Rule A ships.**
+- **MediaMTX WHEP ships as a KNOWN LIMITATION:** its SRs lag the media (a staircase, or flat).
+  - The residual reaches up to ~−28 ms at +26 min (measured −27.8 ms grid-corrected on
+    `srfix-whep-mediamtx`). That is outside the ±20 ms gate below; Robbie accepts it as within
+    broadcast tolerance.
+  - The flat-SR case is bounded by the fallback (§18.7: −59 / −70 ms worst, caught up by ~28 min).
+  - The fix is post-release: the level-based correction (BUGS.md, POST-RELEASE entry).
+- **The start → end criterion is restated** (below: +26 min against the session start).
+- **No MediaMTX rerun.** Next is the Cloudflare SRT soak only.
+
 **Why, and why it is not C's alone:**
 - **Engaged, the correction is a RATE,** re-read every minute from the latest check: r = b_depth − b_SR.
   On correct SRs that number is noise, so the correction random-walks at r × 60 s per check instead
@@ -3501,16 +3519,17 @@ min returns lip-sync to the SESSION START, not to capture A.
 - **C fails the criterion as written by exactly the head start.** It is right against the session
   start.
 - **A passes as written only because +26 min lands mid catch-up** (§18.7: it compares two instants).
-- **Proposed restatement:** lip-sync at +26 min relative to the SESSION START, within ±10 ms, plus
-  the unchanged ±20 ms absolute gate on each capture.
+- **✅ ADOPTED 2026-09-29 (Robbie):** lip-sync at +26 min relative to the SESSION START, within
+  ±10 ms, plus the unchanged ±20 ms absolute gate (criterion 12, grid-corrected) on each capture.
+  It replaces capture A → capture B from this date; §6.3 carries the definition.
   - Capture A still measures the absolute, but the start is not capturable at device level: the
     first ~60 s are the startup realign (§10.10).
   - Device-level form: (capture B − capture A) + (queue depth at capture A − queue depth at 60–120
     s), the second term from the log's steering windows. Lip-sync walk ∝ depth change (§18.7).
-  - The start window (60–120 s) matters by 2–3 ms (30–90 s gives −5.6 / −18.8 for A on the flats).
-    Fix it once, before the next run.
+  - **The start window is fixed at 60–120 s after the connect.** It matters by 2–3 ms (30–90 s
+    gives −5.6 / −18.8 for A on the flats).
 - On Cloudflare the restatement changes nothing that matters: +0.1…+6.4 ms on every session.
-- ⚠️ **Not adopted: Robbie's decision.** Until then start → end stays as written.
+- Capture A → B is still reported, not gated, so earlier runs stay comparable.
 
 **The overshoot, and why a rate cannot give it back** (for the post-release item):
 - **A rate needs a long window to be stable, and a long window integrates a staircase's flat
@@ -3542,3 +3561,110 @@ min returns lip-sync to the SESSION START, not to capture A.
   rule's parameters and a force switch. The committed replay tools run the working tree's rule
   only.
 
+
+### 18.10 Cloudflare SRT soak, 2026-09-29 12:57–13:37 — ❌ the picture drifts −29 ppm from its own timestamps; Cloudflare's output cleared
+
+**Protocol.** Build `.build-cc/rulecheck-Profile`: HEAD's code, engage rule A. OBS "SRT Cloudflare"
+(switched to Advanced output with a 1 s keyframe for this run), 23.976, AAC. The orchestrator ran
+`go.sh cloudflare-srt`, its first run: OBS and Manifold both call Cloudflare, and Manifold disconnects
+first. It worked end to end. Log `~/Desktop/ruleA-srt-cloudflare.log`.
+- Timeline: file control 1, connect at 13:03:43, capture A at +3 min, the noise segment, capture B at
+  +26 min, then control 2.
+
+| | result | limit | |
+|---|---|---|---|
+| file controls | +0.7 / +3.6 ms (Δ +2.9); zero +2.2 | ±5 | ✅ |
+| criterion 12, grid-corrected | **−50.5 ms** (+3 min), **−90.5 ms** (+26 min) | ±20 | ❌ |
+| criterion 12, as written | −70.5 / −110.5 ms | | |
+| **start → end (§6.3, from the session start)** | **−39.0 ms**: capture A → B −40.0, log term +1.0 | ±10 | ❌ |
+| gates, both captures | beep count, 1 Hz grid, one burst per beep, digital silence between beeps | | ✅ |
+| criterion 1, mutes (20 min) | **0** (the tracker's two hits are the segment's edges) | 0 | ✅ |
+| audio loop | `e` median ≈ 0 in every 3-min block; renderer depth flat (Theil–Sen +0.0 ppm after 180 s); ρ−1 median −2.6 ppm | | ✅ |
+| audio axis | stamped PTS = the sample count, cumulative +0.000 ms over 80 447 buffers | | ✅ |
+| rail events | 1, at connect: LiveClock railed +0.5 % and starved publication 3.0 s; ρ at B 13.2 s, peak \|e\| 31.3 ms, over by +30 s (§13.4 tally) | | ⚠️ |
+| LiveClock at ±0.5 % | **~92 % of its `[LIVECLOCK]` lines**, both rails (local SRT §18.4: 21 %; Cloudflare WHEP §18.8: 20 %) | | ⚠️ |
+
+- **The zero moved.** Every earlier file control read +21…+27 ms. Today's read +0.7 / +3.6, the
+  same launch, consistent with each other. A capture-chain change moves captures and controls
+  together, so this session's numbers stand, but the cause is not known.
+
+**Cloudflare's SRT output is cleared** (2026-09-29 13:48–14:13). With Manifold not running, OBS
+streamed to Cloudflare SRT and ffmpeg recorded Cloudflare's playback with no re-encode and
+`-copyts`, 1424 s (`~/Desktop/manifold-soak/cfsrt-probe.ts`). Analysed on the file's own
+timeline:
+
+| | result |
+|---|---|
+| flash/beep A/V, +180…310 s | +7.85 ms (grid-corrected +27.85) |
+| flash/beep A/V, +1260…1390 s | +7.88 ms (grid-corrected +27.88) |
+| **start → end** | **+0.03 ms**; trend over 34 whole grid periods **0.00 ppm** (each period +7.9…+8.3 ms) |
+| audio PTS vs the sample count | exact: +0.000 ms over 1424 s, every step 1920 ticks |
+| video PTS vs the frame count | within one frame over 1424 s; no rate error |
+| **video PTS grid** | **quantised to 1 ms**: steps alternate 3780 / 3690 ticks (42 / 41 ms), not 3753.75 |
+
+- ⚠️ **CORRECTED by §18.11:** the local repro does not reproduce the lag, and restamping changes
+  nothing, so the next two bullets are withdrawn as conclusions. They are kept as the reasoning that
+  led to the repro.
+- **So the −40 ms is Manifold's, on the video side.** Manifold's audio follows the stream's
+  timestamps exactly, and the timestamps carry no drift. The picture falls behind its own
+  timestamps at about −29 ppm.
+- **What the code says** (read 2026-09-29):
+  - picture and audio follow one line, LiveClock's `now(t)`;
+  - each display tick shows the newest queued frame with PTS ≤ `now()`;
+  - SRT's audio target is `now()` itself, with cushion and offset 0.
+  - So the lag must come from which frame is chosen against `now()`, or from the present pipeline
+    between the tick and the glass.
+- **Leading suspect, not shown:** the 1 ms grid.
+  - Frame-to-frame the 41/42 ms steps are ±1.2 % of rate, beyond LiveClock's ±0.5 % rail, which
+    fits a clock that sits on a rail 92 % of the time.
+  - How rail-bouncing becomes a steady picture lag is not established.
+  - A 1 ms PTS grid is legal MPEG-TS from any muxer or server, so the fix must handle quantised
+    timestamps generally (CLAUDE.md), not Cloudflare.
+- **Next: the local repro (§18.11)**, this file served to Manifold over local SRT with telemetry,
+  as recorded and restamped to exact 41.708 ms steps.
+
+### 18.11 The local repro, 2026-09-29 15:02–15:51 — ❌ the lag does NOT reproduce; restamping changes nothing
+
+**Protocol (unattended).** Build `.build-cc/avlag-Profile`: HEAD plus the DEBUG-only `[AV-LAG]` line
+and the `MANIFOLD_SRT_DEBUG_URL` override (BUGS.md, PRE-SHIP entry). Each run:
+- ffmpeg serves the file as a local SRT listener (`-re -c copy -pes_payload_size 0`);
+- Manifold launches with the override and the licence prompt is denied by osascript;
+- ⌃⌥D is pressed by osascript, and the whole 1424 s file plays.
+
+Two runs:
+1. **as recorded:** `cfsrt-probe.ts`, video PTS on Cloudflare's 1 ms grid;
+2. **restamped:** video PTS snapped to exact 41.708 ms steps. Each moved by at most ±0.9 ms, and
+   audio is untouched (both carry the muxer's constant +1400 ms).
+
+`[AV-LAG]`, once a second: `av` is the audio heard at the moment the picture reached the glass,
+minus the picture's PTS. Its parts are frame choice (now − pts), audio against the clock, and tick →
+glass (from the drawable's presented time).
+
+| after 180 s, Theil–Sen | now − pts | audio − now | tick → glass | **av** | LiveClock at ±0.5 % |
+|---|---|---|---|---|---|
+| as recorded | +0.0 ppm | −0.2 ppm | −0.5 ppm | **−0.7 ppm** (−0.8 ms / 20 min) | 79 % of lines |
+| restamped | −0.6 ppm | −0.3 ppm | −0.1 ppm | **−0.4 ppm** (−0.5 ms / 20 min) | 82 % of lines |
+| **arrival −30 ppm** (as recorded, `-readrate 0.99997`, 16:03–16:27) | +0.3 ppm | +0.3 ppm | −0.9 ppm | **−1.5 ppm** (−1.8 ms / 20 min) | 80 % of lines |
+
+- **av held within ±1.5 ms of +17.8 ms** (3-min block medians) for 23.7 min in both runs. The soak
+  drifted −40 ms over the same length.
+- Audio was intact in both runs: 0 holes, 0 overlaps, ρ within 30 ppm of 1 at the end.
+- **The 1 ms grid is not the cause of the drift.** It is not the cause of the railing either:
+  LiveClock rails as much on exact timestamps (82 %) as on the grid (79 %).
+- **Corrects §18.10:** "the picture falls behind its own timestamps" was an inference from `e` ≈ 0
+  and is not supported. On this file Manifold's picture, its present pipeline and its audio all hold
+  to the stream's timestamps within 1 ppm.
+- **What the repro does not reproduce, so where the −29 ppm can still be:**
+  1. ~~**The arrival clock.**~~ **RULED OUT the same afternoon (third row).** Content arriving
+     30 ppm slow against the Mac's clock left A/V at −1.5 ppm. The integrator absorbed it (`i` +25
+     … +104 ppm, queue flat at ~208 ms) with 0 holes, 0 overlaps and no rail event.
+  2. **Network delivery:** jitter, bursts and loss. Only a live run has them.
+  3. **Outside the in-app path:** the device output or the capture chain, whose file-control zero
+     moved ~20 ms today (§18.10). Testable with `[AV-LAG]` running during a live Cloudflare SRT soak
+     with its device captures, which compares the app's own A/V with the device's in one session.
+- Operator events: a desktop click at ~15:05 slid all windows off-screen for a moment. Two samples
+  show one extra refresh to the glass (+20 ms tick → glass). The slopes are Theil–Sen, which ignores
+  them.
+- **A repro artefact, and a real gap:** the first attempt served with ffmpeg's default MPEG-TS
+  muxing, about six AAC frames per PES. Manifold's SRT audio decoded none of it (BUGS.md). That
+  attempt is void.

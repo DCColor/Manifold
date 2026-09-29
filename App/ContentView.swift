@@ -1953,12 +1953,17 @@ struct ContentView: View {
             // blacked at connect, and the route is configured once the demuxer has reported the
             // stream's colorimetry.
             Button("") {
-                let bookmark = StreamBookmarkStore.shared.firstConnectable(ofType: .srt)
+                // MANIFOLD_SRT_DEBUG_URL (pre-ship removal, docs/BUGS.md): an unattended repro dials
+                // this instead of the first bookmark, so no stored passphrase is read and an unsigned
+                // build raises no keychain prompt. Unset, nothing changes.
+                let override = ProcessInfo.processInfo.environment["MANIFOLD_SRT_DEBUG_URL"]
+                    .flatMap(URL.init(string:))
+                let bookmark = override == nil ? StreamBookmarkStore.shared.firstConnectable(ofType: .srt) : nil
                 let saved = bookmark.flatMap { StreamBookmarkStore.connectURL(for: $0) }
                 // One lookup, used for BOTH the URL and the name another window would be shown —
                 // two lookups could disagree if the store changed between them.
-                DeckRegistry.shared.connectLive(.srt, from: deck, label: bookmark?.name) {
-                    LiveSource.connectSRT(to: saved ?? Self.srtDebugTarget)
+                DeckRegistry.shared.connectLive(.srt, from: deck, label: override != nil ? "SRT debug URL" : bookmark?.name) {
+                    LiveSource.connectSRT(to: override ?? saved ?? Self.srtDebugTarget)
                 }
             }
             .keyboardShortcut("d", modifiers: [.control, .option])

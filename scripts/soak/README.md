@@ -83,10 +83,57 @@ The operator's part is spoken by the orchestrator:
 | `analysis/mutes.sh` | criterion 1: finds the noise segment in an Audio Hijack WAV (`noise_start.py`) and runs the tracker on it |
 | `analysis/extract.py` | `<log>` → `<name>.pairs.tsv` (SR pairs, formed as the fit forms them; last session) and `<name>.windows.tsv` (steering depth + fit offset per window) |
 | `analysis/shape.py` | a Δ series' shape: slope, residual sd, jumps; depth and depth-implied slopes |
+| `analysis/depth_term.py` | the log term of the restated start → end (§6.3): queue depth at capture A − at 60–120 s, any transport |
 | `analysis/net.py` | rolling 600 s depth-implied slope against the applied slope |
+| `analysis/avlag.py` | `[AV-LAG]` lines (DEBUG builds): A/V at the glass and its parts per 3-min block, Theil–Sen slopes, LiveClock's rail share |
+| `analysis/probe_ts.py` | a received `.ts` on its own timestamps: audio PTS vs sample count, video PTS vs frame count, video step histogram, grid phase |
+| `analysis/probe_av.py` | flash/beep A/V of a whole recorded stream on its own timeline, windows at +180 / +1260 s and the trend over whole grid periods |
 
 Criterion 12 is `mean_whole − zero` as written and `gridfree − zero` grid-corrected, where zero is the
 mean of the two file controls (§18.3).
+Start → end (from 2026-09-29, §6.3) is (B − A, grid-corrected) + `depth_term.py <log>`, ±10 ms.
+
+## Probing a server without Manifold
+
+To test whether a server's output carries an A/V drift, record its playback with no player in
+the path, no re-encode, and the original timestamps (`-copyts`), while the sender streams the
+fixture (§18.10). For Cloudflare SRT, with the passphrase in `$CF_SRT_PASS` and the playback URL in
+`$CF_SRT_URL`:
+
+```sh
+node scripts/soak/obsws.mjs 4455 StartStream
+ffmpeg -hide_banner -loglevel warning -i "${CF_SRT_URL}&passphrase=${CF_SRT_PASS}" -map 0:v -map 0:a \
+  -c copy -copyts -t 1500 -f mpegts ~/Desktop/manifold-soak/cfsrt-probe.ts
+node scripts/soak/obsws.mjs 4455 StopStream
+```
+
+- With `-copyts`, `-t` counts from timestamp 0, not from the stream's start. Add the start time
+  to get the full length.
+- The passphrase is visible in the process list while ffmpeg runs.
+- Then `probe_ts.py` (the timestamps) and `probe_av.py` (the content), with the audible-events venv's
+  python for the latter.
+
+## Local SRT repro (unattended)
+
+Serves a recorded `.ts` to Manifold as a local SRT listener and logs `[AV-LAG]` (§18.11), with no
+operator:
+
+```sh
+zsh scripts/soak/repro/run.sh <label> <file.ts>                        # real time
+READRATE=0.99997 zsh scripts/soak/repro/run.sh <label> <file.ts>       # content arriving 30 ppm slow
+zsh scripts/soak/repro/restamp.sh <in.ts> <out.ts>                     # video onto the exact frame grid
+python3 scripts/soak/analysis/avlag.py ~/Desktop/manifold-soak/repro/<label>.manifold.log
+```
+
+- **Needs a DEBUG (Profile) build:** the `MANIFOLD_SRT_DEBUG_URL` override and `[AV-LAG]` are
+  `#if DEBUG`. `MANIFOLD_APP` selects it.
+- **Needs UI scripting (Accessibility) for the process running it.** It denies the unsigned
+  build's licence prompt, opens a window if the launch restored none, and presses ⌃⌥D.
+- **Serves with `-pes_payload_size 0`:** one AAC frame per PES. ffmpeg's default packs several, and
+  Manifold's SRT audio then decodes nothing (BUGS.md, PRE-SHIP must-fix). Until that is fixed, a run
+  without this flag measures no audio.
+- **Do not touch Manifold while it runs.** The script quits it at the end. A forced quit can make
+  the next launch restore with no window, which the script handles.
 
 ## Replay
 

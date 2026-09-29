@@ -253,6 +253,16 @@ final class MetalVideoRenderer {
     /// actually wait between pull and display — the quantity its picture delay is supposed to set.
     /// Must not block. Nil otherwise.
     var onFrameSelected: ((_ pts: Double, _ skipped: Int) -> Void)?
+
+    /// Measurement only, DEBUG only — `[AV-LAG]`, listed for pre-ship removal (docs/BUGS.md, "SRT:
+    /// the picture drifts from its own timestamps"). Given the live clock's `now()`, returns the
+    /// audio content being heard minus that `now()`, in seconds (the engine's `liveAudioDrift`), or
+    /// nil with no live audio. Called at most once a second on the CVDisplayLink thread.
+    var avLagAudioMinusClock: ((Double) -> Double?)?
+    /// One sampled tick awaiting its drawable's on-glass time. Render thread only: set in
+    /// `performDisplayTick`, consumed by `presentDrawable` in the same tick, cleared after it.
+    private var avLagProbe: (tick: Double, now: Double, audioMinusClock: Double, pts: Double)?
+    private var avLagLastSample: Double = 0
     #endif
 
     /// One display tick's view of the frame queue, as the live control loop needs to see it.
@@ -2305,9 +2315,19 @@ final class MetalVideoRenderer {
             // timestamp the VIDEO carries is what makes A/V alignment structural instead of a guess:
             // it compensates the whole video pipeline delay (offscreen → convert → staging → memcpy →
             // card preroll) for free, because the delay is what the pipeline IS, not something we model.
+            #if DEBUG
+            // [AV-LAG]: once a second, capture this tick for `presentDrawable` to complete with the
+            // drawable's on-glass time.
+            let avLagTick = CACurrentMediaTime()
+            if avLagTick - avLagLastSample >= 1, let hook = avLagAudioMinusClock, let a = hook(now) {
+                avLagLastSample = avLagTick
+                avLagProbe = (avLagTick, now, a, chosenPts)
+            }
+            #endif
             renderPixelBuffer(pb, pts: chosenPts)
             tickPresentedFPS(chosenPts)
             #if DEBUG
+            avLagProbe = nil
             onFrameSelected?(chosenPts, dropCount)
             #endif
             // A frame satisfied the strict gate — the post-seek one-shot is moot. Clear it
@@ -2831,6 +2851,25 @@ final class MetalVideoRenderer {
     /// Every present in this file goes through here. If you add a second one, add it here too.
     private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer) {
         cmdBuffer.waitUntilScheduled()
+        #if DEBUG
+        // [AV-LAG] (pre-ship removal, docs/BUGS.md). Audio heard at the moment this picture reached
+        // the glass, minus the picture's own PTS: the audio content advances one second per second,
+        // so the tick's reading is carried forward by the present latency. Positive = the picture
+        // is behind its sound. Also split into its parts: frame choice (now − pts), audio against
+        // the clock, and tick → glass.
+        if let p = avLagProbe {
+            avLagProbe = nil
+            drawable.addPresentedHandler { d in
+                let shown = d.presentedTime
+                guard shown > 0 else { return }                // dropped, never on glass
+                let present = shown - p.tick
+                let av = (p.now + p.audioMinusClock + present) - p.pts
+                FileHandle.standardError.write(Data(String(format:
+                    "[AV-LAG] tick=%.4f pts=%.5f now−pts=%+.2f ms audio−now=%+.2f ms tick→glass=%+.2f ms av=%+.2f ms\n",
+                    p.tick, p.pts, (p.now - p.pts) * 1e3, p.audioMinusClock * 1e3, present * 1e3, av * 1e3).utf8))
+            }
+        }
+        #endif
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         drawable.present()

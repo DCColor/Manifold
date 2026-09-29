@@ -713,6 +713,89 @@ audio lead (it does: 256 ms median against 250 + one refresh; see the NDI lead e
 
 ---
 
+## ☐ PRE-SHIP: remove the `[AV-LAG]` telemetry and the `MANIFOLD_SRT_DEBUG_URL` override
+
+**Added 2026-09-29** for the SRT picture-drift repro (the "SRT: the picture drifts from its own
+timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
+
+- **What it is:**
+  - `MetalVideoRenderer.avLagAudioMinusClock`, `avLagProbe` and `avLagLastSample`.
+  - Once a second the display tick captures the clock, the chosen frame's PTS and the audio heard
+    (FrameEngine's `liveAudioDrift`). `presentDrawable` adds a presented-handler that logs
+    `[AV-LAG] … now−pts … audio−now … tick→glass … av …`, with the drawable's on-glass time.
+  - Wired in `WindowDeck.attachDeviceHooks`.
+  - `ContentView`'s ⌃⌥D reads `MANIFOLD_SRT_DEBUG_URL`. When it is set, ⌃⌥D dials that URL instead of
+    the first SRT bookmark, so no stored passphrase is read.
+- **Gating:** all `#if DEBUG`, so absent from Release (checked with `strings` on both builds) and
+  present in Profile.
+- **Cost when present:** one engine call, one presented-handler and one log line per second. The
+  override costs nothing when unset.
+- **Remove** once the SRT drift is fixed and verified, or keep `[AV-LAG]` as Profile telemetry by
+  decision. It is the only in-app measure of picture against sound at the glass.
+
+---
+
+## ☐ PRE-SHIP (MUST-FIX): SRT audio decodes nothing when a PES carries more than one ADTS frame
+
+**Status:** MUST FIX BEFORE RELEASE (Robbie, 2026-09-29). Not implemented. **Found by:** the first
+attempt at the SRT repro (`AUDIO_RESAMPLER_DESIGN.md` §18.11). **Affects:** SRT (MPEG-TS) from any
+sender that packs several AAC frames into one PES:
+- ffmpeg, by default;
+- likely vMix, Wirecast and hardware encoders (not yet checked).
+
+OBS and Cloudflare send one frame per PES, which is why every soak so far had audio. **The failure
+is total and silent to the listener: no audio for the whole session.**
+
+- **Measured:**
+  - the audio probe showed `adts.framelen 433 vs packet 2602 — MISMATCH`, about six frames in one
+    demuxed packet;
+  - `SRTAudioDecoder.decode` strips ONE 7-byte header and hands the remaining 2595 bytes to the
+    converter as one AAC frame;
+  - nothing decoded for the whole 24-min session. The resampler ended `in=0 out=0 buf`, and the
+    synchronizer free-ran with no audio.
+- **Why it is Manifold's (CLAUDE.md):** ISO/IEC 13818-1 lets a PES carry any number of whole access
+  units, and ADTS frames are self-delimiting (13-bit `aac_frame_length`). The standard, not a quirk.
+- **Workaround in the repro only:** ffmpeg `-pes_payload_size 0`.
+
+**Fix outline (not implemented):**
+1. **Split in the decoder, not the router.**
+   - `SRTAudioDecoder.decode` walks the payload frame by frame while the remaining bytes start with
+     the ADTS syncword.
+   - Each frame's length comes from `aac_frame_length` (bits 30–42 of the header, including the
+     header). The header is 7 bytes, or 9 with CRC.
+   - Each frame is decoded with the existing single-frame converter call.
+2. **Deliver each AAC frame as its own 1024-frame buffer,** not one concatenated block.
+   - `decode` becomes a per-frame callback (or returns a small array). `handleAudioPacket` enqueues
+     frame k with PTS = packet PTS + k·1024 / sample rate.
+   - The sample-counted axis (`audioPTSTicks`) then advances exactly as with one frame per PES.
+   - The renderer, gap histogram and resampler keep seeing the buffer size they see today, and
+     `maxFramesPerPacket` / scratch stay as they are.
+3. **Validate every frame, fail per frame:**
+   - a length below the header, or past the payload, or a missing syncword mid-payload, ends the
+     walk;
+   - the bytes left are counted `undecodable` and logged once per session with the byte counts,
+     never silently dropped;
+   - `number_of_raw_data_blocks_in_frame > 0` (several raw blocks in one ADTS frame) is rare. Decode
+     it if AudioToolbox accepts it whole, else count it undecodable and log once.
+4. **Cookie from the first frame only,** as today. A later frame whose profile, rate or channels
+   differ goes through the existing format-change path.
+5. **Raw AAC and LATM are untouched:** no syncword, no walk.
+6. **Considered, not preferred:** turning on libavformat's AAC parser so the demuxer returns one
+   frame per packet.
+   - Check first why the SRT demux path does not already split; it may be a flag we set.
+   - The in-decoder walk is self-contained, unit-testable offline, and independent of demuxer
+     options.
+
+**Verification:**
+- **Unit tests** on synthetic payloads: 1, 2, 6 and 12 frames per PES; mixed frame lengths; CRC
+  (9-byte headers); a truncated last frame; garbage after a valid frame; raw AAC unchanged.
+- **The repro WITHOUT `-pes_payload_size 0`:** 0 undecodable, 0 holes, and `[AV-LAG]` within 1 ppm,
+  as in §18.11.
+- **Regression:** local SRT from OBS unchanged (one frame per PES).
+- **At least one other real sender** if available (vMix, Wirecast or a hardware encoder).
+
+---
+
 ## ☐ PRE-SHIP: remove the resampler's pinned back-out switch (step 3 behaviour on demand)
 
 **Status:** OPEN. It goes out with the other debug tools, after step 8. **Raised:** 2026-09-27, resampler
@@ -749,10 +832,17 @@ item. `swift test` passes. A local SRT session still logs exactly one non-zero `
 
 ## ☐ OPEN 2026-09-28 — WHEP via MediaMTX: the SR line fit cannot follow a staircase of SR steps, so lip-sync drifts ~−64 ppm and the audio queue drains
 
-**Status:** OPEN. Fix and fallback committed 2026-09-29 (`14f4b89`), replayed offline
-(`AUDIO_RESAMPLER_DESIGN.md` §18.7). Soaked once on MediaMTX (2026-09-28 evening), where it **failed**
-start → end at −12.9 ms because the fallback did not engage (§18.9). Engage rule A kept, and C
-rejected, 2026-09-29. **Found by:** resampler step 8, the MediaMTX
+**Status:** ⚠️ **KNOWN LIMITATION FOR THIS RELEASE** (Robbie, 2026-09-29). Fix and fallback committed
+2026-09-29 (`14f4b89`), replayed offline (`AUDIO_RESAMPLER_DESIGN.md` §18.7). Soaked once on
+MediaMTX (2026-09-28 evening), where it **failed** start → end at −12.9 ms because the fallback did
+not engage (§18.9). Engage rule A ships; C was rejected. The post-release fix is the level-based
+correction (the POST-RELEASE entry below).
+- **The limitation, as shipped:** MediaMTX's SRs lag the media.
+  - Residual up to ~−28 ms at +26 min (measured −27.8 ms), within broadcast tolerance by Robbie's
+    call, though outside the ±20 ms test gate. On the restated criterion that run reads −17.4 ms
+    from the session start (−12.9 device + −4.5 log), outside ±10 too.
+  - The flat-SR case is bounded by the fallback: −59 / −70 ms worst, caught up by ~28 min.
+- **No MediaMTX rerun** for this release. **Found by:** resampler step 8, the MediaMTX
 WHEP soak (`AUDIO_RESAMPLER_DESIGN.md` §18.5). **Affects:** WHEP from any server whose Sender Reports
 carry the audio↔video slope as discrete jumps rather than a smooth line — MediaMTX measured.
 
@@ -796,7 +886,7 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
   sustain and broke. Device level: start → end **−12.9 ms** (±10 ❌), criterion 12 grid-corrected
   −14.9 / **−27.8 ms** (±20 ❌ at +26). Replay predicted −15.6. A passes one staircase log and
   fails the other.
-- **☐ The start → end criterion needs restating; start → end cannot pass on flat SRs with any fast
+- **✅ The start → end criterion is restated (adopted 2026-09-29); start → end cannot pass on flat SRs with any fast
   rule.** On flat SRs lip-sync walks from the connect, so capture A at +3 min already carries
   b × ~140 s: −8 / −10 ms at 61 / 73 ppm. The correction is anchored at the start of the evidence,
   so a rule that finishes catching up before +26 min returns lip-sync to the SESSION START. Capture
@@ -807,7 +897,8 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
     absolute gate on each capture.
   - On that measure A reads −15.9 on `srtest2-flat` and −20.3 on `srfix-whep-mediamtx`; C reads
     −6.7…+3.3 on all four MediaMTX shapes.
-  - **Robbie's decision; not adopted.**
+  - **✅ ADOPTED 2026-09-29 (Robbie).** The start window is fixed at 60–120 s after the connect.
+    Capture A → B is still reported, not gated. Definition in `AUDIO_RESAMPLER_DESIGN.md` §6.3.
 
 ---
 
@@ -863,6 +954,55 @@ failures:
   a Cloudflare soak.
 
 ---
+
+## ☐ OPEN 2026-09-29 — SRT: lip-sync drifts ~−29 ppm (−40 ms in 23 min) live on Cloudflare SRT, but not when the same stream is replayed locally; cause not established
+
+**Status:** OPEN, cause not established. **Found by:** the Cloudflare SRT soak,
+`AUDIO_RESAMPLER_DESIGN.md` §18.10. **Affects:** SRT, and possibly any push source whose video PTS are
+quantised (Cloudflare's SRT output stamps video on a 1 ms grid). Measured on Cloudflare SRT only.
+
+- **Measured:**
+  - lip-sync −40.0 ms between +3 and +26 min (grid-corrected −50.5 → −90.5 ms, about −29 ppm);
+  - start → end from the session start −39.0 ms (±10 ❌);
+  - 0 mutes.
+- **⚠️ CORRECTED 2026-09-29 by the local repro (§18.11): the lag does NOT reproduce off-network.**
+  - Cloudflare's own recording, served to Manifold over local SRT, holds A/V within 1 ppm, measured
+    at the glass by `[AV-LAG]`. That holds as recorded (−0.7 ppm) and restamped to exact 41.708 ms
+    steps (−0.4 ppm).
+  - **So the 1 ms grid is not the cause.** Nor is it the cause of LiveClock's railing (79 % / 82 %).
+  - "It is the picture", below, was an inference from `e` ≈ 0 and is withdrawn.
+  - **The arrival clock is ruled out too.** Served 30 ppm slow (`-readrate 0.99997`), A/V held at
+    −1.5 ppm.
+  - Remaining candidates: network delivery (jitter, bursts, loss), or outside the app (device output
+    or capture chain; the control zero moved ~20 ms that day).
+  - Next test: `[AV-LAG]` during a live Cloudflare SRT soak with device captures. It separates the
+    two: if `[AV-LAG]` drifts, the cause is in the app under live delivery; if it holds while the
+    device drifts, it is outside the app.
+- **As first read (superseded above), it is Manifold's, and it is the picture:**
+  - the audio loop held `e` ≈ 0 and a flat queue all session;
+  - the audio axis equals the sample count exactly;
+  - **Cloudflare's own output does not drift.** ffmpeg recorded 1424 s of Cloudflare's SRT playback
+    with Manifold not running, and read on its own timestamps it gives +7.85 → +7.88 ms, a trend
+    of 0.00 ppm.
+  - Local SRT from the same OBS held −1.6 ms (§18.4).
+- **Where it can be:** picture and audio follow one line, LiveClock's `now(t)`. Each display tick shows
+  the newest frame with PTS ≤ `now()`, and SRT audio is steered onto `now()`. So the lag is in the
+  frame choice or in the present pipeline after it.
+- **Leading suspect, RULED OUT by §18.11:** Cloudflare's video PTS are on a 1 ms grid (steps of 42 / 41 ms
+  instead of 41.708).
+  - That is ±1.2 % of rate frame to frame, beyond LiveClock's ±0.5 % rail.
+  - LiveClock sat on a rail in ~92 % of its log lines, against ~20 % on local SRT and on Cloudflare
+    WHEP.
+  - How that becomes a steady lag is not established.
+- **Server-agnostic (CLAUDE.md):** a 1 ms PTS grid is legal MPEG-TS from any muxer or server. The fix,
+  when there is one, handles quantised timestamps in general and never branches on Cloudflare.
+- **Next:** the local repro (`AUDIO_RESAMPLER_DESIGN.md` §18.11).
+  - `cfsrt-probe.ts` served to Manifold over local SRT, with the `[AV-LAG]` telemetry.
+  - Run twice: as recorded, and with the video restamped to exact 41.708 ms steps.
+  - No fix until that reports.
+
+---
+
 
 ## ☐ OPEN 2026-09-29 — WHEP via Cloudflare: the stream paused ~4 s upstream (sender or SFU); a 400 ms audio queue plays it as 4 s of silence
 
