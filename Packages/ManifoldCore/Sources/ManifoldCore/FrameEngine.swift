@@ -2304,7 +2304,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                      atHostTime: CMTime(seconds: host, preferredTimescale: 90_000))
             },
             log: { NSLog("%@", $0) },
-            windowCompanion: srFit.map { fit in { fit.windowLine() } })
+            // The fit's window line, and its slope cross-check against the renderer queue (log only):
+            // what the target used at the window's end, beside the window's median depth.
+            windowCompanion: srFit.map { fit in { @Sendable [mirror] facts in
+                mirror.lock.lock()
+                let offset = mirror.appliedOffset, slope = mirror.appliedSlope
+                mirror.lock.unlock()
+                return fit.windowLines(time: facts.elapsed, rendererDepth: facts.rendererDepthMedian,
+                                       appliedOffset: offset, appliedSlope: slope)
+            } })
         mirror.lock.lock(); mirror.steering = steering; mirror.srFit = srFit; mirror.lock.unlock()
         // An input jump past the stage's bridge is the one input event that can step the content
         // error (§4.1 item 2), so it is on record for the splice it may cause. Set before the sink

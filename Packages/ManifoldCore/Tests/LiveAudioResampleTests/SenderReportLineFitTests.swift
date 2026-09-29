@@ -421,22 +421,28 @@ final class SenderReportLineFitTests: XCTestCase {
         XCTAssertEqual(fired.all.count, 1)
     }
 
-    func testStepInDeltaRestartsTheFit() {
+    /// A step RE-LEVELS: the slope, in use before it, stays in use through it — never a restart.
+    func testStepInDeltaReLevelsAndKeepsTheSlope() {
         var s = SyntheticSender(); s.epsV = 69e-6
         var rng = TestRNG(state: 5)
         let sink = LogSink()
         let fit = makeFit(sink)
+        var slopeOutOfUseAfterStep = 0
         feed(fit, s, from: 1, to: 601, deltaNoise: { n in
             (n >= 300 ? 0.080 : 0) + 0.0004 * rng.gaussian()
+        }, each: { n in
+            if n >= 300, !fit.snapshot.slopeInUse { slopeOutOfUseAfterStep += 1 }
         })
         let snap = fit.snapshot
         XCTAssertEqual(snap.steps, 1)
         XCTAssertEqual(snap.unstableEpisodes, 0)
         XCTAssertEqual(sink.count(containing: "Δ STEPPED"), 1)
+        XCTAssertEqual(sink.count(containing: "RE-LEVELLED"), 1)
         let p = s.videoPTS(600)
         XCTAssertEqual(fit.evaluate(atVideoTime: p)!.offset, s.trueOffset(atVideoPTS: p) + 0.080,
                        accuracy: 0.0005)
-        XCTAssertTrue(snap.slopeInUse, "re-qualified on the new level")
+        XCTAssertEqual(slopeOutOfUseAfterStep, 0, "the slope never leaves use across a step")
+        XCTAssertEqual(snap.slopeFit, s.trueSlope, accuracy: 1e-6)
     }
 
     func testNoiseBurstHoldsTheLastGoodLine() {
@@ -452,13 +458,16 @@ final class SenderReportLineFitTests: XCTestCase {
             guard n >= 310, n < 420 else { return }
             let p = s.videoPTS(n)
             let e = fit.evaluate(atVideoTime: p)!
-            if case .holding = e.state { sawHolding = true }
+            if case .holding = e.state {
+                sawHolding = true
+                XCTAssertEqual(e.slope, s.trueSlope, accuracy: 1e-6, "holding keeps the last good slope")
+            }
             worstHeld = max(worstHeld, abs(e.offset - s.trueOffset(atVideoPTS: p)))
         })
         XCTAssertTrue(sawHolding)
-        XCTAssertLessThan(worstHeld, 0.001, "the held line, extrapolated on its slope")
+        XCTAssertLessThan(worstHeld, 0.001, "the tracked median ignores the burst")
         XCTAssertGreaterThanOrEqual(sink.count(containing: "FIT UNSTABLE"), 1)
-        XCTAssertGreaterThanOrEqual(sink.count(containing: "LAST GOOD LINE"), 1)
+        XCTAssertGreaterThanOrEqual(sink.count(containing: "LAST GOOD SLOPE"), 1)
         XCTAssertGreaterThanOrEqual(sink.count(containing: "STABLE again"), 1)
         XCTAssertEqual(fit.snapshot.state, .tracking)
     }
@@ -516,6 +525,166 @@ final class SenderReportLineFitTests: XCTestCase {
         }
         XCTAssertNotNil(Fit.make(timeline: .rtpSenderReports, tag: "[X]", reportsWindows: true, log: nil))
         XCTAssertTrue(Fit.sessionLine(tag: "[X]", timeline: .rtpSenderReports).contains("ACTIVE"))
+    }
+
+    // MARK: - The four shapes (docs/BUGS.md, "the SR line fit cannot follow a staircase")
+    //
+    // Each must converge to the long-run slope and never sit on slope 0 once a slope was in use.
+
+    /// Feeds 1 SR pair/s and, per second from `from`, records whether the applied slope was 0 after
+    /// the slope first went into use, and the largest |offset − truth(n)| from `trackFrom` on.
+    struct ShapeRun {
+        var zeroSlopeAfterUse = 0
+        var worstOffsetError = 0.0
+    }
+
+    func runShape(_ fit: Fit, _ s: SyntheticSender, to: Double, trackFrom: Double,
+                  truth: @escaping (Double) -> Double, deltaNoise: @escaping (Double) -> Double) -> ShapeRun {
+        var r = ShapeRun()
+        feed(fit, s, from: 1, to: to, deltaNoise: deltaNoise, each: { n in
+            let p = s.videoPTS(n)
+            guard let e = fit.evaluate(atVideoTime: p) else { return }
+            if fit.snapshot.slopeFirstInUseAt != nil, e.slope == 0 { r.zeroSlopeAfterUse += 1 }
+            if n >= trackFrom { r.worstOffsetError = max(r.worstOffsetError, abs(e.offset - truth(n))) }
+        })
+        return r
+    }
+
+    /// (a) White noise, Cloudflare as measured: 9.5 ms per pair plus a 2 ms / 60 s wander.
+    func testShapeWhiteNoiseConverges() {
+        var s = SyntheticSender(); s.epsV = 68e-6
+        var rng = TestRNG(state: 21)
+        var wander = 0.0
+        let a = exp(-1.0 / 60)
+        let fit = makeFit()
+        let r = runShape(fit, s, to: 1801, trackFrom: 900,
+                         truth: { s.trueOffset(atVideoPTS: s.videoPTS($0)) }, deltaNoise: { _ in
+            wander = a * wander + (1 - a * a).squareRoot() * 0.002 * rng.gaussian()
+            return wander + 0.0095 * rng.gaussian()
+        })
+        let snap = fit.snapshot
+        XCTAssertTrue(snap.slopeInUse)
+        XCTAssertEqual(snap.slopeFit, s.trueSlope, accuracy: 10e-6)
+        XCTAssertEqual(r.zeroSlopeAfterUse, 0)
+        XCTAssertEqual(snap.unstableEpisodes, 0)
+        XCTAssertEqual(snap.steps, 0)
+        XCTAssertLessThan(r.worstOffsetError, 0.008)
+    }
+
+    /// (b) A STAIRCASE: the SRs carry the true line only in jumps — flat to 7 µs for 10–60 s, then a
+    /// jump to where the line has got to (0.3–3.2 ms at these slopes). The 2026-09-28 MediaMTX
+    /// shape; the 4e-2 fit rejected every stair, restarted flat after each, and froze at slope 0.
+    func testShapeStaircaseConvergesToTheLongRunSlope() {
+        for (slope, seed) in [(54e-6, UInt64(31)), (-30e-6, UInt64(32)), (8e-6, UInt64(33))] {
+            var s = SyntheticSender(); s.epsV = slope
+            var rng = TestRNG(state: seed)
+            var lastJump = 1.0, nextJump = 1.0
+            let sink = LogSink()
+            let fit = makeFit(sink)
+            let r = runShape(fit, s, to: 1801, trackFrom: 600,
+                             truth: { s.trueOffset(atVideoPTS: s.videoPTS($0)) }, deltaNoise: { n in
+                if n >= nextJump { lastJump = n; nextJump = n + 10 + 50 * rng.uniform() }
+                // Δ held at the true line's value at the last jump, plus the clean sender's 7 µs.
+                let held = s.trueOffset(atVideoPTS: s.videoPTS(lastJump))
+                    - s.trueOffset(atVideoPTS: s.videoPTS(n))
+                return held + 7e-6 * rng.gaussian()
+            })
+            let snap = fit.snapshot
+            let label = String(format: "%+.0f ppm staircase", slope * 1e6)
+            XCTAssertTrue(snap.slopeInUse, label)
+            XCTAssertLessThan(snap.slopeFirstInUseAt ?? .infinity, 300, label)
+            // The window's slope from a staircase is off the line by at most ~one stair (≤ 3.2 ms)
+            // over the 600 s window: 3.2 ms × 1.5 / 600 s = 8 ppm.
+            XCTAssertEqual(snap.slopeFit, s.trueSlope, accuracy: 8e-6, label)
+            XCTAssertEqual(r.zeroSlopeAfterUse, 0, label)
+            XCTAssertEqual(snap.rejected, 0, "every stair is data: \(label)")
+            XCTAssertEqual(snap.steps, 0, label)
+            XCTAssertEqual(snap.unstableEpisodes, 0, label)
+            XCTAssertEqual(snap.state, .tracking, label)
+            // The SRs lag the line by up to one stair; the fitted line sits across them.
+            XCTAssertLessThan(r.worstOffsetError, 0.004, label)
+            XCTAssertEqual(sink.count(containing: "FIT UNSTABLE"), 0, label)
+        }
+    }
+
+    /// (c) Clean: ffmpeg's 7 µs.
+    func testShapeCleanConverges() {
+        var s = SyntheticSender(); s.epsV = 20e-6
+        var rng = TestRNG(state: 41)
+        let fit = makeFit()
+        let r = runShape(fit, s, to: 1801, trackFrom: 120,
+                         truth: { s.trueOffset(atVideoPTS: s.videoPTS($0)) },
+                         deltaNoise: { _ in 7e-6 * rng.gaussian() })
+        let snap = fit.snapshot
+        XCTAssertTrue(snap.slopeInUse)
+        XCTAssertLessThan(snap.slopeFirstInUseAt ?? .infinity, 130)
+        XCTAssertEqual(snap.slopeFit, s.trueSlope, accuracy: 0.1e-6)
+        XCTAssertEqual(r.zeroSlopeAfterUse, 0)
+        XCTAssertEqual(snap.rejected, 0)
+        XCTAssertLessThan(r.worstOffsetError, 0.0001)
+    }
+
+    /// (d) A genuine large step, both signs, on a clean line and on Cloudflare-like noise: the fit
+    /// RE-LEVELS within the 8-pair step test and keeps its slope — it neither freezes nor restarts.
+    func testShapeLargeStepReLevels() {
+        for (step, noise, seed) in [(0.050, 7e-6, UInt64(51)), (-0.050, 7e-6, UInt64(52)),
+                                    (0.150, 0.0095, UInt64(53))] {
+            var s = SyntheticSender(); s.epsV = 30e-6
+            var rng = TestRNG(state: seed)
+            let sink = LogSink()
+            let fit = makeFit(sink)
+            let label = String(format: "%+.0f ms step, %.1f ms noise", step * 1e3, noise * 1e3)
+            let truth: (Double) -> Double = { n in
+                s.trueOffset(atVideoPTS: s.videoPTS(n)) + (n >= 900 ? step : 0)
+            }
+            var slopeOutOfUseAfterStep = 0
+            var levelledBy: Double?
+            feed(fit, s, from: 1, to: 1801, deltaNoise: { n in
+                (n >= 900 ? step : 0) + noise * rng.gaussian()
+            }, each: { n in
+                guard n >= 900, let e = fit.evaluate(atVideoTime: s.videoPTS(n)) else { return }
+                if !fit.snapshot.slopeInUse || e.slope == 0 { slopeOutOfUseAfterStep += 1 }
+                if levelledBy == nil, abs(e.offset - truth(n)) < max(0.0005, 3 * noise / 60.0.squareRoot()) {
+                    levelledBy = n
+                }
+            })
+            let snap = fit.snapshot
+            XCTAssertEqual(snap.steps, 1, label)
+            XCTAssertEqual(snap.unstableEpisodes, 0, label)
+            XCTAssertEqual(slopeOutOfUseAfterStep, 0, label)
+            XCTAssertEqual(snap.slopeFit, s.trueSlope, accuracy: noise > 0.001 ? 10e-6 : 0.2e-6, label)
+            XCTAssertLessThanOrEqual((levelledBy ?? .infinity) - 900, 8, "re-levelled in 8 pairs: \(label)")
+            XCTAssertEqual(sink.count(containing: "RE-LEVELLED"), 1, label)
+            XCTAssertEqual(snap.state, .tracking, label)
+        }
+    }
+
+    /// Unstable → the last good slope held, the offset still tracking; a burst that ENDS ON A NEW
+    /// LEVEL re-levels on its trailing 8 pairs instead of holding forever (the 2026-09-28 freeze held
+    /// for 1376 consecutive rejections).
+    func testBurstEndingOnANewLevelHoldsTheSlopeThenReLevels() {
+        var s = SyntheticSender(); s.epsV = 60e-6
+        var rng = TestRNG(state: 61)
+        let sink = LogSink()
+        let fit = makeFit(sink)
+        var sawHolding = false
+        var zeroSlope = 0
+        var backOnLevelAt: Double?
+        feed(fit, s, from: 1, to: 1201, deltaNoise: { n in
+            (n >= 660 ? 0.020 : 0) + (n >= 600 && n < 720 ? 0.100 : 0.0004) * rng.gaussian()
+        }, each: { n in
+            guard n >= 600, let e = fit.evaluate(atVideoTime: s.videoPTS(n)) else { return }
+            if case .holding = e.state { sawHolding = true }
+            if e.slope == 0 { zeroSlope += 1 }
+            let truth = s.trueOffset(atVideoPTS: s.videoPTS(n)) + 0.020
+            if n >= 720, backOnLevelAt == nil, abs(e.offset - truth) < 0.001 { backOnLevelAt = n }
+        })
+        XCTAssertTrue(sawHolding)
+        XCTAssertEqual(zeroSlope, 0, "never slope 0 while holding")
+        XCTAssertLessThanOrEqual((backOnLevelAt ?? .infinity) - 720, 10)
+        XCTAssertEqual(fit.snapshot.state, .tracking)
+        XCTAssertEqual(fit.snapshot.slopeFit, s.trueSlope, accuracy: 2e-6)
+        XCTAssertGreaterThanOrEqual(sink.count(containing: "RE-LEVELLED"), 1)
     }
 
     // MARK: - Logging

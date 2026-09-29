@@ -749,7 +749,8 @@ item. `swift test` passes. A local SRT session still logs exactly one non-zero `
 
 ## ☐ OPEN 2026-09-28 — WHEP via MediaMTX: the SR line fit cannot follow a staircase of SR steps, so lip-sync drifts ~−64 ppm and the audio queue drains
 
-**Status:** OPEN — design decision needed, no code yet. **Found by:** resampler step 8, the MediaMTX
+**Status:** OPEN — fix written 2026-09-28 evening (uncommitted), replayed offline, NOT yet soaked
+(`AUDIO_RESAMPLER_DESIGN.md` §18.7). **Found by:** resampler step 8, the MediaMTX
 WHEP soak (`AUDIO_RESAMPLER_DESIGN.md` §18.5). **Affects:** WHEP from any server whose Sender Reports
 carry the audio↔video slope as discrete jumps rather than a smooth line — MediaMTX measured.
 
@@ -767,6 +768,50 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
   server-specific branch (CLAUDE.md).
 - **Blocks:** the overnight drift run on MediaMTX WHEP; step 4e-2's non-Cloudflare verification.
   Cloudflare WHEP is skipped until this is resolved.
+- **Fix (§18.7):** the outlier/step bound gets a 5 ms floor (a third of §5.3's ±15 ms), so stairs
+  are data; a real step RE-LEVELS the stored pairs instead of restarting; unstable HOLDS the last
+  good slope with the offset still tracking; a slope never falls back to 0 once used. Safety net:
+  the applied slope against the renderer queue's (`SenderReportSlopeCrossCheck`), WARNING beyond
+  10 ppm, log only. Replay of §18.5's log: slope in use throughout, +62.3 ppm at the end, 0
+  rejections; predicted drift vs the renderer queue −37 ms / 30 min (was −116).
+- **⚠️ Not fixable by the SR fit alone:** 2 of the 3 MediaMTX sessions of 2026-09-28 (the A/B tests)
+  had SRs flat to 7 µs at 0.00 ppm for their whole length while the queue drained at 60–71 ppm. On
+  such a session the fit correctly reports 0.
+- **Decided (Robbie, same evening), written, replayed, not yet soaked:** a depth-slope FALLBACK
+  (§18.7). It engages when the SR and queue slopes disagree by > 10 ppm with SE ≤ 5 ppm for 10 min,
+  replaces the SRs' long-run slope and keeps their offset, and logs ENGAGE / DISENGAGE / SR
+  DEVIATION. Replay: Cloudflare and ffmpeg never engage and are unchanged; MediaMTX start → end
+  −2.0 ms on the staircase and +4.3 / −6.7 ms on the flat sessions (extrapolated), against −23 /
+  −85 / −101 log-only. The cost: up to −70 ms mid-session before it engages at ~20 min.
+
+---
+
+## ☐ OPEN 2026-09-29 — WHEP via Cloudflare: the stream paused ~4 s upstream (sender or SFU); a 400 ms audio queue plays it as 4 s of silence
+
+**Status:** OPEN, observed once, attributed upstream; nothing to fix in Manifold's recovery. **Found
+by:** the 4.5 h Cloudflare soak, `AUDIO_RESAMPLER_DESIGN.md` §18.8. **Affects:** WHEP from any path
+whose publisher or SFU pauses for longer than the audio queue.
+
+- **Measured:** at 22:50:39 (+7:17) the device output held **4.0 s of exact digital zero**, the only
+  audible fault in the soak's 20-min noise segment.
+- **Both streams stopped arriving, and neither lost a packet:**
+  - audio fell to 23 packets/s, then almost nothing until 22:50:45;
+  - video's queue ran empty for 3.67 s (`[WHEP-UNDERRUN] … 441 ticks starved`);
+  - **audio sequence numbers stayed continuous (0 gaps)**. Nothing was lost in transit: nothing was
+    sent. That points at the sender (OBS's WHIP output) or Cloudflare's SFU.
+- **Not Manifold:** its 1 Hz timers kept logging through the gap, and the process never stalled.
+- **Not visible in OBS:** OBS's log shows no lag or skipped frames, and WHIP stayed `Connected` from
+  22:43:02 to 03:15:34. So OBS's WHIP send path and the SFU cannot yet be separated.
+- **Recovery, all automatic, in ~15 s:**
+  - the stage bridged it as one axis break;
+  - LiveClock railed at −0.5 % and starved publication for 3.1 s (§13.4 tally, event 5);
+  - `e` peaked at +19.7 ms;
+  - no coarse event, no splice, no write.
+- **Why it is silence:** the renderer holds ~400 ms of audio, so a pause longer than that can only
+  end in silence. Concealment (the PLC entry) cannot cover seconds either.
+- **To attribute it:** a second receiver on the same Cloudflare stream at the same time (a browser
+  WHEP player), or OBS's WHIP stats if they can be logged. If it recurs on MediaMTX with the same
+  sender, it is OBS; if only on Cloudflare, the SFU.
 
 ---
 
@@ -1199,6 +1244,12 @@ drops input overlaps (11.1).
 The §11.9 device-output harness, with loss injected (Network Link Conditioner) on **MediaMTX and
 Cloudflare**, because the fix is standard-codec behaviour, not a server's. Pass condition: the 20 ms
 exact-zero runs disappear from the capture, with no new offset-track steps.
+
+**Seen again 2026-09-29, the 4.5 h Cloudflare run (`AUDIO_RESAMPLER_DESIGN.md` §18.8):**
+- Two 20 ms exact-zero mutes in the 20-min noise segment. They match `input axis HOLE 20.00 ms` at
+  22:55:46 and 22:58:41 one for one, each a single lost audio packet (the audio sequence-gap count
+  steps 0 → 1 → 2).
+- **19 such holes over 4.5 h** (20 audio sequence gaps), about 4 per hour, each 20 ms of silence.
 
 ---
 

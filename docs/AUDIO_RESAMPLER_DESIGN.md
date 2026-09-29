@@ -2502,6 +2502,31 @@ well past the ~45 ms threshold for audible audio lead, for about a minute.
 - whether a sustained LiveClock rail should reach the coarse branch (a splice at step 5) rather than
   be glided through.
 
+#### The §13.4 tally, for the B / S / rail-to-coarse decision (updated 2026-09-29)
+
+| # | run | when | delivery at the event | ρ at ±B | peak \|e\| |
+|---|---|---|---|---|---|
+| 1 | Cloudflare WHEP soak (§13.3) | +1572 s | both streams under-delivered ~3 s, sequence-continuous | ~70 s | +106.6 ms |
+| 2 | 4e-2 Cloudflare run 1 (§15.3) | +1652 s | as above | ~50 s | +81.8 ms |
+| 3 | local SRT (§16.6, startup rail) | ~+20 s | — | — | — |
+| 4 | step 8 MediaMTX WHEP (§18.5) | +430 s | publication starved 3.0 s | 2.4 s | +25 ms |
+| 5 | 4.5 h Cloudflare (§18.8) | +7:17 | **both streams paused ~4 s**, sequence-continuous (BUGS.md) | 0 | +19.7 ms (and a 4.0 s mute) |
+| 6 | 〃 | +36:15 | video 22/25 per 5-s window, backlog −0.04 s; audio steady 50 pkt/s | 2 windows | +27.1 ms |
+| 7 | 〃 | +1:40:26 | video 22/25, backlog −0.08 s; audio steady | 22.4 s (logged) | **+51.8 ms** |
+| 8 | 〃 | +2:35:57 | video 21/26, backlog −0.03 s; audio steady | 0 | +23.1 ms |
+| 9 | 〃 | +3:38:54 | video 19/27 in one second, backlog −0.04 s; audio steady | 7.1 s (logged) | +32.9 ms |
+
+Every one logged `publication starved ~3 s` with LiveClock at ±0.5 %.
+
+**⚠️ New on 2026-09-29: events 6–9 had no delivery shortfall worth the name.** Each was a jitter burst
+of a frame or two, 30–80 ms of backlog, with no underrun and audio arriving at a steady rate. Yet
+LiveClock still starved publication for 3 s and railed, the renderer's audio queue dipped to
+190–320 ms, and the loop took up to 52 ms of lip-sync error. So in these four, LiveClock's own
+reaction to small jitter is the amplifier, not the network. Recorded as observed, not diagnosed.
+
+Rate: 5 in 4.5 h on Cloudflare, about 1.1 per hour.
+
+
 The event count and size per hour are what that decision needs. n = 1 so far.
 
 ## 14. Step 4e-1 results — Manifold owns the video RTCP, measured 2026-09-27
@@ -3215,4 +3240,188 @@ step 8 finding; criterion 11 is deferred to an HLS source Manifold can open. **T
 verified:** the connect ran through the provider install and the disconnect restored them — file
 controls +23.0 before, **+20.3 after (Δ −2.7 ms, ±5)**. docs/BUGS.md's leak entry: both NDI and HLS
 now verified.
+
+### 18.7 The SR fit through a staircase, and the depth-slope fallback — written 2026-09-28 evening, replayed, not yet soaked
+
+**Root cause, confirmed in code and by replay.** The outlier and step bounds were
+`5 × max(s, 1/48000 s)`, ≈ 104 µs on a 7 µs sender, so every 0.3–3.5 ms stair was rejected. Eight
+rejections that agreed with each other made a "step", and the fit restarted from those 8 pairs with
+its slope history discarded and the slope out of use. Replaying §18.5's log through HEAD reproduces
+the live session: 5 steps, then UNSTABLE, then 1415 rejections, final state holding at slope 0.
+
+**The change** (`SenderReportLineFit`, header "THE NUMBERS"):
+- **The bound floor is 5 ms:** a third of §5.3's ±15 ms, the same basis as the offset-SE bound. It
+  is a lip-sync tolerance, not a noise figure: a pair within 5 ms of the line cannot by itself take
+  the loop out of its band, so it is data. Accepting a real ≤ 5 ms step as data costs ≤ 12.5 ppm of
+  slope bias for one window, ≤ 0.5 ms at the 37.5 s extrapolation.
+- **A step re-levels, not restarts:** every stored pair shifts by the run's median residual. The
+  slope, its SE and its history survive. The step test uses the trailing 8 rejections, so a noise
+  burst that ends on a new level still re-levels.
+- **Unstable holds the last good slope, and the offset keeps tracking:** it follows the median
+  residual of every recent pair, over as many pairs as its own SE ≤ 5 ms needs (60–600 s). Offset 0
+  and slope 0 remain only for a session whose line was never good.
+- **A slope that loses its SE is held at its last in-use value, never 0.**
+- **Safety net, `SenderReportSlopeCrossCheck`:** `offset_applied − depth = b_true·t + c` whatever
+  line was applied. Its Theil–Sen slope over 600 s of steering windows is compared with the applied
+  slope, once a minute, and a WARNING is logged when they differ by more than 10 ppm (the fit's own
+  slope SE bound; 18 ms / 30 min). The steering now calls its companion every window even when
+  windows are not reported, so the WARNING reaches a Release log. (Extended into a control fallback
+  below, same evening, by Robbie's decision.)
+
+**Replay** (host log time as x; SR pairs formed as the fit forms them). "Drift" is the predicted
+change in lip-sync over 30 min: against the SR data, and against the renderer queue's slope from the
+same log (`offset − depth`, independent of the applied line).
+
+| log | fit | slope at end | in use | rejected | steps | unstable | slope 0 after first use | max offset step (all / after 60 s) | drift vs SRs | drift vs queue | cross-check |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| §18.5 MediaMTX (staircase) | HEAD | 0 applied (fit −0.06) | holding | 1415 | 5 | 1 | 1490 of 1625 pairs | 1.93 / 1.93 ms | −78.9 ms | **−116 ms** | — |
+| | new | **+62.32** | ✅ from 91 s | 0 | 0 | 0 | 0 | 0.13 / 0.13 ms | +0.2 ms | **−37 ms** | 11 of 19 WARN, worst +52 ppm |
+| 4e-2 Cloudflare run 1 | HEAD = new | +67.70 | from 216 s | 4 | 0 | 0 | 0 | 2.86 / 2.86 ms | +0.2 ms | +0.7 ms | 0 of 27, worst −5.2 |
+| 4e-2 Cloudflare run 2 | HEAD = new | +67.95 | from 177 s | 3 | 0 | 0 | 0 | 6.06 / 2.17 ms | −0.0 ms | +0.4 ms | 0 of 27, worst −1.5 |
+| srprobe ffmpeg → MediaMTX | HEAD = new | +0.00 | from 91 s | 0 | 0 | 0 | 0 | 0.004 / 0.001 ms | +0.0 ms | — (no depth logged) | — |
+| srprobe OBS → Cloudflare | HEAD = new | +65.89 | from 184 s | 0 | 0 | 0 | 0 | 7.30 / 1.85 ms | +0.1 ms | — | — |
+| §13.3 soak (`soak133`) | — | not replayable: that build logged only the first SR, no pairs and no depth | | | | | | | | | |
+
+- Cloudflare and ffmpeg are **bit-identical** before and after: their residual sd puts 5·s above the
+  floor, and they never step.
+- The HEAD prediction for §18.5 (−116 ms / 30 min = −64 ppm) matches the device-level −89 ms over
+  23 min measured in §18.5, which validates the queue-slope predictor.
+- **MediaMTX's SRs understate the slope:** in 300 s blocks their slope ran 0…+66 ppm while the queue
+  held +57…+68. The new fit follows the SRs exactly (+0.2 ms vs SRs), and the remaining −37 ms is the
+  SRs' own deviation, which the cross-check WARNs on. Both A/B sessions of §18.5 (`step8-srtest1`
+  session 2, `step8-srtest2`) had flat SRs, 0.00 ppm and 7 µs, against a queue draining at −60 and
+  −71 ppm. There the fit applies 0, correctly by the SRs, and only the WARNING sees it.
+- Rejected 4 / 3 on Cloudflare in replay against 0 live: the replay's x is log time, not video RTP
+  time. The same in both builds.
+
+**Tests:** four shapes (white noise, staircase at +54 / −30 / +8 ppm, clean, ±50 ms and +150 ms steps),
+burst-then-new-level, and the cross-check (agree, disagree, inside the bound, rail event, cadence,
+Release plumbing). The shape tests FAIL against HEAD's fit (checked on a scratch copy) and pass now.
+`swift test` 109 / 109; Profile and Release build clean.
+
+#### The depth-slope fallback (decided by Robbie, 2026-09-28 evening)
+
+Use the renderer queue's slope when the SRs are demonstrably wrong; the SRs stay primary.
+Implemented in `SenderReportSlopeCrossCheck`, applied by `SenderReportLineFit.evaluate`.
+
+- **Two slopes per check,** both Theil–Sen over the same 600 s of steering windows:
+  - `b_depth` = slope of (applied offset − depth), the media's slope;
+  - `b_SR` = slope of the SR-derived offset, level walks included: what the SR line actually
+    delivers to the target. On a staircase this is the stairs' rate, not the fit's in-window slope.
+- **ENGAGE:** |b_depth − b_SR| > 10 ppm with b_depth's SE ≤ 5 ppm, at every check for 10 min.
+  - The SE is MAD-σ / (√n·sd t) × √((1+ρ₁)/(1−ρ₁)), ρ₁ the residuals' lag-1 autocorrelation.
+  - 5 ppm puts a 10 ppm disagreement ≥ 2 SE out.
+- **Engaged:** target offset = SR offset + a correction walking at (b_depth − b_SR).
+  - The SR's level and short-term changes are kept; only its long-run slope is replaced.
+  - A slope substituted inside the fit's line would do nothing over time: the offset re-levels onto
+    the SRs every pair, so the slope only tilts the line within its 60 s window (a constant ~2 ms).
+  - The correction is anchored at the start of the evidence (the first disagreeing check's window
+    start), so the error accumulated before engaging is removed as well.
+  - That back-correction is caught up at ≤ 150 ppm (the slope clamp), so the target never steps.
+  - While the catch-up runs, and for one window after it ends, the rate is held and no disengage
+    decision is made.
+- **DISENGAGE:** |b_depth − b_SR| < 5 ppm for 10 min. The correction is kept, frozen, since dropping
+  it would step the target back. A later SR catch-up shows as the opposite disagreement and
+  re-engages to unwind it.
+- **Logged:** ENGAGE and DISENGAGE with both slopes; `SR DEVIATION` once per session; the fallback's
+  episodes, engaged time and final correction in the fit's session END line.
+- **No feedback loop.** `offset_applied − D = b_true·t + c` for any applied offset, so the correction
+  moves D and the applied offset together and b_depth does not see it. b_SR is read from the SR
+  offset, which excludes the correction. Test (`testEngagedCorrectionLeavesTheDepthSlopeUnbiased`,
+  closed loop through the real fit, queue following the applied offset through a first-order lag of
+  0 / 10 / 30 s): every check that steers stays within 3 SE of the true slope.
+  - Measured on the way: without the catch-up hold, the checks whose window spans the catch-up's
+    start or end read 2.6 / 12.7 ppm off at τ = 10 / 30 s. That is a Δr·τ hump, a transient and not
+    a loop, but the rate integrates, hence the hold.
+- **Tests:**
+  - engages once on flat SRs with media at +65 ppm (at 1200 s), then the queue returns within 5 ms of
+    its start by 1 h;
+  - never engages on Cloudflare-like noise, a staircase, or a clean line (1 h each);
+  - hysteresis: engages on flat SRs, disengages once 10 min after the SRs start carrying the slope,
+    keeps its correction, with no window-to-window step > 6 ms;
+  - no oscillation at the bound: media at +10.3 ppm for 2 h, at most one engagement and no
+    disengagement.
+
+**Replay, closed loop.** At each logged window the depth the new line would have produced is rebuilt
+from the invariant, `depth_new = offset_new − (offset_old − depth_old)`, and fed back to the check.
+Lip-sync walk ∝ depth change. The A/B sessions were 161–170 s, too short for a 600 s check, so they
+are EXTRAPOLATED: flat SRs at their own 7 µs, with media at their measured queue slope (+61.4 /
++73.0 ppm) and 1 ms of depth noise (4× theirs).
+
+| session | fallback | start → end (+3 → +26 min, medians of the capture windows) | log-only | steady drift / 30 min | worst excursion from +3 min |
+|---|---|---|---|---|---|
+| §18.5 MediaMTX, staircase | engaged at 1201 s (SR +52.8 vs queue +66.7 ppm) | **−2.0 ms** | −23.4 ms | catch-up still running at the log's end (1716 s) | −22.1 ms (log-only −25.2) |
+| A/B 1, flat, extrapolated 28.6 min | engaged at 1200 s (SR 0.0 vs +61.0) | **+4.3 ms** | −85.2 ms | — | −58.6 ms at 1190 s (log-only −89.9) |
+| A/B 2, flat, extrapolated 28.6 min | engaged at 1200 s (SR 0.0 vs +73.4) | **−6.7 ms** | −101.4 ms | — | −69.6 ms at 1190 s (log-only −106.9) |
+| A/B 1, flat, extrapolated 1 h | same | +5.3 ms | −85.4 ms | **−1.2 ms** | −58.7 ms (log-only −205 at 1 h) |
+| A/B 2, flat, extrapolated 1 h | same | −5.9 ms | −101.5 ms | **−1.2 ms** | −69.7 ms (log-only −244 at 1 h) |
+| 4e-2 Cloudflare runs 1 and 2 | never | −2.6 / +0.4 ms, **identical** | same | −1.9 / +0.8 ms | run 1 −115 ms = its +1652 s rail event, identical |
+| srprobe ffmpeg, srprobe OBS → Cloudflare | never (no depth logged; cannot engage) | fit figures identical to the table above | | | |
+
+- **Both requirements hold:** Cloudflare and ffmpeg never engage and are unchanged; both MediaMTX
+  shapes are within ±10 ms start → end.
+- **⚠️ The cost is visible mid-session.** On flat SRs, lip-sync walks until the fallback engages at
+  ~20 min (10 min to fill the window, then 10 min of sustain), reaching −59 / −70 ms, and is caught
+  up by ~28 min. A +26 min capture lands in the catch-up; the start → end figure passes because it
+  compares two instants, not because the middle was right.
+- The logged "applied slope" is the fit's slope plus the correction's rate (+76.2 ppm on the
+  staircase, where b_SR = +52.8 is below the fit's in-window +62.3). It only extrapolates the target
+  between 10 Hz evaluations, ≤ 1 µs here.
+- `swift test` 114 / 114; Profile and Release build clean. Not committed.
+
+### 18.8 Cloudflare WHEP, 4 h 32 min unattended, 2026-09-28 22:43 → 2026-09-29 03:15 — ✅ PASS, with one upstream 4 s pause
+
+**Protocol.** Build `.build-cc/srfix-Profile`: the §18.7 fit fix plus the depth-slope fallback,
+uncommitted. OBS "WHIP Cloudflare" (VideoToolbox H.264, 1 s keyframes, Opus 256 k), 23.976. DeckLink
+output off. Log `~/Desktop/srfix-whep-cloudflare-long.log`.
+- **Timeline** (self-contained orchestrator, no operator after +26 min):
+  - file control 1 (5 min);
+  - connect;
+  - capture A at +3 min;
+  - noise segment +5:30 → +25:30 (Audio Hijack);
+  - capture B at +4 h 30 with the stream still up;
+  - then OBS stopped streaming over websocket.
+- **End of session:** Manifold's media-stall watchdog tore the session down 16 s later: `no media
+  for 15s`, DELETE → HTTP 200, and both session END lines. **First observed firing; works.**
+- **Control 2:** in the morning, same launch.
+
+| | result | limit | |
+|---|---|---|---|
+| file controls | before **+24.3**, after **+27.5** ms (Δ +3.2); zero +25.9 | ±5 | ✅ |
+| criterion 12, grid-corrected | **−3.2 ms** (+3 min), **−13.0 ms** (+4 h 30) | ±20 | ✅ |
+| criterion 12, as written | −23.2 / −32.9 ms | | |
+| **start → end** | **−9.8 ms over 4.5 h** | ±10 | ✅ at the edge |
+| criterion 1, mutes (20 min) | **1 × 4.0 s** (upstream pause, below), **2 × 20 ms** (single lost Opus packets, stage HOLE events; BUGS.md PLC item) | 0 | ❌ neither is Manifold's; see the two entries |
+| criterion 2, non-zero `setRate` | 1 (the first anchor) | | ✅ |
+| criterion 3, `e` | all 12 windows outside ±15 ms are inside the 5 rail events; otherwise within about ±5 ms | ±15 | ✅ outside events |
+| criteria 5–6 | coarse 0, splices 0, stage holes 19 × 20 ms (lost packets), 1 axis break (the pause) | | ✅ |
+| criterion 7, pitch | ρ−1 per window, rail windows excluded: median −3.8 ppm, p1/p99 −248/+200; max \|ρ−1\| 2000 (at B, in the rail events) | | ✅ outside events |
+| **rail events** | **5** (§13.4 tally, events 5–9); ρ at B 32.9 s in total, 2 logged episodes (22.4 s, 7.1 s), peak \|e\| 51.8 ms | | ⚠️ for the tuning decision |
+| criterion 10, CPU (2 ch) | Manifold mean **7.8 %**, max 27.3 % (4838 samples) | | ✅ |
+| RTP timestamp wrap | **none possible**: video would first wrap at 13.3 h (T_v0 1,786,904), audio at 17.9 h (T_a0 1,210,282,106) | | not exercised |
+
+**The SR fit and the fallback over 4.5 h.**
+- **Fit:** slope in use from 252 s, ending at **+65.47 ± 3.24 ppm**; 0 rejections, 0 steps, 0 unstable,
+  0 gaps; largest offset step 2.9 ms. The offset walked **+1069 ms** over the session: Cloudflare's
+  slope, carried. Without it, that is the lip-sync drift (§13.3).
+- **Cross-check, 262 checks:** SR +66.7 vs queue +66.6 ppm (medians); disagreement median −0.08,
+  p1/p99 −6.4/+10.7 ppm.
+  - 3 WARNINGs, 01:23–01:25, at +10.7…+12.2 ppm. Their windows follow rail event 8, and the
+    disagreement fell back within 3 min.
+  - **Fallback never engaged** (10-min sustain), as required on Cloudflare.
+
+**Renderer queue by 30-min block (median ms):**
+
+| block | 0–0.5 h | 0.5–1 | 1–1.5 | 1.5–2 | 2–2.5 | 2.5–3 | 3–3.5 | 3.5–4 | 4–4.5 |
+|---|---|---|---|---|---|---|---|---|---|
+| depth | 419.3 | 420.9 | 421.3 | 420.7 | 421.1 | 417.7 | 418.3 | 417.5 | 416.7 |
+
+Theil–Sen trend after 600 s: **−0.33 ppm (−1.2 ms/h)**.
+- The dips are the rail events, down to 190 ms at event 9.
+- The integrator settled at +4…+11 ppm per block, 32 at end-of-session.
+
+**Open, carried:**
+- the rail events (§13.4 tally): events 6–9 had no real delivery shortfall;
+- the upstream pause (BUGS.md);
+- concealment of single lost packets (BUGS.md, Opus PLC).
 

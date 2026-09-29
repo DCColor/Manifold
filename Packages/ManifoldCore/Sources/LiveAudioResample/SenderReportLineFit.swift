@@ -25,7 +25,9 @@
 //  ── THE TWO TIMESCALES (§2.6, "FIT WINDOW CHOSEN") ────────────────────────────────────────────
 //
 //    slope b   least squares over the last `slopeWindow` (600 s) of pairs; used only once its own
-//              standard error is ≤ `slopeStandardErrorBound`, until then b = 0
+//              standard error is ≤ `slopeStandardErrorBound`, until then b = 0. Once a slope has
+//              been in use it is NEVER replaced by 0: a slope that loses its SE is held at its last
+//              in-use value, and a step re-levels the stored pairs instead of discarding them
 //    offset a  the mean residual about the in-use slope over the last `offsetWindow` (60 s)
 //
 //      offset(x) = a + b·(x − x̄₆₀)
@@ -45,15 +47,28 @@
 //  * the SE is the white-noise OLS SE × √v, v the batch-means variance ratio of the residuals in
 //    30 s batches (≥ 4 batches, else "not yet"). Cloudflare's residual is not white (block means level
 //    off at ~2 ms from 60 s out), and a white-noise SE would claim a precision the data does not have.
-//  * outliers: |residual| > 5 × max(s, 1/48000 s), s the residual sd about the slope fit, once ≥ 10
-//    pairs are in it. Gaussian false-rejection rate 5.7e-7 per pair — one per ~20 days at 1 pair/s.
-//    The floor is the audio timestamp quantum, so a clean sender (6.7 µs sd) does not reject jitter
-//    smaller than one sample.
-//  * a step: 8 consecutive rejections whose own sd is within the bound → the fit restarts from them.
+//  * outliers: |residual| > max(5 × s, 5 ms), s the residual sd about the slope fit, once ≥ 10
+//    pairs are in it. Above the floor: Gaussian false-rejection rate 5.7e-7 per pair — one per ~20
+//    days at 1 pair/s.
+//    THE FLOOR IS A LIP-SYNC TOLERANCE, NOT A NOISE FIGURE: 5 ms, a third of §5.3's ±15 ms band —
+//    the same third, of the same band, as the offset-SE bound below. A pair within 5 ms of the line
+//    cannot by itself take the loop out of its band, so it is DATA and enters the fit. Were the
+//    bound allowed to shrink with s, a clean sender (7 µs sd) would reject every sub-ms stair of a
+//    sender that carries its slope as a staircase of small SR jumps, and each run of rejected stairs
+//    would read as a "step" — the 2026-09-28 failure (§18.5), where the fit restarted flat after
+//    every stair and froze. Cost of accepting a real step ≤ 5 ms as data: the 60 s offset absorbs it
+//    within a window, and its bias on the 600 s slope is ≤ 5 ms × 1.5 / 600 s = 12.5 ppm for one
+//    window, i.e. ≤ 0.5 ms at the ≤ 37.5 s extrapolation below.
+//  * a step: 8 consecutive rejections (the trailing 8 of a run) whose own sd is within the bound →
+//    RE-LEVEL: every stored pair is shifted by the run's median residual and the run joins the fit.
+//    The slope and its history survive a step; only the level moves.
 //  * unstable: the offset's own SE (s₆₀/√n₆₀) > 5 ms (a third of §5.3's ±15 ms; Cloudflare measures
 //    ~9.5/√60 ≈ 1.2 ms, 4× inside), or ≥ 5 scattered rejections in the last 20 pairs (a consecutive
-//    run is the step test's), or 8 consecutive rejections that are not self-consistent → hold the
-//    last good line, or 0 if none was ever good.
+//    run is the step test's), or 8 consecutive rejections that are not self-consistent → HOLD: the
+//    last good SLOPE, with the offset still TRACKING every pair (accepted or rejected) as their median
+//    residual about that slope, over as many recent pairs as the median needs for its own SE to be
+//    ≤ 5 ms (never fewer than the 60 s window, never more than the 600 s one). Never slope 0 once a
+//    line was good; offset 0 and slope 0 only if no line was ever good.
 //  * a gap: no pair for 10 s of video content time (> the 7.5 s longest compliant SR interval) →
 //    logged; the last line keeps extrapolating on its in-use slope.
 //
@@ -90,7 +105,7 @@ public final class SenderReportLineFit: @unchecked Sendable {
         public var batchSeconds = 30.0
         public var minimumBatches = 4
         public var rejectSigmas = 5.0
-        public var rejectFloor = 1.0 / 48_000
+        public var rejectFloor = 0.005               // a third of §5.3's ±15 ms; header
         public var rejectAfterPairs = 10
         public var stepRejections = 8
         public var rejectRateWindow = 20
@@ -115,7 +130,8 @@ public final class SenderReportLineFit: @unchecked Sendable {
         case noLine
         /// A line from the current fit (provisional until verified).
         case tracking
-        /// The fit is unstable: the last good line, or none (→ 0).
+        /// The fit is unstable: the last good slope with the offset still tracking the pairs, or —
+        /// if no line was ever good — none (→ offset 0, slope 0).
         case holding(String)
     }
 
@@ -163,10 +179,11 @@ public final class SenderReportLineFit: @unchecked Sendable {
     /// timeline. A degenerate fit over a stream that never reports would be a silent source of noise.
     public static func make(timeline: LiveAVTimeline, tag: String, reportsWindows: Bool,
                             parameters: Parameters = .adopted,
+                            crossCheckParameters: SenderReportSlopeCrossCheck.Parameters = .adopted,
                             log: (@Sendable (String) -> Void)?) -> SenderReportLineFit? {
         guard timeline == .rtpSenderReports else { return nil }
-        return SenderReportLineFit(tag: tag, reportsWindows: reportsWindows,
-                                   parameters: parameters, log: log)
+        return SenderReportLineFit(tag: tag, reportsWindows: reportsWindows, parameters: parameters,
+                                   crossCheckParameters: crossCheckParameters, log: log)
     }
 
     /// The session-start line naming which case the session is in. One per session, every transport.
@@ -218,10 +235,17 @@ public final class SenderReportLineFit: @unchecked Sendable {
     private var firstLineSink: (@Sendable () -> Void)?
 
     init(tag: String, reportsWindows: Bool, parameters: Parameters,
+         crossCheckParameters: SenderReportSlopeCrossCheck.Parameters = .adopted,
          log: (@Sendable (String) -> Void)?) {
         self.tag = tag; self.reportsWindows = reportsWindows
         self.parameters = parameters; self.log = log
+        self.crossCheck = SenderReportSlopeCrossCheck(tag: tag, parameters: crossCheckParameters)
     }
+
+    /// The safety net and fallback: the SR slope against the renderer queue's.
+    public let crossCheck: SenderReportSlopeCrossCheck
+    /// The fallback correction inside the last evaluation, so the SR-only offset can be recovered.
+    private var lastCorrection = 0.0
 
     // MARK: - Per-stream SR state (under `lock`)
 
@@ -254,13 +278,22 @@ public final class SenderReportLineFit: @unchecked Sendable {
 
     // MARK: - Fit state (under `lock`)
 
+    /// The fit's pairs: accepted, in the slope window, on the current level.
     private var xs: [Double] = []
     private var ds: [Double] = []
+    /// EVERY pair in the slope window, accepted or rejected, on the current level — what the offset
+    /// tracks while holding.
+    private var allPairs: [(x: Double, d: Double)] = []
     private var rejectedRun: [(x: Double, d: Double)] = []
     private var recentRejected: [Bool] = []
 
     private var line: Line?
     private var lastGood: Line?
+    /// The line while holding: the last good slope, the offset still tracking the pairs.
+    private var heldLine: Line?
+    private var heldPairs = 0
+    /// The last in-use slope (clamped): what the line keeps when the slope loses its SE.
+    private var heldSlope: Double?
     private var state: State = .noLine
     private var slopeInUse = false
     private var firstLineDone = false
@@ -381,7 +414,11 @@ public final class SenderReportLineFit: @unchecked Sendable {
             if case .holding = state { return Evaluation(offset: 0, slope: 0, state: state) }
             return nil
         }
-        return Evaluation(offset: l.offset(at: x), slope: l.slope, state: state)
+        // The depth-slope fallback's correction (zero unless it ever engaged): SR offset kept, the
+        // SR's long-run slope replaced by the renderer queue's (SenderReportSlopeCrossCheck).
+        let c = crossCheck.correction(atVideoTime: x)
+        lastCorrection = c.offset
+        return Evaluation(offset: l.offset(at: x) + c.offset, slope: l.slope + c.slope, state: state)
     }
 
     /// What is missing for the first pair, for the gate's fallback line.
@@ -409,6 +446,8 @@ public final class SenderReportLineFit: @unchecked Sendable {
         public var pairs = 0, rejected = 0, steps = 0, unstableEpisodes = 0, gaps = 0
         public var audioReports = 0, videoReports = 0
         public var slopeFit = 0.0, slopeSE = Double.infinity, slopeInUse = false
+        /// The slope the usable line carries (in use, held, or the last good one while holding).
+        public var appliedSlope = 0.0
         public var residualSD = 0.0, inflation = 1.0
         public var maxOffsetStep = 0.0, maxOffsetStepSteady = 0.0
         public var slopeFirstInUseAt: Double?
@@ -431,6 +470,23 @@ public final class SenderReportLineFit: @unchecked Sendable {
         return text
     }
 
+    /// Everything to log after one steering window: the `[WHEP-SRFIT] window` line (when windows
+    /// are reported) and the slope cross-check (its WARNING always). `time` is the steering's
+    /// session clock, `rendererDepth` its window median; offset and slope are what the target used.
+    public func windowLines(time: Double, rendererDepth: Double?, appliedOffset: Double,
+                            appliedSlope: Double) -> [String] {
+        var lines: [String] = []
+        if let w = windowLine() { lines.append(w) }
+        lock.lock()
+        let x = lastX, correction = lastCorrection
+        lock.unlock()
+        guard let x else { return lines }
+        lines += crossCheck.note(time: time, videoTime: x, rendererDepth: rendererDepth,
+                                 appliedOffset: appliedOffset, srOffset: appliedOffset - correction,
+                                 appliedSlope: appliedSlope, reportsInfo: reportsWindows)
+        return lines
+    }
+
     /// Session summary, on close.
     public func finish() {
         lock.lock()
@@ -438,7 +494,7 @@ public final class SenderReportLineFit: @unchecked Sendable {
         let text = String(format: "%@ session END — fitted slope %+.2f ± %.2f ppm (SE ×%.2f batch "
             + "inflation), %@ · offset %@ · residual sd %.3f ms · pairs %d accepted + %d rejected "
             + "(SR audio %d, video %d) · steps %d · unstable episodes %d · gaps %d (longest %.1f s) · "
-            + "max offset step %.3f ms (session), %.3f ms after the first 60 s · final state %@",
+            + "max offset step %.3f ms (session), %.3f ms after the first 60 s · final state %@ · %@",
             tag, s.slopeFit * 1e6, s.slopeSE.isFinite ? s.slopeSE * 1e6 : .nan, s.inflation,
             s.slopeFirstInUseAt.map { String(format: "slope IN USE from video t=%.0f s", $0) }
                 ?? "slope NEVER in use (SE never ≤ bound)",
@@ -446,7 +502,8 @@ public final class SenderReportLineFit: @unchecked Sendable {
                               lastX ?? $0.center) } ?? "none",
             s.residualSD * 1e3, xs.count, s.rejected, s.audioReports, s.videoReports,
             s.steps, s.unstableEpisodes, s.gaps, longestGap,
-            s.maxOffsetStep * 1e3, s.maxOffsetStepSteady * 1e3, describe(s.state))
+            s.maxOffsetStep * 1e3, s.maxOffsetStepSteady * 1e3, describe(s.state),
+            crossCheck.summary(atVideoTime: lastX ?? 0, time: nil))
         lock.unlock()
         emit(text)
     }
@@ -462,6 +519,7 @@ public final class SenderReportLineFit: @unchecked Sendable {
         s.residualSD = residualSD; s.inflation = inflation
         s.maxOffsetStep = maxStepSession; s.maxOffsetStepSteady = maxStepSteady
         s.slopeFirstInUseAt = slopeFirstInUseAt; s.state = state; s.line = line
+        s.appliedSlope = usableLineLocked()?.slope ?? 0
         return s
     }
 
@@ -479,6 +537,8 @@ public final class SenderReportLineFit: @unchecked Sendable {
         let slopeState: String
         if slopeInUse {
             slopeState = "IN USE"
+        } else if let h = heldSlope {
+            slopeState = String(format: "HELD at %+.2f ppm (SE above the release bound)", h * 1e6)
         } else if !slopeSE.isFinite {
             slopeState = "not in use (fewer than \(parameters.minimumBatches) × "
                 + "\(Int(parameters.batchSeconds)) s batches)"
@@ -488,21 +548,22 @@ public final class SenderReportLineFit: @unchecked Sendable {
         return String(format: "%@ %@ video t=%.0f s · offset %@ · slope %+.2f ppm (SE %@ ppm, bound "
             + "%.0f; batch inflation ×%.2f) %@ · residual sd %.3f ms (offset window %.3f ms, n %d) · "
             + "N %d over %.0f s · rejected %d this window, %d session · pairs %d (SR a %d v %d) · "
-            + "max offset step %.3f ms this window · state %@",
+            + "max offset step %.3f ms this window · applied slope %+.2f ppm · state %@",
             tag, prefix, x,
             l.map { String(format: "%+.3f ms", $0.offset(at: x) * 1e3) } ?? "— (0 applied)",
             slopeFit * 1e6, slopeSE.isFinite ? String(format: "%.2f", slopeSE * 1e6) : "∞",
             parameters.slopeStandardErrorBound * 1e6, inflation, slopeState,
             residualSD * 1e3, offsetSD * 1e3, offsetN,
             xs.count, (xs.last ?? 0) - (xs.first ?? 0), rejectedWindow, rejectedTotal,
-            pairs, audio.count, video.count, maxStepWindow * 1e3, describe(state))
+            pairs, audio.count, video.count, maxStepWindow * 1e3, (l?.slope ?? 0) * 1e6,
+            describe(state))
     }
 
     private func usableLineLocked() -> Line? {
         switch state {
         case .noLine: return nil
         case .tracking: return line
-        case .holding: return lastGood
+        case .holding: return heldLine
         }
     }
 
@@ -525,6 +586,18 @@ public final class SenderReportLineFit: @unchecked Sendable {
 
     private func ingestLocked(x: Double, delta: Double, events: inout [String]) {
         guard x.isFinite, delta.isFinite else { return }
+        let before = usableLineLocked()
+        admitLocked(x: x, delta: delta, events: &events)
+        // Offset step at the newest pair, as the loop sees it — whichever path the pair took.
+        if let before, let after = usableLineLocked() {
+            let step = abs(after.offset(at: x) - before.offset(at: x))
+            maxStepWindow = max(maxStepWindow, step)
+            maxStepSession = max(maxStepSession, step)
+            if let f = firstX, x - f > parameters.offsetWindow { maxStepSteady = max(maxStepSteady, step) }
+        }
+    }
+
+    private func admitLocked(x: Double, delta: Double, events: inout [String]) {
         pairs += 1
         if firstX == nil { firstX = x }
         if inGap, let last = lastX {
@@ -535,53 +608,118 @@ public final class SenderReportLineFit: @unchecked Sendable {
         }
         lastX = x
         let p = parameters
+        allPairs.append((x, delta))
+        var dropAll = 0
+        while dropAll < allPairs.count - 1, allPairs[dropAll].x < x - p.slopeWindow { dropAll += 1 }
+        if dropAll > 0 { allPairs.removeFirst(dropAll) }
 
         // ── Outlier test against the running fit ──────────────────────────────────────────────
         if xs.count >= p.rejectAfterPairs {
             let predicted = predictLocked(x)
-            let bound = p.rejectSigmas * max(residualSD, p.rejectFloor)
+            let bound = rejectBoundLocked()
             let r = delta - predicted
             if abs(r) > bound {
                 rejectedTotal += 1; rejectedWindow += 1
                 rejectedRun.append((x, delta))
                 noteRejectionLocked(true)
                 if rejectedRun.count >= p.stepRejections {
-                    let run = rejectedRun.map(\.d)
-                    let mean = run.reduce(0, +) / Double(run.count)
-                    let sd = (run.map { ($0 - mean) * ($0 - mean) }.reduce(0, +)
-                              / Double(max(1, run.count - 1))).squareRoot()
+                    // The TRAILING run, so a burst that ends on a new level is still a step once the
+                    // last 8 agree — the escape the 2026-09-28 freeze lacked.
+                    let tail = Array(rejectedRun.suffix(p.stepRejections))
+                    let resid = tail.map { $0.d - predictLocked($0.x) }
+                    let sd = Self.sampleSD(resid)
                     if sd <= bound {
-                        // A step: the new pairs agree with each other and not with the line.
-                        steps += 1
-                        events.append(String(format: "%@ ⚠️ Δ STEPPED — %d consecutive pairs %+.1f ms "
-                            + "off the line (their own sd %.3f ms, bound %.3f ms). The fit restarts "
-                            + "from them; the slope leaves use until it re-qualifies",
-                            tag, run.count, (mean - predicted) * 1e3, sd * 1e3, bound * 1e3))
-                        xs = rejectedRun.map(\.x); ds = run
-                        rejectedRun.removeAll()
-                        recentRejected.removeAll()
-                        slopeInUse = false
-                        refitLocked(events: &events, restarted: true)
-                    } else {
-                        enterHoldingLocked(String(format: "%d consecutive rejections that disagree "
-                            + "with each other too (sd %.3f ms > %.3f ms)", run.count, sd * 1e3,
-                            bound * 1e3), events: &events)
+                        relevelLocked(tail, shift: Self.median(resid), sd: sd, bound: bound,
+                                      events: &events)
+                        return
                     }
+                    enterHoldingLocked(String(format: "%d consecutive rejections that disagree "
+                        + "with each other too (sd %.3f ms > %.3f ms)", rejectedRun.count, sd * 1e3,
+                        bound * 1e3), events: &events)
                 } else if scatteredRejectionsLocked() >= p.rejectRateLimit {
                     enterHoldingLocked(String(format: "%d scattered rejections in the last %d pairs "
                         + "at %.0f × sd", scatteredRejectionsLocked(), recentRejected.count,
                         p.rejectSigmas), events: &events)
                 }
+                trackHeldLocked(x)
                 return
             }
         }
         rejectedRun.removeAll()
         noteRejectionLocked(false)
         xs.append(x); ds.append(delta)
+        trimFitWindowLocked(x)
+        refitLocked(events: &events)
+    }
+
+    private func trimFitWindowLocked(_ x: Double) {
         var drop = 0
-        while drop < xs.count - 1, xs[drop] < x - p.slopeWindow { drop += 1 }
+        while drop < xs.count - 1, xs[drop] < x - parameters.slopeWindow { drop += 1 }
         if drop > 0 { xs.removeFirst(drop); ds.removeFirst(drop) }
-        refitLocked(events: &events, restarted: false)
+    }
+
+    /// max(5 × s, floor): the header's rule, one place.
+    private func rejectBoundLocked() -> Double {
+        let p = parameters
+        return max(p.rejectSigmas * residualSD, p.rejectFloor)
+    }
+
+    /// A step: the new pairs agree with each other and not with the line. Every stored pair moves
+    /// by the step, so the level changes and NOTHING ELSE does — the slope, its SE, its in-use
+    /// state and its 600 s of history all survive. A restart would refit flat from 8 pairs, and on a
+    /// staircase of steps would never carry a slope at all.
+    private func relevelLocked(_ run: [(x: Double, d: Double)], shift: Double, sd: Double,
+                               bound: Double, events: inout [String]) {
+        steps += 1
+        let firstRunX = run[0].x
+        for i in ds.indices { ds[i] += shift }
+        for i in allPairs.indices where allPairs[i].x < firstRunX { allPairs[i].d += shift }
+        xs.append(contentsOf: run.map(\.x)); ds.append(contentsOf: run.map(\.d))
+        trimFitWindowLocked(run[run.count - 1].x)
+        rejectedRun.removeAll()
+        recentRejected.removeAll()
+        events.append(String(format: "%@ ⚠️ Δ STEPPED — %d consecutive pairs %+.3f ms off the line "
+            + "(their own sd %.3f ms, bound %.3f ms). RE-LEVELLED: every stored pair shifted by the "
+            + "step; the slope and its history are kept (%@)", tag, run.count, shift * 1e3,
+            sd * 1e3, bound * 1e3,
+            slopeInUse ? String(format: "slope %+.2f ppm IN USE", slopeFit * 1e6)
+                : heldSlope.map { String(format: "slope HELD at %+.2f ppm", $0 * 1e6) }
+                    ?? "slope not yet in use"))
+        refitLocked(events: &events)
+    }
+
+    /// While holding: the last good slope, with the level the median residual about it of EVERY
+    /// recent pair — robust to the noise that caused the hold, and never frozen. The median's SE is
+    /// ≈ 1.2533 σ/√n (σ from the MAD of the 60 s window), so n grows until that SE is within
+    /// `offsetStandardErrorBound`: a clean sender tracks on the 60 s window like the fit itself, a
+    /// noise burst is averaged over up to the slope window.
+    private func trackHeldLocked(_ xNow: Double) {
+        guard case .holding = state, let g = lastGood, !allPairs.isEmpty else { heldLine = nil; return }
+        let p = parameters
+        let b = g.slope
+        var lo = allPairs.count - 1
+        while lo > 0, allPairs[lo - 1].x >= xNow - p.offsetWindow { lo -= 1 }
+        let windowResiduals = allPairs[lo...].map { $0.d - b * ($0.x - xNow) }
+        let m = Self.median(windowResiduals)
+        let sigma = 1.4826 * Self.median(windowResiduals.map { abs($0 - m) })
+        let needed = (1.2533 * sigma / p.offsetStandardErrorBound)
+        let n = min(allPairs.count, max(windowResiduals.count,
+                                        needed.isFinite ? Int((needed * needed).rounded(.up)) : 0))
+        let residuals = allPairs.suffix(n).map { $0.d - b * ($0.x - xNow) }
+        heldLine = Line(level: Self.median(residuals), center: xNow, slope: b)
+        heldPairs = n
+    }
+
+    static func median(_ v: [Double]) -> Double {
+        guard !v.isEmpty else { return 0 }
+        let s = v.sorted()
+        return s.count % 2 == 1 ? s[s.count / 2] : (s[s.count / 2 - 1] + s[s.count / 2]) / 2
+    }
+
+    static func sampleSD(_ v: [Double]) -> Double {
+        guard v.count > 1 else { return 0 }
+        let mean = v.reduce(0, +) / Double(v.count)
+        return (v.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(v.count - 1)).squareRoot()
     }
 
     /// Rejections among the recent pairs that are NOT the current consecutive run. A run is the step
@@ -601,11 +739,10 @@ public final class SenderReportLineFit: @unchecked Sendable {
     private var olsMeanX = 0.0, olsMeanD = 0.0
     private func predictLocked(_ x: Double) -> Double { olsMeanD + slopeFit * (x - olsMeanX) }
 
-    private func refitLocked(events: inout [String], restarted: Bool) {
+    private func refitLocked(events: inout [String]) {
         let p = parameters
         let n = xs.count
         guard n > 0 else { return }
-        let before = usableLineLocked()
         let xNow = xs[n - 1]
 
         // ── Slope: OLS over the slope window ──────────────────────────────────────────────────
@@ -662,11 +799,15 @@ public final class SenderReportLineFit: @unchecked Sendable {
                 slopeSE * 1e6, p.slopeStandardErrorBound * 1e6, inflation, n, xNow - xs[0],
                 abs(b) > p.slopeClamp ? String(format: " — CLAMPED to ±%.0f ppm", p.slopeClamp * 1e6)
                                       : ""))
-        } else if wasInUse, !slopeInUse, !restarted {
-            events.append(String(format: "%@ slope LEFT use at video t=%.0f s: SE %.2f ppm > %.0f",
-                                 tag, xNow, slopeSE * 1e6, p.slopeReleaseBound * 1e6))
         }
-        let bUse = slopeInUse ? min(p.slopeClamp, max(-p.slopeClamp, b)) : 0
+        if slopeInUse { heldSlope = min(p.slopeClamp, max(-p.slopeClamp, b)) }
+        if wasInUse, !slopeInUse {
+            events.append(String(format: "%@ slope LEFT use at video t=%.0f s: SE %.2f ppm > %.0f — "
+                + "HELD at its last in-use value %+.2f ppm (never 0 once measured)", tag, xNow,
+                slopeSE * 1e6, p.slopeReleaseBound * 1e6, (heldSlope ?? 0) * 1e6))
+        }
+        // Not in use: the last in-use slope if there was one. 0 only before any slope qualified.
+        let bUse = heldSlope ?? 0
 
         // ── Offset: mean residual about the in-use slope over the offset window ───────────────
         var lo = n - 1
@@ -712,24 +853,21 @@ public final class SenderReportLineFit: @unchecked Sendable {
             state = .tracking
             if m >= p.verifyPairs { lastGood = fresh }
         }
-
-        // Offset step at the newest pair, as the loop sees it.
-        if let before, let after = usableLineLocked() {
-            let step = abs(after.offset(at: xNow) - before.offset(at: xNow))
-            maxStepWindow = max(maxStepWindow, step)
-            maxStepSession = max(maxStepSession, step)
-            if let f = firstX, xNow - f > p.offsetWindow { maxStepSteady = max(maxStepSteady, step) }
-        }
+        trackHeldLocked(xNow)
     }
 
     private func enterHoldingLocked(_ why: String, events: inout [String]) {
-        if case .holding = state { state = .holding(why); return }
-        unstableEpisodes += 1
+        let already: Bool
+        if case .holding = state { already = true } else { already = false }
         state = .holding(why)
-        if let g = lastGood, let x = lastX {
-            events.append(String(format: "%@ ⚠️ FIT UNSTABLE — %@. Falling back to the LAST GOOD LINE "
-                + "(offset %+.3f ms here, slope %+.2f ppm)", tag, why, g.offset(at: x) * 1e3,
-                g.slope * 1e6))
+        trackHeldLocked(lastX ?? 0)
+        if already { return }
+        unstableEpisodes += 1
+        if let h = heldLine, let x = lastX {
+            events.append(String(format: "%@ ⚠️ FIT UNSTABLE — %@. HOLDING the LAST GOOD SLOPE "
+                + "%+.2f ppm; the offset keeps TRACKING the pairs (median residual about that slope "
+                + "over %d pairs: %+.3f ms here)", tag, why, h.slope * 1e6, heldPairs,
+                h.offset(at: x) * 1e3))
         } else {
             events.append("\(tag) ⚠️ FIT UNSTABLE — \(why). No line was ever verified good: "
                 + "falling back to offset 0")

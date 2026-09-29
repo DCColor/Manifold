@@ -191,9 +191,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private let write: @Sendable (_ outputSeconds: Double, _ hostSeconds: Double,
                                   _ origin: WriteOrigin) -> Void
     private let log: (@Sendable (String) -> Void)?
-    /// A line printed right after each window line, on the same utility-queue block so the two stay
-    /// adjacent: WHEP's `[WHEP-SRFIT]` fit state (step 4e-2). nil on every other transport.
-    private let windowCompanion: (@Sendable () -> String?)?
+    /// Lines printed right after each window line, on the same utility-queue block so they stay
+    /// adjacent: WHEP's `[WHEP-SRFIT]` fit state (step 4e-2) and its slope cross-check. nil on every
+    /// other transport. Called every window even when windows are not reported — the cross-check's
+    /// WARNING must reach a Release log — with no steering line printed then.
+    private let windowCompanion: (@Sendable (WindowFacts) -> [String])?
 
     private let lock = UnfairLockBox()
 
@@ -271,7 +273,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                             hostNow: @escaping @Sendable () -> Double,
                             write: @escaping @Sendable (Double, Double, WriteOrigin) -> Void,
                             log: (@Sendable (String) -> Void)?,
-                            windowCompanion: (@Sendable () -> String?)? = nil) {
+                            windowCompanion: (@Sendable (WindowFacts) -> [String])? = nil) {
         self.init(tag: tag, mode: mode, clock: stage, gains: .adopted, thresholds: .adopted,
                   reportsWindows: reportsWindows, readTimebase: readTimebase, hostNow: hostNow,
                   write: write, log: log, windowCompanion: windowCompanion)
@@ -284,7 +286,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
          hostNow: @escaping @Sendable () -> Double,
          write: @escaping @Sendable (Double, Double, WriteOrigin) -> Void,
          log: (@Sendable (String) -> Void)?,
-         windowCompanion: (@Sendable () -> String?)? = nil) {
+         windowCompanion: (@Sendable (WindowFacts) -> [String])? = nil) {
         self.tag = tag; self.mode = mode; self.clock = clock; self.gains = gains
         self.thresholds = thresholds; self.reportsWindows = reportsWindows
         self.readTimebase = readTimebase; self.hostNow = hostNow; self.write = write; self.log = log
@@ -388,7 +390,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
 
         var newRho: Double?
         var coarse: (Trigger, Double, Double)?     // trigger, e, target
-        var windowLine: (() -> String)?
+        var windowLine: (() -> (line: String?, facts: WindowFacts))?
 
         lock.lock()
         if !anchored { lock.unlock(); return read }
@@ -664,7 +666,14 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         settleUntil = host + thresholds.settle
     }
 
-    private func windowIfDueLocked(now: Double) -> (() -> String)? {
+    /// What a window hands its companion: the session clock at the window's end and the renderer
+    /// queue's median depth over it (nil when no depth was read).
+    public struct WindowFacts: Sendable {
+        public let elapsed: Double
+        public let rendererDepthMedian: Double?
+    }
+
+    private func windowIfDueLocked(now: Double) -> (() -> (line: String?, facts: WindowFacts))? {
         guard windowStart > 0, now - windowStart >= Self.windowSeconds else { return nil }
         return windowLocked(final: false, now: now)
     }
@@ -672,10 +681,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// Snapshot and reset the window. Only the copy happens under the lock; the sort and the
     /// formatting run in the returned closure, which `emit` runs on a utility queue — the same
     /// discipline as the paired probe, for the same reason: this is the audio thread.
-    private func windowLocked(final: Bool, now: Double? = nil) -> (() -> String)? {
+    private func windowLocked(final: Bool, now: Double? = nil)
+        -> (() -> (line: String?, facts: WindowFacts))? {
         let n = count
         let hadAnything = n > 0 || discarded > 0 || settling > 0 || windowWrites > 0
-        guard hadAnything, reportsWindows || windowCoarse > 0 || final else {
+        let prints = reportsWindows || windowCoarse > 0 || final
+        guard hadAnything, prints || windowCompanion != nil else {
             resetWindowLocked(now: now); return nil
         }
         let e = Array(errs[0..<n])
@@ -696,6 +707,10 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                 : "no reads"
             var sortedDepth = d
             sortedDepth.sort()
+            let facts = WindowFacts(elapsed: snap.elapsed,
+                                    rendererDepthMedian: sortedDepth.isEmpty
+                                        ? nil : sortedDepth[sortedDepth.count / 2])
+            guard prints else { return (nil, facts) }
             let depthText = sortedDepth.isEmpty
                 ? "—"
                 : String(format: "min %.1f med %.1f max %.1f", sortedDepth[0] * 1e3,
@@ -703,7 +718,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             let rhoRange = snap.rhoMin.isFinite
                 ? String(format: "%+.1f … %+.1f", (snap.rhoMin - 1) * 1e6, (snap.rhoMax - 1) * 1e6)
                 : "—"
-            return String(format: "%@ steering %@ +%.0fs · mode %@ · ρ−1 %+.1f ppm (window %@, "
+            return (String(format: "%@ steering %@ +%.0fs · mode %@ · ρ−1 %+.1f ppm (window %@, "
                           + "slew max %.1f ppm/s) · i %+.2f ppm · e_f %+.2f ms · e ms %@ · n=%d "
                           + "discarded=%d settling=%d%@ · saturated %d · coarse this window %d "
                           + "(splices %d) · writes this window %d · session: writes %d = first %d + "
@@ -720,7 +735,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                           snap.total.coarseLevel + snap.total.coarseStep,
                           snap.total.coarseLevel, snap.total.coarseStep, snap.total.splices,
                           snap.total.splicedSeconds * 1000, snap.total.unmatched,
-                          snap.total.maxAbsRhoMinusOne * 1e6, depthText)
+                          snap.total.maxAbsRhoMinusOne * 1e6, depthText), facts)
         }
     }
 
@@ -739,16 +754,20 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
 
     /// A window line, then its companion's, in one block so nothing interleaves between them. The
     /// companion is read on the utility queue, never on the enqueue thread that closed the window.
-    private func emitWindow(_ line: @escaping () -> String) {
+    private func emitWindow(_ window: @escaping () -> (line: String?, facts: WindowFacts)) {
         guard let log else { return }
-        let box = UncheckedLine(make: line)
+        let box = UncheckedWindow(make: window)
         let companion = windowCompanion
         DispatchQueue.global(qos: .utility).async {
-            log(box.make())
-            if let c = companion?() { log(c) }
+            let w = box.make()
+            if let line = w.line { log(line) }
+            companion?(w.facts).forEach(log)
         }
     }
 }
 
-/// The window closure captures only value snapshots; this lets it cross to the utility queue.
+/// The window closure captures only value snapshots; these let it cross to the utility queue.
 private struct UncheckedLine: @unchecked Sendable { let make: () -> String }
+private struct UncheckedWindow: @unchecked Sendable {
+    let make: () -> (line: String?, facts: LiveAudioResampleSteering.WindowFacts)
+}
