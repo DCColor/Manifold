@@ -3425,3 +3425,120 @@ Theil–Sen trend after 600 s: **−0.33 ppm (−1.2 ms/h)**.
 - the upstream pause (BUGS.md);
 - concealment of single lost packets (BUGS.md, Opus PLC).
 
+### 18.9 The engage rule: C (300 s window, 5 min sustain) fails the false-engagement test on Cloudflare; A stays — 2026-09-29
+
+**The question.** A (§18.7: 600 s window, 10 min sustain) lets lip-sync walk −59 / −70 ms on flat
+SRs before it engages at ~20 min. C (window 300 s, minimum span 270 s, engage sustain 300 s;
+disengage unchanged at 5 ppm for 600 s) engages at ~10.5 min, worst walk −25 / −29 ms, and never
+engages on the Cloudflare logs or the synthetic noise. But it comes closer: its longest disagreeing run
+reaches 0.67 of the sustain on §18.8's log and 0.83 on the synthetic, against A's 0.27 / 0.36.
+**Robbie's condition (2026-09-29):** keep C only if a false engagement on Cloudflare peaks at ≤ 10 ms
+of lip-sync error and disengages by itself.
+
+**Method.** The closed-loop replay (§18.7) with rule C, and an engagement FORCED at one check whatever
+the evidence. The anchor is where a real engagement would put it (the current disagreeing run's
+first window start, else the check's own window start), and the rate is the check's disagreement.
+Forced at EVERY check, not only the worst one:
+- §18.8's 4.5 h Cloudflare log, 267 checks;
+- three 10 h seeds of the Cloudflare-like synthetic, 1785 checks. Its SRs carry the true slope
+  (+68 ppm) with 9.5 ms white + 2 ms AR(1) noise; queue noise is 1 ms.
+
+Error = the forced run's queue depth − the unforced run's, from the forced check to the log's end.
+The SRs are right here, so the unforced run is the reference and the difference is lip-sync error.
+
+| C, forced | worst point | C's own closest approach | peak \|error\|, median / p90 of all points | disengaged by itself | error at the log's end |
+|---|---|---|---|---|---|
+| 4.5 h log | **+25.9 ms**: check 155, t 9591 s, +29.1 ppm (the window after rail event 8). **Never disengages** | +10.2 ms (check 156, 180 of 300 s sustained). Never disengages | 3.1 / 6.6 ms | **134 of 267** (50 %), median 27 min after | worst +25.3 ms, 1.9 h later |
+| 30 h synthetic | **−49.0 ms** (seed 11, −53.8 ppm). Never disengages | −17.5 / +13.3 / +13.6 ms (the three seeds' longest runs, 240 s). Never disengages | 10.2 / 18.8 ms | **111 of 1785** (6 %; seeds 11 and 13: 0), median 70 min after | worst −46.2 ms |
+| *A on the 4.5 h log, for comparison* | +15.7 ms (check 153). Disengages after 21 min | — | 1.7 / 4.9 ms | 241 of 262 (92 %), median 21 min | +14.8 ms |
+
+**The condition is not met on either input. A stays; no code change.**
+
+**Why, and why it is not C's alone:**
+- **Engaged, the correction is a RATE,** re-read every minute from the latest check: r = b_depth − b_SR.
+  On correct SRs that number is noise, so the correction random-walks at r × 60 s per check instead
+  of returning to 0.
+  - The disagreement's sd per 300 s check is 5.3 ppm on the real log and 12 ppm on the synthetic.
+- **Disengaging takes 10 consecutive checks under 5 ppm.** 77 % of the real log's checks are, and
+  27–31 % of the synthetic's, so it can take tens of minutes or never happen.
+- **Disengaging does not remove the error.** By design (§18.7) the correction is kept, frozen, so
+  the target does not step back. **A false engagement is permanent for the session under ANY rule
+  of this form.** The rule only sets how likely it is and how big.
+- A's 600 s window halves the noise and keeps it far from engaging (0.27 / 0.36), but forced, it
+  leaves 15 ms too. The fix is the level-based correction (BUGS.md, "POST-RELEASE: the depth-slope
+  fallback should hold the queue's level"), not a faster or slower rule.
+
+**Found on the way: last night's live MediaMTX run on A did not engage, and fails.**
+`srfix-whep-mediamtx` ran 2026-09-28 21:51–22:20 on the §18.7 build, with staircase SRs, the fit at
++62.3 ppm and 8 WARNINGs. The run reached 0.73 of A's sustain and broke. Device captures, analysed
+2026-09-29 (`c12.py`, all four gates pass):
+
+| | result | limit | |
+|---|---|---|---|
+| file controls | +22.1 / +21.2 ms (zero +21.7) | ±5 | ✅ |
+| criterion 12, grid-corrected | −14.9 ms (+3 min), **−27.8 ms (+26 min)** | ±20 | ❌ at +26 |
+| criterion 12, as written | −34.9 / −47.8 ms | | |
+| **start → end** | **−12.9 ms** | ±10 | ❌ |
+| replay prediction (this log, A) | −15.6 ms start → end | | agrees within 2.7 ms |
+
+So A passes §18.5's staircase (−2.0 ms) and fails this one. On C the same log replays at +3.2 ms
+start → end.
+
+**Start → end cannot pass on flat SRs with any fast rule: capture A has a head start.** On flat
+SRs lip-sync walks from the connect, so capture A at +3 min is already b × ~140 s off: −8.2 / −10.0
+ms of queue depth between 60–120 s and capture A on the two flat sessions (61 / 73 ppm). The
+correction is anchored at the start of the evidence, so a rule that finishes its catch-up before +26
+min returns lip-sync to the SESSION START, not to capture A.
+
+| start → end (+3 → +26) | srtest1-flat | srtest2-flat | step8-whep-soak (staircase) | srfix-whep-mediamtx (staircase) |
+|---|---|---|---|---|
+| A | +5.3 | −5.9 | −2.0 | −15.6 |
+| C | **+11.0** | **+13.3** | +3.1 | +3.2 |
+| **proposed: start → +26 (depth 60–120 s → +26)** | | | | |
+| A | −2.9 | **−15.9** | **−11.8** | **−20.3** |
+| C | +2.8 | +3.3 | −6.7 | −1.6 |
+
+- **C fails the criterion as written by exactly the head start.** It is right against the session
+  start.
+- **A passes as written only because +26 min lands mid catch-up** (§18.7: it compares two instants).
+- **Proposed restatement:** lip-sync at +26 min relative to the SESSION START, within ±10 ms, plus
+  the unchanged ±20 ms absolute gate on each capture.
+  - Capture A still measures the absolute, but the start is not capturable at device level: the
+    first ~60 s are the startup realign (§10.10).
+  - Device-level form: (capture B − capture A) + (queue depth at capture A − queue depth at 60–120
+    s), the second term from the log's steering windows. Lip-sync walk ∝ depth change (§18.7).
+  - The start window (60–120 s) matters by 2–3 ms (30–90 s gives −5.6 / −18.8 for A on the flats).
+    Fix it once, before the next run.
+- On Cloudflare the restatement changes nothing that matters: +0.1…+6.4 ms on every session.
+- ⚠️ **Not adopted: Robbie's decision.** Until then start → end stays as written.
+
+**The overshoot, and why a rate cannot give it back** (for the post-release item):
+- **A rate needs a long window to be stable, and a long window integrates a staircase's flat
+  stretches.** On a staircase, b_SR over a short window is not the SRs' long-run slope. A flat
+  stretch between stairs reads as a large disagreement (§18.5's log: +27, +67, +71, +61, +35, +24
+  ppm in successive checks).
+- **The rule engages on that and holds the rate** through the catch-up plus one full window.
+- **The next stair then jumps the SR offset up, delivering the same slope a second time.** The
+  target moves by both, and the correction is never unwound: frozen on disengage, and a stair is a
+  step, not the sustained opposite disagreement that would re-engage it.
+- **Measured in replay:** B (600 s window, 5 min sustain) on `step8-whep-soak` engages at −21 ms,
+  reaches 0 by ~1100 s, then climbs to **+66.5 ms** by the log's end. C on `srfix-whep-mediamtx` is
+  +6.4 ms and still rising at the end (1712 s).
+- **A level-based correction avoids both failures.** Hold the queue depth at its reference level:
+  the stair raises the SR offset, the depth rises with it, and the correction falls by the same. On
+  correct SRs the level error is noise around 0, so a false engagement unwinds by itself.
+
+**Replay of the working tree (A), including the two logs not in §18.7's table** (the committed
+`scripts/soak/replay`; figures for the earlier logs are unchanged from §18.7):
+
+| session | fallback | start → end (+3 → +26) | log-only | steady drift / 30 min | WARN |
+|---|---|---|---|---|---|
+| srfix-whep-mediamtx (live on A, staircase) | never (0.73 of sustain) | **−15.6 ms** (device −12.9) | same | −8.5 ms | 8 |
+| srfix-whep-cloudflare-long (§18.8, 4.5 h) | never (0.27) | +3.6 ms | same | −0.2 ms | 3 |
+
+- `swift test` 114 / 114. Profile and Release build clean; warnings are the same set as §18.7's
+  build. The only additions are vendored-header warnings from a fresh DerivedData.
+- Harnesses: the rules matrix and the forced sweep are scratch copies of the cross-check with the
+  rule's parameters and a force switch. The committed replay tools run the working tree's rule
+  only.
+

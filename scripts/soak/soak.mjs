@@ -7,7 +7,7 @@ import { readFileSync, existsSync, writeFileSync, statSync, readdirSync, openSyn
 import { homedir } from 'node:os';
 
 const [label, logPath, transport] = process.argv.slice(2);
-if (!label || !logPath || !['ndi', 'srt', 'whep', 'whep-cf', 'whep-cf-long', 'hls'].includes(transport)) { console.error('usage: node soak.mjs <label> <manifold-log> <ndi|srt|whep|whep-cf|whep-cf-long|hls>'); process.exit(2); }
+if (!label || !logPath || !['ndi', 'srt', 'srt-cf', 'whep', 'whep-cf', 'whep-cf-long', 'hls'].includes(transport)) { console.error('usage: node soak.mjs <label> <manifold-log> <ndi|srt|srt-cf|whep|whep-cf|whep-cf-long|hls>'); process.exit(2); }
 if (existsSync(logPath) && process.env.SOAK_ATTACH !== '1') { console.error(`${logPath} already exists — use a fresh log name (or SOAK_ATTACH=1 for a Manifold launched just now)`); process.exit(2); }
 // Timelines, probes and stdout captures go to SOAK_OUT, never into the repo.
 const DIR = (process.env.SOAK_OUT ?? `${homedir()}/Desktop/manifold-soak`).replace(/\/?$/, '/');
@@ -161,6 +161,13 @@ const TR = {
          endMsg: 'Run complete. O B S has stopped streaming. Disconnect in Manifold but keep it open. Then play the beeps file for the second control.',
          endedLog: /\[SRT\] (session ended|══ stopped ══|connection lost)/,
          quitMsg: 'All done. Quit Manifold and stop Audio Hijack.' },
+  // Cloudflare SRT: both OBS and Manifold are callers to Cloudflare, so the OBS-listener hang does
+  // not apply and Manifold disconnects first, as on WHEP.
+  'srt-cf': { profile: 'SRT Cloudflare', stream: true, connected: /\[SRT\] transport up/,
+         connectMsg: 'Control done. O B S is streaming to Cloudflare over S R T. Connect Manifold to the Cloudflare S R T bookmark, and allow the passphrase prompt.',
+         endMsg: 'Run complete. Disconnect in Manifold but keep it open. Then play the beeps file for the second control.',
+         endedLog: /\[SRT\] (session ended|══ stopped ══|connection lost)/,
+         quitMsg: 'All done. Quit Manifold and stop Audio Hijack. O B S has stopped streaming.' },
 }[transport];
 
 if (TR.profile) {

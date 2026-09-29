@@ -749,8 +749,10 @@ item. `swift test` passes. A local SRT session still logs exactly one non-zero `
 
 ## ☐ OPEN 2026-09-28 — WHEP via MediaMTX: the SR line fit cannot follow a staircase of SR steps, so lip-sync drifts ~−64 ppm and the audio queue drains
 
-**Status:** OPEN — fix written 2026-09-28 evening (uncommitted), replayed offline, NOT yet soaked
-(`AUDIO_RESAMPLER_DESIGN.md` §18.7). **Found by:** resampler step 8, the MediaMTX
+**Status:** OPEN. Fix and fallback committed 2026-09-29 (`14f4b89`), replayed offline
+(`AUDIO_RESAMPLER_DESIGN.md` §18.7). Soaked once on MediaMTX (2026-09-28 evening), where it **failed**
+start → end at −12.9 ms because the fallback did not engage (§18.9). Engage rule A kept, and C
+rejected, 2026-09-29. **Found by:** resampler step 8, the MediaMTX
 WHEP soak (`AUDIO_RESAMPLER_DESIGN.md` §18.5). **Affects:** WHEP from any server whose Sender Reports
 carry the audio↔video slope as discrete jumps rather than a smooth line — MediaMTX measured.
 
@@ -783,6 +785,82 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
   DEVIATION. Replay: Cloudflare and ffmpeg never engage and are unchanged; MediaMTX start → end
   −2.0 ms on the staircase and +4.3 / −6.7 ms on the flat sessions (extrapolated), against −23 /
   −85 / −101 log-only. The cost: up to −70 ms mid-session before it engages at ~20 min.
+- **2026-09-29: a faster rule, C (300 s window, 5 min sustain), was tested and REJECTED.**
+  (`AUDIO_RESAMPLER_DESIGN.md` §18.9.) A false engagement forced at the worst point of the 4.5 h
+  Cloudflare log peaks at +25.9 ms and never disengages; on 30 h of synthetic Cloudflare noise the
+  worst is −49 ms and only 6 % of forced engagements disengage. Robbie's condition was ≤ 10 ms and
+  self-disengaging. **A (above) stays.** A false engagement is permanent under any rule of this
+  form, because the correction is kept on disengage; see the POST-RELEASE entry below.
+- **⚠️ 2026-09-29: A did NOT engage on the live MediaMTX run of 2026-09-28 evening, and the run
+  fails.** On `srfix-whep-mediamtx` (staircase SRs) the disagreeing run reached 0.73 of the 10 min
+  sustain and broke. Device level: start → end **−12.9 ms** (±10 ❌), criterion 12 grid-corrected
+  −14.9 / **−27.8 ms** (±20 ❌ at +26). Replay predicted −15.6. A passes one staircase log and
+  fails the other.
+- **☐ The start → end criterion needs restating; start → end cannot pass on flat SRs with any fast
+  rule.** On flat SRs lip-sync walks from the connect, so capture A at +3 min already carries
+  b × ~140 s: −8 / −10 ms at 61 / 73 ppm. The correction is anchored at the start of the evidence,
+  so a rule that finishes catching up before +26 min returns lip-sync to the SESSION START. Capture
+  A → B then reads the head start: C +11.0 / +13.3 ms ❌, correct against the start (+2.8 / +3.3).
+  A passes as written only because +26 min lands mid catch-up.
+  - **Proposed:** lip-sync at +26 min relative to the session start, ±10 ms, measured as (capture
+    B − capture A) + (log queue depth at capture A − at 60–120 s); plus the unchanged ±20 ms
+    absolute gate on each capture.
+  - On that measure A reads −15.9 on `srtest2-flat` and −20.3 on `srfix-whep-mediamtx`; C reads
+    −6.7…+3.3 on all four MediaMTX shapes.
+  - **Robbie's decision; not adopted.**
+
+---
+
+## ☐ POST-RELEASE (design) — the depth-slope fallback should hold the queue's LEVEL, not integrate a rate
+
+**Status:** design item, recorded 2026-09-29 by Robbie's decision. To be taken with the post-release
+buffer / latency work: both are decisions about what the renderer queue's depth is held to.
+**Source:** `AUDIO_RESAMPLER_DESIGN.md` §18.9. **Affects:** WHEP from servers whose SRs do not carry
+the media's slope (MediaMTX: staircase and flat).
+
+**Today (§18.7):** engaged, the correction walks at a rate, r = b_depth − b_SR, from Theil–Sen slopes
+over a trailing window. It is kept, frozen, on disengage. That rate-based form has three measured
+failures:
+1. **Overshoot on a staircase.**
+   - Over a short window a flat stretch between stairs reads as a large disagreement: §18.5's log
+     gives +27, +67, +71, +61, +35, +24 ppm in successive checks.
+   - The rule engages on it and holds that rate through the catch-up and one more window.
+   - The next stair then raises the SR offset by the slope the correction is already adding. The
+     target moves by both.
+   - Nothing unwinds the excess: the correction is kept on disengage, and a stair is a step, not
+     the sustained opposite disagreement that would re-engage it.
+   - Replay: rule B on `step8-whep-soak` engages at −21 ms, reaches 0, then climbs to +66.5 ms.
+2. **A false engagement is permanent.** On correct SRs the rate is noise, re-read every minute, so
+   the correction random-walks. It is kept on disengage, and disengaging can take tens of minutes or
+   never happen.
+   - Forced on Cloudflare: 15.7 ms left for good under A, 25.9 ms under C (49 ms on synthetic noise).
+3. **Speed against safety.** A short window is needed to engage before the walk gets large (−59 /
+   −70 ms under A), but it doubles the noise that makes false engagements likely and costly. No
+   window/sustain pair met both (§18.9).
+
+**The design to evaluate: hold the queue depth.**
+- Engaged, the correction = D_ref − D(t), servoed slowly: the depth deviation from a reference level.
+  - D_ref is the depth when the evidence began, or better the depth at session start: that also
+    removes capture A's head start (the start → end item above).
+  - Servoing D to D_ref holds (applied offset − D) = b_true·t + c on its line, so lip-sync is held
+    whatever the SRs do.
+- **It unwinds by itself as the SRs catch up.** A stair raises the SR offset, D rises with it, and
+  the correction falls by the same. No double count, no overshoot.
+- **A false engagement costs noise, not drift.** On correct SRs D is flat, so the level error is
+  noise around 0 and the correction stays near 0.
+- **Open questions it must answer before it is built:**
+  - Rail events, splices and pauses move D by up to ~100 ms for tens of seconds (§13.4, §18.8).
+    Needs a robust level (a median over minutes) and a slew limit: the same ≤ 150 ppm catch-up.
+  - Feedback: the correction now depends on D, and D follows the applied offset. It is a loop
+    with the resampler's own loop inside it, so it needs a bandwidth well below that loop's and a
+    stability analysis. The rate-based form was free of feedback by construction (§18.7).
+  - Its relation to the buffer / latency work: if that work changes the queue's target depth, D_ref
+    must move with it, deliberately, not be read as SR error.
+  - Still server-agnostic: the queue depth is measured in-app, and the SRs stay primary for offset
+    (CLAUDE.md).
+- **Verification bar:** the §18.9 forced-engagement sweep (≤ 10 ms, unwinds by itself) plus the
+  §18.7 replay matrix and the restated start → end on both MediaMTX shapes. Then a MediaMTX soak and
+  a Cloudflare soak.
 
 ---
 

@@ -1,6 +1,6 @@
 #!/bin/zsh
 # One soak run per invocation, from your own terminal (README.md):
-#   zsh scripts/soak/go.sh mediamtx | cloudflare | cloudflare-long
+#   zsh scripts/soak/go.sh mediamtx | cloudflare | cloudflare-long | cloudflare-srt
 # Starts the orchestrator (soak.mjs) in the background, then Manifold in the foreground under
 # caffeinate, with its log at $SOAK_LOG_DIR/<label>.log. Quitting Manifold ends this script.
 #
@@ -24,7 +24,8 @@ case "${1:-}" in
   mediamtx)        LABEL=$PREFIX-whep-mediamtx;        TR=whep ;;
   cloudflare)      LABEL=$PREFIX-whep-cloudflare;      TR=whep-cf ;;
   cloudflare-long) LABEL=$PREFIX-whep-cloudflare-long; TR=whep-cf-long ;;
-  *) echo "usage: zsh go.sh mediamtx|cloudflare|cloudflare-long"; exit 2 ;;
+  cloudflare-srt)  LABEL=$PREFIX-srt-cloudflare;       TR=srt-cf ;;
+  *) echo "usage: zsh go.sh mediamtx|cloudflare|cloudflare-long|cloudflare-srt"; exit 2 ;;
 esac
 LOG="$LOG_DIR/$LABEL.log"
 

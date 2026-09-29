@@ -9,8 +9,8 @@ SR fit (§18.7). Nothing here is part of the app build.
   `plugin_config/obs-websocket/config.json` and never printed.
   - **Sender**, websocket **4455**: scene `BLIPS_NOISE` holding the sources `BEEPS` (the flash-beep
     fixture, looping) and `NOISE` (the 1200 s reference noise). Video at 23.976.
-    - Profiles `MediaMTX Local` (WHIP to MediaMTX) and `WHIP Cloudflare`.
-    - Both in **Advanced** output mode with a **1 s keyframe**. The orchestrator checks both
+    - Profiles `MediaMTX Local` (WHIP to MediaMTX), `WHIP Cloudflare` and `SRT Cloudflare`.
+    - All in **Advanced** output mode with a **1 s keyframe**. The orchestrator checks both
       settings and refuses to start otherwise.
   - **Recorder**, websocket **4456**, 60 fps:
     `open -n -a OBS --args --multi --profile Recorder --collection "AV Capture" --websocket_port 4456`.
@@ -39,6 +39,7 @@ Manifold's log goes to `$SOAK_LOG_DIR/<label>.log` (default `~/Desktop`).
 zsh scripts/soak/go.sh mediamtx          # ~40 min: control, 28 min live, control
 zsh scripts/soak/go.sh cloudflare        # the same on Cloudflare WHEP
 zsh scripts/soak/go.sh cloudflare-long   # self-ending: live to +4 h 30, then OBS stops
+zsh scripts/soak/go.sh cloudflare-srt    # ~40 min on Cloudflare SRT (OBS and Manifold both callers)
 node scripts/soak/control2.mjs <manifold-log>   # control 2 of a cloudflare-long run, later
 ```
 
