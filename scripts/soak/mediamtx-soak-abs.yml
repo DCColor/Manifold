@@ -1,0 +1,85 @@
+###############################################################################
+# Manifold local test server — MediaMTX v1.21.1
+#
+# Exists to satisfy the server-agnostic rule in the Manifold repo's CLAUDE.md:
+# every streaming fix is verified against at least one NON-Cloudflare server
+# before it is committed. This is that server.
+#
+# ⚠️ THIS IS THE `useAbsoluteTimestamp: true` VARIANT (go.sh --abs, AUDIO_RESAMPLER_DESIGN.md §18.23).
+# Identical to mediamtx-soak.yml except the path setting at the bottom: MediaMTX keeps the
+# publisher's own RTCP SR mapping instead of stamping packets with its own arrival clock, and drops a
+# track's packets until that track's first SR arrives ("received RTP packet without absolute time,
+# skipping it"). Keep the two files in step.
+#
+# Deliberately minimal. Everything not needed for WHIP/WHEP and SRT is OFF, so
+# that a failure here is a failure of the path under test and not of some other
+# protocol MediaMTX happened to be serving.
+#
+# ⚠️ SIGNALLING IS BOUND TO LOOPBACK ONLY (127.0.0.1). There is no auth, which
+# is fine precisely BECAUSE nothing off this machine can reach the ports that
+# accept a publish. Do not move these to :8889 / :8890 without adding auth.
+#
+# ⚠️ SRT IS ON 8890, NOT 9000. OBS's own SRT server owns 9000 on this machine.
+###############################################################################
+
+logLevel: info
+logDestinations: [stdout, file]
+logFile: mediamtx.log
+
+# ── auth: none, scoped to this machine ───────────────────────────────────────
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: publish
+      - action: read
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+
+# ── API, for verifying a session from the command line ───────────────────────
+# `curl -s localhost:9997/v3/paths/list` names the publisher and the tracks it
+# negotiated. That is the check that separates "OBS is not sending" from
+# "Manifold is not playing".
+api: true
+apiAddress: 127.0.0.1:9997
+
+metrics: false
+pprof: false
+playback: false
+
+# ── off: not under test ──────────────────────────────────────────────────────
+# MoQ is ON by default in v1.21 and binds :8892/:8893 on EVERY interface, which
+# contradicts the loopback-only intent above. Off.
+rtsp: true
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+rtmp: false
+hls: true
+hlsAddress: 127.0.0.1:8888
+hlsVariant: fmp4
+moq: false
+
+# ── WHIP ingest + WHEP playback ──────────────────────────────────────────────
+# One HTTP server serves both: POST .../whip to publish, POST .../whep to read.
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+# Media UDP binds to every interface and advertises loopback as well, so an ICE
+# pair can form whichever candidate the peer picks first. The SIGNALLING port
+# above is what keeps this private, not this one.
+webrtcLocalUDPAddress: :8189
+webrtcIPsFromInterfaces: true
+webrtcAdditionalHosts: [127.0.0.1]
+
+# ── SRT ingest + playback ────────────────────────────────────────────────────
+srt: true
+srtAddress: 127.0.0.1:8890
+
+# ── one path; the only setting that differs from mediamtx-soak.yml ───────────
+paths:
+  live:
+    useAbsoluteTimestamp: true

@@ -42,6 +42,8 @@ zsh scripts/soak/go.sh cloudflare-long   # self-ending: live to +4 h 30, then OB
 zsh scripts/soak/go.sh cloudflare-srt    # ~40 min on Cloudflare SRT (OBS and Manifold both callers)
 zsh scripts/soak/go.sh mediamtx --diag   # + a 135 s sender probe at capture A and at capture B, aligned
                                          #   with them, analysed into $SOAK_OUT/soak-<label>-diag/ (§18.21)
+zsh scripts/soak/go.sh mediamtx --abs    # MediaMTX with useAbsoluteTimestamp: true (mediamtx-soak-abs.yml):
+                                         #   the publisher's own SRs kept; label <prefix>-abs-whep-mediamtx (§18.23)
 node scripts/soak/control2.mjs <manifold-log>   # control 2 of a cloudflare-long run, later
 ```
 
@@ -65,6 +67,7 @@ The operator's part is spoken by the orchestrator:
 | `watcher.py` | read-only: Manifold %CPU every 10 s (`cpu.csv`), volume of each new capture, a warning on more than one Manifold PID |
 | `srfit-live.sh` | the SR fit's state in a running or finished log: events, window, cross-check, depth, END |
 | `mediamtx-soak.yml` | the plain MediaMTX config plus RTSP (127.0.0.1:8554, for the sender probe) and HLS |
+| `mediamtx-soak-abs.yml` | the same with `useAbsoluteTimestamp: true` on `live` (`go.sh --abs`); keep the two in step |
 
 **What the orchestrator does** (`soak.mjs`):
 - **Setup:** switches and verifies the sender profile.

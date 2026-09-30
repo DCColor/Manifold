@@ -5031,9 +5031,124 @@ steps.
   −22.3) would have been the same under the lock.
 - **The queue drain.** With the offset held, the queue keeps draining at the media's ~65 ppm.
   - Rebuilt from the logged windows: −66.3 / −64.0 ppm on `srfix-whep-mediamtx` / `step8-whep-soak`.
-  - It reaches the 250 ms coarse level at ~39–46 min. A 28-min soak stays clear; a longer MediaMTX
-    session would not.
+  - ~~It reaches the 250 ms coarse level at ~39–46 min.~~ **Corrected 2026-09-30:** the coarse
+    branch triggers on content-time error (|e_f| > 250 ms), not on queue depth, so a draining queue
+    never reaches it. What the drain reaches is the starvation hold; see "Step-free rejected" below.
   - Not rebuildable for today's run: the windows record the SR-line offset, not the hold-corrected
     one.
 - **§6.3's restated criterion** ((B − A) + depth term) reads that drain as lip-sync, so under the lock
   it must not be used on MediaMTX; B − A is the figure.
+
+**Step-free rejected: the drain is OBS's, and the sender's timestamps are not consistent across days
+(analysis 2026-09-30 evening, logs and replay only).**
+
+- **OBS delivers audio ~66 ppm slower than video.** The invariant (applied offset − queue depth) moves
+  at +66.0 / +66.4 / +68.0 ppm on `step8-whep-soak` / `srfix-whep-mediamtx` / today (before the hold
+  engaged), and +66.4 ppm on the 4.5 h Cloudflare run.
+- **The steps are the relay's ratchet and do not carry the drain.**
+  - The skew is the same in windows where Δ is flat (+60.1…+69.0 ppm) as in windows where it steps
+    (+66.3…+66.4 ppm).
+  - The steps accumulate at a different, bursty rate: 31 / 42 / 52 ppm (112 / 152 / 186 ms/h).
+  - Removing them leaves the drain untouched.
+- **Device move = applied-offset move + content move on the RTP timestamps.** It fits all three
+  MediaMTX sessions:
+
+| session | applied A → B | content A → B | predicted device | measured device B − A |
+|---|---|---|---|---|
+| `step8-whep-soak` (Sep 28) | ≈ 0 (the fit froze on a slope-0 line, §18.5) | ≈ −89 | ≈ −89 | −89 |
+| `srfix-whep-mediamtx` (Sep 28) | +76.0 | ≈ −89 | ≈ −13 | −12.9 |
+| `level-whep-mediamtx` (Sep 30) | +100.0 | −1.3 (measured) | +98.7 | +98.6 |
+
+- **OBS's timestamps were inconsistent on Sep 28 and honest on Sep 30.**
+  - On Sep 28 the content drifted ~−64 ppm against OBS's own RTP timestamps, tracking the arrival
+    skew. On Sep 30 it held (−1.3 ms over 23 min), with the same 66 ppm skew.
+  - The one sender-side difference on record is OBS's audio buffering (85 ms after a day's running
+    on Sep 28; 42 ms on a fresh launch on Sep 30, AV_SYNC_FINDINGS.md §1.2). It is a lead, not a
+    proven cause.
+  - This resolves §18.21's "−89 ms unresolved" for `srfix-whep-mediamtx`.
+- **`step8-whep-soak` was effectively a step-free run, and it failed by −89 ms** at +26 min. Step-free
+  holds the applied offset, which is right only on a Sep 30-type day.
+- **The consequence for long sessions, even on a Sep 30-type day** (a model from the replayed drain
+  and the steering's constants; the steering was not run out to 90 min):
+  - **The drain.** The queue falls ~238 ms/h from ~424 ms, to ~74 ms at 90 min.
+  - **What fires: the starvation hold, not the coarse branch.**
+    - It arms when the queue's low point before an enqueue reaches `starvationMarginSeconds`
+      (20 ms): ~98 min on smooth arrival.
+    - A delivery stall of d ms brings it forward to when the median reaches d + 20 ms. Today's log
+      has a session low-water of 199 ms, i.e. a ~225 ms stall, which would mean ~45 min.
+  - **Each hold** is a timebase write, with the renderer's ~50 ms mute. The resume waits for 100 ms
+    of refill, so the audio restarts ~80–100 ms behind the picture.
+  - **The debt cannot be repaid.** A cut needs debt + 100 ms queued, and the catch-up write needs the
+    whole debt queued within 1 s; under a steady drain neither happens.
+  - **So device lip-sync moves audio-later by ~80–100 ms per hold**, with a hold every ~16 min. Once
+    the arrival lead is spent, audio cannot play before it arrives, so lip-sync walks at the arrival
+    skew whatever offset is chosen.
+  - **Holding lip-sync on a Sep 30-type day** would need the picture slowed to the audio's arrival
+    rate, with latency growing ~238 ms/h. Nothing in Manifold does that.
+- **Cloudflare, for contrast:** the same 66 ppm arrives as a smooth SR slope. The fit follows it, the
+  queue stays level (−0.3 ppm), and the device held within 10 ms over 4.5 h (§18.8).
+- **Decision: step-free is rejected, and was not implemented.** The level hold stays observe-only.
+
+**Conclusion.** Default-configured MediaMTX (`useAbsoluteTimestamp: false`) discards the sender's SRs
+and restamps from its own arrival clock (§18.21). Whatever A/V correction the sender's SRs carried is
+lost before Manifold sees the stream. On the same sender, the correct offset trajectory was flat on
+Sep 30 and −64 ppm on Sep 28, while the SRs Manifold received looked alike. **No rule using only the
+received SRs can recover it**: not the fit, not the level hold, not step-free. Default-configured
+MediaMTX with OBS over WHEP stays a known limitation (§18.21 decision 4). §18.23 tests whether keeping
+the sender's SRs helps.
+
+### 18.23 MediaMTX with `useAbsoluteTimestamp: true` — does OBS's own SR mapping hold A/V? — prepared 2026-09-30
+
+**Setup.** `go.sh mediamtx --abs` runs MediaMTX on `scripts/soak/mediamtx-soak-abs.yml`. It is
+identical to `mediamtx-soak.yml` except for `useAbsoluteTimestamp: true` on `live`, and runs with
+label `<prefix>-abs-whep-mediamtx`. The default config is unchanged. `go.sh` restarts MediaMTX
+whenever the running config is not the one asked for.
+
+**From the source** (MediaMTX v1.21.1, gortsplib v5.6.6, OBS 32.2.2, which bundles libdatachannel
+v0.24.2):
+- **Yes: the WebRTC output's SRs are mapped from OBS's own SR NTP.**
+  - With the setting on, `ToStream` stamps each inbound packet with
+    `rtpreceiver.PacketNTP` = NTP of that track's latest OBS SR + (packet RTP − SR RTP) / clock rate.
+    It is re-anchored on every OBS SR (1 s).
+  - The stream keeps that NTP (no `ntpestimator`). The WebRTC output's `rtpsender` builds its SRs from
+    the last packet's (RTP, NTP), so they carry OBS's mapping.
+  - Video RTP timestamps pass through. Audio is re-stamped on output as a contiguous count with the
+    matching NTP (the #5597 fix). If OBS's audio timestamps jumped by < 500 ms, the audio mapping would
+    shift by the jump; it would show as a Δ change on an audio SR.
+- **Packets are dropped before the first OBS SR, but in practice ~none.**
+  - Until a track's first SR arrives, each of its packets is dropped and logged: `WAR received RTP
+    packet without absolute time, skipping it`. This is per track and per packet.
+  - libdatachannel's `RtcpSrReporter` sends an SR on the first outgoing batch, because its
+    last-report time starts at the clock epoch, then every ≥ 1 s. So the first SR travels with each
+    track's first RTP packets.
+  - If that SR were lost, the track would lose up to 1 s. On video that would also delay the first
+    decodable frame to the next keyframe (1 s GOP).
+  - Check the MediaMTX log for the warning after the run.
+- **What OBS's SRs are:** libdatachannel stamps NTP = `system_clock::now()` at send, with the RTP
+  timestamp of the packet just sent. They are send-time mappings, each track's own encode-to-send
+  latency included.
+  - They carry the ~66 ppm skew as a smooth slope, as Cloudflare's do, and a constant offset of the
+    tracks' latency difference.
+  - They are right about content only on a day when OBS's timestamps drift with the skew (a
+    Sep 28-type day).
+
+**Prediction** (observe-Profile, hold observe-only, so the applied offset is the SR line; A = +3 min,
+B = +26 min):
+
+| figure | prediction | pass band |
+|---|---|---|
+| SR Δ | a smooth ramp at ~+66 ppm with ms-level per-pair jitter; **no staircase** (0 confirmed upward steps) | ramp +55…+75 ppm; any staircase = fail of the premise |
+| applied offset A → B | follows the ramp: ~+91 ms | +75…+105 ms |
+| queue depth A → B | level, as on Cloudflare | within ±15 ms |
+| content on RTP timestamps (`[AV-CONTENT]` decoded) A → B | measured, not predicted: ≈ 0 on a Sep 30-type day, ≈ −89 on a Sep 28-type day | classify: \|x\| ≤ 10 → Sep 30-type; −70…−105 → Sep 28-type |
+| device B − A, grid-corrected | = applied + content | see below |
+
+- **OBS's own SRs are correct if** device B − A is within **±10 ms**, i.e. applied + content ≈ 0.
+  That is expected only on a Sep 28-type day (content ≈ −89).
+- **They are not correct if** device B − A ≈ the applied move (**+75…+105 ms**) while content stays
+  within ±10 ms (a Sep 30-type day). Given how libdatachannel stamps them, that is the expected
+  outcome on a freshly launched OBS.
+- **Either way the queue stays level.** A pass here would mean lip-sync and queue both hold on that
+  day, but not that OBS's SRs are right on every day.
+- **Also check:** 0 packets dropped before the first SR (MediaMTX log), and the §18.21 staircase gone
+  from Δ.
