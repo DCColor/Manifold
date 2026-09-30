@@ -923,6 +923,26 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
 
 ---
 
+## ⚠️ KNOWN LIMITATION THIS RELEASE (2026-09-30) — MediaMTX with OBS over WHEP can drift beyond ±20 ms in long sessions; the level correction is observe-only
+
+**Status:** KNOWN LIMITATION (Robbie, 2026-09-30, decision B). **Source:** `AUDIO_RESAMPLER_DESIGN.md`
+§18.20, §18.21. **Affects:** WHEP from servers whose Sender Reports do not carry the media's A/V line
+(MediaMTX with OBS: staircase or flat SRs).
+- **Lip-sync can walk beyond ±20 ms over a long session.** On the SR line alone it reached ~−28 ms at
+  +26 min (§18.9), and the queue said ~−59 ms by +30 min on 2026-09-30.
+- **The level-based correction (§18.20) ships OBSERVE-ONLY.** It computes and logs the session-start
+  reference, the SR line's level error, and when it WOULD engage or release. It never changes the
+  target, the rate or the splices (`SenderReportSlopeCrossCheck.levelHoldApplies = false`; research
+  builds only).
+  - Why: applied live (§18.21), the queue was held within 0.6 ms of its start, yet device lip-sync
+    moved +98.6 ms between +3 and +26 min, against +10.5 ms the queue allows.
+  - Until that is explained, the correction is not trusted to act.
+- Cloudflare WHEP is unaffected (its SRs carry the line; the hold never engages there, §18.20).
+- **Open research item:** the diagnostic run (`go.sh mediamtx --diag`, sender probes at both
+  captures, sender OBS relaunched first).
+
+---
+
 ## ☐ THIS RELEASE (after the level-based WHEP correction) — the per-source audio offset
 
 **Status:** ☐ IN THIS RELEASE (Robbie, 2026-09-30). Order: after the level-based correction (the
@@ -938,7 +958,8 @@ splice (19.1), calibration mode (19.2), sync clips (19.3), manual control, HUD a
 
 ## ☐ THIS RELEASE (after the SRT items) — the depth-slope fallback should hold the queue's LEVEL, not integrate a rate
 
-**Status:** ☐ IN THIS RELEASE (Robbie, 2026-09-29, rescoped from post-release). **2026-09-30: designed,
+**Status:** ⚠️ OBSERVE-ONLY THIS RELEASE (Robbie, 2026-09-30, decision B: §18.21, and the known limitation
+above). Built; the applied form failed its live MediaMTX run at the device. **2026-09-30: designed,
 built and replayed offline (`AUDIO_RESAMPLER_DESIGN.md` §18.20).** MediaMTX is within ±1 ms of the
 start at +26 min on all four sessions; Cloudflare is identical bit for bit. The forced sweep, judged
 against the session start (Robbie, 2026-09-30), holds within 1.1 ms and releases by itself. Next: one

@@ -40,6 +40,8 @@ zsh scripts/soak/go.sh mediamtx          # ~40 min: control, 28 min live, contro
 zsh scripts/soak/go.sh cloudflare        # the same on Cloudflare WHEP
 zsh scripts/soak/go.sh cloudflare-long   # self-ending: live to +4 h 30, then OBS stops
 zsh scripts/soak/go.sh cloudflare-srt    # ~40 min on Cloudflare SRT (OBS and Manifold both callers)
+zsh scripts/soak/go.sh mediamtx --diag   # + a 135 s sender probe at capture A and at capture B, aligned
+                                         #   with them, analysed into $SOAK_OUT/soak-<label>-diag/ (§18.21)
 node scripts/soak/control2.mjs <manifold-log>   # control 2 of a cloudflare-long run, later
 ```
 

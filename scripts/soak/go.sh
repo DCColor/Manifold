@@ -1,6 +1,9 @@
 #!/bin/zsh
 # One soak run per invocation, from your own terminal (README.md):
-#   zsh scripts/soak/go.sh mediamtx | cloudflare | cloudflare-long | cloudflare-srt
+#   zsh scripts/soak/go.sh mediamtx | cloudflare | cloudflare-long | cloudflare-srt  [--diag]
+#   --diag   diagnostic run (AUDIO_RESAMPLER_DESIGN.md §18.21): a ≥ 130 s sender probe at capture A
+#            (+3 min) and capture B (+26 min), aligned with them, analysed into
+#            $SOAK_OUT/soak-<label>-diag/. Needs a local probe point: mediamtx only.
 # Starts the orchestrator (soak.mjs) in the background, then Manifold in the foreground under
 # caffeinate, with its log at $SOAK_LOG_DIR/<label>.log. Quitting Manifold ends this script.
 #
@@ -28,6 +31,11 @@ case "${1:-}" in
   *) echo "usage: zsh go.sh mediamtx|cloudflare|cloudflare-long|cloudflare-srt"; exit 2 ;;
 esac
 LOG="$LOG_DIR/$LABEL.log"
+DIAG=0
+if [[ "${2:-}" == --diag ]]; then
+  [[ $TR == whep ]] || { echo "--diag needs a local sender probe point (MediaMTX's RTSP): mediamtx only"; exit 2; }
+  DIAG=1
+elif [[ -n "${2:-}" ]]; then echo "unknown option: $2 (only --diag)"; exit 2; fi
 
 [[ -x "$APP/Contents/MacOS/Manifold" ]] || { echo "build missing: $APP (set MANIFOLD_APP)"; exit 2; }
 [[ -e "$LOG" ]] && { echo "$LOG already exists — move it aside or set SOAK_PREFIX"; exit 2; }
@@ -50,7 +58,7 @@ if [[ $TR == whep ]]; then
 fi
 
 pgrep -f "$S/watcher.py" >/dev/null || { nohup python3 "$S/watcher.py" >/dev/null 2>&1 & }
-(cd "$S" && node soak.mjs "$LABEL" "$LOG" "$TR" > "$SOAK_OUT/soak-$LABEL.out" 2>&1; echo "orchestrator exit $?" >> "$SOAK_OUT/soak-$LABEL.out") &
+(cd "$S" && SOAK_DIAG=$DIAG node soak.mjs "$LABEL" "$LOG" "$TR" > "$SOAK_OUT/soak-$LABEL.out" 2>&1; echo "orchestrator exit $?" >> "$SOAK_OUT/soak-$LABEL.out") &
 sleep 2
 if ! pgrep -f "soak.mjs $LABEL" >/dev/null; then
   echo "orchestrator stopped at setup:"; cat "$SOAK_OUT/soak-$LABEL.out"; exit 1

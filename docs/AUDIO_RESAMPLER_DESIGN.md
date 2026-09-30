@@ -3535,10 +3535,14 @@ min returns lip-sync to the SESSION START, not to capture A.
   It replaces capture A → capture B from this date; §6.3 carries the definition.
   - Capture A still measures the absolute, but the start is not capturable at device level: the
     first ~60 s are the startup realign (§10.10).
-  - Device-level form: (capture B − capture A) + (queue depth at capture A − queue depth at 60–120
-    s), the second term from the log's steering windows. Lip-sync walk ∝ depth change (§18.7).
-  - **The start window is fixed at 60–120 s after the connect.** It matters by 2–3 ms (30–90 s
-    gives −5.6 / −18.8 for A on the flats).
+  - Device-level form: (capture B − capture A) + (queue depth at capture A − queue depth at the
+    start), the second term from the log's steering windows. Lip-sync walk ∝ depth change (§18.7).
+  - ~~The start window is fixed at 60–120 s after the connect.~~ **From 2026-09-30 (§18.21) the start
+    is the SETTLED span the log's "LEVEL REFERENCE set" line names:** the first 60 s with the loop
+    unsaturated and its integrator moving < 10 ppm, the SR slope in use, LiveClock within ±10 ms of
+    its target, and no hold, splice or write. `depth_term.py` reads it (60–120 s, flagged, for logs
+    without the line). The choice of window matters by 2–3 ms (30–90 s gave −5.6 / −18.8 for A on
+    the flats).
 - On Cloudflare the restatement changes nothing that matters: +0.1…+6.4 ms on every session.
 - Capture A → B is still reported, not gated, so earlier runs stay comparable.
 
@@ -4769,3 +4773,112 @@ unforced depth, from the force on):
   leaves nothing when released. The "forced − unforced" columns above are kept for comparison with
   §18.9.
 - `replay-level sweep` prints both measures.
+
+### 18.21 MediaMTX live run with the level hold applied — ❌ device lip-sync moved +98.6 ms between captures; the hold becomes OBSERVE-ONLY — 2026-09-30
+
+**Run:** `level-whep-mediamtx`, 2026-09-30 16:41–17:24, `.build-cc/level-Profile` (the §18.20 hold,
+applied). OBS → MediaMTX (WHIP) → Manifold (WHEP), the soak rig: controls, captures at +3 / +26 min,
+noise segment +5:30 → +25:30.
+
+**In the log, the hold did what §18.20 says.**
+- **Engaged at 481 s.** The SR line alone had put the queue −16.4 ms off its start level
+  (424.3 ms, taken at 60–120 s).
+- **Held to the end:** the queue read 424.6–424.9 ms against 424.3.
+- **This session's SRs** carried +17.7 ppm (two +5.4 ms re-levels during capture B) against the
+  media's ~69 ppm. The SR line alone would have ended −58.5 ms off.
+- 1 timebase write, no holds or splices, no LiveClock jumps. Mutes 0 (the tracker's three hits are
+  the noise segment's edges).
+
+**At the device it failed** (`c12.py`, every gate passing on every recording; zero = the mean of the
+controls, −0.9 / +2.5 → +0.8 ms):
+
+| | grid-corrected | against zero | gate |
+|---|---|---|---|
+| capture A (+3 min) | −73.5 ms | **−74.3 ms** | ±20 ❌ |
+| capture B (+26 min) | +25.2 ms | **+24.4 ms** | ±20 ❌ |
+| B − A | | **+98.6 ms** | |
+| start → +26: (B − A) + depth term (−10.1 ms) | | **+88.5 ms** | ±10 ❌ |
+
+**The 88 ms is not in anything Manifold measures.** Between A and B the queue moved +10.5 ms, which
+is all the lip-sync walk the queue invariant (§18.7) allows. The two readings of which line was the
+truth predict:
+
+| if the truth is… | B − A predicted | measured |
+|---|---|---|
+| the queue (the premise of the hold) | +10.5 ms | +98.6 ms |
+| the SR line (so the hold's correction is the error) | ≈ +58.5 ms (+69 with B's re-levels) | +98.6 ms |
+
+Neither fits.
+- Capture A's absolute (−74.3 ms) is also far from the previous MediaMTX session at +3 min
+  (−14.9 ms, `srfix-whep-mediamtx`), with every gate passing.
+
+**Transient analysis (connect → +5 min, per 10 s window): no transient at the reference or at
+capture A.**
+- The loop settled by ~50 s: |e_f| ≤ 1 ms, the integrator flat at −53…−71 ppm, never saturated.
+- LiveClock's buffer held 394–404 ms against its 400 ms target. Its rate hunts on its ±0.5 % rails
+  in every period, as normal on WHEP.
+- The SR offset was flat to 3 µs; its slope came into use at 110 s.
+- The queue drained at a steady ~−65 ppm from 10 s (431 → 424 → 418.5 → 409.7 ms). That is the
+  flat-SR drain itself, with no knee.
+- Both the 60–120 s reference and capture A (180–312 s) were taken in steady state. Neither can be
+  discarded as mid-transient.
+
+**OBS and MediaMTX logs: no hiccup near either capture, in this run or in the passing one.**
+- Sender (4455): no lagged frames (rendering), no skipped frames (encoding), no audio-buffering
+  change and no audio-timestamp warning during the session.
+- Recorder (4456): no dropped frames during either capture or either control.
+- MediaMTX: one publish session and one read session, no reconnects, no warnings, no losses
+  reported.
+- **The one difference between the runs is the sender's OBS audio buffering: 42 ms here (a fresh
+  launch at 16:40), 85 ms on Sep 28** (grown 42 → 64 → 85 ms over that day's session, last step 32
+  min before the run; AV_SYNC_FINDINGS.md §1.2).
+  - It is constant within each session, so it cannot make a change between A and B.
+  - It can shift the absolutes between days.
+- The orchestrator's 40 s sender probe at +65 s is shorter than one 41.7 s grid period, so it
+  cannot be read. That is the instrument this run lacked.
+
+**The settled-reference rule, applied to this log in hindsight.**
+- The first span that qualifies is 120–180 s: SR slope in use from 110 s, the integrator moving
+  9.9 ppm, LiveClock within ±4 ms, nothing excluded. Reference 419.6 ms, against 424.2 at 60–120 s.
+- The depth term becomes −5.5 ms, and start → +26 +93.1 ms. The rule does not explain the failure
+  (none was expected: nothing was unsettled).
+
+**✅ DECIDED 2026-09-30 (Robbie), decision B:**
+1. **The level hold is OBSERVE-ONLY this release.**
+   - `SenderReportSlopeCrossCheck.levelHoldApplies = false`: one flag, off, not user-facing;
+     research builds flip it.
+   - Everything is computed and logged: the reference, E, the sustain timers, "WOULD ENGAGE" /
+     "WOULD RELEASE" / "WOULD BE OFF", and the session summary says observe-only.
+   - `correction` returns zero, so the target, the rate and the splices are untouched.
+   - Test `testObserveOnlyHasNoEffectOnOutput`: on a session where the applied hold engages, the
+     observe-only run logs WOULD ENGAGE and its queue equals the log-only run's in every window,
+     exactly, with the correction 0 throughout.
+2. **The settled-reference rule** replaces the fixed 60–120 s, for the hold's reference and for
+   §6.3's capture-side start.
+   - The reference is the first 60 s of consecutive windows with: the loop unsaturated and its
+     integrator moving < 10 ppm across the span; the SR slope in use; LiveClock's picture buffer
+     within ±10 ms of its target (new: `LiveClock.Mapping.bufferError`); no hold, splice or write
+     (an excluded window) inside.
+   - It is logged once per session, as "LEVEL REFERENCE set … span a–b s". `depth_term.py` takes the
+     start from that line (60–120 s, flagged, for older logs).
+   - Tests: waits for the SR slope, waits for the integrator, restarts on saturation, a LiveClock
+     excursion or an excluded window, and a line jump shifts the candidates.
+3. **An open research item:** the 88 ms swing, and whether the queue invariant holds on MediaMTX.
+   - Next instrument: `go.sh mediamtx --diag`, a 135 s sender probe at capture A and at capture B,
+     aligned with them, analysed into `<SOAK_OUT>/soak-<label>-diag/`.
+   - Relaunch the sender OBS first (AV_SYNC_FINDINGS.md §1.2).
+4. MediaMTX with OBS over WHEP is a known limitation this release (BUGS.md).
+
+`swift test` **148 / 148**. The replay tools opt into the applied hold explicitly (research).
+
+**§18.20's replay, re-run with the settled reference** (the hold's reference is now the settled span;
+the tool's "start" is still the 60–120 s median, so a draining flat-SR queue reads a few ms lower):
+
+| session | engaged | start → +26 min (was, §18.20) |
+|---|---|---|
+| step8-whep-soak | 780 s | −3.3 ms (−0.8) |
+| srfix-whep-mediamtx | 1331 s | −3.1 ms (+0.4) |
+| srtest1-flat / srtest2-flat | 499 / 479 s | −1.7 / −2.2 ms (+0.7 / +0.8) |
+| the three Cloudflare sessions | never | unchanged, bit-identical to the SR line |
+
+All within ±10 ms. None of this is live: the hold is observe-only.

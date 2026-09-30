@@ -2,7 +2,7 @@
 // obs-websocket, watches Manifold's log for the moments that need the operator, and writes a
 // timeline for the analysis. Usage: node soak.mjs <label> <manifold-log>
 import { connect } from './obsws.mjs';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, statSync, readdirSync, openSync, readSync, closeSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 
@@ -21,6 +21,15 @@ const CAPTURE_S = 130;
 // File controls cover ≥ 5 loops of the 60 s fixture, so every display phase is sampled (§18.4).
 const CONTROL_S = 300;
 const T = { captureA: 180, noiseOn: 330, noiseOff: 1530, captureB: 1560, end: 1710 };
+// DIAGNOSTIC MODE (go.sh --diag, AUDIO_RESAMPLER_DESIGN.md §18.21): a sender probe of PROBE_S at the
+// same instant as capture A and capture B, so the stream's own A/V is measured over the same span as
+// the device's. Needs a local probe point (the transport's `probe`: MediaMTX's RTSP). Results go to
+// the run folder, <SOAK_OUT>/soak-<label>-diag/.
+const DIAG = process.env.SOAK_DIAG === '1';
+const PROBE_S = 135;   // ≥ 130 s: three whole 41.7 s fixture grid periods, as the captures
+const DIAG_DIR = `${DIR}soak-${label}-diag/`;
+const PROBE_PY = `${homedir()}/Desktop/manifold-audible-events/venv/bin/python`;
+const PROBE_AV = new URL('./analysis/probe_av.py', import.meta.url).pathname;
 
 const sleep = s => new Promise(r => setTimeout(r, s * 1000));
 const stamp = () => new Date().toISOString();
@@ -248,6 +257,25 @@ mark(`T0 ${transport} connected`, { pids: manifoldPids() });
 alert('Connected. Nothing to do for about twenty eight minutes.');
 const at = s => sleep(Math.max(0, (t0 + s * 1000 - Date.now()) / 1000));
 
+if (DIAG && !TR.probe) { alert('Diagnostic mode needs a local sender probe point; this transport has none.'); process.exit(2); }
+if (DIAG) mkdirSync(DIAG_DIR, { recursive: true });
+// One diagnostic probe, started without waiting: it runs alongside the capture it is aligned with.
+// When ffmpeg ends, probe_av.py reads it from its start (window 0) into <name>.txt.
+function diagProbe(name) {
+  const out = `${DIAG_DIR}probe-${name}.mkv`;
+  mark(`diag probe ${name} start`, { out, seconds: PROBE_S });
+  const p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-rtsp_transport', 'tcp',
+    '-i', TR.probe, '-t', String(PROBE_S), '-c', 'copy', out]);
+  let err = ''; p.stderr.on('data', d => { err += d; });
+  return new Promise(resolve => p.on('close', status => {
+    mark(`diag probe ${name} stop`, { out, status, err: err.slice(0, 200) });
+    const r = existsSync(PROBE_PY) ? spawnSync(PROBE_PY, [PROBE_AV, out, '0']) : null;
+    const text = r ? r.stdout.toString() + r.stderr.toString() : 'probe_av.py not run: no audible-events venv';
+    writeFileSync(`${DIAG_DIR}probe-${name}.txt`, text);
+    mark(`diag probe ${name} analysed`, { txt: `${DIAG_DIR}probe-${name}.txt` });
+    resolve(status);
+  }));
+}
 if (TR.probe) {
   // The sender's own A/V, off the server, with no player in the path (AV_SYNC_FINDINGS §1.2b).
   setTimeout(() => {
@@ -261,7 +289,9 @@ if (TR.logOnly) {
   await at(TR.sessionS);
 } else {
 await at(T.captureA);
+const probeA = DIAG ? diagProbe('A') : null;
 const a = await record('capture A', CAPTURE_S);
+if (probeA) await probeA;
 if (a.vol < -40) alert('Warning: capture A is silent.');
 await at(T.noiseOn);
 await sender.call('SetInputMute', { inputName: BEEPS, inputMuted: true });
@@ -295,8 +325,10 @@ if (TR.long) {
   process.exit(0);
 } else {
 await at(T.captureB);
+const probeB = DIAG ? diagProbe('B') : null;
 const b = await record('capture B', CAPTURE_S);
 if (b.vol < -40) alert('Warning: capture B is silent.');
+if (probeB) await probeB;
 await at(T.end);
 }
 }

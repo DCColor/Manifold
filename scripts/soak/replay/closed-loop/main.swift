@@ -31,6 +31,7 @@ if name == "synth" {
     pairs = rows(name + ".pairs.tsv"); wins = rows(name + ".windows.tsv")
 }
 var cp = SenderReportSlopeCrossCheck.Parameters(); cp.fallbackEnabled = !logOnly
+cp.applies = true   // research replay: the hold applied (the app is observe-only, §18.21)
 var lines: [String] = []
 let fit = SenderReportLineFit.make(timeline: .rtpSenderReports, tag: "[R]", reportsWindows: false,
                                    crossCheckParameters: cp, log: { lines.append($0) })!

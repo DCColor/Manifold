@@ -15,6 +15,8 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
     typealias Check = SenderReportSlopeCrossCheck
 
     static var logOnly: Check.Parameters { var p = Check.Parameters(); p.fallbackEnabled = false; return p }
+    /// A research build's parameters: the hold APPLIED (`levelHoldApplies` is false in the app).
+    static var active: Check.Parameters { var p = Check.Parameters(); p.applies = true; return p }
 
     /// One steering window every 10 s for `seconds`, CLOSED LOOP: the SR line's offset walks at
     /// `appliedSlope` (with a 1 ms level jitter), the check's own correction is added to it, and the
@@ -84,16 +86,18 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
     func testCadenceAndReporting() {
         // The slope check's cadence, log only: the level hold would engage inside 590 s here.
         let early = Check(tag: "[T]", parameters: Self.logOnly)
-        XCTAssertTrue(run(early, seconds: 590, trueSlope: 66e-6, appliedSlope: 0).isEmpty)
+        XCTAssertTrue(run(early, seconds: 590, trueSlope: 66e-6, appliedSlope: 0)
+                        .filter { !$0.contains("LEVEL REFERENCE") }.isEmpty)
         XCTAssertNil(early.latest)
         XCTAssertTrue(early.summary(atVideoTime: 0, time: nil).contains("no check"))
 
         let quietAgree = Check(tag: "[T]")
         XCTAssertTrue(run(quietAgree, seconds: 1800, trueSlope: 66e-6, appliedSlope: 66e-6,
-                          reportsInfo: false).isEmpty)
+                          reportsInfo: false).filter { !$0.contains("LEVEL REFERENCE") }.isEmpty)
         let quietDisagree = Check(tag: "[T]", parameters: Self.logOnly)
+        // The one LEVEL REFERENCE line is logged regardless (§6.3 reads it); the rest are WARNINGs.
         let lines = run(quietDisagree, seconds: 1800, trueSlope: 66e-6, appliedSlope: 0,
-                        reportsInfo: false)
+                        reportsInfo: false).filter { !$0.contains("LEVEL REFERENCE") }
         XCTAssertFalse(lines.isEmpty)
         XCTAssertTrue(lines.allSatisfy { $0.contains("WARNING") })
         // One check a minute: (1800 − 600) / 60 + 1.
@@ -111,8 +115,10 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
             lines += fit.windowLines(time: t, rendererDepth: 0.420 - 60e-6 * t, appliedOffset: 0,
                                      appliedSlope: 0)
         }
-        XCTAssertFalse(lines.isEmpty)
-        XCTAssertTrue(lines.allSatisfy { $0.contains("WARNING SLOPE CROSS-CHECK") })
+        XCTAssertEqual(lines.filter { $0.contains("LEVEL REFERENCE") }.count, 1)
+        let checks = lines.filter { !$0.contains("LEVEL REFERENCE") }
+        XCTAssertFalse(checks.isEmpty)
+        XCTAssertTrue(checks.allSatisfy { $0.contains("WARNING SLOPE CROSS-CHECK") })
         XCTAssertEqual(fit.crossCheck.latest!.implied, 60e-6, accuracy: 0.1e-6)
     }
 
@@ -124,7 +130,7 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
     /// the log lines and the queue depth per window.
     func session(seconds: Double, delta: @escaping (Double) -> Double, media: (Double) -> Double,
                  depthNoise: Double = 0.001, lag: Double = 0, seed: UInt64 = 3,
-                 parameters: SenderReportSlopeCrossCheck.Parameters = .adopted,
+                 parameters: SenderReportSlopeCrossCheck.Parameters = SenderReportSlopeCrossCheckTests.active,
                  extraDepth: (Double) -> Double = { _ in 0 }, excluded: (Double) -> Bool = { _ in false },
                  each: ((Double, SenderReportLineFit) -> Void)? = nil)
         -> (lines: [String], depth: [(t: Double, d: Double)], fit: SenderReportLineFit) {
@@ -180,7 +186,7 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
         // The slope is the 300 s line's, refitted every window: it only extrapolates the level for
         // ≤ 10 s, so 10 ppm is 0.1 ms. The level is what is held (below).
         XCTAssertEqual(r.fit.evaluate(atVideoTime: 3600)!.slope, 65e-6, accuracy: 10e-6)
-        let start = level(r, 60, 120)
+        let start = r.fit.crossCheck.reference!
         // Engaged by ~8 min; the worst excursion is the level at engagement (≤ 12 ms + 180 s of
         // drain); back within 2 ms of the start from 20 min on, to the end.
         let worst = r.depth.filter { $0.t >= 120 }.map { abs($0.d - start) }.max()!
@@ -198,7 +204,7 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
             let r = session(seconds: 3600, delta: { _ in -0.020 + 7e-6 * rng.gaussian() },
                             media: { 65e-6 * $0 }, lag: lag)
             XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 1, "lag \(lag)")
-            let start = level(r, 60, 120)
+            let start = r.fit.crossCheck.reference!
             let late = r.depth.filter { $0.t >= 1500 }.map { $0.d - start }
             XCTAssertLessThan(late.map(abs).max()!, 0.003 + 0.003, "lag \(lag): held level")
             XCTAssertEqual(late.reduce(0, +) / Double(late.count), 0, accuracy: 0.0015, "lag \(lag): mean")
@@ -245,7 +251,7 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
         let e = r.fit.evaluate(atVideoTime: 5400)!
         XCTAssertEqual(r.fit.crossCheck.correction(atVideoTime: 5400, srOffset: e.offset, srSlope: e.slope),
                        .init(), "nothing kept")
-        let start = level(r, 60, 120)
+        let start = r.fit.crossCheck.reference!
         for p in r.depth where p.t >= 1200 { XCTAssertEqual(p.d - start, 0, accuracy: 0.006, "at \(p.t)") }
         noStep(r, "staircase catch-up")
     }
@@ -253,7 +259,7 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
     /// §18.9's condition, on the level form: an engagement FORCED on correct SRs costs ≤ 10 ms and
     /// releases by itself, leaving the correction at exactly 0.
     func testAForcedFalseEngagementIsBoundedAndReleases() {
-        var p = SenderReportSlopeCrossCheck.Parameters(); p.forceEngageAt = 900
+        var p = Self.active; p.forceEngageAt = 900
         var n1 = TestRNG(state: 111), n2 = TestRNG(state: 111)
         var w1 = 0.0, w2 = 0.0
         let a = exp(-1.0 / 60)
@@ -304,6 +310,113 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
                         media: { 60e-6 * $0 }, extraDepth: { stall($0) ? -0.300 : 0 }, excluded: stall)
         XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 0)
         XCTAssertLessThan(abs(r.fit.crossCheck.levelError ?? 1), 0.004)
+    }
+
+    // MARK: - Observe-only (this release) and the settled reference (§18.21)
+
+    /// The app's switch is OFF: the hold is observe-only unless a research build flips it.
+    func testTheLevelHoldIsObserveOnlyByDefault() {
+        XCTAssertFalse(Check.levelHoldApplies)
+        XCTAssertFalse(Check.Parameters().applies)
+        XCTAssertFalse(Check.Parameters.adopted.applies)
+    }
+
+    /// Observe-only has NO effect on output: on a session where the applied hold engages (flat SRs,
+    /// media +65 ppm), the observe-only run logs "WOULD ENGAGE" and its target — hence the queue —
+    /// is identical, window for window, to a log-only run's. The correction is zero throughout.
+    func testObserveOnlyHasNoEffectOnOutput() {
+        var n1 = TestRNG(state: 141), n2 = TestRNG(state: 141)
+        var observed: [Double] = []
+        let obs = session(seconds: 3600, delta: { _ in -0.020 + 7e-6 * n1.gaussian() }, media: { 65e-6 * $0 },
+                          parameters: .adopted, each: { t, fit in
+            let e = fit.evaluate(atVideoTime: t)!
+            observed.append(fit.crossCheck.correction(atVideoTime: t, srOffset: e.offset, srSlope: e.slope).offset)
+        })
+        let off = session(seconds: 3600, delta: { _ in -0.020 + 7e-6 * n2.gaussian() }, media: { 65e-6 * $0 },
+                          parameters: Self.logOnly)
+        XCTAssertEqual(count(obs.lines, "LEVEL HOLD WOULD ENGAGE (observe-only)"), 1)
+        XCTAssertEqual(count(obs.lines, "⚠️ LEVEL HOLD ENGAGED"), 0)
+        XCTAssertEqual(obs.fit.crossCheck.currentMode, .engaged, "the state machine runs")
+        XCTAssertEqual(obs.depth.count, off.depth.count)
+        for (a, b) in zip(obs.depth, off.depth) { XCTAssertEqual(a.d, b.d, "at \(a.t): output changed") }
+        XCTAssertTrue(observed.allSatisfy { $0 == 0 }, "a correction was applied")
+        XCTAssertTrue(obs.fit.crossCheck.summary(atVideoTime: 3600, time: nil).contains("observe-only"))
+    }
+
+    /// One window every 10 s into the check directly, with a stated loop state per window.
+    func feed(_ check: Check, seconds: Double, loop: (Double) -> Check.LoopState?,
+              excluded: (Double) -> Bool = { _ in false }, srInUse: (Double) -> Bool = { _ in true })
+        -> [String] {
+        var lines: [String] = []
+        var t = 10.0
+        while t <= seconds {
+            lines += check.note(time: t, videoTime: t, rendererDepth: 0.420, appliedOffset: -0.020,
+                                srOffset: -0.020, appliedSlope: 0, reportsInfo: false,
+                                excluded: excluded(t), loop: loop(t), srSlopeInUse: srInUse(t))
+            t += 10
+        }
+        return lines
+    }
+
+    func referenceSpan(_ lines: [String]) -> (Double, Double)? {
+        guard let l = lines.first(where: { $0.contains("LEVEL REFERENCE set") }),
+              let r = l.range(of: #"span (\d+)–(\d+) s"#, options: .regularExpression) else { return nil }
+        let parts = l[r].dropFirst(5).dropLast(2).split(separator: "–").compactMap { Double($0) }
+        return (parts[0], parts[1])
+    }
+
+    /// Settled from the start: the first 60 s span once the SR slope is in use (here from 110 s).
+    func testReferenceWaitsForTheSRSlope() {
+        let c = Check(tag: "[T]")
+        let lines = feed(c, seconds: 600, loop: { _ in .init(saturated: false, integral: -60e-6,
+                                                             liveClockBufferError: 0.002) },
+                         srInUse: { $0 >= 110 })
+        let span = referenceSpan(lines)!
+        XCTAssertEqual(span.0, 110); XCTAssertEqual(span.1, 170)
+        XCTAssertEqual(c.reference!, 0.420, accuracy: 1e-9)
+    }
+
+    /// An integrator still winding (6 ppm per window until 300 s) is not settled: a span holding two
+    /// of its steps (12 ppm) is refused, one (6 ppm) is accepted — the span begins at 290 s.
+    func testReferenceWaitsForTheIntegrator() {
+        let c = Check(tag: "[T]")
+        let lines = feed(c, seconds: 800, loop: { t in
+            .init(saturated: false, integral: -6e-6 * min(t, 300) / 10, liveClockBufferError: 0) })
+        let span = referenceSpan(lines)!
+        XCTAssertEqual(span.0, 290)
+        XCTAssertEqual(span.1 - span.0, 60, accuracy: 1e-9)
+    }
+
+    /// A saturated window, a LiveClock excursion past ±10 ms, or an excluded window (a hold, splice
+    /// or write) at 100 s — before the first span from 60 s can complete — restarts the span.
+    func testReferenceRestartsOnSaturationLiveClockOrExclusion() {
+        let cases: [(String, (Double) -> Check.LoopState?, (Double) -> Bool, Double)] = [
+            ("saturation", { t in .init(saturated: t == 100, integral: 0, liveClockBufferError: 0) }, { _ in false }, 110),
+            ("LiveClock", { t in .init(saturated: false, integral: 0, liveClockBufferError: t == 100 ? 0.012 : 0) },
+             { _ in false }, 110),
+            ("excluded", { _ in .init(saturated: false, integral: 0, liveClockBufferError: 0) }, { $0 == 100 }, 110),
+        ]
+        for (label, loop, excluded, from) in cases {
+            let c = Check(tag: "[T]")
+            let span = referenceSpan(feed(c, seconds: 600, loop: loop, excluded: excluded))!
+            XCTAssertEqual(span.0, from, label)
+            XCTAssertEqual(span.1, from + 60, label)
+        }
+    }
+
+    /// A line jump before the reference is set shifts the candidates with it: the reference is the
+    /// level after the move.
+    func testALineJumpBeforeTheReferenceShiftsItsCandidates() {
+        let c = Check(tag: "[T]")
+        var t = 10.0
+        while t <= 400 {
+            if t == 140 { c.noteLineJump(0.050) }
+            let depth = t >= 140 ? 0.370 : 0.420
+            _ = c.note(time: t, videoTime: t, rendererDepth: depth, appliedOffset: -0.020, srOffset: -0.020,
+                       appliedSlope: 0, reportsInfo: false, loop: .init(), srSlopeInUse: t >= 110)
+            t += 10
+        }
+        XCTAssertEqual(c.reference!, 0.370, accuracy: 1e-9)
     }
 
     /// The steering hands its companion the window's time and median depth EVEN WHEN it does not

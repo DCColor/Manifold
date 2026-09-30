@@ -19,6 +19,8 @@ struct Result { var depth: [(t: Double, d: Double)] = []; var lines: [String] = 
 func replay(_ pairs: [[Double]], _ wins: [[Double]], logOnly: Bool, forceAt: Double? = nil) -> Result {
     var cp = SenderReportSlopeCrossCheck.Parameters()
     cp.fallbackEnabled = !logOnly; cp.forceEngageAt = forceAt
+    // A research replay: the hold APPLIED (the app is observe-only, `levelHoldApplies` false, §18.21).
+    cp.applies = true
     var r = Result()
     let fit = SenderReportLineFit.make(timeline: .rtpSenderReports, tag: "[R]", reportsWindows: false,
                                        crossCheckParameters: cp, log: { _ in })!

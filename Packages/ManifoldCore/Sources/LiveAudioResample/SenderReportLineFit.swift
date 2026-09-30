@@ -474,19 +474,21 @@ public final class SenderReportLineFit: @unchecked Sendable {
     /// are reported) and the slope cross-check (its WARNING always). `time` is the steering's
     /// session clock, `rendererDepth` its window median; offset and slope are what the target used.
     /// `excluded`: the steering saw a starvation hold, its recovery, a splice or a fallback in the
-    /// window; the level hold does not read its depth.
+    /// window; the level hold does not read its depth. `loop`: the loop's saturation and integrator
+    /// and LiveClock's buffer error, for the settled-reference rule (§18.21).
     public func windowLines(time: Double, rendererDepth: Double?, appliedOffset: Double,
-                            appliedSlope: Double, excluded: Bool = false) -> [String] {
+                            appliedSlope: Double, excluded: Bool = false,
+                            loop: SenderReportSlopeCrossCheck.LoopState? = nil) -> [String] {
         var lines: [String] = []
         if let w = windowLine() { lines.append(w) }
         lock.lock()
-        let x = lastX, correction = lastCorrection
+        let x = lastX, correction = lastCorrection, slopeInUse = snapshotLocked().slopeInUse
         lock.unlock()
         guard let x else { return lines }
         lines += crossCheck.note(time: time, videoTime: x, rendererDepth: rendererDepth,
                                  appliedOffset: appliedOffset, srOffset: appliedOffset - correction,
                                  appliedSlope: appliedSlope, reportsInfo: reportsWindows,
-                                 excluded: excluded)
+                                 excluded: excluded, loop: loop, srSlopeInUse: slopeInUse)
         return lines
     }
 

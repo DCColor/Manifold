@@ -5,8 +5,8 @@
 L=${1:?log}
 echo "── events"
 grep -a -E "\[WHEP-SRFIT\] (FIRST LINE|slope IN USE|slope LEFT|⚠️|line STABLE|SR pairs RESUMED)" "$L" | cut -c12-260 | tail -15
-echo "── level hold (§18.20): ENGAGED / RELEASED / OFF, and the SR line's level error at the last check"
-grep -a -E "LEVEL HOLD (ENGAGED|RELEASED|OFF)" "$L" | cut -c12-300
+echo "── level hold (§18.20; observe-only this release, §18.21): reference, (WOULD) ENGAGE / RELEASE / OFF"
+grep -a -E "LEVEL REFERENCE set|LEVEL HOLD (WOULD )?(ENGAGE|RELEASE|BE OFF|OFF)" "$L" | cut -c12-300
 grep -a -E "slope cross-check|WARNING SLOPE CROSS-CHECK" "$L" | tail -1 | grep -o -E "queue level [^·]*|level hold [A-Z]+" | tr '\n' ' '; echo
 echo "── latest window"
 grep -a "\[WHEP-SRFIT\] window" "$L" | tail -1 | cut -c12-400

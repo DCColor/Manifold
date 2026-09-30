@@ -134,6 +134,19 @@ offset measured from such a capture walks, with nothing else reading unhealthy.
     own beep level), never an absolute one.
   - Do not gain it up. Every earlier capture was analysed at this level.
 
+📌 **SENDER NOTE (2026-09-30): OBS's audio buffering grows during an OBS session and resets only on
+relaunch — RELAUNCH THE SENDER OBS BEFORE A MEASUREMENT RUN.**
+- OBS adds 21 ms of audio buffering whenever a source's audio arrives late ("adding 21 milliseconds
+  of audio buffering, total audio buffering is now …" in its log). It never gives it back while the
+  process runs.
+- Measured on this rig's sender: **42 ms fresh** (2026-09-30, launched 16:40); **85 ms after hours of
+  use** (2026-09-28: 42 → 64 → 85 ms, steps at 12:50, 16:19, 21:19, from its DeckLink and Atem
+  sources).
+- It is constant within a session, so it does not move lip-sync between two captures of one run.
+- It shifts the absolute A/V between sessions, and so between days. Check the sender log's last
+  "total audio buffering" line before the run, and record it with the run.
+- AUDIO_RESAMPLER_DESIGN.md §18.21.
+
 ### 1.2b The sender probe — the term the player controls cannot remove
 
 ⚠️ **ADDED 2026-09-23, AFTER IT WAS NEEDED. Every raw stream figure in §2 carries an unmeasured

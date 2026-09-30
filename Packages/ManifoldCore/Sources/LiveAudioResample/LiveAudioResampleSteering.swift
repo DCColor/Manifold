@@ -1227,8 +1227,14 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         /// residual splice, or a coarse splice or fallback: its depth is the steering's own doing, not
         /// the target line's, and the WHEP level hold (§18.20) does not read it.
         public var excluded = false
-        public init(elapsed: Double, rendererDepthMedian: Double?, excluded: Bool = false) {
+        /// The loop's state over the window, for the level hold's settled-reference rule: a step
+        /// at the ratio's rail in it, and the integrator at its end.
+        public var saturated = false
+        public var integral: Double?
+        public init(elapsed: Double, rendererDepthMedian: Double?, excluded: Bool = false,
+                    saturated: Bool = false, integral: Double? = nil) {
             self.elapsed = elapsed; self.rendererDepthMedian = rendererDepthMedian; self.excluded = excluded
+            self.saturated = saturated; self.integral = integral
         }
     }
 
@@ -1272,7 +1278,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             let facts = WindowFacts(elapsed: snap.elapsed,
                                     rendererDepthMedian: sortedDepth.isEmpty
                                         ? nil : sortedDepth[sortedDepth.count / 2],
-                                    excluded: snap.excluded)
+                                    excluded: snap.excluded, saturated: snap.sat > 0,
+                                    integral: snap.i)
             guard prints else { return (nil, facts) }
             let depthText = sortedDepth.isEmpty
                 ? "—"

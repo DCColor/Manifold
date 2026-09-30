@@ -598,10 +598,16 @@ public final class LiveClock: @unchecked Sendable {
         /// the publication gate and its tripwire compare the line, and must go on doing exactly
         /// that — a new frame must not count as a mapping change.
         public let pictureLate: Double
+        /// The picture buffer's smoothed depth less its target when the mapping is stated, seconds;
+        /// nil before the first depth reading. Read by the WHEP level hold's settled-reference rule
+        /// (docs/AUDIO_RESAMPLER_DESIGN.md §18.20), which waits for LiveClock to be within ±10 ms of
+        /// its target. Not part of equality, for the same reason as `pictureLate`.
+        public let bufferError: Double?
 
-        public init(senderPTS: Double, hostTime: Double, rate: Double, pictureLate: Double = 0) {
+        public init(senderPTS: Double, hostTime: Double, rate: Double, pictureLate: Double = 0,
+                    bufferError: Double? = nil) {
             self.senderPTS = senderPTS; self.hostTime = hostTime; self.rate = rate
-            self.pictureLate = pictureLate
+            self.pictureLate = pictureLate; self.bufferError = bufferError
         }
 
         public static func == (a: Mapping, b: Mapping) -> Bool {
@@ -849,7 +855,8 @@ public final class LiveClock: @unchecked Sendable {
         lock.lock()
         let live: Mapping? = (anchorSenderPTS != nil && anchorHostTime != nil)
             ? Mapping(senderPTS: anchorSenderPTS!, hostTime: anchorHostTime!, rate: rate,
-                      pictureLate: pictureLateLocked(at: t)) : nil
+                      pictureLate: pictureLateLocked(at: t),
+                      bufferError: smoothedDepth.map { $0 - targetDepth }) : nil
         guard mappingDirty else {
             // ── TRIPWIRE ────────────────────────────────────────────────────────────────────
             // Nothing declared a change, so the live mapping must equal what we last published.
@@ -950,7 +957,8 @@ public final class LiveClock: @unchecked Sendable {
         guard t - last >= controlInterval else { return nil }
         lastMirrorTickHost = t
         return Mapping(senderPTS: aPTS + (t - aHost) * rate, hostTime: t, rate: rate,
-                       pictureLate: pictureLateLocked(at: t))
+                       pictureLate: pictureLateLocked(at: t),
+                       bufferError: smoothedDepth.map { $0 - targetDepth })
     }
 
     /// `Mapping.pictureLate` at host `t`: the line's position then, less the newest arrived frame.

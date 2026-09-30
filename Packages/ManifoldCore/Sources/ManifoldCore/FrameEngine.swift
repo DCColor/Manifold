@@ -2396,10 +2396,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             windowCompanion: srFit.map { fit in { @Sendable [mirror] facts in
                 mirror.lock.lock()
                 let offset = mirror.appliedOffset, slope = mirror.appliedSlope
+                let bufferError = mirror.liveClockBufferError
                 mirror.lock.unlock()
                 return fit.windowLines(time: facts.elapsed, rendererDepth: facts.rendererDepthMedian,
                                        appliedOffset: offset, appliedSlope: slope,
-                                       excluded: facts.excluded)
+                                       excluded: facts.excluded,
+                                       loop: .init(saturated: facts.saturated, integral: facts.integral,
+                                                   liveClockBufferError: bufferError))
             } })
         // A superseded session's steering may still hold an armed starvation deadline: retire it
         // before this session owns the synchronizer, so it can never hold this session's timebase.
@@ -2522,6 +2525,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// offset is what `liveAudioDrift` adds back, as it used to add the constant cushion.
         var appliedOffset: Double = 0
         var appliedSlope: Double = 0
+        /// LiveClock's picture-buffer error at the latest mapping (for the WHEP level hold's
+        /// settled-reference rule, §18.20); nil until LiveClock has a depth reading.
+        var liveClockBufferError: Double?
         var changes = 0
         var pushes = 0
         /// Heartbeat evaluations — `onMappingTick`, the mapping re-stated at the control cadence
@@ -2905,6 +2911,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         mirror.lock.lock()
         mirror.appliedOffset = offset; mirror.appliedSlope = slope
+        mirror.liveClockBufferError = m.bufferError
         // ⚠️ THE `min(1.0, …)` CLAMP IS KEPT, AND IT IS NO LONGER LOAD-BEARING IN THE CASE THAT
         // MADE IT VISIBLE. With the heartbeat feeding this at `controlHz`, `dt` is ~0.1 s and the
         // clamp never binds — the pathology it was caught in (a 25 s gap advancing a τ=30 s filter
