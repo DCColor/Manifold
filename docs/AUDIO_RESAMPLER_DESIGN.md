@@ -4577,3 +4577,195 @@ lost or repeated in each beep gap, as the gap − its exact-zero time − 1000 m
 - Residual splices over 20 ms, ≥ 2 s apart, while LiveClock moves its line.
 - ≤ 3 s is met whenever the audio has arrived. At 1.05× the time to sync is the sender's catch-up.
 - **Not done:** WHEP and NDI with induced stalls; a Release build.
+
+### 18.20 The level-based WHEP correction — design, 2026-09-30
+
+**Asked (Robbie, 2026-09-30).** Replace §18.7's rate-based fallback (BUGS.md, "THIS RELEASE: the
+depth-slope fallback should hold the queue's LEVEL") so a lagging SR staircase unwinds by itself.
+Design first — the control law, the feedback-loop proof, the interactions with rail events, the
+buffer target and the stall hold, and why it cannot false-engage on Cloudflare — then an offline
+replay of every WHEP log. **Pass:** Cloudflare unchanged; MediaMTX within ±10 ms at +26 min relative
+to the session start (§6.3). Report before any live run.
+
+#### Quantities (per 10 s steering window k)
+
+| symbol | what | depends on the correction? |
+|---|---|---|
+| D_k | the window's median renderer queue depth | yes, one for one (the loop tracks its target) |
+| O_SR(x) | the SR line's offset at video time x | no |
+| C(x) | the correction the target adds | — |
+| O_a = O_SR + C | the offset the target applied | yes |
+| u_k = O_a,k − D_k | the media line: b_true·t + c (§18.7's invariant) | **no** (only a transient, below) |
+| D_ref | median of D_k over 60–120 s after the connect: the session start (§6.3's start window) | no |
+
+Lip-sync walk ∝ D − D_ref (§18.7). Holding D at D_ref holds lip-sync at the session start, whatever
+the SRs do.
+
+#### The control law
+
+1. **The media line, robustly.** Each window: û = the Theil–Sen line of u against x over the trailing
+   W = 300 s, evaluated at x.
+2. **The level error the SR line alone would give:** E_k = (O_SR(x_k) − û(x_k)) − D_ref. This is the
+   queue depth the target would produce with C = 0, less the reference. Both terms exclude C.
+3. **Engage** when |E| > E_on = 12 ms at every window for T_on = 180 s.
+4. **Engaged, the target offset is the queue's line:** O*(x) = D_ref + û(x). The applied offset is
+   Ô(x), which reaches O*(x) at ≤ 150 ppm (§18.7's catch-up rate, the slope clamp) from wherever it
+   was. The correction the fit adds is C(x) = Ô(x) − O_SR(x). Then D = Ô − u → D_ref once Ô = O*. The
+   SR line drops out of the target, and its stairs drop out with it.
+5. **Disengage** when |E| < E_off = 4 ms at every window for T_off = 600 s. Ô then returns to O_SR(x)
+   at ≤ 150 ppm, and C → 0. **Nothing is kept:** once released, the SR line is used exactly.
+
+**Why it unwinds by itself.** A stair raises O_SR, but the engaged target does not contain O_SR, so
+nothing double-counts. Unlike §18.7, no rate is integrated, so there is no excess to give back. When
+the SRs catch up, E returns inside E_off and the correction is released with it.
+
+**A false engagement costs at most the level error, and ends.** Engaged on correct SRs, D is held at
+D_ref, which differs from what the SR line would give by E (≤ E_on + the sustain's growth). The
+disengage test then sees |E| < 4 ms, and releasing moves lip-sync by < 4 ms. Under §18.7 the same
+event left a permanent random walk (15.7 ms under A, 25.9 under C, §18.9).
+
+#### The feedback-loop proof
+
+- **The decision (E) has no feedback path.** O_SR excludes C by construction, and u is independent of
+  C in steady state: a correction moves O_a and D together (§18.7's invariant).
+- **The target (û) has one path: the resampler loop's lag.** The loop is PI, kp 0.1 s⁻¹, ki 0.0025
+  s⁻², critically damped, time constant ≈ 20 s. So D follows O_a through a lag τ ≈ 20–40 s, and u
+  carries a transient ≈ τ · dÔ/dx.
+- **Small-gain bound.** The map Ô → û is (τ·s) followed by a robust line fit over W, whose response
+  to a change of slope Δ in its input is at most ≈ 1.5·Δ·τ/W in level. The loop gain is therefore
+  ≤ 1.5·τ/W = **0.15 at τ = 30 s, W = 300 s**. That is < 1, so the loop is stable whatever its phase.
+- **Bounded by the slew limit.** |dÔ/dx − b| ≤ 150 ppm, so the transient in u is ≤ τ · 150 ppm =
+  **4.5 ms** at τ = 30 s, and it decays with τ once the slew ends. It is never integrated: the next
+  fit sees it at ≤ 0.15 gain, and it vanishes.
+- Tested closed loop at τ = 0 / 10 / 30 s (the §18.7 harness).
+
+#### Interactions
+
+- **Rail events, pauses, splices.** These move D by up to ~100 ms for tens of seconds (§13.4, §18.8).
+  - The Theil–Sen line over 300 s ignores up to 29 % of its 30 points, i.e. an excursion shorter
+    than ~85 s.
+  - The 180 s sustain rejects anything the fit passes for less than that.
+  - The worst case measured is Cloudflare's rail event 9, below.
+- **The buffer target: D_ref follows deliberate line moves.** A LiveClock position jump of j (snap,
+  freeze-guard, queue-full, target-step; + = the picture moved forward) moves the audio queue by −j
+  and leaves O_a unchanged, so u moves by +j.
+  - On every jump D_ref −= j, and the stored u points shift by +j. E and the engaged target are then
+    unchanged by the jump, and the latency change is kept, not undone.
+  - The buffer / latency work (post-release) moves the queue's target through the same jumps, so
+    nothing more is needed there.
+  - None of the seven WHEP logs has a jump over 23 ms (the 4.5 h run has two freeze-guard re-anchors
+    of +23 / 0 ms).
+- **The stall hold (§18.19).**
+  - A window containing a hold, a recovery debt, a catch-up write, or a splice or fallback is not fed
+    to the fit, the sustain or the decision. During recovery D is deliberately off its level, and
+    that is the stall's own bookkeeping, not SR error.
+  - Engaged or not, the state is kept across the gap.
+  - The steering reports these in `WindowFacts`.
+- **The SRs stay primary.** Not engaged, the target is the SR line exactly (C = 0). The queue is
+  measured in-app, and nothing branches on the server (CLAUDE.md).
+- **The slope cross-check's WARNING is unchanged** (log only, §18.7).
+
+#### Why it cannot false-engage on Cloudflare — measured before choosing E_on
+
+The level error E of the SR line alone (C = 0), from the closed-loop replay run log-only on every
+WHEP log (300 s Theil–Sen line, against D_ref at 60–120 s):
+
+| session | server, SR shape | max \|E\| | E at +26 min | first \|E\| > 10 / 12 / 15 ms |
+|---|---|---|---|---|
+| srfix-whep-cloudflare-long (4.5 h) | Cloudflare | **8.5 ms** (9400 s, rail event 9) | +6.0 | never |
+| step4e2-cloudflare | Cloudflare | 4.3 ms | +0.9 | never |
+| step4e2-cloudflare-2 | Cloudflare | 3.2 ms | +2.6 | never |
+| step8-whep-soak (§18.5) | MediaMTX, staircase | 34.2 ms | −33.4 | 240 / 280 / 620 s |
+| srfix-whep-mediamtx | MediaMTX, staircase | 24.1 ms | −21.3 | 1111 / 1131 / 1161 s |
+| srtest1-flat (extrapolated, 61.4 ppm) | MediaMTX, flat | 100.2 ms | −95.8 | 250 / 290 / 330 s |
+| srtest2-flat (extrapolated, 73.0 ppm) | MediaMTX, flat | 118.8 ms | −113.5 | 230 / 260 / 300 s |
+
+- **E_on = 12 ms** is 3.5 ms above the largest level Cloudflare reached in 4.5 h (8.5 ms, at a
+  rail event), and a third of the smallest MediaMTX deviation at +26 min.
+- The 180 s sustain adds margin in time: Cloudflare would need to hold > 12 ms for 3 minutes; its
+  largest excursion does not reach 10.
+- **If it did engage, it costs ≤ the level error while engaged, and < 4 ms after release** (above).
+  The forced-engagement sweep (§18.9's method) measures that.
+
+#### Built and replayed offline, 2026-09-30 — no live run yet
+
+**Code.**
+- `SenderReportSlopeCrossCheck`: the rate state machine is replaced by the level hold above. The
+  slope WARNING is unchanged.
+- `SenderReportLineFit.evaluate` passes the SR line to `correction(atVideoTime:srOffset:srSlope:)`.
+- `WindowFacts.excluded` is set by holds, recovery debt, resumes, catch-up writes, splices, fallbacks
+  and caller re-anchors (not the first anchor).
+- `FrameEngine.liveAudioPositionJump` forwards every LiveClock jump to `noteLineJump`.
+- Two details found in testing:
+  - A goal change of ≤ 1 ms is taken as is rather than slewed. Each window's refit moves the goal by
+    a fraction of a millisecond, and slewing it made the reported slope ring at ±150 ppm.
+  - The excess's slope is capped at what clears it within one window.
+- `swift test` **142 / 142**: 8 level-hold tests replace §18.7's fallback tests (flat SRs, loop lag
+  0/10/30 s, never engages on three correct-SR shapes, a lagging staircase unwinds and releases with
+  nothing kept, a forced false engagement ≤ 10 ms and released, no flapping at the threshold, a line
+  jump kept, excluded windows not read). Profile build clean (`.build-cc/level-Profile`).
+- Replay tool: `scripts/soak/replay/level/main.swift` (`replay-level`, built by `build.sh`).
+
+**Replay, closed loop, every WHEP log** (§18.7's invariant; start = median depth 60–120 s,
++26 = 1560–1690 s):
+
+| session | engaged | start → +26 min | worst from the start (after 120 s) | SR line alone: start → +26 |
+|---|---|---|---|---|
+| step8-whep-soak (§18.5, staircase) | 750 s | **−0.8 ms** ✅ | −31.9 ms at 430 s | −23.4 ms |
+| srfix-whep-mediamtx (staircase) | 1281 s | **+0.4 ms** ✅ | −20.5 ms at 1221 s | −15.6 ms |
+| srtest1-flat (extrapolated, 61.4 ppm) | 479 s | **+0.7 ms** ✅ | −25.3 ms at 480 s | −85.2 ms |
+| srtest2-flat (extrapolated, 73.0 ppm) | 479 s | **+0.8 ms** ✅ | −29.7 ms at 480 s | −101.4 ms |
+| step4e2-cloudflare | never | −0.4 ms | −113.1 ms (its 1651 s rail event) | **identical** |
+| step4e2-cloudflare-2 | never | +2.7 ms | +4.2 ms | **identical** |
+| srfix-whep-cloudflare-long (4.5 h) | never | +6.4 ms | −52.1 ms (the 6027 s pause) | **identical** |
+
+- **MediaMTX: all four sessions within ±1 ms of the start at +26 min** (requirement ±10).
+  - The worst mid-session excursion is the level at engagement: −20…−32 ms. Under §18.7's rate rule
+    it was −59 / −70 ms on the flats.
+- **Cloudflare: unchanged, bit for bit.** The replayed queue depth equals the SR-only replay's in
+  every window (difference 0.000000000 ms) on all three sessions: the hold never engaged.
+
+**§18.9's forced-engagement sweep** (engaged at every minute from 300 s; error = forced depth −
+unforced depth, from the force on):
+
+| log | forced | peak \|error\| worst / median / p90 | released by itself | \|error\| at the log's end |
+|---|---|---|---|---|
+| step4e2-cloudflare | 32 | 5.7 / 3.2 / 5.7 ms | 16 of 32 (median 10 min) | ≤ 1.1 ms |
+| step4e2-cloudflare-2 | 31 | 3.6 / 3.5 / 3.6 ms | 22 of 31 (median 11 min) | ≤ 2.3 ms |
+| srfix-whep-cloudflare-long (4.5 h) | 267 | **12.4** / 9.0 / 12.4 ms | 257 of 267 (median 105 min) | ≤ 3.2 ms |
+| *§18.9, rule A on the 4.5 h log* | 262 | 15.7 / 1.7 / 4.9 ms | 241 of 262, the error KEPT | worst +14.8 ms |
+
+- ⚠️ **The ≤ 10 ms bar fails on the 4.5 h log, by 2.4 ms. By construction, not by a defect.**
+  - Engaged, the hold keeps the queue at the session start. On that log the SR line alone sits
+    +6…+8.5 ms off the start for hours (the level table above).
+  - So "forced − unforced" there is the SR line's own departure from the start, plus the fit's noise.
+    Its median is 9.0 ms because that departure lasts.
+  - For the same reason, release (|E| < 4 ms for 10 min) takes a median 105 min.
+- **What does hold:**
+  - Every forced run is back on the SR line within ≤ 3.2 ms at the log's end, with nothing kept.
+    Under A the error was permanent (+14.8 ms).
+  - The two 4e-2 sessions stay ≤ 5.7 ms.
+- **The question for Robbie:** under §6.3's adopted criterion (lip-sync relative to the session
+  start), the forced run on that log is the one nearer the start. Is the sweep's reference the SR
+  line (the bar fails at 12.4 ms), or the session start?
+
+**✅ DECIDED 2026-09-30 (Robbie): the forced-engagement sweep is judged against the SESSION START.**
+- This is consistent with criterion 12 as adopted (§6.3: lip-sync relative to the session start).
+- On the 4.5 h log the device drifted ~−10 ms while following the SR line, which shows the start is
+  nearer the truth there. So the 12.4 ms "forced − unforced" above is the SR line's departure from
+  the start, not an error of the hold.
+- **The measure.** Each forced run's queue level (a 300 s rolling median, so a rail event or pause —
+  common to every run, and short — does not count) against the start (60–120 s). Taken from 10 min
+  after the force (the catch-up done), while engaged or releasing. Bar: ≤ 10 ms, and back on the SR
+  line by itself.
+
+| log | forced | worst \|level − start\| while held | released by itself | \|forced − unforced\| at the log's end |
+|---|---|---|---|---|
+| step4e2-cloudflare | 32 | **0.8 ms** | 16 of 32 (the rest: the log ended first) | ≤ 1.1 ms |
+| step4e2-cloudflare-2 | 31 | **0.4 ms** | 22 of 31 | ≤ 2.3 ms |
+| srfix-whep-cloudflare-long (4.5 h) | 267 | **1.1 ms** | 257 of 267 | ≤ 3.2 ms |
+
+- **✅ Passes.** A false engagement holds the session start within 1.1 ms, releases by itself, and
+  leaves nothing when released. The "forced − unforced" columns above are kept for comparison with
+  §18.9.
+- `replay-level sweep` prints both measures.

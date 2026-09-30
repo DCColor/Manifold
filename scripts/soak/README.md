@@ -147,6 +147,9 @@ cd "$SOAK_OUT" && python3 <repo>/scripts/soak/analysis/extract.py ~/Desktop/<log
 replay-bin/replay-before <name>; replay-bin/replay-after <name>
 replay-bin/replay-closed <name> [logonly]
 replay-bin/replay-closed synth <label> <media ppm> <depth noise ms> <seconds> [logonly]
+replay-bin/replay-level <name> [logonly]      # the level hold (§18.20): start → +26, worst, end
+replay-bin/replay-level synth <label> <media ppm> <depth noise ms> <seconds> [logonly]
+replay-bin/replay-level sweep <name>          # §18.9's forced-engagement sweep, one per minute
 ```
 
 - **Open loop** (`replay-before`, `replay-after`): the fit alone, fed the logged pairs; x is log time.

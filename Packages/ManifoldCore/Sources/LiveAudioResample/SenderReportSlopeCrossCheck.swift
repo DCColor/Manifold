@@ -2,12 +2,13 @@
 //  SenderReportSlopeCrossCheck.swift
 //  LiveAudioResample
 //
-//  The SR line's cross-check and its depth-slope FALLBACK (docs/AUDIO_RESAMPLER_DESIGN.md §18.7,
-//  docs/BUGS.md "the SR line fit cannot follow a staircase"): the slope the SR line delivers,
-//  checked against the slope the renderer's own audio queue measures, over a long window; and,
-//  only when the SRs are demonstrably wrong, the queue's slope in their place.
+//  The SR line's cross-check, and its LEVEL HOLD (docs/AUDIO_RESAMPLER_DESIGN.md §18.7, §18.20;
+//  docs/BUGS.md "the depth-slope fallback should hold the queue's LEVEL"): the slope the SR line
+//  delivers, checked against the slope the renderer's own audio queue measures (log only); and, only
+//  when the SR line demonstrably takes the queue off its session-start level, the queue's own line in
+//  its place.
 //
-//  ── WHY THE QUEUE MEASURES THE TRUE SLOPE, WHATEVER LINE IS APPLIED ────────────────────────────
+//  ── WHY THE QUEUE MEASURES THE MEDIA, WHATEVER LINE IS APPLIED ─────────────────────────────────
 //
 //  With the loop holding the audio content on its target, at host time t:
 //
@@ -15,55 +16,41 @@
 //      consumed content  T(t) = p(t) − offset(p(t)),  p(t) ≈ (1 + ε_v)·t
 //      renderer depth    D(t) = A − T = offset(t) − (ε_v − ε_a)·t + const
 //
-//  so   offset(t) − D(t) = b_true · t + const,   b_true = ε_v − ε_a,
+//  so   u(t) = offset(t) − D(t) = b_true · t + const,   b_true = ε_v − ε_a,
 //
-//  the physical audio↔video slope in the SR line's own sign convention (`SenderReportLineFit
-//  .reference`), and INDEPENDENT of the offset the target applied: a different line moves D and
-//  offset together. When the SRs carry the true slope, the SR-derived offset walks at b_true and D
-//  is flat; when they do not (a sender or relay whose SRs deviate from the media clocks, §18.5), D
-//  drains or fills at the difference.
+//  the media's audio↔video line in the SR line's own sign convention, and INDEPENDENT of the offset
+//  the target applied: a different line moves D and offset together. Lip-sync walk ∝ D − D_start.
 //
-//  ── THE FALLBACK, AND WHY IT CANNOT FEED BACK ON ITSELF ─────────────────────────────────────────
+//  ── THE SLOPE CHECK (§18.7, log only) ──────────────────────────────────────────────────────────
 //
-//  The SR fit stays the primary source of offset and slope. Two slopes are measured per check, both
-//  Theil–Sen over the same 600 s of steering windows:
+//  Once a minute, over 600 s of steering windows: b_depth = Theil–Sen slope of u, b_SR = that of the
+//  SR-derived offset. |b_depth − b_SR| > 10 ppm (18 ms / 30 min) with the hold off: a WARNING.
 //
-//      b_depth = slope of (applied offset − D)      the media's slope, from the queue (above)
-//      b_SR    = slope of the SR-derived offset     what the SR line delivers, level walks included
+//  ── THE LEVEL HOLD (§18.20, replacing §18.7's rate-based fallback) ─────────────────────────────
 //
-//  Engaged, the target's offset is the SR offset PLUS a correction that walks at (b_depth − b_SR):
-//  the SR's own level and short-term changes are kept, and only its long-run slope is replaced.
+//  Per steering window k (10 s), windows the steering marks EXCLUDED (a starvation hold, its
+//  recovery, a splice or fallback) skipped entirely:
 //
-//  No feedback: the correction enters the APPLIED offset, and D follows the applied offset one for
-//  one (the loop tracks its target), so (applied − D) — hence b_depth — is unchanged by it; b_SR is
-//  read from the SR-derived offset, which excludes the correction by construction. Neither input to
-//  the decision moves when the decision acts. A loop lag τ only delays D by a constant for a ramp,
-//  which a slope does not see. Pinned by `testEngagedCorrectionLeavesTheDepthSlopeUnbiased`.
+//    D_ref   median depth over 60–120 s after the connect — the session start (§6.3's start window)
+//    û(x)    Theil–Sen line of u against video time over the trailing 300 s, at x
+//    E       = O_SR(x) − û(x) − D_ref: the queue level the SR line ALONE would give, less the start.
+//            O_SR excludes the correction and u does not depend on it: E has no feedback path.
 //
-//  ── THE NUMBERS ────────────────────────────────────────────────────────────────────────────────
+//    ENGAGE     |E| > 12 ms at every window for 180 s
+//    ENGAGED    the target offset is the queue's line, O*(x) = D_ref + û(x): D is held at D_ref, and
+//               the SR line — stairs and all — drops out of the target. The applied offset Ô reaches
+//               O* at ≤ 150 ppm (the slope clamp) from wherever it was, so the target never steps.
+//    RELEASE    |E| < 4 ms at every window for 600 s: Ô returns to the SR line at ≤ 150 ppm and the
+//               correction ends. NOTHING IS KEPT — no rate was integrated, so there is nothing to
+//               give back. A false engagement costs at most E while engaged and < 4 ms after.
 //
-//  * window 600 s, the fit's own slope window. First check once the points span ≥ 540 s; the first
-//    60 s after anchoring are skipped (startup realign, provisional first line). One check a minute.
-//  * estimator Theil–Sen: a rail event or a splice moves D by up to ~100 ms for tens of seconds
-//    (§13.4); the median of pairwise slopes ignores up to 29 % of the points.
-//  * bound 10 ppm: the fit's own slope SE bound (§15.1); 18 ms of lip-sync walk per 30 min.
-//    Beyond it (and not engaged): a WARNING.
-//  * ENGAGE: |b_depth − b_SR| > 10 ppm with b_depth's SE ≤ 5 ppm, at EVERY check for 10 min.
-//    SE ≤ 5 ppm puts a 10 ppm disagreement ≥ 2 SE out. The SE is the residual σ (MAD) over
-//    √n · sd(t), inflated by √((1+ρ₁)/(1−ρ₁)), ρ₁ the residuals' lag-1 autocorrelation — the
-//    window points are not independent.
-//  * DISENGAGE: |b_depth − b_SR| < 5 ppm (half the bound) at every check for 10 min. The
-//    correction accumulated so far is KEPT (frozen): dropping it would step the target back by the
-//    error it removed. A later SR catch-up shows as the opposite disagreement and re-engages to
-//    unwind it — symmetric by construction, and each transition needs 10 min of evidence, so no
-//    oscillation faster than that is possible.
-//  * while the catch-up runs, and for one window after it ends, the rate is held and no disengage
-//    decision is made: those windows span a change of the correction's rate, which a loop lag τ
-//    turns into a Δr·τ hump that a slope would misread (measured in test: 12.7 ppm at τ = 30 s).
-//  * the correction is anchored where the evidence starts (the first disagreeing check's window
-//    start), so the error accumulated before engaging is removed too; that back-correction is
-//    caught up at ≤ 150 ppm — the fit's slope clamp, the fastest slope the design admits — so the
-//    target never steps. 80 ms takes ~9 min.
+//  Feedback: û sees the resampler loop's lag τ (≈ 20–40 s) as a transient τ·dÔ/dx ≤ τ·150 ppm =
+//  4.5 ms at τ = 30 s; a robust line over W = 300 s passes a slope change at ≤ ≈1.5·τ/W = 0.15 of
+//  itself, so the loop gain is < 1 and it is stable whatever its phase (§18.20).
+//
+//  Line moves: a LiveClock position jump j (+ = picture forward) moves the audio queue by −j and
+//  leaves the applied offset alone, so u moves by +j. `noteLineJump` shifts D_ref by −j and the
+//  stored u by +j: E and the engaged target are unchanged, and the latency change is kept.
 //
 
 import Foundation
@@ -71,21 +58,35 @@ import Foundation
 public final class SenderReportSlopeCrossCheck: @unchecked Sendable {
 
     public struct Parameters: Sendable {
+        // The slope check (log only).
         public var window = 600.0
         public var minimumSpan = 540.0
         public var warmup = 60.0
         public var bound = 10e-6
         public var checkEvery = 60.0
         public var slopeSEBound = 5e-6
-        public var engageSustain = 600.0
-        public var disengageBound = 5e-6
-        public var disengageSustain = 600.0
+        // The level hold.
+        public var referenceStart = 60.0
+        public var referenceEnd = 120.0
+        public var levelWindow = 300.0
+        public var levelMinimumSpan = 240.0
+        public var engageLevel = 0.012
+        public var engageSustain = 180.0
+        public var releaseLevel = 0.004
+        public var releaseSustain = 600.0
         public var catchUpRate = 150e-6
-        /// false: log only (the pre-fallback behaviour).
+        /// false: log only (no correction ever applied).
         public var fallbackEnabled = true
+        /// Offline sweeps only (§18.9's method): engage at the first window at or after this session
+        /// time, whatever the evidence. Never set in the app.
+        public var forceEngageAt: Double?
         public init() {}
         public static let adopted = Parameters()
     }
+
+    /// The steering window's length: the slope reported for a catch-up in progress assumes the next
+    /// evaluation of the line comes within it.
+    static let windowSeconds = 10.0
 
     public struct Check: Sendable, Equatable {
         /// Theil–Sen slope of (applied offset − renderer depth): the physical A/V slope.
@@ -108,73 +109,207 @@ public final class SenderReportSlopeCrossCheck: @unchecked Sendable {
         public var slope = 0.0
     }
 
+    public enum Mode: String, Sendable { case off = "off", engaged = "ENGAGED", releasing = "RELEASING" }
+
     public let parameters: Parameters
     private let tag: String
     private let lock = UnfairLockBox()
+
+    // The slope check.
     private var points: [(t: Double, x: Double, y: Double, depth: Double, sr: Double)] = []
     private var lastCheckAt: Double?
     private var checks = 0, warnings = 0
     private var worst: Check?
     private var latestCheck: Check?
 
-    // Fallback state.
-    private var engaged = false
-    private var runStart: Double?                 // first check of the current sustained run
-    private var runAnchorX: Double?               // its window start, in video time
-    private var runSign: Bool?
+    // The level hold.
+    private var referenceDepths: [Double] = []
+    private var dRef: Double?
+    private var level: [(t: Double, x: Double, u: Double)] = []
+    private var line: (a: Double, b: Double)?          // û(x) = a + b·x
+    private var lastE: Double?
+    private var worstE = 0.0
+    private var mode = Mode.off
+    private var engageRun: Double?, releaseRun: Double?
     private var episodes = 0
     private var engagedSeconds = 0.0, engagedSince: Double?
     private var deviationLogged = false
-    // correction(x) = K + r·(x − xk) − remaining(x),  remaining = R0 caught up at catchUpRate from xe
-    private var k = 0.0, r = 0.0, xk = 0.0
-    private var r0 = 0.0, xe = 0.0
-    /// Until this time the fallback holds its rate and makes no disengage decision: the window still
-    /// spans a change in the correction's rate (the catch-up's start or end).
-    private var holdDecisionsUntil = -Double.infinity
+    /// Ô(x) − goal(x) = excess0 at excessX, shrinking toward 0 at `catchUpRate`.
+    private var excess0 = 0.0, excessX = 0.0
+    private var excludedWindows = 0, jumps = 0
 
     public init(tag: String, parameters: Parameters = .adopted) {
         self.tag = tag; self.parameters = parameters
     }
 
-    /// The correction to add to the SR line's offset (and slope) at video time x. Zero until the
-    /// fallback first engages.
-    public func correction(atVideoTime x: Double) -> Correction {
+    // MARK: - The correction
+
+    /// What to add to the SR line at video time x, given the SR line's own offset and slope there.
+    /// Zero unless the hold is engaged or releasing.
+    public func correction(atVideoTime x: Double, srOffset: Double, srSlope: Double) -> Correction {
         lock.lock(); defer { lock.unlock() }
-        return correctionLocked(x)
+        guard mode != .off, x.isFinite, srOffset.isFinite else { return Correction() }
+        let (o, s) = appliedLocked(x, srOffset: srOffset, srSlope: srSlope)
+        return Correction(offset: o - srOffset, slope: s - srSlope)
     }
 
-    private func correctionLocked(_ x: Double) -> Correction {
-        guard episodes > 0, x.isFinite else { return Correction() }
-        return Correction(offset: k + r * (x - xk) - remainingLocked(x), slope: engaged ? r : 0)
+    /// Ô(x) and its slope.
+    private func appliedLocked(_ x: Double, srOffset: Double, srSlope: Double) -> (Double, Double) {
+        let e = excessLocked(x)
+        // The excess's slope: the catch-up rate, but never more than clears it within one window —
+        // a new line re-anchors a µs-sized excess every window, which is not a 150 ppm ramp.
+        let eSlope = -(e >= 0 ? 1.0 : -1.0) * min(parameters.catchUpRate, abs(e) / Self.windowSeconds)
+        switch mode {
+        case .off: return (srOffset, srSlope)
+        case .releasing: return (srOffset + e, srSlope + eSlope)
+        case .engaged:
+            guard let l = line, let r = dRef else { return (srOffset + e, srSlope + eSlope) }
+            return (r + l.a + l.b * x + e, l.b + eSlope)
+        }
     }
 
-    /// Back-correction not yet caught up at x: r0 at xe, shrinking toward 0 at `catchUpRate`.
-    private func remainingLocked(_ x: Double) -> Double {
-        let caught = min(abs(r0), parameters.catchUpRate * max(0, x - xe))
-        return r0 - (r0 < 0 ? -caught : caught)
+    private func excessLocked(_ x: Double) -> Double {
+        let caught = parameters.catchUpRate * max(0, x - excessX)
+        return abs(excess0) <= caught ? 0 : excess0 - (excess0 > 0 ? caught : -caught)
     }
 
-    public var isEngaged: Bool { lock.lock(); defer { lock.unlock() }; return engaged }
-    /// Engaged and past the catch-up's hold: its checks now steer the rate and the disengage test.
-    public var isSettled: Bool {
+    /// Re-anchor the excess so Ô is continuous at x across a change of goal (a new line, a mode
+    /// change). `before` is Ô at x under the old goal. A change under `stepThrough` is taken as is:
+    /// each window's refit moves the goal by a fraction of a millisecond, which the loop absorbs in
+    /// its own noise, and slewing it would only make the reported slope ring.
+    private func reanchorLocked(_ x: Double, before: Double, srOffset: Double, srSlope: Double) {
+        excess0 = 0; excessX = x
+        let goal = appliedLocked(x, srOffset: srOffset, srSlope: srSlope).0
+        excess0 = abs(before - goal) <= Self.stepThrough ? 0 : before - goal
+    }
+
+    /// The largest target move taken without a catch-up (see `reanchorLocked`).
+    static let stepThrough = 0.001
+
+    public var currentMode: Mode { lock.lock(); defer { lock.unlock() }; return mode }
+    public var isEngaged: Bool { currentMode == .engaged }
+    /// E at the latest window: the queue level the SR line alone gives, less the session start.
+    public var levelError: Double? { lock.lock(); defer { lock.unlock() }; return lastE }
+    public var reference: Double? { lock.lock(); defer { lock.unlock() }; return dRef }
+
+    // MARK: - Line moves
+
+    /// A deliberate move of the target line by `jumped` seconds (+ = the picture moved forward): the
+    /// audio queue moves by −jumped and u by +jumped. The session-start reference and the stored
+    /// points move with it, so the hold neither reads it as SR error nor undoes the latency change.
+    public func noteLineJump(_ jumped: Double) {
+        guard jumped.isFinite, jumped != 0 else { return }
         lock.lock(); defer { lock.unlock() }
-        return engaged && (lastCheckAt ?? -.infinity) >= holdDecisionsUntil
+        jumps += 1
+        if dRef != nil { dRef! -= jumped } else { referenceDepths = referenceDepths.map { $0 - jumped } }
+        level = level.map { ($0.t, $0.x, $0.u + jumped) }
+        points = points.map { ($0.t, $0.x, $0.y + jumped, $0.depth - jumped, $0.sr) }
+        if let l = line { line = (l.a + jumped, l.b) }
     }
 
-    /// One steering window. `time` is seconds since the session's anchor on any steady clock and
-    /// `videoTime` the SR fit's latest video content time; `rendererDepth` the window's median queue
-    /// depth; `appliedOffset` what the target used (SR offset + correction), `srOffset` the SR line's
-    /// alone. Returns the lines to log (WARNING, ENGAGE, DISENGAGE, SR DEVIATION regardless of
-    /// `reportsInfo`).
+    // MARK: - Per window
+
+    /// One steering window. `time` is seconds since the session's anchor, `videoTime` the SR fit's
+    /// latest video content time; `rendererDepth` the window's median queue depth; `appliedOffset`
+    /// what the target used (SR offset + correction), `srOffset` the SR line's alone. `excluded`: the
+    /// steering saw a starvation hold, its recovery, a splice or a fallback in this window, so its
+    /// depth is not the SR line's doing and is not used. Returns the lines to log.
     public func note(time t: Double, videoTime x: Double, rendererDepth: Double?, appliedOffset: Double,
-                     srOffset: Double, appliedSlope: Double, reportsInfo: Bool) -> [String] {
+                     srOffset: Double, appliedSlope: Double, reportsInfo: Bool,
+                     excluded: Bool = false) -> [String] {
         guard let depth = rendererDepth, depth.isFinite, t.isFinite, x.isFinite, appliedOffset.isFinite,
               srOffset.isFinite, appliedSlope.isFinite else { return [] }
         let p = parameters
         lock.lock()
         defer { lock.unlock() }
         guard t >= p.warmup else { return [] }
-        points.append((t, x, appliedOffset - depth, depth, srOffset))
+        if excluded { excludedWindows += 1; return [] }
+        // Only Ô's offset is used per window, never its slope: the SR slope does not enter.
+        var lines = levelLocked(t: t, x: x, depth: depth, applied: appliedOffset, sr: srOffset, srSlope: 0)
+        lines += slopeCheckLocked(t: t, x: x, depth: depth, applied: appliedOffset, sr: srOffset,
+                                  appliedSlope: appliedSlope, reportsInfo: reportsInfo)
+        return lines
+    }
+
+    private func levelLocked(t: Double, x: Double, depth: Double, applied: Double, sr: Double,
+                             srSlope: Double) -> [String] {
+        let p = parameters
+        var lines: [String] = []
+        // The session-start reference.
+        if dRef == nil {
+            if t >= p.referenceStart, t <= p.referenceEnd { referenceDepths.append(depth) }
+            if t > p.referenceEnd, !referenceDepths.isEmpty {
+                dRef = SenderReportLineFit.median(referenceDepths)
+            }
+        }
+        // The media line, robustly.
+        level.append((t, x, applied - depth))
+        var drop = 0
+        while drop < level.count - 1, level[drop].t < t - p.levelWindow { drop += 1 }
+        if drop > 0 { level.removeFirst(drop) }
+        guard let ref = dRef, t - level[0].t >= p.levelMinimumSpan else { return lines }
+        let before = appliedLocked(x, srOffset: sr, srSlope: srSlope).0
+        let xs = level.map(\.x), us = level.map(\.u)
+        let b = Self.theilSen(xs, us)
+        let a = SenderReportLineFit.median((0..<xs.count).map { us[$0] - b * xs[$0] })
+        line = (a, b)
+        let e = sr - (a + b * x) - ref
+        lastE = e
+        if abs(e) > abs(worstE) { worstE = e }
+        // A new line moves the engaged goal: keep Ô continuous.
+        if mode == .engaged { reanchorLocked(x, before: before, srOffset: sr, srSlope: srSlope) }
+        guard p.fallbackEnabled else { return lines }
+
+        switch mode {
+        case .off, .releasing:
+            if abs(e) > p.engageLevel { engageRun = engageRun ?? t } else { engageRun = nil }
+            let forced = p.forceEngageAt.map { t >= $0 && episodes == 0 } ?? false
+            if forced || (engageRun.map { t - $0 >= p.engageSustain - 1e-6 } ?? false) {
+                let now = appliedLocked(x, srOffset: sr, srSlope: srSlope).0
+                mode = .engaged; episodes += 1; engagedSince = t; engageRun = nil; releaseRun = nil
+                reanchorLocked(x, before: now, srOffset: sr, srSlope: srSlope)
+                lines.append(String(format: "%@ ⚠️ LEVEL HOLD ENGAGED at video t=%.0f s%@ — the SR line "
+                    + "alone puts the renderer queue %+.1f ms from its session-start level (%.1f ms) "
+                    + "for %.0f s (> %.0f ms). The target offset now comes from the queue's own line "
+                    + "(%+.2f ppm), holding it at the session start; the %+.1f ms is caught up at ≤ "
+                    + "%.0f ppm. The SR line is not used while engaged", tag, x,
+                    forced ? " (FORCED, offline sweep)" : "", e * 1e3, ref * 1e3, p.engageSustain,
+                    p.engageLevel * 1e3, b * 1e6, -excess0 * 1e3, p.catchUpRate * 1e6))
+                if !deviationLogged {
+                    deviationLogged = true
+                    lines.append(String(format: "%@ ⚠️ SR DEVIATION (once per session): this "
+                        + "session's Sender Reports do not hold the media's audio↔video line — the "
+                        + "queue it produces left its session-start level by %+.1f ms. RFC 3550 "
+                        + "§6.4.1 SRs relate each stream's RTP clock to one wallclock; these do not. "
+                        + "Holding the queue's level", tag, e * 1e3))
+                }
+            } else if mode == .releasing, excessLocked(x) == 0 {
+                mode = .off
+                lines.append(String(format: "%@ LEVEL HOLD OFF at video t=%.0f s — back on the SR line "
+                    + "exactly, correction 0", tag, x))
+            }
+        case .engaged:
+            if abs(e) < p.releaseLevel { releaseRun = releaseRun ?? t } else { releaseRun = nil }
+            if let s = releaseRun, t - s >= p.releaseSustain - 1e-6 {
+                let now = appliedLocked(x, srOffset: sr, srSlope: srSlope).0
+                mode = .releasing; releaseRun = nil
+                if let since = engagedSince { engagedSeconds += t - since }
+                engagedSince = nil
+                reanchorLocked(x, before: now, srOffset: sr, srSlope: srSlope)
+                lines.append(String(format: "%@ LEVEL HOLD RELEASED at video t=%.0f s — the SR line "
+                    + "alone is within %.0f ms of the session-start level (%+.1f ms) for %.0f s; "
+                    + "returning to it at ≤ %.0f ppm (%+.1f ms), nothing kept", tag, x,
+                    p.releaseLevel * 1e3, e * 1e3, p.releaseSustain, p.catchUpRate * 1e6,
+                    excess0 * 1e3))
+            }
+        }
+        return lines
+    }
+
+    private func slopeCheckLocked(t: Double, x: Double, depth: Double, applied: Double, sr: Double,
+                                  appliedSlope: Double, reportsInfo: Bool) -> [String] {
+        let p = parameters
+        points.append((t, x, applied - depth, depth, sr))
         var drop = 0
         while drop < points.count - 1, points[drop].t < t - p.window { drop += 1 }
         if drop > 0 { points.removeFirst(drop) }
@@ -192,95 +327,26 @@ public final class SenderReportSlopeCrossCheck: @unchecked Sendable {
         checks += 1
         latestCheck = check
         if abs(check.disagreement) > abs(worst?.disagreement ?? 0) { worst = check }
-        var lines: [String] = []
         let dis = check.disagreement
         let describe = String(format: "SR slope %+.2f ppm vs renderer-depth slope %+.2f ppm (SE %.2f) "
             + "over the last %.0f s (%d windows): disagreement %+.2f ppm", check.srSlope * 1e6,
             check.implied * 1e6, check.impliedSE * 1e6, check.span, check.points, dis * 1e6)
-
-        // ── The fallback's state machine ────────────────────────────────────────────────────────
-        if p.fallbackEnabled {
-            if !engaged {
-                // A run is broken by a check that does not disagree, or disagrees the other way.
-                if abs(dis) > p.bound, check.impliedSE <= p.slopeSEBound,
-                   runSign == nil || runSign == (dis > 0) {
-                    if runStart == nil { runStart = t; runAnchorX = points[0].x; runSign = dis > 0 }
-                } else {
-                    runStart = nil; runAnchorX = nil; runSign = nil
-                }
-                if let s = runStart, t - s >= p.engageSustain - 1e-6, let anchor = runAnchorX {
-                    // Engage: the correction walks at the disagreement from now, and the error
-                    // accumulated since the evidence began is caught up at ≤ catchUpRate.
-                    // Target moves by `back`; the part not yet caught up grows by the same, so the
-                    // applied correction is continuous at x. An earlier episode's unfinished
-                    // catch-up carries over.
-                    let back = dis * (x - anchor)
-                    let remaining = remainingLocked(x) + back
-                    k = k + r * (x - xk) + back; r = dis; xk = x
-                    r0 = remaining; xe = x
-                    engaged = true; episodes += 1; engagedSince = t
-                    holdDecisionsUntil = t + abs(remaining) / p.catchUpRate + p.window
-                    runStart = nil; runAnchorX = nil; runSign = nil
-                    lines.append(String(format: "%@ ⚠️ DEPTH-SLOPE FALLBACK ENGAGED at video t=%.0f s — %@, "
-                        + "sustained %.0f s. The slope term now comes from the renderer depth: the "
-                        + "target is the SR offset plus a correction walking at %+.2f ppm; the %+.1f ms "
-                        + "accumulated since video t=%.0f s is caught up at ≤ %.0f ppm. The offset's "
-                        + "level stays from the SRs", tag, x, describe, p.engageSustain, dis * 1e6,
-                        back * 1e3, anchor, p.catchUpRate * 1e6))
-                    if !deviationLogged {
-                        deviationLogged = true
-                        lines.append(String(format: "%@ ⚠️ SR DEVIATION (once per session): this "
-                            + "session's Sender Reports do not carry the media's audio↔video slope — "
-                            + "SR %+.2f ppm against %+.2f ppm measured on the audio queue. RFC 3550 "
-                            + "§6.4.1 SRs relate each stream's RTP clock to one wallclock; these do "
-                            + "not. Falling back to the queue's slope, SR offset kept", tag,
-                            check.srSlope * 1e6, check.implied * 1e6))
-                    }
-                }
-            } else {
-                // Engaged: follow the disagreement while it is measured well; watch for agreement.
-                // Not while the window spans the catch-up: a loop lag τ turns a change of the
-                // correction's rate Δr into a Δr·τ hump in (applied − D), which a slope over that
-                // window would read as a few ppm (§18.7) — a transient, but the rate integrates.
-                let settled = t >= holdDecisionsUntil
-                if settled, check.impliedSE <= p.slopeSEBound {
-                    k += r * (x - xk); xk = x; r = dis
-                }
-                if !settled {
-                    runStart = nil
-                } else if abs(dis) < p.disengageBound {
-                    if runStart == nil { runStart = t }
-                } else {
-                    runStart = nil
-                }
-                if let s = runStart, t - s >= p.disengageSustain - 1e-6 {
-                    k += r * (x - xk); xk = x; r = 0
-                    engaged = false; runStart = nil
-                    if let e = engagedSince { engagedSeconds += t - e }
-                    engagedSince = nil
-                    lines.append(String(format: "%@ DEPTH-SLOPE FALLBACK DISENGAGED at video t=%.0f s — "
-                        + "%@, agreeing within %.0f ppm for %.0f s. The SR slope is used again; the "
-                        + "correction accumulated so far (%+.1f ms) is kept, frozen", tag, x, describe,
-                        p.disengageBound * 1e6, p.disengageSustain, correctionLocked(x).offset * 1e3))
-                }
-            }
-        }
-
-        if !engaged, abs(dis) > p.bound {
+        let levelText = lastE.map { String(format: "queue level %+.1f ms from the session start on "
+            + "the SR line alone", $0 * 1e3) } ?? "no session-start level yet"
+        if mode == .off, abs(dis) > p.bound {
             warnings += 1
-            lines.append(String(format: "%@ ⚠️ WARNING SLOPE CROSS-CHECK — %@ > %.0f ppm (the fit "
+            return [String(format: "%@ ⚠️ WARNING SLOPE CROSS-CHECK — %@ > %.0f ppm (the fit "
                 + "applies %+.2f ppm). The renderer queue is moving %+.2f ppm; at this disagreement "
                 + "lip-sync walks %.1f ms per 30 min. The SRs are not carrying this session's "
-                + "audio↔video slope%@", tag, describe, p.bound * 1e6, check.applied * 1e6,
-                check.depthSlope * 1e6, abs(dis) * 1800 * 1e3,
-                p.fallbackEnabled ? String(format: " (fallback engages after %.0f s of this with SE ≤ "
-                    + "%.0f ppm)", p.engageSustain, p.slopeSEBound * 1e6) : " (log only)"))
+                + "audio↔video slope · %@%@", tag, describe, p.bound * 1e6, check.applied * 1e6,
+                check.depthSlope * 1e6, abs(dis) * 1800 * 1e3, levelText,
+                p.fallbackEnabled ? String(format: " (the level hold engages beyond ±%.0f ms for %.0f s)",
+                                           p.engageLevel * 1e3, p.engageSustain) : " (log only)")]
         } else if reportsInfo {
-            lines.append(String(format: "%@ slope cross-check — %@ · fallback %@ (correction %+.1f ms, "
-                + "%+.2f ppm) · queue %+.2f ppm", tag, describe, engaged ? "ENGAGED" : "off",
-                correctionLocked(x).offset * 1e3, (engaged ? r : 0) * 1e6, check.depthSlope * 1e6))
+            return [String(format: "%@ slope cross-check — %@ · %@ · level hold %@", tag, describe,
+                           levelText, mode.rawValue)]
         }
-        return lines
+        return []
     }
 
     public var latest: Check? { lock.lock(); defer { lock.unlock() }; return latestCheck }
@@ -290,19 +356,24 @@ public final class SenderReportSlopeCrossCheck: @unchecked Sendable {
     /// For the fit's session summary.
     public func summary(atVideoTime x: Double, time t: Double?) -> String {
         lock.lock(); defer { lock.unlock() }
-        guard let w = worst, let l = latestCheck else {
-            return "slope cross-check: no check (the session never spanned "
-                + "\(Int(parameters.minimumSpan)) s of renderer depth) · depth-slope fallback never engaged"
+        let slope: String
+        if let w = worst, let l = latestCheck {
+            slope = String(format: "slope cross-check: %d checks, %d WARNING(s) (bound %.0f ppm) · last: "
+                + "SR %+.2f vs renderer-depth %+.2f ppm · worst disagreement %+.2f ppm", checks, warnings,
+                parameters.bound * 1e6, l.srSlope * 1e6, l.implied * 1e6, w.disagreement * 1e6)
+        } else {
+            slope = "slope cross-check: no check (the session never spanned "
+                + "\(Int(parameters.minimumSpan)) s of renderer depth)"
         }
         let engagedTotal = engagedSeconds + (engagedSince.map { max(0, (t ?? $0) - $0) } ?? 0)
-        return String(format: "slope cross-check: %d checks, %d WARNING(s) (bound %.0f ppm) · last: "
-            + "SR %+.2f vs renderer-depth %+.2f ppm · worst disagreement %+.2f ppm · depth-slope "
-            + "fallback: %@", checks, warnings, parameters.bound * 1e6, l.srSlope * 1e6,
-            l.implied * 1e6, w.disagreement * 1e6,
+        let hold = String(format: "level hold: session-start level %@, SR-line level error last %@ / "
+            + "worst %+.1f ms, %@ · %d line jump(s), %d window(s) excluded", dRef.map {
+                String(format: "%.1f ms", $0 * 1e3) } ?? "never set",
+            lastE.map { String(format: "%+.1f ms", $0 * 1e3) } ?? "—", worstE * 1e3,
             episodes == 0 ? "never engaged"
-                : String(format: "%d episode(s), engaged %.0f s, %@ at end, correction %+.1f ms "
-                    + "(%+.2f ppm)", episodes, engagedTotal, engaged ? "ENGAGED" : "disengaged",
-                    correctionLocked(x).offset * 1e3, (engaged ? r : 0) * 1e6))
+                : String(format: "%d episode(s), engaged %.0f s, %@ at end", episodes, engagedTotal,
+                         mode.rawValue), jumps, excludedWindows)
+        return slope + " · " + hold
     }
 
     /// The median of all pairwise slopes. n ≤ 60 here, so the O(n²) is 1770 slopes a minute.

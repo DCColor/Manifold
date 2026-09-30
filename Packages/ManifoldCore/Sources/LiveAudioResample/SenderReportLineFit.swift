@@ -414,9 +414,9 @@ public final class SenderReportLineFit: @unchecked Sendable {
             if case .holding = state { return Evaluation(offset: 0, slope: 0, state: state) }
             return nil
         }
-        // The depth-slope fallback's correction (zero unless it ever engaged): SR offset kept, the
-        // SR's long-run slope replaced by the renderer queue's (SenderReportSlopeCrossCheck).
-        let c = crossCheck.correction(atVideoTime: x)
+        // The level hold's correction (zero unless engaged or releasing): engaged, the target is the
+        // renderer queue's own line, holding its session-start level (SenderReportSlopeCrossCheck).
+        let c = crossCheck.correction(atVideoTime: x, srOffset: l.offset(at: x), srSlope: l.slope)
         lastCorrection = c.offset
         return Evaluation(offset: l.offset(at: x) + c.offset, slope: l.slope + c.slope, state: state)
     }
@@ -473,8 +473,10 @@ public final class SenderReportLineFit: @unchecked Sendable {
     /// Everything to log after one steering window: the `[WHEP-SRFIT] window` line (when windows
     /// are reported) and the slope cross-check (its WARNING always). `time` is the steering's
     /// session clock, `rendererDepth` its window median; offset and slope are what the target used.
+    /// `excluded`: the steering saw a starvation hold, its recovery, a splice or a fallback in the
+    /// window; the level hold does not read its depth.
     public func windowLines(time: Double, rendererDepth: Double?, appliedOffset: Double,
-                            appliedSlope: Double) -> [String] {
+                            appliedSlope: Double, excluded: Bool = false) -> [String] {
         var lines: [String] = []
         if let w = windowLine() { lines.append(w) }
         lock.lock()
@@ -483,9 +485,14 @@ public final class SenderReportLineFit: @unchecked Sendable {
         guard let x else { return lines }
         lines += crossCheck.note(time: time, videoTime: x, rendererDepth: rendererDepth,
                                  appliedOffset: appliedOffset, srOffset: appliedOffset - correction,
-                                 appliedSlope: appliedSlope, reportsInfo: reportsWindows)
+                                 appliedSlope: appliedSlope, reportsInfo: reportsWindows,
+                                 excluded: excluded)
         return lines
     }
+
+    /// A deliberate move of the target line (a LiveClock position jump; + = the picture forward).
+    /// The level hold re-references so it neither reads it as SR error nor undoes it.
+    public func noteLineJump(_ jumped: Double) { crossCheck.noteLineJump(jumped) }
 
     /// Session summary, on close.
     public func finish() {

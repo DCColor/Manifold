@@ -408,6 +408,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var windowCoarse = 0
     private var windowSplices = 0
     private var windowWrites = 0
+    /// Anything in this window that moves the queue depth by the steering's own action (see
+    /// `WindowFacts.excluded`).
+    private var windowExcluded = false
     private var windowStart = 0.0
 
     /// - Parameters:
@@ -501,7 +504,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         refMedia = media; refHost = host; refRate = rate.isFinite && rate > 0 ? rate : 1.0
         anchored = true
         if sessionStart == 0 { sessionStart = host; windowStart = host }
-        if first { firstAnchors = 1 } else { reanchors += 1 }
+        if first { firstAnchors = 1 } else { reanchors += 1; windowExcluded = true }
         windowWrites += 1
         restartAfterWriteLocked(host: host)
         lock.unlock()
@@ -592,6 +595,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
 
         lock.lock()
         if !anchored { lock.unlock(); return read }
+        // A held timebase or a debt still owed: this window's depth is the recovery's (§18.20).
+        if held != nil || recoveryOffset > 0 { windowExcluded = true }
         // ── The queue's far end, and its low-water mark just before this enqueue (§18.16) ──
         if held == nil, let f = frontier, timebase.isFinite {
             lowWater = min(lowWater, f - timebase); sessionLowWater = min(sessionLowWater, f - timebase)
@@ -705,7 +710,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             // The write puts the content heard on the line: nothing is owed, the loop restarts.
             let since = recoveryStartHost.map { t1 - $0 } ?? .nan, tag = self.tag
             recoveryOffset = 0; recoveryStartHost = nil; recoveryPeak = 0
-            catchUpWrites += 1; windowWrites += 1
+            catchUpWrites += 1; windowWrites += 1; windowExcluded = true
             residualWatchUntil = t1 + Self.residualWatchSeconds
             restartAfterWriteLocked(host: t1)
             let writes = writesLocked(), q = (enqueuedFrontier ?? .nan) - timebase
@@ -825,7 +830,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         let paused = t - h.host
         heldSeconds += paused
         held = nil
-        resumes += 1; windowWrites += 1
+        resumes += 1; windowWrites += 1; windowExcluded = true
         lastResumeHost = t
         var d = max(0, targetFull - heard)
         var folded = 0.0
@@ -1218,6 +1223,13 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     public struct WindowFacts: Sendable {
         public let elapsed: Double
         public let rendererDepthMedian: Double?
+        /// The window saw a starvation hold, a recovery debt, a catch-up write, a recovery or
+        /// residual splice, or a coarse splice or fallback: its depth is the steering's own doing, not
+        /// the target line's, and the WHEP level hold (§18.20) does not read it.
+        public var excluded = false
+        public init(elapsed: Double, rendererDepthMedian: Double?, excluded: Bool = false) {
+            self.elapsed = elapsed; self.rendererDepthMedian = rendererDepthMedian; self.excluded = excluded
+        }
     }
 
     private func windowIfDueLocked(now: Double) -> (() -> (line: String?, facts: WindowFacts))? {
@@ -1243,7 +1255,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                     slew: slewMax, i: state.integral, ef: state.filteredError,
                     coarse: windowCoarse, splices: windowSplices, writes: windowWrites,
                     total: totalsLocked(), elapsed: (now ?? lastEvaluationHost) - sessionStart,
-                    lowWater: lowWater, holds: windowHolds, d: recoveryOffset)
+                    lowWater: lowWater, holds: windowHolds, d: recoveryOffset,
+                    excluded: windowExcluded || windowHolds > 0 || windowSplices > 0 || windowCoarse > 0
+                        || held != nil || recoveryOffset > 0)
         resetWindowLocked(now: now)
         let tag = self.tag, mode = self.mode
         return {
@@ -1257,7 +1271,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             sortedDepth.sort()
             let facts = WindowFacts(elapsed: snap.elapsed,
                                     rendererDepthMedian: sortedDepth.isEmpty
-                                        ? nil : sortedDepth[sortedDepth.count / 2])
+                                        ? nil : sortedDepth[sortedDepth.count / 2],
+                                    excluded: snap.excluded)
             guard prints else { return (nil, facts) }
             let depthText = sortedDepth.isEmpty
                 ? "—"
@@ -1294,7 +1309,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private func resetWindowLocked(now: Double?) {
         count = 0; depthCount = 0; overflowed = 0; discarded = 0; settling = 0; saturatedSteps = 0
         rhoMin = .infinity; rhoMax = -.infinity; slewMax = 0
-        windowCoarse = 0; windowSplices = 0; windowWrites = 0
+        windowCoarse = 0; windowSplices = 0; windowWrites = 0; windowExcluded = false
         lowWater = .infinity; windowHolds = 0
         if let now { windowStart = now }
     }

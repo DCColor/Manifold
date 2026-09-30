@@ -27,7 +27,7 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
         var t = 10.0
         while t <= seconds {
             let sr = -0.020 + appliedSlope * t + 0.001 * rng.gaussian()
-            let c = check.correction(atVideoTime: t)
+            let c = check.correction(atVideoTime: t, srOffset: sr, srSlope: appliedSlope)
             let offset = sr + c.offset
             let depth = 0.420 + offset + 0.020 - trueSlope * t + depthNoise * rng.gaussian()
                 + extraDepth(t)
@@ -82,7 +82,8 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
 
     /// No check before the window spans 540 s, INFO only when reported, WARNING always.
     func testCadenceAndReporting() {
-        let early = Check(tag: "[T]")
+        // The slope check's cadence, log only: the level hold would engage inside 590 s here.
+        let early = Check(tag: "[T]", parameters: Self.logOnly)
         XCTAssertTrue(run(early, seconds: 590, trueSlope: 66e-6, appliedSlope: 0).isEmpty)
         XCTAssertNil(early.latest)
         XCTAssertTrue(early.summary(atVideoTime: 0, time: nil).contains("no check"))
@@ -115,18 +116,22 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
         XCTAssertEqual(fit.crossCheck.latest!.implied, 60e-6, accuracy: 0.1e-6)
     }
 
-    // MARK: - The depth-slope fallback
+    // MARK: - The level hold (§18.20)
 
     /// A whole WHEP session through the real fit, closed loop: SR pairs `delta(x)` at 1/s, the
     /// media's true line `media(t)` (offset − depth), the queue following the APPLIED offset through
-    /// a first-order loop lag `lag` s. Returns the log lines and the queue depth per window.
+    /// a first-order loop lag `lag` s, plus `extraDepth(t)` (events the line does not cause). Returns
+    /// the log lines and the queue depth per window.
     func session(seconds: Double, delta: @escaping (Double) -> Double, media: (Double) -> Double,
                  depthNoise: Double = 0.001, lag: Double = 0, seed: UInt64 = 3,
+                 parameters: SenderReportSlopeCrossCheck.Parameters = .adopted,
+                 extraDepth: (Double) -> Double = { _ in 0 }, excluded: (Double) -> Bool = { _ in false },
                  each: ((Double, SenderReportLineFit) -> Void)? = nil)
         -> (lines: [String], depth: [(t: Double, d: Double)], fit: SenderReportLineFit) {
         let sink = LogSink()
         let fit = SenderReportLineFit.make(timeline: .rtpSenderReports, tag: "[TEST-SRFIT]",
-                                           reportsWindows: false, log: { sink.append($0) })!
+                                           reportsWindows: false, crossCheckParameters: parameters,
+                                           log: { sink.append($0) })!
         var rng = TestRNG(state: seed)
         var depth: [(Double, Double)] = []
         var lagged: Double?
@@ -136,10 +141,10 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
             if Int(t) % 10 == 0, let e = fit.evaluate(atVideoTime: t) {
                 let a = lag > 0 ? 1 - exp(-10 / lag) : 1
                 lagged = lagged.map { $0 + a * (e.offset - $0) } ?? e.offset
-                let d = 0.420 + lagged! - media(t) + depthNoise * rng.gaussian()
+                let d = 0.420 + lagged! - media(t) + depthNoise * rng.gaussian() + extraDepth(t)
                 depth.append((t, d))
                 fit.windowLines(time: t, rendererDepth: d, appliedOffset: e.offset,
-                                appliedSlope: e.slope).forEach(sink.append)
+                                appliedSlope: e.slope, excluded: excluded(t)).forEach(sink.append)
                 each?(t, fit)
             }
             t += 1
@@ -148,54 +153,61 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
     }
 
     func count(_ lines: [String], _ s: String) -> Int { lines.filter { $0.contains(s) }.count }
+    func level(_ r: (lines: [String], depth: [(t: Double, d: Double)], fit: SenderReportLineFit),
+               _ a: Double, _ b: Double) -> Double {
+        let v = r.depth.filter { $0.t >= a && $0.t <= b }.map(\.d).sorted()
+        return v[v.count / 2]
+    }
+    func noStep(_ r: (lines: [String], depth: [(t: Double, d: Double)], fit: SenderReportLineFit),
+                _ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        for i in 1..<r.depth.count {
+            XCTAssertLessThan(abs(r.depth[i].d - r.depth[i - 1].d), 0.006,
+                              "\(label) at \(r.depth[i].t)", file: file, line: line)
+        }
+    }
 
-    /// §18.5's A/B sessions: SRs flat to 7 µs, the media +65 ppm. Engages once, after the 10 min of
-    /// sustained evidence; the deviation is logged once; the queue then flattens and the error the
-    /// SRs let accumulate is caught up — within 2 ms of the start by 1 h.
-    func testEngagesOnFlatSRsWithDriftingMedia() {
+    /// §18.5's A/B sessions: SRs flat to 7 µs, the media +65 ppm. The SR line alone drains the queue
+    /// at 65 ppm; the hold engages once (|E| > 12 ms for 180 s), logs the deviation once, catches up
+    /// at ≤ 150 ppm with no target step, and holds the queue at its session-start level.
+    func testHoldsTheLevelOnFlatSRs() {
         var rng = TestRNG(state: 71)
         let r = session(seconds: 3600, delta: { _ in -0.020 + 7e-6 * rng.gaussian() },
                         media: { 65e-6 * $0 })
-        XCTAssertEqual(count(r.lines, "FALLBACK ENGAGED"), 1)
-        XCTAssertEqual(count(r.lines, "DISENGAGED"), 0)
+        XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 1)
+        XCTAssertEqual(count(r.lines, "RELEASED"), 0)
         XCTAssertEqual(count(r.lines, "SR DEVIATION"), 1)
-        let at = r.lines.first { $0.contains("FALLBACK ENGAGED") }!
-        XCTAssertTrue(at.contains("video t=1200 s") || at.contains("video t=1190 s"), at)
         XCTAssertTrue(r.fit.crossCheck.isEngaged)
-        XCTAssertEqual(r.fit.evaluate(atVideoTime: 3600)!.slope, 65e-6, accuracy: 2e-6)
-        // Lip-sync error ∝ depth change: from the first minutes to the last, back within 5 ms (a
-        // third of §5.3's ±15 ms; the residual is the integrated noise of the measured rate).
-        let start = r.depth.filter { $0.t >= 60 && $0.t <= 120 }.map(\.d).reduce(0, +) / 7
-        let end = r.depth.filter { $0.t >= 3540 }.map(\.d).reduce(0, +) / 7
-        XCTAssertEqual(end - start, 0, accuracy: 0.005)
-        // Never a target step: consecutive windows differ by the slope plus noise, never ~ms jumps.
-        for i in 1..<r.depth.count {
-            XCTAssertLessThan(abs(r.depth[i].d - r.depth[i - 1].d), 0.006, "at \(r.depth[i].t)")
-        }
+        // The slope is the 300 s line's, refitted every window: it only extrapolates the level for
+        // ≤ 10 s, so 10 ppm is 0.1 ms. The level is what is held (below).
+        XCTAssertEqual(r.fit.evaluate(atVideoTime: 3600)!.slope, 65e-6, accuracy: 10e-6)
+        let start = level(r, 60, 120)
+        // Engaged by ~8 min; the worst excursion is the level at engagement (≤ 12 ms + 180 s of
+        // drain); back within 2 ms of the start from 20 min on, to the end.
+        let worst = r.depth.filter { $0.t >= 120 }.map { abs($0.d - start) }.max()!
+        XCTAssertLessThan(worst, 0.030)
+        for p in r.depth where p.t >= 1200 { XCTAssertEqual(p.d - start, 0, accuracy: 0.004, "at \(p.t)") }
+        XCTAssertEqual(level(r, 3500, 3600) - start, 0, accuracy: 0.002)
+        noStep(r, "flat")
     }
 
-    /// No feedback: while engaged, the depth-slope measurement stays on the media's true slope —
-    /// with and without a loop lag between the applied offset and the queue.
-    func testEngagedCorrectionLeavesTheDepthSlopeUnbiased() {
+    /// No feedback (§18.20's small-gain bound): with the queue following the applied offset through
+    /// a loop lag of 0 / 10 / 30 s, the held level stays within 3 ms of the start and does not ring.
+    func testTheLoopLagDoesNotDestabiliseTheHold() {
         for lag in [0.0, 10.0, 30.0] {
-            var worst = 0.0
             var rng = TestRNG(state: 72)
             let r = session(seconds: 3600, delta: { _ in -0.020 + 7e-6 * rng.gaussian() },
-                            media: { 65e-6 * $0 }, lag: lag, each: { t, fit in
-                // The checks that steer: engaged and past the catch-up's hold. Unbiased means within
-                // the measurement's own noise: 3 SE.
-                guard fit.crossCheck.isSettled, let c = fit.crossCheck.latest else { return }
-                worst = max(worst, abs(c.implied - 65e-6) / c.impliedSE)
-            })
-            XCTAssertTrue(r.fit.crossCheck.isEngaged, "lag \(lag)")
-            XCTAssertLessThan(worst, 3, "lag \(lag) s: implied slope off by \(worst) SE")
-            XCTAssertEqual(count(r.lines, "FALLBACK ENGAGED"), 1, "lag \(lag)")
+                            media: { 65e-6 * $0 }, lag: lag)
+            XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 1, "lag \(lag)")
+            let start = level(r, 60, 120)
+            let late = r.depth.filter { $0.t >= 1500 }.map { $0.d - start }
+            XCTAssertLessThan(late.map(abs).max()!, 0.003 + 0.003, "lag \(lag): held level")
+            XCTAssertEqual(late.reduce(0, +) / Double(late.count), 0, accuracy: 0.0015, "lag \(lag): mean")
         }
     }
 
-    /// Stays disengaged whenever the SRs carry the media's slope: Cloudflare-like noise, a
-    /// staircase, and a clean line.
-    func testStaysDisengagedWhenTheSRsCarryTheSlope() {
+    /// Never engages when the SR line holds the level: Cloudflare-like noise, a staircase that
+    /// carries the media's slope, and a clean line — 1 h each, correction exactly 0.
+    func testStaysOffWhenTheSRsHoldTheLevel() {
         var n = TestRNG(state: 81)
         var wander = 0.0
         let a = exp(-1.0 / 60)
@@ -211,41 +223,87 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
         ]
         for (label, delta, slope) in shapes {
             let r = session(seconds: 3600, delta: delta, media: { slope * $0 })
-            XCTAssertEqual(count(r.lines, "FALLBACK ENGAGED"), 0, label)
-            XCTAssertEqual(r.fit.crossCheck.correction(atVideoTime: 3600).offset, 0, label)
+            XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 0, label)
+            XCTAssertEqual(r.fit.crossCheck.currentMode, .off, label)
+            XCTAssertLessThan(abs(r.fit.crossCheck.levelError ?? 1), 0.008, label)
         }
     }
 
-    /// Hysteresis: engaged on flat SRs; when the SRs begin to carry the slope (from 2400 s) it
-    /// disengages once, 10 min after they agree, keeping its correction — no step, no re-engage.
-    func testDisengagesWithHysteresisAndKeepsItsCorrection() {
+    /// The lagging staircase that unwinds by itself: SRs flat, so the hold engages; at 2400 s they
+    /// catch up in one stair onto the media's line THROUGH THE SESSION START (the level they gave at
+    /// 60–120 s). E returns inside 4 ms, the hold releases 600 s later and returns to the SR line at
+    /// ≤ 150 ppm — nothing kept, no step, and the queue stays on the start.
+    func testALaggingStaircaseUnwindsByItself() {
         var rng = TestRNG(state: 91)
-        var correctionAt: [Double: Double] = [:]
         let r = session(seconds: 5400, delta: { x in
-            -0.020 + 65e-6 * max(0, x - 2400) + 7e-6 * rng.gaussian()
-        }, media: { 65e-6 * $0 }, each: { t, fit in
-            correctionAt[t] = fit.crossCheck.correction(atVideoTime: t).offset
-        })
-        XCTAssertEqual(count(r.lines, "FALLBACK ENGAGED"), 1)
-        XCTAssertEqual(count(r.lines, "DISENGAGED"), 1)
-        XCTAssertFalse(r.fit.crossCheck.isEngaged)
-        let off = r.lines.first { $0.contains("DISENGAGED") }!
-        XCTAssertTrue(off.contains("kept, frozen"), off)
-        // Frozen after disengaging: constant to the end.
-        XCTAssertEqual(correctionAt[5400]!, correctionAt[5000]!, accuracy: 1e-9)
-        for i in 1..<r.depth.count {
-            XCTAssertLessThan(abs(r.depth[i].d - r.depth[i - 1].d), 0.006, "at \(r.depth[i].t)")
-        }
+            -0.020 + (x < 2400 ? 0 : 65e-6 * (x - 90)) + 7e-6 * rng.gaussian()
+        }, media: { 65e-6 * $0 })
+        XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 1)
+        XCTAssertEqual(count(r.lines, "RELEASED"), 1)
+        XCTAssertEqual(count(r.lines, "LEVEL HOLD OFF"), 1)
+        XCTAssertEqual(r.fit.crossCheck.currentMode, .off)
+        let e = r.fit.evaluate(atVideoTime: 5400)!
+        XCTAssertEqual(r.fit.crossCheck.correction(atVideoTime: 5400, srOffset: e.offset, srSlope: e.slope),
+                       .init(), "nothing kept")
+        let start = level(r, 60, 120)
+        for p in r.depth where p.t >= 1200 { XCTAssertEqual(p.d - start, 0, accuracy: 0.006, "at \(p.t)") }
+        noStep(r, "staircase catch-up")
     }
 
-    /// No oscillation at the margin: a disagreement hovering at the 10 ppm bound engages at most
-    /// once and never flaps over two hours.
-    func testNoOscillationAtTheBound() {
+    /// §18.9's condition, on the level form: an engagement FORCED on correct SRs costs ≤ 10 ms and
+    /// releases by itself, leaving the correction at exactly 0.
+    func testAForcedFalseEngagementIsBoundedAndReleases() {
+        var p = SenderReportSlopeCrossCheck.Parameters(); p.forceEngageAt = 900
+        var n1 = TestRNG(state: 111), n2 = TestRNG(state: 111)
+        var w1 = 0.0, w2 = 0.0
+        let a = exp(-1.0 / 60)
+        func sr(_ n: inout TestRNG, _ w: inout Double, _ x: Double) -> Double {
+            w = a * w + (1 - a * a).squareRoot() * 0.002 * n.gaussian()
+            return -0.020 + 68e-6 * x + w + 0.0095 * n.gaussian()
+        }
+        let forced = session(seconds: 5400, delta: { sr(&n1, &w1, $0) }, media: { 68e-6 * $0 }, parameters: p)
+        let free = session(seconds: 5400, delta: { sr(&n2, &w2, $0) }, media: { 68e-6 * $0 })
+        XCTAssertEqual(count(free.lines, "LEVEL HOLD ENGAGED"), 0)
+        XCTAssertEqual(count(forced.lines, "LEVEL HOLD ENGAGED"), 1)
+        XCTAssertEqual(count(forced.lines, "LEVEL HOLD OFF"), 1, "released by itself")
+        let err = zip(forced.depth, free.depth).map { abs($0.d - $1.d) }
+        XCTAssertLessThan(err.max()!, 0.010)
+        XCTAssertLessThan(err.last!, 1e-9, "back on the SR line exactly")
+    }
+
+    /// No flapping at the threshold: the SR line holds the queue 12 ms off its start, with noise.
+    /// At most one engagement over 2 h, and no release (E never comes inside 4 ms).
+    func testNoFlappingAtTheThreshold() {
         var rng = TestRNG(state: 101)
-        let r = session(seconds: 7200, delta: { _ in -0.020 + 7e-6 * rng.gaussian() },
-                        media: { 10.3e-6 * $0 }, depthNoise: 0.002)
-        XCTAssertLessThanOrEqual(count(r.lines, "FALLBACK ENGAGED"), 1)
-        XCTAssertEqual(count(r.lines, "DISENGAGED"), 0)
+        let r = session(seconds: 7200, delta: { x in -0.020 + 66e-6 * x - (x > 150 ? 0.012 : 0)
+                                                + 7e-6 * rng.gaussian() },
+                        media: { 66e-6 * $0 }, depthNoise: 0.002)
+        XCTAssertLessThanOrEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 1)
+        XCTAssertEqual(count(r.lines, "RELEASED"), 0)
+    }
+
+    /// A deliberate line move (a LiveClock snap / target step of 80 ms) moves the queue by −80 ms.
+    /// Told of it, the hold neither engages nor undoes it; the queue stays at the new level.
+    func testALineJumpIsKeptNotUndone() {
+        var rng = TestRNG(state: 121)
+        var told = false
+        let r = session(seconds: 3600, delta: { _ in -0.020 + 7e-6 * rng.gaussian() }, media: { _ in 0 },
+                        extraDepth: { $0 >= 1200 ? -0.080 : 0 }, each: { t, fit in
+            if t >= 1200, !told { told = true; fit.noteLineJump(0.080) }
+        })
+        XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 0)
+        XCTAssertEqual(level(r, 3000, 3600) - level(r, 60, 120), -0.080, accuracy: 0.002)
+    }
+
+    /// Windows the steering marks excluded (a starvation hold and its recovery: here the queue 300
+    /// ms low for 60 s) are not read: no engagement, and the level is unmoved.
+    func testExcludedWindowsAreNotRead() {
+        var rng = TestRNG(state: 131)
+        let stall: (Double) -> Bool = { $0 >= 1200 && $0 < 1260 }
+        let r = session(seconds: 3600, delta: { x in -0.020 + 60e-6 * x + 7e-6 * rng.gaussian() },
+                        media: { 60e-6 * $0 }, extraDepth: { stall($0) ? -0.300 : 0 }, excluded: stall)
+        XCTAssertEqual(count(r.lines, "LEVEL HOLD ENGAGED"), 0)
+        XCTAssertLessThan(abs(r.fit.crossCheck.levelError ?? 1), 0.004)
     }
 
     /// The steering hands its companion the window's time and median depth EVEN WHEN it does not
@@ -287,6 +345,7 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(box.facts.count, 3)
         XCTAssertEqual(box.facts[0].rendererDepthMedian ?? 0, 0.400, accuracy: 0.001)
         XCTAssertEqual(box.facts[0].elapsed, 10, accuracy: 0.1)
+        XCTAssertFalse(box.facts[0].excluded, "a healthy window is read by the level hold")
         XCTAssertEqual(box.logged.filter { $0.contains("steering window") }.count, 0)
         XCTAssertEqual(box.logged.filter { $0.contains("companion") }.count, box.facts.count)
     }

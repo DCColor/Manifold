@@ -2398,7 +2398,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 let offset = mirror.appliedOffset, slope = mirror.appliedSlope
                 mirror.lock.unlock()
                 return fit.windowLines(time: facts.elapsed, rendererDepth: facts.rendererDepthMedian,
-                                       appliedOffset: offset, appliedSlope: slope)
+                                       appliedOffset: offset, appliedSlope: slope,
+                                       excluded: facts.excluded)
             } })
         // A superseded session's steering may still hold an armed starvation deadline: retire it
         // before this session owns the synchronizer, so it can never hold this session's timebase.
@@ -2773,6 +2774,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.lock.unlock()
         steering?.noteEvent(jump.kind.rawValue, host: jump.host, jumped: jump.jumped,
                             detail: jump.detail)
+        // The WHEP level hold's session-start reference moves with a deliberate line move (§18.20).
+        mirror.lock.lock()
+        let fit = mirror.srFit
+        mirror.lock.unlock()
+        fit?.noteLineJump(jump.jumped)
     }
 
     /// One RTCP Sender Report, audio or video, already matched to its stream by SSRC. Network

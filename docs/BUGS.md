@@ -938,7 +938,11 @@ splice (19.1), calibration mode (19.2), sync clips (19.3), manual control, HUD a
 
 ## ☐ THIS RELEASE (after the SRT items) — the depth-slope fallback should hold the queue's LEVEL, not integrate a rate
 
-**Status:** ☐ IN THIS RELEASE (Robbie, 2026-09-29, rescoped from post-release). Order: after the
+**Status:** ☐ IN THIS RELEASE (Robbie, 2026-09-29, rescoped from post-release). **2026-09-30: designed,
+built and replayed offline (`AUDIO_RESAMPLER_DESIGN.md` §18.20).** MediaMTX is within ±1 ms of the
+start at +26 min on all four sessions; Cloudflare is identical bit for bit. The forced sweep, judged
+against the session start (Robbie, 2026-09-30), holds within 1.1 ms and releases by itself. Next: one
+MediaMTX and one Cloudflare WHEP live confirmation run. Order: after the
 Cloudflare SRT absolute offset, the SRT device mutes and the multi-frame AAC must-fix. Recorded
 2026-09-29 as a design item; the open questions below still have to be answered before it is built,
 and the verification bar is unchanged. Its relation to the buffer / latency work (still
