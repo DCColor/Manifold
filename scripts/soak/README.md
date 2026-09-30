@@ -152,6 +152,8 @@ replay-bin/replay-closed synth <label> <media ppm> <depth noise ms> <seconds> [l
 replay-bin/replay-level <name> [logonly]      # the level hold (§18.20): start → +26, worst, end
 replay-bin/replay-level synth <label> <media ppm> <depth noise ms> <seconds> [logonly]
 replay-bin/replay-level sweep <name>          # §18.9's forced-engagement sweep, one per minute
+[LOCK_MODE=integrate|gated|anchored|stepfree] replay-bin/replay-offset-lock <name> [refStart refEnd]
+                                              # the fit's applied offset against the offset lock (§18.22)
 ```
 
 - **Open loop** (`replay-before`, `replay-after`): the fit alone, fed the logged pairs; x is log time.

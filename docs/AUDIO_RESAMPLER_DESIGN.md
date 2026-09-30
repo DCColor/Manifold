@@ -4917,3 +4917,123 @@ AV_SYNC_FINDINGS.md §6.8 carries the short form.
 - **Instrument added:** `[WHEP-SR-RAW]` (DEBUG, pre-ship removal in BUGS.md) logs every SR per track
   with NTP, RTP and local receive time. On a same-machine relay `ntp − rx_wall` reads the relay's
   per-track anchor directly.
+
+**The applied hold caused this run's device swing (read-only analysis, 2026-09-30 evening).**
+
+- **The at-glass estimate cannot see a target move, by design.** `[AV-CONTENT]`'s at-glass figure
+  uses `audio−now`, which is `FrameEngine.liveAudioDrift`. That adds `appliedOffset` back before
+  reporting, so it reads only the error around the target. `appliedOffset` is the SR line's offset
+  plus the hold's correction (`SenderReportLineFit.evaluate`), so neither the SR line's moves nor the
+  hold's reach the estimate.
+- **What else the hold did between A and B:** 0 timebase writes (the session's one was the first
+  anchor), 0 splices, 0 coarse events. Every action went through the target offset.
+- **Applied offset:** −22.3 ms at A (SR line, hold not engaged) → +77.7 ms at B. At B that is the
+  SR line's +20.9 ms plus the hold's +56.8 ms (queue −0.3 ms from its start level, against −57.1 ms on
+  the SR line alone).
+  - A → B: **+100.0 ms**, of which ~+10.8 ms is the SR line before the hold engaged (481 s) and
+    ~+89 ms is the hold.
+- **The gap between the recorded device A/V and the at-glass estimate** grew +22.0 → +122.3 ms:
+  **+100.35 ms, 1:1 with the applied-offset move, same sign.**
+- **Device prediction:** applied move (+100.0) + content move on the raw RTP timestamps (−1.3) =
+  **+98.7 ms**, against **+98.6 ms** measured.
+- **Why the hold did this: its premise fails on MediaMTX.** The hold assumes queue level =
+  lip-sync. Here the queue drains at ~65 ppm while the content on the RTP timestamps stays put
+  (−1.3 ms over 23 min). Holding the queue level therefore moved the target, and lip-sync with it,
+  at ~70 ppm.
+- **Unresolved: Sep 28 `srfix-whep-mediamtx`** (no hold, a build without `[AV-CONTENT]`).
+  - Its applied offset (the SR line, slope in use) moved +76.0 ms from A to B, but the device moved
+    −12.9 ms, close to the queue-depth change (−15.8 ms).
+  - Reconciling it with the relation above needs about **−89 ms** of content movement on the RTP
+    timestamps that day, which that build could not measure.
+
+### 18.22 Offset lock — replay of every logged WHEP session (no app change) — 2026-09-30 evening
+
+**Hypothesis.** On MediaMTX the SR offset's steps are artefacts of the relay's arrival anchor ratcheting
+(§18.21), not A/V changes, so following them walks lip-sync. **Candidate: the offset lock.**
+- Take the SR offset once, at the reference span.
+- After that, only the slope comes from the SRs, and the offset never re-levels on a step.
+- A re-level is still allowed on a real discontinuity: an RTP timestamp jump, a restart, or an SSRC
+  change.
+
+**Tool.** `replay/offset-lock/main.swift` → `replay-bin/replay-offset-lock`, open loop. It runs the
+working tree's fit (hold observe-only, as shipped) and the candidate on the logged SR pairs of each
+session.
+- **The figure is the applied offset**, not queue depth: on MediaMTX lip-sync moves 1:1 with the
+  applied offset and the queue is not lip-sync (§18.21).
+- **Reference span:** 60–120 s. None of these logs has a "LEVEL REFERENCE set" line.
+- **Step:** a pair-to-pair jump over max(50 µs, 8σ) that persists over the next 5 pairs. σ is the MAD
+  of the session's own first differences, so the threshold is relative to each server's noise, not
+  tuned to either one.
+- **Sessions:** 18 sessions in 14 logs (`step8-srtest1`'s first, 42 pairs, is skipped). Eight are long
+  enough for the A → B figures.
+- **Discontinuities:** no session contains an RTP timestamp jump, SSRC change or restart inside it
+  (a restart is a new session here), so that re-level path is not exercised.
+
+**The SRs of the two servers differ in kind:**
+- **MediaMTX + OBS:** Δ pair noise ~10 µs.
+  - Every long session is a staircase: 38 / 53 / 53 confirmed upward steps. These account for all of
+    Δ's movement (+57.1 / +88.4 / +72.3 ms, against +57.2 / +88.6 / +72.5).
+- **MediaMTX + ffmpeg sender:** no step at all (Δ flat for 31 min).
+- **Cloudflare:** Δ pair noise 4–9 ms and a steady ~66–68 ppm ramp.
+  - Its "jumps" are 1–2-pair spikes that return. **No persistent step in any Cloudflare session.**
+  - The one candidate, the 4.5 h run's upstream pause at 6022 s, is a −1.0 to −1.8 ms level change
+    on 900–1800 s windows. That is inside the SR noise.
+
+**Four forms of the lock were replayed.** They differ only in how the slope reaches the applied
+offset.
+
+| form | MediaMTX + OBS (3 sessions) | Cloudflare (4 long sessions) |
+|---|---|---|
+| **integrate** the trailing-600 s step-free slope | flat within 0.1 ms | early slope noise is integrated for good: up to 10 ms off the fit; −8.3 ms at +26 min on the 4.5 h run |
+| **gated** (the same, slope used once SE ≤ 10 ppm) | flat | worse: 12–23 ms behind (no slope while waiting, and nothing re-levels) |
+| **anchored** line through the reference, slope over everything since | flat within 0.2 ms | ≤ 5 ms on 30-min sessions; **10.3 ms behind at +4 h 30** (a whole-session slope lags a drifting one) |
+| **step-free**: the fit itself, fed the step-free Δ 5 pairs late | flat within 0.2 ms | **= the fit**: mean difference 0.00 ms, sd 0.4–0.6 ms, ≤ 0.2 ms at every capture point |
+
+The literal lock (offset once, slope only) is not transparent on Cloudflare. Its offset cannot recover
+from the slope's acquisition error. **Step-free** keeps the offset the SRs give and removes only the
+steps.
+
+**Applied offset, current fit against step-free** (movement in ms):
+
+| session | server | length | fit: ref → end | step-free: ref → end | fit: A → B (+3 → +26) | step-free: A → B |
+|---|---|---|---|---|---|---|
+| level-whep-mediamtx (today) | MediaMTX | 31 min | +56.6 | **+0.1** | +43.6 | **+0.1** |
+| srfix-whep-mediamtx | MediaMTX | 29 min | +89.1 | **+0.2** | +75.9 | **+0.2** |
+| step8-whep-soak | MediaMTX | 29 min | +71.7 | **+0.1** | +64.2 | **+0.1** |
+| srprobe-ffmpeg-mediamtx | MediaMTX (ffmpeg) | 31 min | 0.0 | 0.0 | 0.0 | 0.0 |
+| srfix-whep-cloudflare-long | Cloudflare | 4.5 h | +1081.0 | +1084.1 | +101.8 | +101.9 |
+| srprobe-obs-cloudflare | Cloudflare | 32 min | +126.8 | +125.6 | +98.6 | +98.8 |
+| step4e2-cloudflare | Cloudflare | 37 min | +141.1 | +141.0 | +90.4 | +90.5 |
+| step4e2-cloudflare-2 | Cloudflare | 37 min | +142.0 | +142.3 | +91.7 | +91.6 |
+
+- **The sessions under 4 min** (4e1 ×2, srtest1/2, the six 2026-09-23 probes): MediaMTX flat in both;
+  the 4e1 Cloudflare session +10.5 fit / +10.3 step-free.
+- **The 4.5 h run at its own capture B (+4 h 30):** fit − step-free = +0.12 ms.
+- Traces: `<session>.offset-lock-<form>.trace.tsv` (x, Δ, fit applied, candidate applied, slope).
+
+**What any step-rejecting rule gives up** (synthetic persistent steps added to `step4e2-cloudflare` at
+900 s):
+
+| injected real step | +5 ms | +20 ms | +40 ms | +100 ms |
+|---|---|---|---|---|
+| current fit follows | +5.0 | +20.0 | +40.0 | +100.0 |
+| step-free follows | +5.0 | +20.0 | +40.0 | **−6.4 (missed)** |
+| anchored follows | +7.1 | +28.6 | +57.2 | −9.1 (missed) |
+
+- **Below the noise-relative threshold** (~50 ms on Cloudflare), step-free follows a real step
+  exactly.
+- **Above it**, a real A/V step with no RTP timestamp jump, restart or SSRC change is ignored.
+- **On MediaMTX the threshold is ~0.08 ms**, so there any real step without such a signal is ignored.
+
+**What the lock does not fix.**
+- **The absolute offset.** It is locked at the relay's arrival anchor, which differs per session
+  (first-pair Δ −22.3 / −42.9 / −20.2 ms). Today's capture A (−74.3 ms against zero, SR offset
+  −22.3) would have been the same under the lock.
+- **The queue drain.** With the offset held, the queue keeps draining at the media's ~65 ppm.
+  - Rebuilt from the logged windows: −66.3 / −64.0 ppm on `srfix-whep-mediamtx` / `step8-whep-soak`.
+  - It reaches the 250 ms coarse level at ~39–46 min. A 28-min soak stays clear; a longer MediaMTX
+    session would not.
+  - Not rebuildable for today's run: the windows record the SR-line offset, not the hold-corrected
+    one.
+- **§6.3's restated criterion** ((B − A) + depth term) reads that drain as lip-sync, so under the lock
+  it must not be used on MediaMTX; B − A is the figure.
