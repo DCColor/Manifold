@@ -694,6 +694,38 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 }
 #endif
 
+// ── [WHEP-SR-RAW] (pre-ship removal, docs/BUGS.md) ─────────────────────────────────────────
+//
+// Every Sender Report matched to our SSRC, per track: NTP, RTP timestamp, and the local receive
+// time on the wall clock and on host time. DEBUG ONLY — deliberately not MD_SR_LOG, whose gate also
+// admits MANIFOLD_TELEMETRY.
+//
+// WHY THE WALL CLOCK. On a same-machine relay (MediaMTX on this Mac) the server's NTP and this
+// clock are one clock, so `ntp − rx_wall` is readable directly. It equals the SR's NTP minus the
+// local arrival of the last media packet sent before it: an RFC 3550 sender extrapolates both
+// fields from that packet by the same interval, and the SR shares the media's 5-tuple (rtcp-mux).
+// Constant per track → the SR tracks capture; walking or stepping per track → it tracks arrival.
+// The `[WHEP-SR]` lines cannot answer this: they print the raw NTP for SR #1 only
+// (AUDIO_RESAMPLER_DESIGN.md §18.21).
+//
+// Integer nanoseconds throughout: NTP-since-1970 in a double keeps ~0.2 µs, which is enough, but
+// the log is read by scripts and exact integers leave nothing to argue about.
+#if DEBUG
+static uint64_t ManifoldWHEPWallNs(void) { return clock_gettime_nsec_np(CLOCK_REALTIME); }
+/// Host time on the same clock as CACurrentMediaTime(), which the other `host=` lines use.
+static uint64_t ManifoldWHEPHostNs(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+static void ManifoldWHEPLogSRRaw(BOOL isAudio, const ManifoldRTCPSenderReport *sr,
+                                 uint64_t rxWallNs, uint64_t rxHostNs) {
+    const int64_t ntpUnixNs = ((int64_t)(sr->ntp >> 32) - 2208988800LL) * 1000000000LL
+                            + (int64_t)(((sr->ntp & 0xFFFFFFFFull) * 1000000000ull) >> 32);
+    NSLog(@"[WHEP-SR-RAW] %@ ssrc=%u ntp=0x%016llx ntp_unix_ns=%lld rtp=%u rx_wall_ns=%llu "
+          @"rx_host=%.6f ntp−rx_wall=%+.3f ms",
+          isAudio ? @"AUDIO" : @"VIDEO", sr->ssrc, sr->ntp, ntpUnixNs, sr->rtp, rxWallNs,
+          (double)rxHostNs / 1e9, (double)(ntpUnixNs - (int64_t)rxWallNs) / 1e6);
+}
+#endif
+
 #endif // MANIFOLD_WHEP_SR_PROBE
 
 @implementation ManifoldWHEPSession {
@@ -1515,6 +1547,9 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 /// ignored it.
 - (void)ingestVideoRTCP:(const uint8_t *)packet length:(size_t)length {
     const uint64_t arrivalNs = ManifoldWHEPNowNs();
+#if DEBUG && MANIFOLD_WHEP_SR_PROBE
+    const uint64_t rxWallNs = ManifoldWHEPWallNs(), rxHostNs = ManifoldWHEPHostNs();
+#endif
     _videoRTCPSeen++;
 
     ManifoldH264DepacketizerReception rx;
@@ -1540,6 +1575,9 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
 
 #if MANIFOLD_WHEP_SR_PROBE
     // Deliberately after the RR: the probe logs, and the RR's DLSR should not include a log call.
+#if DEBUG
+    ManifoldWHEPLogSRRaw(NO, &sr, rxWallNs, rxHostNs);
+#endif
     [self srProbeNoteSR:&sr isAudio:NO];
     [self deliverSenderReport:&sr isAudio:NO];
 #endif
@@ -1643,12 +1681,18 @@ static NSString *ManifoldWHEPFormatNTP(uint64_t ntp) {
         // callback too, and before 4e-1 the first SR in the packet was taken whatever its SSRC.
         // Until the first audio RTP packet latches the SSRC there is nothing to match, and the SR
         // is skipped: RFC 3550 senders only report after sending, so that is a reordering case.
+#if DEBUG
+        const uint64_t rxWallNs = ManifoldWHEPWallNs(), rxHostNs = ManifoldWHEPHostNs();
+#endif
         ManifoldRTCPSenderReport info;
         if (!_audioHaveSSRC) return;
         if (!ManifoldRTCPFindSenderReport(packet, length, _audioSSRC, &info)) {
             if (info.senderReportsSeen > 0) _audioSRNotOurs++;
             return;
         }
+#if DEBUG
+        ManifoldWHEPLogSRRaw(YES, &info, rxWallNs, rxHostNs);
+#endif
         [self srProbeNoteSR:&info isAudio:YES];
         // To the SR line (step 4e-2), whose first pair opens the anchor gate's SR half (§2.7).
         // Behaviour, not logging, so it is outside the telemetry gate: compiled into Release.

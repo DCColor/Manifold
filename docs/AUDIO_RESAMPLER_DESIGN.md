@@ -4882,3 +4882,38 @@ the tool's "start" is still the 60–120 s median, so a draining flat-SR queue r
 | the three Cloudflare sessions | never | unchanged, bit-identical to the SR line |
 
 All within ±10 ms. None of this is live: the hold is observe-only.
+
+**MediaMTX's SRs follow arrival at the relay, not capture (read-only analysis, 2026-09-30 evening).**
+This is the cause of the MediaMTX staircase SRs (§18.5, §18.7). It does not explain the device swing.
+AV_SYNC_FINDINGS.md §6.8 carries the short form.
+
+- **How MediaMTX v1.21.1 builds them.** With the default `useAbsoluteTimestamp: false` (the soak
+  config does not set it), OBS's own SRs are discarded. MediaMTX builds each track's NTP on its own
+  packet-arrival wall clock (`internal/ntpestimator`):
+  - the first packet's arrival time is the anchor;
+  - later packets get the anchor plus their RTP advance;
+  - the anchor resets to the current arrival when a packet arrives earlier than that prediction (or
+    more than 5 s late), so it only ever moves earlier.
+  - Each SR is the last packet's (RTP, NTP) pair, extrapolated by wall time (gortsplib `rtpsender`,
+    1 s period).
+- **So the SR A/V relation is the difference of each track's earliest arrival at the relay**, not
+  of their capture. Nothing Manifold does can recover capture from it.
+- **Measured on this run.** From capture A to capture B the SR Δ moved **+44.0 ms** (−22.30 →
+  +21.73 ms). The flash-beep content on the raw RTP timestamps (`[AV-CONTENT]` decoded) moved
+  **−1.3 ms** (−72.6 → −73.9 ms). Sep 28 `srfix-whep-mediamtx`: +75.3 ms of SR movement.
+- **The signature, in all three MediaMTX sessions** (this run, `srfix-whep-mediamtx`,
+  `step8-whep-soak`): every change in Δ arrives on a video SR and is upward, i.e. the video anchor
+  stepping earlier. There are 46 / 55 / 63 steps of 0.1–5 ms, totalling +57 / +88 / +72 ms. Audio SRs
+  never moved Δ.
+- **Not issue #5593** (mixed RTP domains when WebRTC egress rewrites audio timestamps). It was fixed
+  in PR #5597 (merged 2026-03-21), which v1.21.1 contains. One residual path remains: an incoming
+  audio timestamp gap under 500 ms would still shift the audio mapping. It would show as Δ moving on
+  audio SRs, which never happened here.
+- **The RTSP output (the `--diag` sender probe) uses the same per-track NTP**, so a probe read with
+  RTCP sync inherits the same error. MediaMTX's SRT/MPEG-TS output is stamped from the RTP timestamps
+  instead (one fixed start offset), and a sender-side OBS recording is independent of the relay.
+- **Why it does not explain the swing:** the SR movement (+44 ms) is not the device movement
+  (+98.6 ms), and on Sep 28 the SRs moved +75 ms while the device moved −12.9 ms.
+- **Instrument added:** `[WHEP-SR-RAW]` (DEBUG, pre-ship removal in BUGS.md) logs every SR per track
+  with NTP, RTP and local receive time. On a same-machine relay `ntp − rx_wall` reads the relay's
+  per-track anchor directly.

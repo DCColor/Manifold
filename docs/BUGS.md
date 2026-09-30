@@ -743,6 +743,24 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 
 ---
 
+## ☐ PRE-SHIP: remove the `[WHEP-SR-RAW]` per-SR log
+
+**Added 2026-09-30** to tell whether a server's RTCP Sender Reports follow capture or arrival
+(`AUDIO_RESAMPLER_DESIGN.md` §18.21, the MediaMTX SR finding). `[WHEP-SR]` prints an SR's raw NTP for
+SR #1 only, so the question could not be answered from any earlier log.
+
+- **What it is:** `ManifoldWHEPLogSRRaw`, `ManifoldWHEPWallNs` and `ManifoldWHEPHostNs` in
+  `App/WebRTC/DataChannelBridge.m`, called from `-ingestVideoRTCP:length:` and the audio track's
+  RTCP branch of `-ingestAudioRTP:length:`. One line per SR matched to our SSRC, per track: NTP (raw
+  and as Unix ns), RTP timestamp, local receive time on the wall clock (ns) and host time, and
+  `ntp − rx_wall` in ms.
+- **Gating:** `#if DEBUG` only (not `MANIFOLD_TELEMETRY`), so absent from Release, present in Profile.
+- **Cost when present:** two clock reads per RTCP packet on each track, one log line per SR (~2/s).
+- **Remove** once the SR question is settled for the servers under test, or keep as Profile telemetry
+  by decision.
+
+---
+
 ## ✅ FIXED 2026-09-29 (uncommitted, awaiting Robbie) — PRE-SHIP (MUST-FIX): SRT audio decodes nothing when a PES carries more than one ADTS frame
 
 **Status:** implemented and verified with ffmpeg as the sender (`AUDIO_RESAMPLER_DESIGN.md` §18.15):

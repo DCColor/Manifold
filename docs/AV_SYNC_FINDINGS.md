@@ -892,6 +892,27 @@ it. The SR figure is taken as the reference.
   excursions were trimmed.
 - **The fix:** a fixture longer than the session, so the sender never loops mid-run.
 
+### 6.8 MediaMTX's SRs follow arrival at the relay, not capture — 2026-09-30
+
+**Read from the v1.21.1 source and three existing session logs. Full account:
+AUDIO_RESAMPLER_DESIGN.md §18.21.**
+
+- **With the default `useAbsoluteTimestamp: false`, MediaMTX discards the sender's SRs.** It builds
+  each track's SR from its own packet-arrival wall clock (`internal/ntpestimator`). The anchor is a
+  packet's arrival time, advanced by the RTP timestamps, and it only ever moves earlier: it resets
+  whenever a packet arrives ahead of the prediction.
+- **So its SR A/V relation reflects arrival at the relay, not capture.** On 2026-09-30 the SR Δ moved
+  **+44 ms** from capture A to capture B, while the content on the raw RTP timestamps moved
+  **−1.3 ms**.
+- **This is the cause of the MediaMTX staircase SRs.** Every step, in all three sessions, is an
+  upward step on a video SR.
+- **It does not explain that run's device swing.**
+- **Issue #5593** (mixed RTP domains in the audio egress) was fixed in PR #5597, which v1.21.1
+  contains.
+- **Bearing on §6.7:** on MediaMTX an SR slope measures arrival timing. §6.7 attributes the ~60 ppm to
+  OBS, and that most likely stands, since the relay only timestamps what the sender delivers. But what
+  it measures is the sender's delivery, not necessarily its capture clocks. Not re-tested.
+
 ---
 
 ## 7. What is not answered here
