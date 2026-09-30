@@ -6,6 +6,11 @@
 # Environment (optional):
 #   MANIFOLD_APP  the Manifold.app (default .build-cc/soak-Profile/…); must be a DEBUG (Profile) build
 #   READRATE      ffmpeg -readrate (default 1 = real time; 0.99997 = content arriving 30 ppm slow)
+#   PES_PAYLOAD   ffmpeg -pes_payload_size (default 0: one AAC frame per PES where frames exceed
+#                 170 bytes; "default" leaves ffmpeg's own packing, several frames per PES)
+#   STALLS        induced delivery stalls, "<s after connect>:<ms>" pairs, space-separated
+#                 (e.g. "60:100 90:200 120:400"): the sender is SIGSTOPped for <ms>, then resumed.
+#                 Each is logged with its wall-clock time to <label>.stalls.log.
 #   SOAK_OUT      where <label>.manifold.log / .ffmpeg.log go (default ~/Desktop/manifold-soak/repro)
 # Needs UI scripting (Accessibility) for the process running it; osascript fails loudly without it.
 set -u
@@ -40,8 +45,9 @@ for i in {1..3}; do
   sleep 3
 done
 
+PESOPT="-pes_payload_size ${PES_PAYLOAD:-0}"; [[ ${PES_PAYLOAD:-0} == default ]] && PESOPT=""
 say_ "serve $FILE on srt://127.0.0.1:9000 (listener)"
-ffmpeg -hide_banner -loglevel warning -readrate "${READRATE:-1}" -i "$FILE" -map 0:v -map 0:a -c copy -pes_payload_size 0 -f mpegts \
+ffmpeg -hide_banner -loglevel warning -readrate "${READRATE:-1}" -i "$FILE" -map 0:v -map 0:a -c copy ${=PESOPT} -f mpegts \
   'srt://127.0.0.1:9000?mode=listener' > "$FLOG" 2>&1 &
 FPID=$!
 sleep 2
@@ -58,6 +64,19 @@ for attempt in 1 2 3; do
 done
 [[ $up == 1 ]] || { say_ "no SRT connect — abort"; kill $FPID $MPID 2>/dev/null; exit 1; }
 say_ "connected"
+
+if [[ -n "${STALLS:-}" ]]; then
+  SLOG="$D/$LABEL.stalls.log"
+  ( t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+    for pair in ${=STALLS}; do
+      at=${pair%%:*}; ms=${pair##*:}
+      perl -MTime::HiRes=time,sleep -e "my \$d=$t0+$at-time; sleep(\$d) if \$d>0"
+      kill -STOP $FPID 2>/dev/null || break
+      perl -MTime::HiRes=sleep -e "sleep($ms/1000)"
+      kill -CONT $FPID
+      echo "$(perl -MPOSIX=strftime -MTime::HiRes=time -e '$t=time; printf "%s.%03d", strftime("%H:%M:%S",localtime $t), ($t-int $t)*1000') stalled ${ms} ms (resumed), +${at}s" >> "$SLOG"
+    done ) &
+fi
 
 # Keep denying licence re-prompts until the file ends.
 while kill -0 $FPID 2>/dev/null; do deny; sleep 5; done

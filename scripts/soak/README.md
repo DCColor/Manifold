@@ -87,6 +87,7 @@ The operator's part is spoken by the orchestrator:
 | `analysis/net.py` | rolling 600 s depth-implied slope against the applied slope |
 | `analysis/avlag.py` | `[AV-LAG]` lines (DEBUG builds): A/V at the glass and its parts per 3-min block, Theil–Sen slopes, LiveClock's rail share |
 | `analysis/probe_ts.py` | a received `.ts` on its own timestamps: audio PTS vs sample count, video PTS vs frame count, video step histogram, grid phase |
+| `analysis/avcontent.py` | `[AV-CONTENT]` lines (DEBUG builds): flash-beep content A/V on Manifold's own PTS (decoded), through the resampler, and at the glass (§18.13) |
 | `analysis/probe_av.py` | flash/beep A/V of a whole recorded stream on its own timeline, windows at +180 / +1260 s and the trend over whole grid periods |
 
 Criterion 12 is `mean_whole − zero` as written and `gridfree − zero` grid-corrected, where zero is the
@@ -121,6 +122,8 @@ operator:
 ```sh
 zsh scripts/soak/repro/run.sh <label> <file.ts>                        # real time
 READRATE=0.99997 zsh scripts/soak/repro/run.sh <label> <file.ts>       # content arriving 30 ppm slow
+STALLS="60:200 120:400" zsh scripts/soak/repro/run.sh <label> <file.ts>  # sender SIGSTOPped 200 ms at +60 s, …
+PES_PAYLOAD=default zsh scripts/soak/repro/run.sh <label> <file.ts>    # ffmpeg's own PES packing (several AAC frames)
 zsh scripts/soak/repro/restamp.sh <in.ts> <out.ts>                     # video onto the exact frame grid
 python3 scripts/soak/analysis/avlag.py ~/Desktop/manifold-soak/repro/<label>.manifold.log
 ```
@@ -129,9 +132,10 @@ python3 scripts/soak/analysis/avlag.py ~/Desktop/manifold-soak/repro/<label>.man
   `#if DEBUG`. `MANIFOLD_APP` selects it.
 - **Needs UI scripting (Accessibility) for the process running it.** It denies the unsigned
   build's licence prompt, opens a window if the launch restored none, and presses ⌃⌥D.
-- **Serves with `-pes_payload_size 0`:** one AAC frame per PES. ffmpeg's default packs several, and
-  Manifold's SRT audio then decodes nothing (BUGS.md, PRE-SHIP must-fix). Until that is fixed, a run
-  without this flag measures no audio.
+- **Serves with `-pes_payload_size 0` by default:** one AAC frame per PES, but only for frames over
+  170 bytes. ffmpeg groups smaller ones (digital silence) regardless, so a replayed file whose audio
+  has digital silence needs a noise floor (§18.13, §18.15). Builds before the multi-frame fix
+  (§18.15) decode only the first frame of each PES.
 - **Do not touch Manifold while it runs.** The script quits it at the end. A forced quit can make
   the next launch restore with no window, which the script handles.
 

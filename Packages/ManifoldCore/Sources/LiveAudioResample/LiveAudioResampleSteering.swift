@@ -82,6 +82,29 @@
 //      logged. So two lines per minute at most, and none for a touch shorter than 5 s.
 //  Episodes, suppressed episodes and seconds at the rail are on the session END line.
 //
+//  ── THE STARVATION HOLD (option A, docs/AUDIO_RESAMPLER_DESIGN.md §18.16) ──────────────────────
+//
+//  The renderer's queue is only as deep as the audio's ARRIVAL LEAD over the timebase (§18.14),
+//  and nothing above reads it between enqueues: a delivery stall longer than that lead ran the
+//  renderer dry, and every refill then landed behind the playhead and was dropped whole — exact
+//  zero, for as long as the sender took to catch up (33 s after a 2 s stall). So:
+//
+//    * HOLD: a one-shot host-time deadline, re-armed on every enqueue at the moment the queue would
+//      fall to `starvationMarginSeconds`. It fires only if no input arrived before then, i.e. only
+//      when the renderer is about to run dry. The timebase is then held (rate 0) where it stands.
+//    * RESUME: on the first enqueue that leaves `resumeFillSeconds` queued past the held point. The
+//      timebase restarts (rate 1.0) at the LATEST content that still leaves that fill queued, and
+//      never later than the target: a burst redelivery resumes on the target (the outcome a dry
+//      renderer reached, minus its drops), a sender that is still late resumes late.
+//    * RECOVERY: what the resume could not reach is `recoveryOffset`, D: the target line the loop
+//      steers to is the picture's less D, so the loop sees no step. D is taken back by forward
+//      splices (the step-5 drop) as the queue grows past `recoveryKeepSeconds` plus the drop
+//      guard, at most one per `recoveryDropSpacingSeconds`; under `recoveryFoldSeconds` it is
+//      handed to the loop as ordinary error.
+//  Two writes per starvation episode (hold, resume), counted with the others. On a stream whose
+//  queue never falls to the margin the deadline never fires, D stays 0 and the loop is identical
+//  to the one without this. Loop mode only: pinned is step 3 exactly.
+//
 //  ── PINNED MODE — THE BACK-OUT SWITCH ─────────────────────────────────────────────────────────
 //
 //  `.pinned` is step 3, exactly: the ratio stays at 1.0, the controller is never stepped, and the
@@ -139,6 +162,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         /// A deliberate re-anchor by the caller: a pinned-mode position branch, NDI's pinned
         /// re-anchor or a Desktop Audio Lead change, or the anchor after a clock reset.
         case reanchor(String)
+        /// The starvation hold's restart (§18.16), after `pausedSeconds` held at rate 0. The hold
+        /// itself is the `hold` closure's rate-0 write, not this one.
+        case starvationResume(pausedSeconds: Double)
 
         public var label: String {
             switch self {
@@ -147,6 +173,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                 return String(format: "COARSE RE-ANCHOR — splice fallback (%@, e %+.1f ms)",
                               t.rawValue, e * 1000)
             case let .reanchor(why): return "re-anchor (\(why))"
+            case let .starvationResume(p):
+                return String(format: "STARVATION RESUME after %.0f ms held", p * 1000)
             }
         }
     }
@@ -180,6 +208,25 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     static let railDwellSeconds = 5.0
     static let railRewarnSeconds = 60.0
 
+    // ── The starvation hold (§18.16; see the header) ──────────────────────────────────────────────
+    /// Queue left when the hold fires. As SMALL as the deadline's lateness (a strict timer, ≤ 1 ms
+    /// typical) and the rate write's landing allow, because every hold costs two rate writes and
+    /// the renderer mutes ~50 ms on each (§11.11): a larger margin holds on stalls the queue would
+    /// have ridden out. The lowest healthy window measured on any transport is ~106 ms after the
+    /// enqueue (§18.16), so a stream that is not stalling never comes near it.
+    public static let starvationMarginSeconds = 0.020
+    /// Queue required past the held point before the timebase restarts: one refill's worth, so a
+    /// trickle does not restart and re-hold on every packet.
+    public static let resumeFillSeconds = 0.100
+    /// Queue a recovery drop must leave behind, on top of the drop guard (fade + 50 ms).
+    static let recoveryKeepSeconds = 0.100
+    /// Smallest recovery drop, unless less than this is left: few splices rather than many.
+    static let recoveryMinimumDropSeconds = 0.100
+    /// At most one recovery drop per this, so each is heard before the next is decided.
+    static let recoveryDropSpacingSeconds = 1.0
+    /// A recovery offset this small is handed to the loop as ordinary error (≈ 10 s at the rail).
+    static let recoveryFoldSeconds = 0.020
+
     public let mode: Mode
     private let tag: String
     private let reportsWindows: Bool
@@ -190,6 +237,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private let hostNow: @Sendable () -> Double
     private let write: @Sendable (_ outputSeconds: Double, _ hostSeconds: Double,
                                   _ origin: WriteOrigin) -> Void
+    /// `setRate(0, time: outputSeconds, atHostTime: hostSeconds)`: the starvation hold's write.
+    /// nil disables the hold (tests of the pre-§18.16 law, and any caller that cannot stop).
+    private let holdWrite: (@Sendable (_ outputSeconds: Double, _ hostSeconds: Double) -> Void)?
+    /// Arms the one-shot deadline: call `starvationCheck()` at host time `at` unless re-armed first.
+    /// nil = no timer (tests call `starvationCheck()` themselves).
+    private let armDeadline: (@Sendable (_ at: Double) -> Void)?
     private let log: (@Sendable (String) -> Void)?
     /// Lines printed right after each window line, on the same utility-queue block so they stay
     /// adjacent: WHEP's `[WHEP-SRFIT]` fit state (step 4e-2) and its slope cross-check. nil on every
@@ -198,6 +251,13 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private let windowCompanion: (@Sendable (WindowFacts) -> [String])?
 
     private let lock = UnfairLockBox()
+    /// Serialises every TIMEBASE WRITE decision with its write: the anchor, the per-buffer
+    /// evaluation (resume, coarse fallback) and the starvation deadline (hold). Without it a hold
+    /// decided on the timer thread could land after a resume or an anchor decided on another, and
+    /// leave the timebase at rate 0 with nothing held. Order: `transition`, then `lock`.
+    private let transition = UnfairLockBox()
+    /// Set by `retire()`: the renderer belongs to another session now, so nothing here may write.
+    private var retired = false
 
     // ── Session state, under `lock` ─────────────────────────────────────────────────────────────
     private var anchored = false
@@ -207,6 +267,27 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var lastEvaluationHost = 0.0
     private var settleUntil = -Double.infinity
     private var sessionStart = 0.0
+
+    // The starvation hold (§18.16).
+    /// Output-axis end of everything enqueued so far (max over reads), the queue's far end.
+    private var frontier: Double?
+    private var held: (timebase: Double, host: Double, frontier: Double)?
+    /// D: seconds the audio is steered behind the picture's line since a resume; 0 otherwise.
+    private var recoveryOffset = 0.0
+    private var recoveryStartHost: Double?
+    private var recoveryPeak = 0.0
+    private var lastRecoveryDropHost = -Double.infinity
+    private var holds = 0
+    private var resumes = 0
+    private var heldSeconds = 0.0
+    private var recoveryDrops = 0
+    private var recoveryDroppedSeconds = 0.0
+    private var recoveryFolded = 0.0
+    /// Lowest queue seen just BEFORE an enqueue (previous frontier − timebase) — the margin the
+    /// hold is judged against. Per window, and session-long.
+    private var lowWater = Double.infinity
+    private var sessionLowWater = Double.infinity
+    private var windowHolds = 0
 
     // Counters, session-long.
     private var firstAnchors = 0
@@ -267,17 +348,27 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     ///   - hostNow: `CACurrentMediaTime`.
     ///   - write: `setRate(1.0, time: outputSeconds, atHostTime: hostSeconds)`, plus whatever the
     ///     caller logs about it. Called without this object's lock held.
+    ///   - hold: `setRate(0, time: outputSeconds, atHostTime: hostSeconds)` — the starvation
+    ///     hold (§18.16). The steering arms its own deadline timer when this is given.
     public convenience init(tag: String, mode: Mode, stage: LiveAudioResampleStage,
                             reportsWindows: Bool,
                             readTimebase: @escaping @Sendable () -> Double,
                             hostNow: @escaping @Sendable () -> Double,
                             write: @escaping @Sendable (Double, Double, WriteOrigin) -> Void,
+                            hold: (@Sendable (Double, Double) -> Void)? = nil,
                             log: (@Sendable (String) -> Void)?,
                             windowCompanion: (@Sendable (WindowFacts) -> [String])? = nil) {
+        let timer = hold != nil ? StarvationDeadline(hostNow: hostNow) : nil
         self.init(tag: tag, mode: mode, clock: stage, gains: .adopted, thresholds: .adopted,
                   reportsWindows: reportsWindows, readTimebase: readTimebase, hostNow: hostNow,
-                  write: write, log: log, windowCompanion: windowCompanion)
+                  write: write, hold: hold, armDeadline: timer.map { t in { t.arm(at: $0) } },
+                  log: log, windowCompanion: windowCompanion)
+        timer?.fire = { [weak self] in self?.starvationCheck() }
+        deadline = timer
     }
+
+    /// The timer behind `armDeadline` in the app; kept so it lives as long as the steering.
+    private var deadline: StarvationDeadline?
 
     init(tag: String, mode: Mode, clock: LiveAudioContentClock,
          gains: LiveAudioResampleController.Gains, thresholds: Thresholds,
@@ -285,11 +376,14 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
          readTimebase: @escaping @Sendable () -> Double,
          hostNow: @escaping @Sendable () -> Double,
          write: @escaping @Sendable (Double, Double, WriteOrigin) -> Void,
+         hold: (@Sendable (Double, Double) -> Void)? = nil,
+         armDeadline: (@Sendable (Double) -> Void)? = nil,
          log: (@Sendable (String) -> Void)?,
          windowCompanion: (@Sendable (WindowFacts) -> [String])? = nil) {
         self.tag = tag; self.mode = mode; self.clock = clock; self.gains = gains
         self.thresholds = thresholds; self.reportsWindows = reportsWindows
         self.readTimebase = readTimebase; self.hostNow = hostNow; self.write = write; self.log = log
+        self.holdWrite = hold; self.armDeadline = armDeadline
         self.windowCompanion = windowCompanion
     }
 
@@ -313,7 +407,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// the drift the integrator learned is a property of the clocks.
     public func anchor(media: Double, host: Double, rate: Double = 1.0, reason: String? = nil) {
         guard media.isFinite, host.isFinite else { return }
+        transition.lock(); defer { transition.unlock() }
         lock.lock()
+        guard !retired else { lock.unlock(); return }
+        // An anchor places the content heard on the target: any hold is over and nothing is owed.
+        if let h = held { heldSeconds += max(0, host - h.host); held = nil }
+        endRecoveryLocked()
         let first = firstAnchors == 0
         let origin: WriteOrigin = first ? .firstAnchor : .reanchor(reason ?? "caller")
         refMedia = media; refHost = host; refRate = rate.isFinite && rate > 0 ? rate : 1.0
@@ -355,10 +454,25 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// The clock un-anchored (`LiveClock.reset()`): the synchronizer is being held at rate 0, so
     /// there is nothing to steer until the next `anchor`. The ratio and `i` are kept.
     public func hold() {
+        transition.lock(); defer { transition.unlock() }
         lock.lock()
         anchored = false
         previousError = nil
+        // The caller holds the timebase itself; a starvation hold, if any, is superseded by it.
+        if let h = held { heldSeconds += max(0, hostNow() - h.host); held = nil }
+        endRecoveryLocked()
         lock.unlock()
+    }
+
+    /// This session's renderer is being handed to another (a new session, or the end of this one):
+    /// no write of any kind from here on, and the deadline is disarmed.
+    public func retire() {
+        transition.lock(); defer { transition.unlock() }
+        lock.lock()
+        retired = true
+        anchored = false
+        lock.unlock()
+        deadline?.cancel()
     }
 
     // MARK: - Per buffer
@@ -374,8 +488,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// the renderer queue's absolute depth, logged per window and never acted on.
     @discardableResult
     public func sample(enqueuedFrontier: Double? = nil) -> PairedRead? {
+        transition.lock(); defer { transition.unlock() }
         lock.lock()
-        let live = anchored
+        let live = anchored && !retired
         lock.unlock()
         guard live else { return nil }
 
@@ -394,17 +509,34 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
 
         lock.lock()
         if !anchored { lock.unlock(); return read }
+        // ── The queue's far end, and its low-water mark just before this enqueue (§18.16) ──
+        if held == nil, let f = frontier, timebase.isFinite {
+            lowWater = min(lowWater, f - timebase); sessionLowWater = min(sessionLowWater, f - timebase)
+        }
+        if let f = enqueuedFrontier, f.isFinite { frontier = max(frontier ?? f, f) }
+        // ── Held: restart once the refill leaves the resume fill queued past the held point ──
+        if let h = held {
+            let ready = (frontier ?? -.infinity) - h.timebase >= Self.resumeFillSeconds
+            let line = ready ? resumeLocked(host: t1, timebaseRead: timebase) : nil
+            windowLine = windowIfDueLocked(now: t1)
+            lock.unlock()
+            if let line { line() }
+            if let w = windowLine { emitWindow(w) }
+            return read
+        }
         if t1 - t0 > Self.pairingGateSeconds || !content.isFinite {
             discarded += 1
             windowLine = windowIfDueLocked(now: t1)
             lock.unlock()
             if let w = windowLine { emitWindow(w) }
+            armDeadlineIfLive(timebase: timebase, host: t1)
             return read
         }
         if let f = enqueuedFrontier, f.isFinite, depthCount < Self.capacity {
             depths[depthCount] = f - timebase; depthCount += 1
         }
-        let target = refMedia + (t1 - refHost) * refRate
+        // The picture's line, less what a starvation resume could not reach (D, §18.16).
+        let target = refMedia + (t1 - refHost) * refRate - recoveryOffset
         let e = content - target
         let dt = lastEvaluationHost > 0
             ? max(0, min(Self.maximumStepSeconds, t1 - lastEvaluationHost)) : 0
@@ -445,6 +577,16 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             state = LiveAudioResampleController.coarseEvent(state)
             previousError = nil
         }
+        // ── Recovery: take D back by a forward splice once the queue can cover it (§18.16) ──
+        var recoveryDrop: Double?
+        if coarse == nil, recoveryOffset > 0, mode == .loop, t1 >= settleUntil,
+           t1 - lastRecoveryDropHost >= Self.recoveryDropSpacingSeconds,
+           let f = enqueuedFrontier, f.isFinite {
+            let room = (f - timebase) - Self.recoveryKeepSeconds
+                - LiveAudioResampleStage.crossfadeSeconds - Self.dropQueueMarginSeconds
+            let x = min(recoveryOffset, room, LiveAudioResampleStage.maximumSpliceSeconds)
+            if x >= min(recoveryOffset, Self.recoveryMinimumDropSeconds) { recoveryDrop = x }
+        }
         windowLine = windowIfDueLocked(now: t1)
         lock.unlock()
 
@@ -455,8 +597,150 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             coarseAction(trigger: trigger, error: e, filtered: filteredAtEvent, target: target,
                          host: t1, queueDepth: depth)
         }
+        if let x = recoveryDrop { recover(by: x, host: t1, queueDepth: (enqueuedFrontier ?? .nan) - timebase) }
         if let w = windowLine { emitWindow(w) }
+        armDeadlineIfLive(timebase: timebase, host: t1)
         return read
+    }
+
+    // MARK: - The starvation hold (§18.16)
+
+    /// The deadline fired: no input arrived while the queue drained to the margin. Hold the
+    /// timebase where it stands. Called on the deadline's queue (tests: directly). Re-checks
+    /// everything under the transition lock, so a deadline that lost a race with an enqueue does
+    /// nothing but re-arm.
+    public func starvationCheck() {
+        guard holdWrite != nil else { return }
+        transition.lock(); defer { transition.unlock() }
+        lock.lock()
+        guard anchored, !retired, mode == .loop, held == nil, let f = frontier else {
+            lock.unlock(); return
+        }
+        lock.unlock()
+        let t = hostNow()
+        let timebase = readTimebase()
+        guard timebase.isFinite else { return }
+        let queue = f - timebase
+        lock.lock()
+        // Not yet at the margin (the deadline ran early, or a write moved the timebase): re-arm.
+        // Inside the settle window after a write the timebase may not have taken it yet.
+        guard queue <= Self.starvationMarginSeconds + 0.002, t >= settleUntil else {
+            lock.unlock()
+            armDeadlineIfLive(timebase: timebase, host: t)
+            return
+        }
+        held = (timebase, t, f)
+        holds += 1; windowHolds += 1; windowWrites += 1
+        previousError = nil
+        let n = holds, writes = writesLocked(), tag = self.tag, d = recoveryOffset
+        let since = lastEvaluationHost > 0 ? t - lastEvaluationHost : .nan
+        lock.unlock()
+        holdWrite?(timebase, t)
+        // Read straight back: how far the timebase is from the held point once the write returns.
+        // The write's landing latency has never been measured (§18.16); this and the resume line's
+        // "timebase at the resume read" are the measurement.
+        let back = readTimebase() - timebase, backHost = hostNow() - t
+        emit {
+            String(format: "%@ ⏸ STARVATION HOLD #%d at host %.3f s — no input for %.0f ms, renderer queue %.1f ms "
+                   + "(margin %.0f ms): timebase held at %.6f s, rate 0 (session writes %d) · read "
+                   + "back %+.2f ms from the held point, %.2f ms after the decision%@",
+                   tag, n, t, since * 1000, queue * 1000, Self.starvationMarginSeconds * 1000,
+                   timebase, writes, back * 1000, backHost * 1000,
+                   d > 0 ? String(format: " · recovery offset %.1f ms carried", d * 1000) : "")
+        }
+    }
+
+    /// The restart. Under `lock` and `transition`; returns its log line to emit off the lock.
+    /// Resumes at the latest content that leaves `resumeFillSeconds` queued, never past the target
+    /// and never before the held point; whatever the target is ahead of that becomes D.
+    private func resumeLocked(host t: Double, timebaseRead: Double) -> (() -> Void)? {
+        guard let h = held, let f = frontier else { return nil }
+        let targetFull = refMedia + (t - refHost) * refRate
+        let owed = recoveryOffset
+        lock.unlock()
+        // Outside `lock` (the stage's lock is taken); `transition` still serialises writes.
+        let targetOut = clock.outputTime(atInputTime: targetFull - owed)
+        let at = max(h.timebase, min(targetOut, f - Self.resumeFillSeconds))
+        let heard = clock.inputTime(atOutputTime: at) + clock.spliceCorrectionAhead(ofOutputTime: at)
+        lock.lock()
+        let paused = t - h.host
+        heldSeconds += paused
+        held = nil
+        resumes += 1; windowWrites += 1
+        var d = max(0, targetFull - heard)
+        var folded = 0.0
+        if d < Self.recoveryFoldSeconds { folded = d; recoveryFolded += d; d = 0 }
+        recoveryOffset = d
+        if d > 0 {
+            if recoveryStartHost == nil { recoveryStartHost = t }
+            recoveryPeak = max(recoveryPeak, d)
+            lastRecoveryDropHost = t      // the first drop waits a spacing: the refill is still landing
+        } else { recoveryStartHost = nil }
+        restartAfterWriteLocked(host: t)
+        let writes = writesLocked(), n = resumes, tag = self.tag
+        let skipped = at - h.timebase, queued = f - at
+        return { [write] in
+            write(at, t, .starvationResume(pausedSeconds: paused))
+            self.armDeadlineIfLive(timebase: at, host: t)
+            self.emit {
+                String(format: "%@ ▶ STARVATION RESUME #%d at host %.3f s after %.0f ms held (timebase read %+.2f ms "
+                       + "from the held point) — restarts at %.6f s (%+.1f ms from the held point), "
+                       + "%.1f ms queued · audio %@ · session writes %d", tag, n, t, paused * 1000,
+                       (timebaseRead - h.timebase) * 1000, at, skipped * 1000, queued * 1000,
+                       d > 0 ? String(format: "%.1f ms BEHIND the picture's line: recovered by "
+                                      + "forward splices as the queue allows", d * 1000)
+                             : String(format: "on the target (%.1f ms folded into the loop)",
+                                      folded * 1000),
+                       writes)
+            }
+        }
+    }
+
+    /// One recovery drop of `x` seconds. Called without the lock, under `transition`.
+    private func recover(by x: Double, host t: Double, queueDepth: Double) {
+        guard let g = clock.requestSplice(contentSeconds: x) else { return }
+        lock.lock()
+        recoveryOffset = max(0, recoveryOffset - g.seconds)
+        var folded = 0.0
+        if recoveryOffset < Self.recoveryFoldSeconds {
+            folded = recoveryOffset; recoveryFolded += folded; recoveryOffset = 0
+        }
+        recoveryDrops += 1; recoveryDroppedSeconds += g.seconds
+        lastRecoveryDropHost = t
+        windowSplices += 1
+        let left = recoveryOffset, n = recoveryDrops, tag = self.tag
+        let since = recoveryStartHost.map { t - $0 } ?? .nan, peak = recoveryPeak
+        if left == 0 { recoveryStartHost = nil; recoveryPeak = 0 }
+        lock.unlock()
+        emit {
+            String(format: "%@ RECOVERY DROP #%d at host %.3f s: %lld fr / %.1f ms forward · renderer queue %.1f ms · "
+                   + "%@ · no rate write", tag, n, t, g.frames, g.seconds * 1000, queueDepth * 1000,
+                   left > 0 ? String(format: "%.1f ms still behind", left * 1000)
+                            : String(format: "RECOVERED %.1f s after the resume (peak %.1f ms behind, "
+                                     + "%.1f ms folded into the loop)", since, peak * 1000,
+                                     folded * 1000))
+        }
+    }
+
+    /// Nothing owed any more (an anchor or a fallback put the content on the target).
+    private func endRecoveryLocked() {
+        recoveryOffset = 0; recoveryStartHost = nil; recoveryPeak = 0
+    }
+
+    /// Re-arm the deadline for the moment the queue reaches the margin, if a hold is possible.
+    private func armDeadlineIfLive(timebase: Double, host t: Double) {
+        guard let armDeadline, mode == .loop, timebase.isFinite else { return }
+        lock.lock()
+        let f = frontier, ok = anchored && !retired && held == nil, settle = settleUntil
+        lock.unlock()
+        guard ok, let f else { return }
+        // Inside a settle window the timebase may not have taken the last write, so a read then
+        // can misstate the queue; the deadline waits for the window to close.
+        armDeadline(max(settle, t + max(0, f - timebase - Self.starvationMarginSeconds)))
+    }
+
+    private func writesLocked() -> Int {
+        firstAnchors + spliceFallbacks + reanchors + holds + resumes
     }
 
     /// §2.4's action: splice the content by −e, or — past the bound, or a drop the renderer queue
@@ -496,7 +780,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         }
         let number = spliceDrops + spliceInserts
         let integralPpm = state.integral * 1e6
-        let writes = firstAnchors + spliceFallbacks + reanchors
+        let writes = writesLocked()
         lock.unlock()
 
         // The fallback: place the timebase so the content heard now is the target, as step 4 did.
@@ -604,7 +888,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         public var unmatched = 0
         public var splices: Int { spliceDrops + spliceInserts }
         /// `coarseLevel + coarseStep == splices + spliceFallbacks`.
-        public var writes: Int { firstAnchors + spliceFallbacks + reanchors }
+        public var writes: Int { firstAnchors + spliceFallbacks + reanchors + holds + resumes }
         public var rho = 1.0
         public var integral = 0.0
         public var filteredError = 0.0
@@ -614,6 +898,17 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         public var railEpisodes = 0
         public var railSuppressed = 0
         public var railSeconds = 0.0
+        /// The starvation hold (§18.16): holds and resumes are writes (rate 0, rate 1.0).
+        public var holds = 0
+        public var resumes = 0
+        public var heldSeconds = 0.0
+        /// Recovery drops after a resume, what they moved, and what was folded into the loop.
+        public var recoveryDrops = 0
+        public var recoveryDroppedSeconds = 0.0
+        public var recoveryFoldedSeconds = 0.0
+        /// D now, and the lowest queue seen just before an enqueue (nil before the second one).
+        public var recoveryOffset = 0.0
+        public var lowWater: Double?
     }
 
     public var totals: Totals {
@@ -623,10 +918,14 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
 
     /// End of session: the last partial window, then one summary line.
     public func finish() {
+        transition.lock()
         lock.lock()
+        retired = true
         let w = windowLocked(final: true)
         let t = totalsLocked()
         lock.unlock()
+        transition.unlock()
+        deadline?.cancel()
         if let w { emitWindow(w) }
         let tag = self.tag, mode = self.mode
         emit {
@@ -634,12 +933,18 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                    + "coarse %d [splice fallbacks] + re-anchor %d) · coarse events %d [level %d, step %d] · "
                    + "splices %d (drop %d, insert %d), %.1f ms spliced, unmatched %d · ρ−1 at end "
                    + "%+.1f ppm, max |ρ−1| %.1f ppm · i %+.2f ppm · ρ at its rail %.1f s, %d "
-                   + "episode(s) ≥ 5 s (%d not logged)",
+                   + "episode(s) ≥ 5 s (%d not logged) · starvation: holds %d + resumes %d (writes), "
+                   + "%.0f ms held, recovery drops %d / %.1f ms, %.1f ms folded, D at end %.1f ms, "
+                   + "queue low-water before an enqueue %@",
                    tag, mode.rawValue, t.writes, t.firstAnchors, t.spliceFallbacks, t.reanchors,
                    t.coarseLevel + t.coarseStep, t.coarseLevel, t.coarseStep,
                    t.splices, t.spliceDrops, t.spliceInserts, t.splicedSeconds * 1000, t.unmatched,
                    (t.rho - 1) * 1e6, t.maxAbsRhoMinusOne * 1e6, t.integral * 1e6,
-                   t.railSeconds, t.railEpisodes, t.railSuppressed)
+                   t.railSeconds, t.railEpisodes, t.railSuppressed,
+                   t.holds, t.resumes, t.heldSeconds * 1000, t.recoveryDrops,
+                   t.recoveryDroppedSeconds * 1000, t.recoveryFoldedSeconds * 1000,
+                   t.recoveryOffset * 1000,
+                   t.lowWater.map { String(format: "%.1f ms", $0 * 1000) } ?? "—")
         }
     }
 
@@ -655,6 +960,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         t.unmatched = unmatched
         t.railEpisodes = railEpisodes; t.railSuppressed = railSuppressed
         t.railSeconds = railSeconds + (railSince.map { max(0, lastEvaluationHost - $0) } ?? 0)
+        t.holds = holds; t.resumes = resumes
+        t.heldSeconds = heldSeconds + (held.map { max(0, lastEvaluationHost - $0.host) } ?? 0)
+        t.recoveryDrops = recoveryDrops; t.recoveryDroppedSeconds = recoveryDroppedSeconds
+        t.recoveryFoldedSeconds = recoveryFolded; t.recoveryOffset = recoveryOffset
+        t.lowWater = sessionLowWater.isFinite ? sessionLowWater : nil
         return t
     }
 
@@ -684,8 +994,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private func windowLocked(final: Bool, now: Double? = nil)
         -> (() -> (line: String?, facts: WindowFacts))? {
         let n = count
-        let hadAnything = n > 0 || discarded > 0 || settling > 0 || windowWrites > 0
-        let prints = reportsWindows || windowCoarse > 0 || final
+        let hadAnything = n > 0 || discarded > 0 || settling > 0 || windowWrites > 0 || held != nil
+        let prints = reportsWindows || windowCoarse > 0 || windowHolds > 0 || final
         guard hadAnything, prints || windowCompanion != nil else {
             resetWindowLocked(now: now); return nil
         }
@@ -695,7 +1005,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                     sat: saturatedSteps, rho: state.rho, rhoMin: rhoMin, rhoMax: rhoMax,
                     slew: slewMax, i: state.integral, ef: state.filteredError,
                     coarse: windowCoarse, splices: windowSplices, writes: windowWrites,
-                    total: totalsLocked(), elapsed: (now ?? lastEvaluationHost) - sessionStart)
+                    total: totalsLocked(), elapsed: (now ?? lastEvaluationHost) - sessionStart,
+                    lowWater: lowWater, holds: windowHolds, d: recoveryOffset)
         resetWindowLocked(now: now)
         let tag = self.tag, mode = self.mode
         return {
@@ -722,10 +1033,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                           + "slew max %.1f ppm/s) · i %+.2f ppm · e_f %+.2f ms · e ms %@ · n=%d "
                           + "discarded=%d settling=%d%@ · saturated %d · coarse this window %d "
                           + "(splices %d) · writes this window %d · session: writes %d = first %d + "
-                          + "coarse %d (splice fallbacks) + re-anchor %d · coarse events %d (level %d, "
+                          + "coarse %d (splice fallbacks) + re-anchor %d + starvation holds/resumes · coarse events %d (level %d, "
                           + "step %d) · "
                           + "splices %d, %.1f ms, unmatched %d · max |ρ−1| %.1f ppm · "
-                          + "renderer depth ms %@",
+                          + "renderer depth ms %@ · low-water %@ · holds this window %d, session %d "
+                          + "(resumes %d, %.0f ms held) · D %.1f ms",
                           tag, final ? "END" : "window", snap.elapsed, mode.rawValue,
                           (snap.rho - 1) * 1e6, rhoRange, snap.slew * 1e6, snap.i * 1e6,
                           snap.ef * 1e3, errText, snap.n, snap.disc, snap.settle,
@@ -735,7 +1047,10 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                           snap.total.coarseLevel + snap.total.coarseStep,
                           snap.total.coarseLevel, snap.total.coarseStep, snap.total.splices,
                           snap.total.splicedSeconds * 1000, snap.total.unmatched,
-                          snap.total.maxAbsRhoMinusOne * 1e6, depthText), facts)
+                          snap.total.maxAbsRhoMinusOne * 1e6, depthText,
+                          snap.lowWater.isFinite ? String(format: "%.1f ms", snap.lowWater * 1e3) : "—",
+                          snap.holds, snap.total.holds, snap.total.resumes,
+                          snap.total.heldSeconds * 1e3, snap.d * 1e3), facts)
         }
     }
 
@@ -743,6 +1058,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         count = 0; depthCount = 0; overflowed = 0; discarded = 0; settling = 0; saturatedSteps = 0
         rhoMin = .infinity; rhoMax = -.infinity; slewMax = 0
         windowCoarse = 0; windowSplices = 0; windowWrites = 0
+        lowWater = .infinity; windowHolds = 0
         if let now { windowStart = now }
     }
 
@@ -770,4 +1086,32 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
 private struct UncheckedLine: @unchecked Sendable { let make: () -> String }
 private struct UncheckedWindow: @unchecked Sendable {
     let make: () -> (line: String?, facts: LiveAudioResampleSteering.WindowFacts)
+}
+
+/// The starvation hold's one-shot deadline (§18.16): a strict dispatch timer on its own
+/// high-priority queue, re-armed on every enqueue. Host times are `CACurrentMediaTime`, the same
+/// mach clock `DispatchTime.now()` reads.
+final class StarvationDeadline: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "manifold.liveaudio.starvation", qos: .userInteractive)
+    private let timer: DispatchSourceTimer
+    private let hostNow: @Sendable () -> Double
+    /// Set once, before the first `arm`.
+    var fire: (@Sendable () -> Void)?
+
+    init(hostNow: @escaping @Sendable () -> Double) {
+        self.hostNow = hostNow
+        timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
+        timer.schedule(deadline: .distantFuture)
+        timer.setEventHandler { [weak self] in self?.fire?() }
+        timer.activate()
+    }
+
+    func arm(at host: Double) {
+        let delay = max(0, host - hostNow())
+        timer.schedule(deadline: .now() + delay, leeway: .microseconds(500))
+    }
+
+    func cancel() { timer.schedule(deadline: .distantFuture) }
+
+    deinit { timer.cancel() }
 }

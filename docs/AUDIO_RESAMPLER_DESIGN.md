@@ -1042,6 +1042,12 @@ the connect). The ±20 ms above still gates each capture. Capture A → B is rep
 SRs that lag the media, lip-sync has already walked by capture A, and a correction that restores
 the session start would fail A → B by exactly that head start.
 
+📌 **FROM 2026-09-29, A STREAM THAT CARRIES ITS OWN A/V OFFSET IS READ AS DEVICE − STREAM** (§18.13).
+When the source's own timestamps put audio off its picture (Cloudflare SRT: ~70–80 ms early), the
+±20 ms judges Manifold, not the sender: the absolute is reported, and a same-session stream probe
+(`probe_av.py`, both streams on the file's PTS) is subtracted for the gate. Proposed with §18.13's
+record; Robbie to confirm it as a gate rather than a reading.
+
 ⚠️ **THE PRE-RESAMPLER BASELINE FOR THIS CRITERION IS ALREADY MEASURED AND IT IS NOT ZERO**
 (`AV_SYNC_FINDINGS.md` §2): local SRT **+203.9 ms**, Cloudflare SRT **+165.8 ms**, NDI
 **+230.1 ms**, WHEP **−98.9 / +36.7 ms** on two sessions. So this criterion is not "did the
@@ -3468,7 +3474,9 @@ The SRs are right here, so the unforced run is the reference and the difference 
     `srfix-whep-mediamtx`). That is outside the ±20 ms gate below; Robbie accepts it as within
     broadcast tolerance.
   - The flat-SR case is bounded by the fallback (§18.7: −59 / −70 ms worst, caught up by ~28 min).
-  - The fix is post-release: the level-based correction (BUGS.md, POST-RELEASE entry).
+  - ~~The fix is post-release~~ **Rescoped 2026-09-29 (Robbie): the level-based correction is in
+    THIS release**, after the SRT items (BUGS.md, "THIS RELEASE: the depth-slope fallback should
+    hold the queue's LEVEL"). The limitation stands until it lands.
 - **The start → end criterion is restated** (below: +26 min against the session start).
 - **No MediaMTX rerun.** Next is the Cloudflare SRT soak only.
 
@@ -3483,8 +3491,9 @@ The SRs are right here, so the unforced run is the reference and the difference 
   the target does not step back. **A false engagement is permanent for the session under ANY rule
   of this form.** The rule only sets how likely it is and how big.
 - A's 600 s window halves the noise and keeps it far from engaging (0.27 / 0.36), but forced, it
-  leaves 15 ms too. The fix is the level-based correction (BUGS.md, "POST-RELEASE: the depth-slope
-  fallback should hold the queue's level"), not a faster or slower rule.
+  leaves 15 ms too. The fix is the level-based correction (BUGS.md, "THIS RELEASE: the depth-slope
+  fallback should hold the queue's LEVEL"; rescoped from post-release 2026-09-29), not a faster or
+  slower rule.
 
 **Found on the way: last night's live MediaMTX run on A did not engage, and fails.**
 `srfix-whep-mediamtx` ran 2026-09-28 21:51–22:20 on the §18.7 build, with staircase SRs, the fit at
@@ -3531,7 +3540,7 @@ min returns lip-sync to the SESSION START, not to capture A.
 - On Cloudflare the restatement changes nothing that matters: +0.1…+6.4 ms on every session.
 - Capture A → B is still reported, not gated, so earlier runs stay comparable.
 
-**The overshoot, and why a rate cannot give it back** (for the post-release item):
+**The overshoot, and why a rate cannot give it back** (for the level-based item, in this release):
 - **A rate needs a long window to be stable, and a long window integrates a staircase's flat
   stretches.** On a staircase, b_SR over a short window is not the SRs' long-run slope. A flat
   stretch between stairs reads as a large disagreement (§18.5's log: +27, +67, +71, +61, +35, +24
@@ -3595,7 +3604,7 @@ timeline:
 
 | | result |
 |---|---|
-| flash/beep A/V, +180…310 s | +7.85 ms (grid-corrected +27.85) |
+| flash/beep A/V, +180…310 s | +7.85 ms (grid-corrected +27.85) — ⚠️ WRONG by the 77 ms start gap; corrected −69.15 (§18.13) |
 | flash/beep A/V, +1260…1390 s | +7.88 ms (grid-corrected +27.88) |
 | **start → end** | **+0.03 ms**; trend over 34 whole grid periods **0.00 ppm** (each period +7.9…+8.3 ms) |
 | audio PTS vs the sample count | exact: +0.000 ms over 1424 s, every step 1920 ticks |
@@ -3682,7 +3691,7 @@ glass (from the drawable's presented time).
 
 | instrument | A → B | trend |
 |---|---|---|
-| **stream** (ffmpeg file, flash/beep on its own timestamps, same wall-clock windows) | **−20.3 ms** (+2.50 → −17.84) | −12 ppm over 12 whole grid periods (beeps are muted during the noise segment) |
+| **stream** (ffmpeg file, flash/beep on its own timestamps, same wall-clock windows) | **−20.3 ms** (+2.50 → −17.84; absolute ⚠️ +81 ms wrong, corrected −78.50 → −99.12, §18.13) | −12 ppm over 12 whole grid periods (beeps are muted during the noise segment) |
 | **in-app** (`[AV-LAG]`, audio at the glass − picture PTS) | **−0.6 ms** (+24.62 → +24.05) | −1.1 ppm after 180 s; frame choice, audio − clock and tick → glass all flat |
 | **device** (captures, grid-corrected) | **−23.9 ms** (−53.64 → −77.49) | |
 
@@ -3709,7 +3718,8 @@ glass (from the drawable's presented time).
   - The absolute offset is not explained by the stream: the stream's own A/V at capture A is +2.5
     ms as written.
   - The §18.10 soak was similar: −50.5 against a +7.9 ms stream in another session.
-  - Not investigated; the absolute gate is open for Cloudflare SRT.
+  - ~~Not investigated; the absolute gate is open for Cloudflare SRT.~~ Resolved in §18.13: the
+    stream figure was wrong by its 81 ms start gap; the stream carries the offset.
 - **start → end:** A → B −23.9 ms, which is the stream's drift. The new criterion's log term,
   −44.6 ms, is contaminated by the connect rail event below and was only derived for WHEP. It is
   reported, not gated.
@@ -3726,3 +3736,612 @@ glass (from the drawable's presented time).
 | 16:56:23 | 6 short zeros (24–106 ms) within 0.5 s | a delivery burst: 19–28 frames/s, a video underrun at 16:56:25 |
 | 16:57:29 | 1 × 156 ms | video queue underruns at 16:57:31 (64 ms empty) |
 | 17:07:29 | 2 × 18 / 10 ms | nothing logged |
+
+### 18.13 The Cloudflare SRT absolute offset, 2026-09-29 evening (unattended) — ✅ it is in the stream; the stream probe read it +77 ms wrong
+
+**Question (Robbie):** why does Cloudflare SRT read −50 … −83 ms at the device (criterion 12,
+grid-corrected) when its stream read +8 ms?
+
+**✅ RECORDED 2026-09-29 (Robbie): the Cloudflare SRT absolute offset is UPSTREAM.** The stream
+carries audio ~70–80 ms early on its own timestamps (measured 69–81 ms across two sessions), and
+Manifold plays it faithfully (device − stream +4.9 / +1.6 ms, same session). Not a Manifold defect;
+nothing is changed in the app (CLAUDE.md, server-agnostic). A user who wants it removed does so with
+the per-source audio offset (§19, design only).
+
+**Answer: the stream does not read +8 ms. `probe_av.py` was wrong by exactly the gap between the
+file's first video PTS and its first audio PTS.** avsync decodes each stream from its OWN first
+frame: luma times start at the first video frame, audio at the first sample. Cloudflare's TS starts
+its video 77–81 ms after its audio, so every Cloudflare stream figure read that much too positive.
+An ffmpeg mux starts video 21 ms after audio, so the same error was +21 ms there. Fixed:
+`probe_av.py` now puts both on the file's PTS (`-copyts` first PTS of each stream).
+
+| file | video starts after audio | old probe_av (as written) | corrected, as written | corrected, +20 grid | device, grid-corrected |
+|---|---|---|---|---|---|
+| `cfsrt-probe.ts` (§18.10 probe session) | +77.0 ms | +7.85 / +7.88 | **−69.15 / −69.12** | −49.15 / −49.12 | −50.5 (+3 min, the soak: another session) |
+| `cfsrt-probe-avlag.ts` (§18.12, same session as the device) | +81.0 ms | +2.50 → −17.84 | **−78.50 → −99.12** | −58.50 → −79.12 | **−53.64 → −77.49** |
+| reference: fixture, ffmpeg libx264 + aac | +21.3 ms | +22.13 | **+0.79** | | |
+
+- **Same session, the device tracks the stream's absolute A/V within +4.9 / +1.6 ms at captures A and
+  B.** The §18.10 soak's −50.5 matches the probe session's −49.15 within 1.4 ms, across sessions.
+- **The whole offset is in Cloudflare's stream: audio ~70–80 ms ahead of its picture on the stream's
+  own timestamps.** Size varies by session, like the slope (§18.12). Not separated between OBS and
+  Cloudflare. The local OBS SRT soak (§18.4) passed at +17 grid-corrected, so OBS's own output is
+  unlikely to carry it; Cloudflare re-stamps both streams (the 1 ms grid) and re-encodes video
+  (B-frames, pts−dts up to 208 ms, which OBS's output does not have). Likely Cloudflare; not proven.
+- **Nothing to fix in Manifold (CLAUDE.md, server-agnostic):** an MPEG-TS source's A/V is what its
+  timestamps say, and Manifold plays exactly that.
+- **Criterion 12 on a stream that carries its own offset** should be read as device − stream. On
+  that reading Cloudflare SRT passes (+4.9 / +1.6 ms).
+- **Also retracted:** the "+22 ms from a 25p → 23.976 conversion" reading, which was this session's
+  first probe of an ffmpeg reference. It was the same +21 ms start gap; the conversion's mean is
+  +0.8 ms.
+- ⚠️ **Probably affected, not re-checkable:** §18.5's MediaMTX RTSP sender probe (−13.1 ms as
+  written) used the same avsync decode on an `.mkv`. The file is gone. Any sender probe whose
+  streams start at different times read too positive by that gap.
+
+**How it was found: the in-app content A/V.** `[AV-LAG]` checks timestamps only, so it cannot see
+content. A DEBUG probe, `[AV-CONTENT]` (pre-ship removal, BUGS.md), logs each fixture beep's onset
+on the audio the sink receives (`in`, the transport's axis = content time) and hands the renderer
+(`out`, the resampler's output axis), and each flash at the first display tick that shows it with
+`now` and `audio−now` (content time, `liveAudioDrift`). "At the glass" is beep(in) − (now +
+audio−now) − tick→glass. The output axis carries the ratio's integral by design, so out − in is not
+a content shift and is not used. `scripts/soak/analysis/avcontent.py` pairs them. Three local SRT replays through
+`repro/run.sh`, 6–7 min each, one AAC frame per PES:
+
+| source | decoded: beep(in) − flash, on Manifold's PTS | same file, same onset rule, on its own PTS (`-copyts`) | at the glass | glass − decoded |
+|---|---|---|---|---|
+| reference, no B-frames | +1.11 ms | +1.58 ms | −14.71 | −15.82 |
+| reference, B-pyramid (pts−dts to 208 ms, as Cloudflare) | +1.10 ms | | −14.78 | −15.88 |
+| Cloudflare capture (`cfsrt-probe.ts`, first 7 min) | **−68.78 ms** | **−68.80 ms** | **−84.93** | −16.15 |
+| the same, again, on §18.15's build | −68.78 ms | | −84.69 | −15.91 |
+
+- **Manifold's decoded A/V equals the file's to 0.5 ms on both sources.** B-frames change nothing.
+- AudioToolbox, fed Cloudflare's AAC packet by packet as `SRTAudioDecoder` does, matches ffmpeg's
+  decode to the sample (lag 0, residual 6e-9). The sample-counted axis re-pinned 0 times.
+- **The render path is a constant: glass − decoded = −15.8 … −16.2 ms on every run**, whatever the
+  source, B-frames or not, and (§18.15) 1, 7 or 17 AAC frames per PES. It holds on both builds. The
+  control subtracts it along with the rest of the device chain.
+- The first replay attempt was void: see §18.14's note on ffmpeg's PES packing of digital silence.
+
+### 18.14 SRT device mutes, 2026-09-29 evening (unattended) — ✅ the renderer starves when a delivery stall outlasts the AUDIO queue's lead, then drops every late refill whole
+
+**Instruments added** (DEBUG / telemetry, `LiveAudioSink`, pre-ship removal in BUGS.md):
+- **`[<PATH>-STARVE]`**: at each enqueue, the renderer's timebase (the steering's own read) against
+  the end of everything enqueued before. Past it means the renderer ran dry and played silence for
+  at least that long. The line gives the silence's host span, the time since the previous enqueue,
+  and where the refill lands against the playhead.
+- **`[<PATH>-ZERO]`**: exact-zero runs ≥ 5 ms in what is handed to the renderer, on all channels.
+  This separates silence the app wrote from silence the renderer made.
+- The renderer probe's existing notifications (automatic flush, `hasSufficientMediaData…` KVO)
+  logged nothing in any run: the renderer never flushed.
+
+**Already in §18.12's log, read with those instruments' logic:** the steering window's renderer
+queue depth (measured after each enqueue) went **negative** in the windows holding mute clusters
+1 and 2: min **−6.9 ms** (window ending 16:56:26.9) and **−40.8 ms** (16:57:37.0), against a
+session median of ~205 ms. So audio was enqueued after the renderer had played past it. Cluster 3
+(17:07:29, 18 / 10 ms) dipped only to +44.8 ms, which a per-enqueue depth measured after the refill
+cannot rule out: a short dry spell followed by a multi-buffer refill ends ahead. `[STARVE]` measures
+before the refill and would show it.
+
+**Reproduced, local SRT with induced stalls** (`STALLS=` in `repro/run.sh`: SIGSTOP / SIGCONT on the
+ffmpeg sender; reference TS with a −60 dBFS noise floor, so any exact zero is a mute; no catch-up
+burst after the stall, so content stays late by the stall's length):
+
+| stall | `[STARVE]` events | silence at the renderer | last starve after resume | video underruns (empty) | `[ZERO]` |
+|---|---|---|---|---|---|
+| 50–300 ms (6 stalls) | 0 | 0 | — | ≤ 2 (≤ 98 ms) | 0 |
+| 400 ms | 59 | 1.0 s | +1.5 s | 69 (2.5 s) | 0 |
+| 600 ms | 277 | 5.7 s | +5.9 s | 182 (6.5 s) | 0 |
+| 800 ms | 431 | 9.0 s | +9.1 s | 255 (9.3 s) | 0 |
+| 1200 ms | 862 | 18.2 s | +17.7 s | 458 (17.1 s) | 0 |
+| 2000 ms | 1576 | 33.5 s | +32.3 s | 808 (30.4 s) | 0 |
+
+**Where it starves:**
+1. The audio target is LiveClock's `now()`, and the renderer's queue is only as deep as the audio's
+   ARRIVAL LEAD over `now()`: **~340 ms here, ~205 ms on Cloudflare live.** That lead is set by the
+   sender's mux (how far ahead of its video it interleaves audio) and by the reorder depth: video
+   PTS carry pts − dts, audio does not. Manifold does not control it. The 250 ms cushion is sized
+   and measured on VIDEO.
+2. A stall longer than that lead runs the renderer dry. **The first refill is already behind the
+   playhead, and so is every one after it until the clock has fallen back.** Each buffer is dropped
+   whole ("ends −35 ms against the playhead"), so the renderer plays exact zero while the resampler
+   reports 0 holes and contiguous buffers, because the axis IS contiguous. This is §18.12's
+   signature.
+3. The mute lasts until `now()` falls back behind arrival: about the deficit at LiveClock's catch-up
+   (≈ 16 × the stall excess here). On a live network, SRT redelivers in a burst, the deficit is
+   brief, and the mutes are the 24–156 ms seen in §18.12.
+- **Nothing app-written:** 0 `[ZERO]` runs in every stall. The zeros are the renderer's.
+- **Not a mapping step:** no snap, freeze guard or queue-full re-anchor in the stall windows.
+  LiveClock slewed at its rail, as §18.12 shows 80 % of the time.
+
+**Fix options, for decision (none implemented):**
+- **A. Hold the audio with the picture.** When the renderer is about to run dry, stop the audio
+  timebase (rate 0) and restart it when data arrives. That turns "silence, then drop everything
+  late" into a short pause with A/V intact and latency +stall, recovered afterwards by the existing
+  slew. Server-agnostic. Costs a pitch-free pause; interacts with the resampler loop's error
+  (a known, one-off step).
+- **B. Size the cushion on the audio lead,** not the video's. Measure min(audio lead, video lead) and
+  keep the target above the observed stall p99. Costs latency on every session.
+- **C. Play late audio instead of dropping it:** re-stamp a refill that lands behind the playhead
+  onto it (a splice, as step 5 does for jumps). The refill is heard with no mute, and lip-sync takes
+  a step the loop then removes.
+- A is the only one that removes the minutes-long silence of a long stall. B only moves the
+  threshold. C trades mute for A/V error.
+
+### 18.15 The multi-frame AAC must-fix, 2026-09-29 evening — ✅ implemented, verified with ffmpeg as the sender; one residual belongs to §18.14
+
+**Root cause, confirmed:** the vendored libavcodec is configured `--enable-parser=h264` only. With
+no AAC parser, libavformat's mpegts demuxer returns each audio PES PAYLOAD as one packet, and
+`SRTSession.m`'s comment ("one complete AUDIO frame per AVPacket") was true only of senders that
+put one frame in each PES. **Worse than recorded:** ffmpeg rounds `-pes_payload_size 0` up to 170
+bytes, so digital-silence AAC frames (~13 bytes) are grouped even when asked for one per PES (17 per
+PES in the fixture). The first attempt at §18.13's replays hit exactly that: 1 of 7–13 frames
+decoded, 228 `[STARVE]` events. Void, redone with a −60 dBFS noise floor under the fixture audio.
+
+**The fix (BUGS.md outline, as written):**
+- `AACFraming.ADTSWalk`, a new leaf target (`swift test`): splits a payload by each header's
+  `aac_frame_length`, 7- or 9-byte headers. It stops on a bad length, a missing syncword or a short
+  tail, and reports the bytes left and why. Raw AAC and LATM are not walked.
+- `SRTAudioDecoder.decode` walks the payload and runs each frame through the existing one-frame
+  converter call (`convertOne`). Each decoded frame is handed on as its own buffer. The cookie comes
+  from the first frame; a later header that differs is logged once.
+- `SRTFrameRouter.handleAudioPacket` stamps frame k at the packet PTS + the samples decoded before
+  it from that packet (13818-1: the PES PTS is the first access unit's). The sample-counted axis
+  then advances exactly as with one frame per PES. Unwalked bytes and failed frames are counted on
+  the chain line (`aacFrames=`, `unwalkedBytes=`) and logged once per session.
+- `xcodegen generate` is needed once (new `AACFraming` product in `project.yml`).
+
+**Verification** (`repro/run.sh` with `PES_PAYLOAD=default`, i.e. ffmpeg's own packing, no
+`-pes_payload_size 0`; build `.build-cc/aacwalk-Profile`):
+
+| | frames per PES | undecodable | holes / overlaps / axis breaks | re-pins | `[STARVE]` | decoded A/V (§18.13's probe) | `[AV-LAG]` av |
+|---|---|---|---|---|---|---|---|
+| noise-floor reference, 6 min | 5–7 | **0** | 0 / 0 / 0 | 0 | 0 | **+1.11 ms** (1 frame per PES: +1.11) | −1.2 ppm |
+| fixture audio as is (digital silence), 4 min | **17** | **0** | 0 / 0 / 0 | 0 | ⚠️ 7125 | +1.54 ms | ⚠️ −63 ppm |
+
+- `swift test`: 124 / 124, including 10 new `ADTSWalkTests`: 1, 2, 6 and 12 frames per PES; mixed
+  lengths including silence-sized frames; CRC headers; a truncated last frame; garbage after a
+  valid frame; a short tail; a length shorter than its header; raw AAC and LATM not walked.
+- **Every frame decodes in both runs, and on the Manifold timeline its content lands where the
+  single-frame run puts it (+1.11 vs +1.11 ms).**
+- ⚠️ **Residual, NOT a decode defect: §18.14's starvation, reached through the sender's mux.** 17
+  frames is 363 ms of audio per PES, and the muxer holds each PES until it is full, so audio ARRIVES
+  up to ~360 ms after its time. The renderer queue swings +300 … −430 ms per chunk. Each chunk lands
+  behind the playhead and is dropped; `[AV-LAG]` reads −63 ppm while it lasts. Content A/V at the
+  glass still averages −14.8 ms (the other runs: −14.7), but spreads wider. It happens only where the
+  audio is near-silent (tiny frames), so it is mostly inaudible, but it can
+  clip the first frames when sound resumes. §18.14's options A / B cover it. A real ffmpeg sender with
+  programme audio packs ~6 frames (~130 ms) and is clean (row 1).
+- **One frame per PES, regression:** Cloudflare's capture replayed on this build: 0 undecodable,
+  0 holes, 0 `[STARVE]`, decoded −68.78 ms and glass −84.69 ms (the old build: −68.78 / −84.93).
+- ~~**Not yet run:** OBS live over local SRT~~ (done below), and another real sender (vMix, Wirecast,
+  hardware) — still not run.
+
+**OBS live over local SRT, regression A/B, 2026-09-29 22:12–22:36 (unattended, log-only).**
+- Setup:
+  - OBS "SRT Local" (listener, AAC, 23.976) streamed the looping flash-beep fixture.
+  - Manifold dialled it through `MANIFOLD_SRT_DEBUG_URL` with the passphrase in the URL (no
+    keychain read), connected by ⌃⌥D, for 8 min per build.
+  - Previous build `.build-cc/avcontent-Profile` (the same instruments, no ADTS walk), then
+    `.build-cc/aacwalk-Profile`. Driven over obs-websocket.
+- **OBS sends one AAC frame per PES** (rx 22 640 packets, 23 019 520 frames = 1.00 frame per
+  packet), so OBS never exercised the defect. This run checks for regression only.
+
+| | previous build | fix build | |
+|---|---|---|---|
+| undecodable / unwalked bytes | 0 / — | **0 / 0** | ✅ |
+| holes / overlaps / axis breaks / clamps | 0 / 0 / 0 / 0 | **0 / 0 / 0 / 0** | ✅ |
+| `[STARVE]` | 0 | 0 | ✅ |
+| timebase writes | 1 | 1 | ✅ |
+| decoded content A/V (`avcontent.py`, median / mean) | −119.25 / −119.29 ms | **−119.21 / −119.25 ms** | ✅ Δ 0.04 ms |
+| at the glass (mean) | −135.08 ms | −134.99 ms | ✅ |
+| `[AV-LAG]` audio − now, slope after 180 s | +0.1 ppm | +0.1 ppm | ✅ |
+
+- **A/V is unchanged.** The decoded figure is the fixture's 25p-in-23.976 phase spread (p10/p90
+  ±16 ms) plus OBS's sender term. It is identical on both builds.
+- The `[AV-LAG]` `av` slope (+13.7 / +24.9 ppm) comes from `tick→glass` alone: +11.6 → +19.9 ms in
+  the fix build's last 3-min block, one extra display refresh. Robbie was working in overlapping
+  windows during the run. That is the display path, not audio: `audio − now` is flat on both.
+- Harness notes:
+  - The first attempt at the fix-build run was void (a manual StopStream stopped OBS 5 s in).
+  - OBS's SRT listener re-listens when its caller leaves, so the sender must stop first. The
+    scratch runner does that now.
+
+### 18.16 The starvation hold (§18.14 option A) — design, 2026-09-29 night
+
+**Decided by Robbie (2026-09-29):** option A. When the renderer is about to run dry, hold the audio
+timebase (rate 0) and restart it when data returns. Asked for, before building: how lip-sync
+recovers after the resume, how it interacts with the steering loop, the splice and LiveClock, and
+proof that the rate is written only during actual starvation.
+
+**First, a correction to §18.14.** Its repro says "no catch-up burst after the stall". That is wrong.
+ffmpeg 8's `-readrate` catches up at **1.05×** after a lag (`stall1.ffmpeg.log`: "Resumed reading
+at pts 316.462 with rate 1.050 after a lag of 2.117s"). So §18.14's silences (≈ 16–20 × the stall
+excess) measure the SENDER's catch-up, not LiveClock falling back. Nothing else in §18.14 changes.
+
+**Second, what the picture does through the same stall.** Option A as written in §18.14 ("A/V intact,
+latency +stall") assumed the picture waits too. It does not.
+- LiveClock keeps running through a video underrun. `evaluateFreezeGuard`: "an EMPTY queue is an
+  underrun, not a freeze … the clock is positioned correctly".
+- When frames return, each tick shows the newest frame with PTS ≤ `now()`.
+- **Sender caught up (a burst, or fast):** the picture is back on `now()` at once.
+- **Sender still late:** the picture shows frames as they arrive, behind `now()`, until the P-loop
+  slews `now()` back at ≤ 0.5 %.
+
+So a pause that simply restarts where it stopped leaves audio late against a picture that has
+moved on, by the whole time held. The restart point, and a debt the loop steers around, are the
+design.
+
+#### The mechanism (`LiveAudioResampleSteering`, "THE STARVATION HOLD")
+
+| step | rule | figure |
+|---|---|---|
+| **deadline** | re-armed on every enqueue for the host time at which the queue (frontier − timebase) would reach the margin M; a strict dispatch timer, 0.5 ms leeway | M = **20 ms** |
+| **hold** | the deadline fires, and a fresh read confirms queue ≤ M + 2 ms outside a settle window → `setRate(0, time: timebase, atHostTime: now)` | write 1 |
+| **resume** | the first enqueue that leaves R queued past the held point → `setRate(1.0)` at `at = max(held, min(target, frontier − R))` | R = **100 ms**; write 2 |
+| **debt D** | `D = target − content heard at at`, ≥ 0. The loop's target becomes the picture's line − D | D < 20 ms is folded into the loop |
+| **recovery** | a forward splice (step 5's drop) of `x = min(D, queue − 100 ms keep − 10 ms fade − 50 ms margin, 1 s)`, taken when x ≥ min(D, 100 ms), at most one per second | 0 writes |
+
+- **Why M is small.** Every hold is two rate writes, and the renderer mutes ~50 ms on each
+  (`LIVECLOCK_AUDIO_MIRROR_FINDINGS.md` §11.11). A larger M holds on stalls the queue would have
+  ridden out. At 40 ms the tests held on a 280 ms stall over a 340 ms lead, which never ran dry
+  before. M must still cover the timer's lateness (sub-ms) and the write's landing (below).
+- **The landing is not measured.** `setRate` changes the rate synchronously and the timebase
+  asynchronously. The 0.25 s settle is a bound, and `delaysRateChangeUntilHasSufficientMediaData`
+  may delay a restart.
+  - A landing slower than M lets the renderer run dry for the difference, and no longer. Once the
+    hold lands, the timebase is back behind the frontier, so the refill is not behind the playhead
+    (test: 30 ms landing → ≤ 10 ms dry).
+  - The hold line logs a read-back, and the resume line logs the timebase read against the held
+    point. Those two are the measurement.
+- **Why the resume point is `max(held, min(target, frontier − R))`.**
+  - Burst: the refill covers the target, so the restart is on the target with D = 0. That is what
+    a dry renderer eventually reached, but without the dropped refills or the silence after them.
+  - Slow sender: the refill reaches only the held point, so the restart is there and D = the time
+    held.
+  - Never later than the target: never early audio. Never before the held point: never repeated
+    audio.
+  - A restart past the held point skips content inside the silence the hold already made.
+
+#### 1. How lip-sync recovers after the resume
+
+**The picture's line is the reference** (the loop's target, as everywhere since step 4d). Audio is
+never early. It is late by D at most, and D only shrinks.
+
+| sender after the stall | resume | D at resume | brought back by | how fast | worst lip-sync error |
+|---|---|---|---|---|---|
+| catches up at once (SRT redelivering its buffer, a burst) | on the target | **0** | nothing needed | at the resume | the loop's usual ±ms after the 0.25 s settle |
+| catches up at k× (ffmpeg: 1.05) | at the held point | ≈ time held ≈ stall − (queue at the stall − M) + (R − M)/k | recovery drops, ≥ 100 ms each, ≥ 1 s apart, as the queue grows at (k − 1) s/s | ≈ D / (k − 1) + ~4 s: **≈ 20 × D** at 1.05 | **D, audio late**, falling in ≥ 100 ms steps |
+| never catches up (content permanently late) | at the held point | ≈ time held | recovery drops once LiveClock slews `now()` back (the loop follows at ±B = 2000 ppm, so the queue grows ~2 ms/s) | slow | small against the picture, which is late too (it shows arrivals behind `now()`); D is owed against `now()`, not against the picture |
+
+- **Compared with the build before it,** with the same stall and sender:
+  - The HELD time is silence in both. There is no audio to play.
+  - Before: after the stall, silence for as long as the sender took to catch up (the "20 × D"),
+    because every refill landed behind the playhead.
+  - Now: the audio is heard late by D, and D is removed by splices over the same time.
+  - The trade is silence against late audio. The late audio never exceeds the silence it
+    replaces, and a burst leaves no debt at all.
+- **Worst case, bounded:**
+  - |lip-sync error| ≤ D₀ ≤ the time held + (R − M)/k.
+  - It is always "audio late". It returns to the loop's band by the time the sender has caught up.
+  - At 2 s over a 340 ms lead at 1.05×, D₀ ≈ 1.7 s. The test
+    (`testSlowCatchUpRecoversBySplices`) requires the loop back within 2 ms of the target by
+    25 × D₀ + 2 s after the stall, and late by no more than the time held + 70 ms.
+- **Cost in splices:** ≤ D₀ / 100 ms + 2 drops, each a 10 ms equal-power fade (step 5). A burst
+  costs none.
+
+#### 2. Interactions
+
+- **The steering loop.**
+  - While held there is no input, so there are no reads: nothing steps or integrates.
+  - The resume is a write, handled like every write: e_f reset, i held, 0.25 s settle.
+  - Because D comes off the target, the resume causes no step or level trigger. The loop sees
+    e ≈ 0, and the ratio does not rail to chase a debt it could only repay at 2 ms/s.
+  - A recovery drop moves content + ahead and D by the same amount at the same instant, so e is
+    continuous. It is not a coarse event and is not matched against one.
+- **The splice.**
+  - Recovery drops use the stage's `requestSplice` and step 5's drop guard (drop + fade + 50 ms),
+    plus a 100 ms keep, so a recovery never takes the queue back towards the margin.
+  - A coarse event during recovery (a LiveClock jump) splices as before against target − D.
+  - A coarse fallback write places content on target − D, so D is kept.
+  - An anchor (a clock reset, NDI's re-anchor, a Desktop Audio Lead change) places content on the
+    target, so D ends.
+- **LiveClock.**
+  - Nothing is written to it, and nothing new is read from it: the loop's target is its line, as
+    before.
+  - Its underrun behaviour, snap, freeze guard and rails are unchanged. The picture is NOT held
+    (out of scope; a pause of the picture would be a LiveClock change).
+  - Rail events move the target, and the loop follows at ±B as before.
+- **WHEP's SR fit and fallback.** D sits on top of the SR offset. The cross-check's b_depth is a
+  Theil–Sen slope over 600 s, and a recovery (tens of seconds, depth low by up to D) is a transient
+  inside it that the median rejects. ⚠️ A cluster of long recoveries inside one window is untested.
+- **DeckLink and the meters.** The tap is upstream of the renderer and never sees the hold.
+- **Transport-agnostic (CLAUDE.md).** The rule reads only the renderer queue.
+  - NDI's pull pump keeps enqueueing through a sender gap, so its queue never falls to M and it
+    never holds.
+  - Pinned mode (the back-out switch) never holds: it is step 3 exactly.
+- **Session hand-over.** A superseded session's steering is retired before the next one owns the
+  synchronizer, so a stale deadline cannot hold the new session's timebase. Every write decision is
+  serialised with its write: anchor, per-buffer evaluation (resume, fallback) and the deadline
+  (hold) share one lock.
+
+#### 3. Proof that the rate is written only during actual starvation
+
+1. **Write sites.** The session writes the timebase at:
+   - the first anchor;
+   - a coarse fallback;
+   - a caller re-anchor;
+   - **the hold**;
+   - **the resume**.
+
+   Holds and resumes are counted with the others (steering END line, `timebase writes`).
+2. **A resume exists only after a hold.** It is decided only while `held` is set.
+3. **A hold requires a deadline that no enqueue re-armed first.** Every enqueue re-arms it for
+   (queue after the enqueue − M) seconds ahead. So it fires only when no input arrived for as
+   long as the queue took to drain to M: the renderer would play dry within M = 20 ms. It then
+   re-reads the queue and holds only if it is ≤ M + 2 ms, outside a settle window, and on the loop.
+4. **The only non-starvation case is a stall that ends inside those 20 ms,** which the queue would
+   have survived.
+5. **A healthy stream's queue never comes near M.** Window minima of the renderer queue, measured
+   after each enqueue, in every soak log since step 4d (a pre-enqueue low-water is logged from
+   this build on):
+
+| log | transport | windows | median depth | **lowest window minimum** | windows < 100 ms |
+|---|---|---|---|---|---|
+| step8-ndi-soak, step8-ndi | NDI | 359 | 259 ms | 251.9 ms | 0 |
+| step8-srt-soak, step5-srt-a/b, step7-srt | local SRT | 244 | 337–340 ms | 222.1 ms | 0 |
+| ruleA-srt-cloudflare (§18.10) | Cloudflare SRT | 171 | 201 ms | **105.8 ms** | 0 |
+| avlag-srt-cloudflare (§18.12) | Cloudflare SRT | 225 | 204 ms | **−40.8 ms** | **6, the mute clusters: actual starvation** |
+| srfix-whep-cloudflare-long (§18.8, 4.5 h) | Cloudflare WHEP | 1631 | 420 ms | 189.6 ms (rail event 9) | 0 |
+| step4e2-cloudflare ×2 | Cloudflare WHEP | 442 | 421 ms | 276.7 ms | 0 |
+| step8-whep-soak, srfix-whep-mediamtx, srtest1/2 | MediaMTX WHEP | 379 | 385–427 ms | 207.5 ms | 0 |
+
+- The one log whose queue went under 100 ms is the one that muted, and only in its mute windows.
+  Everywhere else the lowest reading is 105.8 ms, more than 5 × M.
+- **Offline, the rule in a queue model** (`LiveAudioStarvationHoldTests`, 9 tests):
+  - leads of 110 / 205 / 340 / 420 ms with 60 ms delivery bursts for 20 min each: 0 holds, 1 write;
+  - stalls inside the lead (≤ 280 ms on 340): 0 holds;
+  - 0.4 / 1 / 2 s stalls, burst or 1.05×: exactly 1 hold + 1 resume, never dry, D recovered;
+  - a deadline fired early holds nothing; pinned and retired steerings never write.
+
+  `swift test` 133 / 133.
+- **Live evidence:** §18.17 (the stall runs, with the new low-water line).
+
+## 19. The per-source audio offset — design sketch only (no build), 2026-09-29 night
+
+**Why it exists.** Some sources carry their own A/V offset in their timestamps, and Manifold plays
+timestamps faithfully (CLAUDE.md: no per-server correction):
+- Cloudflare SRT: audio ~70–80 ms early (§18.13), with a slope that varies by session (§18.12).
+- OBS on either transport: provisionally ≈ +16…+22 ms (§18.3, §18.4).
+
+The user needs a way to correct what the source carries, per source, that Manifold never applies
+by itself.
+
+### 19.1 Where the offset is applied: a term in the TARGET, moved by a splice
+
+- **The offset is one more term in the steering's target line,** beside the SR offset and the
+  starvation debt D (§18.16):
+  - target content = picture's line − cushion/SR offset − D − **O**;
+  - **O > 0 = audio heard O later** (the fix for Cloudflare SRT's early audio).
+- **A change of O is applied as ONE splice, never through the ratio.** Changing the target by ΔO and
+  requesting a splice of −ΔO in the same evaluation keeps content + ahead − target continuous, which
+  is exactly the §18.16 recovery drop's bookkeeping.
+  - The loop's e does not step, ρ does not move, and the coarse branch does not fire.
+  - So the resampler loop is unaffected: it never sees O.
+  - Without the splice, a 75 ms change would be a step trigger (a splice anyway, unmatched: a
+    WARNING). A < 50 ms change would be walked in by the ratio at ≤ 2 ms/s, i.e. 25 s for 50 ms.
+  - Delay (O up): an INSERT of repeated material, always possible; the renderer queue deepens by ΔO.
+  - Advance (O down): a DROP, possible only while the queue covers it (step 5's guard). So audio can
+    be advanced by at most the audio's arrival lead − ~160 ms: ~40 ms on Cloudflare SRT, ~180 ms
+    locally, ~260 ms on WHEP. Past that the UI says so, and the picture would have to wait instead,
+    which is a LiveClock change and out of scope.
+- **NDI** (no LiveClock): the same term in its anchor line. **HLS** (AVPlayer): out of scope; the
+  control is disabled with a note.
+- **DeckLink:** the tap feeds SDI by the staged video frame's PTS (`AudioTapBuffer.read(framesStarting
+  At:)`). The same O is applied as `startTime − O` there, so SDI and desktop move together. That is
+  a second, independent site, with its own test. The meters stay on the source (§4.3).
+- **Server-agnostic (CLAUDE.md):** O is the USER's per-source setting. Nothing in the app chooses
+  it from the server's identity. Calibration measures it from content and offers it; the user
+  applies it.
+
+### 19.2 (a) Calibration mode — productising `[AV-CONTENT]`
+
+- **Detectors:** `AVContentBeepDetector` on the sink's input (content time) and the renderer's
+  flash detector (256 luma samples per new frame). Today they are DEBUG and run while the probe is
+  on (BUGS.md, pre-ship).
+  - They ship in Release, but run ONLY while calibration mode is on (a menu item and a button in
+    the bookmark's sheet). Zero cost otherwise.
+- **Measurement:** pair each flash with the beep within ± half the pattern's shortest interval.
+  - Offset = median of (beep content time − flash content time), on the stream's own PTS: the
+    "decoded" column of §18.13, which is what the source carries.
+  - Needs ≥ 10 pairs (~15 s), a spread (p90 − p10) under one frame, and a stable ±2 ms median over
+    the last 5 pairs; otherwise it keeps listening and says why.
+  - The pattern's coding (19.3) rejects a pairing that is off by a whole interval.
+- **Report:** "This source's sound is 76 ms EARLY (n = 14, ±3 ms). Apply +76 ms to this bookmark?"
+  with [Apply] [Apply for this session only] [Cancel].
+  - It also shows the value currently applied, and the residual after it.
+  - Re-running calibration with O applied should read ≈ 0 on the decoded axis, plus O.
+- **What it does not measure:** Manifold's own render path, a constant −16 ms (§18.13: glass −
+  decoded), and the output device. Those are the app's, the same for every source. They belong to a
+  file-control calibration of the output chain (post-release), not to a per-source O.
+
+### 19.3 (e) The sync clips we would ship, free
+
+- **One per frame rate, native:** 23.976, 24, 25, 29.97, 30, 50, 59.94.
+  - Today's fixture is 25p shown at 23.976, which is why every live figure carries the ±20 ms
+    grid correction (§18.1).
+- **Frame-aligned:**
+  - each flash is exactly one frame, and each beep starts on that frame's boundary and lasts one
+    frame period (1 kHz, −20 dBFS, 5 ms raised-cosine edges);
+  - events fall on frame counts, not on whole seconds.
+- **Coded, not periodic:** intervals cycle through 23 / 29 / 31 / 37 frames.
+  - A pairing that is off by one interval cannot fit the sequence, so offsets up to ± half a cycle
+    (~2.5 s at 25p) are unambiguous.
+  - A periodic 1 s pattern aliases at ±0.5 s.
+- **A −60 dBFS noise floor between beeps.** Digital silence packs 17 AAC frames per PES in ffmpeg
+  (§18.15) and hides starvation mutes. Also a burnt-in frame counter and the clip's rate in the
+  corner.
+- **Generated by one committed ffmpeg recipe per rate** (lavfi, no third-party media), in ProRes 422
+  and H.264/AAC MP4.
+  - The shipped files' A/V is verified at 0.0 ms by `c12.py`'s gates, each release.
+- **Optional OBS scene collection:** one scene per rate holding the clip as a looping media source,
+  its audio routed to the stream. Import instructions in the user guide.
+- **Where they ship:** a free download beside the app (they are data, ~20 MB), linked from
+  calibration mode.
+
+### 19.4 (b) Manual control, (c) HUD, (d) per bookmark
+
+- **(b) Manual:** the bookmark sheet gets an "Audio offset" field in ms, −500…+2000, step 1.
+  - A live nudge is also available while connected (⌥[ / ⌥], ±1 ms; ⇧ for ±10 ms), applied by the
+    19.1 splice.
+  - The nudge edits the session. "Save to bookmark" persists it.
+- **(c) HUD:** whenever O ≠ 0, a persistent badge in the video corner reads "A/V +76 ms" in the HUD's
+  style. It does NOT auto-hide with the HUD, because a hidden correction is how a wrong one
+  survives. It is also in the window title's live suffix, and on the session line of the log.
+- **(d) Per bookmark:** `StreamBookmark.audioOffsetMs: Int?`, **Optional**, per `Preferences.swift`'s
+  rule. A required field makes every stored bookmark undecodable for every user at once.
+  - nil = 0. Never written unless the user sets it.
+  - The store's existing whole-array write is unchanged. CLAUDE.md's read-before-write rule applies
+    to any hand-run `defaults` in its testing: stash `streamBookmarks` first and restore after.
+  - **Test:** decode a pre-feature `streamBookmarks` blob, re-encode, compare every existing field.
+  - The DEBUG ⌃⌥D path (the URL override) has no bookmark, so it uses a session value.
+
+### 19.5 (f) Does a one-time calibration hold for 90 minutes? Per path, from what is measured
+
+90 min is extrapolated at each run's measured slope. "Holds" means the drift stays within ±10 ms,
+the start → end gate of §6.3.
+
+| path | measured | slope | over 90 min | one calibration holds? |
+|---|---|---|---|---|
+| NDI (OBS/DistroAV) | +1.6 ms / 28.5 min (§18.3) | ~+1 ppm | ≈ +5 ms | ✅ |
+| local SRT (OBS) | −1.6 ms / 28.5 min (§18.4) | ~−1 ppm | ≈ −5 ms | ✅ |
+| Cloudflare WHEP | −9.8 ms / 4.5 h (§18.8) | −0.6 ppm | ≈ −3 ms | ✅ |
+| MediaMTX WHEP | −12.9 ms / 23 min, live on rule A (§18.9) | SR-lag dependent | up to ~−50 ms today; bounded once the level-based correction lands (this release) | ⚠️ not until the level-based correction is verified |
+| **Cloudflare SRT (OBS)** | 0.00 / −12…−15 / −29 ppm in three sessions (§18.10, §18.12) | **varies by session, in the stream** | **0 to −157 ms** | ❌ re-calibrate |
+| HLS | not measured (§18.6) | — | — | no offset control (AVPlayer) |
+
+- **Cloudflare SRT:** §18.18 (the ffmpeg-published fixture) says whether Cloudflare or OBS makes
+  the slope. If ffmpeg's single-clock stream still drifts, the slope is Cloudflare's, and no
+  calibration can hold on that path.
+
+**User-guide wording (draft):**
+
+> **Audio offset.** Some streams arrive with their sound slightly ahead of or behind the picture —
+> the offset is in the stream itself, and Manifold plays exactly what it receives. If you see it,
+> play one of the free Manifold sync clips through your encoder, open **Calibrate A/V** while
+> connected, and apply the measured value to that saved stream. A badge in the corner of the video
+> shows whenever an offset is active.
+>
+> **Which transport to use for long sessions.** On Cloudflare Stream we recommend **WHEP**: a single
+> calibration holds for 90 minutes and more. **Cloudflare's SRT output can drift during a session**
+> (we have measured up to about 40 ms in 25 minutes, varying from session to session), so on long
+> sessions over Cloudflare SRT, re-run the calibration every 20–30 minutes, or use WHEP. Local SRT,
+> NDI and WHEP from a server that sends accurate sender reports hold a single calibration.
+
+### 19.6 Effort (one engineer; the unattended rigs of §18 already exist)
+
+| part | days |
+|---|---|
+| 19.1 offset term and the splice on change, NDI anchor line, DeckLink tap read, tests (continuity, insert/drop bounds, loop untouched) | 2 |
+| 19.4 bookmark field and migration test, sheet field, live nudge, HUD badge, log line | 1.5 |
+| 19.2 calibration mode: Release-grade detectors gated on the mode, pairing with the coded pattern, confidence rules, UI, tests on recorded logs | 3–4 |
+| 19.3 clips: the recipe per rate, gates, ProRes/H.264 builds, OBS scene collection, download page | 1.5–2 |
+| verification: one run per transport with calibration → apply → device capture, plus a 90-min Cloudflare SRT run | 2–3 (mostly unattended) |
+| **total** | **≈ 10–12.5 days** |
+
+- **Dependencies:** §18.16 (the starvation debt D shares the target term and the splice
+  bookkeeping); the level-based WHEP correction (for the MediaMTX row of 19.5).
+- **Pre-ship list:** the DEBUG `[AV-CONTENT]` code is replaced, not kept beside the shipped
+  detectors (BUGS.md's pre-ship entry).
+
+### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
+
+**Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,
+−60 dBFS floor, so any exact zero is a mute) with `STALLS="60:300 100:400 150:1000 210:2000"`
+(SIGSTOP/SIGCONT on the ffmpeg sender).
+- Builds, same file and stalls: `.build-cc/aacwalk-Profile` (baseline) then
+  `.build-cc/starve-Profile` (+ the hold).
+- ffmpeg catches up at **1.05×** after each stall, so this is the slow-catch-up row of §18.16. A
+  burst redelivery was not exercised live.
+- Analysis: `stalls.py` (scratch).
+  - Renderer silence = the union of `[STARVE]` dry spans.
+  - Lip-sync = `[AV-CONTENT]` glass per beep minus its median over the 30 s before the stall.
+  - Host ↔ wall from `time.time() − time.monotonic()` at launch (the same mach clock).
+
+| stall | renderer DRY, baseline | renderer DRY, hold | held (silence by design) | D at resume | recovery | worst lip-sync Δ vs the picture, baseline / hold |
+|---|---|---|---|---|---|---|
+| 300 ms | 0.05 s | **0** | 77 ms | 70 ms | 1 drop, 2.4 s after the resume | 26 / 80 ms |
+| 400 ms | 1.89 s | **0** | 138 ms | 131 ms | 1 drop (121 ms), 3.2 s | 148 / 120 ms |
+| 1000 ms | 14.1 s | **0** | 772 ms | 758 ms | 7 drops, 15.6 s | 735 / 193 ms |
+| 2000 ms | **34.8 s** | **0** | 1752 ms | 1766 ms | 17 drops, 36.2 s | 1775 / 191 ms |
+
+- **The minutes-long silences are gone.** The renderer never ran dry: 0 `[STARVE]` in the hold run,
+  against 51 s in the baseline. What is left is the time held, i.e. the stall less the queue it
+  had, which is the audio that did not exist yet.
+- **Write count: 9 = the first anchor + 4 holds + 4 resumes.** Exactly two per stall.
+  - Coarse events 0, splice fallbacks 0, unmatched 0.
+  - Stage holes / overlaps / breaks 0.
+- **Lip-sync against the PICTURE stayed within 193 ms, although D reached 1.77 s.**
+  - The sender is late on video too, so the picture shows arrivals behind `now()`, and the audio,
+    held behind `now()` by D, stays near it (§18.16's "never catches up" reasoning holds while the
+    catch-up lasts).
+  - D is owed against LiveClock's line, not against the picture.
+  - The baseline's large figures are where its timebase sat while the renderer played silence.
+- **Recovery:** drops of ~100 ms about every 2 s, since the queue grows 50 ms/s at 1.05×. So the
+  2 s stall costs 17 skips, each across a 10 ms fade.
+  - A tuning choice for Robbie: fewer, larger drops, i.e. a larger `recoveryMinimumDropSeconds`,
+    means more time late and fewer skips.
+- **Back within ±5 ms of the pre-stall figure:** hold 26 / 24 / — / 80 s; baseline — / 26 / — / 94 s.
+  "—" means the next stall came first.
+  - Both builds are limited by the same thing: after a stall, LiveClock's line slews at its rail,
+    and ρ sits at ±B (86.7 s at the rail with the hold, 103.4 s without).
+  - `i` winds to −258 / −297 ppm on both. That is §13.4's rail class, pre-existing, not caused by
+    the hold.
+- **⚠️ The 300 ms stall is the borderline case.**
+  - The baseline ran dry for 50 ms. The hold build held 77 ms and dropped 70 ms 2.4 s later.
+  - Add the ~50 ms renderer mute on each of the two rate writes (§11.11; not re-measured, there
+    was no device capture tonight), and a borderline stall is slightly WORSE with the hold. Longer
+    stalls are far better.
+- **⚠️ The hold write returns 33–37 ms after the decision.**
+  - Read back afterwards, the timebase is exactly the held point (−0.00 ms), and the resume read
+    agrees.
+  - The call itself blocks longer than the 20 ms margin. Whether the renderer plays past the
+    frontier inside the call cannot be seen from the log (`[STARVE]` saw nothing).
+  - A device capture of one stall settles it. If it does, M goes to ~40 ms, trading more
+    borderline holds for none dry.
+- **Healthy windows:** every window with a pre-enqueue low-water under 150 ms was a stall or its
+  recovery. The healthy windows read ≥ 286 ms.
+- **OBS live, healthy, on this build** (`obslocal-starve`, 8 min, 22:52–23:01):
+  - **0 holds, 1 write**;
+  - lowest pre-enqueue queue **280.8 ms**, 14 × the margin;
+  - 0 `[STARVE]`;
+  - decoded content A/V −119.46 ms (the §18.15 A/B read −119.25 / −119.21), glass −135.37 ms.
+- `swift test` 133 / 133; Profile build clean.
+- **Not done:** Release build; a device capture of a stall (mutes and the hold write's landing); a
+  live burst redelivery; WHEP or NDI with induced stalls.
+
+### 18.18 Cloudflare SRT drift: OBS or Cloudflare? — offline half done 2026-09-29 night; live half waiting for the ingest URL
+
+**Could arrival timing let Manifold see the drift itself? No.**
+- On SRT the audio target is LiveClock's line, which is paced by VIDEO timestamps against arrival.
+  So the renderer queue (audio frontier − timebase) walks at exactly the rate at which the audio
+  timestamps diverge from the video timestamps in real time.
+- In both drifting sessions it is flat:
+
+| session | content drift (device / stream) | renderer queue, OLS after 180 s | 5-min block medians |
+|---|---|---|---|
+| §18.12 `avlag-srt-cloudflare` | −12…−15 ppm (−20 to −24 ms / 23 min) | **+0.25 ± 0.36 ppm** | 204.6 204.3 204.3 204.3 204.6 204.9 204.5 203.5 ms |
+| §18.10 `ruleA-srt-cloudflare` | −29 ppm (−40 ms / 23 min) | **−0.45 ± 0.35 ppm** | 200.4 200.8 201.8 202.3 201.7 199.3 ms |
+| §18.4 local SRT (reference, no drift) | ~0 | −1.16 ± 0.42 ppm | 341.4 … 340.6 ms |
+
+- A 15–29 ppm divergence of the timestamps would have walked the queue 20–40 ms. It walked ≤ 1 ms.
+- With §18.10's probe (audio PTS = the sample count, video PTS = the frame count), this means
+  timestamps and arrival agree with each other throughout. **The drift is between the CONTENT and
+  its own timestamps**: the picture or the sound slides against its PTS inside the stream.
+- Nothing Manifold receives besides the content itself carries it, so only a content probe (§19.2's
+  calibration mode) can see it.
+
+**Live half, not run:** publish the flash-beep fixture with ffmpeg (single clock, H.264 + AAC) to
+Cloudflare's SRT ingest, record Cloudflare's SRT playback with ffmpeg for 25 min (`-c copy
+-copyts`), and measure drift from content (`probe_av.py`) and timestamps (`probe_ts.py`). Waiting
+for the ingest URL.

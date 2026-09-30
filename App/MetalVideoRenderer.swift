@@ -263,6 +263,10 @@ final class MetalVideoRenderer {
     /// `performDisplayTick`, consumed by `presentDrawable` in the same tick, cleared after it.
     private var avLagProbe: (tick: Double, now: Double, audioMinusClock: Double, pts: Double)?
     private var avLagLastSample: Double = 0
+    /// [AV-CONTENT] (pre-ship removal, docs/BUGS.md): the last selected PTS and whether it was a
+    /// flash-beep fixture flash (a full-white frame over black). Render thread only.
+    private var avContentLastPts = -Double.infinity
+    private var avContentLastWasFlash = false
     #endif
 
     /// One display tick's view of the frame queue, as the live control loop needs to see it.
@@ -2323,6 +2327,17 @@ final class MetalVideoRenderer {
                 avLagLastSample = avLagTick
                 avLagProbe = (avLagTick, now, a, chosenPts)
             }
+            // [AV-CONTENT]: the first tick that shows a flash frame, with the audio being heard.
+            if chosenPts != avContentLastPts, let hook = avLagAudioMinusClock {
+                avContentLastPts = chosenPts
+                let flash = Self.avContentMeanLuma(pb) > 0.5
+                if flash && !avContentLastWasFlash, let a = hook(now) {
+                    FileHandle.standardError.write(Data(String(format:
+                        "[AV-CONTENT] flash pts=%.6f tick=%.4f now=%.6f audio−now=%+.3f ms\n",
+                        chosenPts, avLagTick, now, a * 1e3).utf8))
+                }
+                avContentLastWasFlash = flash
+            }
             #endif
             renderPixelBuffer(pb, pts: chosenPts)
             tickPresentedFPS(chosenPts)
@@ -2849,6 +2864,28 @@ final class MetalVideoRenderer {
     /// display-link callback off cadence.
     ///
     /// Every present in this file goes through here. If you add a second one, add it here too.
+    #if DEBUG
+    /// [AV-CONTENT]: mean luma of a 16×16 sample grid of plane 0, 0…1. 8-bit or 16-bit containers.
+    private static func avContentMeanLuma(_ pb: CVPixelBuffer) -> Double {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        let planar = CVPixelBufferIsPlanar(pb)
+        guard let base = planar ? CVPixelBufferGetBaseAddressOfPlane(pb, 0) : CVPixelBufferGetBaseAddress(pb)
+        else { return 0 }
+        let w = planar ? CVPixelBufferGetWidthOfPlane(pb, 0) : CVPixelBufferGetWidth(pb)
+        let h = planar ? CVPixelBufferGetHeightOfPlane(pb, 0) : CVPixelBufferGetHeight(pb)
+        let rb = planar ? CVPixelBufferGetBytesPerRowOfPlane(pb, 0) : CVPixelBufferGetBytesPerRow(pb)
+        let wide = rb >= 2 * w
+        var sum = 0.0
+        for j in 0..<16 { for i in 0..<16 {
+            let x = (2 * i + 1) * w / 32, y = (2 * j + 1) * h / 32
+            sum += wide ? Double(base.load(fromByteOffset: y * rb + 2 * x, as: UInt16.self)) / 65_535
+                        : Double(base.load(fromByteOffset: y * rb + x, as: UInt8.self)) / 255
+        } }
+        return sum / 256
+    }
+    #endif
+
     private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer) {
         cmdBuffer.waitUntilScheduled()
         #if DEBUG

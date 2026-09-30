@@ -732,12 +732,31 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
   override costs nothing when unset.
 - **Remove** once the SRT drift is fixed and verified, or keep `[AV-LAG]` as Profile telemetry by
   decision. It is the only in-app measure of picture against sound at the glass.
+- **Added 2026-09-29 evening, same removal decision** (§18.13, §18.14):
+  - `[AV-CONTENT]`: `AVContentBeepDetector` (ManifoldCore, new file) and its `beepIn` / `beepOut` in
+    `FrameEngine.LiveAudioSink`; `avContentLastPts`, `avContentLastWasFlash` and
+    `avContentMeanLuma` in `MetalVideoRenderer`. Scans every live audio buffer twice and reads 256
+    luma samples per new frame, only while the renderer probe is on (DEBUG).
+  - `[<PATH>-STARVE]` / `[<PATH>-ZERO]`: `noteStarvationAndZeros` and `scanZeros` in
+    `LiveAudioSink`, same gate. Copies each renderer buffer once for the zero scan.
+  - The scripts stay: `analysis/avcontent.py`; `repro/run.sh`'s `STALLS=` and `PES_PAYLOAD=`.
 
 ---
 
-## ☐ PRE-SHIP (MUST-FIX): SRT audio decodes nothing when a PES carries more than one ADTS frame
+## ✅ FIXED 2026-09-29 (uncommitted, awaiting Robbie) — PRE-SHIP (MUST-FIX): SRT audio decodes nothing when a PES carries more than one ADTS frame
 
-**Status:** MUST FIX BEFORE RELEASE (Robbie, 2026-09-29). Not implemented. **Found by:** the first
+**Status:** implemented and verified with ffmpeg as the sender (`AUDIO_RESAMPLER_DESIGN.md` §18.15):
+`AACFraming.ADTSWalk` plus a per-frame decode and stamp. On ffmpeg's default packing (5–7 frames per
+PES): 0 undecodable, 0 holes, decoded A/V identical to one frame per PES, `[AV-LAG]` −1.2 ppm.
+`swift test` 124/124. **Root cause confirmed:** the vendored build has no AAC parser
+(`--enable-parser=h264` only). **Worse than recorded:** ffmpeg groups silence-sized frames even at
+`-pes_payload_size 0` (rounded up to 170 bytes), up to 17 per PES. **Residual:** a 17-frame PES is
+363 ms of audio arriving late, which starves the renderer (the device-mutes entry below, same
+mechanism). One-frame-per-PES regression (Cloudflare capture) identical to the old build. **OBS
+live over local SRT, A/B against the previous build (2026-09-29 night, §18.15):** 0 undecodable,
+0 holes/overlaps/breaks, decoded content A/V −119.21 vs −119.25 ms. OBS sends one frame per PES, so
+this is a regression check. Not run yet: another real sender that packs several frames.
+**Was:** MUST FIX BEFORE RELEASE (Robbie, 2026-09-29). **Found by:** the first
 attempt at the SRT repro (`AUDIO_RESAMPLER_DESIGN.md` §18.11). **Affects:** SRT (MPEG-TS) from any
 sender that packs several AAC frames into one PES:
 - ffmpeg, by default;
@@ -835,8 +854,10 @@ item. `swift test` passes. A local SRT session still logs exactly one non-zero `
 **Status:** ⚠️ **KNOWN LIMITATION FOR THIS RELEASE** (Robbie, 2026-09-29). Fix and fallback committed
 2026-09-29 (`14f4b89`), replayed offline (`AUDIO_RESAMPLER_DESIGN.md` §18.7). Soaked once on
 MediaMTX (2026-09-28 evening), where it **failed** start → end at −12.9 ms because the fallback did
-not engage (§18.9). Engage rule A ships; C was rejected. The post-release fix is the level-based
-correction (the POST-RELEASE entry below).
+not engage (§18.9). Engage rule A stands; C was rejected. The fix is the level-based correction,
+**now in this release** (Robbie, 2026-09-29), taken after the SRT items (the entry below, "THIS
+RELEASE: the depth-slope fallback should hold the queue's LEVEL"). Until it lands, the limitation
+below describes the build.
 - **The limitation, as shipped:** MediaMTX's SRs lag the media.
   - Residual up to ~−28 ms at +26 min (measured −27.8 ms), within broadcast tolerance by Robbie's
     call, though outside the ±20 ms test gate. On the restated criterion that run reads −17.4 ms
@@ -880,7 +901,7 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
   Cloudflare log peaks at +25.9 ms and never disengages; on 30 h of synthetic Cloudflare noise the
   worst is −49 ms and only 6 % of forced engagements disengage. Robbie's condition was ≤ 10 ms and
   self-disengaging. **A (above) stays.** A false engagement is permanent under any rule of this
-  form, because the correction is kept on disengage; see the POST-RELEASE entry below.
+  form, because the correction is kept on disengage; see the level-based entry below (this release).
 - **⚠️ 2026-09-29: A did NOT engage on the live MediaMTX run of 2026-09-28 evening, and the run
   fails.** On `srfix-whep-mediamtx` (staircase SRs) the disagreeing run reached 0.73 of the 10 min
   sustain and broke. Device level: start → end **−12.9 ms** (±10 ❌), criterion 12 grid-corrected
@@ -902,10 +923,14 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
 
 ---
 
-## ☐ POST-RELEASE (design) — the depth-slope fallback should hold the queue's LEVEL, not integrate a rate
+## ☐ THIS RELEASE (after the SRT items) — the depth-slope fallback should hold the queue's LEVEL, not integrate a rate
 
-**Status:** design item, recorded 2026-09-29 by Robbie's decision. To be taken with the post-release
-buffer / latency work: both are decisions about what the renderer queue's depth is held to.
+**Status:** ☐ IN THIS RELEASE (Robbie, 2026-09-29, rescoped from post-release). Order: after the
+Cloudflare SRT absolute offset, the SRT device mutes and the multi-frame AAC must-fix. Recorded
+2026-09-29 as a design item; the open questions below still have to be answered before it is built,
+and the verification bar is unchanged. Its relation to the buffer / latency work (still
+post-release) is the last open question below: D_ref must move with any deliberate change of the
+queue's target depth.
 **Source:** `AUDIO_RESAMPLER_DESIGN.md` §18.9. **Affects:** WHEP from servers whose SRs do not carry
 the media's slope (MediaMTX: staircase and flat).
 
@@ -966,8 +991,15 @@ in parallel with a live Manifold session. Capture A → capture B:
 **Device ≈ stream: not a Manifold defect.** The slope varies by session (0.00 ppm, about −15 ppm and
 presumably −29 ppm in the first soak). Whether OBS or Cloudflare adds it is not separated.
 Server-agnostic (CLAUDE.md): nothing to special-case. An MPEG-TS source's A/V is what its
-timestamps say. Still open, and separate: Cloudflare SRT's **absolute** criterion 12 (−50 … −83 ms,
-§18.12) and the device mutes (next entry).
+timestamps say. The device mutes are separate (next entry).
+
+**✅ The ABSOLUTE offset is in the stream too (2026-09-29 evening, §18.13). RECORDED AS UPSTREAM
+(Robbie, 2026-09-29): the stream carries audio ~70–80 ms early and Manifold plays it faithfully. No
+app change.** `probe_av.py` read every
+stream too positive by the gap between its first video and first audio PTS (Cloudflare: 77–81 ms).
+Corrected, Cloudflare's stream carries audio **69–81 ms ahead** of its picture; same session, the
+device matches it within +4.9 / +1.6 ms, and a local replay's in-app content A/V equals the file's to
+0.02 ms. The "+8 ms stream" figures in §18.10 / §18.12 are withdrawn. `probe_av.py` fixed.
 
 ## (history) ☐ OPEN 2026-09-29 — SRT: lip-sync drifts ~−29 ppm (−40 ms in 23 min) live on Cloudflare SRT, but not when the same stream is replayed locally
 
@@ -1020,7 +1052,31 @@ quantised (Cloudflare's SRT output stamps video on a 1 ms grid). Measured on Clo
 
 ## ☐ OPEN 2026-09-29 — SRT via Cloudflare: device-output mutes (exact zero) that are not in the stream, at video delivery disturbances
 
-**Status:** OPEN, cause not established. **Found by:** test 3 (`AUDIO_RESAMPLER_DESIGN.md` §18.12).
+**🔧 FIX IMPLEMENTED 2026-09-29 night, uncommitted, awaiting Robbie: option A, the starvation hold
+(`AUDIO_RESAMPLER_DESIGN.md` §18.16 design, §18.17 verification).**
+- The timebase holds (rate 0) when the queue would fall to 20 ms with no input, and restarts at
+  the latest content that leaves 100 ms queued, never past the target. What it cannot reach (D) is
+  taken back by forward splices.
+- Induced stalls of 300 / 400 / 1000 / 2000 ms (sender catching up at 1.05×):
+  - renderer dry 0 s every time (baseline: 0.05 / 1.9 / 14.1 / 34.8 s);
+  - 2 writes per stall;
+  - lip-sync against the picture within 193 ms, recovered 2.4–36 s after the resume.
+- Open:
+  - borderline stalls (~300 ms on a 340 ms lead) are slightly worse (two ~50 ms write mutes);
+  - the hold write blocks ~35 ms, longer than its 20 ms margin; a device capture should check it;
+  - a live burst redelivery is untested.
+
+**✅ CAUSE ESTABLISHED 2026-09-29 evening (`AUDIO_RESAMPLER_DESIGN.md` §18.14).** The renderer STARVES: a delivery stall longer than the audio's arrival lead (~205 ms on
+Cloudflare live, ~340 ms locally; set by the sender's mux and reorder depth, not by the 250 ms video
+cushion) lets the timebase pass the end of enqueued audio, and every refill then lands behind the
+playhead and is dropped whole. That gives exact zero, 0 resampler holes and contiguous PTS, which is
+this entry's signature. §18.12's log already shows it: renderer queue depth −6.9 / −40.8 ms in the
+windows of clusters 1 and 2. Reproduced with induced stalls: none up to 300 ms; 1.0 s of silence at
+400 ms, 33 s at 2 s (no catch-up burst). No app-written zeros, no mapping jumps. Options A (hold the
+audio timebase when dry), B (size the cushion on the audio lead), C (re-stamp late refills); A is
+the only one that removes long silences. Instruments `[SRT-STARVE]` / `[SRT-ZERO]` (pre-ship entry).
+
+**Status (as found):** OPEN, cause not established. **Found by:** test 3 (`AUDIO_RESAMPLER_DESIGN.md` §18.12).
 Not seen on the §18.10 Cloudflare SRT soak (0 mutes).
 
 - **Measured:** 9 mutes in 20 min of reference noise, in 3 clusters: 6 × 24–106 ms within 0.5 s at
@@ -1250,8 +1306,9 @@ drops `goog-remb` from the answer, where Cloudflare keeps it.
 
 - **SRT through MediaMTX.** Configured on 8890, never connected. The SRT path already has local OBS
   as a non-vendor reference, so this is lower value than the WHIP/WHEP half — but it is the only way
-  to get a non-OBS, non-Cloudflare SRT sender, and **Cloudflare's SRT egress term has never been
-  measured** (`AV_SYNC_FINDINGS.md` §7).
+  to get a non-OBS, non-Cloudflare SRT sender. ~~Cloudflare's SRT egress term has never been
+  measured~~ **Measured 2026-09-29:** audio ~70–80 ms early on the stream's own timestamps, upstream
+  of Manifold (`AUDIO_RESAMPLER_DESIGN.md` §18.13).
 - **A second machine.** Everything here is loopback. Nothing has been run across a real link.
 - **Nothing is measured yet.** This entry establishes that the server works, not that any number
   taken from it means anything.
@@ -2223,7 +2280,9 @@ i.e. identically. There is no per-route term in the quantity that was wrong.
 What is **not** established for Cloudflare is its own **sender term**: its SRT egress is a transcode
 of the WHIP ingest and carries an audio-versus-video error that has never been measured. That is a
 property of Cloudflare, not of this fix; characterise it with the sender probe against the egress
-URL if the absolute number is ever wanted.
+URL if the absolute number is ever wanted. **Measured 2026-09-29 (`AUDIO_RESAMPLER_DESIGN.md`
+§18.13):** audio ~70–80 ms ahead of the picture on the egress's own timestamps, varying by session;
+the device matches the stream within 5 ms.
 
 ⚠️ **AND IT IS SAFE ON THE AXIS THAT LOOKS RISKY.** The NDI lead ladder in this file measured this
 renderer crackling below ~150 ms of lead. SRT's renderer currently holds ≈500 ms (`now()` runs
@@ -2459,8 +2518,9 @@ only thing here that catches that term. It applies to **all four transports**, n
 
 **What would schedule it:** a WHEP session whose lip-sync is still wrong after the sender-report fix
 lands, or the first time anyone needs an absolute A/V number on Cloudflare's SRT egress — whose
-transcode carries a sender term that **has never been measured** and which no amount of receiver
-work can recover.
+transcode carries a sender term that ~~has never been measured~~ **was measured 2026-09-29 at audio
+~70–80 ms early (`AUDIO_RESAMPLER_DESIGN.md` §18.13)** and which no amount of receiver work can
+recover.
 
 ---
 

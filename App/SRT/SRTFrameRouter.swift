@@ -1008,6 +1008,12 @@ final class SRTFrameRouter {
     private var audioEstablishedPublished = false
     private var audioLastHeartbeat: CFTimeInterval = 0
     private var audioPacketsUndecodable = 0
+    /// Of those packets: ADTS frames the converter produced nothing for, and bytes after the last
+    /// whole frame of a payload that the walk could not use.
+    private var audioFramesUndecodable = 0
+    private var audioBytesUnwalked = 0
+    private var audioLoggedMultiFramePES = false
+    private var audioLoggedUnwalked = false
     private var audioPacketsWithoutPTS = 0
     private var audioLoggedFirstFrames = false
     private var audioTimeBase: Double = 1.0 / 90_000.0
@@ -1046,6 +1052,8 @@ final class SRTFrameRouter {
     func prepareAudioDecoder(format: ManifoldSRTAudioFormat) {
         audioPacketsReceived = 0; audioFramesIngested = 0
         audioPacketsUndecodable = 0; audioPacketsWithoutPTS = 0
+        audioFramesUndecodable = 0; audioBytesUnwalked = 0
+        audioLoggedMultiFramePES = false; audioLoggedUnwalked = false
         // The axis is per-STREAM. Carrying an anchor across a format change or a reconnect would
         // stamp the new stream's first buffer from the old stream's count — the same reasoning
         // NDIService resets its counter under.
@@ -1315,13 +1323,47 @@ final class SRTFrameRouter {
         guard let data = packet.data, packet.size > 0 else { return }
 
         let pcm = UnsafeRawBufferPointer(start: data, count: packet.size)
-        guard let frames = decoder.decode(pcm) else { audioPacketsUndecodable += 1; return }
-        let frameCount = frames.count / decoder.channelCount
-        guard frameCount > 0 else { return }
-
         // The stream's own time base. Used to PIN the sample axis, never as the per-buffer stamp —
         // see `audioPTSTicks` for why the conversion that used to happen here was the bug.
-        let pts = Double(packet.pts) * audioTimeBase
+        let packetPTS = Double(packet.pts) * audioTimeBase
+        // ⚠️ ONE PES, POSSIBLY SEVERAL AAC FRAMES (docs/BUGS.md, "SRT audio decodes nothing when a
+        // PES carries more than one ADTS frame"). The PES PTS stamps the FIRST frame's first sample
+        // (ISO/IEC 13818-1 §2.4.3.7); frame k starts after the samples of frames 0…k−1, so each is
+        // pinned at the packet PTS plus the samples already decoded from this packet. The sample
+        // axis then advances exactly as with one frame per PES.
+        var samplesBefore = 0
+        let result = decoder.decode(pcm) { frames in
+            let frameCount = frames.count / decoder.channelCount
+            guard frameCount > 0 else { return }
+            let pts = packetPTS + Double(samplesBefore) / decoder.sampleRate
+            samplesBefore += frameCount
+            ingestDecodedAudio(frames, frameCount: frameCount, pts: pts, decoder: decoder, tap: tap)
+        }
+        if result.frames > 1 && !audioLoggedMultiFramePES {
+            audioLoggedMultiFramePES = true
+            NSLog("[SRT-AUDIO] this sender packs %d AAC frames into one PES — each is decoded and "
+                + "stamped on its own (packet PTS + the samples before it). Logged once per session.",
+                  result.frames)
+        }
+        if result.failed > 0 || result.leftoverBytes > 0 {
+            audioPacketsUndecodable += 1
+            audioFramesUndecodable += result.failed
+            audioBytesUnwalked += result.leftoverBytes
+            if !audioLoggedUnwalked {
+                audioLoggedUnwalked = true
+                NSLog("[SRT-AUDIO] ⚠️ a %d-byte payload: %d of %d ADTS frame(s) decoded, %d produced "
+                    + "nothing, %d byte(s) after the last whole frame not used (%@). Counted as "
+                    + "undecodable, never silently dropped; logged once per session, the totals are "
+                    + "on the chain line.",
+                      packet.size, result.decoded, result.frames, result.failed, result.leftoverBytes,
+                      result.stop.map { "\($0)" } ?? "no walk stop")
+            }
+        }
+    }
+
+    /// One decoded AAC frame, stamped and handed on. SESSION THREAD, inline from `handleAudioPacket`.
+    private func ingestDecodedAudio(_ frames: UnsafeBufferPointer<Int32>, frameCount: Int, pts: Double,
+                                    decoder: SRTAudioDecoder, tap: AudioTapBuffer) {
         let ptsTicks = audioPTSTicks(forFrames: frameCount, sampleRate: decoder.sampleRate,
                                      channels: decoder.channelCount, sourcePTS: pts)
         guard let sb = Self.makeAudioSampleBuffer(frames, frames: frameCount,
@@ -1329,7 +1371,7 @@ final class SRTFrameRouter {
                                                   sampleRate: decoder.sampleRate,
                                                   ptsTicks: ptsTicks,
                                                   layout: decoder.channelLayoutData)
-        else { audioPacketsUndecodable += 1; return }
+        else { audioFramesUndecodable += 1; return }
 
         // ── THE STARTUP WINDOW ────────────────────────────────────────────────────────────
         //
@@ -1349,12 +1391,12 @@ final class SRTFrameRouter {
         // shorter: it closes on the first video frame that clears the gap test, with no crossover
         // to establish afterwards.
         guard startupAnchored else {
-            audioPacketsBeforeAnchor += 1
+            audioPacketsBeforeAnchor += 1   // per AAC frame: a PES may carry several
             return
         }
         if audioPacketsBeforeAnchor > 0 && !audioLoggedAnchorDrop {
             audioLoggedAnchorDrop = true
-            NSLog("[SRT-AUDIO] startup: dropped %d packet(s) that arrived before the video anchor "
+            NSLog("[SRT-AUDIO] startup: dropped %d AAC frame(s) that arrived before the video anchor "
                 + "— they belong to the content span the anchor discarded, and playing them would "
                 + "put audio against picture that was skipped.", audioPacketsBeforeAnchor)
         }
@@ -1400,11 +1442,12 @@ final class SRTFrameRouter {
             audioLastHeartbeat = hostNow
             stateLock.lock(); let clock = liveClock; stateLock.unlock()
             let drift = clock.map { c in SRTFrameRouter.shared.liveAudioDrift?(c.now()) } ?? nil
-            NSLog("[SRT-AUDIO] chain — rx=%d frames=%d (%.1f s) undecodable=%d noPTS=%d "
-                + "droppedPreAnchor=%d · pts=%.3fs · timebase−clock=%@",
+            NSLog("[SRT-AUDIO] chain — rx=%d frames=%d (%.1f s) undecodable=%d (aacFrames=%d "
+                + "unwalkedBytes=%d) noPTS=%d droppedPreAnchor=%d · pts=%.3fs · timebase−clock=%@",
                   audioPacketsReceived, audioFramesIngested,
                   Double(audioFramesIngested) / decoder.sampleRate,
-                  audioPacketsUndecodable, audioPacketsWithoutPTS, audioPacketsBeforeAnchor, pts,
+                  audioPacketsUndecodable, audioFramesUndecodable, audioBytesUnwalked,
+                  audioPacketsWithoutPTS, audioPacketsBeforeAnchor, pts,
                   drift.map { String(format: "%+.1f ms", $0 * 1000) } ?? "n/a")
         }
 

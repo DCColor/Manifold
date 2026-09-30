@@ -2090,6 +2090,77 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                          probe: LiveAudioRendererProbe?, paired: LiveAudioPairedProbe?) {
             self.renderer = renderer; self.tap = tap; self.path = path; self.resample = resample
             self.steering = steering; self.probe = probe; self.paired = paired
+            // [AV-CONTENT] (pre-ship removal, docs/BUGS.md): on whenever the renderer probe is.
+            self.beepIn = probe != nil ? AVContentBeepDetector(tag: "in") : nil
+            self.beepOut = probe != nil ? AVContentBeepDetector(tag: "out") : nil
+        }
+        private let beepIn: AVContentBeepDetector?
+        private let beepOut: AVContentBeepDetector?
+
+        // [STARVE] / [ZERO] (pre-ship removal, docs/BUGS.md, "device-output mutes"): the enqueue
+        // thread only. `lastFrontier` is the output-axis end of everything enqueued so far.
+        private var lastFrontier: Double?
+        private var lastEnqueueHost: Double?
+        private var zeroRun = 0
+        private var zeroRunStart = 0.0
+
+        /// RENDERER STARVATION, MEASURED, NOT INFERRED: the renderer plays its queue at its
+        /// timebase, so a timebase already past the end of everything enqueued before this call
+        /// means it ran dry, for at least that long, and played silence. Read against the
+        /// steering's own timebase read, so no extra clock read and no timer. Also exact-zero
+        /// runs ≥ 5 ms in what is handed to the renderer (on all channels), which separates
+        /// silence this app WROTE from silence the renderer made by starving.
+        private func noteStarvationAndZeros(_ out: [CMSampleBuffer], read: LiveAudioResampleSteering.PairedRead?) {
+            let tag = path.rawValue.uppercased()
+            let firstPTS = out.first.map { CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp($0)) }
+            if let read, let f = lastFrontier, read.timebase.isFinite {
+                let dry = read.timebase - f
+                if dry > 0.0005 {
+                    let end = Self.outputEnd(of: out.last) ?? .nan
+                    NSLog("[%@-STARVE] renderer ran DRY: timebase %.6f is %.1f ms past the end of "
+                        + "everything enqueued (%.6f) — silence heard from host ≈%.4f to ≈%.4f · "
+                        + "previous enqueue %.1f ms before · this refill starts %+.1f ms and ends "
+                        + "%+.1f ms against the playhead (%d buffer(s))",
+                          tag, read.timebase, dry * 1e3, f, read.t0 - dry, read.t0,
+                          ((read.t0 - (lastEnqueueHost ?? read.t0)) * 1e3),
+                          ((firstPTS ?? .nan) - read.timebase) * 1e3, (end - read.timebase) * 1e3,
+                          out.count)
+                }
+            }
+            if let end = Self.outputEnd(of: out.last) { lastFrontier = max(lastFrontier ?? end, end) }
+            lastEnqueueHost = read?.t0 ?? CACurrentMediaTime()
+            for sb in out { scanZeros(sb, tag: tag) }
+        }
+
+        private func scanZeros(_ sb: CMSampleBuffer, tag: String) {
+            guard let fmt = CMSampleBufferGetFormatDescription(sb),
+                  let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee,
+                  asbd.mSampleRate > 0, asbd.mBitsPerChannel == 32,
+                  asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0,
+                  let block = CMSampleBufferGetDataBuffer(sb) else { return }
+            let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb))
+            let n = CMSampleBufferGetNumSamples(sb), ch = Int(asbd.mChannelsPerFrame)
+            var words = [UInt32](repeating: 0, count: n * ch)
+            guard words.withUnsafeMutableBytes({ CMBlockBufferCopyDataBytes(
+                block, atOffset: 0, dataLength: min($0.count, CMBlockBufferGetDataLength(block)),
+                destination: $0.baseAddress!) }) == noErr else { return }
+            let minRun = Int(0.005 * asbd.mSampleRate)
+            for i in 0..<n {
+                var zero = true
+                // +0.0 and −0.0 both count as exact zero (float); Int32 0 is bit-identical.
+                for c in 0..<ch where words[i * ch + c] & 0x7FFF_FFFF != 0 { zero = false; break }
+                if zero {
+                    if zeroRun == 0 { zeroRunStart = pts + Double(i) / asbd.mSampleRate }
+                    zeroRun += 1
+                } else {
+                    if zeroRun >= minRun {
+                        NSLog("[%@-ZERO] exact-zero run of %d samples (%.1f ms) enqueued to the "
+                            + "renderer at pts %.6f", tag, zeroRun,
+                              Double(zeroRun) / asbd.mSampleRate * 1e3, zeroRunStart)
+                    }
+                    zeroRun = 0
+                }
+            }
         }
         #else
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
@@ -2118,6 +2189,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// downstream of both, and are unchanged (§4.5).
         public func enqueue(_ sampleBuffer: CMSampleBuffer) {
             tap.ingest(sampleBuffer, path: path)
+            #if DEBUG || MANIFOLD_TELEMETRY
+            beepIn?.scan(sampleBuffer)
+            #endif
             let out = resample.process(sampleBuffer)
             guard !out.isEmpty else { return }
             // AFTER the stage, so this buffer's block is in the content-time map; the ratio it sets
@@ -2134,6 +2208,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // the timebase is read once per buffer rather than twice.
             for sb in out { probe?.willEnqueue(sb) }
             if let read { paired?.sample(read.t0, read.timebase, read.t1) }
+            for sb in out { beepOut?.scan(sb) }
+            if probe != nil { noteStarvationAndZeros(out, read: read) }
             #endif
             for sb in out { renderer.enqueue(sb) }
         }
@@ -2303,6 +2379,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                      time: CMTime(seconds: outputSeconds, preferredTimescale: 90_000),
                                      atHostTime: CMTime(seconds: host, preferredTimescale: 90_000))
             },
+            // The starvation hold (§18.16): the renderer is about to run dry, so the timebase stops
+            // where it stands rather than playing past the end of the queue.
+            hold: { [synchronizer, mirror] outputSeconds, host in
+                #if DEBUG || MANIFOLD_TELEMETRY
+                mirror.lock.lock(); let probe = mirror.probe; mirror.lock.unlock()
+                probe?.recordRateSet(rate: 0, mediaTime: outputSeconds, origin: "starvation hold")
+                #endif
+                synchronizer.setRate(0,
+                                     time: CMTime(seconds: outputSeconds, preferredTimescale: 90_000),
+                                     atHostTime: CMTime(seconds: host, preferredTimescale: 90_000))
+            },
             log: { NSLog("%@", $0) },
             // The fit's window line, and its slope cross-check against the renderer queue (log only):
             // what the target used at the window's end, beside the window's median depth.
@@ -2313,7 +2400,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 return fit.windowLines(time: facts.elapsed, rendererDepth: facts.rendererDepthMedian,
                                        appliedOffset: offset, appliedSlope: slope)
             } })
-        mirror.lock.lock(); mirror.steering = steering; mirror.srFit = srFit; mirror.lock.unlock()
+        // A superseded session's steering may still hold an armed starvation deadline: retire it
+        // before this session owns the synchronizer, so it can never hold this session's timebase.
+        mirror.lock.lock()
+        let superseded = mirror.steering
+        mirror.steering = steering; mirror.srFit = srFit
+        mirror.lock.unlock()
+        superseded?.retire()
         // An input jump past the stage's bridge is the one input event that can step the content
         // error (§4.1 item 2), so it is on record for the splice it may cause. Set before the sink
         // exists, so before any `process`.

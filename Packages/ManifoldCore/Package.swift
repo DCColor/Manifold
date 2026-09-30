@@ -22,7 +22,9 @@ let package = Package(
         // Linked by the APP target directly (project.yml), for App/WebRTC's bridge and
         // depacketizer. ManifoldCore does not use it.
         .library(name: "RTCPWire", targets: ["RTCPWire"]),
-        .library(name: "DisplayProviders", targets: ["DisplayProviders"])
+        .library(name: "DisplayProviders", targets: ["DisplayProviders"]),
+        // Linked by the APP target directly (project.yml), for App/SRT's audio decoder.
+        .library(name: "AACFraming", targets: ["AACFraming"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -140,6 +142,25 @@ let package = Package(
             name: "DisplayProvidersTests",
             dependencies: ["DisplayProviders"],
             path: "Tests/DisplayProvidersTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // Splits one PES payload into its ADTS frames (docs/BUGS.md, "SRT audio decodes nothing
+        // when a PES carries more than one ADTS frame"). A leaf target for the same reason as
+        // RTCPWire: `swift test` must reach the byte layouts. The app links it through the
+        // AACFraming product; nothing in this package does.
+        .target(
+            name: "AACFraming",
+            path: "Sources/AACFraming",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "AACFramingTests",
+            dependencies: ["AACFraming"],
+            path: "Tests/AACFramingTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

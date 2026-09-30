@@ -154,6 +154,10 @@ targets:
       # target so `swift test` can reach it. Used by App/Live/LiveDisplayRoute, NDI and HLS.
       - package: ManifoldCore
         product: DisplayProviders
+      # The ADTS frame walker — a leaf target so `swift test` can reach it. Used by
+      # App/SRT/SRTAudioDecoder only.
+      - package: ManifoldCore
+        product: AACFraming
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,

@@ -60,6 +60,7 @@
 //  extend, which is the whole reason this is written this way in stage 1.
 import AudioToolbox
 import AVFoundation
+import AACFraming   // ADTSWalk
 import ManifoldCore   // AudioChannelLayoutBridge
 
 final class SRTAudioDecoder {
@@ -341,8 +342,29 @@ final class SRTAudioDecoder {
 
     private var haveCookie = false
 
-    /// Decode one packet. Returns interleaved Int32 frames — the decoder's own scratch, VALID ONLY
-    /// UNTIL THE NEXT CALL, so the caller copies immediately.
+    /// What one packet came to. A packet is one PES payload, which may carry several ADTS frames.
+    struct PacketResult {
+        /// ADTS frames found in the payload (1 for raw AAC, which is not walked).
+        var frames = 0
+        /// Frames that produced PCM, each handed to `each` in order.
+        var decoded = 0
+        /// Frames the converter produced nothing for.
+        var failed = 0
+        /// Bytes after the last whole ADTS frame that the walk could not use, and why.
+        var leftoverBytes = 0
+        var stop: ADTSWalk.Stop?
+    }
+
+    /// Decode one packet, frame by frame. Each decoded frame is handed to `each` as interleaved
+    /// Int32 — the decoder's own scratch, VALID ONLY FOR THE CALL, so the caller copies at once.
+    ///
+    /// ⚠️ A PES MAY CARRY SEVERAL ADTS FRAMES, AND THE DEMUXER DOES NOT SPLIT THEM. ISO/IEC 13818-1
+    /// allows any number of whole access units per PES; ffmpeg packs several by default (docs/BUGS.md,
+    /// "SRT audio decodes nothing when a PES carries more than one ADTS frame"). The vendored
+    /// libavformat has no AAC parser, so the packet is the whole PES payload. `ADTSWalk` splits it by
+    /// each header's `aac_frame_length`, and every frame goes through the one-frame converter call
+    /// below. Stripping one header and handing the rest over as one frame decoded the first frame
+    /// and dropped the others.
     ///
     /// ⚠️ ADTS IS STRIPPED HERE, AND THE COOKIE MAY BE SYNTHESISED FROM IT. AudioToolbox wants RAW
     /// AAC access units plus a cookie; libavformat's mpegts demuxer hands back ADTS-framed packets
@@ -350,15 +372,17 @@ final class SRTAudioDecoder {
     /// index and channel configuration — the same three facts an AudioSpecificConfig carries — so
     /// when the demuxer supplied no extradata, the first ADTS header is a sufficient source for the
     /// cookie. The channel configuration is READ from the header, never assumed.
-    func decode(_ packet: UnsafeRawBufferPointer) -> UnsafeBufferPointer<Int32>? {
-        guard let converter, let base = packet.baseAddress, packet.count > 0 else { return nil }
-        var ptr = base.assumingMemoryBound(to: UInt8.self)
-        var size = packet.count
+    func decode(_ packet: UnsafeRawBufferPointer,
+                each: (UnsafeBufferPointer<Int32>) -> Void) -> PacketResult {
+        var result = PacketResult()
+        guard converter != nil, let base = packet.baseAddress, packet.count > 0 else { return result }
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+        let size = packet.count
 
         #if DEBUG
-        // Emitted from a `defer` so EVERY exit path prints — including the two early returns
-        // below. A probe that goes quiet on the refusal paths would be silent about exactly the
-        // packets worth reading.
+        // Emitted from a `defer` so EVERY exit path prints — including the early returns below. A
+        // probe that goes quiet on the refusal paths would be silent about exactly the packets worth
+        // reading.
         var probe: PacketProbe? = {
             guard probePacketsLogged < Self.probePacketCount else { return nil }
             probePacketsLogged += 1
@@ -378,57 +402,103 @@ final class SRTAudioDecoder {
         defer { if let probe { probeEmit(probe) } }
         #endif
 
-        if let adts = Self.parseADTS(ptr, size) {
-            #if DEBUG
-            probe?.branch = "ADTS — header stripped"
-            probe?.branchEvidence = "parseADTS matched: syncword present and size >= 7; "
-                                  + "headerBytes = \(adts.headerBytes) "
-                                  + "(protection_absent = \((ptr[1] & 0x01) != 0 ? 1 : 0))"
-            probe?.headerBytesUsed = adts.headerBytes
-            #endif
-            if !haveCookie {
-                // ADTS `profile` is objectType − 1, so LC (objectType 2) arrives here as 1.
-                setCookie(Self.audioSpecificConfig(from: adts), origin: "ADTS header",
-                          objectType: UInt16(adts.profileMinusOne) + 1)
-                haveCookie = true
-            }
-            // A rejection on a format the converter cannot infer is fatal to correctness, not to
-            // the session: refuse here so the packet is counted undecodable and the failure is
-            // visible in the counters instead of arriving as quietly wrong audio.
-            if isUnusable {
-                #if DEBUG
-                probe?.outcome = "REFUSED — cookie rejected and the format is not inferable"
-                #endif
-                return nil
-            }
-            ptr += adts.headerBytes
-            size -= adts.headerBytes
-            guard size > 0 else {
-                #if DEBUG
-                probe?.outcome = "REFUSED — nothing left after stripping \(adts.headerBytes) bytes"
-                #endif
-                return nil
-            }
-        } else {
+        guard let walk = ADTSWalk.walk(packet) else {
             #if DEBUG
             probe?.branch = "RAW/LATM — passed through whole"
-            probe?.branchEvidence = "parseADTS returned nil: "
+            probe?.branchEvidence = "not ADTS at byte 0: "
                                   + (size < 7 ? "size \(size) < 7"
                                      : ptr[0] != 0xFF ? String(format: "p[0]=%02X is not FF", ptr[0])
                                      : String(format: "p[1]&F0=%02X is not F0", ptr[1] & 0xF0))
             probe?.headerBytesUsed = 0
+            probe?.converterOffset = 0
+            probe?.converterSize = size
+            probe?.converterHead = Array(UnsafeBufferPointer(start: ptr, count: min(8, size)))
             #endif
             haveCookie = true   // raw AAC: whatever cookie we have (or none) is what we use
+            result.frames = 1
+            let n = convertOne(ptr, size)
+            if n > 0 { result.decoded = 1; each(UnsafeBufferPointer(start: scratch, count: n * channelCount)) }
+            else { result.failed = 1 }
+            #if DEBUG
+            probe?.outcome = n > 0 ? "decoded \(n) frame(s) × \(channelCount) ch" : "NO FRAMES — AudioConverter status \(lastStatus)"
+            #endif
+            return result
         }
 
+        result.frames = walk.frames.count
+        result.leftoverBytes = walk.leftoverBytes
+        result.stop = walk.stop
         #if DEBUG
-        if probe != nil {
-            probe!.converterOffset = packet.count - size
-            probe!.converterSize = size
-            probe!.converterHead = Array(UnsafeBufferPointer(start: ptr, count: min(8, size)))
+        let first = walk.frames.first
+        probe?.branch = "ADTS — \(walk.frames.count) frame(s) in this payload, each header stripped"
+        probe?.branchEvidence = "ADTSWalk: frame lengths \(walk.frames.map(\.length))"
+            + (walk.stop.map { "; stopped: \($0), \(walk.leftoverBytes) byte(s) left" } ?? "")
+        probe?.headerBytesUsed = first?.headerBytes ?? -1
+        if let first {
+            probe?.converterOffset = first.payloadOffset
+            probe?.converterSize = first.payloadLength
+            probe?.converterHead = Array(UnsafeBufferPointer(start: ptr + first.payloadOffset,
+                                                             count: min(8, first.payloadLength)))
         }
         #endif
+        guard let first = walk.frames.first else { return result }
 
+        // Cookie from the FIRST frame only (a later frame whose header differs is logged once below
+        // and decoded as configured; a real format change arrives through the demuxer's stream
+        // parameters and rebuilds this decoder).
+        if !haveCookie {
+            // ADTS `profile` is objectType − 1, so LC (objectType 2) arrives here as 1.
+            let adts = ADTS(headerBytes: first.headerBytes, profileMinusOne: first.profileMinusOne,
+                            samplingIndex: first.samplingIndex, channelConfig: first.channelConfig)
+            setCookie(Self.audioSpecificConfig(from: adts), origin: "ADTS header",
+                      objectType: UInt16(adts.profileMinusOne) + 1)
+            haveCookie = true
+            cookieFrame = first
+        }
+        // A rejection on a format the converter cannot infer is fatal to correctness, not to
+        // the session: refuse here so the packet is counted undecodable and the failure is
+        // visible in the counters instead of arriving as quietly wrong audio.
+        if isUnusable {
+            #if DEBUG
+            probe?.outcome = "REFUSED — cookie rejected and the format is not inferable"
+            #endif
+            result.failed = walk.frames.count
+            return result
+        }
+
+        for f in walk.frames {
+            if let c = cookieFrame, !headerMismatchLogged,
+               (f.profileMinusOne, f.samplingIndex, f.channelConfig) != (c.profileMinusOne, c.samplingIndex, c.channelConfig) {
+                headerMismatchLogged = true
+                NSLog("[SRT-AUDIO] ⚠️ an ADTS frame's header differs from the one the decoder was "
+                    + "configured from (profile−1/index/channels %d/%d/%d, configured %d/%d/%d). "
+                    + "Decoded as configured; logged once per session.",
+                      f.profileMinusOne, f.samplingIndex, f.channelConfig,
+                      c.profileMinusOne, c.samplingIndex, c.channelConfig)
+            }
+            let n = convertOne(ptr + f.payloadOffset, f.payloadLength)
+            if n > 0 {
+                result.decoded += 1
+                each(UnsafeBufferPointer(start: scratch, count: n * channelCount))
+            } else {
+                result.failed += 1
+            }
+        }
+        #if DEBUG
+        probe?.outcome = "decoded \(result.decoded) of \(result.frames) frame(s) × \(channelCount) ch"
+            + (result.failed > 0 ? " — \(result.failed) produced nothing (status \(lastStatus))" : "")
+        #endif
+        return result
+    }
+
+    /// The configured decoder's source header, for the mismatch check. Set with the cookie.
+    private var cookieFrame: ADTSWalk.Frame?
+    private var headerMismatchLogged = false
+
+    /// ONE raw AAC access unit (no ADTS header) through the converter, into `scratch`. Returns the
+    /// frames produced, 0 when it produced none.
+    private func convertOne(_ ptr: UnsafePointer<UInt8>, _ size: Int) -> Int {
+        guard let converter, size > 0 else { return 0 }
         pendingPacket = ptr
         pendingSize = size
         pendingConsumed = false
@@ -468,20 +538,13 @@ final class SRTAudioDecoder {
         // every successful decode — it must never be reported as a fault.
         guard frames > 0 else {
             if status != noErr && status != Self.noMoreInput { lastStatus = status }
-            #if DEBUG
-            probe?.outcome = "NO FRAMES — AudioConverter status \(status)"
-            #endif
-            return nil
+            return 0
         }
-        #if DEBUG
-        probe?.outcome = "decoded \(frames) frame(s) × \(channelCount) ch"
-            + (status == Self.noMoreInput || status == noErr ? "" : " (status \(status))")
-        #endif
         // STEP 3, and deliberately HERE rather than in `init`: the magic cookie may only have been
         // set moments ago, from this very packet's ADTS header, and the converter's idea of its own
         // output layout is not settled until it knows what it is decoding.
         resolveOutputLayout()
-        return UnsafeBufferPointer(start: scratch, count: Int(frames) * channelCount)
+        return Int(frames)
     }
 
     /// Read `kAudioConverterOutputChannelLayout` back and label from WHAT CAME BACK. Runs once.

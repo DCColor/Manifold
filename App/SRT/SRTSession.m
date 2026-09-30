@@ -903,9 +903,10 @@ static void runSession(ManifoldSRTSession *s) {
                 } else if (s->audioIndex >= 0 && pkt->stream_index == s->audioIndex) {
                     // FORWARDED RAW, NOT THROUGH THE ACCESS-UNIT READER. That reader reassembles
                     // H.264 access units from PES payloads split across packets; libavformat's
-                    // mpegts demuxer already hands back one complete AUDIO frame per AVPacket, so
-                    // there is nothing to reassemble and reusing it would be borrowing a solution
-                    // to a problem this stream does not have.
+                    // mpegts demuxer hands back one complete audio PES PAYLOAD per AVPacket.
+                    // ⚠️ A PAYLOAD, NOT A FRAME: the vendored build has no AAC parser
+                    // (--enable-parser=h264 only), so a PES carrying several ADTS frames arrives
+                    // as one packet. SRTAudioDecoder walks it frame by frame (docs/BUGS.md).
                     if (s->callbacks.onAudioPacket) {
                         ManifoldSRTAudioPacket audioPacket = {
                             .data = pkt->data, .size = (size_t)pkt->size,
