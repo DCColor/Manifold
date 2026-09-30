@@ -923,6 +923,19 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
 
 ---
 
+## ☐ THIS RELEASE (after the level-based WHEP correction) — the per-source audio offset
+
+**Status:** ☐ IN THIS RELEASE (Robbie, 2026-09-30). Order: after the level-based correction (the
+entry below), which the MediaMTX row of the design's 19.5 depends on. Effort: 1–2 calendar days, as
+revised 2026-09-29.
+**Source:** `AUDIO_RESAMPLER_DESIGN.md` §19. **Affects:** sources whose own timestamps put audio off
+the picture (Cloudflare SRT ~70–80 ms early; OBS provisionally ≈ +16…+22 ms).
+**Scope:** a user-set offset O per source, applied as a term in the steering target and moved by a
+splice (19.1), calibration mode (19.2), sync clips (19.3), manual control, HUD and bookmark field
+(19.4). Manifold never applies an offset by itself (CLAUDE.md: no per-server correction).
+
+---
+
 ## ☐ THIS RELEASE (after the SRT items) — the depth-slope fallback should hold the queue's LEVEL, not integrate a rate
 
 **Status:** ☐ IN THIS RELEASE (Robbie, 2026-09-29, rescoped from post-release). Order: after the

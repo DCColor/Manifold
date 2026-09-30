@@ -1045,8 +1045,10 @@ the session start would fail A → B by exactly that head start.
 📌 **FROM 2026-09-29, A STREAM THAT CARRIES ITS OWN A/V OFFSET IS READ AS DEVICE − STREAM** (§18.13).
 When the source's own timestamps put audio off its picture (Cloudflare SRT: ~70–80 ms early), the
 ±20 ms judges Manifold, not the sender: the absolute is reported, and a same-session stream probe
-(`probe_av.py`, both streams on the file's PTS) is subtracted for the gate. Proposed with §18.13's
-record; Robbie to confirm it as a gate rather than a reading.
+(`probe_av.py`, both streams on the file's PTS) is subtracted for the gate.
+- **✅ ACCEPTED 2026-09-30 (Robbie) as the gate**, not only a reading, on one condition: the stream
+  offset must have been MEASURED. device − stream is judged only when that session's stream probe
+  exists. Without it, nothing is subtracted, and the absolute figure is what the ±20 ms judges.
 
 ⚠️ **THE PRE-RESAMPLER BASELINE FOR THIS CRITERION IS ALREADY MEASURED AND IT IS NOT ZERO**
 (`AV_SYNC_FINDINGS.md` §2): local SRT **+203.9 ms**, Cloudflare SRT **+165.8 ms**, NDI
@@ -4109,6 +4111,10 @@ never early. It is late by D at most, and D only shrinks.
 
 ## 19. The per-source audio offset — design sketch only (no build), 2026-09-29 night
 
+**✅ IN THIS RELEASE (Robbie, 2026-09-30).** Order: after the level-based WHEP correction (BUGS.md,
+"THIS RELEASE: the depth-slope fallback should hold the queue's LEVEL"), which the MediaMTX row of
+19.5 depends on. Effort as revised in 19.6: 1–2 calendar days.
+
 **Why it exists.** Some sources carry their own A/V offset in their timestamps, and Manifold plays
 timestamps faithfully (CLAUDE.md: no per-server correction):
 - Cloudflare SRT: audio ~70–80 ms early (§18.13), with a slope that varies by session (§18.12).
@@ -4238,16 +4244,24 @@ the start → end gate of §6.3.
 > sessions over Cloudflare SRT, re-run the calibration every 20–30 minutes, or use WHEP. Local SRT,
 > NDI and WHEP from a server that sends accurate sender reports hold a single calibration.
 
-### 19.6 Effort (one engineer; the unattended rigs of §18 already exist)
+### 19.6 Effort — revised 2026-09-29 (Robbie: 10–12 days was a human-engineer estimate)
 
-| part | days |
-|---|---|
-| 19.1 offset term and the splice on change, NDI anchor line, DeckLink tap read, tests (continuity, insert/drop bounds, loop untouched) | 2 |
-| 19.4 bookmark field and migration test, sheet field, live nudge, HUD badge, log line | 1.5 |
-| 19.2 calibration mode: Release-grade detectors gated on the mode, pairing with the coded pattern, confidence rules, UI, tests on recorded logs | 3–4 |
-| 19.3 clips: the recipe per rate, gates, ProRes/H.264 builds, OBS scene collection, download page | 1.5–2 |
-| verification: one run per transport with calibration → apply → device capture, plus a 90-min Cloudflare SRT run | 2–3 (mostly unattended) |
-| **total** | **≈ 10–12.5 days** |
+At this project's pace (§18.16 was designed, built, tested and verified in ~1 h of work plus
+~25 min of runs), the code is hours. Elapsed time is set by real-time verification and by the
+decisions only Robbie makes.
+
+| part | work | elapsed, mostly machine |
+|---|---|---|
+| 19.1 offset term and the splice on change (reuses §18.16's D bookkeeping), NDI anchor line, DeckLink tap read, tests | 1–2 h | — |
+| 19.4 bookmark field and migration test, sheet field, live nudge, HUD badge, log line | 2–3 h | — |
+| 19.2 calibration mode: pairing with the coded pattern, confidence rules, UI (the detectors exist) | ~½ day, the riskiest part | — |
+| 19.3 clips, 7 frame rates: recipe, gates, OBS scene collection | ~2 h | render time |
+| verification: one run per transport, plus the 90-min Cloudflare SRT hold check | — | ~6 h unattended |
+| **total** | **~1 day** | **1–2 calendar days** |
+
+- **Attended, and so not compressible:** device-level captures (the recorder's audio source is
+  re-picked by hand after every launch; Audio Hijack); UI placement and nudge keys; review of the
+  clip pattern. The in-app `[AV-CONTENT]` figures cover most of the verification unattended.
 
 - **Dependencies:** §18.16 (the starvation debt D shares the target term and the splice
   bookkeeping); the level-based WHEP correction (for the MediaMTX row of 19.5).
@@ -4345,3 +4359,221 @@ the start → end gate of §6.3.
 Cloudflare's SRT ingest, record Cloudflare's SRT playback with ffmpeg for 25 min (`-c copy
 -copyts`), and measure drift from content (`probe_av.py`) and timestamps (`probe_ts.py`). Waiting
 for the ingest URL.
+
+### 18.19 Stall catch-up: one cut for the whole debt, small cuts only while the picture stays late — 2026-09-30
+
+**Decided by Robbie (2026-09-30), option A of the morning's analysis.** The request was "back within
+±20 ms in ≤ 3 s after audio resumes". That can be met only when the audio it needs has ARRIVED: a
+forward splice can drop only content in hand. So the time to sync is ≥ D / (k − 1) for a sender
+catching up at k×, whatever the cut rule. At ffmpeg's default 1.05× that is ≈ 20 × D, and the picture
+is late by nearly as much.
+
+#### The rule (`LiveAudioResampleSteering`, header "THE STARVATION HOLD")
+
+| part | rule | figure |
+|---|---|---|
+| **resume** | once the refill leaves R queued past the held point: at once if it arrives under 2× real time (measured over 15 ms), otherwise wait for up to 100 ms more so a burst lands before the restart is placed | R = 100 ms, window 100 ms |
+| **the debt D** | while owed, re-measured on every read as line − content heard, so if LiveClock moves its line during the catch-up the debt moves with it | fold under 20 ms |
+| **the picture** | `LiveClock.Mapping.pictureLate` = now() − the newest frame that has arrived, floored at 0; its catch-up rate is measured over 0.5 s from the resume | on the line: ≤ 50 ms |
+| **whole-debt cut** | picture on the line, or reaching it within 1 s at its measured rate: ONE drop of D as soon as the queue holds D + keep + fade + margin | up to 4 s (the stage's new drop bound) |
+| **tracking cuts** | picture late and staying late: a drop whenever the audio is ≥ 100 ms behind the PICTURE (D − pictureLate), from what the queue holds | ≥ 100 ms, the late-audio detectability threshold (~125 ms, BT.1359) |
+| **partial** | picture on the line for 1 s and the whole debt still not queued: drop what the queue holds | ≥ 100 ms |
+| **spacing** | the next cut waits for the last one's length + 0.25 s | — |
+| **residual** | for 60 s after the debt is repaid (or after a resume that owed nothing): ONE splice (drop or insert) of the error once \|e_f\| > 20 ms, instead of the ratio crawling it back at 2 ms/s | 20 ms |
+
+- **Writes are unchanged:** the hold and the resume, two per stall. Cuts and the residual are splices.
+- **A drop is no longer bounded by the ring.** `LiveAudioSplicer` keeps a drop's 10 ms fade-out aside
+  once it has arrived. The skipped content streams through unfed, and the fade-in is taken as it
+  lands. Inserts stay at 1 s. The coarse branch keeps its own 1 s bound.
+- **Healthy streams:** no hold means D stays 0, no watch opens, and `pictureLate` is never read. The
+  loop is the loop of §18.16.
+
+#### Offline (`LiveAudioStarvationHoldTests`, queue model)
+
+- ⚠️ **§18.16's offline 1.05× cases were bursts.** The plant accrued catch-up credit through the
+  stall, so the first packet after it delivered `stall × catchUp` at once. Fixed: a stalled sender
+  accrues nothing. The live §18.17 run was a real 1.05× catch-up and is unaffected.
+- The plant now models the picture (same sender, same axis: late = line − sent), inserts, and a
+  line LiveClock moves.
+- New cases:
+  - 3× catch-up: one cut, sync ≤ 2.6 s.
+  - 1.05×: tracking cuts, audio never ahead of the picture.
+  - Line slewed back 150 ms during recovery: no early audio (fixed bookkeeping left +138 ms live in
+    §18.17).
+  - One residual splice for a 60 ms line move after a hold, and none without a hold.
+  - A 2.5 s drop through the real stage: bit-exact outside the fade, and the fade = cos·x[r0] +
+    sin·x[to].
+- `swift test` **138 / 138**. Profile build clean (`.build-cc/recut2-Profile`).
+
+#### Live, unattended, local SRT (ffmpeg listener, `ref-nob.ts`, `STALLS="60:300 100:400 150:1000 210:2000"`)
+
+`run.sh` now takes `READRATE_CATCHUP` (ffmpeg `-readrate_catchup`). Analysis: `stalls2.py` (scratch).
+- **Silence** = time held + renderer DRY (`[STARVE]`).
+- **Sync** = resume → the first `[AV-LAG]` audio − now within ±20 ms of its pre-stall median for 5 s
+  (1 s resolution).
+- **Lip-sync** = `[AV-LAG]` av and `[AV-CONTENT]` beep − flash on glass, each minus its pre-stall
+  median, worst from the resume to the next stall.
+
+**Default 1.05× catch-up** (`recut2-slow`, 14:19–14:26):
+
+| stall | silence | D at resume | sync (measured / from the log) | cuts (ms) | largest | worst lip-sync vs picture (AV-LAG / beeps) |
+|---|---|---|---|---|---|---|
+| 300 | 0.134 s | 107 ms | 3.5 / 2.5 s | 77 whole + 23 residual | 77 | 104 / 125 ms |
+| 400 | 0.183 s | 154 ms | 4.4 / 3.4 s | 119 whole + 26 residual | 119 | 145 / 167 ms |
+| 1000 | 0.818 s | 787 ms | 15.4 / 14.8 s | 6 × ~103 tracking, 73 whole, 27 residual | 106 | 171 / 178 ms |
+| 2000 | 1.825 s | 1793 ms | 41.0 / 33.4 s | 14 × ~102 tracking, 142 partial, 29 whole, 28 residual | 142 | 151 / 175 ms |
+
+**Burst, `-readrate_catchup 20`** (`recut2-burst`, 14:26–14:33):
+
+| stall | silence | D at resume | sync | cuts | worst lip-sync vs picture |
+|---|---|---|---|---|---|
+| 300 | 0.186 s | 0 (on target) | 0.3 s | 0 | 11 / 26 ms |
+| 400 | 0.230 s | 0 | 0.2 s | 0 | 10 / 27 ms |
+| 1000 | 0.849 s | 0 | 0.9 s | 0 | 17 / 23 ms |
+| 2000 | 1.866 s | 868 ms | 1.9 s | 1 × 867 ms, whole | 873 / 854 ms (until the cut is heard) |
+
+- **Writes: 9 in both sessions = the first anchor + 4 holds + 4 resumes.** Coarse 0, fallbacks 0,
+  unmatched 0, renderer DRY 0.
+- **No stalls** (`recut2-healthy`, 14:34–14:40): 0 holds, **1 write**, 0 cuts, 0 residual splices.
+  The lowest queue before an enqueue was 283.5 ms, and ρ was never at its rail.
+- **Met:** ≤ 3 s and one cut whenever the audio has arrived (every burst row). Never dry. Writes as
+  before. Healthy unaffected.
+- **Not met at 1.05×, and not meetable:**
+  - Time to sync is the sender's catch-up: 15 s at 1000 ms, 33–41 s at 2000 ms.
+  - Cuts stay ~100 ms because they track a picture that is late by nearly as much. Lip-sync against
+    it stayed within 104–178 ms (§18.17: up to 193).
+- **The 2000 ms burst:** 2 s of backlog at 20× did not all land inside the 100 ms window. The
+  restart owed 868 ms, and the audio was that far behind the picture until the one cut was heard,
+  1.5 s later. The window trades silence against that case; a longer one costs every burst more
+  silence.
+- ⚠️ **The resume costs more than §18.16's on a slow sender.** Held 134 / 183 / 818 / 1825 ms
+  against §18.17's 77 / 138 / 772 / 1752, with a 26 ms content skip at each restart (4.8 ms before).
+  - The first ~15 ms of a 1.05× refill arrives faster than 2× (the socket's backlog), so the probe
+    reads it as a burst and waits.
+  - A tuning item: a longer probe, or a probe that starts after the first refill packet.
+  - The first build, with a fixed 100 ms wait, held 219 ms on the 300 ms stall.
+- ⚠️ **The residual splice does not end the post-stall excursion at 2000 ms.**
+  - LiveClock's line kept moving after the one residual splice, and ρ spent 86 s at its rail over
+    the session.
+  - That is why the 2000 ms sync reads 41 s measured against 33 s from the log.
+  - Pre-existing (§13.4's rail class). One splice per hold, as specified; repeated residual splices
+    are the option if wanted.
+- **Not done:** the device capture (below); WHEP and NDI with induced stalls; a Release build.
+
+#### Revision 2026-09-30 afternoon (Robbie): no longer hold on a slow refill; repeat the residual splice
+
+- **Burst classification.** The refill is classified once, when it reaches R, by its mean rate since its
+  first packet after the stall. Under 2× the restart is placed at once (§18.16's rule). Otherwise the
+  100 ms window applies, unchanged. The RESUME line logs the rate and the decision.
+- **Residual splices repeat.** Each time |e_f| > 20 ms, at least 2 s apart. Each one extends the watch
+  60 s, so it stays open while LiveClock keeps moving its line.
+- `swift test` **139 / 139**. Profile build `.build-cc/recut3-Profile`.
+
+**Default 1.05×** (`recut3-slow`, 15:12–15:19):
+
+| stall | held (§18.17) | restart skip | refill rate → decision | D at resume | sync (measured / from the log) | cuts (ms) | worst lip-sync vs picture |
+|---|---|---|---|---|---|---|---|
+| 300 | 100 ms (77) | +5.0 ms | 1.85× → at the fill | 95 ms | 3.4 / 2.6 s | 78 whole | 84 / 112 ms |
+| 400 | 161 ms (138) | +4.8 ms | 1.12× → at the fill | 151 ms | 4.3 / 3.4 s | 123 whole | 121 / 144 ms |
+| 1000 | 799 ms (772) | +4.8 ms | 0.79× → at the fill | 783 ms | 15.3 / 15.0 s | 6 × ~103 tracking, 65 whole, 2 × 27 residual | 166 / 188 ms |
+| 2000 | 1806 ms (1752) | +4.7 ms | 0.79× → at the fill | 1784 ms | 33.9 / 33.5 s | 14 × ~102 tracking, 124 partial, 24 whole, 4 × 26 residual | 164 / 174 ms |
+
+- **The hold is §18.16's again.** Every restart was placed at the fill, with the same 4.8 ms skip.
+- **The extra held time is the sender's.** ffmpeg's lag after SIGCONT was 16 / 17 / 27 / 15 ms longer
+  than in §18.17 (0.425 / 0.396 / 1.124 / 2.143 s against 0.409 / 0.379 / 1.097 / 2.128). Each hold
+  began at the same queue: 319–324 ms without input, 19.4–19.7 ms queued.
+- **The rail: 19.7 s over the session, against 86 s** with one residual splice. The 2000 ms stall's
+  measured sync now agrees with the log (33.9 / 33.5 s, against 41.0 / 33.4).
+- 9 writes (anchor + 4 holds + 4 resumes). DRY 0.
+
+**Burst, `-readrate_catchup 20`** (`recut3-burst`, 15:19–15:26): ⚠️ **regressed against recut2.**
+
+| stall | held | refill rate → decision | D at resume | sync | cuts | worst lip-sync vs picture |
+|---|---|---|---|---|---|---|
+| 300 | 185 ms | 3.70× → waited | 0 | 0.5 s | 0 | 10 / 19 ms |
+| 400 | 130 ms | 1.64× → at the fill | 123 ms | 1.3 s | 1 × 122 | 126 / 100 ms |
+| 1000 | 750 ms | 1.31× → at the fill | 740 ms | 2.1 s | 1 × 739 | 745 / 753 ms |
+| 2000 | 1770 ms | 1.08× → at the fill | 1754 ms | 3.1 s | 1 × 1752 | 1761 / 1748 ms |
+
+- **A 20× refill starts slowly.** Its first 100 ms arrived at 1.08–1.64× and only then accelerated.
+- **A 1.05× refill can start fast.** 1.85× on the 300 ms stall, its socket backlog.
+- **The two ranges overlap, so a rate taken at the fill point cannot separate them.**
+  - recut2's 15 ms probe after the fill caught the bursts, but held the slow sender 57 ms longer.
+  - Measured from the refill's start, the slow sender is right and the bursts are missed.
+- One whole-debt cut per stall, and sync within 3.1 s. But the audio was D behind the picture until
+  the cut was heard.
+- **No stalls** (`recut3-healthy`, 15:26–15:33): 0 holds, **1 write**, 0 cuts, 0 residual splices.
+  The lowest queue before an enqueue was 289.2 ms, and ρ was never at its rail.
+
+#### The device check (`devcheck-2`, 2026-09-30 15:41–15:48, recut3) and option 2 — ✅ CLOSED
+
+**Device check:** local SRT with stalls of 300 / 400 / 1000 / 300 ms, recorded by Audio Hijack and the
+OBS recorder, analysed with `scripts/soak/analysis/devicecheck.py`. That script reads the content
+lost or repeated in each beep gap, as the gap − its exact-zero time − 1000 ms.
+- **Cuts and residual splices are clean on both recorders.** All 12 were heard at their logged sizes,
+  none with zeros, and nothing unexplained anywhere in the capture.
+- **The hold write loses no programme.**
+  - The writes returned 28–35 ms after the decision, longer than the 20 ms margin. The renderer
+    played exactly its queue: audio stops +20.0…20.6 ms past the held point, i.e. the 19.4–19.7 ms
+    still queued.
+  - Then it idled inside the silence. M stays 20 ms.
+- **The restart write mutes, per Audio Hijack.** Audio returned 55–79 ms after the logged restart
+  point: 35–59 ms of programme lost per stall.
+  - The OBS recorder read −17…+11 ms at the same restarts, but it also shortened the held silences
+    by 10–25 ms (AV_SYNC_FINDINGS.md §1.2 records both recorders' limits).
+  - **Decided by Robbie:** §11.11 is settled (each rate write mutes ~50 ms), and the restart write's
+    cost is accepted.
+- Both 300 ms refills read just over 2× (2.04 / 2.07) and waited as bursts. That is the classifier
+  failure below.
+
+**Option 2 (Robbie, 2026-09-30): no refill classifier; a catch-up WRITE for a burst's debt over 125 ms.**
+- **The restart** is §18.16's again: on the first enqueue that leaves R queued, with no
+  classification and no wait.
+- **The catch-up write.** Taken when the whole debt is in the queue within 1 s of the restart (the
+  picture on the line) and the debt is over 125 ms, the late-audio detectability threshold. ONE
+  timebase write puts the content heard on the line.
+  - A cut is heard only after the late queue in front of it plays out: after a burst, D behind the
+    picture for about D.
+  - The write costs one ~50 ms mute, accepted.
+- A debt under 125 ms, or one that arrives later (a slow catch-up), is still taken by a cut.
+- Counted as a write: `WriteOrigin.starvationCatchUp`, and "catch-up" on the END line.
+- `swift test` **139 / 139**. Profile build `.build-cc/recut4-Profile`.
+
+**Default 1.05×** (`recut4-slow`, 15:55–16:02):
+
+| stall | silence | time to sync | cuts (ms) | largest | worst lip-sync vs picture (AV-LAG / beeps) |
+|---|---|---|---|---|---|
+| 300 | 0.083 s | 2.4 s | 48 whole + 22 residual | 48 | 70 / 95 ms |
+| 400 | 0.151 s | 4.2 s | 122 whole + 24 residual | 122 | 129 / 152 ms |
+| 1000 | 0.784 s | 15.4 s | 6 × ~102 tracking, 72 whole, 2 × 28 residual | 104 | 172 / 165 ms |
+| 2000 | 1.791 s | 33.9 s | 14 × ~103 tracking, 106 partial, 32 whole, 4 × 26 residual | 106 | 151 / 161 ms |
+
+- Every restart was placed at the fill, with a 4.8–5.2 ms skip, as §18.16.
+- **Writes 9** (anchor + 4 holds + 4 resumes; catch-up 0). DRY 0. ρ at its rail **10.8 s** over
+  the session (86 s before the repeat residual splices).
+
+**Burst, `-readrate_catchup 20`** (`recut4-burst`, 16:02–16:09):
+
+| stall | silence | D at resume | action | time to sync | worst lip-sync vs picture (AV-LAG / beeps) |
+|---|---|---|---|---|---|
+| 300 | 0.067 s | 61 ms | 1 cut, 59 ms | 1.4 s | 59 / 21 ms |
+| 400 | 0.120 s | 113 ms | 1 cut, 112 ms | 1.3 s | 115 / 97 ms |
+| 1000 | 0.753 s | 743 ms | **1 catch-up write**, 0.26 s after the resume | 1.0 s | 10 / 557 ms (one beep inside the 0.26 s before the write) |
+| 2000 | 1.740 s | 1724 ms | **1 catch-up write**, 0.26 s after the resume | 1.0 s | 17 / 33 ms |
+
+- **Writes 11** (anchor + 4 holds + 4 resumes + 2 catch-up). DRY 0. ρ never at its rail.
+- **Against recut3's burst run:** the 1000 / 2000 ms stalls were 745 / 1761 ms behind the picture
+  until a cut was heard, and synced in 2.1 / 3.1 s. Now it is one write after 0.26 s, and sync in
+  1.0 s.
+- **Healthy path:** unchanged by option 2, which only acts on a debt. recut3's no-stall session
+  stands: 0 holds, 1 write.
+
+**The rule, final:**
+- Hold at the 20 ms margin, and restart on the first 100 ms of refill.
+- The debt is re-measured against the line on every read.
+- A burst's debt over 125 ms, whole within 1 s, is taken by ONE catch-up write.
+- Otherwise ONE whole-debt cut once the queue holds it, with ~100 ms cuts only while the picture
+  stays late.
+- Residual splices over 20 ms, ≥ 2 s apart, while LiveClock moves its line.
+- ≤ 3 s is met whenever the audio has arrived. At 1.05× the time to sync is the sender's catch-up.
+- **Not done:** WHEP and NDI with induced stalls; a Release build.

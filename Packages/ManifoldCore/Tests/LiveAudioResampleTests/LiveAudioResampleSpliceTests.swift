@@ -255,16 +255,18 @@ final class LiveAudioResampleSpliceTests: XCTestCase {
 
     // MARK: - The bound, and abandonment
 
-    /// Past `maximumSpliceSeconds` the stage refuses, and the steering re-anchors instead (its own
-    /// test). At the bound it is granted, and the ring holds enough history for a full-second insert.
+    /// Past `maximumSpliceSeconds` the stage refuses an INSERT, and past `maximumDropSeconds` a DROP
+    /// (the coarse branch applies its own 1 s and re-anchors; its own test). At the insert bound it
+    /// is granted, and the ring holds enough history for a full-second insert.
     func testTheSpliceBoundIsOneSecond() {
         let s = stage()
         let fmt = T.makeFormat(rate: Self.rate, channels: 2)
         var tick: Int64 = 0
         var outs: [T.Out] = []
         for _ in 0..<100 { outs += s.process(T.makeInput(tick: tick, frames: 960, format: fmt)).map(T.read); tick += 960 }
-        XCTAssertNil(s.requestSplice(contentSeconds: 1.0001))
+        XCTAssertNil(s.requestSplice(contentSeconds: -1.0001))
         XCTAssertNil(s.requestSplice(contentSeconds: -1.5))
+        XCTAssertNil(s.requestSplice(contentSeconds: LiveAudioResampleStage.maximumDropSeconds + 0.001))
         XCTAssertNil(s.requestSplice(contentSeconds: 0.1 / Self.rate), "under one frame")
         let fadeStart = tick
         XCTAssertEqual(s.requestSplice(contentSeconds: -1.0)?.frames, -48_000)
@@ -273,6 +275,50 @@ final class LiveAudioResampleSpliceTests: XCTestCase {
         XCTAssertEqual(s.totals.splicesAbandoned, 0)
         assertCarries(outs, ticks: (fadeStart + 480)..<(tick + 48_000 - 32), shift: -48_000,
                       "a full second replayed from the ring")
+    }
+
+    /// A DROP longer than the ring (§18.19's whole-debt cut): its fade-out is kept aside, the skipped
+    /// 2.5 s streams through unfed, and the fade-in lands on exactly input + delta. Output = input −
+    /// delta, contiguous, bit for bit outside the fade, and the fade itself is cos·x[r0] + sin·x[to].
+    func testADropLongerThanTheRingExecutesExactly() {
+        let s = stage()
+        let fmt = T.makeFormat(rate: Self.rate, channels: 2)
+        let start: Int64 = 96_000
+        var tick = start
+        var outs: [T.Out] = []
+        for _ in 0..<20 { outs += s.process(T.makeInput(tick: tick, frames: 960, format: fmt)).map(T.read); tick += 960 }
+        let delta: Int64 = 120_000                                  // 2.5 s
+        XCTAssertGreaterThan(Double(delta) / Self.rate, LiveAudioResampleStage.maximumSpliceSeconds)
+        XCTAssertEqual(s.requestSplice(contentSeconds: 2.5)?.frames, delta)
+        for _ in 0..<200 { outs += s.process(T.makeInput(tick: tick, frames: 960, format: fmt)).map(T.read); tick += 960 }
+        let t = s.totals
+        XCTAssertEqual(t.spliceDrops, 1)
+        XCTAssertEqual(t.spliceDropFrames, delta)
+        XCTAssertEqual(t.splicesAbandoned, 0)
+        let out = outs.reduce(0) { $0 + Int64($1.frames) }
+        XCTAssertEqual(out, (tick - start) - delta, "output frames = input − delta")
+        assertContiguous(outs, "through a 2.5 s drop")
+        let fadeStart = start + 20 * 960
+        assertCarries(outs, ticks: start..<fadeStart, shift: 0, "before")
+        assertCarries(outs, ticks: (fadeStart + Int64(Self.fade))..<(start + out - 32), shift: delta, "after")
+        // The fade: the kept fade-out against the fade-in from the ring.
+        var worst = 0.0, checked = 0
+        for o in outs {
+            for f in 0..<o.frames {
+                let k = Int(o.pts.value + Int64(f) - fadeStart)
+                guard k >= 0, k < Self.fade else { continue }
+                let th = (Double(k) + 0.5) / Double(Self.fade) * Double.pi / 2
+                for c in 0..<o.channels {
+                    let tk = fadeStart + Int64(k)
+                    let want = cos(th) * Double(T.sample(tick: tk, channel: c))
+                        + sin(th) * Double(T.sample(tick: tk + delta, channel: c))
+                    worst = max(worst, abs(Double(o.pcm[f * o.channels + c]) - want)); checked += 1
+                }
+            }
+        }
+        XCTAssertEqual(checked, Self.fade * 2)
+        // Float arithmetic on 2^31-scale samples: ≤ a few ulps at 24 bits, i.e. ~10^-6 of full scale.
+        XCTAssertLessThan(worst, 2048, "the fade mixes the kept fade-out with the fade-in")
     }
 
     /// A format change before a drop's material has arrived abandons it: counted, its correction no

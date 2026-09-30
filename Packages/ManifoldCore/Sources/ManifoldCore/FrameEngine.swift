@@ -3022,8 +3022,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         #endif
         // The loop's target line (§2.8): the mapping minus the offset, on every evaluation, at the
         // mapping's rate times (1 − SR slope). A snap or re-anchor moves it, and the steering sees
-        // that as a step (§2.4).
-        steering?.setReference(media: target, host: m.hostTime, rate: reference.rate)
+        // that as a step (§2.4). `pictureLate` is how far the picture is behind that line (0 on a
+        // healthy stream): the starvation recovery tracks a late picture rather than the line.
+        steering?.setReference(media: target, host: m.hostTime, rate: reference.rate,
+                               pictureLate: m.pictureLate)
 
         // ⚠️ EMITTED BEFORE THE PUSH GUARD, AND THAT ORDERING IS THE WHOLE POINT OF THIS LINE.
         // It used to sit after `guard shouldPush`, while `lastStatsHost` was advanced before it —

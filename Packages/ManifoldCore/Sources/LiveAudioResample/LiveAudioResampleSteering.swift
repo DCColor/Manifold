@@ -92,18 +92,41 @@
 //    * HOLD: a one-shot host-time deadline, re-armed on every enqueue at the moment the queue would
 //      fall to `starvationMarginSeconds`. It fires only if no input arrived before then, i.e. only
 //      when the renderer is about to run dry. The timebase is then held (rate 0) where it stands.
-//    * RESUME: on the first enqueue that leaves `resumeFillSeconds` queued past the held point. The
-//      timebase restarts (rate 1.0) at the LATEST content that still leaves that fill queued, and
+//    * RESUME: on the first enqueue that leaves `resumeFillSeconds` queued past the held point. No
+//      classification of the sender's refill (§18.19: a rate threshold tuned to one sender's refill
+//      profile cannot separate a burst from a slow catch-up). The timebase restarts (rate 1.0) at the LATEST content that still leaves that fill queued, and
 //      never later than the target: a burst redelivery resumes on the target (the outcome a dry
 //      renderer reached, minus its drops), a sender that is still late resumes late.
-//    * RECOVERY: what the resume could not reach is `recoveryOffset`, D: the target line the loop
-//      steers to is the picture's less D, so the loop sees no step. D is taken back by forward
-//      splices (the step-5 drop) as the queue grows past `recoveryKeepSeconds` plus the drop
-//      guard, at most one per `recoveryDropSpacingSeconds`; under `recoveryFoldSeconds` it is
-//      handed to the loop as ordinary error.
-//  Two writes per starvation episode (hold, resume), counted with the others. On a stream whose
-//  queue never falls to the margin the deadline never fires, D stays 0 and the loop is identical
-//  to the one without this. Loop mode only: pinned is step 3 exactly.
+//    * RECOVERY (REVISED 2026-09-30, §18.19): what the resume could not reach is `recoveryOffset`,
+//      D: the target line the loop steers to is the line less D, so the loop sees no step. While D
+//      is owed it is RE-MEASURED against the line on every read (line − content heard), so a line
+//      LiveClock moves during the catch-up changes the debt rather than leaving the audio early
+//      when it is repaid. It is taken back by forward splices (the step-5 drop) from the queue past
+//      `recoveryKeepSeconds` plus the drop guard, by ONE of two rules, on the picture:
+//        - the picture is on the line (`Mapping.pictureLate` ≤ 50 ms), or closing on it fast enough
+//          to arrive within `recoveryHorizonSeconds`: ONE CUT of the whole debt, as soon as the
+//          queue holds it (a burst or a fast catch-up);
+//        - the picture is late and staying late (a slow catch-up, ffmpeg's 1.05×): cuts of ≥
+//          `recoveryTrackingSeconds` that keep the audio with the late PICTURE, since the audio the
+//          line would need has not arrived. 100 ms late is inside the late-audio detectability
+//          threshold (~125 ms, ITU-R BT.1359).
+//      Under `recoveryFoldSeconds` D is handed to the loop as ordinary error.
+//    * CATCH-UP WRITE (option 2, Robbie 2026-09-30): when the whole debt is in the queue within
+//      `catchUpWindowSeconds` of the restart (a burst arrived just after it) AND it exceeds
+//      `catchUpWriteSeconds` (125 ms, the late-audio detectability threshold), it is taken by ONE
+//      timebase write onto the line instead of a cut. A cut is heard only after the late queue in
+//      front of it plays out, which after a burst holds the whole debt: the audio would sit D
+//      behind the picture for about D. The write costs a renderer mute (~50 ms, §11.11, accepted);
+//      a debt under 125 ms, or one that arrives later, is still a cut.
+//    * RESIDUAL: for `residualWatchSeconds` after the debt is repaid (or after a resume that owed
+//      nothing), a splice takes an |e_f| over `residualSpliceSeconds` instead of the ratio crawling
+//      it back at 2 ms/s. It repeats, `residualSpacingSeconds` apart, while LiveClock keeps moving
+//      its line after the stall (its rail is 0.5 %, the ratio's 0.2 %), and each one extends the
+//      watch, so it closes 60 s after the line has settled.
+//  Two writes per starvation episode (hold, resume), three when a catch-up write is taken, all
+//  counted with the others; the cuts and the residual splices write nothing. On a stream whose queue never falls to the margin the deadline
+//  never fires, D stays 0, no watch opens, and the loop is identical to the one without this. Loop
+//  mode only: pinned is step 3 exactly.
 //
 //  ── PINNED MODE — THE BACK-OUT SWITCH ─────────────────────────────────────────────────────────
 //
@@ -165,6 +188,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         /// The starvation hold's restart (§18.16), after `pausedSeconds` held at rate 0. The hold
         /// itself is the `hold` closure's rate-0 write, not this one.
         case starvationResume(pausedSeconds: Double)
+        /// The starvation recovery's catch-up write (§18.19): a debt over 125 ms that arrived whole
+        /// within 1 s of the restart, placed onto the line in one write.
+        case starvationCatchUp(debtSeconds: Double)
 
         public var label: String {
             switch self {
@@ -175,6 +201,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             case let .reanchor(why): return "re-anchor (\(why))"
             case let .starvationResume(p):
                 return String(format: "STARVATION RESUME after %.0f ms held", p * 1000)
+            case let .starvationCatchUp(d):
+                return String(format: "STARVATION CATCH-UP — %.0f ms debt onto the line in one write", d * 1000)
             }
         }
     }
@@ -218,14 +246,37 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// Queue required past the held point before the timebase restarts: one refill's worth, so a
     /// trickle does not restart and re-hold on every packet.
     public static let resumeFillSeconds = 0.100
+    /// The catch-up write (see the header): taken only for a debt over this, which is the late-audio
+    /// detectability threshold (~125 ms, ITU-R BT.1359). Below it a cut is inaudible as lip-sync.
+    static let catchUpWriteSeconds = 0.125
+    /// …and only when the whole debt is in the queue this soon after the restart: a burst. Later
+    /// arrivals are a slow catch-up, whose cuts are small and heard soon.
+    static let catchUpWindowSeconds = 1.0
     /// Queue a recovery drop must leave behind, on top of the drop guard (fade + 50 ms).
     static let recoveryKeepSeconds = 0.100
-    /// Smallest recovery drop, unless less than this is left: few splices rather than many.
-    static let recoveryMinimumDropSeconds = 0.100
-    /// At most one recovery drop per this, so each is heard before the next is decided.
-    static let recoveryDropSpacingSeconds = 1.0
+    /// While the picture stays late: cut when the audio is this far behind the PICTURE (the
+    /// late-audio detectability threshold is ~125 ms), and no smaller. Also the smallest partial cut.
+    static let recoveryTrackingSeconds = 0.100
+    /// The picture counts as ON the line when it is no later than this (about a frame, plus the
+    /// mapping's 100 ms cadence at a 50 ms/s catch-up).
+    static let pictureOnLineSeconds = 0.050
+    /// A picture that will reach the line within this, at its measured catch-up rate, is treated as
+    /// on it: the audio waits for the whole debt rather than tracking a picture about to jump.
+    static let recoveryHorizonSeconds = 1.0
+    /// The picture's catch-up rate is measured over this, from the first mapping after a resume.
+    static let pictureRateWindowSeconds = 0.5
+    /// The picture on the line but the whole debt still not in the queue after this: take what is.
+    static let recoveryPartialGraceSeconds = 1.0
+    /// After a cut of x, the next waits x + this: the queue drains by x while the drop's material
+    /// arrives, and the frontier the next decision reads does not show it until then.
+    static let recoveryCutSettleSeconds = 0.25
     /// A recovery offset this small is handed to the loop as ordinary error (≈ 10 s at the rail).
     static let recoveryFoldSeconds = 0.020
+    /// The residual splice (see the header): taken once |e_f| exceeds this inside the watch.
+    static let residualSpliceSeconds = 0.020
+    static let residualWatchSeconds = 60.0
+    /// Between two residual splices: the last is heard (a queue, ≤ 0.5 s) and the filter refilled.
+    static let residualSpacingSeconds = 2.0
 
     public let mode: Mode
     private let tag: String
@@ -272,11 +323,28 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// Output-axis end of everything enqueued so far (max over reads), the queue's far end.
     private var frontier: Double?
     private var held: (timebase: Double, host: Double, frontier: Double)?
+    /// The last restart's host time: the catch-up write's window is measured from it.
+    private var lastResumeHost = -Double.infinity
+    private var catchUpWrites = 0
     /// D: seconds the audio is steered behind the picture's line since a resume; 0 otherwise.
     private var recoveryOffset = 0.0
     private var recoveryStartHost: Double?
     private var recoveryPeak = 0.0
-    private var lastRecoveryDropHost = -Double.infinity
+    private var nextRecoveryCutHost = -Double.infinity
+    private var recoveryLargestCut = 0.0
+    private var recoveryTrackingCuts = 0
+    /// The picture (§18.19): how far it is behind the line (`Mapping.pictureLate`), since when it
+    /// has been on it, and its catch-up rate (s/s, + = closing) — nil until measured after a resume.
+    private var pictureLate = 0.0
+    private var pictureOnLineSince: Double?
+    private var pictureLateMark: (host: Double, late: Double)?
+    private var pictureCatchUp: Double?
+    /// The residual watch: until this host time, a splice takes an |e_f| > 20 ms residual, at most
+    /// one per `residualSpacingSeconds`; each splice extends the watch (§18.19).
+    private var residualWatchUntil = -Double.infinity
+    private var nextResidualHost = -Double.infinity
+    private var residualSplices = 0
+    private var residualSplicedSeconds = 0.0
     private var holds = 0
     private var resumes = 0
     private var heldSeconds = 0.0
@@ -393,10 +461,25 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// Mirrored transports push the LiveClock mapping minus cushion on every evaluation; NDI's is
     /// set by its anchor and left. Never writes the timebase — a moved line is an error for the
     /// loop, or, if it moved by more than 50 ms, a step for the coarse branch.
-    public func setReference(media: Double, host: Double, rate: Double) {
+    ///
+    /// `pictureLate`: how far the picture is behind this line (`LiveClock.Mapping.pictureLate`),
+    /// read only by the starvation recovery. 0 = on the line, which is also what a caller with no
+    /// picture clock (NDI) passes.
+    public func setReference(media: Double, host: Double, rate: Double, pictureLate late: Double = 0) {
         guard media.isFinite, host.isFinite, rate.isFinite, rate > 0 else { return }
+        let l = late.isFinite ? max(0, late) : 0
         lock.lock()
         refMedia = media; refHost = host; refRate = rate
+        pictureLate = l
+        if l <= Self.pictureOnLineSeconds {
+            if pictureOnLineSince == nil { pictureOnLineSince = host }
+        } else { pictureOnLineSince = nil }
+        if let m = pictureLateMark {
+            if host - m.host >= Self.pictureRateWindowSeconds {
+                pictureCatchUp = (m.late - l) / (host - m.host)
+                pictureLateMark = (host, l)
+            }
+        } else { pictureLateMark = (host, l) }
         lock.unlock()
     }
 
@@ -535,8 +618,18 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         if let f = enqueuedFrontier, f.isFinite, depthCount < Self.capacity {
             depths[depthCount] = f - timebase; depthCount += 1
         }
-        // The picture's line, less what a starvation resume could not reach (D, §18.16).
-        let target = refMedia + (t1 - refHost) * refRate - recoveryOffset
+        // The picture's line, less what a starvation resume could not reach (D, §18.16). While D is
+        // owed it is re-measured against the line (§18.19): a line LiveClock moves during the
+        // catch-up changes the debt, so the audio is never left early when it is repaid.
+        let line = refMedia + (t1 - refHost) * refRate
+        var recoveredByLine: (() -> String)?
+        if recoveryOffset > 0, t1 >= settleUntil {
+            recoveryOffset = max(0, line - content)
+            if recoveryOffset < Self.recoveryFoldSeconds {
+                recoveredByLine = endRecoveryByFoldLocked(host: t1, how: "the line came back to the audio")
+            }
+        }
+        let target = line - recoveryOffset
         let e = content - target
         let dt = lastEvaluationHost > 0
             ? max(0, min(Self.maximumStepSeconds, t1 - lastEvaluationHost)) : 0
@@ -577,15 +670,70 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             state = LiveAudioResampleController.coarseEvent(state)
             previousError = nil
         }
-        // ── Recovery: take D back by a forward splice once the queue can cover it (§18.16) ──
-        var recoveryDrop: Double?
+        // ── Recovery: take D back by forward splices, on the picture (§18.19; see the header) ──
+        var recoveryDrop: (seconds: Double, kind: RecoveryCut)?
+        var catchUp: (debt: Double, line: Double)?
         if coarse == nil, recoveryOffset > 0, mode == .loop, t1 >= settleUntil,
-           t1 - lastRecoveryDropHost >= Self.recoveryDropSpacingSeconds,
-           let f = enqueuedFrontier, f.isFinite {
+           t1 >= nextRecoveryCutHost, let f = enqueuedFrontier, f.isFinite {
             let room = (f - timebase) - Self.recoveryKeepSeconds
                 - LiveAudioResampleStage.crossfadeSeconds - Self.dropQueueMarginSeconds
-            let x = min(recoveryOffset, room, LiveAudioResampleStage.maximumSpliceSeconds)
-            if x >= min(recoveryOffset, Self.recoveryMinimumDropSeconds) { recoveryDrop = x }
+            let d = recoveryOffset, maxDrop = LiveAudioResampleStage.maximumDropSeconds
+            let onLine = pictureLate <= Self.pictureOnLineSeconds
+            let arriving = !onLine && (pictureCatchUp.map {
+                $0 > 0 && pictureLate / $0 <= Self.recoveryHorizonSeconds } ?? false)
+            if onLine || arriving {
+                if room >= d - Self.recoveryFoldSeconds, d > Self.catchUpWriteSeconds,
+                   t1 - lastResumeHost <= Self.catchUpWindowSeconds {
+                    catchUp = (d, line)
+                } else if room >= d - Self.recoveryFoldSeconds {
+                    recoveryDrop = (min(d, room, maxDrop), .whole)
+                } else if onLine, let since = pictureOnLineSince,
+                          t1 - since >= Self.recoveryPartialGraceSeconds,
+                          room >= Self.recoveryTrackingSeconds {
+                    recoveryDrop = (min(room, maxDrop), .partial)
+                }
+            } else if pictureCatchUp != nil {
+                // Late and staying late: keep the audio with the picture the viewer sees.
+                let behindPicture = d - pictureLate
+                if behindPicture >= Self.recoveryTrackingSeconds, room >= Self.recoveryTrackingSeconds {
+                    recoveryDrop = (min(behindPicture, room, maxDrop), .tracking)
+                }
+            }
+        }
+        var catchUpLine: (() -> String)?
+        if let c = catchUp {
+            // The write puts the content heard on the line: nothing is owed, the loop restarts.
+            let since = recoveryStartHost.map { t1 - $0 } ?? .nan, tag = self.tag
+            recoveryOffset = 0; recoveryStartHost = nil; recoveryPeak = 0
+            catchUpWrites += 1; windowWrites += 1
+            residualWatchUntil = t1 + Self.residualWatchSeconds
+            restartAfterWriteLocked(host: t1)
+            let writes = writesLocked(), q = (enqueuedFrontier ?? .nan) - timebase
+            catchUpLine = {
+                String(format: "%@ ⏩ STARVATION CATCH-UP at host %.3f s: %.1f ms debt, all queued %.2f s after "
+                       + "the resume (renderer queue %.1f ms) → ONE timebase write onto the line instead of "
+                       + "a cut heard a queue later · RECOVERED · session writes %d",
+                       tag, t1, c.debt * 1000, since, q * 1000, writes)
+            }
+        }
+        // ── The residual: one splice instead of the ratio crawling it back (§18.19) ──
+        var residual: (move: Double, filtered: Double)?
+        if coarse == nil, recoveryDrop == nil, catchUp == nil, recoveryOffset == 0, mode == .loop,
+           t1 >= settleUntil, t1 < residualWatchUntil, t1 >= nextResidualHost, previousError != nil,
+           pictureLate <= Self.pictureOnLineSeconds,
+           abs(state.filteredError) > Self.residualSpliceSeconds {
+            let move = -e      // + = the audio is behind: a drop, which the queue must cover
+            let depth = enqueuedFrontier.flatMap { $0.isFinite ? $0 - timebase : nil } ?? 0
+            if move < 0 || move + LiveAudioResampleStage.crossfadeSeconds
+                + Self.dropQueueMarginSeconds <= depth {
+                residual = (move, state.filteredError)
+                // Repeats while LiveClock keeps moving its line; the watch closes 60 s after the last.
+                nextResidualHost = t1 + Self.residualSpacingSeconds
+                residualWatchUntil = t1 + Self.residualWatchSeconds
+                // As for a coarse splice: e_f reset, i held, no step comparison across it.
+                state = LiveAudioResampleController.coarseEvent(state)
+                previousError = nil
+            }
         }
         windowLine = windowIfDueLocked(now: t1)
         lock.unlock()
@@ -597,7 +745,18 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             coarseAction(trigger: trigger, error: e, filtered: filteredAtEvent, target: target,
                          host: t1, queueDepth: depth)
         }
-        if let x = recoveryDrop { recover(by: x, host: t1, queueDepth: (enqueuedFrontier ?? .nan) - timebase) }
+        if let recoveredByLine { emit(recoveredByLine) }
+        if let c = catchUp {
+            write(clock.outputTime(atInputTime: c.line), t1, .starvationCatchUp(debtSeconds: c.debt))
+            if let catchUpLine { emit(catchUpLine) }
+        }
+        if let x = recoveryDrop {
+            recover(by: x.seconds, kind: x.kind, host: t1, queueDepth: (enqueuedFrontier ?? .nan) - timebase)
+        }
+        if let r = residual {
+            spliceResidual(move: r.move, filtered: r.filtered, host: t1,
+                           queueDepth: (enqueuedFrontier ?? .nan) - timebase)
+        }
         if let w = windowLine { emitWindow(w) }
         armDeadlineIfLive(timebase: timebase, host: t1)
         return read
@@ -667,15 +826,23 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         heldSeconds += paused
         held = nil
         resumes += 1; windowWrites += 1
+        lastResumeHost = t
         var d = max(0, targetFull - heard)
         var folded = 0.0
         if d < Self.recoveryFoldSeconds { folded = d; recoveryFolded += d; d = 0 }
         recoveryOffset = d
+        // The picture's catch-up rate is measured afresh from here: before the resume it was
+        // falling behind, which says nothing about how fast it will come back.
+        pictureLateMark = nil; pictureCatchUp = nil
         if d > 0 {
             if recoveryStartHost == nil { recoveryStartHost = t }
             recoveryPeak = max(recoveryPeak, d)
-            lastRecoveryDropHost = t      // the first drop waits a spacing: the refill is still landing
-        } else { recoveryStartHost = nil }
+            nextRecoveryCutHost = t       // the settle window after the write is the only wait
+            residualWatchUntil = .infinity
+        } else {
+            recoveryStartHost = nil
+            residualWatchUntil = t + Self.residualWatchSeconds
+        }
         restartAfterWriteLocked(host: t)
         let writes = writesLocked(), n = resumes, tag = self.tag
         let skipped = at - h.timebase, queued = f - at
@@ -687,8 +854,10 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                        + "from the held point) — restarts at %.6f s (%+.1f ms from the held point), "
                        + "%.1f ms queued · audio %@ · session writes %d", tag, n, t, paused * 1000,
                        (timebaseRead - h.timebase) * 1000, at, skipped * 1000, queued * 1000,
-                       d > 0 ? String(format: "%.1f ms BEHIND the picture's line: recovered by "
-                                      + "forward splices as the queue allows", d * 1000)
+                       d > 0 ? String(format: "%.1f ms BEHIND the picture's line: a catch-up write if "
+                                      + "all of it (> 125 ms) is queued within 1 s, else one cut once "
+                                      + "the queue holds it, or cuts tracking a picture that stays late",
+                                      d * 1000)
                              : String(format: "on the target (%.1f ms folded into the loop)",
                                       folded * 1000),
                        writes)
@@ -696,25 +865,42 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         }
     }
 
+    /// Which rule took a recovery cut (§18.19; see the header).
+    enum RecoveryCut: String {
+        case whole = "WHOLE DEBT"
+        case tracking = "TRACKING THE LATE PICTURE"
+        case partial = "PARTIAL (picture on the line, debt not all queued)"
+    }
+
     /// One recovery drop of `x` seconds. Called without the lock, under `transition`.
-    private func recover(by x: Double, host t: Double, queueDepth: Double) {
+    private func recover(by x: Double, kind: RecoveryCut, host t: Double, queueDepth: Double) {
         guard let g = clock.requestSplice(contentSeconds: x) else { return }
         lock.lock()
+        let owedBefore = recoveryOffset, late = pictureLate, rate = pictureCatchUp
         recoveryOffset = max(0, recoveryOffset - g.seconds)
         var folded = 0.0
         if recoveryOffset < Self.recoveryFoldSeconds {
             folded = recoveryOffset; recoveryFolded += folded; recoveryOffset = 0
         }
         recoveryDrops += 1; recoveryDroppedSeconds += g.seconds
-        lastRecoveryDropHost = t
+        recoveryLargestCut = max(recoveryLargestCut, g.seconds)
+        if kind == .tracking { recoveryTrackingCuts += 1 }
+        nextRecoveryCutHost = t + g.seconds + Self.recoveryCutSettleSeconds
         windowSplices += 1
         let left = recoveryOffset, n = recoveryDrops, tag = self.tag
         let since = recoveryStartHost.map { t - $0 } ?? .nan, peak = recoveryPeak
-        if left == 0 { recoveryStartHost = nil; recoveryPeak = 0 }
+        if left == 0 {
+            recoveryStartHost = nil; recoveryPeak = 0
+            residualWatchUntil = t + Self.residualWatchSeconds
+        }
         lock.unlock()
         emit {
-            String(format: "%@ RECOVERY DROP #%d at host %.3f s: %lld fr / %.1f ms forward · renderer queue %.1f ms · "
-                   + "%@ · no rate write", tag, n, t, g.frames, g.seconds * 1000, queueDepth * 1000,
+            String(format: "%@ RECOVERY DROP #%d (%@) at host %.3f s: %lld fr / %.1f ms forward of %.1f ms owed · "
+                   + "picture %.1f ms behind the line%@ · renderer queue %.1f ms · heard ≈ %.2f s from now · "
+                   + "%@ · no rate write", tag, n, kind.rawValue, t, g.frames, g.seconds * 1000,
+                   owedBefore * 1000, late * 1000,
+                   rate.map { String(format: " (closing %+.0f ms/s)", $0 * 1000) } ?? "",
+                   queueDepth * 1000, queueDepth,
                    left > 0 ? String(format: "%.1f ms still behind", left * 1000)
                             : String(format: "RECOVERED %.1f s after the resume (peak %.1f ms behind, "
                                      + "%.1f ms folded into the loop)", since, peak * 1000,
@@ -722,9 +908,48 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         }
     }
 
+    /// D fell under the fold without a cut (re-measured, §18.19): the rest is the loop's. Under
+    /// `lock`; returns the line to emit off it.
+    private func endRecoveryByFoldLocked(host t: Double, how: String) -> () -> String {
+        let folded = recoveryOffset, since = recoveryStartHost.map { t - $0 } ?? .nan
+        let peak = recoveryPeak, tag = self.tag
+        recoveryFolded += folded
+        recoveryOffset = 0; recoveryStartHost = nil; recoveryPeak = 0
+        residualWatchUntil = t + Self.residualWatchSeconds
+        return {
+            String(format: "%@ RECOVERED %.1f s after the resume without a cut — %@ (peak %.1f ms "
+                   + "behind, %.1f ms folded into the loop)", tag, since, how, peak * 1000,
+                   folded * 1000)
+        }
+    }
+
+    /// The residual splice (§18.19): the content moves by `move` (+ drop, − insert of repeated
+    /// material). `e_f` was already reset and `i` held under the lock. Called without the lock.
+    private func spliceResidual(move: Double, filtered: Double, host t: Double, queueDepth: Double) {
+        let g = clock.requestSplice(contentSeconds: move)
+        lock.lock()
+        if let g {
+            residualSplices += 1; residualSplicedSeconds += abs(g.seconds)
+            windowSplices += 1
+        }
+        let tag = self.tag, i = state.integral
+        lock.unlock()
+        emit {
+            guard let g else {
+                return String(format: "%@ RESIDUAL SPLICE refused by the stage (%+.1f ms) at host %.3f s — "
+                              + "the loop keeps it", tag, move * 1000, t)
+            }
+            return String(format: "%@ RESIDUAL SPLICE at host %.3f s: %@ %lld fr / %.1f ms (e_f %+.1f ms after "
+                          + "the hold) · renderer queue %.1f ms · no rate write · e_f reset, i held at "
+                          + "%+.2f ppm", tag, t, g.frames > 0 ? "DROP" : "INSERT", abs(g.frames),
+                          abs(g.seconds) * 1000, filtered * 1000, queueDepth * 1000, i * 1e6)
+        }
+    }
+
     /// Nothing owed any more (an anchor or a fallback put the content on the target).
     private func endRecoveryLocked() {
         recoveryOffset = 0; recoveryStartHost = nil; recoveryPeak = 0
+        residualWatchUntil = -.infinity
     }
 
     /// Re-arm the deadline for the moment the queue reaches the margin, if a hold is possible.
@@ -740,7 +965,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     }
 
     private func writesLocked() -> Int {
-        firstAnchors + spliceFallbacks + reanchors + holds + resumes
+        firstAnchors + spliceFallbacks + reanchors + holds + resumes + catchUpWrites
     }
 
     /// §2.4's action: splice the content by −e, or — past the bound, or a drop the renderer queue
@@ -888,7 +1113,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         public var unmatched = 0
         public var splices: Int { spliceDrops + spliceInserts }
         /// `coarseLevel + coarseStep == splices + spliceFallbacks`.
-        public var writes: Int { firstAnchors + spliceFallbacks + reanchors + holds + resumes }
+        public var writes: Int { firstAnchors + spliceFallbacks + reanchors + holds + resumes + catchUpWrites }
+        /// Catch-up writes (§18.19 option 2): a burst's debt over 125 ms, taken in one write.
+        public var catchUpWrites = 0
         public var rho = 1.0
         public var integral = 0.0
         public var filteredError = 0.0
@@ -906,6 +1133,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         public var recoveryDrops = 0
         public var recoveryDroppedSeconds = 0.0
         public var recoveryFoldedSeconds = 0.0
+        /// Of those: the largest single cut, and how many tracked a late picture (§18.19).
+        public var recoveryLargestCut = 0.0
+        public var recoveryTrackingCuts = 0
+        /// Residual splices after a hold, and the content they moved (§18.19).
+        public var residualSplices = 0
+        public var residualSplicedSeconds = 0.0
         /// D now, and the lowest queue seen just before an enqueue (nil before the second one).
         public var recoveryOffset = 0.0
         public var lowWater: Double?
@@ -933,17 +1166,19 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                    + "coarse %d [splice fallbacks] + re-anchor %d) · coarse events %d [level %d, step %d] · "
                    + "splices %d (drop %d, insert %d), %.1f ms spliced, unmatched %d · ρ−1 at end "
                    + "%+.1f ppm, max |ρ−1| %.1f ppm · i %+.2f ppm · ρ at its rail %.1f s, %d "
-                   + "episode(s) ≥ 5 s (%d not logged) · starvation: holds %d + resumes %d (writes), "
-                   + "%.0f ms held, recovery drops %d / %.1f ms, %.1f ms folded, D at end %.1f ms, "
+                   + "episode(s) ≥ 5 s (%d not logged) · starvation: holds %d + resumes %d + catch-up %d (writes), "
+                   + "%.0f ms held, recovery drops %d / %.1f ms (largest %.1f ms, %d tracking the "
+                   + "picture), %.1f ms folded, D at end %.1f ms, residual splices %d / %.1f ms, "
                    + "queue low-water before an enqueue %@",
                    tag, mode.rawValue, t.writes, t.firstAnchors, t.spliceFallbacks, t.reanchors,
                    t.coarseLevel + t.coarseStep, t.coarseLevel, t.coarseStep,
                    t.splices, t.spliceDrops, t.spliceInserts, t.splicedSeconds * 1000, t.unmatched,
                    (t.rho - 1) * 1e6, t.maxAbsRhoMinusOne * 1e6, t.integral * 1e6,
                    t.railSeconds, t.railEpisodes, t.railSuppressed,
-                   t.holds, t.resumes, t.heldSeconds * 1000, t.recoveryDrops,
-                   t.recoveryDroppedSeconds * 1000, t.recoveryFoldedSeconds * 1000,
-                   t.recoveryOffset * 1000,
+                   t.holds, t.resumes, t.catchUpWrites, t.heldSeconds * 1000, t.recoveryDrops,
+                   t.recoveryDroppedSeconds * 1000, t.recoveryLargestCut * 1000,
+                   t.recoveryTrackingCuts, t.recoveryFoldedSeconds * 1000,
+                   t.recoveryOffset * 1000, t.residualSplices, t.residualSplicedSeconds * 1000,
                    t.lowWater.map { String(format: "%.1f ms", $0 * 1000) } ?? "—")
         }
     }
@@ -960,10 +1195,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         t.unmatched = unmatched
         t.railEpisodes = railEpisodes; t.railSuppressed = railSuppressed
         t.railSeconds = railSeconds + (railSince.map { max(0, lastEvaluationHost - $0) } ?? 0)
-        t.holds = holds; t.resumes = resumes
+        t.holds = holds; t.resumes = resumes; t.catchUpWrites = catchUpWrites
         t.heldSeconds = heldSeconds + (held.map { max(0, lastEvaluationHost - $0.host) } ?? 0)
         t.recoveryDrops = recoveryDrops; t.recoveryDroppedSeconds = recoveryDroppedSeconds
         t.recoveryFoldedSeconds = recoveryFolded; t.recoveryOffset = recoveryOffset
+        t.recoveryLargestCut = recoveryLargestCut; t.recoveryTrackingCuts = recoveryTrackingCuts
+        t.residualSplices = residualSplices; t.residualSplicedSeconds = residualSplicedSeconds
         t.lowWater = sessionLowWater.isFinite ? sessionLowWater : nil
         return t
     }

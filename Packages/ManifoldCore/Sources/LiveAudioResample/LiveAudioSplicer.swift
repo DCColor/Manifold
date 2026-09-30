@@ -23,6 +23,12 @@
 //    * delta < 0 — BACKWARD (a target raise). INSERT: the read head goes back `|delta|` and replays
 //      from the ring. It waits only for x[r0 + F − 1], the fade-out's last frame.
 //
+//  A DROP IS NOT BOUNDED BY THE RING. It needs only its two fades: the fade-out x[r0 ..< r0+F] is
+//  copied aside as soon as it arrives, and the ring may then move on past it while the skipped
+//  content streams through unfed; the fade-in x[to ..< to+F] is taken from the ring the moment it
+//  lands. So `maximumSplice` bounds INSERTS (which replay from the ring) and a drop may be as long as
+//  the caller allows — the starvation recovery's whole-debt cut is up to seconds (§18.19).
+//
 //  ⚠️ AN INSERT IS REPEATED MATERIAL, NOT SILENCE, AND THAT IS STEP 5's ONE REAL DECISION. Silence
 //  is a run of digital zero as long as the jump — at 200 ms, 2.5× the 78 ms mute this step exists
 //  to remove, and exactly what the §11.9 harness counts as one. Replay keeps the envelope and the
@@ -72,6 +78,8 @@ final class LiveAudioSplicer {
 
     private var queue: [(id: Int, delta: Int64)] = []
     private var active: (id: Int, delta: Int64, r0: Int64)?
+    /// An active DROP's fade-out, [channel][k], kept once it has arrived (see the header).
+    private var savedFadeOut: [[Float]]?
     private let fadeOut: [Float]
     private let fadeIn: [Float]
 
@@ -125,7 +133,7 @@ final class LiveAudioSplicer {
         var outcomes: [Outcome] = []
         if let a = active { outcomes.append(.abandoned(id: a.id, delta: a.delta, reason: reason)) }
         for q in queue { outcomes.append(.abandoned(id: q.id, delta: q.delta, reason: reason)) }
-        active = nil; queue = []
+        active = nil; queue = []; savedFadeOut = nil
         var ignored: [Mark] = []
         advance(into: &out, marks: &ignored, outcomes: &outcomes)
         return outcomes
@@ -181,29 +189,36 @@ final class LiveAudioSplicer {
                 active = nil
                 continue
             }
+            let oldest = written - Int64(capacity)
+            // A drop keeps its fade-out aside once it has arrived, so the ring may pass it.
+            if a.delta > 0, savedFadeOut == nil, written >= a.r0 + Int64(crossfade), a.r0 >= oldest {
+                savedFadeOut = (0..<channels).map { c in
+                    (0..<crossfade).map { k in ring[c][Int((a.r0 + Int64(k)) % Int64(capacity))] }
+                }
+            }
             // Wait for the later of the two fades' last frames.
             guard written >= max(a.r0, to) + Int64(crossfade) else { return }
-            let oldest = written - Int64(capacity)
-            if a.r0 < oldest || to < oldest {
+            if (a.r0 < oldest && savedFadeOut == nil) || to < oldest {
                 outcomes.append(.abandoned(id: a.id, delta: a.delta,
                                            reason: "history ring no longer holds the splice's material"))
-                active = nil
+                active = nil; savedFadeOut = nil
                 continue
             }
+            let held = savedFadeOut
             let base = out[0].count
             for c in 0..<channels { out[c].append(contentsOf: repeatElement(0, count: crossfade)) }
             for k in 0..<crossfade {
                 let p = Int((a.r0 + Int64(k)) % Int64(capacity))
                 let q = Int((to + Int64(k)) % Int64(capacity))
                 for c in 0..<channels {
-                    out[c][base + k] = fadeOut[k] * ring[c][p] + fadeIn[k] * ring[c][q]
+                    out[c][base + k] = fadeOut[k] * (held?[c][k] ?? ring[c][p]) + fadeIn[k] * ring[c][q]
                 }
             }
             marks.append(Mark(fed: fed + Int64(crossfade / 2), delta: a.delta, id: a.id))
             outcomes.append(.executed(id: a.id, delta: a.delta))
             fed += Int64(crossfade)
             readHead = to + Int64(crossfade)
-            active = nil
+            active = nil; savedFadeOut = nil
         }
     }
 }

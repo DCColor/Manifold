@@ -30,6 +30,15 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
 - `project.yml` — XcodeGen input; version, build number, signing, embedded dylibs
 - `ThirdParty/*/README.md` — provenance for the gitignored vendored libraries
 
+## Test environment
+
+- Device-level audio measurement is **Audio Hijack + the OBS recorder instance only**. There is no
+  hardware loopback on the Scarlett 18i20, and none will be set up. Never propose hardware
+  loopback, a loopback driver, or capturing the interface. Details and each recorder's known limits:
+  `docs/AV_SYNC_FINDINGS.md` §1.2.
+- The recorder's audio source is re-picked by hand after every Manifold launch. Start Audio Hijack
+  only after Manifold has connected: started earlier, it can quit or relaunch Manifold.
+
 ## Rules
 
 - `Profile` is the default build configuration and it has `DEBUG=1` — dev affordances are

@@ -113,6 +113,27 @@ audio timeline is **compressed** and its alignment to the video is destroyed. It
 because the fixture is a 1 Hz train and a gate checked for that — beeps arrived 0.851 s apart. An
 offset measured from such a capture walks, with nothing else reading unhealthy.
 
+📌 **DEVICE-LEVEL MEASUREMENT IS AUDIO HIJACK + THE OBS RECORDER, AND NOTHING ELSE (Robbie,
+2026-09-30).**
+- There is **no hardware loopback** on this Mac's Scarlett 18i20, and none will be set up.
+- Never propose hardware loopback, a loopback driver, or a capture of the interface as an
+  instrument. Work within these two recorders.
+- What each is faithful to (the §18.19 device check, `devcheck-2`):
+  - **Both are sample-accurate through continuous playback.** All 12 cuts were measured at their
+    logged sizes on each.
+  - **They disagree around a timebase pause.** At each restart Audio Hijack lost 35–59 ms of
+    programme, while the OBS recorder read −17…+11 ms.
+  - **The OBS recorder shortens a silence.** Its held silences were 10–25 ms shorter than the time
+    logged.
+  - So a pause's own length is read from Audio Hijack, with the OBS recorder as the cross-check.
+- **The OBS recorder captures ~19.5 dB low, consistently.** The mixer is at max. Every recording
+  2026-09-29 → 30 peaks at −27.4…−27.9 dBFS, against the fixture's −8 dB beeps, while Audio Hijack
+  records Manifold's output at full level (0.416). This is the recorder path, not a setting that
+  moved.
+  - Analysis must use a level-independent onset threshold (`devicecheck.py`: ¼ of the capture's
+    own beep level), never an absolute one.
+  - Do not gain it up. Every earlier capture was analysed at this level.
+
 ### 1.2b The sender probe — the term the player controls cannot remove
 
 ⚠️ **ADDED 2026-09-23, AFTER IT WAS NEEDED. Every raw stream figure in §2 carries an unmeasured

@@ -60,6 +60,8 @@ public final class LiveClock: @unchecked Sendable {
     /// Sender-timeline PTS of the first frame — the origin the mapping is anchored to.
     /// `nil` until the first `registerFrame`; `now()` returns "never due" while it is nil.
     private var anchorSenderPTS: Double?
+    /// The newest frame PTS `registerFrame` has seen this stream — `Mapping.pictureLate`'s far end.
+    private var newestArrivedPTS: Double?
 
     /// Host time (`CACurrentMediaTime()`) the anchor is pinned to, pushed `startupDepth`
     /// into the future so the buffer fills before the first frame comes due.
@@ -527,6 +529,7 @@ public final class LiveClock: @unchecked Sendable {
     /// Called on the source thread.
     public func registerFrame(senderPTS: Double) -> Double {
         lock.lock()
+        if senderPTS.isFinite { newestArrivedPTS = max(newestArrivedPTS ?? senderPTS, senderPTS) }
         if anchorSenderPTS == nil {
             // `hostNow() + startupDepth` — the anchor is pinned into the FUTURE so the buffer fills
             // before the first frame comes due. The audio mirror inherits this for free now that it
@@ -584,6 +587,26 @@ public final class LiveClock: @unchecked Sendable {
         public let senderPTS: Double
         public let hostTime: Double
         public let rate: Double
+        /// How far the PICTURE is behind this line when the mapping is stated: `now()` less the
+        /// newest frame that has ARRIVED, floored at 0. Nothing later than that frame can be on
+        /// the glass, so > 0 means the picture is late (a sender catching up after a stall); on a
+        /// healthy stream the newest frame is `targetDepth` ahead and this is 0. Read by the audio
+        /// steering's starvation recovery (docs/AUDIO_RESAMPLER_DESIGN.md §18.19), and by nothing
+        /// that decides the video.
+        ///
+        /// ⚠️ NOT PART OF EQUALITY. It is a reading taken alongside the mapping, not the mapping:
+        /// the publication gate and its tripwire compare the line, and must go on doing exactly
+        /// that — a new frame must not count as a mapping change.
+        public let pictureLate: Double
+
+        public init(senderPTS: Double, hostTime: Double, rate: Double, pictureLate: Double = 0) {
+            self.senderPTS = senderPTS; self.hostTime = hostTime; self.rate = rate
+            self.pictureLate = pictureLate
+        }
+
+        public static func == (a: Mapping, b: Mapping) -> Bool {
+            a.senderPTS == b.senderPTS && a.hostTime == b.hostTime && a.rate == b.rate
+        }
     }
 
     /// Fires whenever the mapping changes — including the first anchor — and with `nil` when
@@ -825,7 +848,8 @@ public final class LiveClock: @unchecked Sendable {
         let t = hostNow()
         lock.lock()
         let live: Mapping? = (anchorSenderPTS != nil && anchorHostTime != nil)
-            ? Mapping(senderPTS: anchorSenderPTS!, hostTime: anchorHostTime!, rate: rate) : nil
+            ? Mapping(senderPTS: anchorSenderPTS!, hostTime: anchorHostTime!, rate: rate,
+                      pictureLate: pictureLateLocked(at: t)) : nil
         guard mappingDirty else {
             // ── TRIPWIRE ────────────────────────────────────────────────────────────────────
             // Nothing declared a change, so the live mapping must equal what we last published.
@@ -925,7 +949,16 @@ public final class LiveClock: @unchecked Sendable {
         }
         guard t - last >= controlInterval else { return nil }
         lastMirrorTickHost = t
-        return Mapping(senderPTS: aPTS + (t - aHost) * rate, hostTime: t, rate: rate)
+        return Mapping(senderPTS: aPTS + (t - aHost) * rate, hostTime: t, rate: rate,
+                       pictureLate: pictureLateLocked(at: t))
+    }
+
+    /// `Mapping.pictureLate` at host `t`: the line's position then, less the newest arrived frame.
+    /// 0 before the first frame and while un-anchored. Call under `lock`.
+    private func pictureLateLocked(at t: Double) -> Double {
+        guard let aPTS = anchorSenderPTS, let aHost = anchorHostTime, let newest = newestArrivedPTS
+        else { return 0 }
+        return max(0, aPTS + (t - aHost) * rate - newest)
     }
 
     /// Snapshot and reset the gap window if it is due. Call under `lock`.
@@ -1743,6 +1776,7 @@ public final class LiveClock: @unchecked Sendable {
     public func reset() {
         lock.lock()
         clearMappingLocked()
+        newestArrivedPTS = nil
         // Re-arm the control loop cleanly for the next stream/loop: forget the smoothed depth and
         // cadence gates, and return the rate to unity so a fresh anchor starts from wall-clock speed.
         smoothedDepth = nil

@@ -135,6 +135,10 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     /// should hide. An insert that size replays a whole second — a sentence heard twice — and it
     /// sizes the history ring (1 s + fade + one 4096-frame chunk: 3.4 MB at 48 kHz × 16).
     public static let maximumSpliceSeconds = 1.0
+    /// Largest forward DROP `requestSplice` grants. A drop needs only its two fades, not the ring
+    /// (`LiveAudioSplicer`'s header), so it is not bounded by `maximumSpliceSeconds`: the starvation
+    /// recovery takes its whole debt in one cut (§18.19). The coarse branch applies its own 1 s.
+    public static let maximumDropSeconds = 4.0
 
     // MARK: - Stats
 
@@ -479,11 +483,12 @@ public final class LiveAudioResampleStage: @unchecked Sendable {
     /// material for its fade has arrived — immediately, or ~`contentSeconds` later for a drop.
     ///
     /// nil when there is nothing to splice (no session, a passthrough, a retired stage), when it
-    /// rounds to zero frames, or when it is larger than `maximumSpliceSeconds`. The caller then
-    /// keeps its pre-existing action.
+    /// rounds to zero frames, or when it is larger than `maximumDropSeconds` (a drop) or
+    /// `maximumSpliceSeconds` (an insert). The caller then keeps its pre-existing action.
     public func requestSplice(contentSeconds: Double) -> SpliceGrant? {
         guard contentSeconds.isFinite,
-              abs(contentSeconds) <= Self.maximumSpliceSeconds else { return nil }
+              contentSeconds <= Self.maximumDropSeconds,
+              -contentSeconds <= Self.maximumSpliceSeconds else { return nil }
         lock.lock(); defer { lock.unlock() }
         guard !retired, let s = session else { return nil }
         let frames = Int64((contentSeconds * s.sampleRate).rounded())
