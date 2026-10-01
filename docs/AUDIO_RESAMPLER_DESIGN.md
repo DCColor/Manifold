@@ -5152,3 +5152,56 @@ B = +26 min):
   day, but not that OBS's SRs are right on every day.
 - **Also check:** 0 packets dropped before the first SR (MediaMTX log), and the §18.21 staircase gone
   from Δ.
+
+#### Result: `observe-abs-whep-mediamtx`, 2026-09-30 19:05–19:47 — ✅ lip-sync held (B − A +3.9 ms), and this OBS session DRIFTED
+
+**Run.** observe-Profile (hold observe-only, applied offset = the SR line), `go.sh mediamtx --abs`, OBS →
+MediaMTX v1.21.1 (`useAbsoluteTimestamp: true`) → Manifold WHEP. Connect 19:11:30. Capture A +180 s,
+capture B +1560 s.
+- **Sender OBS:** launched 18:57:20. Audio buffering 42 ms from 18:57:21 (sources Atem, Decklink), no
+  change during the stream (19:11:10–19:47:27). Scene BLIPS_NOISE.
+
+| figure | §18.23 band | measured | |
+|---|---|---|---|
+| SR Δ shape | smooth ramp, no staircase | ramp; pair noise 4.2 ms (MAD); 0 persistent steps; fit: 0 steps, 0 rejected, 0 unstable | ✅ |
+| SR Δ slope | +55…+75 ppm | **+60.55 ± 1.48 ppm** (fit, session end); Δ +15.7 → +131 ms | ✅ |
+| applied offset A → B | +75…+105 ms | **+92.6 ms** (+27.9 → +120.5) | ✅ |
+| queue depth A → B | ±15 ms | **+1.5 ms** (428.6 → 430.0; session 425.4–432.2) | ✅ |
+| content on RTP timestamps A → B | classify | **−92.1 ms** (−35.1 → −127.2) → **drifting (Sep 28-type)** | |
+| device B − A, grid-corrected | drifting: ±10 ms | **+3.9 ms** | ✅ |
+
+- **Device detail** (`c12.py`, controls by `fc.py`):
+  - Controls: +2.47 / +4.29 ms, 1.8 apart (±5 ✅), zero +3.38.
+  - Capture A +14.58, B +18.51 grid-corrected, i.e. **+11.2 / +15.1 against zero** (±20 ✅ both).
+  - All capture gates pass. The controls' grid gate fails by construction (a looped file), which is
+    why `fc.py` reads them.
+- **The model holds a fourth time:** applied + content = +92.6 − 92.1 = +0.5 ms predicted, +3.9
+  measured.
+- **The at-glass estimate** moved −92.2 ms (−58.6 → −150.7) while the device moved +3.9. The gap grew
+  +96.1 ms against an applied move of +92.6. That is §18.21's blind spot, as expected.
+- **MediaMTX log:** 2 × "received RTP packet without absolute time, skipping it", both at 19:11:11
+  when publishing started, before OBS's first SR and 19 s before Manifold connected. None afterwards.
+  No other warnings.
+- **No audio-SR step.** Δ moves on every SR on both tracks, but that is OBS's send-time jitter: per-pair
+  NTP − receive sd 8 ms audio, 3–4 ms video. No persistent step on either track at the 33 ms
+  (8σ) threshold.
+- **Per track, OBS's SR NTP sits flat against arrival** (`[WHEP-SR-RAW]`, same Mac clock): audio
+  +1.4 → +2.4 ms, video −7.3 → −7.3 ms, slopes −2.9 / +0.6 ppm.
+  - So OBS's SRs map each packet to about when it arrived, as libdatachannel's code says.
+  - The ramp is OBS's audio RTP timestamps advancing ~60 ppm slower than that clock.
+
+**Reading.**
+- **"A freshly launched OBS is honest" is refuted.** This session and §18.21's (16:40) had the same
+  logged sender state: fresh launch, 42 ms, BLIPS_NOISE, the same 60–68 ppm arrival skew. Content held
+  on the RTP timestamps in one (−1.3 ms) and drifted with the skew in the other (−92.1 ms). Neither
+  launch age nor audio buffering predicts it; it has to be measured per session.
+- **OBS's own SRs were right for lip-sync in this session**, because the content drifted exactly with
+  the arrival skew they carry. On the 16:40 session the same SRs would have been wrong by ~+90 ms
+  (applied ≈ +91, content −1.3). They are send-time mappings: right when OBS's timestamps drift with
+  delivery, wrong when its timestamps are honest.
+- **For the DeckLink → Cloudflare run** (README.md, "A realistic sender"):
+  - The prediction table stands with both outcomes. The note that a fresh OBS would be honest is
+    withdrawn.
+  - The sender recording is what classifies the session.
+  - The DeckLink path removes OBS's media-source playback entirely. Whether the honest/drifting
+    alternation belongs to that playback, or to OBS's output for any source, is what the run can show.
