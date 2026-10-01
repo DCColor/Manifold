@@ -946,6 +946,19 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
 **Status:** KNOWN LIMITATION (Robbie, 2026-09-30, decision B). **Source:** `AUDIO_RESAMPLER_DESIGN.md`
 §18.20, §18.21. **Affects:** WHEP from servers whose Sender Reports do not carry the media's A/V line
 (MediaMTX with OBS: staircase or flat SRs).
+
+**In plain language (updated 2026-09-30 night, §18.22–§18.24):**
+- **MediaMTX on its default settings:** lip-sync can drift over long sessions.
+  - MediaMTX throws away the sender's timing reports and makes its own from when packets arrive, so
+    the A/V information is gone before Manifold sees the stream. No receiver-side rule recovers it
+    (§18.22).
+  - **The remedy is server-side:** set `useAbsoluteTimestamp: true` on the MediaMTX path. Tested
+    passing: one 28-min session, B − A +3.9 ms (§18.23). Not yet verified with every sender, and
+    untested on a session where the sender's timestamps are honest.
+- **Cloudflare WHEP: verified.** It held over 4.5 h (§18.8), and with a realistic sender, Resolve →
+  SDI → DeckLink → OBS (B − A +4.15 ms, §18.24).
+- **The absolute offset on a relay that times by arrival** is set at session start. The per-source
+  audio offset (entry below) is the remedy for it.
 - **Lip-sync can walk beyond ±20 ms over a long session.** On the SR line alone it reached ~−28 ms at
   +26 min (§18.9), and the queue said ~−59 ms by +30 min on 2026-09-30.
 - **The level-based correction (§18.20) ships OBSERVE-ONLY.** It computes and logs the session-start

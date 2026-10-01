@@ -913,6 +913,26 @@ AUDIO_RESAMPLER_DESIGN.md §18.21.**
   OBS, and that most likely stands, since the relay only timestamps what the sender delivers. But what
   it measures is the sender's delivery, not necessarily its capture clocks. Not re-tested.
 
+
+### 6.9 OBS delivers audio ~66 ppm slow even from one SDI card; what differs is whose timestamps carry it — 2026-09-30
+
+**Full account: AUDIO_RESAMPLER_DESIGN.md §18.23–§18.24.**
+
+- **The skew is OBS's.** With picture and sound from one DeckLink card (Resolve playing out over SDI),
+  OBS's stream still carries audio delivered ~66 ppm slower than video: Cloudflare's SR slope
+  +66.0 ppm, the same as with OBS's file playback. It is not the media source.
+- **OBS's own timestamps were honest in that run.** OBS's recording of its output held A/V to
+  +0.02 ms over 23 min. On another evening's sessions they were not (−64 ppm on Sep 28; one of two
+  sessions on Sep 30). Neither launch age nor audio buffering predicts which.
+- **Senders and relays differ in whether their timestamps carry the skew, and lip-sync holds when the
+  received SRs match the received timestamps:**
+  - **Cloudflare** re-stamps, and its SRs correct its own timestamps. That held with an honest OBS
+    (+4.15 ms over 23 min) and over 4.5 h.
+  - **MediaMTX on default settings** passes the sender's timestamps but restamps SRs from its arrival
+    clock (§6.8): they do not match.
+  - **MediaMTX with `useAbsoluteTimestamp: true`** passes OBS's send-time SRs: matched in the one
+    (drifting) session tested.
+
 ---
 
 ## 7. What is not answered here

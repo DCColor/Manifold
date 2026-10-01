@@ -2,6 +2,7 @@
 // obs-websocket, watches Manifold's log for the moments that need the operator, and writes a
 // timeline for the analysis. Usage: node soak.mjs <label> <manifold-log>
 import { connect } from './obsws.mjs';
+import { sessionEnd } from './soaklog.mjs';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, statSync, readdirSync, openSync, readSync, closeSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -418,22 +419,24 @@ alert(TR.endMsg);
 // NO DEADLINE: a control recorded while the stream is still up is a live capture, not a control
 // (2026-09-29: the operator was away, both waits timed out, and "control 2" recorded the stream).
 // Repeat the prompt every 2 min instead.
-let endedPos;
+// Wait for the session's end line AND the deck release, both searched from `endPos` (soaklog.mjs:
+// their order varies, and searching for the release only after the end line lost control 2 on
+// 2026-09-30), THEN for playback after both, so a live-session `[Play] presented` line cannot start
+// the control early. NDI also reloads the file, SRT does not (2026-09-28).
+let end, lastPrompt = Date.now(), endedMarked = false;
 for (;;) {
-  endedPos = await waitForLog(TR.endedLog, 'live session ended', endPos, 120);
-  if (endedPos !== endPos) break;
-  alert(`Still connected. ${TR.endMsg}`);
+  end = sessionEnd(logText(), endPos, TR.endedLog);
+  if (end.since !== null) break;
+  if (end.ended !== null && !endedMarked) { mark('live session ended; waiting for the deck release'); endedMarked = true; }
+  if (Date.now() - lastPrompt > 120000) {
+    if (end.ended === null) alert(`Still connected. ${TR.endMsg}`);
+    else mark('deck not yet released; still waiting');
+    lastPrompt = Date.now();
+  }
+  await sleep(1);
 }
-// Wait for the live source to release the deck, THEN for playback, so a live-session
-// `[Play] presented` line cannot start the control early. The release line is common to every
-// transport; NDI also reloads the file, SRT does not (2026-09-28).
-let releasedPos;
-for (;;) {
-  releasedPos = await waitForLog(/\[ARBITER\] (exclusive device released|released )/, 'deck released', endedPos, 120);
-  if (releasedPos !== endedPos) break;
-  mark('deck not yet released; still waiting');
-}
-await fileControl('control 2', releasedPos);
+mark('live session ended and deck released');
+await fileControl('control 2', end.since);
 if (TR.stream && !TR.stopFirst && !TR.keepStreaming) { await sender.call('StopStream'); mark('sender stopped streaming'); }
 alert(DECKLINK ? `${TR.quitMsg} Stop playback in Resolve.` : TR.quitMsg);
 mark('done');

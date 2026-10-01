@@ -62,6 +62,7 @@ The operator's part is spoken by the orchestrator:
 |---|---|
 | `go.sh` | one run: preflight checks, MediaMTX with RTSP (MediaMTX runs only), watcher, orchestrator, Manifold |
 | `soak.mjs` | the orchestrator; see "What the orchestrator does" below |
+| `soaklog.mjs` | pure scans of Manifold's log for the orchestrator (the session end and deck release, in either order); tested by `node --test scripts/soak/soaklog.test.mjs` |
 | `obsws.mjs` | minimal obs-websocket client; also a CLI: `node obsws.mjs 4455 GetStreamStatus` |
 | `control2.mjs` | a later control 2: waits for the fixture to play, records 300 s, appends to the timeline |
 | `watcher.py` | read-only: Manifold %CPU every 10 s (`cpu.csv`), volume of each new capture, a warning on more than one Manifold PID |

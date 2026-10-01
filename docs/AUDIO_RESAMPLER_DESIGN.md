@@ -4247,6 +4247,9 @@ the start → end gate of §6.3.
 > (we have measured up to about 40 ms in 25 minutes, varying from session to session), so on long
 > sessions over Cloudflare SRT, re-run the calibration every 20–30 minutes, or use WHEP. Local SRT,
 > NDI and WHEP from a server that sends accurate sender reports hold a single calibration.
+> **MediaMTX:** set `useAbsoluteTimestamp: true` on the path you play over WHEP. On its default
+> settings MediaMTX replaces the sender's timing reports, and lip-sync can drift over a long session
+> (§18.22–§18.24).
 
 ### 19.6 Effort — revised 2026-09-29 (Robbie: 10–12 days was a human-engineer estimate)
 
@@ -5205,3 +5208,75 @@ capture B +1560 s.
   - The sender recording is what classifies the session.
   - The DeckLink path removes OBS's media-source playback entirely. Whether the honest/drifting
     alternation belongs to that playback, or to OBS's output for any source, is what the run can show.
+
+### 18.24 A realistic sender: Resolve → SDI → DeckLink → OBS → Cloudflare WHEP — ✅ lip-sync held (B − A +4.15 ms); the sender was honest — 2026-09-30 20:13–20:58
+
+**Run.** `observe-decklink-whep-cloudflare`, observe-Profile (hold observe-only, applied offset = the
+SR line), `go.sh cloudflare --sender decklink` (scripts/soak/README.md, "A realistic sender").
+- **Picture and sound came from one card.** A Resolve workstation played
+  `decklink-flash-beep-noise-2398-45m.mov` (the BLIPS_NOISE schedule on one timeline, verified every
+  frame and sample) out over SDI into this Mac's DeckLink. OBS sent scene DECKLINK_BEEPS (the
+  DeckLink input alone, 0 dB) to Cloudflare over WHIP.
+- **Timing.** Connect 20:19:55. The file anchor (first beep received) was 20:20:08, 3 s after the
+  prompt. Captures at anchor +180 / +1560 s, which is session time 192–324 / 1572–1704 s.
+- **The anchor checks out.** The noise segment starts at 20:25:37 in the Audio Hijack capture,
+  against 20:25:38 expected.
+- **Sender recording** (OBS's own output, stream encoder, on OBS's own timestamps):
+  `~/Movies/2026-09-30 20-20-08.mov`.
+
+| figure | measured | |
+|---|---|---|
+| **sender recording A → B** (`probe_av.py … 180 1560`, grid-corrected) | **+0.02 ms** (−27.12 → −27.10 as written; −7.1 ms grid-corrected at both; trend +0.1 ms over 23 min) | **honest**: OBS's output held A/V on OBS's timestamps |
+| SR Δ shape | smooth ramp, pair noise 6.8 ms (MAD); two one-pair spikes; no persistent step; fit: 0 steps, 1 rejection, 0 unstable | ✅ |
+| SR Δ slope | **+66.01 ± 1.58 ppm** (fit, session end) | the same skew as with OBS's file playback |
+| applied offset A → B | **+93.1 ms** (+11.2 → +104.3; s × 1380 s = +91.1) | ✅ |
+| queue depth A → B | **+1.9 ms** (419.6 → 421.5; session 416.0–424.2) | ✅ level |
+| content on the RECEIVED (Cloudflare's) RTP timestamps A → B | **−92.05 ms** (−57.71 → −149.76) | drifts on Cloudflare's timestamps |
+| **device B − A, grid-corrected** | **+4.15 ms** (−3.61 → +0.54) | ✅ ±10 |
+
+- **The model holds a fifth time:** device = applied + content on the received timestamps =
+  +93.1 − 92.05 = **+1.05 ms** predicted, **+4.15** measured.
+- **Absolutes:** −31.4 / −27.3 ms against the zero, outside ±20. Not read as Manifold's:
+  - The zero is control 1 alone. Control 2 was lost (below).
+  - The sender chain itself reads −7.1 ms grid-corrected.
+  - The controls moved 25 ms between launches tonight (next bullet).
+- **The controls move between launches, in the measurement chain.** Control 1 read **+2.47 ms at
+  19:06** (`observe-abs-whep-mediamtx`) and **+27.81 ms at 20:14** (this run). A file played from disk
+  by Manifold, the same recorder and fixture, so the 25 ms is the measurement chain launch to launch,
+  not Manifold's live path. It is why every absolute is taken against the same launch's controls,
+  and why B − A is the figure.
+- **Mutes:** 2 × 20 ms exact-zero gaps in the noise segment. They match audio sequence gaps at
+  20:29:44 and 20:37:07: single Opus packets lost upstream, as in §18.8. Manifold: 0 holes, 0
+  starvation holds, 0 splices, 1 timebase write.
+- **Control 2 was lost to an orchestrator race, now fixed.**
+  - Manifold logged the deck release 645 ms *before* WHEP's DELETE; at 19:42 it had come 41 ms after.
+  - `soak.mjs` searched for the release only after the DELETE and waited forever.
+  - It now scans for both from where the wait began (`scripts/soak/soaklog.mjs`, tested on both
+    runs' real lines in `soaklog.test.mjs`).
+- **The prediction (README, "A realistic sender") was wrong for the honest case.** It expected
+  content on the received timestamps to follow the sender recording, so that a 66 ppm ramp would
+  fail by ~+91 ms. Cloudflare re-stamps the stream: its timestamps drift against the content by the
+  skew, and its SR slope corrects exactly that.
+
+**Conclusion: what matters is whether the received SRs match the received timestamps, not whether the
+sender is honest.**
+- **OBS's output carries ~66 ppm audio-slow delivery even from a single SDI card.** So it is not OBS's
+  media-source playback. Senders and relays differ in whether their *timestamps* carry it.
+- **Cloudflare re-stamps consistently.** Its SRs correct its own timestamps, so following them held
+  lip-sync with an honest sender (here, +4.15 ms) and over 4.5 h (§18.8).
+- **Default MediaMTX does not.** It passes the sender's timestamps through but replaces the SRs with
+  its arrival ratchet (§18.21, §18.22).
+- **MediaMTX with `useAbsoluteTimestamp: true`** passed in the one session tested, which drifted
+  (§18.23). It is untested on a session where the received timestamps are honest.
+
+**Withdrawn.**
+- The inference that the 4.5 h Cloudflare pass needed a drifting OBS: Cloudflare works with an honest
+  sender too.
+- That a freshly launched OBS predicts honesty (already refuted by §18.23).
+
+**Open research.** `go.sh mediamtx --sender decklink`, with and without `--abs`.
+- **What it separates:** MediaMTX re-stamps the audio on output (a contiguous count, §18.21), so
+  "content on the received timestamps" on MediaMTX includes MediaMTX's own audio re-stamping, not
+  only OBS's timestamps.
+- **What it gives:** the sender recording (OBS's timestamps) and the received content side by side in
+  one session.

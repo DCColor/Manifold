@@ -5,6 +5,11 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## Next release
+
+- WHEP from Cloudflare Stream keeps sound and picture in sync for long sessions: verified over four and a half hours, and with picture and sound arriving over SDI and sent through OBS.
+- Known limitation: with MediaMTX on its default settings, sound and picture can slowly drift apart during long WHEP sessions. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it. This has passed our tests, but is not yet verified with every sender.
+
 ## 0.8.4
 
 - Live streams now carry audio on SDI. SRT, HLS, WHEP and NDI were all silent on the card before this.
