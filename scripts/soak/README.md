@@ -118,6 +118,10 @@ zsh scripts/soak/go.sh mediamtx --sender decklink     # label <prefix>-decklink-
     If beeps were already arriving it asks you to stop and park Resolve first.
   - It takes the first `[AV-CONTENT] beep in` line in Manifold's log as the file's 0 s. That is a
     DEBUG line, so a Profile build is needed.
+  - The anchor is that line's own `host=` time (CACurrentMediaTime, the clock Node's `process.hrtime`
+    reads) converted to wall time, not the moment the script noticed it. Before 2026-09-30 21:51 it
+    was the noticing time, up to the spoken prompt's length late (5 s on that run). The prompt is
+    now spoken in the background.
   - Captures A / B and the end are timed from that anchor (+180 / +1560 / +1710 s). The noise segment
     is in the file, so the timeline marks it rather than toggling it.
 - **Records the sender's own output** (StartRecord on 4455 at the anchor, StopRecord at the end).

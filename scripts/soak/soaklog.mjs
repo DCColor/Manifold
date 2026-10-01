@@ -22,3 +22,20 @@ export function sessionEnd(text, from, endedRe) {
   const released = r ? from + r.index + r[0].length : null;
   return { ended, released, since: ended !== null && released !== null ? Math.max(ended, released) : null };
 }
+
+// The DeckLink file's first beep as Manifold received it: `[AV-CONTENT] beep in pts=… host=<s>`, where
+// host is CACurrentMediaTime() — mach_absolute_time, the clock Node's process.hrtime also reads on
+// macOS (checked 2026-09-30: the two interleave to the millisecond).
+export const BEEP_IN = /\[AV-CONTENT\] beep in [^\n]*?host=([\d.]+)/;
+
+// Wall time (ms since the epoch) of a beep line, from the line's OWN host time, not from when the
+// orchestrator noticed it: on 2026-09-30 the anchor taken at noticing was 5 s late (the poll began
+// only after the spoken prompt ended). `hostNowS` / `wallNowMs` are read together by the caller.
+// An age outside [0, maxAgeS] means the clocks are not the same one: fall back to "now", flagged.
+export function beepWallMs(line, hostNowS, wallNowMs, maxAgeS = 60) {
+  const m = BEEP_IN.exec(line);
+  if (!m) return null;
+  const ageS = hostNowS - Number(m[1]);
+  if (!(ageS >= 0 && ageS <= maxAgeS)) return { wallMs: wallNowMs, fromHost: false, ageS };
+  return { wallMs: wallNowMs - ageS * 1000, fromHost: true, ageS };
+}

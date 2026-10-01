@@ -2,7 +2,7 @@
 // obs-websocket, watches Manifold's log for the moments that need the operator, and writes a
 // timeline for the analysis. Usage: node soak.mjs <label> <manifold-log>
 import { connect } from './obsws.mjs';
-import { sessionEnd } from './soaklog.mjs';
+import { sessionEnd, BEEP_IN, beepWallMs } from './soaklog.mjs';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, statSync, readdirSync, openSync, readSync, closeSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -47,9 +47,11 @@ function mark(event, extra = {}) {
   timeline.events.push(e); writeFileSync(timelinePath, JSON.stringify(timeline, null, 1));
   console.log(`${e.t.slice(11, 19)}  ${event}${Object.keys(extra).length ? ' ' + JSON.stringify(extra) : ''}`);
 }
-function alert(msg, speak = true) {
+function alert(msg, speak = true, wait = true) {
   spawnSync('osascript', ['-e', `display notification "${msg.replace(/"/g, "'")}" with title "Manifold soak — ${label}" sound name "Glass"`]);
-  if (speak) spawnSync('say', [msg]);
+  // wait = false: speak in the background, for a prompt whose response must be timed (the DeckLink
+  // anchor) — a blocking `say` delayed it by the length of the sentence.
+  if (speak) { if (wait) spawnSync('say', [msg]); else spawn('say', [msg], { stdio: 'ignore' }).unref(); }
   mark('alert', { msg });
 }
 const logText = () => existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
@@ -290,25 +292,32 @@ mark(`T0 ${transport} connected`, { pids: manifoldPids() });
 
 // DeckLink: the session's schedule is the FILE's (make_decklink_fixture.py: beeps from 0 s, noise
 // 330–1530 s with the beeps muted), so the captures are timed from the file's first beep as Manifold
-// receives it (`[AV-CONTENT] beep in`, a DEBUG line: Profile builds only), not from the connect.
+// receives it (`[AV-CONTENT] beep in`, a DEBUG line: Profile builds only), not from the connect. The
+// anchor is the beep line's OWN host time converted to wall time (soaklog.mjs beepWallMs), not the
+// moment this script noticed it (2026-09-30: 5 s late).
 // Resolve must be stopped at the start of its timeline when asked: a beep in the last 5 s means it is
 // already playing, and the anchor would land on an arbitrary second of the file.
-const BEEP_LINE = /\[AV-CONTENT\] beep in [^\n]*/;
 let base = t0;
 if (DECKLINK) {
   for (;;) {
     const quietFrom = logSize(); await sleep(5);
-    if (!BEEP_LINE.exec(logTail(quietFrom))) break;
+    if (!BEEP_IN.exec(logTail(quietFrom))) break;
     alert('Resolve is already playing. Stop it and park it at the start of the timeline.');
     await sleep(10);
   }
   for (;;) {
     const from = logSize();
-    alert('Connected. Start playback in Resolve now, from the start, with loop on.');
+    alert('Connected. Start playback in Resolve now, from the start, with loop on.', true, false);
     const deadline = Date.now() + 60000;
     let seen = null;
-    while (!seen && Date.now() < deadline) { await sleep(0.5); seen = BEEP_LINE.exec(logTail(from)); }
-    if (seen) { base = Date.now(); mark('file start (first beep received)', { line: seen[0].slice(0, 120) }); break; }
+    while (!seen && Date.now() < deadline) { await sleep(0.5); seen = BEEP_IN.exec(logTail(from)); }
+    if (seen) {
+      const a = beepWallMs(seen[0], Number(process.hrtime.bigint()) / 1e9, Date.now());
+      base = a.wallMs;
+      mark('file start (first beep received)', { at: new Date(base).toISOString(), fromHost: a.fromHost,
+        noticedAfterS: Number(a.ageS.toFixed(3)), line: seen[0].slice(0, 120) });
+      break;
+    }
     mark('no beep yet');
   }
   // The sender's own output, recorded with its stream encoder (WHIP Cloudflare: RecEncoder none), is

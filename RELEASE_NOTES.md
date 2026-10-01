@@ -8,7 +8,7 @@ changelog page. Format notes are at the bottom.
 ## Next release
 
 - WHEP from Cloudflare Stream keeps sound and picture in sync for long sessions: verified over four and a half hours, and with picture and sound arriving over SDI and sent through OBS.
-- Known limitation: with MediaMTX on its default settings, sound and picture can slowly drift apart during long WHEP sessions. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it. This has passed our tests, but is not yet verified with every sender.
+- Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
 
 ## 0.8.4
 

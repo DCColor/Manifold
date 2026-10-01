@@ -947,18 +947,23 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
 §18.20, §18.21. **Affects:** WHEP from servers whose Sender Reports do not carry the media's A/V line
 (MediaMTX with OBS: staircase or flat SRs).
 
-**In plain language (updated 2026-09-30 night, §18.22–§18.24):**
-- **MediaMTX on its default settings:** lip-sync can drift over long sessions.
-  - MediaMTX throws away the sender's timing reports and makes its own from when packets arrive, so
-    the A/V information is gone before Manifold sees the stream. No receiver-side rule recovers it
-    (§18.22).
-  - **The remedy is server-side:** set `useAbsoluteTimestamp: true` on the MediaMTX path. Tested
-    passing: one 28-min session, B − A +3.9 ms (§18.23). Not yet verified with every sender, and
-    untested on a session where the sender's timestamps are honest.
-- **Cloudflare WHEP: verified.** It held over 4.5 h (§18.8), and with a realistic sender, Resolve →
-  SDI → DeckLink → OBS (B − A +4.15 ms, §18.24).
+**In plain language (updated 2026-09-30 night, §18.22–§18.25):**
+- **At 23.976 fps from OBS's WHIP output, MediaMTX on default settings drifts about 240 ms an hour.**
+  - Why: OBS stamps 23.976 video slightly fast, +66.6 ppm (the upstream entry below).
+  - MediaMTX on default settings throws away the sender's timing reports, which would correct it, and
+    makes its own from packet arrival. No receiver-side rule recovers the lost information (§18.22).
+  - Lip-sync starts right and drifts steadily (≈ 4 ms a minute); reconnecting resets it.
+- **The remedy is server-side:** set `useAbsoluteTimestamp: true` on the MediaMTX path. MediaMTX then
+  passes OBS's own timing reports, which correct the error. **Passed with two OBS sources:** BLIPS_NOISE
+  B − A +3.9 ms (§18.23); Resolve → SDI → DeckLink → OBS, −5.45 ms (§18.25).
+- **Cloudflare corrects it automatically:** its timing reports map OBS's timestamps to real time. It
+  held over 4.5 h (§18.8) and with the SDI sender (+4.15 ms, §18.24).
+- **Other frame rates** (arithmetic, not measured): 24, 25, 29.97, 30, 50 and 60 fps are unaffected;
+  59.94 comes out −111 ppm.
 - **The absolute offset on a relay that times by arrival** is set at session start. The per-source
   audio offset (entry below) is the remedy for it.
+- **Post-release:** `docs/WHEP_TIMESTAMP_ROBUSTNESS.md` (per-track arrival-rate estimation, so Manifold
+  can hold lip-sync even on a relay that discards the reports).
 - **Lip-sync can walk beyond ±20 ms over a long session.** On the SR line alone it reached ~−28 ms at
   +26 min (§18.9), and the queue said ~−59 ms by +30 min on 2026-09-30.
 - **The level-based correction (§18.20) ships OBSERVE-ONLY.** It computes and logs the session-start
@@ -969,8 +974,36 @@ carry the audio↔video slope as discrete jumps rather than a smooth line — Me
     moved +98.6 ms between +3 and +26 min, against +10.5 ms the queue allows.
   - Until that is explained, the correction is not trusted to act.
 - Cloudflare WHEP is unaffected (its SRs carry the line; the hold never engages there, §18.20).
-- **Open research item:** the diagnostic run (`go.sh mediamtx --diag`, sender probes at both
-  captures, sender OBS relaunched first).
+- ~~**Open research item:** the diagnostic run (`go.sh mediamtx --diag`, sender probes at both
+  captures, sender OBS relaunched first).~~ **Resolved 2026-09-30:** the +98.6 ms swing was the applied
+  hold moving the target (§18.21), and the drift underneath is OBS's 23.976 stamping (§18.25).
+
+---
+
+## ☐ REPORT UPSTREAM (OBS / libdatachannel) — OBS's WHIP output stamps 23.976 video RTP +66.6 ppm fast
+
+**Status:** ☐ TO REPORT. Not Manifold's bug; Manifold's handling is correct where the relay passes
+usable sender reports. **Found:** 2026-09-30, `AUDIO_RESAMPLER_DESIGN.md` §18.25. **Plan:**
+`docs/WHEP_TIMESTAMP_ROBUSTNESS.md` §4.3.
+- **What happens:**
+  - OBS 32.2.2 `WHIPOutput::Send` (plugins/obs-webrtc/whip-output.cpp) advances the video RTP timestamp
+    by `secondsToTimestamp(dts difference)`, i.e. libdatachannel v0.24.2
+    `getTimestampFromSeconds` = `round(seconds × 90000)`, per frame.
+  - At 23.976 a frame is 41 708 or 41 709 µs: 3753.72 or 3753.81 ticks, both rounded to 3754 (exact
+    3753.75).
+  - The rounded steps are summed, so the error accumulates: **+66.6 ppm**, 240 ms an hour.
+  - 59.94 by the same arithmetic: −111 ppm.
+- **Evidence:**
+  - Video − audio RTP clock against wall clock, measured: +66.5 / +67.5 / +66.7 ppm in three sessions,
+    two with a single SDI card as the source.
+  - Flash-beep content on the received timestamps: −92.1 / −92.05 / −92.06 ms over 1380 s, against
+    −91.9 predicted.
+  - OBS's own recording of the same output: +0.02 ms.
+- **The fix to propose:** compute each timestamp from the total elapsed time
+  (`startTimestamp + round(elapsed_total × 90000)`), or from the frame count, instead of summing
+  rounded per-frame steps.
+- **Report with:** OBS and libdatachannel versions, the arithmetic, the table in §18.25, and a capture
+  of the RTP timestamp increments (constant 3754 at 23.976).
 
 ---
 

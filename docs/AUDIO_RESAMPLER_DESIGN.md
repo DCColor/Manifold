@@ -4249,7 +4249,12 @@ the start → end gate of §6.3.
 > NDI and WHEP from a server that sends accurate sender reports hold a single calibration.
 > **MediaMTX:** set `useAbsoluteTimestamp: true` on the path you play over WHEP. On its default
 > settings MediaMTX replaces the sender's timing reports, and lip-sync can drift over a long session
-> (§18.22–§18.24).
+> (§18.22–§18.25).
+>
+> **OBS at 23.976 fps over WHIP.** OBS stamps 23.976 video very slightly fast (about a quarter of a
+> second an hour). Cloudflare Stream, and MediaMTX with `useAbsoluteTimestamp: true`, correct it and
+> sound stays in sync. On MediaMTX's default settings it shows as a slow drift that a reconnect resets.
+> 25, 29.97, 30, 50 and 60 fps are not affected (§18.25).
 
 ### 19.6 Effort — revised 2026-09-29 (Robbie: 10–12 days was a human-engineer estimate)
 
@@ -5280,3 +5285,94 @@ sender is honest.**
   only OBS's timestamps.
 - **What it gives:** the sender recording (OBS's timestamps) and the received content side by side in
   one session.
+
+### 18.25 MediaMTX `useAbsoluteTimestamp: true` with the DeckLink sender — ✅ B − A −5.45 ms — and the root cause: OBS stamps 23.976 video 66.6 ppm fast — 2026-09-30 21:10–21:51
+
+**Run.** `observe-abs-decklink-whep-mediamtx`, observe-Profile (hold observe-only, applied offset = the
+SR line), `go.sh mediamtx --abs --sender decklink`.
+- **Chain:** Resolve → SDI → DeckLink → OBS (scene DECKLINK_BEEPS, input at 0 dB) → MediaMTX v1.21.1
+  (`mediamtx-soak-abs.yml`; the instance running since 19:05 was reused, as the config matched) →
+  Manifold WHEP.
+- **Timing:**
+  - Connect 21:17:17.97.
+  - File anchor 21:17:29 as noticed. The noise check puts the real file start ~5 s earlier (noise at
+    21:22:54 against 21:22:59): the spoken-prompt delay, inside the capture margins and now fixed
+    (below).
+  - Captures at session 191–323 / 1571–1703 s.
+- **Both controls ran.** The release-line fix (§18.24) worked: "live session ended and deck released"
+  13 s after the prompt.
+
+| figure | measured | |
+|---|---|---|
+| sender recording A → B (OBS's own timestamps, `probe_av.py … 180 1560`) | **+0.02 ms** (−26.80 → −26.78; −6.8 grid-corrected at both; trend +0.1 ms over 23 min) | honest |
+| SR Δ shape | smooth ramp, pair noise 4.0 ms (MAD); one one-pair spike at 1120 s (−34.9 then back); fit: 0 steps, 0 rejected, 0 unstable | ✅ |
+| SR Δ slope | **+61.87 ± 1.52 ppm** | |
+| applied offset A → B | **+91.5 ms** (+11.7 → +103.2) | |
+| queue depth A → B | **−0.2 ms** (428.8 → 428.6; session 426.4–431.8) | ✅ level |
+| content on MediaMTX's received timestamps A → B | **−92.06 ms** (−44.85 → −136.91) | |
+| **device B − A, grid-corrected** | **−5.45 ms** (A +13.15, B +7.70) | ✅ ±10 |
+| absolutes against the zero | **−13.1 / −18.5 ms** | ✅ ±20 |
+
+- **Controls:** +27.18 / +25.30 ms, 1.9 apart (±5 ✅), zero +26.24.
+- **The model holds a sixth time:** +91.5 − 92.06 = −0.56 ms predicted, −5.45 measured.
+- **Per track, OBS's SR NTP stays flat against arrival:** audio +1.19 → +1.04 ms, video −5.95 → −5.45.
+- **MediaMTX:** 2 packets dropped before OBS's first SR at publish (21:17:03, before Manifold
+  connected). Nothing else.
+- **Mutes:** none (segment edge only). Manifold: 1 timebase write, 0 splices, 0 starvation holds.
+
+**The root cause: OBS 32.2.2's WHIP output stamps 23.976 video +66.6 ppm fast.**
+- **The mechanism.** OBS advances each video frame's RTP timestamp by `round(frame duration × 90000)`
+  (`WHIPOutput::Send` → libdatachannel v0.24.2 `RtpPacketizationConfig::getTimestampFromSeconds`,
+  `uint32_t(int64_t(round(seconds × clockRate)))`).
+  - A 23.976 frame is 3753.75 ticks. OBS measures it in whole microseconds (41 708 or 41 709 µs, from
+    `dts_usec`): 3753.72 or 3753.81 ticks, rounded to 3754 every frame.
+  - +0.25 / 3753.75 = **+66.6 ppm**, accumulating, because the rounded steps are summed.
+  - Audio is exact: 20 ms Opus = 960 samples.
+- **Measured: the received RTP clocks against the wall clock** (`[WHEP-SR-RAW]` RTP against receive
+  time, OLS over the session):
+
+| run | video RTP vs wall | audio RTP vs wall | video − audio |
+|---|---|---|---|
+| `observe-abs-whep-mediamtx` (19:05, BLIPS_NOISE, §18.23) | +71.9 ppm | +5.4 ppm | **+66.5 ppm** |
+| `observe-decklink-whep-cloudflare` (20:13, §18.24) | +60.8 ppm | −6.7 ppm | **+67.5 ppm** |
+| `observe-abs-decklink-whep-mediamtx` (21:10, this run) | +60.1 ppm | −6.6 ppm | **+66.7 ppm** |
+
+  - The common ±6–7 ppm is the wall clock (NTP-disciplined) against the Mac's host clock. The difference
+    is what counts: +66.6 predicted.
+  - Over 1380 s that is −91.9 ms of content against the received timestamps; measured −92.1, −92.05 and
+    −92.06 ms.
+- **What it explains:**
+  - **"Audio delivered ~66 ppm slow"** (§18.22–§18.24, AV_SYNC_FINDINGS §6.9 before revision) is the
+    same fact seen from the other side: the video is stamped fast.
+  - **OBS's recordings are honest** (§18.24, this run): a recording stamps frames by count, not by
+    summed rounded steps.
+  - **Default MediaMTX's video-only upward staircase** (§18.21, §18.22): video timestamps run ahead of
+    arrival, so its arrival anchor keeps re-anchoring earlier on the video track only.
+  - **Cloudflare's +66 ppm SR slope, and OBS's own SRs under `useAbsoluteTimestamp: true`** (+60.5,
+    +61.9 ppm): both map the timestamps to real time, so following them cancels the error. That is
+    why both pass.
+  - **The queue drain at ~65 ppm** under a flat applied offset (§18.22), and the level hold's walk on
+    MediaMTX (§18.21).
+  - **Sep 28's −89 ms** at +26 min (`step8-whep-soak`, `srfix-whep-mediamtx`, §18.22).
+- **One unexplained case:** `level-whep-mediamtx` (Sep 30 16:47, §18.21).
+  - Its content on the received timestamps held at −1.3 ms where this predicts ≈ −92, with the same
+    66–68 ppm arrival skew.
+  - §18.22's "OBS's timestamps were inconsistent on Sep 28 and honest on Sep 30" now rests on this
+    session alone.
+- **Ruled out: MediaMTX's audio re-stamping** (the open research of §18.24). The received audio RTP
+  clock is within ±7 ppm of wall time in every run; the error is in the video timestamps.
+- **Other frame rates, by arithmetic, not measured** (OBS's whole-microsecond frame durations × 0.09,
+  rounded):
+  - **No error:** 24, 25, 29.97, 30, 50 and 60 fps. Every rounded step equals the exact tick count
+    (3750, 3600, 3003, 3000, 1800, 1500).
+  - **59.94** (1501.5 ticks): durations step 16 683, 16 683, 16 684 µs, rounding to 1501, 1501, 1502,
+    a mean of 1501.333. That is **−111 ppm** (video stamped slow), not merely "mixed".
+- **Post-release work** (per-track arrival-rate estimation, a 23.976 signature detector, the upstream
+  report, other relays): `docs/WHEP_TIMESTAMP_ROBUSTNESS.md`. Not duplicated here.
+
+**Orchestrator: the DeckLink anchor is now the beep's own time.**
+- `soak.mjs` converts the first `[AV-CONTENT] beep in` line's `host=` (CACurrentMediaTime) to wall
+  time, using Node's `process.hrtime`, which reads the same mach clock (checked: the two interleave to
+  the millisecond). It no longer uses the moment it noticed the line.
+- The prompt is spoken in the background.
+- `soaklog.mjs` `beepWallMs`, tested on this run's real line in `soaklog.test.mjs`.

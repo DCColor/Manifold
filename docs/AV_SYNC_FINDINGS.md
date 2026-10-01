@@ -914,25 +914,30 @@ AUDIO_RESAMPLER_DESIGN.md §18.21.**
   it measures is the sender's delivery, not necessarily its capture clocks. Not re-tested.
 
 
-### 6.9 OBS delivers audio ~66 ppm slow even from one SDI card; what differs is whose timestamps carry it — 2026-09-30
+### 6.9 OBS's WHIP output stamps 23.976 video 66.6 ppm fast; lip-sync holds when the received SRs correct the received timestamps — 2026-09-30 (revised the same night)
 
-**Full account: AUDIO_RESAMPLER_DESIGN.md §18.23–§18.24.**
+**Full account: AUDIO_RESAMPLER_DESIGN.md §18.23–§18.25. Post-release work:
+docs/WHEP_TIMESTAMP_ROBUSTNESS.md.**
 
-- **The skew is OBS's.** With picture and sound from one DeckLink card (Resolve playing out over SDI),
-  OBS's stream still carries audio delivered ~66 ppm slower than video: Cloudflare's SR slope
-  +66.0 ppm, the same as with OBS's file playback. It is not the media source.
-- **OBS's own timestamps were honest in that run.** OBS's recording of its output held A/V to
-  +0.02 ms over 23 min. On another evening's sessions they were not (−64 ppm on Sep 28; one of two
-  sessions on Sep 30). Neither launch age nor audio buffering predicts which.
-- **Senders and relays differ in whether their timestamps carry the skew, and lip-sync holds when the
-  received SRs match the received timestamps:**
-  - **Cloudflare** re-stamps, and its SRs correct its own timestamps. That held with an honest OBS
-    (+4.15 ms over 23 min) and over 4.5 h.
-  - **MediaMTX on default settings** passes the sender's timestamps but restamps SRs from its arrival
-    clock (§6.8): they do not match.
-  - **MediaMTX with `useAbsoluteTimestamp: true`** passes OBS's send-time SRs: matched in the one
-    (drifting) session tested.
-
+- **What first read as "OBS delivers audio ~66 ppm slow" is the video stamped fast.**
+  - OBS 32.2.2 advances each video frame's RTP timestamp by `round(frame duration × 90000)` (libdatachannel
+    v0.24.2 `getTimestampFromSeconds`), from whole-microsecond durations.
+  - At 23.976 that is 3754 ticks every frame instead of 3753.75: **+66.6 ppm**.
+  - Measured, video − audio RTP clock against wall clock: +66.5 / +67.5 / +66.7 ppm in three sessions.
+    Two of them used one SDI card through a DeckLink, so it is not OBS's media-source playback.
+- **OBS's recordings are honest** (+0.02 ms over 23 min, twice): they stamp frames by count. Only the
+  WHIP RTP stamping is wrong.
+- **Lip-sync holds when the received SRs correct the received timestamps:**
+  - **Cloudflare** keeps OBS's video timing and maps it to real time in its SRs. It held with the SDI
+    sender (+4.15 ms over 23 min) and over 4.5 h.
+  - **MediaMTX on default settings** replaces the SRs with its arrival ratchet (§6.8), which follows
+    the fast video only in bursts. It drifts ~240 ms an hour at 23.976.
+  - **MediaMTX with `useAbsoluteTimestamp: true`** passes OBS's own send-time SRs, which correct it.
+    It passed with two OBS sources (§18.23 −92 → +3.9 ms; §18.25 −5.45 ms).
+- **One session does not fit:** 2026-09-30 16:47 (§18.21). There the content on the received
+  timestamps held (−1.3 ms) where the error predicts ≈ −92 ms. Unexplained.
+- **By arithmetic, not measured:** 24, 25, 29.97, 30, 50 and 60 fps are unaffected; 59.94 comes out
+  −111 ppm (stamped slow).
 ---
 
 ## 7. What is not answered here
