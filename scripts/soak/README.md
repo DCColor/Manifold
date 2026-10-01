@@ -67,6 +67,7 @@ The operator's part is spoken by the orchestrator:
 | `watcher.py` | read-only: Manifold %CPU every 10 s (`cpu.csv`), volume of each new capture, a warning on more than one Manifold PID |
 | `srfit-live.sh` | the SR fit's state in a running or finished log: events, window, cross-check, depth, END |
 | `mediamtx-soak.yml` | the plain MediaMTX config plus RTSP (127.0.0.1:8554, for the sender probe) and HLS |
+| `fixtures/make_decklink_fixture.py` | builds the DeckLink-sender fixture file (see "A realistic sender") |
 | `mediamtx-soak-abs.yml` | the same with `useAbsoluteTimestamp: true` on `live` (`go.sh --abs`); keep the two in step |
 
 **What the orchestrator does** (`soak.mjs`):
@@ -78,6 +79,55 @@ The operator's part is spoken by the orchestrator:
   - capture B at +26 min (or at +4 h 30 on `whep-cf-long`, which then stops the stream and checks
     that Manifold's media-stall watchdog ended the session).
 - **Control 2.**
+
+## A realistic sender: Resolve → SDI → DeckLink (`--sender decklink`)
+
+Picture and sound come from one card, as from a real facility, instead of from two OBS media sources.
+A Resolve workstation plays a fixture file out through its Blackmagic output, over SDI, into this
+Mac's DeckLink input; the sender OBS streams scene `DECKLINK_BEEPS` as usual.
+
+```sh
+zsh scripts/soak/go.sh cloudflare --sender decklink   # label <prefix>-decklink-whep-cloudflare
+zsh scripts/soak/go.sh mediamtx --sender decklink     # label <prefix>-decklink-whep-mediamtx
+```
+
+**The fixture** is made once by `fixtures/make_decklink_fixture.py` (the audible-events venv's python):
+`~/Desktop/Manifold-Test-Sources/decklink-flash-beep-noise-2398-45m.mov`.
+- **Video:** ProRes 422 Proxy, 1920×1080 at 24000/1001, 64 735 frames (≈ 45 min). Black, with one
+  white frame per whole second (the first frame at or after it).
+- **Audio:** pcm_s24le 48 kHz stereo.
+  - The fixture's beep, sample-exact on every whole second.
+  - `mutes-pitch-ref-1200s.wav` once, from 330 s to 1530 s, with the beeps muted meanwhile: go.sh's
+    noise schedule, baked in.
+  - Both at 0 dB, the noise copied to both channels, as BLIPS_NOISE's OBS mix.
+- **Timing:** beep − flash is 0 grid-corrected, and as written 0…41.7 ms (mean T/2 = 20.854 ms), as
+  BLIPS_NOISE's render grid gives today.
+  - c12.py's grid-corrected figure adds +20.0 (the 25p fixture's 40 ms flash). On this file the right
+    constant is +20.854, so it reads −0.85 ms off. Constant, so B − A is unaffected.
+  - The sender adds its own terms: OBS re-renders the card's frames on its own 23.976 clock (up to one
+    frame, slowly walking), and the Resolve and DeckLink paths.
+
+**What the orchestrator does differently:**
+- **Touches no media source and no scene.**
+  - It checks that `DECKLINK_BEEPS` is the program scene, holding an enabled DeckLink input,
+    unmuted at 0 dB. Otherwise it stops.
+  - It never plays, restarts, seeks or mutes anything in OBS.
+- **Anchors the schedule on the file, not the connect.**
+  - After the connect it asks you to start Resolve (stopped at the start of the timeline, loop on).
+    If beeps were already arriving it asks you to stop and park Resolve first.
+  - It takes the first `[AV-CONTENT] beep in` line in Manifold's log as the file's 0 s. That is a
+    DEBUG line, so a Profile build is needed.
+  - Captures A / B and the end are timed from that anchor (+180 / +1560 / +1710 s). The noise segment
+    is in the file, so the timeline marks it rather than toggling it.
+- **Records the sender's own output** (StartRecord on 4455 at the anchor, StopRecord at the end).
+  WHIP Cloudflare records with the stream encoder, so there is no second encode. Read it afterwards
+  with `probe_av.py <recording> 180 1560`: the sender's A/V at the capture windows, independent of
+  the relay and of Manifold.
+- **Unchanged:** the controls (Manifold plays the 25p fixture from disk), the recorder captures, the
+  voice prompts, and the Audio Hijack noise-segment analysis. `noise_start.py` finds the segment by
+  its content, so it does not depend on when Resolve started.
+  - Check its result against the timeline: the noise should start ~330 s after "file start" in the
+    Audio Hijack capture. A mismatch means Resolve was not at the start when play was pressed.
 
 ## Analysis
 

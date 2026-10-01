@@ -1,12 +1,17 @@
 #!/bin/zsh
 # One soak run per invocation, from your own terminal (README.md):
-#   zsh scripts/soak/go.sh mediamtx | cloudflare | cloudflare-long | cloudflare-srt  [--diag] [--abs]
+#   zsh scripts/soak/go.sh mediamtx | cloudflare | cloudflare-long | cloudflare-srt  [--diag] [--abs] [--sender decklink]
 #   --diag   diagnostic run (AUDIO_RESAMPLER_DESIGN.md §18.21): a ≥ 130 s sender probe at capture A
 #            (+3 min) and capture B (+26 min), aligned with them, analysed into
 #            $SOAK_OUT/soak-<label>-diag/. Needs a local probe point: mediamtx only.
 #   --abs    MediaMTX with useAbsoluteTimestamp: true on the test path (mediamtx-soak-abs.yml,
 #            AUDIO_RESAMPLER_DESIGN.md §18.23): the publisher's own SRs are kept instead of MediaMTX's
 #            arrival clock. Label <prefix>-abs-whep-mediamtx. mediamtx only.
+#   --sender decklink
+#            a realistic sender (README.md, "A realistic sender"): Resolve plays the fixture out over
+#            SDI into the DeckLink input, scene DECKLINK_BEEPS. No media source or scene is touched;
+#            captures are timed from the file's first beep. Label <prefix>-decklink-<transport>.
+#            WHEP only (mediamtx, cloudflare).
 # Starts the orchestrator (soak.mjs) in the background, then Manifold in the foreground under
 # caffeinate, with its log at $SOAK_LOG_DIR/<label>.log. Quitting Manifold ends this script.
 #
@@ -35,17 +40,30 @@ case "${1:-}" in
 esac
 DIAG=0
 CONF=mediamtx-soak.yml
-for opt in "${@:2}"; do
+SENDER=scene
+ARGS=("${@:2}")
+for ((i = 1; i <= ${#ARGS}; i++)); do
+  opt=${ARGS[i]}
   case $opt in
+    --sender)
+      (( i++ )); SENDER=${ARGS[i]:-}
+      [[ $SENDER == decklink ]] || { echo "--sender takes: decklink"; exit 2; }
+      [[ $TR == whep || $TR == whep-cf ]] || { echo "--sender decklink: WHEP only (mediamtx, cloudflare)"; exit 2; }
+      ;;
     --diag)
       [[ $TR == whep ]] || { echo "--diag needs a local sender probe point (MediaMTX's RTSP): mediamtx only"; exit 2; }
       DIAG=1 ;;
     --abs)
       [[ $TR == whep ]] || { echo "--abs is a MediaMTX setting: mediamtx only"; exit 2; }
       CONF=mediamtx-soak-abs.yml; LABEL=$PREFIX-abs-whep-mediamtx ;;
-    *) echo "unknown option: $opt (--diag, --abs)"; exit 2 ;;
+    *) echo "unknown option: $opt (--diag, --abs, --sender decklink)"; exit 2 ;;
   esac
 done
+# "decklink" goes right after the prefix and any -abs: <prefix>[-abs]-decklink-whep-cloudflare.
+if [[ $SENDER == decklink ]]; then
+  if [[ $LABEL == $PREFIX-abs-* ]]; then LABEL=$PREFIX-abs-decklink-${LABEL#$PREFIX-abs-}
+  else LABEL=$PREFIX-decklink-${LABEL#$PREFIX-}; fi
+fi
 LOG="$LOG_DIR/$LABEL.log"
 
 [[ -x "$APP/Contents/MacOS/Manifold" ]] || { echo "build missing: $APP (set MANIFOLD_APP)"; exit 2; }
@@ -72,7 +90,7 @@ if [[ $TR == whep ]]; then
 fi
 
 pgrep -f "$S/watcher.py" >/dev/null || { nohup python3 "$S/watcher.py" >/dev/null 2>&1 & }
-(cd "$S" && SOAK_DIAG=$DIAG node soak.mjs "$LABEL" "$LOG" "$TR" > "$SOAK_OUT/soak-$LABEL.out" 2>&1; echo "orchestrator exit $?" >> "$SOAK_OUT/soak-$LABEL.out") &
+(cd "$S" && SOAK_DIAG=$DIAG SOAK_SENDER=$SENDER node soak.mjs "$LABEL" "$LOG" "$TR" > "$SOAK_OUT/soak-$LABEL.out" 2>&1; echo "orchestrator exit $?" >> "$SOAK_OUT/soak-$LABEL.out") &
 sleep 2
 if ! pgrep -f "soak.mjs $LABEL" >/dev/null; then
   echo "orchestrator stopped at setup:"; cat "$SOAK_OUT/soak-$LABEL.out"; exit 1

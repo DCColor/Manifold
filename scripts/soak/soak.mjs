@@ -15,7 +15,15 @@ mkdirSync(DIR, { recursive: true });
 const timelinePath = `${DIR}soak-${label}-timeline.json`;
 const timeline = { label, log: logPath, events: [] };
 
-const SCENE = 'BLIPS_NOISE', BEEPS = 'BEEPS', NOISE = 'NOISE';
+// SENDER (go.sh --sender): 'scene' (default) plays the fixture and the noise from OBS media sources in
+// BLIPS_NOISE, and this script schedules the noise. 'decklink' (README.md, "A realistic sender"): a
+// Resolve workstation plays make_decklink_fixture.py's file out over SDI into the DeckLink input, in
+// scene DECKLINK_BEEPS. The file carries the noise schedule itself, so this script touches no media
+// source and no scene: it anchors the captures on the file's first beep instead of on the connect.
+const SENDER = process.env.SOAK_SENDER ?? 'scene';
+if (!['scene', 'decklink'].includes(SENDER)) { console.error(`unknown SOAK_SENDER ${SENDER}`); process.exit(2); }
+const DECKLINK = SENDER === 'decklink';
+const SCENE = DECKLINK ? 'DECKLINK_BEEPS' : 'BLIPS_NOISE', BEEPS = 'BEEPS', NOISE = 'NOISE';
 const APP_AUDIO = 'macOS Audio Capture', BUNDLE = 'com.graviton.manifold';
 const CAPTURE_S = 130;
 // File controls cover ≥ 5 loops of the 60 s fixture, so every display phase is sampled (§18.4).
@@ -82,9 +90,10 @@ function manifoldPids() {
   const r = spawnSync('pgrep', ['-x', 'Manifold']); return r.stdout.toString().split(/\s+/).filter(Boolean);
 }
 
-let sender, recorder, beepsId, noiseId, recording = false;
+let sender, recorder, beepsId, noiseId, recording = false, senderRecording = false;
 
 async function restoreSender() {
+  if (DECKLINK) return;          // nothing of the sender's is ever changed in DeckLink mode
   try {
     await sender.call('SetSceneItemEnabled', { sceneName: SCENE, sceneItemId: noiseId, sceneItemEnabled: false });
     await sender.call('SetInputMute', { inputName: BEEPS, inputMuted: false });
@@ -115,6 +124,7 @@ async function repickAudio() {
 process.on('SIGINT', async () => {
   mark('interrupted');
   if (recording) await recorder.call('StopRecord').catch(() => {});
+  if (senderRecording) await sender.call('StopRecord').catch(() => {});
   await restoreSender(); process.exit(130);
 });
 
@@ -122,13 +132,35 @@ process.on('SIGINT', async () => {
 sender = await connect(4455);
 recorder = await connect(4456);
 const items = (await sender.call('GetSceneItemList', { sceneName: SCENE })).sceneItems;
-beepsId = items.find(i => i.sourceName === BEEPS)?.sceneItemId;
-noiseId = items.find(i => i.sourceName === NOISE)?.sceneItemId;
-if (!beepsId || !noiseId) throw new Error(`scene ${SCENE} must hold ${BEEPS} and ${NOISE}`);
-const noiseSettings = (await sender.call('GetInputSettings', { inputName: NOISE })).inputSettings;
-await sender.call('SetInputSettings', { inputName: NOISE, inputSettings: { looping: false, restart_on_activate: true } });
-await sender.call('SetSceneItemEnabled', { sceneName: SCENE, sceneItemId: beepsId, sceneItemEnabled: true });
-await restoreSender();
+let noiseSettings = {};
+if (DECKLINK) {
+  // Read-only checks. The program scene is NOT switched here: switching away from BLIPS_NOISE would
+  // deactivate (and later restart) its media sources.
+  const { currentProgramSceneName } = await sender.call('GetCurrentProgramScene');
+  if (currentProgramSceneName !== SCENE) {
+    alert(`Switch the sender O B S to the scene ${SCENE.replace('_', ' ')} first.`);
+    throw new Error(`sender program scene is ${currentProgramSceneName}, not ${SCENE}`);
+  }
+  const deck = items.find(i => i.inputKind === 'decklink-input' && i.sceneItemEnabled);
+  if (!deck) throw new Error(`scene ${SCENE} has no enabled DeckLink input`);
+  const { inputMuted } = await sender.call('GetInputMute', { inputName: deck.sourceName });
+  const { inputVolumeDb } = await sender.call('GetInputVolume', { inputName: deck.sourceName });
+  // The fixture's levels are the mix (0 dB, as BLIPS_NOISE's two sources): the input must pass them.
+  if (inputMuted || Math.abs(inputVolumeDb) > 0.1) {
+    alert('The DeckLink input on the sender must be unmuted at zero dB.');
+    throw new Error(`${deck.sourceName}: muted ${inputMuted}, volume ${inputVolumeDb} dB (needs unmuted, 0 dB)`);
+  }
+  const others = items.filter(i => i.sceneItemEnabled && i.sourceName !== deck.sourceName).map(i => i.sourceName);
+  mark('sender decklink', { scene: SCENE, input: deck.sourceName, volumeDb: inputVolumeDb, otherItems: others });
+} else {
+  beepsId = items.find(i => i.sourceName === BEEPS)?.sceneItemId;
+  noiseId = items.find(i => i.sourceName === NOISE)?.sceneItemId;
+  if (!beepsId || !noiseId) throw new Error(`scene ${SCENE} must hold ${BEEPS} and ${NOISE}`);
+  noiseSettings = (await sender.call('GetInputSettings', { inputName: NOISE })).inputSettings;
+  await sender.call('SetInputSettings', { inputName: NOISE, inputSettings: { looping: false, restart_on_activate: true } });
+  await sender.call('SetSceneItemEnabled', { sceneName: SCENE, sceneItemId: beepsId, sceneItemEnabled: true });
+  await restoreSender();
+}
 
 // ── transport specifics ────────────────────────────────────────────────────────────────────────
 const TR = {
@@ -201,7 +233,7 @@ if (TR.profile) {
 }
 const video = await sender.call('GetVideoSettings');
 const recVideo = await recorder.call('GetVideoSettings');
-mark('setup', { transport, profile: (await sender.call('GetProfileList')).currentProfileName,
+mark('setup', { transport, sender: SENDER, profile: (await sender.call('GetProfileList')).currentProfileName,
   noiseLoopWas: noiseSettings.looping, noiseLoopNow: false,
   senderFps: video.fpsNumerator / video.fpsDenominator, recorderFps: recVideo.fpsNumerator / recVideo.fpsDenominator });
 if (Math.abs(video.fpsNumerator / video.fpsDenominator - 23.976) > 0.01) throw new Error('sender is not 23.976');
@@ -254,8 +286,41 @@ const t0 = process.env.SOAK_T0 ? Number(process.env.SOAK_T0) : Date.now();
 if (process.env.SOAK_T0) mark('resumed', { t0: new Date(t0).toISOString() });
 
 mark(`T0 ${transport} connected`, { pids: manifoldPids() });
-alert('Connected. Nothing to do for about twenty eight minutes.');
-const at = s => sleep(Math.max(0, (t0 + s * 1000 - Date.now()) / 1000));
+
+// DeckLink: the session's schedule is the FILE's (make_decklink_fixture.py: beeps from 0 s, noise
+// 330–1530 s with the beeps muted), so the captures are timed from the file's first beep as Manifold
+// receives it (`[AV-CONTENT] beep in`, a DEBUG line: Profile builds only), not from the connect.
+// Resolve must be stopped at the start of its timeline when asked: a beep in the last 5 s means it is
+// already playing, and the anchor would land on an arbitrary second of the file.
+const BEEP_LINE = /\[AV-CONTENT\] beep in [^\n]*/;
+let base = t0;
+if (DECKLINK) {
+  for (;;) {
+    const quietFrom = logSize(); await sleep(5);
+    if (!BEEP_LINE.exec(logTail(quietFrom))) break;
+    alert('Resolve is already playing. Stop it and park it at the start of the timeline.');
+    await sleep(10);
+  }
+  for (;;) {
+    const from = logSize();
+    alert('Connected. Start playback in Resolve now, from the start, with loop on.');
+    const deadline = Date.now() + 60000;
+    let seen = null;
+    while (!seen && Date.now() < deadline) { await sleep(0.5); seen = BEEP_LINE.exec(logTail(from)); }
+    if (seen) { base = Date.now(); mark('file start (first beep received)', { line: seen[0].slice(0, 120) }); break; }
+    mark('no beep yet');
+  }
+  // The sender's own output, recorded with its stream encoder (WHIP Cloudflare: RecEncoder none), is
+  // the sender-side A/V, independent of the relay and of Manifold. Read later with probe_av.py at the
+  // capture windows; not analysed here, so nothing competes with control 2 for the CPU.
+  const { outputActive } = await sender.call('GetRecordStatus');
+  if (outputActive) mark('sender already recording: left alone');
+  else { await sender.call('StartRecord'); senderRecording = true; mark('sender recording start'); }
+  alert('Playback running. Nothing to do for about twenty eight minutes.');
+} else {
+  alert('Connected. Nothing to do for about twenty eight minutes.');
+}
+const at = s => sleep(Math.max(0, (base + s * 1000 - Date.now()) / 1000));
 
 if (DIAG && !TR.probe) { alert('Diagnostic mode needs a local sender probe point; this transport has none.'); process.exit(2); }
 if (DIAG) mkdirSync(DIAG_DIR, { recursive: true });
@@ -294,12 +359,15 @@ const a = await record('capture A', CAPTURE_S);
 if (probeA) await probeA;
 if (a.vol < -40) alert('Warning: capture A is silent.');
 await at(T.noiseOn);
-await sender.call('SetInputMute', { inputName: BEEPS, inputMuted: true });
-await sender.call('SetSceneItemEnabled', { sceneName: SCENE, sceneItemId: noiseId, sceneItemEnabled: true });
-mark('noise on, beeps muted');
+if (DECKLINK) mark('noise on, beeps muted (in the file)');
+else {
+  await sender.call('SetInputMute', { inputName: BEEPS, inputMuted: true });
+  await sender.call('SetSceneItemEnabled', { sceneName: SCENE, sceneItemId: noiseId, sceneItemEnabled: true });
+  mark('noise on, beeps muted');
+}
 await at(T.noiseOff);
-await restoreSender();
-mark('noise off, beeps unmuted');
+if (DECKLINK) mark('noise off, beeps unmuted (in the file)');
+else { await restoreSender(); mark('noise off, beeps unmuted'); }
 if (TR.long) {
   await sleep(20);
   alert('Noise segment done. Stop Audio Hijack now. Nothing else tonight. The run ends by itself at four and a half hours.');
@@ -333,6 +401,12 @@ await at(T.end);
 }
 }
 mark('end', { pids: manifoldPids() });
+if (senderRecording) {
+  let r = {};
+  try { r = await sender.call('StopRecord'); } catch (e) { mark('sender recording stop failed', { why: e.message }); }
+  senderRecording = false;
+  mark('sender recording stop', { path: r.outputPath ?? null });
+}
 
 // ── control 2, same launch ───────────────────────────────────────────────────────────────────
 // SRT: the SENDER stops first. Manifold hanging up on OBS's listener hangs OBS (docs/BUGS.md).
@@ -361,6 +435,6 @@ for (;;) {
 }
 await fileControl('control 2', releasedPos);
 if (TR.stream && !TR.stopFirst && !TR.keepStreaming) { await sender.call('StopStream'); mark('sender stopped streaming'); }
-alert(TR.quitMsg);
+alert(DECKLINK ? `${TR.quitMsg} Stop playback in Resolve.` : TR.quitMsg);
 mark('done');
 sender.close(); recorder.close();
