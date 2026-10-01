@@ -1454,8 +1454,10 @@ final class DeckRegistry {
         SRTFrameRouter.shared.liveAudioDrift = { [weak engine] c in engine?.liveAudioDrift(against: c) }
         #if DEBUG
         // [AV-LAG] telemetry, pre-ship removal (docs/BUGS.md): the renderer's once-a-second reading of
-        // the audio being heard against the live clock, for either push transport.
-        renderer?.avLagAudioMinusClock = { [weak engine] c in engine?.liveAudioDrift(against: c) }
+        // the audio being heard against the live clock, for either push transport. The HEARD figure,
+        // which carries the per-source audio offset O (§19.1); `liveAudioDrift` is blind to O.
+        // Identical while O = 0.
+        renderer?.avLagAudioMinusClock = { [weak engine] c in engine?.liveAudioHeardMinusClock(against: c) }
         #endif
 
         // SEED THE INCOMING DECK WITH WHATEVER SHAPE IS ALREADY ON SCREEN. `LiveDisplaySize` only

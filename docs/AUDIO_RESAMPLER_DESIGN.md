@@ -4280,6 +4280,170 @@ decisions only Robbie makes.
 - **Pre-ship list:** the DEBUG `[AV-CONTENT]` code is replaced, not kept beside the shipped
   detectors (BUGS.md's pre-ship entry).
 
+### 19.7 Stage A built: the offset term and its splice — 2026-10-01 (unattended; uncommitted)
+
+**Decided by Robbie (2026-10-01):**
+- Range −250…+500 ms, one constant (`LiveAudioResampleSteering.userOffsetRange`). One splice per
+  change, never chained.
+- An advance larger than the queue allows is REFUSED whole. The refusal reports the most available
+  now: queue − 100 keep − 10 fade − 50 margin, the recovery guard.
+- The existing drift figure stays blind to O. One new log figure, "heard A/V", includes it.
+- SDI: a change crossfades. Pinned mode has no O. Sign: O > 0 = audio heard later.
+
+#### What was built
+
+| part | where | rule |
+|---|---|---|
+| **O in the line** | `LiveAudioResampleSteering.setReference` / `anchor` | every line handed in is stored as `media − O`, so D (re-measured against the line, §18.19), the resume and the catch-up write all see it. D never takes O |
+| **the change** | `setUserOffset`, under `transition` | the line moves by −ΔO and `requestSplice(−ΔO)` is granted in the same step. No write, no coarse event, no ρ step. Not anchored yet: stored and placed by the next anchor, with no splice |
+| **refusals** | same | outside the range: REJECTED. Advance > queue − 160 ms: REFUSED with the figure. Stage refused: REFUSED. Pinned: NOT APPLIED, logged once. O is unchanged in every case |
+| **NDI** | none needed | its anchor goes through the same `anchor`, so it carries O, and a change uses the same entry point. No re-anchor |
+| **the app's entry** | `FrameEngine.setLiveAudioOffset` | only an accepted (or pending) O reaches the SDI read |
+| **SDI** | `LiveReadOffsetFader` (LiveAudioResample), owned by `AudioTapBuffer` | `read` serves `startTime − O`, a change crossfaded equal power over 10 ms (the stage's fade). Set while a live session is open, cleared in `endLiveAudio`. At O = 0 the read is the old read, untouched |
+| **level hold** | `WindowFacts.offsetMoved` → `windowLines(offsetMoved:)` → `noteUserOffsetMove` | the reference is re-based (D_ref + ΔO, u − ΔO) in window order, and the window with the change is excluded, like a recovery window |
+| **figures** | see below | `liveAudioDrift` adds O back (blind). `liveAudioHeardMinusClock` does not, and feeds the renderer's `[AV-LAG]` / `[AV-CONTENT]` |
+| **log** | steering | one line per change (old → new, splice, queue, accepted or refused with the available figure). The window line ends `heard A/V med … (O …)`; the END line ends `audio offset O … (n change(s), n refused)` |
+| **testing hooks** | app, `#if DEBUG` behind `DebugMenuGate`; FrameEngine `liveAudioStartOffset`, `nudgeCurrentLiveAudioOffset` | `MANIFOLD_AUDIO_OFFSET_MS` (the start value); Debug ▸ Audio Offset +10 / −10 / +50 / −50 / Reset. **Remove in stage B** |
+
+- ⚠️ **Where O is subtracted differs from the brief's wording:** inside the steering, not by
+  FrameEngine and NDI before they call it.
+  - FrameEngine computes its line on the mapping thread. A change arrives from another.
+  - A line computed with the old O and landing after the change would step the line back by ΔO
+    for one evaluation, and that is a step trigger.
+  - Under the steering's `lock`, the line move and the stored line are one write. The effect the
+    brief asks for holds: `refMedia` carries −O, which is what D, the resume and the catch-up read.
+- ⚠️ **The renderer's at-glass hook now reads the heard figure, not `liveAudioDrift`.**
+  - `avcontent.py`'s glass is `beep − (now + audio−now)`, and `audio−now` was `liveAudioDrift`.
+  - Made blind, it would have hidden O from the very figure the live gate reads.
+  - So `liveAudioDrift` (the routers' `timebase−clock`) and the paired probe's reference stay blind
+    (O added back, or taken off the reference). `[AV-LAG]` and `[AV-CONTENT]` show what is heard.
+  - Identical at O = 0. While a change sits in the renderer's queue (≤ ~0.5 s), the blind figure
+    reads the step the listener has not heard yet.
+
+#### O = 0 is HEAD b35a810
+
+- **`swift test`: 148 / 148 unchanged**, before the new tests were added. With them, **158 / 158**.
+- ⚠️ **One pre-existing flake.** `testSteeringCallsItsCompanionWithoutReportingWindows` failed once
+  (2 logged vs 3 facts) in one full run under build load.
+  - The race is in the test: its wait ends on `facts`, and the companion's line reaches `log` after
+    its facts entry.
+  - 0 / 40 alone and 0 / 10 full runs, both at HEAD and on this tree. Not changed: the brief says
+    existing tests pass unchanged.
+- **Replays, before and after, byte-identical.** Built from HEAD and then from the final tree (the
+  same `swiftc` lines as `replay/build.sh`), and run on copies of the saved inputs in
+  `~/Desktop/manifold-soak/level/`:
+  - Sessions: `srfix-whep-cloudflare-long`, `srfix-whep-mediamtx`, `step4e2-cloudflare`,
+    `step4e2-cloudflare-2`, `step8-whep-soak`, `step8-srtest1`, `step8-srtest2`, plus `synth` at
+    66.6 ppm.
+  - Tools, each on every session: `replay-after`, `replay-closed` (fallback and logonly),
+    `replay-level` (level and logonly), `replay-offset-lock`.
+  - **59 / 59 files identical**: 8 stdout reports and 51 trace TSVs. For example `step8-whep-soak`
+    `level`: start → +26 −3.3 ms, worst −31.9 ms at 430 s, end −2.5 ms, before and after.
+  - The Python analyses only read logs, so they cannot move.
+- **Log formats:** only tails were added (window line, END line, the fit's summary only when a change
+  was re-based). `extract.py`, `depth_term.py` and `srfit-live.sh` anchor before them;
+  `soaklog.test.mjs` 8 / 8.
+- **Builds:** Profile (`.build-cc/offsetA-Profile`) and Release (`.build-cc/offsetA-Release`), no
+  errors. No new warnings.
+
+#### Offline (`LiveAudioOffsetTests`, 10 tests, on §18.16's `QueuePlant`)
+
+| test | result |
+|---|---|
+| 0 → +80 → +200 → −40 → 0 ms | 4 changes = 4 splices of exactly −ΔO, 1 write, 0 coarse / residual / recovery. \|e\| < 0.5 ms through every change. ρ and max \|ρ−1\| equal the no-change run's within 0.5 ppm. D 0 throughout. Heard on the old value 50 ms before each change and on the new one 1 s after, within 0.5 ms |
+| start value | pending, then placed by the first anchor: no splice, 1 write, heard = O |
+| stall with O = +150 / −100, at 1.05×, a 1000× burst, and 30× (the catch-up write) | 1 hold, never dry, D = 0 at end, writes as with O = 0. Heard − O and e equal the O = 0 run's within 1 ms; the 1.05× residual is the loop's own (−2.65 ms in both). **D = D₀ − O**: 612 / 762 ms (+150), 862 / 762 ms (−100), 978 / 1128 ms on the 30× burst. The physical debt, never O more |
+| a change while D is owed (2 s stall, 1.05×, +50 ms at +3 s) | D unchanged within 3 ms across it; recovered, heard = O |
+| advance past the guard | −250 at a 340 ms lead: REFUSED, available = queue − 160 ms exactly. −150 accepted. A further −50: REFUSED (queue ≈ 180 ms). 1 splice in all |
+| out of range | +501, −251, NaN rejected; +500 accepted |
+| pinned | NOT APPLIED; O 0, no splice |
+| NDI anchor line | a start O is placed by the first anchor; a change takes one splice and no re-anchor; a later re-anchor keeps O; 2 writes (anchor and the test's re-anchor) |
+| SDI read (`LiveReadOffsetFader`) | O = 0 is the plain read, bit-exact. +100 ms: 480 frames cos/sin from the old position to the new, then exact. A fade across two reads carries its position. `clear()` gives the plain read again |
+| level hold re-base | +200 ms in the window at 600 s: D_ref 400 → 600 ms, E 0, implied slope 0, no WOULD ENGAGE, no warning. Without the re-base: E +200 ms and WOULD ENGAGE |
+
+#### Live, unattended, non-Cloudflare
+
+Both runs used the Profile build, `MANIFOLD_DEBUG_MENU=1` (no `defaults` written), the
+`ref-nob.ts` fixture (23.976, −60 dBFS floor), and the click schedule
+`0 → +80 → +200 → −40 → 0`, then a probe of −50 ×4, then 0. Each click is one Debug-menu change,
+4 s apart; each plateau ≥ 28 s.
+- **At glass** = `avcontent.py`'s `[AV-CONTENT]` glass per beep.
+- **Grid-free** = glass − decoded (beep − flash PTS) per pair: the same figure without the fixture's
+  beep-to-frame phase, which walks by up to a frame on this file.
+- Δ is against the pooled O = 0 plateaus.
+- Analysis: `analyze.py` (scratch).
+
+**Local SRT** (`repro/run.sh`, ffmpeg listener, `MANIFOLD_SRT_DEBUG_URL`;
+`offsetA-srt.manifold.log`, 18:28–18:34):
+
+| O | at glass Δ (n) | grid-free Δ (p10–p90) |
+|---|---|---|
+| +80 | +88.2 ms (27) | **+80.4** (+77.8…+84.2) |
+| +200 | +207.8 ms (27) | **+200.8** (+197.6…+204.1) |
+| −40 | −48.2 ms (25) | **−39.5** (−42.8…−36.2) |
+| −150 (probe) | −141.4 ms (18) | **−148.6** (−152.8…−145.5) |
+| 0, at end | −0.1 ms (101) | −0.3 |
+
+**ffmpeg → MediaMTX → WHEP** (ffmpeg re-encoding `ref-nob.ts` to H.264 baseline, no B-frames, plus
+Opus, published over RTSP; Manifold on the `MediaMTX Whip` bookmark, chosen by UI scripting;
+`offsetA-whep.manifold.log`, 18:37–18:43):
+- ⚠️ **The MediaMTX was the one already running**, on `mediamtx-soak-abs.yml`
+  (`useAbsoluteTimestamp: true`), up since 2026-09-30 19:05 and idle. It was used as it was.
+
+| O | at glass Δ (n) | grid-free Δ (p10–p90) |
+|---|---|---|
+| +80 | +72.7 ms (26) | **+79.9** (+77.1…+83.7) |
+| +200 | +193.6 ms (25) | **+200.4** (+196.5…+204.6) |
+| −40 | −31.2 ms (25) | **−39.6** (−43.2…−36.1) |
+| 0, at end | +0.1 ms (48) | +0.1 |
+
+| gate | local SRT | MediaMTX WHEP |
+|---|---|---|
+| changes accepted | 21 | 22 |
+| splices executed (stage session totals) / abandoned | **21** / 0 | **22** / 0 |
+| timebase writes (END) | **1** (the first anchor) | **1** |
+| coarse events / splice fallbacks / unmatched | **0** / 0 / 0 | **0** / 0 / 0 |
+| each change: grid-free step − ΔO, worst of all | **5.5 ms** | **4.9 ms** |
+| the same at glass, 1–4 beeps a side | 41.7 ms | 24.6 ms |
+| refusals | 1: −150 → −200, "a 50.0 ms advance needs 210.0 ms … the queue holds 174.3 ms: at most 14.3 ms … available" | 0 (the ~420 ms WHEP queue covers −200) |
+| ρ range inside a change window, widest / quiet windows widest (median) | 173 / 414 (89) ppm | 158 / 466 (109) ppm |
+| windows without a change: e med, \|e\| max | −0.9…+3.2 ms, 5.6 ms | −1.8…+3.4 ms, 5.4 ms |
+| heard A/V − O (window medians, no change) | −3.2…+0.9 ms | −3.4…+1.8 ms |
+| holds, recovery, residual splices, DRY | 0 | 0 |
+
+- **Met:** every change moved what is heard by ΔO, far inside one frame on the grid-free figure. 1
+  splice per change, 0 extra writes, 0 coarse events, on both servers.
+  - The raw at-glass plateaus are within 8.9 ms. The rest is the fixture's grid phase: the two O = 0
+    plateaus of the WHEP run differ by 7.5 ms between themselves.
+  - The per-change raw steps (≤ 41.7 ms, 1–4 beeps a side) are the same phase noise. 41.7 ms is one
+    frame at 23.976, so the SRT worst sits exactly on the bound on that figure.
+- **The integrator** was +98 ppm at 20–30 s on SRT, before the first change, and decayed through
+  every change with e_f within ±1.3 ms. It is a start-up transient, not the changes.
+- ⚠️ **The level hold was not exercised live.** The WHEP session was 5 min with changes every
+  ≤ 30 s, so no settled 60 s span formed. The summary reads "session-start level never set … 13
+  window(s) excluded, 13 audio-offset change(s) re-based", and the slope check never ran (it needs
+  540 s). The re-base is verified offline only.
+
+#### Not done
+
+- **Attended (Robbie):**
+  - NDI from OBS with a change: the anchor line live.
+  - DeckLink SDI output during a live session:
+    - a change crossfades on the wire;
+    - SDI moves with the desktop;
+    - the offset is gone on file playback after the session ends;
+    - an advance past what the tap holds plays silence and re-anchors the bridge's cursor.
+  - A device capture (Audio Hijack and the recorder) of a few changes: what the listener hears,
+    and the ~50 ms mute that a change does NOT cost (no rate write).
+- **Unattended, not run:**
+  - a WHEP session long enough for the level reference (≥ 60 s settled before the first change and
+    ≥ 10 min after the last), to see the re-base and the excluded windows live;
+  - pinned mode live (the NOT APPLIED line);
+  - a change during a starvation hold or recovery, live;
+  - a Release-build run (Release has no Debug menu, so it needs stage B's controls).
+- **Stage B removes** `MANIFOLD_AUDIO_OFFSET_MS`, Debug ▸ Audio Offset,
+  `FrameEngine.liveAudioStartOffset` and `nudgeCurrentLiveAudioOffset`.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,

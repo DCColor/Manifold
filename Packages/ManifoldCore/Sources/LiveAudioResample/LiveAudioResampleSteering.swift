@@ -128,6 +128,23 @@
 //  never fires, D stays 0, no watch opens, and the loop is identical to the one without this. Loop
 //  mode only: pinned is step 3 exactly.
 //
+//  ── THE PER-SOURCE AUDIO OFFSET O (docs/AUDIO_RESAMPLER_DESIGN.md §19.1, stage A) ─────────────
+//
+//  O > 0 = the audio is heard O LATER. O is IN THE LINE, not a separate steering term: every line
+//  handed in (`setReference`, `anchor`) is stored as `media − O`, so D (re-measured against the
+//  line, §18.19), the resume and the catch-up write all see it, and D never absorbs it. It is held
+//  HERE, not subtracted by the caller, because the caller computes its line on the mapping thread
+//  while a change arrives from another: a line computed with the old O landing after the change
+//  would step the line back by ΔO and fire the step trigger. Under `lock` the move and the line
+//  write are one.
+//
+//  A change (`setUserOffset`) moves the line by −ΔO and requests the splice of −ΔO in the same
+//  step, under `transition`: content + ahead − target is continuous, so e does not step, ρ does not
+//  move, no trigger fires and nothing is written. Delay (O up) is an insert; advance (O down) is a
+//  drop, taken only if the queue holds it plus the recovery guard (keep + fade + margin), and
+//  otherwise REFUSED whole, with the most available now. One splice per change, never chained:
+//  the range keeps every change inside the stage's bounds. Pinned mode has no O (step 3 exactly).
+//
 //  ── PINNED MODE — THE BACK-OUT SWITCH ─────────────────────────────────────────────────────────
 //
 //  `.pinned` is step 3, exactly: the ratio stays at 1.0, the controller is never stepped, and the
@@ -278,6 +295,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// Between two residual splices: the last is heard (a queue, ≤ 0.5 s) and the filter refilled.
     static let residualSpacingSeconds = 2.0
 
+    // ── The per-source audio offset O (§19.1; see the header) ─────────────────────────────────────
+    /// THE range of O, seconds (Robbie, 2026-10-01). Every change is one splice inside the stage's
+    /// bounds: an insert ≤ 0.75 s (bound 1 s), a drop ≤ 0.75 s (bound 4 s).
+    public static let userOffsetRange: ClosedRange<Double> = -0.250...0.500
+
     public let mode: Mode
     private let tag: String
     private let reportsWindows: Bool
@@ -357,6 +379,15 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var sessionLowWater = Double.infinity
     private var windowHolds = 0
 
+    // The per-source audio offset (§19.1).
+    /// O, seconds: subtracted from every line handed in, so `refMedia` already carries −O.
+    private var userOffset = 0.0
+    private var userOffsetChanges = 0
+    private var userOffsetRefusals = 0
+    private var userOffsetPinnedLogged = false
+    /// Net O accepted in this window: the WHEP level hold re-bases its reference by it (§19.1).
+    private var windowOffsetMoved = 0.0
+
     // Counters, session-long.
     private var firstAnchors = 0
     private var coarseLevel = 0
@@ -394,6 +425,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     // Window. Preallocated: 10 s at 100 Hz is 1000 reads.
     private static let capacity = 4096
     private var errs = [Double](repeating: 0, count: capacity)
+    /// "Heard A/V" per accepted read: the picture's line without O, less the content heard (+ = the
+    /// audio is heard later). Includes O and D; the loop's e does not include O.
+    private var heards = [Double](repeating: 0, count: capacity)
     private var count = 0
     /// Renderer queue depth per accepted read: enqueued output frontier − timebase, seconds.
     /// MEASUREMENT ONLY — nothing reads it but the window line.
@@ -472,7 +506,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         guard media.isFinite, host.isFinite, rate.isFinite, rate > 0 else { return }
         let l = late.isFinite ? max(0, late) : 0
         lock.lock()
-        refMedia = media; refHost = host; refRate = rate
+        // O is in the line (§19.1): `media` is the picture's line, the stored line is O behind it.
+        refMedia = media - userOffset; refHost = host; refRate = rate
         pictureLate = l
         if l <= Self.pictureOnLineSeconds {
             if pictureOnLineSince == nil { pictureOnLineSince = host }
@@ -501,7 +536,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         endRecoveryLocked()
         let first = firstAnchors == 0
         let origin: WriteOrigin = first ? .firstAnchor : .reanchor(reason ?? "caller")
-        refMedia = media; refHost = host; refRate = rate.isFinite && rate > 0 ? rate : 1.0
+        // O is in the line (§19.1): the content heard at `host` is placed O behind `media`.
+        let line = media - userOffset
+        refMedia = line; refHost = host; refRate = rate.isFinite && rate > 0 ? rate : 1.0
         anchored = true
         if sessionStart == 0 { sessionStart = host; windowStart = host }
         if first { firstAnchors = 1 } else { reanchors += 1; windowExcluded = true }
@@ -509,7 +546,128 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         restartAfterWriteLocked(host: host)
         lock.unlock()
         // Outside the lock: the inverse takes the stage's, and the write reaches the synchronizer.
-        write(clock.outputTime(atInputTime: media), host, origin)
+        write(clock.outputTime(atInputTime: line), host, origin)
+    }
+
+    // MARK: - The per-source audio offset (§19.1)
+
+    /// What `setUserOffset` did. Seconds throughout; + = the audio heard later.
+    public enum UserOffsetOutcome: Sendable, Equatable {
+        /// The line moved by −(new − old) and one splice of `spliceSeconds` was granted (+ = a drop,
+        /// content forward; − = an insert of repeated material). No timebase write.
+        case applied(old: Double, new: Double, spliceSeconds: Double)
+        /// Not anchored yet (or held by the caller): stored, and placed by the next anchor.
+        case pending(old: Double, new: Double)
+        /// An advance larger than the queue allows: refused whole, O unchanged. `available` is the
+        /// largest advance the queue allows now (queue − keep − fade − margin), ≥ 0.
+        case refusedAdvance(old: Double, requested: Double, available: Double, queue: Double)
+        /// The stage refused the splice (no resampled session, a retired stage): O unchanged.
+        case refusedByStage(old: Double, requested: Double)
+        /// Outside `userOffsetRange`, or not finite: O unchanged.
+        case outOfRange(old: Double, requested: Double)
+        /// Pinned mode has no O (step 3 exactly).
+        case disabledPinned(requested: Double)
+        case unchanged(Double)
+        case retired
+    }
+
+    /// O now (0 in pinned mode, which never takes one).
+    public var userOffsetSeconds: Double { lock.lock(); defer { lock.unlock() }; return userOffset }
+
+    /// Change O. Under `transition`, like every write decision, so no evaluation, hold or resume
+    /// interleaves with the line move and its splice. Never writes the timebase.
+    @discardableResult
+    public func setUserOffset(_ requested: Double) -> UserOffsetOutcome {
+        let tag = self.tag
+        let range = Self.userOffsetRange
+        guard requested.isFinite, range.contains(requested) else {
+            lock.lock(); let old = userOffset; userOffsetRefusals += 1; lock.unlock()
+            emit {
+                String(format: "%@ AUDIO OFFSET %+.1f ms REJECTED — outside %+.0f…%+.0f ms · O stays %+.1f ms",
+                       tag, requested * 1000, range.lowerBound * 1000, range.upperBound * 1000, old * 1000)
+            }
+            return .outOfRange(old: old, requested: requested)
+        }
+        guard mode == .loop else {
+            lock.lock()
+            let first = !userOffsetPinnedLogged
+            userOffsetPinnedLogged = true
+            lock.unlock()
+            if first {
+                emit {
+                    String(format: "%@ AUDIO OFFSET %+.1f ms NOT APPLIED — the ratio is PINNED (step 3, the "
+                           + "back-out switch), which has no offset; O is 0 for this session (logged once)",
+                           tag, requested * 1000)
+                }
+            }
+            return .disabledPinned(requested: requested)
+        }
+        transition.lock(); defer { transition.unlock() }
+        lock.lock()
+        guard !retired else { lock.unlock(); return .retired }
+        let old = userOffset, delta = requested - old
+        guard delta != 0 else { lock.unlock(); return .unchanged(old) }
+        guard anchored else {
+            // Nothing is playing on a line yet: the next anchor places the content O behind it.
+            userOffset = requested; userOffsetChanges += 1
+            lock.unlock()
+            emit {
+                String(format: "%@ AUDIO OFFSET %+.1f → %+.1f ms · not anchored: placed by the next anchor, "
+                       + "no splice, no write", tag, old * 1000, requested * 1000)
+            }
+            return .pending(old: old, new: requested)
+        }
+        let f = frontier
+        lock.unlock()
+        // The queue now, for an advance (a drop must leave the recovery guard behind it).
+        let t = hostNow()
+        let timebase = readTimebase()
+        let queue = (f.map { $0 - timebase }).flatMap { $0.isFinite ? $0 : nil } ?? 0
+        let move = -delta          // + = content forward: a drop
+        let available = max(0, queue - Self.recoveryKeepSeconds
+                            - LiveAudioResampleStage.crossfadeSeconds - Self.dropQueueMarginSeconds)
+        if move > 0, move > available {
+            lock.lock(); userOffsetRefusals += 1; lock.unlock()
+            emit {
+                String(format: "%@ AUDIO OFFSET %+.1f → %+.1f ms REFUSED at host %.3f s — a %.1f ms advance "
+                       + "needs %.1f ms of renderer queue (advance + %.0f keep + %.0f fade + %.0f margin) "
+                       + "and the queue holds %.1f ms: at most %.1f ms of advance is available now · "
+                       + "O stays %+.1f ms, no splice, no write", tag, old * 1000, requested * 1000, t,
+                       move * 1000, (move + Self.recoveryKeepSeconds + LiveAudioResampleStage.crossfadeSeconds
+                                     + Self.dropQueueMarginSeconds) * 1000,
+                       Self.recoveryKeepSeconds * 1000, LiveAudioResampleStage.crossfadeSeconds * 1000,
+                       Self.dropQueueMarginSeconds * 1000, queue * 1000, available * 1000, old * 1000)
+            }
+            return .refusedAdvance(old: old, requested: requested, available: available, queue: queue)
+        }
+        guard let g = clock.requestSplice(contentSeconds: move) else {
+            lock.lock(); userOffsetRefusals += 1; lock.unlock()
+            emit {
+                String(format: "%@ AUDIO OFFSET %+.1f → %+.1f ms REFUSED by the stage (no resampled session) · "
+                       + "O stays %+.1f ms", tag, old * 1000, requested * 1000, old * 1000)
+            }
+            return .refusedByStage(old: old, requested: requested)
+        }
+        lock.lock()
+        // The line moves by −ΔO in the same step as the splice's −ΔO: content + ahead − target is
+        // continuous, so e does not step and D (line − content) does not change.
+        refMedia -= delta
+        userOffset = requested
+        userOffsetChanges += 1
+        windowOffsetMoved += delta
+        windowSplices += 1
+        windowExcluded = true
+        let n = userOffsetChanges, writes = writesLocked(), d = recoveryOffset
+        lock.unlock()
+        emit {
+            String(format: "%@ AUDIO OFFSET %+.1f → %+.1f ms ACCEPTED at host %.3f s (change #%d): one splice, "
+                   + "%@ %lld fr / %.1f ms, heard ≈ %.2f s from now · line moved %+.1f ms with it, so e, ρ "
+                   + "and D%@ are continuous · renderer queue %.1f ms · no rate write (session writes %d)",
+                   tag, old * 1000, requested * 1000, t, n, g.frames > 0 ? "DROP" : "INSERT", abs(g.frames),
+                   abs(g.seconds) * 1000, queue, -delta * 1000,
+                   d > 0 ? String(format: " (%.1f ms owed)", d * 1000) : "", queue * 1000, writes)
+        }
+        return .applied(old: old, new: requested, spliceSeconds: g.seconds)
     }
 
     /// Record an event that moves content — a LiveClock position jump, an input axis re-pin, a stage
@@ -643,7 +801,12 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         if t1 < settleUntil {
             settling += 1
         } else {
-            if count < Self.capacity { errs[count] = e; count += 1 } else { overflowed += 1 }
+            if count < Self.capacity {
+                errs[count] = e
+                // Heard A/V (§19.1): against the picture's line WITHOUT O, so it carries O; e does not.
+                heards[count] = line + userOffset - content
+                count += 1
+            } else { overflowed += 1 }
             if mode == .loop {
                 if let p = previousError, abs(e - p) > thresholds.step {
                     coarse = (.step, e, target)
@@ -1147,6 +1310,11 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         /// D now, and the lowest queue seen just before an enqueue (nil before the second one).
         public var recoveryOffset = 0.0
         public var lowWater: Double?
+        /// The per-source audio offset (§19.1): O now, changes taken (each one splice, or placed by
+        /// an anchor), and changes refused (out of range, an advance past the queue, the stage).
+        public var userOffset = 0.0
+        public var userOffsetChanges = 0
+        public var userOffsetRefusals = 0
     }
 
     public var totals: Totals {
@@ -1174,7 +1342,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                    + "episode(s) ≥ 5 s (%d not logged) · starvation: holds %d + resumes %d + catch-up %d (writes), "
                    + "%.0f ms held, recovery drops %d / %.1f ms (largest %.1f ms, %d tracking the "
                    + "picture), %.1f ms folded, D at end %.1f ms, residual splices %d / %.1f ms, "
-                   + "queue low-water before an enqueue %@",
+                   + "queue low-water before an enqueue %@ · audio offset O %+.1f ms (%d change(s), %d refused)",
                    tag, mode.rawValue, t.writes, t.firstAnchors, t.spliceFallbacks, t.reanchors,
                    t.coarseLevel + t.coarseStep, t.coarseLevel, t.coarseStep,
                    t.splices, t.spliceDrops, t.spliceInserts, t.splicedSeconds * 1000, t.unmatched,
@@ -1184,7 +1352,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                    t.recoveryDroppedSeconds * 1000, t.recoveryLargestCut * 1000,
                    t.recoveryTrackingCuts, t.recoveryFoldedSeconds * 1000,
                    t.recoveryOffset * 1000, t.residualSplices, t.residualSplicedSeconds * 1000,
-                   t.lowWater.map { String(format: "%.1f ms", $0 * 1000) } ?? "—")
+                   t.lowWater.map { String(format: "%.1f ms", $0 * 1000) } ?? "—",
+                   t.userOffset * 1000, t.userOffsetChanges, t.userOffsetRefusals)
         }
     }
 
@@ -1207,6 +1376,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         t.recoveryLargestCut = recoveryLargestCut; t.recoveryTrackingCuts = recoveryTrackingCuts
         t.residualSplices = residualSplices; t.residualSplicedSeconds = residualSplicedSeconds
         t.lowWater = sessionLowWater.isFinite ? sessionLowWater : nil
+        t.userOffset = userOffset; t.userOffsetChanges = userOffsetChanges
+        t.userOffsetRefusals = userOffsetRefusals
         return t
     }
 
@@ -1231,10 +1402,14 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         /// at the ratio's rail in it, and the integrator at its end.
         public var saturated = false
         public var integral: Double?
+        /// Net change of the audio offset O accepted in this window (§19.1): the queue deepens by it
+        /// from here on, by design, so the level hold re-bases its reference by it. Such a window is
+        /// also `excluded`.
+        public var offsetMoved = 0.0
         public init(elapsed: Double, rendererDepthMedian: Double?, excluded: Bool = false,
-                    saturated: Bool = false, integral: Double? = nil) {
+                    saturated: Bool = false, integral: Double? = nil, offsetMoved: Double = 0) {
             self.elapsed = elapsed; self.rendererDepthMedian = rendererDepthMedian; self.excluded = excluded
-            self.saturated = saturated; self.integral = integral
+            self.saturated = saturated; self.integral = integral; self.offsetMoved = offsetMoved
         }
     }
 
@@ -1250,11 +1425,13 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         -> (() -> (line: String?, facts: WindowFacts))? {
         let n = count
         let hadAnything = n > 0 || discarded > 0 || settling > 0 || windowWrites > 0 || held != nil
+            || windowOffsetMoved != 0
         let prints = reportsWindows || windowCoarse > 0 || windowHolds > 0 || final
         guard hadAnything, prints || windowCompanion != nil else {
             resetWindowLocked(now: now); return nil
         }
         let e = Array(errs[0..<n])
+        let h = Array(heards[0..<n])
         let d = Array(depths[0..<depthCount])
         let snap = (n: n, disc: discarded, settle: settling, over: overflowed,
                     sat: saturatedSteps, rho: state.rho, rhoMin: rhoMin, rhoMax: rhoMax,
@@ -1262,6 +1439,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                     coarse: windowCoarse, splices: windowSplices, writes: windowWrites,
                     total: totalsLocked(), elapsed: (now ?? lastEvaluationHost) - sessionStart,
                     lowWater: lowWater, holds: windowHolds, d: recoveryOffset,
+                    o: userOffset, oMoved: windowOffsetMoved,
                     excluded: windowExcluded || windowHolds > 0 || windowSplices > 0 || windowCoarse > 0
                         || held != nil || recoveryOffset > 0)
         resetWindowLocked(now: now)
@@ -1279,12 +1457,16 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                                     rendererDepthMedian: sortedDepth.isEmpty
                                         ? nil : sortedDepth[sortedDepth.count / 2],
                                     excluded: snap.excluded, saturated: snap.sat > 0,
-                                    integral: snap.i)
+                                    integral: snap.i, offsetMoved: snap.oMoved)
             guard prints else { return (nil, facts) }
             let depthText = sortedDepth.isEmpty
                 ? "—"
                 : String(format: "min %.1f med %.1f max %.1f", sortedDepth[0] * 1e3,
                          sortedDepth[sortedDepth.count / 2] * 1e3, sortedDepth[sortedDepth.count - 1] * 1e3)
+            var sortedHeard = h
+            sortedHeard.sort()
+            let heardText = sortedHeard.isEmpty
+                ? "—" : String(format: "%+.2f ms", sortedHeard[sortedHeard.count / 2] * 1e3)
             let rhoRange = snap.rhoMin.isFinite
                 ? String(format: "%+.1f … %+.1f", (snap.rhoMin - 1) * 1e6, (snap.rhoMax - 1) * 1e6)
                 : "—"
@@ -1296,7 +1478,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                           + "step %d) · "
                           + "splices %d, %.1f ms, unmatched %d · max |ρ−1| %.1f ppm · "
                           + "renderer depth ms %@ · low-water %@ · holds this window %d, session %d "
-                          + "(resumes %d, %.0f ms held) · D %.1f ms",
+                          + "(resumes %d, %.0f ms held) · D %.1f ms · heard A/V med %@ (O %+.1f ms%@)",
                           tag, final ? "END" : "window", snap.elapsed, mode.rawValue,
                           (snap.rho - 1) * 1e6, rhoRange, snap.slew * 1e6, snap.i * 1e6,
                           snap.ef * 1e3, errText, snap.n, snap.disc, snap.settle,
@@ -1309,7 +1491,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                           snap.total.maxAbsRhoMinusOne * 1e6, depthText,
                           snap.lowWater.isFinite ? String(format: "%.1f ms", snap.lowWater * 1e3) : "—",
                           snap.holds, snap.total.holds, snap.total.resumes,
-                          snap.total.heldSeconds * 1e3, snap.d * 1e3), facts)
+                          snap.total.heldSeconds * 1e3, snap.d * 1e3, heardText, snap.o * 1e3,
+                          snap.oMoved != 0 ? String(format: ", moved %+.1f ms this window", snap.oMoved * 1e3)
+                                           : ""), facts)
         }
     }
 
@@ -1317,7 +1501,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         count = 0; depthCount = 0; overflowed = 0; discarded = 0; settling = 0; saturatedSteps = 0
         rhoMin = .infinity; rhoMax = -.infinity; slewMax = 0
         windowCoarse = 0; windowSplices = 0; windowWrites = 0; windowExcluded = false
-        lowWater = .infinity; windowHolds = 0
+        lowWater = .infinity; windowHolds = 0; windowOffsetMoved = 0
         if let now { windowStart = now }
     }
 

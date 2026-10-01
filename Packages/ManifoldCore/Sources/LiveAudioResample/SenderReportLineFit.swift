@@ -475,11 +475,14 @@ public final class SenderReportLineFit: @unchecked Sendable {
     /// session clock, `rendererDepth` its window median; offset and slope are what the target used.
     /// `excluded`: the steering saw a starvation hold, its recovery, a splice or a fallback in the
     /// window; the level hold does not read its depth. `loop`: the loop's saturation and integrator
-    /// and LiveClock's buffer error, for the settled-reference rule (§18.21).
+    /// and LiveClock's buffer error, for the settled-reference rule (§18.21). `offsetMoved`: the audio
+    /// offset O changed by this much in the window (§19.1); the level hold re-bases before the window.
     public func windowLines(time: Double, rendererDepth: Double?, appliedOffset: Double,
                             appliedSlope: Double, excluded: Bool = false,
-                            loop: SenderReportSlopeCrossCheck.LoopState? = nil) -> [String] {
+                            loop: SenderReportSlopeCrossCheck.LoopState? = nil,
+                            offsetMoved: Double = 0) -> [String] {
         var lines: [String] = []
+        if offsetMoved != 0 { crossCheck.noteUserOffsetMove(offsetMoved) }
         if let w = windowLine() { lines.append(w) }
         lock.lock()
         let x = lastX, correction = lastCorrection, slopeInUse = snapshotLocked().slopeInUse

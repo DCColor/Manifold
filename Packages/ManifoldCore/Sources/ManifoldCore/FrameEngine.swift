@@ -2402,7 +2402,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                        appliedOffset: offset, appliedSlope: slope,
                                        excluded: facts.excluded,
                                        loop: .init(saturated: facts.saturated, integral: facts.integral,
-                                                   liveClockBufferError: bufferError))
+                                                   liveClockBufferError: bufferError),
+                                       offsetMoved: facts.offsetMoved)
             } })
         // A superseded session's steering may still hold an armed starvation deadline: retire it
         // before this session owns the synchronizer, so it can never hold this session's timebase.
@@ -2411,6 +2412,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.steering = steering; mirror.srFit = srFit
         mirror.lock.unlock()
         superseded?.retire()
+        // ── THE PER-SOURCE AUDIO OFFSET O (§19.1) ──────────────────────────────────────────────
+        // Held by the steering, in its line; nothing is anchored yet, so a start value is placed by
+        // the first anchor with no splice. The SDI read takes the same O, for this session only.
+        audioTap.clearLiveReadOffset()
+        let startOffset = Self.liveAudioStartOffset
+        if startOffset != 0 { applyLiveAudioOffset(startOffset, steering: steering) }
+        Self.setCurrentLiveAudioOffsetEngine(self)
         // An input jump past the stage's bridge is the one input event that can step the content
         // error (§4.1 item 2), so it is on record for the splice it may cause. Set before the sink
         // exists, so before any `process`.
@@ -3030,7 +3038,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // it inside the mirror's would create a second lock order for no benefit. Before the
         // `shouldPush` gate, because the reference describes where the audio should be — true on
         // every mapping whether or not this one produces a `setRate`.
-        pairedProbeForReference?.noteReference(media: target, host: m.hostTime,
+        // Less O (§19.1): this drift figure stays blind to the audio offset, as `liveAudioDrift` does.
+        pairedProbeForReference?.noteReference(media: target - (steering?.userOffsetSeconds ?? 0),
+                                               host: m.hostTime,
                                                rate: reference.rate, smoothed: smoothedNow)
         #endif
         // The loop's target line (§2.8): the mapping minus the offset, on every evaluation, at the
@@ -3184,8 +3194,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // audio device crystal against mach — §5.1's "-7.8 ppm, a property of the output device" —
         // and NOT a sender-vs-receiver figure like SRT's and WHEP's. Do not pool them.
         // `smoothed: 1.0` because there is nothing to smooth: this path never computes a rate.
-        pairedProbeForReference?.noteReference(media: mediaTime, host: hostTime,
-                                               rate: 1.0, smoothed: 1.0)
+        // Less O (§19.1), as on the mirrored path: blind to the audio offset.
+        pairedProbeForReference?.noteReference(media: mediaTime - (steering?.userOffsetSeconds ?? 0),
+                                               host: hostTime, rate: 1.0, smoothed: 1.0)
         #endif
         // Through the steering, the session's one writer (step 4d). The anchor line — `mediaTime`
         // at `hostTime`, rate 1.0 — is also NDI's TARGET line for the loop (§2.8): set here and
@@ -3286,6 +3297,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// with it and this guard was left keyed to a field frozen at nil. The mirror's own state is
     /// the correct predicate: it is set exactly when a mapping has actually reached the timebase.
     public func liveAudioDrift(against clockSeconds: Double) -> Double? {
+        // Blind to the per-source audio offset O (Robbie, 2026-10-01): O is added back, as the
+        // cushion is, so this stays the MIRROR ERROR. While a change is in the renderer's queue
+        // (≤ a queue, ~0.2–0.5 s) it reads the step the listener has not heard yet.
+        guard let heard = liveAudioHeardMinusClock(against: clockSeconds) else { return nil }
+        mirror.lock.lock()
+        let o = mirror.steering?.userOffsetSeconds ?? 0
+        mirror.lock.unlock()
+        return heard + o
+    }
+
+    /// The content being HEARD, on the clock's axis, minus the clock: `liveAudioDrift` without O
+    /// added back, so a per-source audio offset shows in full (§19.1). The renderer's at-glass
+    /// telemetry (`[AV-LAG]`, `[AV-CONTENT]`) reads this — it measures what is heard. Identical to
+    /// `liveAudioDrift` while O = 0.
+    public func liveAudioHeardMinusClock(against clockSeconds: Double) -> Double? {
         mirror.lock.lock()
         let ready = mirror.active && mirror.mirrored
         mirror.lock.unlock()
@@ -3301,6 +3327,74 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // timebase has slipped from the mapping it is tracking — which is what this is read for.
         // Reporting the raw difference would show a constant −0.400 s and bury the signal.
         return (timebase + liveAudioCushionValue) - clockSeconds
+    }
+
+    // MARK: - The per-source audio offset O (docs/AUDIO_RESAMPLER_DESIGN.md §19.1, stage A)
+
+    /// Set the current live session's audio offset O (seconds, + = heard later). The steering moves
+    /// its line and requests one splice (no timebase write); only an accepted value reaches the SDI
+    /// read. nil when no live-audio session is open. Any thread.
+    @discardableResult
+    public nonisolated func setLiveAudioOffset(_ seconds: Double) -> LiveAudioResampleSteering.UserOffsetOutcome? {
+        mirror.lock.lock()
+        let steering = mirror.active ? mirror.steering : nil
+        mirror.lock.unlock()
+        guard let steering else { return nil }
+        return applyLiveAudioOffset(seconds, steering: steering)
+    }
+
+    /// O now for the current live session (0 without one).
+    public nonisolated var liveAudioOffset: Double {
+        mirror.lock.lock(); defer { mirror.lock.unlock() }
+        return mirror.steering?.userOffsetSeconds ?? 0
+    }
+
+    @discardableResult
+    private nonisolated func applyLiveAudioOffset(_ seconds: Double, steering: LiveAudioResampleSteering)
+        -> LiveAudioResampleSteering.UserOffsetOutcome {
+        let outcome = steering.setUserOffset(seconds)
+        switch outcome {
+        case let .applied(_, new, _), let .pending(_, new):
+            // The SDI read moves with the renderer (§19.1), crossfaded; live sessions only.
+            audioTap.setLiveReadOffset(new)
+        default: break
+        }
+        return outcome
+    }
+
+    // ── TESTING HOOKS, STAGE A ONLY (removed in stage B, which brings the bookmark field and the
+    // nudge keys). The app sets these only under `#if DEBUG` behind `DebugMenuGate`. ──────────────
+    private nonisolated static let offsetHookLock = NSLock()
+    private nonisolated(unsafe) static var startOffset = 0.0
+    private nonisolated(unsafe) static weak var offsetEngine: FrameEngine?
+
+    /// O placed at each new live session's first anchor (`MANIFOLD_AUDIO_OFFSET_MS`). 0 = none.
+    public nonisolated static var liveAudioStartOffset: Double {
+        get { offsetHookLock.lock(); defer { offsetHookLock.unlock() }; return startOffset }
+        set { offsetHookLock.lock(); startOffset = newValue.isFinite ? newValue : 0; offsetHookLock.unlock() }
+    }
+
+    private nonisolated static func setCurrentLiveAudioOffsetEngine(_ engine: FrameEngine?) {
+        offsetHookLock.lock(); offsetEngine = engine; offsetHookLock.unlock()
+    }
+
+    private nonisolated static func clearCurrentLiveAudioOffsetEngine(ifIs engine: FrameEngine) {
+        offsetHookLock.lock(); if offsetEngine === engine { offsetEngine = nil }; offsetHookLock.unlock()
+    }
+
+    /// Debug ▸ Audio Offset: step the open live session's O by `delta` (or to 0 with `reset`).
+    /// Returns false when no live-audio session is open.
+    @discardableResult
+    public nonisolated static func nudgeCurrentLiveAudioOffset(by delta: Double, reset: Bool = false) -> Bool {
+        offsetHookLock.lock(); let engine = offsetEngine; offsetHookLock.unlock()
+        guard let engine else {
+            NSLog("[AUDIO-OFFSET] no live-audio session open — connect a live source first")
+            return false
+        }
+        let target = reset ? 0 : engine.liveAudioOffset + delta
+        NSLog("[AUDIO-OFFSET] debug item: %@ → request %+.1f ms",
+              reset ? "reset" : String(format: "%+.0f ms", delta * 1000), target * 1000)
+        return engine.setLiveAudioOffset(target) != nil
     }
 
     /// The offset the mirror last applied — the constant cushion, or on RTP A/V the SR line's
@@ -3326,6 +3420,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         mirror.lock.unlock()
         steering?.finish()
         srFit?.finish()
+        // The SDI read is shared with file playback: the session's O ends with it (§19.1).
+        audioTap.clearLiveReadOffset()
+        Self.clearCurrentLiveAudioOffsetEngine(ifIs: self)
         #if DEBUG || MANIFOLD_TELEMETRY
         liveAudioProbe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "endLiveAudio")
         // Writes the final window before the observations go, so the last 10 s are not lost.

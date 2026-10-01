@@ -65,6 +65,11 @@
 //  leaves the applied offset alone, so u moves by +j. `noteLineJump` shifts D_ref by −j and the
 //  stored u by +j: E and the engaged target are unchanged, and the latency change is kept.
 //
+//  The per-source audio offset O (§19.1) is the same kind of move: a change ΔO deepens the queue by
+//  ΔO, by design, while the applied offset this sees (the SR line's) is unchanged. `noteUserOffsetMove`
+//  re-bases by it (D_ref + ΔO, u − ΔO), and the window that contains the change is excluded like a
+//  recovery window, so neither the level error nor the 600 s slope reads a deliberate step as SR error.
+//
 
 import Foundation
 
@@ -170,7 +175,7 @@ public final class SenderReportSlopeCrossCheck: @unchecked Sendable {
     private var deviationLogged = false
     /// Ô(x) − goal(x) = excess0 at excessX, shrinking toward 0 at `catchUpRate`.
     private var excess0 = 0.0, excessX = 0.0
-    private var excludedWindows = 0, jumps = 0
+    private var excludedWindows = 0, jumps = 0, offsetMoves = 0
 
     public init(tag: String, parameters: Parameters = .adopted) {
         self.tag = tag; self.parameters = parameters
@@ -235,6 +240,20 @@ public final class SenderReportSlopeCrossCheck: @unchecked Sendable {
         guard jumped.isFinite, jumped != 0 else { return }
         lock.lock(); defer { lock.unlock() }
         jumps += 1
+        shiftLocked(jumped)
+    }
+
+    /// A change of the audio offset O by `delta` seconds (+ = the audio heard later, §19.1): the queue
+    /// deepens by delta and u moves by −delta, exactly as a line jump of −delta. Counted apart.
+    public func noteUserOffsetMove(_ delta: Double) {
+        guard delta.isFinite, delta != 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        offsetMoves += 1
+        shiftLocked(-delta)
+    }
+
+    /// The re-base both take: the queue moved by −jumped, u by +jumped.
+    private func shiftLocked(_ jumped: Double) {
         if dRef != nil { dRef! -= jumped } else {
             referenceCandidates = referenceCandidates.map { ($0.t, $0.depth - jumped, $0.integral) }
         }
@@ -445,6 +464,7 @@ public final class SenderReportSlopeCrossCheck: @unchecked Sendable {
             episodes == 0 ? "never engaged"
                 : String(format: "%d episode(s), engaged %.0f s, %@ at end", episodes, engagedTotal,
                          mode.rawValue), jumps, excludedWindows)
+            + (offsetMoves > 0 ? String(format: ", %d audio-offset change(s) re-based", offsetMoves) : "")
         return slope + " · " + hold
     }
 

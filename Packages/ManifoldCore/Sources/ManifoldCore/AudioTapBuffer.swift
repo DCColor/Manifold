@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import CoreMedia
 import AudioToolbox
+import LiveAudioResample
 
 /// D4b-1: PCM audio TAP + PTS-keyed ring buffer.
 ///
@@ -82,6 +83,11 @@ public final class AudioTapBuffer: @unchecked Sendable {
     private var writeHead = 0               // next frame slot (mod capacityFrames)
     private var framesWritten = 0           // total frames written this session (monotonic)
     private var basePTS: Double = .nan      // source time (s) of session frame 0; NaN until first buffer
+    /// The per-source audio offset O on the SDI read (docs/AUDIO_RESAMPLER_DESIGN.md §19.1): O > 0 =
+    /// heard later, so `read` serves `startTime − O`, a change crossfaded. LIVE SESSIONS ONLY —
+    /// FrameEngine sets it while a live-audio session is open and clears it when the session ends,
+    /// because the card's read closure is shared with file playback. At 0 the read is the pre-offset read.
+    private var liveReadOffset = LiveReadOffsetFader()
     private var currentFormat: Format?
     private var buffersIngested = 0
     private var lastLoggedFrames = 0
@@ -150,6 +156,23 @@ public final class AudioTapBuffer: @unchecked Sendable {
         lastLoggedFrames = 0
         basePTS = .nan
     }
+
+    // MARK: - The live session's audio offset on the SDI read (§19.1)
+
+    /// O for the current live session (seconds, + = heard later); a change crossfades on SDI
+    /// (`LiveReadOffsetFader`).
+    public func setLiveReadOffset(_ seconds: Double) {
+        lock.lock(); defer { lock.unlock() }
+        liveReadOffset.set(seconds)
+    }
+
+    /// The live session ended: the read is the pre-offset read again, at once (file playback next).
+    public func clearLiveReadOffset() {
+        lock.lock(); defer { lock.unlock() }
+        liveReadOffset.clear()
+    }
+
+    public var liveReadOffsetSeconds: Double { lock.lock(); defer { lock.unlock() }; return liveReadOffset.offset }
 
     // MARK: - Ingest (decode/enqueue thread)
 
@@ -525,6 +548,18 @@ public final class AudioTapBuffer: @unchecked Sendable {
     public func read(framesStartingAt startTime: Double, frameCount: Int,
                      into dst: UnsafeMutablePointer<Int32>) -> Int {
         lock.lock(); defer { lock.unlock() }
+        // No offset and no fade: the pre-offset read, exactly.
+        guard !liveReadOffset.isIdentity else {
+            return readLocked(framesStartingAt: startTime, frameCount: frameCount, into: dst)
+        }
+        return liveReadOffset.read(startTime: startTime, frameCount: frameCount, channels: channels,
+                                   sampleRate: sampleRate, into: dst) {
+            readLocked(framesStartingAt: $0, frameCount: $1, into: $2)
+        }
+    }
+
+    private func readLocked(framesStartingAt startTime: Double, frameCount: Int,
+                            into dst: UnsafeMutablePointer<Int32>) -> Int {
         guard capacityFrames > 0, channels > 0, !basePTS.isNaN, framesWritten > 0, frameCount > 0 else { return 0 }
         let held = min(framesWritten, capacityFrames)
         let firstHeld = framesWritten - held    // absolute frame index of oldest retained frame
