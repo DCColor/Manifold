@@ -16,6 +16,7 @@ frame rate, made by ffmpeg from committed recipes. No third-party media and no t
 ```sh
 zsh scripts/syncclips/generate.sh                    # all seven rates, ~1 min on an M-series Mac
 zsh scripts/syncclips/generate.sh 23.976 59.94       # or some
+SYNCCLIPS_FORMATS=mp4 zsh scripts/syncclips/generate.sh   # the MP4s only (what the app bundles), ~25 s
 FFPROBE=/path/to/ffprobe  <python-with-numpy> scripts/syncclips/verify.py --json /tmp/syncclips.json
 python3 scripts/syncclips/pairing_check.py /tmp/syncclips.json
 ```
@@ -24,6 +25,20 @@ python3 scripts/syncclips/pairing_check.py /tmp/syncclips.json
   audible-events venv's python (`~/Desktop/manifold-audible-events/venv/bin/python`). Nothing is
   installed for it.
 - `FFPROBE` defaults to `ffprobe` on PATH.
+- `pairing_check.py` uses the MEDIAN score. The app's matcher uses the MEAN score (§19.9 Decisions 5);
+  its port of these four checks is `swift test` (`SyncCalibrationTests/PairingCheckTests`), §19.10.
+
+## In the app (calibration mode, `AUDIO_RESAMPLER_DESIGN.md` §19.10)
+
+- **Bundled:** every build copies `build/syncclips/manifold-sync-<label>p.mp4` (labels from
+  `recipes.tsv`) into `Contents/Resources/SyncClips` (project.yml, "Bundle sync clips"). Absent here,
+  a dev build has none and says "Sync clips aren't included in this build".
+- **Release:** `scripts/release-mac.sh` regenerates the MP4 set (step 3b) and fails if any clip is
+  missing from the exported app or differs from what it generated (step 6c).
+- **Download:** `…/manifold-sync-clips-v1.zip` (`SyncClipLibrary.downloadURL`). A change to the
+  pattern — the code, the unit, the tone, the flash — is a NEW v2 zip and a new constant; v1 is never
+  replaced. Keep `SyncClips` (Packages/ManifoldCore/Sources/SyncCalibration) in step with
+  `recipes.tsv`.
 
 ## The pattern
 

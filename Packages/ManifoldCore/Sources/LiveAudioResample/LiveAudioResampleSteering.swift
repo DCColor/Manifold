@@ -629,19 +629,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         }
         let f = frontier
         lock.unlock()
-        // The queue for an advance (a drop must leave the recovery guard behind it): the LOWEST of the
-        // queue now and its pre-enqueue low points over the last 10 s, so the figure a refusal states
-        // is one a later press of that size still finds (§19.8, follow-up).
-        let t = hostNow()
-        let timebase = readTimebase()
-        let queueNow = (f.map { $0 - timebase }).flatMap { $0.isFinite ? $0 : nil } ?? 0
-        lock.lock()
-        let lowest = lowestRecentQueueLocked(now: t)
-        lock.unlock()
-        let queue = min(queueNow, lowest ?? queueNow)
+        let (t, queueNow, queue, available) = advanceFigure(frontier: f)
         let move = -delta          // + = content forward: a drop
-        let available = max(0, queue - Self.recoveryKeepSeconds
-                            - LiveAudioResampleStage.crossfadeSeconds - Self.dropQueueMarginSeconds)
         if move > 0, move > available {
             lock.lock(); userOffsetRefusals += 1; lock.unlock()
             emit {
@@ -689,6 +678,35 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
                    d > 0 ? String(format: " (%.1f ms owed)", d * 1000) : "", queue * 1000, writes)
         }
         return .applied(old: old, new: requested, spliceSeconds: g.seconds)
+    }
+
+    /// The queue for an advance (a drop must leave the recovery guard behind it): the LOWEST of the
+    /// queue now and its pre-enqueue low points over the last 10 s, so the figure a refusal states is
+    /// one a later press of that size still finds (§19.8, follow-up). Returns the host time read, the
+    /// queue now, the queue judged, and the advance available (queue − keep − fade − margin, ≥ 0).
+    private func advanceFigure(frontier f: Double?) -> (Double, Double, Double, Double) {
+        let t = hostNow()
+        let timebase = readTimebase()
+        let queueNow = (f.map { $0 - timebase }).flatMap { $0.isFinite ? $0 : nil } ?? 0
+        lock.lock()
+        let lowest = lowestRecentQueueLocked(now: t)
+        lock.unlock()
+        let queue = min(queueNow, lowest ?? queueNow)
+        let available = max(0, queue - Self.recoveryKeepSeconds
+                            - LiveAudioResampleStage.crossfadeSeconds - Self.dropQueueMarginSeconds)
+        return (t, queueNow, queue, available)
+    }
+
+    /// The largest advance (sound EARLIER, seconds) `setUserOffset` would accept now: the figure its
+    /// refusal states. READ-ONLY — calibration shows a proposed advance beyond it as not applicable
+    /// (§19.10). nil when there is no anchored loop session (a change would be pending, or refused).
+    public func availableAdvanceSeconds() -> Double? {
+        guard mode == .loop else { return nil }
+        lock.lock()
+        guard !retired, anchored else { lock.unlock(); return nil }
+        let f = frontier
+        lock.unlock()
+        return advanceFigure(frontier: f).3
     }
 
     /// Record an event that moves content — a LiveClock position jump, an input axis re-pin, a stage

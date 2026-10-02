@@ -740,6 +740,73 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
   - `[<PATH>-STARVE]` / `[<PATH>-ZERO]`: `noteStarvationAndZeros` and `scanZeros` in
     `LiveAudioSink`, same gate. Copies each renderer buffer once for the zero scan.
   - The scripts stay: `analysis/avcontent.py`; `repro/run.sh`'s `STALLS=` and `PES_PAYLOAD=`.
+- **✅ RECONCILED 2026-10-01 (stage D, `AUDIO_RESAMPLER_DESIGN.md` §19.10): the DETECTORS now ship;
+  the PROBE WRAPPERS stay on this list.**
+  - **Moved to Release, calibration mode only** (not on this list any more):
+    - the beep detector: `AVContentBeepDetector`, now ungated, with a calibration mode whose onset is
+      `SyncCalibration.ToneOnsetDetector` (the tone's half-amplitude point less half its 5 ms edge);
+    - the flash test: `SyncCalibration.FlashDetector` (the 16 × 16 luma grid; it replaces
+      `avContentMeanLuma`, which is gone);
+    - both run only while a calibration run is on: `CalibrationBeepTap` (the engine's, on every live
+      sink) and `MetalVideoRenderer.calibrationFlash` are empty otherwise. Off: one lock and a nil
+      test per audio buffer and per display tick; no taps, buffers or timers. `[CALIBRATION]` log lines
+      and `SyncCalibrationCounters` (logged at each live-audio session end) are the evidence.
+  - **Still to remove before ship (unchanged decision):** the DEBUG wrappers that PRINT —
+    `AVContentBeepDetector.init(tag:)` (the probe mode, behind `#if DEBUG || MANIFOLD_TELEMETRY`) and
+    its `beepIn` / `beepOut` in `LiveAudioSink`; the renderer's `avContentLastPts`,
+    `avContentLastWasFlash` and the `[AV-CONTENT] flash` print; and the whole `[AV-LAG]` probe
+    (`avLagAudioMinusClock`, `avLagProbe`, `avLagLastSample`, the presented-handler).
+  - Removing them leaves calibration whole: it has its own taps and never reads the probe.
+  - The probe's `[AV-CONTENT] beep` onset rule is UNCHANGED (first sample above 0.05 after 0.3 s
+    quiet), so its figures stay comparable with every §18 reading. Its scans are counted apart
+    (`debugProbeBuffersScanned`), so calibration's own counters read 0 in Profile too.
+
+---
+
+## ☐ PRE-SHIP: confirm the sync clip download URL — the zip is not uploaded yet
+
+**Added 2026-10-01 (stage D, `AUDIO_RESAMPLER_DESIGN.md` §19.10).** ⚠️ ROBBIE TO CONFIRM BEFORE RELEASE.
+
+- **The constant:** `SyncClipLibrary.downloadURL` (App/Live/CalibrationMode.swift) =
+  `https://releases.graviton.tools/manifold/manifold-sync-clips-v1.zip`. Marked in the source.
+- **Opened by** A/V ▸ Download ProRes Sync Clips…, Help ▸ Download Sync Clips…, the calibration
+  sheet's link and the "not included in this build" alert. In the browser; no in-app downloader.
+- **To do before release:** upload the zip to that path and open the link once from the shipped
+  build. Decide what it holds: the ProRes masters (755 MB) and, presumably, the MP4 set and the OBS
+  scene collection template too, since one link serves both menu items.
+- **"v1" is the coded pattern's version** (`SyncClips.patternVersion`). Any change to the pattern
+  (the code, the unit, the tone, the flash) is a NEW `…-v2.zip` and a new constant. Never replace
+  v1: a user's v1 clips must keep matching the v1 detector, and the calibration matcher pairs by the
+  pattern.
+
+---
+
+## ☐ OPEN 2026-10-01 — WHEP via MediaMTX: the A/V relation is off by a different amount every session (−19…+42 ms), equal to the first SR line's offset
+
+**Found by stage D's calibration runs (`AUDIO_RESAMPLER_DESIGN.md` §19.10).**
+- **What:** ffmpeg → MediaMTX (`useAbsoluteTimestamp: true`) → WHEP, one clean fixture per run, twelve sessions.
+  The heard A/V read −19 … +42 ms off the file's own A/V, a different amount each connect. Each
+  session's excess equals its first `[WHEP-SRFIT] FIRST LINE` offset, negated, within 4.3 ms.
+- **Not in the content or MediaMTX's ingest:** in three of those sessions ffmpeg read the same path
+  over RTSP at the same time (it aligns streams by the SRs too), and measured −0.25 ms each time.
+- **So** either MediaMTX's WebRTC-side Sender Reports state a per-session audio↔video relation the
+  media does not have, or Manifold's SR line fit maps them wrongly. Separating the two needs a second
+  WHEP client (a browser).
+- **Why it matters now:** calibration measures and removes it, but a value saved to a MediaMTX
+  bookmark would be wrong after the next reconnect. Cloudflare WHEP (Monday, §19.8 D3) shows whether
+  it is MediaMTX's.
+- **Not changed** (CLAUDE.md: server-agnostic, no constants tuned to one server).
+
+---
+
+## ☐ OPEN 2026-10-01 — NDI: calibration reads −67…−70 ms on a sender that is in sync by construction
+
+**Found by stage D (`AUDIO_RESAMPLER_DESIGN.md` §19.10).** An NDI SDK sender synthesising the
+23.976 clip (audio and video per frame, one thread) reads heard A/V −66.75 … −69.80 ms in four runs.
+Calibration offers +67…+70 ms and the re-check reads ≈ 0, but on NDI the heard figure is on host
+time (pull stamps, picture delay, the direct anchor), and nobody has checked it against the device.
+**Monday's D1 + D4 decide it:** if a device capture with the offered value applied is ~70 ms off,
+NDI's heard figure is not what the listener hears, and NDI calibration must be disabled until it is.
 
 ---
 
@@ -1049,6 +1116,12 @@ the picture (Cloudflare SRT ~70–80 ms early; OBS provisionally ≈ +16…+22 m
 **Scope:** a user-set offset O per source, applied as a term in the steering target and moved by a
 splice (19.1), calibration mode (19.2), sync clips (19.3), manual control, HUD and bookmark field
 (19.4). Manifold never applies an offset by itself (CLAUDE.md: no per-server correction).
+**Progress (2026-10-01):** stage A (the term and its splice, §19.7), stage B (the bookmark field, the
+nudge, the indicator, §19.8) and stage C (the sync clips, §19.9) are committed. **Stage D (calibration
+mode, §19.10) is built, uncommitted**: detectors in Release (calibration only), the coded matcher
+with the mean score, the confidence rules, the sheet, the menu items and the bundled MP4 set. Left:
+the attended Monday items in §19.8 (NDI and Cloudflare with a clip, a device capture, the 90-minute
+Cloudflare SRT hold, the sheet and menu review) and the download URL above.
 
 ---
 

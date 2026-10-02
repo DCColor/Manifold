@@ -204,6 +204,13 @@ struct ManifoldApp: App {
                 // testers, and they are on whichever configuration we shipped them.
                 Button("Export Diagnostics…") { DiagnosticsExporter.shared.begin() }
             }
+            // Help ▸ Download Sync Clips… — the free sync clips for calibration mode
+            // (docs/AUDIO_RESAMPLER_DESIGN.md §19.10). Opens the one download link in the browser;
+            // `SyncClipLibrary.downloadURL` is the single source of truth (A/V ▸ Download ProRes Sync
+            // Clips… opens the same). Not gated: calibration ships.
+            CommandGroup(after: .help) {
+                Button("Download Sync Clips…") { SyncClipLibrary.openDownload() }
+            }
             // ⌘O, in the File menu directly under New Window (`.newItem` is that group), where a
             // Mac user looks for it. The app had no Open item at all: opening a file meant finding
             // the folder button on the auto-hiding control bar, or the pill on the empty state.

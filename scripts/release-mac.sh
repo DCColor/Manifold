@@ -291,6 +291,21 @@ if compgen -G "${REPO_ROOT}/ThirdParty/ffmpeg/lib/*.a" >/dev/null; then
 fi
 ok "gitignored build inputs present (DeckLink SDK, NDI headers, 3 vendored lib trees)"
 
+# ── THE SYNC CLIPS ARE GENERATED, NOT COMMITTED (docs/AUDIO_RESAMPLER_DESIGN.md §19.10) ───────
+# Step 3b runs scripts/syncclips/generate.sh (MP4s only) into build/syncclips/, project.yml's
+# "Bundle sync clips" phase copies them into Contents/Resources/SyncClips, and step 6c fails the
+# release if any rate's clip is missing from the exported app. So ffmpeg is a build tool here.
+command -v ffmpeg >/dev/null 2>&1 \
+    || die "ffmpeg not on PATH — step 3b generates the bundled sync clips with it
+       (scripts/syncclips/generate.sh; Homebrew's ffmpeg with libx264)."
+[[ -f "${SYNCCLIPS_FONT:-/System/Library/Fonts/Menlo.ttc}" ]] \
+    || die "the sync clips' label font is missing: ${SYNCCLIPS_FONT:-/System/Library/Fonts/Menlo.ttc}"
+SYNCCLIP_LABELS=()
+while IFS= read -r label; do SYNCCLIP_LABELS+=("$label"); done \
+    < <(awk -F'\t' '!/^#/ && NF >= 3 {print $1}' "${REPO_ROOT}/scripts/syncclips/recipes.tsv")
+[[ ${#SYNCCLIP_LABELS[@]} -gt 0 ]] || die "no rates read from scripts/syncclips/recipes.tsv"
+ok "sync clip generator present (ffmpeg $(ffmpeg -version 2>/dev/null | awk 'NR==1{print $3}'), ${#SYNCCLIP_LABELS[@]} rates)"
+
 # ── LGPL §6: THE ABOUT PANEL MAKES A WRITTEN OFFER, AND AN OFFER MUST BE ACTIONABLE ──────
 #
 # App/AboutWindow.swift offers, in the shipped binary, to supply FFmpeg's corresponding source
@@ -417,6 +432,24 @@ step "xcodegen generate"
 ( cd "$REPO_ROOT" && xcodegen generate ) || die "xcodegen failed"
 [[ -d "$XCODEPROJ" ]] || die "xcodegen reported success but ${XCODEPROJ} does not exist"
 ok "project regenerated"
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# 3b. Generate the sync clips (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# The MP4 set the app bundles, from the committed recipes, into build/syncclips/ — BEFORE the
+# archive, whose "Bundle sync clips" phase copies them. Regenerated every release, so the shipped
+# clips are always the recipes' output, never a stale file left in build/.
+
+step "Generate the sync clips (MP4)"
+
+( cd "$REPO_ROOT" && SYNCCLIPS_FORMATS=mp4 zsh scripts/syncclips/generate.sh ) \
+    || die "scripts/syncclips/generate.sh failed"
+for label in "${SYNCCLIP_LABELS[@]}"; do
+    [[ -s "${REPO_ROOT}/build/syncclips/manifold-sync-${label}p.mp4" ]] \
+        || die "sync clip missing after generation: build/syncclips/manifold-sync-${label}p.mp4"
+done
+ok "${#SYNCCLIP_LABELS[@]} sync clips generated (build/syncclips/)"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # 4. Archive
@@ -574,6 +607,25 @@ if grep -q 'com.apple.security.get-task-allow' "${LOG_DIR}/entitlements.plist"; 
 fi
 ok "get-task-allow absent (would be an automatic notarization rejection)"
 record "get-task-allow:          absent (correct)"
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# 6c. The bundled sync clips (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# Every rate's MP4, in the EXPORTED (signed) app, byte-identical to what step 3b generated. A dev
+# build may lack them and say so; a release may not.
+
+step "Verify the bundled sync clips"
+
+for label in "${SYNCCLIP_LABELS[@]}"; do
+    clip="${APP}/Contents/Resources/SyncClips/manifold-sync-${label}p.mp4"
+    [[ -s "$clip" ]] || die "sync clip missing from the app: Contents/Resources/SyncClips/manifold-sync-${label}p.mp4
+       The \"Bundle sync clips\" phase (project.yml) copies build/syncclips/*.mp4; did step 3b run?"
+    cmp -s "$clip" "${REPO_ROOT}/build/syncclips/manifold-sync-${label}p.mp4" \
+        || die "the bundled ${label}p sync clip differs from build/syncclips/ — a stale copy in the build?"
+done
+ok "${#SYNCCLIP_LABELS[@]} sync clips bundled, identical to step 3b's"
+record "sync clips:              ${#SYNCCLIP_LABELS[@]} MP4s in Contents/Resources/SyncClips"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # 6b. The embedded libav dylibs

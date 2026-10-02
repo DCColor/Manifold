@@ -11,6 +11,7 @@ import ManifoldCore   // ScrubProducerFlags.stats — gates the [SETTLE] measure
 import CryptoKit     // ⚠️ SPIKE — SHA-256 for the [CSPROBE] source-vs-dest verdict.
 #endif
 import ManifoldCore      // UnfairLock — priority-donating lock for the live frame queue
+import SyncCalibration   // calibration mode's flash detector (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
 // UnfairLock.swift) because LiveClock needs the same primitive and ManifoldCore cannot depend on
@@ -268,6 +269,37 @@ final class MetalVideoRenderer {
     private var avContentLastPts = -Double.infinity
     private var avContentLastWasFlash = false
     #endif
+
+    /// CALIBRATION MODE's flash detector (docs/AUDIO_RESAMPLER_DESIGN.md §19.2, §19.10). SHIPS, in
+    /// every configuration, and exists only while calibration is on: the window's
+    /// `SyncCalibrationModel` installs one at start and removes it at stop. With none installed a
+    /// tick costs one lock and a nil test — no sampling, no buffer, no timer.
+    ///
+    /// On each NEW selected frame it samples the 16 × 16 luma grid; on the first frame of a flash it
+    /// reads `heard(now)` (the engine's heard − clock, O included) and calls `onFlash(pts, heard)`.
+    /// Both closures run on the CVDisplayLink thread and must not block.
+    final class CalibrationFlashTap {
+        let detector = FlashDetector()
+        let heard: (Double) -> Double?
+        let onFlash: (_ pts: Double, _ heardMinusClock: Double) -> Void
+        init(heard: @escaping (Double) -> Double?, onFlash: @escaping (Double, Double) -> Void) {
+            self.heard = heard; self.onFlash = onFlash
+        }
+    }
+    private let calibrationLock = UnfairLock()
+    private var calibrationFlashStorage: CalibrationFlashTap?
+    /// Set on main by calibration's start and stop; read once per display tick.
+    var calibrationFlash: CalibrationFlashTap? {
+        get { calibrationLock.lock(); defer { calibrationLock.unlock() }; return calibrationFlashStorage }
+        set { calibrationLock.lock(); calibrationFlashStorage = newValue; calibrationLock.unlock() }
+    }
+
+    /// The source's frame interval as the queue measures it (median of recent PTS deltas), seconds; 0
+    /// until known. Calibration's spread rule and "Get Sync Clip…" read it. Any thread.
+    var measuredFrameInterval: Double {
+        queueLock.lock(); defer { queueLock.unlock() }
+        return cachedFrameInterval
+    }
 
     /// One display tick's view of the frame queue, as the live control loop needs to see it.
     ///
@@ -2319,6 +2351,12 @@ final class MetalVideoRenderer {
             // timestamp the VIDEO carries is what makes A/V alignment structural instead of a guess:
             // it compensates the whole video pipeline delay (offscreen → convert → staging → memcpy →
             // card preroll) for free, because the delay is what the pipeline IS, not something we model.
+            // Calibration mode (§19.10): a new frame is sampled only while a tap is installed.
+            if let cal = calibrationFlash, cal.detector.isNew(pts: chosenPts) {
+                let edge = cal.detector.observe(pts: chosenPts, meanLuma: FlashDetector.meanLuma(pb))
+                SyncCalibrationCounters.countFrame(flash: edge)
+                if edge, let h = cal.heard(now) { cal.onFlash(chosenPts, h) }
+            }
             #if DEBUG
             // [AV-LAG]: once a second, capture this tick for `presentDrawable` to complete with the
             // drawable's on-glass time.
@@ -2330,7 +2368,7 @@ final class MetalVideoRenderer {
             // [AV-CONTENT]: the first tick that shows a flash frame, with the audio being heard.
             if chosenPts != avContentLastPts, let hook = avLagAudioMinusClock {
                 avContentLastPts = chosenPts
-                let flash = Self.avContentMeanLuma(pb) > 0.5
+                let flash = FlashDetector.meanLuma(pb) > FlashDetector.threshold
                 if flash && !avContentLastWasFlash, let a = hook(now) {
                     FileHandle.standardError.write(Data(String(format:
                         "[AV-CONTENT] flash pts=%.6f tick=%.4f now=%.6f audio−now=%+.3f ms\n",
@@ -2864,28 +2902,6 @@ final class MetalVideoRenderer {
     /// display-link callback off cadence.
     ///
     /// Every present in this file goes through here. If you add a second one, add it here too.
-    #if DEBUG
-    /// [AV-CONTENT]: mean luma of a 16×16 sample grid of plane 0, 0…1. 8-bit or 16-bit containers.
-    private static func avContentMeanLuma(_ pb: CVPixelBuffer) -> Double {
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-        let planar = CVPixelBufferIsPlanar(pb)
-        guard let base = planar ? CVPixelBufferGetBaseAddressOfPlane(pb, 0) : CVPixelBufferGetBaseAddress(pb)
-        else { return 0 }
-        let w = planar ? CVPixelBufferGetWidthOfPlane(pb, 0) : CVPixelBufferGetWidth(pb)
-        let h = planar ? CVPixelBufferGetHeightOfPlane(pb, 0) : CVPixelBufferGetHeight(pb)
-        let rb = planar ? CVPixelBufferGetBytesPerRowOfPlane(pb, 0) : CVPixelBufferGetBytesPerRow(pb)
-        let wide = rb >= 2 * w
-        var sum = 0.0
-        for j in 0..<16 { for i in 0..<16 {
-            let x = (2 * i + 1) * w / 32, y = (2 * j + 1) * h / 32
-            sum += wide ? Double(base.load(fromByteOffset: y * rb + 2 * x, as: UInt16.self)) / 65_535
-                        : Double(base.load(fromByteOffset: y * rb + x, as: UInt8.self)) / 255
-        } }
-        return sum / 256
-    }
-    #endif
-
     private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer) {
         cmdBuffer.waitUntilScheduled()
         #if DEBUG

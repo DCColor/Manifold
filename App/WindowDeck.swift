@@ -258,6 +258,10 @@ final class WindowDeck: ObservableObject {
     /// `DeckRegistry.connectLive`, edited by the nudge keys and `AudioOffsetControl`.
     private(set) lazy var audioOffset = LiveAudioOffsetModel(deck: self)
 
+    /// This window's calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.10): the sheet's state and
+    /// the run, whose detectors exist only while it listens. Opened from the A/V menu.
+    private(set) lazy var calibration = SyncCalibrationModel(deck: self)
+
     /// What this deck is allowed to do. THE ARBITER OWNS THIS — see `DeckRegistry`.
     @Published fileprivate(set) var gate = DeckGate()
 
@@ -1032,6 +1036,13 @@ final class DeckRegistry {
                 // It went live and has now stopped, or it never came up inside the grace period.
                 claims[device] = nil
             }
+        }
+
+        // A deck whose live source has gone ends any calibration run on it (§19.10): its detectors
+        // must not outlive the stream, nor sample a file opened next.
+        for entry in entries.values {
+            guard let deck = entry.deck, liveLabel(for: deck) == nil else { continue }
+            deck.calibration.connectionEnded()
         }
 
         // ── 2. OWNER ──────────────────────────────────────────────────────────────────────

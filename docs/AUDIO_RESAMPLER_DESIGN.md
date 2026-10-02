@@ -4748,6 +4748,97 @@ repeat its step 3 on MediaMTX WHEP: OBS profile `MediaMTX Local`, Start Streamin
 - Full screen: confirm there is no marker (the accepted limit), and that the title marker returns on
   leaving full screen.
 
+**5. Stage D — calibration mode, attended (added 2026-10-01; §19.10). ≈ 2 h 45 min, of which 90 min
+is a hold you only check on.**
+
+**Build:** `.build-cc/stageD-Profile/Build/Products/Profile/Manifold.app` (the seven MP4 clips are
+bundled). Same launch rules as above: deny the licence prompt; ALLOW the stream-passphrase prompt
+(Cloudflare SRT will not dial without it).
+
+**⚠️ Two rules for every block below:**
+- **Stay connected from the first Start to the re-check.** A disconnect starts a new session: the
+  applied value returns to the saved one and the re-check measures something else.
+- **The clip must be playing BEFORE you press Start, and keep playing until the re-check's result.**
+  Calibration needs the clip's flashes and beeps; the first figure takes 15–60 s (it waits for the
+  stream to settle), the re-check 15–30 s.
+
+**D0. Set-up (≈ 10 min)**
+1. The clips: `build/syncclips/manifold-sync-23.976p.mp4` (and `…-29.97p.mp4` if a profile runs
+   29.97). Or, once Manifold is connected, A/V ▸ Save Sync Clip… (it picks the stream's rate).
+2. Sender OBS: in the scene you stream from, add a Media Source **SYNC** with the clip whose rate is
+   the OBS profile's FPS (Settings ▸ Video): Loop ON, "Restart playback when source becomes active"
+   ON, **Audio Monitoring OFF**, Mic/Aux muted. Its audio goes to the stream like `BEEPS` did. Hide
+   `BEEPS` while SYNC is showing (one clip's audio at a time).
+   - Or import `scripts/syncclips/obs-scene-collection.json` (README there; never import-tested,
+     §19.9).
+3. **Press play:** make SYNC visible (it starts and loops). Leave it playing for D1–D3 and D5.
+4. Manifold's volume up, not muted. Recorder OBS ready (AV_SYNC_FINDINGS.md §1.2), **Audio Hijack
+   not started yet**.
+
+**D1. OBS → NDI (≈ 10 min)** — NDI applies for the session only, by decision.
+1. Manifold: connect the OBS NDI source. Wait 30 s.
+2. A/V ▸ **Calibrate…** ▸ **Start**. Watch "Pairs found" climb. Do not touch the nudge keys (a change
+   restarts the measurement, and the sheet says so).
+3. At the result, note "Sound is heard N ms early/late", the measured figure and "proposed …".
+   - Expected from OBS: about −16…−22 ms (OBS's provisional +16…+22 ms, §19 header). ⚠️ But the
+     unattended SDK sender, in sync by construction, read −67…−70 ms here (§19.10): D4's capture is
+     what says whether NDI's figure is what you hear. Until then, note the figure and apply it only
+     for the session.
+   - The sheet must offer only **Apply for Session** (no Save), with "NDI: a result applies to
+     this session only."
+4. **Apply for Session.** The badge and the title show the value.
+5. **Start** again. Pass: the re-check reads within ±2 ms ("Sound is in sync" or ±1–2 ms).
+6. **Cancel.** Disconnect NDI.
+
+**D2. OBS → Cloudflare SRT (≈ 10 min, then D4 and D5 on the same connection)**
+1. OBS: the Cloudflare SRT profile, SYNC playing, Start Streaming.
+2. Manifold: the Cloudflare SRT bookmark (allow the passphrase prompt). Wait 30 s.
+3. Calibrate… ▸ Start. Expected: sound ~70–80 ms EARLY (§18.13), so proposed ≈ +70…+80 ms.
+4. **Apply for Session** (or Apply and Save, if you want to keep it on the bookmark:
+   A/V ▸ Reset to 0 ms, then Save 0 ms to "…", removes it again; 0 is stored as absent).
+5. Start again. Pass: within ±2 ms. Cancel.
+6. **STAY CONNECTED** for D4 and D5.
+
+**D3. OBS → Cloudflare WHEP (≈ 10 min)** — run after D5, or in a second window while D5 holds; only
+one window can stream at a time, so after D5 is simplest.
+1. OBS: the Cloudflare WHIP profile, SYNC playing, Start Streaming. Manifold: the Cloudflare WHEP
+   bookmark. Wait 30 s.
+2. Calibrate… ▸ Start ▸ result ▸ Apply for Session ▸ Start ▸ pass within ±2 ms ▸ Cancel.
+
+**D4. One Audio Hijack capture (≈ 10 min), on D2's connection, after its Apply** — and, if time
+allows, a second on NDI (D1) after its Apply: the NDI question in §19.10
+1. Now start Audio Hijack. Re-pick Manifold in the recorder's macOS Audio Capture; run the 5-second
+   preflight (AV_SYNC_FINDINGS.md §1.2; the clip's tone reads about −20 dB less the path's losses;
+   −91 dB is silence: stop and fix).
+2. Record 60 s. Stop.
+3. `python3 scripts/soak/analysis/c12.py <capture.mov>`.
+   - ⚠️ c12 reads **+1.708 ms** on these clips by its onset rule (§19.9 Decisions 1). Pass: c12's
+     grid-corrected median − 1.7 ms is within one frame of 0 — the applied offset removed
+     Cloudflare's ~−75 ms at the device. The coded pattern makes c12's `g_grid` False: expected.
+
+**D5. The 90-minute Cloudflare SRT hold (≈ 90 min, mostly unattended)** — §19.5's ❌ row, measured.
+1. Same connection as D2/D4, the applied value in place, SYNC looping, OBS streaming. Do not
+   reconnect.
+2. At +0 (right after D2's re-check), +30, +60 and +90 min: Calibrate… ▸ Start ▸ note the measured
+   figure ▸ **Cancel** (do NOT apply).
+3. Read: the figure's walk over 90 min. §19.5 predicts 0 to −157 ms (the slope varies by session).
+   Within ±10 ms = one calibration holds; beyond it, the user guide's "re-calibrate every 20–30
+   minutes, or use WHEP" stands. The log keeps every run's `[CALIBRATION] RESULT`.
+4. Then stop OBS streaming and disconnect.
+
+**D6. The sheet and the menus (≈ 15 min)**
+- The A/V menu while live: Calibrate…, Save Sync Clip…, Download ProRes Sync Clips… under the offset
+  items (§19.10 screenshot M01).
+- Help ▸ **Download Sync Clips…** and A/V ▸ Download ProRes Sync Clips…: both open
+  `https://releases.graviton.tools/manifold/manifold-sync-clips-v1.zip` in the browser. It 404s
+  until uploaded (BUGS.md pre-ship). Confirm the URL.
+- Save Sync Clip…: the save panel's rate line ("This stream is 23.976 fps.") and its rate menu.
+- The sheet's wording in each state: progress, result, not applicable (an advance beyond the queue:
+  on local SRT, inject +250 ms, §19.10), NDI session-only (D1), HLS (connect `MTX HLS`: the control
+  reads "A/V offset — not on HLS", its menu still has Calibrate…, whose sheet says it is not
+  available), and "Sync clips aren't included in this build" (`.build-cc/stageD-noclips-Profile/…`).
+- Proposed names, button order, and whether Apply and Save should be the default button.
+
 ### 19.9 Stage C built: the sync clips — 2026-10-01 (unattended; committed `dfe6463`; decisions below)
 
 §19.3's clips, generated from committed recipes by ffmpeg alone (lavfi `color`, `drawbox`,
@@ -4941,6 +5032,355 @@ The test, per clip:
      clears a capture's ±20 ms frame grid (§18.1).
    - `pairing_check.py` is unchanged (no code changed for these decisions). Stage D re-runs the same
      four checks with the mean score and records the margin.
+
+### 19.10 Stage D built: calibration mode — 2026-10-01 (unattended; uncommitted)
+
+On top of stages A–C (§19.7–§19.9, through `7395a59`). The brief's decisions (Robbie, 2026-10-01):
+the detectors ship but run only while calibration is on; the matcher's score is mean-based (§19.9
+Decisions 5); calibration measures the stage A HEARD figure (O included); proposed = O − measured,
+rounded to 1 ms, clamped to −250…+500; an advance beyond the queue's low point is shown as not
+applicable, with the figure; a figure only with ≥ 10 pairs, p90 − p10 < 1 frame and the last 5 pairs
+within ±2 ms; Manifold never applies a value by itself; NDI applies for the session only; HLS has no
+calibration; the MP4 set is bundled by the build, not committed.
+
+#### What was built
+
+| part | where | rule |
+|---|---|---|
+| **the leaf target** | `Packages/ManifoldCore/Sources/SyncCalibration` (new), tests in `Tests/SyncCalibrationTests` | no dependencies, so `swift test` reaches the detectors, the matcher, the rules and the arithmetic. The app links it as a product (`project.yml`), like `StreamBookmarkModel` |
+| **the clips, in Swift** | `SyncClips` | the rates, units, file names and event times of `recipes.tsv`; the nearest clip for a stream's rate and whether it is exact (0.05 %: 23.976 and 24 differ by 0.1 %) |
+| **the beep detector** | `AVContentBeepDetector` (ManifoldCore, now ungated) in calibration mode → `ToneOnsetDetector` | trigger on the 1 kHz tone demodulated over a one-cycle box; then, on the RAW capture, I/Q under a 2 ms Hann window per sample, the tone's own plateau, and its half-amplitude crossing less 2.5 ms (half the 5 ms raised-cosine edge). Level-independent. The `[AV-CONTENT]` probe's old rule is kept unchanged for the DEBUG print |
+| **the flash detector** | `FlashDetector` (replaces the renderer's `avContentMeanLuma`) | the 16 × 16 luma grid, a flash above half scale, once per new frame; the event time is the frame's PTS |
+| **off = zero work** | `CalibrationBeepTap` (`FrameEngine.calibrationBeepTap`, handed to every `LiveAudioSink`); `MetalVideoRenderer.calibrationFlash` | both EMPTY unless a run is on: one lock and a nil test per audio buffer and per display tick. No detector object, buffer or timer exists until Start, none after a result, Stop, Cancel, closing the sheet or a disconnect |
+| **the counters** | `SyncCalibrationCounters` | buffers scanned, frames sampled, tones and flashes found, since launch. Logged at each run's start and stop and at every live-audio session's end (`[CALIBRATION] live audio session end — detector work this launch: …`). The DEBUG probe's scans are counted apart |
+| **the matcher** | `CodedMatcher` | pairing_check.py's `match`, ported, score = the MEAN \|d − centre\| (centre = median d); `.median` kept for the comparison |
+| **one run** | `CalibrationMeasurement` | heard A/V per pair = b − (f + h) (header). LOCK: the coded matcher over the latest ≤ 16 flashes and the beeps around them, accepted at score ≤ 10 ms with every wrong candidate ≥ 40 ms. PAIR: each flash takes the beep nearest f + h + d* within ± half the shortest interval (§19.2's rule), so a missed event leaves a flash unpaired, never mispaired. The FIGURE, its p10–p90, the stability test and the walk guard are taken over the most recent 10 pairs (choices 2–4 below) |
+| **the offer** | `CalibrationProposal` | current − measured, rounded, clamped (said so); an advance is applicable only up to `FrameEngine.liveAudioAvailableAdvance()` |
+| **the advance figure** | `LiveAudioResampleSteering.availableAdvanceSeconds()` | READ-ONLY: the very figure a refusal states (the queue's 10 s low point − keep − fade − margin). `setUserOffset`'s computation moved into one helper both call; the arithmetic is unchanged |
+| **the stream's rate** | `SyncCalibrationModel.frameInterval` | the transport's stated rate first (`LiveDisplaySize`, what DeckLink Follow source uses: NDI's declared N/D, SRT's and WHEP's), the renderer's measured PTS interval only as a fallback (choice 6) |
+| **the run, per window** | `SyncCalibrationModel` (`WindowDeck.calibration`) | Start installs both taps; events hop to main; a change of O during a run restarts it ("The audio offset changed — measuring again"); a result stops the detectors; the arbiter ends a run whose live source has gone |
+| **the sheet** | `CalibrationSheet`, hosted by `CalibrationSheetHost` (a `.background` in ContentView: its body is at the type-checker's limit) | Start / Stop; progress (pairs found of 10, spread, why it is waiting) and never a number; the result ("Sound is heard 80 ms late", the measured figure over the last 10 pairs, "Current offset 0 ms → proposed −80 ms", not applicable with the available figure, clamped); Apply and Save (the default; a line above it names the saved stream), Apply for Session, Cancel, Measure Again. NDI and connects without a saved stream: Apply for Session only. HLS: the offset control's note, Start disabled. After Apply: "Start again to check: it should read close to 0 ms." |
+| **the clips** | `SyncClipLibrary` | Get Sync Clip… / Save Sync Clip…: a save panel naming the stream's rate ("This stream is 60 fps: there is no 60 fps clip, 59.94p is the nearest.") with a rate menu preselected. Not bundled: "Sync clips aren't included in this build." with the download link; calibration still runs on a clip from anywhere |
+| **the menus** | `AudioOffsetControl`; `ManifoldApp` | A/V: Calibrate…, Save Sync Clip…, Download ProRes Sync Clips… under the offset items. On HLS the greyed "A/V offset — not on HLS" is now a MENU (the note, then the same three items). Help: Download Sync Clips… |
+| **the URL** | `SyncClipLibrary.downloadURL` | `https://releases.graviton.tools/manifold/manifold-sync-clips-v1.zip`, marked ⚠️ ROBBIE: CONFIRM BEFORE RELEASE in the source and listed in BUGS.md's pre-ship items |
+| **bundling** | `project.yml` "Bundle sync clips" (postBuildScripts); `scripts/release-mac.sh` steps 3b and 6c; `generate.sh` `SYNCCLIPS_FORMATS=mp4` | every build copies `build/syncclips/manifold-sync-<label>p.mp4` (labels from `recipes.tsv`) into `Contents/Resources/SyncClips`, rebuilt each time, before signing. The release generates the MP4 set first (3b), and fails if any clip is missing from the exported app or differs from what 3b made (6c). Preflight requires ffmpeg and the label font |
+| **logs** | `[CALIBRATION]` | sheet opened (availability, frame interval), START (O, frame, counters), each tone (time, level, width) and flash (pts, heard − clock), the code's pairing (offset, score, margin), each pair, RESULT, APPLIED (by the user), detectors off (counters) |
+
+**"v1" (the brief):** the download zip's name carries the coded pattern's version
+(`SyncClips.patternVersion = 1`). **Any change to the coded pattern** — the code, the unit, the
+tone, the flash — **means a new `manifold-sync-clips-v2.zip` and a new URL constant, never replacing
+v1.** A user's v1 clips must keep matching what the app pairs, and an old build must keep finding
+its own zip.
+
+#### Choices made in building it, each measured — for Robbie's review
+
+1. **The beep onset is the tone's half-amplitude point, not a threshold.** A threshold on the 5 ms
+   raised-cosine edge lags the start by ~2.6 ms and moves with the level. The half-amplitude point
+   is level-independent by the edge's symmetry. A first version took it on the trigger's one-cycle
+   box and read a constant 65–100 µs late (the 2 kHz product term leaks during the ramp), so the
+   onset is measured on the raw capture under a 2 ms Hann window. Synthetic clip audio at −12 / 0 /
+   +6 dB, uneven buffers: worst 6–23 µs per rate.
+2. **The figure is the most recent 10 pairs, not every pair since Start.** On a fresh connect the
+   heard figure walks while the steering settles after the connect's re-anchors: +95 → +77 → +80 ms
+   over ~40 s on local SRT (`pass1-no-walk-guard/stageD-srt-23.976p-inj80-allpairs-superseded`). A
+   median over every pair carries the walk into the result.
+3. **A walk guard beyond the brief's three rules: no figure while the 10-pair window's slope exceeds
+   0.2 ms/s** (≤ 2 ms across the window). Measured (`pass1-no-walk-guard/stageD-srt-59.94p-inj0`):
+   an exponential settle +46 → 0 → −5 ms. At 59.94 the last 5 pairs span ~4 s, the three rules
+   offered +1.5 ms mid-walk, and the re-check read −5.29 ms. `testASlowWalkOffersNothingUntilItStops`
+   has the teeth: the same feed without the guard offers more than 2 ms off.
+4. **"The last 5 pairs within ±2 ms" is read as §19.2 words it: a stable ±2 ms MEDIAN over the last
+   5 pairs** (the window median as it stood after each of the last 5 pairs, within ±2 ms of now's).
+   The per-pair reading was built first. On NDI the window median held −66…−71 ms for 3 minutes
+   while single pairs scattered ±3–5 ms (p10–p90 5–7 ms, `extras-pass1/extras-ndi`), so it never
+   offered a figure. The spread rule (under one frame) still bounds the scatter.
+5. **Pairing: the code decides, the window rule pairs.** pairing_check.py's index-shift matcher
+   assumes no missed events. Live, a missed flash would shift every later pair by one. So the coded
+   matcher LOCKS the offset on a clean run of ≤ 16 flashes, and pairs are then taken by §19.2's
+   ± half-interval rule around it, which leaves a missed event's partner unpaired.
+6. **The stream's rate comes from the transport first.** NDI frames are stamped on host time at
+   pull. The renderer's 8-delta median read 41.594 ms (24.04 fps) on a 24000/1001 sender, and Get
+   Sync Clip… offered 24p. `LiveDisplaySize` carries NDI's declared N/D (and SRT's and WHEP's
+   rates); the renderer's figure is the fallback.
+7. **Measured on the stream's PTS, not at the glass.** heard = b − (f + h): f is the flash frame's
+   PTS, h the heard − clock at the tick that showed it. Manifold's own render path (frame choice,
+   tick → glass, ≈ −16 ms, §18.13) is left out, per §19.2's "what it does not measure". So the
+   figure equals the old `[AV-CONTENT]` "glass" figure less that constant.
+8. **The HLS control is now a menu** (greyed label, the same note, then Calibrate… / Save Sync
+   Clip… / Download ProRes Sync Clips…), so the clips and calibration's own HLS note are reachable on
+   HLS. Stage B's C04 had it as plain text.
+9. **After Apply the sheet stays open**, says "Start again to check: it should read close to 0 ms",
+   and Start runs the re-check. Cancel and Close dismiss. A result stops the detectors; Measure
+   Again restarts them.
+10. **The counters split the DEBUG probe out.** In Profile the `[AV-CONTENT]` probe scans every live
+    buffer whenever telemetry is on (22 002 buffers in one 4-min session). Calibration's own
+    counters stay 0 until Start, and the probe's appear apart ("(and N by the DEBUG [AV-CONTENT]
+    probe)"). Release has no probe at runtime.
+
+#### Verification
+
+**`swift test`: 173 / 173** (162 + 11 new in `SyncCalibrationTests`). The pre-existing flake
+(`testSteeringCallsItsCompanionWithoutReportingWindows`) did not recur.
+
+**Builds:** Profile (`.build-cc/stageD-Profile`) and Release (`.build-cc/stageD-Release`), from the
+final tree, with no errors and no new warnings in any file touched; the no-clips Profile is below.
+
+**The four pairing checks, ported, with the MEAN score** (`PairingCheckTests`). On each clip's exact
+timeline, 508 injected offsets plain and 508 with ±10 ms jitter, 0 failures at every rate. Every
+one-interval mispair came back as injected; nearest-neighbour got each wrong.
+
+| rate | code step | wrong-pairing margin, MEAN score | with ±10 ms jitter | margin, median score (pairing_check.py's) |
+|---|---|---|---|---|
+| 23.976 | 41.7 ms | **161.4 ms (3.87 steps)** | 159.8 ms | 41.7 ms (1 step) |
+| 24 | 41.7 ms | **161.2 ms (3.87)** | 159.6 ms | 41.7 ms (1) |
+| 25 | 40.0 ms | **160.0 ms (4.00)** | 158.0 ms | 160.0 ms (4) |
+| 29.97 | 33.4 ms | **130.0 ms (3.90)** | 128.5 ms | 33.4 ms (1) |
+| 30 | 33.3 ms | **129.9 ms (3.90)** | 128.4 ms | 33.3 ms (1) |
+| 50 | 40.0 ms | **160.0 ms (4.00)** | 158.0 ms | 160.0 ms (4) |
+| 59.94 | 33.4 ms | **130.0 ms (3.90)** | 128.5 ms | 33.4 ms (1) |
+
+- The mean score gives every wrong shift ≈ 4 code steps everywhere, as §19.9 predicted. Worst
+  recovery error 0.000 µs plain, 3.8–4.7 ms with ±10 ms jitter.
+
+**O = 0, calibration off: still b35a810.**
+- The replay tools were built from b35a810 and from this tree (the same `swiftc` lines as
+  `replay/build.sh`), and run on copies of `~/Desktop/manifold-soak/level/`.
+  - Tools: `replay-after`, `replay-closed` (plain and logonly), `replay-level` (plain and logonly),
+    `replay-offset-lock`.
+  - Sessions: the seven saved sessions, plus `synth` at 66.6 ppm through closed and level.
+- **99 / 99 files byte-identical** (44 stdout reports, 55 TSVs). `step8-whep-soak` level reproduces
+  §19.7's figures exactly: start → +26 −3.3 ms, worst −31.9 ms at 430 s, end −2.5 ms.
+- The only steering change is a read-only accessor; `setUserOffset`'s figure moved into a shared
+  helper with its arithmetic unchanged. With calibration off, the sink's and the renderer's slots
+  are empty.
+
+**Detector truth: the in-app detectors offline over every bundled MP4, against verify.py.**
+- A scratch harness decodes each MP4 with AVFoundation (the edit list honoured) into the
+  CMSampleBuffers and NV12 CVPixelBuffers a transport hands on. It runs the shipped
+  `AVContentBeepDetector` (calibration mode) and `FlashDetector` on them, and compares with
+  `verify.py --json`'s exact event times.
+
+| clip | tones found | onset − verify.py, worst (Float32 / Int16 decode) | mean | flashes | flash pts − verify.py | the whole measurement, h = 0 |
+|---|---|---|---|---|---|---|
+| 23.976p | 48 / 48 | **13.0 / 13.0 µs** | −4.7 µs | 48 / 48 | 0.000 µs | 48 pairs, −0.005 ms |
+| 24p | 48 / 48 | **19.1 / 19.2 µs** | −4.3 µs | 48 / 48 | 0.000 µs | 48 pairs, −0.005 ms |
+| 25p | 50 / 50 | **16.8 / 16.8 µs** | −3.1 µs | 50 / 50 | 0.000 µs | 50 pairs, −0.003 ms |
+| 29.97p | 60 / 60 | **18.1 / 18.0 µs** | −6.5 µs | 60 / 60 | 0.000 µs | 60 pairs, −0.007 ms |
+| 30p | 60 / 60 | **24.0 / 24.0 µs** | −5.2 µs | 60 / 60 | 0.000 µs | 60 pairs, −0.005 ms |
+| 50p | 50 / 50 | **27.1 / 27.1 µs** | −9.6 µs | 50 / 50 | 0.000 µs | 50 pairs, −0.010 ms |
+| 59.94p | 60 / 60 | **30.4 / 30.4 µs** | −15.9 µs | 60 / 60 | 0.000 µs | 60 pairs, −0.016 ms |
+
+- Half-amplitude widths 11.70–36.73 ms (one frame less 5 ms, as designed). Levels −20.0 / −20.1 dBFS.
+
+**Live, unattended, non-Cloudflare.**
+- **Fixtures.** One continuous 300 s file per (rate, injection): the bundled MP4 concatenated ×5 by
+  the concat filter, each segment trimmed to exactly its frames and 2 882 880 samples. The audio is
+  shifted by the injection (+ = sound LATER). H.264 constrained baseline + AAC, in MPEG-TS
+  (`~/Desktop/manifold-soak/stageD/syncD-*.ts`).
+  - Measured offline with the same detectors: **+80.33 / +0.33 / −39.67 ms**, spread 0.01 ms.
+  - The +0.32 ms is the AAC re-encode.
+- ⚠️ **Two fixture faults were found and fixed before any run counted.**
+  - Untrimmed concat segments shifted the audio ~15 ms at each join.
+  - An MKV's 1 ms timebase rounded 23.976 frames to 41/42 ms, which the stream then reported as
+    23.81 fps and which drove queue-full re-anchors.
+- **Senders.**
+  - (a) Local SRT: an ffmpeg listener serving the TS (`-re`, `-pes_payload_size 0`), Manifold on
+    `MANIFOLD_SRT_DEBUG_URL` (no bookmark).
+  - (b) ffmpeg → MediaMTX (the running `mediamtx-soak-abs.yml`, `useAbsoluteTimestamp: true`) →
+    WHEP: the TS published over RTSP with the audio as Opus, Manifold on the `MediaMTX Whip`
+    bookmark.
+- **Each run:** connect, 10 s, A/V ▸ Calibrate… ▸ Start, the result, **Apply for Session** (labelled "Apply for This Session" in passes 1–3; relabelled after, same action), 4 s,
+  Start again, Cancel. Driven by UI scripting, Profile build. Logs:
+  `~/Desktop/manifold-soak/stageD/stageD-<srv>-<rate>p-inj<ms>.*`.
+- **Never Apply and Save:** `streamBookmarks` was not written (read-only hash before and after:
+  identical, see the end of this section).
+- **Pass:** the proposal = −injection within ±1 frame, and the re-check within ±2 ms of 0.
+
+| path | rate | injected (measured) | 1st: heard A/V (pairs, s to result) | proposed | − injection | re-check heard | pass? |
+|---|---|---|---|---|---|---|---|
+| SRT | 23.976 | +0.33 | −2.01 (19, 48 s) | +2 | +2.3 ms | **+3.13** | ✅ / ❌ (3.13 > 2) |
+| SRT | 23.976 | +80.33 | +80.14 (19, 46 s) | −80 | +0.3 ms | −0.03 | ✅ ✅ |
+| SRT | 23.976 | −39.67 | −43.12 (33, 66 s) | +43 | +3.3 ms | +1.06 | ✅ ✅ |
+| SRT | 59.94 | +0.33 | −2.76 (80, 99 s) | +3 | +3.3 ms | −0.26 | ✅ ✅ |
+| SRT | 59.94 | +80.33 | +81.65 (34, 54 s) | −82 | −1.7 ms | +0.15 | ✅ ✅ |
+| SRT | 59.94 | −39.67 | −42.77 (72, 91 s) | +43 | +3.3 ms | +0.24 | ✅ ✅ |
+| WHEP | 23.976 | +0.33 | +41.44 (10, 12 s) | −41 | −40.7 ms | −1.19 | ✅ (by 1 ms) / ✅ |
+| WHEP | 23.976 | +80.33 | +115.50 (19, 23 s) | −116 | −35.7 ms | +0.69 | ✅ ✅ |
+| WHEP | 23.976 | −39.67 | −54.60 (14, 17 s) | +55 | +15.3 ms | −0.27 | ✅ ✅ |
+| WHEP | 59.94 | +0.33 | −12.18 (10, 10 s) | +12 | +11.7 ms | −0.10 | ✅ ✅ |
+| WHEP | 59.94 | +80.33 | +67.67 (10, 10 s) | −68 | +12.3 ms | +0.18 | ✅ ✅ |
+| WHEP | 59.94 | −39.67 | −59.01 (10, 10 s) | +59 | +19.3 ms | −0.42 | ❌ (19.3 > 16.7) / ✅ |
+
+- **Re-check: 11 / 12 within ±2 ms; all 12 within ±3.2 ms.** Worst miss: SRT 23.976 / 0.
+  - It measured −2.01 and applied +2; 16 s later the heard figure read +3.13.
+  - That is the steering's own wander: §19.7 recorded window e medians of −0.9…+3.2 ms on local SRT
+    with no change. ±2 ms is at the edge of what that path holds minute to minute.
+  - WHEP re-checks are all within ±1.2 ms.
+- **The proposal within ±1 frame of the injection: SRT 6 / 6 (worst 3.3 ms); WHEP 5 / 6.**
+  - The WHEP figures are off the injection by −40.7 … +19.3 ms, by session. The next block shows
+    that this is not calibration's error.
+- **Every change was one splice:** `AUDIO OFFSET … ACCEPTED`, one per Apply; no coarse event, no rate
+  write.
+- **On the final build** (after the relabel and the true minus) two cases were run again for the
+  screenshots: SRT 23.976 / +80 → −77, re-check −0.09 ms; WHEP 59.94 / −40 → +59, re-check −0.16 ms,
+  and again → +53, re-check +0.47 ms (another session, another SR offset).
+- Pass 1 (no walk guard) and pass 2 (the per-pair stability rule) are kept in
+  `pass1-no-walk-guard/` and `pass2-per-pair-stability/`. Pass 3 above is the final build.
+  - The final build also takes the stream's rate from the transport (choice 6), rebuilt after pass 3.
+  - For SRT and WHEP the renderer already read 41.711 / 16.683 ms, so only the rate note's source
+    differs.
+
+**⚠️ FOUND: on ffmpeg → MediaMTX → WHEP the audio↔video relation is off by a different amount each
+session (−19 … +42 ms here), and it equals the first Sender Report line's offset.**
+- Pass 3, for each WHEP session: the excess over the injection, then the same with that session's
+  first SR-line offset added back (`[WHEP-SRFIT] FIRST LINE … offset`):
+
+| session | excess over injection | first SR-line offset | excess + offset |
+|---|---|---|---|
+| 23.976 / 0 | +41.11 | −41.17 | **−0.05** |
+| 23.976 / +80 | +35.17 | −39.44 | **−4.27** |
+| 23.976 / −40 | −14.93 | +16.63 | **+1.70** |
+| 59.94 / 0 | −12.51 | +12.20 | **−0.31** |
+| 59.94 / +80 | −12.66 | +12.21 | **−0.45** |
+| 59.94 / −40 | −19.34 | +18.84 | **−0.50** |
+
+- **The independent read** (`whepx-1…3`): in each of three sessions, ffmpeg also read MediaMTX's RTSP
+  output of the same path and recorded 90 s, while Manifold calibrated over WHEP. ffmpeg aligns RTP
+  streams by the SRs too.
+
+| session | Manifold WHEP heard A/V | its first SR-line offset | ffmpeg's RTSP read of the same MediaMTX path, same time |
+|---|---|---|---|
+| whepx-1 | +29.36 ms | −29.95 ms | −0.25 ms (72 pairs) |
+| whepx-2 | +8.61 ms | −8.26 ms | −0.25 ms |
+| whepx-3 | +26.06 ms | −26.53 ms | −0.25 ms |
+
+- **So the content and the RTSP side carry 0. Over WHEP the SRs, as Manifold reads them, state an
+  audio↔video relation of 8–42 ms that the content does not have, different every session, and
+  Manifold plays exactly that.**
+  - It is either MediaMTX's WebRTC-side Sender Reports, or Manifold's mapping of them (SR line fit,
+    §2.6). Separating the two needs a second WHEP client (e.g. a browser's), which is not
+    unattended.
+  - Nothing was changed for it: it is not calibration's to correct, and CLAUDE.md forbids tuning to
+    a server.
+- **What it means for calibration:** it measures this faithfully; every WHEP re-check read within
+  ±1.2 ms. But **on this chain a value calibrated in one session does not hold for the next**, and a
+  value saved to the bookmark would be wrong after a reconnect.
+  - §19.5 does not cover per-session offsets; its MediaMTX row was about drift.
+  - **Robbie's decision:** investigate as a WHEP item before the bookmark Save is trusted on
+    MediaMTX; Cloudflare WHEP on Monday (D3) says whether it is MediaMTX-only.
+- The Release run below read +25.94 ms on the same path: another session, another offset.
+
+**NDI (an extra, not in the brief's live list): the SDK sender.**
+- A scratch sender built on the NDI SDK (`scratchpad/ndi/ndisync.cpp`) synthesises the 23.976 clip
+  exactly as generate.sh does. Audio and video go out per frame from one thread, at 24000/1001, with
+  no injection.
+- Manifold on ⌃⌥N. Four runs, each: calibrate, Apply for Session, re-check:
+
+| build | heard A/V (p10–p90) | proposed | re-check |
+|---|---|---|---|
+| median rule, rate from the renderer | −68.21 ms (8.2) | +68 | +1.44 ms |
+| median rule, rate from the transport | −66.75 ms (7.4) | +67 | −0.49 ms |
+| final labels | −68.16 ms (7.5) | +68 | +0.46 ms |
+| final (true minus) | −69.80 ms (5.2) | +70 | **+2.88 ms** (p10–p90 6.4) |
+
+- NDI's single pairs scatter ±3–5 ms, so its re-check sits around the ±2 ms bound (3 / 4 within).
+- ⚠️ **The sender is in sync by construction, so −67 ms is Manifold's NDI path or NDI's own transport
+  timing, not content.**
+  - Unlike SRT and WHEP, NDI's heard − clock is on host time (pull stamps, the picture delay, the
+    direct anchor), and whether that equals what is heard at the device has not been measured.
+  - Calibration offers what it measures: +67 ms.
+  - **Monday's D1 device capture decides whether +67 is right.** If a capture with O = +67 is off by
+    ~67 ms, NDI's heard figure is not the listener's, and NDI calibration must stay disabled until
+    it is.
+  - The §19 header's provisional OBS NDI +16…+22 ms (sound late) is a device figure, of the opposite
+    sign.
+
+**Release build: no work while off, work while on.**
+- `.build-cc/stageD-Release`, WHEP via the `MediaMTX Whip` bookmark (Release has no ⌃⌥D or debug
+  URL). `release-proof.*`.
+
+| phase | `[CALIBRATION]` lines | `[AV-CONTENT]` / `[AV-LAG]` lines | counters (since launch) |
+|---|---|---|---|
+| 120 s connected, calibration OFF | **0** | **0** | at Start: **0 buffers, 0 frames, 0 tones, 0 flashes** |
+| a 13 s run (Start → result → Cancel) | 11 tones, 11 flashes, the result (+25.94 ms) | 0 | at stop: **652 buffers, 313 frames, 11 / 11** (50 Opus packets and 24 frames a second) |
+| 60 s connected, OFF again; then the session end | — | 0 | at session end: **652, 313, 11, 11: unchanged** |
+
+- Release binary (`strings`):
+  - the release script's telemetry marker `enqueued=%.1f/s`: 0 (its Release assertion holds);
+  - `[CALIBRATION] RESULT`: present;
+  - `[AV-LAG] tick` and `[AV-CONTENT] flash`: 0 (DEBUG, app-side);
+  - `[AV-CONTENT] beep`: present, as it was before stage D. ManifoldCore defines
+    `MANIFOLD_TELEMETRY` unconditionally, so only the runtime gate (a DEBUG app's telemetry flag)
+    keeps that probe off. It stays on BUGS.md's removal list.
+
+**Bundling.**
+- Profile and Release logged "Sync clips bundled: 7 of 7"; `Contents/Resources/SyncClips` holds the
+  seven MP4s.
+- With `build/syncclips` moved aside, a third build (`.build-cc/stageD-noclips-Profile`) logged "0 of
+  7" and has no folder. Its sheet says "Sync clips aren't included in this build." with the link
+  (C01), and calibration still ran there (+0.25 ms on the clean SRT fixture, C02).
+- `SYNCCLIPS_FORMATS=mp4 generate.sh` into scratch: 23 s, and **all seven MP4s byte-identical to the
+  stage C set** verify.py passed. On this Mac, release step 3b reproduces the verified clips exactly.
+- `release-mac.sh` was syntax-checked (`bash -n`), not run (it signs, notarizes and bumps the build
+  number).
+
+**Screenshots** (`~/Desktop/manifold-shots/stageD/`, window or menu captures):
+
+| shot | state |
+|---|---|
+| S1-srt23976-01 … 05 | SRT, no saved stream: idle; **progress**; **result** (heard 80 ms late → −80); applied; re-check "in sync" |
+| S2-whep5994-01 … 05 | WHEP from a bookmark: the same five, with **Apply and Save** offered and the line naming "MediaMTX Whip - Locla" (not pressed) |
+| X01-result-not-applicable | +250 injected on SRT: proposed −250 (clamped from −252), "Not applicable … At most N ms is available on this stream right now", Apply disabled |
+| N01, N02, N03 | **NDI: session only** — "NDI: a result applies to this session only.", only Apply for Session; re-check |
+| H01-hls-av-menu, H02-sheet-hls-disabled | **HLS**: the greyed control's menu; the sheet "No audio offset on HLS — Apple's player owns the audio." / "Calibration isn't available on HLS.", Start disabled |
+| C01, C02 | **clips not bundled**: the note and the download link; a run on that build |
+| M01-av-menu, M02-help-menu | **the menu items**: A/V ▸ Calibrate… / Save Sync Clip… / Download ProRes Sync Clips…; Help ▸ Download Sync Clips… |
+
+`streamBookmarks`: hashed read-only before the WHEP runs and after all of them; identical. No
+`defaults` was written.
+
+#### What `scripts/release-mac.sh` does that affects this (read first, as asked; nothing in its configuration changed)
+
+1. **It ships Profile by default, and project.yml's scheme now pins `archive` to Profile too.**
+   - The script's header still says the archive action is pinned to Release. That is stale: the
+     scheme comment in project.yml says Profile, and so does the scheme.
+   - So the tester build carries DEBUG. The `[AV-CONTENT]` / `[AV-LAG]` probes run beside calibration
+     whenever telemetry is on: they print per beep and per flash, and scan every live buffer even
+     with calibration off.
+   - Calibration's counters keep that apart, but a tester's log will be busier.
+   - Not changed: the configuration is a pre-ship decision.
+2. **project.yml's scheme comment says the script asserts `[SRT-FLOW]`.** It now asserts the format
+   string `enqueued=%.1f/s` (2026-09-21). Stale comment, harmless. Calibration's strings do not
+   contain the marker, and the Release check holds (0 hits).
+3. **The DMG grows by ~22 MB** (the MP4s do not compress): from ~6–9 MB to ~30 MB.
+   - The script's "probably under Nextcloud's threshold" reasoning no longer applies.
+   - Its default output is outside Nextcloud (`~/Builds/Manifold`), so nothing breaks.
+4. **ffmpeg is now a release build tool** (Homebrew 8.1.1 here, with libx264), as is the label font
+   `/System/Library/Fonts/Menlo.ttc`. Both are checked at preflight.
+   - The clips' bytes depend on that ffmpeg/x264. On another build Mac they would differ in bytes,
+     but not in timing.
+   - verify.py is not run by the release: it needs numpy and an ffprobe that are not installed
+     system-wide. Adding it would be the stronger gate (Robbie's call).
+5. **The clips enter the bundle through an Xcode run-script phase.**
+   - It runs before signing, so they are sealed in CodeResources and notarized with the app.
+   - `ENABLE_USER_SCRIPT_SANDBOXING` is not set (default off). If a future Xcode turns it on, the
+     phase could not read `build/syncclips` and step 6c would fail the release loudly, not silently.
+6. **Step 3b regenerates `build/syncclips/*.mp4` every release**, overwriting what is there. The
+   ProRes masters there are untouched.
+
+#### Not done
+
+- **Attended (Monday, §19.8 block 5):**
+  - OBS → NDI and OBS → Cloudflare SRT / WHEP with a clip;
+  - one Audio Hijack capture, which also decides the NDI −67 ms question above;
+  - the 90-minute Cloudflare SRT hold;
+  - the sheet and menu review.
+- **Upload the v1 zip** and confirm the URL (BUGS.md pre-ship).
+- **The WHEP per-session SR offset** (above): not investigated beyond the RTSP cross-check.
+- **DeckLink:** the SDI read takes the same O (stage A). Calibration does not measure SDI (§19.2:
+  the output chain is not per-source).
+- **Not tested live:** a loss of a few events mid-run on a real network. Covered offline: a missed
+  flash and a missed beep in `testLocksPairsAndOffersOnlyWhenConfident`.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 

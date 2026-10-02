@@ -3,6 +3,8 @@
 # ffmpeg's own sources (lavfi `color`, `drawbox`, `drawtext`, `aevalsrc`). No media goes in.
 #
 #   zsh scripts/syncclips/generate.sh [label ...]     # all rows, or the labels named (e.g. 23.976 59.94)
+#   SYNCCLIPS_FORMATS=mp4 zsh scripts/syncclips/generate.sh   # the MP4s only (what the app bundles;
+#                                                            # scripts/release-mac.sh runs this)
 #
 # Output (gitignored): build/syncclips/manifold-sync-<label>p.mov  ProRes 422, 10-bit 4:2:2, PCM 24-bit
 #                      build/syncclips/manifold-sync-<label>p.mp4  H.264 High 4:2:0, AAC-LC 256k
@@ -26,6 +28,8 @@ OUT=${SYNCCLIPS_OUT:-$REPO/build/syncclips}; mkdir -p $OUT
 FONT=${SYNCCLIPS_FONT:-/System/Library/Fonts/Menlo.ttc}
 [[ -f $FONT ]] || { echo "no font at $FONT (set SYNCCLIPS_FONT)"; exit 2; }
 want=("$@")
+formats=(${=SYNCCLIPS_FORMATS:-mov mp4})
+for f in $formats; do [[ $f == mov || $f == mp4 ]] || { echo "SYNCCLIPS_FORMATS: unknown format '$f' (mov, mp4)"; exit 2; }; done
 while IFS=$'\t' read -r label rate unit; do
   [[ -z $label || $label == \#* ]] && continue
   (( ${#want} )) && [[ ${want[(Ie)$label]} -eq 0 ]] && continue
@@ -47,14 +51,18 @@ while IFS=$'\t' read -r label rate unit; do
   tags=(-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv)
   base=$OUT/manifold-sync-${label}p
   echo "── ${label}p: $rate, $frames frames ($dur s), first event frame $F0, code ×$unit"
+  if (( ${formats[(Ie)mov]} )); then
   ffmpeg -nostdin -hide_banner -loglevel error -y -filter_complex "${vchain}[v];aevalsrc=exprs='${aexpr}':s=48000:c=stereo:d=${dur}[a]" \
     -map '[v]' -map '[a]' -frames:v $frames \
     -c:v prores_ks -profile:v 2 -vendor apl0 -pix_fmt yuv422p10le $tags \
     -c:a pcm_s24le -movflags +write_colr -metadata comment="Manifold sync clip ${label}p (scripts/syncclips)" $base.mov
+  fi
+  if (( ${formats[(Ie)mp4]} )); then
   ffmpeg -nostdin -hide_banner -loglevel error -y -filter_complex "${vchain}[v];aevalsrc=exprs='${aexpr}':s=48000:c=stereo:d=${dur}[a]" \
     -map '[v]' -map '[a]' -frames:v $frames \
     -c:v libx264 -preset slow -crf 16 -profile:v high -pix_fmt yuv420p -g $(( 2 * nominal )) $tags \
     -c:a aac -b:a 256k -ar 48000 -movflags +faststart+write_colr \
     -metadata comment="Manifold sync clip ${label}p (scripts/syncclips)" $base.mp4
+  fi
 done < $HERE/recipes.tsv
 ls -l $OUT

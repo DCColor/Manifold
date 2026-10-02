@@ -162,6 +162,11 @@ targets:
       # App/SRT/SRTAudioDecoder only.
       - package: ManifoldCore
         product: AACFraming
+      # Calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.10): the sync clips' detectors, the coded
+      # matcher and the confidence rules — a leaf target so `swift test` can reach them. Used by
+      # App/Live/CalibrationMode and the renderer's flash tap.
+      - package: ManifoldCore
+        product: SyncCalibration
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,
@@ -212,6 +217,29 @@ targets:
         embed: true
         link: false
         codeSign: true
+    # ── THE SYNC CLIPS (docs/AUDIO_RESAMPLER_DESIGN.md §19.10) ──────────────────────────────────
+    # The MP4 set is NOT committed: scripts/syncclips/generate.sh writes it to build/syncclips/
+    # (gitignored). This phase copies whatever is there into Contents/Resources/SyncClips, after the
+    # resources and before Xcode signs the bundle, in EVERY configuration. A dev build without the
+    # clips simply has none, and the app says "Sync clips aren't included in this build" with the
+    # download link. The RELEASE script generates them first and FAILS if any is missing from the
+    # exported app, so a shipped build cannot lack one. The labels come from recipes.tsv, the one
+    # list of rates. The folder is rebuilt every time, so a removed clip never lingers in a build.
+    postBuildScripts:
+      - name: Bundle sync clips
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          SRC="${SRCROOT}/build/syncclips"
+          DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/SyncClips"
+          rm -rf "$DEST"
+          n=0; total=0
+          for label in $(awk -F'\t' '!/^#/ && NF >= 3 {print $1}' "${SRCROOT}/scripts/syncclips/recipes.tsv"); do
+            total=$((total + 1))
+            f="$SRC/manifold-sync-${label}p.mp4"
+            if [ -f "$f" ]; then mkdir -p "$DEST"; cp "$f" "$DEST/"; n=$((n + 1)); fi
+          done
+          echo "Sync clips bundled: $n of $total (from build/syncclips/)"
     info:
       path: App/Info.generated.plist
       properties:

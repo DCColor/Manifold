@@ -5,6 +5,7 @@ import Combine
 import UniformTypeIdentifiers
 // The ASRC stage at the live-audio seam — `LiveAudioSink` is its only caller.
 import LiveAudioResample
+import SyncCalibration
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -2079,6 +2080,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// have been labelled WHEP in the tap's stats and in its format-change callback — a
         /// mislabel that reads as a real observation and would be believed.
         private let path: AudioTapBuffer.SourcePath
+        /// Calibration mode's beep detector slot (§19.10), the engine's: empty unless calibration is
+        /// on. In every configuration.
+        private let calibration: CalibrationBeepTap
         #if DEBUG || MANIFOLD_TELEMETRY
         /// Read-only observer of what this sink hands the renderer. See `LiveAudioRendererProbe`.
         private let probe: LiveAudioRendererProbe?
@@ -2086,10 +2090,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         private let paired: LiveAudioPairedProbe?
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
                          path: AudioTapBuffer.SourcePath, resample: LiveAudioResampleStage,
-                         steering: LiveAudioResampleSteering,
+                         steering: LiveAudioResampleSteering, calibration: CalibrationBeepTap,
                          probe: LiveAudioRendererProbe?, paired: LiveAudioPairedProbe?) {
             self.renderer = renderer; self.tap = tap; self.path = path; self.resample = resample
-            self.steering = steering; self.probe = probe; self.paired = paired
+            self.steering = steering; self.calibration = calibration; self.probe = probe; self.paired = paired
             // [AV-CONTENT] (pre-ship removal, docs/BUGS.md): on whenever the renderer probe is.
             self.beepIn = probe != nil ? AVContentBeepDetector(tag: "in") : nil
             self.beepOut = probe != nil ? AVContentBeepDetector(tag: "out") : nil
@@ -2165,9 +2169,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         #else
         fileprivate init(renderer: AVSampleBufferAudioRenderer, tap: AudioTapBuffer,
                          path: AudioTapBuffer.SourcePath, resample: LiveAudioResampleStage,
-                         steering: LiveAudioResampleSteering) {
+                         steering: LiveAudioResampleSteering, calibration: CalibrationBeepTap) {
             self.renderer = renderer; self.tap = tap; self.path = path; self.resample = resample
-            self.steering = steering
+            self.steering = steering; self.calibration = calibration
         }
         #endif
         /// The tap gets the ORIGINAL buffer; the renderer gets the RESAMPLED one.
@@ -2189,6 +2193,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         /// downstream of both, and are unchanged (§4.5).
         public func enqueue(_ sampleBuffer: CMSampleBuffer) {
             tap.ingest(sampleBuffer, path: path)
+            // Calibration mode (§19.10): the transport's buffer, on its axis (content time), as the
+            // tap gets it. One lock and a nil test while calibration is off.
+            calibration.scan(sampleBuffer)
             #if DEBUG || MANIFOLD_TELEMETRY
             beepIn?.scan(sampleBuffer)
             #endif
@@ -2461,10 +2468,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         liveAudioPairedProbe = paired
         setPairedProbe(paired)
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
-                             resample: resample, steering: steering, probe: probe, paired: paired)
+                             resample: resample, steering: steering, calibration: calibrationBeepTap,
+                             probe: probe, paired: paired)
         #else
         return LiveAudioSink(renderer: audioRenderer, tap: audioTap, path: path,
-                             resample: resample, steering: steering)
+                             resample: resample, steering: steering, calibration: calibrationBeepTap)
         #endif
     }
 
@@ -3350,6 +3358,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return mirror.steering?.userOffsetSeconds ?? 0
     }
 
+    /// The most the current session's sound can move EARLIER now, seconds: the steering's own refusal
+    /// figure (the queue's 10 s low point less keep, fade and margin). nil with no anchored session.
+    public nonisolated func liveAudioAvailableAdvance() -> Double? {
+        mirror.lock.lock()
+        let steering = mirror.active ? mirror.steering : nil
+        mirror.lock.unlock()
+        return steering?.availableAdvanceSeconds()
+    }
+
+    // MARK: - Calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.2, §19.10)
+
+    /// The beep detector's slot on every live sink this engine opens. EMPTY unless calibration is on
+    /// (the app's `SyncCalibrationModel` starts and stops it), in every configuration.
+    public nonisolated let calibrationBeepTap = CalibrationBeepTap()
+
     @discardableResult
     private nonisolated func applyLiveAudioOffset(_ seconds: Double, steering: LiveAudioResampleSteering)
         -> LiveAudioResampleSteering.UserOffsetOutcome {
@@ -3406,6 +3429,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         srFit?.finish()
         // The SDI read is shared with file playback: the session's O ends with it (§19.1).
         audioTap.clearLiveReadOffset()
+        // Calibration mode's detectors, counted since launch: all zero unless calibration was on
+        // (§19.10's "off = zero work" evidence). Every configuration.
+        NSLog("[CALIBRATION] live audio session end — detector work this launch: %@",
+              SyncCalibrationCounters.snapshot.text)
         #if DEBUG || MANIFOLD_TELEMETRY
         liveAudioProbe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "endLiveAudio")
         // Writes the final window before the observations go, so the last 10 s are not lost.

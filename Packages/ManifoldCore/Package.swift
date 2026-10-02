@@ -26,7 +26,10 @@ let package = Package(
         // Linked by the APP target directly (project.yml), for the saved-stream store and sheet.
         .library(name: "StreamBookmarkModel", targets: ["StreamBookmarkModel"]),
         // Linked by the APP target directly (project.yml), for App/SRT's audio decoder.
-        .library(name: "AACFraming", targets: ["AACFraming"])
+        .library(name: "AACFraming", targets: ["AACFraming"]),
+        // Linked by the APP target directly (project.yml), for calibration mode's sheet, the flash
+        // detector in the renderer, and the bundled sync clips. ManifoldCore uses it too (the beep tap).
+        .library(name: "SyncCalibration", targets: ["SyncCalibration"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -186,9 +189,28 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // Calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.2, §19.10): the sync clips' tone-onset
+        // and flash detectors, the coded-interval matcher, the confidence rules and the proposal. A
+        // leaf target, no dependencies, so `swift test` reaches all of it: the matcher's four checks
+        // (pairing_check.py's, with the mean score) and the detectors on synthesised clip audio.
+        .target(
+            name: "SyncCalibration",
+            path: "Sources/SyncCalibration",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "SyncCalibrationTests",
+            dependencies: ["SyncCalibration"],
+            path: "Tests/SyncCalibrationTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .target(
             name: "ManifoldCore",
-            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample"],
+            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

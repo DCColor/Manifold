@@ -162,6 +162,8 @@ final class LiveAudioOffsetModel: ObservableObject {
 /// one element in `ContentView`'s control bar with no modifiers.
 struct AudioOffsetControl: View {
     @ObservedObject var model: LiveAudioOffsetModel
+    /// The window's calibration mode, opened from this menu (§19.10).
+    let calibration: SyncCalibrationModel
 
     var body: some View {
         HStack(spacing: 5) {
@@ -172,15 +174,21 @@ struct AudioOffsetControl: View {
                     .menuIndicator(.hidden)
                     .fixedSize()
             } else {
-                // HLS: disabled, and the note is ON the control, not only in a tooltip.
-                HStack(spacing: 4) {
-                    Image(systemName: "waveform")
-                    Text("A/V offset — not on HLS")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .fixedSize()
+                // HLS: disabled, and the note is ON the control, not only in a tooltip. Still a menu,
+                // so the sync clips and calibration's own note (it is off on HLS too) are reachable.
+                Menu { hlsMenuContent } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "waveform")
+                        Text("A/V offset — not on HLS")
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .fixedSize()
+                    }
+                    .opacity(0.45)
+                    .accessibilityLabel(LiveAudioOffsetModel.hlsNote)
                 }
-                .opacity(0.45)
-                .accessibilityLabel(LiveAudioOffsetModel.hlsNote)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
         }
         .help(model.isAvailable
@@ -240,5 +248,24 @@ struct AudioOffsetControl: View {
         } else {
             Text("Not a saved stream: this offset lasts for this connection only")
         }
+        Divider()
+        calibrationItems
+    }
+
+    /// Calibration mode and the sync clips (docs/AUDIO_RESAMPLER_DESIGN.md §19.10).
+    @ViewBuilder
+    private var calibrationItems: some View {
+        Button("Calibrate…") { calibration.present() }
+        Button("Save Sync Clip…") {
+            SyncClipLibrary.saveClip(frameInterval: calibration.frameInterval, window: NSApp.keyWindow)
+        }
+        Button("Download ProRes Sync Clips…") { SyncClipLibrary.openDownload() }
+    }
+
+    @ViewBuilder
+    private var hlsMenuContent: some View {
+        Text(LiveAudioOffsetModel.hlsNote)
+        Divider()
+        calibrationItems
     }
 }
