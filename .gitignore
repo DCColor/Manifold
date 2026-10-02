@@ -13,6 +13,8 @@
 DerivedData/
 .build-cc/
 build/
+# The sync clips (scripts/syncclips/generate.sh) — generated, ~780 MB; already under build/, named for clarity.
+build/syncclips/
 *.hmap
 *.ipa
 *.dSYM.zip

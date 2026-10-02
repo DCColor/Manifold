@@ -1,0 +1,16 @@
+# Manifold sync clips — the committed recipes (AUDIO_RESAMPLER_DESIGN.md §19.3, §19.9).
+# One row per clip. Tab-separated: label, frame rate (exact rational), unit (frames per code step).
+#
+# The code is 23 / 29 / 31 / 37 steps between events, repeating (cycle 120 steps). `unit` scales a
+# step in frames: 1 at ≤ 30 fps; 2 at 50 and 59.94, where 23 frames would be 0.46 / 0.38 s and the
+# existing beep detector (avsync.beep_times) merges onsets closer than 0.5 s. With it, every interval
+# at every rate is 0.77–1.54 s. Set it to 1 for the literal frame code.
+#
+# label	rate	unit
+23.976	24000/1001	1
+24	24/1	1
+25	25/1	1
+29.97	30000/1001	1
+30	30/1	1
+50	50/1	2
+59.94	60000/1001	2

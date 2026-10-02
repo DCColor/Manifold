@@ -4748,6 +4748,164 @@ repeat its step 3 on MediaMTX WHEP: OBS profile `MediaMTX Local`, Start Streamin
 - Full screen: confirm there is no marker (the accepted limit), and that the title marker returns on
   leaving full screen.
 
+### 19.9 Stage C built: the sync clips — 2026-10-01 (unattended; uncommitted)
+
+§19.3's clips, generated from committed recipes by ffmpeg alone (lavfi `color`, `drawbox`,
+`drawtext`, `aevalsrc`; no media in, no other tool). Everything is in `scripts/syncclips/`
+(README.md there):
+- `recipes.tsv`, `generate.sh` → `build/syncclips/` (gitignored: already under `build/`, now also
+  named explicitly);
+- `verify.py`, `pairing_check.py`, `obs-scene-collection.json`.
+
+#### What each clip is
+
+| | |
+|---|---|
+| rates | 23.976, 24, 25, 29.97, 30, 50, 59.94 (exact rationals: 24000/1001 …) |
+| length | 60 × round(rate) frames: 60 s, or 60.06 s at the 1001 rates. Every clip is a whole number of frames AND of samples (e.g. 1440 × 2002 = 2 882 880) |
+| picture | black (Y 16 / 64); each event frame full-white (235 / 940); a burned-in grey label: "Manifold sync clip 23.976p · code 23-29-31-37 x1 · frame 000024" |
+| sound | 1 kHz at −20 dBFS peak, exactly one frame period, phase 0 at the frame's exact boundary, 5 ms raised-cosine edges; a −60 dBFS RMS white-noise floor throughout (independent per channel) |
+| code | events at frame F0 + unit × {0, 23, 52, 83} + unit × 120 × c, with F0 = round(rate) ≈ 1 s. Intervals 23 / 29 / 31 / 37 steps, repeating |
+| containers | `.mov`: ProRes 422 (prores_ks profile 2, `apl0`), yuv422p10le, PCM s24le. `.mp4`: H.264 High yuv420p CRF 16, AAC-LC 256k, faststart. Both 1920×1080, bt709 / bt709 / bt709 / limited range in the stream and the `colr` atom, 48 kHz stereo |
+
+- **Timing is never rounded.** The tone is computed from the exact boundary time k / rate
+  (`aevalsrc`, per sample).
+  - At 23.976 / 24 / 25 / 30 / 50 every boundary is an exact sample.
+  - At 29.97 and 59.94, four frames in five fall between samples (k × 1601.6, k × 800.8). There the
+    waveform is the exactly anchored tone, sampled.
+- **Regenerate:** `zsh scripts/syncclips/generate.sh` (all, ~1 min on this Mac), or name labels.
+  `FFPROBE=… <python with numpy> scripts/syncclips/verify.py --json out.json`, then `python3
+  scripts/syncclips/pairing_check.py out.json`.
+- **Nothing was installed** (Robbie, 2026-10-01: nothing system-wide). The tools already on the Mac:
+  - ffmpeg 8.1.1 (Homebrew, already present);
+  - ffprobe n8.1.1 from `Index/binaries/ffprobe-mac` (no ffprobe on PATH);
+  - numpy for `verify.py` and `c12.py` from the existing audible-events venv.
+- **Total output: 777 MB** (ProRes 755 MB, MP4 22 MB). §19.3's "~20 MB" holds for the MP4 set alone.
+  The ProRes set is 77–171 MB a clip: keep it as the master and ship the MP4s, or shorten the
+  ProRes. Robbie's call.
+
+#### Deviations from §19.3 and from "passes c12", found and kept visible
+
+1. **The code's unit is 2 frames at 50 and 59.94** (46 / 58 / 62 / 74 frames).
+   - At 1 the shortest interval would be 0.46 s / 0.38 s, and `avsync.beep_times` merges onsets
+     closer than 0.5 s: half the beeps would vanish.
+   - With 2, every interval at every rate is 0.77–1.54 s, and the ±½-cycle range is ±2.0–2.5 s
+     everywhere.
+   - One column in `recipes.tsv`; 1 restores the literal frame code.
+2. **c12's `g_grid` is False on every clip, by design.** It fits the beeps to a 1.000 Hz grid; the
+   coded pattern is uneven so that it cannot be mis-paired. `verify.py` restates the gate for the
+   code: the white frames are exactly the coded frames, and the intervals follow the code.
+3. **c12's "level between beeps" reads the next tone** whenever an interval is under its fixed
+   100–900 ms window: −40.5 dB at 29.97 / 30, −44.5 dB at 59.94, against −57.0 / −57.5 dB elsewhere.
+   `verify.py` measures from 10 ms after a tone to 10 ms before the next: −60.0 dBFS RMS (MOV), −60.5
+   (MP4).
+4. **c12 reads +1.67…+1.69 ms, not 0.0, on every clip** (sd 0.01 ms).
+   - avsync's onset is the first sample above 25 % of the peak. On §19.3's 5 ms raised-cosine edge
+     that is 1.708 ms after the tone starts (1.713 ms at 29.97 / 59.94, the sub-sample phase), less
+     its 0.0417 ms `FIXTURE_OFFSET_MS`.
+   - The clips are at 0.0 (below). The detector's definition of an onset is not.
+   - For c12 on these clips, the fixture constant is +1.708 ms: one number, per clip, or a
+     phase-based onset like `verify.py`'s. Stage D's detector should define the onset the way the
+     clip does.
+
+#### Every clip, both containers — `verify.py` (all 14 PASS)
+
+ffprobe read-back, on every file:
+- **Video:** 1920×1080; frame count = the recipe's; r_frame_rate as the recipe; colour tags
+  bt709 / bt709 / bt709 / tv.
+- **Codecs:** `.mov` is prores Standard yuv422p10le + pcm_s24le; `.mp4` is h264 High yuv420p + aac.
+- **Audio:** 48 kHz, 2 channels.
+
+A/V per event = the tone's onset (from its 1 kHz phase over the flat middle, < 1 µs) − the white
+frame's pts, both channels.
+
+| clip | frames / duration | events | flash pts − k/rate | A/V worst (MOV / MP4) | tone peak | c12: beeps · pairs · median |
+|---|---|---|---|---|---|---|
+| 23.976p | 1440 / 60.060 s | 48 | 0.000 µs | 0.156 / 0.314 µs | 0.0998–0.1002 | 48 · 48 · +1.68 / +1.67 ms |
+| 24p | 1440 / 60.000 s | 48 | 0.000 µs | 0.118 / 0.182 µs | 0.0998–0.1002 | 48 · 48 · +1.69 ms |
+| 25p | 1500 / 60.000 s | 50 | 0.000 µs | 0.175 / 0.231 µs | 0.0998–0.1001 | 50 · 50 · +1.69 / +1.68 ms |
+| 29.97p | 1800 / 60.060 s | 60 | 0.000 µs | 0.199 / 0.290 µs | 0.0998–0.1001 | 60 · 60 · +1.67 / +1.68 ms |
+| 30p | 1800 / 60.000 s | 60 | 0.000 µs | 0.198 / 0.284 µs | 0.0998–0.1001 | 60 · 60 · +1.67 ms |
+| 50p | 3000 / 60.000 s | 50 | 0.000 µs | 0.432 / 0.542 µs | 0.0997–0.1001 | 50 · 50 · +1.69 / +1.68 ms |
+| 59.94p | 3600 / 60.060 s | 60 | 0.000 µs | 0.396 / 0.552 µs | 0.0997–0.1002 | 60 · 60 · +1.67 / +1.68 ms |
+
+- **0.0 ms on every event: worst 0.55 µs.**
+  - The MP4's AAC priming is compensated by its edit list (ffmpeg honours it): the MP4 worst is the
+    MOV worst + < 0.2 µs.
+  - Measured on the decoded stream, as a player honouring the edit list hears it.
+- **Also on every file:**
+  - c12's other gates hold: `g_count` True, `doubled` 0;
+  - no burst outside a tone;
+  - the floor −60.0 dBFS RMS (−55.2 peak) in MOV, −60.5 (−50.9) in MP4.
+
+**Frame boundaries at 23.976 and 59.94**, where rounding would slip:
+
+| clip | boundary position in samples | events | beep onset − exact boundary, worst | flash pts − k·1001/rate |
+|---|---|---|---|---|
+| 23.976p .mov / .mp4 | exact (k × 2002) | 48 | 0.156 / 0.314 µs | 0.000 µs |
+| 59.94p .mov | +0 sample / +1/5 / +4/5 | 15 / 15 / 30 | 0.295 / 0.252 / 0.396 µs | 0.000 µs |
+| 59.94p .mp4 | +0 / +1/5 / +4/5 | 15 / 15 / 30 | 0.426 / 0.333 / 0.552 µs | 0.000 µs |
+
+One sample is 20.8 µs. No boundary slipped by one, at any sample phase.
+
+#### The coded pairing — `pairing_check.py` (a scripted check, all 14 PASS)
+
+A scripted check, not a Swift test: no Swift pairing code exists until stage D's calibration mode,
+and a Swift test now would test a stand-in.
+
+On each clip's MEASURED timeline (from `verify.py --json`), beeps shifted by δ (dropping any that
+leave the clip), then paired back by the coded matcher. For every index shift s, the offsets
+b(i+s) − f(i):
+- the score is the median absolute deviation from their median;
+- a candidate needs ≥ ½ the flashes and an offset inside ±½ cycle;
+- the smallest score wins.
+
+The test, per clip:
+1. 101 offsets across ±½ of the shortest interval;
+2. a deliberate one-interval mispair: δ = ± each coded interval (8);
+3. 399 offsets across the whole ±½ cycle;
+4. the same again with ±10 ms of uniform jitter on every beep.
+
+| rate | cycle / shortest interval | recovery, worst (508 offsets) | with ±10 ms jitter | wrong-pairing margin | one-interval mispair (δ = +1 interval) |
+|---|---|---|---|---|---|
+| 23.976 | 5005.0 / 959.3 ms | 0.006–0.010 µs | 4.87 ms | 41.7 ms | coded +959.3 ms ✓ · nearest-neighbour −250.3 ms ✗ |
+| 24 | 5000.0 / 958.3 ms | 0.010–0.024 µs | 4.87 ms | 41.7 ms | +958.3 ✓ · −250.0 ✗ |
+| 25 | 4800.0 / 920.0 ms | 0.022 µs | 5.25 ms | 160.0 ms | +920.0 ✓ · −240.0 ✗ |
+| 29.97 | 4004.0 / 767.4 ms | 0.006–0.013 µs | 4.97 ms | 33.4 ms | +767.4 ✓ · −200.2 ✗ |
+| 30 | 4000.0 / 766.7 ms | 0.021 µs | 4.97 ms | 33.3 ms | +766.7 ✓ · −200.0 ✗ |
+| 50 | 4800.0 / 920.0 ms | 0.003–0.039 µs | 5.25 ms | 160.0 ms | +920.0 ✓ · −240.0 ✗ |
+| 59.94 | 4004.0 / 767.4 ms | 0.018–0.070 µs | 4.97 ms | 33.4 ms | +767.4 ✓ · −200.2 ✗ |
+
+- **Recovered, every time; no alias anywhere inside ±½ cycle; 0 failures** in 7 112 recoveries
+  (14 clips × 508), and 0 with jitter.
+- **Every one-interval mispair (all 8 per clip) came back as injected.** Nearest-neighbour pairing,
+  shown alongside, got every one wrong, by up to ±333 ms.
+- ⚠️ **For stage D: the margin is ONE code step at some rates** (41.7 ms at 24, 33.4 ms at 29.97 /
+  59.94), not the four steps the interval spread suggests.
+  - With a median score, a wrong shift's deviations split between 1 and 7 steps. When the event
+    count is not a multiple of four, the median lands on 1.
+  - It still separates ±10 ms of jitter cleanly. A capture's ±20 ms frame grid (§18.1) would leave a
+    thinner gap at 29.97 / 59.94.
+  - A mean-absolute-deviation score gives every wrong shift ≈ 4 steps.
+
+#### The OBS scene collection (optional)
+
+`scripts/syncclips/obs-scene-collection.json`: a TEMPLATE scene collection "Manifold Sync Clips".
+- One scene per rate, each holding that rate's `.mp4` as a looping media source (restart on
+  activate, audio monitoring off).
+- The media paths are `__SYNCCLIPS_DIR__/…`, marked in the file. The README's sed line writes a
+  filled COPY to import.
+- Robbie's OBS profiles and collections were not touched. **Not import-tested** for that reason;
+  the JSON parses and follows OBS's collection layout.
+
+#### Not done
+
+- An OBS import of the template, and a stream of a clip through a real sender (attended, or with
+  Robbie's OBS).
+- A device capture of a clip played in Manifold.
+- Choosing between the two c12 answers in deviation 4 (a per-clip fixture constant, or a
+  phase-based onset); the ProRes size.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,

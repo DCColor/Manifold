@@ -1,0 +1,568 @@
+{
+  "__comment": "Manifold sync clips — an OBS scene collection TEMPLATE (AUDIO_RESAMPLER_DESIGN.md §19.9). EDIT BEFORE IMPORTING: replace every __SYNCCLIPS_DIR__ with the absolute path of the folder holding the clips (build/syncclips/ after scripts/syncclips/generate.sh), e.g. with the sed line in scripts/syncclips/README.md, into a COPY. One scene per rate; each plays its clip's .mp4 on loop, audio monitoring off. Set OBS's video frame rate to the clip's rate (Settings > Video) before streaming.",
+  "name": "Manifold Sync Clips",
+  "current_scene": "Sync 23.976p",
+  "current_program_scene": "Sync 23.976p",
+  "scene_order": [
+    {
+      "name": "Sync 23.976p"
+    },
+    {
+      "name": "Sync 24p"
+    },
+    {
+      "name": "Sync 25p"
+    },
+    {
+      "name": "Sync 29.97p"
+    },
+    {
+      "name": "Sync 30p"
+    },
+    {
+      "name": "Sync 50p"
+    },
+    {
+      "name": "Sync 59.94p"
+    }
+  ],
+  "sources": [
+    {
+      "id": "ffmpeg_source",
+      "versioned_id": "ffmpeg_source",
+      "name": "Manifold sync clip 23.976p",
+      "uuid": "30aa3cec-ee58-523a-a919-f1204511300e",
+      "settings": {
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-23.976p.mp4",
+        "is_local_file": true,
+        "looping": true,
+        "restart_on_activate": true,
+        "close_when_inactive": false,
+        "clear_on_media_end": false,
+        "hw_decode": false,
+        "speed_percent": 100
+      },
+      "mixers": 255,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "balance": 0.5,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "scene",
+      "versioned_id": "scene",
+      "name": "Sync 23.976p",
+      "uuid": "bc42e9d4-95ff-5fad-8690-3e8bd817fe05",
+      "settings": {
+        "custom_size": false,
+        "id_counter": 1,
+        "items": [
+          {
+            "name": "Manifold sync clip 23.976p",
+            "source_uuid": "30aa3cec-ee58-523a-a919-f1204511300e",
+            "visible": true,
+            "locked": true,
+            "id": 1,
+            "pos": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "rot": 0.0,
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "align": 5,
+            "bounds_type": 2,
+            "bounds_align": 0,
+            "bounds": {
+              "x": 1920.0,
+              "y": 1080.0
+            },
+            "crop_left": 0,
+            "crop_top": 0,
+            "crop_right": 0,
+            "crop_bottom": 0,
+            "scale_filter": "disable",
+            "blend_method": "default",
+            "blend_type": "normal"
+          }
+        ]
+      },
+      "mixers": 0,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "ffmpeg_source",
+      "versioned_id": "ffmpeg_source",
+      "name": "Manifold sync clip 24p",
+      "uuid": "cad646c2-5e87-55f9-bb66-c40a2cbef47e",
+      "settings": {
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-24p.mp4",
+        "is_local_file": true,
+        "looping": true,
+        "restart_on_activate": true,
+        "close_when_inactive": false,
+        "clear_on_media_end": false,
+        "hw_decode": false,
+        "speed_percent": 100
+      },
+      "mixers": 255,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "balance": 0.5,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "scene",
+      "versioned_id": "scene",
+      "name": "Sync 24p",
+      "uuid": "4dc715a9-8473-5afe-accb-b6f2779f75b0",
+      "settings": {
+        "custom_size": false,
+        "id_counter": 1,
+        "items": [
+          {
+            "name": "Manifold sync clip 24p",
+            "source_uuid": "cad646c2-5e87-55f9-bb66-c40a2cbef47e",
+            "visible": true,
+            "locked": true,
+            "id": 1,
+            "pos": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "rot": 0.0,
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "align": 5,
+            "bounds_type": 2,
+            "bounds_align": 0,
+            "bounds": {
+              "x": 1920.0,
+              "y": 1080.0
+            },
+            "crop_left": 0,
+            "crop_top": 0,
+            "crop_right": 0,
+            "crop_bottom": 0,
+            "scale_filter": "disable",
+            "blend_method": "default",
+            "blend_type": "normal"
+          }
+        ]
+      },
+      "mixers": 0,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "ffmpeg_source",
+      "versioned_id": "ffmpeg_source",
+      "name": "Manifold sync clip 25p",
+      "uuid": "2f64f868-0e23-55d6-9874-f3af9bc04304",
+      "settings": {
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-25p.mp4",
+        "is_local_file": true,
+        "looping": true,
+        "restart_on_activate": true,
+        "close_when_inactive": false,
+        "clear_on_media_end": false,
+        "hw_decode": false,
+        "speed_percent": 100
+      },
+      "mixers": 255,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "balance": 0.5,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "scene",
+      "versioned_id": "scene",
+      "name": "Sync 25p",
+      "uuid": "c648079f-6487-59f8-87ea-de44de06f878",
+      "settings": {
+        "custom_size": false,
+        "id_counter": 1,
+        "items": [
+          {
+            "name": "Manifold sync clip 25p",
+            "source_uuid": "2f64f868-0e23-55d6-9874-f3af9bc04304",
+            "visible": true,
+            "locked": true,
+            "id": 1,
+            "pos": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "rot": 0.0,
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "align": 5,
+            "bounds_type": 2,
+            "bounds_align": 0,
+            "bounds": {
+              "x": 1920.0,
+              "y": 1080.0
+            },
+            "crop_left": 0,
+            "crop_top": 0,
+            "crop_right": 0,
+            "crop_bottom": 0,
+            "scale_filter": "disable",
+            "blend_method": "default",
+            "blend_type": "normal"
+          }
+        ]
+      },
+      "mixers": 0,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "ffmpeg_source",
+      "versioned_id": "ffmpeg_source",
+      "name": "Manifold sync clip 29.97p",
+      "uuid": "7d3b6718-fd1e-5849-b7e2-cc4355123f43",
+      "settings": {
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-29.97p.mp4",
+        "is_local_file": true,
+        "looping": true,
+        "restart_on_activate": true,
+        "close_when_inactive": false,
+        "clear_on_media_end": false,
+        "hw_decode": false,
+        "speed_percent": 100
+      },
+      "mixers": 255,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "balance": 0.5,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "scene",
+      "versioned_id": "scene",
+      "name": "Sync 29.97p",
+      "uuid": "90194380-ac82-5918-8e9d-82031314dcda",
+      "settings": {
+        "custom_size": false,
+        "id_counter": 1,
+        "items": [
+          {
+            "name": "Manifold sync clip 29.97p",
+            "source_uuid": "7d3b6718-fd1e-5849-b7e2-cc4355123f43",
+            "visible": true,
+            "locked": true,
+            "id": 1,
+            "pos": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "rot": 0.0,
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "align": 5,
+            "bounds_type": 2,
+            "bounds_align": 0,
+            "bounds": {
+              "x": 1920.0,
+              "y": 1080.0
+            },
+            "crop_left": 0,
+            "crop_top": 0,
+            "crop_right": 0,
+            "crop_bottom": 0,
+            "scale_filter": "disable",
+            "blend_method": "default",
+            "blend_type": "normal"
+          }
+        ]
+      },
+      "mixers": 0,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "ffmpeg_source",
+      "versioned_id": "ffmpeg_source",
+      "name": "Manifold sync clip 30p",
+      "uuid": "e7174cad-7c66-57c0-bd79-304f51455419",
+      "settings": {
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-30p.mp4",
+        "is_local_file": true,
+        "looping": true,
+        "restart_on_activate": true,
+        "close_when_inactive": false,
+        "clear_on_media_end": false,
+        "hw_decode": false,
+        "speed_percent": 100
+      },
+      "mixers": 255,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "balance": 0.5,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "scene",
+      "versioned_id": "scene",
+      "name": "Sync 30p",
+      "uuid": "bc32c4dd-d690-5a8f-9782-55909f9cf6a0",
+      "settings": {
+        "custom_size": false,
+        "id_counter": 1,
+        "items": [
+          {
+            "name": "Manifold sync clip 30p",
+            "source_uuid": "e7174cad-7c66-57c0-bd79-304f51455419",
+            "visible": true,
+            "locked": true,
+            "id": 1,
+            "pos": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "rot": 0.0,
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "align": 5,
+            "bounds_type": 2,
+            "bounds_align": 0,
+            "bounds": {
+              "x": 1920.0,
+              "y": 1080.0
+            },
+            "crop_left": 0,
+            "crop_top": 0,
+            "crop_right": 0,
+            "crop_bottom": 0,
+            "scale_filter": "disable",
+            "blend_method": "default",
+            "blend_type": "normal"
+          }
+        ]
+      },
+      "mixers": 0,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "ffmpeg_source",
+      "versioned_id": "ffmpeg_source",
+      "name": "Manifold sync clip 50p",
+      "uuid": "58905ba2-713e-55b8-9251-5d0be3e24916",
+      "settings": {
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-50p.mp4",
+        "is_local_file": true,
+        "looping": true,
+        "restart_on_activate": true,
+        "close_when_inactive": false,
+        "clear_on_media_end": false,
+        "hw_decode": false,
+        "speed_percent": 100
+      },
+      "mixers": 255,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "balance": 0.5,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "scene",
+      "versioned_id": "scene",
+      "name": "Sync 50p",
+      "uuid": "6f146928-f5bc-5896-a125-74baa25f8b11",
+      "settings": {
+        "custom_size": false,
+        "id_counter": 1,
+        "items": [
+          {
+            "name": "Manifold sync clip 50p",
+            "source_uuid": "58905ba2-713e-55b8-9251-5d0be3e24916",
+            "visible": true,
+            "locked": true,
+            "id": 1,
+            "pos": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "rot": 0.0,
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "align": 5,
+            "bounds_type": 2,
+            "bounds_align": 0,
+            "bounds": {
+              "x": 1920.0,
+              "y": 1080.0
+            },
+            "crop_left": 0,
+            "crop_top": 0,
+            "crop_right": 0,
+            "crop_bottom": 0,
+            "scale_filter": "disable",
+            "blend_method": "default",
+            "blend_type": "normal"
+          }
+        ]
+      },
+      "mixers": 0,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "ffmpeg_source",
+      "versioned_id": "ffmpeg_source",
+      "name": "Manifold sync clip 59.94p",
+      "uuid": "9533b0df-ba56-540e-b379-f39edd20ce02",
+      "settings": {
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-59.94p.mp4",
+        "is_local_file": true,
+        "looping": true,
+        "restart_on_activate": true,
+        "close_when_inactive": false,
+        "clear_on_media_end": false,
+        "hw_decode": false,
+        "speed_percent": 100
+      },
+      "mixers": 255,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "balance": 0.5,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    },
+    {
+      "id": "scene",
+      "versioned_id": "scene",
+      "name": "Sync 59.94p",
+      "uuid": "eea9d495-327c-534c-92d0-f0f0453061c8",
+      "settings": {
+        "custom_size": false,
+        "id_counter": 1,
+        "items": [
+          {
+            "name": "Manifold sync clip 59.94p",
+            "source_uuid": "9533b0df-ba56-540e-b379-f39edd20ce02",
+            "visible": true,
+            "locked": true,
+            "id": 1,
+            "pos": {
+              "x": 0.0,
+              "y": 0.0
+            },
+            "rot": 0.0,
+            "scale": {
+              "x": 1.0,
+              "y": 1.0
+            },
+            "align": 5,
+            "bounds_type": 2,
+            "bounds_align": 0,
+            "bounds": {
+              "x": 1920.0,
+              "y": 1080.0
+            },
+            "crop_left": 0,
+            "crop_top": 0,
+            "crop_right": 0,
+            "crop_bottom": 0,
+            "scale_filter": "disable",
+            "blend_method": "default",
+            "blend_type": "normal"
+          }
+        ]
+      },
+      "mixers": 0,
+      "sync": 0,
+      "flags": 0,
+      "volume": 1.0,
+      "enabled": true,
+      "muted": false,
+      "monitoring_type": 0,
+      "private_settings": {}
+    }
+  ],
+  "groups": [],
+  "quick_transitions": [],
+  "transitions": [],
+  "current_transition": "Cut",
+  "transition_duration": 300,
+  "saved_projectors": [],
+  "preview_locked": false,
+  "scaling_enabled": false,
+  "scaling_level": 0,
+  "scaling_off_x": 0.0,
+  "scaling_off_y": 0.0,
+  "modules": {}
+}
