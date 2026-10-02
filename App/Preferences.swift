@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import StreamBookmarkModel
+import ManifoldCore
 
 /// How the transport controls are presented.
 /// Where **Open…** puts a file: into the window you invoked it from, or into a new one.
@@ -261,98 +263,9 @@ final class Preferences: ObservableObject {
 // bookmark's UUID (`KeychainStore.streams`), and the persisted `urlString` is stripped of it before
 // it is ever written — see `add` and `strippingPassphrase`.
 
-/// The transport a bookmarked URL uses, detected from the URL on save and stored per entry so a
-/// later implementation needs no migration. All three connect today — `.web` from the start,
-/// `.srt` from stage 3e, `.hls` once the AVPlayer pull route landed — and each arrived by
-/// changing `isSupported` and nothing else. See that property for what a single gate bought.
-enum StreamType: String, Codable {
-    case web    // http(s) — the default; there is no reliable WHEP signature, it is just an https URL
-    case srt    // srt://
-    case hls    // a path containing .m3u8
-
-    /// Detect from a URL. srt:// wins first, then an .m3u8 path, then the http(s) default. A URL
-    /// matching none of the accepted schemes is rejected before this is reached (see `validate`).
-    static func detect(_ url: URL) -> StreamType {
-        if url.scheme?.lowercased() == "srt" { return .srt }
-        if url.path.lowercased().contains(".m3u8") { return .hls }
-        return .web
-    }
-
-    /// Row label — reads naturally, never a protocol acronym, EXCEPT SRT, which broadcast people
-    /// know by name and expect to see. Deliberately never "WHEP".
-    var label: String {
-        switch self {
-        case .web: return "Web Stream"
-        case .srt: return "SRT"
-        case .hls: return "HLS"
-        }
-    }
-
-    /// ALL THREE CONNECT. SRT joined in stage 3e and HLS joins here — `type` has been stored per
-    /// entry since the beginning precisely so this line could change without a migration, and an
-    /// `.m3u8` bookmark saved months ago becomes connectable the moment this admits it. That
-    /// promise is now spent twice and it held both times.
-    ///
-    /// ⚠️ VERIFIED, NOT ASSUMED, and the check is worth restating because the value of a single
-    /// gate is exactly that it has no second copy. Admitting `.hls` here lights up every refusal
-    /// site at once, all four of which read THIS property and none of which name a transport:
-    ///
-    ///   1. `ContentView.streamBookmarkRows`  — the disabled menu row becomes a live Button
-    ///   2. `StreamBookmarksSheet.row`        — the Connect button and the tap gesture appear,
-    ///                                          the orange reason line reverts to the host, and
-    ///                                          the row's 0.55 opacity lifts
-    ///   3. `StreamBookmarksSheet.savedNotice`— "Saved. HLS — not yet supported." stops being said
-    ///   4. `StreamBookmarksSheet.pasteAndConnect` — "Connect without saving" stops refusing
-    ///
-    /// …plus `firstConnectable`, which gates the empty-state pill's default entry.
-    /// `firstConnectable(ofType:)` is unaffected: ⌃⌥H and ⌃⌥D name their transports explicitly.
-    var isSupported: Bool { true }
-
-    /// Honest greyed-row reason for an unsupported entry; nil when supported.
-    ///
-    /// ⚠️ KEPT, AND DELIBERATELY NOT DELETED NOW THAT NOTHING RETURNS A REASON. This is the seam a
-    /// FOURTH transport is detected on before it is implemented — the state `.srt` and `.hls` both
-    /// passed through, where a bookmark is saved, listed and honestly refused rather than rejected
-    /// at the door and lost. Deleting it would mean the next transport's detection-only stage has
-    /// to rebuild all four call sites above instead of returning a string.
-    var unsupportedReason: String? {
-        switch self {
-        case .web, .srt, .hls: return nil
-        }
-    }
-}
-
-/// One saved stream endpoint. `id` is stable across launches so SwiftUI list identity and per-row
-/// delete are unambiguous. `urlString` is stored verbatim and only ever handed to WHEPClient.connect
-/// — the host is derived for display, the full string is never shown or logged.
-///
-/// ⚠️ ADDING A FIELD HERE IS THE ONE MIGRATION HAZARD IN THIS FILE, AND IT IS OURS, NOT THE DISK'S.
-/// A new REQUIRED field — no default value, not Optional — makes every already-persisted entry
-/// undecodable (`DecodingError.keyNotFound`), for EVERY USER AT ONCE, on the first launch after
-/// that ship. Nothing about the failure is local to one bad install. So: new fields are Optional
-/// or defaulted, or they arrive with an explicit migration that reads the old shape first.
-/// `StreamBookmarkStore.storedDataUnreadable` is the backstop that stops the damage compounding
-/// when this rule is broken; it is not permission to break it, because it cannot recover the data
-/// — it can only decline to overwrite it.
-struct StreamBookmark: Codable, Identifiable {
-    let id: UUID
-    var name: String
-    var urlString: String
-    var type: StreamType
-
-    init(id: UUID = UUID(), name: String, urlString: String, type: StreamType) {
-        self.id = id; self.name = name; self.urlString = urlString; self.type = type
-    }
-
-    /// The URL AS PERSISTED — no passphrase, by construction (see `StreamBookmarkStore.add`). This
-    /// is the right URL to display, to inspect, and to detect a type from; it is NOT the one to
-    /// dial. `StreamBookmarkStore.connectURL(for:)` is, and it is the only thing that reassembles
-    /// the secret.
-    var url: URL? { URL(string: urlString) }
-
-    /// Host for secondary display. NEVER the path — it can carry the stream key.
-    var displayHost: String { url?.host ?? "—" }
-}
+// `StreamType` and `StreamBookmark` live in the `StreamBookmarkModel` leaf target
+// (Packages/ManifoldCore/Sources/StreamBookmarkModel), so `swift test` can decode a stored blob with
+// the real type (docs/AUDIO_RESAMPLER_DESIGN.md §19.8). The store below is unchanged.
 
 /// Why a pasted URL was rejected — distinct cases so the sheet can give a specific message rather
 /// than saving an entry that fails mysteriously later.
@@ -375,6 +288,10 @@ enum StreamValidationError: Error {
     /// nothing typed into the form fixes it — but unlike every other case, refusing is what
     /// PROTECTS the user's data rather than merely declining to store theirs.
     case storeUnreadable
+    /// The audio offset field (docs/AUDIO_RESAMPLER_DESIGN.md §19.8): not a whole number of ms, or
+    /// outside the steering's range. Checked at save, while the user is looking at the field.
+    case audioOffsetNotANumber
+    case audioOffsetOutOfRange
 
     var message: String {
         switch self {
@@ -391,6 +308,11 @@ enum StreamValidationError: Error {
             return "Couldn’t store the stream passphrase in your keychain, so this stream wasn’t saved."
         case .noLongerSaved:
             return "That stream was deleted, so there was nothing to update."
+        case .audioOffsetNotANumber:
+            return "Enter the audio offset as a whole number of milliseconds, e.g. 80 or −40."
+        case .audioOffsetOutOfRange:
+            let r = FrameEngine.liveAudioOffsetRangeMs
+            return "The audio offset must be between \(r.lowerBound) and +\(r.upperBound) ms."
         case .storeUnreadable:
             return """
                    Your saved streams can’t be read by this version, so nothing can be saved right \
@@ -647,8 +569,8 @@ final class StreamBookmarkStore: ObservableObject {
     /// leftover `?passphrase=` in a pasted URL is the older, likelier-stale value. Either way the
     /// URL is stripped, so exactly one of them survives and it is never the plist's copy.
     @discardableResult
-    func add(name: String, urlString: String,
-             passphrase: String? = nil) -> Result<StreamBookmark, StreamValidationError> {
+    func add(name: String, urlString: String, passphrase: String? = nil,
+             audioOffsetMs: Int? = nil) -> Result<StreamBookmark, StreamValidationError> {
         // ⚠️ BEFORE VALIDATION, AND BEFORE ANY KEYCHAIN WRITE. This is the one path that can reach
         // `persist()` while the list is empty, so it is the path on which the user's undecodable
         // saved streams actually get destroyed — see `storedDataUnreadable`. Refusing here (rather
@@ -677,7 +599,7 @@ final class StreamBookmarkStore: ObservableObject {
             }
 
             let bookmark = StreamBookmark(name: finalName, urlString: sanitized.absoluteString,
-                                          type: type)
+                                          type: type, audioOffsetMs: Self.storedAudioOffset(audioOffsetMs))
             if let secret {
                 // Keyed by the bookmark's own UUID, which is why the write happens here rather
                 // than in the sheet: this is where the id exists and where `delete` can match it.
@@ -743,7 +665,8 @@ final class StreamBookmarkStore: ObservableObject {
     /// was never actually changed.
     @discardableResult
     func update(_ bookmark: StreamBookmark, name: String, urlString: String,
-                passphrase: PassphraseEdit) -> Result<StreamBookmark, StreamValidationError> {
+                passphrase: PassphraseEdit,
+                audioOffsetMs: Int?) -> Result<StreamBookmark, StreamValidationError> {
         guard let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else {
             return .failure(.noLongerSaved)
         }
@@ -803,6 +726,7 @@ final class StreamBookmarkStore: ObservableObject {
             updated.name = finalName
             updated.urlString = sanitized.absoluteString
             updated.type = type
+            updated.audioOffsetMs = Self.storedAudioOffset(audioOffsetMs)
             bookmarks[index] = updated
             persist()
 
@@ -833,6 +757,40 @@ final class StreamBookmarkStore: ObservableObject {
     /// outlives the app, survives reinstalls, and is invisible in the UI that created it.
     /// `KeychainStore.delete` is a no-op when there is nothing stored, so this is safe for the
     /// common case of a bookmark that never had one.
+    // MARK: - The per-source audio offset (docs/AUDIO_RESAMPLER_DESIGN.md §19.4, §19.8)
+
+    /// "Save to Bookmark": persist a live session's audio offset into the bookmark it was connected
+    /// from. Only that field changes; the store's own whole-array write, with the same refusal over
+    /// undecodable saved data as every other write here.
+    @discardableResult
+    func setAudioOffset(_ ms: Int?, forBookmark id: UUID) -> Result<StreamBookmark, StreamValidationError> {
+        guard !storedDataUnreadable else { return .failure(.storeUnreadable) }
+        guard let index = bookmarks.firstIndex(where: { $0.id == id }) else { return .failure(.noLongerSaved) }
+        if let ms, !FrameEngine.liveAudioOffsetRangeMs.contains(ms) { return .failure(.audioOffsetOutOfRange) }
+        var updated = bookmarks[index]
+        updated.audioOffsetMs = Self.storedAudioOffset(ms)
+        bookmarks[index] = updated
+        persist()
+        return .success(updated)
+    }
+
+    /// 0 is stored as ABSENT: nil = 0, and a bookmark whose offset is 0 is byte-for-byte a bookmark
+    /// that never had one. "Never written unless the user sets it" then holds for a reset too.
+    static func storedAudioOffset(_ ms: Int?) -> Int? { ms == 0 ? nil : ms }
+
+    /// The sheet's field: blank = no offset; otherwise a whole number of ms inside the steering's
+    /// range. A typographic minus (−) is accepted, since that is what the hint and the badge print.
+    static func parseAudioOffset(_ text: String) -> Result<Int?, StreamValidationError> {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "−", with: "-")
+            .replacingOccurrences(of: " ms", with: "").replacingOccurrences(of: "ms", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        if t.isEmpty { return .success(nil) }
+        guard let v = Int(t) else { return .failure(.audioOffsetNotANumber) }
+        guard FrameEngine.liveAudioOffsetRangeMs.contains(v) else { return .failure(.audioOffsetOutOfRange) }
+        return .success(storedAudioOffset(v))
+    }
+
     func delete(_ bookmark: StreamBookmark) {
         bookmarks.removeAll { $0.id == bookmark.id }
         KeychainStore.streams.delete(bookmark.id.uuidString)

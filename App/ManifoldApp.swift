@@ -52,14 +52,6 @@ struct ManifoldApp: App {
         if ProcessInfo.processInfo.environment["MANIFOLD_PIN_RESAMPLER_RATIO"] == "1" {
             FrameEngine.setLiveAudioRatioPinned(true)
         }
-        // The per-source audio offset, stage A (docs/AUDIO_RESAMPLER_DESIGN.md §19.1): the start
-        // value of every live session, in ms. A testing hook behind the Debug menu's gate; REMOVED in
-        // stage B, which brings the bookmark field.
-        if let ms = ProcessInfo.processInfo.environment["MANIFOLD_AUDIO_OFFSET_MS"].flatMap(Double.init),
-           DebugMenuGate.isEnabled {
-            FrameEngine.liveAudioStartOffset = ms / 1000
-            NSLog("[AUDIO-OFFSET] MANIFOLD_AUDIO_OFFSET_MS: every live session starts at O = %+.1f ms", ms)
-        }
         #endif
         // FIRST LINE OF EVERY LOG, before anything else can emit. A log that cannot state which
         // build produced it is not evidence — see BuildInfo for why this is derived rather than
@@ -273,7 +265,6 @@ struct ManifoldApp: App {
                 Divider()
                 ResamplerRatioCommand()
                 ForcedVideoJumpCommand()
-                AudioOffsetCommand()
                 Divider()
                 NDIAudioWAVCaptureCommand()
             }
@@ -470,19 +461,6 @@ private struct ForcedVideoJumpCommand: View {
             NSLog("[DEBUG-SPLICE] no live SRT or WHEP clock — connect a push source first "
                 + "(NDI and HLS have no LiveClock)")
         }
-    }
-}
-
-/// Debug ▸ Audio Offset — the per-source audio offset, stage A (docs/AUDIO_RESAMPLER_DESIGN.md
-/// §19.1). ⚠️ TESTING HOOK, REMOVED IN STAGE B (the bookmark field and the ⌥[ / ⌥] nudges replace it).
-/// Steps the open live session's O; each change is one splice, or a refusal in the log.
-private struct AudioOffsetCommand: View {
-    var body: some View {
-        Button("Audio Offset +10 ms (later)") { FrameEngine.nudgeCurrentLiveAudioOffset(by: 0.010) }
-        Button("Audio Offset −10 ms (earlier)") { FrameEngine.nudgeCurrentLiveAudioOffset(by: -0.010) }
-        Button("Audio Offset +50 ms (later)") { FrameEngine.nudgeCurrentLiveAudioOffset(by: 0.050) }
-        Button("Audio Offset −50 ms (earlier)") { FrameEngine.nudgeCurrentLiveAudioOffset(by: -0.050) }
-        Button("Audio Offset Reset to 0") { FrameEngine.nudgeCurrentLiveAudioOffset(by: 0, reset: true) }
     }
 }
 

@@ -154,6 +154,10 @@ targets:
       # target so `swift test` can reach it. Used by App/Live/LiveDisplayRoute, NDI and HLS.
       - package: ManifoldCore
         product: DisplayProviders
+      # `StreamType` / `StreamBookmark` — a leaf target so `swift test` can decode a stored
+      # `streamBookmarks` blob with the real type. Used by Preferences, the sheet, ContentView, LiveSource.
+      - package: ManifoldCore
+        product: StreamBookmarkModel
       # The ADTS frame walker — a leaf target so `swift test` can reach it. Used by
       # App/SRT/SRTAudioDecoder only.
       - package: ManifoldCore

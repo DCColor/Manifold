@@ -1,6 +1,7 @@
 import SwiftUI
 import ManifoldCore
 import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
+import StreamBookmarkModel
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -936,10 +937,11 @@ struct ContentView: View {
         // has — rides in the `engine.metadata` observer further up, for the same type-checker
         // reason. See the note there.
         .sheet(isPresented: $showStreamBookmarks) {
-            StreamBookmarksSheet(store: .shared) { url in
+            StreamBookmarksSheet(store: .shared) { url, bookmark in
                 // Same connect+takeover path the chevron rows use; then close the sheet so the async
                 // result — a connect-error banner or live video — is visible in the main window.
-                connectToStreamURL(url)
+                // `bookmark` is nil for "Connect without saving": a session-only audio offset.
+                connectToStreamURL(url, name: bookmark?.name, bookmark: bookmark)
                 showStreamBookmarks = false
             }
         }
@@ -1883,7 +1885,7 @@ struct ContentView: View {
                     // Through the arbitration funnel, exactly like the shipping menu path. This
                     // used to call WHEPClient.connect directly and so retired nothing — a live SRT
                     // session stayed up and both pushed to the renderer.
-                    DeckRegistry.shared.connectLive(.web, from: deck, label: bookmark.name) {
+                    DeckRegistry.shared.connectLive(.web, from: deck, label: bookmark.name, bookmark: bookmark) {
                         LiveSource.connectWeb(to: url)
                     }
                 } else {
@@ -1962,7 +1964,9 @@ struct ContentView: View {
                 let saved = bookmark.flatMap { StreamBookmarkStore.connectURL(for: $0) }
                 // One lookup, used for BOTH the URL and the name another window would be shown —
                 // two lookups could disagree if the store changed between them.
-                DeckRegistry.shared.connectLive(.srt, from: deck, label: override != nil ? "SRT debug URL" : bookmark?.name) {
+                // The override has no bookmark, so its audio offset is a session value only (§19.8).
+                DeckRegistry.shared.connectLive(.srt, from: deck, label: override != nil ? "SRT debug URL" : bookmark?.name,
+                                                bookmark: bookmark) {
                     LiveSource.connectSRT(to: override ?? saved ?? Self.srtDebugTarget)
                 }
             }
@@ -2651,7 +2655,7 @@ struct ContentView: View {
                     if let url = StreamBookmarkStore.connectURL(for: bookmark) {
                         // The NAME, never the URL — a stream path can carry the stream key, and
                         // this is the label another window will show in its standing message.
-                        connectToStreamURL(url, name: bookmark.name)
+                        connectToStreamURL(url, name: bookmark.name, bookmark: bookmark)
                     }
                 }
             } else {
@@ -2704,18 +2708,20 @@ struct ContentView: View {
     /// be replaced by hand. The refusal it replaced (`NSLog("… not supported in this build")`)
     /// existed precisely because `isSupported` excluded HLS; both changed in the same pass, and
     /// they have to.
-    private func connectToStreamURL(_ url: URL, name: String? = nil) {
+    /// `bookmark`: the saved stream, when the connect came from one — its audio offset starts the
+    /// session (docs/AUDIO_RESAMPLER_DESIGN.md §19.8). nil = a session value only.
+    private func connectToStreamURL(_ url: URL, name: String? = nil, bookmark: StreamBookmark? = nil) {
         switch StreamType.detect(url) {
         case .web:
-            DeckRegistry.shared.connectLive(.web, from: deck, label: name) {
+            DeckRegistry.shared.connectLive(.web, from: deck, label: name, bookmark: bookmark) {
                 LiveSource.connectWeb(to: url)
             }
         case .srt:
-            DeckRegistry.shared.connectLive(.srt, from: deck, label: name) {
+            DeckRegistry.shared.connectLive(.srt, from: deck, label: name, bookmark: bookmark) {
                 LiveSource.connectSRT(to: url)
             }
         case .hls:
-            DeckRegistry.shared.connectLive(.hls, from: deck, label: name) {
+            DeckRegistry.shared.connectLive(.hls, from: deck, label: name, bookmark: bookmark) {
                 LiveSource.connectHLS(to: url)
             }
         }
@@ -3244,6 +3250,13 @@ struct ContentView: View {
                 // §6.7: this file's body is at the type-checker's limit.
                 if hasSource {
                     DisplayTransformControl(deck: deck, chrome: chrome)
+                }
+
+                // The per-source audio offset (docs/AUDIO_RESAMPLER_DESIGN.md §19.8): its control and
+                // its standing badge, while this window has a live source. One element, no modifiers,
+                // for the same reason as the line above.
+                if activeLiveSource != nil {
+                    AudioOffsetControl(model: deck.audioOffset)
                 }
 
                 Spacer()

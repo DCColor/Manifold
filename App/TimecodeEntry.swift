@@ -383,6 +383,16 @@ final class TransportKeyMonitor: ObservableObject {
         // ⌘/⌃/⌥ combinations belong to the menu bar and to the existing ⌃⌥ shortcut blocks, and they
         // keep working THROUGHOUT entry — ⌘W still closes the window with the overlay up, ⌃⌥T still
         // toggles the tray. Only bare and shifted keys are ours to consider.
+        // ── THE AUDIO OFFSET NUDGE (docs/AUDIO_RESAMPLER_DESIGN.md §19.8) — BEFORE THE ⌥ PASS-THROUGH ──
+        // ⌥] / ⌥[ = sound later / earlier by 1 ms, ⇧ for 10 ms, while this window has a live
+        // source. HERE, on the exact modifier flags and the physical key, and NOT as key equivalents:
+        // this file records AppKit's matcher not discriminating ⇧ on the arrows, and ⇧] / ⇧[ are
+        // the same hazard; and ⌥[ is a typing key (“) in a text field, which `isEditingText` above
+        // leaves alone. Consumed only while live: otherwise the chord falls through as before.
+        if let step = Self.audioOffsetNudge(event), let deck, DeckRegistry.shared.liveLabel(for: deck) != nil {
+            deck.audioOffset.nudge(byMs: step)
+            return true
+        }
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard mods.isDisjoint(with: [.command, .control, .option]) else { return false }
 
@@ -420,6 +430,23 @@ final class TransportKeyMonitor: ObservableObject {
         if Self.isPlus(characters),  begin(sign: .plus)  { return true }
         if Self.isMinus(characters), begin(sign: .minus) { return true }
         return false
+    }
+
+    /// The audio offset nudge for this key, ms, or nil: ⌥] +1, ⌥[ −1, ⇧⌥] +10, ⇧⌥[ −10 (§19.8).
+    /// Physical keys (ANSI 30 = ], 33 = [), with exactly ⌥ or ⇧⌥ held; Caps Lock is ignored.
+    static func audioOffsetNudge(_ event: NSEvent) -> Int? {
+        let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        let size: Int
+        switch mods {
+        case [.option]: size = 1
+        case [.option, .shift]: size = 10
+        default: return nil
+        }
+        switch event.keyCode {
+        case 30: return size
+        case 33: return -size
+        default: return nil
+        }
     }
 
     /// How many frames this arrow press should move, or nil if it is not an arrow step.

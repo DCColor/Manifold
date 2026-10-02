@@ -2416,9 +2416,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // Held by the steering, in its line; nothing is anchored yet, so a start value is placed by
         // the first anchor with no splice. The SDI read takes the same O, for this session only.
         audioTap.clearLiveReadOffset()
-        let startOffset = Self.liveAudioStartOffset
+        // The session value (the bookmark's, or what the user has nudged it to): every session this
+        // connect opens starts on it, so a transport's own reconnect keeps the user's offset.
+        let startOffset = liveAudioSessionOffset
         if startOffset != 0 { applyLiveAudioOffset(startOffset, steering: steering) }
-        Self.setCurrentLiveAudioOffsetEngine(self)
         // An input jump past the stage's bridge is the one input event that can step the content
         // error (§4.1 item 2), so it is on record for the splice it may cause. Set before the sink
         // exists, so before any `process`.
@@ -3357,45 +3358,28 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         case let .applied(_, new, _), let .pending(_, new):
             // The SDI read moves with the renderer (§19.1), crossfaded; live sessions only.
             audioTap.setLiveReadOffset(new)
+            liveAudioSessionOffset = new
         default: break
         }
         return outcome
     }
 
-    // ── TESTING HOOKS, STAGE A ONLY (removed in stage B, which brings the bookmark field and the
-    // nudge keys). The app sets these only under `#if DEBUG` behind `DebugMenuGate`. ──────────────
-    private nonisolated static let offsetHookLock = NSLock()
-    private nonisolated(unsafe) static var startOffset = 0.0
-    private nonisolated(unsafe) static weak var offsetEngine: FrameEngine?
-
-    /// O placed at each new live session's first anchor (`MANIFOLD_AUDIO_OFFSET_MS`). 0 = none.
-    public nonisolated static var liveAudioStartOffset: Double {
-        get { offsetHookLock.lock(); defer { offsetHookLock.unlock() }; return startOffset }
-        set { offsetHookLock.lock(); startOffset = newValue.isFinite ? newValue : 0; offsetHookLock.unlock() }
+    /// THE range of O, in whole ms, for the app's field and nudge: the steering's one constant
+    /// (`LiveAudioResampleSteering.userOffsetRange`), not a second copy of it.
+    public nonisolated static var liveAudioOffsetRangeMs: ClosedRange<Int> {
+        let r = LiveAudioResampleSteering.userOffsetRange
+        return Int((r.lowerBound * 1000).rounded())...Int((r.upperBound * 1000).rounded())
     }
 
-    private nonisolated static func setCurrentLiveAudioOffsetEngine(_ engine: FrameEngine?) {
-        offsetHookLock.lock(); offsetEngine = engine; offsetHookLock.unlock()
+    /// The SESSION value of O (seconds): what each `beginLiveAudio` starts at. The app sets it at
+    /// connect (from the bookmark, or 0) and `setLiveAudioOffset` keeps it current on every accepted
+    /// change, so a transport's reconnect inside one connect keeps the user's offset. Any thread.
+    public nonisolated var liveAudioSessionOffset: Double {
+        get { sessionOffsetLock.lock(); defer { sessionOffsetLock.unlock() }; return sessionOffset }
+        set { sessionOffsetLock.lock(); sessionOffset = newValue.isFinite ? newValue : 0; sessionOffsetLock.unlock() }
     }
-
-    private nonisolated static func clearCurrentLiveAudioOffsetEngine(ifIs engine: FrameEngine) {
-        offsetHookLock.lock(); if offsetEngine === engine { offsetEngine = nil }; offsetHookLock.unlock()
-    }
-
-    /// Debug ▸ Audio Offset: step the open live session's O by `delta` (or to 0 with `reset`).
-    /// Returns false when no live-audio session is open.
-    @discardableResult
-    public nonisolated static func nudgeCurrentLiveAudioOffset(by delta: Double, reset: Bool = false) -> Bool {
-        offsetHookLock.lock(); let engine = offsetEngine; offsetHookLock.unlock()
-        guard let engine else {
-            NSLog("[AUDIO-OFFSET] no live-audio session open — connect a live source first")
-            return false
-        }
-        let target = reset ? 0 : engine.liveAudioOffset + delta
-        NSLog("[AUDIO-OFFSET] debug item: %@ → request %+.1f ms",
-              reset ? "reset" : String(format: "%+.0f ms", delta * 1000), target * 1000)
-        return engine.setLiveAudioOffset(target) != nil
-    }
+    private nonisolated let sessionOffsetLock = NSLock()
+    private nonisolated(unsafe) var sessionOffset = 0.0
 
     /// The offset the mirror last applied — the constant cushion, or on RTP A/V the SR line's
     /// offset (step 4e-2) — readable on the main actor for `liveAudioDrift`.
@@ -3422,7 +3406,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         srFit?.finish()
         // The SDI read is shared with file playback: the session's O ends with it (§19.1).
         audioTap.clearLiveReadOffset()
-        Self.clearCurrentLiveAudioOffsetEngine(ifIs: self)
         #if DEBUG || MANIFOLD_TELEMETRY
         liveAudioProbe?.recordRateSet(rate: 0, mediaTime: .nan, origin: "endLiveAudio")
         // Writes the final window before the observations go, so the last 10 s are not lost.

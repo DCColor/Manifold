@@ -867,6 +867,38 @@ item. `swift test` passes. A local SRT session still logs exactly one non-zero `
 
 ---
 
+## ☐ PRE-SHIP: `testSteeringCallsItsCompanionWithoutReportingWindows` is flaky — the race is in the test
+
+**Status:** OPEN. Test only; the code under test is correct. **Raised:** 2026-10-01, the per-source audio
+offset's stage A (`AUDIO_RESAMPLER_DESIGN.md` §19.7). **Not changed then or in stage B** (§19.8),
+because those stages required the existing tests to pass unchanged.
+
+**What happens.** `SenderReportSlopeCrossCheckTests.testSteeringCallsItsCompanionWithoutReportingWindows`
+failed once in one full `swift test` run under build load: `XCTAssertEqual failed: ("2") is not equal
+to ("3")`, on the last assertion (companion lines logged vs facts seen).
+- 0 / 40 alone and 0 / 10 full runs, both at b35a810 and on the stage A tree. So it is load-dependent,
+  and it predates the offset work.
+
+**The race, in the test.**
+- The steering's `emitWindow` runs on a utility queue. For each window, it calls the companion, and
+  the companion appends `facts`; only after the companion RETURNS does `emitWindow` hand its line to
+  `log`, which appends `logged`.
+- The test waits until `facts.count >= 3` and then compares `logged`'s companion lines with
+  `facts.count`. It stops waiting on one counter before the other has caught up: the third window's
+  facts can be in while its line is not yet logged.
+
+**The fix.**
+- Wait for the counter the assertion reads: loop until `logged` holds ≥ 3 companion lines (with the
+  same 2 s deadline), and only then take both counts under the lock.
+- Or wait until the two counts agree. The assertion then states what the test means.
+- No change to `LiveAudioResampleSteering`: the facts-then-line order inside one utility-queue block
+  is deliberate (`emitWindow`'s comment), and nothing outside the test reads the two in step.
+
+**Done means:** the test waits on the logged count. 100 consecutive full `swift test` runs, while a
+Profile build runs alongside, show no failure of it.
+
+---
+
 ## ☐ OPEN 2026-09-28 — WHEP via MediaMTX: the SR line fit cannot follow a staircase of SR steps, so lip-sync drifts ~−64 ppm and the audio queue drains
 
 **Status:** ⚠️ **KNOWN LIMITATION FOR THIS RELEASE** (Robbie, 2026-09-29). Fix and fallback committed

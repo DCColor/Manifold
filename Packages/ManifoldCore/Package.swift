@@ -23,6 +23,8 @@ let package = Package(
         // depacketizer. ManifoldCore does not use it.
         .library(name: "RTCPWire", targets: ["RTCPWire"]),
         .library(name: "DisplayProviders", targets: ["DisplayProviders"]),
+        // Linked by the APP target directly (project.yml), for the saved-stream store and sheet.
+        .library(name: "StreamBookmarkModel", targets: ["StreamBookmarkModel"]),
         // Linked by the APP target directly (project.yml), for App/SRT's audio decoder.
         .library(name: "AACFraming", targets: ["AACFraming"])
     ],
@@ -142,6 +144,25 @@ let package = Package(
             name: "DisplayProvidersTests",
             dependencies: ["DisplayProviders"],
             path: "Tests/DisplayProvidersTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // `StreamType` and `StreamBookmark`, the persisted shape of a saved stream. A leaf target so
+        // `swift test` can decode a stored `streamBookmarks` blob with the REAL type, not a copy of it
+        // (the per-source audio offset's migration test, docs/AUDIO_RESAMPLER_DESIGN.md §19.8). The
+        // store and the sheet are app code; the app links this through the StreamBookmarkModel product.
+        .target(
+            name: "StreamBookmarkModel",
+            path: "Sources/StreamBookmarkModel",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "StreamBookmarkModelTests",
+            dependencies: ["StreamBookmarkModel"],
+            path: "Tests/StreamBookmarkModelTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

@@ -23,18 +23,24 @@
 //
 
 import SwiftUI
+import StreamBookmarkModel
+import ManifoldCore
 
 struct StreamBookmarksSheet: View {
     @ObservedObject var store: StreamBookmarkStore
     /// Connect to a URL. Injected so the sheet holds no engine/WHEP handle and the caller owns the
-    /// source takeover and dismissal.
-    var onConnect: (URL) -> Void
+    /// source takeover and dismissal. The bookmark rides along (nil for "Connect without saving"),
+    /// so its audio offset can start the session (docs/AUDIO_RESAMPLER_DESIGN.md §19.8).
+    var onConnect: (URL, StreamBookmark?) -> Void
     @Environment(\.dismiss) private var dismiss
 
     // The composer fields — shared by "Add a stream" and "Edit stream". See `editing`.
     @State private var newName = ""
     @State private var newURL = ""
     @State private var newPassphrase = ""
+    /// The audio offset field, as typed (ms). Blank = none. Parsed and range-checked at save by
+    /// `StreamBookmarkStore.parseAudioOffset`, against the steering's one constant.
+    @State private var newAudioOffset = ""
     @State private var addError: String?
     @State private var savedNotice: String?
 
@@ -153,6 +159,13 @@ struct StreamBookmarksSheet: View {
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(.secondary.opacity(0.15), in: Capsule())
                         .foregroundStyle(.secondary)
+                    // The stored audio offset, when there is one (§19.8): visible in the list, not
+                    // only behind Edit.
+                    if let ms = bookmark.audioOffsetMs, bookmark.type != .hls {
+                        Text(LiveAudioOffsetModel.indicator(ms))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 // Host only — never the path.
                 Text(bookmark.type.unsupportedReason ?? bookmark.displayHost)
@@ -191,7 +204,7 @@ struct StreamBookmarksSheet: View {
         // and this is the call that puts the Keychain's copy back for the duration of the dial.
         guard bookmark.type.isSupported,
               let url = StreamBookmarkStore.connectURL(for: bookmark) else { return }
-        onConnect(url)
+        onConnect(url, bookmark)
     }
 
     // MARK: Composer — add, or edit in place (save, never connect)
@@ -210,6 +223,7 @@ struct StreamBookmarksSheet: View {
                 passphraseField
                 if editing != nil { passphraseRemovalControl }
             }
+            audioOffsetField
             if willDropStoredPassphrase {
                 Text("This is no longer an SRT address, so its stored passphrase will be removed when you save.")
                     .font(.caption).foregroundStyle(.orange)
@@ -310,6 +324,7 @@ struct StreamBookmarksSheet: View {
         return !newName.trimmingCharacters(in: .whitespaces).isEmpty
             || !newURL.trimmingCharacters(in: .whitespaces).isEmpty
             || !newPassphrase.isEmpty
+            || !newAudioOffset.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// True once what has been typed parses as an srt:// URL. Uses the SAME `StreamType.detect` the
@@ -330,6 +345,39 @@ struct StreamBookmarksSheet: View {
         guard let editing, editing.type == .srt else { return false }
         guard case .success(let parsed) = StreamBookmarkStore.validate(newURL) else { return false }
         return parsed.type != .srt
+    }
+
+    /// The per-source audio offset (docs/AUDIO_RESAMPLER_DESIGN.md §19.4, §19.8). Shown for every
+    /// type, and DISABLED with its note for HLS: Apple's player owns that audio, so an offset would
+    /// be a control that does nothing. The hint is one line.
+    @ViewBuilder private var audioOffsetField: some View {
+        let range = FrameEngine.liveAudioOffsetRangeMs
+        HStack(spacing: 8) {
+            Text("Audio offset")
+            TextField("0", text: $newAudioOffset)
+                .frame(width: 64)
+                .multilineTextAlignment(.trailing)
+                .disabled(isEnteringHLS)
+            Text("ms").foregroundStyle(.secondary)
+        }
+        .opacity(isEnteringHLS ? 0.45 : 1)
+        Text(isEnteringHLS
+             ? "Not for HLS — Apple’s player owns the audio."
+             : "Positive = sound later, negative = earlier (\(LiveAudioOffsetModel.signed(range.lowerBound)) to \(LiveAudioOffsetModel.signed(range.upperBound)) ms).")
+            .font(.caption).foregroundStyle(.secondary)
+            .wrapsInsteadOfClipping()
+    }
+
+    /// True once what has been typed parses as an HLS URL (`StreamType.detect`, as the save path).
+    private var isEnteringHLS: Bool {
+        let trimmed = newURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), url.scheme != nil else { return false }
+        return StreamType.detect(url) == .hls
+    }
+
+    /// The field's value for a save, or the reason it cannot be saved. HLS saves none.
+    private func parsedAudioOffset() -> Result<Int?, StreamValidationError> {
+        isEnteringHLS ? .success(nil) : StreamBookmarkStore.parseAudioOffset(newAudioOffset)
     }
 
     @ViewBuilder private var passphraseField: some View {
@@ -419,9 +467,14 @@ struct StreamBookmarksSheet: View {
     // MARK: Save — add or update, decided by `editing`
 
     private func save() {
+        let offset: Int?
+        switch parsedAudioOffset() {
+        case .success(let v): offset = v
+        case .failure(let e): savedNotice = nil; addError = e.message; return
+        }
         if let editing {
             switch store.update(editing, name: newName, urlString: newURL,
-                                passphrase: passphraseEdit()) {
+                                passphrase: passphraseEdit(), audioOffsetMs: offset) {
             case .success(let b):
                 addError = nil
                 endEditing()
@@ -432,9 +485,9 @@ struct StreamBookmarksSheet: View {
             }
         } else {
             switch store.add(name: newName, urlString: newURL,
-                             passphrase: isEnteringSRT ? newPassphrase : nil) {
+                             passphrase: isEnteringSRT ? newPassphrase : nil, audioOffsetMs: offset) {
             case .success(let b):
-                addError = nil; newName = ""; newURL = ""
+                addError = nil; newName = ""; newURL = ""; newAudioOffset = ""
                 clearPassphraseEntry()
                 // Saved, but say plainly if it cannot connect yet — it is still listed.
                 savedNotice = b.type.isSupported ? nil : (b.type.unsupportedReason.map { "Saved. \($0)." })
@@ -463,6 +516,7 @@ struct StreamBookmarksSheet: View {
         editing = bookmark
         newName = bookmark.name
         newURL = bookmark.urlString      // the STORED URL, which by construction carries no secret
+        newAudioOffset = bookmark.audioOffsetMs.map(String.init) ?? ""
         clearPassphraseEntry()           // never prefilled — see `passphraseField`
         removePassphrase = false
         addError = nil
@@ -478,7 +532,7 @@ struct StreamBookmarksSheet: View {
     /// `savedNotice`, so `save()` can set one immediately afterwards.
     private func endEditing() {
         editing = nil
-        newName = ""; newURL = ""
+        newName = ""; newURL = ""; newAudioOffset = ""
         clearPassphraseEntry()
         removePassphrase = false
         addError = nil
@@ -515,7 +569,7 @@ struct StreamBookmarksSheet: View {
         case .success(let (url, type)):
             guard type.isSupported else { pasteError = type.unsupportedReason; return }
             pasteError = nil
-            onConnect(url)
+            onConnect(url, nil)
         case .failure(let e):
             pasteError = e.message
         }

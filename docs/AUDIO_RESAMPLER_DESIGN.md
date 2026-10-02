@@ -4442,7 +4442,251 @@ Opus, published over RTSP; Manifold on the `MediaMTX Whip` bookmark, chosen by U
   - a change during a starvation hold or recovery, live;
   - a Release-build run (Release has no Debug menu, so it needs stage B's controls).
 - **Stage B removes** `MANIFOLD_AUDIO_OFFSET_MS`, Debug ▸ Audio Offset,
-  `FrameEngine.liveAudioStartOffset` and `nudgeCurrentLiveAudioOffset`.
+  `FrameEngine.liveAudioStartOffset` and `nudgeCurrentLiveAudioOffset`. (Done, §19.8.)
+
+### 19.8 Stage B built: the bookmark field, the live nudge, the indicator — 2026-10-01 (unattended; uncommitted)
+
+On top of stage A (`98d1f69`).
+
+**Decided by Robbie (2026-10-01):**
+- Range −250…+500 ms (stage A's constant). O > 0 = sound later.
+- Nothing is drawn over the picture, as for the Bypass marker (COLOR_MANAGEMENT_FINDINGS.md §6.8).
+  The indicator is a control-bar badge plus the window-title suffix " — A/V +80 ms".
+- Full screen has no marker: an accepted limit, as for Bypass.
+
+#### What was built
+
+| part | where | rule |
+|---|---|---|
+| **the stored value** | `StreamBookmark.audioOffsetMs: Int?` in the new leaf target `StreamBookmarkModel` | Optional, nil = 0. 0 is stored as absent (`StreamBookmarkStore.storedAudioOffset`), so a bookmark reset to 0 is byte-for-byte one that never had an offset |
+| **the test's home** | `Packages/ManifoldCore/Sources/StreamBookmarkModel`, `Tests/StreamBookmarkModelTests` | see below |
+| **the sheet field** | `StreamBookmarksSheet.audioOffsetField` | "Audio offset [ ] ms". Hint, one line: "Positive = sound later, negative = earlier (−250 to +500 ms)." Parsed and range-checked at Save (`StreamBookmarkStore.parseAudioOffset`) against `FrameEngine.liveAudioOffsetRangeMs`, which is derived from the steering's one constant. The saved value also shows on the bookmark's row ("A/V +80 ms") |
+| **the session value** | `LiveAudioOffsetModel`, one per window (`WindowDeck.audioOffset`) | set at connect by `DeckRegistry.connectLive`, the one funnel, from the bookmark (or 0), before the transport opens: the first anchor places it with no splice. `FrameEngine.liveAudioSessionOffset` keeps it for every audio session the connect opens (a transport's own reconnect keeps it) |
+| **the nudge** | `TransportKeyMonitor.audioOffsetNudge` | ⌥] / ⌥[ = ±1 ms, ⇧ = ±10 ms, while the window has a live source and no text field is being edited. Exact modifier flags and physical keys (ANSI 30 / 33), not key equivalents |
+| **the control** | `AudioOffsetControl`, in the control bar while live | "A/V" menu: the four nudges (keys named in the titles), Reset to 0 ms, **Save +80 ms to "…"**, Revert to Saved. Not a saved stream: "this offset lasts for this connection only" |
+| **the badge** | the same view, beside the menu | O ≠ 0 only: filled cyan capsule (sRGB 0.35 / 0.80 / 1.00), black "A/V +80 ms". Nothing at O = 0 |
+| **the title** | `WindowDeck.windowTitle`, case 5 | " — A/V +80 ms" before any " — Bypass", while this window owns a live source and O ≠ 0 |
+| **refusals** | `LiveAudioOffsetModel.set` → `engine.playbackNotice` | whole or not at all, in plain words, in the window's notice banner (auto-dismisses after 9 s) |
+| **HLS** | model `isAvailable`; the control; the sheet field | no offset: the control reads "A/V offset — not on HLS", greyed; the sheet field is disabled with "Not for HLS — Apple's player owns the audio."; a nudge says so |
+| **⌃⌥D override** | `ContentView`, ⌃⌥D | no bookmark, so a session value only (the menu has no Save). ⌃⌥D's own bookmark path and ⌃⌥H pass their bookmark |
+| **stage A hooks removed** | `ManifoldApp.swift`, `FrameEngine` | `MANIFOLD_AUDIO_OFFSET_MS`, Debug ▸ Audio Offset, `liveAudioStartOffset`, `nudgeCurrentLiveAudioOffset` and the current-engine registry behind it |
+| **flaky test** | `docs/BUGS.md`, pre-ship | `testSteeringCallsItsCompanionWithoutReportingWindows`: the race and the fix written up; the test is not changed |
+
+**The test's home: a leaf package target, not an app test target.**
+- `StreamType` and `StreamBookmark` moved verbatim from `App/Preferences.swift` into
+  `StreamBookmarkModel`, a leaf target the app links as a product, like `DisplayProviders` (and
+  `project.yml` lists it).
+- So the test decodes with the REAL type, inside `swift test` with the rest, with no app host,
+  keychain or licence prompt.
+- An app test target would need `xcodebuild test` with the app as host, which raises the unsigned
+  build's licence prompt: not something that runs unattended. The store (`StreamBookmarkStore`) stays
+  in the app.
+
+**The chord check (asked for before choosing keys): no conflict.**
+- ⌥] ⌥[ ⇧⌥] ⇧⌥[ are bound nowhere:
+  - none of the `.keyboardShortcut`s in App/ (all ⌃⌥ letters or digits, ⌘ menu items, or bare
+    keys);
+  - no `CommandMenu` (Debug, Color, View, File) and no macOS standard menu item;
+  - `TransportKeyMonitor` passes every ⌘/⌃/⌥ chord through.
+- **Nearest neighbours:** ⌃⌥[ / ⌃⌥] step LiveClock's target depth (`stepLiveTargetDepth`). They are
+  compiled only in the **Debug** configuration (`MANIFOLD_CONFIG_DEBUG`), not in Profile or
+  Release, and carry ⌃, so they are different chords.
+- **Two hazards, avoided:**
+  - AppKit's key-equivalent matcher ignores ⇧ on the arrow keys (TimecodeEntry.swift records it);
+    brackets are the same risk, so the nudge reads the exact flags in the key monitor. Measured
+    live: ⌥] → +1, ⌥[ → −1, ⇧⌥] → +10, each one change in the log.
+  - ⌥[ types “ in a text field: the nudge is skipped while a field is being edited.
+- **For the UI review:** physical keys. On a layout where [ and ] sit elsewhere (German: Ü and +),
+  the chord is ⌥ plus the key in the US bracket position.
+
+#### O = 0 is still b35a810
+
+- `swift test`: **161 / 161** (stage A's 158, plus 3 bookmark tests). The pre-existing flake did not
+  recur.
+- Replays rebuilt from the final tree against the b35a810 outputs (§19.7's set, same tools): **59 /
+  59 files byte-identical.**
+- Builds: Profile `.build-cc/offsetB-Profile`, Release `.build-cc/offsetB-Release`; no errors, no
+  warnings in any file touched.
+
+#### The bookmark round trip
+
+- `StreamBookmarkMigrationTests` (3), on a synthetic pre-feature blob in the stored shape (a real
+  blob carries stream URLs, so none is committed):
+  - every existing field equal, entry by entry; the new field nil;
+  - re-encoded by the new type, byte-identical (sorted keys) to the pre-feature type's encoding,
+    with no `audioOffsetMs` key;
+  - a set value round-trips and only that entry carries the key; cleared, the key goes;
+  - a new blob still decodes as the pre-feature type (going back a build loses nothing).
+- **The real stored blob, read-only** (`defaults export`, scratch tool, contents never printed):
+  1196 bytes, 7 entries, all four pre-feature keys only; decoded and re-encoded, every field of
+  every entry equal; no `audioOffsetMs` key appears.
+- **Save to Bookmark, live, against the real key.** `streamBookmarks` was read and stashed first
+  (CLAUDE.md), byte for byte.
+  - The save wrote `"audioOffsetMs": 80` on the MediaMTX entry only; the other six were field-for-field
+    unchanged.
+  - The sheet then showed it on the row and in the field (C01).
+  - Afterwards, with Manifold quit, the stash was written back and read again: byte-identical
+    (sha256 4466c076…).
+
+#### The UI, rendered — screenshots in `~/Desktop/manifold-shots/stageB/`
+
+Window captures (`screencapture -l`). The overlay HUD was woken with a pointer move. Pixel check:
+- **Cyan** = the badge's colour, any profile within tolerance (R < 140, G 165–230, B ≥ 225).
+- **Amber** = the banner's warning triangle and border. The window's own yellow traffic light alone
+  gives 32.
+
+| shot | state | title read back | cyan px (box) | amber px |
+|---|---|---|---|---|
+| A01 | WHEP, O = 0 | MediaMTX Whip - Locla | **0** | 32 |
+| A02 | ⌥] ⌥[ then ⇧⌥] ×8 → +80 | … **— A/V +80 ms** | **1253** (x 1250–1339, y 1032–1050: the control bar) | 32 |
+| A03 | the A/V menu after Save: Save and Revert greyed | … — A/V +80 ms | — (rect capture) | — |
+| A05 | ⇧⌥[ ×12 → −40 | … **— A/V −40 ms** | 1273 | 32 |
+| A06 | ⇧⌥] ×4 → 0 | MediaMTX Whip - Locla | **0** | 32 |
+| B02 | SRT (⌃⌥D override), −151 ms, advance refused, banner | SRT debug URL — A/V −151 ms | 1317 | **113** |
+| B03 | the menu on a connect with no bookmark: "Not a saved stream: …", no Save | — | — | — |
+| B04 | +500, then ⌥] refused: "The audio offset can be set from −250 to +500 ms. It stays at +500 ms." | … — A/V +500 ms | 1351 | 113 |
+| D01 | SRT, **"Can move sound earlier by at most 1 ms on this stream right now. It stays at −160 ms."** | … — A/V −160 ms | 1335 | 113 |
+| C01 | sheet, editing MediaMTX: field 80, hint; the row shows "A/V +80 ms" | — | — | — |
+| C02 | sheet, editing MTX HLS: field greyed, "Not for HLS — Apple's player owns the audio." | — | — | — |
+| C03 | sheet, 600 typed, Save Changes: red "The audio offset must be between -250 and +500 ms."; nothing saved | — | — | — |
+| C04 | HLS connected: "A/V offset — not on HLS", greyed; no badge | MTX HLS | 0 | 32 |
+| C05 | HLS, ⌥]: banner "No audio offset on HLS — Apple's player owns the audio." | MTX HLS | 0 | 113 |
+
+- **Every change was one splice and no write.** A (WHEP): 26 changes, 1 timebase write, 0 coarse
+  events. A2: 41 changes, 1 write, 0 coarse events. B, D: each accepted press one `ACCEPTED` line.
+- The cyan box is the same 18-pixel-high band on the control bar in every shot. Nothing was
+  drawn over the picture.
+
+#### The long WHEP run: the level hold re-bases on a change, live
+
+ffmpeg → MediaMTX → WHEP (`offsetB-whep-level.manifold.log`, 19:36–19:52, 16 min connected).
+- **One continuous 30-min fixture.** `ref-nob.ts` ×5 through ffmpeg's concat filter, H.264
+  constrained baseline + Opus, published `-c copy`.
+- ⚠️ **Why not `-stream_loop`:** the first attempt (`offsetB-whep-long`, 17 min) looped the 360 s
+  file. Every wrap jolted the line (i +115 ppm saturated at 340 s, +497 ppm at 721 s), and with
+  start-up drift no settled 60 s span formed until 851–911 s, after the last change. **Stage A's
+  §19.7 WHEP run used the same loop**, and was too short to reach a wrap. Soaks should use one
+  continuous file.
+- The changes were keyed to the `LEVEL REFERENCE` line (the same MediaMTX as §19.7, still
+  `useAbsoluteTimestamp: true`).
+
+| time | event | renderer depth (window median) | heard A/V | level hold |
+|---|---|---|---|---|
+| 220 s | **LEVEL REFERENCE: 417.8 ms** (span 160–220 s, integrator moved 6.8 ppm) | 417.8 | −0.3…+0.2 ms | reference set |
+| 290 s | +80 (⇧⌥] ×8) | 418 → 499 | +80.7 | window excluded, re-based |
+| 591–601 s | −40 (⇧⌥[ ×12) | → 424, then 378 | −40 | excluded, re-based |
+| 902–922 s | the refusal probe, ⇧⌥[ to −250 | → 202 at −250 | −220 → −250 | excluded, re-based |
+
+- **Six slope cross-checks after the first change** (one a minute): SR −0.00 ppm against
+  renderer-depth +0.13…+0.68 ppm; **queue level −0.2…+0.1 ms from the session start**.
+- **The summary:** "session-start level **167.8 ms** … SR-line level error last −0.3 ms / worst
+  +0.8 ms, never engaged · 6 window(s) excluded, **6 audio-offset change(s) re-based**".
+  - 167.8 = 417.8 + 80 − 120 − 210: the reference moved by every change exactly.
+  - Without the re-base, the +80 alone would have read as an 80 ms level error, and WOULD ENGAGE 180 s
+    later (the offline test's control case).
+- **The steering:** 41 changes, 1 timebase write, 0 coarse events; window e medians within ±1.1 ms
+  except the change windows (−2.2 ms).
+- **On WHEP the advance never refused.** The ~418 ms queue left ≥ 160 ms even at −250, so the
+  range limit answered first. The refusal wording was shown on local SRT (B02, D01).
+
+#### Found — for Robbie's decision, nothing changed for them
+
+1. ⚠️ **"They do not auto-hide" holds for the title, not for the badge.**
+   - The badge sits in the control bar. The default overlay HUD auto-hides it after a few seconds
+     without the pointer, exactly as it does the Bypass badge (COLOR_MANAGEMENT §6.8, its open
+     question).
+   - Docked mode shows it permanently. The title suffix is the standing marker.
+   - Making the badge standing in overlay mode needs either the HUD staying up while O ≠ 0, or
+     drawing over the picture. That is a design call, not made here.
+2. ⚠️ **"At most N ms" is an instantaneous figure.**
+   - D01 said "at most 1 ms" (1.3 ms, queue 161.3 ms). The next 1 ms press, 3 s later, was refused
+     (queue 145.7 ms).
+   - The queue moves by up to a packet (an AAC frame, ~21 ms on SRT) between enqueues, so the figure
+     can promise a few ms the next press cannot get.
+   - Options:
+     - report from the window's low-water instead of the instantaneous queue (conservative; a stage A
+       change);
+     - or keep it, and word it "about N ms".
+3. **The refusal is shown in the notice banner, which is drawn over the top of the picture** for 9 s,
+   as every connect error already is. The no-overlay decision was read as covering the standing
+   indicator, not a transient notice. Say if it should go elsewhere.
+4. **The sheet's range error sits at the fold** of the 540 pt list (C03: visible, near the bottom
+   edge). It prints "-250" with an ASCII hyphen where the hint and the badge use "−".
+5. **One launch stalled** before `[LICENSE]` (an unsigned Profile build; the launch-blocking keychain
+   stall in BUGS.md), and a relaunch was clean. Not this change.
+
+#### Monday — the attended session (Robbie)
+
+**Build:** `.build-cc/offsetB-Profile/Build/Products/Profile/Manifold.app`.
+- Launch it by double-click: deny the licence prompt; allow the stream-passphrase prompt if one
+  appears.
+- **Stay connected for the whole of each block.** A disconnect starts a new session, and its
+  offset with it.
+
+**0. Set-up (≈ 10 min)**
+1. Sender OBS (websocket 4455), scene `BLIPS_NOISE`. **Press play on `BEEPS`** (loop on) and
+   leave it playing until block 3 ends. Turn on DistroAV's NDI output.
+2. Manifold's volume up, not muted.
+3. Recorder OBS, profile "Recorder", collection "AV Capture", 60 fps (AV_SYNC_FINDINGS.md §1.2). Do
+   not start Audio Hijack yet: started before Manifold connects, it can quit or relaunch Manifold.
+
+**1. NDI from OBS, with changes (≈ 10 min)**
+1. Manifold: Connect Stream… (or the streaming chevron) ▸ the OBS NDI source.
+   - The log should show `[AUDIO-OFFSET] connect (ndi) — session value 0 ms (no saved stream: this
+     connection only)`.
+2. Now start Audio Hijack. Re-pick Manifold in the recorder's macOS Audio Capture, and run the
+   5-second preflight (beeps about −28 dB).
+3. Start recording in the recorder. 60 s at 0. Then, 60 s on each value:
+   - ⇧⌥] ×8 → +80;
+   - ⇧⌥] ×12 → +200;
+   - ⇧⌥[ ×24 → −40;
+   - A/V menu ▸ Reset to 0 ms.
+
+   Stop recording.
+4. Pass:
+   - `c12.py` on the capture: each plateau moves by its ΔO within one frame.
+   - The log: one `AUDIO OFFSET … ACCEPTED` per press, and none of `NDI caller re-anchor`. The END
+     line: `timebase writes 1` (plus one per Desktop Audio Lead change, if any), coarse 0.
+   - Audio Hijack: no mute at the change times (a change writes no rate).
+5. Leave NDI connected for block 2.
+
+**2. DeckLink SDI during the live session (≈ 15 min), still on NDI**
+1. DeckLink output on (⌃⌥O, or the DeckLink control). DeckLink options ▸ Audio: **SDI**. Watch and
+   listen on the SDI monitor.
+2. **The crossfade:** ⇧⌥] ×20 → +200, one press a second. Each change should be smooth on SDI: no
+   click, no gap.
+   - In the log, no `SILENCE · ring empty at the cursor (underrun)` and no `snapping source cursor`
+     at the presses.
+3. **SDI moves with the desktop.** The two cannot be heard together: the destination is SDI or
+   Computer, never both.
+   - At +200, judge lip-sync on the SDI monitor: sound clearly late.
+   - DeckLink options ▸ Audio: Computer. The same +200 on the Mac.
+   - Back to SDI. A/V menu ▸ Reset to 0 ms: both back in sync.
+4. **An advance beyond what the tap holds.** From 0, ⇧⌥[ once a second until the banner refuses
+   ("Can move sound earlier by at most …").
+   - At each step, listen on SDI and watch the log for `SILENCE · ring empty` / `underrun`.
+   - Note the most negative O that plays clean on SDI, against the renderer's refusal point. Expected:
+     a gap on SDI if the tap's lead is shorter than the renderer's. Not yet measured.
+5. **Offset gone after the session.** Leave O at a clearly non-zero value (e.g. +200), then
+   disconnect NDI (⌃⌥⇧N).
+   - With DeckLink output still on and SDI the destination, open
+     `~/Desktop/Manifold-Test-Sources/criterion12-flash-beep-25p-60s.mov` and press play.
+   - SDI must be in sync as before the session. The log has no `AUDIO OFFSET` line for the file.
+
+**3. One device capture of a few changes.** Block 1's recorder capture is it. If block 1 was cut short,
+repeat its step 3 on MediaMTX WHEP: OBS profile `MediaMTX Local`, Start Streaming, Manifold ▸ the
+`MediaMTX Whip` bookmark.
+
+**4. The UI review (≈ 15 min)**
+- The badge's place: right of the display-transform control. Its colour (cyan, distinct from Bypass
+  amber). And question 1 above: the badge hides with the overlay HUD.
+- The keys under the fingers, including holding one down (auto-repeat makes one change per repeat,
+  and each is a splice).
+- The A/V menu's wording; Save / Revert to Saved; the "not a saved stream" line on NDI.
+- The sheet: the field, the hint, the range error at the fold (question 4), the HLS note.
+- The refusal banner's wording and place (questions 2 and 3).
+- Full screen: confirm there is no marker (the accepted limit), and that the title marker returns on
+  leaving full screen.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 

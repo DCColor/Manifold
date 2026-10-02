@@ -40,6 +40,7 @@
 //
 
 import Foundation
+import StreamBookmarkModel
 
 /// A live (non-file) source that can own the renderer. At most one is ever connected — that is
 /// the invariant `retireActive` maintains.

@@ -73,6 +73,7 @@ import Combine
 import CoreMedia   // CMTimeGetSeconds — the NDI desktop-audio timebase read below
 import UniformTypeIdentifiers
 import ManifoldCore
+import StreamBookmarkModel
 
 // MARK: - Exclusive devices
 
@@ -252,6 +253,11 @@ final class WindowDeck: ObservableObject {
     /// chrome states size independently — the constraint reads THIS deck's `WindowChrome`.
     let sizer = WindowSizer()
 
+    /// This window's per-source audio offset for its live connect (docs/AUDIO_RESAMPLER_DESIGN.md
+    /// §19.8): the session value, the bookmark it came from, the indicator's words. Set by
+    /// `DeckRegistry.connectLive`, edited by the nudge keys and `AudioOffsetControl`.
+    private(set) lazy var audioOffset = LiveAudioOffsetModel(deck: self)
+
     /// What this deck is allowed to do. THE ARBITER OWNS THIS — see `DeckRegistry`.
     @Published fileprivate(set) var gate = DeckGate()
 
@@ -300,6 +306,12 @@ final class WindowDeck: ObservableObject {
     ///      ⚠️ Full screen has no marker at all: the title bar is hidden, the control bar
     ///      auto-hides, and the alternative is drawing over the picture. Accepted limit, §6.8.
     ///
+    ///   5. **A live stream with a per-source audio offset appends " — A/V +80 ms"**, before any
+    ///      Bypass suffix, whenever O ≠ 0 (docs/AUDIO_RESAMPLER_DESIGN.md §19.8). Same reasoning as
+    ///      case 4: the control-bar badge hides with the overlay HUD, this does not, and nothing is
+    ///      drawn over the picture. Only while this deck owns a live source, so a value left in the
+    ///      model after a disconnect never shows. Full screen has no marker: the same accepted limit.
+    ///
     /// ⚠️ NEVER A URL, for a stream. A stream path can carry the stream key, and this string goes
     /// into the Window menu, into Mission Control, and into any screenshot of either. That is the
     /// same rule the bookmark rows and the standing message already follow.
@@ -308,9 +320,13 @@ final class WindowDeck: ObservableObject {
         if let name = displayName { base = name }
         else if let live = DeckRegistry.shared.liveLabel(for: self) { base = live }
         else { base = "Manifold" }
+        var title = base
+        if DeckRegistry.shared.liveLabel(for: self) != nil, audioOffset.isAvailable, audioOffset.sessionMs != 0 {
+            title += " — " + LiveAudioOffsetModel.indicator(audioOffset.sessionMs)
+        }
         // `chrome` is weak and nil before the window is configured; a nil chrome is the default
         // mode, so an absent marker is the right answer during that gap rather than a guess.
-        return chrome?.displayTransform == .bypass ? base + " — Bypass" : base
+        return chrome?.displayTransform == .bypass ? title + " — Bypass" : title
     }
 
     /// Push `windowTitle` at the window, if there is one yet.
@@ -1561,9 +1577,18 @@ final class DeckRegistry {
     /// Stand a live source up from `deck`. `label` is what to call this deck in another window's
     /// standing message — an NDI source name or a bookmark name. NEVER a URL: a stream path can
     /// carry the stream key, which is why the bookmark rows pass the name they display.
+    ///
+    /// `bookmark`: the saved stream this connect came from, if any — its audio offset is the
+    /// session's starting value (docs/AUDIO_RESAMPLER_DESIGN.md §19.8). nil (NDI, a pasted URL, the
+    /// DEBUG ⌃⌥D override) = a session value only, starting at 0.
     func connectLive(_ source: LiveSource, from deck: WindowDeck, label: String? = nil,
-                     _ standUp: () -> Void) {
-        claim(.live(source), by: deck, label: label, standUp)
+                     bookmark: StreamBookmark? = nil, _ standUp: () -> Void) {
+        claim(.live(source), by: deck, label: label) {
+            // After the claim is granted and before the transport opens its audio session, so the
+            // first anchor places the value with no splice.
+            deck.audioOffset.prepare(source: source, bookmark: bookmark)
+            standUp()
+        }
     }
 
     /// What to call the live source THIS deck owns, or nil when it owns none.
