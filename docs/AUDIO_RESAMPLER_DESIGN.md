@@ -4748,7 +4748,7 @@ repeat its step 3 on MediaMTX WHEP: OBS profile `MediaMTX Local`, Start Streamin
 - Full screen: confirm there is no marker (the accepted limit), and that the title marker returns on
   leaving full screen.
 
-### 19.9 Stage C built: the sync clips — 2026-10-01 (unattended; uncommitted)
+### 19.9 Stage C built: the sync clips — 2026-10-01 (unattended; committed `dfe6463`; decisions below)
 
 §19.3's clips, generated from committed recipes by ffmpeg alone (lavfi `color`, `drawbox`,
 `drawtext`, `aevalsrc`; no media in, no other tool). Everything is in `scripts/syncclips/`
@@ -4804,9 +4804,8 @@ repeat its step 3 on MediaMTX WHEP: OBS profile `MediaMTX Local`, Start Streamin
      that is 1.708 ms after the tone starts (1.713 ms at 29.97 / 59.94, the sub-sample phase), less
      its 0.0417 ms `FIXTURE_OFFSET_MS`.
    - The clips are at 0.0 (below). The detector's definition of an onset is not.
-   - For c12 on these clips, the fixture constant is +1.708 ms: one number, per clip, or a
-     phase-based onset like `verify.py`'s. Stage D's detector should define the onset the way the
-     clip does.
+   - **Decided (Robbie, 2026-10-01): c12 stays unchanged.** Its +1.708 ms on these clips is a
+     known property of its onset detector, and `verify.py` is the clips' gate. See "Decisions" below.
 
 #### Every clip, both containers — `verify.py` (all 14 PASS)
 
@@ -4880,7 +4879,7 @@ The test, per clip:
   (14 clips × 508), and 0 with jitter.
 - **Every one-interval mispair (all 8 per clip) came back as injected.** Nearest-neighbour pairing,
   shown alongside, got every one wrong, by up to ±333 ms.
-- ⚠️ **For stage D: the margin is ONE code step at some rates** (41.7 ms at 24, 33.4 ms at 29.97 /
+- ⚠️ **For stage D (now a requirement, see "Decisions"): the margin is ONE code step at some rates** (41.7 ms at 24, 33.4 ms at 29.97 /
   59.94), not the four steps the interval spread suggests.
   - With a median score, a wrong shift's deviations split between 1 and 7 steps. When the event
     count is not a multiple of four, the median lands on 1.
@@ -4903,8 +4902,45 @@ The test, per clip:
 - An OBS import of the template, and a stream of a clip through a real sender (attended, or with
   Robbie's OBS).
 - A device capture of a clip played in Manifold.
-- Choosing between the two c12 answers in deviation 4 (a per-clip fixture constant, or a
-  phase-based onset); the ProRes size.
+- ~~Choosing between the two c12 answers in deviation 4; the ProRes size.~~ Decided below.
+
+#### Decisions (Robbie, 2026-10-01)
+
+1. **c12 stays unchanged.**
+   - It is the instrument behind every §18 soak result. Changing its onset detection would make
+     new readings incomparable with old ones.
+   - **`verify.py` is the gate for the sync clips.**
+   - ⚠️ **A KNOWN PROPERTY, NOT CLIP ERROR:** on these clips c12 reads a constant **+1.708 ms**
+     (raw onset; +1.67…+1.69 ms after its 0.0417 ms `FIXTURE_OFFSET_MS`; +1.713 ms raw at 29.97 /
+     59.94, the sub-sample phase), sd 0.01 ms.
+     - Its onset is the first sample above 25 % of the tone's peak, and on the clips' 5 ms
+       raised-cosine fade-in that is 1.708 ms after the tone starts.
+     - The clips themselves are at 0.0 (worst 0.55 µs, `verify.py`).
+     - Do not subtract it from, or compare it with, the §18 fixture's readings: that fixture's beep
+       had no fade-in.
+   - **Stage D's in-app detector is validated against `verify.py`'s exact event times** (the white
+     frame's pts, and the tone onset from its 1 kHz phase), not against c12.
+2. **The ProRes masters stay full length** (60 s; 77–171 MB each, 755 MB the set). A separate
+   download, not bundled.
+3. **Distribution:**
+   - **The 22 MB MP4 set is bundled in the app.**
+   - The ProRes masters are a separate download from releases.graviton.tools.
+   - **Stage D adds:**
+     - **"Save Sync Clip…"** to the control-bar A/V menu: the bundled MP4 for the current rate;
+     - **"Download ProRes Sync Clips…"** to the same menu;
+     - **"Download Sync Clips…"** to the Help menu;
+     - **"Get Sync Clip…"** to the calibration sheet.
+   - The download items open the page in the browser. **No in-app downloader.**
+4. **Accepted:** the two-frame steps at 50 and 59.94 (deviation 1), and the `recipes.tsv` `unit`
+   column that restores the literal frame code.
+5. **STAGE D REQUIREMENT: the matcher's score is MEAN-based**, the mean absolute deviation of the
+   pair offsets from their centre.
+   - With the median-based score of `pairing_check.py` the wrong-pairing margin is one code step at
+     24, 29.97 and 59.94 (33–42 ms).
+   - With the mean, every wrong shift scores about four code steps (≈ 133–167 ms at ≤ 30 fps), which
+     clears a capture's ±20 ms frame grid (§18.1).
+   - `pairing_check.py` is unchanged (no code changed for these decisions). Stage D re-runs the same
+     four checks with the mean score and records the margin.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
