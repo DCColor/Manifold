@@ -312,7 +312,9 @@ enum StreamValidationError: Error {
             return "Enter the audio offset as a whole number of milliseconds, e.g. 80 or −40."
         case .audioOffsetOutOfRange:
             let r = FrameEngine.liveAudioOffsetRangeMs
-            return "The audio offset must be between \(r.lowerBound) and +\(r.upperBound) ms."
+            // A true minus (U+2212), as the hint, the badge and the title print it.
+            return "The audio offset must be \(LiveAudioOffsetModel.signed(r.lowerBound)) to "
+                + "\(LiveAudioOffsetModel.signed(r.upperBound)) ms."
         case .storeUnreadable:
             return """
                    Your saved streams can’t be read by this version, so nothing can be saved right \

@@ -25,6 +25,9 @@ final class LiveAudioOffsetTests: XCTestCase {
         var loopErr: [(t: Double, e: Double)] = []
         var debt: [(t: Double, d: Double)] = []
         var outcomes: [(t: Double, o: S.UserOffsetOutcome)] = []
+        /// The renderer queue at the moment of each change request (frontier − timebase): the
+        /// MOMENTARY figure the stage A rule judged an advance on.
+        var queueAtChange: [Double] = []
         var totals = S.Totals()
         var granted: [Double] = []
         var writes = 0
@@ -60,6 +63,7 @@ final class LiveAudioOffsetTests: XCTestCase {
             if let r = reanchorAt, !reanchored, t >= r { reanchored = true; s.anchor(media: line(t), host: t, reason: "test re-anchor") }
             while let c = pendingChanges.first, t >= c.at {
                 pendingChanges.removeFirst()
+                out.queueAtChange.append(p.frontier - p.timebase)
                 out.outcomes.append((t, s.setUserOffset(c.o)))
             }
             let stalled = stall.map { t >= $0.at && t < $0.at + $0.s } ?? false
@@ -224,6 +228,47 @@ final class LiveAudioOffsetTests: XCTestCase {
         XCTAssertEqual(r.totals.userOffsetRefusals, 2)
         XCTAssertEqual(r.writes, 1)
         XCTAssertEqual(heard(r, at: 39), -0.150, accuracy: 0.0005)
+    }
+
+    /// §19.8 follow-up: the refusal's "at most N ms" is judged on the LOWEST queue over the recent
+    /// window, so pressing exactly N ms a few seconds later is accepted. The plant's queue oscillates
+    /// by one packet (21.3 ms, an AAC frame: SRT's case). Ten request phases across one packet cycle:
+    /// every one states a figure that a press of that size, 3 s later, gets. The stage A figure (the
+    /// momentary queue) promised more than the queue gives on some phases, and that press is refused.
+    func testTheStatedAdvanceIsAcceptedOnALaterPress() {
+        var momentaryPromisedTooMuch = 0
+        for k in 0..<10 {
+            let at = 20.0 + Double(k) * 0.00213
+            // −150 leaves ~170–190 ms of queue; −250 then needs 260 and is refused.
+            let base: [(at: Double, o: Double)] = [(10, -0.150), (at, -0.250)]
+            let r = run(seconds: at + 1, changes: base)
+            guard case let .refusedAdvance(_, _, available, queue) = r.outcomes[1].o else {
+                return XCTFail("phase \(k): \(r.outcomes[1].o)")
+            }
+            XCTAssertLessThanOrEqual(queue, r.queueAtChange[1] + 1e-9, "phase \(k): never above the queue now")
+            let stated = (available * 1000).rounded(.down) / 1000      // what the banner says, whole ms
+            XCTAssertGreaterThan(stated, 0, "phase \(k): a figure worth stating")
+            // Press exactly that amount 3 s later: accepted.
+            let r2 = run(seconds: at + 5, changes: base + [(at + 3, -0.150 - stated)])
+            guard case .applied(_, let new, _) = r2.outcomes[2].o else {
+                return XCTFail("phase \(k): stated \(stated * 1000) ms, then \(r2.outcomes[2].o)")
+            }
+            XCTAssertEqual(new, -0.150 - stated, accuracy: 1e-12)
+            // And one ms more than stated is refused: the figure is the most there is.
+            let r3 = run(seconds: at + 5, changes: base + [(at + 3, -0.151 - stated)])
+            guard case .refusedAdvance = r3.outcomes[2].o else {
+                return XCTFail("phase \(k): one ms past the stated figure was \(r3.outcomes[2].o)")
+            }
+            // The stage A figure: the momentary queue at the refusal.
+            let momentary = ((r.queueAtChange[1] - 0.160) * 1000).rounded(.down) / 1000
+            if momentary > stated {
+                let r4 = run(seconds: at + 5, changes: base + [(at + 3, -0.150 - momentary)])
+                if case .refusedAdvance = r4.outcomes[2].o { momentaryPromisedTooMuch += 1 }
+            }
+        }
+        XCTAssertGreaterThan(momentaryPromisedTooMuch, 0,
+                             "the test has teeth: the momentary figure was refused on a later press")
+        print("[§19.8] momentary figure refused on a later press on \(momentaryPromisedTooMuch) / 10 phases")
     }
 
     func testValuesOutsideTheRangeAreRejected() {

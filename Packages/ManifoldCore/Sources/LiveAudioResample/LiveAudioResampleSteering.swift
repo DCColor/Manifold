@@ -299,6 +299,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// THE range of O, seconds (Robbie, 2026-10-01). Every change is one splice inside the stage's
     /// bounds: an insert ≤ 0.75 s (bound 1 s), a drop ≤ 0.75 s (bound 4 s).
     public static let userOffsetRange: ClosedRange<Double> = -0.250...0.500
+    /// How far back the advance figure looks for the queue's low point: the steering's window.
+    static let advanceQueueWindowSeconds = 10.0
+    private static let queueHistoryCapacity = 4096
 
     public let mode: Mode
     private let tag: String
@@ -387,6 +390,13 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var userOffsetPinnedLogged = false
     /// Net O accepted in this window: the WHEP level hold re-bases its reference by it (§19.1).
     private var windowOffsetMoved = 0.0
+    /// The advance figure (§19.8, follow-up): the renderer queue just BEFORE each enqueue — its lowest
+    /// point in each packet cycle — over the last `advanceQueueWindowSeconds`, as a ring. An advance
+    /// is judged, and its "at most" figure stated, from the lowest of these and the queue now, so a
+    /// press of the stated size a few seconds later finds at least that much: the momentary figure
+    /// swung by a packet (~21 ms on SRT) and could promise what the next press could not get.
+    private var queueHistory = [(host: Double, queue: Double)](repeating: (0, 0), count: queueHistoryCapacity)
+    private var queueHistoryHead = 0, queueHistoryCount = 0
 
     // Counters, session-long.
     private var firstAnchors = 0
@@ -619,10 +629,16 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         }
         let f = frontier
         lock.unlock()
-        // The queue now, for an advance (a drop must leave the recovery guard behind it).
+        // The queue for an advance (a drop must leave the recovery guard behind it): the LOWEST of the
+        // queue now and its pre-enqueue low points over the last 10 s, so the figure a refusal states
+        // is one a later press of that size still finds (§19.8, follow-up).
         let t = hostNow()
         let timebase = readTimebase()
-        let queue = (f.map { $0 - timebase }).flatMap { $0.isFinite ? $0 : nil } ?? 0
+        let queueNow = (f.map { $0 - timebase }).flatMap { $0.isFinite ? $0 : nil } ?? 0
+        lock.lock()
+        let lowest = lowestRecentQueueLocked(now: t)
+        lock.unlock()
+        let queue = min(queueNow, lowest ?? queueNow)
         let move = -delta          // + = content forward: a drop
         let available = max(0, queue - Self.recoveryKeepSeconds
                             - LiveAudioResampleStage.crossfadeSeconds - Self.dropQueueMarginSeconds)
@@ -631,12 +647,14 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
             emit {
                 String(format: "%@ AUDIO OFFSET %+.1f → %+.1f ms REFUSED at host %.3f s — a %.1f ms advance "
                        + "needs %.1f ms of renderer queue (advance + %.0f keep + %.0f fade + %.0f margin) "
-                       + "and the queue holds %.1f ms: at most %.1f ms of advance is available now · "
-                       + "O stays %+.1f ms, no splice, no write", tag, old * 1000, requested * 1000, t,
+                       + "and the queue's low point over the last %.0f s is %.1f ms (now %.1f ms): at most "
+                       + "%.1f ms of advance is available · O stays %+.1f ms, no splice, no write",
+                       tag, old * 1000, requested * 1000, t,
                        move * 1000, (move + Self.recoveryKeepSeconds + LiveAudioResampleStage.crossfadeSeconds
                                      + Self.dropQueueMarginSeconds) * 1000,
                        Self.recoveryKeepSeconds * 1000, LiveAudioResampleStage.crossfadeSeconds * 1000,
-                       Self.dropQueueMarginSeconds * 1000, queue * 1000, available * 1000, old * 1000)
+                       Self.dropQueueMarginSeconds * 1000, Self.advanceQueueWindowSeconds, queue * 1000,
+                       queueNow * 1000, available * 1000, old * 1000)
             }
             return .refusedAdvance(old: old, requested: requested, available: available, queue: queue)
         }
@@ -654,6 +672,9 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         refMedia -= delta
         userOffset = requested
         userOffsetChanges += 1
+        // The queue moves by the splice: shallower by a drop, deeper by an insert. The history moves
+        // with it, so the next advance is judged on the queue this change leaves.
+        shiftQueueHistoryLocked(by: -move)
         windowOffsetMoved += delta
         windowSplices += 1
         windowExcluded = true
@@ -758,6 +779,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         // ── The queue's far end, and its low-water mark just before this enqueue (§18.16) ──
         if held == nil, let f = frontier, timebase.isFinite {
             lowWater = min(lowWater, f - timebase); sessionLowWater = min(sessionLowWater, f - timebase)
+            noteQueueLocked(host: t1, queue: f - timebase)
         }
         if let f = enqueuedFrontier, f.isFinite { frontier = max(frontier ?? f, f) }
         // ── Held: restart once the refill leaves the resume fill queued past the held point ──
@@ -1387,6 +1409,39 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         state = LiveAudioResampleController.coarseEvent(state)
         previousError = nil
         settleUntil = host + thresholds.settle
+        // A write moves the timebase: queue readings from before it describe another queue.
+        queueHistoryCount = 0
+    }
+
+    // MARK: - The advance figure's queue history (§19.8, follow-up)
+
+    private func noteQueueLocked(host: Double, queue: Double) {
+        guard host.isFinite, queue.isFinite else { return }
+        queueHistory[queueHistoryHead] = (host, queue)
+        queueHistoryHead = (queueHistoryHead + 1) % Self.queueHistoryCapacity
+        queueHistoryCount = min(queueHistoryCount + 1, Self.queueHistoryCapacity)
+    }
+
+    /// The lowest pre-enqueue queue within `advanceQueueWindowSeconds` of `now`, newest first; nil
+    /// when there is none (just after a write).
+    private func lowestRecentQueueLocked(now: Double) -> Double? {
+        var lowest: Double?
+        var k = queueHistoryHead
+        for _ in 0..<queueHistoryCount {
+            k = (k - 1 + Self.queueHistoryCapacity) % Self.queueHistoryCapacity
+            let e = queueHistory[k]
+            guard now - e.host <= Self.advanceQueueWindowSeconds else { break }
+            lowest = min(lowest ?? e.queue, e.queue)
+        }
+        return lowest
+    }
+
+    private func shiftQueueHistoryLocked(by shift: Double) {
+        var k = queueHistoryHead
+        for _ in 0..<queueHistoryCount {
+            k = (k - 1 + Self.queueHistoryCapacity) % Self.queueHistoryCapacity
+            queueHistory[k].queue += shift
+        }
     }
 
     /// What a window hands its companion: the session clock at the window's end and the renderer

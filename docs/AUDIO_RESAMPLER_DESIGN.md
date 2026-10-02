@@ -4598,7 +4598,7 @@ ffmpeg → MediaMTX → WHEP (`offsetB-whep-level.manifold.log`, 19:36–19:52, 
    - Docked mode shows it permanently. The title suffix is the standing marker.
    - Making the badge standing in overlay mode needs either the HUD staying up while O ≠ 0, or
      drawing over the picture. That is a design call, not made here.
-2. ⚠️ **"At most N ms" is an instantaneous figure.**
+2. ✅ **RESOLVED in the follow-up below.** ~~"At most N ms" is an instantaneous figure.~~
    - D01 said "at most 1 ms" (1.3 ms, queue 161.3 ms). The next 1 ms press, 3 s later, was refused
      (queue 145.7 ms).
    - The queue moves by up to a packet (an AAC frame, ~21 ms on SRT) between enqueues, so the figure
@@ -4610,10 +4610,69 @@ ffmpeg → MediaMTX → WHEP (`offsetB-whep-level.manifold.log`, 19:36–19:52, 
 3. **The refusal is shown in the notice banner, which is drawn over the top of the picture** for 9 s,
    as every connect error already is. The no-overlay decision was read as covering the standing
    indicator, not a transient notice. Say if it should go elsewhere.
-4. **The sheet's range error sits at the fold** of the 540 pt list (C03: visible, near the bottom
-   edge). It prints "-250" with an ASCII hyphen where the hint and the badge use "−".
+4. ✅ **RESOLVED in the follow-up below.** ~~The sheet's range error sits at the fold of the 540 pt
+   list (C03), and prints "-250" with an ASCII hyphen.~~
 5. **One launch stalled** before `[LICENSE]` (an unsigned Profile build; the launch-blocking keychain
    stall in BUGS.md), and a relaunch was clean. Not this change.
+
+#### Follow-up, 2026-10-01 evening (Robbie): the advance figure and the sheet's range error
+
+**1. The advance is judged on the queue's LOW POINT, not the momentary level.**
+- **What changed.** `LiveAudioResampleSteering` keeps the renderer queue just BEFORE each enqueue
+  (its lowest point in each packet cycle) in a 10 s ring (`advanceQueueWindowSeconds`, the steering's
+  window). `setUserOffset` judges an advance on `min(queue now, that low point)`. The refusal and its
+  "at most N ms" come from the same number.
+- **Two corrections keep the history honest:**
+  - it is cleared by every timebase write (anchor, resume, catch-up, fallback), which move the
+    timebase;
+  - an accepted change shifts it by the splice (−drop, +insert), so the next advance is judged on
+    the queue that change leaves.
+- The refusal log line now prints both, e.g. "the queue's low point over the last 10 s is 169.9 ms
+  (now 192.2 ms)". O = 0 untouched: the ring is written only on the pre-enqueue read the
+  low-water already took, and read only by `setUserOffset`.
+- **Offline** (`testTheStatedAdvanceIsAcceptedOnALaterPress`, on `QueuePlant`, whose queue
+  oscillates by one 21.3 ms packet, SRT's AAC frame):
+  - ten request phases across one packet cycle: −150, then −250 refused;
+  - exactly the stated whole-ms figure requested 3 s later: **accepted on 10 / 10**;
+  - 1 ms more: refused on 10 / 10 (the figure is the most there is);
+  - **the stage A (momentary) figure, pressed 3 s later: refused on 9 / 10 phases** — the test's
+    teeth.
+- **Live, unattended, local SRT repro** (`repro/run.sh`, ffmpeg listener, `MANIFOLD_SRT_DEBUG_URL`;
+  `offsetB2-srt-advance.manifold.log`, 20:15–20:22). Each trial: step −10 ms until refused, read the
+  figure, then 3 s later press ⌥[ exactly N times (1 ms each), then once more.
+
+| trial | refusal (steering line) | stated | ⌥[ ×N, 3 s later | one more ⌥[ |
+|---|---|---|---|---|
+| 1 | low point 169.9 ms, **now 192.2 ms** → 9.9 ms available | **9 ms** | **9 / 9 accepted** | refused (1.0 → 0.99996 ms) |
+| 2 | low point 164.7 ms, now 187.0 ms → 4.7 ms | **4 ms** | **4 / 4 accepted** | refused (0.7 ms) |
+| 3 | low point 166.5 ms, now 178.5 ms → 6.5 ms | **6 ms** | **6 / 6 accepted** | refused (0.4 ms) |
+
+- The momentary queue sat 12–40 ms above the low point. On trial 1 the stage A rule would have
+  stated "at most 32 ms" (192.2 − 160) where 9 ms was there: D01's failure, by a larger margin.
+- Screenshots: E01 (the trial 1 banner, "at most 9 ms", title "— A/V −130 ms"), E02 (−139 after
+  the 9 presses).
+
+**2. The sheet's range error is shown under the field, with a true minus.**
+- The field's own errors (not a number, out of range) now REPLACE the hint, directly under the field,
+  in red with an icon. They no longer appear with the save errors below the buttons, which sat at the
+  fold. Cleared as soon as the field changes.
+- **The message:** "The audio offset must be −250 to +500 ms." It is formatted by
+  `LiveAudioOffsetModel.signed`, now `nonisolated`.
+- **U+2212 everywhere a negative value is printed for the user:**
+  - the badge, the title suffix, the refusal and range banners, and the field's not-a-number example
+    already used `signed()` / "−" (checked: code point 0x2212);
+  - the sheet's range error was the only hyphen, and it is fixed.
+- **Screenshot F01** (`F01-sheet-range-error-visible.png`): the sheet with nothing scrolled.
+  - Editing MediaMTX, 600 typed, Return (Save Changes): the red line sits between the field and the
+    Save Changes / Cancel buttons, 316 red px at y 584–593 of the 720 px window.
+  - Read back through accessibility: "The audio offset must be −250 to +500 ms.", the first
+    character 0x2212.
+  - Nothing saved: `streamBookmarks` sha256 4466c076… before and after.
+
+**Gates:**
+- `swift test` **162 / 162**.
+- Replays against b35a810: **59 / 59 byte-identical**.
+- Profile and Release build with no errors; no new warnings in the files touched.
 
 #### Monday — the attended session (Robbie)
 
@@ -4683,8 +4742,9 @@ repeat its step 3 on MediaMTX WHEP: OBS profile `MediaMTX Local`, Start Streamin
 - The keys under the fingers, including holding one down (auto-repeat makes one change per repeat,
   and each is a splice).
 - The A/V menu's wording; Save / Revert to Saved; the "not a saved stream" line on NDI.
-- The sheet: the field, the hint, the range error at the fold (question 4), the HLS note.
-- The refusal banner's wording and place (questions 2 and 3).
+- The sheet: the field, the hint, the range error under the field (F01), the HLS note.
+- The refusal banner's wording and place (question 3); the advance figure now holds for a later
+  press (follow-up).
 - Full screen: confirm there is no marker (the accepted limit), and that the title marker returns on
   leaving full screen.
 

@@ -41,6 +41,10 @@ struct StreamBookmarksSheet: View {
     /// The audio offset field, as typed (ms). Blank = none. Parsed and range-checked at save by
     /// `StreamBookmarkStore.parseAudioOffset`, against the steering's one constant.
     @State private var newAudioOffset = ""
+    /// The field's own error (not a number, out of range), shown IN PLACE OF the hint directly under
+    /// the field — where the user just typed — rather than with `addError` below the buttons, which
+    /// sat at the fold of the list (§19.8, C03). Cleared as soon as the field changes.
+    @State private var audioOffsetError: String?
     @State private var addError: String?
     @State private var savedNotice: String?
 
@@ -361,11 +365,18 @@ struct StreamBookmarksSheet: View {
             Text("ms").foregroundStyle(.secondary)
         }
         .opacity(isEnteringHLS ? 0.45 : 1)
-        Text(isEnteringHLS
-             ? "Not for HLS — Apple’s player owns the audio."
-             : "Positive = sound later, negative = earlier (\(LiveAudioOffsetModel.signed(range.lowerBound)) to \(LiveAudioOffsetModel.signed(range.upperBound)) ms).")
-            .font(.caption).foregroundStyle(.secondary)
-            .wrapsInsteadOfClipping()
+        .onChange(of: newAudioOffset) { _, _ in audioOffsetError = nil }
+        if let audioOffsetError, !isEnteringHLS {
+            Label(audioOffsetError, systemImage: "exclamationmark.circle.fill")
+                .font(.caption).foregroundStyle(.red)
+                .wrapsInsteadOfClipping()
+        } else {
+            Text(isEnteringHLS
+                 ? "Not for HLS — Apple’s player owns the audio."
+                 : "Positive = sound later, negative = earlier (\(LiveAudioOffsetModel.signed(range.lowerBound)) to \(LiveAudioOffsetModel.signed(range.upperBound)) ms).")
+                .font(.caption).foregroundStyle(.secondary)
+                .wrapsInsteadOfClipping()
+        }
     }
 
     /// True once what has been typed parses as an HLS URL (`StreamType.detect`, as the save path).
@@ -470,8 +481,9 @@ struct StreamBookmarksSheet: View {
         let offset: Int?
         switch parsedAudioOffset() {
         case .success(let v): offset = v
-        case .failure(let e): savedNotice = nil; addError = e.message; return
+        case .failure(let e): savedNotice = nil; addError = nil; audioOffsetError = e.message; return
         }
+        audioOffsetError = nil
         if let editing {
             switch store.update(editing, name: newName, urlString: newURL,
                                 passphrase: passphraseEdit(), audioOffsetMs: offset) {
@@ -517,6 +529,7 @@ struct StreamBookmarksSheet: View {
         newName = bookmark.name
         newURL = bookmark.urlString      // the STORED URL, which by construction carries no secret
         newAudioOffset = bookmark.audioOffsetMs.map(String.init) ?? ""
+        audioOffsetError = nil
         clearPassphraseEntry()           // never prefilled — see `passphraseField`
         removePassphrase = false
         addError = nil
@@ -532,7 +545,7 @@ struct StreamBookmarksSheet: View {
     /// `savedNotice`, so `save()` can set one immediately afterwards.
     private func endEditing() {
         editing = nil
-        newName = ""; newURL = ""; newAudioOffset = ""
+        newName = ""; newURL = ""; newAudioOffset = ""; audioOffsetError = nil
         clearPassphraseEntry()
         removePassphrase = false
         addError = nil

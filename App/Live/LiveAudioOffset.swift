@@ -136,12 +136,13 @@ final class LiveAudioOffsetModel: ObservableObject {
 
     // MARK: Words
 
-    /// "+80 ms", "−40 ms", "0 ms" — a typographic minus, as the badge prints it.
-    static func text(_ ms: Int) -> String { ms == 0 ? "0 ms" : "\(signed(ms)) ms" }
-    static func signed(_ ms: Int) -> String { ms > 0 ? "+\(ms)" : ms < 0 ? "−\(-ms)" : "0" }
+    /// "+80 ms", "−40 ms", "0 ms" — a true minus sign (U+2212), as the badge, the title and the
+    /// messages print it. Pure, so callable from any isolation.
+    nonisolated static func text(_ ms: Int) -> String { ms == 0 ? "0 ms" : "\(signed(ms)) ms" }
+    nonisolated static func signed(_ ms: Int) -> String { ms > 0 ? "+\(ms)" : ms < 0 ? "−\(-ms)" : "0" }
 
     /// The badge and the title suffix's words.
-    static func indicator(_ ms: Int) -> String { "A/V \(text(ms))" }
+    nonisolated static func indicator(_ ms: Int) -> String { "A/V \(text(ms))" }
 
     /// Stage A's refusal, in plain words. The figure is what the queue allows NOW, floored to whole
     /// ms so the sentence never promises a fraction the next press could not deliver.
