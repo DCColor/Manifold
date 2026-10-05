@@ -831,13 +831,29 @@ findings re-examined").**
 - **Pre-existing, not Stage A:** the offset read cannot run on a file (`AudioTapBuffer.read` is the
   b35a810 read whenever the live offset is the identity, and `endLiveAudio` clears it), and
   `DeckLinkBridge.mm` is unchanged.
-- **Not diagnosed.** A candidate is the file path's tap feed arriving in bursts (AAC decode) against
-  the card's steady reads; the card itself is not implicated by anything seen.
+- **Diagnosed 2026-10-05 (`AUDIO_RESAMPLER_DESIGN.md` §19.12), unattended, from timestamped tap and
+  card events.**
+  - **The cause: the muted system renderer starves the tap.** The tap is filled only when
+    `audioRenderer` asks for more. While SDI owns the audio, the renderer is muted. Muted, it refills
+    on a 0.5 / 1.0 s timer and lets its queue drain to −150…+60 ms of the playhead. Unmuted, it stays
+    +1.2…+1.6 s ahead.
+  - The card reads at playhead − 54 ms. Each refill cycle that drains past that ends in an underrun:
+    68 / 68 mid-file events fell 893–996 ms after a pump wake.
+  - **Not codec frames, not decode, not the card:** both files arrive in 8192 / 7168-frame buffers,
+    and decode never took over 3 ms. AAC loses more often only because of where its buffer grid's
+    phase falls.
+  - **Second case:** at the start of play, a renderer prefill over 2 s overruns the 2.0 s tap window
+    (§19.10's `srcT=0.014`).
+  - **On the wire:** 20–35 ms of digital silence per callback, 1–4 callbacks in a row, and the
+    programme under it is skipped. 237–1158 ms of silence per minute on the MP4.
+  - **Proposed, not applied:** a 250 ms tap look-ahead in the AVF pump plus a 4 s tap window. In a
+    scratch build: **0 underruns in 7 / 7 runs**, mid-file lead ≥ 232 ms, card cursor unchanged.
+  - **Rejected:** raising the bridge's audio depth (worse: 11–14 events per run).
 - **Why release-blocking candidate:** SDI out is a reference output. A dropout every few seconds on
   file playback is audible on a broadcast monitor, and the SDI ear checks of §19.8 block 2 were
   deferred to the Resolve workstation (2026-10-05).
-- **Next:** decide at the Release-build check on the Resolve workstation; diagnose from the tap's
-  ingest timing (per-buffer arrival against the card's read cursor) on a file.
+- **Next:** Robbie decides on §19.12's fix. Then check the libav path (MXF), seeks, and device A/V
+  on SDI with the attended recorder.
 
 ---
 

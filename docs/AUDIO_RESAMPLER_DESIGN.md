@@ -6247,6 +6247,194 @@ that reach 60 s.
 - Masters were checked offline only, not in OBS. They share the bundled clips' audio construction
   (PCM, exact sample count), which OBS looped with zero drift.
 
+### 19.12 SDI tap underruns during file playback: the muted renderer starves the tap — 2026-10-05 15:30–16:42 (unattended; no shipped code changed)
+
+**The question (BUGS.md, open):** what an underrun puts on the wire, when underruns happen, why AAC
+has more of them than PCM, and which setting removes them, at what cost. All measured from the tap's
+own counters, with no listening.
+
+**Predictions (Robbie, written before the investigation):**
+- The underruns are a fill-ahead margin too small for AAC's 1024-sample delivery: the tap's lead
+  over the read cursor dips under one codec frame.
+- Raising the tap's fill-ahead (or the bridge's audio depth) by one codec frame (~21 ms) brings
+  both formats to 0 underruns with no change to A/V alignment on SDI.
+
+**Which held:**
+- **The first: only "the lead dips to zero".** The ring does run dry at the cursor, but codec
+  frames play no part.
+  - The AVF reader delivers 8192- and 7168-frame buffers (171 / 149 ms) for AAC and PCM alike.
+  - The tap's lead collapses by up to ~150 ms, not ~21 ms. The **muted** system renderer lets its
+    queue drain past the playhead before it asks for more, and the tap is filled only when the
+    renderer asks.
+- **The second: no.**
+  - Raising the bridge's audio depth by 21 ms makes it worse: the cursor reads that much later.
+  - A ~21 ms fill-ahead is short of the ~95 ms deficit.
+  - Any fill-ahead on the current 2 s ring adds a new underrun at the start of play.
+  - What reaches 0 / 7 is a 250 ms tap look-ahead plus a 4 s ring. It does not move the card's
+    cursor (by the bridge's own model; not checked on a device).
+
+**Setup.**
+- **Build:** `.build-cc/tapinstr-Profile`, HEAD `a350dd8`, from a scratch worktree with the
+  gitignored `ThirdParty/*/{include,lib}` and the DeckLink SDK symlinked in, as for §19.10.
+- **Instrumentation:** `TAPI` lines on one clock (mach uptime) for:
+  - the AVF audio pump: every wake, every `copyNextSampleBuffer` with its duration, and every "renderer full";
+  - every tap append: pts, frames, the new head;
+  - every tap read: start, want, got, the head, the tail of the 2 s window, and lead = head − start;
+  - every card audio callback: buffered, vq, want, staged pts, ideal, cursor, got;
+  - every video frame completion.
+- **Three scratch knobs (env, default off):**
+  - `MANIFOLD_DL_AUDIO_DEPTH`: the bridge's `kAudioTargetDepthSeconds`.
+  - `MANIFOLD_TAP_LOOKAHEAD`: the AVF pump reads this far past what the renderer accepted, ingests
+    it into the tap now, and enqueues it at the renderer's next wake.
+  - `MANIFOLD_TAP_WINDOW`: the tap ring's `windowSeconds`.
+- **The patch:** `~/Desktop/manifold-soak/sdi-underrun-1912/scratch-instrument-and-knobs.patch`.
+  It also has `MANIFOLD_MUTE_VIA_VOLUME`, below.
+- **Runs:** §19.10's driver unchanged. Launch, open the file into the empty window, ⌃⌥O
+  (1080p23.98, video + SDI audio), Space, 65 s.
+  - No stream, no defaults written.
+  - The same two files as §19.10 (sha256 unchanged): `build/syncclips/manifold-sync-23.976p.mp4`
+    (AAC) and `manifold-sync-23.976p.mov` (ProRes, PCM).
+  - Logs: `~/Desktop/manifold-soak/sdi-underrun-1912/`.
+- **The instrumentation does not visibly perturb it:** baseline counts of 8–45 underrun callbacks
+  on the MP4 and 1–9 on the MOV, against §19.10's 8–43 and 4–6.
+
+#### Q1. What an underrun is, and what goes on the wire
+
+- `AudioTapBuffer.readLocked` returns 0 in two different cases. The bridge cannot tell them apart:
+  - **Dry:** `start ≥ head`. The tap holds nothing yet at the cursor.
+  - **Overrun:** `start < tail`. The 2 s window has already overwritten the cursor's samples.
+  - Both were measured (Q2).
+- **On the wire: digital silence, then a skip.** On `got == 0`, `RenderAudioSamples` schedules
+  `want` frames of zeros (~20–35 ms) and drops the anchor.
+  - The next callback snaps the cursor to `ideal`, which is already past the dry head. So it
+    underruns again, 1–4 callbacks in a row, until the renderer's next wake refills the tap.
+  - The source audio under the gap is skipped for good, not delayed.
+  - Example: `base-mp4-1` at srcT 7.147 s, three callbacks (1573 + 923 + 995 frames).
+    - The wire carries 73 ms of silence.
+    - The read resumes at 7.229 s, so 82 ms of programme is lost.
+  - Not a repeat, and not a short buffer. The short-read path (`0 < got < want`) puts nothing
+    wrong on the wire: it schedules what exists and the 200 ms card buffer covers the rest.
+  - **This is audible on SDI by construction:** a 20–100 ms hole in the programme.
+- **The `underruns=` counter counts callbacks, not events.** `base-mp4-1`: 45 callbacks, 20 events,
+  1158 ms of silence in 60 s.
+
+#### Q2. When they happen
+
+**Mid-file (the dry case): a steady rate, one per renderer refill cycle. Not decode, and not the card.**
+- 68 mid-file events across the six baseline runs and three depth runs.
+- Every one starts **893–996 ms after an AVF pump wake** and ends **0–19 ms before the next wake**.
+- `copyNextSampleBuffer` never took more than 3.0 ms in any run, so decode bursts are not involved.
+- The card is steady throughout: vq = 4, `buffered` ~180 ms, `resyncs=0`, no late or dropped frames.
+
+**The mechanism, from the `wake` lines.** While SDI owns the audio, `applyAudioMute` sets
+`audioRenderer.isMuted` (`deckLinkOwnsAudio`).
+- The muted renderer wakes the pump on a **0.5 s or 1.0 s** grid and takes ~0.9 s of buffers.
+- It then sleeps until its queue has drained to around the playhead:
+  - head − sync at each wake, `base-mp4-1`: min −144, median −44, max +475 ms;
+  - `base-mov-1`: min −148, median +15, max +477 ms.
+- The card's cursor reads at **sync − 53…−54 ms** (median, every baseline run):
+  `ideal = stagedPts + audioDepth − videoDepth`, i.e. ~180 ms − 5 × 41.7 ms, minus the staged
+  frame's quantisation.
+- Every wake whose head has fallen below ~sync − 54 ms ends in an underrun just before the wake.
+
+**Unmuted control** (no DeckLink, the renderer audible, MP4, 40 s, `nodl-mp4-1`):
+- head − sync at every wake is **+1240…+1613 ms**. It never comes near the playhead.
+- §4.5 found that a muted renderer keeps the same clock and consumption rate. True, but its
+  *refill* policy is different, and the tap inherits that.
+- So the effect is SDI-only: the desktop renderer is muted whenever it starves.
+
+**At the start of play (the overrun case).**
+- Before Space, the renderer prefills **1.64–2.01 s** (six baseline runs). The tap window is
+  exactly **2.0 s**.
+- When prefill + the cursor's start offset exceeds 2 s, the file's first samples are overwritten
+  before the card reads them.
+  - That is §19.10's `srcT=0.014` underrun.
+  - Here: one at srcT 0.034 in each `d221-mp4` run.
+
+**After seeks: not measured.** These runs have no seeks. A seek calls `reset()`, and the bridge's
+post-seek silence is designed behaviour (`got <= 0`, "post-seek gap").
+
+#### Q3. Why AAC has more than PCM
+
+- **Not codec frame size.** Same reader buffer sizes:
+
+  | file | reader buffers (`base-*-1`) |
+  |---|---|
+  | MP4 | 288 × 8192, 60 × 7168, 25 × 2048, 10 others |
+  | MOV | 262 × 8192, 135 × 2048, 51 × 7168, 20 others |
+
+- **Not where the card reads:** the same cursor − sync on both (−53 / −54 ms).
+- **The difference is where the head lands at each wake.** The renderer accepts whole buffers up to
+  its high-water mark, then sleeps a fixed 0.5 / 1.0 s, so the head at the next wake beats against
+  the buffer grid.
+  - The MP4's grid sat in long runs at −80…−143 ms (e.g. −127, −123, −120, −119, −114, −112 at
+    34–39 s, one underrun per second).
+  - The MOV's hovered around 0 ± 60 ms.
+- So AAC loses more often on these two files, but both formats have the same failure, and the
+  counts vary run to run:
+
+  | file | events | underrun callbacks | silence in 60 s |
+  |---|---|---|---|
+  | MP4 | 20, 6, 6 | 45, 23, 8 | 1158, 546, 237 ms |
+  | MOV | 1, 2, 5 | 1, 9, 8 | 36, 200, 233 ms |
+
+#### Q4. Settings tried, and their cost
+
+| setting | runs | events / run | mid-file min lead (0.5–59.5 s) | cursor − sync | card min depth | verdict |
+|---|---|---|---|---|---|---|
+| baseline (depth 200 ms, window 2 s) | 3 + 3 | MP4 6–20, MOV 1–5 | **0 ms** (all 6) | −53…−54 ms | 60–117 ms | — |
+| depth **0.221** (+1 AAC frame, the prediction) | 2 + 1 | MP4 **11, 14**, MOV 5 | 0 ms | **−32 ms** | 65–112 ms | **worse:** the cursor reads 21 ms later |
+| depth **0.100** | 2 + 1 | 1 (start; cursor < 0) | **9.8**, 21, 45 ms | **−153 ms** | **70–75 ms** | mid-file events gone, but a 10 ms margin and half the card cushion. Rejected |
+| window **4 s** only | 1 | MP4 4 (13 cbs) | 0 ms | −53.5 ms | 65 ms | no effect: the dry case is untouched |
+| look-ahead **0.25 s**, window 2 s | 3 + 3 | 1 or 0, all **at start**: 23–27 cbs, ~0.5 s | 184–265 ms | −53 ms | 163–172 ms | mid-file fixed, but the head reaches 2.47 s before play, so the start is overrun |
+| **look-ahead 0.25 s + window 4 s** | **4 + 3** | **0 (all 7)** | **232–275 ms** | **−53.0…−54.0 ms** | **158–172 ms** | ✅ |
+| renderer volume 0 not `isMuted`, window 2 s | 2 + 1 | **83–88** (16.5–17.9 s of silence) | — | −45 ms | — | the unmuted renderer runs ~1.5 s ahead and overruns a 2 s ring at every wake |
+| renderer volume 0 not `isMuted`, window 4 s | 2 + 1 | **0 (all 3)** | 561–573 ms (max 2.43 s, over a 2 s ring) | −53.3…−53.7 ms | 162–172 ms | ✅ also, but rests on undocumented renderer behaviour |
+
+- **The look-ahead + 4 s window costs no latency.**
+  - The bridge is untouched: same cursor − sync, vq = 4, same depth target.
+  - The bridge's own alignment error (ideal − cursor, anchored callbacks): median −0.37…−1.08 ms,
+    |p99| 24–27 ms, against baseline −3.05…+1.40 ms and 29–34 ms. Baseline's tail is wider because
+    of its re-anchors.
+  - **Device-level A/V on SDI was not measured.** That needs the attended OBS recorder, and an
+    unchanged cursor is the argument here, not a capture.
+- **Its other costs:**
+  - Memory: the ring doubles. 1.5 MB for stereo 48 kHz, 12 MB for 16 ch.
+  - Up to 250 ms more decoded audio held in the pump.
+  - The max mid-file lead is 1.96 s, so a 4 s ring leaves ~2 s of headroom.
+
+#### Proposed fix (for Robbie to decide; no shipped code changed)
+
+1. **The AVF audio pump keeps a 250 ms look-ahead into the tap**, independent of the renderer's
+   refill policy.
+   - After each `while isReadyForMoreMediaData` loop, read ahead until the buffers held total
+     ≥ 250 ms. `ingest` each into the tap at read time, and enqueue the held buffers first at the
+     next wake.
+   - The held buffers belong to the closure, so a seek or track switch (new token) drops them with it.
+2. **Raise `AudioTapBuffer.windowSeconds` from 2.0 to 4.0.**
+   - Needed with (1): the renderer's 1.6–2.0 s prefill plus the look-ahead overruns a 2 s ring at
+     the start.
+   - The 2 s ring is already marginal on its own: one baseline prefill reached 2.005 s.
+
+Measured effect of 1 + 2 in the scratch build: **0 underruns, 0 mid-file short reads, mid-file lead
+≥ 232 ms in 7 / 7 runs** (4 MP4, 3 MOV), against 6–20 / 1–5 events per baseline run.
+
+The alternative (mute by `volume = 0`, plus the 4 s window) also measured 0 / 3. It is not
+recommended:
+- it depends on an undocumented difference between the renderer's muted and unmuted refill;
+- the renderer keeps rendering to the device;
+- on a 2 s ring it is far worse than today.
+
+#### Not done
+
+- **The libav path** (MXF and others, `LibavAudioSource`): not examined. It feeds the same tap
+  from its own pump. Whether it inherits the muted renderer's refill the same way is the next check.
+- **Seeks, pause / resume, loop wrap:** not exercised.
+- **Device-level A/V on SDI with the fix:** needs the attended recorder.
+- **A secondary bridge item, not changed:** after a dry read, the bridge re-anchors forward to
+  `ideal`, past a head that cannot have moved yet. One underrun becomes 2–4 consecutive silent
+  callbacks. With the fix there are none to compound.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,
