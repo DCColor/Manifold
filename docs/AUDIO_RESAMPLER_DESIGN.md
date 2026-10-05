@@ -5270,6 +5270,102 @@ session (−19 … +42 ms here), and it equals the first Sender Report line's of
     MediaMTX; Cloudflare WHEP on Monday (D3) says whether it is MediaMTX-only.
 - The Release run below read +25.94 ms on the same path: another session, another offset.
 
+#### Is it `useAbsoluteTimestamp: true` with an ffmpeg publisher? — 2026-10-05 11:57–12:15 (unattended; no app change) — ❌ no: the default config is off too
+
+**What Stage D ran on** (checked before running anything):
+- **MediaMTX:** PID 9578, up since 2026-09-30 19:05 as `./mediamtx scripts/soak/mediamtx-soak-abs.yml`
+  (cwd `~/Desktop/mediamtx`), so `useAbsoluteTimestamp: true` on `live`. Its log has Stage D's WHEP
+  publishes (2026-10-02 00:14–00:25), each with the abs mode's "received RTP packet without absolute
+  time" drops.
+- **The publisher:** ffmpeg over **RTSP/TCP** (RTMP is off in both configs):
+  `-re -i syncD-<rate>p-inj<ms>.ts -c:v copy -c:a libopus -b:a 128k -ar 48000 -ac 2 -f rtsp`.
+  - The fixture is the bundled MP4 concatenated ×5 into one continuous 300 s TS (above). There is no
+    `-stream_loop`.
+
+**Run.**
+- **Each reconnect** used Stage D's WHEP protocol (`run.sh`) plus whepx's parallel RTSP read:
+  - a fresh ffmpeg publish of `syncD-23.976p-inj80.ts` (+80.33 ms measured), the same command;
+  - a fresh Manifold launch on the `MediaMTX Whip` bookmark; calibrate, Apply for Session, re-check,
+    Cancel;
+  - ffmpeg reading MediaMTX's RTSP output of `live` for 90 s, through the in-app detectors offline
+    (`fileprobe`).
+- **Build:** Profile from `23e8223`, `.build-cc/monday-Profile`.
+- **MediaMTX:** v1.21.1, restarted fresh for each config:
+  - (a) `mediamtx-soak-abs.yml`;
+  - (b) `mediamtx-soak.yml`, which differs only by not having `useAbsoluteTimestamp`.
+- **Logs:** `~/Desktop/manifold-soak/srabs/srabs-<a|b>-<n>.*` and `mediamtx-<a|b>.stdout.log`.
+
+**Predictions (Robbie's, written before the run):**
+- If the setting interacts with ffmpeg, (b) reads within ±5 ms of +80 on all 4 reconnects, and (a)
+  scatters by tens of ms.
+- If both scatter, it is not the setting: the cause is MediaMTX's WebRTC SR generation, or
+  Manifold's reading of it.
+
+| reconnect | proposed | heard A/V | − injection (+80.33) | Manifold's first SR-line offset | excess + offset | re-check | ffmpeg RTSP read, same path (pairs; p10…p90) |
+|---|---|---|---|---|---|---|---|
+| a-1 | −117 | +116.89 | +36.56 | −35.37 | **+1.19** | −2.43 | +79.75 (72; 79.62…80.14) |
+| a-2 | −107 | +107.42 | +27.09 | −28.26 | **−1.17** | −0.07 | +79.75 (72; 79.62…80.14) |
+| a-3 | −115 | +115.27 | +34.94 | −35.07 | **−0.13** | −1.74 | +79.75 (72; 79.62…80.14) |
+| a-4 | −69 | +69.34 | −10.99 | +10.05 | **−0.94** | −1.64 | +79.75 (72; 79.62…80.14) |
+| b-1 | −111 | +111.27 | +30.94 | −33.80 | **−2.86** | −0.75 | +78.14 (71; 77.13…79.34) |
+| b-2 | −108 | +107.92 | +27.59 | −29.72 | **−2.13** | −0.87 | +78.57 (71; 75.13…79.16) |
+| b-3 | −111 | +110.63 | +30.30 | −33.81 | **−3.51** | −2.03 | +78.34 (71; 78.10…79.34) |
+| b-4 | −112 | +111.63 | +31.30 | −32.50 | **−1.20** | −1.36 | +79.61 (71; 76.59…80.16) |
+
+(ms; "heard A/V" is calibration's first figure, and the proposal is its negative, rounded.)
+
+**Neither prediction held.**
+- **(a) scattered, as both predicted:** −11.0 … +36.6 ms off the injection, a 48 ms range. Stage D
+  saw −19 … +42.
+- **(b) did not read +80.** All four reconnects were **+27.6 … +31.3 ms** off, a 3.7 ms range: a
+  steady bias, not a scatter. So the first prediction fails on (b), and the second fails because
+  (b) does not scatter.
+- **What the setting changes is the per-session scatter, not whether there is an error.**
+  - With it on, the WHEP offset is different on every connect.
+  - With it off, it is about +30 ms on every connect.
+  - Neither config gives the content's relation over WHEP.
+
+**In every session, both configs, the error is Manifold's first SR-line offset.**
+- Excess + offset is −3.5 … +1.2 ms (8 / 8), as in Stage D's six sessions (−4.3 … +1.7).
+- Every re-check read within ±2.5 ms, so calibration measured what was played. The error is in
+  the relation Manifold received, not in calibration.
+
+**MediaMTX's RTSP output of the same path carries the content's relation in both configs.**
+- (a): +79.75 every time, p10…p90 0.5 ms.
+- (b): +78.1 … +79.6, with a wider spread (up to 4 ms).
+- The RTSP side is read through RTCP SRs too, by ffmpeg. So the stream inside MediaMTX is right,
+  and the error appears between its WebRTC output and Manifold's SR-line offset, with or without
+  the setting.
+  - In (a) that rules out the sender's SRs: their mapping feeds the RTSP output too.
+  - The −0.6 ms on the RTSP side (a) is the Opus → AAC re-encode of the read.
+
+**The abs mode's pre-SR drops do not explain the scatter.**
+- (a) dropped 487–494 packets per publish, all in the first ~5 s (ffmpeg's first SR on the RTSP
+  path came late), against 0 in (b).
+- The count was the same every publish while the offset moved 46 ms. The drops end 15+ s before
+  Manifold connects.
+
+**So the cause is MediaMTX's WebRTC-side SRs or Manifold's reading of them**, as the second
+prediction says, even though (b) did not scatter.
+- **Still not separated:** that needs a second WHEP client on the same session. No unattended one
+  is installed here: no aiortc, no GStreamer, and ffmpeg 8.1.1 has no WHEP demuxer.
+- **(b) is now the easier case for the attended split**, because it is repeatable (≈ +30 ms every
+  connect):
+  - a browser WHEP read of a (b) session that shows ≈ 0 points at Manifold's mapping;
+  - one that shows ≈ +30 points at MediaMTX.
+- **What is unchanged:**
+  - Calibration on ffmpeg → MediaMTX → WHEP is still per-session in (a), Stage D's config. A value
+    saved to the bookmark is wrong after a reconnect.
+  - In (b) a saved value would hold across these 4 reconnects (±2 ms), but it would be correcting a
+    ~30 ms error that is not in the content.
+  - Nothing was tuned: CLAUDE.md forbids constants taken from one server's traces.
+- **State after the run:**
+  - MediaMTX was restarted on `mediamtx-soak-abs.yml`, as before (new PID 52468). Its stdout is
+    appended to `~/Desktop/manifold-soak/mediamtx-soak.log`, and both logs' original bytes are
+    intact.
+  - The configs are byte-identical to before (sha256).
+  - `streamBookmarks` was hashed read-only before and after: identical. No `defaults` was written.
+
 **NDI (an extra, not in the brief's live list): the SDK sender.**
 - A scratch sender built on the NDI SDK (`scratchpad/ndi/ndisync.cpp`) synthesises the 23.976 clip
   exactly as generate.sh does. Audio and video go out per frame from one thread, at 24000/1001, with
@@ -5376,7 +5472,9 @@ session (−19 … +42 ms here), and it equals the first Sender Report line's of
   - the 90-minute Cloudflare SRT hold;
   - the sheet and menu review.
 - **Upload the v1 zip** and confirm the URL (BUGS.md pre-ship).
-- **The WHEP per-session SR offset** (above): not investigated beyond the RTSP cross-check.
+- **The WHEP per-session SR offset** (above): `useAbsoluteTimestamp` ruled out as the cause
+  (2026-10-05). MediaMTX's WebRTC SRs versus Manifold's reading of them is not yet separated: that
+  needs an attended browser WHEP read.
 - **DeckLink:** the SDI read takes the same O (stage A). Calibration does not measure SDI (§19.2:
   the output chain is not per-source).
 - **Not tested live:** a loss of a few events mid-run on a real network. Covered offline: a missed
