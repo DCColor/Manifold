@@ -5480,6 +5480,451 @@ prediction says, even though (b) did not scatter.
 - **Not tested live:** a loss of a few events mid-run on a real network. Covered offline: a missed
   flash and a missed beep in `testLocksPairsAndOffersOnlyWhenConfident`.
 
+#### Attended session — 2026-10-05 (Robbie)
+
+**Build:** `.build-cc/monday-Profile` (Profile, `23e8223`, 7 clips bundled). No app code changed.
+Each item's prediction and band were written here BEFORE it ran.
+
+**Starting state** (read-only over obs-websocket):
+- **Sender OBS:** profile "MediaMTX Local", collection "Manifold Decklink Sender", scene
+  DECKLINK_BEEPS (DeckLink input only), 24000/1001, not streaming.
+- **Recorder OBS:** profile "Recorder", collection "AV Capture", 60 fps.
+- **Audio Hijack** was already running (13:04) before Manifold, so it was quit before Manifold
+  launched (CLAUDE.md).
+
+##### 1. OBS → NDI with the 23.976 sync clip
+
+**Prediction** (Robbie; the sign settled before the run):
+- **Calibration proposes −45…0 ms.** This is OBS's sender term: provisionally +16…+22 ms sound
+  LATE at the device (§19 header), so ≈ −16…−22 proposed.
+- **A proposal near +68 ms** would mean Stage D's SDK-sender reading (−67…−70 heard) is real for
+  OBS too: Manifold's NDI path, not the sender.
+- **The re-check after Apply for Session reads within ±2 ms of 0.**
+- **A 60 s Audio Hijack + Recorder OBS capture after the Apply** (`c12.py`, less its +1.708 ms
+  onset bias on these clips, §19.10 D4) reads within ±1 frame (±41.7 ms) of calibration's re-check
+  figure.
+  - That is the device agreeing with calibration.
+  - Calibration leaves out Manifold's own render path (≈ −16 ms, choice 7), which fits inside the
+    band.
+  - If the device reads ≈ −68 ms while calibration reads 0, NDI's heard figure is not the
+    listener's, and NDI calibration must stay disabled (§19.10, NDI).
+
+**Calibration result** (Manifold connected at 13:12:08 to "MAC-STUDIO (OBS PGM)" with ⌃⌥N; 30 s
+settle; driven by UI scripting; log `~/Desktop/manifold-soak/attended/att-1-ndi.manifold.log`):
+- **Sender:** OBS launched 13:01, 42 ms audio buffering (fresh). New scene collection "Untitled",
+  scene SYNC: Media Source `manifold-sync-23.976p.mp4`, looping, monitoring off. 24000/1001. DistroAV
+  main output.
+- **First run:** heard **−24.91 ms** (sound EARLY), last 10 of 22 pairs, p10…p90 −28.22…−17.39
+  (10.8 ms), so it proposed **+25 ms**. The sheet offered only Apply for Session, with the NDI
+  session-only note.
+- **Apply for Session:** `AUDIO OFFSET +0.0 → +25.0 ms ACCEPTED`, one splice (INSERT 1200 fr), no
+  rate write.
+- **Re-check:** **−1.79 ms** (p10…p90 −4.38…+5.18), so it would propose +27.
+
+| check | band | measured | |
+|---|---|---|---|
+| proposal | −45…0 | **+25** | ❌ the opposite sign: sound early, not late |
+| near +68 (the SDK reading)? | — | no: +25 | the SDK sender's −67…−70 is not what OBS gives |
+| re-check | ±2 ms | −1.79 | ✅ |
+
+**Device capture, O = +25 applied, 13:17:15:**
+- **Recorder:** OBS "Recorder", 60 fps. macOS Audio Capture was re-picked to Manifold. The
+  preflight read max −39.8 dB: the clip's −20 dBFS tone less the recorder's ~19.5 dB loss (§1.2).
+- **Files:** `~/Movies/2026-10-05 13-17-15.mov` (70.6 s) and Audio Hijack's
+  `~/Music/Audio Hijack/20261005 1317 Recording.wav`.
+- **c12.py** (run from a scratchpad venv with numpy; none is installed system-wide):
+  - 57 beeps, 57 flashes, 57 pairs, g_count ✅. g_grid False, as expected on the coded clip.
+  - **median +94.48 ms** (positive = audio LATE), sd 8.64; windows +90.4 … +97.7.
+  - Less c12's +1.708 ms onset bias: **+92.8 ms raw**.
+- **Not yet judged against a zero.** The chain's zero moves launch to launch (+2.5 / +27.8 ms,
+  §18.24), so the control is taken in this recorder launch, at item 2's end: Manifold plays
+  `manifold-sync-23.976p.mp4` from disk after NDI disconnects.
+- **Provisionally ❌.** Anywhere in the historical control range, device − zero is ≈ +65…+90 ms
+  (sound late), against calibration's −1.8. That is far outside ±1 frame, and near Stage D's SDK
+  −67…−70. If the control confirms it, NDI's heard figure is not the listener's.
+
+**The control, 13:32:33 — ❌ confirmed: on NDI, calibration's heard figure is ~70 ms earlier than
+the listener's.**
+- **Setup:** the same Manifold process (PID 56708), the same recorder launch, Audio Hijack, DeckLink
+  audio set to Computer. Manifold played `manifold-sync-23.976p.mp4` from disk at O = 0 (no offset
+  on a file, 2d).
+- **Files:** `~/Movies/2026-10-05 13-32-33.mov` (68.1 s, max −39.8 dB) and
+  `~/Music/Audio Hijack/20261005 1332 Recording.wav`.
+- **c12.py `--file`:** 48 / 48 / 48 pairs, g_count ✅, **median +25.17 ms**, sd 4.78. It is inside
+  the earlier launches' +2.5…+27.8 (§18.23, §18.24). c12's +1.708 bias is in both figures and
+  cancels.
+
+| figure | value |
+|---|---|
+| NDI capture (O = +25 applied) − control | +94.48 − 25.17 = **+69.3 ms, sound LATE at the device** |
+| calibration's re-check, same state | **−1.79 ms** |
+| device − calibration | **+71.1 ms (1.7 frames)**: ❌ against ±1 frame |
+| implied device figure before the Apply (O = 0) | ≈ +44 ms late, where calibration said 24.9 ms EARLY |
+
+- **The prediction's own wording had the sign wrong** ("if the device reads ≈ −68 while calibration
+  reads 0"). The consistent reading is device = calibration + ~70 ms.
+  - Stage D's SDK sender, in sync by construction, read heard −67…−70: a listener would hear ≈ 0.
+  - Here: heard −24.9, device ≈ +44. Same gap, same direction.
+- **So the ~70 ms is Manifold's NDI path, not the sender.** Two different senders (the SDK sender,
+  OBS/DistroAV) show the same gap between Manifold's NDI heard − clock (host time: pull stamps, the
+  picture delay, the direct anchor) and what reaches the speakers.
+- **Consequence:**
+  - On NDI, calibration proposes a value ~70 ms wrong, and in the opposite direction from what is
+    needed when the true error is small. Today it offered +25 (delay the sound) for sound that was
+    already ~44 ms late.
+  - §19.10's NDI note applies: **NDI calibration should stay disabled until its heard figure is
+    fixed** (Robbie's decision; no app change today). Stage D's NDI −67 ms question is answered.
+- **The sender term asked about (−45…0) cannot be read from calibration on NDI.** From the device,
+  OBS → NDI at O = 0 is ≈ +44 ms late on this rig today (42 ms OBS audio buffering, fresh launch).
+- **c12 on the NDI capture:** sd 8.64 against the control's 4.78. NDI's ±3–5 ms per-pair scatter
+  (§19.10) shows at the device too.
+
+##### 2. DeckLink SDI during the item 1 NDI session (O = +25 at the start)
+
+**⏸ ALL OF ITEM 2 IS DEFERRED, NOT FAILED (Robbie, 2026-10-05, mid-session).**
+- **The reason:** this machine's SDI monitoring speakers cannot resolve these differences. Robbie: "I'm having a little trouble distinguishing."
+- **Deferred to:** the final Release-build confirmation on Robbie's Resolve workstation.
+- **No verdict is taken here for 2a–2d.** The ✅ / ❌ / ⚠️ marks below are what was observed, kept as evidence for that confirmation.
+- **The log facts stand as recorded and do not depend on the speakers:**
+  - 2a: 20 changes with 0 underruns;
+  - 2c: the tap's standing shortfall past −30 ms, while the renderer allowed −80;
+  - 2d: no offset carried to the file, and DeckLink underruns on file playback.
+  The Resolve-workstation run should re-read them.
+
+**Predictions** (Robbie's, each with its own band; the item 1 session stays connected until 2d):
+- **2a. A change crossfades on SDI.**
+  - ⇧⌥] presses, one a second, with no click and no gap heard on the SDI monitor.
+  - In the log: no `SILENCE · ring empty at the cursor (underrun)` and no `snapping source cursor` at
+    the presses; one `AUDIO OFFSET … ACCEPTED` per press.
+  - Fail: any audible click or gap, or either log line at a press.
+- **2b. SDI moves with the desktop.**
+  - At O = +200 ms (+175 from item 1's +25), the sound on the SDI monitor is clearly late.
+  - Audio ▸ Computer gives the same +200 on the Mac; back to SDI, Reset to 0 ms, and both are in
+    sync.
+  - Fail: SDI sounds unchanged at +200 (the offset not reaching the tap), or the two differ by
+    ear.
+- **2c. An advance beyond what the tap holds plays silence and re-anchors.**
+  - From 0, ⇧⌥[ once a second until the banner refuses.
+  - Past the tap's lead, SDI plays a short silence and re-anchors (`SILENCE · ring empty` /
+    `underrun`, then clean). It never plays wrong or stuttering audio for more than the gap.
+  - Record the most negative O that plays clean on SDI against the renderer's refusal point.
+  - Fail: sustained garbage, repeated underruns after the re-anchor, or a stuck SDI.
+- **2d. The offset is gone on file playback after the disconnect.**
+  - With O left at a clearly non-zero value, disconnect NDI (⌃⌥⇧N), then play a file with DeckLink
+    output on to SDI.
+  - SDI is in sync, as before the session, and the log has no `AUDIO OFFSET` line for the file.
+  - Fail: a lingering offset, or an `AUDIO OFFSET` line on the file.
+  - The file is `manifold-sync-23.976p.mp4`, so the same playback is item 1's device control (above).
+
+**2a — DEFERRED (observed: log clean, no click heard).**
+- **Setup:** DeckLink output on with ⌃⌥O at 13:20, 1080p23.98, "video + SDI audio".
+- **The presses:** 20 × ⇧⌥], 13:21:16–13:21:40, one every ~1.3 s.
+  - The scripted Reset to 0 ms first failed: the A/V menu button was not reachable by
+    accessibility with DeckLink on. So the run went **+25 → +225 ms**, not 0 → +200.
+  - 20 × `AUDIO OFFSET … ACCEPTED`, each one splice (INSERT 480 fr / 10 ms), no rate write.
+- **Log:** no `SILENCE · ring empty`, no `snapping source cursor`. DeckLinkAudio `underruns=0`
+  throughout, buffered 179–181 ms, drift within ±2 ms.
+- **Robbie, on SDI:** "sounded normal": no click, no gap.
+
+**2b — DEFERRED (observed by ear only, with one comparison note).**
+- **SDI, +225 ms:** "clearly late" (Robbie).
+- **Audio ▸ Computer** (`audio destination → computer`, O unchanged at +225): **"that seems a bit
+  tighter sync vs SDI out"** (Robbie, verbatim).
+  - Late on both, but less late on the Mac by ear.
+  - Not quantified. It is the direction item 1's capture points to: if the Mac path hears NDI ≈ 65 ms
+    earlier than calibration's figure, +225 lands nearer +160 there.
+  - SDI's own chain (the 180 ms card buffer, the monitor's processing) is the other candidate.
+- **Back to SDI, then A/V ▸ Reset to 0 ms:** `AUDIO OFFSET +225.0 → +0.0 ms ACCEPTED`, one splice
+  (DROP 10800 fr). On SDI: **"hard to tell but seems fine"** (Robbie, verbatim).
+- **Log:** 56 `SILENCE · transport gate` lines, all between the switch to Computer and the switch
+  back: the card is silent by design while the Mac has the audio. PCM from the ring resumed on SDI,
+  `underruns=0`.
+
+**2c — DEFERRED (observed in the log: no silence and no re-anchor; the SDI tap sticks in a standing shortfall).**
+- **The presses:** from 0, 12 × ⇧⌥[ by script, 13:24:55–13:25:14.
+- **The renderer:** 8 accepted (0 → **−80 ms**, each one splice, DROP 480 fr). Then −90 was
+  REFUSED: "a 10.0 ms advance needs 170.0 ms of renderer queue … low point over the last 10 s is
+  167.2 ms … at most 7.2 ms of advance is available · O stays −80.0 ms". As designed.
+- **The DeckLink tap (SDI):**
+  - Clean through **−30 ms** (`short` 1 → 5, sched = want).
+  - **From the −40 step (13:25:00.9) every callback is short:** want ≈ 935 → 3000 frames, ringAvail
+    ≈ 1030; `short` 5 → 1649 by 13:25:35 (~50 a second); `underruns=0`, `resyncs=0`.
+  - The card's buffered audio drained 180 → ~138 ms and held there.
+  - The tap schedules what the ring has. It inserts no silence and never re-anchors, so "want" keeps
+    growing with each further advance and the deficit persists.
+- **Robbie, on SDI, at −80 after the run:** "sounds a little weird almost like dropping frame"
+  (verbatim). The shortfall is audible.
+- **Most negative O clean on SDI: −30 ms**, against the renderer's limit of −80 ms in this session.
+  The tap's lead is ~50 ms shorter than the renderer's, as §19.8 block 2 suspected.
+- **Against the prediction:** no silence-then-re-anchor. Instead, a persistent deficit in the log
+  that sounded off by ear. The verdict is deferred with the rest of item 2; the log behaviour is the
+  thing to re-check on the Resolve workstation.
+- **Process note:** the script brought Manifold to the front before every press, which kept Robbie
+  out of the menus. Later steps leave focus to him.
+- **Recovery on return — ✅.** A/V ▸ Reset to 0 ms by Robbie at 13:28:54: `−80.0 → +0.0 ms
+  ACCEPTED`, one splice (INSERT 3840 fr).
+  - Within a second the tap was full again: sched = want, buffered back to 180 ms, `short` frozen at
+    11 683, `resyncs=0`.
+  - So the deficit lasts exactly as long as O is beyond the tap's lead (~−30 ms here), and clears by
+    itself on return. The shortfall ran 13:25:00 → 13:28:54.
+  - Robbie: "sounds a bit better now".
+- ⚠️ **Robbie: the SDI ear checks (2a, 2b, 2c) need a retest on a system with better speakers.**
+  "I'm having a little trouble distinguishing." The log findings (2a clean; 2c's standing shortfall
+  past −30 ms) do not depend on it.
+
+**2d — DEFERRED (observed: the offset does not follow the file; separately, SDI underruns on file
+playback in the log).**
+- **Steps** (scripted, Robbie hands off):
+  - 20 × ⇧⌥] to **+200 ms** (ACCEPTED, 13:30:11);
+  - ⌃⌥⇧N: `[NDI] disconnected` 13:30:12, arbiter released NDI, DeckLink "live source gone — holding
+    output mode 1080p23.98";
+  - `open -a` the build with `manifold-sync-23.976p.mp4`: `[OPEN] loaded into an existing empty
+    window` 13:30:17, FILE 23.976, the mode unchanged; Space to play, presented 24.0 fps.
+- **Log:** **0** `AUDIO OFFSET` / `[AUDIO-OFFSET]` lines after the disconnect. The +200 stayed with
+  the NDI session.
+- **Robbie, on SDI:** "I don't sounds as expected to my ear" (verbatim). Read as: sync as expected,
+  no dropouts heard. The better-speakers retest above applies.
+- ⚠️ **DeckLink tap underruns during file playback:**
+  - `!! UNDERRUN — ring has nothing at srcT=… scheduling silence, will re-anchor`, at srcT ≈ −0.03,
+    10.03, 11.03, 13.04, 14.04, 15.04, 20.50, ~22 s. Often one a second, on the second boundary.
+    The total went 245 → 260 in 22 s.
+  - Between them: buffered 180 ms, sched = want, `resyncs=0`.
+  - The ~244 before srcT 0 are the gap between the NDI disconnect and the file loading (no source),
+    as expected.
+  - Not investigated (no app change today). Whether it is new, or happens without a preceding live
+    session, is open: a file-only launch with DeckLink on separates the two. Logged for BUGS.md.
+
+##### 3. OBS → Cloudflare SRT and OBS → Cloudflare WHEP with the 23.976 clip
+
+**Predictions** (Robbie; the WHEP sign settled before the run, as in item 1):
+- **Cloudflare SRT: calibration proposes +70…+90 ms.** Cloudflare SRT's audio arrives ~70–80 ms
+  early (§18.13), so the sound is heard early and the proposal is positive.
+- **Cloudflare WHEP: calibration proposes −45…0 ms.** This is the sender term only: OBS sound late,
+  as for NDI. WHEP's SR line carries no Cloudflare offset (§18.8, §18.24).
+- **Each re-check after Apply for Session reads within ±2 ms of 0.**
+- Each runs in its own connection: calibrate, Apply for Session, re-check, Cancel. Never Apply and
+  Save.
+- Item 1 found NDI's heard figure ~70 ms off the device. SRT and WHEP read heard − clock on the
+  stream's PTS (choice 7), not on host pull stamps, so their figures are not expected to share
+  that error. No device capture is in item 3's brief.
+
+**3 · SRT result — ❌ sound LATE, not early; the proposal could not be applied (no advance budget);
+a starvation hold then added its debt.**
+- **Connection:** OBS profile "SRT Cloudflare", collection "Untitled", scene SYNC. Manifold, the same
+  process as items 1–2, ▸ "DC Color Live  - SRT" (by Robbie). `[AUDIO-OFFSET] connect (srt) —
+  session value 0 ms (from the saved stream's setting)`, transport up 13:41:32.
+- **Settle:** steering at its ±2000 ppm rail for the first ~35 s (e_f −27 … −33 ms). Settled by
+  +50 s (e_f +2.2, then within ±4 ms).
+- **Run 1, Start 13:42:09 (+37 s), RESULT 13:42:35:** heard **+26.75 ms** (sound LATE), last 10 of
+  20 pairs, p10…p90 +25.28…+27.34. **Proposed −27 ms · NOT APPLICABLE: "at most 0.0 ms available"**.
+  - The sheet said so, and Robbie reported it: "moving sound 27 ms earlier needs more of the stream
+    buffered than it has. At most 0 ms is available on this stream right now".
+  - The 10 pairs (+53…+63 s) fall after the settle, so the figure is valid.
+- **Why there is no advance budget:**
+  - An advance needs advance + 100 keep + 10 fade + 50 margin ms of renderer queue.
+  - This session's renderer depth: min 164, median 198, max 243 ms; **low-water 143 ms**.
+  - Even 0 ms of advance (160 needed) does not fit, so on this path calibration can never apply a
+    negative value.
+- **⏸ STARVATION HOLD #1 at 13:42:41.38**, 6 s after run 1's result: "no input for 190 ms, renderer
+  queue 19.7 ms". It resumed after 36 ms held, +5.1 ms from the held point, with 100 ms queued.
+  No other hold, cut or catch-up.
+- **Run 2, measure only (Start 13:49:26, Cancel):** heard **+61.44 ms** (25 pairs, p10…p90
+  +59.53…+62.84), proposed −61 · NOT APPLICABLE (0.0 ms).
+  - **+34.7 ms later than run 1, about the hold's 36 ms.**
+  - **The hold's debt went into lip-sync and has not been repaid**, as §18.22 modelled (the
+    catch-up needs the whole debt queued, which this queue never has).
+- **No Apply, so no re-check.** The re-check band (±2 ms) could not be tested.
+
+| check | band | measured | |
+|---|---|---|---|
+| proposal | +70…+90 | **−27** (run 1), **−61** (run 2, after the hold) | ❌ the opposite sign: sound late |
+| apply | — | not applicable: 0.0 ms of advance available | — |
+| re-check | ±2 ms | not run | — |
+
+- **Against §18.13** (Cloudflare SRT audio ~70–80 ms early, 2026-09-29): this session reads the
+  other way.
+  - §18.12 found Cloudflare SRT's offset varies by session.
+  - Today's sender also differs: a fresh OBS, a new collection, the SYNC clip, not BEEPS.
+  - Whether "~70–80 early" is a stable property of Cloudflare SRT is now in doubt.
+- **For the user guide:** on a path whose queue sits near its floor, sound-late results can never
+  be corrected by calibration, only measured. The advance budget is the queue's own lead.
+
+**3 · WHEP result — proposal ✅ in band; first re-check ❌ (+14.6); the relation wandered ±12 ms over
+the first ~2½ min; a second cycle passed (−1.9).**
+- **Connection:** OBS profile "WHIP Cloudflare", scene SYNC. Manifold ▸ "DC Color Live - WHEP" (by
+  Robbie), replacing the SRT connection.
+  - `[AUDIO-OFFSET] connect (web) — session value 0 ms (from the saved stream's setting)`, connected
+    13:51:18.5.
+  - SDP CNAMEs differ (the SR line is applied anyway, as designed). First SR line offset +0.011 ms;
+    windows −6.2 → −1.5…−2.0 ms; the slope not yet in use (fewer than 4 × 30 s batches).
+
+| run | time (since connect) | O | heard A/V (pairs; p10…p90) | O-corrected (heard − O) | action |
+|---|---|---|---|---|---|
+| 1 | 13:51:42 → :57 (+24…+39 s) | 0 | **+40.26** (10; 39.36…41.49) | +40.3 | proposed **−40**, Apply for Session: one splice, DROP 1920 fr |
+| 2, re-check | 13:52:02 → :24 | −40 | **+14.57** (15; 13.62…15.43) | +54.6 | ❌ ±2 |
+| 3, measure only | 13:52:48 → 13:53:02 | −40 | +12.88 (10; 11.28…13.51) | +52.9 | Cancel |
+| 4 | 13:53:18 → :32 | −40 | +24.59 (10; 23.88…25.96) | +64.6 | proposed −65, Apply: one splice, DROP 1200 fr |
+| 5, re-check | 13:53:37 → :54 | −65 | **−1.93** (12; −3.24…−1.23) | +63.1 | ✅ ±2 |
+
+- **The steering did exactly what was applied.**
+  - Its own heard figure moved −1.4 → −40.3 ms at the first Apply, then held −40.2…−40.8.
+  - e_f within ±1.7 ms from +20 s. No starvation hold, cut or re-anchor; SR-line offset steady at
+    −1.5…−2.0 ms.
+- **So the content relation itself moved** by +24 ms between runs 1 and 2 and by +12 ms between runs
+  3 and 4. Nothing in Manifold's log moved with it.
+  - Each run's own 10 pairs were tight (p10…p90 ≤ 2.1 ms) and passed the walk guard.
+  - The wander is slower than a 10-pair window and larger than the ±2 ms re-check band.
+  - Candidates, not separated: Cloudflare's WebRTC side, whose SR pair noise is 4–9 ms (§18.22),
+    or OBS's WHIP output early in a stream. A longer session would show whether it settles.
+
+| check | band | measured | |
+|---|---|---|---|
+| proposal (run 1) | −45…0 | **−40** | ✅ |
+| re-check (run 2) | ±2 ms | **+14.57** | ❌ |
+| second cycle re-check (run 5, not in the brief) | ±2 ms | −1.93 | ✅ |
+
+- **Reading:**
+  - The sender-term sign and size were predicted right: OBS's sound is late on WHEP.
+  - But a single calibration taken in the first minute was off by 25 ms.
+  - For the sheet: consider requiring ≥ 60 s connected (not the 10 s settle), or a longer pair
+    window on WHEP (Robbie's decision; no change today).
+- The session is left at O = −65 ms (session only, not saved).
+- **DistroAV's NDI output stayed on through both runs** (Robbie asked whether it matters). The sender
+  log shows no load effect:
+  - audio buffering stayed at 42 ms, with no 21 ms additions;
+  - SRT output: 0.0 % bytes dropped, 0.0 % retransmitted (so SRT's 190 ms input gap was downstream
+    of OBS);
+  - NDI render lag 23 / 43 125 frames (0.1 %).
+  - Item 3 was not re-run. NDI stays on for item 4's NDI states (N01–N03) and is turned off
+    after them, before item 6.
+- **Addendum, found during item 4 (13:58): the WHEP relation kept moving, by −58 ms in 4 min, and
+  the SR-line fit's slope entering use is the visible change.**
+  - O-corrected relation, the same session: +40.3 (13:51:57) → +54.6 → +52.9 → +64.6 → +63.1
+    (13:53:54) → **+4.5 (13:58:21)**.
+  - **Steering:** heard A/V med −63.7…−68.3 ms throughout (= O), e_f within ±1.5 ms after 13:54. No
+    hold, splice, coarse event or re-anchor; holes 1 (960 fr) at 13:53:59 only. One incomplete
+    keyframe at 13:54:53 (PLI sent): video only.
+  - **The SR-line fit:**
+    - Its slope was "not in use (fewer than 4 × 30 s batches)" until ~13:55, then in use at
+      +94…+116 ppm.
+    - The window offset ramped **+6.6 → +32.5 ms** between 13:53:59 and 13:58:09. That is OBS's
+      23.976 video-timestamp error (+66.6 ppm, §18.25) as Cloudflare's SRs carry it, plus the
+      fit's early slope estimate.
+  - **Not resolved live:** the content moved −58 ms while the line offset moved +26 ms. Sorting
+    out signs and terms (applied line, content on Cloudflare's timestamps, the slope's entry into
+    use) needs this session's SR pairs replayed offline (`replay-offset-lock`-style).
+  - **What it means for calibration on Cloudflare WHEP:** a result taken before the fit's slope is
+    in use (~2–4 min after connect) does not hold.
+    - Run 1's −40 was taken at +39 s; even the passing re-check at +2 min 36 s was off by ~60 ms
+      four minutes later.
+    - Candidate rule (Robbie's decision): calibration waits for `[WHEP-SRFIT]` slope in use, or
+      ≥ 4 min connected, on WHEP.
+    - §18.8's 4.5 h hold says the fit is stable once established. That should be re-checked on
+      this session's later readings.
+
+##### ⚠️ Found during item 4 (14:02–14:07): THE BUNDLED MP4 CLIPS DRIFT A/V BY ONE AAC PAD PER LOOP IN OBS — today's live readings were taken on a stepping sender
+
+**The check** (Robbie's go-ahead). The sender OBS recorded its own output, `~/Movies/2026-10-05
+14-02-15.mov`, 14:02:15 → ~14:07, while it streamed to Cloudflare WHEP. Meanwhile Manifold ran six
+measure-only calibrations, 40 s apart, at O = +47 (Cancel, no apply).
+- **The recording, through the shipped detectors** (`fileprobe`, DUMP, 231 pairs; 20 s bins):
+  - flat within ±0.02 ms inside each 60 s loop;
+  - **+14.67 ms at every loop**: +38.12 → +52.79 → +67.45 → **+8.79** → +23.45 ms;
+  - after four steps it wraps by −58.7 ms. OBS's media source resyncs; the threshold was not
+    looked up.
+- **Manifold over WHEP, the same minutes:**
+  - heard +19.9, +30.4, +42.1, +39.8, **−21.4**, −9.9 ms (14:03:01 → 14:06:26);
+  - three steps of +11…+12 ms, then −61 ms, the wrap ~30 s after the recording's, i.e. the
+    transport.
+  - So the WHEP "wander" in item 3 and item 4's addendum is mostly the sender.
+
+**The cause:**
+- `manifold-sync-23.976p.mp4`'s video is 1440 frames = 60 060.000 ms.
+- Its AAC audio decodes to 2 883 584 samples = **60 074.667 ms**: whole 1024-sample frames, the last
+  one padded.
+- The edit list trims it to 2 882 880 samples (`elst` duration), but an ffmpeg-based player ignores
+  the end trim. OBS's Media Source is one.
+- So every loop the audio runs **704 samples = 14.667 ms** long and falls that much later.
+
+| clips | decoded audio, 60 s clip | extra per loop |
+|---|---|---|
+| MP4 (AAC) 23.976, 29.97, 59.94 | 60 074.667 ms vs 60 060 | **+14.667 ms** |
+| MP4 (AAC) 24, 25, 30, 50 | 60 010.667 ms vs 60 000 | **+10.667 ms** |
+| **ProRes .mov (PCM s24le), all seven** | equal to the video | **0** |
+
+- **Stage D's fixture fault was the same thing:** "untrimmed concat segments shifted the audio ~15 ms
+  at each join" (§19.10).
+- **For the product (Robbie's decision; nothing changed today):**
+  - The sheet, the README and §19.8 D0 all say to loop the clip in OBS. With the MP4s that moves
+    the measured relation 10.7–14.7 ms per minute, by sawtooth.
+  - Options:
+    - ship / recommend the ProRes `.mov` for OBS;
+    - make each MP4's audio a whole number of AAC frames (e.g. 23.976: a multiple of 512 frames,
+      since 2002 × N must be a multiple of 1024);
+    - or carry the end trim in a form OBS honours.
+  - Whether a length change is a "v2" under the pattern-version rule is Robbie's call. The code,
+    unit, tone and flash would not change.
+- **What it does to today's readings:**
+  - Every live figure in items 1 and 3 was taken at an unknown loop phase. Each can be off by up to
+    ~59 ms, and two figures minutes apart are not comparable.
+  - **Item 1:** the 71 ms device − calibration gap compared readings 4 minutes apart (13:13 against
+    13:17), so it is confounded. **Stage D's SDK result (−67…−70, no loop) still stands and
+    supports it, but item 1 alone does not prove it.**
+  - **Item 3:** the SRT and WHEP proposals and re-checks are confounded the same way. WHEP's
+    +14.6 re-check fail and the later −58 ms wander are explained in large part.
+    - The SR-fit observation stands as an observation.
+    - So does SRT's +34.7 after the hold, which was within one loop: run 2 came 7 min after run 1,
+      so not certainly.
+- **For the rest of the session:** switch SYNC to `build/syncclips/manifold-sync-23.976p.mov`
+  (ProRes, PCM), which loops exactly.
+
+##### 4. The sheet and menu review (Robbie, on the live app)
+
+**Brief:** walk each state in §19.10's screenshot list on the live app; Robbie's comments are noted
+verbatim. There is no pass/fail band; it is a review. Never Apply and Save (no `defaults` written).
+
+**Order** (the fewest reconnects):
+1. **On the Cloudflare WHEP bookmark (connected):**
+   - M01, the A/V menu while live;
+   - M02, Help ▸ Download Sync Clips… (opens the v1 zip URL; 404 until uploaded);
+   - Save Sync Clip…, the panel's rate line;
+   - the S2 sheet states: idle, progress, result with Apply and Save offered and the line naming
+     the bookmark, applied, re-check.
+2. **X01, not applicable:** seen live on Cloudflare SRT in item 3 (Robbie read the wording out). Noted
+   from that.
+3. **NDI** (⌃⌥N): N01–N03, session only (the NDI note; only Apply for Session).
+4. **HLS** (`MTX HLS`): H01, the greyed control's menu; H02, the sheet's HLS note with Start
+   disabled.
+5. **Clips not bundled** (`.build-cc/stageD-noclips-Profile`): C01, the note and the download link.
+   It needs a relaunch, so it comes last and is optional.
+
+**Robbie's comments, verbatim:**
+- **M01, the A/V menu (live, Cloudflare WHEP, O = −65):** "I think the wording works well"
+- **M02, Help ▸ Download Sync Clips…:** "yes that URL launched but 404 as expected". The URL is
+  confirmed (`…/manifold/manifold-sync-clips-v1.zip`). The upload is still a BUGS.md pre-ship item.
+- **Save Sync Clip… (the panel's rate line and rate menu, 23.976 stream):** "yes I think thats fine"
+- **S2, the sheet on the WHEP bookmark (idle → Start → progress → result; Apply and Save offered,
+  not pressed):** "looks and operates fine".
+  - Robbie's run 22, 13:58:07 → :21: heard **−60.50 ms** at O = −65 (11 pairs, p10…p90
+    −61.26…−59.16), proposed −5. O-corrected **+4.5 ms**, against +63.1 at 13:53:54. See the item 3
+    addendum.
+  - `streamBookmarks` hash unchanged after it.
+
+##### Session stopped at 14:10 (Robbie), after the MP4 loop finding — items 4 (rest), 5 and 6 not run
+
+- **Item 4:** M01, M02, Save Sync Clip… and S2 reviewed (comments above). Not reviewed: X01 (seen
+  live on SRT, wording read out by Robbie), N01–N03, H01–H02, C01.
+- **Item 5** (the browser cross-check of MediaMTX WHEP) and **item 6** (the 90-min Cloudflare SRT
+  hold): not started. Item 6 must use the ProRes `.mov` (or MP4s fixed per the finding above),
+  or its 30-min readings are sawtooth-confounded.
+- **Pending re-runs on a loop-exact sender:** items 1 and 3.
+- **State left:**
+  - Manifold (monday-Profile, PID 56708) connected to Cloudflare WHEP, at a session-only O = +47.
+  - The sender OBS streaming ("WHIP Cloudflare") with the NDI output on.
+  - MediaMTX untouched (abs config).
+  - `streamBookmarks` hash unchanged.
+  - Nothing of OBS changed by Claude.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,
