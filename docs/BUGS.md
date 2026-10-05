@@ -811,7 +811,7 @@ NDI's heard figure is not what the listener hears, and NDI calibration must be d
 
 ---
 
-## ☐ OPEN 2026-10-05 — DeckLink SDI: the tap underruns during FILE playback (pre-existing; worse on AAC than PCM) — a release-blocking candidate for SDI reference output
+## ✅ FIXED 2026-10-05 (uncommitted; pending the attended SDI check on the Resolve workstation) — DeckLink SDI: the tap underruns during FILE playback (pre-existing; worse on AAC than PCM)
 
 **Found in the attended session, measured unattended (`AUDIO_RESAMPLER_DESIGN.md` §19.10, "Two
 findings re-examined").**
@@ -852,8 +852,71 @@ findings re-examined").**
 - **Why release-blocking candidate:** SDI out is a reference output. A dropout every few seconds on
   file playback is audible on a broadcast monitor, and the SDI ear checks of §19.8 block 2 were
   deferred to the Resolve workstation (2026-10-05).
-- **Next:** Robbie decides on §19.12's fix. Then check the libav path (MXF), seeks, and device A/V
-  on SDI with the attended recorder.
+- **Fixed (`AUDIO_RESAMPLER_DESIGN.md` §19.12, "Implemented"), as decided by Robbie:**
+  - Both file pumps keep a 250 ms tap look-ahead (`FileAudioLookahead`, `TapLookahead.seconds`).
+  - The tap window is 4 s.
+  - The bridge is unchanged, apart from an event-level underrun counter
+    (`!! UNDERRUN EVENT #n`, `events=`).
+- **Measured, DeckLink on, file-only:** **0 events in 12 / 12 runs**: 4 each on the AAC MP4, the PCM
+  ProRes and a DNxHR MXF (libav). The MXF had 0 before the fix too.
+  - Steady play, pause / resume × 5 and a file switch: 0.
+  - Each seek, scrub release and loop seam still leaves one 20–140 ms gap, against 1–2 s before the
+    fix. Accepted as designed behaviour (closed below).
+- **Live:**
+  - Replays against b35a810 are 99 / 99 byte-identical.
+  - Local SRT with SDI owning the audio: 16 / 16 O changes accepted, 0 events across them.
+- **Remaining:** device-level A/V and an ear check on SDI, both DEFERRED to the Release-build check on
+  the Resolve workstation.
+
+---
+
+## ✅ CLOSED 2026-10-05 — ACCEPTED AS DESIGNED (Robbie) — DeckLink SDI: a 20–140 ms silence at every seek, scrub release and loop seam (file playback; was 1–2 s before the look-ahead fix)
+
+**Found verifying the SDI underrun fix; decided 2026-10-05 (`AUDIO_RESAMPLER_DESIGN.md` §19.12,
+"Implemented" and "Decisions").**
+- **What:**
+  - Seeking while playing resets the tap, as it must, and the card keeps reading. It finds nothing
+    until the new reader's first audio arrives.
+- **Measured** (fixed build, MP4, `transport.sh`):
+  - seeks while playing: 1–2 underrun events per seek, 20–100 ms each;
+  - scrub release: 139 ms;
+  - loop seam: 109 ms;
+  - pre-fix: 52–115 empty callbacks per seek (1–2 s), because the renderer's ~2 s prefill overran
+    the old 2 s ring.
+- **Accepted:** silence at the cut, the same as any player or NLE at a cut. The tap holds nothing from
+  before the jump, so it is not stale audio, and not a dropout inside continuous programme.
+- **Rejected alternatives:**
+  - *Hold the card's audio position until the new reader has primed.* The post-seek picture is
+    already on SDI, so the audio after the cut would start up to ~140 ms late against it, and the
+    anchor loop would have to resync it back. That is an A/V error after the cut in place of a silence
+    at it.
+  - *Delay the post-seek SDI picture to match.* That adds up to ~140 ms of transport latency to the
+    reference picture at every jump, with SDI trailing the desktop after each. It is new machinery and
+    a slower reference output, to remove a silence every player has.
+  - *Gate the card during the gap.* Same zeros on the wire, only relabelled. Not done. So
+    `!! UNDERRUN EVENT` logs one line per jump, and that is expected.
+
+---
+
+## ☐ OPEN 2026-10-05 — CHECK BEFORE RELEASE — DeckLink SDI: every timeline-slider click stages a scrub frame stamped pts 0 on SDI
+
+**Found verifying the SDI underrun fix (`AUDIO_RESAMPLER_DESIGN.md` §19.12, "Implemented"). Kept
+separate from the seek gap above (Robbie, 2026-10-05).** Pre-existing: the scrub path is untouched by
+the fix.
+- **Seen:**
+  - At each slider click, the scrub producer's frame reaches the DeckLink staging path with
+    `[V210] drag … offered=1 converted=1 … SDI frontPts 0.000→0.000`.
+  - The card's audio anchor, which follows the staged pts, briefly reads srcT −0.03 s. One of the 1–2
+    underrun events per seek begins there (`tr-fix-mp4-1/2` in
+    `~/Desktop/manifold-soak/sdi-underrun-fix/`).
+- **The question, to answer read-only before release:** is the frame's CONTENT wrong, or only its
+  timestamp?
+  - **Content wrong** would be a wrong picture briefly on SDI (e.g. the file's first frame instead of
+    the frame at the click). That is a reference-output defect.
+  - **Timestamp only** means the right picture, stamped 0: harmless bookkeeping. Its only effect is
+    the audio anchor's brief read at srcT ≈ 0, inside a gap that is silent anyway.
+- **Not investigated.** Starting points: the scrub producer's delivery into the SDI staging buffer
+  (the `[V210] drag` line), and which pts that delivery carries.
 
 ---
 

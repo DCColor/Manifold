@@ -208,9 +208,31 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // The file audio pumps' tap look-ahead (docs/AUDIO_RESAMPLER_DESIGN.md §19.12): the tap is
+        // filled 250 ms past what the system renderer has taken, so SDI never waits on the muted
+        // renderer's refill timer. A leaf target (CoreMedia only) for the same linking reason as
+        // AudioResample: `swift test` must reach the pump loop and its retire-on-seek rule, and a
+        // test bundle cannot link ManifoldCore. Both file pumps (FrameEngine's AVFoundation pump,
+        // LibavAudioSource) drive it.
+        .target(
+            name: "FileAudioLookahead",
+            path: "Sources/FileAudioLookahead",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "FileAudioLookaheadTests",
+            dependencies: ["FileAudioLookahead"],
+            path: "Tests/FileAudioLookaheadTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .target(
             name: "ManifoldCore",
-            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration"],
+            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
+                           "FileAudioLookahead"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

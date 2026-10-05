@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 // The ASRC stage at the live-audio seam — `LiveAudioSink` is its only caller.
 import LiveAudioResample
 import SyncCalibration
+import FileAudioLookahead
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -1984,8 +1985,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             if let ainfo = try? audio.open() {
                 let aRenderer = audioRenderer
                 let tap = audioTap   // local capture (thread-safe class) — no main-actor hop on the pump
-                audio.onAudioFrame = { sb in
+                // Teed at decode time, enqueued when the renderer takes it: the tap runs
+                // `TapLookahead.seconds` ahead of the renderer (§19.12).
+                audio.onDecoded = { sb in
                     tap.ingest(sb, path: .libav)   // D4b-1 tee — does not alter the enqueued buffer
+                }
+                audio.onAudioFrame = { sb in
                     aRenderer.enqueue(sb)
                 }
                 libavAudioSource = audio
@@ -3537,20 +3542,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let aRenderer = audioRenderer
         let tap = audioTap          // thread-safe class, captured locally — no main-actor hop
         let session = audioSessionToken
+        // The tap look-ahead (§19.12): the tap is filled `TapLookahead.seconds` past what the
+        // renderer has taken, so SDI never waits on the renderer's refill timer. One per arm —
+        // this closure's — so a seek / switch drops it with the token. See `TapLookaheadPump`.
+        let lookahead = TapLookaheadPump<CMSampleBuffer>(duration: TapLookahead.duration(of:))
         aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [weak self] in
             guard self != nil, session.isCurrent(token) else {
                 aRenderer.stopRequestingMediaData(); return
             }
-            while aRenderer.isReadyForMoreMediaData {
-                guard session.isCurrent(token) else {
-                    aRenderer.stopRequestingMediaData(); return
-                }
-                guard newReader.status == .reading, let next = out.copyNextSampleBuffer() else {
-                    aRenderer.stopRequestingMediaData(); return
-                }
-                tap.ingest(next, path: .avFoundation)   // D4b-1 tee — does not alter the buffer
-                aRenderer.enqueue(next)
-            }
+            let outcome = lookahead.service(
+                isReady: { aRenderer.isReadyForMoreMediaData },
+                isCurrent: { session.isCurrent(token) },
+                next: { newReader.status == .reading ? out.copyNextSampleBuffer() : nil },
+                ingest: { tap.ingest($0, path: .avFoundation) },   // D4b-1 tee — does not alter the buffer
+                enqueue: { aRenderer.enqueue($0) })
+            if outcome != .waiting { aRenderer.stopRequestingMediaData() }
         }
 
         // The channel count the meters label, from the track's own ASBD. A count we cannot read is

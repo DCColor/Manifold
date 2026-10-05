@@ -8,7 +8,7 @@ import LiveAudioResample
 ///
 /// Tees decoded audio at the two FrameEngine enqueue sites (AVFoundation reader + libav source),
 /// normalizes BOTH producers to ONE card-ready format — **32-bit signed integer, interleaved,
-/// source-native sample rate + channel count** — and holds a rolling ~2 s window keyed by source
+/// source-native sample rate + channel count** — and holds a rolling ~4 s window keyed by source
 /// PTS so D4b-2's DeckLink audio callback can later ask "give me N frames starting at source time T"
 /// (T = synchronizer clock). NOTHING is sent to the card in this stage: this is capture + buffer +
 /// format only.
@@ -92,9 +92,20 @@ public final class AudioTapBuffer: @unchecked Sendable {
     private var buffersIngested = 0
     private var lastLoggedFrames = 0
 
-    /// Rolling window length. ~2 s gives the 50 Hz card callback (D4b-2) generous slack for
-    /// host-clock vs card-clock drift.
-    private let windowSeconds: Double = 2.0
+    /// Rolling window length. 4 s, raised from 2 s with the file pumps' tap look-ahead
+    /// (docs/AUDIO_RESAMPLER_DESIGN.md §19.12).
+    ///
+    /// ⚠️ THE WINDOW MUST HOLD EVERYTHING FROM THE CARD'S CURSOR TO THE NEWEST INGESTED SAMPLE, and
+    /// on a file that span is set by the renderer, not by the card. Before play the renderer
+    /// prefills 1.64–2.01 s (MEASURED); mid-file the tap leads the cursor by up to 1.96 s with the
+    /// look-ahead, and by up to 2.43 s when the renderer is unmuted. A 2 s window overwrote the
+    /// cursor's samples in each of those cases (the start-of-play underrun, and 83–88 underruns a
+    /// minute unmuted). 4 s leaves ≥ 1.5 s of headroom over every case measured.
+    ///
+    /// MEMORY: 4 s × rate × channels × 4 bytes (Int32), allocated when the format is set. At 48 kHz:
+    /// 768 KB per channel — 1.5 MB stereo, 6.1 MB at 8 ch, 12.3 MB at 16 ch (double that at 96 kHz).
+    /// Twice the 2 s window's cost. One ring per engine.
+    private let windowSeconds: Double = 4.0
 
     /// If an incoming buffer's PTS deviates from the expected running time by more than this, treat it
     /// as a discontinuity (a seek not routed through `reset()`, or a gap) and re-anchor rather than

@@ -549,6 +549,7 @@ public:
             // Nothing at this source time at all: post-seek gap (the ring was reset), or the source has
             // no audio. Fill silence and drop the anchor so the next callback with data re-syncs cleanly.
             m_underruns++;
+            noteUnderrunCallback(want);
             m_cursorAnchored = false;
             m_errEma = 0.0;
             logAudioBranch("SILENCE · ring empty at the cursor (underrun)", silent, 0, want);
@@ -556,6 +557,7 @@ public:
             return scheduleSilence(want) ? S_OK : E_FAIL;
         }
         // Past every silence return: this callback is serving REAL audio out of the ring.
+        endUnderrunEventIfAny();
         logAudioBranch("PCM · read from the ring", silent, got, want);
         // The ring had SOME but not all of what we asked for — the decoder simply hasn't reached that far
         // yet. Schedule only what exists (see kAudioCriticalDepthSeconds) unless the card is about to run
@@ -688,12 +690,12 @@ private:
         const double rate = (double)m_audio.sampleRate;
         fprintf(stdout,
                 "DeckLinkAudio: buffered=%uf (%.0fms) · srcT=%.3fs · sched=%uf (want=%df ringAvail=%df"
-                "%s) · vq=%uf · drift=%+.2fms · corr=%+df · underruns=%llu short=%llu resyncs=%llu\n",
+                "%s) · vq=%uf · drift=%+.2fms · corr=%+df · underruns=%llu events=%llu short=%llu resyncs=%llu\n",
                 bufferedAudio, (double)bufferedAudio / rate * 1000.0, m_cursorSeconds,
                 written, want, got, silencePad > 0 ? " +PAD" : "", bufferedVideo,
                 m_errEma * 1000.0, correction,
-                (unsigned long long)m_underruns, (unsigned long long)m_shortReads,
-                (unsigned long long)m_resyncs);
+                (unsigned long long)m_underruns, (unsigned long long)m_underrunEvents,
+                (unsigned long long)m_shortReads, (unsigned long long)m_resyncs);
         fflush(stdout);
     }
 
@@ -739,6 +741,36 @@ private:
         fprintf(stdout, "DeckLinkAudio: !! UNDERRUN — ring has nothing at srcT=%.3fs (wanted %df); "
                         "scheduling silence, will re-anchor (total=%llu)\n",
                 srcTime, want, (unsigned long long)m_underruns);
+        fflush(stdout);
+    }
+
+    // UNDERRUN EVENTS (docs/AUDIO_RESAMPLER_DESIGN.md §19.12). `m_underruns` counts CALLBACKS, and
+    // one dropout is usually several: after an empty read the cursor re-anchors to `ideal`, which is
+    // already past a head that has not moved, so the next 1–3 callbacks are empty too. An EVENT is
+    // one run of consecutive empty-ring callbacks — one hole in the programme — and it is what a
+    // listener hears. Logged once, when the run ends (the next real read), unthrottled: with the
+    // file pumps' tap look-ahead there should be none mid-file, so each one is worth a line.
+    void noteUnderrunCallback(int32_t want) {
+        if (!m_inUnderrunEvent) {
+            m_inUnderrunEvent = true;
+            m_underrunEvents++;
+            m_eventStartSrcT = m_cursorSeconds;
+            m_eventCallbacks = 0;
+            m_eventSilenceFrames = 0;
+        }
+        m_eventCallbacks++;
+        m_eventSilenceFrames += (uint64_t)std::max(want, 0);
+    }
+
+    void endUnderrunEventIfAny() {
+        if (!m_inUnderrunEvent) return;
+        m_inUnderrunEvent = false;
+        fprintf(stdout, "DeckLinkAudio: !! UNDERRUN EVENT #%llu ended — began at srcT=%.3fs, %u callback%s, "
+                        "%lluf of silence (%.0f ms) · events=%llu underrunCallbacks=%llu\n",
+                (unsigned long long)m_underrunEvents, m_eventStartSrcT, m_eventCallbacks,
+                m_eventCallbacks == 1 ? "" : "s", (unsigned long long)m_eventSilenceFrames,
+                (double)m_eventSilenceFrames * 1000.0 / (double)m_audio.sampleRate,
+                (unsigned long long)m_underrunEvents, (unsigned long long)m_underruns);
         fflush(stdout);
     }
 
@@ -793,7 +825,12 @@ private:
     double m_cursorSeconds = 0.0;           // SOURCE time of the next sample frame to schedule
     bool m_cursorAnchored = false;          // false → snap to the video's source time next callback
     double m_errEma = 0.0;                  // smoothed (ideal − cursor), seconds
-    uint64_t m_underruns = 0;               // ring had NOTHING at the cursor → silence + re-anchor
+    uint64_t m_underruns = 0;               // ring had NOTHING at the cursor → silence + re-anchor (CALLBACKS)
+    uint64_t m_underrunEvents = 0;          // runs of consecutive empty-ring callbacks (see noteUnderrunCallback)
+    bool m_inUnderrunEvent = false;
+    double m_eventStartSrcT = 0.0;
+    uint32_t m_eventCallbacks = 0;
+    uint64_t m_eventSilenceFrames = 0;
     uint64_t m_shortReads = 0;              // ring had SOME but not all → short schedule (no hole)
     uint64_t m_shortSchedules = 0;          // card accepted fewer frames than offered
     uint64_t m_resyncs = 0;                 // smoothed drift exceeded the band → cursor snapped
@@ -812,6 +849,7 @@ private:
 
 public:
     uint64_t audioUnderrunCount() const { return m_underruns; }
+    uint64_t audioUnderrunEventCount() const { return m_underrunEvents; }
     uint64_t audioShortReadCount() const { return m_shortReads; }
     uint64_t audioResyncCount()   const { return m_resyncs; }
     uint64_t audioShortScheduleCount() const { return m_shortSchedules; }
@@ -1491,9 +1529,10 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
             const unsigned long long silence = (unsigned long long)_player->audioSilenceFramesScheduled();
             fprintf(stdout, "DeckLinkAudio: stopped — scheduled=%lldf TOTAL = real=%lluf (PCM read from "
                             "the ring) + silence=%lluf (transport gate / no anchor / underrun / tail pad) "
-                            "· underruns=%llu shortReads=%llu shortSchedules=%llu resyncs=%llu\n",
+                            "· underruns=%llu underrunEvents=%llu shortReads=%llu shortSchedules=%llu resyncs=%llu\n",
                     (long long)_player->audioFramesScheduled(), pcm, silence,
                     (unsigned long long)_player->audioUnderrunCount(),
+                    (unsigned long long)_player->audioUnderrunEventCount(),
                     (unsigned long long)_player->audioShortReadCount(),
                     (unsigned long long)_player->audioShortScheduleCount(),
                     (unsigned long long)_player->audioResyncCount());

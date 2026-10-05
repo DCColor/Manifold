@@ -1,4 +1,5 @@
 import Foundation
+import FileAudioLookahead
 import CoreMedia
 import AudioToolbox
 @preconcurrency import AVFoundation
@@ -124,9 +125,14 @@ public final class LibavAudioSource: @unchecked Sendable {
         public var formatDescription: CMAudioFormatDescription? { decoded.formatDescription }
     }
 
-    /// Handed each decoded PCM CMSampleBuffer on the pump queue — the engine wires
-    /// this to `audioRenderer.enqueue`.
+    /// Handed each decoded PCM CMSampleBuffer on the pump queue when the RENDERER takes it — the
+    /// engine wires this to `audioRenderer.enqueue`.
     public var onAudioFrame: ((CMSampleBuffer) -> Void)?
+
+    /// Handed each decoded PCM CMSampleBuffer on the pump queue at DECODE time, up to
+    /// `TapLookahead.seconds` before `onAudioFrame` gets the same buffer — the engine wires this to
+    /// the audio tap. Exactly once per buffer, in order. See `TapLookaheadPump` (§19.12).
+    public var onDecoded: ((CMSampleBuffer) -> Void)?
 
     private let url: URL
     private let pacingRenderer: AVSampleBufferAudioRenderer
@@ -394,17 +400,21 @@ public final class LibavAudioSource: @unchecked Sendable {
     public func arm(fromSeconds time: Double, isCurrent: @escaping @Sendable () -> Bool) {
         let renderer = pacingRenderer
         let emit = onAudioFrame
+        let tee = onDecoded
         let current = isCurrent
+        // One look-ahead per arm: a re-arm (seek, stream switch) starts empty, and the retired
+        // arm's held buffers are dropped the first time its block sees `current()` false.
+        let lookahead = TapLookaheadPump<CMSampleBuffer>(duration: TapLookahead.duration(of:))
         pumpQueue.async { [weak self] in self?.seekOnPump(toSeconds: time) }
         renderer.requestMediaDataWhenReady(on: pumpQueue) { [weak self] in
             guard let self, current() else { return }
-            while renderer.isReadyForMoreMediaData {
-                guard current() else { return }
-                guard let sb = self.nextFrame() else {
-                    renderer.stopRequestingMediaData(); return
-                }
-                emit?(sb)
-            }
+            let outcome = lookahead.service(
+                isReady: { renderer.isReadyForMoreMediaData },
+                isCurrent: current,
+                next: { self.nextFrame() },
+                ingest: { tee?($0) },
+                enqueue: { emit?($0) })
+            if outcome == .ended { renderer.stopRequestingMediaData() }
         }
     }
 

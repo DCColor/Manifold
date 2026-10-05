@@ -6247,7 +6247,7 @@ that reach 60 s.
 - Masters were checked offline only, not in OBS. They share the bundled clips' audio construction
   (PCM, exact sample count), which OBS looped with zero drift.
 
-### 19.12 SDI tap underruns during file playback: the muted renderer starves the tap — 2026-10-05 15:30–16:42 (unattended; no shipped code changed)
+### 19.12 SDI tap underruns during file playback: the muted renderer starves the tap — 2026-10-05 (diagnosed 15:30–16:42; fix implemented 16:45–17:50, uncommitted)
 
 **The question (BUGS.md, open):** what an underrun puts on the wire, when underruns happen, why AAC
 has more of them than PCM, and which setting removes them, at what cost. All measured from the tap's
@@ -6434,6 +6434,181 @@ recommended:
 - **A secondary bridge item, not changed:** after a dry read, the bridge re-anchors forward to
   `ideal`, past a head that cannot have moved yet. One underrun becomes 2–4 consecutive silent
   callbacks. With the fix there are none to compound.
+
+#### Implemented — 2026-10-05 16:45–17:50 (unattended; uncommitted)
+
+**Decided (Robbie, 2026-10-05):**
+- A 250 ms tap look-ahead in both file pumps, whether or not the renderer is muted.
+- `windowSeconds` 2.0 → 4.0.
+- The bridge unchanged, so no added SDI latency.
+- Rejected: volume 0 instead of mute, and raising the card's audio depth.
+
+**What changed:**
+- **`FileAudioLookahead` (new leaf target, CoreMedia only)**, with `TapLookahead.seconds = 0.250`
+  (the one constant) and `TapLookaheadPump<Buffer>`, the pump loop both file pumps now run. One per
+  arm. Each renderer wake:
+  1. Hand the renderer the held buffers first, then fresh decodes, while it is ready.
+  2. Decode on until 250 ms is held, ingesting each buffer into the tap at decode time.
+  - The renderer receives the identical sequence, at its own wakes; only the decode time moves.
+  - It is a leaf target for the same linking reason as `AudioResample`: `swift test` cannot link
+    ManifoldCore.
+- **AVFoundation pump** (`FrameEngine.beginAudioReading`): the `while isReadyForMoreMediaData` loop
+  is replaced by `lookahead.service(…)`.
+  - `copyNextSampleBuffer` and `tap.ingest` are as before; `stopRequestingMediaData` on `.ended` or
+    `.retired`, as before.
+- **libav pump** (`LibavAudioSource.arm`): the same.
+  - `onAudioFrame` now only enqueues. A new `onDecoded` tees to the tap at decode time.
+  - `FrameEngine.beginLibavReading` wires both.
+- **No stale look-ahead audio:**
+  - The held buffers belong to the arm, i.e. the closure of the session token. Every event that moves
+    the read position already retires the arm through `teardownAudioReading()`: token bump, renderer
+    flush, `audioTap.reset()`. That covers seek, frame step, scrub release (`exactSeek` → `seek`),
+    loop (`beginReading(from: 0)`), audio track and libav stream switch, and file switch.
+  - The retired arm's held buffers are dropped the first time its block sees the stale token. Their
+    tap copies went with the `reset()`.
+  - `isCurrent` is re-tested after each decode and before the ingest, so a decode in flight at the
+    teardown does not land in the freshly reset tap. That window existed before the change too, and is
+    now closed.
+  - Pause and fast shuttle move no read position and flush nothing; the card's transport gate
+    silences them as before.
+- **`AudioTapBuffer.windowSeconds` 2.0 → 4.0.** The comment states why: prefill 1.64–2.01 s, mid-file
+  lead to 1.96 s, unmuted 2.43 s. Memory: 768 KB per channel at 48 kHz (1.5 MB stereo, 12.3 MB at 16 ch).
+- **Bridge: the event-level underrun counter only.**
+  - `m_underrunEvents` is one run of consecutive empty-ring callbacks.
+  - `!! UNDERRUN EVENT #n ended — began at srcT=…, k callbacks, …f of silence (… ms)` is printed
+    once per event, when it ends.
+  - `events=` is added to the periodic line, and `underrunEvents=` to the stop summary.
+  - Nothing parses those lines. The scratch instrumentation and env knobs are not carried over.
+
+**Verify** (logs: `~/Desktop/manifold-soak/sdi-underrun-fix/`; build `.build-cc/lookahead-Profile`;
+driver as in §19.10):
+
+*File playback, DeckLink on, file-only launches, 65 s:*
+
+| file | path | fixed build | pre-fix (`monday-Profile`) |
+|---|---|---|---|
+| `manifold-sync-23.976p.mp4` (AAC) | AVF | **0 events, 0 underrun callbacks, 4 / 4 runs** | 6–20 events / run (above) |
+| `manifold-sync-23.976p.mov` (ProRes, PCM) | AVF | **0, 4 / 4** | 1–5 events / run |
+| DNxHR SQ MXF, 24-bit PCM, made from the `.mov` with ffmpeg (same content, 60.06 s) | **libav** | **0, 4 / 4** | **0, 2 / 2** |
+
+- Every fixed-run stop summary: `underruns=0 underrunEvents=0`.
+  - `real` = 2 882 047–2 882 698 of the file's 2 882 880 samples reached SDI.
+  - `shortReads=2`, both at end of file.
+  - No late or dropped video frames.
+- **The libav path did not reproduce the underruns on this MXF before the fix either.** Its `0` is
+  therefore not evidence that the look-ahead was needed there, only that it does no harm. The same
+  renderer drives it, so the AAC-like case on libav is untested rather than excluded.
+
+*Transport, fixed build, MP4* (`transport.sh`: slider clicks via CGEvent, Space, a drag, the loop
+button, `open -a` of the `.mov` into the window). Same script on the pre-fix build:
+
+| event | fixed: underrun events (silence) | pre-fix: underrun callbacks |
+|---|---|---|
+| steady play | **0** | (above) |
+| pause / resume × 5 | **0** | 0–3 |
+| 5 seeks while playing (slider clicks) | **1–2 per seek, 20–100 ms each** | **52–115 per seek** (1–2 s of silence each) |
+| scrub drag + release | **1, 139 ms** | 75 |
+| loop seam (play-through at 60.06 s) | **1, 109 ms** | 171 (with the seek to 95 %) |
+| file switch (`.mov` into the playing window) | **0** (one cursor resync) | 265 |
+
+- **The brief's "0 across seeks, scrub release and loop" is NOT met.**
+- What remains is one silence per discontinuity: the time from the seek to the new reader's first
+  audio reaching the tap. The card keeps reading through it.
+  - It is not stale audio: the tap holds nothing from before the seek.
+  - It is not a dropout inside continuous programme.
+  - Pre-fix, the same gap was 1–2 s, because the renderer's ~2 s prefill overran the 2 s ring after
+    every seek: §19.12's start-of-play mechanism.
+- **Not relabelled.** Gating the card while the new arm is empty would print gate silence instead of
+  an underrun, with the same zeros on the wire. That hides the gap, it does not remove it.
+  - Removing it needs the card to hold the last picture's audio position until the new reader has
+    primed, or to delay the post-seek picture on SDI by the same ~100 ms. **Decided: accepted as
+    designed behaviour** (see "Decisions" below).
+- **Separately, a pre-existing oddity:** each slider click first stages a scrub frame at **pts 0** on
+  SDI (`[V210] drag … SDI frontPts 0.000`). The card's anchor briefly reads srcT −0.03 s, which is
+  where one of the 1–2 events per seek begins. That is the scrub producer's pts on the SDI staging
+  path; it is not investigated here. **Kept open, "check before release"** (see "Decisions" below).
+
+*DeckLink off (renderer unmuted), MP4, 30 s, fixed and pre-fix:*
+- no `[PLAYBACK]` warnings and no renderer failure; one tap format line, no discontinuities.
+- The renderer path is identical by construction: the same buffers, in the same order, enqueued only
+  at the renderer's own wakes, with decode earlier.
+- `testRendererGetsTheSameSequenceAndTheTapLeadsByTheLookahead` checks the sequence.
+- **What the system output plays was not captured** (Audio Hijack, attended).
+
+*Live:*
+- **Replays against b35a810: 99 / 99 files byte-identical** (44 stdout reports, 55 TSVs; the §19.7
+  gate's `cmp.sh`).
+  - The replay tools compile only `LiveAudioResample` sources, which this change does not touch.
+- **Local SRT with SDI owning the audio** (`scripts/soak/repro/run.sh`, `syncD-23.976p-inj0.ts`, 300 s;
+  ⌃⌥O after connect; O stepped +40 → −40 → 0 ms in 10 ms steps; one 1000 ms stall at +150 s;
+  `srt-fix-1`), and the same session on the pre-fix build (`srt-pre-1`):
+
+  | | fixed | pre-fix |
+  |---|---|---|
+  | O changes | **16 / 16 ACCEPTED** (each one splice; SDI read moved by `LiveReadOffsetFader`) | 16 / 16 |
+  | SDI across the O changes (srcT ≈ 30–90 s) | **0 events, 0 short reads, 0 resyncs** | 0 underruns, 0 short |
+  | start: the first anchor plus the harness's 6 coarse re-anchors (3–5 s jumps, §19.10's open observation) | **1 event at the first anchor** (1 callback, 200 ms), then 12 cursor resyncs | **15 underrun callbacks**, 1 resync |
+  | the 1000 ms stall | 36 short reads (no audio was sent), 0 events, 6 resyncs | 41 short, 5 resyncs |
+
+  - The first-anchor event is the card's first read before that time's audio had arrived. It was not
+    present pre-fix, which instead underran 15 callbacks at the coarse re-anchors that follow.
+  - With the 4 s ring, the card finds audio at each jumped-to time and snaps rather than going silent.
+    **Recorded as an observed improvement** (see "Decisions" below).
+  - **The crossfade itself is not observable from the counters.** It is shown by "no hole at any of 16
+    changes" and by the unit tests (`LiveReadOffsetFader`'s, in `swift test`), not by a capture.
+- **Device-level A/V on SDI is DEFERRED** to the Release-build check on Robbie's Resolve workstation.
+  Not measured here.
+
+**Tests:** `swift test` **180 / 180**: 173 before, plus 7 in `FileAudioLookaheadTests`:
+- the renderer's sequence is unchanged and the tap leads by the look-ahead;
+- the tap stays ahead of a starving renderer;
+- **seek retires the held look-ahead, and the new arm starts clean**;
+- a decode in flight at the seek is not ingested, both in the renderer loop and in the look-ahead loop;
+- end of file drains the held buffers;
+- PCM duration.
+
+**Builds:** Profile and Release with no errors, and no new warnings in the files touched.
+
+**Not done:**
+- the scrub frame at pts 0 on SDI (open, "check before release": see below);
+- system-output capture with DeckLink off;
+- device A/V on SDI (deferred);
+- an AAC file on the libav path.
+
+#### Decisions (Robbie, 2026-10-05) — recorded; no code changed
+
+1. **The gap at a seek, scrub release or loop seam: ACCEPTED as designed behaviour.**
+   - What it is: 20–140 ms of digital silence on SDI at the jump. MEASURED on the fixed build:
+     - seeks while playing: 1–2 events per seek, 20–100 ms each;
+     - a scrub release: 139 ms;
+     - the loop seam: 109 ms.
+   - It is the time from the jump to the new reader's first audio reaching the tap. The tap holds
+     nothing from before the jump, so it is silence at the cut, not stale audio and not a dropout
+     inside continuous programme.
+   - The same as any player or NLE at a cut. Pre-fix the same gap was 1–2 s.
+   - **Rejected: holding the card's audio position until the new reader has primed.**
+     - The post-seek picture is already on SDI by then, so the audio after the cut would start late
+       against it by the priming time (up to ~140 ms).
+     - The anchor loop would then have to resync it back.
+     - That trades a silence at the cut for an A/V error just after it, on a reference output.
+   - **Rejected: delaying the post-seek SDI picture by the same amount.**
+     - It adds up to ~140 ms of transport latency to the reference picture at every jump.
+     - SDI would trail the desktop after each one.
+     - That is new machinery and a slower reference output, to remove a silence every player has at a cut.
+   - **Not relabelled either:** gating the card during the gap would print gate silence instead of
+     underrun events, with the same zeros on the wire. The event counter therefore logs one line per
+     jump, and that is expected.
+2. **The pts-0 scrub frame on SDI: kept open as its own BUGS.md entry, "check before release".**
+   - Separate from the gap.
+   - The question, to answer read-only: is the frame's CONTENT wrong (a wrong picture briefly on SDI,
+     a reference-output defect), or only its timestamp (harmless bookkeeping)?
+3. **Live start-up: an observed improvement.**
+   - In the local SRT session (`srt-fix-1` against `srt-pre-1`), the harness's start-up coarse
+     re-anchors (3–5 s timebase jumps) used to leave the card reading outside the 2 s ring:
+     **15 silent underrun callbacks** pre-fix.
+   - With the 4 s ring the card finds audio at each jumped-to time and **snaps its cursor instead
+     (12 resyncs)**, with no silence.
+   - The one remaining event is the card's very first read at the first anchor (1 callback, 200 ms).
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
