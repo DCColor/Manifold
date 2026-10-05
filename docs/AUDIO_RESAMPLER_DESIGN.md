@@ -5012,7 +5012,8 @@ The test, per clip:
    - **Stage D's in-app detector is validated against `verify.py`'s exact event times** (the white
      frame's pts, and the tone onset from its 1 kHz phase), not against c12.
 2. **The ProRes masters stay full length** (60 s; 77–171 MB each, 755 MB the set). A separate
-   download, not bundled.
+   download, not bundled. (2026-10-05, §19.11: now whole code cycles, ≥ 60 s; 25p / 50p are 62.4 s;
+   742.8 MB the set.)
 3. **Distribution:**
    - **The 22 MB MP4 set is bundled in the app.** (Superseded 2026-10-05 by §19.11: the MP4s drifted
      on every loop; the bundled set is now H.264 + PCM `.mov`, 27 MB.)
@@ -6200,9 +6201,51 @@ added or removed.
 - Save Sync Clip… was not exercised through its panel on the live app. The code path is a rename
   and a content type; the build bundles 7 / 7.
 - The 25 / 50 / 59.94 clips were looped only offline, not in OBS (23.976 in OBS).
-- The ProRes masters keep their 60 s length. At 25 and 50 that is 12.5 cycles, so a looped master's
-  seam breaks the code there. The masters were not meant to loop; the bundled clip is.
+- ~~The ProRes masters keep their 60 s length. At 25 and 50 that is 12.5 cycles, so a looped master's
+  seam breaks the code there.~~ Done the same day: see "The masters, loop-exact too" below.
 - Robbie's "Media" source still points at the new clip. Setting it back is his choice.
+
+#### The masters, loop-exact too — 2026-10-05 (uncommitted; the v1 zip still unuploaded; pattern unchanged, still v1)
+
+**The rule:** each master is `master_cycles` whole code cycles (a new `recipes.tsv` column), the fewest
+that reach 60 s.
+- 60 s already was whole cycles at five rates.
+- At 25 and 50 a cycle is 4.8 s, so 60 s was 12.5 cycles, and the code broke at the loop seam (and
+  the old clip ended mid-cycle).
+- 12 cycles (57.6 s) and 13 (62.4 s) are equally near 60 s. **13 was chosen so every master stays ≥
+  60 s.** Whole cycles are whole frames and whole samples (a cycle is a multiple of 5 frames), and the
+  code runs on across the seam as for the bundled clip.
+- `generate.sh` checks the sample count is whole. `release-mac.sh` 3b and `verify.py` read the new
+  column.
+
+| master | cycles | frames | samples | length | events | size | vs before |
+|---|---|---|---|---|---|---|---|
+| 23.976p | 12 | 1440 | 2 882 880 | 60.060 s | 48 | 79.4 MB | **byte-identical** |
+| 24p | 12 | 1440 | 2 880 000 | 60.000 s | 48 | 76.7 MB | byte-identical |
+| **25p** | **13** | **1560** | **2 995 200** | **62.400 s** | **52** | **82.3 MB** | was 1500 fr / 60 s |
+| 29.97p | 15 | 1800 | 2 882 880 | 60.060 s | 60 | 94.6 MB | byte-identical |
+| 30p | 15 | 1800 | 2 880 000 | 60.000 s | 60 | 91.6 MB | byte-identical |
+| **50p** | **13** | **3120** | **2 995 200** | **62.400 s** | **52** | **146.8 MB** | was 3000 fr / 60 s |
+| 59.94p | 15 | 3600 | 2 882 880 | 60.060 s | 60 | 171.5 MB | byte-identical |
+| **set** | | | | | | **742.8 MB** (742 831 977 bytes) | |
+
+- **"Byte-identical"** is a sha256 against the masters generated before the change.
+- **§19.9's "755 MB"** is not reproducible from today's files: the two old masters are overwritten,
+  and the five unchanged ones plus the two new ones total 742.8 MB. The 742.8 MB is measured; BUGS.md's
+  zip item now carries it.
+- **The bundled clips are unchanged:** regenerated after the edit, all seven are byte-identical, and
+  the release loop gate passes on the five-column recipe.
+
+**`verify.py --loop 20` on every master: 7 / 7 PASS.**
+- Every event in sync: worst 0.118–0.432 µs; flash pts − k / rate 0.000 µs.
+- At 25p and 50p, 52 / 52 events, flash frames exact, the intervals follow the code.
+- **The exact length on every master:** decoded frames and samples = the recipe's (2 995 200 /
+  2 995 200 at 25p and 50p).
+- **Loop ×20: drift −0.000 / +0.000 µs on all seven**, and each master's per-pass median constant
+  (−0.02 … +0.01 µs).
+- c12 52 / 52 / 52 at 25p and 50p, median +1.69 ms (§19.9's known onset rule).
+- Masters were checked offline only, not in OBS. They share the bundled clips' audio construction
+  (PCM, exact sample count), which OBS looped with zero drift.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 

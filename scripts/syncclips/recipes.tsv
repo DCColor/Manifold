@@ -10,15 +10,18 @@
 # 4 → 16–20 s, 16 events. A whole number of cycles is a whole number of frames AND of 48 kHz samples
 # at every rate (a cycle is a multiple of 5 frames, and 5 frames is whole samples at 29.97 / 59.94),
 # and the code runs on unbroken across the loop seam: the last event of a cycle is 37 steps before
-# the next cycle's first, which is the clip's first event once the clip loops (§19.11). The ProRes
-# masters are unchanged (60 × round(rate) frames; at 25 and 50 that is 12.5 cycles, so a master's
-# loop seam breaks the code there — the bundled clips are the ones meant to loop).
+# the next cycle's first, which is the clip's first event once the clip loops (§19.11).
 #
-# label	rate	unit	cycles
-23.976	24000/1001	1	4
-24	24/1	1	4
-25	25/1	1	4
-29.97	30000/1001	1	4
-30	30/1	1	4
-50	50/1	2	4
-59.94	60000/1001	2	4
+# `master_cycles` is the ProRes MASTER's length in whole code cycles: the fewest that reach 60 s (a
+# longer, edit-friendly file for senders). 60.0 / 60.06 s at every rate but 25 and 50, where a cycle
+# is 4.8 s and 60 s would be 12.5 cycles (the code broke at the loop seam): there 13 cycles, 62.4 s.
+# Whole cycles, so a master loops sample-exactly too (§19.11).
+#
+# label	rate	unit	cycles	master_cycles
+23.976	24000/1001	1	4	12
+24	24/1	1	4	12
+25	25/1	1	4	13
+29.97	30000/1001	1	4	15
+30	30/1	1	4	15
+50	50/1	2	4	13
+59.94	60000/1001	2	4	15

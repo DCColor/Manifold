@@ -772,7 +772,7 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 - **Opened by** A/V ▸ Download ProRes Sync Clips…, Help ▸ Download Sync Clips…, the calibration
   sheet's link and the "not included in this build" alert. In the browser; no in-app downloader.
 - **To do before release:** upload the zip to that path and open the link once from the shipped
-  build. Decide what it holds: the ProRes masters (755 MB) and, presumably, the bundled set
+  build. Decide what it holds: the ProRes masters (742.8 MB measured 2026-10-05, after 25p / 50p grew to 62.4 s, §19.11) and, presumably, the bundled set
   (`manifold-sync-<rate>p-h264.mov`, 27 MB; the MP4s are gone, §19.11) and the OBS scene collection
   template too, since one link serves both menu items.
 - **"v1" is the coded pattern's version** (`SyncClips.patternVersion`). Any change to the pattern
@@ -896,8 +896,9 @@ listener), on today's build and on b35a810 alike, so pre-existing.
     ±0.001 ms.
   - `release-mac.sh` step 3b now fails a clip that does not decode to exactly its frames and samples
     with PCM audio.
-- **The ProRes masters are unchanged.** At 25 and 50 a 60 s master is 12.5 code cycles, so its loop
-  seam breaks the code there: the bundled clip is the one to loop.
+- **The ProRes masters loop exactly too** (same day, §19.11). They are now whole code cycles: 25p and 50p
+  went from 60 s (12.5 cycles, the code broke at the seam) to 62.4 s. The other five are
+  byte-identical to before. `verify.py --loop 20`: 7 / 7, 0.000 µs drift.
 
 ---
 

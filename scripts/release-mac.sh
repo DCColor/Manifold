@@ -453,7 +453,7 @@ step "Generate the sync clips (H.264 + PCM .mov)"
 
 ( cd "$REPO_ROOT" && SYNCCLIPS_FORMATS=h264 zsh scripts/syncclips/generate.sh ) \
     || die "scripts/syncclips/generate.sh failed"
-while IFS=$'\t' read -r label rate unit cycles; do
+while IFS=$'\t' read -r label rate unit cycles master_cycles; do
     clip="${REPO_ROOT}/build/syncclips/manifold-sync-${label}p-h264.mov"
     [[ -s "$clip" ]] || die "sync clip missing after generation: build/syncclips/manifold-sync-${label}p-h264.mov"
     num=${rate%/*}; den=${rate#*/}

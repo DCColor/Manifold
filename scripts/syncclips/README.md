@@ -59,9 +59,10 @@ python3 scripts/syncclips/pairing_check.py /tmp/syncclips.json
     cut to exactly that many samples, and PCM has no codec padding for a player to trim. The code runs
     on unbroken across the seam. ~3.4–4.2 MB a clip, 27 MB the set. **This is the one to loop in an
     encoder.**
-  - **The master, `manifold-sync-<label>p.mov`:** ProRes 422 (10-bit 4:2:2, PCM 24-bit), 60 s (60.06 s
-    at the 1001 rates). A separate download. Its audio is exact too, but at 25 and 50 a 60 s master
-    is 12.5 code cycles, so its loop seam breaks the code there.
+  - **The master, `manifold-sync-<label>p.mov`:** ProRes 422 (10-bit 4:2:2, PCM 24-bit), `master_cycles`
+    whole code cycles (`recipes.tsv`): the fewest that reach 60 s, so 60.0 / 60.06 s, and 62.4 s at 25
+    and 50 (13 cycles of 4.8 s). A longer, edit-friendly file for senders, and a separate download
+    (743 MB the set). **It loops sample-exactly too**, with the code unbroken across the seam.
   - **No `.mp4`.** The AAC MP4s (until 2026-10-05) gained one AAC pad of audio per loop in OBS
     (+14.667 ms at 23.976 / 29.97 / 59.94, +10.667 ms otherwise): OBS's Media Source ignores the edit
     list's end trim.

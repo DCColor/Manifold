@@ -8,7 +8,7 @@
 #
 # Output (gitignored):
 #   build/syncclips/manifold-sync-<label>p.mov       THE MASTER: ProRes 422, 10-bit 4:2:2, PCM 24-bit,
-#                                                    60 × round(rate) frames (a separate download)
+#                                                    `master_cycles` whole code cycles, ≥ 60 s (a separate download)
 #   build/syncclips/manifold-sync-<label>p-h264.mov  THE BUNDLED CLIP: H.264 High 4:2:0 (no B-frames),
 #                                                    PCM 16-bit, `cycles` whole code cycles (recipes.tsv)
 # Both 1920×1080, Rec.709 tagged (primaries, transfer, matrix; limited range), 48 kHz stereo.
@@ -32,8 +32,9 @@
 #            the exact boundary-anchored waveform, sampled.
 #   code     events at frame F0 + unit × {0, 23, 52, 83} + unit × 120 × c (intervals 23/29/31/37
 #            steps): a pairing off by one interval cannot fit the sequence (§19.3).
-# A master is 60 × round(rate) frames (60.06 s at the 1001 rates), a whole number of samples. A bundled
-# clip is cycles × 120 × unit frames: 16–20 s at cycles = 4.
+# A master is master_cycles × 120 × unit frames: 60.0 / 60.06 s, 62.4 s at 25 and 50. A bundled clip is
+# cycles × 120 × unit frames: 16–20 s at cycles = 4. Both are whole frames AND whole samples, and both
+# loop with the code unbroken across the seam.
 set -eu
 HERE=${0:A:h}; REPO=${HERE:h:h}
 OUT=${SYNCCLIPS_OUT:-$REPO/build/syncclips}; mkdir -p $OUT
@@ -42,13 +43,14 @@ FONT=${SYNCCLIPS_FONT:-/System/Library/Fonts/Menlo.ttc}
 want=("$@")
 formats=(${=SYNCCLIPS_FORMATS:-mov h264})
 for f in $formats; do [[ $f == mov || $f == h264 ]] || { echo "SYNCCLIPS_FORMATS: unknown format '$f' (mov, h264)"; exit 2; }; done
-while IFS=$'\t' read -r label rate unit cycles; do
+while IFS=$'\t' read -r label rate unit cycles master_cycles; do
   [[ -z $label || $label == \#* ]] && continue
   (( ${#want} )) && [[ ${want[(Ie)$label]} -eq 0 ]] && continue
   num=${rate%/*}; den=${rate#*/}
   F="($num/$den)"
   nominal=$(( (num + den / 2) / den ))           # round(rate): 24, 25, 30, 50, 60
-  frames=$(( 60 * nominal ))
+  frames=$(( master_cycles * 120 * unit ))          # the master: whole code cycles, ≥ 60 s (recipes.tsv)
+  (( frames * 48000 * den % num == 0 )) || { echo "${label}p: master $frames frames is not a whole number of samples"; exit 2; }
   dur=$(perl -e "printf '%.6f', $frames*$den/$num")
   # The bundled clip: whole code cycles, whole frames, whole samples (checked, not assumed).
   lframes=$(( cycles * 120 * unit ))

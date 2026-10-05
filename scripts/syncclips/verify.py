@@ -6,9 +6,9 @@
     --json out.json                                        # per-clip results, and every event's times
     --loop N                                               # also the loop test: N passes, per seam
 
-Two kinds of clip, told apart by name: `manifold-sync-<label>p.mov`, the ProRes master (60 × round(rate)
-frames), and `manifold-sync-<label>p-h264.mov`, the bundled clip (`cycles` whole code cycles,
-recipes.tsv). A legacy `.mp4` named explicitly is read as a 60 s clip (for comparison only).
+Two kinds of clip, told apart by name: `manifold-sync-<label>p.mov`, the ProRes master (`master_cycles`
+whole code cycles, ≥ 60 s), and `manifold-sync-<label>p-h264.mov`, the bundled clip (`cycles` whole code
+cycles); both from recipes.tsv. A legacy `.mp4` named explicitly is read as a 60 s clip (for comparison only).
 
 Per clip:
   * READ-BACK (ffprobe): codecs, profile, pixel format, size, frame rate, frame count, duration, the
@@ -49,9 +49,9 @@ def recipes():
     for line in open(os.path.join(HERE, 'recipes.tsv')):
         if not line.strip() or line.startswith('#'):
             continue
-        label, rate, unit, cycles = line.rstrip('\n').split('\t')
+        label, rate, unit, cycles, master_cycles = line.rstrip('\n').split('\t')
         num, den = (int(v) for v in rate.split('/'))
-        out[label] = dict(num=num, den=den, unit=int(unit), cycles=int(cycles))
+        out[label] = dict(num=num, den=den, unit=int(unit), cycles=int(cycles), master_cycles=int(master_cycles))
     return out
 
 
@@ -114,9 +114,12 @@ def clip_kind(path):
     return m.group(1), m.group(2) is not None
 
 
-def frame_count(r, bundled):
-    nominal = (r['num'] + r['den'] // 2) // r['den']
-    return r['cycles'] * CYCLE * r['unit'] if bundled else 60 * nominal
+def frame_count(r, bundled, legacy=False):
+    """The recipe's frames: the bundled clip's or the master's whole code cycles (§19.11); a legacy
+    .mp4 was 60 × round(rate)."""
+    if legacy:
+        return 60 * ((r['num'] + r['den'] // 2) // r['den'])
+    return (r['cycles'] if bundled else r['master_cycles']) * CYCLE * r['unit']
 
 
 def loop_check(x, white, n_frames, num, den, passes):
@@ -143,7 +146,7 @@ def verify(path, rec, passes=0):
     pr = probe(path)
     tb_num, tb_den = (int(v) for v in pr['time_base'].split('/'))
     nominal = (num + den // 2) // den
-    n_frames = frame_count(r, bundled)
+    n_frames = frame_count(r, bundled, legacy=path.endswith('.mp4'))
     F0 = nominal
     events = [F0 + unit * (CYCLE * c + o) for c in range(n_frames) for o in CODE
               if F0 + unit * (CYCLE * c + o) < n_frames]
@@ -245,7 +248,7 @@ def main():
               f"bursts outside tones {r['bursts_outside_tones']} · avsync onset {r['avsync_detector_ms_median']:+.3f} ms")
         print(f"     length: {r['probe']['frames']}/{r['frames_expected']} frames, {r['samples_decoded']}/"
               f"{r['samples_expected']} samples decoded · exact: {r['length_exact']}"
-              f" ({'bundled' if r['bundled'] else 'master / legacy'})")
+              f" ({'bundled' if r['bundled'] else ('legacy mp4' if r['clip'].endswith('.mp4') else 'master')})")
         if passes:
             lp = r['loop']
             print(f"     loop ×{passes}: drift (last − first pass) {lp['drift_ms']*1000:+.3f} µs · worst event "
