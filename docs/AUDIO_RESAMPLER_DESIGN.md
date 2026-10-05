@@ -5731,8 +5731,12 @@ a starvation hold then added its debt.**
 - **Run 2, measure only (Start 13:49:26, Cancel):** heard **+61.44 ms** (25 pairs, p10…p90
   +59.53…+62.84), proposed −61 · NOT APPLICABLE (0.0 ms).
   - **+34.7 ms later than run 1, about the hold's 36 ms.**
-  - **The hold's debt went into lip-sync and has not been repaid**, as §18.22 modelled (the
-    catch-up needs the whole debt queued, which this queue never has).
+  - ~~**The hold's debt went into lip-sync and has not been repaid**, as §18.22 modelled (the
+    catch-up needs the whole debt queued, which this queue never has).~~ **WRONG, corrected the same
+    day** ("Two findings re-examined" below).
+    - The log has the debt repaid: `RECOVERY DROP #1 (WHOLE DEBT)` 26.2 of 26.2 ms, "RECOVERED 0.3 s
+      after the resume", D 0.0 in every window afterwards.
+    - The +34.7 ms is the MP4 loop sawtooth (7 loops between the two readings).
 - **No Apply, so no re-check.** The re-check band (±2 ms) could not be tested.
 
 | check | band | measured | |
@@ -5924,6 +5928,137 @@ verbatim. There is no pass/fail band; it is a review. Never Apply and Save (no `
   - MediaMTX untouched (abs config).
   - `streamBookmarks` hash unchanged.
   - Nothing of OBS changed by Claude.
+
+
+#### Two findings re-examined: SDI file underruns and the SRT hold debt — 2026-10-05 afternoon (unattended; no app change)
+
+**The question:** is each a regression since b35a810 (before Stage A), pre-existing, or an artefact
+of the MP4 loop drift?
+
+**Predictions (Robbie, written before the investigation):**
+- SDI underruns are pre-existing in file playback and unrelated to Stage A, since the tap read
+  applies O only during live sessions.
+- The unrepaid debt is an artefact of the clip stepping +14.7 ms per loop under the recovery; with
+  a loop-free sender, D repays to within ±5 ms.
+
+**Which held:**
+- **The first: yes.**
+- **The second: half.** The "unrepaid debt" was the clip, and in fact D had been repaid. But with a
+  loop-free sender, D does not always repay within ±5 ms. After stalls of 1 s or more, 10–18 ms
+  stays late for 20–50 s, at O = 0 and O ≠ 0, on today's build and on b35a810 alike.
+
+**Builds:**
+- `.build-cc/pre-stageA-Profile`: b35a810, built from a scratch worktree with the gitignored
+  `ThirdParty/*/{include,lib}` and the DeckLink SDK symlinked in from the main tree. 0 errors.
+- `.build-cc/monday-Profile`: `23e8223`, today's.
+
+##### 1. SDI tap underruns during file playback — PRE-EXISTING (b35a810 has them, more); not Stage A; not the clip drift
+
+**The code.** Stage A's read cannot run during file playback.
+- `AudioTapBuffer.read` takes the `LiveReadOffsetFader` branch only when it is not the identity
+  (O ≠ 0 or a fade in progress). Otherwise it calls `readLocked`, which is b35a810's read unchanged.
+- The fader is set only by `FrameEngine.applyLiveAudioOffset`, which needs the session's steering.
+  It is cleared in `beginLiveAudio` and in `endLiveAudio` (`clearLiveReadOffset()`: O = 0, any fade
+  dropped).
+- After a session ends there is no steering to set it again.
+  - In today's log `endLiveAudio` ran at 13:30:12.499, after the last change (13:30:11).
+  - The file was opened at 13:30:17.
+- `DeckLinkBridge.mm` is unchanged since b35a810.
+
+**Measured, unattended, no SDI listening** (`DeckLinkAudio: buffered … underruns=N short=M` counters):
+- Each run: launch, open the file into the empty window, ⌃⌥O (1080p23.98, "video + SDI audio"),
+  Space, 65 s, then read the counters.
+- No stream and no live session in the launch.
+- Builds alternated. Logs: `~/Desktop/manifold-soak/sdi-underrun/`.
+
+| file | build | underruns (whole file) | short reads |
+|---|---|---|---|
+| `manifold-sync-23.976p.mp4` (AAC) | monday | 8, 23 | 49, 38 |
+| same | **b35a810** | **39, 43** | 41, 61 |
+| `manifold-sync-23.976p.mov` (ProRes, PCM) | monday | 4 | 7 |
+| same | **b35a810** | **6** | 7 |
+
+- **Pre-existing:** b35a810 underruns at least as often.
+- **No live session is needed:** these launches had none (today's attended case followed one).
+- **The clip drift is not involved:** Manifold plays the file once, and the drift is OBS's loop.
+- **It depends on the source:** 4–6 per minute on PCM ProRes, 8–43 on the AAC MP4.
+  - They fall anywhere in the file, e.g. srcT 0.01, 28.7 and 49.1 s.
+  - Between them: buffered 180 ms, sched = want, `resyncs=0`. The log prints a sample, not every
+    one.
+- **Cause not investigated.** The ring has no audio at the card's read position. A candidate is the
+  file path's tap feed arriving in bursts (AAC decode), not the card. That is a file-playback /
+  DeckLink item for BUGS.md, not a Stage A one.
+
+##### 2. The SRT starvation-hold "debt" — NOT unrepaid: the steering repaid it in 0.3 s; the +34.7 ms was the clip. A real, smaller, pre-existing remainder shows after ≥ 1 s stalls
+
+**Today's log** (`att-1-ndi.manifold.log`, Cloudflare SRT, 13:41:32–13:50:53):
+
+| time | line |
+|---|---|
+| 13:42:41.380 | `⏸ STARVATION HOLD #1` — no input for 190 ms, queue 19.7 ms, write 2; read back −0.00 ms, 27.77 ms after the decision |
+| 13:42:41.390 | `▶ STARVATION RESUME #1` after 36 ms held, +5.1 ms from the held point, 100 ms queued · **audio 27.2 ms BEHIND the picture's line** = D at resume |
+| 13:42:41.669 | `RECOVERY DROP #1 (WHOLE DEBT)` **1260 fr / 26.2 ms forward of 26.2 ms owed** · picture 0.0 ms behind · queue 224.8 ms · **RECOVERED 0.3 s after the resume** (0.0 folded) · no rate write |
+| every window after | **D 0.0 ms**; steering heard A/V med −4.6…+0.9 ms (O +0.0); low-water 143.0–148.1 ms |
+
+- **There were no refusals:** one recovery cut, accepted. The guard figures are on the line (queue
+  224.8 ms against a 26.2 + 160 ms need).
+- **O was 0** throughout: the session value 0, and calibration run 1 was not applicable, so it was
+  not applied. So "D never takes O" was not exercised here; it is exercised in the repro below.
+- **The low-point ring:**
+  - `restartAfterWriteLocked` clears it (`queueHistoryCount = 0`) on every timebase write: anchor,
+    coarse fallback, hold, resume.
+  - For ≤ 10 s after a write, the advance figure rests on post-write lows only.
+  - No interaction here. The 0 ms budget stood before the hold: low-water 135–145 ms against the
+    160 ms guard. The second reading came 7 min after it.
+- **The +34.7 ms between calibration runs 1 and 2** (13:42:35 → 13:49:58, 443 s ≈ 7.4 loops of the
+  60.07 s MP4) is the sawtooth.
+  - After 7–8 loops (+14.667 ms per step, −58.67 ms per wrap), the net move can only be +29.3, +44,
+    −14.7 or −44 ms.
+  - +34.7 sits nearest +29.3 (7 loops, 1 wrap).
+  - The steering's own heard figure did not move.
+
+**The repro, loop-free, unattended** (`repro/run.sh`; `syncD-23.976p-inj0.ts`, the clip ×5 as one
+continuous 300 s file with trimmed joins, so no per-loop step):
+- `STALLS="90:400 150:1000 210:2000"`, ffmpeg's default 1.05× catch-up.
+- O set by ⇧⌥] after the first anchor.
+- Per event: heard = beep(in) − (flash PTS + audio−now), calibration's b − (f + h), from the
+  `[AV-CONTENT]` lines, in 10 s bins, minus O.
+- Logs: `~/Desktop/manifold-soak/stalldebt/repro/`.
+
+| run | pre-stall heard − O | 400 ms stall | 1000 ms stall | 2000 ms stall |
+|---|---|---|---|---|
+| monday, O = 0 | +20.4…+21.7 | D 140.8 → cut 126.0 + residual 25.8 → **back to baseline** ✅ | cut **139.0 of 158.7** owed + 2 residuals → **+12…+14 ms for ~30 s**, then baseline | cut **109.5 of 127.3** + 4 residuals → **+11…+15 ms until the file ended (~50 s)** |
+| monday, **O = +80** | +1.1…+2.0 | D 109.2 → cut 97.8 + residual → **baseline** ✅ | cut **67.6 of 77.5** + 2 residuals → **+13…+16 ms ~20–30 s** | cut **131.0 of 147.7** + 4 residuals → **+12…+18 ms ~40 s**, then baseline |
+| **b35a810**, O = 0 | −1.3…+0.5 | cut 29.0 of 37.0 + residual → **baseline** ✅ | cut **61.8 of 81.7** + 2 residuals → **+11…+15 ms ~30 s** | cut **29.7 of 42.6** + 4 residuals → **+12…+16 ms ~50 s** |
+
+- **The same on both builds and at both O, so it is not a regression and does not depend on O.**
+  - D at resume is the physical debt at O = +80 as at O = 0 (123 / 691 / 1702 ms against
+    159 / 741 / 1755; the held times differ with the sender). D never takes O, live.
+- **Why the remainder is left:**
+  - The whole-debt cut is `min(D, room, maxDrop)`, taken once `room ≥ D − recoveryFoldSeconds`
+    (20 ms).
+  - With the queue up to 20 ms short of D, it cuts what fits, and `recover` folds the rest (< 20 ms)
+    "into the loop" and logs RECOVERED.
+  - The residual splice fires only at |e_f| > 20 ms.
+  - So a 10–20 ms remainder sits inside both thresholds, which matches the
+    lingering +11…+18 ms. Folded per cut: 8.0–19.9 ms. The 400 ms stalls folded 8–15 ms too, and
+    their residual splice and the loop took it back.
+  - The residual drops that do fire (~26 ms at e_f −20) are matched by the integrator winding
+    (i −786 → −952 ppm): §13.4's rail class, as §18.19 recorded.
+- **By §18.19's own definition this is in band** (sync = within ±20 ms). It is not within the ±5 ms
+  the prediction asked.
+  - A tighter fold or residual threshold (e.g. 5–10 ms) is the lever. That is Robbie's decision; no
+    change today.
+- **Also seen, pre-existing (both builds), not the question:**
+  - On this fixture over local SRT, the first anchor came ~38 s after transport-up.
+  - Then 7–8 coarse level re-anchors in ~1.5 s (e −3…−4.4 s, queue 3.6–5.7 s). Settled before any
+    stall.
+
+**Summary for BUGS.md (not edited today):**
+1. The DeckLink file-playback tap underruns: pre-existing, AAC-heavy.
+2. The ≤ 20 ms post-stall remainder (fold + residual threshold): a tuning decision.
+3. The ~38 s first anchor with coarse re-anchors on the TS fixture over local SRT.
+4. None is a Stage A–D regression.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
