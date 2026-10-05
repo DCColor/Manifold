@@ -7,6 +7,8 @@
 //
 //  ⚠️ KEEP IN STEP WITH recipes.tsv. The clips are generated from that file and bundled from
 //  build/syncclips/; this table names the files the app looks for and the timeline the tests rebuild.
+//  It describes the BUNDLED clip (H.264 + PCM `.mov`, `loopCycles` whole code cycles, §19.11), the
+//  one that loops sample-exactly; the ProRes masters are a separate 60 s download.
 //  A change to the coded pattern is a new clip set: a new download (…-v2.zip, never replacing v1)
 //  and a new `SyncClips.patternVersion` (§19.10).
 //
@@ -34,19 +36,24 @@ public enum SyncClips {
         public let den: Int
         /// Frames per code step (2 at 50 and 59.94, §19.9 deviation 1).
         public let unit: Int
+        /// The bundled clip's length in whole code cycles (recipes.tsv `cycles`).
+        public let loopCycles: Int
 
         public var rate: Double { Double(num) / Double(den) }
         public var frameSeconds: Double { Double(den) / Double(num) }
         /// round(rate): 24, 25, 30, 50, 60.
         public var nominal: Int { (num + den / 2) / den }
-        /// 60 × round(rate) frames.
-        public var frameCount: Int { 60 * nominal }
+        /// The bundled clip's frames: whole code cycles (cycles × 120 × unit), which is also a whole
+        /// number of 48 kHz samples at every rate, so it loops with no gap and no overlap (§19.11).
+        public var frameCount: Int { loopCycles * SyncClips.cycleSteps * unit }
+        /// frameCount × 1 / rate: 16.0–20.02 s.
+        public var durationSeconds: Double { Double(frameCount) * frameSeconds }
         /// The first event, ≈ 1 s in.
         public var firstEventFrame: Int { nominal }
         public var cycleSeconds: Double { Double(SyncClips.cycleSteps * unit) * frameSeconds }
         public var shortestIntervalSeconds: Double { Double(SyncClips.codeSteps.min()! * unit) * frameSeconds }
-        /// "manifold-sync-23.976p.mp4", as generate.sh writes it.
-        public var mp4Name: String { "manifold-sync-\(label)p.mp4" }
+        /// "manifold-sync-23.976p-h264.mov", as generate.sh writes it: the bundled clip.
+        public var bundledName: String { "manifold-sync-\(label)p-h264.mov" }
         /// "23.976p".
         public var displayName: String { "\(label)p" }
 
@@ -70,13 +77,13 @@ public enum SyncClips {
 
     /// The bundled set, in recipes.tsv's order.
     public static let all: [Clip] = [
-        Clip(label: "23.976", num: 24000, den: 1001, unit: 1),
-        Clip(label: "24", num: 24, den: 1, unit: 1),
-        Clip(label: "25", num: 25, den: 1, unit: 1),
-        Clip(label: "29.97", num: 30000, den: 1001, unit: 1),
-        Clip(label: "30", num: 30, den: 1, unit: 1),
-        Clip(label: "50", num: 50, den: 1, unit: 2),
-        Clip(label: "59.94", num: 60000, den: 1001, unit: 2),
+        Clip(label: "23.976", num: 24000, den: 1001, unit: 1, loopCycles: 4),
+        Clip(label: "24", num: 24, den: 1, unit: 1, loopCycles: 4),
+        Clip(label: "25", num: 25, den: 1, unit: 1, loopCycles: 4),
+        Clip(label: "29.97", num: 30000, den: 1001, unit: 1, loopCycles: 4),
+        Clip(label: "30", num: 30, den: 1, unit: 1, loopCycles: 4),
+        Clip(label: "50", num: 50, den: 1, unit: 2, loopCycles: 4),
+        Clip(label: "59.94", num: 60000, den: 1001, unit: 2, loopCycles: 4),
     ]
 
     /// The largest |offset| the coded matcher accepts: half the SHORTEST cycle of any clip (30p's

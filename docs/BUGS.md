@@ -772,8 +772,9 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 - **Opened by** A/V ▸ Download ProRes Sync Clips…, Help ▸ Download Sync Clips…, the calibration
   sheet's link and the "not included in this build" alert. In the browser; no in-app downloader.
 - **To do before release:** upload the zip to that path and open the link once from the shipped
-  build. Decide what it holds: the ProRes masters (755 MB) and, presumably, the MP4 set and the OBS
-  scene collection template too, since one link serves both menu items.
+  build. Decide what it holds: the ProRes masters (755 MB) and, presumably, the bundled set
+  (`manifold-sync-<rate>p-h264.mov`, 27 MB; the MP4s are gone, §19.11) and the OBS scene collection
+  template too, since one link serves both menu items.
 - **"v1" is the coded pattern's version** (`SyncClips.patternVersion`). Any change to the pattern
   (the code, the unit, the tone, the flash) is a NEW `…-v2.zip` and a new constant. Never replace
   v1: a user's v1 clips must keep matching the v1 detector, and the calibration matcher pairs by the
@@ -807,6 +808,96 @@ Calibration offers +67…+70 ms and the re-check reads ≈ 0, but on NDI the hea
 time (pull stamps, picture delay, the direct anchor), and nobody has checked it against the device.
 **Monday's D1 + D4 decide it:** if a device capture with the offered value applied is ~70 ms off,
 NDI's heard figure is not what the listener hears, and NDI calibration must be disabled until it is.
+
+---
+
+## ☐ OPEN 2026-10-05 — DeckLink SDI: the tap underruns during FILE playback (pre-existing; worse on AAC than PCM) — a release-blocking candidate for SDI reference output
+
+**Found in the attended session, measured unattended (`AUDIO_RESAMPLER_DESIGN.md` §19.10, "Two
+findings re-examined").**
+- **What:** with DeckLink output on and a local FILE playing (no live session), the card's audio read
+  finds the tap's ring empty at its read position: `DeckLinkAudio: !! UNDERRUN — ring has nothing at
+  srcT=… scheduling silence, will re-anchor`.
+  - Each one schedules silence on SDI. Robbie heard "dropping frames" in a related live case.
+  - Between them: buffered 180 ms, sched = want, `resyncs=0`.
+- **Measured from the tap's own counters** (`DeckLinkAudio: buffered … underruns=N short=M`), not by
+  listening. One 60 s clip, launches alternated:
+
+  | file | today's build (`23e8223`) | b35a810 (before Stage A) |
+  |---|---|---|
+  | `manifold-sync-23.976p.mp4` (AAC) | 8 and 23 underruns | 39 and 43 |
+  | `manifold-sync-23.976p.mov` (ProRes, PCM) | 4 | 6 |
+
+- **Pre-existing, not Stage A:** the offset read cannot run on a file (`AudioTapBuffer.read` is the
+  b35a810 read whenever the live offset is the identity, and `endLiveAudio` clears it), and
+  `DeckLinkBridge.mm` is unchanged.
+- **Not diagnosed.** A candidate is the file path's tap feed arriving in bursts (AAC decode) against
+  the card's steady reads; the card itself is not implicated by anything seen.
+- **Why release-blocking candidate:** SDI out is a reference output. A dropout every few seconds on
+  file playback is audible on a broadcast monitor, and the SDI ear checks of §19.8 block 2 were
+  deferred to the Resolve workstation (2026-10-05).
+- **Next:** decide at the Release-build check on the Resolve workstation; diagnose from the tap's
+  ingest timing (per-buffer arrival against the card's read cursor) on a file.
+
+---
+
+## ☐ OPEN 2026-10-05 — after a starvation hold of ≥ 1 s, 10–20 ms of the debt is folded, not cut, and stays late for 20–50 s (pre-existing; a tuning decision)
+
+**Found re-examining the attended SRT hold (`AUDIO_RESAMPLER_DESIGN.md` §19.10, "Two findings
+re-examined").** The attended "unrepaid ~35 ms debt" was the MP4 loop sawtooth: that hold's 27 ms
+debt was cut whole in 0.3 s. But a loop-free local SRT repro (stalls 400 / 1000 / 2000 ms, ffmpeg
+1.05× catch-up) shows a smaller real effect.
+- **What:** after the 1000 and 2000 ms stalls, heard − O stays **+11…+18 ms** late for 20–50 s. The
+  400 ms stall returns to baseline.
+- **The same at O = 0 and O = +80, and on b35a810.** Not a regression, and not O.
+- **Why:**
+  - The whole-debt cut is `min(D, room, maxDrop)`, taken once `room ≥ D − recoveryFoldSeconds`
+    (20 ms).
+  - The remainder (< 20 ms; 8.0–19.9 ms measured) is folded "into the loop" and logged RECOVERED.
+  - The residual splice fires only at |e_f| > 20 ms, and the integrator winds (−786 → −952 ppm,
+    §13.4's rail class).
+- **In band by §18.19's definition (±20 ms); not within ±5 ms.**
+- **Decision for Robbie:** lower `recoveryFoldSeconds` and / or the residual threshold (e.g. 5–10 ms),
+  or accept. No change made.
+
+---
+
+## ☐ OPEN OBSERVATION 2026-10-05 — local SRT: the first anchor came ~38 s after transport-up, then 7–8 coarse re-anchors
+
+**Seen in every run of the §19.10 stall repro** (`repro/run.sh`, `syncD-23.976p-inj0.ts`, ffmpeg
+listener), on today's build and on b35a810 alike, so pre-existing.
+- `[SRT] transport up` at +0 s, the first anchor ~38 s later.
+- Then 7–8 `COARSE RE-ANCHOR — no splice` (LEVEL, e −3.0 … −4.4 s, renderer queue 3.6–5.7 s) inside
+  ~1.5 s, each a timebase write.
+- Settled well before any stall: the baseline was flat from +70 s.
+- **Not investigated.** Stage D's earlier SRT runs with the same fixture calibrated 10 s after
+  connect, so it may be this harness (`-readrate 1`, `-pes_payload_size 0`, launch order) rather than
+  Manifold. Worth one look: a 38 s start would be a user-visible stall.
+
+---
+
+## ✅ FIXED 2026-10-05 (uncommitted, awaiting Robbie) — the bundled sync clips drifted A/V by one AAC pad on every loop in OBS
+
+**`AUDIO_RESAMPLER_DESIGN.md` §19.11.**
+- **What it was:** the bundled H.264 / AAC MP4s decoded to one AAC frame of audio more than their
+  video (e.g. 2 883 584 against 2 882 880 samples at 23.976). OBS's Media Source ignores the edit
+  list's end trim, so a looped clip moved the sound **+14.667 ms per loop** (23.976 / 29.97 / 59.94),
+  **+10.667 ms** otherwise, wrapping when OBS resynced.
+- **Every live calibration reading of 2026-10-05 was taken on that sawtooth** (§19.10).
+- **The fix:**
+  - The bundled clips are now `manifold-sync-<rate>p-h264.mov`: H.264 (no B-frames) + PCM 16-bit,
+    four whole code cycles (16–20 s).
+  - That is whole frames and whole samples at every rate, with the code unbroken across the seam.
+  - 27 MB the set. The MP4s are removed.
+- **Verified:**
+  - `verify.py` 7 / 7, with exact decoded length and a 20-pass loop test at 0.000 µs drift.
+  - The in-app detectors 16 / 16 per clip.
+  - OBS's own recording of the 23.976 clip on loop: 12.5 loops, per-loop A/V constant within
+    ±0.001 ms.
+  - `release-mac.sh` step 3b now fails a clip that does not decode to exactly its frames and samples
+    with PCM audio.
+- **The ProRes masters are unchanged.** At 25 and 50 a 60 s master is 12.5 code cycles, so its loop
+  seam breaks the code there: the bundled clip is the one to loop.
 
 ---
 

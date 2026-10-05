@@ -40,16 +40,17 @@ enum SyncClipLibrary {
 
     static let notBundledNote = "Sync clips aren’t included in this build."
 
-    /// `Contents/Resources/SyncClips`, where the build copies build/syncclips/*.mp4 (project.yml).
+    /// `Contents/Resources/SyncClips`, where the build copies build/syncclips/*-h264.mov (project.yml):
+    /// H.264 + PCM, whole code cycles, so a clip loops sample-exactly in an encoder (§19.11).
     static var directory: URL? { Bundle.main.resourceURL?.appendingPathComponent("SyncClips", isDirectory: true) }
 
     static func bundledURL(_ clip: SyncClips.Clip) -> URL? {
-        guard let u = directory?.appendingPathComponent(clip.mp4Name),
+        guard let u = directory?.appendingPathComponent(clip.bundledName),
               FileManager.default.fileExists(atPath: u.path) else { return nil }
         return u
     }
 
-    /// Every rate's MP4 is in the bundle.
+    /// Every rate's clip is in the bundle.
     static var isBundled: Bool { SyncClips.all.allSatisfy { bundledURL($0) != nil } }
 
     static func openDownload() {
@@ -67,7 +68,7 @@ enum SyncClipLibrary {
                     : "This stream is \(fps) fps: there is no \(fps) fps clip, \(m.clip.displayName) is the nearest.")
     }
 
-    /// "Save Sync Clip…" / "Get Sync Clip…": the bundled MP4 for the stream's rate (nearest supported,
+    /// "Save Sync Clip…" / "Get Sync Clip…": the bundled clip for the stream's rate (nearest supported,
     /// said so when it is not the stream's own), through a save panel with the rate on a menu.
     @MainActor
     static func saveClip(frameInterval: Double, window: NSWindow?) {
@@ -83,7 +84,7 @@ enum SyncClipLibrary {
         }
         let match = rateNote(frameInterval: frameInterval)
         let popup = NSPopUpButton(frame: .zero, pullsDown: false)
-        for c in SyncClips.all { popup.addItem(withTitle: "\(c.displayName) — \(c.mp4Name)") }
+        for c in SyncClips.all { popup.addItem(withTitle: "\(c.displayName) — \(c.bundledName)") }
         popup.selectItem(at: SyncClips.all.firstIndex { $0 == match?.0.clip } ?? 0)
         let label = NSTextField(wrappingLabelWithString: match?.1 ?? "The stream’s frame rate isn’t known yet: choose the clip’s rate.")
         label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -97,11 +98,11 @@ enum SyncClipLibrary {
         panel.title = "Save Sync Clip"
         panel.message = "Play it through your encoder, then calibrate while connected."
         panel.accessoryView = stack
-        panel.nameFieldStringValue = (match?.0.clip ?? SyncClips.all[0]).mp4Name
-        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.nameFieldStringValue = (match?.0.clip ?? SyncClips.all[0]).bundledName
+        panel.allowedContentTypes = [.quickTimeMovie]
         let target = NotificationCenter.default.addObserver(forName: NSMenu.didSendActionNotification,
                                                             object: popup.menu, queue: .main) { _ in
-            MainActor.assumeIsolated { panel.nameFieldStringValue = SyncClips.all[popup.indexOfSelectedItem].mp4Name }
+            MainActor.assumeIsolated { panel.nameFieldStringValue = SyncClips.all[popup.indexOfSelectedItem].bundledName }
         }
         defer { NotificationCenter.default.removeObserver(target) }
         guard panel.runModal() == .OK, let dest = panel.url else { return }

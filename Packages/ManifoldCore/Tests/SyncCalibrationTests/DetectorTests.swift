@@ -4,7 +4,7 @@
 //  The tone-onset detector on clip audio synthesised exactly as generate.sh's `aevalsrc` writes it
 //  (the tone anchored to k / rate, sampled, 5 ms raised-cosine edges, −20 dBFS, a −60 dBFS RMS
 //  noise floor), fed in uneven buffers. Every event, at every rate, at three levels. The truth check
-//  against the bundled MP4s themselves (AAC, decoded) is offline, in §19.10.
+//  against the bundled clips themselves (decoded) is offline: §19.10 (the old MP4s), §19.11 (H.264 + PCM).
 //
 
 import XCTest
@@ -107,9 +107,17 @@ final class DetectorTests: XCTestCase {
     }
 
     func testTheClipCatalogueMatchesTheGeneratedSet() {
-        // §19.9's table: events per clip.
-        XCTAssertEqual(SyncClips.all.map { $0.eventFrames.count }, [48, 48, 50, 60, 60, 50, 60])
-        XCTAssertEqual(SyncClips.all.map(\.frameCount), [1440, 1440, 1500, 1800, 1800, 3000, 3600])
+        // The bundled clips (§19.11): four whole code cycles, 16 events each, whole frames and whole
+        // 48 kHz samples at every rate.
+        XCTAssertEqual(SyncClips.all.map { $0.eventFrames.count }, [16, 16, 16, 16, 16, 16, 16])
+        XCTAssertEqual(SyncClips.all.map(\.frameCount), [480, 480, 480, 480, 480, 960, 960])
+        for c in SyncClips.all {
+            let samples = Double(c.frameCount) * 48000 * Double(c.den) / Double(c.num)
+            XCTAssertEqual(samples, samples.rounded(), "\(c.label): \(samples) samples")
+            // The code runs on across the seam: the last event is one closing interval (37 steps)
+            // before the clip's end + its first event.
+            XCTAssertEqual(c.frameCount + c.firstEventFrame - c.eventFrames.last!, 37 * c.unit, c.label)
+        }
         XCTAssertEqual(SyncClips.halfCycleLimitSeconds, 2.0, accuracy: 1e-9)
         // Nearest supported rate, and whether it is the stream's own.
         XCTAssertEqual(SyncClips.clip(forRate: 24000.0 / 1001)?.clip.label, "23.976")

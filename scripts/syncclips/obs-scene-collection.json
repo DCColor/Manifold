@@ -1,5 +1,5 @@
 {
-  "__comment": "Manifold sync clips — an OBS scene collection TEMPLATE (AUDIO_RESAMPLER_DESIGN.md §19.9). EDIT BEFORE IMPORTING: replace every __SYNCCLIPS_DIR__ with the absolute path of the folder holding the clips (build/syncclips/ after scripts/syncclips/generate.sh), e.g. with the sed line in scripts/syncclips/README.md, into a COPY. One scene per rate; each plays its clip's .mp4 on loop, audio monitoring off. Set OBS's video frame rate to the clip's rate (Settings > Video) before streaming.",
+  "__comment": "Manifold sync clips — an OBS scene collection TEMPLATE (AUDIO_RESAMPLER_DESIGN.md §19.9, §19.11). EDIT BEFORE IMPORTING: replace every __SYNCCLIPS_DIR__ with the absolute path of the folder holding the clips (build/syncclips/ after scripts/syncclips/generate.sh), e.g. with the sed line in scripts/syncclips/README.md, into a COPY. One scene per rate; each plays its bundled clip (manifold-sync-<rate>p-h264.mov: H.264 + PCM, whole code cycles, so it loops with zero A/V drift) on loop, audio monitoring off. Set OBS's video frame rate to the clip's rate (Settings > Video) before streaming.",
   "name": "Manifold Sync Clips",
   "current_scene": "Sync 23.976p",
   "current_program_scene": "Sync 23.976p",
@@ -33,7 +33,7 @@
       "name": "Manifold sync clip 23.976p",
       "uuid": "30aa3cec-ee58-523a-a919-f1204511300e",
       "settings": {
-        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-23.976p.mp4",
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-23.976p-h264.mov",
         "is_local_file": true,
         "looping": true,
         "restart_on_activate": true,
@@ -108,7 +108,7 @@
       "name": "Manifold sync clip 24p",
       "uuid": "cad646c2-5e87-55f9-bb66-c40a2cbef47e",
       "settings": {
-        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-24p.mp4",
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-24p-h264.mov",
         "is_local_file": true,
         "looping": true,
         "restart_on_activate": true,
@@ -183,7 +183,7 @@
       "name": "Manifold sync clip 25p",
       "uuid": "2f64f868-0e23-55d6-9874-f3af9bc04304",
       "settings": {
-        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-25p.mp4",
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-25p-h264.mov",
         "is_local_file": true,
         "looping": true,
         "restart_on_activate": true,
@@ -258,7 +258,7 @@
       "name": "Manifold sync clip 29.97p",
       "uuid": "7d3b6718-fd1e-5849-b7e2-cc4355123f43",
       "settings": {
-        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-29.97p.mp4",
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-29.97p-h264.mov",
         "is_local_file": true,
         "looping": true,
         "restart_on_activate": true,
@@ -333,7 +333,7 @@
       "name": "Manifold sync clip 30p",
       "uuid": "e7174cad-7c66-57c0-bd79-304f51455419",
       "settings": {
-        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-30p.mp4",
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-30p-h264.mov",
         "is_local_file": true,
         "looping": true,
         "restart_on_activate": true,
@@ -408,7 +408,7 @@
       "name": "Manifold sync clip 50p",
       "uuid": "58905ba2-713e-55b8-9251-5d0be3e24916",
       "settings": {
-        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-50p.mp4",
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-50p-h264.mov",
         "is_local_file": true,
         "looping": true,
         "restart_on_activate": true,
@@ -483,7 +483,7 @@
       "name": "Manifold sync clip 59.94p",
       "uuid": "9533b0df-ba56-540e-b379-f39edd20ce02",
       "settings": {
-        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-59.94p.mp4",
+        "local_file": "__SYNCCLIPS_DIR__/manifold-sync-59.94p-h264.mov",
         "is_local_file": true,
         "looping": true,
         "restart_on_activate": true,

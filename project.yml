@@ -217,8 +217,9 @@ targets:
         embed: true
         link: false
         codeSign: true
-    # ── THE SYNC CLIPS (docs/AUDIO_RESAMPLER_DESIGN.md §19.10) ──────────────────────────────────
-    # The MP4 set is NOT committed: scripts/syncclips/generate.sh writes it to build/syncclips/
+    # ── THE SYNC CLIPS (docs/AUDIO_RESAMPLER_DESIGN.md §19.10, §19.11) ─────────────────────────
+    # The bundled set (manifold-sync-<label>p-h264.mov: H.264 + PCM, whole code cycles, so a clip
+    # loops sample-exactly) is NOT committed: scripts/syncclips/generate.sh writes it to build/syncclips/
     # (gitignored). This phase copies whatever is there into Contents/Resources/SyncClips, after the
     # resources and before Xcode signs the bundle, in EVERY configuration. A dev build without the
     # clips simply has none, and the app says "Sync clips aren't included in this build" with the
@@ -236,7 +237,7 @@ targets:
           n=0; total=0
           for label in $(awk -F'\t' '!/^#/ && NF >= 3 {print $1}' "${SRCROOT}/scripts/syncclips/recipes.tsv"); do
             total=$((total + 1))
-            f="$SRC/manifold-sync-${label}p.mp4"
+            f="$SRC/manifold-sync-${label}p-h264.mov"
             if [ -f "$f" ]; then mkdir -p "$DEST"; cp "$f" "$DEST/"; n=$((n + 1)); fi
           done
           echo "Sync clips bundled: $n of $total (from build/syncclips/)"

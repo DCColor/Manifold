@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Verify Manifold sync clips (AUDIO_RESAMPLER_DESIGN.md §19.3, §19.9). Read-only on the clips.
 
-    python3 scripts/syncclips/verify.py [clip ...]        # default: every clip in build/syncclips/
+    python3 scripts/syncclips/verify.py [clip ...]        # default: every .mov in build/syncclips/
     FFPROBE=/path/to/ffprobe  (default: ffprobe on PATH)   # the read-back
     --json out.json                                        # per-clip results, and every event's times
+    --loop N                                               # also the loop test: N passes, per seam
+
+Two kinds of clip, told apart by name: `manifold-sync-<label>p.mov`, the ProRes master (60 × round(rate)
+frames), and `manifold-sync-<label>p-h264.mov`, the bundled clip (`cycles` whole code cycles,
+recipes.tsv). A legacy `.mp4` named explicitly is read as a 60 s clip (for comparison only).
 
 Per clip:
   * READ-BACK (ffprobe): codecs, profile, pixel format, size, frame rate, frame count, duration, the
@@ -18,6 +23,14 @@ Per clip:
     after a tone to 10 ms before the next) is the −60 dBFS floor.
   * c12.py, UNMODIFIED, with `--file` (a disk file has no sender grid). Its 1 Hz grid gate does not
     apply to a coded pattern; it is run and printed as is, and §19.9 says which gates fit.
+  * EXACT LENGTH (§19.11): the DECODED audio — what a player gets, edit list honoured — is exactly
+    frames × 48000 / rate samples, and the video's decoded frames are the recipe's. Then a loop adds
+    nothing: audio and video restart together.
+  * LOOP (--loop N): the clip decoded ONCE and appended N times, the way a looping player plays it
+    (audio sample after sample; video frame after frame, each pass the decoded frames × 1 / rate
+    later). Every event in every pass is measured with the same phase fit. Per seam (pass), the
+    A/V median and worst; the drift is the last pass − the first. A clip whose decoded audio runs
+    long or short drifts by exactly that difference per pass.
 """
 import json, os, re, subprocess, sys, math
 import numpy as np
@@ -36,9 +49,9 @@ def recipes():
     for line in open(os.path.join(HERE, 'recipes.tsv')):
         if not line.strip() or line.startswith('#'):
             continue
-        label, rate, unit = line.rstrip('\n').split('\t')
+        label, rate, unit, cycles = line.rstrip('\n').split('\t')
         num, den = (int(v) for v in rate.split('/'))
-        out[label] = dict(num=num, den=den, unit=int(unit))
+        out[label] = dict(num=num, den=den, unit=int(unit), cycles=int(cycles))
     return out
 
 
@@ -95,14 +108,42 @@ def tone_onset(x, t_nominal, period):
     return phase_t0 + k / TONE_HZ, amp, (a0 + hit) / FS
 
 
-def verify(path, rec):
-    label = re.search(r'manifold-sync-([\d.]+)p\.', path).group(1)
+def clip_kind(path):
+    """(label, bundled?) from the file name."""
+    m = re.search(r'manifold-sync-([\d.]+)p(-h264)?\.(mov|mp4)$', path)
+    return m.group(1), m.group(2) is not None
+
+
+def frame_count(r, bundled):
+    nominal = (r['num'] + r['den'] // 2) // r['den']
+    return r['cycles'] * CYCLE * r['unit'] if bundled else 60 * nominal
+
+
+def loop_check(x, white, n_frames, num, den, passes):
+    """The clip appended `passes` times (decode → append). Per pass: (median, worst) A/V in ms over
+    every event, left channel; the flash of pass p is at its pts + p × the video's decoded length."""
+    period = den / num
+    xt = np.tile(x[:, 0], passes)
+    vlen = n_frames * period
+    out = []
+    for p_ in range(passes):
+        av = []
+        for f, tf in white:
+            t_flash = tf + p_ * vlen
+            t0, _, _ = tone_onset(xt, t_flash, period)
+            av.append((t0 - t_flash) * 1e3)
+        out.append((float(np.median(av)), float(max(av, key=abs))))
+    return out
+
+
+def verify(path, rec, passes=0):
+    label, bundled = clip_kind(path)
     r = rec[label]
     num, den, unit = r['num'], r['den'], r['unit']
     pr = probe(path)
     tb_num, tb_den = (int(v) for v in pr['time_base'].split('/'))
     nominal = (num + den // 2) // den
-    n_frames = 60 * nominal
+    n_frames = frame_count(r, bundled)
     F0 = nominal
     events = [F0 + unit * (CYCLE * c + o) for c in range(n_frames) for o in CODE
               if F0 + unit * (CYCLE * c + o) < n_frames]
@@ -128,6 +169,8 @@ def verify(path, rec):
                          avR_ms=(t0R - tf) * 1e3, boundary_err_us=(t0L - f * den / num) * 1e6,
                          amp=ampL, detector_ms=(crossL - tf) * 1e3))
     av = np.array([q['av_ms'] for q in rows] + [q['avR_ms'] for q in rows])
+    # Exact length: the decoded audio against the recipe's frames, in samples (an integer: §19.11).
+    samples_expected = n_frames * FS * den // num if (n_frames * FS * den) % num == 0 else None
     # Coded gates.
     intervals = np.diff(white_frames)
     code_steps = [23, 29, 31, 37]
@@ -153,7 +196,14 @@ def verify(path, rec):
         floor_rms_dbfs=float(20 * np.log10(np.sqrt(np.mean(g ** 2)) + 1e-12)),
         floor_peak_dbfs=float(20 * np.log10(np.max(np.abs(g)) + 1e-12)),
         avsync_detector_ms_median=float(np.median([q['detector_ms'] for q in rows])),
-        events=rows, cycle_s=unit * CYCLE * den / num, shortest_s=unit * 23 * den / num)
+        events=rows, cycle_s=unit * CYCLE * den / num, shortest_s=unit * 23 * den / num,
+        bundled=bundled, frames_expected=n_frames, samples_decoded=int(len(x)),
+        samples_expected=samples_expected,
+        length_exact=(pr['frames'] == n_frames and samples_expected is not None and len(x) == samples_expected))
+    if passes:
+        lp = loop_check(x, [(q['frame'], q['flash']) for q in rows], pr['frames'], num, den, passes)
+        res['loop'] = dict(passes=passes, per_pass=lp, drift_ms=lp[-1][0] - lp[0][0],
+                           worst_ms=max((abs(w) for _, w in lp)))
     # c12.py, unmodified.
     c = subprocess.run([sys.executable, os.path.join(REPO, 'scripts/soak/analysis/c12.py'), path, '--file'],
                        capture_output=True, text=True)
@@ -167,17 +217,21 @@ def main():
     jpath = sys.argv[sys.argv.index('--json') + 1] if '--json' in sys.argv else None
     if jpath in args:
         args.remove(jpath)
+    passes = int(sys.argv[sys.argv.index('--loop') + 1]) if '--loop' in sys.argv else 0
+    if passes and str(passes) in args:
+        args.remove(str(passes))
     clips = args or sorted(os.path.join(REPO, 'build/syncclips', f)
                            for f in os.listdir(os.path.join(REPO, 'build/syncclips'))
-                           if re.match(r'manifold-sync-.*\.(mov|mp4)$', f))
+                           if re.match(r'manifold-sync-.*\.mov$', f))
     rec = recipes()
     out, ok_all = [], True
     for p in clips:
-        r = verify(p, rec)
+        r = verify(p, rec, passes)
         out.append(r)
         pr = r['probe']
         ok = (r['flash_frames_exact'] and r['intervals_follow_code'] and r['beeps'] == r['expected_events']
-              and r['av_ms_worst'] < 0.001 and r['bursts_outside_tones'] == 0 and r['flash_pts_err_us_max'] < 1)
+              and r['av_ms_worst'] < 0.001 and r['bursts_outside_tones'] == 0 and r['flash_pts_err_us_max'] < 1
+              and r['length_exact'] and (not passes or r['loop']['worst_ms'] < 0.001))
         ok_all &= ok
         print(f"{'PASS' if ok else 'FAIL'} {r['clip']}: {pr['vcodec']} {pr['profile']} {pr['pix_fmt']} {pr['size']} "
               f"{pr['r_frame_rate']} ({pr['frames']} fr, {pr['format_duration']:.3f} s) · "
@@ -189,6 +243,14 @@ def main():
               f"flash pts vs k/rate worst {r['flash_pts_err_us_max']:.3f} µs · tone peak {r['tone_amp_min']:.4f}–"
               f"{r['tone_amp_max']:.4f} · floor {r['floor_rms_dbfs']:.1f} dBFS rms / {r['floor_peak_dbfs']:.1f} peak · "
               f"bursts outside tones {r['bursts_outside_tones']} · avsync onset {r['avsync_detector_ms_median']:+.3f} ms")
+        print(f"     length: {r['probe']['frames']}/{r['frames_expected']} frames, {r['samples_decoded']}/"
+              f"{r['samples_expected']} samples decoded · exact: {r['length_exact']}"
+              f" ({'bundled' if r['bundled'] else 'master / legacy'})")
+        if passes:
+            lp = r['loop']
+            print(f"     loop ×{passes}: drift (last − first pass) {lp['drift_ms']*1000:+.3f} µs · worst event "
+                  f"{lp['worst_ms']*1000:.3f} µs · per pass median (µs): "
+                  + ' '.join(f"{m*1000:+.2f}" for m, _ in lp['per_pass']))
         c = r['c12']
         print("     c12: " + ' · '.join(f"{k} {c[k]}" for k in ('beeps', 'flashes', 'pairs', 'g_count', 'g_grid',
                                                                   'doubled', 'gap_rms_db', 'median', 'sd') if k in c)

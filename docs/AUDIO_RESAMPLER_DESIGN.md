@@ -5014,7 +5014,8 @@ The test, per clip:
 2. **The ProRes masters stay full length** (60 s; 77–171 MB each, 755 MB the set). A separate
    download, not bundled.
 3. **Distribution:**
-   - **The 22 MB MP4 set is bundled in the app.**
+   - **The 22 MB MP4 set is bundled in the app.** (Superseded 2026-10-05 by §19.11: the MP4s drifted
+     on every loop; the bundled set is now H.264 + PCM `.mov`, 27 MB.)
    - The ProRes masters are a separate download from releases.graviton.tools.
    - **Stage D adds:**
      - **"Save Sync Clip…"** to the control-bar A/V menu: the bundled MP4 for the current rate;
@@ -6059,6 +6060,149 @@ continuous 300 s file with trimmed joins, so no per-loop step):
 2. The ≤ 20 ms post-stall remainder (fold + residual threshold): a tuning decision.
 3. The ~38 s first anchor with coarse re-anchors on the TS fixture over local SRT.
 4. None is a Stage A–D regression.
+
+
+### 19.11 The bundled sync clips loop sample-exactly: H.264 + PCM `.mov`, four whole code cycles — 2026-10-05 (uncommitted)
+
+**The problem** (§19.10, attended section):
+- The bundled H.264 / AAC MP4s decode to whole 1024-sample AAC frames: 2 883 584 samples against the
+  video's 2 882 880 at 23.976.
+- The edit list trims the end, but an ffmpeg-based player ignores the end trim, and OBS's Media
+  Source is one. So every loop moved the sound **+14.667 ms** (23.976 / 29.97 / 59.94) or
+  **+10.667 ms** (24 / 25 / 30 / 50), wrapping when OBS resynced.
+- The ProRes masters (PCM) were exact.
+
+**Decided (Robbie, 2026-10-05):**
+- The bundled clips must loop with zero A/V drift in OBS's Media Source.
+- The coded pattern stays exactly as is (still v1; the zip is not uploaded).
+- The ProRes masters are unchanged.
+- ffmpeg only.
+
+#### Options considered
+
+| option | loops exactly? | bundled set | why not / why |
+|---|---|---|---|
+| AAC MP4, 60 s (as shipped) | ❌ one AAC pad a loop | 22 MB | the defect |
+| AAC with the audio a multiple of 1024 samples | only if every player honours the priming skip, and the encoder's flush adds no frame | — | needs lcm(1024-sample frames, 120-frame cycles): 1920 frames = 80 s at 23.976. Fragile and lossy |
+| ALAC in `.mov` | yes in principle (a short last frame) | ~15–20 MB | one more codec path, untested in OBS; PCM fits the budget |
+| PCM in `.mp4` | yes | — | poor support (QuickTime, the mp4 muxer's ipcm) |
+| ProRes, shortened | yes | ~25–55 MB a clip | too large to bundle |
+| **H.264 + PCM in `.mov`, 60 s** | yes | ~80 MB | over the 50 MB budget; and 60 s is 12.5 cycles at 25 / 50, so the code breaks at the seam |
+| **H.264 + PCM s16le in `.mov`, 4 whole code cycles — CHOSEN** | **yes, by construction** | **27.1 MB** | PCM has no codec padding; whole cycles are whole frames AND samples at every rate; the code runs on across the seam |
+
+- **PCM 16-bit, not 24:** the clip's floor is −60 dBFS. 16-bit quantisation (−98 dBFS) is far below
+  it, and the tone's timing does not depend on the word length. 24-bit would be ~42 MB.
+- **No B-frames** (`-bf 0`): no composition offset, so the video's edit list starts at media time 0,
+  like the audio's (checked: both `media time: 0`, full duration).
+- **The name is `manifold-sync-<label>p-h264.mov`,** so it never collides with the master
+  `manifold-sync-<label>p.mov`, in build/syncclips/ or in a user's folder.
+
+#### The length: four whole code cycles
+
+- A cycle is 120 × unit frames. 120 is a multiple of 5, and 5 frames is a whole number of 48 kHz
+  samples at 29.97 / 59.94 (5 × 1601.6, 5 × 800.8). So any whole number of cycles is whole frames
+  AND whole samples at every rate.
+- **Across the seam:** events at F0 + unit × {0, 23, 52, 83} + C·c. The last event of the last cycle
+  is 37 steps before (clip length + F0), the next pass's first event. The closing interval is the
+  code's own 37, and F0 < 37 × unit at every rate (24…60 frames against 37 / 74). `swift test`
+  asserts both for every clip.
+- `generate.sh` checks the sample count is whole, then cuts the audio to exactly that many samples
+  (`atrim=end_sample`, after a 0.1 s longer `aevalsrc`).
+
+| clip | frames | samples | length | events | file |
+|---|---|---|---|---|---|
+| 23.976p | 480 | 960 960 | 20.020 s | 16 | 4.24 MB |
+| 24p | 480 | 960 000 | 20.000 s | 16 | 4.22 MB |
+| 25p | 480 | 921 600 | 19.200 s | 16 | 4.06 MB |
+| 29.97p | 480 | 768 768 | 16.016 s | 16 | 3.45 MB |
+| 30p | 480 | 768 000 | 16.000 s | 16 | 3.44 MB |
+| 50p | 960 | 921 600 | 19.200 s | 16 | 4.14 MB |
+| 59.94p | 960 | 768 768 | 16.016 s | 16 | 3.53 MB |
+| **set** | | | | | **27.1 MB** (≤ 50 MB target) |
+
+- At 23.976 and 59.94 the looped clip's events are exactly the old 60 s clip's (60 s was 12 / 15
+  whole cycles there).
+- The DMG grows by ~5 MB against the MP4 set, not ~22.
+
+#### What changed (no change to the pattern, the detectors, the matcher or the masters)
+
+| file | change |
+|---|---|
+| `scripts/syncclips/recipes.tsv` | a `cycles` column (4) |
+| `scripts/syncclips/generate.sh` | formats `mov` (the ProRes master, unchanged) and `h264` (the bundled clip); the `mp4` branch removed |
+| `scripts/syncclips/verify.py` | two kinds of clip by name; an EXACT LENGTH gate (decoded samples and frames = the recipe's); `--loop N`, the loop test; the default set is `.mov` only |
+| `scripts/release-mac.sh` | 3b generates `SYNCCLIPS_FORMATS=h264` and **fails a clip that does not decode to exactly its frames and samples with PCM audio** (ffmpeg only; tested on the set, and on an AAC re-wrap, which it rejects); 6c checks `-h264.mov` |
+| `project.yml` | "Bundle sync clips" copies `-h264.mov` |
+| `SyncClips.swift` | `loopCycles`; `frameCount` = the bundled clip's; `durationSeconds`; `mp4Name` → `bundledName` |
+| `CalibrationMode.swift` (Save Sync Clip…) | the bundled `.mov` name, the panel's type `.quickTimeMovie`. Wording unchanged (reviewed by Robbie, §19.10) |
+| `obs-scene-collection.json` | the seven sources play `-h264.mov` |
+| `SyncCalibrationTests` | the catalogue (16 events; 480 / 960 frames; whole samples; the seam interval); the measurement tests feed the LOOPED clip over the same 60 / 120 s spans as before |
+| `scripts/syncclips/README.md` | both kinds of clip, the loop test, why not MP4 |
+
+#### Verification
+
+**`verify.py --loop 20`, every bundled clip: 7 / 7 PASS.** The legacy 23.976 MP4 FAILS as the
+control.
+
+| clip | events in sync | A/V worst | decoded length | loop ×20: drift (last − first pass) | per-pass median |
+|---|---|---|---|---|---|
+| 23.976p | 16 / 16, flash frames and code exact | 0.119 µs | 480 / 480 fr, 960 960 / 960 960 smp | **−0.000 µs** | +0.00 µs, every pass |
+| 24p | 16 / 16 | 0.113 µs | exact | **−0.000 µs** | +0.03 µs, every pass |
+| 25p | 16 / 16 | 0.123 µs | exact | **−0.000 µs** | −0.04 µs, every pass |
+| 29.97p | 16 / 16 | 0.132 µs | exact | **−0.000 µs** | −0.01 µs, every pass |
+| 30p | 16 / 16 | 0.114 µs | exact | **−0.000 µs** | +0.04 µs, every pass |
+| 50p | 16 / 16 | 0.228 µs | exact | **−0.000 µs** | −0.03 µs, every pass |
+| 59.94p | 16 / 16 | 0.293 µs | 960 / 960 fr, 768 768 / 768 768 smp | **−0.000 µs** | −0.01 µs, every pass |
+| *legacy 23.976 MP4 (control)* | 48 / 48 | 0.314 µs | 2 883 584 / 2 882 880 smp ❌ | pass 1 → 2: **+14 666.66 µs** | ❌ |
+
+- **The loop test:** decode once, append 20× (audio sample after sample; video frame after frame,
+  each pass the decoded frames × 1 / rate later), and fit every event of every pass.
+  - The control's pass 2 reads +14 666.66 µs, exactly its 704 extra samples.
+  - Its later passes (≥ 29 ms off) fall outside the fit's ±20 ms search window, so the figures
+    printed there are not readings; the per-pass drift is the 704 samples.
+- **Also on every clip:**
+  - flash pts − k / rate 0.000 µs; tone peak 0.0998–0.1001;
+  - floor −60.0 dBFS RMS / −55.2 peak; no bursts outside tones;
+  - Rec.709 tags as §19.9;
+  - c12 16 / 16 / 16 with g_count True, median +1.67…+1.69 ms (§19.9's known onset rule; its
+    gap_rms −40 / −44 dB at 29.97 / 30 / 59.94 is §19.9 deviation 3).
+- **`pairing_check.py` (median score):** 7 / 7 PASS, 0 failures in 508 offsets each, margins as
+  §19.9 (33.3–41.7 ms).
+- **The in-app detectors** (the stage D harness `fileprobe`, AVFoundation decode): **16 / 16 flashes
+  and tones on every clip**, heard A/V median −0.014…+0.001 ms.
+
+**In OBS (OBS 32.2.2, the sender instance, Media Source on loop).**
+- Robbie set the existing "Media" source in his "Untitled" collection to
+  `manifold-sync-23.976p-h264.mov`. No source and no collection was added.
+- Claude started and stopped recording over the websocket (the profile's own recording settings):
+  `~/Movies/2026-10-05 15-10-51.mov`, 250 s.
+
+| loop | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 (½) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| A/V median (ms) | −50.276 | −50.275 | −50.275 | −50.276 | −50.275 | −50.276 | −50.277 | −50.276 | −50.276 | −50.276 | −50.275 | −50.276 | −50.276 |
+| Δ vs loop 0 (µs) | 0 | +1 | +1 | 0 | +1 | 0 | −1 | 0 | 0 | 0 | +1 | 0 | +1 |
+
+- **12.5 loops, 200 events: zero drift** (per-loop medians within ±0.001 ms, all 200 pairs
+  −50.287…−50.264 ms). Loop starts are exactly 20.02 s apart.
+- Against the MP4 earlier that day, in the same OBS: +14.67 ms at every loop, wrapping after four.
+- **The constant −50.3 ms is OBS's own A/V in its recording** (sound early). It is the same on every
+  loop, so it is not the clip. Not investigated. OBS's audio buffering was 42 ms that launch.
+
+**`swift test`: 173 / 173.** The same count as before: the catalogue test was rewritten, no test was
+added or removed.
+
+**Profile build** (`.build-cc/syncloop-Profile`): 0 errors, no new warnings in the touched files.
+"Sync clips bundled: 7 of 7". `Contents/Resources/SyncClips` holds exactly the seven
+`-h264.mov`, 26 MB on disk.
+
+#### Not done
+
+- Save Sync Clip… was not exercised through its panel on the live app. The code path is a rename
+  and a content type; the build bundles 7 / 7.
+- The 25 / 50 / 59.94 clips were looped only offline, not in OBS (23.976 in OBS).
+- The ProRes masters keep their 60 s length. At 25 and 50 that is 12.5 cycles, so a looped master's
+  seam breaks the code there. The masters were not meant to loop; the bundled clip is.
+- Robbie's "Media" source still points at the new clip. Setting it back is his choice.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 

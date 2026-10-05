@@ -292,9 +292,10 @@ fi
 ok "gitignored build inputs present (DeckLink SDK, NDI headers, 3 vendored lib trees)"
 
 # ── THE SYNC CLIPS ARE GENERATED, NOT COMMITTED (docs/AUDIO_RESAMPLER_DESIGN.md §19.10) ───────
-# Step 3b runs scripts/syncclips/generate.sh (MP4s only) into build/syncclips/, project.yml's
-# "Bundle sync clips" phase copies them into Contents/Resources/SyncClips, and step 6c fails the
-# release if any rate's clip is missing from the exported app. So ffmpeg is a build tool here.
+# Step 3b runs scripts/syncclips/generate.sh (the bundled H.264 + PCM .mov clips only) into
+# build/syncclips/ and checks each loops sample-exactly, project.yml's "Bundle sync clips" phase
+# copies them into Contents/Resources/SyncClips, and step 6c fails the release if any rate's clip is
+# missing from the exported app. So ffmpeg is a build tool here.
 command -v ffmpeg >/dev/null 2>&1 \
     || die "ffmpeg not on PATH — step 3b generates the bundled sync clips with it
        (scripts/syncclips/generate.sh; Homebrew's ffmpeg with libx264)."
@@ -437,19 +438,36 @@ ok "project regenerated"
 # 3b. Generate the sync clips (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
 # ══════════════════════════════════════════════════════════════════════════════════════════
 #
-# The MP4 set the app bundles, from the committed recipes, into build/syncclips/ — BEFORE the
-# archive, whose "Bundle sync clips" phase copies them. Regenerated every release, so the shipped
-# clips are always the recipes' output, never a stale file left in build/.
+# The clips the app bundles (H.264 + PCM in .mov, whole code cycles: §19.11), from the committed
+# recipes, into build/syncclips/ — BEFORE the archive, whose "Bundle sync clips" phase copies them.
+# Regenerated every release, so the shipped clips are always the recipes' output, never a stale file
+# left in build/.
+#
+# THE LOOP GATE. A customer loops the clip in OBS's Media Source. It loops with zero A/V drift only if
+# the DECODED audio is exactly the video's length: a long or short track moves the sound by the
+# difference on every loop (the AAC MP4s ran one padded frame long: +10.7 / +14.7 ms a loop). So each
+# clip is decoded here and must hold exactly the recipe's frames and frames × 48000 / rate samples,
+# with PCM audio. ffmpeg alone; verify.py (numpy) is the full gate, run by hand (§19.11).
 
-step "Generate the sync clips (MP4)"
+step "Generate the sync clips (H.264 + PCM .mov)"
 
-( cd "$REPO_ROOT" && SYNCCLIPS_FORMATS=mp4 zsh scripts/syncclips/generate.sh ) \
+( cd "$REPO_ROOT" && SYNCCLIPS_FORMATS=h264 zsh scripts/syncclips/generate.sh ) \
     || die "scripts/syncclips/generate.sh failed"
-for label in "${SYNCCLIP_LABELS[@]}"; do
-    [[ -s "${REPO_ROOT}/build/syncclips/manifold-sync-${label}p.mp4" ]] \
-        || die "sync clip missing after generation: build/syncclips/manifold-sync-${label}p.mp4"
-done
-ok "${#SYNCCLIP_LABELS[@]} sync clips generated (build/syncclips/)"
+while IFS=$'\t' read -r label rate unit cycles; do
+    clip="${REPO_ROOT}/build/syncclips/manifold-sync-${label}p-h264.mov"
+    [[ -s "$clip" ]] || die "sync clip missing after generation: build/syncclips/manifold-sync-${label}p-h264.mov"
+    num=${rate%/*}; den=${rate#*/}
+    want_frames=$(( cycles * 120 * unit ))
+    want_samples=$(( want_frames * 48000 * den / num ))
+    (( want_frames * 48000 * den % num == 0 )) || die "${label}p: ${want_frames} frames is not a whole number of samples"
+    acodec=$(ffmpeg -hide_banner -i "$clip" 2>&1 | sed -n 's/.*Audio: \([a-z0-9_]*\).*/\1/p' | head -1)
+    [[ "$acodec" == pcm_s16le ]] || die "${label}p sync clip audio is '${acodec}', not pcm_s16le (it must loop sample-exactly)"
+    got_samples=$(( $(ffmpeg -nostdin -v error -i "$clip" -map 0:a -f s16le -ac 1 - | wc -c) / 2 ))
+    got_frames=$(ffmpeg -nostdin -hide_banner -i "$clip" -map 0:v -f null - 2>&1 | grep -oE 'frame= *[0-9]+' | tail -1 | tr -dc 0-9)
+    [[ "$got_samples" == "$want_samples" && "$got_frames" == "$want_frames" ]] \
+        || die "${label}p sync clip does not loop exactly: ${got_frames}/${want_frames} frames, ${got_samples}/${want_samples} samples decoded"
+done < <(awk -F'\t' '!/^#/ && NF >= 4' "${REPO_ROOT}/scripts/syncclips/recipes.tsv")
+ok "${#SYNCCLIP_LABELS[@]} sync clips generated (build/syncclips/), each decoded to exactly its frames and samples"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # 4. Archive
@@ -612,20 +630,20 @@ record "get-task-allow:          absent (correct)"
 # 6c. The bundled sync clips (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
 # ══════════════════════════════════════════════════════════════════════════════════════════
 #
-# Every rate's MP4, in the EXPORTED (signed) app, byte-identical to what step 3b generated. A dev
-# build may lack them and say so; a release may not.
+# Every rate's bundled clip, in the EXPORTED (signed) app, byte-identical to what step 3b generated
+# (and loop-checked). A dev build may lack them and say so; a release may not.
 
 step "Verify the bundled sync clips"
 
 for label in "${SYNCCLIP_LABELS[@]}"; do
-    clip="${APP}/Contents/Resources/SyncClips/manifold-sync-${label}p.mp4"
-    [[ -s "$clip" ]] || die "sync clip missing from the app: Contents/Resources/SyncClips/manifold-sync-${label}p.mp4
-       The \"Bundle sync clips\" phase (project.yml) copies build/syncclips/*.mp4; did step 3b run?"
-    cmp -s "$clip" "${REPO_ROOT}/build/syncclips/manifold-sync-${label}p.mp4" \
+    clip="${APP}/Contents/Resources/SyncClips/manifold-sync-${label}p-h264.mov"
+    [[ -s "$clip" ]] || die "sync clip missing from the app: Contents/Resources/SyncClips/manifold-sync-${label}p-h264.mov
+       The \"Bundle sync clips\" phase (project.yml) copies build/syncclips/*-h264.mov; did step 3b run?"
+    cmp -s "$clip" "${REPO_ROOT}/build/syncclips/manifold-sync-${label}p-h264.mov" \
         || die "the bundled ${label}p sync clip differs from build/syncclips/ — a stale copy in the build?"
 done
 ok "${#SYNCCLIP_LABELS[@]} sync clips bundled, identical to step 3b's"
-record "sync clips:              ${#SYNCCLIP_LABELS[@]} MP4s in Contents/Resources/SyncClips"
+record "sync clips:              ${#SYNCCLIP_LABELS[@]} H.264 + PCM .mov clips in Contents/Resources/SyncClips"
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # 6b. The embedded libav dylibs

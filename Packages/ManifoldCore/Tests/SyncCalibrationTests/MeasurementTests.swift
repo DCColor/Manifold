@@ -77,13 +77,29 @@ final class MeasurementTests: XCTestCase {
         }
     }
 
+    /// The clip looping, as an encoder plays it (§19.11): its event times from 0 up to `seconds`. The
+    /// bundled clip is whole code cycles, so at 23.976 and 59.94 this is exactly the old 60 s clip's
+    /// timeline, and the code runs on unbroken across every seam.
+    private func looped(_ clip: SyncClips.Clip, _ seconds: Double) -> [Double] {
+        var out: [Double] = []
+        var l = 0
+        while true {
+            for t in clip.eventTimes {
+                let x = t + Double(l) * clip.durationSeconds
+                if x >= seconds { return out }
+                out.append(x)
+            }
+            l += 1
+        }
+    }
+
     func testTheFigureIsTheRecentWindowNotTheStartUpWalk() {
         // The live shape (§19.10): the heard figure walks from +95 to +77 ms over 40 s while the
         // steering settles, then holds +80. The result must be +80, not a median over the walk.
         let clip = SyncClips.all[0]
         let m = CalibrationMeasurement(frameSeconds: clip.frameSeconds)
         var events: [(Double, Bool, Double, Double)] = []      // (arrival, isFlash, time, h)
-        for (n, t) in clip.eventTimes.enumerated() {
+        for (n, t) in looped(clip, 60.06).enumerated() {
             let pts = 500 + t
             let heard = t < 40 ? 0.095 - 0.018 * t / 40 : 0.080 + (n % 2 == 0 ? 0.0005 : -0.0005)
             events.append((pts + 0.3, true, pts, -0.1))
@@ -105,7 +121,7 @@ final class MeasurementTests: XCTestCase {
         let clip = SyncClips.all[6]
         let m = CalibrationMeasurement(frameSeconds: clip.frameSeconds)
         var events: [(Double, Bool, Double)] = []
-        for t in clip.eventTimes + clip.eventTimes.map({ $0 + 60.06 }) {
+        for t in looped(clip, 120.12) {
             let pts = 900 + t
             let heard = -0.005 + 0.051 * exp(-t / 10)
             events.append((pts + 0.3, true, pts))
@@ -156,7 +172,7 @@ final class MeasurementTests: XCTestCase {
         // nothing in between (a half-way 53 ms) is ever offered; the offer ends on the new value.
         let m4 = CalibrationMeasurement(frameSeconds: clip.frameSeconds)
         var events: [(Double, Bool, Double)] = []
-        for (n, t) in clip.eventTimes.enumerated() {
+        for (n, t) in looped(clip, 60.06).enumerated() {
             let heard = n < 30 ? 0.050 : 0.056
             events.append((700 + t + 0.3, true, 700 + t))
             events.append((700 + t + heard - 0.2, false, 700 + t + heard))

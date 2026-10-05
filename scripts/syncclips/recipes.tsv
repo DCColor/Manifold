@@ -6,11 +6,19 @@
 # existing beep detector (avsync.beep_times) merges onsets closer than 0.5 s. With it, every interval
 # at every rate is 0.77–1.54 s. Set it to 1 for the literal frame code.
 #
-# label	rate	unit
-23.976	24000/1001	1
-24	24/1	1
-25	25/1	1
-29.97	30000/1001	1
-30	30/1	1
-50	50/1	2
-59.94	60000/1001	2
+# `cycles` is the BUNDLED clip's length in whole code cycles (cycle = 120 × unit frames, 4.0–5.0 s):
+# 4 → 16–20 s, 16 events. A whole number of cycles is a whole number of frames AND of 48 kHz samples
+# at every rate (a cycle is a multiple of 5 frames, and 5 frames is whole samples at 29.97 / 59.94),
+# and the code runs on unbroken across the loop seam: the last event of a cycle is 37 steps before
+# the next cycle's first, which is the clip's first event once the clip loops (§19.11). The ProRes
+# masters are unchanged (60 × round(rate) frames; at 25 and 50 that is 12.5 cycles, so a master's
+# loop seam breaks the code there — the bundled clips are the ones meant to loop).
+#
+# label	rate	unit	cycles
+23.976	24000/1001	1	4
+24	24/1	1	4
+25	25/1	1	4
+29.97	30000/1001	1	4
+30	30/1	1	4
+50	50/1	2	4
+59.94	60000/1001	2	4
