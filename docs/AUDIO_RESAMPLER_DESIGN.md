@@ -7255,6 +7255,9 @@ proposal is its negative. **−** = sound heard **early**.
   - MediaMTX's calibrations ran ~10 s after connect, while the first line was still the line in use.
   - Here the line moved +25.1 / +14.4 / +7.4 ms between the first SR pair and t = 251 s. That is the
     window offset ramp §19.10's addendum saw, as the slope comes into use.
+- ⚠️ **Superseded by §19.15 §3.** Calibration's figure on WHEP omits the SR-line offset Manifold
+  applies: it reads what is heard − offset(t). What was heard was ≈ −4.8 ms on all three connections,
+  and the per-connection spread is in the reading. The reading below is kept as written.
 - **What it says:**
   - As on MediaMTX, what differs between Cloudflare WHEP connections is the audio↔video relation
     Manifold's SR line states, not the content.
@@ -7360,6 +7363,242 @@ proposal is its negative. **−** = sound heard **early**.
   - Calibration on WHEP is better read after the slope is in use (~4 min), as done here: the line still
     moves 7–25 ms in the first minutes.
 - No app code changed. No `defaults` were written.
+
+### 19.15 One start-up root cause behind the Cloudflare SRT step and the WHEP per-connection offsets? — ❌ no: SRT's 41 ms is in the received timestamps, and on WHEP calibration omits the SR-line offset Manifold applies — 2026-10-06 evening (read-only; one local run; no code changed)
+
+**Hypothesis (Robbie, 2026-10-06):** one root cause behind three findings. Manifold's audio/video
+alignment at the START of a network session is off by a session-dependent amount, and it becomes
+correct only when the alignment is re-established later.
+- **Cloudflare SRT (§19.14):** sound +41 ms late from connect. Within 1 ms of sync after the catch-up
+  write at 14:04, which followed a 1.48 s input gap.
+- **Cloudflare WHEP (§19.14) and MediaMTX WHEP (§19.10):** per-connection offsets that equal
+  Manifold's SR-line offset in use, while the content relation is constant.
+
+**Predictions (Robbie, written before the investigation):**
+- The SRT first anchor and the catch-up anchor use different rules or different reference points.
+  Their difference ≈ the 41 ms step.
+- The WHEP line's early movement is Manifold's fit converging from too few SR pairs, not the SRs
+  changing.
+- Local SRT (item 4): the start is already correct, so a forced catch-up re-anchor makes no step.
+
+**Which held:**
+
+| prediction | measured | |
+|---|---|---|
+| SRT first anchor and catch-up differ by ≈ 41 ms | **Same rule, same reference, 0 ms apart.** Both put the audio's own PTS on LiveClock's line at offset +0.000. `heard − clock` was −3.1…+3.3 ms before 14:04 and −1.2…−0.5 after. The 41 ms and its step are in the RECEIVED timestamps: beep PTS − flash PTS +40.7…+41.0 → −0.8 ms | ❌ |
+| SRT connections 1–2: first anchor off by the same rule | All three anchored identically (offset +0.000). On each, the 41 ms is in the received PTS (+40.7…+41.0), not in the alignment (−1.5…+1.4) | ❌ (no anchor error to repeat) |
+| WHEP line's early move = fit converging, not the SRs changing | **Mostly the SRs.** Video RTP runs +61…+62 ppm on NTP (OBS 23.976, §18.25), so the pair offset genuinely ramps ~17–19 ms over 251 s. First-pair noise adds −9.3…+6.0 ms on top | ❌ (~¾ real ramp, ~¼ first-pair noise) |
+| Local SRT: no step at a forced catch-up | **+0.17 / +0.73 → +0.98 / +0.50 / +0.25 ms** around a 1 214.6 ms catch-up write | ✅ |
+
+**What the WHEP finding actually is (not in the brief's hypotheses):**
+- Calibration's figure on an RTP path omits the SR-line offset Manifold applies.
+- Its reading = what is heard − offset(t). So the per-connection spread is in the reading, not in
+  playback. Below, §3.
+
+#### Method
+
+Read-only on the §19.14 logs (`~/Desktop/manifold-soak/cf1914/`), plus one local run (item 4). Two
+scratch scripts (session scratchpad), offline over the logs:
+- **`split1915.py`** splits every calibration run into its two terms.
+  - `[CALIBRATION] tone` is the beep's time on the AUDIO transport's axis (`CalibrationBeepTap` scans
+    the transport's buffer before the resampler, `FrameEngine` sink `enqueue`).
+  - `[CALIBRATION] flash pts` is the video sender PTS (`LiveClock.registerFrame` returns `senderPTS`
+    unchanged).
+  - The flash line's `heard−clock` is `liveAudioHeardMinusClock`.
+  - The calibration figure is `beep − flash − (heard − clock)`, last 10 pairs, median.
+  - The split reproduces every §19.14 RESULT within 0.3 ms.
+- **`srraw1915.py`** refits the raw SR pairs (`[WHEP-SR-RAW]`: audio and video SRs share each NTP
+  instant). The per-pair offset relative to pair 0 is `Δa_rtp/48000 − Δv_rtp/90000`, and each RTP
+  clock's rate is taken against NTP.
+
+#### 1. Cloudflare SRT, connection 3: the first anchor and the 14:04 catch-up
+
+**The first anchor** (13:22:56):
+- **Video:** `[SRT] startup anchor: GAP` (waited 0.043 s; discarded 71 frames, net clock jump
+  +2.802 s), then `queue-full re-anchor` (depth 0.334 → 0.250, +0.084 s).
+- **Audio:** 142 AAC frames from before the video anchor were dropped. Then `timebase MIRRORED — first
+  anchor: senderPTS=357.448s … offset=+0.000 ms (the transport's constant cushion) …
+  timebase=357.448s`.
+  - The audio PTS is the TS packet PTS × the stream time base, on the program's single 90 kHz clock.
+    No origin is subtracted (`SRTFrameRouter` audio ingest).
+  - The video PTS is the same clock, through `registerFrame` (an identity).
+  - So audio at PTS p plays when the picture at PTS p is due, with no lead or cushion term.
+- **The gate:** `first mapping +280 ms · first presentation +288 ms · anchor +310 ms · audio after
+  picture 22 ms`. That is start-up timing, not an offset in the line.
+
+**The 14:04 catch-up** (`⏩ STARVATION CATCH-UP … 1547.9 ms debt … ONE timebase write onto the line`):
+- The same line, the same zero offset, after holds #4–#5.
+- `[SRT-AUDIO] chain … timebase−clock` was −1408.3 ms before it and +0.9 ms one second after.
+
+**Numerically, the difference between the two rules is 0 ms.** Calibration's two terms, every reading
+on connection 3:
+
+| reading | time | beep PTS − flash PTS (received) | heard − clock (Manifold's alignment) | figure |
+|---|---|---|---|---|
+| cal 1 | 13:24 | +41.03 | −0.60 | +41.6 |
+| cal 2 | 13:24 | +40.95 | −2.35 | +43.3 |
+| for Apply | 13:25 | +41.04 | +3.26 | +37.8 |
+| hold +0 | 13:25 | +40.87 | −0.17 | +41.0 |
+| hold +30 | 13:55 | +40.87 | −3.14 | +44.0 |
+| **hold +60** | 14:25 | **−0.82** | −0.53 | −0.3 |
+| **hold +90** | 14:56 | **−0.82** | −1.20 | +0.4 |
+
+(ms, medians of the last 10 pairs.)
+
+- **The 41 ms was in the timestamps Cloudflare delivered, and so was the step.**
+  - Manifold's alignment stayed within ±3.3 ms throughout.
+  - The step is −41.7 ms: **exactly one frame at 23.976** (41.71 ms).
+- **The audio side is continuous.** Audio PTS − the decoded sample count stayed at 357 585.5 ±0.2 ms
+  for the whole 93 min (5 515 `chain` lines). So the frame moved on the video side of the received
+  stream, upstream of Manifold.
+  - Whether OBS's SRT output or Cloudflare re-stamped is not separable from these logs.
+  - Not investigated further.
+- The hold's starvation events (§19.14 §4) are Manifold's and were all repaid. None moved `heard − clock`.
+
+#### 2. SRT connections 1 and 2
+
+| connection | first anchor | beep − flash (received) | heard − clock |
+|---|---|---|---|
+| 1 | offset +0.000 (constant cushion) | +40.95 / +41.03 | +1.39 / −0.26 |
+| 2 | offset +0.000 | +40.70 / +40.70 | −1.46 / −0.61 |
+| 3 | offset +0.000 | +41.03 / +40.95 | −0.60 / −2.35 |
+
+- The same rule on all three, and no anchor error on any.
+- Each connection received the same +41 ms in the stream's timestamps, and Manifold played it as
+  received.
+- This is SRT's design (§19.1: Manifold plays what it receives). Calibration measures it correctly
+  here, because on SRT both axes are the one 90 kHz clock.
+
+#### 3. WHEP: how the first SR line forms, why it moves, and what calibration reads
+
+**Formation:**
+- `FIRST LINE from the first SR pair at video t≈0.7–0.9 s: offset … (provisional until 10 pairs verify
+  it)`: one pair.
+- Then windowed fits every 10 s. The slope stays out of use until 4 × 30 s batches and an SE under
+  10 ppm. Here it entered at video t = 221 / 221 / 211 s.
+
+**Why it moves 7–25 ms in the first four minutes**, from the raw SR pairs:
+
+| connection | pairs | video RTP vs NTP | audio RTP vs NTP | pair-offset slope (whole session) | first-pair error (adds to the ramp) | ramp 0 → 251 s | ramp + first-pair error | Manifold's line moved (§19.14) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 286 | +61.1 ppm | −14.0 ppm | 75.1 ppm | 6.0 ms | 18.8 ms | **24.9** | **25.1** |
+| 2 | 286 | +61.4 | −7.6 | 69.0 | −4.7 | 17.3 | **12.6** | **14.4** |
+| 3 | 342 | +62.3 | −4.5 | 66.8 | −9.3 | 16.8 | **7.5** | **7.4** |
+
+(Signs in Manifold's convention. Pair residual sd 8.6–9.1 ms; p01…p99 −16…+21 ms.)
+
+- **Mostly the SRs themselves.** OBS stamps 23.976 video ~62 ppm fast (§18.25), and Cloudflare's SRs
+  carry it. The A/V offset the SRs state genuinely ramps ~17 ms in four minutes, and the line follows
+  it, correctly.
+- **The rest is the first line's single pair.**
+  - One pair carries the pair noise: sd ≈ 9 ms, tails to ~±20 ms.
+  - Here the first pair was off by −9.3…+6.0 ms.
+  - A line from 1 pair allows ±9 ms (1 sd), from 2 pairs ±6 ms, and from the 10 pairs that verify it
+    ±3 ms.
+  - This is the only genuine start-up alignment error found. It is real in playback, bounded by the
+    pair noise, and gone within ~10 s.
+
+**What calibration reads on WHEP. The per-connection offsets are a measurement error, not a playback
+error:**
+- **What the SR line does to playback.** On WHEP the SR-line offset takes the cushion's slot
+  (`FrameEngine.mirrorLiveAudio`: `target = senderPTS − offset`, `SenderReportLineFit.reference`).
+  The audio stamped `p − offset` is played with the picture at `p`, which corrects the audio epoch
+  latched on the first packet.
+- **What `heard − clock` reports.** `liveAudioHeardMinusClock` returns
+  `(timebase + appliedOffset) − clock`: the audio converted to the video axis, i.e. the steering error.
+  It reads ≈ 0 (−3.0…+0.4 ms here) whatever the offset.
+- **The beep is never converted.** Calibration's beep time is on the AUDIO axis, unconverted. So:
+  - `figure = beep − flash − (heard − clock)`;
+  - what is heard = `beep + offset − flash − (heard − clock)`;
+  - **so the figure = what is heard − offset(t).**
+- **The check, using §19.14's numbers:** figure + offset in use = **−5.17 / −4.40 / −4.71 ms** on the
+  three connections. That is one heard relation, ≈ −4.8 ms (sound ~5 ms early), on every connection.
+- **Within a connection, too.** WHEP-3's figure walked +0.08 → −4.38 ms in 61 s while its line rose
+  ~3.8 ms (62 ppm).
+- **It agrees with every earlier measurement that had a reference:**
+  - §18.24's device-tested model: "device = applied + content on the received timestamps", held five
+    times. Calibration's figure is the second term alone.
+  - §19.10's MediaMTX sessions: figure + first offset = injection −3.5…+1.2 ms (8 / 8), and MediaMTX's
+    RTSP output of the same path, read by ffmpeg, = the injection.
+  - So the "8–42 ms that the content does not have … and Manifold plays exactly that" (§19.10) is
+    calibration's reading. Playback was right, and RTSP agreed with playback.
+- **SRT and NDI are not affected.** Both pass a cushion of 0 (`SRTFrameRouter`, `NDIService`:
+  `beginLiveAudio?(0)`), and NDI's figure was device-checked in §19.13. WHEP is affected once a line
+  exists; before the first SR pair, its offset is 0 too.
+
+**What it means for what was done and written today:**
+- **§19.14's WHEP per-connection spread** (−35.6 / +6.6 / −0.9) is the reading. What was heard was
+  ≈ −4.8 ms each time.
+  - The +4 ms applied on connection 3 happened to land near the truth.
+  - Applying connection 1's proposal (+37) would have made sound ~32 ms late, and the re-check would
+    still have read ~0: the same −offset is in both readings.
+  - **The re-check cannot catch this error.**
+- **`USER_GUIDE_SYNC.md`'s WHEP lines written today** ("can be different every time you connect … 36 ms
+  early, 7 ms late and 1 ms early"; "apply for the session") **rest on the reading.** So do its
+  MediaMTX "calibrate each session" lines and the 10-05 "give it a few minutes".
+  - Not changed here (read-only brief). They should be revisited once the fix below is verified.
+- The Cloudflare WHEP four-minute wait still has a reason, but a smaller one: the first-pair noise
+  (±9 ms). The ramp affects the reading, not playback.
+
+#### 4. Local SRT, loop-exact fixture, a forced catch-up re-anchor
+
+**Run:**
+- **Fixture:** `manifold-sync-23.976p-h264.mov` ×18 through the concat demuxer, video copied, PCM →
+  AAC 192 k, MPEG-TS, 360 s (scratchpad `fix/sync1915-23976.ts`). Every segment is whole code cycles
+  (§19.11), so the joins are exact.
+- **Driver:** `repro/run.sh` on the `cf-Profile` build (HEAD `dff06a0`), `READRATE_CATCHUP=20
+  STALLS="150:1500"`.
+- **Calibrations:** two before the stall (+60 s) and three after (+175 s on), each measure-only.
+- **Logs:** `~/Desktop/manifold-soak/cf1915/repro/local-stall-{1,2}.*`.
+- **`local-stall-1`:** one calibration before the stall (−0.03 ms). The rest were lost to a
+  UI-scripting miss on the A/V menu ("Can't get item 7 of every menu button"). Its `[AV-CONTENT]`
+  `audio−now` (heard − clock at each flash) read −0.39 ms before the hold, +0.47 ms in the 60 s after a
+  1 241 ms catch-up write, and +0.03 ms thereafter.
+- **`local-stall-2`:** re-run with a menu retry (every menu click needed a second try).
+  - `STARVATION HOLD #1` (no input 368 ms), then `⏩ STARVATION CATCH-UP` of **1 214.6 ms** debt in
+    one write, at 17:21:20.
+
+| reading | when | beep − flash | heard − clock | figure |
+|---|---|---|---|---|
+| pre-1 | connect +88 s | −0.00 | −0.74 | **+0.73** |
+| pre-2 | connect +129 s | −0.01 | −0.17 | **+0.17** |
+| post-1 | write +90 s | −0.00 | −1.00 | **+0.98** |
+| post-2 | write +150 s | −0.00 | −0.50 | **+0.50** |
+| post-3 | write +200 s | −0.00 | −0.25 | **+0.25** |
+
+- **✅ No step.** Before and after a catch-up write of the same kind as Cloudflare's, the figure is
+  within 1 ms of 0, and the first anchor was the same `offset=+0.000`.
+- **The start-up rule is right in general on SRT.** The Cloudflare step was in what Cloudflare
+  delivered.
+- CLAUDE.md's non-Cloudflare check: this run is it, on SRT.
+
+#### The fix that is clear — described, not built
+
+**Calibration on RTP paths: measure in the video axis.** Either form gives the same number:
+- in the flash tap, read `timebase − clock` (`liveAudioHeardMinusClock` without the `appliedOffset`
+  term) instead of the mirror error; or
+- add the offset in use at the flash, `figure = beep + appliedOffset − flash − (heard − clock)`.
+
+**Expected effect:**
+- **WHEP calibration reads what is heard.**
+  - §19.14's three Cloudflare connections would have read −5.2 / −4.4 / −4.7 ms, not −35 / +7 / −1.
+  - §19.10's MediaMTX sessions would have read the injection within −3.5…+1.2 ms, as ffmpeg's RTSP
+    read did.
+  - The within-connection walk with the SR ramp disappears.
+- **SRT, NDI and WHEP before its first SR pair are unchanged** (offset 0).
+- **Save on a WHEP bookmark becomes meaningful.** The value would no longer carry the connection's
+  epoch latch.
+- **Verify before trusting it:** one Audio Hijack capture on WHEP against calibration, on two
+  connections with different first offsets, on MediaMTX (non-Cloudflare, CLAUDE.md) and on Cloudflare.
+  It predicts: device − own control ≈ figure (fixed), and ≈ figure + offset (today's build).
+
+**Not a fix, noted:**
+- The first line from one SR pair is off by up to the pair noise (±9 ms, 1 sd) for its first ~10 s.
+  Waiting for 2–3 pairs before the first line halves that, at the cost of 1–2 s on the first anchor
+  gate.
+- Robbie's decision; it is the only start-up alignment error this investigation found.
+
+- No app code changed. No `defaults` were written. Manifold was quit after each local run.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
