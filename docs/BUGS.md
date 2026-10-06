@@ -828,6 +828,26 @@ verified").**
   - **MediaMTX:** both configs × 4 reconnects, the +80 file. 16 / 16 calibrations read +75.1…+80.1 ms
     (unfixed formula +68.4…+107.4), each within 2.2 ms of ffmpeg's RTSP read.
   - **Cloudflare:** §19.14's three connections, re-read from the logs: −4.83 / −4.45 / −4.47 ms.
+  - **Cloudflare, live on the fixed build** (2026-10-06 18:23–18:32; §19.15 "Cloudflare WHEP on the
+    fixed build, live"; build `dcfb702`):
+    - **Three reconnects, six calibrations:** −64.78…−60.40 ms, a **4.4 ms spread**, while ℓ ranged
+      over **38 ms** (−73.1…−34.8).
+    - **The unfixed formula** on the same pairs would have read −26.8…+12.7 ms, a **39.5 ms spread**
+      following ℓ.
+    - **Apply and Save → reconnect → re-check:** Apply and Save stored +63 ms. On reconnect the saved
+      value loaded (`[AUDIO-OFFSET] connect (web) — session value +63 ms (from the saved stream's
+      setting)`), and the re-check read **+1.37 ms**.
+    - `streamBookmarks` was stashed before the save and restored byte-identical afterwards (same
+      sha256).
+  - **The sender's offset changed between the two Cloudflare sessions: −4.8 ms (§19.14, re-read) →
+    −62 ms (live).** That is the sender's own variation, not this bug or its fix: within each session
+    the reading held within ~4 ms on every reconnect, independent of ℓ.
+    - Same OBS set-up and clip, six hours apart.
+    - Recorded alongside OBS's other measured shifts:
+      - changing its output frame rate moved the heard figure by ~85 ms (§19.13);
+      - Cloudflare SRT's one-frame step (−41.7 ms) was in the received timestamps (§19.15 §1).
+    - **Cause open.** OBS, its WHIP output and Cloudflare cannot be separated from these logs. Not
+      checked at the device.
   - **Device (Audio Hijack + recorder OBS at 60 fps, `cap2`):** two MediaMTX connections with line
     offsets −39.45 and −29.33 ms. Device − calibration **+1.7 / +0.5 ms**; the unfixed formula would
     have been off by 37.8 / 28.9 ms.

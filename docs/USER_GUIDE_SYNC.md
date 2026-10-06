@@ -332,9 +332,11 @@ in sync, and Manifold held sync across the session.
 
 ### Cloudflare Stream, WebRTC (WHEP) output
 
-- **Cloudflare adds no offset of its own here.** What you measure is the sender's own offset. In our
-  tests with OBS, sound was about 5 ms early, the same on every connection (within about 2 ms).
-- **One calibration holds across reconnects**, so Apply and Save is fine on this path.
+- **Calibrate it.** The offset on this path comes from the stream as it was sent. It held steady
+  across reconnects but differed between sessions. With the same OBS set-up, sound was about 5 ms
+  early in one session and about 60 ms early in another, both within about 5 ms on every connection.
+- **One calibration holds across reconnects**, so Apply and Save is fine on this path. Calibrate again
+  when the sender starts a new session.
 - **Once calibrated, it holds for long sessions.** We measured under 10 ms of drift over 4½ hours.
 - There is plenty of room to make sound earlier on this path.
 
@@ -491,15 +493,25 @@ The server's name stays, so we can tell which service you were using.
   Those came from a calibration bug (§19.15, BUGS.md FIXED 2026-10-06): on WHEP the figure left out
   the SR-line offset Manifold applies, so it read what is heard − that offset.
   - Fixed and re-measured 2026-10-06 (§19.15, "The fix, built and verified").
-  - Cloudflare: §19.14's three connections re-read −4.8 / −4.5 / −4.5 ms (all eight runs −6.5…−2.7).
-    "About 5 ms early" is that one OBS sender, one session.
+  - Cloudflare, re-read: §19.14's three connections read −4.8 / −4.5 / −4.5 ms (all eight runs
+    −6.5…−2.7).
+  - Cloudflare, measured live on the fixed build (2026-10-06 18:23, §19.15 "Cloudflare WHEP on the
+    fixed build, live"): three connections, six calibrations, −64.8…−60.4 ms.
+    - The SR line differed by up to 38 ms between them.
+    - Apply and Save stored +63 ms. After a reconnect, the saved value loaded and the re-check read
+      +1.4 ms.
   - MediaMTX: 16 / 16 calibrations over 8 reconnects on both configs read the +80 ms file at
     +75.1…+80.1 ms, each within 2.2 ms of ffmpeg's RTSP read.
   - At the device (recorder at 60 fps): two connections agreed with calibration within +1.7 / +0.5 ms.
-  - The "within about 2 ms" for Cloudflare is the three first calibrations. The MediaMTX "within
-    5 ms" is the 16.
-  - ⚠️ No Cloudflare WHEP session has been run on the fixed build. The Cloudflare line rests on the
-    re-read of the logs and on the MediaMTX device check. Run one before publishing.
+  - The Cloudflare "within about 5 ms on every connection" is each session's spread (re-read 3.8 ms,
+    live 4.4 ms). The MediaMTX "within 5 ms" is the 16.
+  - ⚠️ **"About 5 ms … about 60 ms early" is two sessions with the same OBS set-up, six hours apart.**
+    The cause of the change (OBS, its WHIP output, or Cloudflare) is not known.
+    - "Calibrate again when the sender starts a new session" is inferred from those two sessions. It
+      has not been tested across an OBS restart.
+    - The live session was not checked at the device (Audio Hijack). The fixed formula's device check
+      is MediaMTX's `cap2`.
+    - Confirm before publishing.
 - **MediaMTX `useAbsoluteTimestamp` drift note** (0.25 s an hour at 23.976 on the default config) is
   from device captures (§18.21–§18.25), not from calibration. The bug does not touch it.
 - **SDI:** the −30 ms limit is from one session's log plus an ear check on speakers Robbie judged

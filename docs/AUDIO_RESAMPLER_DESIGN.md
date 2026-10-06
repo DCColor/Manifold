@@ -7719,6 +7719,65 @@ file):
   with heard − clock on the video axis, so on WHEP they carry the same −ℓ. Earlier WHEP figures from
   them, and analyses built on them, need ℓ added.
 
+#### Cloudflare WHEP on the fixed build, live — 2026-10-06 18:23–18:32 (closes the open Cloudflare item)
+
+**Run:**
+- **Build:** `.build-cc/cfwhep-Profile`, Profile, from HEAD `dcfb702`. No app code changed.
+- **Sender:** Robbie's OBS on the Cloudflare WHIP profile at 23.976. The Media Source loops
+  `manifold-sync-23.976p-h264.mov`. NDI off. This is §19.14's set-up.
+- **Driver:** `cfwhep.sh` (scratch; §19.14's `lib.sh` helpers). One Manifold process, on the "DC Color
+  Live - WHEP" bookmark.
+  - Connections 1–3: connect, settle 60 s, two measure-only calibrations (Cancel each), ⌃⌥⇧N.
+  - Connection 3 then: calibrate, Apply and Save, ⌃⌥⇧N.
+  - Connection 4: the saved value loads, settle 60 s, one re-check calibration (Cancel).
+- **Settle:** 60 s, not §19.14's 240 s. The fix takes the SR ramp out of the reading, and the first
+  line is verified by 10 pairs within ~10 s (§3).
+- **`streamBookmarks`:** read and stashed before the run (1196 bytes, sha256 `4466c076…0f57`). After
+  the run it held the WHEP bookmark's `audioOffsetMs` = 63, nothing else changed. Restored with
+  Manifold quit; read back byte-identical, same sha256.
+- **Logs:** `~/Desktop/manifold-soak/cfwhep/run.{manifold,driver}.log`.
+
+| connection | first SR pair Δ | calibration | ℓ (median over the pairs) | fixed figure | without the fix |
+|---|---|---|---|---|---|
+| 1 | −49.63 | 1 / 2 | −50.47 / −46.96 | **−64.78 / −60.76** | −14.31 / −13.79 |
+| 2 | −50.67 | 1 / 2 | −36.59 / −34.75 | **−60.72 / −61.56** | −24.13 / −26.81 |
+| 3 | −65.66 | 1 / 2 | −73.08 / −72.54 | **−60.40 / −62.97** | +12.68 / +9.57 |
+| 3 | | for Save | −71.56 | **−62.87** → proposed +63, **APPLIED (this session and the saved stream)** | +8.68 |
+| 4 (O = +63, from the bookmark) | +1.57 | re-check | −0.07 | **+1.37** (proposed +62) | +1.43 |
+
+(ms. Every run: the last 10 pairs, p10–p90 ≤ 2.4 ms. Re-reading ℓ from the `[WHEP-SRFIT]` lines with
+`recal1916.py` instead of the logged `line offset` gives the same figures within 0.7 ms.)
+
+- **The fixed figure stays put while the line moves.**
+  - Across connections 1–3 the seven readings lie in −64.78…−60.40 ms: a 4.4 ms spread, mean −62.0.
+  - ℓ ranged over 38 ms (−73.1…−34.8), and over 75 ms counting connection 4's first pair.
+  - The unfixed formula would have read −26.8…+12.7 ms: a 39.5 ms spread, following ℓ.
+- **Save and reload work.** Connection 4 logged `[AUDIO-OFFSET] connect (web) — session value +63 ms
+  (from the saved stream's setting)`. The re-check, with O in it, read +1.37 ms.
+- **But this session's sender offset is −62 ms (sound ~62 ms early), not §19.14's −4.8.**
+  - Same sender set-up and clip, six hours apart.
+  - Manifold's reading is consistent within the session, and the method is the one the MediaMTX
+    device check confirmed (`cap2`).
+  - Where the −57 ms change comes from (OBS, its WHIP output, or Cloudflare) is not separable from
+    these logs. Not investigated.
+  - **Not checked at the device.** An Audio Hijack capture would show whether −62 ms is what is heard.
+
+**Predictions (Robbie, written before the run):**
+
+| prediction | measured | |
+|---|---|---|
+| Every calibration reads about −4.5 ms (sound ~5 ms early) | **−64.78…−60.40 ms**, mean −62.0 (sound ~62 ms early) | ❌ |
+| … all within ±5 ms of each other across reconnects | 4.4 ms spread, all within ±2.8 ms of the mean | ✅ |
+| … while the SR-line offset differs by connection | first pair −49.6 / −50.7 / −65.7 / +1.6 ms; ℓ at calibration −73.1…−34.8 | ✅ |
+| After Apply and Save and a reconnect, the re-check reads within ±3 ms of 0 | **+1.37 ms**, the saved +63 loaded at connect | ✅ |
+
+**What it means:**
+- **The fix holds on Cloudflare live.** On every reconnect the reading is independent of the line, so a
+  value saved to a Cloudflare WHEP bookmark holds across reconnects within the same sender session.
+- **The sender's offset is not one fixed number across sessions.** §19.14 (re-read) gave −4.8 ms.
+  This run gave −62 ms. So "about 5 ms early" is not a property of this path. Calibrate when the
+  sender's session changes. That rests on two sessions; the cause is unknown.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,
