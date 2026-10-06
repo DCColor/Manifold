@@ -6610,6 +6610,229 @@ button, `open -a` of the `.mov` into the window). Same script on the pre-fix bui
      (12 resyncs)**, with no silence.
    - The one remaining event is the card's very first read at the first anchor (1 callback, 200 ms).
 
+### 19.13 NDI reads sound ~70 ms early: one frame is the Stage D sender, ~27 ms is the depth term in the picture hold (H1 + H3; the device agrees) — 2026-10-05 evening (unattended, then one attended capture; no shipped code changed)
+
+**The question (§19.10):**
+- Stage D's SDK sender read heard A/V −67…−70 ms, though it was "in sync by construction".
+- Item 1's OBS reading was confounded by the MP4 loop drift.
+- Item 1's device capture read ~71 ms later than calibration.
+- Where does the ~70 ms enter?
+
+**Hypotheses (Robbie, written before the investigation):**
+- **H1, sender artefact:** the sender's own stamps are ~70 ms apart.
+- **H2, measurement only:** the heard figure mis-accounts the hold. What is heard is in sync, and
+  the device reads ~0.
+- **H3, real:** the hold is wrong, and the device reads the error.
+
+**Which held, so far:**
+- **H1 holds for one frame of Stage D's −70.** Stage D's sender submitted audio chunk k, then a
+  *clocked* `send_video` of frame k. That call stamps on entry and then blocks a frame, so the video
+  went out 41.7 ms after its audio.
+- **The remaining ~27 ms (23.976; ~14 ms at 59.94) is a hold term.** The picture is held
+  lead + mean `framesync_audio_queue_depth`. That depth overstates how much later the pulled audio is
+  stamped than the video of the same instant.
+- **H3, confirmed at the device** (step 4, 20:09). With the hold corrected, the device read
+  **−0.67 ms** against a disk control in the same recording, and calibration read +2.55 ms. H2 is
+  rejected: it predicted ≈ +27 ms. Item 1's 71 ms gap is not NDI's: it predicted ≥ +56 ms.
+
+#### Setup
+
+- **Sender:** `ndiclip` (scratch, NDI SDK). It plays the §19.11 loop-exact clips, decoded once to
+  1280×720 UYVY and float PCM: 480 frames / 960 960 samples at 23.976, 960 / 768 768 at 59.94.
+  Looped sample-exactly.
+  - **paced:** its own mach deadline per frame. At t0 + k·T it submits audio chunk k (one chunk per
+    frame), then video frame k. Explicit timecodes on one content axis (tc = content time).
+    `clock_video` is off.
+  - **legacy:** Stage D's order: audio chunk k, then the clocked `send_video`. Timecodes are
+    synthesised by the SDK.
+  - It logs every submission (mach), each flash frame's timecode, and each beep onset's timecode
+    (found in the bytes it sends).
+- **Manifold:** scratch build `wt-ndi/.build-cc/ndi1913-Profile` (HEAD `109cfc3`, Profile).
+  - It logs every NDI pull to one trace on mach: video pull time, SDK timestamp and timecode, and
+    the stamp Manifold gives the frame. Each audio pull's time, depth, want/got, SDK
+    timestamp, timecode, and the PTS of its first sample.
+  - `MANIFOLD_NDI_SOURCE` picks the sender by name. The OBS sender's NDI output stayed up and was
+    not touched.
+- **Runs:** one fresh launch per session, ⌃⌥N, 25 s, then two calibrations (Start → result →
+  Cancel; nothing applied) by UI scripting. No `defaults` were written.
+- **Logs:** `~/Desktop/manifold-soak/ndi1913/`: `<tag>.{sender.log,trace,manifold.log,driver.log}`,
+  the patches, `ndiclip.cpp`, `ana1913.py` (the decomposition below), and the drivers.
+- Audio Hijack was quit before the first launch (CLAUDE.md).
+- ⚠️ The Stage D UI helpers addressed `window 1`. That is now macOS's `WindowSharingSessionButton`
+  overlay, so the copy points at the standard window.
+
+#### 1. The sender, proven from its own submission log
+
+| | 23.976 (73 flashes) | 59.94 (94 flashes) |
+|---|---|---|
+| \|tc audio − tc video\| on each flash frame | **0.000 ms** | **≤ 0.017 ms** (800.8 samples a frame, rounded to a sample) |
+| beep onset − flash, timecodes | +0.19 ms (the log's onset rule; the clip is exact, §19.11) | +0.19 ms |
+| video submit − audio submit, flash frames | **≤ 0.11 ms** | **≤ 0.15 ms** |
+| SDK timestamp as received, audio − video | −0.03 ms | −0.02 ms |
+
+- **PASS:** in sync within 1 ms by its own stamps, at both rates.
+  - Over all frames, 3 of 2197 (23.976) and 7 of 5631 (59.94) had a submission gap over 1 ms (worst
+    2.7 ms). Those were wake jitter on non-event frames.
+- **The legacy (Stage D) order is not provably in sync.**
+  - Received video's SDK timestamp equals the *entry* to the clocked `send_video` (ts − entry 0.00 ms).
+    The call then blocks 41.72 ms (median) before it returns.
+  - So the timestamps say audio and video left together, while the video reached FrameSync a frame
+    after its audio.
+  - Its synthesised timecodes disagree with the content too (below).
+
+#### 2. Manifold's figures on one timeline (paced sender, the shipped hold)
+
+FrameSync passes the sender's timecode through on both pulls (audio: the first returned sample's). So
+every pulled block's content time is known. Stamps are relative to the sender's t0, at which content 0
+was submitted (≈ +3.9 / +2.5 ms submission latency).
+
+| figure (median) | 23.976 (`p23-1`) | 59.94 (`p59-1`) |
+|---|---|---|
+| audio stamp − content | **+39.99** (p10–p90 0.6 ms) | **+30.16** |
+| video stamp − content | **+11.66** (p10–p90 8.9: the 60 Hz pull tick) | **+9.72** |
+| ⇒ audio stamped after video, same instant | **+28.33** | **+20.44** |
+| FrameSync depth at pull | 56.5 (39.9…73.4) | 36.0 (29.3…42.7) |
+| depth term in the hold (published) | **55.2** → hold 305.2 ms | **36.3** → hold 286.3 ms |
+| calibration h (heard − clock) | **+55.24** (= the depth term) | **+34.28** |
+| calibration b − f | +28.95 | +21.57 |
+| heard per pair, b − f − h | −26.3 | −12.8 |
+| **calibration RESULT** | **−25.57 / −28.42** | **−12.33 / −14.21** |
+| `[AV-LAG]` audio−now / now−pts / tick→glass | +55.22 / +2.4 / +11.6 | +34.28 / +6.6 / +11.6 |
+
+**Where the error enters:**
+- **Not a sign error, and not a double count.**
+  - h is the depth term exactly (+55.24 against 55.2 published). The audio timebase sits at
+    now − lead, and the renderer clock at now − lead − depth.
+  - So calibration subtracts exactly the hold the picture is given.
+  - b − f from the calibration's own events equals the trace's stamp-axis figure within 1 ms.
+- **Not "lead minus something".** The lead is exact on both sides.
+- **It is the depth estimate.** The depth term should be the audio's stamp lag over the video's, which
+  is +28.3 / +20.4 ms. Mean FrameSync depth reads +55.2 / +36.3. **The excess, 27 / 14 ms, is the
+  heard error.**
+- **Why depth overstates it:**
+  - Audio arrives in chunks, one per frame from this sender. The newest queued sample is a whole
+    chunk ahead of the moment it landed.
+  - Stamp − content = depth + (arrival latency) − T_chunk / 2, on average over the pulls.
+  - 23.976: 56.5 + 3.9 − 20.9 = 39.5 against 40.0 measured. 59.94: 36.0 + 2.5 − 8.3 = 30.2 against
+    30.2.
+  - The picture also waits for the next display tick (+7.7 / +7.2 ms over its submission). Depth
+    cannot see that.
+  - Both terms depend on the sender: its chunk size and its timing. So no constant can correct them.
+- **Stage D's −70, decomposed** (`l23-1`, the legacy order, this clip):
+  - calibration −69.17 / −69.13, so Stage D reproduces;
+  - b − f −10.5 against the paced +29.0: **−40 ms from the sender's clocked-video order (H1)**;
+  - **−27 ms from the depth term**, as on the paced sender.
+
+#### 3. The scratch fix: the hold by the sender's timecodes
+
+- **The term:** `mean(audio PTS − tc) − mean(video PTS − tc)`, read from the first returned sample of
+  every audio pull and every new video frame.
+  - Each mean is an EMA, τ 10 s. It publishes after 1 s on each stream, then on a ≥ 2 ms move.
+  - It replaces the depth term in `PullSourcePictureDelay`.
+  - The sender's clock and its offset from mach cancel in the difference, so this is NDI's own
+    per-frame timecode, used as the standard defines it. Nothing branches on the sender.
+  - Undefined timecodes (FrameSync manufactures audio with tc = INT64_MAX at start-up) fall back to
+    the depth term.
+  - `MANIFOLD_NDI_HOLD=depth` gives the shipped hold in the same binary.
+- **Pass: calibration within ±1 frame of 0 on the in-sync sender, at both rates, over ≥ 3
+  reconnects.**
+
+| session | hold term (skew / depth it replaced) | RESULT 1, 2 (ms) | per-pair median |
+|---|---|---|---|
+| f23-1 | 29.6 / 57.5 | **+0.17, −2.16** | −0.99 |
+| f23-2 | 30.2 / 56.8 | **+1.03, −1.17** | −0.19 |
+| f23-3 | 27.3 / 54.5 | **+1.92, −0.23** | +0.79 |
+| f59-1 | 19.0 / 34.8 | **+0.11, +1.77** | +1.17 |
+| f59-2 | 19.5 / 36.1 | **+3.29, +1.55** | +2.71 |
+| f59-3 | 20.3 / 34.7 | **+1.77, +2.59** | +2.36 |
+
+- **✅ All 12 within −2.2…+3.3 ms** (±1 frame is ±41.7 / ±16.7). The skew settles at 27–30 ms
+  (23.976) and 19–20 ms (59.94). In each session it equals the trace's stamp-axis figure within 1–2 ms.
+- **The legacy sender on the fix** (`fl23-1`) reads **−25.42 / −23.07**. That is now the sender's own
+  statement: its synthesised timecodes put audio and video that far apart against what it sent. The
+  calibration offer would correct it.
+- **What the fix does not touch:**
+  - SDI: the hold is zero while the card owns audio, unchanged. SDI still carries FrameSync's term,
+    as BUGS.md records.
+  - The pull size and the audio stamps.
+- **Not measured:**
+  - an OBS / DistroAV sender on the fix (it sends 1024-sample audio frames, so its depth excess
+    should be smaller);
+  - a sender with undefined timecodes (the fallback path).
+- **Tests:** `swift test` 180 / 180 on the main tree, which is unchanged.
+
+#### Why H2 and H3 are not separated in the app
+
+- Every term of the heard figure is the term presentation uses:
+  - b and f are the PTS the renderers schedule by;
+  - h is the hold the renderer's clock applies (`[AV-LAG]` audio−now = the published term);
+  - `[AV-LAG]` now−pts (+2…+7 ms) shows frames selected at their PTS on the held clock.
+- The rest is the render path, which SRT validated against the device (§18.13, device − stream
+  +1.6 / +4.9 ms).
+- And 2026-09-28's change of the hold moved the device 1:1 (+38.6 → +1.3 ms for a ~40 ms depth term,
+  BUGS.md).
+- **That argues H3.** But item 1's device reading is ≥ 56 ms from calibration in the same session:
+  - 71 ms as measured;
+  - 56 or 115 if the MP4 loop drift stepped between the two readings, 13:13 → 13:17;
+  - the drift cycle is +14.67 ×3 then −44.0, so no drift phase reaches 0.
+- **Only the device can settle that**, so step 4 is the one capture below.
+
+#### 4. The attended capture — run 2026-10-05 20:09 (Robbie) — ✅ H3: the device equals calibration
+
+- **One recording, ~70 s, in one Manifold process and one recorder launch** (`capture1913.sh`):
+  1. 35 s of NDI: the paced sender at 23.976, the fixed build, O = 0.
+  2. Then NDI off and the 23.976 ProRes master from disk for 35 s: the chain's zero, in the same file.
+     That removes the launch-to-launch drift of the zero (+2.5…+27.8 ms, §18.23–24) that confounded
+     item 1.
+- The script calibrates once before the recording, so the in-app figure is from the same session.
+  The DEBUG `[AV-CONTENT]` probe logs every flash during it.
+- **Analysis:** split at the logged switch; `c12.py` on the NDI part, and `c12.py --file` on the
+  file part. Device = NDI − file.
+- **Predictions (written before it runs):**
+  - **H3, the fix is right:** device = in-app heard (≈ 0) within ±10 ms.
+  - **H2, the 27 ms was measurement only:** device ≈ +27 ms (+17…+37), sound late. The fix would then
+    make lip-sync worse by what it removed from the hold.
+  - **Item 1's gap is real and NDI-wide:** device ≈ +56…+115 ms.
+
+**Result.**
+- **Files:** `~/Movies/2026-10-05 20-09-25.mov` (119 s, 60 fps) and
+  `~/Music/Audio Hijack/20261005 2009 Recording.wav`.
+- **The split, from the driver's marks:** NDI 2–69 s (`ndi1913/cap1-ndi.mov`) and disk 80–112 s
+  (`cap1-file.mov`). The switch was at 71 s, and the file played from 78 s.
+- **In-app, this session:** calibration +2.55 ms (last 10 of 15 pairs, p10 −2.22, p90 +4.94) at
+  20:09:59, inside the recording. The hold term was the timecode skew, 27.2 ms (depth 56.5).
+
+| segment | c12 (beeps / flashes / pairs, g_count) | median | mean over whole periods | sd |
+|---|---|---|---|---|
+| NDI, fixed build, O = 0 | 54 / 54 / 54 ✅ | +28.14 ms | +27.12 | 6.23 |
+| disk control (the 23.976 ProRes master) | 25 / 25 / 25 ✅ | +28.81 ms | +28.04 | 5.21 |
+| **device = NDI − control** | | **−0.67 ms** | **−0.92** | |
+
+- c12's onset bias is in both figures and cancels.
+- **Device − calibration: −3.2 ms. H3 holds (band ±10).**
+  - What the app measures on NDI is what the listener hears.
+  - The shipped depth term is a real lip-sync error: ~27 ms sound-early at 23.976, ~14 ms at 59.94,
+    on an in-sync sender.
+  - The timecode skew removes it.
+- **H2 rejected** (predicted ≈ +27).
+- **Item 1's "≥ 56 ms" was not NDI's:** this capture, on the same kind of chain, agrees with the
+  app to 3 ms. What made item 1 disagree (the MP4 sender's drift beyond the model, OBS, or that
+  session's control) is not re-examined here.
+- **Housekeeping:**
+  - The driver's `kill` missed the sender, so it was stopped by hand afterwards. Its submission
+    log is therefore incomplete; the device result does not use it.
+  - Audio Hijack and the recorder are as Robbie left them.
+
+#### Not done
+
+- **For Robbie's decision: the product change.** Hold the NDI picture by the timecode skew instead of
+  the FrameSync depth, keeping depth as the fallback for undefined timecodes. Calibration on NDI could
+  then be re-enabled.
+- An OBS → NDI run on the fix, with the loop-exact `.mov`.
+- A product change. Nothing shipped was changed; the fix is a scratch patch
+  (`ndi1913/scratch-instrument-and-tcskew.patch`).
+- BUGS.md's NDI calibration entry stays open until the product change ships.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,

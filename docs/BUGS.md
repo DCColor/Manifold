@@ -809,6 +809,41 @@ time (pull stamps, picture delay, the direct anchor), and nobody has checked it 
 **Monday's D1 + D4 decide it:** if a device capture with the offered value applied is ~70 ms off,
 NDI's heard figure is not what the listener hears, and NDI calibration must be disabled until it is.
 
+**Diagnosed 2026-10-05 evening (`AUDIO_RESAMPLER_DESIGN.md` §19.13; no shipped code changed). Two
+terms, and the device confirms it (H1 + H3).**
+- **~42 ms of Stage D's −70 is the sender (H1).**
+  - Stage D's sender sent audio chunk k, then a *clocked* `send_video` of frame k.
+  - That call takes its SDK timestamp on entry, then blocks 41.7 ms before the frame goes out.
+  - Reproduced on the loop-exact clip: −69.17 / −69.13 ms.
+- **The other ~27 ms (23.976; ~14 ms at 59.94) is the picture hold's depth term (H3 in mechanism).**
+  - A scratch sender that is provably in sync, by its own timecodes and submission log (≤ 0.15 ms
+    on every flash frame), still reads −25.6 / −28.4 ms (23.976) and −12.3 / −14.2 ms (59.94).
+  - The hold adds the mean `framesync_audio_queue_depth` (55 / 36 ms). The pulled audio is actually
+    stamped only 28.3 / 20.4 ms after the video of the same instant.
+  - Depth counts the newest audio chunk as if it had just played out (≈ T_chunk / 2 too much). It
+    also cannot see the video's wait for the display tick.
+  - Both terms depend on the sender, so no constant fixes them.
+  - Not a sign error, not a double count: calibration subtracts exactly the hold the picture gets.
+- **Scratch fix, measured:**
+  - The hold uses the sender's own NDI timecodes on both streams:
+    `mean(audio PTS − tc) − mean(video PTS − tc)`, with the depth term as the fallback when timecodes
+    are undefined.
+  - Calibration on the in-sync sender then reads −2.2…+3.3 ms: 12 / 12 calibrations, both rates,
+    3 reconnects each.
+  - Patch: `~/Desktop/manifold-soak/ndi1913/scratch-instrument-and-tcskew.patch`.
+- **✅ H3 confirmed at the device, 2026-10-05 20:09** (one attended capture: NDI, then a disk
+  control in the same recording).
+  - With the scratch fix, the device read **−0.67 ms** against calibration's +2.55 ms. The heard
+    figure is what the listener hears.
+  - So the shipped depth term is a real lip-sync error: ~27 ms sound-early at 23.976, ~14 ms at
+    59.94, on an in-sync sender.
+  - H2 (≈ +27) and item 1's gap (≥ +56) are both rejected.
+- **Open: the product change (Robbie's decision).** Hold the picture by the timecode skew, with the
+  depth term as the fallback for undefined timecodes. Then re-enable NDI calibration.
+  - Not yet measured on the fix: an OBS / DistroAV sender, and a sender with undefined timecodes.
+  - Until it ships, NDI calibration on the shipped build offers values ~27 ms too large (23.976) on
+    an in-sync sender. Keep it disabled.
+
 ---
 
 ## ✅ FIXED 2026-10-05 (uncommitted; pending the attended SDI check on the Resolve workstation) — DeckLink SDI: the tap underruns during FILE playback (pre-existing; worse on AAC than PCM)
