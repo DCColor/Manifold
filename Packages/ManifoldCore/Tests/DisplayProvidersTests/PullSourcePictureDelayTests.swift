@@ -265,17 +265,82 @@ final class PullSourcePictureDelayTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(e.audio.restarts, 2)
     }
 
-    /// The skew has the depth's range: never negative, never past the ceiling.
-    func testTheSkewIsClampedToTheDepthsRange() {
+    /// A sender that stamps its audio AHEAD of its video (Omniscope, §19.13): the skew goes negative
+    /// and is held as is, unclamped, and the hold is the lead less it.
+    func testANegativeSkewIsHeld() {
         var e = PictureHoldBasisEstimate()
-        var s = Session(); s.audioLag = 0.0; s.videoLag = 0.050
-        play(&e, s, seconds: 10)
+        var s = Session(); s.audioLag = 0.0; s.videoLag = 0.020
+        play(&e, s, seconds: 30)
         XCTAssertEqual(e.basis, .timecode)
-        XCTAssertEqual(e.skew!, 0)
-        var f = PictureHoldBasisEstimate()
-        var t = Session(); t.audioLag = 1.5
-        play(&f, t, seconds: 10)
-        XCTAssertEqual(f.skew!, AudioQueueDepthEstimate.ceiling)
+        XCTAssertEqual(e.skew!, expectedSkew(s), accuracy: 0.002)        // ≈ −28 ms
+        XCTAssertLessThan(e.skew!, -0.020)
+        XCTAssertEqual(e.rawSkew!, e.skew!, accuracy: PictureHoldBasisEstimate.hysteresis)
+        XCTAssertFalse(e.notOnOneClock)
+        let hold = PullSourcePictureDelay.seconds(desktopAudioLead: 0.250, timecodeSkew: e.skew!,
+                                                  cardOwnsAudio: false)
+        XCTAssertEqual(hold, 0.250 + e.skew!, accuracy: 1e-12)
+        XCTAssertEqual(PullSourcePictureDelay.seconds(desktopAudioLead: 0.250, timecodeSkew: e.skew!,
+                                                      cardOwnsAudio: true), 0)
+        // The depth keeps its range: a negative depth still counts as none.
+        XCTAssertEqual(PullSourcePictureDelay.seconds(desktopAudioLead: 0.250, frameSyncAudioDepth: -0.028,
+                                                      cardOwnsAudio: false), 0.250)
+    }
+
+    /// Inside −100…+200 ms the skew is used as is, right down to the floor.
+    func testASkewJustInsideTheFloorIsUsedAsIs() {
+        var e = PictureHoldBasisEstimate()
+        var s = Session(); s.audioLag = 0.0; s.videoLag = 0.087      // ≈ −95 ms
+        play(&e, s, seconds: 30)
+        XCTAssertEqual(e.basis, .timecode)
+        XCTAssertFalse(e.notOnOneClock)
+        XCTAssertEqual(e.skew!, expectedSkew(s), accuracy: 0.002)
+        XCTAssertGreaterThan(e.skew!, PictureHoldBasisEstimate.skewFloor)
+    }
+
+    /// Outside −100…+200 ms the two streams' timecodes are NOT on one clock: the depth, for good.
+    func testASkewOutsideTheBoundsFallsBackToTheDepth() {
+        for (audioLag, videoLag) in [(0.0, 0.150), (1.5, 0.004)] {        // ≈ −158 ms, ≈ +1488 ms
+            var e = PictureHoldBasisEstimate()
+            var s = Session(); s.audioLag = audioLag; s.videoLag = videoLag
+            play(&e, s, seconds: 30)
+            XCTAssertEqual(e.basis, .depth, "\(audioLag), \(videoLag)")
+            XCTAssertTrue(e.notOnOneClock)
+            XCTAssertNil(e.skew)
+            // The value that showed it (the first warmed mean), kept for the log.
+            let raw = e.rawSkew!
+            XCTAssertTrue(raw < PictureHoldBasisEstimate.skewFloor || raw > PictureHoldBasisEstimate.skewCeiling)
+            XCTAssertEqual(raw, expectedSkew(s), accuracy: 0.010)
+        }
+    }
+
+    /// Omniscope's shape (§19.13): each stream's timecode keeps time, but audio is stamped on a
+    /// Unix-epoch clock and video near zero. The raw skew is epoch-scale; the hold never takes it.
+    func testTwoStreamsOnDifferentClocksFallBackToTheDepth() {
+        var e = PictureHoldBasisEstimate()
+        var s = Session()
+        let epoch: Int64 = 17_912_513_946_918_000                      // 100 ns since 1970, Oct 2026
+        s.tcA = { epoch + Int64(($0 * 1e7).rounded()) }
+        let changes = play(&e, s, seconds: 60)
+        XCTAssertEqual(e.basis, .depth)
+        XCTAssertTrue(e.notOnOneClock)
+        XCTAssertLessThan(e.rawSkew!, -1.7e9)
+        XCTAssertTrue(changes.allSatisfy { $0.1 == .depth }, "\(changes)")  // never held by it
+        XCTAssertLessThanOrEqual(changes.count, 1)
+    }
+
+    /// The fallback is for the session: timecodes that come onto one clock later do not bring the
+    /// skew back (a new session does).
+    func testNotOnOneClockIsLatchedForTheSession() {
+        var e = PictureHoldBasisEstimate()
+        var s = Session(); s.audioLag = 0.0; s.videoLag = 0.150
+        play(&e, s, seconds: 20)
+        XCTAssertTrue(e.notOnOneClock)
+        s.videoLag = 0.004
+        XCTAssertTrue(play(&e, s, from: 20, seconds: 60).isEmpty)
+        XCTAssertEqual(e.basis, .depth)
+        var fresh = PictureHoldBasisEstimate()
+        play(&fresh, s, seconds: 20)
+        XCTAssertEqual(fresh.basis, .timecode)
     }
 
     /// The same warm-up and smoothing as the depth: a constant offset is the mean after 1 s.

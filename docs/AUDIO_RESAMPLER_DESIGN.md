@@ -6962,6 +6962,205 @@ Media source `manifold-sync-23.976p-h264.mov` looping):
   costs. When a stream's rate matches no clip exactly, the sheet should say so and recommend
   matching the sender's output to the clip's rate.
 
+**A second sender: Omniscope over NDI** (2026-10-05, 21:37–21:46).
+- **Setup:** OBS's NDI output off. Omniscope playing `manifold-sync-23.976p-h264.mov` on loop, its
+  NDI output on at 23.976.
+- **Manifold** connected by ⌃⌥N to the only source, "MAC-STUDIO (NobeOmniScope)", 1920×1080.
+  Shipped build `.build-cc/ndihold-Profile` (`a159fd3`'s code).
+- **Same protocol** as the OBS runs. Logs: `ndihold/omni-{1,2,3}.*`.
+
+**Predictions (written before the run):**
+- calibration completes and offers a value on every reconnect;
+- the spread across reconnects is within ±5 ms, per-run scatter ~4–8 ms, whatever the basis;
+- the absolute is Omniscope's own sender offset, no band;
+- DEPTH is fine if its timecodes don't keep time.
+
+| reconnect | frame (Manifold) | basis | held | calibration RESULT 1 (p10…p90, pairs) | RESULT 2 |
+|---|---|---|---|---|---|
+| omni-1 | 41.708 ms (23.976) | **TIMECODE**, 0 switches | skew **0.0 ms** (depth 34.1) | **−2.73** (−6.01…+0.52, 24) | **−1.30** (−28.46…+2.06, 13) |
+| omni-2 | 41.708 ms | TIMECODE, 0 switches | skew **0.0 ms** (depth 33.7) | **−7.61** (−10.71…−3.06, 51) | **+1.31** (−0.50…+7.68, 11) |
+| omni-3 | 41.708 ms | TIMECODE, 0 switches | skew **0.0 ms** (depth 34.2) | **−3.50** (−8.04…+0.11, 26) | **+3.13** (−0.51…+7.61, 10) |
+
+**Which held:**
+- **✅ Calibration completes and offers a value on every reconnect:** 6 / 6, none missed.
+- **❌ Spread across reconnects within ±5 ms: just outside.** −7.61…+3.13 ms, a 10.7 ms range (±5.4).
+- **Per-run scatter ~4–8 ms: 5 of 6.** p10–p90 6.5, 7.7, 8.2, 8.1 and 8.2 ms.
+  - The exception is omni-1's second run: **30.5 ms** (p10 −28.46). One or more pairs ~25 ms early
+    sat in its window, and the spread rule (under one frame, 41.7) still let it through.
+- **Within every reconnect the second calibration reads later than the first** (+1.4, +8.9,
+  +6.6 ms). The first runs also needed more pairs before offering (24 / 51 / 26 against 13 / 11 / 10).
+  Observed only.
+- **Absolute:** Omniscope reads close to in sync, −7.6…+3.1 ms (median of the six ≈ −2 ms). That is
+  its own sender offset on this path.
+- **Basis: TIMECODE**, so Omniscope's timecodes keep time. **⚠️ But the skew sat at the clamp, 0.0 ms,
+  all session, every reconnect.**
+  - Omniscope's timecodes state the audio stamped *earlier* than the picture of the same instant,
+    by an amount the clamp hides. So the hold here is the lead alone.
+  - The depth term would have held 34 ms more.
+  - The unclamped value is not logged, so how far below 0 it sits is unknown.
+  - **For Robbie:** whether the skew's lower clamp should stay at 0 (the depth's range) or follow a
+    sender that says audio leads. Not investigated, as the brief says.
+- **Stopped here, as briefed** (the spread is outside ±5 ms). Not investigated further.
+
+**Follow-up (2026-10-05 late): the negative skew, and the within-session settling.**
+
+*1. The clamp (Robbie's decision: the skew may be negative down to −100 ms; +200 stays).*
+- **Built (uncommitted):**
+  - `PictureHoldBasisEstimate.skewFloor = −0.100`, `skewCeiling = 0.200`. `rawSkew` keeps the
+    unclamped value, current even while a bound is in force, and `clamp` names the bound.
+  - A change of clamp state counts as a change.
+  - `PullSourcePictureDelay.seconds(desktopAudioLead:timecodeSkew:cardOwnsAudio:)`: lead + skew, never
+    below 0, 0 while the card owns audio. The depth keeps `seconds(…frameSyncAudioDepth:…)` and its
+    0…200 ms.
+  - Log: the basis line carries `raw …` and `CLAMPED at the floor/ceiling`. A separate
+    `[NDI] timecode skew CLAMPED at … / back inside its bounds` line logs on each change of clamp
+    state.
+- **Tests:**
+  - `testANegativeSkewIsHeld`: −28 ms held as is, hold = lead + skew; the depth still floors at 0.
+  - `testTheSkewIsClampedToItsBounds`: floor, ceiling, raw kept, leaving a bound reported. It caught
+    a stale `rawSkew` while clamped; fixed.
+  - `swift test` **188 / 188**. Replays against b35a810 **99 / 99 identical**. Profile build
+    `.build-cc/ndihold2-Profile`, clean.
+
+*2. The settling, read-only (`settle.py` over every session's DEBUG `[AV-CONTENT]` pairs; heard =
+beep − (flash + audio−now), calibration's formula).*
+- **Second calibration against the first:**
+  - On the SDK sender (`p`, `f`, `t`, `z`; 14 sessions) and OBS at 23.976 (3), the second reads
+    **−2.9…+2.0 ms** from the first, mixed in sign.
+  - The first runs needed 10–16 pairs.
+  - **Not "later every time".** Only Omniscope showed it (+1.4, +8.9, +6.6; 24 / 51 / 26 pairs).
+- **Over the session, by 15 s bins:**
+  - **A small start-up effect, common to every sender on the TIMECODE basis.** The first published
+    skew is the 1 s warm-up mean; the hold then walks to its level in 2 ms steps.
+    - That moves heard by **4–10 ms over the first ~20–50 s.** 23.976 `f23-1`: −9.0 → +2.8.
+      `t23-2`: −5.8 → +3.3. 59.94 `f59-1`: +10.4 → +3.7. OBS `obs2398-2`: −67.3 → −73.5.
+    - It is in hand by the ~40 s calibration start, with exceptions: the hold still stepped at
+      53 s (`obs2398-1`) and 71 s (`obs2398-2`), by 2 ms.
+    - On the DEPTH basis (`z23-1`) heard is flat from the start, ±0.8 ms.
+  - **Omniscope: a different, larger thing.** Steps of **25–35 ms**: `omni-2` +28…+32 for 30 s, then
+    −6; `omni-3` +11…+23 for 60 s, then 0.
+    - In the longer runs below it keeps wandering **±20 ms for the whole 3–4 min**, in steps. The
+      hold is constant all the while.
+    - It is not start-up and not the hold: it is on Omniscope's path. Not investigated.
+
+*3. Omniscope again, on the new clamp* (`ndihold/omniB-{1,2,3}`, 3 reconnects, two calibrations,
+then a 90 s tail).
+
+| reconnect | basis | raw skew | held | calibration RESULT 1 (p10…p90, pairs) | RESULT 2 |
+|---|---|---|---|---|---|
+| omniB-1 | TIMECODE | **−1 791 251 394.7 s** | −100.0 ms (floor) | **+137.87** (+134.04…+142.94, 47) | **+115.33** (+110.35…+122.01, 20) |
+| omniB-2 | TIMECODE | **−1 791 251 639.9 s** | −100.0 ms (floor) | **+94.21** (+91.04…+96.62, 44) | **+101.31** (+99.33…+105.55, 39) |
+| omniB-3 | TIMECODE | **−1 791 251 884.7 s** | −100.0 ms (floor) | **+129.70** (+126.61…+132.73, 26) | **+108.93** (+103.74…+113.18, 23) |
+
+- **Omniscope's two streams carry timecodes on different clocks.**
+  - Each keeps time on its own, so the basis is TIMECODE.
+  - Their difference is −1.79 × 10⁹ s and grows with wall time between reconnects (+245 s each):
+    one stream is stamped on a Unix-epoch clock and the other near zero.
+  - The skew between them is meaningless.
+- **On the 0 floor (`a159fd3`) that was hidden.** The skew sat at 0 and the hold was the lead alone,
+  which reads near sync (−7.6…+3.1). On −100 ms the picture is held 150 ms and sound reads
+  **~+94…+138 ms late**. Calibration offers −94…−138, "not applicable" past the queue.
+- **Neither floor is following Omniscope's timecodes.** Both are a fixed number standing in for a
+  relation the sender never stated.
+
+**Which held:**
+- **❌ Raw skew −5…0 ms:** it is −1.79 × 10⁹ s: no common clock.
+- **❌ The spread tightens to ±5 ms:** +94.2…+137.9 ms. Worse, and wandering within each session as
+  above.
+- **❌ The settling is common to all senders:**
+  - What is common is small: the hold's 2 ms-step settle, 4–10 ms over ≤ 50 s, mostly before the
+    calibration starts.
+  - The second-reads-later pattern and Omniscope's 25–35 ms steps belong to Omniscope alone, and do
+    not settle.
+
+**Proposed (not built) — for Robbie:**
+1. **A skew past a bound is not a sender stamping audio ahead: it is two clocks.**
+   - Recommend: past a plausibility bound the basis falls back to DEPTH and says so, instead of
+     clamping. For example |raw| > 1 s, or simply outside −100…+200.
+   - "The streams' timecodes are not on one clock" joins "a stream's timecode does not keep time" as
+     a fallback reason.
+   - It is the rule already applied per stream, extended to the pair. It needs no special case for
+     any sender.
+   - **Until decided, the uncommitted −100 floor makes Omniscope read ~+100 ms late, against ~0 on
+     `a159fd3`.** It should not be committed as is.
+2. **Calibration and the start-up settle:**
+   - Calibration starts ≥ 40 s after connect in these runs, and a user's run starts later still. The
+     common settle is ≤ 10 ms and mostly over by then. A minimum time since connect is therefore not
+     needed for it.
+   - The cheaper guard: offer no figure while the hold has moved in the last 10 s. The walk guard
+     already covers a slope; a 2 ms step is below it.
+   - Optional, and only if Robbie wants it.
+
+
+**Decided and built (Robbie, 2026-10-05 late; uncommitted): the clamp is replaced by a fallback.**
+- **The rule:** a skew inside −100…+200 ms is used as is. Outside, the two streams' timecodes are NOT
+  on one clock, and the session falls back to the depth for good:
+  - `PictureHoldBasisEstimate.notOnOneClock` latches;
+  - `rawSkew` keeps the value that showed it;
+  - the log reads `picture hold basis this session: DEPTH: timecodes not on one clock (raw skew …,
+    outside −100…+200 ms) — FrameSync's depth for this session`.
+- **No extra calibration wait** (Robbie).
+- **The clamp, its state and its log line are gone.** The negative-skew hold
+  (`seconds(…timecodeSkew:…)`) stays.
+- **Tests:**
+  - a skew just inside the floor (−95 ms) is used as is;
+  - outside either bound falls back;
+  - **two streams on different clocks** (audio on a Unix-epoch clock, video near zero) never hold
+    by the skew;
+  - the fallback is latched for the session (a fresh one re-evaluates);
+  - the negative-skew test is kept.
+  - `PullSourcePictureDelayTests` 24 / 24. **`swift test` 191 / 191.** Replays against b35a810
+    **99 / 99 identical**. Profile `.build-cc/ndihold3-Profile`, clean.
+
+**Omniscope, two sets of 3 reconnects** (two calibrations each, then a 90 s tail;
+`ndihold/omniC-*` with Clocked video output ON, `omniD-*` with it OFF, set by Robbie).
+
+**Predictions (written before the run):**
+- DEPTH in both sets, "not on one clock".
+- (a) ON: the ±20 ms wander and the later-second-reading pattern remain.
+- (b) OFF: the wander drops to the ~4–8 ms per-run scatter of the other senders, and the spread
+  across reconnects falls within ±5 ms.
+
+| set | reconnect | basis, why | held | RESULT 1 (p10…p90; pairs) | RESULT 2 (p10…p90; pairs) | heard, 15 s bins, ~3–3.5 min |
+|---|---|---|---|---|---|---|
+| (a) ON | omniC-1 | DEPTH: not on one clock, raw −1 791 252 431.9 s | 250 + 33.3 | **−91.08** (−94.12…−87.68; 62) | **−85.96** (−90.04…−83.47; 12) | −59.9…−95.0 |
+| | omniC-2 | DEPTH: same, raw −1 791 252 657.5 s | 250 + 32.9 | **−77.03** (−104.89…−73.72; 31) | **−84.34** (−86.87…−81.07; 41) | −66.6…−96.4 |
+| | omniC-3 | DEPTH: same, raw −1 791 252 902.8 s | 250 + 31.7 | **−101.20** (−104.50…−93.31; 18) | **−84.65** (−90.33…−80.39; 10) | −67.5…−108.6 |
+| (b) OFF | omniD-1 | DEPTH: not on one clock, raw **−2 068.6 s** | 250 + 35.0 | **+1.35** (−11.27…+6.60; 14) | **−5.73** (−12.11…−0.40; 27) | −14.9…+6.9 |
+| | omniD-2 | DEPTH: same, raw −2 268.8 s | 250 + 32.4 | **−10.46** (−16.33…−0.11; 10) | **+1.88** (−13.81…+5.82; 19) | −11.2…+20.7 |
+| | omniD-3 | DEPTH: same, raw −2 470.2 s | 250 + 31.7 | **+12.91** (+5.16…+16.52; 34) | **−4.72** (−8.25…+1.75; 22) | −5.8…+15.9 |
+
+**Which held:**
+- **✅ DEPTH in both sets, "not on one clock", on all six reconnects.** The new rule does what it says.
+  - Clocked ON: the raw skew is epoch-scale, as before.
+  - Clocked OFF it is −2 069 … −2 470 s. That is still two clocks, growing ~200 s a reconnect with the
+    wall time.
+- **(a) ON: the wander remains ✅; the later-second pattern ❌.**
+  - Over a session heard spans 35–41 ms in 15 s bins: ±20 ms and more.
+  - The second calibration was +5.1, −7.3 and +16.6 ms from the first: mixed. First runs needed
+    62 / 31 / 18 pairs.
+- **(b) OFF: ❌ on both counts.**
+  - The wander does not drop to 4–8 ms: 15 s bins span 21.8 / 31.9 / 21.7 ms. Per-run p10–p90 is
+    10.0–19.6 ms.
+  - The spread across reconnects is −10.46…+12.91 ms, 23.4 ms (±11.7): not within ±5.
+- **What did change with Clocked OFF is the absolute:**
+  - ON reads ~−85 ms (sound early), OFF ~0 (median of the six ≈ −1.7 ms), both on the same depth
+    hold (31.7–35.0 ms).
+  - That ~85 ms is Omniscope's own output timing.
+- ⚠️ **The ON absolute also differs from the earlier runs.**
+  - `omni-*` read ~0 on the lead-only hold (the old 0 clamp). Adding the 33 ms depth should give
+    ≈ −33; this set reads ≈ −85.
+  - So Omniscope's own offset moved by ~50 ms between those runs and this set, in the same
+    "Clocked ON" mode.
+  - Not investigated.
+- **Reading:**
+  - Manifold's side behaves the same on Omniscope as on the SDK and OBS senders: the depth hold, flat
+    start-up on DEPTH.
+  - Omniscope's NDI output wanders ±10–20 ms within a session in either mode.
+  - Its absolute offset depends on its clocking mode and has moved between launches.
+  - Calibration on Omniscope therefore gives a value good to about ±10–20 ms at best, and only for
+    that session. The NDI "session only" rule already covers that.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,

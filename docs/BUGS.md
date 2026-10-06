@@ -820,6 +820,35 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 
 ---
 
+## ✅ FIXED 2026-10-05 (uncommitted) — NDI hold: a sender whose two streams carry timecodes on DIFFERENT clocks gets a clamped, meaningless skew (Omniscope)
+
+**Found (`AUDIO_RESAMPLER_DESIGN.md` §19.13, follow-up):**
+- Omniscope's audio and video timecodes each keep time, but on different clocks. One is Unix-epoch,
+  the other near zero.
+- Raw skew −1.79 × 10⁹ s, growing with wall time between reconnects.
+- **On `a159fd3` (floor 0)** the hold is the lead alone, which happens to read near sync (−7.6…+3.1 ms).
+- **On the uncommitted floor −100 ms** (Robbie's decision of 2026-10-05) the picture is held 150 ms.
+  Sound reads +94…+138 ms late, and calibration's offers are not applicable.
+- **Proposed, not built:** past a plausibility bound (outside −100…+200 ms, or |raw| > 1 s), fall back
+  to DEPTH with the reason "the streams' timecodes are not on one clock", instead of clamping.
+- **Do not commit the −100 floor without it.**
+- **✅ Built (Robbie's decision, 2026-10-05 late; uncommitted).**
+  - Outside −100…+200 ms the session falls back to the depth for good, logging "timecodes not on
+    one clock (raw skew …)". Inside, the skew is used as is. The clamp is gone.
+  - Tests for the bounds, an epoch-scale pair and the latch. `swift test` 191 / 191; replays
+    99 / 99 identical.
+  - Omniscope: DEPTH "not on one clock" on 6 / 6 reconnects in both clocking modes.
+- **Also seen, not investigated:** Omniscope's heard figure wanders ±20 ms in steps over minutes with
+  the hold constant. That is on its path, not Manifold's start-up.
+- **Clocked video output OFF does not remove it** (§19.13, `omniD-*`).
+  - The wander stays 22–32 ms per session in 15 s bins, and the spread across reconnects is
+    23.4 ms.
+  - It moves the absolute instead: ~−85 ms with Clocked ON, ~0 with it OFF, on the same depth hold.
+  - The ON absolute also moved ~50 ms from the earlier `omni-*` runs. Omniscope's own output timing;
+    a value calibrated on it is good to about ±10–20 ms for that session only.
+
+---
+
 ## ✅ FIXED 2026-10-05 (`a159fd3`) — NDI: calibration reads −67…−70 ms on a sender that is in sync by construction
 
 **Found by stage D (`AUDIO_RESAMPLER_DESIGN.md` §19.10).** An NDI SDK sender synthesising the

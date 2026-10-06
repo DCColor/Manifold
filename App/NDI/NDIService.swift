@@ -953,6 +953,8 @@ final class NDIService: ObservableObject {
         let frameSyncDepth = frameSyncDepthSeconds
         let basis = holdBasis.basis
         let skew = holdBasis.skew
+        let rawSkew = holdBasis.rawSkew
+        let notOnOneClock = holdBasis.notOnOneClock
         pictureDelayLock.unlock()
         // §19.13: the sender's timecode skew when both streams carry timecodes that keep time;
         // FrameSync's depth, today's term, when either does not.
@@ -965,21 +967,33 @@ final class NDIService: ObservableObject {
                 self?.applyPictureDelay()
             }
         }
-        let settled = basis == .timecode
+        let settled = basis == .timecode || notOnOneClock
             || (firstHoldTermAt.map { now - $0 >= Self.holdBasisSettle } ?? false)
         if bridge != nil, settled, loggedHoldBasis != basis {
+            let reason: String
+            if basis == .timecode {
+                reason = String(format: "the sender's timecode skew, %+.1f ms (raw skew %+.1f ms)",
+                                depth * 1000, (rawSkew ?? depth) * 1000)
+            } else if notOnOneClock {
+                reason = String(format: "timecodes not on one clock (raw skew %+.1f ms, outside "
+                                + "%+.0f…%+.0f ms) — FrameSync's depth for this session",
+                                (rawSkew ?? 0) * 1000, PictureHoldBasisEstimate.skewFloor * 1000,
+                                PictureHoldBasisEstimate.skewCeiling * 1000)
+            } else {
+                reason = "a stream carries no timecode that keeps time — FrameSync's depth"
+            }
             NSLog("%@", String(format: "[NDI] picture hold basis %@ %@: %@ (FrameSync depth %.1f ms)",
                                loggedHoldBasis == nil ? "this session:" : "switched to",
-                               basis == .timecode ? "TIMECODE" : "DEPTH",
-                               basis == .timecode
-                                 ? String(format: "the sender's timecode skew, %.1f ms", depth * 1000)
-                                 : "a stream carries no timecode that keeps time — FrameSync's depth",
+                               basis == .timecode ? "TIMECODE" : "DEPTH", reason,
                                frameSyncDepth * 1000))
             loggedHoldBasis = basis
         }
-        let delay = PullSourcePictureDelay.seconds(desktopAudioLead: lead,
-                                                   frameSyncAudioDepth: depth,
-                                                   cardOwnsAudio: deckLinkOwnsAudio)
+        // The skew may be negative (a sender stamping audio ahead of video); the depth may not.
+        let delay = basis == .timecode
+            ? PullSourcePictureDelay.seconds(desktopAudioLead: lead, timecodeSkew: depth,
+                                             cardOwnsAudio: deckLinkOwnsAudio)
+            : PullSourcePictureDelay.seconds(desktopAudioLead: lead, frameSyncAudioDepth: depth,
+                                             cardOwnsAudio: deckLinkOwnsAudio)
         pictureDelayLock.lock()
         let previous = pictureDelaySeconds
         pictureDelaySeconds = delay

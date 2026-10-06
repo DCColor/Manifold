@@ -67,6 +67,16 @@ public enum PullSourcePictureDelay {
         return desktopAudioLead + depth
     }
 
+    /// The hold on the TIMECODE basis: lead + the sender's skew, which may be negative (its floor is
+    /// `PictureHoldBasisEstimate.skewFloor`); never below zero. Zero while the card owns audio, as
+    /// for the depth. A non-finite skew counts as none.
+    public static func seconds(desktopAudioLead: Double, timecodeSkew: Double,
+                               cardOwnsAudio: Bool) -> Double {
+        guard !cardOwnsAudio, desktopAudioLead.isFinite, desktopAudioLead > 0 else { return 0 }
+        let skew = timecodeSkew.isFinite ? timecodeSkew : 0
+        return max(0, desktopAudioLead + skew)
+    }
+
     /// The highest source rate the queue bound is sized for. A bound is a ceiling, not an
     /// allocation: memory is spent only on frames that actually arrive, so sizing for a fast sender
     /// costs a slow one nothing.
@@ -221,9 +231,21 @@ public struct TimecodeOffsetMean {
 /// restarting faster than it can warm, and the hold returns to the depth term: today's behaviour,
 /// unchanged. A brief re-warm (a looped clip restarting its timecode) keeps the last skew published.
 /// The same `hysteresis` as the depth: the picture moves only when the skew moves ≥ 2 ms.
-/// The skew is clamped to `0…AudioQueueDepthEstimate.ceiling`, the range the depth term has.
+/// THE SKEW MAY BE NEGATIVE (Robbie, 2026-10-05): a sender that stamps its audio ahead of its video.
+/// Inside `skewFloor…skewCeiling`, −100…+200 ms, it is used as is (the hold, lead + skew, stays well
+/// positive).
+///
+/// ⚠️ OUTSIDE THOSE BOUNDS THE TWO STREAMS' TIMECODES ARE NOT ON ONE CLOCK, and the session falls
+/// back to the depth for good (Robbie, 2026-10-05). Omniscope stamps one stream on a Unix-epoch clock
+/// and the other near zero: each keeps time, the skew between them read −1.79 × 10⁹ s, and clamping
+/// it held the picture by a number the sender never stated (+94…+138 ms heard, §19.13). A relation
+/// the sender does not state cannot be followed, so it is not: `notOnOneClock` latches and
+/// `rawSkew` keeps the value that showed it. The depth fallback keeps its own 0…200 ms.
 public struct PictureHoldBasisEstimate {
     public enum Basis: String { case depth, timecode }
+
+    public static let skewFloor = -0.100
+    public static let skewCeiling = AudioQueueDepthEstimate.ceiling
 
     public static let staleAfter = 2.0
     public static let hysteresis = AudioQueueDepthEstimate.hysteresis
@@ -237,6 +259,12 @@ public struct PictureHoldBasisEstimate {
     public private(set) var basis: Basis = .depth
     /// The skew the hold uses while `basis == .timecode`; nil otherwise.
     public private(set) var skew: Double?
+    /// The skew as last measured (nil before both streams warm, or after a stale fallback). On the
+    /// TIMECODE basis it is the value behind `skew`; once `notOnOneClock`, the value that showed it.
+    public private(set) var rawSkew: Double?
+    /// Latched for the session: the streams' skew fell outside −100…+200 ms, so their timecodes are
+    /// not on one clock and the hold stays on the depth.
+    public private(set) var notOnOneClock = false
 
     public init() {}
 
@@ -266,16 +294,23 @@ public struct PictureHoldBasisEstimate {
     public static func isDefined(_ timecode: Int64) -> Bool { timecode != undefinedTimecode }
 
     private mutating func update(now: Double) -> Bool {
+        if notOnOneClock { return false }
         let fresh = now - lastAudioWarm <= Self.staleAfter && now - lastVideoWarm <= Self.staleAfter
         if !fresh {
             guard basis == .timecode else { return false }
-            basis = .depth; skew = nil
+            basis = .depth; skew = nil; rawSkew = nil
             return true
         }
         guard let a = audio.mean, let v = video.mean else { return false }   // re-warming: hold the last
-        let s = min(max(a - v, 0), AudioQueueDepthEstimate.ceiling)
-        if basis == .timecode, let current = skew, abs(s - current) < Self.hysteresis { return false }
-        basis = .timecode; skew = s
+        let raw = a - v
+        rawSkew = raw
+        guard raw >= Self.skewFloor, raw <= Self.skewCeiling else {
+            notOnOneClock = true
+            basis = .depth; skew = nil
+            return true
+        }
+        if basis == .timecode, let current = skew, abs(raw - current) < Self.hysteresis { return false }
+        basis = .timecode; skew = raw
         return true
     }
 }
