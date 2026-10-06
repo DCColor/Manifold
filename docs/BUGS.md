@@ -782,6 +782,21 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 
 ---
 
+## ☐ PRE-SHIP: Export Diagnostics — add a Sync section per session
+
+**Added 2026-10-05** with the user guide draft (`docs/USER_GUIDE_SYNC.md`, section 6), which tells users
+to send Export Diagnostics for a sync problem.
+
+- Export Diagnostics: add a Sync section per session (transport and rate, NDI sender name, offset in
+  use and its source, last calibrations, NDI hold basis and fallback reason, resampler session
+  summary, SDI underrun events); confirm these log lines survive the Release NSLog audit; never
+  include URLs, keys or passphrases.
+- **Today:** the export has no sync section. `DiagnosticsRedactor` blanks URL paths, queries,
+  passphrases, stream IDs and keys, and keeps host and port. The guide's redaction sentence states
+  exactly that, so it changes if the redactor changes.
+
+---
+
 ## ☐ OPEN 2026-10-01 — WHEP via MediaMTX: the A/V relation is off by a different amount every session (−19…+42 ms), equal to the first SR line's offset
 
 **Found by stage D's calibration runs (`AUDIO_RESAMPLER_DESIGN.md` §19.10).**
