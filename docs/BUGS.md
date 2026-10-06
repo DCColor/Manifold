@@ -800,7 +800,7 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 
 ---
 
-## ☐ OPEN 2026-10-01 — NDI: calibration reads −67…−70 ms on a sender that is in sync by construction
+## ✅ FIXED 2026-10-05 (uncommitted) — NDI: calibration reads −67…−70 ms on a sender that is in sync by construction
 
 **Found by stage D (`AUDIO_RESAMPLER_DESIGN.md` §19.10).** An NDI SDK sender synthesising the
 23.976 clip (audio and video per frame, one thread) reads heard A/V −66.75 … −69.80 ms in four runs.
@@ -843,6 +843,25 @@ terms, and the device confirms it (H1 + H3).**
   - Not yet measured on the fix: an OBS / DistroAV sender, and a sender with undefined timecodes.
   - Until it ships, NDI calibration on the shipped build offers values ~27 ms too large (23.976) on
     an in-sync sender. Keep it disabled.
+
+**✅ Built 2026-10-05 night (uncommitted; §19.13 "Shipped"). NDI calibration stays enabled
+(session-only), Robbie.**
+- **The hold:** lead + the sender's timecode skew (`PictureHoldBasisEstimate`, DisplayProviders).
+  It uses the depth's warm-up and smoothing (1 s, τ 10 s, 2 ms), plus one rule: the timecode must
+  keep time.
+- **The fallback:** the FrameSync depth, per stream and automatic. The basis is logged once a
+  session and on every switch. Still 0 while DeckLink owns audio.
+- **Measured on the shipped code:**
+  - in-sync sender, 12 / 12 calibrations within −2.63…+2.47 ms (both rates, 3 reconnects);
+  - timecodes left meaningless (0): DEPTH, reading today's −27 / −14 ms (one stream is enough);
+  - DeckLink owning audio: not held;
+  - replays 99 / 99 identical; `swift test` 187 / 187 (7 new).
+- **OBS / DistroAV:**
+  - It sends timecodes that keep time (TIMECODE, skew 13–14 ms against a depth of 29).
+  - It read +11.8 / +11.5, +13.2 / +11.9 and −5.5 / −2.3 ms over 3 reconnects.
+  - Against the prediction −45…0: 1 of 3 inside. The spread is ~1 output frame on a **60 fps OBS
+    canvas** carrying the 23.976 clip.
+  - Likely the canvas grid; not tested. A 23.976 canvas run is open, Robbie's call.
 
 ---
 
@@ -1551,6 +1570,11 @@ refresh (`[NDI-PICTURE]`), and the audio axis, steering and renderer were clean.
 **Provisional reading:** the sender's own audio-versus-video error — OBS with DistroAV. OBS's A/V is
 known to move across an output restart (`AV_SYNC_FINDINGS.md` §1.2b), and nothing in Manifold's
 path measured here accounts for 22 ms. Not proven: NDI has no container to probe.
+
+**⚠️ 2026-10-05 (§19.13):** part of the arithmetic this entry rests on is now known to be wrong.
+"Manifold's own contribution ≈ 0" assumed the depth term was right. On OBS it overstated the hold by
+~15 ms (skew 13–14 ms, depth 29). The NDI hold now uses the timecode skew, so a device re-read on
+OBS / DistroAV with the shipped fix is the next measurement for this entry.
 
 **To settle it:** the same protocol with a non-OBS NDI sender playing the flash-beep fixture — NDI
 Tools' Test Patterns or ffmpeg with NDI output, if either is available — and, if possible, two OBS

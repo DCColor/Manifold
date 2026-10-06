@@ -6825,13 +6825,107 @@ was submitted (≈ +3.9 / +2.5 ms submission latency).
 
 #### Not done
 
-- **For Robbie's decision: the product change.** Hold the NDI picture by the timecode skew instead of
-  the FrameSync depth, keeping depth as the fallback for undefined timecodes. Calibration on NDI could
-  then be re-enabled.
-- An OBS → NDI run on the fix, with the loop-exact `.mov`.
-- A product change. Nothing shipped was changed; the fix is a scratch patch
-  (`ndi1913/scratch-instrument-and-tcskew.patch`).
-- BUGS.md's NDI calibration entry stays open until the product change ships.
+- ~~For Robbie's decision: the product change.~~ Decided and built the same night: see "Shipped" below.
+- ~~An OBS → NDI run on the fix.~~ Done below, on a 60 fps OBS canvas.
+- BUGS.md's NDI calibration entry: fixed, uncommitted.
+
+#### Shipped: the NDI picture hold by the sender's timecodes — 2026-10-05 night (uncommitted)
+
+**Decided (Robbie, 2026-10-05):**
+- Hold the picture by the sender's own NDI timecodes on both streams: the mean of (audio PTS − tc)
+  minus the mean of (video PTS − tc).
+- Fall back to the FrameSync depth term when a sender leaves timecodes undefined.
+- NDI calibration stays enabled (session-only).
+
+**What was built (on `ec1b86e`):**
+
+| part | where | rule |
+|---|---|---|
+| **one stream's mean** | `TimecodeOffsetMean` (DisplayProviders, `PullSourcePictureDelay.swift`) | (stamp − timecode). **The same rules as `AudioQueueDepthEstimate`, by reference to its constants:** a time-weighted mean over the first 1 s, then an EMA with τ 10 s; a reading after a gap > 1 s is skipped. **Plus one rule:** a reading > 200 ms from the running mean restarts the warm-up, so the timecode must keep time |
+| **the basis** | `PictureHoldBasisEstimate` (same file) | **TIMECODE** while both streams have fed a warmed mean within the last 2 s; **DEPTH** otherwise, per stream and automatically. The skew republishes on a ≥ 2 ms move (the depth's hysteresis) and is clamped to 0…200 ms (the depth's range). A re-warm (a timecode restart on a loop) keeps the last skew |
+| **the frames** | `NDIBridge` | `timecode` on `NDIVideoFrame` and `NDIAudioFrame` (the first returned sample's, as FrameSync hands it on) |
+| **the feed** | `NDIService` | the display tick feeds each new frame's stamp and timecode; the audio pump feeds each block's first-sample stamp and timecode. Under `pictureDelayLock`, reset per session in `start(with:)` |
+| **the hold** | `NDIService.applyPictureDelay` | lead + (the skew on TIMECODE, the depth on DEPTH). `PullSourcePictureDelay.seconds` is unchanged, so it is still **0 while DeckLink owns audio** |
+| **the log** | `[NDI] picture hold basis this session: TIMECODE / DEPTH …` | Once a session, when the basis settles: the skew has published, or 3 s (warm-up + staleness) after the first hold term without it. Then `… switched to …` on every change. The `picture held` line names the term in use |
+
+- **Why "keeps time" and not "is defined":**
+  - A sender cannot send an undefined timecode. `INT64_MAX` on send means "synthesise".
+  - The receive side's `INT64_MAX` appears only on audio FrameSync manufactures (start-up, sender
+    gaps).
+  - A sender that sends timecode **0**, measured: video arrives as 0 on every frame. FrameSync's
+    audio arrives as the block's offset inside its chunk, 0…41.7 ms. Both are "defined", and
+    neither means anything.
+  - The keep-time rule catches both. Their (stamp − timecode) walks 1 s per second and trips the
+    200 ms gate before the 1 s warm-up completes.
+- **Scratch instrumentation:** none of it is in the shipped change. The scratch worktree is removed;
+  its patch stays at `ndi1913/scratch-instrument-and-tcskew.patch`.
+- **Test-only change to the scratch sender:** a timecode mode (`explicit` | `zero` | `zero-audio` |
+  `zero-video`), so it can leave timecodes meaningless. Copies are in `~/Desktop/manifold-soak/ndihold/`.
+
+**Verification.** Profile build `.build-cc/ndihold-Profile` (shipped code only, no errors, no new
+warnings in touched files). The UI-scripted driver of §19.13. Logs:
+`~/Desktop/manifold-soak/ndihold/`. No `defaults` were written.
+
+| session | sender | basis logged | calibration RESULT 1, 2 (ms) | hold, settled |
+|---|---|---|---|---|
+| t23-1 | in sync, 23.976 | TIMECODE (once) | **−0.27, −2.63** | 250 + skew 28.8 |
+| t23-2 | | TIMECODE | **+0.69, −1.01** | 250 + 30.8 |
+| t23-3 | | TIMECODE | **−0.10, +1.93** | 250 + 27.8 |
+| t59-1 | in sync, 59.94 | TIMECODE | **+2.47, +1.45** | 250 + 19.4 |
+| t59-2 | | TIMECODE | **+0.99, −0.17** | 250 + 19.8 |
+| t59-3 | | TIMECODE | **+0.46, +1.61** | 250 + 19.1 |
+| z23-1 | timecode 0, both streams | **DEPTH** (once, at 3 s) | **−27.23, −25.93** | 250 + depth |
+| z59-1 | timecode 0, both, 59.94 | **DEPTH** | **−14.64, −13.35** | 250 + depth |
+| za23-1 | timecode 0, audio only | **DEPTH** | **−24.97, −27.36** | 250 + depth |
+
+- **✅ In sync, both rates, 3 reconnects: 12 / 12 within −2.63…+2.47 ms** (±1 frame = ±41.7 /
+  ±16.7). The scratch build read −2.2…+3.3.
+- **✅ The fallback is today's behaviour.** On a sender whose timecodes keep no time, the shipped
+  build's hold read −25.6 / −28.4 (23.976) and −12.3 / −14.2 (59.94), §19.13. The fallback reads
+  −27.2 / −25.9 and −14.6 / −13.4. **Per stream:** one stream without timecodes is enough
+  (−25.0 / −27.4).
+- **The skew settles.** The first published value is the 1 s warm-up mean and caught FrameSync's
+  start-up (11.4 … 50.9 ms in different sessions). The skew then walks to its level in 2 ms steps
+  over ~10–20 s, as the depth did (§18.3: seven 2 ms steps). Calibration runs at ≥ 25 s, after it.
+- **✅ DeckLink owning audio** (`dl23-1`, ⌃⌥O 20 s then ⌃⌥⇧O): on TIMECODE, the card taking audio
+  gives `picture held 0.0 ms … (DeckLink owns audio — SDI unchanged, not held)`. Handing it back
+  restores 280.6 ms (250 + skew). As before, §18.2.
+- **✅ The replay gate against b35a810: 99 / 99 files byte-identical** (`cmp.sh` of §19.7, seven
+  sessions plus synth).
+- **✅ `swift test`: 187 / 187**, which is 180 + 7 new in `PullSourcePictureDelayTests`:
+  - a timecoded sender holds by the skew after the warm-up;
+  - undefined on audio, video or both keeps the depth;
+  - constant timecodes keep the depth;
+  - the fallback goes both ways, in `staleAfter`;
+  - a timecode restart keeps the skew;
+  - the clamp;
+  - the offset mean warms like the depth.
+  - **Checked for teeth:** with the 200 ms gate disabled, the constant-timecode and restart tests
+    fail.
+
+**OBS / DistroAV, the customer case** (Robbie's sender OBS, NDI output "MAC-STUDIO (OBS PGM)",
+Media source `manifold-sync-23.976p-h264.mov` looping):
+- ⚠️ **The stream is 60 fps.** NDI declares 60/1, and the sheet said "This stream is 60 fps … 59.94p is
+  the nearest". So OBS's canvas is 60 fps and the 23.976 clip goes out with pulldown.
+
+| reconnect | basis | calibration RESULT 1, 2 (p10…p90 of RESULT 1) | skew / depth it replaced |
+|---|---|---|---|
+| obs23-1 | **TIMECODE**, 0 switches | **+11.83, +11.53** (+6.0…+20.6) | 14.0 / 28.5 |
+| obs23-2 | TIMECODE, 0 switches | **+13.24, +11.91** (+7.4…+19.1) | 13.1 / 29.9 |
+| obs23-3 | TIMECODE, 0 switches | **−5.49, −2.31** (−10.5…+2.2) | 14.4 / 28.7 |
+
+- **DistroAV sends timecodes, and they keep time.** TIMECODE on every reconnect, no switch. Its skew
+  (13–14 ms) is half the depth (28.5–29.9). On the old hold the same sender would read ~15 ms lower.
+- **Prediction (−45…0 ms, stable): ❌ in part.** Reconnect 3 is inside the band; 1 and 2 read +12 ms
+  (sound late).
+  - The reconnects spread 18.7 ms, about one 60 fps output frame.
+  - Each run's own p10–p90 is 10–15 ms, against 4–7 ms on the SDK sender.
+- **Likely, not tested:** the 60 fps canvas.
+  - Each 23.976 flash lands on the next 60 fps output frame (0…16.7 ms late).
+  - That phase walks 0.2 frame per 20.02 s loop (1201.2 output frames).
+  - So a ~13 s calibration window reads a different grid phase each time: the "+20 ms grid" term of
+    §18.3 and BUGS.md, now visible because nothing else in the path scatters.
+  - A run with the OBS canvas at 23.976 would remove it. That is Robbie's call; OBS was not changed.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 

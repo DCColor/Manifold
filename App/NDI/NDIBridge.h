@@ -55,6 +55,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// NDI's 100ns timestamp. Used only to skip re-converting a frame FrameSync is repeating;
 /// NOT used as a clock this step (real timestamp handling is the deferred clock step).
 @property (nonatomic, readonly) int64_t timestamp;
+/// The SENDER's timecode for this frame (100 ns; `NDIlib_recv_timestamp_undefined` = INT64_MAX when
+/// there is none). With the audio's, it sets how long the picture is held
+/// (`PictureHoldBasisEstimate`, docs/AUDIO_RESAMPLER_DESIGN.md §19.13).
+@property (nonatomic, readonly) int64_t timecode;
 
 @end
 
@@ -102,6 +106,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// rather than `#if DEBUG`: the cost is nothing and a diagnostic compiled out of the build that
 /// ships is a diagnostic nobody can ask a tester for.
 @property (nonatomic, readonly) int queueDepthAtPull;
+
+/// The SENDER's timecode of the first returned sample (100 ns), as FrameSync hands it on: the
+/// sender's audio frame timecode plus this block's offset inside it. INT64_MAX when undefined, which
+/// is what FrameSync gives the audio it manufactures (start-up, sender gaps). Paired with the
+/// video's, it sets how long the picture is held (`PictureHoldBasisEstimate`, §19.13).
+@property (nonatomic, readonly) int64_t timecode;
 
 @end
 

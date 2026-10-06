@@ -170,7 +170,7 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
 @synthesize width = _width, height = _height, fourCC = _fourCC;
 @synthesize frameRateN = _frameRateN, frameRateD = _frameRateD;
-@synthesize lineStrideInBytes = _lineStrideInBytes, timestamp = _timestamp;
+@synthesize lineStrideInBytes = _lineStrideInBytes, timestamp = _timestamp, timecode = _timecode;
 @synthesize metadataXML = _metadataXML;
 
 - (instancetype)initWithPixelBuffer:(CVPixelBufferRef)pb
@@ -187,6 +187,7 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
         _frameRateD = frame->frame_rate_D;
         _lineStrideInBytes = frame->line_stride_in_bytes;
         _timestamp = frame->timestamp;
+        _timecode = frame->timecode;
         _fourCC = [fourCC copy];
         // DEEP-COPIED, like the source strings: p_metadata points into memory the SDK owns and
         // reclaims at framesync_free_video, which happens the moment the pixel buffer's last
@@ -214,13 +215,14 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
 @synthesize frameCount = _frameCount, channelCount = _channelCount;
 @synthesize sampleRate = _sampleRate, timestamp = _timestamp;
-@synthesize queueDepthAtPull = _queueDepthAtPull;
+@synthesize queueDepthAtPull = _queueDepthAtPull, timecode = _timecode;
 
 - (instancetype)initWithSamples:(int32_t *)samples
                      frameCount:(int)frameCount
                    channelCount:(int)channelCount
                      sampleRate:(int)sampleRate
                       timestamp:(int64_t)timestamp
+                       timecode:(int64_t)timecode
                queueDepthAtPull:(int)queueDepth {
     if ((self = [super init])) {
         _samples = samples;   // takes ownership
@@ -228,6 +230,7 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
         _channelCount = channelCount;
         _sampleRate = sampleRate;
         _timestamp = timestamp;
+        _timecode = timecode;
         _queueDepthAtPull = queueDepth;
     }
     return self;
@@ -764,6 +767,7 @@ static const double kNDIAudioMaxPullSeconds = 0.250;
         }
     }
     const int64_t ts = frame.timestamp;
+    const int64_t tc = frame.timecode;
     gNDI->framesync_free_audio(receiver->_framesync, &frame);   // samples are ours now; hand NDI's back
 
     if (!_loggedFirstAudio) {
@@ -778,6 +782,7 @@ static const double kNDIAudioMaxPullSeconds = 0.250;
                                      channelCount:ch
                                        sampleRate:rate
                                         timestamp:ts
+                                         timecode:tc
                                  queueDepthAtPull:queueDepth];
 }
 

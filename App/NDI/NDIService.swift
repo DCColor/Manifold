@@ -189,6 +189,18 @@ final class NDIService: ObservableObject {
     /// Pump-thread only. Reset on main in `start(with:)` before the pump exists, like the anchor state.
     private var depthEstimate = AudioQueueDepthEstimate()
     private var lastDepthPull = Double.nan
+    /// What the hold uses beyond the lead: the sender's TIMECODE SKEW when both streams carry
+    /// timecodes that keep time, the FrameSync depth above otherwise (`PictureHoldBasisEstimate`,
+    /// docs/AUDIO_RESAMPLER_DESIGN.md §19.13). Fed by the audio pump and the display tick, read by
+    /// `applyPictureDelay` on main; under `pictureDelayLock`. Reset per session in `start(with:)`.
+    private var holdBasis = PictureHoldBasisEstimate()
+    /// The basis the log last stated this session (main). nil until it is settled: the skew has
+    /// published, or `holdBasisSettle` has passed since the first hold term without it.
+    private var loggedHoldBasis: PictureHoldBasisEstimate.Basis?
+    /// When this session's first hold term published (main), so the depth-only case is stated once.
+    private var firstHoldTermAt: Double?
+    /// Warm-up plus staleness: a sender whose timecodes keep time has published its skew by then.
+    private static let holdBasisSettle = AudioQueueDepthEstimate.warmup + PictureHoldBasisEstimate.staleAfter
 
     /// DeckLink output is enabled AND owns the programme audio — the same decision the engine's
     /// mute rule receives (`FrameEngine.setDeckLinkOwnsAudio`), from the same routing hook in
@@ -544,6 +556,9 @@ final class NDIService: ObservableObject {
         anchorCount = 0
         depthEstimate = AudioQueueDepthEstimate()
         lastDepthPull = .nan
+        pictureDelayLock.lock(); holdBasis = PictureHoldBasisEstimate(); pictureDelayLock.unlock()
+        loggedHoldBasis = nil
+        firstHoldTermAt = nil
         audioFormatCache = nil
         audioAnchorTicks = nil; audioCumulativeFrames = 0
         audioAxisRate = 0; audioAxisChannels = 0
@@ -778,7 +793,9 @@ final class NDIService: ObservableObject {
         // output really carried, so the claim stays checked instead of assumed.
         tagOutput(converted, with: info)
 
-        guard let sampleBuffer = makeSampleBuffer(converted, pts: Self.monotonicNow()) else { return }
+        let stamp = Self.monotonicNow()
+        noteHoldTimecode(audio: false, stamp: stamp, timecode: frame.timecode, now: stamp)
+        guard let sampleBuffer = makeSampleBuffer(converted, pts: stamp) else { return }
         renderer.enqueue(sampleBuffer)
         logFrameRate()
     }
@@ -909,6 +926,16 @@ final class NDIService: ObservableObject {
         DispatchQueue.main.async { [weak self] in self?.applyPictureDelay() }
     }
 
+    /// Audio pump (`audio: true`, once per pull) or display tick (`audio: false`, once per new frame).
+    /// When the hold's basis or its skew changes, the picture follows on main.
+    private func noteHoldTimecode(audio: Bool, stamp: Double, timecode: Int64, now: Double) {
+        pictureDelayLock.lock()
+        let changed = audio ? holdBasis.addAudio(stamp: stamp, timecode: timecode, now: now)
+                            : holdBasis.addVideo(stamp: stamp, timecode: timecode, now: now)
+        pictureDelayLock.unlock()
+        if changed { DispatchQueue.main.async { [weak self] in self?.applyPictureDelay() } }
+    }
+
     /// Read by the renderer's clock on the display-link thread.
     private func pictureDelay() -> Double {
         pictureDelayLock.lock(); defer { pictureDelayLock.unlock() }
@@ -923,8 +950,33 @@ final class NDIService: ObservableObject {
         let lead = desktopAudioLead
         toneLock.unlock()
         pictureDelayLock.lock()
-        let depth = frameSyncDepthSeconds
+        let frameSyncDepth = frameSyncDepthSeconds
+        let basis = holdBasis.basis
+        let skew = holdBasis.skew
         pictureDelayLock.unlock()
+        // §19.13: the sender's timecode skew when both streams carry timecodes that keep time;
+        // FrameSync's depth, today's term, when either does not.
+        let depth = (basis == .timecode ? skew : nil) ?? frameSyncDepth
+        let now = Self.monotonicNow()
+        if bridge != nil, firstHoldTermAt == nil, frameSyncDepth > 0 || basis == .timecode {
+            firstHoldTermAt = now
+            // State the basis even if nothing else moves the hold once it has settled.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdBasisSettle + 0.1) { [weak self] in
+                self?.applyPictureDelay()
+            }
+        }
+        let settled = basis == .timecode
+            || (firstHoldTermAt.map { now - $0 >= Self.holdBasisSettle } ?? false)
+        if bridge != nil, settled, loggedHoldBasis != basis {
+            NSLog("%@", String(format: "[NDI] picture hold basis %@ %@: %@ (FrameSync depth %.1f ms)",
+                               loggedHoldBasis == nil ? "this session:" : "switched to",
+                               basis == .timecode ? "TIMECODE" : "DEPTH",
+                               basis == .timecode
+                                 ? String(format: "the sender's timecode skew, %.1f ms", depth * 1000)
+                                 : "a stream carries no timecode that keeps time — FrameSync's depth",
+                               frameSyncDepth * 1000))
+            loggedHoldBasis = basis
+        }
         let delay = PullSourcePictureDelay.seconds(desktopAudioLead: lead,
                                                    frameSyncAudioDepth: depth,
                                                    cardOwnsAudio: deckLinkOwnsAudio)
@@ -939,12 +991,13 @@ final class NDIService: ObservableObject {
         if previous != delay || !loggedPictureDelay {
             loggedPictureDelay = true
             NSLog("%@", String(format: "[NDI] picture held %.1f ms behind the pull clock (%@) · "
-                               + "desktop audio lead %.0f ms + FrameSync audio depth %.1f ms · "
+                               + "desktop audio lead %.0f ms + %@ %.1f ms · "
                                + "renderer queue bound %d",
                                delay * 1000,
                                deckLinkOwnsAudio ? "DeckLink owns audio — SDI unchanged, not held"
                                                  : "desktop plays the programme — A/V 0 by construction",
-                               lead * 1000, depth * 1000,
+                               lead * 1000, basis == .timecode ? "timecode skew" : "FrameSync audio depth",
+                               depth * 1000,
                                renderer.maxQueuedOverride ?? renderer.defaultMaxQueued))
         }
     }
@@ -2075,8 +2128,9 @@ final class NDIService: ObservableObject {
             anchorCount = 1
             let pinned = liveAudioRatioPinned?() ?? false
             NSLog("%@", String(format: "[NDI-AUDIO] desktop timebase anchored %.0f ms behind the "
-                               + "pull clock; picture held %.0f ms (the lead, plus FrameSync's audio "
-                               + "depth once its first second is averaged) — %@",
+                               + "pull clock; picture held %.0f ms (the lead, plus the sender's "
+                               + "timecode skew, or FrameSync's audio depth, once its first second is "
+                               + "averaged) — %@",
                                lead * 1000, pictureDelay() * 1000,
                                pinned
                                 ? String(format: "PINNED (step 3): 10 ms re-anchor armed, checked "
@@ -2188,6 +2242,8 @@ final class NDIService: ObservableObject {
                     // Seconds are derived FROM the ticks, never the other way round — the two loops
                     // below and the continuity trace want a Double; the buffer never does.
                     let pts = Double(ptsTicks) / Double(audio.sampleRate)
+                    // The block's first sample: its stamp and the sender's timecode for it.
+                    noteHoldTimecode(audio: true, stamp: pts, timecode: audio.timecode, now: wallNow)
                     // ── ONE ROUTE OR THE OTHER, NEVER BOTH ──────────────────────────────────
                     //
                     // `LiveAudioSink.enqueue` tees to the tap AND the renderer, so pushing to the
