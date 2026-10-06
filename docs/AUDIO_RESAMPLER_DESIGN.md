@@ -6827,9 +6827,9 @@ was submitted (≈ +3.9 / +2.5 ms submission latency).
 
 - ~~For Robbie's decision: the product change.~~ Decided and built the same night: see "Shipped" below.
 - ~~An OBS → NDI run on the fix.~~ Done below, on a 60 fps OBS canvas.
-- BUGS.md's NDI calibration entry: fixed, uncommitted.
+- BUGS.md's NDI calibration entry: fixed (`a159fd3`).
 
-#### Shipped: the NDI picture hold by the sender's timecodes — 2026-10-05 night (uncommitted)
+#### Shipped: the NDI picture hold by the sender's timecodes — 2026-10-05 night (committed `a159fd3`)
 
 **Decided (Robbie, 2026-10-05):**
 - Hold the picture by the sender's own NDI timecodes on both streams: the mean of (audio PTS − tc)
@@ -6926,6 +6926,41 @@ Media source `manifold-sync-23.976p-h264.mov` looping):
   - So a ~13 s calibration window reads a different grid phase each time: the "+20 ms grid" term of
     §18.3 and BUGS.md, now visible because nothing else in the path scatters.
   - A run with the OBS canvas at 23.976 would remove it. That is Robbie's call; OBS was not changed.
+
+**OBS / DistroAV again, with OBS's output at 23.976** (Robbie set it; NDI declares 24000/1001, frame
+41.719 ms; the same Media source and clip). Logs: `ndihold/obs2398-{1,2,3}.*`.
+
+**Prediction (written before the run):**
+- The spread across reconnects falls from ~19 ms to within ±5 ms.
+- Each run's own scatter falls to ~4–7 ms, as on the SDK sender.
+- The absolute value is OBS's own sender offset; no band is predicted for it.
+
+| reconnect | basis | calibration RESULT 1, 2 (p10…p90) | hold (skew) / depth |
+|---|---|---|---|
+| obs2398-1 | **TIMECODE**, 0 switches | **−76.68** (−80.15…−74.45), **−77.81** (−80.33…−74.90) | 250 + 40.2 / 29.1 |
+| obs2398-2 | TIMECODE, 0 switches | **−76.18** (−78.87…−73.73), **−75.53** (−78.74…−71.05) | 250 + 39.2 / 27.4 |
+| obs2398-3 | TIMECODE, 0 switches | **−76.95** (−81.37…−73.23), **−77.54** (−79.66…−74.87) | 250 + 39.2 / 33.4 |
+
+- **✅ Prediction met.**
+  - All six readings fall in −75.53…−77.81 ms: **2.3 ms across reconnects** (±1.2), against 18.7
+    on the 60 fps canvas.
+  - Each run's own p10–p90 is **4.6–7.7 ms**, against 10–15 at 60 fps and 4–7 on the SDK sender.
+  - So the 60 fps spread was the canvas grid, as suspected.
+- **DistroAV sends timecodes that keep time at 23.976 too.** TIMECODE throughout, no switch.
+- **The absolute: OBS → NDI reads sound ~77 ms early** (calibration would offer ≈ +77 ms,
+  session-only on NDI). That is OBS's own sender offset as its timecodes state it.
+  - Same sign as the constant −50.3 ms in OBS's own recording of this clip (§19.11), though not the
+    same size.
+  - Not investigated; no band was predicted.
+- **⚠️ Here the skew (39–40 ms) is LARGER than the depth (27–33 ms).** At 60 fps it was the reverse
+  (13–14 against 29).
+  - Changing OBS's output rate moved DistroAV's audio-to-video timing by ~25 ms in the skew, and the
+    heard figure by ~85 ms (+12 / −4 → −77).
+  - On the old depth hold this sender would read ≈ −66 ms (the hold ~10 ms shorter).
+  - Both are sender behaviour; nothing in Manifold changed between the two runs.
+- **For the sheet** (BUGS.md, a small UI item; not built): the 60 fps run shows what a rate mismatch
+  costs. When a stream's rate matches no clip exactly, the sheet should say so and recommend
+  matching the sender's output to the clip's rate.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 

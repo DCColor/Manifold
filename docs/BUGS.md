@@ -800,7 +800,27 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 
 ---
 
-## ✅ FIXED 2026-10-05 (uncommitted) — NDI: calibration reads −67…−70 ms on a sender that is in sync by construction
+## ☐ OPEN 2026-10-05 — Calibration sheet: say when the stream's rate matches no clip exactly, and recommend matching the sender to the clip (small UI item; not built)
+
+**Seen in §19.13 (OBS / DistroAV).**
+- With OBS's canvas at 60 fps and the 23.976 clip in its Media source, the sheet only said "This
+  stream is 60 fps: there is no 60 fps clip, 59.94p is the nearest".
+- The readings scattered by about one output frame (+11.8…−5.5 ms across reconnects; 10–15 ms
+  within a run). The pulldown puts each flash on the 60 fps grid, and the phase walks every loop.
+- With the output at 23.976 the same sender read −75.5…−77.8 ms (2.3 ms spread; 4.6–7.7 ms within a
+  run).
+
+**Wanted:**
+- When the stream's frame rate does not match any clip exactly (`SyncClips` nearest, not exact), the
+  sheet says so.
+- It recommends setting the sender's output to the clip's rate (or using the clip for the stream's
+  own rate, where one exists) before trusting a result.
+- The existing rate line and the Save Sync Clip… note are where it would go. No change to the
+  measurement.
+
+---
+
+## ✅ FIXED 2026-10-05 (`a159fd3`) — NDI: calibration reads −67…−70 ms on a sender that is in sync by construction
 
 **Found by stage D (`AUDIO_RESAMPLER_DESIGN.md` §19.10).** An NDI SDK sender synthesising the
 23.976 clip (audio and video per frame, one thread) reads heard A/V −66.75 … −69.80 ms in four runs.
@@ -844,7 +864,7 @@ terms, and the device confirms it (H1 + H3).**
   - Until it ships, NDI calibration on the shipped build offers values ~27 ms too large (23.976) on
     an in-sync sender. Keep it disabled.
 
-**✅ Built 2026-10-05 night (uncommitted; §19.13 "Shipped"). NDI calibration stays enabled
+**✅ Built 2026-10-05 night (committed `a159fd3`; §19.13 "Shipped"). NDI calibration stays enabled
 (session-only), Robbie.**
 - **The hold:** lead + the sender's timecode skew (`PictureHoldBasisEstimate`, DisplayProviders).
   It uses the depth's warm-up and smoothing (1 s, τ 10 s, 2 ms), plus one rule: the timecode must
@@ -862,6 +882,10 @@ terms, and the device confirms it (H1 + H3).**
   - Against the prediction −45…0: 1 of 3 inside. The spread is ~1 output frame on a **60 fps OBS
     canvas** carrying the 23.976 clip.
   - Likely the canvas grid; not tested. A 23.976 canvas run is open, Robbie's call.
+  - **Done, 2026-10-05 night, with OBS's output at 23.976:**
+    - TIMECODE on all 3 reconnects; six readings −75.5…−77.8 ms (2.3 ms spread); per-run p10–p90
+      4.6–7.7 ms. So the 60 fps spread was the canvas grid.
+    - OBS → NDI's own offset reads sound ~77 ms early. That is the sender; not investigated.
 
 ---
 
