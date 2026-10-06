@@ -7161,6 +7161,206 @@ then a 90 s tail).
   - Calibration on Omniscope therefore gives a value good to about ±10–20 ms at best, and only for
     that session. The NDI "session only" rule already covers that.
 
+### 19.14 Cloudflare on the loop-exact clip: WHEP per connection, SRT sound late, and the 90-minute SRT hold (§19.8 D2/D3/D5) — 2026-10-06 (unattended after set-up; no app code changed)
+
+**The question:**
+- §19.10 item 3's Cloudflare readings used the drifting MP4 clip. Re-run D3 (WHEP) and D2 (SRT) on
+  the loop-exact `.mov` (§19.11).
+- Then D5: does one SRT calibration hold for 90 minutes? §19.5's ❌ row had never been measured.
+
+**Predictions (Robbie, written before the runs):**
+- **WHEP:** the spread across reconnects is within ±5 ms. The value is OBS's own WHIP sender offset
+  (no band).
+- **SRT:** sound is heard 70–80 ms EARLIER than on WHEP from the same stream (Cloudflare's SRT output,
+  §18.13). The spread across reconnects is within ±10 ms (its offset varied by session before).
+- **Both re-checks after applying:** within ±2 ms of 0.
+- **The hold:** within ±10 ms of the +0 reading at +90 means one calibration holds for a session.
+  Beyond that, the guide's "recalibrate every 20–30 minutes, or use WHEP" stands. §19.5 predicted a
+  walk of 0 to −157 ms over 90 min.
+
+**Sign convention:** the calibration sheet's. Heard A/V **+** = sound heard **late**, and the
+proposal is its negative. **−** = sound heard **early**.
+
+**Which held:**
+
+| prediction | measured | |
+|---|---|---|
+| WHEP spread across reconnects within ±5 ms | **42.2 ms** between connection means (−35.6 / +6.6 / −0.9); 44.6 ms over all six readings | ❌ |
+| WHEP value = OBS's sender offset, one value | It varies by connection. Each connection's value equals Manifold's SR-line offset at the time of calibration plus a constant **−4.8 ms** (range 0.8 ms; below) | ❌ as a single value |
+| SRT sound 70–80 ms earlier than on WHEP | Sound **late** on SRT, **+41 ms**; about 40 ms LATER than WHEP connections 2–3 | ❌ opposite sign |
+| SRT spread across reconnects within ±10 ms | **5.7 ms** over all seven readings (+37.7…+43.4); 3.6 ms over the six measure-only ones | ✅ |
+| WHEP re-check within ±2 ms | **−2.50 ms** | ❌ by 0.5 ms |
+| SRT re-check within ±2 ms | not run: "NOT APPLICABLE", 0.0 ms of advance available on every reading | — |
+| hold within ±10 ms of +0 at +90 | **+41.27 → +0.54 ms: −40.7 ms**. One step of −44.3 ms between +30 and +60; flat within 3 ms on either side | ❌ |
+
+#### Setup
+
+- **Build:** Profile from HEAD `dff06a0`, `.build-cc/cf-Profile`. It was built from a clean tree after
+  `xcodegen generate` (project.yml was newer than the generated project). Unsigned.
+- **The sender:** OBS, scene SYNC, the Media Source looping `manifold-sync-23.976p-h264.mov` (§19.11),
+  output 23.976. NDI output off.
+  - WHEP legs: the Cloudflare WHIP profile.
+  - SRT legs: the Cloudflare SRT profile, the same scene and clip (see "SRT from a WHIP ingest" below).
+- **Manifold:** one fresh launch per connection, on the saved streams "DC Color Live - WHEP" and
+  "DC Color Live  - SRT".
+  - Each connect logged `[AUDIO-OFFSET] connect … session value 0 ms (from the saved stream's setting)`.
+  - Calibrations ran by UI scripting (§19.13's helpers): Calibrate… ▸ Start ▸ RESULT ▸ Cancel.
+    Apply for Session only. Never Save, so no `defaults` were written.
+- **Settle before the first calibration:**
+  - WHEP: at least 240 s connected AND a `[WHEP-SRFIT]` window with the slope IN USE, per §19.10 item
+    3's addendum. All three settled at +242…+243 s.
+  - SRT: 60 s.
+- **Keychain:** the licence prompt was denied by script, and only that prompt (the helper matches the
+  prompt's text). Robbie allowed the SRT passphrase prompt once with Always Allow before the run.
+- **Logs:** `~/Desktop/manifold-soak/cf1914/`: `<whep|srt>-<n>.manifold.log`, `run.driver.log`,
+  `preflight.*`, and `srt-0-whip-ingest-nobytes.manifold.log`. The drivers are in the session
+  scratchpad (`run1914*.sh`, `lib.sh`).
+- ⚠️ **Driver bug, caught live:** `ensure_window` assigned a global `n`, which overwrote the connection
+  number inside the driver. Every WHEP connection was labelled "1" in `run.driver.log`, and the Apply on
+  the third would have been skipped.
+  - The driver was stopped during WHEP-3's second calibration. Manifold kept running, and a fixed driver
+    resumed it. The log file names were always right.
+  - No calibration was lost or repeated. `run.driver.log` marks the restart.
+
+#### 1. WHEP — three connections (12:03–12:20)
+
+| connection | connected | cal 1 heard (p10…p90) | cal 2 heard (p10…p90) | first SR-line offset (session start) | SR-line offset at cal 1 (window, video t = 251 s) | heard₁ + offset at cal 1 |
+|---|---|---|---|---|---|---|
+| 1 | 12:03:53 | **−34.50** (−35.66…−33.44) | **−36.75** (−37.58…−34.93) | +4.211 | +29.331 | −5.17 |
+| 2 | 12:09:12 | **+7.83** (+5.81…+8.75) | **+5.33** (+4.71…+6.73) | −26.597 | −12.226 | −4.40 |
+| 3 | 12:14:32 | **+0.08** (−0.88…+0.69) | **−1.79** (−3.10…−0.79) | −12.225 | −4.785 | −4.71 |
+
+(ms; 10 pairs each; each connection's slope +62…+80 ppm IN USE at the time of calibration.)
+
+- **Within a connection the two readings agree within 2.5 ms. Across connections the means span 42.2 ms.**
+  - Connection 1: sound **heard ~35 ms early**.
+  - Connections 2 and 3: within ±8 ms of 0.
+  - This is not §19.10's early-settle wander: every calibration came at +4 min, with the slope in use.
+- **Apply on connection 3** (a third calibration, 12:19:52): heard −4.38 → proposed **+4 ms**, Apply for
+  Session. One splice, INSERT 192 fr / 4.0 ms, "line moved −4.0 ms with it".
+- **Re-check, 12:20:10:** heard **−2.50 ms** (p10…p90 −3.29…−1.93), "Sound is heard 2 ms early",
+  proposed +6. ❌ ±2 by 0.5 ms.
+- No starvation hold, recovery drop or cut on any WHEP connection.
+
+**The per-connection difference against the SR-line offset (Robbie's read-only check, as in the MediaMTX
+`whepx`/`srabs` sessions, §19.10):**
+- **Against the offset at session start (the FIRST LINE): ❌.**
+  - heard₁ + first offset = −30.29 / −18.77 / −12.15 ms, an 18.1 ms range.
+  - Between connections: heard moved +42.33 and +34.58 ms (1→2, 1→3). The first offset moved −30.81 and
+    −16.44, and its negatives (+30.81, +16.44) miss the heard differences by 11.5 and 18.1 ms.
+- **Against the offset in use when calibration ran: ✅, within 0.8 ms.**
+  - heard₁ + offset at cal 1 = −5.17 / −4.40 / −4.71 ms.
+  - Between connections: heard +42.33 / +34.58 ms; −Δoffset +41.56 / +34.12 ms.
+- **Why the two differ on Cloudflare and did not on MediaMTX:**
+  - MediaMTX's calibrations ran ~10 s after connect, while the first line was still the line in use.
+  - Here the line moved +25.1 / +14.4 / +7.4 ms between the first SR pair and t = 251 s. That is the
+    window offset ramp §19.10's addendum saw, as the slope comes into use.
+- **What it says:**
+  - As on MediaMTX, what differs between Cloudflare WHEP connections is the audio↔video relation
+    Manifold's SR line states, not the content.
+  - The content relation through Cloudflare WHEP was the same on all three connections: **≈ −4.8 ms**
+    (sound ~5 ms early) once the line is subtracted.
+  - Whether the SRs or Manifold's fit makes the per-connection offset is not separated (the open
+    MediaMTX item; it needs a second WHEP client).
+  - Not investigated further, per the brief.
+
+#### 2. SRT from a WHIP ingest: no data (12:20–12:21)
+
+- The brief had SRT read "the same OBS stream", still published over WHIP.
+- Cloudflare's SRT output accepted the encrypted connection and sent **0 bytes in 32 s**, then closed
+  it: `connection lost … end of stream`, then "Couldn't identify the stream's contents".
+- Every Cloudflare SRT session on record (§18.10–§18.13, §19.10 item 3) published over SRT.
+- **Inference, not checked against Cloudflare's documentation:** Cloudflare does not serve a
+  WHIP-published live input on its SRT output.
+- Robbie switched OBS to the Cloudflare SRT profile (same scene, clip and 23.976) at ~13:15. So WHEP and
+  SRT here are two ingests from the same OBS and clip about an hour apart, not one stream read two ways.
+- Kept as `srt-0-whip-ingest-nobytes.manifold.log`.
+
+#### 3. SRT — three connections (13:17–13:25)
+
+| connection | cal 1 heard (p10…p90; pairs) | cal 2 heard (p10…p90; pairs) | proposal |
+|---|---|---|---|
+| 1 | **+39.79** (+38.65…+40.35; 10) | **+41.34** (+39.57…+42.57; 10) | −40 / −41 · NOT APPLICABLE, 0.0 ms available |
+| 2 | **+42.17** (+40.42…+42.76; 10) | **+41.35** (+40.76…+41.87; 10) | −42 / −41 · NOT APPLICABLE, 0.0 ms |
+| 3 | **+41.45** (+40.86…+43.71; 10) | **+43.42** (+41.93…+44.39; 16) | −41 / −43 · NOT APPLICABLE, 0.0 ms |
+| 3, for Apply | **+37.73** (+36.63…+39.22; 14) | — | −38 · NOT APPLICABLE, 0.0 ms: **nothing applied** |
+
+- **Sound heard ~41 ms LATE**, steady across reconnects: seven readings within 5.7 ms.
+- **Against §18.13's "~70–80 ms early": ❌, the second session in a row.** §19.10 item 3 (10-05, on the
+  drifting MP4) also read late: +26.75 on its first reading.
+- **Against WHEP:** sound is about 40 ms later on SRT than on WHEP connections 2–3, and ~77 ms later
+  than WHEP connection 1. The prediction was 70–80 ms *earlier*.
+- **No Apply was possible**, so there was no re-check.
+  - A sound-late result needs an advance, and on this path the renderer queue never has the 160 ms
+    keep + fade + margin plus the advance (§19.10 item 3).
+  - Every reading said "at most 0.0 ms available".
+- **One starvation hold on connection 3:** 13:24:20, "no input for 196 ms". It held 66 ms, then
+  `RECOVERY DROP #1 (WHOLE DEBT)` 58.5 of 58.5 ms, "RECOVERED 0.3 s after".
+  - It fell inside cal 1's window, which still read +41.45 with p10…p90 2.9 ms.
+  - No other hold on SRT connections 1–2.
+
+#### 4. The 90-minute hold on SRT connection 3 (13:25–14:56)
+
+- **The brief's condition could not be met:** no value could be applied (§3). The hold ran at O = 0 ms,
+  the saved value, on the same connection with no reconnect.
+- So it measures the walk of Cloudflare SRT's own offset over 90 min, which is the quantity §19.5's ❌ row
+  is about. It does not test an applied value.
+
+| reading | time | heard A/V (p10…p90; pairs) | − (+0) | sheet |
+|---|---|---|---|---|
+| +0 | 13:25:48 | **+41.27** (+38.96…+43.10; 10) | — | sound 41 ms late · NOT APPLICABLE, 0.0 ms |
+| +30 | 13:55:50 | **+44.19** (+41.93…+46.10; 10) | +2.92 | sound 44 ms late · NOT APPLICABLE, 0.0 ms |
+| +60 | 14:25:55 | **−0.14** (−1.95…+1.23; 10) | **−41.41** | in sync, nothing to apply |
+| +90 | 14:56:04 | **+0.54** (−0.34…+1.61; 16) | **−40.73** | proposed −1 · NOT APPLICABLE, 0.0 ms |
+
+(ms; O = 0 throughout; Cancel each time.)
+
+**Starvation holds over the session:** 9, every one "no input for" 45–239 ms at a renderer queue of
+~19.5 ms, except #4.
+- **#4–#5, 14:04:20–22: a 1.48 s input gap**, then 81 ms more. `⏩ STARVATION CATCH-UP` put the whole
+  1 547.9 ms debt onto the line in one timebase write, RECOVERED. `timebase−clock` was back within
+  ±3.5 ms a second later.
+- **The other seven:** `RECOVERY DROP (WHOLE DEBT)` each, RECOVERED 0.3 s after. One exception: #3
+  (14:02:11) dropped 36.7 of 39.5 ms owed, 2.8 ms short.
+- Five of the nine fell at hh:m4:20 (13:24:20, 13:34:20, 14:04:20, 14:44:20, 14:54:20). Noted, not
+  investigated.
+- The 1.48 s gap is the only large event in the log between +30 and +60. Calibration readings alone
+  cannot say whether the −44 ms step happened at it.
+- **Not investigated**, per the brief ("record the measured figure").
+
+**Reading:**
+- **One calibration does not hold for a session on Cloudflare SRT. ❌, by four times the band.**
+- **The way it failed differs from §19.5's model.** It was not a slope: +2.9 ms over the first 30 min,
+  then +0.7 ms over the last 30 min.
+- **It was one step of −44 ms (sound ~44 ms earlier), in a span that had a 1.48 s input gap.**
+  - Before the step: sound ~41–44 ms late, not correctable here.
+  - After it: in sync.
+  - Had a +41 ms correction been applicable and applied at +0, sound would have read ~44 ms early
+    after the step.
+- **§19.5's predicted walk was 0 to −157 ms over 90 min.** −40.7 ms is inside that range in size and
+  sign, but as a step, not a slope.
+- **Sign, plainly:** sound was heard **late** by ~41 ms for the first ~40–60 min. It ended **in sync**
+  (within 1 ms).
+
+#### What changes
+
+- **User guide (`USER_GUIDE_SYNC.md`):**
+  - The Cloudflare SRT lines now say the offset has gone both ways between sessions. Sound late, the
+    case measured in the last two sessions, cannot be corrected from Manifold on this path.
+  - "Recalibrate every 20–30 minutes, or use WHEP" stands. It now names a step, not only a slow drift.
+  - Cloudflare WHEP: the reading can differ by connection (tens of ms). Calibrate after each connect, a
+    few minutes in, and apply it for the session rather than saving it.
+  - The editor notes record what was measured here.
+- **For Robbie, not decided here:**
+  - WHEP's per-connection SR-line offset now has two servers. Whether it is the servers' SRs or
+    Manifold's fit stays open. A browser WHEP read of one Cloudflare connection would split it, as
+    planned for MediaMTX.
+  - Until then, Save on a WHEP bookmark stores a value that is right only for the connection it was
+    measured on.
+  - Calibration on WHEP is better read after the slope is in use (~4 min), as done here: the line still
+    moves 7–25 ms in the first minutes.
+- No app code changed. No `defaults` were written.
+
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 
 **Protocol.** `repro/run.sh` served the noise-floor reference (`ref-nob.ts`, one AAC frame per PES,

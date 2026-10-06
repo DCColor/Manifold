@@ -1,7 +1,7 @@
 # Audio sync on live streams
 
 > **DRAFT, 2026-10-05.** User guide section. Every figure here comes from
-> `AUDIO_RESAMPLER_DESIGN.md` §19 (19.1–19.13) and `BUGS.md`. "Notes for the editor" at the end lists
+> `AUDIO_RESAMPLER_DESIGN.md` §19 (19.1–19.14) and `BUGS.md`. "Notes for the editor" at the end lists
 > the claims still waiting on a measurement, and the screenshots needed.
 
 ---
@@ -93,6 +93,10 @@ The next time you connect to that stream, Manifold starts with the saved value.
 **Revert to Saved** goes back to the saved value if you have nudged away from it. Both items are
 greyed out when the current offset already matches the saved one.
 
+Save a value only on a stream whose offset is the same each time you connect. On WebRTC (WHEP)
+streams from Cloudflare and MediaMTX it can change from one connection to the next (section 5), so
+apply it for the session there.
+
 You can also type a value into the **Audio offset** field when you edit a saved stream (Connect
 Stream… ▸ edit). A value outside −250 to +500 ms is refused under the field, and nothing is saved.
 
@@ -112,8 +116,8 @@ that with sound it is already holding, and it keeps a safety margin of about 160
 runs dry. How much sound it holds depends on the stream:
 
 - On some streams there is room for 200 ms or more.
-- On others there is very little, or none. In our tests, one Cloudflare SRT session had no room at
-  all.
+- On others there is very little, or none. In our tests, Cloudflare's SRT output had no room at all,
+  session after session.
 
 When you ask for more than there is room for, Manifold refuses the whole change. The offset stays
 where it was, and a banner explains:
@@ -154,7 +158,8 @@ you press Apply.
    any other sound source on the sender (microphones, other clips), so the stream carries only the
    clip's beeps.
 3. **Let the stream settle.** Wait about a minute after connecting. A stream that has just connected
-   can take up to a minute to settle.
+   can take up to a minute to settle. On Cloudflare's WebRTC (WHEP) output, wait about four minutes
+   (section 5).
 4. **Open calibration:** **A/V ▸ Calibrate…**
 5. **Press Start.** Leave the clip playing, and don't touch the offset while it measures. If the
    offset changes during a run, calibration starts again ("The audio offset changed — measuring
@@ -311,21 +316,29 @@ in sync, and Manifold held sync across the session.
 
 ### Cloudflare Stream, SRT output
 
-- **Calibrate it.** In our measurements, Cloudflare's SRT output carried sound about 70–80 ms
-  **early**. That needs a positive offset (sound later), which always applies.
-- **Long sessions:** the offset on Cloudflare's SRT output can drift during a session, by a different
-  amount each session. We have measured up to about 40 ms in 25 minutes. Re-calibrate every 20–30
-  minutes, or use Cloudflare's WebRTC (WHEP) output.
-- **Making sound earlier:** there is often little or no room on this path (section 2). If calibration
-  ever proposes a negative value here, it will probably say "Not applicable".
+- **Calibrate it, and expect either direction.** The offset on Cloudflare's SRT output has differed
+  from session to session. In one, sound arrived about 70–80 ms **early**. In two later ones it
+  arrived about 30–40 ms **late**.
+  - **Sound early:** calibration proposes a positive offset (sound later). That always applies.
+  - **Sound late:** calibration proposes a negative offset, and on this path it will almost certainly
+    say "Not applicable". There is no room to make sound earlier here (section 2). Correct it at the
+    sender, or use Cloudflare's WebRTC (WHEP) output.
+- **Long sessions:** the offset can change during a session, by a different amount each time. We
+  have measured a slow drift of up to about 40 ms in 25 minutes, and a sudden 44 ms jump partway
+  through a 90-minute session. Calibrate again every 20–30 minutes, or use Cloudflare's WebRTC (WHEP)
+  output.
+- **The sender must publish over SRT** for Cloudflare's SRT output to play. A stream published with
+  WebRTC (WHIP) could not be played over SRT in our tests: Manifold connected but received nothing.
 
 ### Cloudflare Stream, WebRTC (WHEP) output
 
-- **Cloudflare adds no offset of its own here.** What you measure is the sender's own offset. In our
-  tests with OBS, the sound was about 40 ms late.
-- **One calibration holds for long sessions.** We measured under 10 ms of drift over 4½ hours.
-- **Give it a few minutes after connecting.** If a check soon after connecting doesn't read near 0,
-  wait a few minutes and calibrate again.
+- **Calibrate after each connection, and apply it for the session.** The offset can be different
+  every time you connect. In one test with OBS, three connections to the same stream read 36 ms early,
+  7 ms late and 1 ms early. A saved value would be wrong after the next reconnect.
+- **Wait about four minutes after connecting before you calibrate.** The timing Manifold works from
+  is still settling for the first few minutes. A value taken in the first minute can be off by tens of
+  milliseconds a few minutes later.
+- **Once calibrated, it holds for long sessions.** We measured under 10 ms of drift over 4½ hours.
 - There is plenty of room to make sound earlier on this path.
 
 ### MediaMTX
@@ -393,8 +406,8 @@ of milliseconds in our tests:
 - **turning "clocked" or paced NDI output on or off** (about 85 ms on one sender);
 - **switching to a different encoder or sender.** Each has its own offset.
 
-Also calibrate again after reconnecting to MediaMTX over WebRTC (section 5), and every 20–30 minutes
-on long Cloudflare SRT sessions.
+Also calibrate again after reconnecting to Cloudflare or MediaMTX over WebRTC (WHEP) (section 5),
+and every 20–30 minutes on long Cloudflare SRT sessions.
 
 ### The results jump around between runs
 
@@ -458,13 +471,31 @@ The server's name stays, so we can tell which service you were using.
 
 ### Claims to re-check before this ships
 
-- **Cloudflare SRT "sound early ~70–80 ms":** measured 2026-09-29 (§18.13, the device agreed). The
-  attended 2026-10-05 run read sound **late** (+27 ms), but it was taken on the drifting MP4 clip and
-  must be re-run on a loop-exact clip (§19.10 item 3, §19.11). The "drift up to 40 ms in 25 min,
-  re-calibrate every 20–30 min" advice is §19.5's. The 90-minute hold check (§19.8 D5) has not run.
-- **Cloudflare WHEP "give it a few minutes":** from the 2026-10-05 session's wander. It was largely
-  the MP4 clip drift, but the SR-fit observation is unresolved (§19.10, item 3 addendum). "About
-  40 ms late with OBS" is one session (proposal −40), on the drifting clip.
+- **Cloudflare SRT, both directions:** "about 70–80 ms early" is 2026-09-29 (§18.13, the device
+  agreed). "About 30–40 ms late" is 2026-10-05 (+27 ms, on the drifting MP4, §19.10 item 3) and
+  2026-10-06 on the loop-exact `.mov` (§19.14):
+  - seven readings over three reconnects, +37.7 … +43.4 ms;
+  - Not Applicable every time, 0.0 ms of advance available.
+  - Whether the direction depends on the session, the OBS set-up or Cloudflare is not known. The
+    guide says "either direction" for that reason.
+- **Cloudflare SRT "a sudden 44 ms jump" and "every 20–30 min":** the 90-minute hold (§19.8 D5) ran
+  2026-10-06 (§19.14) at O = 0, because nothing could be applied:
+  - +41.27 → +44.19 → −0.14 → +0.54 ms at +0 / +30 / +60 / +90;
+  - one −44 ms step between +30 and +60, in a span with a 1.48 s input gap;
+  - ❌ against the ±10 ms band.
+  - "Up to about 40 ms in 25 minutes" is still §19.5's slope figure. The step is new.
+- **Cloudflare SRT "the sender must publish over SRT":** from one attempt on 2026-10-06 (§19.14 §2). A
+  WHIP-published input gave 0 bytes in 32 s on the SRT output. Not checked against Cloudflare's
+  documentation. Confirm before publishing.
+- **Cloudflare WHEP "different every connection; wait about four minutes":** 2026-10-06, §19.14 §1.
+  - Three connections read −35.6 / +6.6 / −0.9 ms (means of two each, all at +4 min with the
+    SR-fit slope in use). Each tracks Manifold's SR-line offset at the time to within 0.8 ms, as on
+    MediaMTX.
+  - The line moved 7–25 ms in the first four minutes, which is the reason for "four minutes".
+  - The WHEP re-check read −2.50 ms. That is within step 9's "about 3 ms" but not the ±2 ms band.
+  - The 2026-10-05 "about 40 ms late" was dropped: one session on the drifting clip.
+  - Whether Cloudflare's SRs or Manifold's fit makes the per-connection offset is not separated.
+    "Apply for Session, not Save" rests on the measurement either way.
 - **MediaMTX per-session offset:** cause not yet separated (MediaMTX's WebRTC output vs Manifold's
   reading of it). It needs a browser WHEP read (BUGS.md, OPEN 2026-10-01). If it turns out to be
   Manifold's, section 5 changes.
