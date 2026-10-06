@@ -62,4 +62,10 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   streaming fix is verified against at least one non-Cloudflare server (local OBS SRT, NDI,
   or MediaMTX for WHIP/WHEP) before it is committed. Constants must not be tuned from a
   single server's traces.
+- Source colour changes only through `MetalVideoRenderer.setSourceColorSpace` (and a live teardown
+  only through `SavedDisplayProviders.restore`, which clears it). Nothing writes scope colour state
+  directly: the scope models' `sourceMatrixCode`, `sourceTransferCode`, `sourcePrimariesCode` and
+  `spaceReadout` are written only by `ScopeColorFeed`, from the renderer. A new transport or a
+  colorimetry override reaches the scope headers by reaching the renderer. Per-transport scope
+  writes are how the headers came to describe a previous source (2026-10-06).
 - Never add Co-Authored-By or any AI authorship trailer to commit messages or PR descriptions.

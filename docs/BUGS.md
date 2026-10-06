@@ -797,6 +797,77 @@ to send Export Diagnostics for a sync problem.
 
 ---
 
+## ☐ OPEN 2026-10-06 — PRE-EXISTING, ALL BUILDS — SRT colour always reads UNDECLARED: the vendored FFmpeg has no H.264 decoder
+
+**Status:** OPEN. Pre-existing in every build that has had SRT; not caused by the 2026-10-06 scope colour
+work, which only made it visible. **Found:** 2026-10-06, scope-colour device run, by an SRT stream whose
+tags were known in advance.
+
+**What:** every SRT stream reaches the renderer with primaries, transfer and matrix UNDECLARED, whatever
+the bitstream says. So an SRT source is always `assumed` 709 SDR: the layer colorspace, the EDR opt-in,
+the scope maths and headers, the chain readout's tier, DeckLink tagging. A PQ stream over SRT is shown and
+scoped as SDR 709.
+
+**Why:** `fillVideoFormat` (`App/SRT/SRTSession.m`) copies `codecpar->color_*` after
+`avformat_find_stream_info`. Those fields are filled by DECODING frames, and the vendored FFmpeg is built
+with `--disable-everything` plus the H.264 **parser** only — no H.264 decoder
+(`scripts/build_ffmpeg.sh`, the `--enable-*` list). The parser does not fill colour, so the probe never
+does, and `StreamColorimetry`'s "unspecified → undeclared" branch fires on every stream.
+
+**Measured:** a test stream encoded with libx264 and `colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc`
+reads `bt2020nc/bt2020/smpte2084` in the system ffmpeg. Served over SRT (ffmpeg listener, ⌃⌥D with
+`MANIFOLD_SRT_DEBUG_URL`), Manifold logged
+`[SRT] colorimetry: primaries=UNDECLARED → assuming Rec.709  transfer=UNDECLARED → assuming Rec.709  matrix=UNDECLARED → assuming Rec.709`.
+An untagged stream logs the same line, so the two cannot be told apart.
+
+**Re-check once fixed:** the stage-2 spike finding that a real OBS→SRT feed "declares nothing" (every axis
+CICP 2 — recorded in `SRTFrameRouter.swift`'s colorimetry block) may share this cause rather than being a
+property of OBS. It has to be measured again on the fixed build before anything relies on it.
+
+**Preferred direction (Robbie, 2026-10-06):** parse the SPS VUI colour signalling ourselves — the access-unit
+builder already has the SPS in hand — in code shared with WHEP, so WHEP can report declared colour too
+instead of its fixed `assumedRec709SDR`. **No change to the FFmpeg build** (its decoder list carries the
+LGPL/dylib provenance rules in `CLAUDE.md`).
+
+**Comments that are wrong today and are corrected AS PART OF THAT FIX, not before:** the "SRT can state
+the truth" / "libavformat fills `codecpar->color_*` from the same VUI" statements in
+`SRTFrameRouter.swift` (colorimetry block), `LiveDisplayRoute.swift` (`Colorimetry`), and
+`WHEPFrameRouter.swift` (the "AN SRT SOURCE MUST NOT COPY THIS" note).
+
+**Matters for:** the colorimetry override plan (Stage B, SRT) — until this is fixed every SRT stream's tier
+is `assumed`, so an override is the only way to get anything but 709 SDR on SRT.
+
+---
+
+## ☐ OPEN 2026-10-06 — UNVERIFIED — check in colour Phase 4: a file's container tags vs its decoded frames' tags
+
+**Status:** a possibility found by reading, never observed. **Check it in Phase 4** (primaries and
+transfer handled independently, `COLOR_MANAGEMENT_FINDINGS.md` §6.4), which needs the same fixtures.
+
+The picture and the scopes take a file's colour from two different places:
+- **The shader's YCbCr matrix** is read per frame from the DECODED buffer's attachments
+  (`MetalVideoRenderer.colorParams(for:)`).
+- **Everything else** — the scope maths' matrix, the CIE codes, the layer colorspace, the EDR
+  opt-in, the DeckLink tagging, the chain readout and (since 2026-10-06) the scope headers — reads
+  the renderer's source codes, which a file sets once from its FORMAT DESCRIPTION
+  (`FrameEngine` → `onSourceColorTags`, `MediaInspector.colorCodes`), or from libav's codecpar on the
+  MXF/DNxHR path.
+
+If a file's container tags (`colr`/`nclx`, or the MXF descriptor) differ from what the decoder puts
+on its output buffers — the bitstream's own colour signalling, or a decoder default — the picture is
+decoded with one matrix while the scopes weight luma and place chroma with the other, and the
+readouts describe the container. `FrameEngine`'s own comments call the per-frame buffer tags
+"flaky", which is why the source codes come from the format description; nothing checks the two
+agree.
+
+**To check:** a fixture whose `colr` atom and bitstream colour signalling disagree (author with
+ffmpeg, e.g. `-colorspace bt709` in the bitstream and a 2020 `colr` atom), on both the AVFoundation
+and the libav path; log `attachmentSummary` of a decoded frame beside the renderer's codes. **Done
+means:** either the two are shown to agree on every path, or the shader takes its matrix from the
+renderer's codes like everything else.
+
+---
+
 ## ✅ FIXED 2026-10-06 (uncommitted) — RELEASE-BLOCKING — WHEP calibration read what is heard minus the SR-line offset
 
 **Found by `AUDIO_RESAMPLER_DESIGN.md` §19.15. Fixed and verified the same day (§19.15, "The fix, built and

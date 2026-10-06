@@ -552,12 +552,12 @@ final class WaveformScopeModel: ObservableObject {
     weak var renderer: MetalVideoRenderer?
 
     /// Source YCbCr matrix code (CICP), for the header label ONLY — the luma MATH reads the same
-    /// code off the renderer (computeWaveformGPU), so label and weighting stay in lock-step. Set
-    /// from ContentView on metadata change, mirroring cieModel.spaceReadout. nil/2/unknown → 709.
+    /// code off the renderer (computeWaveformGPU), so label and weighting stay in lock-step. Written
+    /// ONLY by `ScopeColorFeed`, from that same renderer code. nil/2/unknown → 709.
     @Published var sourceMatrixCode: Int?
 
     /// Source transfer-function code (CICP) — drives the AUTO vertical-scale ruler (16=PQ, 18=HLG,
-    /// else SDR), INDEPENDENTLY of the matrix/primaries. Set from ContentView the same way as
+    /// else SDR), INDEPENDENTLY of the matrix/primaries. Written by `ScopeColorFeed` the same way as
     /// sourceMatrixCode; the graticule is the only consumer (the TRACE is unaffected). nil/2 → SDR.
     @Published var sourceTransferCode: Int?
 

@@ -147,8 +147,8 @@ final class NDIService: ObservableObject {
     /// each time the override moves.
     ///
     /// The pipeline does not read this: the buffer's CICP attachments carry the colorimetry
-    /// downstream, exactly as they do for a file. This is the DATA MODEL for the readouts — the
-    /// toolbar picker and scope headers today, the inspector's rows in a later step. Its `tier`
+    /// downstream, exactly as they do for a file. This is the DATA MODEL for the Color control's
+    /// face and picker — NOT the scope headers, which read the renderer (`ScopeColorFeed`). Its `tier`
     /// says which of Declared / Assumed / Overridden produced it, so nothing can present a default
     /// or an assertion as a reading.
     @Published private(set) var colorInfo: NDIColorInfo = .assumedRec709

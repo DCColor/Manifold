@@ -958,6 +958,11 @@ final class MetalVideoRenderer {
     /// A notification costs that file nothing and reaches a per-window observer directly.
     static let sourceColorStateDidChange = Notification.Name("ManifoldSourceColorStateDidChange")
 
+    /// Posted on the **main thread** when a live source has let go of this renderer — after its
+    /// source colour has been cleared. `object` is the renderer. `ScopeColorFeed` blanks the
+    /// window's scope traces on it, which is the one trace wipe HLS ever had.
+    static let liveSourceDidRelease = Notification.Name("ManifoldLiveSourceDidRelease")
+
     /// The colour state waiting to be installed on the layer, handed from MAIN to the RENDER
     /// THREAD. Guarded by `refreshLock`, like every other main→render one-shot on this type.
     ///
@@ -1211,6 +1216,19 @@ final class MetalVideoRenderer {
         let post = { NotificationCenter.default.post(
             name: Self.sourceColorStateDidChange, object: self) }
         if Thread.isMainThread { post() } else { DispatchQueue.main.async(execute: post) }
+    }
+
+    /// A live source has let go of this renderer (`SavedDisplayProviders.restore`, the one point
+    /// every live teardown reaches — normal disconnect and drop-on-error alike). MAIN THREAD.
+    ///
+    /// Forgets the departed stream's source colour with the same nil codes `FrameEngine.stop()`
+    /// publishes for a file, so the renderer, the chain readout and the scope headers stop
+    /// describing a stream that is gone. Safe after `clearToBlack`: the render thread consumes
+    /// the pending clear first and drops the retained frame, so the re-present this sets has
+    /// nothing to repaint.
+    func liveSourceReleased() {
+        setSourceColorSpace(primaries: nil, transfer: nil, matrix: nil, provenance: .assumed)
+        NotificationCenter.default.post(name: Self.liveSourceDidRelease, object: self)
     }
 
     func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?,

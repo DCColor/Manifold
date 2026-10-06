@@ -397,6 +397,9 @@ struct ContentView: View {
     @StateObject private var vectorscopeModel = VectorscopeScopeModel()
     @StateObject private var cieModel = CIEScopeModel()
     @StateObject private var meterModel = AudioMeterModel()
+    /// The ONLY writer of the four models' source colour fields — from this window's renderer, for
+    /// every source. Bound in `.onAppear`; see ScopeColorFeed.swift and CLAUDE.md.
+    @StateObject private var scopeColorFeed = ScopeColorFeed()
     /// DeckLink output state (on/off + selected device) — shared singleton, observed so the toolbar
     /// control and the ⌃⌥O/⌃⌥⇧O shortcuts always agree.
     @ObservedObject private var deckLink = DeckLinkService.shared
@@ -687,6 +690,10 @@ struct ContentView: View {
         // WHAT LEGITIMATELY REMAINS: work that needs THIS VIEW'S state and touches nothing app-wide.
         .onAppear {
             armIdleIfNeeded()
+            // The scope headers' source colour, from this window's renderer — BEFORE the sampling
+            // below, which reseeds through it. Here and not as its own modifier (§6.7).
+            scopeColorFeed.bind(deck: deck, waveform: waveformModel, parade: paradeModel,
+                                vectorscope: vectorscopeModel, cie: cieModel)
             // Persisted arrangement may reopen the tray with scopes already on —
             // start their sampling to match the restored visibility.
             updateScopeSampling()
@@ -811,38 +818,23 @@ struct ContentView: View {
                                                                frameRate: meta.frameRate)
                 }
             }
-            // Feed the CIE header the detected source space (honest about untagged → 709 assumed).
-            cieModel.spaceReadout = meta.map(Self.cieSpaceReadout) ?? ""
-            // Feed the matrix-aware scopes their source CICP codes (header labels + vectorscope
-            // graticule). The MATH reads the same codes off the renderer, so labels can't disagree.
-            waveformModel.sourceMatrixCode = meta?.colorMatrixCode
-            vectorscopeModel.sourceMatrixCode = meta?.colorMatrixCode
-            vectorscopeModel.sourcePrimariesCode = meta?.colorPrimariesCode
-            // Transfer code drives the waveform/parade AUTO vertical scale (PQ nits / HLG %·nits),
-            // independent of the matrix/primaries. Graticule-only — the trace is unchanged.
-            waveformModel.sourceTransferCode = meta?.transferFunctionCode
-            paradeModel.sourceTransferCode = meta?.transferFunctionCode
+            // ⚠️ NO SCOPE COLOUR HERE ANY MORE. The scope headers read the RENDERER, through
+            // `ScopeColorFeed`, which the `setSourceColorSpace` call above already reaches. This
+            // block used to write them from the file's metadata, which is why they kept a file's
+            // PQ ruler over a WHEP stream (2026-10-06). See CLAUDE.md's source-colour rule.
         }
-        // NDI's colorimetry reaches the shader, the layer and the scope KERNELS through the pixel
-        // buffer's CICP attachments, with no help from here. The scope HEADERS and the auto
-        // vertical scale do not read the buffer, though — they read these models, which the block
-        // above only ever fills from a FILE. So an NDI source needs the same wiring, from the same
-        // codes, or the scopes would do PQ math under a "Rec.709" label. Fires on connect and on a
-        // mid-stream colorimetry change (NDIService republishes on both).
-        //
-        // ⚠️ EVERY ONE OF THE FOUR STREAM OBSERVERS BELOW IS GATED ON `drivesDevices`, because they
+        // ⚠️ EVERY ONE OF THE THREE STREAM OBSERVERS BELOW IS GATED ON `drivesDevices`, because they
         // observe SINGLETONS and therefore fire in EVERY open window. Ungated, a stream connecting
-        // or disconnecting in window A would repoint window B's scope colorimetry and — on
-        // disconnect — call `clearScopes()` on window B, blanking the scopes of a window that is
-        // quietly showing a paused file and has nothing to do with the stream.
-        .onChange(of: ndi.colorInfo) { _, info in
-            guard deck.gate.drivesDevices, ndi.isConnected else { return }
-            applyNDIColorToScopes(info)
-        }
+        // or disconnecting in window A would call `clearScopes()` on window B, blanking the scopes
+        // of a window that is quietly showing a paused file and has nothing to do with the stream.
+        //
+        // NONE OF THEM CARRIES SCOPE COLOUR. That used to be per transport — NDI's colour info and
+        // SRT's colorimetry each had an `.onChange` here, WHEP and HLS had none, and nothing reset
+        // them — and it is now `ScopeColorFeed`, from the renderer, for every source. Both of those
+        // `.onChange`s were removed, not emptied: they did nothing else.
         .onChange(of: ndi.isConnected) { _, connected in
             guard deck.gate.drivesDevices else { return }
             if connected {
-                applyNDIColorToScopes(ndi.colorInfo)
                 // A connecting stream is a newly-active source — arm the auto-hide so the control
                 // surface reveals then settles exactly as it does when a file loads (line 295).
                 armIdleIfNeeded()
@@ -858,9 +850,7 @@ struct ContentView: View {
         // WHEPFrameRouter.deactivate) already wipes the PICTURE, but the SCOPES still show the last
         // stream's trace — the identical stale-overlay NDI clears just above — so blank them here too
         // for a fully clean empty state. A file taking over instead repaints both on its next frame.
-        // On connect, arm the auto-hide so the control surface reveals then settles, matching NDI;
-        // there is no color push, because WHEP colorimetry is assumed 709 and set in
-        // WHEPFrameRouter.activate rather than published as a source property.
+        // On connect, arm the auto-hide so the control surface reveals then settles, matching NDI.
         .onChange(of: whep.isConnected) { _, connected in
             guard deck.gate.drivesDevices else { return }
             if connected {
@@ -868,22 +858,6 @@ struct ContentView: View {
             } else {
                 clearScopes()
             }
-        }
-        // SRT is the first PUSH source that can state its own colour, so it gets the wiring NDI
-        // has and WHEP could not: the scope HEADERS and the auto vertical scale read these models,
-        // not the pixel buffer, so without this an SRT stream that declared PQ would be scoped with
-        // PQ math under a "Rec.709" label. `bufferTags` is an NDIColorInfo carrying the SAME
-        // declared/assumed provenance, so `applyNDIColorToScopes` and `cieSpaceReadout` label an
-        // undeclared axis "(assumed)" for free — which is the common case, since the measured
-        // OBS→SRT feed declares nothing at all. (That helper's NDI-prefixed name is now wrong; the
-        // type it takes has been the shared CICP vocabulary since WHEP started using it.)
-        //
-        // Keyed on the colorimetry rather than on `isConnected`, because `isConnected` is published
-        // at connect() — seconds before the demuxer has identified the stream — and would fire with
-        // nothing to read.
-        .onChange(of: srt.colorimetry) { _, colorimetry in
-            guard deck.gate.drivesDevices, srt.isConnected, let colorimetry else { return }
-            applyNDIColorToScopes(colorimetry.bufferTags)
         }
         // Teardown ends a source exactly as WHEP's does, and needs the same scope wipe for the same
         // reason: clearToBlack wipes the PICTURE, but the scopes would sit showing the last
@@ -1477,33 +1451,29 @@ struct ContentView: View {
     private func updateScopeSampling() {
         let active = chrome.showTray ? activeKinds : []
 
-        // Waveform / parade / vectorscope: plain start/stop. The matrix-aware scopes also (re)seed
-        // their source CICP codes on (re)start, so a scope opened after the source loaded shows the
-        // right header/graticule (mirrors the CIE detected-space refresh below).
+        // The source colour the headers show comes from the RENDERER, never from `engine.metadata`.
+        // This used to reseed each scope from the window's last FILE on every (re)start, so opening
+        // the tray during a live stream put that file's colour over the stream's picture.
+        scopeColorFeed.refresh()
+
+        // Waveform / parade / vectorscope / CIE: plain start/stop.
         if active.contains(.waveform) {
             waveformModel.renderer = metalRenderer
-            waveformModel.sourceMatrixCode = engine.metadata?.colorMatrixCode
-            waveformModel.sourceTransferCode = engine.metadata?.transferFunctionCode
             waveformModel.start()
         }
         else { waveformModel.stop() }
         if active.contains(.parade) {
             paradeModel.renderer = metalRenderer
-            paradeModel.sourceTransferCode = engine.metadata?.transferFunctionCode
             paradeModel.start()
         }
         else { paradeModel.stop() }
         if active.contains(.vectorscope) {
             vectorscopeModel.renderer = metalRenderer
-            vectorscopeModel.sourceMatrixCode = engine.metadata?.colorMatrixCode
-            vectorscopeModel.sourcePrimariesCode = engine.metadata?.colorPrimariesCode
             vectorscopeModel.start()
         }
         else { vectorscopeModel.stop() }
-        // CIE also refreshes its detected-space header on (re)start.
         if active.contains(.cie) {
             cieModel.renderer = metalRenderer
-            cieModel.spaceReadout = engine.metadata.map(Self.cieSpaceReadout) ?? ""
             cieModel.start()
         } else { cieModel.stop() }
 
@@ -2840,49 +2810,6 @@ struct ContentView: View {
                 LiveSource.connectNDIFirstSource()
             }
         }
-    }
-
-    /// CIE header readout of the DETECTED source space (primaries · transfer). Honest about
-    /// untagged sources: CICP primaries nil / Unspecified (2) means the kernel assumes 709, so the
-    /// header SAYS "untagged → 709 (assumed)" rather than laundering the default into a confident
-    /// label. Same for an absent/unspecified transfer (assumed 709 gamma).
-    /// Point the matrix/transfer-aware scopes at the NDI source's colorimetry — the same fields the
-    /// file path fills from MediaInspector, from the same CICP codes, so the two sources cannot
-    /// disagree about what a code means. Provenance is preserved on the way through: an ASSUMED
-    /// axis reads "(assumed)" in the CIE header exactly as an untagged file does.
-    private func applyNDIColorToScopes(_ info: NDIColorInfo) {
-        waveformModel.sourceMatrixCode = info.matrix.code
-        vectorscopeModel.sourceMatrixCode = info.matrix.code
-        vectorscopeModel.sourcePrimariesCode = info.primaries.code
-        waveformModel.sourceTransferCode = info.transfer.code
-        paradeModel.sourceTransferCode = info.transfer.code
-        cieModel.spaceReadout = Self.cieSpaceReadout(info)
-    }
-
-    /// CIE header readout for an NDI source. Same honesty rule as the file version below, now over
-    /// three tiers — a value the sender never declared is labelled assumed, and one the USER
-    /// asserted is labelled an override. Neither is allowed to read like a fact off the wire.
-    private static func cieSpaceReadout(_ info: NDIColorInfo) -> String {
-        func axis(_ a: NDIColorAxis, _ name: String) -> String {
-            switch a.provenance {
-            case .declared:   return name
-            case .assumed:    return "\(name) (assumed)"
-            case .overridden: return "\(name) (override)"
-            }
-        }
-        return axis(info.primaries, NDIColorInfo.primariesName(info.primaries.code)) + " · "
-             + axis(info.transfer, NDIColorInfo.transferName(info.transfer.code))
-    }
-
-    private static func cieSpaceReadout(_ meta: VideoMetadata) -> String {
-        func known(_ s: String) -> Bool { !s.isEmpty && s != "—" }
-        let primUntagged = (meta.colorPrimariesCode == nil) || (meta.colorPrimariesCode == 2)
-        let transUntagged = (meta.transferFunctionCode == nil) || (meta.transferFunctionCode == 2)
-        let primStr = (!primUntagged && known(meta.colorPrimaries))
-            ? meta.colorPrimaries : "untagged → 709 (assumed)"
-        let transStr = (!transUntagged && known(meta.transferFunction))
-            ? meta.transferFunction : "709 gamma (assumed)"
-        return "\(primStr) · \(transStr)"
     }
 
     private func controls(showPin: Bool) -> some View {

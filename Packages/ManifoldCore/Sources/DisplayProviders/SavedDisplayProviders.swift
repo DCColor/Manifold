@@ -31,12 +31,25 @@
 //  Every caller saves and restores on main. Not asserted here, so the tests can run it directly;
 //  the callers assert.
 //
+//  ── AND THE ONE PLACE A LIVE SOURCE'S COLOUR IS FORGOTTEN ──────────────────────────────────
+//
+//  `restore()` is the only point every live teardown passes through: NDI and HLS call it directly,
+//  SRT and WHEP through `LiveDisplayRoute.deactivate`, and every error, watchdog and stall path of
+//  those clients ends in their `disconnect()`, which reaches it. So it is also where the departed
+//  stream's source colour is cleared — the live twin of `FrameEngine.stop()` publishing nil codes.
+//  Without it the renderer, the chain readout and the scope headers went on describing a stream
+//  that was gone. A source SWITCH (NDI's, HLS's) holds its save and does not come through here,
+//  which is right: the incoming source states its own colour at once.
+//
 
-/// The three renderer providers a live source replaces. `MetalVideoRenderer` conforms in the app.
+/// The three renderer providers a live source replaces, and the colour state it leaves behind.
+/// `MetalVideoRenderer` conforms in the app.
 public protocol DisplayProviderHost: AnyObject {
     var clock: (() -> Double)? { get set }
     var isPausedProvider: (() -> Bool)? { get set }
     var isFullRangeProvider: (() -> Bool)? { get set }
+    /// The live source that held this renderer has let go: forget its source colour.
+    func liveSourceReleased()
 }
 
 /// Providers saved when a live source takes a renderer, restored VERBATIM when it lets go.
@@ -80,11 +93,12 @@ public final class SavedDisplayProviders<Host: DisplayProviderHost> {
         return true
     }
 
-    /// Put the saved providers back on the renderer they came from, and forget them.
+    /// Put the saved providers back on the renderer they came from, forget them, and tell that
+    /// renderer its live source has gone (`liveSourceReleased`, once).
     ///
     /// Returns that renderer, or nil when nothing was held (never saved, already restored, or the
     /// renderer is gone). A nil return has written NOTHING — a stray second call must not un-clock
-    /// a renderer that is minding its own business.
+    /// a renderer that is minding its own business, nor clear the colour of whatever it shows.
     @discardableResult
     public func restore() -> Host? {
         defer {
@@ -98,6 +112,7 @@ public final class SavedDisplayProviders<Host: DisplayProviderHost> {
         saved.clock = clock
         saved.isPausedProvider = isPaused
         saved.isFullRangeProvider = isFullRange
+        saved.liveSourceReleased()
         return saved
     }
 }

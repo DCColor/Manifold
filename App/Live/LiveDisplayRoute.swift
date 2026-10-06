@@ -50,8 +50,9 @@ import ManifoldCore   // LiveClock
 import DisplayProviders
 
 /// The renderer's three file-path providers are what every live source saves and restores —
-/// here, and directly in NDI and HLS. The type and its tests live in the DisplayProviders
-/// package target, because `swift test` cannot reach app code.
+/// here, and directly in NDI and HLS — and the restore is also where the departed stream's
+/// source colour is released (`MetalVideoRenderer.liveSourceReleased`). The type and its tests
+/// live in the DisplayProviders package target, because `swift test` cannot reach app code.
 extension MetalVideoRenderer: DisplayProviderHost {}
 
 final class LiveDisplayRoute {

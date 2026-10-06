@@ -1,11 +1,14 @@
 import XCTest
 @testable import DisplayProviders
 
-/// Stand-in for MetalVideoRenderer: the three providers and nothing else.
+/// Stand-in for MetalVideoRenderer: the three providers, and a count of colour releases.
 private final class FakeRenderer: DisplayProviderHost {
     var clock: (() -> Double)?
     var isPausedProvider: (() -> Bool)?
     var isFullRangeProvider: (() -> Bool)?
+    /// How many times a live source told this renderer it had let go.
+    var releases = 0
+    func liveSourceReleased() { releases += 1 }
 }
 
 /// What `WindowDeck.configure` installs: the file engine's clock, pause state and range.
@@ -134,5 +137,52 @@ final class SavedDisplayProvidersTests: XCTestCase {
         let r2 = FakeRenderer()
         installFileProviders(r2, time: 7.0)
         XCTAssertTrue(saved.save(from: r2))
+    }
+
+    // MARK: - The colour release (stale scope colour, 2026-10-06)
+
+    /// A session that ends releases the renderer's source colour exactly once — the live twin of
+    /// `FrameEngine.stop()` publishing nil codes. Without it the scope headers and the chain
+    /// readout kept describing the departed stream.
+    func testASessionEndReleasesTheColourOnce() {
+        let r = FakeRenderer()
+        let saved = SavedDisplayProviders<FakeRenderer>()
+        saved.save(from: r); installStreamProviders(r)
+        XCTAssertEqual(r.releases, 0, "nothing is released while the stream holds the renderer")
+        saved.restore()
+        XCTAssertEqual(r.releases, 1)
+        saved.restore()                             // a stray second disconnect
+        XCTAssertEqual(r.releases, 1, "a restore with nothing held releases nothing")
+    }
+
+    /// A source switch (NDI's, HLS's) keeps its save and does not come through restore, so it
+    /// releases nothing until the session finally ends — once.
+    func testASourceSwitchReleasesOnlyWhenTheSessionEnds() {
+        let r = FakeRenderer()
+        let saved = SavedDisplayProviders<FakeRenderer>()
+        saved.save(from: r); installStreamProviders(r)
+        saved.save(from: r); installStreamProviders(r)   // switch
+        XCTAssertEqual(r.releases, 0)
+        saved.restore()
+        XCTAssertEqual(r.releases, 1)
+    }
+
+    /// A restore that never saved (a connect that failed before taking the display) releases
+    /// nothing, so it cannot clear the colour of a file another path is showing.
+    func testARestoreThatNeverSavedReleasesNothing() {
+        let r = FakeRenderer()
+        let saved = SavedDisplayProviders<FakeRenderer>()
+        XCTAssertNil(saved.restore())
+        XCTAssertEqual(r.releases, 0)
+    }
+
+    /// The release goes to the renderer the session took, never to another window's.
+    func testTheReleaseTargetsTheRendererSavedFrom() {
+        let a = FakeRenderer(), b = FakeRenderer()
+        let saved = SavedDisplayProviders<FakeRenderer>()
+        saved.save(from: a)
+        saved.restore()
+        XCTAssertEqual(a.releases, 1)
+        XCTAssertEqual(b.releases, 0)
     }
 }

@@ -21,7 +21,8 @@ final class ParadeScopeModel: ObservableObject {
     weak var renderer: MetalVideoRenderer?
 
     /// Source transfer-function code (CICP) — drives the AUTO vertical-scale ruler (16=PQ, 18=HLG,
-    /// else SDR), INDEPENDENTLY of the matrix/primaries. Set from ContentView; the graticule is the
+    /// else SDR), INDEPENDENTLY of the matrix/primaries. Written ONLY by `ScopeColorFeed`, from the
+    /// renderer's source codes; the graticule is the
     /// only consumer (the R|G|B TRACE is unaffected). Shared axis with the waveform. nil/2 → SDR.
     @Published var sourceTransferCode: Int?
 

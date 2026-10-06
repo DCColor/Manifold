@@ -31,8 +31,8 @@ final class CIEScopeModel: ObservableObject {
     @Published var image: CGImage?
     weak var renderer: MetalVideoRenderer?
 
-    /// Detected source space, appended to the header (set from ContentView on metadata change).
-    /// Honest about untagged sources (e.g. "untagged → 709 (assumed)").
+    /// Source space, appended to the header. Written ONLY by `ScopeColorFeed`, from the renderer:
+    /// the chain readout's names plus its tier word, e.g. "Rec. 709 · Rec. 709 — assumed".
     @Published var spaceReadout: String = ""
 
     // The CIE VIEW state — mode (u'v'/xy) and per-triangle visibility — is persisted @AppStorage

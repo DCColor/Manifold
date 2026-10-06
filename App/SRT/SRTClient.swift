@@ -122,14 +122,12 @@ final class SRTClient: ObservableObject {
         lastErrorSurvivesPictures = false
     }
 
-    /// What the stream declared about its colour, published for the SCOPES.
+    /// What the stream declared about its colour. nil while nothing is streaming.
     ///
-    /// The shader, the layer colorspace and the scope KERNELS all get this through the pixel
-    /// buffer's CICP attachments and the renderer's per-source codes, with no help from the UI. The
-    /// scope HEADERS and the waveform/parade auto vertical scale do NOT read the buffer — they read
-    /// ContentView's scope models. So an SRT source needs the same wiring NDI already has, from the
-    /// same codes, or the scopes would do PQ math under a "Rec.709" label on a stream that declared
-    /// PQ. nil while nothing is streaming.
+    /// ⚠️ NO LONGER READ BY THE SCOPES, and as of 2026-10-06 read by nothing. It used to feed the
+    /// scope headers through an `.onChange` in ContentView; those now read the RENDERER, which
+    /// `SRTFrameRouter.activate` already states this colorimetry to (`ScopeColorFeed`, and the
+    /// source-colour rule in CLAUDE.md). Kept as the transport's own published declaration.
     @Published private(set) var colorimetry: SRTFrameRouter.StreamColorimetry?
 
     // MARK: - State (main thread)
@@ -759,8 +757,8 @@ final class SRTClient: ObservableObject {
     }
 
     /// ⚠️ THE MOST DANGEROUS OF THE THREE TO RUN STALE, which is why the generation check leads.
-    /// Everything below configures the DISPLAY: `self.colorimetry` drives the scope headers and
-    /// `SRTFrameRouter.activate` repoints the render route. A hop from a retired session that got
+    /// Everything below configures the DISPLAY: `SRTFrameRouter.activate` repoints the render route
+    /// and states the colorimetry the renderer — and through it the scope headers — will use. A hop from a retired session that got
     /// here would set the live stream up with the DEAD one's format and colorimetry — PQ maths on
     /// a 709 stream, a route configured for dimensions nothing is sending — and it would not fail
     /// visibly. It would just be quietly, confidently wrong about the picture on screen.

@@ -62,9 +62,9 @@ final class VectorscopeScopeModel: ObservableObject {
     weak var renderer: MetalVideoRenderer?
 
     /// Source CICP codes, for the HEADER + GRATICULE only (the trace MATH reads matrixCode off the
-    /// renderer in computeVectorscopeGPU, so label and math can't disagree). Set from ContentView on
-    /// metadata change, mirroring cieModel.spaceReadout.
-    /// - matrix drives the header label + the plotted chroma (WHERE points land).
+    /// renderer in computeVectorscopeGPU). Written ONLY by `ScopeColorFeed`, from the same renderer
+    /// codes, so label and math cannot disagree.
+    /// - matrix drives the header label (the plotted chroma uses the renderer's copy).
     /// - primaries drives the source-primaries graticule box positions (WHICH gamut's boxes).
     /// They are INDEPENDENT (e.g. P3 source: primaries P3, matrix 709-class).
     @Published var sourceMatrixCode: Int?
