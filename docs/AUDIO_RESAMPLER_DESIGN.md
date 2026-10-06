@@ -7572,7 +7572,7 @@ error:**
   delivered.
 - CLAUDE.md's non-Cloudflare check: this run is it, on SRT.
 
-#### The fix that is clear — described, not built
+#### The fix that is clear — described, not built (built and verified the same evening: "The fix, built and verified" below)
 
 **Calibration on RTP paths: measure in the video axis.** Either form gives the same number:
 - in the flash tap, read `timebase − clock` (`liveAudioHeardMinusClock` without the `appliedOffset`
@@ -7599,6 +7599,125 @@ error:**
 - Robbie's decision; it is the only start-up alignment error this investigation found.
 
 - No app code changed. No `defaults` were written. Manifold was quit after each local run.
+
+#### The fix, built and verified — 2026-10-06 evening (uncommitted)
+
+**Decided (Robbie):** calibration and its re-check measure on the video timeline: they add back the
+SR-line offset Manifold applies on WHEP. SRT and NDI are unchanged (offset 0). No playback code
+changes.
+
+**Built:**
+- **`FrameEngine.liveAudioCalibrationRead(against:)`**
+  - Returns `liveAudioHeardMinusClock`'s figure and the `appliedOffset` it used, from one read:
+    readiness and offset under one lock, the timebase read once.
+  - `appliedOffset` is the `offset` `mirrorLiveAudio` hands the steering with its reference, so it is
+    the line playback is steering to at that instant.
+  - The corrected term, heard − clock − ℓ, is exactly `timebase − clock`. The offset cancels by
+    construction and cannot lag.
+  - `liveAudioHeardMinusClock` itself is unchanged; `[AV-LAG]` and `[AV-CONTENT]` read it.
+- **`CalibrationMeasurement.addFlash(pts:heardMinusClock:lineOffset:)`**, with ℓ defaulting to 0.
+  - It stores h − ℓ, so the code-lock window, the pairing target and the figure are all on the beeps'
+    axis.
+  - Each `Pair` keeps its ℓ, and `Snapshot.lineOffset` is the window's median ℓ.
+- **The renderer's flash tap** carries the read. `CalibrationMode` logs `line offset` on every flash
+  line.
+  - On WHEP each RESULT is followed by `[CALIBRATION] RESULT on the SR line: line offset … (median over
+    the same pairs), added back · without it the figure would read …`.
+  - The RESULT line's own format is unchanged.
+- **Test:** `testWHEPReadsTheContentOffsetNotContentMinusTheSRLine`, a synthetic WHEP session.
+  - The audio is stamped p − Δ(p) for picture p. Δ₀ is +29.3 / −26.6 / −12.2 / 0 ms, with and without
+    a 62 ppm slope.
+  - Contents are +80 and −4.8 ms. Playback is on the target with ±0.6 ms of loop error, and h is
+    (timebase + ℓ) − clock.
+  - Calibration reads the content within 1 ms. The pre-fix call (ℓ left out) reads content − Δ.
+
+**Verified, unattended:**
+
+| check | prediction | result | |
+|---|---|---|---|
+| replays against b35a810 (§19.8's set: 7 sessions + synth, 6 tools) | byte-identical | **99 / 99** | ✅ |
+| `swift test` | pass | **192 / 192** (191 + the new test) | ✅ |
+| MediaMTX default config, 4 reconnects, +80 file (§19.10's command) | +80 ± 5 ms every calibration | **+75.11 … +80.10** (8 / 8) | ✅ |
+| MediaMTX `useAbsoluteTimestamp`, 4 reconnects | +80 ± 5 ms | **+78.17 … +79.64** (8 / 8) | ✅ |
+| §19.14's Cloudflare WHEP, first calibration per connection, re-read from the logs | −5.2 / −4.4 / −4.7 ms | **−4.83 / −4.45 / −4.47** | ✅ |
+
+**MediaMTX per reconnect** (ms; build `.build-cc/whepcal-Profile`; two measure-only calibrations at
++15 s; ffmpeg reading the same path over RTSP for 90 s alongside; logs
+`~/Desktop/manifold-soak/cf1916/mtx-<a|b>-<n>.*`):
+
+| reconnect | first line ℓ | calibration 1 / 2 (fixed) | without the fix | RTSP read |
+|---|---|---|---|---|
+| b-1 | +11.09 | +80.10 / +79.11 | +69.25 / +68.42 | +80.16 |
+| b-2 | −7.94 | +77.52 / +76.78 | +85.88 / +85.32 | +77.81 |
+| b-3 | −30.84 | +76.23 / +75.73 | +107.06 / +106.56 | +77.61 |
+| b-4 | −31.65 | +75.80 / +75.11 | +107.44 / +106.26 | +77.31 |
+| a-1 | −28.00 | +79.13 / +78.17 | +107.12 / +106.16 | +79.75 |
+| a-2 | −6.28 | +79.64 / +78.89 | +85.92 / +85.17 | +79.75 |
+| a-3 | −28.00 | +78.83 / +78.18 | +106.82 / +106.17 | +79.75 |
+| a-4 | −6.29 | +79.02 / +79.05 | +85.30 / +85.33 | +79.75 |
+
+- **Calibration matches the RTSP read on every reconnect, within 0.1–2.2 ms.** It no longer follows the
+  line: ℓ ranged over 42.7 ms, and the fixed figures over 5.0 ms.
+- The default config's RTSP read also moved (+80.2 → +77.3 ms). That is in MediaMTX's stream, not
+  Manifold's.
+- MediaMTX was restarted fresh per config and left on `mediamtx-soak-abs.yml`, as found, with stdout
+  appended to `~/Desktop/manifold-soak/mediamtx-soak.log`. The config files' hashes are unchanged.
+
+**§19.14 Cloudflare, all runs re-read** (`recal1916.py`, scratch: ℓ per flash = the last
+`[WHEP-SRFIT]` line before it, along its slope when in use):
+
+| run | as logged | ℓ | corrected |
+|---|---|---|---|
+| WHEP-1 cal 1 / 2 | −34.50 / −36.75 | +29.63 / +30.33 | **−4.83 / −6.28** |
+| WHEP-2 cal 1 / 2 | +7.83 / +5.33 | −12.03 / −11.94 | **−4.45 / −6.48** |
+| WHEP-3 cal 1 / 2 / for Apply | +0.08 / −1.79 / −4.38 | −4.45 / −3.94 / −1.15 | **−4.47 / −5.60 / −5.54** |
+| WHEP-3 re-check (O = +4) | −2.49 | +0.22 | **−2.71** |
+
+- **All eight lie in −6.5…−2.7 ms (sound ~5 ms early), against −36.8…+7.8 as logged.**
+- The +4 ms applied on WHEP-3 happened to be near the truth. Applying WHEP-1's +37 would have made
+  sound ~32 ms late.
+
+**At the device** (`cap1916.sh`: one Manifold process; MediaMTX `useAbsoluteTimestamp`; the +80
+file):
+- **The recording:** connection 1 (35 s), ⌃⌥⇧N, connection 2 (calibrated, 35 s), then the 23.976 ProRes
+  master from disk (35 s) as the chain's zero. Audio Hijack and the recorder OBS ran throughout.
+- **Analysis:** `c12.py` per segment, cut at the driver's marks with 2 s margins. Device = WHEP
+  segment − disk segment, so c12's onset bias cancels.
+- **Prediction:** device and calibration agree within ±5 ms on both connections.
+
+| capture | connection (ℓ) | calibration (fixed) | without the fix | c12 WHEP / disk | device | device − calibration |
+|---|---|---|---|---|---|---|
+| `cap1` (recorder at **23.976**) | 1 (−39.45) | +75.57 | +115.01 | +73.51 / +0.35 | +73.16 | −2.4 |
+| | 2 (−3.58) | +79.75 | +83.33 | +73.18 / +0.35 | +72.83 | **−6.9** |
+| **`cap2` (recorder at 60, as §1.2)** | 1 (−39.45) | +76.73 | +116.18 | +105.50 / +27.10 | **+78.40** | **+1.7** ✅ |
+| | 2 (−29.33) | +81.09 | +110.42 | +108.65 / +27.10 | **+81.55** | **+0.5** ✅ |
+
+- **✅ `cap2` passes on both connections** (+1.7 / +0.5 ms; means +1.0 / +0.5). The unfixed formula would
+  have been off by 37.8 / 28.9 ms. c12 found 24–25 / 25 / 25 pairs, every gate held, and 0 doubled.
+- **`cap1` is not counted.** The recorder was at 23.976, against AV_SYNC_FINDINGS.md §1.2's 60. The
+  instructions left the check out.
+  - Each segment then carries a recorder-phase bias of up to one 41.7 ms frame, which does not average
+    out within 32 s.
+  - Its connection 2 missed the band by 1.9 ms.
+  - Its relative result stands: the two connections played within 0.3 ms of each other at the device,
+    where the unfixed formula claimed 31.7 ms apart.
+- **The disk zero moved** +0.35 → +27.10 ms between the two recorder launches. That is the
+  measurement chain's launch-to-launch drift (§18.24), and why every absolute is taken against its
+  own control.
+- **Files:**
+  - `cap1`: `~/Movies/2026-10-06 17-57-57.mov`, `~/Music/Audio Hijack/20261006 1757 Recording.wav`.
+  - `cap2`: `~/Movies/2026-10-06 18-11-28.mov`, `~/Music/Audio Hijack/20261006 1811 Recording.wav`.
+  - c12 ran on the recorder's file. The Audio Hijack files are kept, not analysed.
+  - Segments and logs: `~/Desktop/manifold-soak/cf1916/cap{1,2}*`.
+
+**What changes:**
+- WHEP calibration can be saved to a bookmark. On both servers tested it read the same within ~5 ms on
+  every reconnect.
+- `USER_GUIDE_SYNC.md` is corrected (its WHEP and MediaMTX lines were taken from the faulty reading).
+  `BUGS.md`: the bug is FIXED, and the 2026-10-01 MediaMTX entry is resolved as this bug.
+- ⚠️ **Not changed: `[AV-LAG]` / `[AV-CONTENT]`** (DEBUG telemetry) still compare beeps on the audio axis
+  with heard − clock on the video axis, so on WHEP they carry the same −ℓ. Earlier WHEP figures from
+  them, and analyses built on them, need ℓ added.
 
 ### 18.17 The starvation hold, verified with induced stalls — 2026-09-29 22:37–22:51 (unattended)
 

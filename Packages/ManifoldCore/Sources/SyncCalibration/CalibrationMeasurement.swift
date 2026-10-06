@@ -8,10 +8,17 @@
 //  ── WHAT IS MEASURED: THE HEARD FIGURE, O INCLUDED ────────────────────────────────────────────
 //
 //  Per flash, the renderer reports its PTS f and h, the engine's heard − clock at that tick
-//  (`liveAudioHeardMinusClock`, stage A: it carries O). The audio heard while that frame is due is
-//  content f + h, so a beep at content b is heard (b − h) − f after the flash:
+//  (`liveAudioHeardMinusClock`, stage A: it carries O), and the line offset ℓ that h added back
+//  (`liveAudioCalibrationRead`). The audio heard while that frame is due is content f + h − ℓ on the
+//  AUDIO axis, the beeps' axis, so a beep at content b is heard b − (f + h − ℓ) after the flash:
 //
-//      heard A/V = b − (f + h)            + = sound LATER than the picture
+//      heard A/V = b − (f + h − ℓ)        + = sound LATER than the picture
+//
+//  ⚠️ ℓ IS THE SR LINE ON WHEP AND 0 ON SRT AND NDI (§19.15). On WHEP the audio stamped p − ℓ
+//  is what plays with picture p, and h is that audio moved onto the video axis. Leaving ℓ out read
+//  what is heard − ℓ: a different figure on every connection (the line carries the connection's
+//  first-packet epoch) and a walk within one (the line's slope), while playback was right. Every
+//  pair keeps its ℓ, so a result can say which line it was measured on.
 //
 //  That is the decoded A/V (b − f, what the source carries) plus O plus the mirror error. It leaves
 //  out Manifold's own render path (frame choice, tick → glass: ≈ −16 ms, §18.13) and the output
@@ -75,9 +82,11 @@ public final class CalibrationMeasurement {
     public struct Pair: Sendable, Equatable {
         public let flashPTS: Double
         public let heardMinusClock: Double
+        /// ℓ, the line offset `heardMinusClock` added back (0 off WHEP).
+        public let lineOffset: Double
         public let beep: Double
-        /// b − (f + h), seconds.
-        public var heard: Double { beep - (flashPTS + heardMinusClock) }
+        /// b − (f + h − ℓ), seconds.
+        public var heard: Double { beep - (flashPTS + heardMinusClock - lineOffset) }
     }
 
     public enum Waiting: Sendable, Equatable {
@@ -112,13 +121,16 @@ public final class CalibrationMeasurement {
         public var spread: Double? { p10.flatMap { a in p90.map { $0 - a } } }
         public let verdict: Verdict
         public let frameSeconds: Double?
+        /// The median line offset ℓ over the same window, seconds; nil before any pair.
+        public let lineOffset: Double?
     }
 
     public let rules: Rules
     /// One frame of the stream, seconds. The spread rule's yardstick; set as the renderer learns it.
     public var frameSeconds: Double?
 
-    public private(set) var flashes: [(pts: Double, h: Double)] = []
+    /// Each flash: its PTS and h − ℓ, the audio heard on the beeps' axis minus the clock, and ℓ.
+    public private(set) var flashes: [(pts: Double, h: Double, lineOffset: Double)] = []
     public private(set) var beeps: [Double] = []
     public private(set) var pairs: [Pair] = []
     /// The locked offset (beep − (f + h)), nil until the code has decided the pairing.
@@ -135,10 +147,11 @@ public final class CalibrationMeasurement {
         self.rules = rules
     }
 
-    /// A flash, with the heard − clock read at the tick that showed it.
-    public func addFlash(pts: Double, heardMinusClock h: Double) {
-        guard pts.isFinite, h.isFinite else { return }
-        flashes.append((pts, h))
+    /// A flash, with the heard − clock read at the tick that showed it and the line offset that read
+    /// added back (`FrameEngine.LiveAudioCalibrationRead`; 0 where there is no SR line).
+    public func addFlash(pts: Double, heardMinusClock h: Double, lineOffset: Double = 0) {
+        guard pts.isFinite, h.isFinite, lineOffset.isFinite else { return }
+        flashes.append((pts, h - lineOffset, lineOffset))
         update()
     }
 
@@ -181,7 +194,8 @@ public final class CalibrationMeasurement {
             }
             if let (j, _) = best {
                 paired.insert(i); usedBeeps.insert(j)
-                pairs.append(Pair(flashPTS: fl.pts, heardMinusClock: fl.h, beep: beeps[j]))
+                pairs.append(Pair(flashPTS: fl.pts, heardMinusClock: fl.h + fl.lineOffset,
+                                  lineOffset: fl.lineOffset, beep: beeps[j]))
                 changed = true
             }
         }
@@ -230,8 +244,10 @@ public final class CalibrationMeasurement {
         } else {
             verdict = .waiting(.frameRate)
         }
+        let lines = pairs.suffix(rules.minPairs).map(\.lineOffset)
         return Snapshot(flashes: flashes.count, beeps: beeps.count, pairs: pairs.count, median: med,
-                        p10: p10, p90: p90, verdict: verdict, frameSeconds: frameSeconds)
+                        p10: p10, p90: p90, verdict: verdict, frameSeconds: frameSeconds,
+                        lineOffset: lines.isEmpty ? nil : CodedMatcher.median(lines))
     }
 }
 

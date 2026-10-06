@@ -191,6 +191,62 @@ final class MeasurementTests: XCTestCase {
         XCTAssertEqual(m3.snapshot.verdict, .waiting(.frameRate))
     }
 
+    /// A synthetic WHEP session (§19.15): the audio is stamped on its own first-packet axis, and
+    /// the SR line says the audio stamped p − Δ(p) belongs with picture p. Playback steers the timebase
+    /// onto clock − Δ, and the engine's read is h = (timebase + ℓ) − clock with ℓ = Δ, as
+    /// `FrameEngine.liveAudioCalibrationRead` returns it. A sound c late in the content is heard c late,
+    /// whatever the line: calibration must read c, not c − Δ.
+    func testWHEPReadsTheContentOffsetNotContentMinusTheSRLine() {
+        let clip = SyncClips.all[0]                      // 23.976
+        // Lines from §19.14's three Cloudflare connections and §19.10's MediaMTX range, with and without
+        // the SR slope OBS's 23.976 carries (+62 ppm); contents from §19.14 (−4.8 ms) and §19.10 (+80).
+        for (delta0, slope) in [(0.029331, 62e-6), (-0.026597, 62e-6), (-0.012225, 0.0), (0.0, 0.0)] {
+            for content in [0.080, -0.0048] {
+                let m = CalibrationMeasurement(frameSeconds: clip.frameSeconds)
+                let old = CalibrationMeasurement(frameSeconds: clip.frameSeconds)
+                let t0 = 3000.0
+                func delta(_ p: Double) -> Double { delta0 + slope * (p - t0) }
+                var events: [(Double, Bool, Double, Double, Double)] = []   // (arrival, isFlash, time, h, ℓ)
+                var state: UInt64 = 7
+                func u() -> Double {
+                    state = state &* 6364136223846793005 &+ 1442695040888963407
+                    return 2 * Double(state >> 11) / Double(1 << 53) - 1
+                }
+                for t in looped(clip, 40.04) {
+                    let f = t0 + t
+                    // The beep heard c after its flash rides with picture f + c, so the sender's audio
+                    // carries it at f + c − Δ(f + c) on the audio axis.
+                    let b = f + content - delta(f + content)
+                    // The flash's tick: the clock a little past f; the timebase on the steering's target
+                    // with a small loop error; ℓ is the offset in that target.
+                    let clock = f + 0.004
+                    let l = delta(clock)
+                    let timebase = clock - l + 0.0006 * u()
+                    let h = (timebase + l) - clock
+                    events.append((f + 0.3, true, f, h, l))
+                    events.append((b - 0.2, false, b, 0, 0))
+                }
+                events.sort { $0.0 < $1.0 }
+                for e in events {
+                    if e.1 {
+                        m.addFlash(pts: e.2, heardMinusClock: e.3, lineOffset: e.4)
+                        old.addFlash(pts: e.2, heardMinusClock: e.3)          // before §19.15: ℓ left out
+                    } else { m.addBeep(e.2); old.addBeep(e.2) }
+                }
+                let s = m.snapshot
+                let label = "Δ0 \(delta0 * 1000) ms, slope \(slope * 1e6) ppm, content \(content * 1000) ms"
+                XCTAssertEqual(s.verdict, .confident, label)
+                XCTAssertEqual(s.median ?? .nan, content, accuracy: 0.001, label)
+                XCTAssertEqual(s.lineOffset ?? .nan, delta(t0 + 30), accuracy: 0.002, label)
+                // The teeth: without ℓ the same session reads content − Δ (where Δ is not ~0).
+                if abs(delta0) > 0.005 {
+                    XCTAssertEqual(old.snapshot.median ?? .nan, content - delta(t0 + 30), accuracy: 0.002, label)
+                    XCTAssertGreaterThan(abs((old.snapshot.median ?? .nan) - content), 0.010, label)
+                }
+            }
+        }
+    }
+
     func testProposalArithmetic() {
         let r = -250...500
         // Sound 76.4 ms early with O = 0: +76 ms.

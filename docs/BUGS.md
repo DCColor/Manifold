@@ -797,7 +797,47 @@ to send Export Diagnostics for a sync problem.
 
 ---
 
-## ☐ OPEN 2026-10-01 — WHEP via MediaMTX: the A/V relation is off by a different amount every session (−19…+42 ms), equal to the first SR line's offset
+## ✅ FIXED 2026-10-06 (uncommitted) — RELEASE-BLOCKING — WHEP calibration read what is heard minus the SR-line offset
+
+**Found by `AUDIO_RESAMPLER_DESIGN.md` §19.15. Fixed and verified the same day (§19.15, "The fix, built and
+verified").**
+- **What:** on WHEP, calibration's figure was `beep − (flash + heard − clock)`.
+  - The beep is on the audio transport's axis. `heard − clock` (`liveAudioHeardMinusClock`) is on the
+    video axis, because it adds the SR-line offset back.
+  - So the figure read what is heard − the line offset. The line carries each connection's
+    first-packet epoch and OBS's 23.976 slope.
+- **What it caused:** a different reading on every WHEP connection, and a walk within one, while
+  playback was right.
+  - §19.14, Cloudflare: −35.6 / +6.6 / −0.9 ms on one stream, against ≈ −4.8 ms heard every time.
+  - §19.10, MediaMTX: −19…+42 ms off the file.
+  - Applying a proposal would have put that error into playback, and the re-check could not see it:
+    the same −offset is in both readings.
+  - SRT and NDI were never affected: their offset is 0.
+- **The fix, in the calibration path only:**
+  - `FrameEngine.liveAudioCalibrationRead(against:)` returns heard − clock and the line offset it used,
+    from one read of the mirror. That offset is the one handed to the steering with its target.
+  - `CalibrationMeasurement.addFlash(…, lineOffset:)` adds it back. That corrects both the figure and
+    the code-lock's pairing window.
+  - On WHEP each RESULT is followed by `[CALIBRATION] RESULT on the SR line: line offset … · without it
+    the figure would read …`.
+  - No playback code changed. `liveAudioHeardMinusClock` is unchanged for `[AV-LAG]`/`[AV-CONTENT]`.
+- **Verified:**
+  - **Unit test:** `testWHEPReadsTheContentOffsetNotContentMinusTheSRLine`. The no-offset path
+    reproduces the bug.
+  - **Replays:** 99 / 99 byte-identical to b35a810. `swift test` 192 / 192.
+  - **MediaMTX:** both configs × 4 reconnects, the +80 file. 16 / 16 calibrations read +75.1…+80.1 ms
+    (unfixed formula +68.4…+107.4), each within 2.2 ms of ffmpeg's RTSP read.
+  - **Cloudflare:** §19.14's three connections, re-read from the logs: −4.83 / −4.45 / −4.47 ms.
+  - **Device (Audio Hijack + recorder OBS at 60 fps, `cap2`):** two MediaMTX connections with line
+    offsets −39.45 and −29.33 ms. Device − calibration **+1.7 / +0.5 ms**; the unfixed formula would
+    have been off by 37.8 / 28.9 ms.
+- ⚠️ **`[AV-LAG]` and `[AV-CONTENT]` (DEBUG telemetry) still read heard − clock on the video axis**
+  against beeps on the audio axis. On WHEP they carry the same −offset. Diagnostic only, and not
+  changed (out of this fix's scope). Read their WHEP figures with the line offset added.
+
+---
+
+## ✅ RESOLVED 2026-10-06 — calibration's reading, not playback (entry above) — was OPEN 2026-10-01: WHEP via MediaMTX: the A/V relation is off by a different amount every session (−19…+42 ms), equal to the first SR line's offset
 
 **Found by stage D's calibration runs (`AUDIO_RESAMPLER_DESIGN.md` §19.10).**
 - **What:** ffmpeg → MediaMTX (`useAbsoluteTimestamp: true`) → WHEP, one clean fixture per run, twelve sessions.
@@ -812,6 +852,12 @@ to send Export Diagnostics for a sync problem.
   bookmark would be wrong after the next reconnect. Cloudflare WHEP (Monday, §19.8 D3) shows whether
   it is MediaMTX's.
 - **Not changed** (CLAUDE.md: server-agnostic, no constants tuned to one server).
+- **✅ Resolved 2026-10-06 (§19.15):** neither the SRs nor the fit.
+  - The per-session figure was calibration leaving the SR-line offset out (the entry above).
+  - With the fix, 8 reconnects on both MediaMTX configs read +75.1…+80.1 ms on the +80 file. ffmpeg's
+    RTSP read agreed within 2.2 ms each time.
+  - A device capture agreed within 1.7 ms on two connections whose lines differed by 10 ms.
+  - A value saved to a MediaMTX bookmark holds across reconnects.
 
 ---
 

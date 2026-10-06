@@ -11,8 +11,9 @@
 //      live sink (`CalibrationBeepTap`) and the flash detector on the renderer
 //      (`CalibrationFlashTap`); a result, Stop, Cancel, closing the sheet or a disconnect removes both.
 //      Off, neither exists: no taps, no buffers, no timers. `SyncCalibrationCounters` is the evidence.
-//    * WHAT IS MEASURED: heard A/V = beep − (flash pts + heard − clock), the stage A heard figure, so
-//      O is in it. Proposed = O − measured, rounded to 1 ms, clamped to the range. An advance beyond
+//    * WHAT IS MEASURED: heard A/V = beep − (flash pts + heard − clock − line offset), the stage A heard
+//      figure, so O is in it. The line offset is WHEP's SR line (0 on SRT and NDI): the beep is on the
+//      audio axis, and heard − clock is on the video axis by exactly that offset (§19.15). Proposed = O − measured, rounded to 1 ms, clamped to the range. An advance beyond
 //      the queue's low point (the stage B refusal figure) is shown as not applicable, with the figure.
 //    * A FIGURE ONLY WHEN CONFIDENT: ≥ 10 pairs, p90 − p10 under one frame, the last 5 pairs within
 //      ±2 ms of the median (`CalibrationMeasurement`). Until then: pairs found and the spread.
@@ -214,9 +215,9 @@ final class SyncCalibrationModel: ObservableObject {
             DispatchQueue.main.async { self?.tone(tone, run: token) }
         }
         renderer.calibrationFlash = MetalVideoRenderer.CalibrationFlashTap(
-            heard: { [weak engine] c in engine?.liveAudioHeardMinusClock(against: c) },
-            onFlash: { [weak self] pts, h in
-                DispatchQueue.main.async { self?.flash(pts: pts, heard: h, run: token) }
+            heard: { [weak engine] c in engine?.liveAudioCalibrationRead(against: c) },
+            onFlash: { [weak self] pts, r in
+                DispatchQueue.main.async { self?.flash(pts: pts, read: r, run: token) }
             })
         offsetWatch = deck.audioOffset.$sessionMs.dropFirst().removeDuplicates().sink { [weak self] ms in
             self?.offsetChanged(to: ms, run: token)
@@ -272,10 +273,11 @@ final class SyncCalibrationModel: ObservableObject {
         evaluate(m)
     }
 
-    private func flash(pts: Double, heard h: Double, run token: Int) {
+    private func flash(pts: Double, read r: FrameEngine.LiveAudioCalibrationRead, run token: Int) {
         guard token == run, let m = measurement else { return }
-        NSLog("[CALIBRATION] flash pts %.6f s, heard−clock %+.3f ms", pts, h * 1000)
-        m.addFlash(pts: pts, heardMinusClock: h)
+        NSLog("[CALIBRATION] flash pts %.6f s, heard−clock %+.3f ms, line offset %+.3f ms", pts,
+              r.heardMinusClock * 1000, r.lineOffset * 1000)
+        m.addFlash(pts: pts, heardMinusClock: r.heardMinusClock, lineOffset: r.lineOffset)
         evaluate(m)
     }
 
@@ -318,6 +320,14 @@ final class SyncCalibrationModel: ObservableObject {
                 : p.applicable ? "applicable"
                 : String(format: "NOT APPLICABLE: a %d ms advance, at most %.1f ms available", p.advanceMs,
                          p.availableAdvanceMs ?? .nan))
+        // WHEP: the SR line this figure was measured on, added back (§19.15), and the figure without it
+        // (what this line read before the fix, §19.15) — a separate line, so the RESULT line's format
+        // and every parser of it are unchanged.
+        if deck?.audioOffset.source == .web {
+            let l = s.lineOffset ?? 0
+            NSLog("[CALIBRATION] RESULT on the SR line: line offset %+.2f ms (median over the same pairs), added "
+                  + "back · without it the figure would read %+.2f ms", l * 1000, (med - l) * 1000)
+        }
         stopDetectors()
         lastLoggedPairs = 0
         phase = .result(p)

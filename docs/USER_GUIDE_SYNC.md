@@ -1,7 +1,7 @@
 # Audio sync on live streams
 
 > **DRAFT, 2026-10-05.** User guide section. Every figure here comes from
-> `AUDIO_RESAMPLER_DESIGN.md` §19 (19.1–19.14) and `BUGS.md`. "Notes for the editor" at the end lists
+> `AUDIO_RESAMPLER_DESIGN.md` §19 (19.1–19.15) and `BUGS.md`. "Notes for the editor" at the end lists
 > the claims still waiting on a measurement, and the screenshots needed.
 
 ---
@@ -93,9 +93,8 @@ The next time you connect to that stream, Manifold starts with the saved value.
 **Revert to Saved** goes back to the saved value if you have nudged away from it. Both items are
 greyed out when the current offset already matches the saved one.
 
-Save a value only on a stream whose offset is the same each time you connect. On WebRTC (WHEP)
-streams from Cloudflare and MediaMTX it can change from one connection to the next (section 5), so
-apply it for the session there.
+A saved value is right for as long as the sender and its settings stay the same. Calibrate again
+after you change them (section 6).
 
 You can also type a value into the **Audio offset** field when you edit a saved stream (Connect
 Stream… ▸ edit). A value outside −250 to +500 ms is refused under the field, and nothing is saved.
@@ -158,8 +157,7 @@ you press Apply.
    any other sound source on the sender (microphones, other clips), so the stream carries only the
    clip's beeps.
 3. **Let the stream settle.** Wait about a minute after connecting. A stream that has just connected
-   can take up to a minute to settle. On Cloudflare's WebRTC (WHEP) output, wait about four minutes
-   (section 5).
+   can take up to a minute to settle.
 4. **Open calibration:** **A/V ▸ Calibrate…**
 5. **Press Start.** Leave the clip playing, and don't touch the offset while it measures. If the
    offset changes during a run, calibration starts again ("The audio offset changed — measuring
@@ -207,8 +205,8 @@ you press Apply.
 - **What calibration measures:** the stream as it reaches Manifold. It does not measure your display,
   your speakers or your SDI chain. Those delays are the same for every stream and are not part of the
   audio offset.
-- **When a calibration stops being right:** after any change on the sender (section 6), after
-  reconnecting to some servers (section 5), and on Cloudflare SRT during long sessions (section 5).
+- **When a calibration stops being right:** after any change on the sender (section 6), and on
+  Cloudflare SRT, where the stream's own offset can change during a session (section 5).
 
 ---
 
@@ -316,28 +314,27 @@ in sync, and Manifold held sync across the session.
 
 ### Cloudflare Stream, SRT output
 
-- **Calibrate it, and expect either direction.** The offset on Cloudflare's SRT output has differed
-  from session to session. In one, sound arrived about 70–80 ms **early**. In two later ones it
-  arrived about 30–40 ms **late**.
+- **Calibrate it, and expect either direction.** The offset on Cloudflare's SRT output is in the
+  stream itself, and it has differed from session to session. In one, sound arrived about 70–80 ms
+  **early**. In two later ones it arrived late, by about one frame (about 40 ms at 23.976 fps), on
+  every reconnect.
   - **Sound early:** calibration proposes a positive offset (sound later). That always applies.
   - **Sound late:** calibration proposes a negative offset, and on this path it will almost certainly
     say "Not applicable". There is no room to make sound earlier here (section 2). Correct it at the
     sender, or use Cloudflare's WebRTC (WHEP) output.
-- **Long sessions:** the offset can change during a session, by a different amount each time. We
-  have measured a slow drift of up to about 40 ms in 25 minutes, and a sudden 44 ms jump partway
-  through a 90-minute session. Calibrate again every 20–30 minutes, or use Cloudflare's WebRTC (WHEP)
-  output.
+- **Long sessions:** the offset can change during a session. We have measured a slow drift of up to
+  about 40 ms in 25 minutes. In another session, sound arrived one frame late for the first 40–60
+  minutes, then in sync for the rest, after a brief interruption in the stream. That one-frame change
+  was in the stream Cloudflare sent, not in Manifold. Calibrate again every 20–30 minutes, or use
+  Cloudflare's WebRTC (WHEP) output.
 - **The sender must publish over SRT** for Cloudflare's SRT output to play. A stream published with
   WebRTC (WHIP) could not be played over SRT in our tests: Manifold connected but received nothing.
 
 ### Cloudflare Stream, WebRTC (WHEP) output
 
-- **Calibrate after each connection, and apply it for the session.** The offset can be different
-  every time you connect. In one test with OBS, three connections to the same stream read 36 ms early,
-  7 ms late and 1 ms early. A saved value would be wrong after the next reconnect.
-- **Wait about four minutes after connecting before you calibrate.** The timing Manifold works from
-  is still settling for the first few minutes. A value taken in the first minute can be off by tens of
-  milliseconds a few minutes later.
+- **Cloudflare adds no offset of its own here.** What you measure is the sender's own offset. In our
+  tests with OBS, sound was about 5 ms early, the same on every connection (within about 2 ms).
+- **One calibration holds across reconnects**, so Apply and Save is fine on this path.
 - **Once calibrated, it holds for long sessions.** We measured under 10 ms of drift over 4½ hours.
 - There is plenty of room to make sound earlier on this path.
 
@@ -347,11 +344,9 @@ in sync, and Manifold held sync across the session.
   MediaMTX replaces the sender's timing information, and sound can drift slowly away from the picture
   over a long session. With OBS at 23.976 that drift is about a quarter of a second an hour.
   Reconnecting resets it.
-- **Calibrate each session.** MediaMTX's WebRTC output can carry an offset of its own that is
-  different on every connection. We measured anything from about −20 to +40 ms. It is not in the
-  content: the same stream read through MediaMTX's other outputs was in sync.
-- So use **Apply for Session** on MediaMTX, not Apply and Save. A saved value would be wrong after the
-  next reconnect.
+- **One calibration holds across reconnects.** Over eight reconnects, with and without
+  `useAbsoluteTimestamp`, calibration read a test stream's known offset to within 5 ms every time, and
+  agreed with MediaMTX's other outputs. Apply and Save is fine.
 
 ### NDI
 
@@ -406,8 +401,7 @@ of milliseconds in our tests:
 - **turning "clocked" or paced NDI output on or off** (about 85 ms on one sender);
 - **switching to a different encoder or sender.** Each has its own offset.
 
-Also calibrate again after reconnecting to Cloudflare or MediaMTX over WebRTC (WHEP) (section 5),
-and every 20–30 minutes on long Cloudflare SRT sessions.
+Also calibrate again every 20–30 minutes on long Cloudflare SRT sessions (section 5).
 
 ### The results jump around between runs
 
@@ -478,27 +472,36 @@ The server's name stays, so we can tell which service you were using.
   - Not Applicable every time, 0.0 ms of advance available.
   - Whether the direction depends on the session, the OBS set-up or Cloudflare is not known. The
     guide says "either direction" for that reason.
-- **Cloudflare SRT "a sudden 44 ms jump" and "every 20–30 min":** the 90-minute hold (§19.8 D5) ran
-  2026-10-06 (§19.14) at O = 0, because nothing could be applied:
+- **Cloudflare SRT "one frame late, then in sync after an interruption" and "every 20–30 min":** the
+  90-minute hold (§19.8 D5) ran 2026-10-06 (§19.14) at O = 0, because nothing could be applied:
   - +41.27 → +44.19 → −0.14 → +0.54 ms at +0 / +30 / +60 / +90;
-  - one −44 ms step between +30 and +60, in a span with a 1.48 s input gap;
   - ❌ against the ±10 ms band.
-  - "Up to about 40 ms in 25 minutes" is still §19.5's slope figure. The step is new.
+  - §19.15: the +41 ms, and its −41.7 ms step (exactly one frame at 23.976), are in the timestamps
+    Cloudflare delivered (beep PTS − flash PTS), on all three connections. Manifold's alignment held
+    within ±3.3 ms throughout.
+  - The step came during a 1.48 s input gap, on the video side (the audio PTS stayed continuous with
+    its samples). Whether OBS's SRT output or Cloudflare re-stamped is not known.
+  - Local SRT with a forced catch-up showed no step (§19.15 item 4).
+  - "Up to about 40 ms in 25 minutes" is still §19.5's slope figure.
 - **Cloudflare SRT "the sender must publish over SRT":** from one attempt on 2026-10-06 (§19.14 §2). A
   WHIP-published input gave 0 bytes in 32 s on the SRT output. Not checked against Cloudflare's
   documentation. Confirm before publishing.
-- **Cloudflare WHEP "different every connection; wait about four minutes":** 2026-10-06, §19.14 §1.
-  - Three connections read −35.6 / +6.6 / −0.9 ms (means of two each, all at +4 min with the
-    SR-fit slope in use). Each tracks Manifold's SR-line offset at the time to within 0.8 ms, as on
-    MediaMTX.
-  - The line moved 7–25 ms in the first four minutes, which is the reason for "four minutes".
-  - The WHEP re-check read −2.50 ms. That is within step 9's "about 3 ms" but not the ±2 ms band.
-  - The 2026-10-05 "about 40 ms late" was dropped: one session on the drifting clip.
-  - Whether Cloudflare's SRs or Manifold's fit makes the per-connection offset is not separated.
-    "Apply for Session, not Save" rests on the measurement either way.
-- **MediaMTX per-session offset:** cause not yet separated (MediaMTX's WebRTC output vs Manifold's
-  reading of it). It needs a browser WHEP read (BUGS.md, OPEN 2026-10-01). If it turns out to be
-  Manifold's, section 5 changes.
+- **WHEP (Cloudflare and MediaMTX) "the same on every connection; Save is fine":** this replaces the
+  2026-10-06 draft's "different every connection, apply for the session" and "wait four minutes".
+  Those came from a calibration bug (§19.15, BUGS.md FIXED 2026-10-06): on WHEP the figure left out
+  the SR-line offset Manifold applies, so it read what is heard − that offset.
+  - Fixed and re-measured 2026-10-06 (§19.15, "The fix, built and verified").
+  - Cloudflare: §19.14's three connections re-read −4.8 / −4.5 / −4.5 ms (all eight runs −6.5…−2.7).
+    "About 5 ms early" is that one OBS sender, one session.
+  - MediaMTX: 16 / 16 calibrations over 8 reconnects on both configs read the +80 ms file at
+    +75.1…+80.1 ms, each within 2.2 ms of ffmpeg's RTSP read.
+  - At the device (recorder at 60 fps): two connections agreed with calibration within +1.7 / +0.5 ms.
+  - The "within about 2 ms" for Cloudflare is the three first calibrations. The MediaMTX "within
+    5 ms" is the 16.
+  - ⚠️ No Cloudflare WHEP session has been run on the fixed build. The Cloudflare line rests on the
+    re-read of the logs and on the MediaMTX device check. Run one before publishing.
+- **MediaMTX `useAbsoluteTimestamp` drift note** (0.25 s an hour at 23.976 on the default config) is
+  from device captures (§18.21–§18.25), not from calibration. The bug does not touch it.
 - **SDI:** the −30 ms limit is from one session's log plus an ear check on speakers Robbie judged
   inadequate. All SDI ear checks and device A/V on SDI are deferred to the Release-build check on the
   Resolve workstation (§19.10 item 2, §19.12).

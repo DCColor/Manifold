@@ -3343,6 +3343,42 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return (timebase + liveAudioCushionValue) - clockSeconds
     }
 
+    /// Calibration's read at a flash (docs/AUDIO_RESAMPLER_DESIGN.md §19.15): the heard −
+    /// clock above, together with the line offset it added back, from ONE read of the mirror.
+    public struct LiveAudioCalibrationRead: Sendable, Equatable {
+        /// `liveAudioHeardMinusClock`'s figure: the audio heard, moved onto the video axis by
+        /// `lineOffset`, minus the clock.
+        public let heardMinusClock: Double
+        /// The offset in the target playback is steering to right now: the SR line on WHEP (`offset`
+        /// in `mirrorLiveAudio`, the same value handed to the steering with its reference), the
+        /// constant cushion (0) on SRT and NDI.
+        public let lineOffset: Double
+        public init(heardMinusClock: Double, lineOffset: Double) {
+            self.heardMinusClock = heardMinusClock; self.lineOffset = lineOffset
+        }
+    }
+
+    /// ⚠️ CALIBRATION ONLY. `liveAudioHeardMinusClock` stays as it is for `[AV-LAG]`/`[AV-CONTENT]`.
+    ///
+    /// Calibration's beeps are on the AUDIO transport's axis, and on WHEP the audio stamped p − offset
+    /// is the audio played with picture p. So the heard figure needs the audio heard on that same
+    /// axis: heardMinusClock − lineOffset, which is exactly `timebase − clock`. Calibration subtracts
+    /// it (`CalibrationMeasurement.addFlash(…, lineOffset:)`); before the fix it used heardMinusClock
+    /// alone and read what is heard − offset (§19.15). The offset is read under the same lock as the
+    /// readiness, and the timebase once, so both terms are this instant's.
+    public func liveAudioCalibrationRead(against clockSeconds: Double) -> LiveAudioCalibrationRead? {
+        mirror.lock.lock()
+        let ready = mirror.active && mirror.mirrored
+        let lineOffset = mirror.appliedOffset
+        mirror.lock.unlock()
+        guard ready, clockSeconds.isFinite, lineOffset.isFinite else { return nil }
+        let raw = CMTimeGetSeconds(synchronizer.currentTime())
+        guard raw.isFinite else { return nil }
+        let timebase = liveAudioResample?.inputTime(atOutputTime: raw) ?? raw
+        return LiveAudioCalibrationRead(heardMinusClock: (timebase + lineOffset) - clockSeconds,
+                                        lineOffset: lineOffset)
+    }
+
     // MARK: - The per-source audio offset O (docs/AUDIO_RESAMPLER_DESIGN.md §19.1, stage A)
 
     /// Set the current live session's audio offset O (seconds, + = heard later). The steering moves

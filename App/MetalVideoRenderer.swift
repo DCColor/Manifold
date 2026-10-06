@@ -276,13 +276,15 @@ final class MetalVideoRenderer {
     /// tick costs one lock and a nil test — no sampling, no buffer, no timer.
     ///
     /// On each NEW selected frame it samples the 16 × 16 luma grid; on the first frame of a flash it
-    /// reads `heard(now)` (the engine's heard − clock, O included) and calls `onFlash(pts, heard)`.
+    /// reads `heard(now)` (the engine's heard − clock, O included, and the line offset that figure
+    /// added back, from one read: §19.15) and calls `onFlash(pts, read)`.
     /// Both closures run on the CVDisplayLink thread and must not block.
     final class CalibrationFlashTap {
         let detector = FlashDetector()
-        let heard: (Double) -> Double?
-        let onFlash: (_ pts: Double, _ heardMinusClock: Double) -> Void
-        init(heard: @escaping (Double) -> Double?, onFlash: @escaping (Double, Double) -> Void) {
+        let heard: (Double) -> FrameEngine.LiveAudioCalibrationRead?
+        let onFlash: (_ pts: Double, _ read: FrameEngine.LiveAudioCalibrationRead) -> Void
+        init(heard: @escaping (Double) -> FrameEngine.LiveAudioCalibrationRead?,
+             onFlash: @escaping (Double, FrameEngine.LiveAudioCalibrationRead) -> Void) {
             self.heard = heard; self.onFlash = onFlash
         }
     }
@@ -2355,7 +2357,7 @@ final class MetalVideoRenderer {
             if let cal = calibrationFlash, cal.detector.isNew(pts: chosenPts) {
                 let edge = cal.detector.observe(pts: chosenPts, meanLuma: FlashDetector.meanLuma(pb))
                 SyncCalibrationCounters.countFrame(flash: edge)
-                if edge, let h = cal.heard(now) { cal.onFlash(chosenPts, h) }
+                if edge, let r = cal.heard(now) { cal.onFlash(chosenPts, r) }
             }
             #if DEBUG
             // [AV-LAG]: once a second, capture this tick for `presentDrawable` to complete with the
