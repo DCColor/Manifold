@@ -105,16 +105,15 @@ private struct RGBToV210Params {
 }
 
 /// BT YCbCr matrix (Kr, Kb) selected STRICTLY by the source CICP matrix-coefficient code (D5) —
-/// never inferred from primaries. nil / 2 (unspecified) / unknown → 709.
-///   matrixCode 1 (709)  → Kr 0.2126, Kb 0.0722
-///   matrixCode 9 (2020) → Kr 0.2627, Kb 0.0593
-///   matrixCode 6 (601)  → Kr 0.299,  Kb 0.114
+/// never inferred from primaries. The table is `YCbCrMatrix` (ColorimetryModel, unit-tested), shared
+/// with the scope header label and the live buffer tags so the three cannot disagree:
+///   matrixCode 1 (709)       → Kr 0.2126, Kb 0.0722   (also nil / 2 / unknown)
+///   matrixCode 9 (2020)      → Kr 0.2627, Kb 0.0593
+///   matrixCode 5 or 6 (601)  → Kr 0.299,  Kb 0.114    (5 = BT.470BG, same matrix as 6)
+/// Feeds the waveform and vectorscope maths and the DeckLink RGB→v210 encode.
 private func ycbcrKrKb(forMatrixCode code: Int?) -> (kr: Float, kb: Float) {
-    switch code {
-    case 9:  return (0.2627, 0.0593)   // Rec.2020
-    case 6:  return (0.299,  0.114)    // Rec.601
-    default: return (0.2126, 0.0722)   // Rec.709 (also 1 / nil / 2 / unknown)
-    }
+    let m = YCbCrMatrix(cicp: code)
+    return (m.kr, m.kb)
 }
 
 /// Renders decoded NV12 video frames to a CAMetalLayer, presentation-timed:

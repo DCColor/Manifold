@@ -3,6 +3,7 @@ import CoreGraphics
 import AppKit
 import Combine
 import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Debug too)
+import ColorimetryModel   // YCbCrMatrix — the matrix label shares the kernels' table
 
 /// Stores/restores a scope trace color as a 6-digit sRGB hex string (no alpha) so it
 /// can live in @AppStorage, and converts to RGB floats for the trace compute.
@@ -44,14 +45,11 @@ func scopeBucketWidth(_ width: CGFloat, min lo: Int, max hi: Int) -> Int {
 /// Short YCbCr-matrix label for scope headers, in the canonical "Rec." form (period + space) that the
 /// CIE scope + inspector already render (MediaInspector.matrixName / primariesName) — so every surface
 /// reads character-identically. Driven by the SAME colorMatrixCode that selects the luma/chroma Kr/Kb
-/// in the kernels (via ycbcrKrKb), so the header and the math can never disagree. nil / 2 (unspecified)
-/// / unknown → "Rec. 709" (the math's default; the scope always plots with a concrete matrix).
+/// in the kernels (via ycbcrKrKb), and from the same `YCbCrMatrix` table, so the header and the math
+/// can never disagree. 5 and 6 → "Rec. 601". nil / 2 (unspecified) / unknown → "Rec. 709" (the math's
+/// default; the scope always plots with a concrete matrix).
 func ycbcrMatrixLabel(_ code: Int?) -> String {
-    switch code {
-    case 9: return "Rec. 2020"
-    case 6: return "Rec. 601"
-    default: return "Rec. 709"   // also 1 / nil / 2 / unknown
-    }
+    YCbCrMatrix(cicp: code).label
 }
 
 /// Short gamut label for the SOURCE-PRIMARIES vectorscope graticule — driven by colorPrimariesCode

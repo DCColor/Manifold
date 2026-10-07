@@ -878,7 +878,7 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ✅ FIXED 2026-10-07 (`<commit — to be filled in>`) — PRE-EXISTING, ALL BUILDS — SRT colour always reads UNDECLARED: the vendored FFmpeg has no H.264 decoder
+## ✅ FIXED 2026-10-07 (`418fcef`) — PRE-EXISTING, ALL BUILDS — SRT colour always reads UNDECLARED: the vendored FFmpeg has no H.264 decoder
 
 **Status:** FIXED by Stage SPS (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, *Stage SPS*), OBS re-check included. Pre-existing in every build that has had SRT; not caused by the
 2026-10-06 scope colour work, which only made it visible. **Found:** 2026-10-06, scope-colour device
@@ -942,10 +942,11 @@ before Stage B.
 
 ---
 
-## ☐ OPEN 2026-10-07 — PRE-EXISTING, ALL BUILDS — declared colour codes outside the renderer's vocabulary are labelled `tagged` but drawn as 709
+## ✅ FIXED 2026-10-07 (`<commit — to be filled in>`) — matrix 5 (BT.470BG) — PRE-EXISTING, ALL BUILDS — declared colour codes outside the renderer's vocabulary are labelled `tagged` but drawn as 709
 
-**Status:** OPEN, found by Stage SPS (`COLOR_MANAGEMENT_FINDINGS.md` §6.9) while choosing what counts as
-declared. Pre-existing for files. SRT and WHEP can now reach it, because they now read what the
+**Status:** FIXED for matrix 5, the case decided on. The other codes in *What* (matrix 0, transfer
+4, primaries 11) are unchanged and not scheduled. Found by Stage SPS (`COLOR_MANAGEMENT_FINDINGS.md` §6.9)
+while choosing what counts as declared. Pre-existing for files. SRT and WHEP can now reach it, because they now read what the
 stream declares.
 
 **What:** the SPS reader passes any code H.273 defines as a declaration. Examples: matrix 5 (BT.470BG,
@@ -963,8 +964,51 @@ from such an SPS carries `YCbCrMatrix#5`, so the file path has the same gap.
 in every code-to-attachment table and in Kr/Kb. Decide separately whether codes with no mapping
 should read `tagged`. Not done in Stage SPS.
 
-**Decided (Robbie, 2026-10-07):** map matrix 5 to the 601 matrix in its own commit, after Stage SPS is
-committed. This entry stays open until that commit lands.
+**Decided (Robbie, 2026-10-07):** map matrix 5 to the same 601 matrix as code 6 everywhere the renderer
+and scopes look up a matrix, in its own commit after Stage SPS.
+
+**Fixed (2026-10-07):** one table, `YCbCrMatrix` (ColorimetryModel, 3 unit tests), maps 5 and 6 to
+601 (Kr 0.299, Kb 0.114). The lookups that changed:
+
+- **Scope maths and the DeckLink v210 encode:** `ycbcrKrKb` in `MetalVideoRenderer`, which feeds the
+  waveform, the vectorscope and the RGB→v210 kernel. It reads the table now.
+- **Scope header label:** `ycbcrMatrixLabel` (waveform and vectorscope). 5 → "Rec. 601".
+- **Live buffer tag:** `SourceColorimetry.matrixAttachment` (SRT, WHEP). 5 → `ITU_R_601_4`, which is
+  what the shader's `colorParams` decodes with. `colorParams` itself is keyed by that tag and did not
+  change.
+- **Chain readout and inspector wording:** `MediaInspector.matrixName`. 5 → "BT.470BG / 601".
+- **Log wording:** `SourceColorimetry.matrixName`. Same name.
+
+**Checked, not changed:**
+
+- `MetalVideoRenderer.matrixAttachment`, the layer colorspace in the P3 arm only. It already treated
+  5 exactly as 6 (both fall to 709), and the matrix does not enter the layer's RGB colorspace.
+- PNG export: `sourceDerivedColorSpace`, from the same.
+- DeckLink output tag: primaries only.
+- The readers that turn a declaration into a code: MediaInspector's file `matrixMap`, HLS `cicp(of:)`
+  and NDI's words. A file or HLS stream tagged `YCbCrMatrix#5` still reads untagged there and draws
+  709, consistently.
+- The libav file path already tagged BT.470BG buffers `ITU_R_601_4`. Its scope maths, which read code
+  5, now agree with that.
+
+**Measured.** SRT from an ffmpeg listener sent static SMPTE bars as one encode, with `h264_metadata`
+setting only the matrix (1/1/5 vs 1/1/6). The window was on the ASUS PA147, OS mode, 875×492, HUD
+hidden, compared at 8 bits per channel:
+
+| comparison | result |
+|---|---|
+| CONTROL: same stream, 5 s apart (each build, each stream) | 0 codes |
+| **new, matrix 5 vs matrix 6** | **0 codes, 0.00 %** |
+| HEAD vs new, matrix 6 | 0 codes |
+| SANITY: HEAD, matrix 5 vs matrix 6 (HEAD decoded 5 with 709) | 51 codes, 95.24 %, worst (245,58,233) → (247,7,242) |
+
+| | HEAD, matrix 5 | new, matrix 5 |
+|---|---|---|
+| chain readout | `Rec. 709 · Rec. 709 · — · limited — CICP 1-1-5 — tagged` | `… · BT.470BG / 601 · …` |
+| waveform header | `luma Rec. 709` | `luma Rec. 601` |
+| `[SPS-COLOR]` | `matrix=5 (code 5)` | `matrix=5 (BT.470BG / 601)` |
+
+Matrix 6 reads `SMPTE-C / 170M` and `luma Rec. 601` on both builds.
 
 ---
 

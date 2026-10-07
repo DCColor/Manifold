@@ -153,11 +153,14 @@ extension SourceColorimetry {
         }
     }
 
+    /// Through `YCbCrMatrix`, the table the renderer's Kr/Kb and the scope labels use. 5 (BT.470BG)
+    /// is tagged `ITU_R_601_4`, CoreVideo's 601 matrix, because it IS that matrix — the tag is what the
+    /// shader's `colorParams` decodes with.
     private static func matrixAttachment(_ code: Int) -> CFString {
-        switch code {
-        case 9: return kCVImageBufferYCbCrMatrix_ITU_R_2020
-        case 6: return kCVImageBufferYCbCrMatrix_ITU_R_601_4
-        default: return kCVImageBufferYCbCrMatrix_ITU_R_709_2
+        switch YCbCrMatrix(cicp: code) {
+        case .rec2020: return kCVImageBufferYCbCrMatrix_ITU_R_2020
+        case .rec601:  return kCVImageBufferYCbCrMatrix_ITU_R_601_4
+        case .rec709:  return kCVImageBufferYCbCrMatrix_ITU_R_709_2
         }
     }
 
@@ -248,6 +251,7 @@ extension SourceColorimetry {
         case 1:  return "Rec.709"
         case 9:  return "Rec.2020"
         case 6:  return "SMPTE-C / 170M"
+        case 5:  return "BT.470BG / 601"
         default: return "code \(code)"
         }
     }

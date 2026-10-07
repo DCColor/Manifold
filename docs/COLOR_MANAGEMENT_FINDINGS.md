@@ -1826,7 +1826,11 @@ dictionary-equal (1 141 keys); `streamBookmarks` was not written.
   `SourceColorimetry.matrixAttachment` and the renderer's Kr/Kb know only 1, 6 and 9, so a matrix-5
   stream is decoded with 709 coefficients under a `tagged` label. Before Stage SPS the same stream was
   decoded the same way, labelled `assumed`. Recorded in BUGS.md; not fixed here. **Decided (Robbie,
-  2026-10-07):** matrix 5 maps to the 601 matrix in its own commit, after Stage SPS.
+  2026-10-07):** matrix 5 maps to the 601 matrix in its own commit, after Stage SPS. **Done 2026-10-07:**
+  one `YCbCrMatrix` table (ColorimetryModel) behind the renderer's Kr/Kb, the scope labels and the live
+  buffer tags. On the ASUS in OS mode a matrix-5 SRT stream is byte-identical to the same frame sent
+  as matrix 6, and HEAD differs by 51 codes. Lookups and measurements are in the BUGS.md entry. Matrix
+  0, transfer 4 and primaries 11 are unchanged.
 - **SRT taking the display at the first SPS** rather than at `onVideoFormat`: accepted (Robbie,
   2026-10-07).
 - **MediaMTX's HLS of the Baseline test stream** failed to open in AVFoundation (CoreMedia −12927).

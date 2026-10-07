@@ -254,6 +254,7 @@ public enum MediaInspector {
         case 9:  return "Rec. 2020"
         case 7:  return "SMPTE 240M"
         case 6:  return "SMPTE-C / 170M"
+        case 5:  return "BT.470BG / 601"   // the 625-line 601 matrix — same Kr/Kb as 6 (YCbCrMatrix)
         default: return "—"
         }
     }
