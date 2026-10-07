@@ -837,6 +837,80 @@ the truth" / "libavformat fills `codecpar->color_*` from the same VUI" statement
 **Matters for:** the colorimetry override plan (Stage B, SRT) — until this is fixed every SRT stream's tier
 is `assumed`, so an override is the only way to get anything but 709 SDR on SRT.
 
+**Scheduled (2026-10-06): Stage SPS** of the colorimetry override plan (`COLOR_MANAGEMENT_FINDINGS.md`
+§6.9, decision 7). It adds one shared H.264 SPS colour reader for SRT and WHEP, so both report declared
+or assumed per axis. It also corrects the comments listed above and repeats the OBS→SRT check. It runs
+before Stage B.
+
+---
+
+## ☐ OPEN 2026-10-06 — HLS maps P3-D65 primaries to CICP 11, not 12
+
+**Status:** OPEN, found by reading (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, finding 5). Not yet observed:
+no P3-tagged HLS stream has been played. **Fix:** its own commit, ahead of Stage E (decision 6).
+
+- **What:** `HLSClient.cicp(of:)` maps `kCVImageBufferColorPrimaries_P3_D65` to **11**
+  (`App/HLS/HLSClient.swift:1551`). CICP 11 is DCI-P3; P3-D65 is **12**. The rest of the app uses 12
+  for P3-D65: the NDI preset (`App/NDI/NDIColorInfo.swift:85`) and `makeColorSpace`
+  (`App/MetalVideoRenderer.swift:1506`).
+- **Expected effect:** 11 falls to `makeColorSpace`'s default arm, so the layer is tagged 709 primaries.
+  The scope headers treat 11 and 12 alike and say "P3" (`CIEScope.swift:180`, `WaveformScope.swift:63`).
+  A P3-D65 HLS stream would be drawn as 709 while its scopes say P3. The chain readout would show
+  CICP 11.
+- **To verify, before and after:** a P3-tagged HLS test stream, made with ffmpeg and served from a local
+  server. Log the `[HLS] colour signalling` line and the `[EDR] source tags` line, and read the layer
+  colorspace.
+
+---
+
+## ☐ OPEN 2026-10-06 — HLS reports the BT.2020 SDR transfer as 1, and NDI's Rec.2020 SDR preset as 14
+
+**Status:** OPEN, found by reading (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, finding 5). **Belongs with
+Phase 4** (§6.4, §7.3), which handles transfer independently of primaries.
+
+- **What:** `HLSClient.cicp(of:)` maps `kCVImageBufferTransferFunction_ITU_R_2020` to **1**
+  (`App/HLS/HLSClient.swift:1566`). The comment there says this is deliberate: the renderer's transfer
+  table keys off the curve, and 14 would fall to its gamma-2.4 default. The NDI `Rec.2020 SDR` preset
+  asserts **14** (`App/NDI/NDIColorInfo.swift:86`), tagged as `kCVImageBufferTransferFunction_ITU_R_2020`
+  (`:315`).
+- **Effect:** the same signal gets a different code depending on transport. The chain readout and the
+  scope headers differ: 14 has no name in `MediaInspector`, so it prints a dash. The two paths also
+  reach the renderer's transfer table by different routes.
+- **Done means:** one code for this transfer on every path, chosen in Phase 4 together with the renderer
+  table it has to agree with.
+
+---
+
+## ☐ OPEN 2026-10-06 — NDI's Rec.2020 SDR override is flattened to 709 primaries
+
+**Status:** OPEN, known limitation, kept on purpose (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, decision 3).
+**Fixed by** Phase 4 (§7.3).
+
+- **What:** the NDI colorimetry override offers `Rec.2020 SDR` (9/14/9). `makeColorSpace` enumerates
+  (primaries, transfer) pairs and has no arm for (9,14), so the layer is tagged **709 primaries**. The
+  scopes and readout use the 2020 codes. The user asked for 2020 and the picture is not shown as 2020,
+  and nothing says so.
+- **Decision:** NDI keeps the preset for now. SRT, WHEP and HLS do not offer it until §7.3 is fixed.
+  **When §7.3 is fixed, enable it on all four transports**, and verify (9,14) on the layer.
+
+---
+
+## ☐ OPEN 2026-10-06 — UNEXERCISED — the HLS 601 rendition step has not been run on device since 946417a
+
+**Status:** not a known defect, a gap in verification. **Found:** 2026-10-06, scope-colour device run.
+
+- **What:** HLS is the only source whose declared colour changes mid-session. `publishColorTagsIfChanged`
+  (`App/HLS/HLSClient.swift:1267`) calls `setSourceColorSpace` on every change, and since `946417a`
+  `ScopeColorFeed` carries the change to the scope headers. Apple's bipbop stream steps between 601 and
+  709 (`primaries=6 matrix=6` on the 416×234 rendition). That was measured before `946417a`; see *"an unrecognised
+  CICP primaries code silently becomes 709"* in this file.
+- **Not exercised:** in the 2026-10-06 run, bipbop stayed on 709 for the 45 s it was watched, so the
+  scope headers were never seen following a 601↔709 step.
+- **To do:** force the low rendition (throttle the link, or serve a ladder whose first rung is
+  601-tagged). Confirm that the headers, the readout and the vectorscope target follow the step both
+  ways. Check that the first frame after the step is the only one presented under the old state
+  (the bound the `publishColorTagsIfChanged` comment describes).
+
 ---
 
 ## ☐ OPEN 2026-10-06 — UNVERIFIED — check in colour Phase 4: a file's container tags vs its decoded frames' tags

@@ -1381,6 +1381,128 @@ is right; the word is missing.
   where the transfer word goes. Pre-existing, now visible, deliberately not fixed. 2c part 2.
 - **One fixture, one session.** No colorimeter, 8-bit captures, as everywhere else here.
 
+### 6.9 Colorimetry override audit — 2026-10-06
+
+**The question:** what it takes to give SRT, WHEP and HLS the colorimetry override NDI already has.
+This was a reading audit, not a measurement. File:line references are against `946417a`.
+
+**Superseded before it was written down.** The audit's scope-header findings were fixed by `946417a`
+(`ScopeColorFeed`), which landed before this section was written. The findings were: WHEP and HLS
+never wrote scope colour, nothing reset it on teardown, and toggling the scopes tray reloaded the
+last file's metadata during a live stream. Scopes now follow the renderer's source state, and only
+`ScopeColorFeed` writes it (CLAUDE.md). An override on any transport reaches the scopes by going
+through `setSourceColorSpace`, and needs no scope work of its own. They are recorded here so the
+audit reads complete, not as open items.
+
+**Wrong in the audit:** it said SRT reads its colour from the bitstream. It does not. Every SRT stream
+arrives UNDECLARED on all three axes, because the vendored FFmpeg has the H.264 parser and no decoder,
+and `codecpar->color_*` is filled by decoding. Measured; see BUGS.md, *"SRT colour always reads
+UNDECLARED"*. The comments that say otherwise (`App/SRT/SRTFrameRouter.swift:159-185`,
+`App/Live/LiveDisplayRoute.swift:66-71`, `App/WebRTC/WHEPFrameRouter.swift:489`) are corrected in
+Stage SPS, below.
+
+#### Findings
+
+1. **The override exists on NDI only, and it is process-wide.**
+   - Type: `NDIColorimetryOverride`, `App/NDI/NDIColorInfo.swift:66`. Its presets are at `:79-88`,
+     and `NDIColorInfo.resolve` (`:180`) is the only place a preset meets a declaration.
+   - Held on the `NDIService` singleton: published value at `App/NDI/NDIService.swift:164`, lock
+     mirror at `:308`, setter at `:320`, reset to `.auto` on every connect at `:723`.
+   - It reaches the renderer at `NDIService.swift:2652`, carrying `effective.sourceProvenance`, so
+     the readout says `overridden`.
+   - UI: the Color control, `App/ContentView.swift:2153`, shown only when NDI is the live source
+     (`:3163`). Picker at `:2230`, binding at `:2260`, keyboard cycle at `:1986`.
+   - The type is NDI-named but is not NDI-specific. `SRTFrameRouter.swift:163-200` already says so.
+2. **SRT has no override hook.** Its colour is fixed at activate:
+   - `SRTFrameRouter.StreamColorimetry` (`App/SRT/SRTFrameRouter.swift:206`, provenance at `:237`)
+     goes through `LiveDisplayRoute.Colorimetry` (`App/Live/LiveDisplayRoute.swift:72`), and from
+     there to the renderer once, at `LiveDisplayRoute.swift:223`.
+   - Because of the FFmpeg defect above, the tier is always `assumed`.
+3. **WHEP has no hook and reads nothing.** It passes the constant `.assumedRec709SDR`
+   (`App/WebRTC/WHEPFrameRouter.swift:491`; the constant is at `LiveDisplayRoute.swift:88`), because
+   its RTP depacketizer does not parse the SPS VUI.
+4. **HLS re-reads its colour per frame, so an override has to win over a rendition change.**
+   - It starts on assumed 709 (`App/HLS/HLSClient.swift:870`).
+   - Each buffer's attachments are read through `cicp(of:)` (`:1537`), and
+     `publishColorTagsIfChanged` (`:1267`) calls `setSourceColorSpace` whenever the codes change.
+   - With an override active, that publisher must not overwrite it. It should keep tracking the
+     declared value for the Color control's "Stream" line.
+5. **HLS maps two codes differently from the rest of the app.**
+   - **P3-D65 → 11** (`HLSClient.swift:1551`). CICP 11 is DCI-P3. The NDI preset (`NDIColorInfo.swift:85`)
+     and `makeColorSpace` (`App/MetalVideoRenderer.swift:1506`, `case (12, _)`) use 12. An 11 falls to
+     `makeColorSpace`'s default arm (`:1520`), so the layer is tagged 709 primaries. The scope headers
+     treat 11 and 12 alike and say "P3" (`App/CIEScope.swift:180`, `App/WaveformScope.swift:63`).
+     So a P3-D65 HLS stream would be drawn as 709 while its scopes say P3. Read from the code, not
+     yet observed. Decision 6 fixes it.
+   - **BT.2020 transfer → 1** (`HLSClient.swift:1566`). The comment there says this is on purpose,
+     so the curve gets named. The NDI `Rec.2020 SDR` preset sets 14 (`NDIColorInfo.swift:86`). The
+     same signal therefore gets a different code depending on transport, and the readout and headers
+     show the difference: 14 has no name in `MediaInspector` (§6.8 *Still open*).
+6. **Rec.2020 SDR does not do what it says on any transport.** `makeColorSpace` handles (9,16) and
+   (9,18). (9,1) and (9,14) both fall to the default arm, which tags 709 primaries (§7.3). An NDI
+   user who picks Rec.2020 SDR gets 2020 maths in the scopes and 709 primaries on the layer.
+   Offering the same preset on three more transports would spread that defect further.
+7. **The audio offset is the persistence pattern to copy.**
+   - `LiveAudioOffsetModel` is one per window (`App/WindowDeck.swift:259`). It is seeded from the
+     bookmark in `DeckRegistry.connectLive` (`WindowDeck.swift:1595-1600`) and saved or reverted
+     from the live menu only (`App/Live/LiveAudioOffset.swift:118`, `:130`, `:246`).
+   - It is persisted as an optional field, `StreamBookmark.audioOffsetMs`
+     (`Packages/ManifoldCore/Sources/StreamBookmarkModel/StreamBookmark.swift:98`). When the field is
+     nil it is left out of the JSON.
+   - `StreamBookmark` uses synthesized `Codable` (`:87`). A new enum-typed field that meets a raw
+     value this build does not know (a preset added later, then a downgrade) would fail decoding for
+     the whole bookmark. Store a raw string instead, and decode it tolerantly.
+8. **No transport shows an override in the window title.** `windowTitle`
+   (`App/WindowDeck.swift:322`) appends the A/V suffix and the Bypass suffix. The only standing
+   sign of an override is the Color control's amber tint (`ContentView.swift:2221`), and it
+   auto-hides with the control bar.
+
+#### Decisions (Robbie, 2026-10-06)
+
+1. **Where the override lives.** SRT, WHEP and HLS keep it on the owning window, following the
+   `LiveAudioOffsetModel` pattern, and set it up in `connectLive`. NDI keeps it on `NDIService`,
+   for the session only, and changes only to use the shared type.
+2. **HLS is saved per bookmark** too, the same as SRT and WHEP.
+3. **Rec.2020 SDR is hidden on SRT, WHEP and HLS until §7.3 is fixed in Phase 4.** NDI keeps it for
+   now. BUGS.md records that NDI's Rec.2020 SDR is flattened to 709 primaries; it is enabled
+   everywhere once §7.3 is fixed.
+4. **An active override adds a window-title suffix on all four transports**, NDI included. It sits
+   alongside the Bypass and A/V suffixes.
+5. **The Stream Sources sheet gets no edit field.** Save and Revert are in the live menu only, as
+   for the audio offset.
+6. **The HLS P3-D65 code fix (11 → 12) is its own commit, ahead of Stage E.** It is verified with a
+   P3-tagged HLS test stream (ffmpeg and a local server).
+7. **WHEP reads declared colour from the H.264 SPS colour signalling** (revised from the audit's
+   question). One shared SPS colour reader serves WHEP and also fixes the SRT defect in BUGS.md.
+   The FFmpeg build does not change.
+
+#### Staged plan, revised
+
+Run in this order.
+
+- **Stage A — shared type.**
+  - Move the override type into a ManifoldCore package target and point NDI at it.
+  - Add unit tests.
+  - No behaviour change.
+- **Stage SPS — shared H.264 SPS colour reader for SRT and WHEP.**
+  - SRT and WHEP report declared or assumed for each axis.
+  - Correct the "SRT can state the truth" comments.
+  - Check again whether OBS → SRT really declares nothing.
+- **Stage B — SRT override, per session.**
+  - The override goes through `setSourceColorSpace(…, provenance: .overridden)`.
+  - The scopes need no extra work: they follow the renderer since `946417a`.
+- **Stage C — WHEP override, per session.** Same pattern as Stage B.
+- **Stage D — save per bookmark for SRT, WHEP and HLS.**
+  - Add an optional raw-string field to `StreamBookmark`, decoded tolerantly.
+  - Add migration tests.
+  - Save and Revert in the live menu.
+- **Stage E — HLS override.** The P3 code fix (decision 6) lands before it.
+
+**Measured before Stage B ships:**
+- Does VideoToolbox convert pixels when SRT or WHEP source buffers are tagged PQ, HLG or 2020? If
+  it does, an override changes the pixels as well as their interpretation.
+- Does 10-bit H.264 decode on these paths?
+
 ---
 
 ## 7. Open and unverified
@@ -1422,6 +1544,9 @@ is right; the word is missing.
    tool exists to catch, and today it is rendered with 709 primaries with no indication. The defect
    is also **structural, not specific to that pair** — any combination absent from the enumerated
    list falls to the same default arm.
+
+   Added 2026-10-06: (9,14), the NDI `Rec.2020 SDR` preset, falls to the same arm. Until this is
+   fixed in Phase 4 the preset is hidden on SRT, WHEP and HLS (§6.9, decision 3).
 
 4. **The `[EDR]` log has been blind to P3 all along.** Because the P3 space is unnamed
    (§3), the log line at `MetalVideoRenderer.swift:534` prints `<unnamed>` for every P3 source.

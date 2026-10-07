@@ -9,6 +9,7 @@ changelog page. Format notes are at the bottom.
 
 - WHEP from Cloudflare Stream keeps sound and picture in sync for long sessions: verified over four and a half hours, and with picture and sound arriving over SDI and sent through OBS.
 - Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
+- Fixed: the scopes could keep showing an earlier source's colour settings (scale, gamut target and labels). This happened after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 
 ## 0.8.4
 
