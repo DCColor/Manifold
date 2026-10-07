@@ -465,6 +465,18 @@ The server's name stays, so we can tell which service you were using.
 
 ## Notes for the editor (remove before publishing)
 
+### Sections still to write
+
+- **Sender setup recipes** (added 2026-10-07). OBS settings per transport (SRT, WHEP, NDI/DistroAV),
+  SDR and HDR, with the expected Manifold chain readout for each.
+  - **HDR:** Color Format P010 (10-bit), Color Space Rec. 2100 PQ or HLG, Color Range Limited, SDR
+    White Level 203 nits (BT.2408 reference white; OBS defaults to 300), HDR Nominal Peak 1000, a
+    10-bit encoder (HEVC Main 10).
+  - **Say that H.264 HDR from OBS is 8-bit,** so expect banding (measured 2026-10-07,
+    `COLOR_MANAGEMENT_FINDINGS.md` §6.9, *The OBS re-check*).
+  - **Say that HEVC over SRT is not supported yet** (planned before release).
+  - **Write it after** colorimetry override Stages B–C.
+
 ### Claims to re-check before this ships
 
 - **Cloudflare SRT, both directions:** "about 70–80 ms early" is 2026-09-29 (§18.13, the device

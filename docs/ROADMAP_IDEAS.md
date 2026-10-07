@@ -1,3 +1,19 @@
+## HEVC over WHEP
+Status: idea (2026-10-07)
+Version: ?
+
+What: Negotiate and decode HEVC on WHEP, alongside H.264.
+
+Why: 10-bit HDR over WebRTC. WHEP is H.264-only today, and OBS's H.264 HDR is 8-bit, so it bands
+(COLOR_MANAGEMENT_FINDINGS.md §6.9, *The OBS re-check*).
+
+Open questions:
+- Browser and server HEVC support is uneven (MediaMTX, Cloudflare).
+- Negotiation, and falling back to H.264 when the server won't offer HEVC.
+
+Depends on: HEVC over SRT (shared parser/decoder work).
+Size guess: ?
+
 ## Timecoded markers with EDL export
 Status: idea (2026-10-06)
 Version: 1.5?

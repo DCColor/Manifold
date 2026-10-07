@@ -942,7 +942,7 @@ before Stage B.
 
 ---
 
-## ✅ FIXED 2026-10-07 (`<commit — to be filled in>`) — matrix 5 (BT.470BG) — PRE-EXISTING, ALL BUILDS — declared colour codes outside the renderer's vocabulary are labelled `tagged` but drawn as 709
+## ✅ FIXED 2026-10-07 (`95563f7`) — matrix 5 (BT.470BG) — PRE-EXISTING, ALL BUILDS — declared colour codes outside the renderer's vocabulary are labelled `tagged` but drawn as 709
 
 **Status:** FIXED for matrix 5, the case decided on. The other codes in *What* (matrix 0, transfer
 4, primaries 11) are unchanged and not scheduled. Found by Stage SPS (`COLOR_MANAGEMENT_FINDINGS.md` §6.9)
@@ -1009,6 +1009,25 @@ hidden, compared at 8 bits per channel:
 | `[SPS-COLOR]` | `matrix=5 (code 5)` | `matrix=5 (BT.470BG / 601)` |
 
 Matrix 6 reads `SMPTE-C / 170M` and `luma Rec. 601` on both builds.
+
+---
+
+## ☐ OPEN 2026-10-07 — PRE-EXISTING, ALL BUILDS — SRT: a low-bitrate stream waits a long time to be identified
+
+**Status:** OPEN. Found during the matrix-5 measurement (2026-10-07). To be looked at with the
+HEVC-over-SRT work.
+
+**What:** SRT does not identify the stream until the demuxer has about 2 MB of probe data
+(`fmt->probesize = 2 * 1024 * 1024` in `App/SRT/SRTSession.m`; `max_analyze_duration` is 5 s). A
+low-bitrate feed takes a long time to reach that. Static SMPTE bars at ~220 kb/s from a local
+ffmpeg listener had shown no picture after 32 s: about 0.9 MB had arrived, the demuxer had not
+returned, and the reader had seen 0 access units. The same stream at 25 Mb/s was identified in the
+usual few seconds.
+
+**Matters for:** real static slates, bars and other low-bitrate feeds, which look like a hung connect.
+
+**Not yet decided:** how far to lower the probe size, or whether to cap the wait. Either has to keep
+identification reliable on ordinary feeds, and must be checked against more than one server.
 
 ---
 
