@@ -309,6 +309,15 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// already been zeroed — so `delegate == nil` is PRECISELY the test for "we still held the slot",
     /// and it correctly declines to stomp a successor sizer that has taken it since.
     deinit {
+        #if DEBUG
+        // ⚠️ PROBE (docs/BUGS.md pre-ship: `[WINDOWSIZER-DEINIT]`). `deinit` is not main-actor
+        // isolated, and the line below touches `NSWindow`. Nothing has shown it running off main —
+        // the deck that owns this is a `@StateObject` — so this records whether it ever does before
+        // anything changes here. Log only: no assert, no change to what the deinit does.
+        if !Thread.isMainThread {
+            NSLog("%@", "[WINDOWSIZER-DEINIT] deinit OFF MAIN on \(Thread.current) — window.delegate is touched below")
+        }
+        #endif
         if let window, window.delegate == nil { window.delegate = inner }
     }
 

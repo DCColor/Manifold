@@ -8,7 +8,8 @@ what makes a regression recognisable, and deleting it the day the patch lands is
 gets rediscovered from scratch.
 
 The file opens with a **pre-ship checklist** — work that is required before public launch but is
-not a defect — and the numbered defect entries follow it.
+not a defect — then a **post-release list** of decided work held back until after release, and the
+numbered defect entries follow.
 
 ---
 
@@ -796,6 +797,84 @@ to send Export Diagnostics for a sync problem.
 - **Today:** the export has no sync section. `DiagnosticsRedactor` blanks URL paths, queries,
   passphrases, stream IDs and keys, and keeps host and port. The guide's redaction sentence states
   exactly that, so it changes if the redactor changes.
+
+---
+
+## ☐ PRE-SHIP: review the `[WINDOWSIZER-DEINIT]` probe
+
+**Added 2026-10-06**, from the build-warnings triage (warnings #1–2, `App/WindowSizer.swift`).
+
+- **What it is:** a log line in `WindowSizer.deinit`, written only when the deinit runs OFF the main
+  thread: `[WINDOWSIZER-DEINIT] deinit OFF MAIN on <thread> — window.delegate is touched below`.
+- **Why:** `deinit` is not main-actor isolated, and it sets `window.delegate` (AppKit, main only). If
+  the last reference to a sizer were ever released on another thread, that write would happen off
+  main: a crash, or the window that never comes on screen which that deinit exists to prevent.
+  Nothing has shown it happening; the owning deck is a `@StateObject`, released on main.
+- **Gating:** `#if DEBUG`, so absent from Release and present in Profile (tester) builds. Log only:
+  no assert, and the deinit's behaviour is unchanged.
+- **Cost when present:** one `Thread.isMainThread` check per sizer teardown.
+- **Decide before ship:** keep it for Profile builds, or remove it. **Any hit** means the deinit
+  fix in the post-release list is needed sooner. That fix is chosen from what this shows.
+
+---
+
+# Post-release list
+
+**Not defects, and deliberately not before release.** Work that was decided on but would change
+measured behaviour, or buys nothing for users, close to a release. Each entry says what it would take.
+
+---
+
+## ☐ POST-RELEASE: `CVDisplayLink` → `CADisplayLink`, as its own project with a full re-measure
+
+**Added 2026-10-06**, from the build-warnings triage (warnings #18–21).
+
+- **What:** `MetalVideoRenderer.start()` / `stop()` use `CVDisplayLinkCreateWithActiveCGDisplays`,
+  `CVDisplayLinkSetOutputCallback`, `CVDisplayLinkStart` and `CVDisplayLinkStop`, all deprecated in
+  macOS 15. They still work.
+- **Replacement:** `NSView` / `NSWindow` / `NSScreen.displayLink(target:selector:)`, which returns a
+  `CADisplayLink`. Available from macOS 14, so on our 15.0 floor.
+- **Why it is a project, not a swap — the behaviour changes:**
+  - Ticks arrive on a run loop (main by default) instead of `CVDisplayLink`'s own high-priority
+    thread.
+  - The link follows the view's screen. Today's link is created for the active displays and never
+    retargeted, so moving a window between displays with different refresh rates would start
+    changing its tick timing.
+  - The timestamps change from `CVTimeStamp` to `timestamp` and `targetTimestamp`.
+  - `displayTick` drives frame selection, the NDI video pull, live presentation, the scope feed
+    and the offscreen ring that SDI reads. All of them would move with it.
+- **Re-measure, all of it:** A/V sync on every transport (file, NDI, SRT, WHEP, HLS); colour
+  byte-identity (`COLOR_MANAGEMENT_FINDINGS.md` §6.8 method, both displays); SDI cadence and
+  underruns.
+
+---
+
+## ☐ POST-RELEASE: `SyntheticLiveSource` — async asset loads and the `@Sendable` capture
+
+**Added 2026-10-06**, from the build-warnings triage (warnings #16, #22–24).
+
+- **What:** `makeReader` uses `tracks(withMediaType:)` and `nominalFrameRate`, deprecated in macOS 13.
+  The replacements are `try await asset.loadTracks(withMediaType:)` and
+  `try await track.load(.nominalFrameRate)`, on our floor. `makeReader` becomes async.
+- **And:** the teardown's `emitQueue.async { [self] in … }` captures the main-actor `self` in a
+  `@Sendable` closure (#16). It is serialised behind any in-flight tick on purpose, so this is the
+  compiler not seeing the design. Fix with an explicit capture.
+- **Why not before release:** the file is `#if DEBUG`, reachable only by a developer keystroke. No user
+  benefit, and churn in a harness that has been used for clock measurements.
+
+---
+
+## ☐ POST-RELEASE: `WindowSizer.deinit` — the fix, chosen from what the probe shows
+
+**Added 2026-10-06**, from the build-warnings triage (warnings #1–2). See the pre-ship
+`[WINDOWSIZER-DEINIT]` entry.
+
+- **Options:** `isolated deinit` (SE-0371), the clean fix. **Its runtime requirement is unverified**: it
+  may need a newer macOS than our 15.0 floor (possibly 15.4). Check before relying on it. Otherwise,
+  `MainActor.assumeIsolated`, which turns a silent off-main run into a crash.
+- **Choose from the probe:** no hits in tester builds means the order of work is free. Any hit means
+  the window-delegate restore can run off main, and the fix comes sooner.
+- **Not before release:** this deinit is on the launch path that once left windows invisible.
 
 ---
 
