@@ -46,6 +46,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import ManifoldCore      // UnfairLock — the priority-donating lock both telemetry locks use
+import ColorimetryModel  // SourceColorimetry.assumedRec709 — the buffer tags
 import QuartzCore
 import VideoToolbox
 
@@ -921,7 +922,7 @@ final class WHEPFrameRouter {
         // scopes, EDR gate). A pooled buffer starts untagged and VT's attachment propagation is
         // measured behavior rather than a documented contract, so tagging the OUTPUT last is the
         // ordering that holds either way — NDIService.tagOutput's reasoning, verbatim.
-        NDIColorInfo.assumedRec709.apply(to: promoted)
+        SourceColorimetry.assumedRec709.apply(to: promoted)
 
         guard let sampleBuffer = Self.makeSampleBuffer(
                 promoted,
@@ -1004,7 +1005,7 @@ final class WHEPFrameRouter {
 
         // Tag the SOURCE before the transfer, so VT converts from a buffer whose colorimetry is
         // stated rather than absent. (The output is re-tagged after, in `deliver` — see there.)
-        NDIColorInfo.assumedRec709.apply(to: source)
+        SourceColorimetry.assumedRec709.apply(to: source)
 
         let status = VTPixelTransferSessionTransferImage(transferSession, from: source, to: destination)
         guard status == noErr else {

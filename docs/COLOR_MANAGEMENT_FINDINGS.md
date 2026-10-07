@@ -1133,7 +1133,7 @@ The log for the same stream reads `color signaling (NOT declared — assuming SD
 three-tier honesty model — `tagged` / `assumed` / `overridden` — collapses to one tier the moment
 the source is a stream**, and a *user assertion* is printed as a *sender's declaration*. The same
 line is correct for a file, because a file's absent CICP arrives as nil. The renderer's codes cannot
-carry the distinction; the tier has to come from `NDIColorInfo.tier`, which already exists and is
+carry the distinction; the tier has to come from `NDIColorInfo.tier` [now `SourceColorimetry.tier`], which already exists and is
 already on screen two controls away. Not fixed here.
 
 Incidentally, the **third verdict case is now exercised live**: overriding to PQ produced
@@ -1165,7 +1165,7 @@ the renderer beside the codes, and `setSourceColorSpace` takes it as a **require
 no default — a default is how the next source in would re-introduce this silently. Every one of the
 seven call sites states its own answer: the two file sites and HLS-from-buffer pass `.fromCodes(…)`,
 which names the condition under which reading the codes is legitimate; NDI passes
-`NDIColorInfo.sourceProvenance`, which existed the whole time and simply was not being passed on;
+`NDIColorInfo.sourceProvenance` [now `SourceColorimetry.sourceProvenance`], which existed the whole time and simply was not being passed on;
 WHEP's `assumedRec709SDR` and both connect-time defaults pass `.assumed`; SRT derives from its
 axes' own `declared` flags.
 
@@ -1338,7 +1338,7 @@ The consequence, measured on exactly that transition:
 So that one transition now does a **redundant republish**: the same `CGColorSpace` object, the same
 EDR flag, and one re-present of the current frame. **No pixel changes** — it installs what was
 already installed, and the byte-identity table above covers the rendered result. The NDI-side lines
-are not new; `NDIColorInfo` is `Equatable` over its axes' provenance, so the receive path always saw
+are not new; `NDIColorInfo` [now `SourceColorimetry`] is `Equatable` over its axes' provenance, so the receive path always saw
 Assumed → Overridden as a change and always re-tagged. Only the renderer used to swallow it.
 
 ⚠️ **The new `[EDR]` block carries a warning line that will mislead somebody**: "AFTER a frame was
@@ -1385,6 +1385,12 @@ is right; the word is missing.
 
 **The question:** what it takes to give SRT, WHEP and HLS the colorimetry override NDI already has.
 This was a reading audit, not a measurement. File:line references are against `946417a`.
+Stage A later renamed the types and moved them into the `ColorimetryModel` package target:
+`NDIColorimetryOverride` → `ColorimetryOverride`, `NDIColorInfo` → `SourceColorimetry`, `NDIColorAxis` →
+`ColorimetryAxis`, `NDIColorProvenance` → `ColorAxisProvenance`. `SourceColorProvenance` kept its name
+and moved too. The app-side extension (NDI parse, CoreVideo tagging, log wording) is now
+`App/Live/SourceColorimetry+App.swift`. The new names are given in brackets below; the line numbers
+still describe the audited commit.
 
 **Superseded before it was written down.** The audit's scope-header findings were fixed by `946417a`
 (`ScopeColorFeed`), which landed before this section was written. The findings were: WHEP and HLS
@@ -1404,8 +1410,9 @@ Stage SPS, below.
 #### Findings
 
 1. **The override exists on NDI only, and it is process-wide.**
-   - Type: `NDIColorimetryOverride`, `App/NDI/NDIColorInfo.swift:66`. Its presets are at `:79-88`,
-     and `NDIColorInfo.resolve` (`:180`) is the only place a preset meets a declaration.
+   - Type: `NDIColorimetryOverride` [now `ColorimetryOverride`, in the `ColorimetryModel` package],
+     `App/NDI/NDIColorInfo.swift:66`. Its presets are at `:79-88`, and `NDIColorInfo.resolve`
+     [now `SourceColorimetry.resolve`] (`:180`) is the only place a preset meets a declaration.
    - Held on the `NDIService` singleton: published value at `App/NDI/NDIService.swift:164`, lock
      mirror at `:308`, setter at `:320`, reset to `.auto` on every connect at `:723`.
    - It reaches the renderer at `NDIService.swift:2652`, carrying `effective.sourceProvenance`, so
@@ -1428,14 +1435,14 @@ Stage SPS, below.
    - With an override active, that publisher must not overwrite it. It should keep tracking the
      declared value for the Color control's "Stream" line.
 5. **HLS maps two codes differently from the rest of the app.**
-   - **P3-D65 → 11** (`HLSClient.swift:1551`). CICP 11 is DCI-P3. The NDI preset (`NDIColorInfo.swift:85`)
+   - **P3-D65 → 11** (`HLSClient.swift:1551`). CICP 11 is DCI-P3. The NDI preset (`NDIColorInfo.swift:85` [now `ColorimetryOverride.p3d65PQ`])
      and `makeColorSpace` (`App/MetalVideoRenderer.swift:1506`, `case (12, _)`) use 12. An 11 falls to
      `makeColorSpace`'s default arm (`:1520`), so the layer is tagged 709 primaries. The scope headers
      treat 11 and 12 alike and say "P3" (`App/CIEScope.swift:180`, `App/WaveformScope.swift:63`).
      So a P3-D65 HLS stream would be drawn as 709 while its scopes say P3. Read from the code, not
      yet observed. Decision 6 fixes it.
    - **BT.2020 transfer → 1** (`HLSClient.swift:1566`). The comment there says this is on purpose,
-     so the curve gets named. The NDI `Rec.2020 SDR` preset sets 14 (`NDIColorInfo.swift:86`). The
+     so the curve gets named. The NDI `Rec.2020 SDR` preset sets 14 (`NDIColorInfo.swift:86` [now `ColorimetryOverride.rec2020SDR`]). The
      same signal therefore gets a different code depending on transport, and the readout and headers
      show the difference: 14 has no name in `MediaInspector` (§6.8 *Still open*).
 6. **Rec.2020 SDR does not do what it says on any transport.** `makeColorSpace` handles (9,16) and
@@ -1465,7 +1472,7 @@ hold. Where the audit's line number had drifted, the corrected one is given belo
 
 9. **Nothing here has a unit test.**
    - The app has one target, `Manifold` (`project.yml:137-138`), and no test bundle.
-   - `NDIColorInfo` (`App/NDI/NDIColorInfo.swift`), `SourceColorProvenance`
+   - `NDIColorInfo` [now `SourceColorimetry`] (`App/NDI/NDIColorInfo.swift`), `SourceColorProvenance`
      (`App/MetalVideoRenderer.swift:135`) and `DisplayChainModel` (`App/DisplayChainModel.swift`)
      all live in `App/`, which `swift test` does not reach.
    - The NDI override and the readout tiers were verified by measurement only, all in §6.8 2c
@@ -1561,6 +1568,37 @@ Run in this order.
 - Does VideoToolbox convert pixels when SRT or WHEP source buffers are tagged PQ, HLG or 2020? If
   it does, an override changes the pixels as well as their interpretation.
 - Does 10-bit H.264 decode on these paths?
+
+#### Stage A — done 2026-10-06, measured as no behaviour change
+
+**What moved:** the override presets, `resolve`, the provenance and tier mapping and the tier wording,
+under transport-neutral names (above), into the `ColorimetryModel` package target, with per-transport
+preset availability and Stage D storage strings. 13 unit tests.
+
+**Method.** Unattended runs with the scratch NDI SDK sender sending static SMPTE HD bars and no colour
+metadata. The window was on the ASUS PA147 at 875×492. The sequence: connect, ⌃⌥C through every preset
+and back to Auto, then disconnect. HEAD (`0ea88e0`) was run twice (H1, H2; H2 is the control) and the
+Stage A build twice (T1, T2). The two binaries differ in SHA-256. Predictions with pass/fail bands were
+written before the code changed.
+
+**T1 is void, as a harness drop.** Its first ⌃⌥C logged nothing at all, and every later step landed one
+preset behind. Every line it did log had the right values for its preset. T2, with the same binary,
+landed every keystroke.
+
+| Check | Method | Result |
+|---|---|---|
+| `[NDI]` and `[EDR]` lines | NSLog prefix stripped. Periodic timing lines dropped (`fps received`, `picture held`, `picture hold basis`, `first audio`). The present count in `colour state installed … after N present(s)` masked. Compared **per step, per thread**: each step's `[NDI]` lines in their own order, then its `[EDR]` lines in theirs. | H1, H2 and T2 identical, 97 lines each. The full line sets also match. |
+| `[SCOPE-COLOR]` lines | Exact sequence | T2 identical to H1 and H2. H1 matched all ten predicted lines. |
+| OS mode, ASUS | §6.8 byte-identity method: window capture, HUD hidden, 8-bit per-channel compare | **T2 vs H1 and vs H2: 0 codes, 0.00 %** for Auto and for the 2020 PQ override. Controls (each build 5 s apart, H1 vs H2): all 0. **Sanity, Auto vs PQ: 228 codes, 83.02 %.** |
+| Color control | Control bar shown, the control's region compared, amber pixels counted | HEAD vs Stage A: 0 codes, 0 px in every state. Auto: `709 709 · Assumed`, white, 0 amber px. Rec.709: `709 709 · Overridden`, amber (240 px). 2020 PQ: `2020 PQ (ST 2084) · Overridden`, amber (348 px). Same tint on both builds (commonest pixel 255,146,48). |
+
+**Why per thread.** The `[NDI] x422 output tags` pair is logged by the tagging on the display-link pull.
+The `[EDR]` lines are logged on main. The interleave between the two is not ordered: HEAD varies it from
+step to step within one run, and H1 against H2 differ at connect. A strict line-order comparison fails
+on HEAD against itself. **Reuse this comparison for Stages B–E.**
+
+**The Rec.709 case** is overridden but has the same codes as Auto. It shows that amber follows the
+override's tier, not the codes, on both builds.
 
 ---
 

@@ -225,12 +225,14 @@ The direction is **British → American ONLY**, and **not inside symbol names, f
 third-party API names**. The codebase is full of correctly-American identifiers that a global
 substitution would corrupt — measured counts of tokens that must be left alone:
 
-`color` 133 · `license` 101 · `colorimetry` 94 · `colorspace` 57 · `Color` 56 · `NDIColorInfo` 44 ·
+`color` 133 · `license` 101 · `colorimetry` 94 · `colorspace` 57 · `Color` 56 · `NDIColorInfo` 44 (since 2026-10-06 `SourceColorimetry`) ·
 `CGColorSpace` 30 · `center` 25 · `licenseType` 20 · `LicenseManager` 20 · `colorMatrixCode` 19 ·
 `setSourceColorSpace` 18 · `colorPrimariesCode` 17
 
-Also off-limits: `NDIColorimetryOverride`, `colorSpace`, `docs/COLOR_MANAGEMENT_FINDINGS.md`,
-`docs/color-fixtures/`, `App/Licenses/`, `App/LicenseManager.swift`, `App/NDI/NDIColorInfo.swift`,
+Also off-limits: `ColorimetryOverride` (was `NDIColorimetryOverride`), `ColorimetryAxis`,
+`ColorAxisProvenance`, `SourceColorProvenance`, the `ColorimetryModel` package target, `colorSpace`,
+`docs/COLOR_MANAGEMENT_FINDINGS.md`, `docs/color-fixtures/`, `App/Licenses/`, `App/LicenseManager.swift`,
+`App/Live/SourceColorimetry+App.swift` (was `App/NDI/NDIColorInfo.swift`),
 and every `LICENSE` / `LICENCE` filename inside `ThirdParty/` and `App/Licenses/` — those are
 third-party artifacts and their names are part of the licence obligation, not our prose.
 
@@ -851,8 +853,8 @@ no P3-tagged HLS stream has been played. **Fix:** its own commit, ahead of Stage
 
 - **What:** `HLSClient.cicp(of:)` maps `kCVImageBufferColorPrimaries_P3_D65` to **11**
   (`App/HLS/HLSClient.swift:1551`). CICP 11 is DCI-P3; P3-D65 is **12**. The rest of the app uses 12
-  for P3-D65: the NDI preset (`App/NDI/NDIColorInfo.swift:85`) and `makeColorSpace`
-  (`App/MetalVideoRenderer.swift:1506`).
+  for P3-D65: the NDI preset (`ColorimetryOverride.p3d65PQ`, `Packages/ManifoldCore/Sources/ColorimetryModel/Colorimetry.swift:151`) and
+  `makeColorSpace` (`App/MetalVideoRenderer.swift:1465`).
 - **Expected effect:** 11 falls to `makeColorSpace`'s default arm, so the layer is tagged 709 primaries.
   The scope headers treat 11 and 12 alike and say "P3" (`CIEScope.swift:180`, `WaveformScope.swift:63`).
   A P3-D65 HLS stream would be drawn as 709 while its scopes say P3. The chain readout would show
@@ -871,8 +873,8 @@ Phase 4** (§6.4, §7.3), which handles transfer independently of primaries.
 - **What:** `HLSClient.cicp(of:)` maps `kCVImageBufferTransferFunction_ITU_R_2020` to **1**
   (`App/HLS/HLSClient.swift:1566`). The comment there says this is deliberate: the renderer's transfer
   table keys off the curve, and 14 would fall to its gamma-2.4 default. The NDI `Rec.2020 SDR` preset
-  asserts **14** (`App/NDI/NDIColorInfo.swift:86`), tagged as `kCVImageBufferTransferFunction_ITU_R_2020`
-  (`:315`).
+  asserts **14** (`ColorimetryOverride.rec2020SDR`, `Packages/ManifoldCore/Sources/ColorimetryModel/Colorimetry.swift:152`), tagged as
+  `kCVImageBufferTransferFunction_ITU_R_2020` (`App/Live/SourceColorimetry+App.swift:151`).
 - **Effect:** the same signal gets a different code depending on transport. The chain readout and the
   scope headers differ: 14 has no name in `MediaInspector`, so it prints a dash. The two paths also
   reach the renderer's transfer table by different routes.
@@ -7372,7 +7374,7 @@ before any tag-table work.
 - **Offer the control, DISABLED, with the reason stated** — *"this file declares no channel roles,
   so a fold would be a guess"* — plus a per-file manual layout ASSERTION for a user who knows what
   the file is. That matches the app's existing pattern for exactly this shape of problem
-  (`rangeOverride`, `NDIColorimetryOverride`): Auto follows the declaration, a preset asserts, and
+  (`rangeOverride`, `NDIColorimetryOverride` [now `ColorimetryOverride`]): Auto follows the declaration, a preset asserts, and
   the assertion is marked as an assertion rather than dressed as a reading. **This is the answer.**
 
 **Never an inferred fold.** A destination whose roles are unknown keeps its default — discrete on

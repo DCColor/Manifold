@@ -11,6 +11,7 @@ import ManifoldCore   // ScrubProducerFlags.stats — gates the [SETTLE] measure
 import CryptoKit     // ⚠️ SPIKE — SHA-256 for the [CSPROBE] source-vs-dest verdict.
 #endif
 import ManifoldCore      // UnfairLock — priority-donating lock for the live frame queue
+import ColorimetryModel   // SourceColorProvenance — the source colour tier the readout prints
 import SyncCalibration   // calibration mode's flash detector (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
@@ -120,48 +121,6 @@ private func ycbcrKrKb(forMatrixCode code: Int?) -> (kr: Float, kb: Float) {
 /// the tap enqueues frames (with PTS); a CVDisplayLink draws the frame matching
 /// the current playback clock each display refresh. Engine-agnostic — it knows
 /// nothing about FrameEngine, only a clock closure returning the current time.
-/// Where the source colour codes the renderer is using CAME FROM — §6's three-tier honesty model,
-/// carried NEXT TO the codes rather than inferred from them.
-///
-/// ⚠️ **INFERRING IT FROM THE CODES IS WRONG FOR HALF THE SOURCES, AND WAS A SHIPPED DEFECT.**
-/// §6.8's Phase 2c part 1 measured it: NDI and WHEP **resolve before they publish**, so the
-/// renderer receives non-nil codes for an assumption and for a user override alike, and a
-/// nil-test calls both "tagged". An assumed 709 stream read `CICP 1/1 — tagged` and a user
-/// assertion read `CICP 9/16 — tagged`, which is the one thing the readout exists to prevent.
-///
-/// Only a source whose UNDECLARED AXES ARRIVE AS nil can be read from the codes — a file (absent
-/// CICP is absent), SRT (`codeIfDeclared` passes nil through), HLS-from-buffer. That is what
-/// `fromCodes` is for, and why it names the condition instead of being the default.
-enum SourceColorProvenance: Equatable {
-    /// The source declared it.
-    case tagged
-    /// Nobody declared it; these are Manifold's defaults.
-    case assumed
-    /// Some axes declared, some not.
-    case partlyAssumed
-    /// The user asserted it, over whatever the source said or didn't.
-    case overridden
-
-    /// ⚠️ **ONLY FOR A SOURCE WHOSE UNDECLARED AXES ARRIVE AS `nil`.** See the type's note.
-    static func fromCodes(primaries: Int?, transfer: Int?, matrix: Int?) -> SourceColorProvenance {
-        switch [primaries, transfer, matrix].filter({ $0 != nil }).count {
-        case 0:  return .assumed
-        case 3:  return .tagged
-        default: return .partlyAssumed
-        }
-    }
-
-    /// The one word the chain readout prints.
-    var label: String {
-        switch self {
-        case .tagged:        return "tagged"
-        case .assumed:       return "assumed"
-        case .partlyAssumed: return "partly assumed"
-        case .overridden:    return "overridden"
-        }
-    }
-}
-
 final class MetalVideoRenderer {
 
     // E1 (was M3b): float render target. rgba16Float — the EDR container Apple specifies for

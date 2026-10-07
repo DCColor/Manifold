@@ -150,7 +150,7 @@ final class DisplayTransformMenuState: ObservableObject {
 ///   * **There is no Color menu to extend.** The app's `.commands` block carries appInfo,
 ///     appSettings, newItem, `RasterSizeCommands` and a DEBUG-gated Debug menu. Nothing colour.
 ///   * **The existing Color CONTROL is NDI-only.** `ContentView.colorControl` is placed under
-///     `if activeLiveSource == .ndi`, and it governs INTERPRETATION (`NDIColorimetryOverride`),
+///     `if activeLiveSource == .ndi`, and it governs INTERPRETATION (`ColorimetryOverride`),
 ///     which is §6.3's *first* section. Its own doc comment marks a seam for a second section —
 ///     but that seam sits inside the NDI gate, so hanging the display transform off it would make
 ///     the mode unreachable during file playback, which is the case §6.5 and §6.6 were measured

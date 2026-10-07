@@ -48,6 +48,7 @@
 import Foundation
 import ManifoldCore   // LiveClock
 import DisplayProviders
+import ColorimetryModel   // SourceColorProvenance
 
 /// The renderer's three file-path providers are what every live source saves and restores —
 /// here, and directly in NDI and HLS — and the restore is also where the departed stream's

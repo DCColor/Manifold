@@ -25,6 +25,9 @@ let package = Package(
         .library(name: "DisplayProviders", targets: ["DisplayProviders"]),
         // Linked by the APP target directly (project.yml), for the saved-stream store and sheet.
         .library(name: "StreamBookmarkModel", targets: ["StreamBookmarkModel"]),
+        // Linked by the APP target directly (project.yml), for every live transport's colorimetry,
+        // the override picker and the renderer's provenance tier.
+        .library(name: "ColorimetryModel", targets: ["ColorimetryModel"]),
         // Linked by the APP target directly (project.yml), for App/SRT's audio decoder.
         .library(name: "AACFraming", targets: ["AACFraming"]),
         // Linked by the APP target directly (project.yml), for calibration mode's sheet, the flash
@@ -166,6 +169,26 @@ let package = Package(
             name: "StreamBookmarkModelTests",
             dependencies: ["StreamBookmarkModel"],
             path: "Tests/StreamBookmarkModelTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // A live source's colorimetry: the three CICP axes and their provenance, the user's override
+        // presets with their stable storage strings and per-transport availability, `resolve`, and the
+        // renderer's provenance tier (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9, Stage A). A leaf target,
+        // no dependencies, so `swift test` reaches what was verified by measurement only. NDI's parse
+        // and the CoreVideo tagging stay in the app.
+        .target(
+            name: "ColorimetryModel",
+            path: "Sources/ColorimetryModel",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "ColorimetryModelTests",
+            dependencies: ["ColorimetryModel"],
+            path: "Tests/ColorimetryModelTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

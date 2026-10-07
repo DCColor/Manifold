@@ -24,6 +24,7 @@
 import AppKit
 import SwiftUI
 import ManifoldCore
+import ColorimetryModel   // SourceColorProvenance
 
 @MainActor
 final class ScopeColorFeed: ObservableObject {

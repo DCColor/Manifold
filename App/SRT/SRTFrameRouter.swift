@@ -51,6 +51,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import ManifoldCore   // LiveClock
+import ColorimetryModel   // SourceColorimetry (buffer tags), SourceColorProvenance
 import QuartzCore
 import VideoToolbox
 
@@ -165,7 +166,7 @@ final class SRTFrameRouter {
     // config site precisely so nothing shared would bake it in. SRT reaches libavformat, which
     // fills `codecpar->color_primaries` / `color_trc` / `color_space` / `color_range` from the same
     // VUI, so this path CAN state the truth. Stating it means being able to say "the sender said
-    // nothing" as a distinct answer from "the sender said 709" — the same distinction NDIColorInfo
+    // nothing" as a distinct answer from "the sender said 709" — the same distinction SourceColorimetry
     // keeps with `declared` vs `assumed`, and for the same reason: A DEFAULT IS NOT A FACT.
     //
     // AND THE COMMON CASE IS "NOTHING". The stage-2 spike measured a real OBS→SRT feed and found
@@ -185,12 +186,12 @@ final class SRTFrameRouter {
     //   2. THE PIXEL-BUFFER ATTACHMENTS — these cannot be nil. Something must be stamped or the
     //      downstream consumers (shader matrix, layer colorspace, scopes, EDR gate) have nothing
     //      to read. So an undeclared axis is tagged 709 AND recorded as assumed, which is exactly
-    //      what NDIColorInfo already does and why this file reuses it rather than inventing a
-    //      second CICP vocabulary. (That type's NDI-prefixed name is now wrong — WHEPFrameRouter
-    //      already uses it too. Renaming it is a separate, mechanical pass.)
+    //      what SourceColorimetry already does and why this file reuses it rather than inventing a
+    //      second CICP vocabulary. (It was `NDIColorInfo` until §6.9's Stage A gave it a
+    //      transport-neutral name and moved it into the ColorimetryModel package.)
     //
     //   3. THE LOG — one line per connect, saying per axis whether it was declared or assumed,
-    //      in the same words NDIColorInfo.summary uses.
+    //      in the same words SourceColorimetry.summary uses.
 
     /// One axis: the CICP code the pipeline consumes, and whether the STREAM said so.
     struct ColorAxis: Equatable {
@@ -252,16 +253,16 @@ final class SRTFrameRouter {
         }
 
         /// What gets stamped on every pixel buffer. Cannot be nil — see point 2 above. Reuses
-        /// NDIColorInfo's provenance vocabulary so an assumed axis reads "(assumed)" in a log line
+        /// SourceColorimetry's provenance vocabulary so an assumed axis reads "(assumed)" in a log line
         /// identically to an untagged NDI source's.
-        var bufferTags: NDIColorInfo {
-            func axis(_ a: ColorAxis, _ name: String) -> NDIColorAxis {
+        var bufferTags: SourceColorimetry {
+            func axis(_ a: ColorAxis, _ name: String) -> ColorimetryAxis {
                 a.declared ? .declaredValue(a.code, name) : .assumed(a.code)
             }
-            return NDIColorInfo(
-                primaries: axis(primaries, NDIColorInfo.primariesName(primaries.code)),
-                transfer:  axis(transfer,  NDIColorInfo.transferName(transfer.code)),
-                matrix:    axis(matrix,    NDIColorInfo.matrixName(matrix.code)))
+            return SourceColorimetry(
+                primaries: axis(primaries, SourceColorimetry.primariesName(primaries.code)),
+                transfer:  axis(transfer,  SourceColorimetry.transferName(transfer.code)),
+                matrix:    axis(matrix,    SourceColorimetry.matrixName(matrix.code)))
         }
 
         /// The connect line. Says "undeclared" in words rather than printing a number that looks
@@ -274,9 +275,9 @@ final class SRTFrameRouter {
             let range = rangeDeclared
                 ? (isFullRange ? "range=full (declared)" : "range=limited (declared)")
                 : "range=UNDECLARED → assuming limited"
-            return axis("primaries", primaries, NDIColorInfo.primariesName(primaries.code)) + "  "
-                 + axis("transfer", transfer, NDIColorInfo.transferName(transfer.code)) + "  "
-                 + axis("matrix", matrix, NDIColorInfo.matrixName(matrix.code)) + "  " + range
+            return axis("primaries", primaries, SourceColorimetry.primariesName(primaries.code)) + "  "
+                 + axis("transfer", transfer, SourceColorimetry.transferName(transfer.code)) + "  "
+                 + axis("matrix", matrix, SourceColorimetry.matrixName(matrix.code)) + "  " + range
         }
     }
 

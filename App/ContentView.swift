@@ -2,6 +2,7 @@ import SwiftUI
 import ManifoldCore
 import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
 import StreamBookmarkModel
+import ColorimetryModel   // the colorimetry override presets and their per-transport availability
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -1985,7 +1986,7 @@ struct ContentView: View {
 
     private func cycleNDIColorimetryOverride() {
         guard ndi.isConnected else { return }
-        let all = NDIColorimetryOverride.allCases
+        let all = ColorimetryOverride.available(on: .ndi)
         let i = all.firstIndex(of: ndi.colorimetryOverride) ?? 0
         NDIService.shared.setColorimetryOverride(all[(i + 1) % all.count])
     }
@@ -2225,12 +2226,12 @@ struct ContentView: View {
     /// The live stream's colorimetry override — the one color-interpretation section with content
     /// today. Presets assert a colorimetry; the "Stream" subsection keeps the sender's own claim
     /// visible so an override reads as CONTRADICTING a declaration rather than filling a silence.
-    /// Same NDIColorimetryOverride path and tagging as before — relocated into the Color control,
+    /// Same ColorimetryOverride path and tagging as before — relocated into the Color control,
     /// logic untouched.
     @ViewBuilder private var colorStreamColorimetrySection: some View {
         Section("Colorimetry") {
             Picker("Colorimetry", selection: ndiColorimetryBinding) {
-                ForEach(NDIColorimetryOverride.allCases) { option in
+                ForEach(ColorimetryOverride.available(on: .ndi)) { option in
                     Text(option.label).tag(option)
                 }
             }
@@ -2244,20 +2245,20 @@ struct ContentView: View {
     /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "709 · Declared".
     private var ndiColorimetryFaceLabel: String {
         let info = ndi.colorInfo
-        return "\(NDIColorInfo.primariesName(info.primaries.code).replacingOccurrences(of: "Rec.", with: "")) "
-             + "\(NDIColorInfo.transferName(info.transfer.code).replacingOccurrences(of: "Rec.", with: "")) · \(info.tier)"
+        return "\(SourceColorimetry.primariesName(info.primaries.code).replacingOccurrences(of: "Rec.", with: "")) "
+             + "\(SourceColorimetry.transferName(info.transfer.code).replacingOccurrences(of: "Rec.", with: "")) · \(info.tier)"
     }
 
     /// The stream's own claim, independent of the override — an absence stated as an absence.
     private var ndiStreamStatusLine: String {
         let d = ndi.declaredColorInfo
         guard d.isDeclared else { return "Declares no colorimetry" }
-        return "Declares \(NDIColorInfo.primariesName(d.primaries.code)) · "
-             + "\(NDIColorInfo.transferName(d.transfer.code)) · "
-             + "\(NDIColorInfo.matrixName(d.matrix.code))"
+        return "Declares \(SourceColorimetry.primariesName(d.primaries.code)) · "
+             + "\(SourceColorimetry.transferName(d.transfer.code)) · "
+             + "\(SourceColorimetry.matrixName(d.matrix.code))"
     }
 
-    private var ndiColorimetryBinding: Binding<NDIColorimetryOverride> {
+    private var ndiColorimetryBinding: Binding<ColorimetryOverride> {
         Binding(get: { ndi.colorimetryOverride },
                 set: { NDIService.shared.setColorimetryOverride($0) })
     }
