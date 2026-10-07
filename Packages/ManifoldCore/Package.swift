@@ -28,6 +28,8 @@ let package = Package(
         // Linked by the APP target directly (project.yml), for every live transport's colorimetry,
         // the override picker and the renderer's provenance tier.
         .library(name: "ColorimetryModel", targets: ["ColorimetryModel"]),
+        // Linked by the APP target directly (project.yml), for SRT's and WHEP's declared colour.
+        .library(name: "H264SPSColor", targets: ["H264SPSColor"]),
         // Linked by the APP target directly (project.yml), for App/SRT's audio decoder.
         .library(name: "AACFraming", targets: ["AACFraming"]),
         // Linked by the APP target directly (project.yml), for calibration mode's sheet, the flash
@@ -189,6 +191,25 @@ let package = Package(
             name: "ColorimetryModelTests",
             dependencies: ["ColorimetryModel"],
             path: "Tests/ColorimetryModelTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // What an H.264 SPS declares about colour, per axis, from the VUI's video_signal_type
+        // (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9, Stage SPS). SRT and WHEP both read it; neither the
+        // vendored FFmpeg (no H.264 decoder) nor CoreMedia (reserved codes pass as declared) gives a
+        // per-axis answer. A leaf target, no dependencies, so `swift test` reaches it with real SPS bytes.
+        .target(
+            name: "H264SPSColor",
+            path: "Sources/H264SPSColor",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "H264SPSColorTests",
+            dependencies: ["H264SPSColor"],
+            path: "Tests/H264SPSColorTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

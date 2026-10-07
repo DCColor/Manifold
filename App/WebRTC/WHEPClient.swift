@@ -228,6 +228,12 @@ final class WHEPClient: ObservableObject {
         decoder.onDecodedFrame = { pixelBuffer, pts in
             WHEPFrameRouter.shared.deliver(pixelBuffer, pts: pts)
         }
+        // What each new SPS declares about colour (§6.9 Stage SPS). On session.decodeQueue, before
+        // the access unit carrying the SPS is decoded, so the router tags the frames that follow
+        // with it.
+        decoder.onSPSColor = { sps in
+            WHEPFrameRouter.shared.noteSPSColor(sps)
+        }
         // The decoder fires this on session.decodeQueue when it needs an IDR it does not have:
         // no format description yet, the startup keyframe gate still closed, or — the case this
         // wiring is really for — a mid-stream decode failure that just re-armed that gate

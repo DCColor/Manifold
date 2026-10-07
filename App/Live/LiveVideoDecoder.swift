@@ -57,6 +57,7 @@ import CoreGraphics
 import CoreMedia
 import CoreVideo
 import Foundation
+import H264SPSColor   // what each SPS declares about colour — handed to the transport, not used here
 import ImageIO
 import QuartzCore   // CACurrentMediaTime — the monotonic clock the suppression window runs on
 import UniformTypeIdentifiers
@@ -95,6 +96,17 @@ final class LiveVideoDecoder {
     /// itself stays display-agnostic: it does not know a renderer exists.
     var onDecodedFrame: ((CVPixelBuffer, CMTime) -> Void)?
 
+    /// Fires on the decode queue with what an SPS declares about colour, ONCE PER CHANGE OF SPS
+    /// BYTES (the first SPS included), and BEFORE the access unit carrying it is decoded. Decode is
+    /// synchronous, so every frame `onDecodedFrame` delivers after this call was decoded under this
+    /// SPS — which is what lets a transport tag each frame with the colour it was actually encoded
+    /// with (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9, Stage SPS).
+    ///
+    /// Here and not in each transport because both have the SPS in hand only on its way into this
+    /// decoder, and the byte comparison that says "this is a new SPS" already lives here. The decoder
+    /// does not act on the answer: colour is the transport's to state.
+    var onSPSColor: ((H264SPSColor) -> Void)?
+
     /// Fires on the decode queue when the decoder needs an IDR it does not have: no format
     /// description yet, or a decode error forced a resync. The client turns this into a PLI.
     ///
@@ -125,6 +137,9 @@ final class LiveVideoDecoder {
     private var formatDescription: CMFormatDescription?
     private var currentSPS: Data?
     private var currentPPS: Data?
+    /// The SPS `onSPSColor` last reported on. Separate from `currentSPS`, which only moves when a
+    /// format description is BUILT — a build can fail, and the colour report must not depend on it.
+    private var colorSPS: Data?
     private var awaitingKeyframe = true
 
     // MARK: - Keyframe request suppression (decode queue only)
@@ -233,6 +248,7 @@ final class LiveVideoDecoder {
         formatDescription = nil
         currentSPS = nil
         currentPPS = nil
+        colorSPS = nil
         awaitingKeyframe = true
         keyframeAskedAt = 0
     }
@@ -269,6 +285,13 @@ final class LiveVideoDecoder {
                 dts: CMTime) {
 
         mutateStats { $0.accessUnitsReceived += 1 }
+
+        // (0) A new SPS → what it declares about colour, before this access unit is decoded. A byte
+        // comparison per access unit (tens of bytes); the parse runs only when the bytes move.
+        if let sps, !sps.isEmpty, sps != colorSPS {
+            colorSPS = sps
+            onSPSColor?(H264SPSColor.parse(nal: sps))
+        }
 
         // (1) In-band parameter sets → format description, rebuilt only on a real change.
         updateFormatDescriptionIfNeeded(sps: sps, pps: pps, changed: parameterSetsChanged)

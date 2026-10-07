@@ -878,11 +878,28 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ OPEN 2026-10-06 — PRE-EXISTING, ALL BUILDS — SRT colour always reads UNDECLARED: the vendored FFmpeg has no H.264 decoder
+## ✅ FIXED 2026-10-07 (`<commit — to be filled in>`) — PRE-EXISTING, ALL BUILDS — SRT colour always reads UNDECLARED: the vendored FFmpeg has no H.264 decoder
 
-**Status:** OPEN. Pre-existing in every build that has had SRT; not caused by the 2026-10-06 scope colour
-work, which only made it visible. **Found:** 2026-10-06, scope-colour device run, by an SRT stream whose
-tags were known in advance.
+**Status:** FIXED by Stage SPS (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, *Stage SPS*), OBS re-check included. Pre-existing in every build that has had SRT; not caused by the
+2026-10-06 scope colour work, which only made it visible. **Found:** 2026-10-06, scope-colour device
+run, by an SRT stream whose tags were known in advance.
+
+**Fixed (2026-10-07):** SRT and WHEP read declared colour per axis from the stream's own SPS VUI
+(`H264SPSColor`, a ManifoldCore leaf target with 13 unit tests). They no longer use codecpar or a
+constant. No change to the FFmpeg build.
+
+- **Verified on a local ffmpeg SRT listener:** a PQ/2020 stream now logs `[SPS-COLOR] … → tagged` and
+  `[SCOPE-COLOR] source: Rec. 2020 · PQ (ST 2084) — tagged (CICP 9-16-9)`; HLG and 709-declared
+  likewise.
+- **Verified on WHEP from MediaMTX:** the same results.
+- **Untagged streams:** identical to HEAD on both transports.
+- **The scope run's rows 9 and 10:** pass.
+- **The comments listed below:** corrected.
+
+**Re-check once fixed: DONE (attended, 2026-10-07).** OBS → SRT → local MediaMTX, VT H.264, NV12. OBS
+DECLARES its Color Space in the SPS: Rec. 709 → 1/1/1, Rec. 2100 (PQ) → 9/16/9, `video_full_range_flag`
+0 in both. FFmpeg's reader and Manifold agree. The spike's "declares nothing" (below) was this defect.
+Details are in §6.9, *The OBS re-check*.
 
 **What:** every SRT stream reaches the renderer with primaries, transfer and matrix UNDECLARED, whatever
 the bitstream says. So an SRT source is always `assumed` 709 SDR: the layer colorspace, the EDR opt-in,
@@ -901,7 +918,7 @@ reads `bt2020nc/bt2020/smpte2084` in the system ffmpeg. Served over SRT (ffmpeg 
 `[SRT] colorimetry: primaries=UNDECLARED → assuming Rec.709  transfer=UNDECLARED → assuming Rec.709  matrix=UNDECLARED → assuming Rec.709`.
 An untagged stream logs the same line, so the two cannot be told apart.
 
-**Re-check once fixed:** the stage-2 spike finding that a real OBS→SRT feed "declares nothing" (every axis
+The stage-2 spike finding that a real OBS→SRT feed "declares nothing" (every axis
 CICP 2 — recorded in `SRTFrameRouter.swift`'s colorimetry block) may share this cause rather than being a
 property of OBS. It has to be measured again on the fixed build before anything relies on it.
 
@@ -922,6 +939,32 @@ is `assumed`, so an override is the only way to get anything but 709 SDR on SRT.
 §6.9, decision 7). It adds one shared H.264 SPS colour reader for SRT and WHEP, so both report declared
 or assumed per axis. It also corrects the comments listed above and repeats the OBS→SRT check. It runs
 before Stage B.
+
+---
+
+## ☐ OPEN 2026-10-07 — PRE-EXISTING, ALL BUILDS — declared colour codes outside the renderer's vocabulary are labelled `tagged` but drawn as 709
+
+**Status:** OPEN, found by Stage SPS (`COLOR_MANAGEMENT_FINDINGS.md` §6.9) while choosing what counts as
+declared. Pre-existing for files. SRT and WHEP can now reach it, because they now read what the
+stream declares.
+
+**What:** the SPS reader passes any code H.273 defines as a declaration. Examples: matrix 5 (BT.470BG,
+the 625-line 601 matrix, common from European encoders), matrix 0 (identity), transfer 4, primaries
+11 (DCI-P3). These reach the renderer and the chain readout as `tagged`. But the code-to-CoreVideo
+tables know only some of them. `SourceColorimetry.matrixAttachment` maps 1, 6 and 9, and everything
+else falls to 709. `MetalVideoRenderer`'s Kr/Kb and `makeColorSpace` have the same gap. So a
+matrix-5 stream is decoded with 709 coefficients under a `tagged` label, where it used to be decoded
+the same way under `assumed`. The readout names the matrix `—`.
+
+**Measured, not just read:** CoreVideo's own vocabulary also lacks matrix 5. A format description built
+from such an SPS carries `YCbCrMatrix#5`, so the file path has the same gap.
+
+**Fix direction:** map 5 to `kCVImageBufferYCbCrMatrix_ITU_R_601_4`, which is the same matrix as 6,
+in every code-to-attachment table and in Kr/Kb. Decide separately whether codes with no mapping
+should read `tagged`. Not done in Stage SPS.
+
+**Decided (Robbie, 2026-10-07):** map matrix 5 to the 601 matrix in its own commit, after Stage SPS is
+committed. This entry stays open until that commit lands.
 
 ---
 

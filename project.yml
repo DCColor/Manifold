@@ -163,6 +163,11 @@ targets:
       # the scope colour feed and the Color control.
       - package: ManifoldCore
         product: ColorimetryModel
+      # What an H.264 SPS declares about colour (COLOR_MANAGEMENT_FINDINGS.md §6.9, Stage SPS) — a
+      # leaf target so `swift test` can reach it with real SPS bytes. Used by App/Live/LiveVideoDecoder
+      # and StreamColorimetry, for SRT and WHEP.
+      - package: ManifoldCore
+        product: H264SPSColor
       # The ADTS frame walker — a leaf target so `swift test` can reach it. Used by
       # App/SRT/SRTAudioDecoder only.
       - package: ManifoldCore

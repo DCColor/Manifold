@@ -1550,7 +1550,8 @@ Run in this order.
   - Move the override type into a ManifoldCore package target and point NDI at it.
   - Add unit tests.
   - No behaviour change.
-- **Stage SPS — shared H.264 SPS colour reader for SRT and WHEP.**
+- **Stage SPS — shared H.264 SPS colour reader for SRT and WHEP.** Done 2026-10-07, below, OBS
+  re-check included.
   - SRT and WHEP report declared or assumed for each axis.
   - Correct the "SRT can state the truth" comments.
   - Check again whether OBS → SRT really declares nothing.
@@ -1564,10 +1565,10 @@ Run in this order.
   - Save and Revert in the live menu.
 - **Stage E — HLS override.** The P3 code fix (decision 6) lands before it.
 
-**Measured before Stage B ships:**
+**Measured before Stage B ships:** both answered in Stage SPS, below.
 - Does VideoToolbox convert pixels when SRT or WHEP source buffers are tagged PQ, HLG or 2020? If
-  it does, an override changes the pixels as well as their interpretation.
-- Does 10-bit H.264 decode on these paths?
+  it does, an override changes the pixels as well as their interpretation. **No.**
+- Does 10-bit H.264 decode on these paths? **Yes, on both.**
 
 #### Stage A — done 2026-10-06, measured as no behaviour change
 
@@ -1599,6 +1600,237 @@ on HEAD against itself. **Reuse this comparison for Stages B–E.**
 
 **The Rec.709 case** is overridden but has the same codes as Auto. It shows that amber follows the
 override's tier, not the codes, on both builds.
+
+#### Stage SPS — done 2026-10-07
+
+**What changed.** SRT and WHEP read declared colour per axis from the stream's own SPS VUI. An axis the
+SPS leaves absent, unspecified (2) or reserved is undeclared and keeps the assumed-709 behaviour. The
+FFmpeg build did not change.
+
+- **The reader:** `H264SPSColor`, a new leaf target in ManifoldCore, with 13 unit tests.
+- **Shared with the app:** `StreamColorimetry` (App/Live) replaces `SRTFrameRouter.StreamColorimetry`.
+  It turns one SPS reading into the renderer's codes and tier, the buffer tags and the log line.
+  Both halves of finding 10 come from that one value.
+- **The hook:** `LiveVideoDecoder.onSPSColor`. It fires once per change of SPS bytes, on the decode
+  thread, before the access unit carrying the SPS is decoded. Decode is synchronous, so every frame
+  after it is tagged with the colour it was encoded with.
+- **SRT** activates its route on the first SPS reading instead of at `onVideoFormat`. It costs no
+  picture, because nothing decodes before an SPS, and audio before the video anchor is dropped
+  anyway. The codec gate still runs at `onVideoFormat`.
+- **WHEP** still activates before media exists, stating assumed 709. What the SPS declares replaces it
+  when the first picture is presented.
+- **A later SPS** that changes the colour re-tags buffers from the next decoded frame. The renderer
+  hears through the new `LiveDisplayRoute.updateColorimetry`, which calls `setSourceColorSpace` and
+  which Stage B will reuse. That hop is timed for the presentation of the first new-colour frame, so
+  the ~0.25 s (SRT) or ~0.4 s (WHEP) of old frames still queued are not drawn under the new colour.
+- **The log:** `[SPS-COLOR]` once per change, per axis, with the SPS's raw number beside the verdict.
+  It also gives `video_full_range_flag` against the range in use. Range is still each transport's
+  own: SRT from codecpar, WHEP pinned limited. Nothing acts on the flag.
+- **The comments** that said libavformat fills `codecpar->color_*` on SRT are corrected in
+  `SRTFrameRouter`, `LiveDisplayRoute` and `WHEPFrameRouter`. So is the matching SAR claim in SRT's
+  `deliver`, which rested on the same reasoning and is now marked unmeasured.
+
+##### Step 1 — CoreMedia was measured first, and is not reliable per axis
+
+`CMVideoFormatDescriptionCreateFromH264ParameterSets` with fixture SPS bytes, and VideoToolbox decoding
+the first IDR to `x420` and to its native format:
+
+| SPS declares | Format description extensions | Decoded buffer attachments |
+|---|---|---|
+| 709 · 709 · 709 | 709 · 709 · 709 | same |
+| 2020 · PQ · 2020 / 2020 · HLG · 2020 | correct | same |
+| 6 · 6 · 6 (BT.601) | SMPTE_C · **ITU_R_709_2** · 601 (transfer 6 respelled 709) | same |
+| nothing (no VUI / no signal type / no colour description) | none | **SMPTE_C · 709 · 601, invented** |
+| 2 · 2 · 2 (explicit unspecified) | none | **SMPTE_C · 709 · 601, invented** |
+| 3 · 0 · 3 (reserved) | `ColorPrimaries#3` · none · `YCbCrMatrix#3`: reserved passed as declared | partly |
+| 200 · 100 · 99 (reserved) | `#200` · `#100` · `#99`: all passed as declared | same |
+| 12 · 13 · 0 | P3_D65 · sRGB · **none (matrix 0, a declaration, dropped)** | same |
+| `video_full_range_flag` absent vs 0 | `FullRangeVideo` 0 in both | — |
+
+So the format description fails the per-axis rule (reserved counts as undeclared), and the decoded
+buffers are worse than nothing: they turn "undeclared" into a confident 601. Hence the parser.
+
+##### Unit tests — prediction 1, PASS
+
+**Fixtures:** 22 real SPS, from the system ffmpeg (libx264, libopenh264, h264_videotoolbox), with
+`h264_metadata` used for the unspecified, partial and reserved cases. They cover:
+
+- 709, PQ/2020, HLG/2020, 601 and 470BG;
+- no VUI; VUI with no signal type; signal type with no colour description;
+- Baseline, High, High 4:4:4 (chroma 3), High 10, interlaced and cropped;
+- Extended_SAR putting `00 00 03` inside the VUI before the colour fields;
+- 2/2/2, 9/2/9, 3/0/3, 200/100/99, matrix 0 and 11/4/14.
+
+**Scaling lists:** x264 writes scaling matrices only in the PPS. So lists were spliced into x264's
+PQ SPS: an explicit 4×4 list, a use-default list and an explicit 8×8 list. FFmpeg reads 9/16/9 after
+them, and its decode differs from the flat-matrix original, so the lists are live.
+
+**Expected values:** FFmpeg's reading, not this reader's. ffprobe is not installed, so
+`ffmpeg -bsf:v trace_headers` was used: libavcodec's CBS parser, which prints every SPS field.
+
+**Result:** every field of every fixture matches. Every prefix of five SPS reads either the exact
+colour or undeclared, never a different colour. SPS-typed garbage, an all-zero SPS and an oversized
+one all return. Two deliberate mutants, no emulation-prevention removal and scaling lists not walked,
+each fail 6 of 13 tests. Both failed *closed*, reading undeclared and never a wrong colour.
+
+##### The pixel question — answered before any wiring, because a yes was a stop
+
+Same slices with the SPS VUI varied by `h264_metadata`, 1280×720 SMPTE bars. Every byte of every plane
+was compared, in the §6.8 shape, with a control and a sanity case:
+
+| comparison | bytes differing |
+|---|---|
+| CONTROL: decode → `x420`, 709 SPS twice | 0 / 2 764 800 |
+| decode → `x420`: 709 SPS vs PQ/2020, vs HLG/2020, vs no colour description | **0, 0, 0** |
+| CONTROL: promote (VTPixelTransferSession 420v → `x420`), source tagged 709 twice | 0 |
+| promote with the SOURCE tagged 709 vs PQ/2020, vs HLG/2020 | **0, 0** |
+| SANITY: the same re-tag into 32BGRA | **895 416 / 3 686 400 (24.29 %)**, worst Δ 13 |
+| SANITY: decode straight to 32BGRA, 709 SPS vs PQ SPS | 24.29 % |
+
+**Neither VideoToolbox step changes a pixel because of the colour tags. The instrument does see a
+difference when one exists.** The promote carries the tags through to its output. And in every live
+run below, VT honoured `x420` (`decoded as 'x420' — … no promote needed`), so the promote did not run
+at all.
+
+**10-bit H.264 (High 10):**
+
+- **Offline:** decodes to `x420`, bit-exact against ffmpeg's decode (921 600 luma samples, 0 differ).
+- **SRT, live:** decodes, 180/180 access units, ~25 fps, `x420`, tagged 9-16-9.
+- **WHEP via MediaMTX, live:** also decodes, ~25 fps, 0 errors, tagged 9-16-9, even though our offer
+  says `profile-level-id=42e01f` (Constrained Baseline). MediaMTX sent High 10 regardless. That is the
+  server's choice, not a guarantee. Predicted not to decode: **miss**.
+
+So an HDR override on SRT or WHEP will not be limited to 8-bit pictures (finding 16), at least with
+MediaMTX as the WHEP server.
+
+##### Device runs — predictions 2–6
+
+**Rig:** unattended, unsigned Profile builds.
+
+- **Builds:** HEAD `c14a1d8`, SHA-256 `7144fa65…`, against the tree, `d7674e5f…`.
+- **SRT:** an ffmpeg listener, connected with ⌃⌥D and `MANIFOLD_SRT_DEBUG_URL`.
+- **WHEP:** ffmpeg publishing SRT into the idle local MediaMTX, read back over WHEP from its saved
+  bookmark. Audio was Opus, for WebRTC.
+- **Streams:** 1280×720/25 with AAC. Baseline, plus a High profile with B-frames for SRT.
+- **Defaults:** the domain was exported before the first launch, and `streamBookmarks` stashed. After
+  the last quit the domain was restored and verified dictionary-equal (1 141 keys).
+  `streamBookmarks` was never written.
+
+| stream | SRT `[SCOPE-COLOR] source` on connect | WHEP `source` on connect | readout | result |
+|---|---|---|---|---|
+| PQ/2020 | 1: `Rec. 2020 · PQ (ST 2084) — tagged (CICP 9-16-9)` | 2: `assumed (1-1-1)`, then the tagged line | `… · limited — CICP 9-16-9 — tagged` | PASS |
+| HLG/2020 | 1: `… HLG — tagged (9-18-9)` | 2 | `9-18-9 — tagged` | PASS |
+| 709-declared | 1: `… — tagged (1-1-1)` | 2 | `1-1-1 — tagged` | PASS |
+| untagged | **0** (HEAD: 0) | 1: `assumed (1-1-1)` (HEAD: same) | `1-1-1 — assumed` | see below |
+| PQ, High + B-frames (SRT) | 1, tagged 9-16-9, 0 decode failures | — | — | PASS |
+| HEAD, PQ | **0. `[SRT] colorimetry: primaries=UNDECLARED …` on every axis**: the defect | `assumed (1-1-1)` only | — | the before |
+
+**Disconnect:** every row gave exactly 1 `source` line (cleared, `assumed (–-–-–)`) and 1 `released`.
+The untagged SRT row gave 0 + 1, because its state already equals the cleared one.
+
+**The earlier scope run's rows 9 and 10, SRT PQ then killing the sender: PASS.** 1 source on connect,
+then 1 source + 1 released on the drop.
+
+**Untagged SRT — a miss in the prediction, not in the build.** I predicted 1 `source` line. The
+undeclared SRT state (nil, nil, nil, assumed) is the cleared state, so the renderer's no-op guard
+swallows it. HEAD does the same: 0 lines on connect, 1 `released` on drop. The scope run's row 11
+had predicted exactly that. The part that mattered is identical to HEAD.
+
+**[SPS-COLOR]:** exactly one line per stream, matching the row. `video_full_range_flag` was 0 on every
+x264 stream that wrote a signal type, and the range in use was limited, so it agreed every time. The
+untagged streams carry no `video_signal_type` (flag absent). **No disagreement was seen.**
+
+**The Color control:** absent on SRT and WHEP before and after, as predicted (NDI-only, finding 13).
+The scope headers agreed with the readout. Waveform `luma Rec. 2020` for 9-x-9 and `luma Rec. 709`
+otherwise. The CIE header is the `[SCOPE-COLOR]` text. The parade and waveform rulers read `HLG *`
+on every source, because that machine's `manifold.scope.verticalScale` is `hlg`: forced, not followed.
+
+**Mid-stream SPS change — prediction 4, PASS on both transports.**
+
+**The stream:** one continuous stream, 10 s declared 709 then 10 s PQ/2020, looping, served without
+disconnecting. MediaMTX passes the in-band SPS change through to WebRTC.
+
+**The result:** each change gave exactly one `[SPS-COLOR]` and one `source` line. The chain readout
+followed.
+
+| | SPS read → renderer switched | |
+|---|---|---|
+| SRT (target 0.25 s) | +0.300 s, +0.263 s (earlier build: +0.280, +0.282) | |
+| WHEP (target 0.40 s) | +0.433 s (first reading), +0.450 s, +0.455 s | |
+
+The renderer moves when the first new-colour frame is due, so the buffer tags and the renderer's codes
+describe the same pictures to within the hop.
+
+**Regression — prediction 6, PASS.** `[SCOPE-COLOR]` and `[NDI] colorimetry override` lines, HEAD
+against the tree, diffed by machine:
+
+- **NDI:** the scratch NDI SDK sender, no colour metadata; connect, ⌃⌥C through all six presets back
+  to Auto, disconnect. 15 lines each, **identical**.
+- **HLS:** Apple bipbop. 5 lines each, **identical**: assumed 1-1-1, tagged 1-1-1, cleared, released.
+
+All these lines are logged on main, so no per-thread split was needed.
+
+##### A defect the device run caught, fixed before the results above
+
+The first WHEP run logged `[SPS-COLOR] … → tagged` and then never told the renderer. A PQ stream
+stayed `assumed (1-1-1)` for the whole connection.
+
+**Cause:** the hop's delay was computed from a `now()` read *before* `registerFrame`. The first frame
+of a stream is the one that anchors the clock, so that read was the unanchored clock's −∞, and the
+delay was +∞. SRT's mid-stream path had the same shape latently. SRT's own first reading activates
+the route directly, so it never hit it.
+
+**Fix:** `LiveDisplayRoute.secondsUntilDue` reads the clock after registration and treats a
+non-finite delay as now. All results above are from the fixed build. SRT was re-run on it.
+
+##### The OBS re-check — attended (Robbie), 2026-10-07
+
+**Rig:** OBS, profile "SRT Local 2" (a duplicate of "MediaMTX Local"), publishing SRT to the local
+MediaMTX at `srt://127.0.0.1:8890?streamid=publish:live&pkt_size=1316`. Not Cloudflare. Manifold read
+`…?streamid=read:live` through ⌃⌥D and `MANIFOLD_SRT_DEBUG_URL`. A second ffmpeg reader recorded 15 s
+of each setting for FFmpeg's `trace_headers`.
+
+**Profile:** NV12 (8-bit 4:2:0) · Range Limited · 23.98 fps (checked after the profile switch) · Apple
+VT H.264 Hardware Encoder · 1920×1080. The SPS is Main profile (77), 8-bit, and carries **no timing
+info**, so the frame rate is not declared there.
+
+| OBS Color Space | SPS, every one of 16 in 15 s (FFmpeg) | Manifold `[SPS-COLOR]` / `[SCOPE-COLOR]` |
+|---|---|---|
+| Rec. 709 | colour description present · 1 / 1 / 1 · `video_full_range_flag` 0 | 1 · 1 · 1 declared → tagged · `Rec. 709 · Rec. 709 — tagged (CICP 1-1-1)` · range flag agrees |
+| Rec. 2100 (PQ) | colour description present · **9 / 16 / 9** · flag 0 | 9 · 16 · 9 declared → tagged · `Rec. 2020 · PQ (ST 2084) — tagged (CICP 9-16-9)` · agrees |
+
+**The stage-2 spike's "a real OBS→SRT feed declares nothing" is wrong**, at least for this OBS and this
+encoder. OBS declares its Color Space setting explicitly in the SPS. The spike read every axis as
+unspecified from codecpar, which this build never fills (BUGS.md). The comments that relied on it
+are corrected in `SRTFrameRouter`.
+
+**What OBS's PQ stream is, which matters for Stage B:**
+
+- **8-bit:** OBS warned "Rec. 2100 should use a format with more precision" and streamed anyway, as
+  8-bit PQ in H.264 Main. Expect banding.
+- **No HDR10 static metadata:** the only SEI in the recording is payload type 5 (user data
+  unregistered). There is no mastering-display SEI (137) and no content-light-level SEI (144).
+
+The chain-readout screenshot for the PQ case missed: the window had resized to 1920×1080 and the
+scripted clicks fell on the picture. The `[SCOPE-COLOR]` line is the one that matched the readout
+exactly in every earlier 9-16-9 run.
+
+**Defaults:** exported before Manifold launched and restored after it quit. The domain is
+dictionary-equal (1 141 keys); `streamBookmarks` was not written.
+
+##### Still open after Stage SPS
+
+- **Declared codes the app has no vocabulary for.** An SPS can now declare codes the renderer's
+  tables do not have, for example matrix 5 (BT.470BG, the 625-line 601 matrix), matrix 0 (identity),
+  transfer 4 or primaries 11. They reach the renderer and the readout as `tagged`. But
+  `SourceColorimetry.matrixAttachment` and the renderer's Kr/Kb know only 1, 6 and 9, so a matrix-5
+  stream is decoded with 709 coefficients under a `tagged` label. Before Stage SPS the same stream was
+  decoded the same way, labelled `assumed`. Recorded in BUGS.md; not fixed here. **Decided (Robbie,
+  2026-10-07):** matrix 5 maps to the 601 matrix in its own commit, after Stage SPS.
+- **SRT taking the display at the first SPS** rather than at `onVideoFormat`: accepted (Robbie,
+  2026-10-07).
+- **MediaMTX's HLS of the Baseline test stream** failed to open in AVFoundation (CoreMedia −12927).
+  It was not investigated; bipbop was used for the HLS regression instead.
 
 ---
 

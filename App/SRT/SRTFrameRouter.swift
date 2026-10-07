@@ -23,7 +23,8 @@
 //    * the promote        — VTPixelTransferSession into a pooled x420 buffer, the shape NDIService
 //                           and WHEPFrameRouter both use to reach the shader's 10-bit domain.
 //
-//  Genuinely new: reading the stream's declared colorimetry instead of assuming it, and measuring
+//  Genuinely new: reading the stream's declared colorimetry (from its SPS, since §6.9 Stage SPS —
+//  see the colorimetry block for why codecpar never had it) instead of assuming it, and measuring
 //  the REORDER DELAY — because unlike WHEP, an SRT contribution feed routinely carries B-frames,
 //  and the buffer has to be deep enough to hold the reorder window. See `targetDepth`.
 //
@@ -52,6 +53,7 @@ import CoreVideo
 import Foundation
 import ManifoldCore   // LiveClock
 import ColorimetryModel   // SourceColorimetry (buffer tags), SourceColorProvenance
+import H264SPSColor       // the decoder's per-SPS colour reading
 import QuartzCore
 import VideoToolbox
 
@@ -159,127 +161,42 @@ final class SRTFrameRouter {
 
     // MARK: - Colorimetry
     //
-    // ── THE THREE-STATE HONESTY, WHICH IS THE WHOLE REASON THIS IS READ AND NOT ASSUMED ─────
+    // ── READ FROM THE STREAM'S OWN SPS, AND STATED ONCE IT HAS BEEN READ ───────────────────
     //
-    // WHEP passes `.assumedRec709SDR` because H.264 signals colorimetry in the SPS VUI and its RTP
-    // depacketizer does not parse it — a limitation of that transport, stated at that transport's
-    // config site precisely so nothing shared would bake it in. SRT reaches libavformat, which
-    // fills `codecpar->color_primaries` / `color_trc` / `color_space` / `color_range` from the same
-    // VUI, so this path CAN state the truth. Stating it means being able to say "the sender said
-    // nothing" as a distinct answer from "the sender said 709" — the same distinction SourceColorimetry
-    // keeps with `declared` vs `assumed`, and for the same reason: A DEFAULT IS NOT A FACT.
+    // `StreamColorimetry` (App/Live) holds the reading and its three-state honesty: an axis the SPS
+    // declares is `declared`; one it leaves absent, unspecified (2) or reserved is undeclared and
+    // ASSUMED 709. Undeclared axes reach the renderer as nil (`route(undeclaredAxisCode: nil)`), as
+    // they always have on this transport.
     //
-    // AND THE COMMON CASE IS "NOTHING". The stage-2 spike measured a real OBS→SRT feed and found
-    // every axis UNSPECIFIED (CICP 2 for primaries/transfer/matrix, 0 for range). So the undeclared
-    // branch is the normal one, not the exception, and it must not launder itself into a confident
-    // Rec.709 anywhere a human reads it.
+    // ⚠️ CORRECTED 2026-10-07 (§6.9, Stage SPS). This block used to say SRT "reaches libavformat,
+    // which fills `codecpar->color_primaries` / `color_trc` / `color_space` / `color_range` from the
+    // same VUI, so this path CAN state the truth". It could not. libavformat fills those fields only
+    // by DECODING, the vendored FFmpeg has the H.264 parser and no decoder, and every SRT stream
+    // arrived undeclared on all three axes — a PQ stream was shown and scoped as SDR 709 (docs/BUGS.md,
+    // "SRT colour always reads UNDECLARED"). The colour now comes from the SPS the access-unit builder
+    // already carries, through `LiveVideoDecoder.onSPSColor`. Range still comes from codecpar, which
+    // has the same defect and so reads unspecified → limited; `[SPS-COLOR]` logs the SPS's
+    // `video_full_range_flag` beside it and nothing acts on it yet.
     //
-    // WHERE THE DISTINCTION ACTUALLY LANDS, in all three places it can:
+    // ⚠️ AND THE OBS FINDING THIS BLOCK USED TO CITE IS SUSPECT FOR THE SAME REASON. The stage-2 spike
+    // read every axis of a real OBS→SRT feed as UNSPECIFIED; it read them from codecpar, which this
+    // build never fills. What OBS actually declares is measured again in §6.9, Stage SPS.
     //
-    //   1. THE RENDERER'S SHADER + LAYER COLORSPACE — `LiveDisplayRoute.Colorimetry` takes
-    //      `Int?` per axis, where nil means "unspecified, use your own default". An UNDECLARED
-    //      axis is passed as nil, NOT as 1. Both produce the same picture (the renderer's default
-    //      is 709), so this is not a display change — it is what makes the CIE scope's header read
-    //      "untagged → 709 (assumed)" instead of a confident "Rec.709", because that header keys
-    //      off `renderer.sourcePrimariesCode` being nil.
+    // ── WHY THE ROUTE WAITS FOR THE FIRST SPS ──────────────────────────────────────────────
     //
-    //   2. THE PIXEL-BUFFER ATTACHMENTS — these cannot be nil. Something must be stamped or the
-    //      downstream consumers (shader matrix, layer colorspace, scopes, EDR gate) have nothing
-    //      to read. So an undeclared axis is tagged 709 AND recorded as assumed, which is exactly
-    //      what SourceColorimetry already does and why this file reuses it rather than inventing a
-    //      second CICP vocabulary. (It was `NDIColorInfo` until §6.9's Stage A gave it a
-    //      transport-neutral name and moved it into the ColorimetryModel package.)
+    // The route states its colour at activation. Activating at `onVideoFormat`, as this used to, would
+    // state "assumed" and then restate "tagged" a moment later when the first SPS arrived — two source
+    // announcements for one connect, and scope headers that describe a guess first. Waiting costs no
+    // picture: nothing decodes before an SPS, and audio before the video anchor is dropped anyway. So
+    // the first SPS reading is what activates the route (see `noteSPSColor`).
     //
-    //   3. THE LOG — one line per connect, saying per axis whether it was declared or assumed,
-    //      in the same words SourceColorimetry.summary uses.
-
-    /// One axis: the CICP code the pipeline consumes, and whether the STREAM said so.
-    struct ColorAxis: Equatable {
-        let code: Int
-        let declared: Bool
-        /// nil when assumed — which is what `LiveDisplayRoute.Colorimetry` wants for "unspecified".
-        var codeIfDeclared: Int? { declared ? code : nil }
-    }
-
-    /// What the chosen video stream declared, axis by axis.
-    /// Equatable so SRTClient can publish it and SwiftUI can key an `.onChange` off it, exactly as
-    /// ContentView already does with `NDIService.colorInfo`.
-    struct StreamColorimetry: Equatable {
-        let primaries: ColorAxis
-        let transfer: ColorAxis
-        let matrix: ColorAxis
-        /// Range is a SEPARATE axis from colorimetry — legal/video vs full swing.
-        let isFullRange: Bool
-        let rangeDeclared: Bool
-
-        /// CICP "unspecified" is 2 for primaries/transfer/matrix. A 0 there is RESERVED, not
-        /// unspecified, and is treated as undeclared too — a reserved value is not a statement.
-        private static func axis(_ cicp: Int32, assuming fallback: Int) -> ColorAxis {
-            let code = Int(cicp)
-            let declared = code != 2 && code != 0
-            return ColorAxis(code: declared ? code : fallback, declared: declared)
-        }
-
-        /// AVColorRange: 0 unspecified, 1 MPEG/limited, 2 JPEG/full.
-        /// UNDECLARED ASSUMES LIMITED, and that is the right assumption rather than a coin toss:
-        /// H.264 in MPEG-TS with no `video_full_range_flag` IS limited range by the standard's own
-        /// default, and it is what WHEP pins for the same content.
-        init(_ format: ManifoldSRTVideoFormat) {
-            primaries = Self.axis(format.colorPrimaries, assuming: 1)
-            transfer  = Self.axis(format.colorTransfer,  assuming: 1)
-            matrix    = Self.axis(format.colorMatrix,    assuming: 1)
-            rangeDeclared = format.colorRange != 0
-            isFullRange = format.colorRange == 2
-        }
-
-        /// Which of the honesty tiers this stream's colorimetry sits in, from the axes' own
-        /// `declared` flags rather than from the codes. SRT has no user override, so `.overridden`
-        /// cannot arise here.
-        var sourceProvenance: SourceColorProvenance {
-            switch [primaries, transfer, matrix].filter(\.declared).count {
-            case 0:  return .assumed
-            case 3:  return .tagged
-            default: return .partlyAssumed
-            }
-        }
-
-        /// What the renderer is told. Undeclared axes go through as nil — see point 1 above.
-        var routeColorimetry: LiveDisplayRoute.Colorimetry {
-            LiveDisplayRoute.Colorimetry(primaries: primaries.codeIfDeclared,
-                                         transfer: transfer.codeIfDeclared,
-                                         matrix: matrix.codeIfDeclared,
-                                         isFullRange: isFullRange,
-                                         provenance: sourceProvenance)
-        }
-
-        /// What gets stamped on every pixel buffer. Cannot be nil — see point 2 above. Reuses
-        /// SourceColorimetry's provenance vocabulary so an assumed axis reads "(assumed)" in a log line
-        /// identically to an untagged NDI source's.
-        var bufferTags: SourceColorimetry {
-            func axis(_ a: ColorAxis, _ name: String) -> ColorimetryAxis {
-                a.declared ? .declaredValue(a.code, name) : .assumed(a.code)
-            }
-            return SourceColorimetry(
-                primaries: axis(primaries, SourceColorimetry.primariesName(primaries.code)),
-                transfer:  axis(transfer,  SourceColorimetry.transferName(transfer.code)),
-                matrix:    axis(matrix,    SourceColorimetry.matrixName(matrix.code)))
-        }
-
-        /// The connect line. Says "undeclared" in words rather than printing a number that looks
-        /// like the sender's statement.
-        var summary: String {
-            func axis(_ label: String, _ a: ColorAxis, _ name: String) -> String {
-                a.declared ? "\(label)=\(name) (declared, code \(a.code))"
-                           : "\(label)=UNDECLARED → assuming \(name)"
-            }
-            let range = rangeDeclared
-                ? (isFullRange ? "range=full (declared)" : "range=limited (declared)")
-                : "range=UNDECLARED → assuming limited"
-            return axis("primaries", primaries, SourceColorimetry.primariesName(primaries.code)) + "  "
-                 + axis("transfer", transfer, SourceColorimetry.transferName(transfer.code)) + "  "
-                 + axis("matrix", matrix, SourceColorimetry.matrixName(matrix.code)) + "  " + range
-        }
-    }
+    // ── A LATER SPS THAT CHANGES THE COLOUR ────────────────────────────────────────────────
+    //
+    // The buffer tags change on the very next frame decoded (this thread). The renderer's half has to
+    // change on main, and the frames still queued ahead of it were decoded under the OLD colour —
+    // `targetDepth` of them. So the announcement is timed for the presentation of the first new-colour
+    // frame (`deliver`), not for its decode: the two halves land together, to within the hop, rather
+    // than a quarter-second of old pictures being drawn under the new colour.
 
     // MARK: - The route's per-source configuration
 
@@ -311,7 +228,7 @@ final class SRTFrameRouter {
             // the target, which is the point: the queue bound must never be what limits depth.
             maxQueued: 30,
 
-            colorimetry: colorimetry.routeColorimetry)
+            colorimetry: colorimetry.route(undeclaredAxisCode: nil))
     }
 
     // MARK: - Live state (main thread, except where noted)
@@ -335,10 +252,22 @@ final class SRTFrameRouter {
     /// telemetry is compiled out, never a plausible measured 0.0.
     var measuredCushionNeeded: Double? { telemetry.measuredCushionNeeded }
 
-    /// What the stream declared, latched at onVideoFormat and read on both threads for the buffer
-    /// tags. Written once on the session thread before any access unit can arrive, read on that
-    /// same thread thereafter — no lock, same discipline as `currentSPS` in the decoder.
-    private var colorimetry = StreamColorimetry(ManifoldSRTVideoFormat())
+    /// What the stream's SPS declares, for the buffer tags. SESSION THREAD ONLY — written by
+    /// `noteSPSColor` (the decoder's `onSPSColor`, before the access unit is decoded) and read by
+    /// `deliver` and the promote, all on that thread. No lock, same discipline as `currentSPS` in
+    /// the decoder.
+    private var colorimetry = StreamColorimetry.undeclared(isFullRange: false, rangeDeclared: false)
+    /// Range as codecpar states it, latched at `prepareDecoder`. The SPS does not set it (see the
+    /// colorimetry block).
+    private var formatRange: (isFullRange: Bool, declared: Bool) = (false, false)
+    /// Whether this stream has had an SPS read yet. The FIRST reading activates the route.
+    private var haveSPSColor = false
+    /// What the renderer has been (or is about to be) told, so `deliver` can see a change. nil until
+    /// the first SPS. Session thread only.
+    private var announcedColorimetry: LiveDisplayRoute.Colorimetry?
+    /// SRTClient's hop to main, carrying its session generation: `first` activates the route, a later
+    /// change updates it, after `delay` seconds (the first new-colour frame's presentation).
+    private var onStreamColorimetry: ((StreamColorimetry, _ first: Bool, _ delay: Double) -> Void)?
 
     // MARK: - Decode + promote state (SESSION THREAD only)
 
@@ -443,10 +372,10 @@ final class SRTFrameRouter {
     /// ── WHY THIS EXISTS, AND WHY WHEP HAS NO EQUIVALENT ──────────────────────────────────
     ///
     /// WHEP activates its route inside `connect()`, before the answer is even applied, because
-    /// nothing about its Config depends on the stream: the colorimetry is assumed. SRT's Config
-    /// CANNOT be built that early — it carries the stream's declared colorimetry, and that is not
-    /// knowable until `avformat_find_stream_info` has run, which is up to 3 s of connect plus up to
-    /// 5 s of analysis away.
+    /// nothing about its Config depends on the stream: it states assumed 709 and corrects itself
+    /// when the first SPS arrives. SRT's Config CANNOT be built that early — it carries the stream's
+    /// declared colorimetry, which is not knowable until the first SPS has been read, and that is
+    /// after `avformat_find_stream_info`: up to 3 s of connect plus up to 5 s of analysis away.
     ///
     /// Leaving the display alone across that window would be wrong twice: the user would keep
     /// watching the OLD source after asking for a new one, and at the moment SRT did take over
@@ -462,9 +391,10 @@ final class SRTFrameRouter {
         renderer?.clearToBlack()
     }
 
-    /// SRT takes the display. Called from SRTClient once the demuxer has identified the video
-    /// stream — LATER than WHEP's equivalent, and necessarily so: the colorimetry that goes into
-    /// the Config is not knowable until `avformat_find_stream_info` has run.
+    /// SRT takes the display. Called from SRTClient once the decoder has read the stream's first
+    /// SPS (`noteSPSColor`) — LATER than WHEP's equivalent, and necessarily so: the colorimetry that
+    /// goes into the Config is what that SPS declares. Until 2026-10-07 this ran as soon as the
+    /// demuxer identified the stream, with colour copied from codecpar, which never held any.
     ///
     /// THERE IS A SHORT WINDOW WHERE ACCESS UNITS ARRIVE AND THIS HAS NOT RUN — the session thread
     /// keeps demuxing across the async hop to main. `deliver` handles it the way WHEP's does: no
@@ -584,6 +514,17 @@ final class SRTFrameRouter {
               """, Self.targetDepth, format.videoDelay)
     }
 
+    /// The stream's SPS colour changed mid-stream. MAIN, from SRTClient, timed for the first
+    /// new-colour frame's presentation. The buffer tags already changed on the session thread; this
+    /// is the renderer's half (`LiveDisplayRoute.updateColorimetry`).
+    func updateColorimetry(_ colorimetry: StreamColorimetry) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stateLock.lock(); let active = liveClock != nil; stateLock.unlock()
+        guard active else { return }
+        route.updateColorimetry(colorimetry.route(undeclaredAxisCode: nil))
+        NSLog("[SRT] colorimetry changed mid-stream: %@", colorimetry.summary)
+    }
+
     /// SRT releases the display. Restores the file-path providers verbatim so playback can resume,
     /// and wipes the last streamed frame. Idempotent-safe.
     func deactivate() {
@@ -619,8 +560,18 @@ final class SRTFrameRouter {
     /// Build the decoder and wire it to `deliver`. SESSION THREAD, from onVideoFormat — the same
     /// thread that will call `decode`, which is what LiveVideoDecoder's "one thread owns the
     /// session" rule requires.
-    func prepareDecoder(format: ManifoldSRTVideoFormat, colorimetry: StreamColorimetry) {
-        self.colorimetry = colorimetry
+    ///
+    /// `onColorimetry` is called on THIS thread with each change of the stream's SPS colour — the
+    /// first one activates the route; see the colorimetry block.
+    func prepareDecoder(format: ManifoldSRTVideoFormat,
+                        onColorimetry: @escaping (StreamColorimetry, _ first: Bool, _ delay: Double) -> Void) {
+        // AVColorRange: 0 unspecified, 1 MPEG/limited, 2 JPEG/full. UNDECLARED ASSUMES LIMITED: H.264
+        // with no `video_full_range_flag` IS limited by the standard's own default.
+        formatRange = (isFullRange: format.colorRange == 2, declared: format.colorRange != 0)
+        colorimetry = .undeclared(isFullRange: formatRange.isFullRange, rangeDeclared: formatRange.declared)
+        haveSPSColor = false
+        announcedColorimetry = nil
+        onStreamColorimetry = onColorimetry
         declaredVideoDelay = format.videoDelay
         reorderMaxSeconds = 0
         reorderExceedances = 0
@@ -683,7 +634,29 @@ final class SRTFrameRouter {
         // cause and an expected duration, rather than being wired to a no-op that reads as if a
         // request went out.
         decoder.onNeedsKeyframe = { [weak self] in self?.noteKeyframeWait() }
+        // Each new SPS's colour, on this thread, before the access unit carrying it is decoded.
+        decoder.onSPSColor = { [weak self] sps in self?.noteSPSColor(sps) }
         self.decoder = decoder
+    }
+
+    /// A new SPS has been read. SESSION THREAD, from the decoder, before its access unit decodes —
+    /// so the frames that follow are tagged with what they were encoded as.
+    ///
+    /// The FIRST reading activates the route, carrying this colour (see the colorimetry block). A
+    /// later reading only changes the tags here; `deliver` announces it to the renderer when the
+    /// first frame decoded under it is due.
+    private func noteSPSColor(_ sps: H264SPSColor) {
+        let next = StreamColorimetry(sps: sps, isFullRange: formatRange.isFullRange,
+                                     rangeDeclared: formatRange.declared)
+        // Once per change. A repeat of the same SPS never reaches here (the decoder compares bytes);
+        // a new SPS saying the same colour stops here.
+        guard !haveSPSColor || next != colorimetry else { return }
+        colorimetry = next
+        NSLog("%@", next.spsColorLine(transport: "SRT"))
+        guard !haveSPSColor else { return }
+        haveSPSColor = true
+        announcedColorimetry = next.route(undeclaredAxisCode: nil)
+        onStreamColorimetry?(next, true, 0)
     }
 
     /// Release everything the session thread owns. SESSION THREAD, from onEnded — the last instant
@@ -696,6 +669,9 @@ final class SRTFrameRouter {
         teardownAudio()
         decoder?.invalidate()
         decoder = nil
+        haveSPSColor = false
+        announcedColorimetry = nil
+        onStreamColorimetry = nil
         transferSession = nil
         pixelBufferPool = nil
         poolSize = (0, 0)
@@ -1721,10 +1697,11 @@ final class SRTFrameRouter {
         // exists for it). Placed AFTER the active guard so a frame racing teardown cannot publish a
         // shape for a stream that has already released the display.
         //
-        // ⚠️ SQUARE PIXELS ASSUMED — AND THIS IS THE ONE TRANSPORT THAT COULD DO BETTER TODAY.
-        // libavformat fills `codecpar->sample_aspect_ratio` from the same SPS VUI it fills the
-        // colorimetry from, exactly as described in the colorimetry block above. It is not in
-        // `ManifoldSRTVideoFormat` yet, so there is nothing to apply; when it is, this is the call
+        // ⚠️ SQUARE PIXELS ASSUMED. SAR is in the same SPS VUI the colour is now read from
+        // (`H264SPSColor` steps over it on the way to the colour fields). Whether this build's
+        // codecpar carries `sample_aspect_ratio` is UNMEASURED — it was once claimed to, by the same
+        // reasoning that wrongly said codecpar carried the colour (colorimetry block). It is not in
+        // `ManifoldSRTVideoFormat` either way, so there is nothing to apply; when it is, this is the call
         // site that would apply it (and `FrameEngine.setLiveDisplaySize` documents what the file
         // path's equivalent value does and does not include).
         //
@@ -1764,6 +1741,15 @@ final class SRTFrameRouter {
                                             arrivalHost: CACurrentMediaTime(), clock: clock)
         }
 
+        // A COLOUR CHANGE REACHES THE RENDERER WHEN ITS FIRST FRAME IS DUE. This frame was decoded
+        // under a later SPS than the renderer has been told about; the frames ahead of it in the
+        // queue were not. See the colorimetry block.
+        let stated = colorimetry.route(undeclaredAxisCode: nil)
+        if let announced = announcedColorimetry, stated != announced {
+            announcedColorimetry = stated
+            onStreamColorimetry?(colorimetry, false, LiveDisplayRoute.secondsUntilDue(presentationPTS, clock))
+        }
+
         guard let promoted = promoteIfNeeded(decoded) else {
             promoteFailures += 1
             logFlowIfDue()
@@ -1773,8 +1759,8 @@ final class SRTFrameRouter {
         // scopes, EDR gate). A pooled buffer starts untagged and VT's attachment propagation is
         // measured behavior rather than a documented contract, so tagging the OUTPUT last is the
         // ordering that holds either way — NDIService.tagOutput's reasoning, verbatim. What is
-        // stamped is the stream's DECLARED colorimetry where it declared any, and 709 where it did
-        // not; the provenance of that choice was stated once at connect.
+        // stamped is what the SPS this frame was decoded under DECLARED, and 709 for any axis it did
+        // not; the provenance of that choice is in its `[SPS-COLOR]` line.
         colorimetry.bufferTags.apply(to: promoted)
 
         guard let sampleBuffer = Self.makeSampleBuffer(

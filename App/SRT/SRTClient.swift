@@ -122,13 +122,14 @@ final class SRTClient: ObservableObject {
         lastErrorSurvivesPictures = false
     }
 
-    /// What the stream declared about its colour. nil while nothing is streaming.
+    /// What the stream's SPS declared about its colour (`StreamColorimetry`, §6.9 Stage SPS). nil
+    /// while nothing is streaming, and until the first SPS has been read.
     ///
     /// ⚠️ NO LONGER READ BY THE SCOPES, and as of 2026-10-06 read by nothing. It used to feed the
     /// scope headers through an `.onChange` in ContentView; those now read the RENDERER, which
     /// `SRTFrameRouter.activate` already states this colorimetry to (`ScopeColorFeed`, and the
     /// source-colour rule in CLAUDE.md). Kept as the transport's own published declaration.
-    @Published private(set) var colorimetry: SRTFrameRouter.StreamColorimetry?
+    @Published private(set) var colorimetry: StreamColorimetry?
 
     // MARK: - State (main thread)
 
@@ -514,7 +515,7 @@ final class SRTClient: ObservableObject {
         }
 
         // TAKE THE DISPLAY NOW, not when the first picture arrives. The route itself cannot be
-        // activated until the demuxer has told us the stream's colorimetry (see
+        // activated until the stream's first SPS has told us its colorimetry (see
         // SRTFrameRouter.activate), and that is up to 3 s of connect plus up to 5 s of analysis
         // away. Leaving a loaded file playing across that window would show the user the OLD
         // source after they asked for a new one, and would put two producers on the renderer the
@@ -552,19 +553,39 @@ final class SRTClient: ObservableObject {
             // (it repoints the renderer's providers). So the format lands here, prepares the
             // decode side synchronously, and hops for the display side. Access units cannot
             // arrive before this returns — the C layer emits onVideoFormat before the first
-            // one — so the decoder is always ready in time. The route may be a few milliseconds
-            // behind, which `deliver` already tolerates by dropping frames with no clock.
+            // one — so the decoder is always ready in time.
+            //
+            // THE ROUTE IS ACTIVATED BY THE FIRST SPS, NOT HERE (§6.9 Stage SPS; the colorimetry
+            // block in SRTFrameRouter says why). The format hop still runs first and does the codec
+            // gate; the colour hop below is enqueued from this same thread later, so it always
+            // lands after it. Frames decoded before the route is up are dropped by `deliver`, as
+            // they always were.
             onVideoFormat: { ctx, generation, format in
                 guard let ctx, let format else { return }
                 let client = Unmanaged<SRTClient>.fromOpaque(ctx).takeUnretainedValue()
                 let f = format.pointee
-                let colorimetry = SRTFrameRouter.StreamColorimetry(f)
                 // The decode-side preparation is NOT generation-gated, and does not need to be: it
                 // runs INLINE on this session's own thread, so it cannot be reached after the join
-                // that proves this thread is gone. Only the hop below can outlive the session.
-                SRTFrameRouter.shared.prepareDecoder(format: f, colorimetry: colorimetry)
+                // that proves this thread is gone. Only the hops can outlive the session, and they
+                // carry its generation.
+                SRTFrameRouter.shared.prepareDecoder(format: f) { colorimetry, first, delay in
+                    // SESSION THREAD. The first reading hops at once — `async`, so it stays in
+                    // order behind the format hop. A later change is timed for the presentation
+                    // of the first frame decoded under it.
+                    if first {
+                        DispatchQueue.main.async {
+                            client.handleStreamColorimetry(generation: generation, format: f,
+                                                           colorimetry, first: true)
+                        }
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            client.handleStreamColorimetry(generation: generation, format: f,
+                                                           colorimetry, first: false)
+                        }
+                    }
+                }
                 DispatchQueue.main.async {
-                    client.handleVideoFormat(generation: generation, f, colorimetry: colorimetry)
+                    client.handleVideoFormat(generation: generation, f)
                 }
             },
             // ── SESSION THREAD, inline, per access unit. No hop: this is the hot path. ──
@@ -756,15 +777,10 @@ final class SRTClient: ObservableObject {
         #endif
     }
 
-    /// ⚠️ THE MOST DANGEROUS OF THE THREE TO RUN STALE, which is why the generation check leads.
-    /// Everything below configures the DISPLAY: `SRTFrameRouter.activate` repoints the render route
-    /// and states the colorimetry the renderer — and through it the scope headers — will use. A hop from a retired session that got
-    /// here would set the live stream up with the DEAD one's format and colorimetry — PQ maths on
-    /// a 709 stream, a route configured for dimensions nothing is sending — and it would not fail
-    /// visibly. It would just be quietly, confidently wrong about the picture on screen.
-    private func handleVideoFormat(generation: UInt64,
-                                   _ format: ManifoldSRTVideoFormat,
-                                   colorimetry: SRTFrameRouter.StreamColorimetry) {
+    /// The stream is identified: the codec gate, the connect log and the first-picture watchdog.
+    /// The DISPLAY is configured later, by `handleStreamColorimetry`, once the first SPS has been
+    /// read — and only if this gate let the stream through (`haveVideoStream`).
+    private func handleVideoFormat(generation: UInt64, _ format: ManifoldSRTVideoFormat) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard isCurrent(generation, "video format") else { return }
         guard session != nil else { return }
@@ -792,9 +808,6 @@ final class SRTClient: ObservableObject {
               codec, Self.text(format.profileName), format.width, format.height,
               format.guessedFrameRate, format.streamIndex,
               format.timeBaseNum, format.timeBaseDen)
-
-        self.colorimetry = colorimetry
-        SRTFrameRouter.shared.activate(format: format, colorimetry: colorimetry)
 
         // PHASE 2 BEGINS HERE, AND ITS GRACE IS ARMED HERE — not at connect. Everything before this
         // instant was the probe's time to spend; charging it to the first-picture clock would
@@ -827,6 +840,31 @@ final class SRTClient: ObservableObject {
 
         NSLog("[SRT] a decoder cannot start on a P-frame and SRT has no PLI, so the picture stays "
               + "BLACK until the sender's next keyframe (≈1s on OBS defaults). This is not a hang.")
+    }
+
+    /// What the stream's SPS declares about colour. `first`: the first reading, which activates the
+    /// display route with it. Otherwise a mid-stream change, timed for the first frame decoded under
+    /// it, which updates the renderer's half (the session thread already re-tags the buffers).
+    ///
+    /// ⚠️ THE MOST DANGEROUS HOP TO RUN STALE, which is why the generation check leads. Activation
+    /// repoints the render route and states the colorimetry the renderer — and through it the scope
+    /// headers — will use. A hop from a retired session that got here would set the live stream up
+    /// with the DEAD one's format and colorimetry — PQ maths on a 709 stream, a route configured for
+    /// dimensions nothing is sending — and it would not fail visibly. It would just be quietly,
+    /// confidently wrong about the picture on screen.
+    private func handleStreamColorimetry(generation: UInt64, format: ManifoldSRTVideoFormat,
+                                         _ colorimetry: StreamColorimetry, first: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isCurrent(generation, "stream colorimetry") else { return }
+        // No session, or the codec gate refused the stream: there is no display to configure.
+        guard session != nil, haveVideoStream else { return }
+
+        self.colorimetry = colorimetry
+        if first {
+            SRTFrameRouter.shared.activate(format: format, colorimetry: colorimetry)
+        } else {
+            SRTFrameRouter.shared.updateColorimetry(colorimetry)
+        }
     }
 
     /// The session thread has finished. Called on main, always after the decode side has already

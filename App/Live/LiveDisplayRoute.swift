@@ -64,13 +64,17 @@ final class LiveDisplayRoute {
     /// (shader matrix + layer colorspace), distinct from the per-buffer attachments a source
     /// stamps on its own pixel buffers.
     ///
-    /// A SOURCE PROPERTY, NOT A CONSTANT, on purpose. WHEP must assume 709 SDR because H.264
-    /// signals colorimetry in the SPS VUI and its RTP depacketizer does not parse it. That is a
-    /// limitation of THAT transport and it must not be baked in here: an SRT source reaches
-    /// libavformat, which fills `codecpar->color_primaries` / `color_trc` / `color_space` from
-    /// the same VUI, so it can state the truth. Anything shared that hardcoded 709 would quietly
-    /// downgrade it.
-    struct Colorimetry {
+    /// A SOURCE PROPERTY, NOT A CONSTANT, on purpose. SRT and WHEP both read it from the stream's
+    /// own SPS VUI (`StreamColorimetry`, §6.9 Stage SPS), and an axis the SPS leaves undeclared is
+    /// assumed 709. Anything shared that hardcoded 709 would quietly downgrade a stream that says PQ.
+    ///
+    /// ⚠️ CORRECTED 2026-10-07. This comment used to say SRT "reaches libavformat, which fills
+    /// `codecpar->color_*` from the same VUI, so it can state the truth". It could not: libavformat
+    /// fills those fields only by DECODING, the vendored FFmpeg has the H.264 parser and no decoder,
+    /// and every SRT stream arrived undeclared (docs/BUGS.md, "SRT colour always reads UNDECLARED").
+    ///
+    /// Equatable so a router can tell whether a new SPS changes what the renderer was told.
+    struct Colorimetry: Equatable {
         /// CICP codes; nil means "unspecified", which the renderer reads as its own default.
         var primaries: Int?
         var transfer: Int?
@@ -84,8 +88,8 @@ final class LiveDisplayRoute {
         /// states its tier anyway, so the two transports answer the same question the same way.
         var provenance: SourceColorProvenance
 
-        /// 709 SDR, video range. The honest default for a source that declares nothing, and the
-        /// value WHEP passes because it cannot read what the stream actually declared.
+        /// 709 SDR, video range. The honest default for a source that declares nothing — what WHEP
+        /// states at activation, before any SPS has arrived, and what its untagged streams keep.
         static let assumedRec709SDR = Colorimetry(primaries: 1, transfer: 1, matrix: 1,
                                                   isFullRange: false, provenance: .assumed)
     }
@@ -228,6 +232,44 @@ final class LiveDisplayRoute {
         renderer.isFullRangeProvider = { [isFullRange = color.isFullRange] in isFullRange }
 
         return clock
+    }
+
+    // MARK: - Mid-stream colour
+
+    /// The stream's colour changed while the route is active — a later SPS declares something
+    /// different (§6.9, Stage SPS), and Stage B's override will come through here too. The renderer
+    /// half only: `setSourceColorSpace`, which is how source colour changes (CLAUDE.md) and what the
+    /// scopes, the chain readout, the layer colorspace and the EDR gate follow.
+    ///
+    /// ⚠️ THE CALLER TAGS THE BUFFERS. The shader takes its YCbCr matrix from each frame's own
+    /// attachments, so the frames decoded under the new colour must carry it too (§6.9 finding 10).
+    /// Both have to come from one value; this method is the half that cannot be done off main.
+    ///
+    /// RANGE IS NOT TOUCHED: it is the transport's fixed choice, set once at activate, and no
+    /// caller changes it mid-stream. `colorimetry.isFullRange` is ignored here, on purpose.
+    ///
+    /// Applied to the renderer this route TOOK THE DISPLAY FROM, never to whatever a caller holds —
+    /// the same rule as `deactivate`. A route that is not active does nothing.
+    func updateColorimetry(_ colorimetry: Colorimetry) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard saved.isHolding, let host = saved.host else { return }
+        host.setSourceColorSpace(primaries: colorimetry.primaries,
+                                 transfer: colorimetry.transfer,
+                                 matrix: colorimetry.matrix,
+                                 provenance: colorimetry.provenance)
+    }
+
+    /// How long until a frame at `presentationPTS` is due, for timing a colour change to it.
+    ///
+    /// ⚠️ READ THE CLOCK AFTER `registerFrame`, NEVER BEFORE, and guard non-finite. Until its anchor
+    /// the clock is "never due" — `now()` returns −∞ — and the FIRST frame of a stream is the one that
+    /// anchors it, which is exactly the frame carrying the first SPS's colour. A `now()` read before
+    /// `registerFrame` predates that anchor: measured, it made this delay +∞ and the hop never
+    /// ran, so a PQ stream over WHEP stayed "assumed 709" for the whole connection (2026-10-07,
+    /// before release). Unknown → now.
+    static func secondsUntilDue(_ presentationPTS: Double, _ clock: LiveClock) -> Double {
+        let due = presentationPTS - clock.now()
+        return due.isFinite ? max(0, due) : 0
     }
 
     // MARK: - Deactivate

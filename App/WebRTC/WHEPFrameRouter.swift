@@ -46,7 +46,8 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import ManifoldCore      // UnfairLock — the priority-donating lock both telemetry locks use
-import ColorimetryModel  // SourceColorimetry.assumedRec709 — the buffer tags
+import ColorimetryModel  // SourceColorimetry — the buffer tags
+import H264SPSColor      // the decoder's per-SPS colour reading
 import QuartzCore
 import VideoToolbox
 
@@ -479,16 +480,22 @@ final class WHEPFrameRouter {
             // run against.
             maxQueued: 30,
 
-            // ASSUMED, NOT READ — and this is a WHEP limitation, which is exactly why it is stated
-            // here rather than defaulted inside LiveDisplayRoute. H.264 signals colorimetry in the
-            // SPS VUI, and our RTP depacketizer does not parse it. 709 SDR video-range is the
-            // honest default for a Constrained Baseline WHEP stream, and it is the SAME default NDI
-            // starts on for a source that declares nothing (NDIService.start). Range is pinned
-            // rather than read from the file transport's override, which describes a file that may
-            // not even be loaded — again exactly as NDI does.
+            // ASSUMED AT ACTIVATION, THEN READ. This route is activated before any media exists
+            // (see `activate`), so the only honest thing to state then is assumed 709 SDR — the SAME
+            // default NDI starts on for a source that declares nothing (NDIService.start). Once the
+            // stream's SPS has been read (`noteSPSColor`, §6.9 Stage SPS), what it declares replaces
+            // this at the first picture's presentation (`deliver`). An untagged stream's SPS reads as
+            // this same value, so nothing changes for it.
             //
-            // AN SRT SOURCE MUST NOT COPY THIS. libavformat fills codecpar->color_primaries /
-            // color_trc / color_space from the same VUI, so SRT can state the truth instead.
+            // Range is pinned rather than read from the file transport's override, which describes
+            // a file that may not even be loaded — again exactly as NDI does. The SPS's
+            // `video_full_range_flag` is logged against it and not acted on.
+            //
+            // ⚠️ CORRECTED 2026-10-07. This used to say WHEP could not read the colour because the
+            // depacketizer does not parse the VUI (true, and still true — the decoder now does), and
+            // that "an SRT source must not copy this" because libavformat fills `codecpar->color_*`
+            // from the VUI. It does not: that needs a decoder, and the vendored FFmpeg has none, so
+            // SRT was ALSO assuming 709 on every stream (docs/BUGS.md). Both read the SPS now.
             colorimetry: .assumedRec709SDR)
     }
 
@@ -506,10 +513,23 @@ final class WHEPFrameRouter {
     /// The shared live-push display plumbing: renderer save/restore, the LiveClock's four seams,
     /// queue bound, flush, colorimetry. Everything in it was written here first and moved out
     /// verbatim so SRT can use the same path rather than cloning it. What stayed behind is what is
-    /// genuinely WHEP's: the measured `targetDepth`, the assumed colorimetry, and the RTP-specific
+    /// genuinely WHEP's: the measured `targetDepth`, the colour reading's timing, and the RTP-specific
     /// drift accountant. The surplus ledger and the underrun accountant moved out too, into
     /// LiveDepthTelemetry — see the note at `telemetry`.
     private let route = LiveDisplayRoute()
+
+    // MARK: - Colour state (decode queue only)
+
+    /// What the stream's SPS declares, for the buffer tags. DECODE QUEUE ONLY: written by
+    /// `noteSPSColor` (the decoder's `onSPSColor`, before the access unit carrying the SPS is
+    /// decoded) and read by `deliver` and the promote. Range is WHEP's pinned limited.
+    private var colorimetry = StreamColorimetry.undeclared(isFullRange: false, rangeDeclared: false)
+    /// Whether this stream has had an SPS read yet — so the first reading is logged even when it says
+    /// what the default already says.
+    private var haveSPSColor = false
+    /// What the renderer has been told: `.assumedRec709SDR` at activation, then whatever `deliver`
+    /// announced. Decode queue only; reset with the rest in `releaseResources`.
+    private var announcedColorimetry = LiveDisplayRoute.Colorimetry.assumedRec709SDR
 
     // MARK: - Promote state (decode queue only)
 
@@ -722,8 +742,33 @@ final class WHEPFrameRouter {
             self?.liveAudioPositionJump?(jump)
         }
 
-        NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR",
+        NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR until the stream's SPS is read",
               Self.targetDepth)
+    }
+
+    // MARK: - Stream colour (decode queue → main)
+
+    /// A new SPS has been read. DECODE QUEUE, from the decoder, before its access unit decodes — so
+    /// the frames that follow are tagged with what they were encoded as. Logged once per change; the
+    /// renderer hears about it from `deliver`, when the first frame decoded under it is due.
+    func noteSPSColor(_ sps: H264SPSColor) {
+        let next = StreamColorimetry(sps: sps, isFullRange: false, rangeDeclared: false)
+        guard !haveSPSColor || next != colorimetry else { return }
+        haveSPSColor = true
+        colorimetry = next
+        NSLog("%@", next.spsColorLine(transport: "WHEP"))
+    }
+
+    /// The renderer's half of a colour change. MAIN, timed by `deliver`. `clock` is the route's clock
+    /// when the change was seen: a hop that outlives its stream (a disconnect, or a reconnect inside
+    /// the delay) finds a different clock or none, and does nothing.
+    private func applyColorimetry(_ colorimetry: LiveDisplayRoute.Colorimetry, summary: String,
+                                  for clock: LiveClock) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stateLock.lock(); let current = liveClock === clock; stateLock.unlock()
+        guard current else { return }
+        route.updateColorimetry(colorimetry)
+        NSLog("[WHEP] colorimetry from the stream's SPS: %@ (%@)", summary, colorimetry.provenance.label)
     }
 
     /// WHEP releases the display. Restores the file-path providers verbatim so playback can resume,
@@ -778,6 +823,10 @@ final class WHEPFrameRouter {
         pixelBufferPool = nil
         poolSize = (0, 0)
         reportedPromote = false
+        // Per-STREAM colour: the next connection activates on assumed 709 again and reads its own SPS.
+        colorimetry = .undeclared(isFullRange: false, rangeDeclared: false)
+        haveSPSColor = false
+        announcedColorimetry = .assumedRec709SDR
         framesDelivered = 0
         framesEnqueued = 0
         promoteFailures = 0
@@ -875,8 +924,8 @@ final class WHEPFrameRouter {
         //
         // It is deliberately NOT read here. Applying SAR means changing `LiveDisplaySize`, the
         // window aspect lock and the framing guides, which is a separate change needing its own
-        // measurement against a non-square-pixel sender. The colorimetry assumption beside it is
-        // unchanged and genuinely still unparsed.
+        // measurement against a non-square-pixel sender. (The colour in the same VUI IS read now,
+        // since §6.9 Stage SPS — `noteSPSColor`.)
         //
         // THE RATE, from the ladder: SPS VUI if the encoder declared one, else the measurement if
         // it has settled, else nil. See `WHEPFrameRateEstimator` — including why the old comment
@@ -913,6 +962,20 @@ final class WHEPFrameRouter {
         // the arrival instant rather than after a conversion.
         let presentationPTS = clock.registerFrame(senderPTS: senderPTS)
 
+        // A COLOUR CHANGE REACHES THE RENDERER WHEN ITS FIRST FRAME IS DUE — the first SPS's reading
+        // included, since activation stated an assumption. The frames still queued ahead of this one
+        // were decoded under the old SPS; timing the hop for this frame's presentation keeps the
+        // renderer's half and the buffer tags describing the same pictures. An untagged stream reads
+        // as `.assumedRec709SDR` and never hops.
+        let stated = colorimetry.route(undeclaredAxisCode: 1)
+        if stated != announcedColorimetry {
+            announcedColorimetry = stated
+            let summary = colorimetry.summary
+            DispatchQueue.main.asyncAfter(deadline: .now() + LiveDisplayRoute.secondsUntilDue(presentationPTS, clock)) { [weak self] in
+                self?.applyColorimetry(stated, summary: summary, for: clock)
+            }
+        }
+
         guard let promoted = promoteIfNeeded(decoded) else {
             promoteFailures += 1
             logFlowIfDue()
@@ -921,8 +984,9 @@ final class WHEPFrameRouter {
         // Tag the buffer every downstream consumer actually reads (shader matrix, layer colorspace,
         // scopes, EDR gate). A pooled buffer starts untagged and VT's attachment propagation is
         // measured behavior rather than a documented contract, so tagging the OUTPUT last is the
-        // ordering that holds either way — NDIService.tagOutput's reasoning, verbatim.
-        SourceColorimetry.assumedRec709.apply(to: promoted)
+        // ordering that holds either way — NDIService.tagOutput's reasoning, verbatim. What is
+        // stamped is what the SPS this frame was decoded under declared, 709 for any axis it did not.
+        colorimetry.bufferTags.apply(to: promoted)
 
         guard let sampleBuffer = Self.makeSampleBuffer(
                 promoted,
@@ -1005,7 +1069,7 @@ final class WHEPFrameRouter {
 
         // Tag the SOURCE before the transfer, so VT converts from a buffer whose colorimetry is
         // stated rather than absent. (The output is re-tagged after, in `deliver` — see there.)
-        SourceColorimetry.assumedRec709.apply(to: source)
+        colorimetry.bufferTags.apply(to: source)
 
         let status = VTPixelTransferSessionTransferImage(transferSession, from: source, to: destination)
         guard status == noErr else {
