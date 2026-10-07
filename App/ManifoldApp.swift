@@ -135,7 +135,7 @@ struct ManifoldApp: App {
                 // these modifiers are even attached, so a Keychain WRITE sat ahead of the first
                 // frame in a place no restructuring of the licensing path could reach. Guarded to
                 // one attempt per process, because this closure runs once per window.
-                .task { await StreamBookmarkStore.shared.migratePassphrasesAtLaunch() }
+                .task { StreamBookmarkStore.shared.migratePassphrasesAtLaunch() }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

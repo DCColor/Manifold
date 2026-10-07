@@ -75,7 +75,7 @@ final class ProVideoWorkflow: ObservableObject {
 
     /// The plug-in directory. Not a search path — this is the single location the installer uses,
     /// and the bundles are loaded by VideoToolbox's and MediaToolbox's own machinery, not by us.
-    private static let pluginDirectory = "/Library/Video/Professional Video Workflow Plug-Ins"
+    nonisolated private static let pluginDirectory = "/Library/Video/Professional Video Workflow Plug-Ins"
 
     // MARK: - Registration
 

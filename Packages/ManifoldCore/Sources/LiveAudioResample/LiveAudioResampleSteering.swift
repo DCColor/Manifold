@@ -476,7 +476,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         let timer = hold != nil ? StarvationDeadline(hostNow: hostNow) : nil
         self.init(tag: tag, mode: mode, clock: stage, gains: .adopted, thresholds: .adopted,
                   reportsWindows: reportsWindows, readTimebase: readTimebase, hostNow: hostNow,
-                  write: write, hold: hold, armDeadline: timer.map { t in { t.arm(at: $0) } },
+                  write: write, hold: hold, armDeadline: timer.map { t in { @Sendable host in t.arm(at: host) } },
                   log: log, windowCompanion: windowCompanion)
         timer?.fire = { [weak self] in self?.starvationCheck() }
         deadline = timer

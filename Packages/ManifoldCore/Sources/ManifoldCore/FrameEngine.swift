@@ -212,7 +212,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     nonisolated(unsafe) private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
-    private let audioRenderer = AVSampleBufferAudioRenderer()
+    // `nonisolated(unsafe)` for the same reason as `synchronizer`: the reference never changes, and
+    // the one off-main reader is `liveAudioRendererState()` on the NDI audio pump (diagnostics only).
+    nonisolated(unsafe) private let audioRenderer = AVSampleBufferAudioRenderer()
 
     /// D4b-1: PCM audio tap. Tees decoded audio at BOTH enqueue sites into a PTS-keyed, card-ready
     /// (int32 interleaved) ring buffer, WITHOUT altering what the renderer receives. Read by D4b-2's
@@ -2654,7 +2656,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// P-loop's 0.1 s update interval and ~30× the ~1 s depth wobble, so depth transients are
     /// attenuated to nothing; while a genuine sender offset is very nearly a constant, so it is
     /// still tracked to within a few percent of its value inside a minute.
-    private static let liveAudioRateTau = 30.0
+    nonisolated private static let liveAudioRateTau = 30.0
 
     /// ── STARTUP CONVERGENCE: A SHORT TIME CONSTANT THAT RAMPS TO THE STEADY-STATE ONE ────────
     ///
@@ -2680,11 +2682,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// 2 s ≈ 20 P-loop updates at `controlHz` — enough to average out per-tick noise, short enough
     /// that the EMA is within ~5% of the true rate by 3τ ≈ 6 s.
-    private static let liveAudioRateTauFast = 2.0
+    nonisolated private static let liveAudioRateTauFast = 2.0
 
     /// 10 s. All measured excursions >30 ms were inside the first 27 s, so full smoothing is in
     /// place well before the steady-state regime the constraint protects begins.
-    private static let liveAudioRateRamp = 10.0
+    nonisolated private static let liveAudioRateRamp = 10.0
 
     /// ⚠️ PART OF THE PINNED BACK-OUT SWITCH (Debug ▸ Resampler Ratio), AND NOTHING ELSE READS IT.
     ///

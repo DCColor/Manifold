@@ -53,14 +53,16 @@ public final class AVPlayerScrubProducer: NSObject, ScrubFrameProducer {
 
     /// The display time of the frame most recently ACCEPTED. The whole of trap 1 is this variable:
     /// a pulled buffer is only new if its `itemTimeForDisplay` differs from this.
-    private var lastDisplay = CMTime.invalid
+    /// `nonisolated(unsafe)`: guarded by `lastDisplayLock`, which the compiler cannot see.
+    nonisolated(unsafe) private var lastDisplay = CMTime.invalid
     private let lastDisplayLock = NSLock()
 
     /// Read on `pollQueue`, written on main. A closed producer's in-flight poll must stop touching
     /// AVFoundation objects that are being torn down.
     private let closedLock = NSLock()
-    private var _closed = false
-    private var closed: Bool { closedLock.lock(); defer { closedLock.unlock() }; return _closed }
+    /// `nonisolated(unsafe)`: guarded by `closedLock`, which the compiler cannot see.
+    nonisolated(unsafe) private var _closed = false
+    nonisolated private var closed: Bool { closedLock.lock(); defer { closedLock.unlock() }; return _closed }
 
     /// Upper bound on one poll, in seconds. NOT a tuning constant for the rate — the coalescer
     /// paces on the decoder's completion, so this only bounds a decode that never lands at all
