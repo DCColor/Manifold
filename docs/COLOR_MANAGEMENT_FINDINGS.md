@@ -1457,6 +1457,65 @@ Stage SPS, below.
    sign of an override is the Color control's amber tint (`ContentView.swift:2221`), and it
    auto-hides with the control bar.
 
+#### Findings 9–16, missing from the first write-up
+
+These were in the original audit and left out when the section above was rebuilt. Each reference was
+checked against `5fabcea`. No app code changed between `946417a` and `5fabcea`, so findings 1–8 still
+hold. Where the audit's line number had drifted, the corrected one is given below.
+
+9. **Nothing here has a unit test.**
+   - The app has one target, `Manifold` (`project.yml:137-138`), and no test bundle.
+   - `NDIColorInfo` (`App/NDI/NDIColorInfo.swift`), `SourceColorProvenance`
+     (`App/MetalVideoRenderer.swift:135`) and `DisplayChainModel` (`App/DisplayChainModel.swift`)
+     all live in `App/`, which `swift test` does not reach.
+   - The NDI override and the readout tiers were verified by measurement only, all in §6.8 2c
+     part 2: the tier table (#1), the amber pixel scan (#4) and the byte-identity captures.
+   - Stage A's move into a package is what makes them testable.
+10. **Two colour inputs have to move together.**
+    - The shader takes its YCbCr matrix from each frame's buffer tags: `colorParams(for:)`, at
+      `App/MetalVideoRenderer.swift:3680` (the audit had ~3662), called at `:2681`.
+    - Everything else takes its colour from `setSourceColorSpace`: the layer colorspace, EDR, the
+      scope maths, the CIE codes, DeckLink tagging (`App/DeckLink/DeckLinkService.swift:711`) and
+      PNG export (`sourceDerivedColorSpace`, `MetalVideoRenderer.swift:3568`).
+    - NDI updates both from one `effectiveColorInfo` (`App/NDI/NDIService.swift:2605`). It tags the
+      buffer with `tagOutput` (`:2664`, called at `:794`) and sets the renderer at `:2652`.
+    - **Every override stage must update both.** If it doesn't, the picture is decoded with one
+      matrix while the scopes, readout and outputs describe another.
+11. **When Phase 3 Reference lands, it must choose its curve from the renderer's
+    `sourceTransferCode`** (`MetalVideoRenderer.swift:933`). That value carries the override. If
+    Reference read the buffer tags instead, an override would apply to everything except the
+    display transform. `App/DisplayTransform.swift:13-23` is where Reference will be built.
+12. **A live stream never moves between windows**, so a per-window override never has to follow it:
+    it ends when the stream ends.
+    - The device hooks are not re-pointed while anything is live (`App/WindowDeck.swift:1244-1247`).
+    - Closing the owning window releases the stream (`:875-880`).
+    - A claim from another window is refused (`:1530-1535`).
+    - What happens when a second stream of the same type is connected in the same window:
+
+      | Swap | What happens | Override |
+      |---|---|---|
+      | NDI → NDI | Swapped in place. | Reset, because `start(with:)` calls `resetColorimetry()` (`NDIService.swift:518`, `:714`). |
+      | SRT → SRT | Full teardown, then a new session (`App/SRT/SRTClient.swift:442-474`). | Starts fresh. |
+      | HLS → HLS | Swapped in place (`App/HLS/HLSClient.swift:800-831`). | Stage E must decide whether it carries over or resets. |
+      | WHEP → WHEP | Refused while a session runs (`App/WebRTC/WHEPClient.swift:135-153`). | Not reached. |
+13. **The Color control and its amber indicator are NDI-only.**
+    - The control is shown only when NDI is live: `App/ContentView.swift:3163`, not ~3236 as the
+      audit had it.
+    - Its label (`:2245`), tint (`:2221`) and binding (`:2260`) all read `ndi.*`.
+    - Generalising it must not add modifiers to `ContentView`'s body, which is at the type-checker's
+      limit (§6.7).
+14. **Menu-row subtitles on any new preset picker must use the `AttributedString` form.** The
+    two-`Text` form draws nothing (§6.8 2c part 2, #3).
+15. **HLS colour changes land one frame late, by design** (`App/HLS/HLSClient.swift:1236-1266`).
+    Override changes on HLS will do the same. As on the rendition path, the next tick re-presents the
+    frame under the new state.
+16. **SRT and WHEP are H.264-only.**
+    - SRT refuses HEVC with a visible error (`App/SRT/SRTClient.swift:772-787`).
+    - WHEP negotiates only H.264 (`App/WebRTC/WHEPClient.swift:648-649`).
+    - So 10-bit HDR on these paths can only arrive as 10-bit H.264. That is why the 10-bit H.264
+      decode measurement must be done before Stage B. If it doesn't decode, an HDR override on SRT
+      or WHEP would only ever be applied to 8-bit pictures.
+
 #### Decisions (Robbie, 2026-10-06)
 
 1. **Where the override lives.** SRT, WHEP and HLS keep it on the owning window, following the
