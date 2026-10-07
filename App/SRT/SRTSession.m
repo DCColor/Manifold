@@ -24,11 +24,18 @@
 #include <string.h>
 #include <syslog.h>   // LOG_NOTICE, for srt_setloglevel
 
+// The vendored libsrt and FFmpeg headers carry doc-comment lint (-Wdocumentation,
+// -Wdocumentation-html) that is theirs, not ours. Silenced around these includes only; the headers
+// are never edited (provenance: ThirdParty/*/README.md).
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdocumentation"
+#pragma clang diagnostic ignored "-Wdocumentation-html"
 #include <srt/srt.h>
 
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
+#pragma clang diagnostic pop
 
 #include "SRTSession.h"
 
