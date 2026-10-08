@@ -1836,6 +1836,165 @@ dictionary-equal (1 141 keys); `streamBookmarks` was not written.
 - **MediaMTX's HLS of the Baseline test stream** failed to open in AVFoundation (CoreMedia −12927).
   It was not investigated; bipbop was used for the HLS regression instead.
 
+### 6.10 HEVC over SRT — audit and decisions, 2026-10-07
+
+**Why here:** HEVC is how 10-bit HDR (Main 10, PQ and HLG) reaches Manifold over SRT. OBS's H.264
+PQ is 8-bit (§6.9, *The OBS re-check*). Decided (Robbie, 2026-10-07): HEVC on SRT lands before
+override Stage B. WHEP HEVC is out of scope (`ROADMAP_IDEAS.md`).
+
+#### The audit — read-only, with offline measurements against the vendored dylibs
+
+- **The gate** (`SRTClient.swift`, `guard codec == "h264"`) is a policy over real gaps:
+  - the access-unit builder is H.264-only;
+  - the decoder builds its format description from SPS and PPS only;
+  - the SPS colour reader accepts NAL type 7 only;
+  - the FFmpeg build has no HEVC parser.
+- **Demux.**
+  - The vendored mpegts demuxer maps stream type 0x24 to HEVC in every build.
+  - Without an HEVC parser, `avformat_find_stream_info` reports 0×0 with no profile and waits the
+    whole window: 2 MB, or 5 s of stream at low bitrate.
+  - In four HEVC test streams (x265 PQ, HLG and 150 kb/s; VideoToolbox PQ) every packet held exactly
+    one picture, but only because ffmpeg's muxer and VideoToolbox write one picture per PES.
+  - **On H.264 too, the one-packet-is-one-access-unit rule is the H.264 parser's guarantee.**
+    `H264AccessUnitBuilder` never splits access units.
+- **Decode, offline.**
+  - `CMVideoFormatDescriptionCreateFromHEVCParameterSets` (VPS, SPS and PPS; 4-byte lengths) worked
+    on all four streams.
+  - VideoToolbox decoded each first access unit to `x420` at 1920×1080, applying VideoToolbox's own
+    1088-line conformance window, with the PQ and HLG tags carried.
+  - **VideoToolbox drops in-band MDCV and CLL SEI.** It attaches neither to the format description
+    nor to the decoded buffers.
+- **Random access.**
+  - x265's default stream has one IDR, then a CRA at every keyframe, with RASL pictures after each
+    CRA (NAL types `20:1 21:8`, `8:23` in 200 frames).
+  - VideoToolbox's encoder uses IDR only (`20:8`).
+  - So an IDR-only start would never start on a joined x265 stream.
+- **Colour.**
+  - The HEVC SPS VUI colour fields follow `profile_tier_level`, the conformance window, the
+    sub-layer ordering loop, HEVC scaling lists, PCM, the short-term reference picture sets (with
+    inter-set prediction) and the long-term references.
+  - The SPS extension flags come **after** the VUI, so they need no parsing.
+  - The SPS syntax differs for `nuh_layer_id > 0`.
+  - ffmpeg's `hevc_videotoolbox` from the command line declared only the matrix (2/2/9) despite the
+    flags, so it is not a colour-test sender without `hevc_metadata`.
+- **HDR10 SEI.** x265 `hdr10=1` sends MDCV (payload 137) and CLL (payload 144) as prefix SEI at every
+  keyframe. The SEI orders primaries G, B, R, where libav orders R, G, B. Nothing in the app consumes
+  HDR10 metadata today: the file inspector shows it, and EDR does not use it (§6.2, no tone-map).
+- **OBS 32.2.2.**
+  - Its VideoToolbox HEVC encoder forces Main 10 for P010.
+  - Its plugin imports `kVTCompressionPropertyKey_MasteringDisplayColorVolume` and
+    `ContentLightLevelInfo`.
+  - Predicted: it sends HDR10 SEI. To be verified with `trace_headers` in Stage 6.
+- **Stream identification (BUGS.md, slow identification) — the cause is the audio probe, not the
+  byte count.**
+  - For stream type 0x0F (AAC) the demuxer sets `request_probe = 50`. While it is set, libav holds
+    **every** packet, video included.
+  - This build compiles no `aac`, `loas` or `mp3` demuxer, so the probe cannot succeed. It ends only
+    at `probesize` (2 MB of buffered packets) or after `max_probe_packets` (2500) audio packets.
+  - Offline, H.264 at 150 kb/s with AAC: ≈ 177 s of stream at today's settings, ≈ 1.1 s with
+    `max_probe_packets = 1`, and 1.5 s with no audio at all.
+  - The audio parameters came out identical either way. The probe can only ever confirm AAC here.
+
+#### Decisions (Robbie, 2026-10-07)
+
+1. **Enable the HEVC parser** in the FFmpeg build: the fifth configure change, carried through all
+   three verification layers and the README.
+2. **Ship Stage 0 (the probe fix) on its own**, before any HEVC work.
+3. **Stage 0 sets `max_probe_packets` only.** Identifying at the first SPS (skipping
+   `avformat_find_stream_info`) is not scheduled.
+4. **One codec-neutral SPS reader target** replaces `H264SPSColor`. It holds the H.264 and HEVC
+   readers and the shared bit reader.
+5. **HEVC decoding starts on any random-access picture** (IDR, CRA, BLA). It drops the RASL pictures
+   that follow until the next random-access picture.
+6. **HDR10 SEI is logged only:** `[HDR10-SEI]` on change, filling `HDR10StaticMetadata` for later
+   display.
+7. **HEVC 4:2:2 and 4:4:4 are refused at the gate with a banner.** "HEVC 4:2:2 10-bit over SRT" goes
+   in `ROADMAP_IDEAS.md`.
+8. **Multi-layer HEVC: the base layer (`nuh_layer_id` 0) only.**
+9. **A C unit-test harness** for the new HEVC access-unit builder.
+
+#### Staged plan
+
+Run in this order. Each stage ships on its own.
+
+- **Stage 0 — the identification fix (H.264 only).** `max_probe_packets` in `SRTSession.m`. Below.
+- **Stage 1 — the HEVC parser in the FFmpeg build.** The gate still refuses HEVC.
+  - Predicted: all three layers pass; H.264 `[SRT]` and `[SPS-COLOR]` lines identical to the commit
+    before; an HEVC stream's refusal log reads `hevc Main 10 1920x1080` within about 1–2 s.
+- **Stage 2 — the HEVC SPS colour reader**, in the renamed codec-neutral target. Package only.
+  - Fixtures from x265, VideoToolbox and `hevc_metadata`, expected values from `trace_headers`. They
+    cover sub-layers, scaling lists, inter-predicted reference picture sets, the conformance window,
+    Extended_SAR, 4:2:2 and the reserved and partial cases.
+  - Predicted: every field matches; truncated SPS read undeclared, never a wrong colour; mutants fail
+    closed.
+- **Stage 3 — the HEVC access-unit builder** (with its C test harness), a codec-selected reader, the
+  decoder's VPS, and the gate opens for 4:2:0 HEVC.
+  - Predicted: x265 PQ/HLG/709 and VideoToolbox streams decode to `x420` with no promote.
+  - `[SCOPE-COLOR]` reads 9-16-9 and 9-18-9.
+  - A mid-stream join of x265 starts at the next CRA with RASL dropped and no decode errors.
+  - H.264 SRT and WHEP are unchanged.
+- **Stage 4 — robustness and sync on HEVC.**
+  - A mid-stream colour change gives one `[SPS-COLOR]` and one `source` line, hop as in §6.9.
+  - Recovery at the next random-access picture after loss.
+  - A 30-minute soak and calibration, non-Cloudflare first.
+- **Stage 5 — `[HDR10-SEI]`.** x265 `hdr10=1` gives one line: mastering 0.0001–1000 nits,
+  MaxCLL/MaxFALL 1000/400. Nothing is logged without SEI.
+- **Stage 6 — the OBS customer pass and the docs.**
+  - OBS P010, Rec. 2100, VideoToolbox HEVC Main 10 → MediaMTX.
+  - Predicted: 10-bit, 9-16-9, MDCV and CLL present.
+  - The user guide and the tester notes stop saying "H.264 only".
+- **Then override Stage B** (§6.9).
+
+#### Stage 0 — the identification fix: predictions, written 2026-10-07 before the code changed
+
+**Builds:** HEAD `f9d8495` (unsigned Profile, `.build-cc/s0head-Profile`) against the tree with the
+one-line change. **Senders:** a local ffmpeg listener through `scripts/soak/repro/run.sh`, unattended;
+then Cloudflare SRT from OBS, attended.
+
+| # | what | HEAD, predicted | Stage 0, predicted | pass band |
+|---|---|---|---|---|
+| 1 | 150 kb/s H.264 + AAC bars, ffmpeg's default PES packing: transport up → first presentation | no picture within 60 s | ≈ 1–3 s | **pass ≤ 3.5 s**; fail > 6 s |
+| 2a | 8 Mb/s, transport up → `[SRT] video:` | ≈ 2.4 s | ≈ 1.2 s | **faster by 0.8–1.6 s** |
+| 2b | 25 Mb/s, same | ≈ 0.8–1.0 s (2 MB arrives in ≈ 0.7 s) | about the same | **faster by 0–0.5 s; never slower by more than 0.2 s** |
+| 3 | `[SRT] container`, `stream`, `video:` and `audio` lines (codec, profile, size, rate, audio parameters) | — | identical text | **identical**, timestamps aside |
+| 4 | `syncD-23.976p-inj0.ts` (507 kb/s, one AAC frame per PES): first anchor, startup discard, coarse and queue-full re-anchors in the first 120 s | ≈ 33–38 s to identify; startup CAP discarding ≈ 9 s of content; queue-full and coarse re-anchors | identify ≤ 2 s; first anchor ≤ 3 s after transport up; discard ≤ 1 s | **pass:** first anchor ≤ 3 s, discard ≤ 1 s, 0 coarse re-anchors at start |
+| 5 | Local soak ≥ 30 min (loop-exact 23.976 clip, ffmpeg listener): calibration at +1, +16, +32 min, `[AV-CONTENT]` | last recorded local SRT soak: −1.6 ms / 28.5 min, ≈ −1 ppm (AUDIO_RESAMPLER_DESIGN.md §19.5, §18.4) | the same band | **pass:** every figure within ±2 ms, end − start within ±5 ms (±10 ms is the §6.3 gate) |
+| 6 | Cloudflare SRT from OBS (attended): identification, startup discard, a ≥ 15 min soak | identify 3.2–3.9 s after transport up; discard 68–71 frames (2.8–3.0 s), §19.14 | identify ≤ 2 s; discard not larger | **pass:** identification faster by ≥ 1 s; calibration in the §19.14 band |
+| 7 | One local SRT calibration with the sync clip | last recorded: +0.17…+0.98 ms (§19.15, item 4) | the same | **pass:** within ±2 ms |
+
+**What could invalidate earlier SRT measurements.** Every SRT session until now released the probe
+backlog in one burst at identification: ~2 MB, or 2500 audio packets. So start-up figures were taken
+in that state: time to first anchor, the startup discard, early re-anchors, initial queue depth and
+calibrations near connect. Steady-state drift figures should not change.
+
+#### Stage 0 — results, 2026-10-07 (unattended, local ffmpeg listener)
+
+**Builds:** HEAD `f9d8495` (binary `930b5549…`) and Stage 0 (`c4732b4b…`), both unsigned Profile.
+**Driver:** `scripts/soak/repro/run.sh`. **Logs:** `~/Desktop/manifold-soak/s0/repro/`.
+Times are from `[SRT] transport up`. "Picture" is the `[SRT] startup anchor:` line, which comes
+≤ 30 ms before the first presentation.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | 150 kb/s bars + AAC (ffmpeg's default packing): HEAD identified at **149.5 s**, only when the 150 s file ended. Stage 0 identified at 0.50 s, picture at **0.87 s**. | **PASS** (≤ 3.5 s) |
+| 2a | 8 Mb/s, ×2 each: HEAD identify 2.02 / 2.03 s, Stage 0 0.40 / 0.40 s, so **1.62–1.63 s faster** (picture 2.39 → 0.67 s) | **MISS, high side:** the band was 0.8–1.6 s. The video analysis takes 0.4 s, not the 1.2 s predicted. |
+| 2b | 25 Mb/s, ×2 each: HEAD 0.68 s, Stage 0 0.40–0.41 s, so **0.27 s faster** | **PASS** (0–0.5 s) |
+| 3 | `[SRT] container`, both `stream` lines, `[SRT] video:` and `[SRT-AUDIO] stream`: **identical text** in all 9 HEAD/Stage 0 pairings | **PASS** |
+| 4 | `syncD-23.976p-inj0.ts`: HEAD identify 37.86 s, first anchor 38.49 s, CAP discarding 10.14 s, 22 coarse and 48 queue-full re-anchors. Stage 0: identify 0.53 s, first anchor **0.77 s**, GAP discarding **1.04 s**, **0 / 0** | **PASS**, but one sub-band missed by 43 ms: discard ≤ 1 s. Every Stage 0 run discards 1.00–1.04 s, which is the GAP rule's live-edge cost, not backlog. |
+| 5 | 33.4 min soak, loop-exact 23.976 clip ×100, one AAC frame per PES. Calibrations (measure-only) at +1 / +2 / +16 / +32 min: **+0.23 / −1.45 / +2.50 / −0.16 ms**. End − start −0.39 ms. `[AV-LAG]` A/V slope after 180 s **+0.1 ppm**. 0 starvation holds, 0 coarse re-anchors, 0 splices. | **PASS** on drift (±5 ms; last recorded local SRT ≈ −1 ppm, §19.5). **MISS by 0.5 ms** on the per-reading ±2 ms band (+2.50, p10…p90 +0.45…+3.89). This soak is log-measured; §18.4's was device-measured with the Recorder OBS. |
+| 6 | Cloudflare SRT, attended (Robbie). OBS sender "SRT Cloudflare" at 24000/1001, scene looping the 23.976 sync clip; Manifold on the saved stream; logs `~/Desktop/manifold-soak/s0/cf/`. **HEAD, same day:** identify 3.73 s, picture 4.00 s, GAP discarding 71 frames (2.96 s); calibration at +60 s **−87.82 ms**. **Stage 0, 17 min:** identify **1.48 s**, picture **1.66 s**, GAP discarding 24 frames (1.13 s); calibrations at +1 / +2 / +8 / +16 min **−86.29 / −92.04 / −90.76 / −86.14 ms** (end − start +0.15 ms); `[AV-LAG]` slope −0.3 ppm; 0 starvation holds, 0 coarse, 0 queue-full, 0 splices. | **PASS:** 2.25 s faster, discard smaller. **The calibration half of the band was wrong:** today's HEAD reads −88 ms (sound early), where §19.14 read +41 ms (late), so Cloudflare's offset changed between days, on both builds. Stage 0 sits within ~4 ms of same-day HEAD. Most of HEAD's ~3 s Cloudflare startup discard (§19.14) was the probe backlog, not Cloudflare's own burst. |
+| 7 | Local calibration +0.23 ms (§19.15: +0.17…+0.98) | **PASS** (±2 ms) |
+
+**Found on the way, pre-existing and not Stage 0's:** ffmpeg's default mpegts packing puts 8–16 AAC
+frames in each PES when the audio is a simple tone, and SRT's 0.25 s audio target starves between
+lumps. Audible at the device. HEAD does it too. See BUGS.md, *SRT audio breaks up when the sender
+packs ≥ ~170 ms of AAC into each PES*.
+
+**Gates:** `swift test` (ManifoldCore) 225 / 225; `node --test scripts/soak/soaklog.test.mjs` 8 / 8;
+the Stage 0 Profile build succeeded. `defaults`: the domain was exported before the first launch.
+After the last quit it was restored, and is dictionary-equal (1 141 keys). The runs had only added
+13 `NSWindow Frame` keys. `streamBookmarks` was never written.
+
 ---
 
 ## 7. Open and unverified

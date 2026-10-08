@@ -801,6 +801,20 @@ static void runSession(ManifoldSRTSession *s) {
     // window they were derived from, and that window should be readable in the log.
     fmt->probesize = 2 * 1024 * 1024;
     fmt->max_analyze_duration = 5 * AV_TIME_BASE;
+    // ── ONE PROBE PACKET PER STREAM: THE AUDIO PROBE CANNOT SUCCEED IN THIS BUILD ─────
+    //
+    // For PMT stream type 0x0F (AAC) the mpegts demuxer sets request_probe, and while ANY
+    // stream has it set libavformat holds EVERY packet — video included — in its raw buffer.
+    // The probe looks for a demuxer that recognises the payload, and this build compiles no
+    // aac, loas or mp3 demuxer, so it can never succeed and never changes the codec the PMT
+    // already gave. It ended only at `probesize` of buffered packets or after 2500 audio
+    // packets: about 3 minutes of a 150 kb/s stream, ~35 s of a 500 kb/s one, and at every
+    // bitrate a backlog released in one burst at identification. One packet ends it. The
+    // video's own analysis (size, rate, reorder) is untouched: that is find_stream_info's,
+    // bounded by the two lines above. Must be set BEFORE avformat_open_input: the streams,
+    // and their probe budget, are created in the demuxer's read_header.
+    // COLOR_MANAGEMENT_FINDINGS.md §6.10; docs/BUGS.md (slow identification, fixed).
+    fmt->max_probe_packets = 1;
 
     // Passing the input format explicitly skips probing entirely — we know what this is,
     // and probing a live socket means buffering before the first packet. The URL is ""

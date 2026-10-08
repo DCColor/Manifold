@@ -1012,22 +1012,84 @@ Matrix 6 reads `SMPTE-C / 170M` and `luma Rec. 601` on both builds.
 
 ---
 
-## ☐ OPEN 2026-10-07 — PRE-EXISTING, ALL BUILDS — SRT: a low-bitrate stream waits a long time to be identified
+## ✅ FIXED 2026-10-07 (commit: ________) — PRE-EXISTING, ALL BUILDS — SRT: a low-bitrate stream waits a long time to be identified
 
-**Status:** OPEN. Found during the matrix-5 measurement (2026-10-07). To be looked at with the
-HEVC-over-SRT work.
+**Status:** FIXED by HEVC Stage 0 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10): `fmt->max_probe_packets = 1`
+in `App/SRT/SRTSession.m`. Verified unattended on a local ffmpeg listener, and attended on
+Cloudflare SRT from OBS: identify 3.73 → 1.48 s, picture 4.00 → 1.66 s, calibration unchanged against
+same-day HEAD over a 17-minute session. Found during the matrix-5 measurement (2026-10-07).
 
-**What:** SRT does not identify the stream until the demuxer has about 2 MB of probe data
-(`fmt->probesize = 2 * 1024 * 1024` in `App/SRT/SRTSession.m`; `max_analyze_duration` is 5 s). A
-low-bitrate feed takes a long time to reach that. Static SMPTE bars at ~220 kb/s from a local
-ffmpeg listener had shown no picture after 32 s: about 0.9 MB had arrived, the demuxer had not
-returned, and the reader had seen 0 access units. The same stream at 25 Mb/s was identified in the
-usual few seconds.
+**What:** SRT took a long time to identify a low-bitrate stream. Static SMPTE bars at ~220 kb/s from
+a local ffmpeg listener showed no picture after 32 s. The same stream at 25 Mb/s was identified in
+the usual few seconds.
 
-**Matters for:** real static slates, bars and other low-bitrate feeds, which look like a hung connect.
+**The cause was not the byte count (corrected).** This entry first blamed the 2 MB `probesize`. The
+cause is the **AAC audio probe**, measured offline against the vendored dylibs and confirmed live:
+- For PMT stream type 0x0F (AAC), the mpegts demuxer sets `request_probe`.
+- While any stream has it set, libavformat holds **every** packet, video included, in its raw buffer.
+- The probe looks for a demuxer that recognises the payload. This build compiles no `aac`, `loas` or
+  `mp3` demuxer, so the probe can never succeed and never changes the codec the PMT gave.
+- It ended only at `probesize` of buffered packets (2 MB) or after `max_probe_packets` (2500) audio
+  packets.
+- A stream with no audio identified in 1.5 s at the same bitrate.
+- At every bitrate, the backlog was then released in one burst at identification. That is the
+  start-up pattern in the 2026-10-05 first-anchor entry below.
 
-**Not yet decided:** how far to lower the probe size, or whether to cap the wait. Either has to keep
-identification reliable on ordinary feeds, and must be checked against more than one server.
+**Fix:** `max_probe_packets = 1`, set before `avformat_open_input`. The video's own analysis (size,
+rate, reorder) is `find_stream_info`'s and is unchanged.
+
+**Measured, 2026-10-07** (`.build-cc/s0head-Profile` HEAD `f9d8495` vs `.build-cc/s0-Profile`;
+`scripts/soak/repro/run.sh`; logs `~/Desktop/manifold-soak/s0/repro/`). Times are from transport up;
+"picture" is the `[SRT] startup anchor:` line, which comes ≤ 30 ms before the first presentation.
+
+| stream | HEAD identify / picture | Stage 0 identify / picture |
+|---|---|---|
+| 150 kb/s bars + AAC, ffmpeg's default PES packing (the reported case), 150 s file | **149.5 / 150.1 s**: only when the file ended; then a CAP anchor discarding 10.6 s and 68 coarse re-anchors | **0.50 / 0.87 s** |
+| 8 Mb/s test pattern, ×2 | 2.02–2.03 / 2.39 s | 0.40 / 0.67 s |
+| 25 Mb/s test pattern, ×2 | 0.68 / 0.92 s | 0.40–0.41 / 0.67–0.68 s |
+| `syncD-23.976p-inj0.ts` (507 kb/s, one AAC frame per PES) | 37.86 / 38.48 s | 0.53 / 0.75 s |
+
+- **Identification lines are identical:** `[SRT] container`, both `stream` lines, `[SRT] video:` and
+  `[SRT-AUDIO] stream` (codec, profile, size, rate, time base, AAC parameters, PID). Every HEAD /
+  Stage 0 pair matches, timestamps aside.
+- **Calibration and drift** on the Stage 0 build are in §6.10 of the findings doc.
+
+---
+
+## ☐ OPEN 2026-10-07 — PRE-EXISTING, ALL BUILDS — SRT audio breaks up when the sender packs ≥ ~170 ms of AAC into each PES
+
+**Status:** OPEN, not scheduled. Found during the Stage 0 runs (above). Robbie heard it, and recorded
+10 s with Audio Hijack on the HEAD build: `~/Music/Audio Hijack/20261007 1433 Recording.wav`. **Not
+caused by Stage 0:** HEAD does it too.
+
+**What:** an ffmpeg sender on its default mpegts packing holds each audio PES until it is full. With a
+plain tone, the AAC frames are small, so many go in each PES:
+- 16 frames (0.34 s) at 64 kb/s;
+- 8 frames (0.17 s) at 128 kb/s.
+
+Audio then arrives in lumps against SRT's 0.25 s target. The renderer queue runs dry between lumps
+and the steering holds: `⏸ STARVATION HOLD`, "no input for 124–244 ms".
+
+**Measured:**
+- **The recording:** 24 gaps of 5–105 ms in 9.5 s, at exact multiples of the file's 0.171 s PES
+  interval.
+- **Logs:** per 45 s session, starvation holds were
+  - **24–51 on HEAD and 6–10 on Stage 0** at 8 and 25 Mb/s;
+  - **263 on Stage 0** at 150 kb/s (HEAD never reached steady playback on that file).
+- **Stage 0 starts with more slack, then ends up in the same place.** At 8 Mb/s, HEAD's holds began
+  about 4 s into the session and Stage 0's at about 33 s. One frame per PES
+  (`syncD-23.976p-inj0.ts`) gave 0 holds on both builds.
+
+**Relation to AUDIO_RESAMPLER_DESIGN.md §18.15:** that section found 17 frames per PES starving on
+digital silence, and noted that real programme audio packs about 6 frames (~130 ms) and plays clean.
+This entry adds that **8 frames (~171 ms) already starves at the 0.25 s target**, and that the sound
+breaks up audibly at the device.
+
+**Matters for:** any SRT sender whose muxer packs coarsely: ffmpeg's defaults with simple or quiet
+audio, and possibly some hardware encoders. Codec-independent, so HEVC inherits it.
+
+**Options, not decided:** §18.14's options A and B, or a target that adapts to the observed PES
+spacing.
 
 ---
 
@@ -1461,7 +1523,32 @@ debt was cut whole in 0.3 s. But a loop-free local SRT repro (stalls 400 / 1000 
 
 ---
 
-## ☐ OPEN OBSERVATION 2026-10-05 — local SRT: the first anchor came ~38 s after transport-up, then 7–8 coarse re-anchors
+## ✅ EXPLAINED AND FIXED 2026-10-07 (commit: ________) — was OPEN OBSERVATION 2026-10-05 — local SRT: the first anchor came ~38 s after transport-up, then 7–8 coarse re-anchors
+
+**Cause:** the AAC probe backlog. See the slow-identification entry above, fixed by the same change
+(HEVC Stage 0, `max_probe_packets = 1`). The harness was not at fault: Manifold held every packet
+until 2 MB had arrived (~33 s at 507 kb/s), then released them in one burst.
+
+**Measured 2026-10-07** on `syncD-23.976p-inj0.ts` through `repro/run.sh` (one AAC frame per PES).
+Times are from transport up.
+
+| | 2026-10-01 log (Stage D) | HEAD `f9d8495`, today | Stage 0 |
+|---|---|---|---|
+| identify | 37.87 s | 37.86 s | **0.53 s** |
+| first anchor (`FIRST-ANCHOR GATE`) | 38.53 s | 38.49 s | **0.77 s** |
+| startup anchor | CAP, discarded 230 frames = 9.59 s | CAP, discarded 243 = 10.14 s | GAP, discarded 25 = 1.04 s |
+| arrivals in the 2 s after first picture | — | 568 frames, max arrival lead +21.7 s | 48 frames, lead +25 ms |
+| `COARSE RE-ANCHOR` | 22 | 22 (11 timebase writes) | **0** (timebase writes: the first anchor only) |
+| `queue-full re-anchor` | 51 | 48 | **0** |
+| `STARVATION HOLD` | — | 0 | 0 |
+
+- **A miss, recorded:** the prediction's band for the startup discard was ≤ 1 s, and it was 1.04 s.
+  Every Stage 0 run discards 1.00–1.04 s, the anchor starting at the live edge, so this is the GAP
+  rule's ordinary cost, not backlog.
+- **Earlier measurements this affects:** every SRT start-up measured before this fix ran after a
+  backlog burst. Steady-state figures are unaffected.
+
+**The original observation, kept:**
 
 **Seen in every run of the §19.10 stall repro** (`repro/run.sh`, `syncD-23.976p-inj0.ts`, ffmpeg
 listener), on today's build and on b35a810 alike, so pre-existing.

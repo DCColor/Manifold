@@ -1,3 +1,20 @@
+## HEVC 4:2:2 10-bit over SRT
+Status: idea (2026-10-07)
+Version: ?
+
+What: Accept HEVC Main 4:2:2 10 (and possibly 4:4:4) on SRT instead of refusing it at the gate.
+
+Why: Contribution encoders send 4:2:2 10-bit. The first HEVC-over-SRT release refuses it with a
+banner (COLOR_MANAGEMENT_FINDINGS.md §6.10, decision 7), because the SRT promote path converts
+anything that isn't 10-bit 4:2:0 to `x420` and would resample 4:2:2 to 4:2:0 without saying so.
+
+Open questions:
+- Decode to a 4:2:2 pixel format end to end (renderer, scopes, DeckLink), or resample and say so?
+- The 8 MB access-unit cap: an all-intra 4:2:2 10-bit frame can legitimately approach it.
+
+Depends on: HEVC over SRT (COLOR_MANAGEMENT_FINDINGS.md §6.10).
+Size guess: ?
+
 ## HEVC over WHEP
 Status: idea (2026-10-07)
 Version: ?
