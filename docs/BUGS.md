@@ -1012,7 +1012,7 @@ Matrix 6 reads `SMPTE-C / 170M` and `luma Rec. 601` on both builds.
 
 ---
 
-## ✅ FIXED 2026-10-07 (commit: ________) — PRE-EXISTING, ALL BUILDS — SRT: a low-bitrate stream waits a long time to be identified
+## ✅ FIXED 2026-10-07 (`c32c074`) — PRE-EXISTING, ALL BUILDS — SRT: a low-bitrate stream waits a long time to be identified
 
 **Status:** FIXED by HEVC Stage 0 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10): `fmt->max_probe_packets = 1`
 in `App/SRT/SRTSession.m`. Verified unattended on a local ffmpeg listener, and attended on
@@ -1056,9 +1056,10 @@ rate, reorder) is `find_stream_info`'s and is unchanged.
 
 ---
 
-## ☐ OPEN 2026-10-07 — PRE-EXISTING, ALL BUILDS — SRT audio breaks up when the sender packs ≥ ~170 ms of AAC into each PES
+## ☐ PRE-SHIP (MUST-FIX, before HEVC Stage 1) 2026-10-07 — PRE-EXISTING, ALL BUILDS — SRT audio breaks up when the sender packs ≥ ~170 ms of AAC into each PES
 
-**Status:** OPEN, not scheduled. Found during the Stage 0 runs (above). Robbie heard it, and recorded
+**Status:** PRE-SHIP. **Decided (Robbie, 2026-10-07):** fix before HEVC Stage 1
+(`COLOR_MANAGEMENT_FINDINGS.md` §6.10, staged plan). Found during the Stage 0 runs (above). Robbie heard it, and recorded
 10 s with Audio Hijack on the HEAD build: `~/Music/Audio Hijack/20261007 1433 Recording.wav`. **Not
 caused by Stage 0:** HEAD does it too.
 
@@ -1523,7 +1524,7 @@ debt was cut whole in 0.3 s. But a loop-free local SRT repro (stalls 400 / 1000 
 
 ---
 
-## ✅ EXPLAINED AND FIXED 2026-10-07 (commit: ________) — was OPEN OBSERVATION 2026-10-05 — local SRT: the first anchor came ~38 s after transport-up, then 7–8 coarse re-anchors
+## ✅ EXPLAINED AND FIXED 2026-10-07 (`c32c074`) — was OPEN OBSERVATION 2026-10-05 — local SRT: the first anchor came ~38 s after transport-up, then 7–8 coarse re-anchors
 
 **Cause:** the AAC probe backlog. See the slow-identification entry above, fixed by the same change
 (HEVC Stage 0, `max_probe_packets = 1`). The harness was not at fault: Manifold held every packet

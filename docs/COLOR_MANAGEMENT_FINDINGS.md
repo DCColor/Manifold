@@ -1908,8 +1908,13 @@ override Stage B. WHEP HEVC is out of scope (`ROADMAP_IDEAS.md`).
    that follow until the next random-access picture.
 6. **HDR10 SEI is logged only:** `[HDR10-SEI]` on change, filling `HDR10StaticMetadata` for later
    display.
-7. **HEVC 4:2:2 and 4:4:4 are refused at the gate with a banner.** "HEVC 4:2:2 10-bit over SRT" goes
-   in `ROADMAP_IDEAS.md`.
+7. ~~**HEVC 4:2:2 and 4:4:4 are refused at the gate with a banner.** "HEVC 4:2:2 10-bit over SRT"
+   goes in `ROADMAP_IDEAS.md`.~~ **Revised (Robbie, 2026-10-07):** HDR shouldn't be shown at 4:2:0
+   when the stream carries 4:2:2.
+   - **HEVC 4:2:2 10-bit is a pre-release stage, Stage 3b**, after Stage 3.
+   - **The fallback**, where a Mac can't decode or carry 4:2:2: show it as 10-bit 4:2:0, **never
+     silently**. The chain readout and a banner both say the picture was converted.
+   - **4:4:4 stays refused**, with a banner.
 8. **Multi-layer HEVC: the base layer (`nuh_layer_id` 0) only.**
 9. **A C unit-test harness** for the new HEVC access-unit builder.
 
@@ -1918,6 +1923,9 @@ override Stage B. WHEP HEVC is out of scope (`ROADMAP_IDEAS.md`).
 Run in this order. Each stage ships on its own.
 
 - **Stage 0 — the identification fix (H.264 only).** `max_probe_packets` in `SRTSession.m`. Below.
+- **Stage 0b — SRT audio break-up with coarse sender packing (H.264 and all SRT).** **Decided (Robbie,
+  2026-10-07):** fixed before Stage 1. Pre-existing and codec-independent. BUGS.md, *SRT audio
+  breaks up when the sender packs ≥ ~170 ms of AAC into each PES*.
 - **Stage 1 — the HEVC parser in the FFmpeg build.** The gate still refuses HEVC.
   - Predicted: all three layers pass; H.264 `[SRT]` and `[SPS-COLOR]` lines identical to the commit
     before; an HEVC stream's refusal log reads `hevc Main 10 1920x1080` within about 1–2 s.
@@ -1933,6 +1941,22 @@ Run in this order. Each stage ships on its own.
   - `[SCOPE-COLOR]` reads 9-16-9 and 9-18-9.
   - A mid-stream join of x265 starts at the next CRA with RASL dropped and no decode errors.
   - H.264 SRT and WHEP are unchanged.
+- **Stage 3b — HEVC 4:2:2 10-bit** (decision 7, revised). Pre-release. Moved here from
+  `ROADMAP_IDEAS.md`.
+  - **Why:** contribution encoders send 4:2:2 10-bit, and HDR shouldn't be shown at 4:2:0 when 4:2:2
+    is available. Today the SRT promote path converts anything that isn't 10-bit 4:2:0 to `x420`,
+    which would resample 4:2:2 to 4:2:0 without saying so.
+  - **What:** decode HEVC Main 4:2:2 10 to a 4:2:2 pixel format and carry it end to end: the
+    renderer, the scopes, DeckLink.
+  - **The fallback**, where the Mac can't decode or carry 4:2:2: convert to 10-bit 4:2:0, and say
+    so in the chain readout and in a banner. Never silently.
+  - **4:4:4 stays refused**, with a banner.
+  - **Open questions:**
+    - which Macs' VideoToolbox decodes HEVC 4:2:2 10-bit, and to which pixel formats — measured,
+      not assumed;
+    - whether every consumer of the live buffer (renderer, scopes, DeckLink v210, the promote) takes
+      4:2:2 as is;
+    - the 8 MB access-unit cap: an all-intra 4:2:2 10-bit frame can legitimately approach it.
 - **Stage 4 — robustness and sync on HEVC.**
   - A mid-stream colour change gives one `[SPS-COLOR]` and one `source` line, hop as in §6.9.
   - Recovery at the next random-access picture after loss.
