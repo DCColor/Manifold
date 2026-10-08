@@ -2,7 +2,8 @@
 //  DisplayChainModel.swift — §6.3 tier 3, the transform chain, for ONE window.
 //
 //  Three lines: what the source declares, what this window's mode does with it, and what macOS
-//  will do on the way to the screen this window is actually on. Phase 2b.
+//  will do on the way to the screen this window is actually on. Phase 2b. A fourth, Buffer, while
+//  a live push source (SRT, WHEP) drives the window: its cushion and any raise (§6.10, Stage 0b-2a).
 //
 //  ── WHY THIS IS RECOMPUTED ON EVENTS AND NOT READ PER FRAME ─────────────────────────────────
 //
@@ -34,6 +35,9 @@ struct DisplayChain: Equatable {
     var verdict: String?
     /// True when the verdict is the "converting" one, so the view can weight it.
     var isConverting: Bool = false
+    /// The live push source's buffer — "250 ms + SRT 120 ms", and any raise with its reason
+    /// (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, decision 5). nil without one (a file, NDI, HLS).
+    var buffer: String? = nil
 }
 
 @MainActor
@@ -93,6 +97,17 @@ final class DisplayChainModel: ObservableObject {
         // Filtered on the renderer the same way the two above filter on the window.
         observers.append(NotificationCenter.default.addObserver(
             forName: MetalVideoRenderer.sourceColorStateDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let r = note.object as? MetalVideoRenderer,
+                      r === self.deck?.renderer else { return }
+                self.refresh()
+            }
+        })
+        // And the Buffer row: a push route activating, a raised cushion, the route released. Same
+        // per-renderer filter.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: LiveBufferReadout.didChange, object: nil, queue: .main
         ) { [weak self] note in
             MainActor.assumeIsolated {
                 guard let self, let r = note.object as? MetalVideoRenderer,
@@ -214,7 +229,8 @@ final class DisplayChainModel: ObservableObject {
         }
 
         let next = DisplayChain(source: sourceLine, transform: transformLine,
-                                display: displayLine, verdict: verdict, isConverting: converting)
+                                display: displayLine, verdict: verdict, isConverting: converting,
+                                buffer: LiveBufferReadout.report(for: renderer)?.text)
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
         if next != chain { chain = next }

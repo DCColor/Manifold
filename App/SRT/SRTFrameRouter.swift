@@ -54,6 +54,7 @@ import Foundation
 import ManifoldCore   // LiveClock
 import ColorimetryModel   // SourceColorimetry (buffer tags), SourceColorProvenance
 import H264SPSColor       // the decoder's per-SPS colour reading
+import DisplayProviders   // LiveCushion — the packing rule and the readout's Buffer row
 import QuartzCore
 import VideoToolbox
 
@@ -132,7 +133,8 @@ final class SRTFrameRouter {
     //
     // ── HOW TO RE-DERIVE IT ─────────────────────────────────────────────────────────────────
     //
-    // Exactly as WHEP's was, with the same instrument: ⌃⌥[ / ⌃⌥] step the live target by ±0.05 s
+    // Exactly as WHEP's was, with the same instrument: ⌃⌥[ / ⌃⌥] (Debug configuration only — not in
+    // Profile or Release, decided 2026-10-08) step the live target by ±0.05 s
     // inside one connection, and [SRT-UNDERRUN] / [SRT-JITTER] report the observed lateness
     // distribution and the running-max "cushion needed" the choice must clear. Re-derive, don't
     // guess. That is why LiveDepthTelemetry was moved out of WHEPFrameRouter rather than left
@@ -200,9 +202,11 @@ final class SRTFrameRouter {
 
     // MARK: - The route's per-source configuration
 
-    private static func routeConfig(colorimetry: StreamColorimetry) -> LiveDisplayRoute.Config {
+    private static func routeConfig(colorimetry: StreamColorimetry, cushion: Double) -> LiveDisplayRoute.Config {
         LiveDisplayRoute.Config(
-            targetDepth: targetDepth,
+            // The floor, or the packing rule's figure when the stream's first PES arrived before the
+            // route did (Stage 0b-2a; see `considerCushion`). Startup and target both, as always.
+            targetDepth: cushion,
 
             // SETTLED, and settled by WHEP's measurement rather than re-argued here: slew is a
             // ppm-scale trim for crystal drift, and a ±0.5% rail drains 0.005 s of buffer per
@@ -226,9 +230,18 @@ final class SRTFrameRouter {
             // Headroom above the shallow file-path bound (12) so the control loop can correct a
             // filling buffer before drop-oldest fires. 30 frames is ~1.25 s at 24 fps — five times
             // the target, which is the point: the queue bound must never be what limits depth.
-            maxQueued: 30,
+            // Scaled with a raised cushion (`queueBound`).
+            maxQueued: queueBound(for: cushion),
 
             colorimetry: colorimetry.route(undeclaredAxisCode: nil))
+    }
+
+    /// The renderer's queue bound for a cushion: 30 frames at the 0.250 floor, the same 120 frames per
+    /// second of cushion above it. A raised cushion with the bound left at 30 would hit drop-oldest at
+    /// high frame rates — 0.513 s at 60p is 31 frames — and every drop is a queue-full re-anchor that
+    /// throws away the depth the raise just bought.
+    private static func queueBound(for cushion: Double) -> Int {
+        max(30, Int((cushion * 120).rounded(.up)))
     }
 
     // MARK: - Live state (main thread, except where noted)
@@ -251,6 +264,25 @@ final class SRTFrameRouter {
     /// The measured "cushion needed" a future adaptive-depth controller will consume — nil when
     /// telemetry is compiled out, never a plausible measured 0.0.
     var measuredCushionNeeded: Double? { telemetry.measuredCushionNeeded }
+
+    // MARK: - The cushion for this stream's packing (Stage 0b-2a)
+    //
+    // docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, "Buffer policy — the review and its decisions". The
+    // rule is `LiveCushion`'s: max(0.250, 1.5 × largest PES this session + 0.08 s), clamped to 1.0 s,
+    // grow-only. The PES figure is `notePacking`'s, which runs on decode — ahead of the pre-anchor
+    // audio drop — so on almost every stream the first PES is known before the clock anchors, and the
+    // clock simply starts on the raised cushion. A raise after the anchor is a `target-step`: `now()`
+    // moves back by the raise (the picture holds that long, once), `onPositionJump` fires, and the
+    // audio splice is matched against it.
+    //
+    // All under `stateLock`: the session thread raises, main activates and publishes.
+
+    /// The cushion the rule asks for this stream. The floor until a PES says otherwise.
+    private var cushionWanted = SRTFrameRouter.targetDepth
+    /// The largest PES behind `cushionWanted`, seconds; nil while the floor stands.
+    private var cushionRaisedForPES: Double?
+    /// SRT's negotiated receive latency, for the readout ("+ SRT 120 ms"). nil until connect states it.
+    private var transportLatencyMs: Int?
 
     /// What the stream's SPS declares, for the buffer tags. SESSION THREAD ONLY — written by
     /// `noteSPSColor` (the decoder's `onSPSColor`, before the access unit is decoded) and read by
@@ -409,7 +441,10 @@ final class SRTFrameRouter {
             return
         }
 
-        let config = Self.routeConfig(colorimetry: colorimetry)
+        stateLock.lock()
+        let cushionAtActivate = cushionWanted
+        stateLock.unlock()
+        let config = Self.routeConfig(colorimetry: colorimetry, cushion: cushionAtActivate)
         let clock = route.activate(
             renderer: renderer,
             config: config,
@@ -439,8 +474,20 @@ final class SRTFrameRouter {
 
         // Before the first frame of this stream can arrive. See LiveDepthTelemetry.reset().
         telemetry.reset()
+        // The anchor will be built on this cushion, not the configured one, when a PES raised it first.
+        if cushionAtActivate != Self.targetDepth { telemetry.setAnchorCushion(cushionAtActivate) }
 
-        stateLock.lock(); liveClock = clock; stateLock.unlock()
+        // Publishing the clock and re-reading the wanted cushion in one critical section: a raise that
+        // landed after `cushionAtActivate` was read found no clock to raise, so it is applied here,
+        // still before the anchor (no frame can register before this clock is published).
+        stateLock.lock()
+        liveClock = clock
+        let cushionNow = cushionWanted
+        let raisedFor = cushionRaisedForPES
+        stateLock.unlock()
+        if cushionNow > cushionAtActivate, let pes = raisedFor {
+            applyCushion(cushionNow, pes: pes, clock: clock)
+        }
 
         // ⚠️ INSTALLED AT ACTIVATE, NOT WHEN AUDIO STARTS — the same ordering WHEP needs. The
         // mapping's FIRST change is the initial anchor, which `registerFrame` performs on the first
@@ -504,14 +551,15 @@ final class SRTFrameRouter {
         audioSink = beginLiveAudio?(0)
 
         NSLog("[SRT] display route ACTIVE — LiveClock target=%.3fs, maxQueued=%d",
-              Self.targetDepth, config.maxQueued)
+              cushionAtActivate, config.maxQueued)
         NSLog("[SRT] colorimetry: %@", colorimetry.summary)
         // The reorder budget, stated at connect so the number the runtime check is measuring
         // against is in the log next to the stream it applies to.
         NSLog("""
               [SRT] reorder budget: targetDepth %.3fs must exceed max(pts − dts). Header claims \
               video_delay=%d (a claim only, often absent) — [SRT-AU] reports the measured value.
-              """, Self.targetDepth, format.videoDelay)
+              """, cushionAtActivate, format.videoDelay)
+        publishBufferReadout()
     }
 
     /// The stream's SPS colour changed mid-stream. MAIN, from SRTClient, timed for the first
@@ -548,6 +596,7 @@ final class SRTFrameRouter {
         audioSink = nil
         endLiveAudio?()
 
+        if let renderer { LiveBufferReadout.publish(nil, renderer: renderer, logPrefix: "SRT") }
         route.deactivate(renderer: renderer)
         // No picture, so no shape. On main, after the route teardown, where a size still hopping in
         // from the session thread cannot overtake it — see LiveDisplaySize's generation counter.
@@ -688,6 +737,12 @@ final class SRTFrameRouter {
         lastFlowLogHost = 0
         lastFlowLogEnqueued = 0
         telemetry.reset()
+        // Per-STREAM, like the packing figures it is computed from: the next stream starts on the
+        // floor and raises on its own first PES.
+        stateLock.lock()
+        cushionWanted = Self.targetDepth
+        cushionRaisedForPES = nil
+        stateLock.unlock()
     }
 
     // MARK: - Access units (session thread)
@@ -755,10 +810,11 @@ final class SRTFrameRouter {
     /// behind `#if DEBUG || MANIFOLD_TELEMETRY` — a Release user is exactly the person who needs to
     /// be told the buffer is too shallow for their stream.
     ///
-    /// IT DOES NOT TOUCH THE DEPTH. Deliberately: raising `targetDepth` automatically would trade
-    /// the user's latency away on the router's own initiative, silently, on evidence that could be
-    /// one malformed packet. The measurement is reported; the decision stays with the user, who has
-    /// ⌃⌥] to act on it.
+    /// IT DOES NOT TOUCH THE DEPTH — YET. The cushion follows the audio packing from Stage 0b-2a
+    /// (`considerCushion`); following this measurement is Stage 0b-2b's reorder term (decided
+    /// 2026-10-08, docs/COLOR_MANAGEMENT_FINDINGS.md §6.10), which will size it from max(pts − dts)
+    /// with a margin rather than from one access unit. Until then it is reported, and nothing in a
+    /// tester or Release build can raise it: ⌃⌥] exists only in the Debug configuration.
     ///
     /// Reads the LIVE target (the stepper moves it), not the configured constant, because the
     /// requirement is against whatever the clock is actually holding right now.
@@ -792,9 +848,9 @@ final class SRTFrameRouter {
                 reorderWarned = true
                 NSLog("""
                       [SRT-AU] ⚠️ REORDER DELAY %.3fs REACHES targetDepth %.3fs — B-frames are \
-                      landing behind the renderer's swept position and being DISCARDED. Raise the \
-                      target with ⌃⌥] until this clears; the requirement is \
-                      targetDepth > max(pts − dts). Header claimed video_delay=%d.
+                      landing behind the renderer's swept position and being DISCARDED. The \
+                      requirement is targetDepth > max(pts − dts); the cushion does not follow the \
+                      reorder delay yet (Stage 0b-2b). Header claimed video_delay=%d.
                       """, delta, target, declaredVideoDelay)
             }
         } else if isNewMax, !reorderNearWarned, delta >= target * Self.reorderWarnFraction {
@@ -1369,6 +1425,7 @@ final class SRTFrameRouter {
         audioPackingSeconds += seconds
         audioPackingMaxFrames = max(audioPackingMaxFrames, frames)
         audioPackingMaxSeconds = max(audioPackingMaxSeconds, seconds)
+        considerCushion(largestPES: audioPackingMaxSeconds)
         if frames != audioPackingLast {
             audioPackingLast = frames
             audioPackingChanges += 1
@@ -1622,11 +1679,12 @@ final class SRTFrameRouter {
             let n = Double(max(audioPackingPES, 1))
             NSLog("[SRT-AUDIO] session end — packets=%d framesIngested=%d undecodable=%d noPTS=%d "
                 + "axisRePins=%d · packing: %d PES, %.2f AAC frames per PES (%.1f ms) mean, max %d "
-                + "(%.1f ms), %d change(s)",
+                + "(%.1f ms), %d change(s) · cushion %.0f ms",
                   audioPacketsReceived, audioFramesIngested,
                   audioPacketsUndecodable, audioPacketsWithoutPTS, audioAxisResyncCount,
                   audioPackingPES, Double(audioPackingFrames) / n, audioPackingSeconds / n * 1000,
-                  audioPackingMaxFrames, audioPackingMaxSeconds * 1000, audioPackingChanges)
+                  audioPackingMaxFrames, audioPackingMaxSeconds * 1000, audioPackingChanges,
+                  stateLock.withLock { cushionWanted } * 1000)
         }
         audioDecoder = nil
     }
@@ -1920,6 +1978,97 @@ final class SRTFrameRouter {
         return destination
     }
 
+    // MARK: - The packing cushion (Stage 0b-2a)
+
+    /// The largest PES so far asks for `LiveCushion`'s cushion: raise to it if that is more than this
+    /// stream holds. SESSION THREAD, from `notePacking`, once per PES; the common case is one compare.
+    /// A digital-silence PES is counted like any other — it is the lump that starves.
+    private func considerCushion(largestPES: Double) {
+        stateLock.lock()
+        let current = cushionWanted
+        guard let next = LiveCushion.raise(current: current, transportDefault: Self.targetDepth,
+                                           largestPES: largestPES) else {
+            stateLock.unlock()
+            return
+        }
+        cushionWanted = next
+        cushionRaisedForPES = largestPES
+        let clock = liveClock
+        stateLock.unlock()
+        guard let clock else {
+            // No route yet (it activates at the first SPS): `activate` builds the clock on this.
+            NSLog("[SRT-BUFFER] cushion %.0f → %.0f ms before the display route is up — the clock will "
+                + "start on it, no step · the sender packs %.1f ms of audio per PES (largest this "
+                + "session) × %.1f + %.0f ms",
+                  current * 1000, next * 1000, largestPES * 1000, LiveCushion.packingFactor,
+                  LiveCushion.packingMarginSeconds * 1000)
+            return
+        }
+        applyCushion(next, pes: largestPES, clock: clock)
+    }
+
+    /// Raise a running route's clock to `cushion`. Any thread.
+    ///
+    /// Before the anchor `raiseTargetDepth` moves the startup fill with the target (no jump), so the
+    /// ledger's anchor cushion follows it. After the anchor it is a re-anchor, and its jump goes to the
+    /// ledger exactly as the manual stepper's does — leaving it out would flag OVER on a deliberate
+    /// action. Either way the renderer's queue bound grows with the cushion and the readout says so.
+    private func applyCushion(_ cushion: Double, pes: Double, clock: LiveClock) {
+        let reason = String(format: "the sender packs %.1f ms of audio per PES", pes * 1000)
+        guard let change = clock.raiseTargetDepth(to: cushion, reason: reason) else { return }
+        let stepped = change.jumped != 0
+        if stepped { telemetry.recordClockJump(change.jumped) } else { telemetry.setAnchorCushion(change.to) }
+        let bound = Self.queueBound(for: change.to)
+        if stepped {
+            NSLog("[SRT-BUFFER] cushion %.0f → %.0f ms AFTER the first anchor — now() moved %+.0f ms, one "
+                + "target-step (the picture holds once; the audio splice is matched to it) · the sender "
+                + "packs %.1f ms of audio per PES (largest this session) × %.1f + %.0f ms · queue bound %d",
+                  change.from * 1000, change.to * 1000, change.jumped * 1000, pes * 1000,
+                  LiveCushion.packingFactor, LiveCushion.packingMarginSeconds * 1000, bound)
+        } else {
+            NSLog("[SRT-BUFFER] cushion %.0f → %.0f ms BEFORE the first anchor — the clock starts on it, "
+                + "no step · the sender packs %.1f ms of audio per PES (largest this session) × %.1f + %.0f "
+                + "ms · queue bound %d",
+                  change.from * 1000, change.to * 1000, pes * 1000,
+                  LiveCushion.packingFactor, LiveCushion.packingMarginSeconds * 1000, bound)
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stateLock.lock()
+            let stillOurs = self.liveClock === clock
+            self.stateLock.unlock()
+            guard stillOurs, let renderer = self.renderer else { return }
+            renderer.maxQueuedOverride = max(renderer.maxQueuedOverride ?? 0, bound)
+            self.publishBufferReadout(stepped: stepped)
+        }
+    }
+
+    /// SRT's negotiated receive latency, for the readout's "+ SRT 120 ms". MAIN, from SRTClient at
+    /// connect, which may be before or after the route activates.
+    func noteTransportLatency(ms: Int32) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stateLock.lock()
+        transportLatencyMs = ms > 0 ? Int(ms) : nil
+        stateLock.unlock()
+        publishBufferReadout()
+    }
+
+    /// The readout's Buffer row for this route, from the clock's live target. MAIN. Silent with no
+    /// active route: `deactivate` clears the row itself.
+    private func publishBufferReadout(stepped: Bool = false) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stateLock.lock()
+        let clock = liveClock
+        let pes = cushionRaisedForPES
+        let latency = transportLatencyMs
+        stateLock.unlock()
+        guard let clock, let renderer else { return }
+        let report = LiveCushion.Report(transport: "SRT", cushion: clock.currentTargetDepth,
+                                        transportDefault: Self.targetDepth,
+                                        transportLatencyMs: latency, raisedForPES: pes)
+        LiveBufferReadout.publish(report, renderer: renderer, logPrefix: "SRT", stepped: stepped)
+    }
+
     // MARK: - Runtime target adjustment (⌃⌥[ / ⌃⌥], main thread)
 
     /// Step the live clock's `targetDepth` by `delta`. The whole point is to A/B several cushion
@@ -1952,6 +2101,7 @@ final class SRTFrameRouter {
             return
         }
         telemetry.recordClockJump(change.jumped)
+        publishBufferReadout(stepped: true)
     }
 
     // MARK: - Latency-control reporting (render thread, coarse actions only)

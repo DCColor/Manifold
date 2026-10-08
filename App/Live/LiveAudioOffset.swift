@@ -64,6 +64,11 @@ final class LiveAudioOffsetModel: ObservableObject {
         savedMs = source == .hls ? nil : bookmark?.audioOffsetMs
         sessionMs = source == .hls ? 0 : (bookmark?.audioOffsetMs ?? 0)
         deck?.engine?.liveAudioSessionOffset = Double(sessionMs) / 1000
+        // A saved advance the first anchor cannot cover is refused there (docs/COLOR_MANAGEMENT_FINDINGS.md
+        // §6.10, decision 7): the engine is already at 0 when this is called, from the audio pump.
+        deck?.engine?.onLiveAudioStartOffsetRefused = { [weak self] requested, available in
+            DispatchQueue.main.async { self?.startRefused(requestedSeconds: requested, availableSeconds: available) }
+        }
         NSLog("[AUDIO-OFFSET] connect (%@) — session value %@ (%@)",
               String(describing: source), Self.text(sessionMs),
               source == .hls ? "HLS: no offset, Apple’s player owns the audio"
@@ -115,6 +120,22 @@ final class LiveAudioOffsetModel: ObservableObject {
     }
 
     /// Persist the session value into the bookmark this connect came from.
+    /// The session's saved advance was refused at the first anchor. The engine runs at 0; so does the
+    /// session value. The bookmark keeps its value — Revert to Saved retries it through the normal
+    /// test once the stream is running — and the user is told, in the same banner as every refusal.
+    private func startRefused(requestedSeconds: Double, availableSeconds: Double) {
+        let requested = Int((requestedSeconds * 1000).rounded())
+        guard sessionMs == requested else { return }   // the user has moved it since: theirs stands
+        sessionMs = 0
+        let fromBookmark = bookmarkID != nil && savedMs == requested
+        NSLog("[AUDIO-OFFSET] %@ %@ was refused at the start of the session — playing at 0 ms%@",
+              fromBookmark ? "the saved" : "the session's", Self.text(requested),
+              fromBookmark ? "; the saved stream keeps it" : "")
+        notice(Self.startRefusalText(requestedMs: requested, availableSeconds: availableSeconds,
+                                     fromBookmark: fromBookmark))
+        deck?.applyWindowTitle()
+    }
+
     func saveToBookmark() {
         guard let id = bookmarkID else { return }
         switch StreamBookmarkStore.shared.setAudioOffset(sessionMs, forBookmark: id) {
@@ -146,6 +167,16 @@ final class LiveAudioOffsetModel: ObservableObject {
 
     /// Stage A's refusal, in plain words. The figure is what the queue allows NOW, floored to whole
     /// ms so the sentence never promises a fraction the next press could not deliver.
+    static func startRefusalText(requestedMs: Int, availableSeconds: Double, fromBookmark: Bool) -> String {
+        let ms = Int((max(0, availableSeconds) * 1000).rounded(.down))
+        let head = "The \(fromBookmark ? "saved " : "")audio offset (\(text(requestedMs))) needs more buffered "
+            + "sound than this stream has"
+        return (ms >= 1
+            ? head + " — it can move sound earlier by at most \(ms) ms right now."
+            : head + " — sound arrives too close to when it plays.")
+            + (fromBookmark ? " Playing at 0 ms; the saved stream keeps \(text(requestedMs))." : " Playing at 0 ms.")
+    }
+
     static func refusalText(availableSeconds: Double, current: Int) -> String {
         let ms = Int((max(0, availableSeconds) * 1000).rounded(.down))
         return ms >= 1

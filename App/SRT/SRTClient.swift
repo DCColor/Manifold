@@ -720,6 +720,8 @@ final class SRTClient: ObservableObject {
         NSLog("[SRT] transport up in %@. Waiting for the demuxer to identify the stream…", elapsed())
         logLatencyBudget(negotiatedLatencyMs: negotiatedLatencyMs,
                          requestedLatencyMs: requestedLatencyMs)
+        // The readout's "+ SRT 120 ms" (Stage 0b-2a): every configuration, unlike the log above.
+        SRTFrameRouter.shared.noteTransportLatency(ms: negotiatedLatencyMs)
     }
 
     /// ── THE ONE LINE THAT MAKES `targetDepth` ARGUABLE FROM A LOG ─────────────────────────
@@ -763,11 +765,13 @@ final class SRTClient: ObservableObject {
         let verdict: String
         if transport < Self.thinTransportLatency {
             verdict = "UNUSUALLY SMALL — TSBPD is doing little smoothing and has almost no "
-                    + "retransmit window, so our cushion is thin, not generous; treat an underrun "
-                    + "here as a reason to RAISE the target (⌃⌥]), not as a bad network"
+                    + "retransmit window, so our cushion is thin, not generous; an underrun here is "
+                    + "evidence for a deeper SRT floor (buffer policy, COLOR_MANAGEMENT_FINDINGS.md "
+                    + "§6.10), not a bad network"
         } else if transport > cushion * Self.largeTransportLatencyFactor {
             verdict = "UNUSUALLY LARGE — the transport is already holding far more than our cushion "
-                    + "assumes, so the target could likely come DOWN (⌃⌥[) for less end-to-end delay"
+                    + "assumes; evidence for trial L3 (a lower SRT floor, §6.10), not something to "
+                    + "change here"
         } else {
             verdict = "nominal — the transport is absorbing burstiness roughly as the target assumes"
         }
@@ -1092,9 +1096,10 @@ final class SRTClient: ObservableObject {
     /// uses. Announced ONCE per stream: the count keeps climbing, and re-raising the banner every
     /// second would make the app unusable while telling the user nothing new.
     ///
-    /// IT DOES NOT ADJUST THE DEPTH. Deliberately — see `SRTFrameRouter.recordReorderDelay`. Raising
-    /// the cushion spends the user's latency, and on this evidence that stays the user's call, with
-    /// ⌃⌥] to make it.
+    /// IT DOES NOT ADJUST THE DEPTH, AND THE USER HAS NO KEY TO. ⌃⌥[ / ⌃⌥] are Debug-configuration
+    /// only (decided 2026-10-08: automatic only, plus the readout). The automatic answer to this banner
+    /// is Stage 0b-2b's reorder term (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10); until it lands, the
+    /// banner is the report and the chain readout's Buffer row shows the depth it is measured against.
     private func checkReorderBudget() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !announcedReorderShortfall else { return }

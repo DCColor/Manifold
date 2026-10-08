@@ -19,7 +19,9 @@
 //      ±2 ms of the median (`CalibrationMeasurement`). Until then: pairs found and the spread.
 //    * NDI: Apply for Session only (NDI connects have no saved stream, by decision). HLS: no
 //      calibration, with the offset control's note — Apple's player owns the audio.
-//    * The O the run started on is watched: a change (a nudge, the menu) restarts the measurement.
+//    * The O the run started on is watched: a change (a nudge, the menu) restarts the measurement. So
+//      does a raised cushion that moves the running clock (Stage 0b-2a, docs/COLOR_MANAGEMENT_FINDINGS.md
+//      §6.10): the picture holds once and the audio splices, and pairs across that are not steady state.
 //
 
 import SwiftUI
@@ -151,6 +153,8 @@ final class SyncCalibrationModel: ObservableObject {
     private var run = 0
     private var startedAtMs = 0
     private var offsetWatch: AnyCancellable?
+    /// A raised cushion that moved the running clock (Stage 0b-2a) restarts the run, like an O change.
+    private var bufferWatch: NSObjectProtocol?
 
     init(deck: WindowDeck) { self.deck = deck }
 
@@ -222,6 +226,12 @@ final class SyncCalibrationModel: ObservableObject {
         offsetWatch = deck.audioOffset.$sessionMs.dropFirst().removeDuplicates().sink { [weak self] ms in
             self?.offsetChanged(to: ms, run: token)
         }
+        bufferWatch = NotificationCenter.default.addObserver(
+            forName: LiveBufferReadout.didChange, object: renderer, queue: .main
+        ) { [weak self] note in
+            guard note.userInfo?[LiveBufferReadout.steppedKey] as? Bool == true else { return }
+            MainActor.assumeIsolated { self?.bufferStepped(run: token) }
+        }
         NSLog("[CALIBRATION] START run %d (%@) — O %@, frame %@ · detector work this launch: %@", token,
               String(describing: deck.audioOffset.source.map { "\($0)" } ?? "?"),
               LiveAudioOffsetModel.text(startedAtMs),
@@ -235,6 +245,8 @@ final class SyncCalibrationModel: ObservableObject {
         deck?.engine?.calibrationBeepTap.stop()
         deck?.renderer?.calibrationFlash = nil
         offsetWatch = nil
+        if let bufferWatch { NotificationCenter.default.removeObserver(bufferWatch) }
+        bufferWatch = nil
         if wasOn {
             NSLog("[CALIBRATION] detectors off — detector work this launch: %@", SyncCalibrationCounters.snapshot.text)
         }
@@ -287,6 +299,15 @@ final class SyncCalibrationModel: ObservableObject {
               LiveAudioOffsetModel.text(startedAtMs), LiveAudioOffsetModel.text(ms))
         start()
         note = "The audio offset changed — measuring again."
+    }
+
+    /// The cushion was raised mid-run: the picture held once and the audio spliced, so pairs taken
+    /// across the step do not describe the steady state. Measure again, as for an O change.
+    private func bufferStepped(run token: Int) {
+        guard token == run, phase == .listening else { return }
+        NSLog("[CALIBRATION] the buffer was raised mid-run — measuring again")
+        start()
+        note = "The buffer was raised — measuring again."
     }
 
     private var lastLoggedPairs = 0

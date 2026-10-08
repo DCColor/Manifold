@@ -2433,6 +2433,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // The session value (the bookmark's, or what the user has nudged it to): every session this
         // connect opens starts on it, so a transport's own reconnect keeps the user's offset.
         let startOffset = liveAudioSessionOffset
+        // A saved advance is judged at playback start (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, 7).
+        steering.onStartOffsetRefused = { [weak self] r in self?.liveAudioStartOffsetRefused(r) }
         if startOffset != 0 { applyLiveAudioOffset(startOffset, steering: steering) }
         // An input jump past the stage's bridge is the one input event that can step the content
         // error (§4.1 item 2), so it is on record for the splice it may cause. Set before the sink
@@ -3429,6 +3431,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         return outcome
     }
+
+    /// Playback start refused the session's saved advance (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10,
+    /// decision 7): the steering already runs at O = 0. Bring the rest of the session with it — the SDI
+    /// read, and the session value a transport's own reconnect would start on — and tell the app, which
+    /// says so and leaves the bookmark's value alone. Any thread (the mirror's or NDI's pump).
+    private nonisolated func liveAudioStartOffsetRefused(_ r: LiveAudioResampleSteering.StartOffsetRefusal) {
+        audioTap.setLiveReadOffset(0)
+        liveAudioSessionOffset = 0
+        onLiveAudioStartOffsetRefused?(r.requested, r.available)
+    }
+
+    /// The app's hook for a refused saved advance: (requested O, advance available), seconds. Called on
+    /// the audio pump's thread; the receiver hops to main. Set once, at window setup.
+    public nonisolated(unsafe) var onLiveAudioStartOffsetRefused: ((Double, Double) -> Void)?
 
     /// THE range of O, in whole ms, for the app's field and nudge: the steering's one constant
     /// (`LiveAudioResampleSteering.userOffsetRange`), not a second copy of it.

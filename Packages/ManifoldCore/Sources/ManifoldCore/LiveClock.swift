@@ -70,14 +70,15 @@ public final class LiveClock: @unchecked Sendable {
     /// Seconds of buffer to fill before the FIRST frame is presented — the startup delay / initial
     /// cushion, applied once when the anchor is established (see `registerFrame`). DISTINCT from
     /// `targetDepth`: startup is a one-time fill, target is the steady-state hold point.
-    /// `var` (was `let`) only so the DEBUG `setDepths` sweep hook can retarget it; production sets it
-    /// once at init and never writes it again. Read under `lock` in `registerFrame`.
+    /// `var` (was `let`) for the DEBUG `setDepths` sweep hook and for `raiseTargetDepth`, which moves
+    /// it with the target while the clock is still unanchored (Stage 0b-2a) and never after. Read
+    /// under `lock` in `registerFrame`.
     private var startupDepth: Double
 
     /// The steady-state control SETPOINT: the buffer depth (seconds of lead ahead of `now()`) the
     /// loop holds once running. `error = smoothedDepth - targetDepth` drives the rate slew.
-    /// `var` (was `let`) only for the DEBUG `setDepths` sweep hook (see `startupDepth`). Read under
-    /// `lock` in `updateDepth`.
+    /// `var` (was `let`) for the DEBUG `setDepths` sweep hook, the stepper and `raiseTargetDepth`
+    /// (see `startupDepth`). Read under `lock` in `updateDepth`.
     private var targetDepth: Double
 
     // --- Control-loop tuning (public var so the debug/tuning pass can adjust them live) ---
@@ -1088,29 +1089,66 @@ public final class LiveClock: @unchecked Sendable {
     @discardableResult
     public func adjustTargetDepth(by delta: Double) -> (from: Double, to: Double, jumped: Double)? {
         lock.lock()
-        let change = adjustTargetDepthLocked(by: delta)
+        let from = targetDepth
+        let change = setTargetDepthLocked(min(maxTargetDepth, max(minTargetDepth, from + delta)),
+                                          alsoStartupIfUnanchored: false)
         lock.unlock()
-        // Before the mapping: see `onPositionJump`. A zero jump (unanchored) moved nothing.
-        if let change, change.jumped != 0 {
-            onPositionJump?(PositionJump(kind: .targetStep, jumped: change.jumped, host: hostNow(),
-                                         detail: String(format: "targetDepth %.3f -> %.3f (manual), "
-                                                        + "now() moved %+.3fs",
-                                                        change.from, change.to, change.jumped)))
-        }
-        publishMappingIfChanged()                                           // outside the lock
-        if let change { emitTargetStep(from: change.from, to: change.to) }   // outside the lock
+        finishTargetStep(change, label: "manual")
         return change
     }
 
-    /// The locked half of `adjustTargetDepth`. Calls out to nothing and formats nothing.
-    private func adjustTargetDepthLocked(by delta: Double)
+    /// RAISE the setpoint to `to` for a measured reason (Stage 0b-2a: the sender's audio packing,
+    /// docs/COLOR_MANAGEMENT_FINDINGS.md §6.10). GROW-ONLY: a `to` at or below the current target is a
+    /// no-op, so two callers racing cannot lower it. Clamped to `maxTargetDepth`.
+    ///
+    /// ⚠️ BEFORE THE ANCHOR IT MOVES THE STARTUP FILL TOO, AND THAT IS THE DIFFERENCE FROM THE STEPPER.
+    /// `adjustTargetDepth` leaves `startupDepth` alone (a steady-state control), so a raise made before
+    /// the first frame would still fill to the OLD depth and then reach the new one at the ±0.5 % rail
+    /// — 14 s for 71 ms. Here the first `registerFrame` fills straight to the raised target: no jump,
+    /// nothing re-shown, nothing for the audio to splice. After the anchor it is the stepper's
+    /// re-anchor exactly — `now()` moves back by the raise, `onPositionJump` fires as a `target-step`
+    /// so the audio splice is matched, and the caller's ledger must take `jumped`.
+    ///
+    /// Returns before/after and the signed jump (0 when unanchored), or nil when nothing changed.
+    /// Safe to call from any thread.
+    @discardableResult
+    public func raiseTargetDepth(to target: Double, reason: String)
+        -> (from: Double, to: Double, jumped: Double)? {
+        guard target.isFinite else { return nil }
+        lock.lock()
+        let change = target > targetDepth
+            ? setTargetDepthLocked(min(maxTargetDepth, target), alsoStartupIfUnanchored: true)
+            : nil
+        lock.unlock()
+        finishTargetStep(change, label: "raised: " + reason)
+        return change
+    }
+
+    /// The unlocked tail both target changes share: the position jump (before the mapping — see
+    /// `onPositionJump`), the publication, the log line.
+    private func finishTargetStep(_ change: (from: Double, to: Double, jumped: Double)?, label: String) {
+        // A zero jump (unanchored) moved nothing.
+        if let change, change.jumped != 0 {
+            onPositionJump?(PositionJump(kind: .targetStep, jumped: change.jumped, host: hostNow(),
+                                         detail: String(format: "targetDepth %.3f -> %.3f (%@), "
+                                                        + "now() moved %+.3fs",
+                                                        change.from, change.to, label, change.jumped)))
+        }
+        publishMappingIfChanged()                                                       // outside the lock
+        if let change { emitTargetStep(from: change.from, to: change.to, label: label) } // outside the lock
+    }
+
+    /// The locked half of a target change. Calls out to nothing and formats nothing.
+    /// `alsoStartupIfUnanchored`: before the first frame, move the startup fill with the target, so the
+    /// anchor fills straight to it (`raiseTargetDepth`); the stepper leaves the fill alone.
+    private func setTargetDepthLocked(_ to: Double, alsoStartupIfUnanchored: Bool)
         -> (from: Double, to: Double, jumped: Double)? {
         let from = targetDepth
-        let to = min(maxTargetDepth, max(minTargetDepth, from + delta))
         let shift = to - from
         guard shift != 0 else { return nil }
 
         targetDepth = to
+        if alsoStartupIfUnanchored && anchorSenderPTS == nil { startupDepth = to }
         var jumped = 0.0
         if let aPTS = anchorSenderPTS, let aHost = anchorHostTime {
             let t = hostNow()
@@ -1128,8 +1166,9 @@ public final class LiveClock: @unchecked Sendable {
             ineligibleSince = nil
         }
         // Unanchored: nothing to rebase — the next `registerFrame` will anchor against the new
-        // setpoint on its own. (`startupDepth` is deliberately NOT stepped: it is the one-time fill
-        // applied at anchor time, and this is a steady-state control.)
+        // setpoint on its own. (The stepper deliberately leaves `startupDepth` alone: it is the
+        // one-time fill applied at anchor time, and the stepper is a steady-state control. A
+        // measured raise moves it — see `raiseTargetDepth`.)
         return (from: from, to: to, jumped: jumped)
     }
 
@@ -1770,11 +1809,11 @@ public final class LiveClock: @unchecked Sendable {
         #endif
     }
 
-    private func emitTargetStep(from: Double, to: Double) {
+    private func emitTargetStep(from: Double, to: Double, label: String) {
         #if DEBUG || MANIFOLD_TELEMETRY
         guard telemetryEnabled else { return }
         FileHandle.standardError.write(Data(String(
-            format: "[LIVECLOCK] targetDepth %.3f -> %.3f (manual)\n", from, to).utf8))
+            format: "[LIVECLOCK] targetDepth %.3f -> %.3f (%@)\n", from, to, label).utf8))
         #endif
     }
 

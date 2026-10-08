@@ -48,6 +48,7 @@ import Foundation
 import ManifoldCore      // UnfairLock — the priority-donating lock both telemetry locks use
 import ColorimetryModel  // SourceColorimetry — the buffer tags
 import H264SPSColor      // the decoder's per-SPS colour reading
+import DisplayProviders  // LiveCushion.Report — the readout's Buffer row
 import QuartzCore
 import VideoToolbox
 
@@ -744,6 +745,17 @@ final class WHEPFrameRouter {
 
         NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR until the stream's SPS is read",
               Self.targetDepth)
+        publishBufferReadout(clock: clock)
+    }
+
+    /// The chain readout's Buffer row (decision 5, docs/COLOR_MANAGEMENT_FINDINGS.md §6.10). WHEP has no
+    /// transport buffer of its own to state and no automatic raise: "400 ms". MAIN.
+    private func publishBufferReadout(clock: LiveClock, stepped: Bool = false) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let renderer else { return }
+        LiveBufferReadout.publish(LiveCushion.Report(transport: "WHEP", cushion: clock.currentTargetDepth,
+                                                     transportDefault: Self.targetDepth),
+                                  renderer: renderer, logPrefix: "WHEP", stepped: stepped)
     }
 
     // MARK: - Stream colour (decode queue → main)
@@ -801,6 +813,7 @@ final class WHEPFrameRouter {
         // must not outlive the clock they drive) and maxQueuedOverride, and wipes the last streamed
         // frame. onDisplayTick is deliberately NOT touched — activate() nil'd it and a push source
         // has nothing to restore.
+        if let renderer { LiveBufferReadout.publish(nil, renderer: renderer, logPrefix: "WHEP") }
         route.deactivate(renderer: renderer)
         // No picture, so no shape. Ordered AFTER the route teardown and on main, where it cannot be
         // overtaken by a size still hopping in from the decode queue — see LiveDisplaySize's
@@ -879,6 +892,7 @@ final class WHEPFrameRouter {
             return
         }
         telemetry.recordClockJump(change.jumped)
+        publishBufferReadout(clock: clock, stepped: true)
     }
 
     // MARK: - Per-frame (decode queue)

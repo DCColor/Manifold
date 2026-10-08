@@ -231,6 +231,9 @@ struct DisplayChainReadout: View {
             row("Source",    model.chain.source)
             row("Transform", model.chain.transform)
             row("Display",   model.chain.display)
+            if let buffer = model.chain.buffer {
+                row("Buffer", buffer)
+            }
 
             if let verdict = model.chain.verdict {
                 Divider()

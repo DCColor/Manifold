@@ -32,13 +32,16 @@ final class LiveAudioOffsetTests: XCTestCase {
         var granted: [Double] = []
         var writes = 0
         var maxDry = 0.0
+        /// What the first anchor returned: a refused saved advance, or nil.
+        var startRefusal: S.StartOffsetRefusal?
     }
 
     /// `changes`: (host s, O) requested at that time. `stall`: (at, seconds, catch-up ×). `ndi`: no
     /// mapping — the line is the anchor's alone, as NDI's (§2.8). The line is content `100 + t`.
     func run(lead: Double = 0.340, seconds: Double, startOffset: Double = 0,
              changes: [(at: Double, o: Double)] = [], stall: (at: Double, s: Double, k: Double)? = nil,
-             ndi: Bool = false, reanchorAt: Double? = nil, mode: S.Mode = .loop) -> Run {
+             ndi: Bool = false, reanchorAt: Double? = nil, mode: S.Mode = .loop,
+             sampledBeforeAnchor: Bool = false) -> Run {
         let p = QueuePlant()
         final class Box: @unchecked Sendable { var at = Double.infinity }
         let deadline = Box()
@@ -53,6 +56,12 @@ final class LiveAudioOffsetTests: XCTestCase {
         p.pieces = [.init(outStart: 0, outEnd: 0, content: line(0), rho: 1)]
         p.deliver(upTo: sent)
         if startOffset != 0 { out.outcomes.append((0, s.setUserOffset(startOffset))) }
+        // The app's order: the sink enqueues (and samples) before the first anchor, while the
+        // renderer holds the queue at rate 0. Off by default, as every test here was written.
+        final class RefusalBox: @unchecked Sendable { var r: S.StartOffsetRefusal? }
+        let refusalBox = RefusalBox()
+        s.onStartOffsetRefused = { refusalBox.r = $0 }
+        if sampledBeforeAnchor { s.sample(enqueuedFrontier: p.frontier) }
         s.anchor(media: line(0), host: 0)
         var pendingChanges = changes
         var lastSend = 0.0, nextRef = 0.0, dryStart: Double?, reanchored = false
@@ -93,6 +102,7 @@ final class LiveAudioOffsetTests: XCTestCase {
             }
         }
         s.finish()
+        out.startRefusal = refusalBox.r
         out.totals = s.totals
         out.granted = p.granted
         out.writes = p.writes.count + p.holds
@@ -155,6 +165,117 @@ final class LiveAudioOffsetTests: XCTestCase {
         XCTAssertEqual(r.writes, 1)
         XCTAssertEqual(heard(r, at: 5), 0.120, accuracy: 0.0005)
         XCTAssertLessThan(r.loopErr.filter { $0.t > 1 }.map { abs($0.e) }.max()!, 0.0005)
+    }
+
+    // MARK: - A saved advance is judged at playback start (COLOR_MANAGEMENT_FINDINGS.md §6.10, decision 7)
+
+    struct StartRun {
+        var refusal: S.StartOffsetRefusal?
+        var offset = 0.0
+        var writes: [S.WriteOrigin] = []
+        var maxDry = 0.0
+        var heardAt5 = 0.0
+    }
+
+    /// SRT's start, as the 2026-10-08 OBS run logged it: the picture's first anchor is placed `fill`
+    /// in the FUTURE with NOTHING enqueued (audio before the video anchor is dropped), and the audio
+    /// then arrives in real time, `interleave` ahead of the picture's line. At playback start the queue
+    /// is fill + interleave (0.34 s, local SRT's measured lead).
+    func srtStart(offset: Double, fill: Double = 0.250, interleave: Double = 0.090) -> StartRun {
+        let p = QueuePlant()
+        p.writeLatency = 0
+        final class Box: @unchecked Sendable { var r: S.StartOffsetRefusal?; var at = Double.infinity }
+        let box = Box()
+        let s = S(tag: "[TEST-START]", mode: .loop, clock: p, gains: .adopted, thresholds: .adopted,
+                  reportsWindows: false, readTimebase: { p.timebase }, hostNow: { p.host },
+                  write: { o, h, why in p.write(o, h, why) }, hold: { o, h in p.hold(o, h) },
+                  armDeadline: { box.at = $0 }, log: nil)
+        s.onStartOffsetRefused = { box.r = $0 }
+        let line: (Double) -> Double = { 100 + $0 - fill }      // the picture's line: 100 heard at `fill`
+        p.arrived = 100
+        p.pieces = [.init(outStart: 0, outEnd: 0, content: 100, rho: 1)]
+        _ = s.setUserOffset(offset)
+        s.anchor(media: 100, host: fill)                        // t = 0, nothing enqueued
+        var out = StartRun()
+        var lastSend = -1.0, nextRef = 0.0, t = 0.0, dryStart: Double?
+        while t < 6 {
+            t += 0.001; p.host = t
+            if t >= nextRef { s.setReference(media: line(t), host: t, rate: 1); nextRef += 0.1 }
+            if t - lastSend >= 0.0213 {
+                p.deliver(upTo: 100 + t + interleave)
+                s.sample(enqueuedFrontier: p.frontier)
+                lastSend = t
+            }
+            if t >= box.at { box.at = .infinity; s.starvationCheck() }
+            let tb = p.timebase
+            if t > fill, tb > p.frontier + 1e-6 {
+                if dryStart == nil { dryStart = t }
+                out.maxDry = max(out.maxDry, t - dryStart!)
+            } else { dryStart = nil }
+            if abs(t - 5) < 0.0005 { out.heardAt5 = line(t) - p.inputTime(atOutputTime: tb) }
+        }
+        s.finish()
+        out.refusal = box.r
+        out.offset = s.totals.userOffset
+        out.writes = p.writes
+        return out
+    }
+
+    /// −100 ms: ~180 ms is available at playback start, so it is placed exactly as before — the one
+    /// write, heard = O from the start, never dry.
+    func testASavedAdvanceTheQueueCoversIsPlacedAtPlaybackStart() {
+        let r = srtStart(offset: -0.100)
+        XCTAssertNil(r.refusal)
+        XCTAssertEqual(r.offset, -0.100)
+        XCTAssertEqual(r.writes, [.firstAnchor])
+        XCTAssertEqual(r.heardAt5, -0.100, accuracy: 0.0005)
+        XCTAssertEqual(r.maxDry, 0)
+    }
+
+    /// −250 ms (the OBS run that broke up at an 87 ms queue): refused WHOLE before anything plays —
+    /// the anchor written again without O, heard 0 from the start, the queue and the figure stated.
+    func testASavedAdvanceBeyondTheQueueIsRefusedBeforePlayback() {
+        let r = srtStart(offset: -0.250)
+        guard let refusal = r.refusal else { return XCTFail("not refused") }
+        XCTAssertEqual(refusal.requested, -0.250)
+        XCTAssertEqual(refusal.queue, 0.340, accuracy: 0.022, "the queue at playback start, within a packet")
+        XCTAssertEqual(refusal.available, refusal.queue - 0.160, accuracy: 1e-9)
+        XCTAssertEqual(r.offset, 0, "refused whole, never clamped")
+        XCTAssertEqual(r.writes, [.firstAnchor, .reanchor("saved advance refused before playback")])
+        XCTAssertEqual(r.heardAt5, 0, accuracy: 0.0005)
+        XCTAssertEqual(r.maxDry, 0)
+    }
+
+    /// Judged at the anchor, as 0b-2a first did, the queue is EMPTY by construction on this start —
+    /// which is why the judgement moved. Nothing is enqueued at t = 0 here, and −250 is still refused.
+    func testTheJudgementWaitsForTheStartupFill() {
+        XCTAssertNotNil(srtStart(offset: -0.250).refusal)
+        XCTAssertNil(srtStart(offset: -0.150).refusal, "0.34 − 0.16 = 0.18 available")
+        XCTAssertNotNil(srtStart(offset: -0.200).refusal)
+    }
+
+    /// A shallower lead (Cloudflare SRT's ~205 ms): even −50 ms is refused.
+    func testAShallowLeadRefusesSmallAdvances() {
+        let r = srtStart(offset: -0.050, interleave: -0.045)
+        XCTAssertNotNil(r.refusal)
+        XCTAssertEqual(r.offset, 0)
+    }
+
+    /// A delay (O > 0) is never judged: it deepens the queue.
+    func testASavedDelayIsNeverJudged() {
+        let r = srtStart(offset: 0.400)
+        XCTAssertNil(r.refusal)
+        XCTAssertEqual(r.offset, 0.400)
+        XCTAssertEqual(r.writes, [.firstAnchor])
+    }
+
+    /// The harness's own start (content enqueued before an anchor at "now"): judged on the first
+    /// buffer after it — late by one packet, so a refusal is a re-anchor — and placed when covered.
+    func testAnAnchorAtNowIsJudgedOnTheNextBuffer() {
+        XCTAssertNil(run(seconds: 5, startOffset: -0.100, sampledBeforeAnchor: true).startRefusal)
+        let r = run(seconds: 5, startOffset: -0.250, sampledBeforeAnchor: true)
+        XCTAssertNotNil(r.startRefusal)
+        XCTAssertEqual(r.totals.userOffset, 0)
     }
 
     // MARK: - A stall with O ≠ 0: hold, resume and recovery land on line − O; D never takes O

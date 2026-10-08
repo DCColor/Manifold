@@ -20,6 +20,13 @@ held back until after release, and the numbered defect entries follow.
 1. **The technical work.**
    - The SRT audio break-up fix, with the buffer review (*SRT audio breaks up when the sender packs
      ≥ ~170 ms of AAC into each PES*, below; `COLOR_MANAGEMENT_FINDINGS.md` §6.10, Stage 0b).
+     **Buffer policy decided 2026-10-08** (§6.10, *Buffer policy — the review and its decisions*):
+     defaults held for 1.0; Stage 0b-2a (the adaptive SRT cushion, the readout's Buffer row, the
+     saved-advance check), then 0b-2b (the reorder term).
+   - **Trial L1 — WHEP cushion 0.30**, after 0b-2b (§6.10). Lowered only if it passes.
+   - **Trial L2 — NDI desktop-audio lead 0.20**, which also finds the audio renderer's crackle
+     threshold (between 40 and 150 ms of lead) on the Scarlett and the built-in output (§6.10).
+   - Trial L3 (SRT floor 0.20) is NOT in 1.0: it waits until after HEVC Stage 3.
    - HEVC over SRT, Stages 1–6, including Stage 3b (HEVC 4:2:2 10-bit) (§6.10).
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
@@ -1122,6 +1129,70 @@ hi25 is not what starves the audio.** Those fixtures' video arrives in bursts, w
 no rail episode and ends at the same 20 ms floor, with holds. The floor comes from the packing, so
 it is 0b-2's to fix. Details: `COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 0b-1 — results* and *The
 rail drain — what it is*.
+
+**2026-10-08, decided (Robbie):** option C, the adaptive target. Cushion = max(0.250, largest PES this
+session + 0.15 s), clamped to 1.0 s, grow-only, set before the first anchor when the packing is known.
+Signal is the PES duration, not the queue. Stage 0b-2a; design and predictions in §6.10, *Buffer
+policy — the review and its decisions*.
+
+**2026-10-08, Stage 0b-2a built and run (uncommitted):** hi8 / hi25 / hi8fine (171 ms per PES) raised to
+321 ms before the anchor, **0 holds** (were 5–8), low-water ~80 ms. **lo150 (341 ms) still breaks up**:
+raised to 513 ms, 115 holds (were ~260), settled floor 30–34 ms. The settled floor fits cushion − 1.41 ×
+PES, so + 0.15 s is too small above ~0.3 s per PES; whether the rule scales with the PES is open
+(§6.10, *Stage 0b-2a — results*). **Status: PARTLY FIXED.**
+
+**2026-10-08 evening, decided (Robbie) and rerun:** the rule is now **1.5 × largest PES + 0.08 s**. hi8 /
+hi25 / hi8fine 336 ms, lo150 624 ms: **0 holds on every fixture**, floors 94–97 ms and 64–66 ms. OBS and
+Cloudflare's SRT egress both pack 1 frame per PES (cushion unchanged at 250). **Status: FIXED in the
+tree (uncommitted).** Confirmed by ear 2026-10-08 18:36: Audio Hijack recording of hi8 (looped, 206 s)
+has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD recording (§6.10, v2 attended).
+
+---
+
+## ☐ OPEN 2026-10-08 — LATENT, ALL LIVE TRANSPORTS — a saved sound-earlier offset is placed at the first anchor with no queue check
+
+**Status:** OPEN; the fix is in Stage 0b-2a (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, decision 7).
+**Found** by reading, in the 2026-10-08 buffer review. Not observed.
+
+- **What:** a nudge or calibration that moves sound EARLIER is judged against the renderer queue
+  (`LiveAudioResampleSteering.setUserOffset`: the queue's 10 s low point less 160 ms of keep, fade and
+  margin; refused whole beyond it). A SAVED negative offset never meets that test. At connect it is
+  stored as pending (`.pending`, "placed by the next anchor") and the first `anchor` places the line O
+  behind the picture with a timebase write and no queue check.
+- **Effect, if the advance exceeds what the stream buffers:** the session starts with the queue near or
+  below the 20 ms starvation margin, so repeated holds; past the lead, the first audio lands behind
+  the playhead.
+- **How it would happen:** calibration only proposes an advance the queue allows on the stream it
+  measured, but the stored value is replayed on whatever that bookmark later connects to. An advance
+  saved on local SRT (~180 ms available) and replayed through Cloudflare SRT (0 available) would
+  trigger it, and so would a value typed into the Stream Sources sheet. Lowering any cushion makes it
+  likelier, which is why the buffer review raised it.
+- **Fix (0b-2a):** the same test at the first anchor, refusing whole through the existing refusal path
+  (O 0 for the session, banner, SDI read back to 0, the bookmark unchanged).
+- **2026-10-08, live (OBS, attended): the first build NEVER JUDGED** — on SRT the first anchor comes
+  before any audio, by design — and −250 ms placed unchecked left an 87 ms queue that Robbie heard
+  breaking up. **Moved to playback start** (the first buffer within 50 ms of the anchor's future host;
+  refused → the anchor rewritten without O). **Retested live 2026-10-08 18:23–18:31 (OBS): −250 refused
+  (queue 329.6 ms, 169.6 available), banner shown, clean; −100 placed, clean. FIXED in the tree
+  (uncommitted).** On SRT the judgement lands ~40 ms after playback start, so a refusal is one
+  re-anchor at the very start; heard clean.
+- **2026-10-08: first build (uncommitted), unit-tested; superseded by the above.** `LiveAudioOffsetTests`: covered →
+  placed; −250 ms on a 340 ms lead → refused with queue 340 / available 180; the boundary at the
+  available figure; nothing enqueued → placed as before. The live check needs the bookmark's keychain
+  prompt answered, so it is in the attended part (§6.10, *Stage 0b-2a — results*, item 7).
+
+---
+
+## ☐ OPEN 2026-10-08 — the NDI desktop-audio lead's doc comment still argues for 40 ms
+
+**Status:** OPEN, comment only. **Found:** the 2026-10-08 buffer review.
+
+- `NDIService.swift`, the doc comment on `desktopAudioLeadDefault` (lines ~829–837 at `d20ff96`)
+  still opens with "40 ms, CHOSEN FROM THE PUMP'S OWN MEASURED BEHAVIOUR…" and the "is 40 ms audible as
+  lip-sync" caveat. The constant is 0.250, and the comment's own second half explains why: 40 ms
+  crackled through this renderer (the lead ladder).
+- **Done means:** the 40 ms paragraphs are removed or marked as the superseded first value, so the
+  comment argues for the number below it. Belongs with trial L2 (§6.10), which revisits this constant.
 
 ---
 

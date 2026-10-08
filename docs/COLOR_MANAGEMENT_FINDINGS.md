@@ -1925,7 +1925,10 @@ Run in this order. Each stage ships on its own.
 - **Stage 0 — the identification fix (H.264 only).** `max_probe_packets` in `SRTSession.m`. Below.
 - **Stage 0b — SRT audio break-up with coarse sender packing (H.264 and all SRT).** **Decided (Robbie,
   2026-10-07):** fixed before Stage 1. Pre-existing and codec-independent. BUGS.md, *SRT audio
-  breaks up when the sender packs ≥ ~170 ms of AAC into each PES*.
+  breaks up when the sender packs ≥ ~170 ms of AAC into each PES*. Its design, and the buffer policy
+  it has to fit inside (defaults held for 1.0; trials L1 and L2 in 1.0, L3 after Stage 3), are in
+  *Buffer policy — the review and its decisions, 2026-10-08*, below: 0b-2a, then 0b-2b (the reorder
+  term), then L1 and L2.
 - **Stage 1 — the HEVC parser in the FFmpeg build.** The gate still refuses HEVC.
   - Predicted: all three layers pass; H.264 `[SRT]` and `[SPS-COLOR]` lines identical to the commit
     before; an HEVC stream's refusal log reads `hevc Main 10 1920x1080` within about 1–2 s.
@@ -2123,6 +2126,310 @@ what starves the audio.**
 - **For 0b-2's tests,** run hi8fine beside hi8: it separates coarse audio from bursty video.
   `hi8fine.ts` is
   `ffmpeg -i hi8.ts -map 0 -c copy -pes_payload_size 0 -f mpegts hi8fine.ts`.
+
+#### Buffer policy — the review and its decisions, 2026-10-08
+
+**Why here:** Stage 0b-2 raises the SRT cushion, and the brief for it asked what the cushion is, what
+it costs, and where it can come down: per transport, the lowest latency that runs without audible or
+visible artefacts. The review was read-only (code, docs, every log on disk). Its tables are kept
+below because 0b-2, L1 and L2 are judged against them. Kept in §6.10 rather than a new section,
+because the stage plan that uses them is here; the audio-side detail it cites is in
+`AUDIO_RESAMPLER_DESIGN.md` §18–§19.
+
+**Decided (Robbie, 2026-10-08):**
+1. **Hold every default for 1.0:** SRT 0.250 floor, WHEP 0.400, NDI desktop-audio lead 0.250. Lower
+   only through the trials below.
+2. **0b-2 gets a reorder term** (Stage 0b-2b).
+3. **No cushion growth from repeated starvation holds** for 1.0.
+4. **Automatic only**, plus the readout. ⌃⌥[ / ⌃⌥] stay Debug-only.
+5. **The chain readout shows the cushion**, and any raise with its reason.
+6. **The three messages that send users to ⌃⌥] are rewritten** (in 0b-2a).
+7. **A saved advance (negative O) is checked against the queue at the first anchor** (in 0b-2a).
+- **Trials:** L1 (WHEP 0.30) is in 1.0, after 0b-2b. L2 (NDI lead 0.20) is in 1.0, and also finds the
+  renderer's crackle threshold between 40 and 150 ms of lead on the Scarlett and the built-in output.
+  L3 (SRT floor 0.20) waits until after HEVC Stage 3.
+
+##### The inventory, sender to glass and SDI
+
+The audio has no target of its own. It follows LiveClock's `now()` (`beginLiveAudio(0)` is an axis
+offset, not a buffer: `FrameEngine.swift` ~2296–2313), so the renderer queue is the cushion plus the
+sender's audio/video interleave, and **every audio margin moves one-for-one with the cushion**.
+
+| stage | SRT | WHEP | NDI | HLS | file |
+|---|---|---|---|---|---|
+| network | TSBPD, libsrt's 120 ms unless `?latency=` (20–8000 ms; the handshake takes the larger side) | no jitter buffer: reorder counted, not held (`H264Depacketizer.c`); NACK window 400 ms, 2 retries | NDI FrameSync, SDK-internal; its audio depth estimated (EMA, ceiling 0.2 s) | AVPlayer's; no forward-buffer or live-offset property set | — |
+| demux | `max_probe_packets` 1, probesize 2 MiB, 5 s cap; audio before the video anchor dropped | audio held until the anchor; first anchor waits ≤ 1.5 s for an RTCP SR | — | — | — |
+| reorder | in the cushion: needs **cushion > max(pts − dts)**; measured per AU, warned at 0.75 ×, never corrected | no B-frames | — | AVPlayer | Apple |
+| **cushion** | **0.250** (`SRTFrameRouter.swift` `targetDepth`); rate ±0.5 %, snap at +0.2 s | **0.400** (`WHEPFrameRouter.swift`) | no LiveClock; lead **0.250** (`NDIService.swift`), picture hold = lead + FrameSync depth | — | — |
+| renderer | ≈ cushion + interleave; hold at 20 ms with no input, resume at 100 ms | same | lead | AVPlayer's | Apple's |
+| display | Metal queue 30 frames (SRT/WHEP), 12 otherwise | | NDI bound from its hold | 12 | 12 |
+| SDI | 4 prerolled frames (~208 ms at 24p) + 0.200 s card audio; tap ring 4 s. **Fixed, independent of the cushion** | same | same; no picture hold when the card owns audio | same | + 0.250 tap look-ahead |
+
+##### What the logs show (every `*.manifold.log` on disk, 2026-09-29 → 10-08)
+
+| path | video, target → lowest | audio queue, lowest (hold at 20) | holds | |
+|---|---|---|---|---|
+| SRT local, 1 frame/PES | 250 → **224** | **258** (median 350; ~90 ms above the cushion) | 0 / 34 min (`s0/repro/soak-s0`) | ~240 ms spare in audio |
+| **SRT Cloudflare** | 250 → **181** | 84.5 at +10 s (`s0/cf/cf-s0`, :389) is startup; **127–143 steady**; median ~202, ~50 ms *below* the cushion | **9 / 94 min** (`cf1914/srt-3`), each on a 45–239 ms input gap, five at hh:m4:20 | **the edge**: reorder 0.208 s against 0.250; advance budget 0 |
+| SRT hi8 / hi25 (171 ms per PES) | 205–229 | at the 20 ms hold; post-enqueue minimum ~43 | 3–8 / 70 s | 0b-2's |
+| SRT lo150 (341 ms, max 363) | dips to 105 | −67 unheld | ~260 / 3 min | 0b-2's |
+| WHEP MediaMTX | 400 → **304** (a rail event); usually 370–392 | 199–383 | 0 | ~100 ms unused at worst |
+| WHEP Cloudflare | 400 → **319** | 190 (4.5 h) – 226 | 0; one 4 s upstream pause muted (beyond any cushion) | ~80 ms unused at worst |
+| NDI | — | 228 at +10 s, **242–247** steady | 0 in 43 short runs | ~210 ms above the hold |
+| HLS, on-screen file | **no data** | | | |
+| file → SDI tap (§19.12 fix) | — | tap 232–275, card 158–172 | 0 underruns | |
+
+**The floor that matters is the renderer's, not the hold's.** The NDI lead ladder found this
+`AVSampleBufferAudioRenderer` crackly at 40 ms of lead and clean at 150 ms, threshold not narrowed and
+device-specific (BUGS.md, the NDI desktop-audio entry). Cloudflare SRT already runs steady at
+127–143 ms, below the last value measured clean. L2 narrows it.
+
+##### Where 0.25 came from
+
+- **SRT's cushion**: `e4210e6`, 2026-07-26, "an ARGUED starting value, not a measured one": TSBPD does
+  the de-jitter, so 0.25 covers reorder, decode jitter and margin. **Never re-derived;** the instrument
+  for it (⌃⌥[ / ⌃⌥]) went Debug-only a month later (`0b6a91c`).
+- **WHEP's 0.400 was measured** (`0c1752d`, 2026-07-21): lateness max 162 ms at a 0.2 target, cushion
+  ≥ 0.362. That predates the NACK work; since then unrecovered loss shows as keyframe waits, which
+  depth does not prevent (`WHEP_LOADED_NETWORK_FINDINGS.md`, the decode-error exclusion).
+- **NDI's lead copied SRT** as the smallest lead measured clean (`786c0d8`).
+- **Other 0.25s are unrelated and must not move with the cushion:** LiveClock `freezeGuardHold`, the
+  steering's `maximumStepSeconds` and `recoveryCutSettleSeconds`, the file tap look-ahead.
+- **One value for every transport does not fit, and was never one value.** The floor is set by
+  reordering and sender packing on SRT, network lateness and the NACK round trip on WHEP, and the
+  renderer's lead on NDI. Within SRT, server-agnosticism means the per-stream part has to come from
+  measuring the stream, never from a per-server constant.
+
+##### What a cushion change does to everything else
+
+- **Relative A/V and calibration: unaffected.** Flash and beep both sit on axes tied to `now()`; the
+  stored per-bookmark O is a property of the sender. §18.24/25, §19.5, §19.13–15 and the AV_SYNC device
+  figures stay valid.
+- **Every absolute queue, stall and advance figure moves one-for-one**, and is invalidated by any
+  change: §18.14's stall table, §18.16's lowest-window table (and its "healthy lows are > 5 × M"),
+  §18.17/§18.19's "held at 319–324 ms", the §19.8 advance trials, the 0b-1 low-water floors, and the
+  "370 ms deliberate" budget line.
+- **The advance budget** (queue's 10 s low point − 160 ms) drops one-for-one; Cloudflare SRT's is
+  already 0. **A saved negative O was placed at the first anchor with no check** (decision 7).
+- **Holds** trigger on a stall of (queue − 20 ms). **Whole-debt catch-up** needs queue ≥ debt + 160 ms.
+- **B-frames:** the reorder delay comes out of the cushion; Cloudflare's 0.208 s rules out any SRT
+  cushion below ~0.21 s. **HEVC Stage 3 does not plan for deeper reordering** (4–8 B-frame pyramids
+  can exceed 0.25 s at 24p): that is 0b-2b's reason.
+- **Drift, SR fit, level hold:** slopes, re-based on every clock jump, so the level does not matter,
+  provided a raise goes through `LiveClock` with `onPositionJump`, and the depth ledger
+  (`LiveDepthTelemetry`) is told.
+
+##### Defaults, and the trials that may lower them
+
+| path | today | 1.0 | margin behind it | trial |
+|---|---|---|---|---|
+| SRT | 0.250 | **0.250 floor + 0b-2** | Cloudflare: video low 181, audio 127, reorder 0.208 (42 ms) | L3, floor 0.20 with 0b-2b, after HEVC Stage 3 |
+| WHEP | 0.400 | **0.400** | video low 304 / 319: 80–100 ms unused; the NACK window is tied to it | **L1, 0.30**, after 0b-2b |
+| NDI | lead 0.250 | **0.250** | 242–247 steady; clean at 150, crackly at 40 | **L2, 0.20** + the threshold |
+| HLS | AVPlayer | unchanged | no data | — |
+| file / SDI | 0.25 look-ahead; 4 frames + 0.2 s card | unchanged | tap 232–275, card 158–172 | — |
+
+##### Stage 0b design (confirms the 0b audit)
+
+- **Signal:** the PES duration (`[SRT-AUDIO] packing`'s seconds, decoded from the PES), not the queue
+  low-water. The first ~30 s of low-water on a bursty sender overstates the floor (*The rail drain*).
+- **Rule:** cushion = max(transport default, largest PES this session + 0.15 s), clamped to 1.0 s.
+  **Grow-only** within a session. A digital-silence PES counts like any other.
+- **Set before the first anchor** when the packing is already known: the startup fill and the target
+  both take it, so there is no step. `notePacking` runs on decode, ahead of the pre-anchor audio drop,
+  so the first PES usually lands before the anchor.
+- **Growth after the anchor goes through `LiveClock`** (`onPositionJump` fires, the audio splice
+  matches it as a `target-step`), the depth ledger is told, and **calibration restarts** if a step lands
+  mid-measurement.
+- **0b-2b** adds the reorder term (max(pts − dts) + margin); its margin is set in that stage.
+
+**Staged:** 0b-2a (the rule, SRT only; the readout; the messages; the saved-advance check) → 0b-2b →
+L1 → L2 → the rest of §6.10 from Stage 1. L3 after Stage 3.
+
+#### Stage 0b-2a — predictions, written 2026-10-08 before the code changed
+
+**What changes:**
+- **The rule** in `SRTFrameRouter`, SRT only, from `notePacking`. Before the clock anchors, a raise
+  moves both the startup fill and the target (new `LiveClock.raiseTargetDepth`, no jump); after it, the
+  same re-anchor `adjustTargetDepth` makes, with `onPositionJump` and a `[LIVECLOCK] targetDepth … (raised:
+  …)` line. The depth ledger's cushion follows a pre-anchor raise; a post-anchor one is a clock jump in
+  the ledger, as the manual step is. The renderer's queue bound grows with the cushion (30 frames is
+  "five times the target" at 24p, and a 0.513 s cushion at 60p would otherwise hit it).
+- **One `[SRT-BUFFER]` line** per decision: the rule's figure, the PES behind it, before or after the
+  anchor. Nothing logged when the floor stands.
+- **The readout:** a Buffer row on SRT and WHEP: "250 ms + SRT 120 ms"; raised, "321 ms + SRT 120 ms —
+  raised 71 ms: the sender packs 171 ms of audio per packet". Logged as `[SRT-BUFFER] readout: …` when
+  it changes, so it is checkable from the log.
+- **Calibration** restarts on a post-anchor raise ("The buffer was raised — measuring again.").
+- **The three messages:** the `[SRT] latency budget` verdicts, the `[SRT-AU]` reorder line, and the
+  comments behind the reorder banner stop pointing at ⌃⌥[ / ⌃⌥].
+- **The saved-advance check — REFUSE, through the existing refusal.** At the steering's first anchor,
+  a pending negative O is judged against the queue then (enqueued frontier − the line without O) less
+  keep, fade and margin, as `setUserOffset` judges any advance. Too large → O = 0 for the session, the
+  refusal line and banner, the SDI read back to 0, the bookmark untouched. **Why refuse and not clamp:**
+  every advance in this app is "whole or not at all" (§19.8, decided at stage B), and a clamp at the
+  anchor would apply a value nobody chose, from a single-instant queue reading, which is the figure
+  §19.8's D01 showed over-promising. The saved value stays in the bookmark; *Revert to Saved* retries it
+  later through the normal 10 s low-point test. Pre-anchor frontier tracking is added for this; a
+  session with nothing enqueued at the anchor keeps today's behaviour and says so in the log.
+
+**Builds:** HEAD `d20ff96` (= the 0b-1 code) and the 0b-2a tree, unsigned Profile. **Driver:**
+`scripts/soak/repro/run.sh`, the 0b-1 fixtures and sender flags; the calibration and bookmark runs
+through the Stage 0 UI helpers. Unattended, local ffmpeg listener only.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | syncD (1 frame / PES) | cushion 0.250, no `[SRT-BUFFER]` raise | no raise line; `[AV-CONTENT]` audio − now median within ±2 ms of 0b-1 (−0.14…−0.01); 0 holds |
+| 2 | hi8, hi25, hi8fine (8 frames, 170.7 ms) | raised to **0.321** before the anchor | raise line says before the anchor, 0.321 (±0.001); **≤ 1 hold, none after +60 s**; renderer low-water after +60 s **45–110 ms** |
+| 3 | lo150 (16–17 frames, max 362.7 ms) | raised to **0.513** before the anchor | **≤ 2 holds**; low-water after +60 s **120–260 ms** |
+| 4 | set before the anchor | every raise in 2–3 is before the first anchor | 0 `target-step` position jumps and 0 `targetDepth … (raised` re-anchors after the first presentation; depth ledger never OVER |
+| 5 | one local calibration, soak fixture | as Stage 0 (+0.23 / −1.45 ms) | within ±2 ms |
+| 6 | 30 min local soak, 1 frame / PES | unchanged against `soak-s0` | cushion 0.250, no raise; 0 holds; audio low-water after +60 s within ±25 ms of Stage 0's 257.7; video lowest within ±25 ms of 224; calibrations at +1 / +16 / +32 min within ±2 ms |
+| 7 | saved advance: a local SRT bookmark at **−250 ms** | queue at the anchor ≈ 340 ms, so ~180 ms available: **refused** | refusal line at the first anchor; O 0 for the session; banner; bookmark still −250 after quit; 0 holds |
+| 7b | the same bookmark at **−100 ms** | placed at the anchor as today | accepted line; O −100; 0 holds; `[AV-CONTENT]` audio − now about −100 ms |
+| 8 | the readout | syncD "250 ms + SRT 120 ms"; hi8 "321 ms + SRT 120 ms — raised 71 ms: the sender packs 171 ms of audio per packet" | exact text in the `[SRT-BUFFER] readout` line |
+| 9 | gates | — | `swift test` all pass (new `LiveClock` raise tests included); `soaklog.test.mjs` 8 / 8; Profile build |
+
+**What this stage could invalidate:** only the absolute queue figures of a sender that packs > 100 ms
+per PES (the 0b-1 floors), which is the point. A one-frame-per-PES sender must read exactly as before
+(items 1, 5, 6). Attended afterwards, one step at a time: local OBS with real programme audio (the
+first real-sender packing figure), then Cloudflare SRT.
+
+#### Stage 0b-2a — results, 2026-10-08 (unattended, local ffmpeg listener)
+
+**Build:** the 0b-2a tree on `d20ff96`, unsigned Profile, `.build-cc/s0b2a-Profile`. **Logs:**
+`~/Desktop/manifold-soak/s0b2a/repro/`. Baselines are the 0b-1 v2 logs (`s0b1/repro/`) and Stage 0's
+soak (`s0/repro/soak-s0`), not re-run.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | syncD: cushion 250, no raise; 0 holds; `[AV-CONTENT]` median **−0.10 ms** (0b-1 −0.06); low-water 273.1 (0b-1 271.6); session end `· cushion 250 ms` | **PASS** |
+| 2 | hi8 ×2, hi25, hi8fine: raised **250 → 321 ms before the first anchor** in every run (0.07–0.15 s before it), queue bound 39; **0 holds** (0b-1: 5–8); low-water **79.4 / 80.0 / 83.7 / 80.5 ms**. These fixtures play < 60 s, so the "after +60 s" band is read on the whole session | **PASS** |
+| 3 | lo150: raised **250 → 513 ms before the anchor** (largest PES 362.7 ms). The steering then sat at its rail for ~75 s, draining the bursty-video startup excess (*The rail drain*), low-water 144 → 22 ms; from +82 s it is settled (e ≈ 0) at **30–34 ms**, and holds recur on every lump: **115 holds** (0b-1: ~260) | **FAIL** (band ≤ 2 holds, 120–260 ms) |
+| 4 | every raise in 2–3 before the anchor; **0 `target-step` jumps** in any log; depth ledger **0 OVER** | **PASS** |
+| 5 | soak calibrations at +1 / +2 min: **−1.64 / +0.17 ms** (Stage 0: +0.23 / −1.45) | **PASS** |
+| 6 | 33.4 min soak (1 frame / PES): cushion 250, no raise; **0 holds**; low-water **263.7** (Stage 0 257.7); video lowest after +60 s **229** (224); `[AV-CONTENT]` median −0.01 ms over 1 600 flashes (−0.04); calibrations +1 / +2 / +16 / +32 min **−1.64 / +0.17 / +2.13 / +0.15 ms** (Stage 0: +0.23 / −1.45 / +2.50 / −0.16) | **PASS**, with +2.13 at +16 min 0.13 ms outside ±2 — Stage 0 read +2.50 at the same point |
+| 7 | **not run unattended.** ⌃⌥D on the "Local SRT" bookmark reads its keychain item, and the unsigned build raised the login-keychain prompt for `tools.graviton.manifold.streams`. That prompt is Robbie's; the run stopped, Manifold was quit (the request withdrawn, not denied) | **moved to the attended part** |
+| 8 | `[SRT-BUFFER] readout: Buffer 250 ms + SRT 120 ms` (syncD, soak) and `Buffer 321 ms + SRT 120 ms — raised 71 ms: the sender packs 171 ms of audio per packet` (hi8); lo150 `513 ms + SRT 120 ms — raised 263 ms: the sender packs 363 ms of audio per packet` | **PASS** (log text; the popover itself not screenshotted) |
+| 9 | `swift test` **242 / 242** (225 + 12 `LiveCushionTests` + 5 new offset tests); `soaklog.test.mjs` 8 / 8; Profile build, no new warnings in the touched files | **PASS** |
+
+**Why lo150 failed — the rule's margin, not its mechanism.** On every fixture the settled low-water
+fits **floor ≈ cushion − 1.41 × mean PES**: hi8 321 − 1.41 × 170.7 = 80 (measured 79.4–83.7), lo150
+513 − 1.41 × 341.4 = 32 (measured 30–34). hi8fine reads like hi8, so the extra ~0.4 PES comes from
+ffmpeg's OUTPUT packing, not the input file. The rule's + 0.15 s covers that only while 0.41 × PES
+< ~0.13 s, i.e. PES ≲ 0.3 s. The prediction was wrong for the same reason: it took 0b-1's −67 ms as
+lo150's unheld floor, and that run held almost continuously, so it was not one. **The decision is
+Robbie's** (put to him 2026-10-08, with these results): whether the rule should scale with the PES (e.g. 1.5 × PES +
+0.15 s: hi8 0.406, lo150 0.662), and whether lo150 (16–17 frames, 150 kb/s, a harness fixture) is a
+sender 1.0 has to cover. Real programme audio is ~6 frames (~130 ms), where either form gives ~0.28 s.
+
+**Defaults:** exported before the first launch. After the last quit: 8 run-added `NSWindow Frame`
+keys, each checked absent from the snapshot and deleted by name; `streamBookmarks` written back from
+the snapshot's bytes after the item 7 attempt; the domain is dictionary-equal to the snapshot (1 141
+keys).
+
+#### Stage 0b-2a — attended, 2026-10-08 evening (Robbie): OBS, and the saved advance that was never judged
+
+- **Local OBS with real programme audio** (the "Local SRT" bookmark, passphrase-protected, so the
+  saved-advance check ran against OBS rather than ffmpeg): `[SRT-AUDIO] packing — 1 AAC frame(s) per
+  PES (21.3 ms)`. **The first real-sender packing figure: OBS packs one frame per PES**; the cushion
+  stays 250 ms. Log `s0b2a/repro/obs-bm250.manifold.log`.
+- **Item 7 FAILED AS BUILT: the check never judged.** The steering logged "placed at the first anchor
+  WITHOUT a queue check — nothing enqueued yet" on both connects. On SRT the steering's first anchor is
+  the picture's, made at the video anchor, and the audio that precedes it is dropped by design, so the
+  queue at the first anchor is EMPTY BY CONSTRUCTION. The unit tests passed because their harness
+  enqueued audio before anchoring, which the SRT path never does.
+- **And the latent bug, heard:** −250 ms placed unchecked left the renderer queue at a **median 87 ms**
+  (window minima 51–66, low-water ~42) for 200 s, **0 holds** — and Robbie heard the audio **breaking
+  up**. This renderer crackles somewhere between 87 and 150 ms of lead on the Scarlett (the NDI lead
+  ladder: 40 crackly, 150 clean). That is evidence for trial L2, and it is why the 160 ms reserve is
+  the right bar.
+- **Cloudflare SRT** (OBS "SRT Cloudflare" profile, 23.976, SYNC scene; the "DC Color Live - SRT"
+  bookmark; 0b-2a build; 17:38–17:48, `s0b2a/cf/cf-1`): **Cloudflare's egress packs 1 frame per PES
+  too**, so the cushion stays 250 ms and the readout reads "250 ms + SRT 120 ms". **0 holds** in 10 min;
+  renderer low-water 92 ms at +10 s, then a steady **145–152 ms**; the reorder warning as always
+  (0.208 s against 0.250 — 0b-2b's). Calibrations +1 / +2 / +8 min **−56.24 / −55.44 / −97.62 ms**:
+  a 42 ms step between +2 and +8 min with **no Manifold event between them** (0 raises, target steps,
+  splices, holds, re-pins, snaps), the size of the step §19.14–§19.15 found in Cloudflare's received
+  timestamps. Cloudflare's, not this build's; the level differs again from 2026-10-07's −86…−92 ms.
+- **Fix, built after the run:** the judgement moved to PLAYBACK START. The first anchor's host is a
+  startup fill in the future; the audio arrives during it. The first buffer within 50 ms of that host
+  judges the queue (enqueued past the picture's line, plus the real-time arrival still to come before
+  the start) with the same 160 ms reserve; refused, the anchor is written again without O, before
+  anything has played. Unit-tested on an SRT-shaped start (`srtStart`: nothing enqueued at the anchor,
+  0.34 s at playback start): −100 placed, −150 placed, −200 and −250 refused, a shallow lead refuses
+  −50, a delay is never judged.
+
+#### Stage 0b-2a v2 — predictions, written 2026-10-08 before the rule changed
+
+**Decided (Robbie, 2026-10-08):** cushion = max(transport default, **1.5 × largest PES + 0.08 s**),
+clamped to 1.0 s, grow-only. Derived from the measured floor ≈ cushion − 1.41 × mean PES, aiming at
+the ~80 ms floor hi8 measured with 0 holds. Not waiting for OBS: 64 kb/s AAC and digital silence pack
+~360 ms.
+
+**The rule as written gives lo150 0.624 s, not ~0.59 s:** its LARGEST PES is the 17-frame first one
+(362.7 ms); 0.59 is the mean (341 ms). By the floor model 0.624 settles at ~143 ms, above Robbie's
+60–110 band. Both bands are recorded; a miss on the high side is margin, not starvation.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | hi8, hi25, hi8fine | raised to **0.336** before the anchor; floor ≈ 336 − 241 = **95 ms** | **0 holds**; low-water 60–130 ms |
+| 2 | lo150 | raised to **0.624** before the anchor (queue bound 75); floor ≈ 624 − 481 = **143 ms** after the rail drain | **≤ 2 holds**; low-water: Robbie's 60–110, mine 100–180 |
+| 3 | syncD | unchanged: 250, no raise | 0 holds; `[AV-CONTENT]` within ±2 ms of 0b-2a's −0.10 |
+| 4 | one soak calibration (soak fixture, +60 s) | as 0b-2a (−1.64 / +0.17) | within ±2 ms |
+| 5 | readout | hi8 "336 ms + SRT 120 ms — raised 86 ms: the sender packs 171 ms of audio per packet"; lo150 "624 ms + SRT 120 ms — raised 374 ms: the sender packs 363 ms of audio per packet" | exact text |
+| 6 | saved advance, attended (OBS, queue ~337 ms at start) | −250: REFUSED at playback start, ~177 ms available, banner, clean sound; −100: placed, no banner | the refusal line before playback; O 0; no break-up by ear; bookmark unchanged |
+| 7 | gates | — | `swift test` all pass; soaklog 8 / 8; Profile build |
+
+#### Stage 0b-2a v2 — results, 2026-10-08 (unattended, local ffmpeg listener)
+
+**Build:** `.build-cc/s0b2a2-Profile` (the rule at 1.5 × PES + 0.08 s, the judgement at playback start).
+**Logs:** `s0b2a/repro/v2-*`.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | hi8 / hi25 / hi8fine: **336 ms** before the anchor (0.07–0.14 s before it), queue bound 41; **0 holds** each; low-water **95.1 / 97.1 / 94.2 ms** (model 95) | **PASS** |
+| 2 | lo150: **624 ms** before the anchor, queue bound 75; **0 holds** (v1 115, 0b-1 ~260). The startup drain is longer at this depth (~110 s, low-water 256 → 64 ms), then settled at **64–66 ms**; video holds ~502 ms against the 624 target | **PASS** on holds and on Robbie's 60–110 band; **MISS** on mine (100–180): the floor model over-predicted lo150 by ~80 ms (audio ~1.64 PES behind at this depth, not 1.41) |
+| 3 | syncD: 250, no raise; 0 holds; `[AV-CONTENT]` **−0.16 ms** (v1 −0.10); low-water 271.5 | **PASS** |
+| 4 | soak fixture, calibration at +60 s: **+0.23 ms** (Stage 0 +0.23, v1 −1.64); 0 holds | **PASS** |
+| 5 | readout: hi8 "336 ms + SRT 120 ms — raised 86 ms: the sender packs 171 ms of audio per packet"; lo150 "624 ms + SRT 120 ms — raised 374 ms: the sender packs 363 ms of audio per packet" | **PASS** |
+| 6 | the saved advance live | attended, below |
+| 7 | `swift test` **244 / 244** (225 + 13 `LiveCushionTests` + 6 saved-advance); soaklog 8 / 8; Profile build, no new warnings in touched files | **PASS** |
+
+**Defaults** after the v2 batch: 9 run-added `NSWindow Frame` keys deleted by name; dictionary-equal to
+the snapshot (1 141 keys).
+
+#### Stage 0b-2a v2 — attended, 2026-10-08 18:20–18:40 (Robbie): the saved advance live, and hi8 by ear
+
+**Part A — the saved advance, OBS local listener ("Local SRT" bookmark), v2 build:**
+
+| | logged | heard | queue | holds |
+|---|---|---|---|---|
+| **−250 ms** | "REFUSED at playback start (+39 ms) — … the queue is 329.6 ms: at most 169.6 ms of advance is available · O is 0 for this session"; banner "The saved audio offset (−250 ms) needs more buffered sound than this stream has — it can move sound earlier by at most 169 ms right now. Playing at 0 ms; the saved stream keeps −250 ms." | **clean** | median **343 ms** (was 87 unchecked, and broke up) | 0 |
+| **−100 ms** | "JUDGED at playback start (+41 ms) — queue 335.6 ms, 175.6 ms of advance available: placed"; no banner | **clean** | median **238 ms** | 0 |
+
+- **PASS.** The bookmark kept its value through both sessions (read after quit); restored to the
+  snapshot's bytes afterwards.
+- ⚠️ **Judged 39–41 ms AFTER playback start, not before.** On SRT the first audio buffer reaches the
+  steering only after the first anchor's host (the anchor waits for the first presentation, so its host
+  is not as far ahead as the design assumed). A refusal is therefore one re-anchor ~40 ms into the session
+  rather than a silent rewrite. Robbie heard the −250 start as clean. Recorded, not changed.
+- **Logs:** `s0b2a/repro/v2-obs-bm250`, `v2-obs-bm100`.
+
+**Part B — hi8 by ear, Audio Hijack, v2 build.** Fixture `hi8x5.ts`: hi8 looped five times with
+`-stream_loop 4 -c copy` (3 min 45 s; hi8 alone plays only ~48 s, too short to start the recorder after
+connect). Cushion **336 ms** before the anchor; **0 holds**; renderer low-water 85–97 ms in every window
+after the startup drain except **31.1 ms at +91 s**, the fixture's second join (the unattended run of the
+same file showed it too, 33.5 ms).
+- **Recording:** `~/Music/Audio Hijack/20261008 1836 Recording.wav` (206 s). A 1 ms RMS envelope, gaps
+  = runs ≥ 3 ms more than 30 dB below the median level: **6 gaps** — four of 30–31 ms at 24.6 / 69.6 /
+  114.6 / 159.7 s (exactly 45.0 s apart), one of 5 ms 0.3 s before the second, and 2.1 s at 204.3 s (the
+  stream ending before the recorder stopped).
+- **The fixture's own audio**, decoded from `hi8x5.ts` with the same detector, has **30–31 ms gaps at
+  every join** (45.02 / 90.06 / 135.09 / 180.13 s). So the four are the file's.
+- **The same detector on the 2026-10-07 recording of the bug** (`20261007 1433 Recording.wav`, HEAD):
+  **28 gaps in 10.8 s** (BUGS.md's count was 24 in 9.5 s). At that rate 206 s would hold ~530.
+- **PASS: Manifold added no gap in 3 min 24 s of hi8.**
 
 ---
 

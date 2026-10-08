@@ -388,6 +388,8 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private var userOffsetChanges = 0
     private var userOffsetRefusals = 0
     private var userOffsetPinnedLogged = false
+    /// The first anchor's saved advance, waiting for playback start to be judged (`anchor`).
+    private var startJudgement: (media: Double, host: Double, rate: Double, offset: Double)?
     /// Net O accepted in this window: the WHEP level hold re-bases its reference by it (§19.1).
     private var windowOffsetMoved = 0.0
     /// The advance figure (§19.8, follow-up): the renderer queue just BEFORE each enqueue — its lowest
@@ -531,11 +533,44 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// A saved advance refused before playback began (`onStartOffsetRefused`). O is 0 for the
+    /// session; the caller tells the user and moves the SDI read back.
+    public struct StartOffsetRefusal: Sendable, Equatable {
+        /// The pending O that was refused (negative: sound earlier), seconds.
+        public let requested: Double
+        /// The largest advance the queue allowed at playback start (queue − keep − fade − margin, ≥ 0).
+        public let available: Double
+        /// The queue at playback start with O = 0: what was enqueued past the picture's line.
+        public let queue: Double
+    }
+
+    /// Called once if the session's saved advance is refused at playback start. Any thread (the
+    /// sink's); must not block. Set before the first `sample`.
+    public var onStartOffsetRefused: ((StartOffsetRefusal) -> Void)?
+
+    /// How long before the first anchor's host time the saved advance is judged: the queue is all
+    /// but full by then, and a rewrite of the anchor still lands before anything plays. Wider than
+    /// one AAC frame (21.3 ms), so a buffer always lands inside it on a running sender.
+    static let startJudgementLeadSeconds = 0.050
+
     /// Anchor the timebase so the content heard at `host` is `media`, and make that the target
     /// line. The first call is the session's rate write; later ones are deliberate re-anchors.
     ///
     /// `e_f` is reset and `i` held, exactly as for a coarse event: a re-anchor moves position, and
     /// the drift the integrator learned is a property of the clocks.
+    ///
+    /// ── A SAVED ADVANCE IS JUDGED AT PLAYBACK START (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, 7) ──
+    ///
+    /// A negative O set before the anchor (the bookmark's, at connect) used to be placed by this
+    /// write and never judged, where every live change of O meets `setUserOffset`'s queue test.
+    /// It now meets the same test — but NOT HERE. On a mirrored transport the first anchor is the
+    /// picture's: its `host` is a startup fill in the FUTURE, and nothing has been enqueued yet (SRT
+    /// drops the audio that precedes the video anchor by design). The 2026-10-08 OBS run showed it:
+    /// judged here, the queue was always empty. So the anchor places O as before and leaves the
+    /// judgement to the first `sample` within `startJudgementLeadSeconds` of `host`, when the queue
+    /// the startup fill built is there to judge (`judgeStartOffsetLocked`). Refused, the anchor is
+    /// written again without O — before anything plays — and O is 0 for the session: refused WHOLE,
+    /// as any advance is (§19.8), never clamped to a value nobody chose.
     public func anchor(media: Double, host: Double, rate: Double = 1.0, reason: String? = nil) {
         guard media.isFinite, host.isFinite else { return }
         transition.lock(); defer { transition.unlock() }
@@ -554,9 +589,79 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         if first { firstAnchors = 1 } else { reanchors += 1; windowExcluded = true }
         windowWrites += 1
         restartAfterWriteLocked(host: host)
+        let judge = first && userOffset < 0 && mode == .loop
+        if judge { startJudgement = (media: media, host: host, rate: refRate, offset: userOffset) }
+        let o = userOffset
         lock.unlock()
+        if judge {
+            let tag = self.tag
+            emit {
+                String(format: "%@ AUDIO OFFSET %+.1f ms (saved) placed by the first anchor — judged against the "
+                       + "queue at playback start, %.0f ms before it", tag, o * 1000,
+                       Self.startJudgementLeadSeconds * 1000)
+            }
+        }
         // Outside the lock: the inverse takes the stage's, and the write reaches the synchronizer.
         write(clock.outputTime(atInputTime: line), host, origin)
+    }
+
+    /// The saved advance's judgement, once its time has come (see `anchor`). Under `transition`,
+    /// from `sample`, with `lock` held on entry and RELEASED on return. Returns the work to do outside
+    /// the lock: the rewrite and the callback when refused, a log line either way; nil when it is not
+    /// yet due or there is nothing enqueued to judge.
+    private func judgeStartOffsetLocked(now t: Double) -> (() -> Void)? {
+        guard let j = startJudgement, t >= j.host - Self.startJudgementLeadSeconds, let f = frontier,
+              userOffset == j.offset else {
+            // Moved by the user since: their change met its own test.
+            if let j = startJudgement, userOffset != j.offset { startJudgement = nil }
+            lock.unlock()
+            return nil
+        }
+        startJudgement = nil
+        lock.unlock()
+        let tag = self.tag
+        // The queue AT playback start: what is enqueued past the line, plus what a running sender
+        // delivers in the ≤ 50 ms still to go (real time). Judged a little early, it must not count
+        // those milliseconds against the user.
+        let queue = f - clock.outputTime(atInputTime: j.media) + max(0, j.host - t)
+        let available = max(0, queue - Self.recoveryKeepSeconds
+                            - LiveAudioResampleStage.crossfadeSeconds - Self.dropQueueMarginSeconds)
+        let late = t - j.host
+        guard -j.offset > available else {
+            return { [weak self] in
+                self?.emit {
+                    String(format: "%@ AUDIO OFFSET %+.1f ms (saved) JUDGED at playback start (%+.0f ms) — queue "
+                           + "%.1f ms, %.1f ms of advance available: placed", tag, j.offset * 1000, late * 1000,
+                           queue * 1000, available * 1000)
+                }
+            }
+        }
+        lock.lock()
+        userOffset = 0; userOffsetRefusals += 1
+        refMedia = j.media; refHost = j.host; refRate = j.rate
+        reanchors += 1; windowExcluded = true; windowWrites += 1
+        restartAfterWriteLocked(host: max(t, j.host))
+        lock.unlock()
+        let refusal = StartOffsetRefusal(requested: j.offset, available: available, queue: queue)
+        let needed = -j.offset + Self.recoveryKeepSeconds + LiveAudioResampleStage.crossfadeSeconds
+            + Self.dropQueueMarginSeconds
+        return { [weak self] in
+            guard let self else { return }
+            // The anchor again, without O: `media` heard at `host`. Before `host` nothing has played.
+            self.write(self.clock.outputTime(atInputTime: j.media), j.host,
+                       .reanchor("saved advance refused before playback"))
+            self.emit {
+                String(format: "%@ AUDIO OFFSET %+.1f ms (saved) REFUSED at playback start (%+.0f ms) — a %.1f ms "
+                       + "advance needs %.1f ms of renderer queue (advance + %.0f keep + %.0f fade + %.0f margin) "
+                       + "and the queue is %.1f ms: at most %.1f ms of advance is available · O is 0 for this "
+                       + "session; the anchor rewritten without it, %@",
+                       tag, j.offset * 1000, late * 1000, -j.offset * 1000, needed * 1000,
+                       Self.recoveryKeepSeconds * 1000, LiveAudioResampleStage.crossfadeSeconds * 1000,
+                       Self.dropQueueMarginSeconds * 1000, queue * 1000, available * 1000,
+                       late < 0 ? "before anything played" : "one re-anchor")
+            }
+            self.onStartOffsetRefused?(refusal)
+        }
     }
 
     // MARK: - The per-source audio offset (§19.1)
@@ -774,8 +879,17 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
         transition.lock(); defer { transition.unlock() }
         lock.lock()
         let live = anchored && !retired
+        // BEFORE THE FIRST ANCHOR NOTHING IS READ, BUT THE FAR END IS KEPT. The renderer already holds
+        // what is enqueued (the timebase sits at rate 0), and the saved-advance judgement at playback
+        // start counts it (`anchor`). Only the frontier: no low-water, no window, no decision. (On SRT
+        // nothing is enqueued before the anchor; on NDI it can be.)
+        if !anchored, !retired, let f = enqueuedFrontier, f.isFinite { frontier = max(frontier ?? f, f) }
         lock.unlock()
         guard live else { return nil }
+        // A saved advance waiting for playback start (`anchor`). Before this call's buffers join the
+        // frontier: one buffer conservative.
+        lock.lock()
+        if let work = judgeStartOffsetLocked(now: hostNow()) { work() }
 
         let t0 = hostNow()
         let timebase = readTimebase()

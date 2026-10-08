@@ -65,11 +65,14 @@ final class LiveDepthTelemetry {
     /// Log prefix: "WHEP" or "SRT". Produces `[WHEP-BACKLOG]`, `[SRT-UNDERRUN]`, and so on.
     private let prefix: String
 
-    /// The clock's one-time ANCHOR offset, fixed at activate() — `startupDepth`, which is the same
-    /// field as the configured `targetDepth`. NOT the live target: the ledger's cushion term is the
-    /// offset the anchor was actually built with, and a runtime step of the target is accounted for
-    /// separately, through `recordClockJump`.
-    private let cushion: Double
+    /// The clock's one-time ANCHOR offset — `startupDepth`, the configured `targetDepth` unless a
+    /// measured raise landed before the anchor (Stage 0b-2a), which moves the startup fill with it and
+    /// is reported here through `setAnchorCushion`. NOT the live target: the ledger's cushion term is
+    /// the offset the anchor was actually built with, and a step of the target AFTER the anchor is
+    /// accounted for separately, through `recordClockJump`. Under `lock`; `reset()` restores the
+    /// configured value.
+    private var cushion: Double
+    private let configuredCushion: Double
 
     /// The clock's rate rail. The residual IS the integrated slew and nothing else, so
     /// |residual| ≤ maxSlew × elapsed is a REAL bound; this is the number that makes it computable.
@@ -78,7 +81,16 @@ final class LiveDepthTelemetry {
     init(prefix: String, cushion: Double, maxSlew: Double) {
         self.prefix = prefix
         self.cushion = cushion
+        self.configuredCushion = cushion
         self.maxSlew = maxSlew
+    }
+
+    /// The clock was raised BEFORE its anchor, so the anchor is built with `seconds`, not the
+    /// configured cushion (`LiveClock.raiseTargetDepth`). Without this the residual would read the
+    /// raise as a missing clock jump and flag OVER on every such stream.
+    func setAnchorCushion(_ seconds: Double) {
+        guard seconds.isFinite else { return }
+        lock.lock(); cushion = seconds; lock.unlock()
     }
 
     // MARK: - Surplus accountant (the convergence proof)
@@ -399,6 +411,7 @@ final class LiveDepthTelemetry {
         let content = senderPTS - originPTS
         let wall = host - firstHost
         let netJumpSnapshot = netJump
+        let cushion = self.cushion
 
         // Snapshot + re-arm the per-window jitter/underrun state in the SAME critical section, so
         // the two lines below describe one consistent window with no arrivals lost between them.
@@ -509,6 +522,7 @@ final class LiveDepthTelemetry {
         underrunTicks = 0
         cushionNeededMax = 0
         totalUnderrunCount = 0
+        cushion = configuredCushion
         #if DEBUG || MANIFOLD_TELEMETRY
         // ── DIAGNOSTIC. The ledger, the lateness arrays and the arrival bins exist only under the
         //    gate, so there is nothing to clear without it.
