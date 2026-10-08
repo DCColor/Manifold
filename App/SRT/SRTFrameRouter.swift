@@ -995,6 +995,23 @@ final class SRTFrameRouter {
     private var audioLoggedFirstFrames = false
     private var audioTimeBase: Double = 1.0 / 90_000.0
 
+    /// The sender's packing: AAC frames per PES, as walked (docs/BUGS.md, "SRT audio breaks up when
+    /// the sender packs ≥ ~170 ms of AAC into each PES"). Logged when the count changes; the session
+    /// figures go on the session-end line. Stage 0b-1, instrumentation only.
+    private var audioPackingPES = 0
+    private var audioPackingFrames = 0
+    private var audioPackingSeconds = 0.0
+    private var audioPackingLast = 0
+    private var audioPackingLogged = 0
+    private var audioPackingMaxFrames = 0
+    private var audioPackingMaxSeconds = 0.0
+    private var audioPackingChanges = 0
+    private var audioPackingUnlogged = 0
+    private var audioPackingLastLogHost: CFTimeInterval = 0
+    /// At most one packing line per second: a sender whose count moves on every PES (programme audio
+    /// packed by size, 5–7 frames) would otherwise log ~6 lines a second.
+    private static let audioPackingLogSpacing: CFTimeInterval = 1.0
+
     /// ⚠️ THE DECLARED LAYOUT, AND WHERE IT GOES NOW (STAGE 3 CONNECTED IT).
     ///
     /// The mux declares the layout and `fillAudioFormat` carries it here intact — the AVChannelOrder
@@ -1031,6 +1048,9 @@ final class SRTFrameRouter {
         audioPacketsUndecodable = 0; audioPacketsWithoutPTS = 0
         audioFramesUndecodable = 0; audioBytesUnwalked = 0
         audioLoggedMultiFramePES = false; audioLoggedUnwalked = false
+        audioPackingPES = 0; audioPackingFrames = 0; audioPackingSeconds = 0
+        audioPackingLast = 0; audioPackingLogged = 0; audioPackingMaxFrames = 0; audioPackingMaxSeconds = 0
+        audioPackingChanges = 0; audioPackingUnlogged = 0; audioPackingLastLogHost = 0
         // The axis is per-STREAM. Carrying an anchor across a format change or a reconnect would
         // stamp the new stream's first buffer from the old stream's count — the same reasoning
         // NDIService resets its counter under.
@@ -1316,6 +1336,7 @@ final class SRTFrameRouter {
             samplesBefore += frameCount
             ingestDecodedAudio(frames, frameCount: frameCount, pts: pts, decoder: decoder, tap: tap)
         }
+        notePacking(frames: result.frames, seconds: Double(samplesBefore) / decoder.sampleRate)
         if result.frames > 1 && !audioLoggedMultiFramePES {
             audioLoggedMultiFramePES = true
             NSLog("[SRT-AUDIO] this sender packs %d AAC frames into one PES — each is decoded and "
@@ -1336,6 +1357,39 @@ final class SRTFrameRouter {
                       result.stop.map { "\($0)" } ?? "no walk stop")
             }
         }
+    }
+
+    /// One PES's packing: `frames` walked, `seconds` decoded from them. SESSION THREAD, inline from
+    /// `handleAudioPacket`. A payload the walk could not split (raw AAC, LATM) has no count and is
+    /// not recorded.
+    private func notePacking(frames: Int, seconds: Double) {
+        guard frames > 0 else { return }
+        audioPackingPES += 1
+        audioPackingFrames += frames
+        audioPackingSeconds += seconds
+        audioPackingMaxFrames = max(audioPackingMaxFrames, frames)
+        audioPackingMaxSeconds = max(audioPackingMaxSeconds, seconds)
+        if frames != audioPackingLast {
+            audioPackingLast = frames
+            audioPackingChanges += 1
+            audioPackingUnlogged += 1
+        }
+        // A change held back by the spacing is logged at the first PES after it, so the count the
+        // sender settles on always reaches the log.
+        guard audioPackingUnlogged > 0 else { return }
+        let now = CACurrentMediaTime()
+        guard audioPackingLastLogHost == 0 || now - audioPackingLastLogHost >= Self.audioPackingLogSpacing
+        else { return }
+        audioPackingLastLogHost = now
+        let skipped = audioPackingUnlogged - 1
+        NSLog("[SRT-AUDIO] packing — %d AAC frame(s) per PES (%.1f ms) at PES #%d, last logged %@ · "
+            + "session max %d frame(s) (%.1f ms)%@",
+              frames, seconds * 1000, audioPackingPES,
+              audioPackingLogged == 0 ? "—" : "\(audioPackingLogged)",
+              audioPackingMaxFrames, audioPackingMaxSeconds * 1000,
+              skipped > 0 ? " · \(skipped) change(s) in between not logged (1 line/s)" : "")
+        audioPackingLogged = frames
+        audioPackingUnlogged = 0
     }
 
     /// One decoded AAC frame, stamped and handed on. SESSION THREAD, inline from `handleAudioPacket`.
@@ -1565,10 +1619,14 @@ final class SRTFrameRouter {
     /// Retire the decode side. SESSION THREAD, from the same place the video decoder is torn down.
     func teardownAudio() {
         if audioPacketsReceived > 0 || audioDecoder != nil {
+            let n = Double(max(audioPackingPES, 1))
             NSLog("[SRT-AUDIO] session end — packets=%d framesIngested=%d undecodable=%d noPTS=%d "
-                + "axisRePins=%d",
+                + "axisRePins=%d · packing: %d PES, %.2f AAC frames per PES (%.1f ms) mean, max %d "
+                + "(%.1f ms), %d change(s)",
                   audioPacketsReceived, audioFramesIngested,
-                  audioPacketsUndecodable, audioPacketsWithoutPTS, audioAxisResyncCount)
+                  audioPacketsUndecodable, audioPacketsWithoutPTS, audioAxisResyncCount,
+                  audioPackingPES, Double(audioPackingFrames) / n, audioPackingSeconds / n * 1000,
+                  audioPackingMaxFrames, audioPackingMaxSeconds * 1000, audioPackingChanges)
         }
         audioDecoder = nil
     }

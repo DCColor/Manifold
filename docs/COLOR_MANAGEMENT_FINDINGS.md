@@ -2019,6 +2019,111 @@ the Stage 0 Profile build succeeded. `defaults`: the domain was exported before 
 After the last quit it was restored, and is dictionary-equal (1 141 keys). The runs had only added
 13 `NSWindow Frame` keys. `streamBookmarks` was never written.
 
+#### Stage 0b-1 — packing instrumentation: predictions, written 2026-10-08 before the build
+
+**What changes:** `[SRT-AUDIO] packing` is logged when the AAC frame count per PES changes (frames,
+PES duration from the decoded samples, the previous count, the session maximum). At most one line
+per second; changes not logged are counted on the next line. The `[SRT-AUDIO] session end` line
+gains `packing: <PES>, <mean> frames per PES (<ms>) mean, max <n> (<ms>), <k> change(s)`. Nothing
+else changes.
+
+**Builds:** c32c074's code (HEAD `92f9c52` is docs-only on top of it), unsigned Profile,
+`.build-cc/s0b1base-Profile`; the 0b-1 tree, `.build-cc/s0b1-Profile`. **Driver:**
+`scripts/soak/repro/run.sh` with ffmpeg's default packing for lo150 / hi8 / hi25 and
+`-pes_payload_size 0` for the sync fixture, as in Stage 0. Unattended, local ffmpeg listener only.
+
+**Measured offline first** (the fixtures remuxed with the sender's own flags, ADTS frames counted
+per PES): lo150 16 frames in 438 of 440 PES (17 first, 8 last), mean 15.98 = 341 ms; hi8 and hi25
+8 frames in 263 of 264 (7 last), mean 8.00 = 170.6 ms; `syncD-23.976p-inj0.ts` 1 frame in every
+PES. The predictions below are Robbie's figures; the bands cover both.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | lo150 session-end packing | 15.9 frames / ~338 ms mean, max 17 | mean 15.5–16.1 frames and 330–345 ms; max 17 (≤ 363 ms) |
+| 2 | hi8 and hi25 session-end packing | 7.8 frames / ~167 ms mean, max 8 | mean 7.6–8.05 frames and 162–172 ms; max 8 (170.7 ms) |
+| 3 | sync fixture packing | 1.0 frame / ~21 ms, max 1 | exactly 1.00 / 21.3 ms, max 1, 1 change (the first PES) |
+| 4 | packing lines | one at the first PES, then one per real change | lo150 ≤ 3, hi8 / hi25 ≤ 2, sync fixture 1; 0 "not logged" |
+| 5 | every other line | identical to c32c074 | the same line kinds (numbers masked) on each thread; deterministic lines (`[SRT] container` / `stream` / `video:`, `[SRT-AUDIO] stream`, layout, cookie) **identical text**; the session-end line identical up to ` · packing:` |
+| 6 | starvation holds, steering, calibration | no change (instrumentation only) | each figure inside the spread of c32c074's own runs on the same fixture (Stage 0: hi8 6–10 holds, hi25 3–10); rail time within ±5 s; sync fixture `[AV-CONTENT]` audio − now median within ±2 ms |
+
+**The soak fixture (one frame per PES, predicted 1.0 / ~21 ms) is not run in this stage**: the brief
+lists lo150, hi8, hi25 and the sync fixture.
+
+**One diagnostic run, for the rail-drain question:** `hi8fine.ts`, the same hi8 content remuxed
+with one AAC frame per PES in the FILE, still sent with ffmpeg's default packing. On the wire the
+audio is the same 8-frame lumps, but the sender's video stops arriving in bursts (offline: video
+arrival gaps max 57 ms, against 114 ms and 213 gaps over 60 ms for hi8). Run on c32c074 only.
+Predicted, if the drain is LiveClock shedding a startup video depth that the bursts inflated:
+**no `RATIO AT ITS RAIL` line; `[LIVECLOCK]` rate off its ±0.5 % rail after the first ~5 s; the
+renderer low-water steady (no ~44 ms fall over 30 s); 0–2 starvation holds** against hi8's 6–10.
+Fail: a rail episode of ≥ 10 s, or ≥ 6 holds.
+
+#### Stage 0b-1 — results, 2026-10-08 (unattended, local ffmpeg listener)
+
+**Builds:** baseline (c32c074's code) `841d46d8…`; 0b-1 first build `f84ca602…`; 0b-1 as left in the
+tree, `s0b1v2` `28369d8f…`. All unsigned Profile. **Logs:** `~/Desktop/manifold-soak/s0b1/repro/`.
+Baseline and first build ran alternately (hi8 twice each); v2 ran all four fixtures afterwards.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | lo150: 438 PES, **16.00 frames (341.4 ms) mean, max 17 (362.7 ms)**, 2 changes | **PASS** |
+| 2 | hi8 ×3, hi25 ×2: 262 PES, **8.00 frames (170.7 ms) mean, max 8**, 1 change. The 7-frame last PES of the file never arrives before the session ends. | **PASS** |
+| 3 | sync fixture ×2: 14 070 PES, **1.00 (21.3 ms), max 1**, 1 change | **PASS** |
+| 4 | **First build: MISS.** On lo150 the 17 → 16 change at PES #2 came inside the 1 s spacing, was counted, and was never logged, so the count the sender settled on was missing from the log. **Fixed in v2:** a held-back change is logged at the first PES after the spacing. v2 logs `17 … at PES #1` and `16 … at PES #6, last logged 17`. hi8 / hi25 / sync: 1 line each, 0 "not logged". | **PASS on v2** |
+| 5 | Every baseline / 0b-1 pair (5 on the first build, 4 on v2): deterministic lines identical text (compared as a multiset: video and audio announce on different threads, and their order swaps between runs of the same build); the session-end line identical up to ` · packing:`, counts included; line kinds otherwise the same. The only kinds on one side of a pair are event lines that vary between runs of one build: `STARVATION CATCH-UP` (lo150: 2 of 3 runs, both builds, and the Stage 0 build), `SPLICE … ABANDONED — session ended` (also on the Stage 0 build's `lo150-s0`). | **PASS** |
+| 6 | Holds — lo150 272 base / 273, 258 new; hi8 5, 7 base / 7, 5, 8 new; hi25 7 base / 6, 5 new; sync 0 / 0. Steering rail — hi8 21.2, 20.3 s base / 19.6, 20.6, 21.0 s new; hi25 20.3 / 19.3, 21.8 s. Sync fixture `[AV-CONTENT]` audio − now median **−0.01 ms base, −0.14 and −0.06 ms new**. | **PASS** |
+| D | hi8fine (smooth video, the same 8-frame audio lumps): **no rail episode** (0.8 s on the rail in total), but **3 holds**, and the renderer low-water starts at **34.9 ms** (hi8: 63.5–68.2 ms) and ends at 19.5 ms, the same place as hi8. | **Half right — see below** |
+
+**The soak fixture was not run** (not in this stage's list). **Gates:** `swift test` (ManifoldCore)
+225 / 225; `node --test scripts/soak/soaklog.test.mjs` 8 / 8; both Profile builds succeeded. No new
+unit test: the change is in the app target, which has none. **`defaults`:** exported before the first
+launch. The runs added 15 `NSWindow Frame` keys and changed nothing else (`streamBookmarks` equal).
+`defaults import` of the snapshot merged rather than replaced, so the 15 run-added keys were then
+deleted by name, each checked absent from the snapshot. The domain is dictionary-equal to the
+snapshot (1 141 keys). No temporary probe was added; nothing goes on the pre-ship cleanup list.
+
+#### The rail drain — what it is
+
+**In plain terms: the rail drain spends startup slack that the stream never had to keep. It is not
+what starves the audio.**
+
+1. **The sender's video arrives in bursts.** ffmpeg re-reading a file whose audio is already packed
+   eight frames to a PES holds video back until the next audio lump is read. Measured offline on the
+   sender's output (UDP, no Manifold): hi8's video arrives with 213 gaps over 60 ms in 637 frames
+   (max 114 ms); the same content with fine audio packing in the file has none (max 57 ms). Sending
+   with `-pes_payload_size 0` does not remove the bursts: they come from the input, not the output
+   packing. lo150's bursts are about twice the size.
+2. **The clock starts on a burst's last frame.** The GAP startup anchor starts the clock on the frame
+   after a delivery gap. On a bursty sender that is the latest-arriving frame of the cycle, so every
+   other frame arrives early: `[LIVECLOCK] startup … max arrival lead=+184…188 ms` on hi8, +128 ms on
+   hi8fine, +25 ms on the sync fixture. The video queue therefore sits 20–60 ms deeper than its
+   250 ms target (`[LIVECLOCK] err=+0.02…+0.08`), and LiveClock runs at its +0.5 % rail for about 30 s
+   to shed the excess.
+3. **The audio follows the picture and pays for it.** The audio's target is LiveClock's line, which
+   now advances 5 ms/s faster than real time. The steering can follow at +2000 ppm (2 ms/s) at most,
+   so it sits on its rail for ~20 s with the audio up to 40–46 ms behind the picture. Every
+   millisecond it catches up comes out of the renderer queue: low-water 63.5 → 46.4 → 23.6 → 20.9 ms
+   in the hi8 windows, and the holds start once it reaches the 20 ms margin.
+4. **Without the bursts, the queue ends in the same place.** hi8fine has no rail episode, but it
+   starts with 35 ms of low-water instead of 64 and still holds. Every hi8 run, bursty or not, ends at
+   19.5–21 ms. The bursts gave the audio ~30–45 ms of slack at startup, and the rail drain took that
+   slack back. The floor itself is set by 170 ms lumps arriving against a 250 ms cushion. This is the
+   BUGS.md entry's "starts with more slack, then ends up in the same place".
+
+**Does 0b-2 (the adaptive cushion) fix it?** **The starvation, yes; the rail episode, no.**
+- **The starvation is 0b-2's to fix.** With the cushion sized on the observed packing, the floor
+  after the drain is the floor 0b-2 chose. **One constraint for 0b-2:** size it from the PES
+  duration, or from the queue after LiveClock has settled. The first 30 s of low-water on a bursty
+  sender overstates the floor by up to ~45 ms.
+- **The rail episode is not 0b-2's, and it does not need its own fix now.** For 20–30 s after
+  connect, the audio is up to ~40 ms behind the picture, because LiveClock may slew at ±0.5 % and
+  the audio at only ±0.2 %. It is pre-existing, the `RATIO AT ITS RAIL` tripwire already reports it,
+  and it needs a sender whose video arrives in bursts. Here that is a harness artefact (ffmpeg
+  re-reading a coarse-packed file); no real sender has shown it. **Recorded, not scheduled.**
+- **For 0b-2's tests,** run hi8fine beside hi8: it separates coarse audio from bursty video.
+  `hi8fine.ts` is
+  `ffmpeg -i hi8.ts -map 0 -c copy -pes_payload_size 0 -f mpegts hi8fine.ts`.
+
 ---
 
 ## 7. Open and unverified

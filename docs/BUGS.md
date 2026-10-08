@@ -7,9 +7,31 @@ A FIXED entry stays here, marked, until the fix has been through a real session 
 what makes a regression recognisable, and deleting it the day the patch lands is how the same bug
 gets rediscovered from scratch.
 
-The file opens with a **pre-ship checklist** — work that is required before public launch but is
-not a defect — then a **post-release list** of decided work held back until after release, and the
-numbered defect entries follow.
+The file opens with the **release scope** for 1.0, then a **pre-ship checklist** — work that is
+required before public launch but is not a defect — then a **post-release list** of decided work
+held back until after release, and the numbered defect entries follow.
+
+---
+
+## Release scope — 1.0
+
+**Decided (Robbie, 2026-10-07; corrected 2026-10-08).** Nothing moves to 1.1. In this order:
+
+1. **The technical work.**
+   - The SRT audio break-up fix, with the buffer review (*SRT audio breaks up when the sender packs
+     ≥ ~170 ms of AAC into each PES*, below; `COLOR_MANAGEMENT_FINDINGS.md` §6.10, Stage 0b).
+   - HEVC over SRT, Stages 1–6, including Stage 3b (HEVC 4:2:2 10-bit) (§6.10).
+   - The colour override, Stages B–E (§6.9).
+   - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
+     readout (§6.4).
+   - LUT loading (§6.4).
+   - The Color control layout and hold-to-compare (§6.3; hold-to-compare is still open in §6.8).
+2. **The shortcut registry and its window**, first of what remains.
+3. **The release gate:**
+   - the sync leftovers;
+   - the user guide;
+   - the Release-build checks on the Resolve workstation;
+   - the pre-ship cleanup (the pre-ship checklist below, including every temporary probe it lists).
 
 ---
 
@@ -1091,6 +1113,15 @@ audio, and possibly some hardware encoders. Codec-independent, so HEVC inherits 
 
 **Options, not decided:** §18.14's options A and B, or a target that adapts to the observed PES
 spacing.
+
+**2026-10-08, Stage 0b-1 (instrumentation, uncommitted):** `[SRT-AUDIO] packing` now logs the frames
+per PES when the count changes, and the session-end line carries the session figures (lo150 16.00 /
+341 ms, max 17; hi8 and hi25 8.00 / 171 ms). **The steering's rail episode at the start of hi8 and
+hi25 is not what starves the audio.** Those fixtures' video arrives in bursts, which gives the audio
+~30–45 ms of extra slack at startup, and LiveClock then takes it back. A run without the bursts has
+no rail episode and ends at the same 20 ms floor, with holds. The floor comes from the packing, so
+it is 0b-2's to fix. Details: `COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 0b-1 — results* and *The
+rail drain — what it is*.
 
 ---
 
