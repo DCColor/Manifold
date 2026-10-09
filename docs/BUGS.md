@@ -28,7 +28,10 @@ held back until after release, and the numbered defect entries follow.
    - **Trial L2 — NDI desktop-audio lead 0.20**, which also finds the audio renderer's crackle
      threshold (between 40 and 150 ms of lead) on the Scarlett and the built-in output (§6.10).
    - Trial L3 (SRT floor 0.20) is NOT in 1.0: it waits until after HEVC Stage 3.
-   - HEVC over SRT, Stages 1–6, including Stage 3b (HEVC 4:2:2 10-bit) (§6.10).
+   - HEVC over SRT, Stages 1–6, including Stage 3b (HEVC 4:2:2 10-bit) (§6.10). Stage 3 (HEVC Main and
+     Main 10 at 4:2:0 play; 4:2:2 and 4:4:4 refused with a banner) built and run unattended 2026-10-09,
+     uncommitted; open from it: DeckLink Follow source on HEVC, one attended click (§6.10, *Stage 3 —
+     results*, item 6).
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).

@@ -27,7 +27,8 @@
 //  (`nal[0] & 0x1F`, H.264 §7.3.1). HEVC breaks all of it: a TWO-byte header,
 //  the type in bits 1–6 of the first byte (`(nal[0] >> 1) & 0x3F`), VPS/SPS/PPS
 //  at 32/33/34, and IDR split across types 19 and 20 with no single "type 5"
-//  equivalent. Adding HEVC means a second builder, not a flag in this one.
+//  equivalent. Adding HEVC meant a second builder, not a flag in this one: it is
+//  HEVCAccessUnitBuilder.h (COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3).
 //
 //  PURE C, NO DEPENDENCIES. No libdatachannel, no libavformat, no Foundation,
 //  no VideoToolbox — a byte-in/byte-out state machine, which is what keeps the

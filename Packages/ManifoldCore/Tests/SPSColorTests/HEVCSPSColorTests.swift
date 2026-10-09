@@ -340,6 +340,74 @@ final class HEVCSPSColorTests: XCTestCase {
         XCTAssertEqual(HEVCSPSColor.parse(nal: padded[1..<(padded.count - 1)]), HEVCSPSColor.parse(nal: f.sps))
     }
 
+    // MARK: The format — what the SRT gate decides on (§6.10, Stage 3; decision 7)
+
+    func testFormatAgreesWithTheVerifiedWalkOnEveryFixture() {
+        // Chroma format and bit depths come from the same walk Stage 2 checked against trace_headers,
+        // so they must agree with it on all thirty. The profile is checked against the bitstream's own
+        // byte: header (2), then vps_id/max_sub_layers/nesting (1), then space(2) tier(1) idc(5).
+        for f in fixtures {
+            guard let format = HEVCSPSColor.format(nal: f.sps) else { XCTFail("\(f.name): no format"); continue }
+            XCTAssertEqual(format.chromaFormatIdc, f.walk.chromaFormatIdc, f.name)
+            XCTAssertEqual(format.bitDepthLuma, f.walk.bitDepthLumaMinus8 + 8, f.name)
+            XCTAssertEqual(format.bitDepthChroma, f.walk.bitDepthChromaMinus8 + 8, f.name)
+            XCTAssertEqual(format.generalProfileIdc, Int(f.sps[3] & 0x1F), f.name)
+        }
+    }
+
+    func testFormatVerdicts() {
+        func format(_ name: String) -> HEVCSPSFormat { HEVCSPSColor.format(nal: fixture(name).sps)! }
+        // Main 10, 4:2:0: x265 and VideoToolbox alike.
+        for name in ["x265_pq", "x265_hlg", "vt_pq", "vt_pq_meta", "synth_all"] {
+            let f = format(name)
+            XCTAssertEqual(f.profileName, "Main 10", name)
+            XCTAssertEqual(f.chromaName, "4:2:0", name)
+            XCTAssertTrue(f.isSupported420, name)
+        }
+        // Main (8-bit), 4:2:0.
+        XCTAssertEqual(format("vt_plain").profileName, "Main")
+        XCTAssertTrue(format("vt_plain").isSupported420)
+        XCTAssertEqual(format("vt_plain").bitDepthLuma, 8)
+        // Format Range Extensions: 4:2:2 and 4:4:4 are refused, and named.
+        let f422 = format("x265_422"), f444 = format("x265_444")
+        XCTAssertEqual([f422.generalProfileIdc, f422.chromaFormatIdc, f422.bitDepthLuma], [4, 2, 10])
+        XCTAssertEqual([f444.generalProfileIdc, f444.chromaFormatIdc, f444.bitDepthLuma], [4, 3, 10])
+        XCTAssertEqual(f422.chromaName, "4:2:2")
+        XCTAssertEqual(f444.chromaName, "4:4:4")
+        XCTAssertFalse(f422.isSupported420)
+        XCTAssertFalse(f444.isSupported420)
+        // The rule, on its own terms: a RExt 4:2:0 stream is refused, a Main Still Picture stream that
+        // signals Main compatibility is not, and 12-bit is refused whatever the profile says.
+        XCTAssertFalse(HEVCSPSFormat(generalProfileIdc: 4, generalProfileCompatibility: 1 << 27,
+                                     chromaFormatIdc: 1, bitDepthLuma: 12, bitDepthChroma: 12).isSupported420)
+        XCTAssertFalse(HEVCSPSFormat(generalProfileIdc: 4, generalProfileCompatibility: 1 << 27,
+                                     chromaFormatIdc: 1, bitDepthLuma: 10, bitDepthChroma: 10).isSupported420)
+        XCTAssertTrue(HEVCSPSFormat(generalProfileIdc: 3, generalProfileCompatibility: (1 << 30) | (1 << 28),
+                                    chromaFormatIdc: 1, bitDepthLuma: 8, bitDepthChroma: 8).isSupported420)
+        XCTAssertFalse(HEVCSPSFormat(generalProfileIdc: 2, generalProfileCompatibility: 1 << 29,
+                                     chromaFormatIdc: 1, bitDepthLuma: 12, bitDepthChroma: 10).isSupported420)
+        XCTAssertFalse(HEVCSPSFormat(generalProfileIdc: 1, generalProfileCompatibility: 1 << 30,
+                                     chromaFormatIdc: 0, bitDepthLuma: 8, bitDepthChroma: 8).isSupported420)
+    }
+
+    func testFormatOfATruncatedSPSIsAbsentOrExact() {
+        // A prefix that ends before the bit depths has no format; one that reaches them has the true
+        // one. Never a different chroma format or depth.
+        for f in fixtures {
+            let full = HEVCSPSColor.format(nal: f.sps)
+            var sawNil = false
+            for n in 0..<f.sps.count {
+                let cut = HEVCSPSColor.format(nal: f.sps.prefix(n))
+                if cut == nil { sawNil = true } else { XCTAssertEqual(cut, full, "\(f.name) cut at \(n)") }
+            }
+            XCTAssertTrue(sawNil, f.name)
+            XCTAssertNil(HEVCSPSColor.format(nal: f.sps.prefix(4)), f.name)
+        }
+        // Not an SPS: a VPS or PPS header has no format.
+        XCTAssertNil(HEVCSPSColor.format(nal: [0x40, 0x01] + fixture("x265_pq").sps.dropFirst(2)))
+        XCTAssertNil(HEVCSPSColor.format(nal: [0x44, 0x01] + fixture("x265_pq").sps.dropFirst(2)))
+    }
+
     func testBothReadersReturnTheSameType() {
         // An H.264 SPS and an HEVC SPS declaring the same colour read as equal values.
         let h264 = H264SPSColor.parse(nal: [UInt8]([0x67, 0x64, 0x00, 0x0c, 0xac, 0xb2, 0x02, 0x83, 0x3f, 0x3e, 0x02, 0xd4, 0x24, 0x40, 0x25,

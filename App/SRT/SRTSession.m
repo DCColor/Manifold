@@ -413,6 +413,16 @@ static void srtForwardAccessUnit(const ManifoldSRTAccessUnit *accessUnit, void *
 
 #pragma mark - Stream discovery
 
+/// The demuxer's codec id as the reader's codec. One definition: the reader's builder and the format
+/// handed to Swift are both chosen by it.
+static ManifoldSRTVideoCodec srtVideoCodec(enum AVCodecID codecID) {
+    switch (codecID) {
+        case AV_CODEC_ID_H264: return ManifoldSRTVideoCodecH264;
+        case AV_CODEC_ID_HEVC: return ManifoldSRTVideoCodecHEVC;
+        default:               return ManifoldSRTVideoCodecUnsupported;
+    }
+}
+
 /// Fill the video-format struct from the chosen stream, RAW — no defaulting, no
 /// interpretation. The UNSPECIFIED codes travel intact; see the header.
 static void fillVideoFormat(AVFormatContext *fmt, int index, ManifoldSRTVideoFormat *out) {
@@ -434,6 +444,7 @@ static void fillVideoFormat(AVFormatContext *fmt, int index, ManifoldSRTVideoFor
     const AVRational guessed = av_guess_frame_rate(fmt, st, NULL);
     out->guessedFrameRate = guessed.den ? (double)guessed.num / guessed.den : 0.0;
 
+    out->codec = srtVideoCodec(par->codec_id);
     const char *codec = avcodec_get_name(par->codec_id);
     strlcpy(out->codecName, codec ? codec : "?", sizeof(out->codecName));
     const char *profile = avcodec_profile_name(par->codec_id, par->profile);
@@ -896,7 +907,13 @@ static void runSession(ManifoldSRTSession *s) {
         s->callbacks.onAudioAbsent(s->callbacks.context, s->generation);
     }
 
-    s->reader = ManifoldSRTAccessUnitReaderCreate();
+    // THE CODEC PICKS THE BUILDER (§6.10, Stage 3). Known here, from the PMT's stream type through
+    // the demuxer, before the first access unit; the gate on main refuses anything that is neither.
+    // An unsupported codec gets H.264's builder, as every stream did before: the gate tears the
+    // session down, and until it does the builder reads nothing from the stream.
+    s->reader = ManifoldSRTAccessUnitReaderCreate(
+        srtVideoCodec(fmt->streams[s->videoIndex]->codecpar->codec_id) == ManifoldSRTVideoCodecHEVC
+            ? ManifoldSRTVideoCodecHEVC : ManifoldSRTVideoCodecH264);
     if (!s->reader) {
         NSLog(@"[SRT] access-unit reader alloc failed");
         strlcpy(message, "Out of memory starting the stream.", sizeof(message));
@@ -1170,6 +1187,12 @@ void ManifoldSRTSessionCopyReaderBuilderStats(const ManifoldSRTSession *s,
                                               ManifoldH264AccessUnitBuilderStats *outStats) {
     if (!outStats) return;
     ManifoldSRTAccessUnitReaderCopyBuilderStats(s ? s->reader : NULL, outStats);
+}
+
+void ManifoldSRTSessionCopyReaderHEVCBuilderStats(const ManifoldSRTSession *s,
+                                                  ManifoldHEVCAccessUnitBuilderStats *outStats) {
+    if (!outStats) return;
+    ManifoldSRTAccessUnitReaderCopyHEVCBuilderStats(s ? s->reader : NULL, outStats);
 }
 
 void ManifoldSRTSessionCopyTransportStats(const ManifoldSRTSession *s,

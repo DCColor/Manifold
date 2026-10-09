@@ -4,7 +4,8 @@
 //
 //  One demuxed video packet in, one access unit out. The SRT path's equivalent of
 //  ManifoldH264Depacketizer: it owns the transport-shaped part, and delegates
-//  every H.264 decision to the shared H264AccessUnitBuilder.
+//  every codec decision to a builder — H264AccessUnitBuilder, or HEVCAccessUnitBuilder for HEVC
+//  (§6.10, Stage 3). The Annex-B scan is the same for both: start codes are codec-neutral.
 //
 //      libsrt → AVIOContext → mpegts demux → AVPacket → THIS → decoder
 //
@@ -48,6 +49,7 @@
 #include <stdint.h>
 
 #include "H264AccessUnitBuilder.h"
+#include "HEVCAccessUnitBuilder.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,8 +60,19 @@ extern "C" {
 /// the two are equal against the real <libavutil/avutil.h>.
 #define MANIFOLD_SRT_NO_TIMESTAMP  INT64_MIN
 
+/// Which builder a reader feeds. A plain int32_t with an anonymous enum, for the import reason
+/// ManifoldSRTEndReason gives in SRTSession.h. Chosen once, at creation, from the demuxer's codec id:
+/// a stream does not change codec mid-session.
+typedef int32_t ManifoldSRTVideoCodec;
+enum {
+    ManifoldSRTVideoCodecUnsupported = -1,   ///< Neither; the gate refuses it. Never handed to a reader.
+    ManifoldSRTVideoCodecH264 = 0,
+    ManifoldSRTVideoCodecHEVC = 1,
+};
+
 /// One access unit from a demuxed stream.
 typedef struct {
+    ManifoldSRTVideoCodec codec;
     const uint8_t *data;            ///< AVCC bytes. Valid ONLY for the duration of the callback.
     size_t         size;
 
@@ -77,12 +90,25 @@ typedef struct {
     int64_t        pts;
     int64_t        dts;
 
-    bool           keyframe;        ///< Contains an IDR slice — NAL type 5, not AV_PKT_FLAG_KEY.
-    bool           parameterSetsChanged;
+    /// Where decoding may start. H.264: an IDR slice, NAL type 5 — never AV_PKT_FLAG_KEY. HEVC: any
+    /// random-access picture, NAL types 16–23 (decision 5); `randomAccessType` says which.
+    bool           keyframe;
+    bool           parameterSetsChanged;   ///< Any parameter set below differs from the last AU's.
     const uint8_t *sps;
     size_t         spsSize;
+    /// H.264: the PPS. HEVC: NULL — an HEVC stream may carry several, in `ppsList`.
     const uint8_t *pps;
     size_t         ppsSize;
+
+    // ── HEVC only; zero / NULL on H.264 ────────────────────────────────────────────────────
+    const uint8_t *vps;
+    size_t         vpsSize;
+    /// Every held PPS in id order, each with a 4-byte big-endian length in front; `ppsCount` of them.
+    const uint8_t *ppsList;
+    size_t         ppsListSize;
+    uint32_t       ppsCount;
+    uint8_t        randomAccessType;   ///< The IRAP picture's nal_unit_type, 16–23; 0 when none.
+    bool           rasl;               ///< A RASL picture (8, 9). See ManifoldHEVCRandomAccessGate.
 } ManifoldSRTAccessUnit;
 
 /// Fires inline on the submitting thread, once per access unit. Copy what you keep.
@@ -109,7 +135,9 @@ typedef struct {
     uint64_t accessUnitsWithoutPTS;    ///< Emitted with NO usable presentation time at all.
 } ManifoldSRTAccessUnitReaderStats;
 
-ManifoldSRTAccessUnitReader *ManifoldSRTAccessUnitReaderCreate(void);
+/// The codec picks the builder: H.264's, or HEVC's. Anything else the gate refuses, and gets H.264's
+/// builder as it always did, which reads nothing from it.
+ManifoldSRTAccessUnitReader *ManifoldSRTAccessUnitReaderCreate(ManifoldSRTVideoCodec codec);
 void ManifoldSRTAccessUnitReaderDestroy(ManifoldSRTAccessUnitReader *reader);
 
 void ManifoldSRTAccessUnitReaderSetHandler(ManifoldSRTAccessUnitReader *reader,
@@ -129,9 +157,14 @@ void ManifoldSRTAccessUnitReaderSubmitPacket(ManifoldSRTAccessUnitReader *reader
 void ManifoldSRTAccessUnitReaderCopyStats(const ManifoldSRTAccessUnitReader *reader,
                                           ManifoldSRTAccessUnitReaderStats *outStats);
 
-/// The shared H.264 layer's counters — NAL types, oversize AUs, parameter-set sizes.
+/// The shared H.264 layer's counters — NAL types, oversize AUs, parameter-set sizes. Zeroed on an
+/// HEVC reader.
 void ManifoldSRTAccessUnitReaderCopyBuilderStats(const ManifoldSRTAccessUnitReader *reader,
                                                  ManifoldH264AccessUnitBuilderStats *outStats);
+
+/// The HEVC layer's counters. Zeroed on an H.264 reader.
+void ManifoldSRTAccessUnitReaderCopyHEVCBuilderStats(const ManifoldSRTAccessUnitReader *reader,
+                                                     ManifoldHEVCAccessUnitBuilderStats *outStats);
 
 #ifdef __cplusplus
 }

@@ -2,9 +2,11 @@
 //  LiveVideoDecoder.swift
 //  Manifold
 //
-//  H.264 access units → decoded CVPixelBuffers, via VideoToolbox. SHARED BY EVERY LIVE
+//  H.264 and HEVC access units → decoded CVPixelBuffers, via VideoToolbox. SHARED BY EVERY LIVE
 //  TRANSPORT: WHEP drives it from RTP, SRT from MPEG-TS, and there is no per-transport branch
-//  anywhere below.
+//  anywhere below. The CODEC is chosen at init (H.264 unless told otherwise, which is WHEP); HEVC is
+//  SRT's (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3). The branches below are per codec, never
+//  per transport.
 //
 //  ── IT WAS `WHEPVideoDecoder`, IN App/WebRTC, AND BOTH WERE WRONG ──────────────────────
 //
@@ -70,6 +72,9 @@ final class LiveVideoDecoder {
         var accessUnitsReceived = 0
         var framesDecoded = 0
         var droppedAwaitingKeyframe = 0
+        /// HEVC: RASL pictures of the CRA or BLA decoding (re)started at — they reference pictures
+        /// this decoder never had (decision 5). Not decode errors: nothing was submitted.
+        var droppedRASL = 0
         var droppedNoFormatDescription = 0
         var sampleBufferFailures = 0
         var decodeErrors = 0
@@ -131,12 +136,32 @@ final class LiveVideoDecoder {
     // choice and say so loudly, because that fallback has the colour consequence above.
     private static let preferredPixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
 
+    // MARK: - Codec
+
+    /// Which bitstream this decoder reads. Fixed for its life: a transport builds a new decoder for a
+    /// new stream, and a stream does not change codec.
+    enum Codec {
+        case h264
+        case hevc
+    }
+    private let codec: Codec
+
     // MARK: - State (decode queue only)
 
     private var session: VTDecompressionSession?
     private var formatDescription: CMFormatDescription?
     private var currentSPS: Data?
     private var currentPPS: Data?
+    /// HEVC only: the VPS, and the PPS after the first (an HEVC stream may carry several ids, and
+    /// every one must be in the format description). Compared with the SPS and first PPS.
+    private var currentVPS: Data?
+    private var currentMorePPS: [Data] = []
+    /// HEVC only: where decoding may start, and which RASL pictures to skip (decision 5). The rule
+    /// is C, in HEVCAccessUnitBuilder, so the harness tests what runs here. Kept closed exactly when
+    /// `awaitingKeyframe` is true — see `closeKeyframeGate`.
+    private var hevcGate = ManifoldHEVCRandomAccessGate()
+    /// One `droppedRASL` line per opening of the gate, not one per picture.
+    private var announcedRASLDrop = false
     /// The SPS `onSPSColor` last reported on. Separate from `currentSPS`, which only moves when a
     /// format description is BUILT — a build can fail, and the colour report must not depend on it.
     private var colorSPS: Data?
@@ -229,8 +254,16 @@ final class LiveVideoDecoder {
 
     // MARK: - Lifecycle
 
-    init(logTag: String) {
+    init(logTag: String, codec: Codec = .h264) {
         self.logTag = logTag
+        self.codec = codec
+    }
+
+    /// Every "start over from the next keyframe" goes through here, so the H.264 flag and the HEVC
+    /// gate can never disagree. Decode queue only. The caller updates the stats as it always did.
+    private func closeKeyframeGate() {
+        awaitingKeyframe = true
+        ManifoldHEVCRandomAccessGateClose(&hevcGate)
     }
 
     deinit {
@@ -248,8 +281,10 @@ final class LiveVideoDecoder {
         formatDescription = nil
         currentSPS = nil
         currentPPS = nil
+        currentVPS = nil
+        currentMorePPS = []
         colorSPS = nil
-        awaitingKeyframe = true
+        closeKeyframeGate()
         keyframeAskedAt = 0
     }
 
@@ -276,13 +311,21 @@ final class LiveVideoDecoder {
     /// order". That is the truth for a stream without B-frames and it is what this path has
     /// always sent. A transport that HAS a real DTS passes it and gets correct display order
     /// on a stream that reorders; that is the whole reason the argument exists.
+    ///
+    /// HEVC ONLY, AND DEFAULTED SO THE H.264 CALLERS ARE UNCHANGED: `vps`; `morePPS`, every PPS after
+    /// `pps` (in id order); `randomAccessType`, the access unit's IRAP nal_unit_type (16–23, 0 for
+    /// none), which is what `keyframe` means on HEVC; and `rasl`.
     func decode(accessUnit: Data,
                 sps: Data?,
                 pps: Data?,
                 parameterSetsChanged: Bool,
                 keyframe: Bool,
                 pts: CMTime,
-                dts: CMTime) {
+                dts: CMTime,
+                vps: Data? = nil,
+                morePPS: [Data] = [],
+                randomAccessType: UInt8 = 0,
+                rasl: Bool = false) {
 
         mutateStats { $0.accessUnitsReceived += 1 }
 
@@ -290,11 +333,15 @@ final class LiveVideoDecoder {
         // comparison per access unit (tens of bytes); the parse runs only when the bytes move.
         if let sps, !sps.isEmpty, sps != colorSPS {
             colorSPS = sps
-            onSPSColor?(H264SPSColor.parse(nal: sps))
+            switch codec {
+            case .h264: onSPSColor?(H264SPSColor.parse(nal: sps))
+            case .hevc: onSPSColor?(HEVCSPSColor.parse(nal: sps))
+            }
         }
 
         // (1) In-band parameter sets → format description, rebuilt only on a real change.
-        updateFormatDescriptionIfNeeded(sps: sps, pps: pps, changed: parameterSetsChanged)
+        updateFormatDescriptionIfNeeded(sps: sps, pps: pps, vps: vps, morePPS: morePPS,
+                                        changed: parameterSetsChanged)
 
         guard let formatDescription, let session else {
             // No SPS/PPS yet. Normal for the first few packets of a mid-GOP join; slices
@@ -307,7 +354,39 @@ final class LiveVideoDecoder {
         // (5) A decoder cannot start on a P-frame: it has no reference picture, and feeding
         // it one produces a stream of confusing kVTVideoDecoderBadDataErr. Drop until the
         // first IDR after the format description is valid.
-        if awaitingKeyframe {
+        //
+        // HEVC: until the first random-access picture of any kind, and then past the RASL pictures
+        // of the CRA or BLA it opened on (decision 5) — the rule is ManifoldHEVCRandomAccessGate's.
+        if codec == .hevc {
+            let wasAwaiting = awaitingKeyframe
+            // `if`, not `switch`: the verdict constants are an anonymous C enum, which imports as
+            // `Int` against the `Int32` return — `==` bridges that, a `case` pattern does not.
+            let verdict = ManifoldHEVCRandomAccessGateAdmit(&hevcGate, randomAccessType, rasl)
+            if verdict == ManifoldHEVCGateDropAwaitingRandomAccess {
+                mutateStats { $0.droppedAwaitingKeyframe += 1 }
+                requestKeyframe()
+                return
+            }
+            if verdict == ManifoldHEVCGateDropRASL {
+                mutateStats { $0.droppedRASL += 1 }
+                if !announcedRASLDrop {
+                    announcedRASLDrop = true
+                    NSLog("[\(logTag)] skipping RASL picture(s) — they reference pictures before the "
+                          + "random-access picture decoding began at, which this decoder never had")
+                }
+                return
+            }
+            if wasAwaiting {
+                awaitingKeyframe = false
+                keyframeAskedAt = 0
+                announcedRASLDrop = false
+                mutateStats { $0.awaitingKeyframe = false }
+                let name = String(cString: ManifoldHEVCRandomAccessName(randomAccessType))
+                NSLog("[\(logTag)] keyframe acquired (%@, NAL %d) — decoding from here%@", name,
+                      Int(randomAccessType),
+                      hevcGate.skippingRASL ? "; its RASL pictures will be skipped" : "")
+            }
+        } else if awaitingKeyframe {
             guard keyframe else {
                 mutateStats { $0.droppedAwaitingKeyframe += 1 }
                 requestKeyframe()
@@ -347,7 +426,7 @@ final class LiveVideoDecoder {
             }
             // Resync rather than keep feeding a session that just rejected a frame: whatever
             // reference state it had is now suspect.
-            awaitingKeyframe = true
+            closeKeyframeGate()
             mutateStats { $0.awaitingKeyframe = true }
             requestKeyframe()
         }
@@ -355,25 +434,40 @@ final class LiveVideoDecoder {
 
     // MARK: - (1) In-band SPS/PPS → CMVideoFormatDescription
 
-    private func updateFormatDescriptionIfNeeded(sps: Data?, pps: Data?, changed: Bool) {
+    private func updateFormatDescriptionIfNeeded(sps: Data?, pps: Data?, vps: Data?, morePPS: [Data],
+                                                 changed: Bool) {
         guard let sps, let pps, !sps.isEmpty, !pps.isEmpty else { return }
+        // HEVC needs its VPS as well: CMVideoFormatDescriptionCreateFromHEVCParameterSets refuses a
+        // set without one.
+        if codec == .hevc, vps?.isEmpty ?? true { return }
 
         // The bytes are compared as well as trusting `changed`, so that a decoder attached
         // mid-stream — which never sees a change event, only a steady repeat of the same
-        // parameter sets — still builds its first format description.
+        // parameter sets — still builds its first format description. On HEVC the VPS and every
+        // PPS are part of the comparison.
         let haveCurrent = formatDescription != nil && session != nil
-        if haveCurrent, !changed, currentSPS == sps, currentPPS == pps { return }
+        if haveCurrent, !changed, currentSPS == sps, currentPPS == pps,
+           currentVPS == vps, currentMorePPS == morePPS { return }
 
-        guard let newFormat = makeFormatDescription(sps: sps, pps: pps) else { return }
+        guard let newFormat = makeFormatDescription(sps: sps, pps: pps, vps: vps, morePPS: morePPS) else { return }
 
         currentSPS = sps
         currentPPS = pps
+        currentVPS = vps
+        currentMorePPS = morePPS
         formatDescription = newFormat
         mutateStats { $0.formatDescriptionBuilds += 1; $0.haveFormatDescription = true }
 
         let dimensions = CMVideoFormatDescriptionGetDimensions(newFormat)
-        NSLog("[\(logTag)] format description built — %dx%d, SPS %d bytes, PPS %d bytes",
-              dimensions.width, dimensions.height, sps.count, pps.count)
+        switch codec {
+        case .h264:
+            NSLog("[\(logTag)] format description built — %dx%d, SPS %d bytes, PPS %d bytes",
+                  dimensions.width, dimensions.height, sps.count, pps.count)
+        case .hevc:
+            NSLog("[\(logTag)] format description built (HEVC) — %dx%d, VPS %d bytes, SPS %d bytes, %d PPS (%d bytes)",
+                  dimensions.width, dimensions.height, vps?.count ?? 0, sps.count, 1 + morePPS.count,
+                  pps.count + morePPS.reduce(0) { $0 + $1.count })
+        }
 
         // An existing session can often absorb a new format description (same resolution,
         // trivially different SPS). Asking is cheaper and less disruptive than tearing down.
@@ -389,7 +483,7 @@ final class LiveVideoDecoder {
         makeSession(for: newFormat)
 
         // A fresh session has no reference frames whatever the bitstream says.
-        awaitingKeyframe = true
+        closeKeyframeGate()
         // …and any keyframe request outstanding against the OLD session is not an answer for this
         // one. Clear the window so the gate below can ask again immediately.
         keyframeAskedAt = 0
@@ -400,7 +494,8 @@ final class LiveVideoDecoder {
     /// per-instance by design; a `static` version would have to be handed the tag to say whose
     /// failure it was reporting, and a decode failure with no transport on it is the thing this
     /// whole change exists to stop producing.
-    private func makeFormatDescription(sps: Data, pps: Data) -> CMFormatDescription? {
+    private func makeFormatDescription(sps: Data, pps: Data, vps: Data?, morePPS: [Data]) -> CMFormatDescription? {
+        if codec == .hevc, let vps { return makeHEVCFormatDescription(vps: vps, sps: sps, pps: [pps] + morePPS) }
         var format: CMFormatDescription?
         let status: OSStatus = sps.withUnsafeBytes { spsRaw in
             pps.withUnsafeBytes { ppsRaw in
@@ -427,6 +522,40 @@ final class LiveVideoDecoder {
         }
         guard status == noErr, let format else {
             NSLog("[\(logTag)] CMVideoFormatDescriptionCreateFromH264ParameterSets failed (%d)", status)
+            return nil
+        }
+        return format
+    }
+
+    /// HEVC: VPS, SPS, then every PPS, in one call. Copied into one buffer so a single pointer scope
+    /// covers them all — the parameter-set count varies with the stream's PPS ids.
+    private func makeHEVCFormatDescription(vps: Data, sps: Data, pps: [Data]) -> CMFormatDescription? {
+        let sets = [vps, sps] + pps
+        let joined = sets.reduce(Data(), +)
+        var format: CMFormatDescription?
+        let status: OSStatus = joined.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return OSStatus(-1) }
+            var offset = 0
+            var pointers: [UnsafePointer<UInt8>] = []
+            for set in sets { pointers.append(base + offset); offset += set.count }
+            let sizes = sets.map(\.count)
+            return pointers.withUnsafeBufferPointer { pointerBuffer in
+                sizes.withUnsafeBufferPointer { sizeBuffer in
+                    CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: sets.count,
+                        parameterSetPointers: pointerBuffer.baseAddress!,
+                        parameterSetSizes: sizeBuffer.baseAddress!,
+                        // 4, matching the builder's length prefix, as for H.264.
+                        nalUnitHeaderLength: 4,
+                        extensions: nil,
+                        formatDescriptionOut: &format)
+                }
+            }
+        }
+        guard status == noErr, let format else {
+            NSLog("[\(logTag)] CMVideoFormatDescriptionCreateFromHEVCParameterSets failed (%d) — %d parameter sets",
+                  status, sets.count)
             return nil
         }
         return format
@@ -522,7 +651,7 @@ final class LiveVideoDecoder {
             // at the keyframe gate before they can reach the decoder, so this branch is not
             // re-entered until an IDR clears it. `decodeErrors` still counts every failure.
             if !awaitingKeyframe {
-                awaitingKeyframe = true
+                closeKeyframeGate()
                 mutateStats { $0.awaitingKeyframe = true }
                 NSLog("[\(logTag)] decode failed (%d) — dropping to next keyframe, PLI requested", status)
                 requestKeyframe()

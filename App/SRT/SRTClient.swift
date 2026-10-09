@@ -569,7 +569,7 @@ final class SRTClient: ObservableObject {
                 // runs INLINE on this session's own thread, so it cannot be reached after the join
                 // that proves this thread is gone. Only the hops can outlive the session, and they
                 // carry its generation.
-                SRTFrameRouter.shared.prepareDecoder(format: f) { colorimetry, first, delay in
+                SRTFrameRouter.shared.prepareDecoder(format: f, onColorimetry: { colorimetry, first, delay in
                     // SESSION THREAD. The first reading hops at once — `async`, so it stays in
                     // order behind the format hop. A later change is timed for the presentation
                     // of the first frame decoded under it.
@@ -584,7 +584,13 @@ final class SRTClient: ObservableObject {
                                                            colorimetry, first: false)
                         }
                     }
-                }
+                }, onRefused: { message in
+                    // SESSION THREAD. The HEVC format gate refused the stream's SPS (decision 7):
+                    // the banner and the teardown are main's, behind the format hop like the rest.
+                    DispatchQueue.main.async {
+                        client.handleFormatRefused(generation: generation, message: message)
+                    }
+                })
                 DispatchQueue.main.async {
                     client.handleVideoFormat(generation: generation, f)
                 }
@@ -790,22 +796,27 @@ final class SRTClient: ObservableObject {
         guard isCurrent(generation, "video format") else { return }
         guard session != nil else { return }
 
-        // ── CODEC GATE. H.264 ONLY, AND IT FAILS LOUDLY RATHER THAN SHOWING BLACK ─────────
-        // H264AccessUnitBuilder is H.264-only and the assumption is load-bearing there: HEVC has
-        // a two-byte NAL header, the type in different bits, VPS/SPS/PPS at 32/33/34, and IDR
-        // split across two types. Feeding it an HEVC stream produces an access unit of nothing,
-        // forever — a permanently black picture with a healthy transport, which is the worst
-        // possible failure to debug. HEVC over SRT is common enough that this WILL be hit.
+        // ── CODEC GATE. H.264 AND HEVC, AND IT FAILS LOUDLY RATHER THAN SHOWING BLACK ─────
+        // Each has its own access-unit builder (H264AccessUnitBuilder, HEVCAccessUnitBuilder);
+        // anything else would reach a builder that cannot read it and produce an access unit of
+        // nothing, forever — a permanently black picture with a healthy transport, which is the
+        // worst possible failure to debug. The codec test is the one the C reader chose its builder
+        // by (`format.codec`), so the gate and the builder cannot disagree.
+        //
+        // HEVC IS ONLY HALF-JUDGED HERE. The demuxer knows the profile name but not the chroma format
+        // ("Rext" covers 4:2:0, 4:2:2 and 4:4:4), so Main / Main 10 at 4:2:0 versus the rest is
+        // decided by the SPS itself, on the session thread, before the decoder sees it — see
+        // SRTFrameRouter's HEVC format gate and `handleFormatRefused` (§6.10, Stage 3, decision 7).
         let codec = Self.text(format.codecName)
-        guard codec == "h264" else {
-            NSLog("[SRT] stream is %@ %@ %dx%d — this build decodes H.264 only; refusing",
+        guard format.codec == ManifoldSRTVideoCodecH264 || format.codec == ManifoldSRTVideoCodecHEVC else {
+            NSLog("[SRT] stream is %@ %@ %dx%d — this build decodes H.264 and HEVC only; refusing",
                   codec, Self.text(format.profileName), format.width, format.height)
             // USER-VISIBLE, through the SAME non-fatal banner a connect error uses. A log line
             // alone would leave the user with a black window and no stated reason — the worse of
             // the two outcomes this gate exists to prevent. Set BEFORE disconnect(), which does not
             // touch `lastError`, so the message survives the teardown and is what the user reads.
             showError("That stream is \(Self.codecDisplayName(codec)) — Manifold’s SRT support "
-                      + "is H.264 only.")
+                      + "is H.264 and HEVC only.")
             disconnect()
             return
         }
@@ -871,6 +882,17 @@ final class SRTClient: ObservableObject {
         } else {
             SRTFrameRouter.shared.updateColorimetry(colorimetry)
         }
+    }
+
+    /// The HEVC format gate refused the stream's SPS: 4:2:2 or 4:4:4 (not yet; Stage 3b), or anything
+    /// else that is not Main or Main 10 at 4:2:0 (decision 7). The router has already stopped feeding
+    /// the decoder; this is the banner and the teardown, as the codec gate above does them.
+    private func handleFormatRefused(generation: UInt64, message: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isCurrent(generation, "format refused") else { return }
+        guard session != nil else { return }
+        showError(message)
+        disconnect()
     }
 
     /// The session thread has finished. Called on main, always after the decode side has already
@@ -1156,6 +1178,26 @@ final class SRTClient: ObservableObject {
         ManifoldSRTSessionCopyTransportStats(session, &messages, &bytes, &timeouts)
         var stats = ManifoldSRTAccessUnitReaderStats()
         ManifoldSRTSessionCopyReaderStats(session, &stats)
+        if SRTFrameRouter.shared.decodingHEVC {
+            var hevc = ManifoldHEVCAccessUnitBuilderStats()
+            ManifoldSRTSessionCopyReaderHEVCBuilderStats(session, &hevc)
+            let decode = SRTFrameRouter.shared.decoderSnapshot()
+            NSLog("""
+                  [SRT-AU] session totals: msgs=%llu bytes=%llu | AUs=%llu (random access=%llu) → %d pictures | \
+                  HEVC NALs: VPS=%llu SPS=%llu PPS=%llu IDR=%llu CRA=%llu BLA=%llu RASL=%llu RADL=%llu \
+                  trailing=%llu SEI=%llu AUD=%llu | layer>0 dropped=%llu reserved dropped=%llu \
+                  malformed=%llu | PPS ids held=%u (max %u), SPS changes=%llu | oversize=%llu | \
+                  decoder: dropped awaiting keyframe=%d, RASL skipped=%d, decode errors=%d
+                  """,
+                  messages, bytes, stats.accessUnits, stats.keyframes,
+                  SRTFrameRouter.shared.picturesDecoded,
+                  hevc.nalVPS, hevc.nalSPS, hevc.nalPPS, hevc.nalIDR, hevc.nalCRA, hevc.nalBLA,
+                  hevc.nalRASL, hevc.nalRADL, hevc.nalTrailing, hevc.nalSEI, hevc.nalAUD,
+                  hevc.nalHigherLayer, hevc.nalDroppedReserved, hevc.nalMalformed,
+                  hevc.ppsIdsHeld, hevc.ppsIdsMax, hevc.spsChanges, hevc.accessUnitsOversize,
+                  decode?.droppedAwaitingKeyframe ?? 0, decode?.droppedRASL ?? 0, decode?.decodeErrors ?? 0)
+            return
+        }
         var builder = ManifoldH264AccessUnitBuilderStats()
         ManifoldSRTSessionCopyReaderBuilderStats(session, &builder)
         NSLog("""

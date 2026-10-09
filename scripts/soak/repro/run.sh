@@ -13,6 +13,9 @@
 #   STALLS        induced delivery stalls, "<s after connect>:<ms>" pairs, space-separated
 #                 (e.g. "60:100 90:200 120:400"): the sender is SIGSTOPped for <ms>, then resumed.
 #                 Each is logged with its wall-clock time to <label>.stalls.log.
+#   COPYINKF      1 = keep the non-key packets before the file's first keyframe (ffmpeg -copyinkf), so
+#                 a file cut mid-GOP reaches Manifold mid-GOP. ffmpeg's stream copy drops them by
+#                 default, which makes every run start on a keyframe (§6.10, Stage 3, the join fixture).
 #   SOAK_OUT      where <label>.manifold.log / .ffmpeg.log go (default ~/Desktop/manifold-soak/repro)
 # Needs UI scripting (Accessibility) for the process running it; osascript fails loudly without it.
 set -u
@@ -49,8 +52,9 @@ done
 
 PESOPT="-pes_payload_size ${PES_PAYLOAD:-0}"; [[ ${PES_PAYLOAD:-0} == default ]] && PESOPT=""
 CATCHUP=""; [[ -n "${READRATE_CATCHUP:-}" ]] && CATCHUP="-readrate_catchup $READRATE_CATCHUP"
+INKF=""; [[ ${COPYINKF:-0} == 1 ]] && INKF="-copyinkf"
 say_ "serve $FILE on srt://127.0.0.1:9000 (listener)"
-ffmpeg -hide_banner -loglevel warning -readrate "${READRATE:-1}" ${=CATCHUP} -i "$FILE" -map 0:v -map 0:a -c copy ${=PESOPT} -f mpegts \
+ffmpeg -hide_banner -loglevel warning -readrate "${READRATE:-1}" ${=CATCHUP} -i "$FILE" -map 0:v -map 0:a -c copy ${=INKF} ${=PESOPT} -f mpegts \
   'srt://127.0.0.1:9000?mode=listener' > "$FLOG" 2>&1 &
 FPID=$!
 sleep 2

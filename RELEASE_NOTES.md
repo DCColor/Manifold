@@ -10,6 +10,7 @@ changelog page. Format notes are at the bottom.
 - WHEP from Cloudflare Stream keeps sound and picture in sync for long sessions: verified over four and a half hours, and with picture and sound arriving over SDI and sent through OBS.
 - Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
 - SRT and WHEP now show the colour the stream declares. A stream tagged HDR (PQ or HLG) is shown and scoped as HDR instead of as standard Rec. 709, and a stream that declares nothing is still treated as Rec. 709.
+- HEVC (Main and Main 10, 4:2:0) now plays over SRT, including 10-bit HDR. HEVC 4:2:2 and 4:4:4 streams are refused with a message saying so, never quietly converted.
 - SRT streams start showing picture much sooner, especially at low bitrates. A static slate or bars feed used to take a minute or more to appear. It now takes a second or two.
 - Fixed: the scopes could keep showing an earlier source's colour settings (scale, gamut target and labels). This happened after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 

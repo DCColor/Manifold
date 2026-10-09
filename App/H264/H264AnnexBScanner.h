@@ -23,12 +23,14 @@
 //  before handing it over, but it is NOT a general Annex-B stream parser: a
 //  caller with arbitrary byte-run boundaries would have to buffer first.
 //
-//  H.264 ONLY. The scan itself is codec-neutral — start codes work the same way
-//  in HEVC — but everything downstream of it is not: HEVC has a TWO-byte NAL
-//  header with the type in bits 1–6 of the first byte, adds VPS (32) alongside
-//  SPS/PPS at 33/34, and splits IDR across types 19 and 20. Pointing this at an
-//  HEVC stream would produce correctly-delimited NALs that the builder then
-//  classifies as nonsense. See the HEVC note in H264AccessUnitBuilder.h.
+//  H.264 AND HEVC. The scan is codec-neutral — start codes and emulation
+//  prevention work the same way in HEVC — and only what is downstream of it is
+//  not: HEVC has a TWO-byte NAL header with the type in bits 1–6 of the first
+//  byte, adds VPS (32) alongside SPS/PPS at 33/34, and splits IDR across types
+//  19 and 20. So the SRT reader hands an HEVC stream's NALs to
+//  HEVCAccessUnitBuilder instead (COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3);
+//  handed to the H.264 builder they would be correctly delimited and classified
+//  as nonsense.
 //
 //  PURE C, NO DEPENDENCIES — no libavformat, no libsrt, no Foundation.
 //

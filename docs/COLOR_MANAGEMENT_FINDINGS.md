@@ -1941,7 +1941,8 @@ Run in this order. Each stage ships on its own.
   - Predicted: every field matches; truncated SPS read undeclared, never a wrong colour; mutants fail
     closed.
 - **Stage 3 — the HEVC access-unit builder** (with its C test harness), a codec-selected reader, the
-  decoder's VPS, and the gate opens for 4:2:0 HEVC.
+  decoder's VPS, and the gate opens for 4:2:0 HEVC. **Done 2026-10-09 (uncommitted), below: every
+  prediction met except item 6's Follow-source switch, which needs one attended click.**
   - Predicted: x265 PQ/HLG/709 and VideoToolbox streams decode to `x420` with no promote.
   - `[SCOPE-COLOR]` reads 9-16-9 and 9-18-9.
   - A mid-stream join of x265 starts at the next CRA with RASL dropped and no decode errors.
@@ -2855,6 +2856,154 @@ declared axis**.
 keys, each checked absent from the snapshot and deleted by name; the domain is dictionary-equal to
 the snapshot (1 141 keys). `streamBookmarks` was never written (every run dialled
 `MANIFOLD_SRT_DEBUG_URL`).
+
+#### Stage 3 — the HEVC access-unit builder, decoder and gate: predictions, written 2026-10-09 before the code
+
+**What changes.**
+- **`App/H264/HEVCAccessUnitBuilder.[ch]`** (new, pure C, beside the H.264 builder): the two-byte NAL
+  header; VPS and SPS held one each (latest wins), **PPS held by id, all 64** (a 64 × 1 KB table is
+  cheap, and VideoToolbox takes every PPS in the format description); the PPS table is cleared when the
+  SPS bytes change; Annex B → 4-byte lengths; `nuh_layer_id` > 0 dropped and counted (decision 8);
+  prefix and suffix SEI passed through unparsed (Stage 5 parses them); AUD and filler dropped; reserved
+  and unspecified non-VCL types (41–63) dropped and counted. The AU says whether it holds a
+  random-access picture (types 16–23, and which) and whether it is RASL (8, 9).
+- **The random-access gate (decision 5) as a small C state machine in the same file,** so the harness
+  tests the rule the app runs: closed until any random-access picture; after opening on a CRA (or a
+  reserved IRAP), its RASL pictures are dropped until the next random-access picture; after a BLA,
+  always; after an IDR, none. Closed again by a decode error or a new session ("the same rule after
+  loss").
+- **C harness (decision 9)**: `scripts/ctest/hevc_access_unit_builder_test.c`, run by
+  `scripts/ctest/run.sh` (clang, `-Wall -Wextra -Werror`, ASan + UBSan). Synthetic NAL streams through
+  the real scanner and reader.
+- **`SRTAccessUnitReader`** takes a codec at creation; `ManifoldSRTAccessUnit` gains the codec, the VPS,
+  the packed PPS list, the random-access type and the RASL flag. `SRTSession.m` picks the codec from
+  `codec_id`.
+- **`LiveVideoDecoder`**: a codec at init (default H.264, so WHEP's construction is unchanged); the VPS
+  and the extra PPS as defaulted arguments to `decode` (WHEP's call unchanged); VPS and every PPS in the
+  changed-parameter-set check; `CMVideoFormatDescriptionCreateFromHEVCParameterSets`; `x420` requested as
+  for H.264; `HEVCSPSColor` for `[SPS-COLOR]`; RASL drops counted.
+- **The gate**: identification passes `h264` and `hevc`. Then each new HEVC SPS is read with a new
+  `HEVCSPSColor.format(nal:)` (profile, chroma format, bit depths, from the walk Stage 2 already does)
+  **before** it reaches the decoder: HEVC Main and Main 10 at 4:2:0 are accepted; 4:2:2 and 4:4:4 are
+  refused with a banner saying they are not supported yet; anything else (4:0:0, 12-bit, other RExt) is
+  refused naming what it is. A refused stream is never decoded, so it can never be resampled.
+- **Wording**: "waiting for an IDR" → "waiting for a keyframe" (on HEVC, any random-access picture). This
+  changes the `[SRT-AU]` waiting line on H.264 too, on purpose; it is not in item 8's compared set.
+- Session totals log HEVC's own NAL counts (VPS/SPS/PPS, IDR/CRA/BLA, RASL/RADL, trailing, SEI, layer > 0)
+  and the decoder's RASL drops.
+
+**Measured offline first** (`nals.py` in the session scratchpad: ffmpeg's own demux, `-c copy -copyinkf`,
+NAL types per access unit; 90 kHz):
+
+| fixture | built with | first AU | random access | RASL per CRA | max(pts − dts) |
+|---|---|---|---|---|---|
+| `hevc_pq_x265`, `hevc_hlg_x265` (Stage 1's) | x265 Main 10, 25p, 12 s | IDR | IDR, then CRA every 25 | 4 | **240 ms**, first reached at AU 2 |
+| `x265_709` | x265 Main (8-bit), 1/1/1 | IDR | IDR, one CRA at 246 | 4 | 240 ms |
+| `hevc_pq_vt` (Stage 1's) | VideoToolbox Main 10, VUI 2/2/9 | IDR | IDR only, every 26 | — | 0 |
+| `vt_pq_meta` | VideoToolbox Main 10 + `hevc_metadata` 9/16/9 | IDR | IDR only, every 12 | — | 0 |
+| `x265_join_cut` | x265 Main 10 PQ, keyint 25, 60 s, cut at a TS packet boundary 12.25 % in, served with `-copyinkf` | **TRAIL** | **11 AUs (0.44 s of DTS) before the first CRA** | 4 | 240 ms |
+| `x265_r240` | x265 Main 10 HLG, `preset fast` (bframes 4, B-pyramid), 25p, 240 s | IDR | CRA ~ every 250 | 4 | **240 ms** at AU 2 |
+| `x265_b8_240` | x265 Main 10 PQ, `bframes=8:b-adapt=0`, 23.976, 240 s | IDR | CRA ~ every 250 | 6 | **417.1 ms** at AU 2 |
+| `x265_422`, `x265_444` | x265 Main 4:2:2 10, Main 4:4:4 10 (profile `Rext`) | IDR | as 709 | 4 | 240 ms |
+| through MediaMTX (`x265_join` published, a reader joining at +3.3 s) | — | **CRA** (MediaMTX starts a joining SRT reader at a random-access point) | CRA every 25 | 4 | 240 ms |
+
+ffmpeg's stream copy drops leading non-key packets unless told `-copyinkf`, so `run.sh` gains a
+`COPYINKF=1` switch for the join fixture; without it the sender itself starts at the CRA.
+
+**Builds:** HEAD `fd657f7` (`.build-cc/s3head-Profile`, built from the clean tree before any edit, 11
+warnings) against the tree (`.build-cc/s3-Profile`), unsigned Profile. **Senders:** the local ffmpeg
+listener through `scripts/soak/repro/run.sh`; MediaMTX v1.21.1's SRT (`publish:live` / `read:live`,
+the instance already running); WHEP from MediaMTX with an ffmpeg RTSP publisher. Everything unattended.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | C harness | all pass, sanitizers clean | every case passes: NAL splitting (3- and 4-byte start codes, AUD dropped, both SEI kept, emulation prevention intact, lengths exact); two-byte header (an HEVC TRAIL is not read as H.264 type 2, a CRA is random access); parameter sets out of band, repeats not a change, a changed PPS a change, two PPS ids both held in id order, a new SPS clearing the PPS table; layer > 0 dropped (a layer-1 SPS does not replace the base one); the gate: closed until random access, RASL dropped after a starting CRA and after any BLA, kept after a mid-stream CRA, none after an IDR, re-closed by loss; malformed (1-byte, forbidden bit) counted, ignored. **Shown to fail:** the builder broken twice on purpose (H.264's type read; the gate without the RASL rule) fails the harness each time |
+| 2 | x265 PQ, HLG, 709 and VideoToolbox + `hevc_metadata`, over the ffmpeg listener and over MediaMTX | decoded, tagged, no promote | `[SRT] video: hevc Main 10 1920x1080 @ 25.000 fps` (709: `hevc Main`); one HEVC SPS line, accepted, 4:2:0; format description 1920x1080; **`[SRT] decoded as 'x420' — … no promote needed`** on every run, the 8-bit 709 included (VideoToolbox is asked for `x420`); `[SPS-COLOR]` all three declared → tagged; **`[SCOPE-COLOR] source: … tagged (CICP 9-16-9)`**, **9-18-9**, **1-1-1**, VT 9-16-9; the chain readout's tier "tagged"; **0 decode errors**; 0 out of order; RASL dropped **0** on the listener (it starts at the IDR; a mid-stream CRA's RASL are decodable) and **exactly 4** on MediaMTX (it starts at a CRA); x265 cushion **290 ms before the first anchor** ("raised 40 ms: the stream reorders 240 ms of pictures"), VT 250 with no raise |
+| 3 | VideoToolbox without the metadata fix (`hevc_pq_vt`) | matrix only | `[SPS-COLOR]` primaries=2 unspecified → undeclared, transfer=2 unspecified → undeclared, matrix=9 declared → **partly assumed**; never a declared 2020 primaries or PQ |
+| 4 | mid-way join, `x265_join_cut` (listener, `COPYINKF=1`) | waits 0.44 s of stream, starts at the CRA, drops its RASL | the first 11 AUs dropped before the gate (no parameter sets yet: `droppedNoFormatDescription` 11); the gate opens on **CRA (21)**; **exactly 4 RASL dropped** (the starting CRA's), none after; **0 decode errors**; first picture **≤ 1.0 s** after the first access unit |
+| 5 | reorder, 240 s: `x265_r240`, `x265_b8_240` | the cushion follows before the clock starts | `x265_r240` **290 ms**, `x265_b8_240` **467 ms** (queue bound 57, as `b8pyr`), both BEFORE the first anchor (raised at AU 2); 0 target-steps, **0 shown out of order**, unseen within the baseline (**≤ 19**), 0 holds, no reorder warning. The 0b-2b depth question is answered with the settled clock error and the low-water, not by changing the term |
+| 6 | frame rate and DeckLink | 25.000 / 23.976 declared; Follow source available | `[SRT-FORMAT] frame rate 25.000 fps declared` (23.976 for `b8`); `DeckLink D4a: LIVE source format 1920x1080 @ 25.000 fps → mode 1080p25`. The persisted manual pick (1080p23.98) still wins, as it does for H.264; to see Follow source engage, the pick is cleared through the menu and restored afterwards, the key read and stashed first: **`mode → 1080p25 via follow source`** |
+| 7 | `x265_422`, `x265_444` | refused at the first SPS | identified as `hevc Rext 1920x1080`; the HEVC SPS line names 4:2:2 (4:4:4) 10-bit and refuses; **a banner saying 4:2:2 (4:4:4) is not supported yet**, naming what does play; no format description, no decode, no route, no `[SPS-COLOR]` line, nothing resampled; the window returns to the empty state |
+| 8 | regression: H.264 SRT (syncD, hi8) and WHEP, HEAD against the tree; one H.264 calibration | unchanged | SRT: `[SRT] container` / `stream` / `video:` / `colorimetry` / `decoded as`, `[SRT-AUDIO] stream`, `[SPS-COLOR]`, `[SRT-BUFFER]` **identical text**; syncD 250, 0 holds, `[AV-CONTENT]` median within ±2 ms of HEAD's same-day run; hi8 336 before the anchor. WHEP: `[WHEP]` connect/format lines, `[WHEP-DECODE]` and `[SPS-COLOR]` **identical text** (timestamps and ids masked). Calibration (soak fixture, +60 s): **within ±2 ms of Stage 1's −0.70** |
+| 9 | gates | — | `swift test` all pass (263 + the new format tests); `soaklog.test.mjs` 8 / 8; the C harness; Profile build with no new warnings in the touched files |
+
+**What this stage could invalidate:** nothing measured on H.264. On HEVC, nothing exists to invalidate:
+every HEVC run before this one was refused at the gate.
+
+#### Stage 3 — results, 2026-10-09 (unattended)
+
+**Code.** `App/H264/HEVCAccessUnitBuilder.[ch]` (builder and gate); `SRTAccessUnitReader` takes the
+codec (`ManifoldSRTVideoCodec`, also on `ManifoldSRTVideoFormat`, from one `srtVideoCodec()` in
+`SRTSession.m`); `LiveVideoDecoder(logTag:codec:)`; `SRTFrameRouter`'s HEVC format gate
+(`admitHEVCFormat`, before the decoder); `SRTClient.handleFormatRefused`; `HEVCSPSColor.format(nal:)` and
+`HEVCSPSFormat` in the `SPSColor` target; the C harness `scripts/ctest/`; `run.sh`'s `COPYINKF`.
+**Builds:** `.build-cc/s3head-Profile` (HEAD `fd657f7`, built from the clean tree before the first edit)
+and `.build-cc/s3-Profile` (the tree), unsigned Profile, the same 11 warnings each (the warning sets are
+identical). **Logs:** `~/Desktop/manifold-soak/s3/` (`repro/` listener, `mtx/` MediaMTX, `mtx-looped/`
+the first MediaMTX attempt, `whep/`); screenshots `~/Desktop/manifold-shots/s3/`.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | **200 checks, 0 failed**, clang `-Wall -Wextra -Werror`, ASan + UBSan clean. **Shown to fail:** the builder with H.264's one-byte type read fails 67 checks; the gate without the RASL rule fails 10 (`after loss`, `reserved IRAP`, …). Both broken copies were scratch files; the tree's builder was never edited for this | **PASS** |
+| 2 | **Listener** — x265 PQ, HLG, 709 (Main, 8-bit), VT + `hevc_metadata`: identified 0.39–0.49 s after `transport up`; one `[SRT] HEVC SPS: … 4:2:0 … → accepted` line each; `format description built (HEVC) — 1920x1080, VPS 24 bytes, SPS 43–47 bytes, 1 PPS`; **`[SRT] decoded as 'x420' — already in the renderer's 10-bit domain, no promote needed` on all four, 8-bit 709 included**; `[SPS-COLOR]` all three declared → tagged; `[SCOPE-COLOR] source:` **9-16-9, 9-18-9, 1-1-1, 9-16-9, all "tagged"**; **0 decode errors**, 0 out of order, 0 holds; RASL skipped **0** (started at the IDR; the 44 RASL of the 11 later CRAs decoded); x265 cushion **290 ms BEFORE the first anchor** ("raised 40 ms: the stream reorders 240 ms of pictures"), VT 250, no raise. **MediaMTX** (single publish, reader joining live): the x265 three **opened on a CRA ("keyframe acquired (CRA, NAL 21) … its RASL pictures will be skipped") and skipped exactly 4 RASL**, 0 decode errors, x420, tags as the listener; VT opened on its IDR, 0 skipped. The chain readout was not read off the window: in playback the window shows no chrome, and the AX read failed (see *the drivers*). The readout's tier is the renderer's `sourceColorProvenance`, which is what `[SCOPE-COLOR]` prints | **PASS**, but the chain readout's tier is taken from the log line that prints the same value, not from the window |
+| 3 | `hevc_pq_vt`: `[SPS-COLOR] SRT: primaries=2 unspecified → undeclared · transfer=2 unspecified → undeclared · matrix=9 (Rec.2020) declared → partly assumed`; `[SCOPE-COLOR] source: Rec. 709 · Rec. 709 — partly assumed (CICP –-–-9)` | **PASS** |
+| 4 | `x265_join_cut`, `COPYINKF=1`: `transport up` → identified 0.634 s → **keyframe acquired (CRA, NAL 21) 0.743 s** → first decoded 0.745 s; 1313 AUs → 1298 pictures, so 11 dropped before the format description (1313 − 1298 − 4; the totals line does not print that counter separately), **RASL skipped 4**, 0 awaiting-keyframe drops after it, **0 decode errors**, 0 out of order, 3 unseen | **PASS** |
+| 5 | `x265_r240`: **290 ms BEFORE the first anchor**, queue bound 35; `x265_b8_240` (23.976): **467 ms BEFORE the first anchor**, queue bound 57; both: 0 target-steps, **0 shown out of order**, unseen **14 / 10**, 0 holds, no reorder warning, 0 decode errors, 5998 / 5753 pictures from as many AUs. The depth question: renderer low-water settles at **141–144 ms** (290 ms cushion) and **~238 ms** (467 ms), clock error median ~0 after +120 s. The term keeps about half its depth in hand with no loss: conservative, as 0b-2b found at 1.2 s. No change to the term | **PASS** |
+| 6 | `[SRT-FORMAT] frame rate 25.000 fps declared` (23.976 on `b8_240`), on every listener run; **`DeckLink D4a: LIVE source format 1920x1080 @ 25.000 fps → mode 1080p25`**: the source-derived mode is computed, which is what makes Follow source available. **Engaging it was not shown:** the persisted manual pick (1080p23.98) won as it does for H.264, and three attempts to click "Follow source" through accessibility found no reachable DeckLink menu in the playback window. Nothing was clicked and nothing written: `manifold.decklink.manualOutputMode` read `1080p23.98` before and after each attempt | **PARTLY**: the rate and the derived mode pass; the switch to Follow source is unverified (one click, attended) |
+| 7 | `x265_422` / `x265_444`: identified `hevc Rext 1920x1080 @ 25.000 fps`; `[SRT] HEVC SPS: Format Range Extensions (general_profile_idc 4), 4:2:2 (4:4:4), 10-bit luma / 10-bit chroma → refusing: … nothing is resampled to fit`; **banners (screenshots): "That stream is HEVC 4:2:2 10-bit — Manifold doesn’t play HEVC 4:2:2 over SRT yet. HEVC 4:2:0 (Main and Main 10) plays."**, and the same for 4:4:4; no format description, no decode (1 AU in, 0 pictures), no `[SPS-COLOR]`, no scope source; the window back at the empty state | **PASS** |
+| 8 | **SRT:** syncD 9 / 9 and hi8 11 / 11 lines **identical text** (`[SRT] container` / `stream` / `video:` / `colorimetry` / `decoded as`, `[SRT-AUDIO] stream`, `[SPS-COLOR]`, `[SRT-BUFFER]`); syncD 250, 0 holds, `[AV-CONTENT]` median **−0.07 (HEAD) / −0.04 ms (tree)**; hi8 **250 → 336 BEFORE the first anchor** on both, 0 holds. **WHEP** (MediaMTX, ffmpeg RTSP publisher, H.264 Constrained Baseline + Opus, the saved local WHEP bookmark): 29 / 29 structural lines; `[WHEP-DECODE] format description built — 1920x1080, SPS 27 bytes, PPS 4 bytes`, `keyframe acquired`, `[SPS-COLOR] WHEP: … → tagged` and the colorimetry line **identical**; the only differences are values that vary run to run (MediaMTX's answer SDP 1826 / 1822 bytes, the ephemeral ICE port, three startup realign depths, and the join moment: noFmt 34 / 33, so 1423 / 1424 frames of 1457), 0 errors on both. **Calibration** (soak fixture, +60 s): **−0.21 ms** (p10 −3.80, p90 +1.51) | **PASS** |
+| 9 | `swift test` **266 / 266** (263 + 3 format tests); `soaklog.test.mjs` 8 / 8; the C harness 200 / 200; Profile build, 11 warnings, the same set as HEAD's | **PASS** |
+
+**The first MediaMTX attempt was invalid: my sender lost its own IDR.** It published each file twice with
+`-stream_loop 1`. **ffmpeg's stream copy drops the second pass's IDR**: a local `-stream_loop 1 -c copy`
+of `hevc_pq_x265` has 599 AUs and one IDR. So every x265 stream through MediaMTX lost a picture
+everything after it referenced. Manifold did what the rule says: one `-12909`, the gate re-closed, a
+mid-stream post-anchor cushion step (the junction's timestamps read as a 302 ms reorder), and decoding
+resumed at the next CRA. `x265_709` has a CRA only every ~10 s, so it lost 244 pictures. The VT stream,
+IDR-only with no reordering, came through clean. Kept in `mtx-looped/` as a recovery-after-loss sample;
+Stage 4 owns that test. The table's MediaMTX results are the single-publish re-run.
+
+**Found on the way — MediaMTX makes up DTS for an HEVC stream with no reordering; the guess is 50 fps.**
+Through the running MediaMTX (v1.21.1, the `-abs` config) the VideoToolbox stream, whose source has
+`dts = pts` at 3600-tick steps, arrives with DTS alternating 1800- and 5400-tick steps (`dts ≠ pts`).
+`av_guess_frame_rate` reads that as **50.000 fps**. The x265 streams arrive at 25.000. The listener gives
+25.000 for both. That is the server's timestamping, not the HEVC path. Under the server-agnostic rule
+nothing here special-cases it. **Open for Robbie:** a VideoToolbox-encoded HEVC sender through MediaMTX
+would make DeckLink's Follow source pick 1080p50. Whether the rate should come from the SPS or VPS VUI
+timing first (when present) is a design question, not a Stage 3 change. Not checked: the default
+MediaMTX config, and H.264 over MediaMTX SRT.
+
+**Found on the way — the earlier stages' `[AV-CONTENT]` medians were the negative half only.** The
+scratch regex used from Stage 0b-2b on (`audio−now=([-\d.]+)`) cannot match a leading `+`, and the log
+prints positive figures with one, so every positive reading was dropped. Recomputed from the same logs
+with both signs (240 readings each):
+
+| run | recorded | negative half (reproduces the recorded figure) | all readings |
+|---|---|---|---|
+| 0b-2b syncD, HEAD `6132970` / tree | −0.77 / −0.75 | −0.77 / −0.75 | **−0.09 / −0.03** |
+| Stage 1 syncD, HEAD / tree | −0.77 / −0.81 | −0.77 / −0.81 | **−0.04 / −0.10** |
+| Stage 2 syncD, HEAD / tree | −0.83 / −0.82 | −0.83 / −0.82 | **−0.15 / −0.06** |
+
+Every verdict stands: each band was relative (±2 ms of the other build), and both builds carried the
+same bias. 0b-2a's −0.10 and 0b-1's −0.06 are true medians. The calibration figures are unaffected
+(they are the app's own `[CALIBRATION] RESULT`). Stage 3's figures above use both signs.
+
+**The unseen count at 25 fps.** The 12 s listener runs discarded 14–21 pictures unseen with 0 out of
+order (`pq` 20, `hlg` 21). 0b-2b's baseline of ≤ 19 was measured at 23.976 with 250 ms. The 240 s
+runs, judged against that baseline, read 14 and 10. It is the startup figure, not loss.
+
+**The drivers.** AppleScript's `entire contents of (first window whose subrole is "AXStandardWindow")`
+fails with −1700 in this window state, so the window-text reads and the DeckLink clicks failed. The
+helpers that address `group 1 of` the same window (the calibration sheet, the Connect Stream menu)
+worked. The banners were read from screenshots, as in Stage 1.
+
+**Defaults:** exported before the first launch (1 141 keys; `manifold.decklink.manualOutputMode` =
+`1080p23.98` stashed). After the last quit: 29 run-added `NSWindow Frame` keys, each absent from the
+snapshot, deleted by name; nothing removed or changed; the domain is dictionary-equal to the snapshot
+(1 141 keys). `streamBookmarks` was read (the WHEP bookmark, from the menu) and never written.
+
+**Stage 3: items 1–5 and 7–9 met. Item 6 is partly met: the rate and the derived mode pass, and the
+switch to Follow source needs one attended click.**
 
 ---
 

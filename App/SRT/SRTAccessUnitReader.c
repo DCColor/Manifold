@@ -15,7 +15,9 @@
 #include <string.h>
 
 struct ManifoldSRTAccessUnitReader {
-    ManifoldH264AccessUnitBuilder *builder;
+    ManifoldSRTVideoCodec          codec;
+    ManifoldH264AccessUnitBuilder *builder;       // H.264 (and any codec the gate refuses)
+    ManifoldHEVCAccessUnitBuilder *hevcBuilder;   // HEVC; exactly one of the two exists
     ManifoldSRTAccessUnitHandler   handler;
     void                          *handlerContext;
     ManifoldSRTAccessUnitReaderStats stats;
@@ -35,18 +37,83 @@ static void MDAppendScannedNAL(const uint8_t *nal, size_t size, void *context) {
     ManifoldH264AccessUnitBuilderAppendNAL(reader->builder, nal, size, 0);
 }
 
-ManifoldSRTAccessUnitReader *ManifoldSRTAccessUnitReaderCreate(void) {
+/// The HEVC builder takes no timestamp at all: it has only the accessor path, where the packet is
+/// the boundary and the reader stamps the AU.
+static void MDAppendScannedHEVCNAL(const uint8_t *nal, size_t size, void *context) {
+    ManifoldSRTAccessUnitReader *reader = (ManifoldSRTAccessUnitReader *)context;
+    ManifoldHEVCAccessUnitBuilderAppendNAL(reader->hevcBuilder, nal, size);
+}
+
+ManifoldSRTAccessUnitReader *ManifoldSRTAccessUnitReaderCreate(ManifoldSRTVideoCodec codec) {
     ManifoldSRTAccessUnitReader *reader = calloc(1, sizeof(*reader));
     if (!reader) return NULL;
-    reader->builder = ManifoldH264AccessUnitBuilderCreate();
-    if (!reader->builder) { free(reader); return NULL; }
+    reader->codec = codec == ManifoldSRTVideoCodecHEVC ? ManifoldSRTVideoCodecHEVC : ManifoldSRTVideoCodecH264;
+    if (reader->codec == ManifoldSRTVideoCodecHEVC) {
+        reader->hevcBuilder = ManifoldHEVCAccessUnitBuilderCreate();
+        if (!reader->hevcBuilder) { free(reader); return NULL; }
+    } else {
+        reader->builder = ManifoldH264AccessUnitBuilderCreate();
+        if (!reader->builder) { free(reader); return NULL; }
+    }
     return reader;
 }
 
 void ManifoldSRTAccessUnitReaderDestroy(ManifoldSRTAccessUnitReader *reader) {
     if (!reader) return;
     ManifoldH264AccessUnitBuilderDestroy(reader->builder);
+    ManifoldHEVCAccessUnitBuilderDestroy(reader->hevcBuilder);
     free(reader);
+}
+
+/// The timestamp policy below, shared by both codecs. Returns the PTS to stamp and counts.
+static int64_t MDEffectivePTS(ManifoldSRTAccessUnitReader *reader, int64_t pts, int64_t dts);
+
+/// HEVC's half of SubmitPacket: scan, read back, dispatch, flush — the H.264 sequence, through the
+/// HEVC builder and with HEVC's fields on the access unit.
+static void MDSubmitHEVC(ManifoldSRTAccessUnitReader *reader, const uint8_t *annexB, size_t size,
+                         int64_t pts, int64_t dts) {
+    const ManifoldH264AnnexBScanResult scan =
+        ManifoldH264AnnexBScan(annexB, size, MDAppendScannedHEVCNAL, reader);
+    reader->stats.nalsScanned         += scan.nalCount;
+    reader->stats.emptyNALsScanned    += scan.emptyNALs;
+    reader->stats.leadingGarbageBytes += scan.bytesBeforeFirstStartCode;
+    if (!scan.foundStartCode) { reader->stats.packetsWithoutStartCode++; return; }
+
+    ManifoldHEVCAccessUnitContents contents;
+    if (!ManifoldHEVCAccessUnitBuilderCopyAccessUnitContents(reader->hevcBuilder, &contents)) {
+        // Parameter sets or SEI alone, or an oversize AU — as on H.264, below.
+        reader->stats.packetsWithoutAccessUnit++;
+        ManifoldHEVCAccessUnitBuilderFlush(reader->hevcBuilder);
+        return;
+    }
+
+    const int64_t effectivePTS = MDEffectivePTS(reader, pts, dts);
+    const bool keyframe = contents.randomAccessType != 0;
+    reader->stats.accessUnits++;
+    if (keyframe) reader->stats.keyframes++;
+
+    if (reader->handler) {
+        ManifoldSRTAccessUnit accessUnit = {
+            .codec                = ManifoldSRTVideoCodecHEVC,
+            .data                 = contents.data,
+            .size                 = contents.size,
+            .pts                  = effectivePTS,
+            .dts                  = dts,
+            .keyframe             = keyframe,
+            .parameterSetsChanged = contents.parameterSetsChanged,
+            .sps                  = contents.sps,
+            .spsSize              = contents.spsSize,
+            .vps                  = contents.vps,
+            .vpsSize              = contents.vpsSize,
+            .ppsList              = contents.ppsList,
+            .ppsListSize          = contents.ppsListSize,
+            .ppsCount             = contents.ppsCount,
+            .randomAccessType     = contents.randomAccessType,
+            .rasl                 = contents.rasl,
+        };
+        reader->handler(&accessUnit, reader->handlerContext);
+    }
+    ManifoldHEVCAccessUnitBuilderFlush(reader->hevcBuilder);
 }
 
 void ManifoldSRTAccessUnitReaderSetHandler(ManifoldSRTAccessUnitReader *reader,
@@ -64,6 +131,7 @@ void ManifoldSRTAccessUnitReaderSubmitPacket(ManifoldSRTAccessUnitReader *reader
 
     reader->stats.packetsReceived++;
     if (!annexB || size == 0) { reader->stats.packetsEmpty++; return; }
+    if (reader->codec == ManifoldSRTVideoCodecHEVC) { MDSubmitHEVC(reader, annexB, size, pts, dts); return; }
 
     const ManifoldH264AnnexBScanResult scan =
         ManifoldH264AnnexBScan(annexB, size, MDAppendScannedNAL, reader);
@@ -121,19 +189,14 @@ void ManifoldSRTAccessUnitReaderSubmitPacket(ManifoldSRTAccessUnitReader *reader
     // picture either. The caller decides, and Stage 3d did: an AU with no PTS
     // cannot be scheduled against LiveClock, so SRTFrameRouter.handleAccessUnit
     // DROPS it and reports the count as [SRT-FLOW]'s `noPTS`.
-    int64_t effectivePTS = pts;
-    if (effectivePTS == MANIFOLD_SRT_NO_TIMESTAMP && dts != MANIFOLD_SRT_NO_TIMESTAMP) {
-        effectivePTS = dts;
-        reader->stats.accessUnitsPTSFromDTS++;
-    }
-    if (dts == MANIFOLD_SRT_NO_TIMESTAMP)          reader->stats.accessUnitsWithoutDTS++;
-    if (effectivePTS == MANIFOLD_SRT_NO_TIMESTAMP) reader->stats.accessUnitsWithoutPTS++;
+    const int64_t effectivePTS = MDEffectivePTS(reader, pts, dts);
 
     reader->stats.accessUnits++;
     if (contents.keyframe) reader->stats.keyframes++;
 
     if (reader->handler) {
         ManifoldSRTAccessUnit accessUnit = {
+            .codec                = ManifoldSRTVideoCodecH264,
             .data                 = contents.data,
             .size                 = contents.size,
             .pts                  = effectivePTS,
@@ -153,6 +216,17 @@ void ManifoldSRTAccessUnitReaderSubmitPacket(ManifoldSRTAccessUnitReader *reader
     ManifoldH264AccessUnitBuilderFlush(reader->builder);
 }
 
+static int64_t MDEffectivePTS(ManifoldSRTAccessUnitReader *reader, int64_t pts, int64_t dts) {
+    int64_t effectivePTS = pts;
+    if (effectivePTS == MANIFOLD_SRT_NO_TIMESTAMP && dts != MANIFOLD_SRT_NO_TIMESTAMP) {
+        effectivePTS = dts;
+        reader->stats.accessUnitsPTSFromDTS++;
+    }
+    if (dts == MANIFOLD_SRT_NO_TIMESTAMP)          reader->stats.accessUnitsWithoutDTS++;
+    if (effectivePTS == MANIFOLD_SRT_NO_TIMESTAMP) reader->stats.accessUnitsWithoutPTS++;
+    return effectivePTS;
+}
+
 void ManifoldSRTAccessUnitReaderCopyStats(const ManifoldSRTAccessUnitReader *reader,
                                           ManifoldSRTAccessUnitReaderStats *outStats) {
     if (!outStats) return;
@@ -164,4 +238,10 @@ void ManifoldSRTAccessUnitReaderCopyBuilderStats(const ManifoldSRTAccessUnitRead
                                                  ManifoldH264AccessUnitBuilderStats *outStats) {
     if (!outStats) return;
     ManifoldH264AccessUnitBuilderCopyStats(reader ? reader->builder : NULL, outStats);
+}
+
+void ManifoldSRTAccessUnitReaderCopyHEVCBuilderStats(const ManifoldSRTAccessUnitReader *reader,
+                                                     ManifoldHEVCAccessUnitBuilderStats *outStats) {
+    if (!outStats) return;
+    ManifoldHEVCAccessUnitBuilderCopyStats(reader ? reader->hevcBuilder : NULL, outStats);
 }

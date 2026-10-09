@@ -69,28 +69,60 @@ public enum HEVCSPSColor {
 
     static func walk<Bytes: Collection>(nal: Bytes, mutant: Mutant? = nil) -> (color: SPSColor, walk: Walk)
     where Bytes.Element == UInt8 {
+        let all = walkAll(nal: nal, mutant: mutant)
+        return (all.color, all.walk)
+    }
+
+    // MARK: - The format: profile, chroma format, bit depths
+
+    /// What the SRT gate needs from an HEVC SPS (§6.10, Stage 3; decision 7): the general profile, the
+    /// chroma format and the bit depths. Read by the same walk as the colour, which stops at
+    /// `matrix_coefficients`; the format fields come early in it, so an SPS damaged LATER still has a
+    /// format. `nil` when the SPS ends, or is out of range, before the bit depths.
+    public static func format<Bytes: Collection>(nal: Bytes) -> HEVCSPSFormat? where Bytes.Element == UInt8 {
+        let all = walkAll(nal: nal, mutant: nil)
+        guard all.shape.bitDepthsRead else { return nil }
+        return HEVCSPSFormat(generalProfileIdc: all.shape.generalProfileIdc,
+                             generalProfileCompatibility: all.shape.generalProfileCompatibility,
+                             chromaFormatIdc: all.walk.chromaFormatIdc,
+                             bitDepthLuma: all.walk.bitDepthLumaMinus8 + 8,
+                             bitDepthChroma: all.walk.bitDepthChromaMinus8 + 8)
+    }
+
+    /// What `format` reads that `Walk` does not hold. Kept out of `Walk` so that the thirty
+    /// field-by-field `trace_headers` expectations stay exactly what Stage 2 verified.
+    private struct Shape {
+        var generalProfileIdc = 0
+        var generalProfileCompatibility: UInt32 = 0
+        var bitDepthsRead = false
+    }
+
+    private static func walkAll<Bytes: Collection>(nal: Bytes, mutant: Mutant?)
+    -> (color: SPSColor, walk: Walk, shape: Shape) where Bytes.Element == UInt8 {
         var w = Walk()
+        var shape = Shape()
         // The 2-byte header (§7.3.1.2): forbidden_zero_bit, nal_unit_type(6), nuh_layer_id(6),
         // nuh_temporal_id_plus1(3). Plus at least the VPS id and the sub-layer count.
-        guard nal.count >= 4 else { return (SPSColor(reach: .notAnSPS), w) }
+        guard nal.count >= 4 else { return (SPSColor(reach: .notAnSPS), w, shape) }
         let b0 = nal[nal.startIndex], b1 = nal[nal.index(after: nal.startIndex)]
         guard b0 & 0x80 == 0,                           // forbidden_zero_bit
               (b0 >> 1) & 0x3F == 33,                   // nal_unit_type 33 = SPS. A VPS or PPS must not parse as one.
               ((b0 & 1) << 5) | (b1 >> 3) == 0,         // nuh_layer_id 0: base layer only (decision 8)
               b1 & 0x07 != 0 else {                     // nuh_temporal_id_plus1 0 is forbidden
-            return (SPSColor(reach: .notAnSPS), w)
+            return (SPSColor(reach: .notAnSPS), w, shape)
         }
-        guard nal.count <= SPSColor.maximumSPSBytes else { return (SPSColor(reach: .malformed), w) }
+        guard nal.count <= SPSColor.maximumSPSBytes else { return (SPSColor(reach: .malformed), w, shape) }
 
         let payload = nal.dropFirst(2)
         var r = BitReader(rbsp: mutant == .keepEmulationPrevention ? Array(payload) : SPSColor.unescape(payload))
-        let color = readSPS(&r, &w, mutant)
-        return (color, w)
+        let color = readSPS(&r, &w, &shape, mutant)
+        return (color, w, shape)
     }
 
     // MARK: - seq_parameter_set_rbsp(), H.265 §7.3.2.2.1, nuh_layer_id 0, up to the colour fields
 
-    private static func readSPS(_ r: inout BitReader, _ w: inout Walk, _ mutant: Mutant?) -> SPSColor {
+    private static func readSPS(_ r: inout BitReader, _ w: inout Walk, _ shape: inout Shape,
+                                _ mutant: Mutant?) -> SPSColor {
         let malformed = SPSColor(reach: .malformed)
 
         _ = r.bits(4)                                   // sps_video_parameter_set_id
@@ -98,7 +130,7 @@ public enum HEVCSPSColor {
         guard maxSubLayersMinus1 <= 6 else { return malformed }   // 7 is not allowed
         w.maxSubLayersMinus1 = maxSubLayersMinus1
         _ = r.bit()                                     // sps_temporal_id_nesting_flag
-        guard skipProfileTierLevel(&r, maxSubLayersMinus1: maxSubLayersMinus1) else { return malformed }
+        guard skipProfileTierLevel(&r, maxSubLayersMinus1: maxSubLayersMinus1, shape: &shape) else { return malformed }
 
         guard r.ue() <= 15 else { return malformed }    // sps_seq_parameter_set_id
         let chromaFormatIdc = r.ue()
@@ -114,6 +146,7 @@ public enum HEVCSPSColor {
         w.bitDepthLumaMinus8 = r.ue()
         w.bitDepthChromaMinus8 = r.ue()
         guard w.bitDepthLumaMinus8 <= 8, w.bitDepthChromaMinus8 <= 8 else { return malformed }
+        shape.bitDepthsRead = !r.overrun
         w.log2MaxPocLsbMinus4 = r.ue()                  // log2_max_pic_order_cnt_lsb_minus4
         guard w.log2MaxPocLsbMinus4 <= 12 else { return malformed }
 
@@ -204,8 +237,14 @@ public enum HEVCSPSColor {
 
     /// The general profile is 88 bits and the level 8; each sub-layer may repeat either. With any
     /// sub-layers at all, the flags are padded to eight entries with reserved_zero_2bits.
-    private static func skipProfileTierLevel(_ r: inout BitReader, maxSubLayersMinus1: Int) -> Bool {
-        _ = r.bits(88)                                  // general profile space … general_inbld_flag
+    private static func skipProfileTierLevel(_ r: inout BitReader, maxSubLayersMinus1: Int,
+                                             shape: inout Shape) -> Bool {
+        // The general profile's 88 bits, read as the format needs them and stepped over otherwise.
+        _ = r.bits(2)                                   // general_profile_space
+        _ = r.bit()                                     // general_tier_flag
+        shape.generalProfileIdc = r.bits(5)             // general_profile_idc
+        shape.generalProfileCompatibility = UInt32(truncatingIfNeeded: r.bits(32)) // ..._compatibility_flag[0…31]
+        _ = r.bits(48)                                  // progressive_source_flag … general_inbld_flag
         _ = r.bits(8)                                   // general_level_idc
         var profilePresent: [Bool] = [], levelPresent: [Bool] = []
         for _ in 0..<maxSubLayersMinus1 {
@@ -288,5 +327,63 @@ public enum HEVCSPSColor {
             _ = r.bit()                                 // used_by_curr_pic_s0/s1_flag
         }
         return r.overrun ? nil : negative + positive
+    }
+}
+
+// MARK: - The format an HEVC SPS declares
+
+/// Profile, chroma format and bit depths of one HEVC SPS: what the SRT gate decides on (§6.10, Stage 3;
+/// decision 7). The colour is `SPSColor`'s; this is only the shape of the samples.
+public struct HEVCSPSFormat: Equatable, Sendable {
+    public let generalProfileIdc: Int
+    /// `general_profile_compatibility_flag[j]` at bit `31 - j`, as it is coded.
+    public let generalProfileCompatibility: UInt32
+    public let chromaFormatIdc: Int
+    public let bitDepthLuma: Int
+    public let bitDepthChroma: Int
+
+    public init(generalProfileIdc: Int, generalProfileCompatibility: UInt32, chromaFormatIdc: Int,
+                bitDepthLuma: Int, bitDepthChroma: Int) {
+        self.generalProfileIdc = generalProfileIdc
+        self.generalProfileCompatibility = generalProfileCompatibility
+        self.chromaFormatIdc = chromaFormatIdc
+        self.bitDepthLuma = bitDepthLuma
+        self.bitDepthChroma = bitDepthChroma
+    }
+
+    /// The profile names a Main or Main 10 decoder (A.3.2, A.3.3): `general_profile_idc` 1 or 2, or the
+    /// compatibility flag for either (a Main Still Picture stream sets Main's).
+    public var isMainOrMain10: Bool {
+        func compatible(_ j: Int) -> Bool { generalProfileCompatibility & (UInt32(1) << UInt32(31 - j)) != 0 }
+        return generalProfileIdc == 1 || generalProfileIdc == 2 || compatible(1) || compatible(2)
+    }
+
+    /// HEVC Main or Main 10 at 4:2:0 and at most 10 bits: what Manifold plays over SRT today. 4:2:2 is
+    /// Stage 3b; 4:4:4 stays refused.
+    public var isSupported420: Bool {
+        isMainOrMain10 && chromaFormatIdc == 1 && bitDepthLuma <= 10 && bitDepthChroma <= 10
+    }
+
+    /// "4:2:0", "4:2:2", "4:4:4", or "4:0:0" (monochrome).
+    public var chromaName: String {
+        switch chromaFormatIdc {
+        case 0:  return "4:0:0"
+        case 1:  return "4:2:0"
+        case 2:  return "4:2:2"
+        default: return "4:4:4"
+        }
+    }
+
+    /// The general profile by name (H.265 Annex A), for the log and the banner.
+    public var profileName: String {
+        switch generalProfileIdc {
+        case 1:  return "Main"
+        case 2:  return "Main 10"
+        case 3:  return "Main Still Picture"
+        case 4:  return "Format Range Extensions"
+        case 5:  return "High Throughput"
+        case 9:  return "Screen Content Coding"
+        default: return "profile \(generalProfileIdc)"
+        }
     }
 }

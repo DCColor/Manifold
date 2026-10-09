@@ -311,6 +311,40 @@ final class SRTFrameRouter {
     /// ones instead of against WHEP's.
     private var decoder: LiveVideoDecoder?
 
+    // MARK: - The HEVC format gate (SESSION THREAD only)
+    //
+    // DECISION 7 (§6.10, Stage 3): HEVC Main and Main 10 at 4:2:0 play; 4:2:2 and 4:4:4 are refused
+    // with a banner until Stage 3b; nothing is ever resampled to 4:2:0 to make it fit. The demuxer
+    // cannot say which — the parser's pixel format never reaches codecpar in this build, and its
+    // profile name is "Rext" for all three chroma formats — so the answer is the SPS's own, read by
+    // `HEVCSPSColor.format` BEFORE the access unit reaches the decoder. A refused stream is never
+    // decoded, so it cannot be converted by accident on the way to the screen.
+
+    /// The SPS the gate last judged; a new one is judged again (a mid-stream change to 4:2:2 is
+    /// refused like a first one).
+    private var formatCheckedSPS: Data?
+    /// Set once the gate refuses; every later access unit is dropped until the session ends.
+    private var formatRefused = false
+    /// SRTClient's hop to main: banner and teardown, carrying its session generation.
+    private var onFormatRefused: ((String) -> Void)?
+
+    /// The decoder again, for MAIN's session-totals line. Under `stateLock`: `decoder` itself belongs
+    /// to the session thread. The totals line can run AFTER `releaseSessionResources` (a peer close
+    /// releases on the session thread first, then hops to main), so the codec and the decoder's last
+    /// counters are kept past the release, until the next stream's `prepareDecoder`.
+    private var statsDecoder: LiveVideoDecoder?
+    private var statsFinalDecoder: LiveVideoDecoder.Stats?
+    private var statsDecodingHEVC = false
+
+    /// Whether the current (or just-ended) stream is HEVC. Any thread.
+    var decodingHEVC: Bool { stateLock.withLock { statsDecodingHEVC } }
+
+    /// The decoder's counters: live, or as they stood at release. Any thread.
+    func decoderSnapshot() -> LiveVideoDecoder.Stats? {
+        let (decoder, final) = stateLock.withLock { (statsDecoder, statsFinalDecoder) }
+        return decoder?.snapshot() ?? final
+    }
+
     private var transferSession: VTPixelTransferSession?
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolSize: (width: Int, height: Int) = (0, 0)
@@ -661,8 +695,12 @@ final class SRTFrameRouter {
     ///
     /// `onColorimetry` is called on THIS thread with each change of the stream's SPS colour — the
     /// first one activates the route; see the colorimetry block.
+    ///
+    /// `onRefused` is called on THIS thread, at most once, when the HEVC format gate refuses the
+    /// stream (decision 7), with the banner's words.
     func prepareDecoder(format: ManifoldSRTVideoFormat,
-                        onColorimetry: @escaping (StreamColorimetry, _ first: Bool, _ delay: Double) -> Void) {
+                        onColorimetry: @escaping (StreamColorimetry, _ first: Bool, _ delay: Double) -> Void,
+                        onRefused: @escaping (String) -> Void) {
         // AVColorRange: 0 unspecified, 1 MPEG/limited, 2 JPEG/full. UNDECLARED ASSUMES LIMITED: H.264
         // with no `video_full_range_flag` IS limited by the standard's own default.
         formatRange = (isFullRange: format.colorRange == 2, declared: format.colorRange != 0)
@@ -670,6 +708,9 @@ final class SRTFrameRouter {
         haveSPSColor = false
         announcedColorimetry = nil
         onStreamColorimetry = onColorimetry
+        onFormatRefused = onRefused
+        formatCheckedSPS = nil
+        formatRefused = false
         declaredVideoDelay = format.videoDelay
         reorderMaxSeconds = 0
         reorderExceedances = 0
@@ -718,7 +759,10 @@ final class SRTFrameRouter {
                 + "publishing no rate; DeckLink Follow source will be unavailable for this stream")
         }
 
-        let decoder = LiveVideoDecoder(logTag: "SRT-DECODE")
+        // The codec the C reader chose its builder by (`ManifoldSRTVideoFormat.codec`), so the decoder
+        // and the builder cannot disagree. Anything else is refused on main before it matters.
+        let decoder = LiveVideoDecoder(logTag: "SRT-DECODE",
+                                       codec: format.codec == ManifoldSRTVideoCodecHEVC ? .hevc : .h264)
         decoder.onDecodedFrame = { [weak self] pixelBuffer, pts in
             self?.deliver(pixelBuffer, pts: pts)
         }
@@ -734,6 +778,11 @@ final class SRTFrameRouter {
         // Each new SPS's colour, on this thread, before the access unit carrying it is decoded.
         decoder.onSPSColor = { [weak self] sps in self?.noteSPSColor(sps) }
         self.decoder = decoder
+        stateLock.withLock {
+            statsDecoder = decoder
+            statsFinalDecoder = nil
+            statsDecodingHEVC = format.codec == ManifoldSRTVideoCodecHEVC
+        }
     }
 
     /// A new SPS has been read. SESSION THREAD, from the decoder, before its access unit decodes —
@@ -764,8 +813,16 @@ final class SRTFrameRouter {
         // here for the same reason the video decoder is — this is the one instant at which the
         // owning thread is both alive and guaranteed idle.
         teardownAudio()
+        let finalStats = decoder?.snapshot()
         decoder?.invalidate()
         decoder = nil
+        stateLock.withLock {
+            statsDecoder = nil
+            statsFinalDecoder = finalStats
+        }
+        onFormatRefused = nil
+        formatCheckedSPS = nil
+        formatRefused = false
         haveSPSColor = false
         announcedColorimetry = nil
         onStreamColorimetry = nil
@@ -840,15 +897,92 @@ final class SRTFrameRouter {
 
         let data = Data(bytes: accessUnit.data, count: accessUnit.size)
         let sps = accessUnit.sps.map { Data(bytes: $0, count: accessUnit.spsSize) }
-        let pps = accessUnit.pps.map { Data(bytes: $0, count: accessUnit.ppsSize) }
 
+        guard accessUnit.codec == ManifoldSRTVideoCodecHEVC else {
+            let pps = accessUnit.pps.map { Data(bytes: $0, count: accessUnit.ppsSize) }
+            decoder.decode(accessUnit: data,
+                           sps: sps,
+                           pps: pps,
+                           parameterSetsChanged: accessUnit.parameterSetsChanged,
+                           keyframe: accessUnit.keyframe,
+                           pts: pts,
+                           dts: dts)
+            return
+        }
+
+        // ── HEVC ───────────────────────────────────────────────────────────────────────────────
+        // The format gate first: a refused SPS never reaches the decoder.
+        guard !formatRefused else { return }
+        if let sps, sps != formatCheckedSPS {
+            formatCheckedSPS = sps
+            guard admitHEVCFormat(sps) else { return }
+        }
+
+        let vps = accessUnit.vps.map { Data(bytes: $0, count: accessUnit.vpsSize) }
+        let ppsList = Self.unpackParameterSets(accessUnit.ppsList, size: accessUnit.ppsListSize)
         decoder.decode(accessUnit: data,
                        sps: sps,
-                       pps: pps,
+                       pps: ppsList.first,
                        parameterSetsChanged: accessUnit.parameterSetsChanged,
                        keyframe: accessUnit.keyframe,
                        pts: pts,
-                       dts: dts)
+                       dts: dts,
+                       vps: vps,
+                       morePPS: Array(ppsList.dropFirst()),
+                       randomAccessType: accessUnit.randomAccessType,
+                       rasl: accessUnit.rasl)
+    }
+
+    /// The HEVC format gate, on one new SPS. SESSION THREAD. True when the stream may be decoded.
+    ///
+    /// An SPS whose format cannot be read is let through: it is not a 4:2:2 stream we know of, and the
+    /// decoder's own format description will fail on it loudly if it is garbage.
+    private func admitHEVCFormat(_ sps: Data) -> Bool {
+        guard let format = HEVCSPSColor.format(nal: sps) else {
+            NSLog("[SRT] HEVC SPS: format unreadable (%d bytes) — passed to the decoder unjudged", sps.count)
+            return true
+        }
+        let described = "\(format.profileName) (general_profile_idc \(format.generalProfileIdc)), "
+            + "\(format.chromaName), \(format.bitDepthLuma)-bit luma / \(format.bitDepthChroma)-bit chroma"
+        if format.isSupported420 {
+            NSLog("[SRT] HEVC SPS: %@ → accepted", described)
+            return true
+        }
+
+        // NEVER RESAMPLED. The refusal is the whole of the handling: nothing below this line decodes.
+        let depth = format.bitDepthLuma == format.bitDepthChroma
+            ? "\(format.bitDepthLuma)-bit" : "\(format.bitDepthLuma)/\(format.bitDepthChroma)-bit"
+        let banner: String
+        switch format.chromaFormatIdc {
+        case 2, 3:
+            banner = "That stream is HEVC \(format.chromaName) \(depth) — Manifold doesn’t play HEVC "
+                + "\(format.chromaName) over SRT yet. HEVC 4:2:0 (Main and Main 10) plays."
+        default:
+            banner = "That stream is HEVC \(format.profileName), \(format.chromaName) \(depth) — Manifold "
+                + "plays HEVC Main and Main 10 (4:2:0, up to 10-bit) over SRT."
+        }
+        NSLog("[SRT] HEVC SPS: %@ → refusing: Manifold plays HEVC Main and Main 10 at 4:2:0 over SRT; "
+              + "nothing is resampled to fit", described)
+        formatRefused = true
+        onFormatRefused?(banner)
+        onFormatRefused = nil
+        return false
+    }
+
+    /// The reader's packed parameter-set run (4-byte big-endian length, then the NAL, repeated) as
+    /// separate NALs. Bounds-checked: a length that overruns ends the walk.
+    private static func unpackParameterSets(_ base: UnsafePointer<UInt8>?, size: Int) -> [Data] {
+        guard let base, size > 0 else { return [] }
+        var sets: [Data] = []
+        var offset = 0
+        while offset + 4 <= size {
+            let n = Int(base[offset]) << 24 | Int(base[offset + 1]) << 16 | Int(base[offset + 2]) << 8 | Int(base[offset + 3])
+            offset += 4
+            guard n > 0, offset + n <= size else { break }
+            sets.append(Data(bytes: base + offset, count: n))
+            offset += n
+        }
+        return sets
     }
 
     /// The runtime half of the reorder requirement, run per access unit on the session thread.
@@ -927,9 +1061,9 @@ final class SRTFrameRouter {
         guard now - lastKeyframeWaitLog >= 1.0 else { return }
         lastKeyframeWaitLog = now
         NSLog("""
-              [SRT-AU] waiting for an IDR — SRT has no back-channel, so there is no PLI to send. \
-              The picture holds until the sender's next keyframe (≈1s on OBS defaults, longer on a \
-              5s or 10s interval).
+              [SRT-AU] waiting for a keyframe (H.264: an IDR; HEVC: any random-access picture) — SRT \
+              has no back-channel, so there is no PLI to send. The picture holds until the sender's \
+              next keyframe (≈1s on OBS defaults, longer on a 5s or 10s interval).
               """)
     }
     private var lastKeyframeWaitLog: CFTimeInterval = 0

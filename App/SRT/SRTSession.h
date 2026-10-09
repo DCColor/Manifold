@@ -174,6 +174,9 @@ typedef struct {
     int32_t videoDelay;
 
     double  guessedFrameRate;    ///< av_guess_frame_rate, or 0 when unknown.
+    /// The codec as the reader sees it — the SAME test that chose the reader's builder, so the decoder
+    /// the Swift side builds cannot disagree with it. Unsupported for anything but H.264 and HEVC.
+    ManifoldSRTVideoCodec codec;
     char    codecName[32];       ///< "h264", "hevc", …
     char    profileName[48];     ///< "High", "Constrained Baseline", … or "unknown".
 } ManifoldSRTVideoFormat;
@@ -368,9 +371,13 @@ void ManifoldSRTSessionCopyTransportStats(const ManifoldSRTSession *session,
                                           uint64_t *outRecvTimeouts);
 
 /// The shared H.264 layer's counters — NAL types, oversize AUs — for the session-totals line.
-/// Same threading caveat as the two above.
+/// Same threading caveat as the two above. Zeroed on an HEVC stream.
 void ManifoldSRTSessionCopyReaderBuilderStats(const ManifoldSRTSession *session,
                                               ManifoldH264AccessUnitBuilderStats *outStats);
+
+/// The HEVC layer's counters, for the same line on an HEVC stream. Zeroed on H.264.
+void ManifoldSRTSessionCopyReaderHEVCBuilderStats(const ManifoldSRTSession *session,
+                                                  ManifoldHEVCAccessUnitBuilderStats *outStats);
 
 #ifdef __cplusplus
 }
