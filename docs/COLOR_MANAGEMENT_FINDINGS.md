@@ -2431,6 +2431,180 @@ same file showed it too, 33.5 ms).
   **28 gaps in 10.8 s** (BUGS.md's count was 24 in 9.5 s). At that rate 206 s would hold ~530.
 - **PASS: Manifold added no gap in 3 min 24 s of hi8.**
 
+**Committed as `6132970`.**
+
+#### Stage 0b-2b — the reorder term: predictions, written 2026-10-08 before the code changed
+
+**Decided (Robbie, 2026-10-08, buffer review decision 2):** SRT cushion = max(0.250, 1.5 × largest PES
++ 0.08 s, **largest observed max(pts − dts) + 0.05 s**), clamped to 1.0 s, grow-only. The mechanics
+are 0b-2a's: set before the first anchor when known (the first GOP usually is enough), otherwise a
+`LiveClock` re-anchor with the matched audio splice; telemetry follows; calibration restarts on a
+mid-measurement step. The readout names the term that raised it ("the stream reorders 209 ms of
+pictures"). The reorder warning stays only for a stream the 1.0 s clamp cannot cover, and points at no
+shortcut. The 75 % "within reach" line goes: with the cushion following the reorder, every B-frame
+stream would trip it (Cloudflare 0.208 against 0.258 is 81 %).
+
+**What changes:**
+- `LiveCushion`: the third term, and a `Reason` (packing / reorder) carried to the readout. The
+  readout names the winning term; a tie names the packing.
+- `SRTFrameRouter.recordReorderDelay`: a new maximum asks for the cushion BEFORE the access unit is
+  judged, so the picture that revealed a deeper reorder is compared against the raised target.
+  `[SRT-BUFFER]` lines name the term.
+- **The warning:** the log line and the banner fire when the reorder needs more than the ceiling
+  (max(pts − dts) + 0.05 s > 1.0 s), or when a picture actually arrives at or beyond the target. The
+  banner wording states the limit and the loss; it names no key.
+- **One measurement probe, DEBUG only:** SRT installs the renderer's existing `onFrameSelected` hook
+  and counts pictures discarded unseen (`skipped`), logged at release as `[SRT-FLOW] pictures
+  discarded unseen`. The exceedance counter is the model's count of late pictures; this is the
+  renderer's. Added to the existing pre-ship entry for that hook.
+
+**Measured offline first** (`framecrc` of each fixture after the sender's own remux, `-c copy
+-pes_payload_size 0`; 90 kHz):
+
+| fixture | built with | max(pts − dts) | reorder term |
+|---|---|---|---|
+| `syncD-23.976p-inj0.ts`, `soak33.ts` | — | **0** (no B-frames) | 0.050 |
+| hi8, hi25, lo150 | x264 defaults, 25 fps | **200.0 ms** (5 frames) | 0.250, = the floor: no raise |
+| `b3nopyr` | x264 `bframes=3:b-pyramid=none`, 23.976 | 125.1 ms | 0.175: no raise |
+| `b3pyr` | `bframes=3:b-pyramid=normal`, 23.976 | **208.5 ms** (5 frames, as Cloudflare's OBS) | **0.2585** |
+| `b8pyr` | `bframes=8:b-pyramid=normal:b-adapt=0`, 23.976 | **417.1 ms** (10 frames) | **0.4671** |
+| `b16pyr` | `bframes=16:b-pyramid=normal:b-adapt=0`, 23.976 | **750.8 ms** (18 frames) | **0.8008** |
+| `b16at15` | the same at 15 fps | **1200 ms** (18 frames) | 1.25 → **clamped 1.0** |
+
+The B-frame fixtures are 60 s of `testsrc2` 1080p at 8 Mb/s with a 1 kHz tone, AAC 128 kb/s, one AAC
+frame per PES (packing term 0.112 s, below the floor), so the reorder term is the only one in play.
+
+**Builds:** HEAD `6132970` (`.build-cc/s0b2bhead-Profile`) and the 0b-2b tree
+(`.build-cc/s0b2b-Profile`), unsigned Profile. **Driver:** `scripts/soak/repro/run.sh`, sender at
+`-pes_payload_size 0` except hi8 (ffmpeg's default packing, as in 0b-2a). Unattended first; then
+Cloudflare SRT attended, one step at a time.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | syncD, both builds | cushion 250, no raise, no reorder line | no `[SRT-BUFFER] cushion` line; readout `Buffer 250 ms + SRT 120 ms`; 0 holds; `[AV-CONTENT]` median within ±2 ms of HEAD's same-day run (6132970 measured −0.16) |
+| 2 | soak fixture, one calibration at +60 s | as 6132970 (+0.23 ms) | **within ±2 ms of +0.23**; cushion 250; 0 holds |
+| 3 | `b3nopyr` (shallow) | no raise | as item 1; 0 discarded unseen |
+| 4 | `b3pyr` | **258.5 ms** (readout **259 ms**), raised before the anchor; readout "259 ms + SRT 120 ms — raised 9 ms: the stream reorders 209 ms of pictures". HEAD: 250, the 75 % line, 0 exceedances | raise line says BEFORE the first anchor, 0.2585 ± 0.001; **0 target-step jumps; 0 exceedances; 0 discarded unseen; 0 reorder warnings or banner; 0 holds** |
+| 5 | `b8pyr` | **467.1 ms**, before the anchor; queue bound 57. **HEAD: the shortfall banner, ~150 exceedances in 60 s** (every 10th-frame P at 417 ms) | as item 4, at 0.4671 ± 0.001. HEAD must show the loss (exceedances > 0), or the fixture proves nothing |
+| 6 | `b16pyr` | **800.8 ms**, before the anchor; queue bound 97; the first picture ~0.55 s later than at 250 (the startup fill) | as item 4, at 0.8008 ± 0.001 |
+| 7 | `b16at15` (beyond the clamp) | **1.0 s** before the anchor; the warning line and banner, once; exceedances ≈ 45 (the 1.2 s pictures); discarded unseen ≈ the same | cushion 1000; exactly one warning line and one banner, naming 1200 ms and the 1000 ms limit, no key named; exceedances and discarded-unseen both > 0 |
+| 8 | hi8 (coarse packing) | packing wins: **336 ms**, readout identical to 6132970 ("raised 86 ms: the sender packs 171 ms of audio per packet") | raise line as 6132970; 0 holds; no reorder line; low-water 60–130 ms |
+| 9 | Cloudflare SRT (attended, OBS "SRT Cloudflare", 23.976) | **~258.5 ms** before the anchor (the reorder is logged ~0.1 s before it in `cf-1`); readout "259 ms + SRT 120 ms — raised 9 ms: the stream reorders 209 ms of pictures"; renderer low-water ~8 ms higher than `cf-1` (145–152 → ~153–161) | **no B-frame warning; 0 holds; 0 target-step jumps; 0 discarded unseen**; calibrations within Cloudflare's recent range (−98…−55 ms on 2026-10-08, −92…−86 on 10-07; it moves by day), no step at the raise |
+| 10 | gates | — | `swift test` all pass (new `LiveCushionTests` for the reorder term and the readout); soaklog 8 / 8; Profile build, no new warnings in touched files |
+
+**What this stage could invalidate:** only absolute queue figures on B-frame SRT senders, which move
+up by (reorder + 50 ms − 250 ms) when that is positive: Cloudflare's by ~8.5 ms. A stream without
+B-frames, or with a reorder ≤ 200 ms, must read exactly as 6132970 (items 1–3, 8).
+
+**For HEVC Stage 3 (deeper reordering):** HEVC encoders run deeper pyramids than H.264's defaults
+(x265's `bframes` 4 by default and 8 in its slower presets, hierarchical GOP-8/16 in hardware and
+broadcast encoders). The measurement is codec-independent — max(pts − dts) on the access unit — so
+Stage 3 inherits the term without code: a GOP-8 pyramid at 23.976 asks for ~0.47 s (item 5's
+figure), GOP-16 ~0.80 s (item 6), and only a stream that reorders more than 0.95 s meets the clamp
+(item 7). What Stage 3 must still check: (a) that the first HEVC GOP's deepest picture arrives before
+the anchor, as H.264's does, or else count on one post-anchor `target-step`; (b) the startup delay a
+raised cushion adds (the startup fill is the cushion); (c) that L3 (SRT floor 0.20) is judged with
+the term in place: it lowers only the floor, so a B-frame stream keeps its reorder + 50 ms.
+**Added after the results below:** (d) every reorder test needs ≥ 240 s, since a too-shallow cushion only
+loses pictures once the startup over-fill (≈ the reorder) has drained, ~100 s at 0.75 s; (e) deep pyramids
+spend that long on LiveClock's rail, with the audio steering following — a longer rail drain on every HEVC
+B-frame connect; (f) the rule is conservative at depth (a 1.2 s reorder played clean at 1.0 s): **decided (Robbie,
+2026-10-08), revisit the term's depth on deep pyramids in Stage 3, with 240 s+ runs.**
+
+#### Stage 0b-2b — results, 2026-10-08 (unattended, local ffmpeg listener)
+
+**Builds:** HEAD `6132970` (`.build-cc/s0b2bhead-Profile`); the tree (`.build-cc/s0b2b-Profile`); and a
+scratch variant of the tree with the reorder term switched off (`.build-cc/s0b2bnoreorder-Profile`,
+`considerCushion` passing no reorder; never in the source tree), built to test the premise below.
+**Logs:** `~/Desktop/manifold-soak/s0b2b/repro/` (`head-*`, `off-*`, the rest the tree). **Fixtures:** the
+table above, plus 240 s versions of `b8pyr`, `b16pyr` and `b16at15` (same encoder settings; same
+reorder figures).
+
+| # | result | verdict |
+|---|---|---|
+| 1 | syncD: HEAD and tree both 250, no raise, no reorder line, readout `Buffer 250 ms + SRT 120 ms`, 0 holds; `[AV-CONTENT]` median **−0.77 (HEAD) / −0.75 ms (tree)**; low-water 272.8 / 274.0 | **PASS** |
+| 2 | soak fixture, calibration at +60 s: **−1.08 ms** (6132970 +0.23; Δ 1.31); cushion 250; 0 holds | **PASS** |
+| 3 | `b3nopyr`: no raise; 0 holds; 0 out of order; 18 discarded unseen (the baseline, below) | **PASS** |
+| 4 | `b3pyr`: **250 → 259 ms BEFORE the first anchor** (83 ms ahead of it), queue bound 32; readout exact ("259 ms + SRT 120 ms — raised 9 ms: the stream reorders 209 ms of pictures"); 0 target-steps, 0 exceedances, 0 out of order, 17 unseen, 0 warnings, 0 holds. HEAD: 250, the 75 % line, 0 exceedances, as predicted | **PASS** |
+| 5 | `b8pyr`: **467 ms before the anchor** (121 ms ahead), queue bound 57; 0 / 0 / 0, 13 unseen, 0 holds. HEAD: the ⚠️ line and the shortfall banner | **PASS** — but 60 s does not show HEAD's loss; see *steady state* |
+| 6 | `b16pyr`: **801 ms before the anchor**, queue bound 97; 0 / 0 / 0, 4 unseen, 0 holds. **MISS on the side prediction:** the first picture is NOT later (anchor +0.75 s as every run); the startup backlog fills the deeper queue (startup depth 1.23 s against 0.80) | **PASS** on the cushion |
+| 7 | `b16at15`: **1000 ms before the anchor** (clamped), queue bound 120; exactly one ⚠️ line and one banner, naming 1200 ms and the 1000 ms limit, no key; model count 45 (60 s) / 180 (240 s). **The renderer lost nothing in either run:** 0 out of order, 12 unseen | **PARTLY:** the warning behaves as specified; the predicted loss did not happen — see *the model* |
+| 8 | hi8 (ffmpeg's default packing): **336 ms** before the anchor; the `[SRT-BUFFER]` lines **byte-identical** to 6132970's; no reorder line (200 ms → 0.250, the floor); 0 holds; low-water 94.8 (6132970 95.1) | **PASS** |
+| 9 | Cloudflare | attended, below |
+| 10 | `swift test` **252 / 252** (244 + 8 new `LiveCushionTests`); `soaklog.test.mjs` 8 / 8; Profile build, no warnings in the touched files | **PASS** |
+
+**The baseline of the unseen count.** The probe counts every picture the display tick passed over, not
+only reorder losses: syncD (no B-frames, 300 s) 19, the soak fixture 19, `b3nopyr` (60 s) 18. It is a
+fixed per-session figure (the same over 60 s and 300 s), so the frames already queued behind the startup
+anchor; read only counts above ~19, and "shown out of order", as loss.
+
+**Steady state: the requirement is real, and 60 s does not reach it.** On a B-frame stream the newest
+queued PTS is a P-frame that runs ahead of the others by about the reorder delay, so the startup depth
+exceeds the target by about that much, and LiveClock drains it at its ±0.5 % rail: ~20 s at 417 ms of
+reorder, ~100 s at 751 ms. Until then no B-frame is late, so the 60 s fixtures showed no loss even with the
+term off (`off-b8pyr`, `off-b16pyr`: clock on its +0.5 % rail throughout, err +0.01…+0.5 s). At 240 s:
+
+| 240 s | cushion | shown out of order | unseen (baseline ≤ 19) | model count | holds |
+|---|---|---|---|---|---|
+| `b8pyr`, term off | 250 | **756** | **149** | 600 | 1 |
+| `b8pyr`, tree | 467 before the anchor | **0** | 13 | 0 | 0 |
+| `b16pyr`, term off | 250 | **446** | **124** | 660 | 1 |
+| `b16pyr`, tree | 801 before the anchor | **0** | 4 | 0 | 0 |
+| `b16at15`, tree | 1000 (clamped) | **0** | 12 | 180 | 0 |
+
+So a cushion below the reorder loses ~13–20 % of the pictures once the clock settles, with a hold at the
+moment it does, and the term removes the loss completely. HEAD's banner on `b8pyr` was right about the
+stream; the loss just starts after the over-fill drains.
+
+**The model is an indicator, not a count.** `reorderExceedances` (per access unit, pts − dts ≥ target)
+under-counted the loss at 250 ms (600 against ~900 lost on `b8pyr`) and counted 180 where nothing was lost
+at the 1.0 s ceiling (`b16at15`: a 1.2 s reorder played clean, though the clock settled to err −0.32 s). The
+real threshold sits between the cushion and max(pts − dts) and depends on the GOP's shape, which is why
+the rule's `max(pts − dts) + 0.05 s` is on the safe side. Consequences, both in the tree:
+- **The banner and the ⚠️ line say "may".** "This stream reorders its pictures by up to 1200 ms, more than
+  Manifold's largest buffer (1000 ms) can cover. Some pictures may arrive too late to be shown." The log's
+  shortfall line says "a model count, not the renderer's". A definite "are discarded" was false on the one
+  case the warning exists for.
+- **Decided (Robbie, 2026-10-08): the term stays as is** (max(pts − dts) + 0.05 s). Its depth on deep
+  pyramids (`b16pyr` got 801 ms; the real need is somewhere above 250) is revisited in HEVC Stage 3, with
+  240 s+ runs.
+
+**Also fixed on the way:** the `[SRT-FLOW]` line printed `budget` from the configured 0.250, not the live
+target, since 0b-2a (hi8 at 336 read "budget 0.250"). It prints the clock's target now ("budget 0.467").
+
+**Pre-existing, recorded:** every B-frame run starts with that over-fill, so the clock and the audio steering
+spend the first 20–100 s on their rails, and the renderer low-water falls ~2 ms/s meanwhile (HEAD included).
+It is §6.10's *rail drain* with a second cause (the reorder lead instead of bursty delivery). Not 0b-2b's.
+
+**Defaults:** exported before the first launch; after the last quit, 21 run-added `NSWindow Frame` keys,
+each checked absent from the snapshot and deleted by name; the domain is dictionary-equal to the snapshot
+(1 141 keys). `streamBookmarks` was never read or written (every run dialled `MANIFOLD_SRT_DEBUG_URL`).
+
+#### Stage 0b-2b — attended, 2026-10-08 23:14–23:25 (Robbie): Cloudflare SRT
+
+OBS "SRT Cloudflare" profile, 23.976, SYNC scene; Manifold `.build-cc/s0b2b-Profile` on the "DC Color Live
+- SRT" bookmark; one 10-minute session, measure-only calibrations (Cancel each time). Log
+`~/Desktop/manifold-soak/s0b2b/cf/cf-1.manifold.log`.
+
+| | predicted | measured | verdict |
+|---|---|---|---|
+| cushion | ~0.2585, before the anchor | **250 → 258 ms, 82 ms before the first anchor**, no step; reorder **208.0 ms** (today's timestamps; 0.208 also on 2026-10-08 17:38) | **PASS** (±0.001) |
+| readout | "259 ms + SRT 120 ms — raised 9 ms: … 209 ms of pictures" | "**258 ms + SRT 120 ms — raised 8 ms: the stream reorders 208 ms of pictures**" | **PASS**: the 1 ms is the stream's figure, not the rule's |
+| B-frame warning | none | **none**: no 75 % line, no ⚠️ line, no banner | **PASS** |
+| holds, target-steps, coarse, splices | 0 | **0, 0, 0, 0** | **PASS** |
+| pictures | — | 18 unseen of 14 404 (the baseline), **0 out of order**; `[SRT-FLOW]` "reorder max=0.208s (budget 0.258s)" | **PASS** |
+| renderer low-water | ~153–161 steady (`cf-1` of 0b-2a 145–152, + ~8) | 194 at +10 s, then **145–161 ms, mostly 150–158** | **PASS**, near the band's floor: a ~5 ms rise, within window noise |
+| calibrations | Cloudflare's recent range (−98…−55 ms) | **−57.76 (+1:45) / −57.93 (+2:10) / −54.23 ms (+8 min)**; packing 1 frame per PES | **PASS**: at the range's top end, close to 0b-2a's −56.24 / −55.44 on the same day; no step at the raise (there was none) |
+
+The +1 and +2 min calibrations ran at +1:45 and +2:10: step 2 began 104 s after connect, when Robbie gave
+the go. **Defaults:** exported before the launch (equal to the first snapshot); one run-added `NSWindow
+Frame` key deleted by name; the domain is dictionary-equal to the snapshot (1 141 keys). The bookmark's
+keychain item was read for the passphrase; `streamBookmarks` was not written.
+
+**Stage 0b-2b: every prediction met except the two side predictions recorded above** (startup delay on
+`b16pyr`, the unseen-count baseline) and the clamp case's loss, which the renderer showed does not happen
+at 1.2 s against 1.0 s.
+
 ---
 
 ## 7. Open and unverified

@@ -22,7 +22,8 @@ held back until after release, and the numbered defect entries follow.
      ≥ ~170 ms of AAC into each PES*, below; `COLOR_MANAGEMENT_FINDINGS.md` §6.10, Stage 0b).
      **Buffer policy decided 2026-10-08** (§6.10, *Buffer policy — the review and its decisions*):
      defaults held for 1.0; Stage 0b-2a (the adaptive SRT cushion, the readout's Buffer row, the
-     saved-advance check), then 0b-2b (the reorder term).
+     saved-advance check; `6132970`), then 0b-2b (the reorder term; built and run 2026-10-08, unattended
+     and on Cloudflare SRT, uncommitted: §6.10, *Stage 0b-2b — results* and *— attended*).
    - **Trial L1 — WHEP cushion 0.30**, after 0b-2b (§6.10). Lowered only if it passes.
    - **Trial L2 — NDI desktop-audio lead 0.20**, which also finds the audio renderer's crackle
      threshold (between 40 and 150 ms of lead) on the Scarlett and the built-in output (§6.10).
@@ -729,7 +730,7 @@ lists no Force Video Jump items.
 
 ---
 
-## ☐ PRE-SHIP: review the NDI frame-wait diagnostic (`[NDI-PICTURE]`, `onFrameSelected`)
+## ☐ PRE-SHIP: review the NDI frame-wait diagnostic (`[NDI-PICTURE]`, `onFrameSelected`) and SRT's unseen-picture count
 
 **Added 2026-09-28** to measure whether NDI's picture delay holds the picture for the full desktop
 audio lead (it does: 256 ms median against 250 + one refresh; see the NDI lead entry).
@@ -740,8 +741,15 @@ audio lead (it does: 256 ms median against 250 + one refresh; see the NDI lead e
 - **Gating:** both are `#if DEBUG`, so absent from Release, present in Profile (tester) builds.
 - **Cost when present:** one closure call and one array append per displayed frame (~24/s), one
   sort of ~24 values and one log line per second.
+- **Second reader, added 2026-10-08 (Stage 0b-2b, uncommitted):** `SRTFrameRouter` installs it at
+  route activation and logs one `[SRT-FLOW] pictures discarded unseen: … · shown out of order: … ·
+  late by the reorder count: …` line at release: the renderer's count of pictures lost to the reorder
+  window, beside the router's own model (`reorderExceedances`). `#if DEBUG`, with a `SelectionProbe`
+  (one lock, three counters) on the router. Cost: one closure call per displayed frame, one line per
+  session.
 - **Decide before ship:** keep as Profile telemetry (it is the only instrument for the NDI picture
-  hold), or remove both. Nothing else reads it.
+  hold, and the only observed count of SRT pictures lost to reordering), or remove all three: the
+  hook, NDI's `[NDI-PICTURE]`, and SRT's probe.
 
 ---
 
@@ -1085,9 +1093,10 @@ rate, reorder) is `find_stream_info`'s and is unchanged.
 
 ---
 
-## ☐ PRE-SHIP (MUST-FIX, before HEVC Stage 1) 2026-10-07 — PRE-EXISTING, ALL BUILDS — SRT audio breaks up when the sender packs ≥ ~170 ms of AAC into each PES
+## ✅ FIXED 2026-10-08 (`6132970`) — PRE-SHIP (MUST-FIX, before HEVC Stage 1) — PRE-EXISTING, ALL BUILDS — SRT audio breaks up when the sender packs ≥ ~170 ms of AAC into each PES
 
-**Status:** PRE-SHIP. **Decided (Robbie, 2026-10-07):** fix before HEVC Stage 1
+**Status:** FIXED in `6132970` (Stage 0b-2a, the adaptive SRT cushion); the reorder term follows in
+Stage 0b-2b. **Decided (Robbie, 2026-10-07):** fix before HEVC Stage 1
 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, staged plan). Found during the Stage 0 runs (above). Robbie heard it, and recorded
 10 s with Audio Hijack on the HEAD build: `~/Music/Audio Hijack/20261007 1433 Recording.wav`. **Not
 caused by Stage 0:** HEAD does it too.
@@ -1143,15 +1152,15 @@ PES, so + 0.15 s is too small above ~0.3 s per PES; whether the rule scales with
 
 **2026-10-08 evening, decided (Robbie) and rerun:** the rule is now **1.5 × largest PES + 0.08 s**. hi8 /
 hi25 / hi8fine 336 ms, lo150 624 ms: **0 holds on every fixture**, floors 94–97 ms and 64–66 ms. OBS and
-Cloudflare's SRT egress both pack 1 frame per PES (cushion unchanged at 250). **Status: FIXED in the
-tree (uncommitted).** Confirmed by ear 2026-10-08 18:36: Audio Hijack recording of hi8 (looped, 206 s)
+Cloudflare's SRT egress both pack 1 frame per PES (cushion unchanged at 250). **Status: FIXED in
+`6132970`.** Confirmed by ear 2026-10-08 18:36: Audio Hijack recording of hi8 (looped, 206 s)
 has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD recording (§6.10, v2 attended).
 
 ---
 
-## ☐ OPEN 2026-10-08 — LATENT, ALL LIVE TRANSPORTS — a saved sound-earlier offset is placed at the first anchor with no queue check
+## ✅ FIXED 2026-10-08 (`6132970`) — LATENT, ALL LIVE TRANSPORTS — a saved sound-earlier offset is placed at the first anchor with no queue check
 
-**Status:** OPEN; the fix is in Stage 0b-2a (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, decision 7).
+**Status:** FIXED in `6132970` (Stage 0b-2a; `COLOR_MANAGEMENT_FINDINGS.md` §6.10, decision 7).
 **Found** by reading, in the 2026-10-08 buffer review. Not observed.
 
 - **What:** a nudge or calibration that moves sound EARLIER is judged against the renderer queue
@@ -1173,8 +1182,8 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
   before any audio, by design — and −250 ms placed unchecked left an 87 ms queue that Robbie heard
   breaking up. **Moved to playback start** (the first buffer within 50 ms of the anchor's future host;
   refused → the anchor rewritten without O). **Retested live 2026-10-08 18:23–18:31 (OBS): −250 refused
-  (queue 329.6 ms, 169.6 available), banner shown, clean; −100 placed, clean. FIXED in the tree
-  (uncommitted).** On SRT the judgement lands ~40 ms after playback start, so a refusal is one
+  (queue 329.6 ms, 169.6 available), banner shown, clean; −100 placed, clean. FIXED in
+  `6132970`.** On SRT the judgement lands ~40 ms after playback start, so a refusal is one
   re-anchor at the very start; heard clean.
 - **2026-10-08: first build (uncommitted), unit-tested; superseded by the above.** `LiveAudioOffsetTests`: covered →
   placed; −250 ms on a 340 ms lead → refused with queue 340 / available 180; the boundary at the

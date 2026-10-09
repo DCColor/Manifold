@@ -41,6 +41,7 @@
 import Combine
 import Foundation
 import QuartzCore      // CACurrentMediaTime — the monotonic host clock the watchdogs measure on
+import DisplayProviders // LiveCushion.ceilingSeconds — the reorder banner states the limit
 
 final class SRTClient: ObservableObject {
 
@@ -233,7 +234,7 @@ final class SRTClient: ObservableObject {
     private var haveConnected = false
     private var haveVideoStream = false
 
-    /// Announced once per stream: the reorder budget is too shallow for what is arriving.
+    /// Announced once per stream: the stream reorders more than the cushion's ceiling can cover.
     private var announcedReorderShortfall = false
 
     /// Below this the transport buffer is doing little for us — a LAN sender, or one explicitly
@@ -1087,33 +1088,36 @@ final class SRTClient: ObservableObject {
 
     /// ── THE REORDER BANNER ───────────────────────────────────────────────────────────────
     ///
-    /// SRTFrameRouter counts, on every access unit and in EVERY build configuration, how many
-    /// pictures arrived with a (pts − dts) at or beyond the live target. Those pictures are not
-    /// shown late — the renderer's PTS-ordered insert places them behind its swept position and
-    /// DISCARDS them, so the user is watching a stream with frames missing and no reason given.
+    /// SRTFrameRouter measures (pts − dts) on every access unit, in EVERY build configuration, and
+    /// the cushion follows it: largest + 0.05 s, up to LiveCushion's 1.0 s ceiling (Stage 0b-2b,
+    /// docs/COLOR_MANAGEMENT_FINDINGS.md §6.10). The raise is said on the chain readout's Buffer row,
+    /// not here. What is left for this banner is the stream the ceiling cannot cover: a reorder
+    /// within 50 ms of 1.0 s or past it. Past it, pictures can land behind the renderer's swept
+    /// position and be discarded, and the user would be watching a stream with frames missing.
     ///
-    /// This is the reason, in the user's words, through the same non-fatal banner a connect error
-    /// uses. Announced ONCE per stream: the count keeps climbing, and re-raising the banner every
-    /// second would make the app unusable while telling the user nothing new.
-    ///
-    /// IT DOES NOT ADJUST THE DEPTH, AND THE USER HAS NO KEY TO. ⌃⌥[ / ⌃⌥] are Debug-configuration
-    /// only (decided 2026-10-08: automatic only, plus the readout). The automatic answer to this banner
-    /// is Stage 0b-2b's reorder term (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10); until it lands, the
-    /// banner is the report and the chain readout's Buffer row shows the depth it is measured against.
+    /// The reason, in the user's words, through the same non-fatal banner a connect error uses.
+    /// Announced ONCE per stream: the count keeps climbing, and re-raising the banner every second
+    /// would make the app unusable while telling the user nothing new. It names no key: there is
+    /// nothing the user can set that would help, short of the sender reordering less.
     private func checkReorderBudget() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !announcedReorderShortfall else { return }
         let report = SRTFrameRouter.shared.reorderReport
-        guard report.exceedances > 0 else { return }
+        guard report.needsWarning else { return }
         announcedReorderShortfall = true
 
-        NSLog("[SRT] reorder shortfall: %d access unit(s) arrived with pts−dts ≥ targetDepth (max %.3fs vs target %.3fs) — those pictures were discarded by the renderer's PTS-ordered insert",
-              report.exceedances, report.maxSeconds, report.targetSeconds)
+        NSLog("[SRT] reorder shortfall: %d access unit(s) arrived with pts−dts ≥ targetDepth (max %.3fs vs target %.3fs, ceiling %.1fs) — at risk of landing behind the renderer's swept position (a model count, not the renderer's)",
+              report.exceedances, report.maxSeconds, report.targetSeconds, LiveCushion.ceilingSeconds)
 
         let neededMs = Int((report.maxSeconds * 1000).rounded(.up))
-        let targetMs = Int((report.targetSeconds * 1000).rounded())
-        showError("Frames are arriving too late to be displayed — the buffer is too shallow for "
-                  + "this stream (it reorders by up to \(neededMs) ms; the buffer holds \(targetMs) ms).",
+        let ceilingMs = Int((LiveCushion.ceilingSeconds * 1000).rounded())
+        // "May": `exceedances` is the router's per-access-unit model, not the renderer's count. At the
+        // ceiling it over-counts — a 1.2 s reorder at 1.0 s counted 180 late in 240 s while the
+        // renderer showed every picture in order (§6.10, Stage 0b-2b results) — so the banner states
+        // the shortfall and the risk, never a loss it cannot see.
+        showError("This stream reorders its pictures by up to \(neededMs) ms, more than Manifold's "
+                  + "largest buffer (\(ceilingMs) ms) can cover. Some pictures may arrive too late "
+                  + "to be shown.",
                   survivesPictures: true)
     }
 
