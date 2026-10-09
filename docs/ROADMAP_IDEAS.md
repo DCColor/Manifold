@@ -133,3 +133,42 @@ Open questions:
 
 Depends on: unsure
 Size guess: Large
+
+## Embed Chapter Markers
+Status: idea (2026-10-06)
+Version: 1.5?
+
+What: Similar to timecoded markers - add chapter markers to the stream
+
+Why: Social media, YouTube etc
+
+Must:
+- be timecode accurate
+- Generous character length and support of special characters
+- Be able to see a chohesive list of chapters once added
+
+Open questions:
+- none
+
+Depends on: unsure
+Size guess: medium
+
+## Subtitle Generation
+Status: idea (2026-10-06)
+Version: 2.0
+
+What: Add ability to generate subs directly from manifold
+
+Why: Social media, YouTube etc
+
+Must:
+- accurate, and fast subtitle creation
+- Ideally support not just english but multiple languages
+- Be editable
+- Be free to use
+
+Open questions:
+- Licensing 
+
+Depends on: unsure
+Size guess: Large
