@@ -144,15 +144,16 @@ enum Attributions {
     /// Where the complete corresponding source for the shipped FFmpeg libraries is published.
     ///
     /// ⚠️ THIS STRING AND `scripts/build_ffmpeg.sh` MUST AGREE, and nothing at compile time can
-    /// check that. The filename carries the short commit SHA of the FFmpeg pin, so bumping the
-    /// pin changes the URL — and a stale copy here would leave the app making a written offer
-    /// that points at a URL nobody ever uploaded.
+    /// check that. The filename carries the short commit SHA of the FFmpeg pin and a build
+    /// revision (`-rN`, bumped for any change to the configure line), so either change moves the
+    /// URL — and a stale copy here would leave the app making a written offer that points at a
+    /// URL nobody ever uploaded, or at a BUILD.txt that describes a different build.
     ///
     /// `scripts/release-mac.sh` therefore asserts, at preflight, that this literal equals the
     /// `SOURCE_URL` that `build_ffmpeg.sh --source-info` derives from the pin. The pin is the
     /// single source of truth; this is a copy that is CHECKED rather than trusted.
     static let ffmpegSourceURL =
-        "https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4.tar.xz"
+        "https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4-r2.tar.xz"
 
     /// Where a §6(c) request is sent.
     ///
@@ -242,6 +243,7 @@ enum Attributions {
                         --enable-demuxer=mxf \\
                         --enable-demuxer=mpegts \\
                         --enable-parser=h264 \\
+                        --enable-parser=hevc \\
                         --enable-protocol=file \\
                         --enable-swscale \\
                         --disable-x86asm \\

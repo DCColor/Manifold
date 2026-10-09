@@ -1929,7 +1929,8 @@ Run in this order. Each stage ships on its own.
   it has to fit inside (defaults held for 1.0; trials L1 and L2 in 1.0, L3 after Stage 3), are in
   *Buffer policy — the review and its decisions, 2026-10-08*, below: 0b-2a, then 0b-2b (the reorder
   term), then L1 and L2.
-- **Stage 1 — the HEVC parser in the FFmpeg build.** The gate still refuses HEVC.
+- **Stage 1 — the HEVC parser in the FFmpeg build.** The gate still refuses HEVC. **Done 2026-10-09
+  (uncommitted), below; every prediction met.**
   - Predicted: all three layers pass; H.264 `[SRT]` and `[SPS-COLOR]` lines identical to the commit
     before; an HEVC stream's refusal log reads `hevc Main 10 1920x1080` within about 1–2 s.
 - **Stage 2 — the HEVC SPS colour reader**, in the renamed codec-neutral target. Package only.
@@ -2606,6 +2607,146 @@ keychain item was read for the passphrase; `streamBookmarks` was not written.
 at 1.2 s against 1.0 s.
 
 **Committed as `5d623af`.**
+
+#### Stage 1 — the HEVC parser: predictions, written 2026-10-09 before the build changed
+
+**What changes (decision 1):** `--enable-parser=hevc`, the fifth numbered configure change, carried
+through the baseline banner, `CONFIGURE_ARGS` (LAYER 1), `EXPECTED_PARSERS` (LAYER 2), a LAYER 3
+check beside the h264 one, and `ThirdParty/ffmpeg/README.md`. Same pin (`239f2c733de4`). **Two more
+places the audit did not list:** the configure line printed in the About panel's FFmpeg licence
+text (`App/AboutWindow.swift`, "Configured exactly as follows"), which must match the shipped build;
+and the gate's refusal line, which today prints only the codec (`[SRT] stream is hevc — …`), so it
+gains the profile and size. Log-only: the gate, the banner and the teardown do not change.
+
+**Read from the pinned configure before the build:** `hevc_parser_select="hevcparse hevc_sei"`;
+`hevcparse` selects `golomb`, `hevc_sei` selects `atsc_a53 golomb`. `golomb` and `atsc_a53` are
+already 1 (the h264 parser selects them). So config.h gains **`CONFIG_HEVCPARSE` and
+`CONFIG_HEVC_SEI`**, config_components.h **`CONFIG_HEVC_PARSER`**, and nothing else. New objects in
+libavcodec: `hevc/parser.o`, `hevc/parse.o`, `hevc/ps.o`, `hevc/data.o`, `hevc/sei.o`,
+`dynamic_hdr_vivid.o` (`h2645_parse`, `h2645_sei`, `h2645_vui` are already in, from H.264).
+
+**Builds:** HEAD `9e10a57` with the July dylibs (`.build-cc/s1head-Profile`), and the tree with the
+rebuilt dylibs (`.build-cc/s1-Profile`), both unsigned Profile. **Driver:** `scripts/soak/repro/run.sh`
+(unattended, local ffmpeg listener). **Fixtures:** `syncD-23.976p-inj0.ts`; hi8 (ffmpeg's default
+packing); the soak fixture with one measure-only calibration at +60 s; the audit's four HEVC streams
+(12 s each at 8.3 Mb/s: x265 PQ, x265 HLG, VideoToolbox PQ; and `hevc_lo`, 40 s at 165 kb/s; all
+Main 10, 1920×1080, 25 fps, with AAC).
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | the three layers | all pass | LAYER 1: the recorded line equals the five-change array. LAYER 2: `CONFIG_GPL 0`, `NONFREE 0`, `VERSION3 0`, `NETWORK 0`; parsers exactly `aac_latm h264 hevc`; no muxer, encoder or BSF. **config.h / config_components.h differ from July's in exactly 3 defines** (the three above), plus the configuration string. LAYER 3: `hevc` and `h264` parsers registered; decoders, demuxers and protocols unchanged; `LGPL version 2.1 or later` |
+| 2 | H.264 SRT, syncD and hi8, HEAD against the tree | no change | `[SRT] container` / `stream` / `video:`, `[SRT-AUDIO] stream` and `[SPS-COLOR]` lines **identical text** (timestamps masked); cushion: syncD 250 with no `[SRT-BUFFER] cushion` line, hi8 **336** with `[SRT-BUFFER]` lines identical to 5d623af's; **0 holds** on both; syncD `[AV-CONTENT]` median within ±2 ms of 5d623af's −0.75 |
+| 3 | one local H.264 calibration (soak fixture, +60 s) | as 5d623af (−1.08 ms) | **within ±2 ms of −1.08** (−3.08…+0.92) |
+| 4a | HEVC refusal, the tree: x265 PQ, x265 HLG, VT PQ | identified ≈ 0.4–0.6 s after transport up (H.264 at 8 Mb/s: 0.40 s in Stage 0) | refusal line reads **`hevc Main 10 1920x1080`**, stream line `hevc 1920x1080`; **≤ 2.0 s** after `transport up`; the banner unchanged ("That stream is HEVC (H.265) — Manifold’s SRT support is H.264 only."); no decoder created, no `[SRT] video:` line |
+| 4b | `hevc_lo` (165 kb/s), the tree | ≈ 0.5–1.0 s | as 4a, **≤ 2.0 s** |
+| 4c | the same four on HEAD (no parser) | 8.3 Mb/s: ≈ 2.0 s (2 MB `probesize` at 8.3 Mb/s); `hevc_lo`: ≈ 5 s (`max_analyze_duration`); stream line `hevc 0x0` | refused, `0x0`; slower than the tree by ≥ 1 s |
+| 5 | the dylibs | same set, same majors | five dylibs, `62 / 62 / 60 / 9 / 6`, `@rpath` ids, `minos 15.0`, arm64 only, no `.a`; **libavcodec +40…+200 KB**, the other four within ±16 KB (only the embedded configuration string changes); the release preflight (release-mac.sh step 1, run on its own) passes |
+| 6 | deployment-target warnings | the 0.5.1 static archives' 226 were fixed by CHANGE 4 in July; none now | **0** `built for newer 'macOS' version` in `make.log` and in the app link; the FFmpeg link's only warnings are configure's own `-single_module is obsolete` (7, one per library, July's count) |
+
+#### Stage 1 — results, 2026-10-09 (unattended, local ffmpeg listener)
+
+**Builds:** `.build-cc/s1head-Profile` (HEAD `9e10a57`, July dylibs, embedded libavcodec `31526f07…`) and
+`.build-cc/s1-Profile` (the tree, rebuilt dylibs, libavcodec `37cf9f30…`), unsigned Profile, both with
+the same 11 Swift warnings. **Logs:** `~/Desktop/manifold-soak/s1/repro/` (`head-*` is HEAD).
+**Screenshots:** `~/Desktop/manifold-shots/s1/`.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | `build_ffmpeg.sh`: LAYER 1 matches the five-change line, both from `config.mak` and read back out of the staged libavutil. LAYER 2: `CONFIG_GPL 0`, `NONFREE 0`, `VERSION3 0`, `GPLV3 0`, `NETWORK 0`; parsers exactly `aac_latm h264 hevc`; decoders, demuxers and protocols unchanged; no muxer, encoder or BSF. **config.h / config_components.h against July: exactly `CONFIG_HEVCPARSE`, `CONFIG_HEVC_SEI`, `CONFIG_HEVC_PARSER` 0 → 1**, plus `FFMPEG_CONFIGURATION`. LAYER 3: `h264` and `hevc` parsers registered, `LGPL version 2.1 or later`, all consumer surfaces present. `--verify-only` passes again afterwards. | **PASS** |
+| 2 | syncD and hi8, HEAD against the tree: the `[SRT] container` / `stream` / `video:` / `colorimetry` / `decoded as`, `[SRT-AUDIO] stream`, `[SPS-COLOR]` and `[SRT-BUFFER]` lines are **identical text** (9 / 9 and 11 / 11). syncD: 250, no raise, 0 holds, `[AV-CONTENT]` median **−0.77 (HEAD) / −0.81 ms (tree)** (5d623af −0.75). hi8: **250 → 336 before the anchor**, the `[SRT-BUFFER]` text identical to 5d623af's own hi8 log, 0 holds, low-water ends at 97.0 / 94.9 (5d623af 94.8). Unseen 19 / 19 and 16 / 16, 0 out of order. | **PASS** |
+| 3 | soak fixture, calibration at +60 s: **−0.70 ms** (p10 −3.18, p90 +0.46; 5d623af −1.08, Δ +0.38); cushion 250; 0 holds | **PASS** |
+| 4a | the tree, refusal after `transport up`: x265 PQ **0.396 s**, x265 HLG **0.396 s**, VT PQ **0.485 s**. Each refusal line reads `[SRT] stream is hevc Main 10 1920x1080 — this build decodes H.264 only; refusing`; the stream line `hevc 1920x1080`; no `[SRT] video:` line, nothing decoded | **PASS** |
+| 4b | `hevc_lo` (165 kb/s): **0.469 s**, same lines | **PASS** (≤ 2.0 s; under the 0.5–1.0 s guess: the parser needs only the first IRAP's parameter sets, which arrive in the first PES) |
+| 4c | HEAD: 1.677 / 1.689 / 1.963 s at 8.3 Mb/s, **4.654 s** on `hevc_lo`; stream line `hevc 0x0`; refusal line `stream is hevc` | **PASS**: 1.2–4.2 s slower than the tree |
+| 4d | the banner, read from a screenshot after the refusal on both builds (x265 PQ): "That stream is HEVC (H.265) — Manifold’s SRT support is H.264 only." **The same on both**; the window returns to the empty state | **PASS** |
+| 5 | Five dylibs, majors `62 / 62 / 60 / 9 / 6`, `@rpath` ids, no dependency outside the bundle or the system, `minos 15.0`, arm64 only, no `.a`, headers byte-identical to July's. **libavcodec 842 104 → 908 712 B (+66 608)**; the other four exactly the same size (their bytes differ only in the configuration string). libavcodec's own exported symbols are identical; it gains three re-exported libavutil imports (`av_dynamic_hdr_plus_alloc`, `av_dynamic_hdr_plus_from_t35`, `av_dynamic_hdr_vivid_alloc`, from the HEVC SEI code), which libavutil 60 already exports. `--verify-relocatable` on the tree's app first printed **RELOCATABLE on no evidence** (see *the Gatekeeper prompt*, below); after the fix it passes on evidence: all five dylibs mapped from the bundle. The tree's app passes every non-signing check of release-mac.sh step 6 (exactly the five dylibs, `@rpath`, `LC_RPATH ../Frameworks`, telemetry present). **release-mac.sh step 1 (Preflight), run on its own: passes**, including the About-panel URL check against the pin | **PASS**: the static checks (`otool`) and, re-run after the fix, the dyld test |
+| 6 | **0** `built for newer` in `make.log` (only 7 × `-single_module is obsolete`, July's count) and **0** in both app builds | **PASS** — see below |
+| gates | `swift test` (ManifoldCore) **252 / 252**; `soaklog.test.mjs` 8 / 8 | **PASS** |
+
+**The "~209 deployment-target warnings" note is stale.** It describes the static by-hand build:
+those archives carried `minos 26.0` (no `-mmacosx-version-min` was passed, so they took the host's SDK
+default) and the app link warned once per archive member, 226 times as measured in July. CHANGE 4
+(2026-07-28, `--extra-cflags/--extra-ldflags=-mmacosx-version-min=15.0`) fixed it. The July shared build
+and this one both produce 0. Nothing to fix.
+
+**Found on the way — the published corresponding source would have gone stale. Decided (Robbie,
+2026-10-09) and done:** the source tarball's filename carries a build revision, `-rN`, bumped for any
+change to the configure line, and a published tarball is never overwritten. Keyed by the pin alone,
+the next release would have found the July tarball at the same URL (HTTP 200), uploaded nothing, and
+left a `BUILD.txt` without `--enable-parser=hevc` behind the About panel's offer.
+- `build_ffmpeg.sh`: `SOURCE_REVISION=2` → `ffmpeg-n8.1.1-239f2c733de4-r2.tar.xz` (r1, the July
+  file, keeps its unsuffixed name, which shipped builds print). `SOURCE_REVISION_CONFIG` holds the
+  sha256 of the public configure line (r1 `995cb106…`, r2 `c401bdce…`); the build, `--source-info`
+  and `--source-tarball` all refuse when the line no longer matches. Tested on a scratch copy with an
+  extra flag: exit 1, nothing on stdout, the new hash printed.
+- `release-mac.sh` uploads only when the URL answers **404 with the Worker's `Not found` body**;
+  `wrangler r2 object put` overwrites silently, so an unrouted 404 (`Unknown endpoint`), a 5xx or a
+  timeout now stops the release. Exercised against the live endpoints (read-only): the r1 URL → 200,
+  nothing to upload; the r2 URL → 404 `Not found`, upload branch; an unrouted path → refused.
+- `Attributions.ffmpegSourceURL` → the r2 URL; release preflight (step 1 alone) passes with it. The
+  r2 tarball, built locally to the scratchpad only, matches the commit plus `BUILD.txt`, and its
+  `BUILD.txt` carries `--enable-parser=hevc`. **Nothing was uploaded**: the next release uploads r2.
+
+**The Gatekeeper prompt — "Manifold.app is damaged and can't be opened", found by Robbie on return.**
+- **Cause: my `--verify-relocatable` run at 11:53.** It copies the app to a `mktemp -d` directory,
+  writes `com.apple.quarantine "0081;00000000;Manifold;"` (agent "Manifold", date 0: hence
+  "Manifold downloaded this file on an unknown date"), and launches the binary. The system log has
+  it: 11:53:09.847 `GK performScan … (team: (null))` after `-67062` (unsigned), 11:53:10.189
+  `GK evaluateScanResult: 1 … (id: Manifold), (bundle_id: com.graviton.manifold)`, then
+  `Prompt shown (1, 0), waiting for response` and CoreServicesUIAgent `present code-evaluation
+  prompt`.
+- **Why "damaged":** the bundle is an unsigned Profile build (`CODE_SIGNING_ALLOWED=NO`). Only the
+  linker's ad-hoc signature is on the main binary, so `codesign --verify --deep --strict` and
+  `spctl --assess` both say "code has no resources but signature indicates they must be present".
+  Quarantined, Gatekeeper calls that damaged. `.build-cc/s1head-Profile` and `s0b2b-Profile` give the
+  identical result, so **the FFmpeg rebuild did not cause it**. No step replaced a dylib inside a
+  signed bundle. `build_ffmpeg.sh` stages only into `ThirdParty/ffmpeg`; nothing in `scripts/` or
+  `project.yml` writes into `Contents/`; `release-mac.sh` re-signs only the DMG, after export. The
+  only quarantine writer in the repo is this check.
+- **The verdict it printed was void.** A process held at the Gatekeeper prompt exists, so the
+  check's `kill -0` "stayed up" test passed while the app never ran. The empty `DYLD_PRINT_LIBRARIES`
+  output was blamed on hardened runtime, which this unsigned build does not have. So Stage 1's
+  relocatability rests on the static `otool` checks only. The temporary copy was deleted by the
+  script itself.
+- **Not a stale build directory.** Nothing to delete. `.build-cc/s1-Profile` is unquarantined and
+  launches normally (every batch run used it).
+- **The installed 0.8.4 (19) in /Applications is fine.** `codesign --verify --deep --strict`: valid
+  on disk, satisfies its Designated Requirement. `spctl`: accepted, `source=Notarized Developer ID`.
+  All five dylibs are signed with Developer ID, hardened runtime. It opened with no prompt
+  (`GK evaluateScanResult: 3`) and quit cleanly. Defaults were exported before, and the one
+  run-added `NSWindow Frame` key was deleted by name; the domain is dictionary-equal to the original
+  snapshot again.
+- **Fixed (decided by Robbie, 2026-10-09), in `build_ffmpeg.sh --verify-relocatable`:**
+  1. The copy is quarantined **only when the bundle is Developer ID–signed** (`codesign -dvv`:
+     a `Developer ID Application` authority and a TeamIdentifier).
+  2. A quarantined copy, whether the flag was added or inherited from the source bundle, is
+     **assessed with `spctl` before launch, and never launched if rejected.** That is the check
+     failing, with the reason.
+  3. **It passes only on evidence of loading:** `lsof` on the running process must show all five
+     libav dylibs mapped from the copy's own `Contents/Frameworks`. lsof works under hardened
+     runtime, where DYLD_* is stripped; a process held at a prompt maps nothing. When
+     `DYLD_PRINT_LIBRARIES` prints anything (unsigned builds), it must agree. Any syspolicyd
+     `Prompt shown` during the launch fails the check. The process is killed as soon as the five
+     are mapped, and a trap removes the copy and puts the moved directories back.
+- **Re-run, `.build-cc/s1-Profile` (unsigned, not quarantined):** **RELOCATABLE.** All five dylibs
+  were mapped from `/private/var/folders/…/tmp.a9bIcHPICQ/Manifold.app/Contents/Frameworks` with
+  `~/manifold-ffmpeg-build/prefix` and `ThirdParty/ffmpeg/lib` moved aside; `DYLD_PRINT_LIBRARIES`
+  agrees; no Gatekeeper prompt was logged. Both directories were restored, the copy removed, no
+  Manifold process left behind, and `defaults` untouched (1 141 keys, no change): the app is killed
+  before it opens a window.
+- **The false-pass scenario now FAILS:** the same check on a quarantined copy of that unsigned build
+  (scratchpad, `0081;00000000;Manifold;`). It said "not Developer ID–signed — no quarantine flag",
+  found the flag inherited on the copy, `spctl` rejected it ("code has no resources but signature
+  indicates they must be present"), and it **failed without launching**: exit 1, no Manifold
+  process, 0 Gatekeeper prompts in the log. Nothing in either test was launched quarantined.
+- **Still open (BUGS.md pre-ship list):** run it on the exported, notarized release build, the one
+  path these tests could not reach (quarantined, `spctl` accepted, lsof under hardened runtime).
+
+**User-visible:** none in behaviour. The About panel's FFmpeg licence text gains one configure flag
+and the source URL gains `-r2`; not a release-notes item. **Defaults:** exported before the first launch; afterwards 15 run-added
+`NSWindow Frame` keys, each checked absent from the snapshot and deleted by name; the domain is
+dictionary-equal to the snapshot (1 141 keys). `streamBookmarks` was never written (every run dialled
+`MANIFOLD_SRT_DEBUG_URL`).
 
 ---
 

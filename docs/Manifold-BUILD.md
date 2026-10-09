@@ -210,14 +210,16 @@ FFmpeg ships as **shared dylibs, not static archives**, to satisfy LGPL 2.1 §6.
 fails if a `.a` reappears in `ThirdParty/ffmpeg/lib`, which would silently undo the
 migration. Do not "optimize" this back to static linking.
 
-The release script publishes the corresponding source itself, keyed by the FFmpeg pin
-rather than the app version:
+The release script publishes the corresponding source itself, keyed by the FFmpeg pin and a
+build revision (`-rN`, bumped for any change to the configure line) rather than the app version:
 
 ```
-graviton/manifold/source/ffmpeg-n8.1.1-239f2c733de4.tar.xz
+graviton/manifold/source/ffmpeg-n8.1.1-239f2c733de4-r2.tar.xz
 ```
 
-A HEAD against the public URL guards it, so a normal release uploads nothing. Two preflight
+A HEAD against the public URL guards it, so a normal release uploads nothing, and a published
+tarball is never overwritten: the upload runs only on a 404 `Not found`. See
+`ThirdParty/ffmpeg/README.md` for the revision rule. Two preflight
 assertions block a release if the licence posture breaks: `ffmpegSourceURL` in
 `App/AboutWindow.swift` must equal the URL derived from the pin, and `licensingContact`
 must be a real address.

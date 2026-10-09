@@ -42,7 +42,7 @@ all asserted on every rebuild.
   be written against a library that is not in the bundle.
 
 Built with the **DNxHD/DNxHR** and **ProRes** decoders, **MOV + MXF + MPEG-TS** demuxers, the
-**h264 parser**, the pcm/aac audio decoders, and **swscale**.
+**h264 and hevc parsers**, the pcm/aac audio decoders, and **swscale**.
 
 ## ⚠️ `--disable-network` is DELIBERATE and LOAD-BEARING — do not "helpfully" enable it
 
@@ -142,12 +142,12 @@ comparing every git-tracked file at the pin against that legacy tree:
 
 > **10,133 files compared — byte-identical.** The by-hand tree was unmodified upstream `n8.1.1`.
 
-## The configure line — four numbered changes (five flags) from the 0.5.1 baseline
+## The configure line — five numbered changes (six flags) from the 0.5.1 baseline
 
 The baseline is recorded verbatim in `scripts/build_ffmpeg.sh`. **Nothing else may differ**, and a
 further difference cannot arrive unannounced — the script asserts the line against a literal array
-and prints exactly which flags drifted. (CHANGE 1 is a pair of flags, which is why four numbered
-changes are five flags.)
+and prints exactly which flags drifted. (CHANGE 1 is a pair of flags, which is why five numbered
+changes are six flags.)
 
 | # | change | why |
 |---|---|---|
@@ -155,6 +155,7 @@ changes are five flags.)
 | 2 | `+ --enable-decoder=prores` | Makes a libav fallback possible for AVFoundation-rejected ProRes (see below). Costs a few hundred KB. |
 | 3 | `+ --install-name-dir=@rpath` | **Required by 1.** Darwin bakes `install_name` at link time from `$(SHLIBDIR)` — an absolute path into the build machine's home directory. Shipped unchanged, the app would work here and fail to launch everywhere else. Also fixes every inter-library reference in one step. |
 | 4 | `+ --extra-cflags/--extra-ldflags=-mmacosx-version-min=15.0` | **Fixes a pre-existing defect.** The by-hand build passed no deployment target, so it inherited the host default: the 0.5.1 archives carry `minos 26.0` against an app targeting macOS 15.0, producing **226** `built for newer 'macOS' version` linker warnings. `scripts/build_libsrt.sh` already pins this pair for the other three vendored libraries. Now **0** warnings. |
+| 5 | `+ --enable-parser=hevc` | **HEVC over SRT** (`docs/COLOR_MANAGEMENT_FINDINGS.md` §6.10, decision 1, 2026-10-07). Without it the mpegts demuxer still maps stream type 0x24 to HEVC, but stream identification reports `0x0` with no profile after waiting out the whole probe window, and nothing splits a PES into access units. Same pin, same soname majors. configure selects `hevcparse` and `hevc_sei` (`golomb` and `atsc_a53` were already on for H.264), so config.h gains exactly `CONFIG_HEVCPARSE`, `CONFIG_HEVC_SEI` and `CONFIG_HEVC_PARSER`. Still LGPL: `CONFIG_GPL 0`. The SRT gate still refuses HEVC until Stage 3. |
 
 **Not added: `--enable-pic`** — unnecessary. clang defines `__PIC__` by default on arm64 Darwin
 and configure picks it up; the *previous static* build already had `CONFIG_PIC 1`. The script
@@ -168,22 +169,46 @@ asserted with `lipo` on each staged dylib instead.
 The App panel's written offer names a URL, and this is what serves it:
 
 ```
-https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4.tar.xz
+https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4-r2.tar.xz
 ```
 
-- **Keyed by the pin, not the Manifold version.** The filename carries the short commit SHA, so
-  the URL the About panel prints and the object in the bucket cannot name different versions —
-  one string, derived from one pin.
-- **Uploaded once per pin.** `release-mac.sh` HEADs the URL; already there → nothing uploaded, at
-  a cost of one HTTP request. Bump the pin → the filename changes, the HEAD misses, and exactly
-  one upload happens automatically. It goes up *before* the DMG, so no binary is ever
-  downloadable whose licence notice points at a 404.
+- **Keyed by the pin and the build revision, not the Manifold version.** The filename carries
+  the short commit SHA and `-rN`, so the URL the About panel prints and the object in the bucket
+  cannot name different builds — one string, derived in `build_ffmpeg.sh`.
+- **A new revision for ANY change to the configure line; a published tarball is never
+  overwritten** (decided by Robbie, 2026-10-09). `BUILD.txt` states the configure line, so the
+  same pin with a different line is a different tarball. Every older build's About panel keeps
+  printing the URL of the `BUILD.txt` that describes it.
+
+  | revision | filename | configure line |
+  |---|---|---|
+  | r1 | `ffmpeg-n8.1.1-239f2c733de4.tar.xz` (no suffix: shipped builds print it) | the four-change line, 2026-07-28 |
+  | r2 | `ffmpeg-n8.1.1-239f2c733de4-r2.tar.xz` | + `--enable-parser=hevc` (CHANGE 5), 2026-10-09 |
+
+  **Enforced, not remembered:** `build_ffmpeg.sh` records the sha256 of the public configure line
+  for the current revision (`SOURCE_REVISION_CONFIG`) and refuses to build, name
+  (`--source-info`) or produce (`--source-tarball`) a tarball when the line no longer matches.
+  The refusal prints the new hash. To bump: increment `SOURCE_REVISION`, paste the hash, add a
+  line to the revision log there, and update `Attributions.ffmpegSourceURL` in
+  `App/AboutWindow.swift` (release preflight asserts the two agree).
+- **Uploaded once per (pin, revision).** `release-mac.sh` HEADs the URL; already there → nothing
+  uploaded, at a cost of one HTTP request. A new pin or revision changes the filename, and
+  exactly one upload happens automatically. **It uploads only when the object is shown to be
+  absent** — HTTP 404 with the Worker's `Not found` body — because `wrangler r2 object put`
+  overwrites silently. An unrouted 404 (`Unknown endpoint`), a 5xx or a timeout stops the release
+  instead. It goes up *before* the DMG, so no binary is ever downloadable whose licence notice
+  points at a 404.
 - **Built from the pinned git checkout** (`git archive` at the SHA), never from a working tree —
   see the reasoning block in `scripts/build_ffmpeg.sh`. The script then diffs the archive's file
   list against `git ls-tree` at the commit and fails on any difference, so "this tarball is that
   commit" is asserted rather than assumed.
 - **Carries `BUILD.txt`** with the tag, commit and configure line, because corresponding source
   means the source *as built*.
+
+**Why the revision exists:** with the tarball keyed by the pin alone, CHANGE 5 would have shipped
+with `release-mac.sh` finding the July tarball at the same URL (HTTP 200), uploading nothing, and
+its `BUILD.txt` naming the four-change line. r2 is not uploaded yet; the next release that ships
+these dylibs uploads it.
 
 ⚠️ **The release Worker must route `source/`.** It passes through `binaries`, `current` and
 `archive` only; an unrouted path returns `Unknown endpoint: "source"`. One line in

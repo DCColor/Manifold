@@ -803,6 +803,24 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
 
 ---
 
+## ☐ PRE-SHIP: run `--verify-relocatable` on a Developer ID–signed release build before shipping
+
+**Added 2026-10-09 (HEVC Stage 1, `COLOR_MANAGEMENT_FINDINGS.md` §6.10).**
+
+- **Why:** the check had been passing vacuously. It quarantined an unsigned copy, Gatekeeper held
+  the exec at its "is damaged" prompt, and the check took "the process exists" as "the app ran".
+  Fixed the same day: the copy is quarantined only when it is Developer ID–signed, a quarantined
+  copy is assessed with `spctl` and never launched if rejected, and it passes only when `lsof` shows
+  all five libav dylibs mapped from the copy's `Contents/Frameworks`. Since the fix it has run on
+  an unsigned Profile build only, where there is no quarantine and no Gatekeeper assessment.
+- **Done means:** `./scripts/build_ffmpeg.sh --verify-relocatable <exported, notarized
+  Manifold.app>` prints `RELOCATABLE` for the build being shipped. That run quarantines the copy,
+  gets `spctl … accepted (source=Notarized Developer ID)`, and lsof sees the five dylibs under
+  hardened runtime. (Run it on the exported app, after notarization: a signed but un-notarized copy
+  is correctly rejected and not launched.)
+
+---
+
 ## ☐ PRE-SHIP: confirm the sync clip download URL — the zip is not uploaded yet
 
 **Added 2026-10-01 (stage D, `AUDIO_RESAMPLER_DESIGN.md` §19.10).** ⚠️ ROBBIE TO CONFIRM BEFORE RELEASE.

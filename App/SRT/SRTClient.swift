@@ -798,7 +798,8 @@ final class SRTClient: ObservableObject {
         // possible failure to debug. HEVC over SRT is common enough that this WILL be hit.
         let codec = Self.text(format.codecName)
         guard codec == "h264" else {
-            NSLog("[SRT] stream is %@ — this build decodes H.264 only; refusing", codec)
+            NSLog("[SRT] stream is %@ %@ %dx%d — this build decodes H.264 only; refusing",
+                  codec, Self.text(format.profileName), format.width, format.height)
             // USER-VISIBLE, through the SAME non-fatal banner a connect error uses. A log line
             // alone would leave the user with a black window and no stated reason — the worse of
             // the two outcomes this gate exists to prevent. Set BEFORE disconnect(), which does not

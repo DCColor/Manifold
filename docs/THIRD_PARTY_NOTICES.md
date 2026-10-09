@@ -57,11 +57,14 @@ conditions. There are three, and each is discharged by a different mechanism:
 
 ### The corresponding source
 
-Published at a URL keyed by the FFmpeg pin:
+Published at a URL keyed by the FFmpeg pin and a build revision:
 
 ```
-https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4.tar.xz
+https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4-r2.tar.xz
 ```
+
+Builds made before 2026-10-09 print the r1 URL, without the suffix
+(`ffmpeg-n8.1.1-239f2c733de4.tar.xz`), which stays published unchanged.
 
 - **Built from the pinned git checkout**, not from any local working tree — `git archive` at
   `239f2c733de417201d7ad3b3b8b0d9b63285b2b1`, so the tarball is a pure function of the commit we
@@ -69,9 +72,11 @@ https://releases.graviton.tools/manifold/source/ffmpeg-n8.1.1-239f2c733de4.tar.x
 - **Contains a `BUILD.txt`** at the root carrying the tag, the commit, and the exact configure
   line. "Corresponding source" means the source *as built*: upstream source alone does not tell
   you which decoders were compiled in or that the network layer was disabled.
-- **Uploaded once per pin, not per release.** `scripts/release-mac.sh` HEADs the URL; if it is
-  already there, nothing is uploaded. Bumping the FFmpeg pin changes the filename, the HEAD
-  misses, and exactly one upload happens automatically.
+- **Uploaded once per pin and build revision, not per release.** `scripts/release-mac.sh` HEADs
+  the URL; if it is already there, nothing is uploaded. A new pin, or any change to the configure
+  line (a new `-rN`, enforced by `scripts/build_ffmpeg.sh`), changes the filename, and exactly one
+  upload happens automatically. **A published tarball is never overwritten**: the upload runs
+  only when the URL answers 404 `Not found`.
 - **Published before the binary**, so no build is ever downloadable whose licence notice points
   at a 404.
 

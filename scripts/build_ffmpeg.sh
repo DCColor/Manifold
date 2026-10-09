@@ -173,7 +173,7 @@ major_for() {
 #   --enable-demuxer=mov --enable-demuxer=mxf --enable-demuxer=mpegts
 #   --enable-parser=h264 --enable-protocol=file --enable-swscale --disable-x86asm
 #
-# FOUR NUMBERED CHANGES — FIVE FLAGS, since CHANGE 1 is a pair. NOTHING ELSE MAY DIFFER. Each
+# FIVE NUMBERED CHANGES — SIX FLAGS, since CHANGE 1 is a pair. NOTHING ELSE MAY DIFFER. Each
 # is marked CHANGE n below and all are encoded in the LAYER 1 assertion, so a further difference
 # cannot arrive unannounced.
 # (That assertion earned its keep immediately: it caught THIS script's first draft passing
@@ -222,6 +222,18 @@ major_for() {
 #             followed the convention. Going shared makes it more visible (ld checks a dylib's
 #             platform at link time), so it is fixed here rather than carried forward.
 #
+#   CHANGE 5  --enable-parser=hevc
+#             HEVC over SRT (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, decision 1, 2026-10-07).
+#             The mpegts demuxer maps stream type 0x24 to HEVC in every build, but without a
+#             parser avformat_find_stream_info reports 0x0 with no profile and waits out the whole
+#             probe window, and nothing splits the PES payload into access units. Same pin, so
+#             the soname majors do not move. configure: hevc_parser_select="hevcparse hevc_sei";
+#             golomb and atsc_a53 were already on for the h264 parser, so config.h gains exactly
+#             CONFIG_HEVCPARSE and CONFIG_HEVC_SEI, and config_components.h CONFIG_HEVC_PARSER.
+#             LGPL either way: no --enable-gpl, CONFIG_GPL stays 0 (LAYER 2).
+#             ⚠️ The configure line is also printed in the About panel (App/AboutWindow.swift) and
+#             in the source tarball's BUILD.txt. Change all three together.
+#
 #   NOT ADDED: --arch=arm64. Redundant — configure already detects aarch64 on this host (the
 #             baseline build's own log reports "ARCH aarch64 (generic)" with no such flag), and
 #             adding it would be a difference that buys nothing. arm64-only is asserted after
@@ -251,6 +263,7 @@ CONFIGURE_ARGS=(
     --enable-demuxer=mxf
     --enable-demuxer=mpegts
     --enable-parser=h264
+    --enable-parser=hevc                # CHANGE 5
     --enable-protocol=file
     --enable-swscale
     --disable-x86asm
@@ -269,7 +282,7 @@ CONFIGURE_ARGS=(
 # that protects --disable-network and --disable-everything.
 EXPECTED_DECODERS=(aac aac_latm dnxhd pcm_f32le pcm_s16be pcm_s16le pcm_s24be pcm_s24le pcm_s32le prores)
 EXPECTED_DEMUXERS=(mov mpegts mxf)
-EXPECTED_PARSERS=(aac_latm h264)        # aac_latm is pulled in by the aac_latm decoder
+EXPECTED_PARSERS=(aac_latm h264 hevc)   # aac_latm is pulled in by the aac_latm decoder; hevc is CHANGE 5
 EXPECTED_PROTOCOLS=(file)
 # Demuxer long-names as libavformat reports them at RUNTIME (LAYER 3), which differ from the
 # config.h component names: the mov demuxer answers to all the container extensions it handles.
@@ -344,11 +357,11 @@ assert_config_line() {
     extra="$(comm -13 <(normalize_config "$expected") <(normalize_config "$actual") || true)"
 
     if [ -z "$missing" ] && [ -z "$extra" ]; then
-        ok "LAYER 1: configure line matches the pinned four-change baseline (${label})"
+        ok "LAYER 1: configure line matches the pinned five-change baseline (${label})"
         return 0
     fi
 
-    bad "LAYER 1: the configure line has DRIFTED from the pinned four-change baseline (${label})"
+    bad "LAYER 1: the configure line has DRIFTED from the pinned five-change baseline (${label})"
     [ -n "$missing" ] && { say "      expected but ABSENT:"; sed 's/^/        /' <<<"$missing"; }
     [ -n "$extra" ]   && { say "      present but UNEXPECTED:"; sed 's/^/        /' <<<"$extra"; }
     say ""
@@ -356,7 +369,7 @@ assert_config_line() {
     say "      actual:   ${actual}"
     say ""
     say "      If a change is intentional, edit CONFIGURE_ARGS in this script AND record it in"
-    say "      the four-change banner above. Do not edit only one of the two."
+    say "      the five-change banner above. Do not edit only one of the two."
     FAIL=1
     return 1
 }
@@ -390,11 +403,6 @@ assert_config_line() {
 # inside the tarball rather than only in the About panel.
 
 FFMPEG_SHORT="${FFMPEG_COMMIT:0:12}"
-SOURCE_FILENAME="ffmpeg-${FFMPEG_TAG}-${FFMPEG_SHORT}.tar.xz"
-# wrangler's objectPath form: the FIRST component is the bucket, the rest is the key. The Worker
-# then serves it at /manifold/source/<file> (env.GRAVITON.get("manifold/source/<file>")).
-SOURCE_OBJECT="graviton/manifold/source/${SOURCE_FILENAME}"
-SOURCE_URL="https://releases.graviton.tools/manifold/source/${SOURCE_FILENAME}"
 # The tree prefix inside the tarball.
 SOURCE_PREFIX="ffmpeg-${FFMPEG_TAG}"
 
@@ -406,6 +414,47 @@ configure_line_public() {
         case "$a" in --prefix=*) continue ;; esac
         printf '%s\n' "  $a"
     done
+}
+
+# ── THE BUILD REVISION: ONE PUBLISHED TARBALL PER (PIN, CONFIGURE LINE) ─────────────────────
+# Decided (Robbie, 2026-10-09). The tarball's BUILD.txt states the configure line, so a change to
+# the line on the SAME pin is a different tarball, and the pin alone cannot name it. Keying by the
+# pin only is how CHANGE 5 would have shipped with the July tarball's four-change BUILD.txt still
+# on the URL the About panel prints: release-mac.sh saw HTTP 200 and uploaded nothing.
+#
+# So the filename carries a revision, bumped for ANY change to the configure line, and a published
+# tarball is NEVER overwritten: a new line is a new file at a new URL, and every older build's
+# About panel keeps pointing at the BUILD.txt that describes it. Revision 1 is the July file and
+# keeps its original, unsuffixed name, because shipped builds print that URL.
+#
+# SOURCE_REVISION_CONFIG is the sha256 of configure_line_public() for this revision.
+# assert_source_revision refuses to name, build or publish a tarball when the line no longer
+# matches it, so a configure change cannot reuse a revision. To bump: increment SOURCE_REVISION,
+# paste the hash the failure prints, and update Attributions.ffmpegSourceURL in
+# App/AboutWindow.swift (release-mac.sh preflight checks it against SOURCE_URL).
+#   r1  2026-07-28  the four-change line          sha256 995cb106…  (no suffix)
+#   r2  2026-10-09  + --enable-parser=hevc        sha256 c401bdce…  (CHANGE 5)
+SOURCE_REVISION=2
+SOURCE_REVISION_CONFIG="c401bdce1764ae5684b80537990f974a30d38332de34e1460fc92678ca803b92"
+if [ "$SOURCE_REVISION" = "1" ]; then
+    SOURCE_FILENAME="ffmpeg-${FFMPEG_TAG}-${FFMPEG_SHORT}.tar.xz"
+else
+    SOURCE_FILENAME="ffmpeg-${FFMPEG_TAG}-${FFMPEG_SHORT}-r${SOURCE_REVISION}.tar.xz"
+fi
+# wrangler's objectPath form: the FIRST component is the bucket, the rest is the key. The Worker
+# then serves it at /manifold/source/<file> (env.GRAVITON.get("manifold/source/<file>")).
+SOURCE_OBJECT="graviton/manifold/source/${SOURCE_FILENAME}"
+SOURCE_URL="https://releases.graviton.tools/manifold/source/${SOURCE_FILENAME}"
+
+assert_source_revision() {
+    local got
+    got="$(configure_line_public | shasum -a 256 | awk '{print $1}')"
+    [ "$got" = "$SOURCE_REVISION_CONFIG" ] || die "the configure line changed but SOURCE_REVISION did not.
+       r${SOURCE_REVISION} was recorded for configure line sha256 ${SOURCE_REVISION_CONFIG}
+       the line now hashes to                       ${got}
+       A published source tarball is never overwritten. Bump SOURCE_REVISION, set
+       SOURCE_REVISION_CONFIG=\"${got}\", add a line to the revision log above it, and update
+       Attributions.ffmpegSourceURL in App/AboutWindow.swift to the new filename."
 }
 
 write_build_txt() {   # write_build_txt <dest-file>
@@ -519,15 +568,17 @@ make_source_tarball() {   # make_source_tarball <out.tar.xz>
 }
 
 # ── --source-info is dispatched HERE, ahead of everything that prints ──────────────────────
-# Its stdout is consumed by `eval` in release-mac.sh, so it must emit the six assignments and
+# Its stdout is consumed by `eval` in release-mac.sh, so it must emit the seven assignments and
 # NOTHING else. GATE 0 below prints a banner, which would be eval'd as commands — hence this
 # runs first and carries its own pin check.
 # (--source-tarball is dispatched further down: it calls fetch_source(), defined after GATE 0.)
 if [ "$MODE" = "sourceinfo" ]; then
     [ -n "$FFMPEG_COMMIT" ] || die "FFMPEG_COMMIT is empty — bootstrap the pin first"
+    assert_source_revision      # die() writes to stderr, so a refusal is never eval'd
     printf 'FFMPEG_TAG=%s\n'      "$FFMPEG_TAG"
     printf 'FFMPEG_COMMIT=%s\n'   "$FFMPEG_COMMIT"
     printf 'FFMPEG_SHORT=%s\n'    "$FFMPEG_SHORT"
+    printf 'SOURCE_REVISION=%s\n' "$SOURCE_REVISION"
     printf 'SOURCE_FILENAME=%s\n' "$SOURCE_FILENAME"
     printf 'SOURCE_OBJECT=%s\n'   "$SOURCE_OBJECT"
     printf 'SOURCE_URL=%s\n'      "$SOURCE_URL"
@@ -623,80 +674,152 @@ if [ "$MODE" = "reloc" ]; then
     fi
 
     head2 "RELOCATABILITY — the dyld test (the one that actually proves it)"
+
+    # ── ⚠️ WHAT THIS USED TO GET WRONG (2026-10-09, COLOR_MANAGEMENT_FINDINGS.md §6.10) ───────
+    # It quarantined EVERY copy and passed if the process "stayed up" (kill -0). On an unsigned
+    # or ad-hoc build Gatekeeper holds a quarantined exec at its "is damaged and can't be opened"
+    # prompt: the process exists, nothing has loaded, and kill -0 succeeds. So it printed
+    # RELOCATABLE for an app that never ran, and left the prompt on screen for whoever came back.
+    # It then blamed the empty DYLD_PRINT_LIBRARIES output on hardened runtime, which an unsigned
+    # build does not have. Three rules now, each closing one of those holes:
+    #   1. Quarantine the copy ONLY when the bundle is Developer ID–signed. Gatekeeper assessment
+    #      is part of what a downloaded signed build goes through; an unsigned build has no answer
+    #      to it but the prompt.
+    #   2. A quarantined copy (added here, or inherited from the source bundle) is assessed with
+    #      spctl BEFORE launching, and a rejection fails the check WITHOUT launching. Nothing this
+    #      script runs may raise a Gatekeeper dialog.
+    #   3. Pass only on EVIDENCE OF LOADING: all five libav dylibs mapped into the running process
+    #      from the copy's Contents/Frameworks, read with lsof. lsof reads the process's open
+    #      mappings, so it works under hardened runtime, which strips DYLD_* from signed builds.
+    #      A process held at a prompt has mapped nothing, so it fails. DYLD_PRINT_LIBRARIES is
+    #      checked too when it produces output (unsigned builds), and any Gatekeeper prompt
+    #      syspolicyd logs during the launch fails the check.
     say "  Moving the build prefix and the staging directory aside, so NO path outside the"
     say "  bundle can satisfy a libav load. This is what a second machine looks like to dyld."
     say ""
 
+    # ── Signed with Developer ID? Captured, then matched (the SIGPIPE note at has_line).
+    RELOC_CS="$(codesign -dvv "$RELOC_APP" 2>&1 || true)"
+    RELOC_TEAM="$(find_lines "$RELOC_CS" '^TeamIdentifier=' | cut -d= -f2)"
+    DEVID_SIGNED=0
+    if has_line "$RELOC_CS" '^Authority=Developer ID Application: ' && [ -n "$RELOC_TEAM" ] && [ "$RELOC_TEAM" != "not set" ]; then
+        DEVID_SIGNED=1
+        ok "bundle is Developer ID–signed (team ${RELOC_TEAM}) — the copy will be quarantined"
+    else
+        ok "bundle is NOT Developer ID–signed ($(find_lines "$RELOC_CS" '^Signature=' | head -1 | tr -d '\n' || true)) — no quarantine flag"
+    fi
+
     moved=()
+    RUN_DIR=""
+    launch_pid=""
     restore() {
+        [ -n "$launch_pid" ] && kill "$launch_pid" 2>/dev/null
         for m in "${moved[@]:-}"; do
             [ -n "$m" ] && [ -d "${m}.away" ] && mv "${m}.away" "$m"
         done
+        [ -n "$RUN_DIR" ] && rm -rf "$RUN_DIR"
     }
     trap restore EXIT
     for d in "${PREFIX}" "${DEST}/lib"; do
         if [ -d "$d" ]; then mv "$d" "${d}.away"; moved+=("$d"); ok "moved aside: ${d}"; fi
     done
 
-    # Run from a copy OUTSIDE the build tree, carrying a quarantine xattr, exactly as a
-    # downloaded build would. TMPDIR is per-user and outside the repo.
+    # Run from a copy OUTSIDE the build tree. TMPDIR is per-user and outside the repo.
     RUN_DIR="$(mktemp -d)"
     cp -R "$RELOC_APP" "${RUN_DIR}/"
     RUN_APP="${RUN_DIR}/$(basename "$RELOC_APP")"
-    xattr -w com.apple.quarantine "0081;00000000;Manifold;" "$RUN_APP" 2>/dev/null || \
-        warn "could not set the quarantine xattr (non-fatal)"
-    ok "copied to ${RUN_APP} (quarantined)"
-
-    say ""
-    say "  launching with DYLD_PRINT_LIBRARIES=1 …"
-    DYLD_LOG="${RUN_DIR}/dyld.log"
-    set +e
-    DYLD_PRINT_LIBRARIES=1 "${RUN_APP}/Contents/MacOS/Manifold" >"$DYLD_LOG" 2>&1 &
-    launch_pid=$!
-    # Long enough for dyld to finish loading and for a load failure to have killed it. A dylib
-    # that cannot be found is fatal at launch and immediate — this is not a race.
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "$launch_pid" 2>/dev/null || break
-        /bin/sleep 0.5
-    done
-    still_running=0
-    kill -0 "$launch_pid" 2>/dev/null && still_running=1
-    [ "$still_running" = "1" ] && kill "$launch_pid" 2>/dev/null
-    wait "$launch_pid" 2>/dev/null
-    set -e
-
-    DYLD_OUT="$(cat "$DYLD_LOG" 2>/dev/null || true)"
-    loaded_libav="$(find_lines "$DYLD_OUT" 'lib(avcodec|avformat|avutil|swscale|swresample)')"
-
-    if [ "$still_running" = "1" ]; then
-        ok "the app LAUNCHED and stayed up with every build-tree path unavailable"
+    RUN_APP_REAL="$(cd "$RUN_APP" && pwd -P)"
+    if [ "$DEVID_SIGNED" = "1" ]; then
+        xattr -w com.apple.quarantine "0081;00000000;Manifold;" "$RUN_APP" \
+            || die "could not set the quarantine xattr on the copy"
+        ok "copied to ${RUN_APP} (quarantined, as a download would be)"
     else
-        fail "the app did NOT stay up. Output:"
-        sed 's/^/        /' <<<"${DYLD_OUT:-<none>}"
+        ok "copied to ${RUN_APP}"
     fi
 
-    if [ -n "$loaded_libav" ]; then
-        say ""
-        say "  libav images dyld actually loaded:"
-        sed 's/^/        /' <<<"$loaded_libav"
-        outside="$(find_lines "$loaded_libav" '(manifold-ffmpeg|ThirdParty|/opt/|/usr/local/)')"
-        if [ -n "$outside" ]; then
-            fail "an image loaded from OUTSIDE the bundle:"
-            sed 's/^/        /' <<<"$outside"
+    # ── Rule 2: a quarantined copy is assessed first, and never launched if Gatekeeper says no.
+    launched=0
+    if xattr -p com.apple.quarantine "$RUN_APP" >/dev/null 2>&1; then
+        GK_OUT="$(spctl --assess -v "$RUN_APP" 2>&1 || true)"
+        if has_line "$GK_OUT" ': accepted$'; then
+            ok "spctl: accepted ($(find_lines "$GK_OUT" '^source=' | head -1))"
         else
-            ok "every libav image loaded from inside the app bundle"
+            fail "the copy is quarantined and Gatekeeper REJECTS it — NOT launched (launching would"
+            say  "        raise the \"damaged\" / \"cannot be opened\" prompt and prove nothing):"
+            sed 's/^/        /' <<<"$GK_OUT"
+            [ "$DEVID_SIGNED" = "1" ] || say "        (the source bundle itself carries a quarantine flag: $(xattr -p com.apple.quarantine "$RELOC_APP" 2>/dev/null || echo '?'))"
+            [ "$DEVID_SIGNED" = "1" ] && say "        (a Developer ID build must be notarized before this check can pass)"
         fi
-    else
-        warn "DYLD_PRINT_LIBRARIES reported no libav image — hardened runtime strips DYLD_* on"
-        warn "signed binaries, so this is expected for a SIGNED build. The launch result above"
-        warn "is still decisive: with the build tree moved aside, an absolute install_name"
-        warn "could not have resolved."
+    fi
+
+    if [ "$FAIL" -eq 0 ]; then
+        say ""
+        say "  launching with DYLD_PRINT_LIBRARIES=1, reading its mappings with lsof …"
+        GK_SINCE="$(date '+%Y-%m-%d %H:%M:%S')"
+        DYLD_LOG="${RUN_DIR}/dyld.log"
+        set +e
+        DYLD_PRINT_LIBRARIES=1 "${RUN_APP}/Contents/MacOS/Manifold" >"$DYLD_LOG" 2>&1 &
+        launch_pid=$!
+        launched=1
+        # Polled, not slept: done as soon as all five are mapped (well under a second when the
+        # app runs), or after 15 s, or when the process exits.
+        mapped=""
+        for _ in $(seq 1 30); do
+            kill -0 "$launch_pid" 2>/dev/null || break
+            mapped="$(/usr/sbin/lsof -p "$launch_pid" -Fn 2>/dev/null | sed -n 's/^n//p' \
+                      | grep -E '/lib(avcodec|avformat|avutil|swscale|swresample)\.[0-9]+\.dylib$' | sort -u)"
+            [ "$(printf '%s\n' "$mapped" | grep -c . )" -ge 5 ] && break
+            /bin/sleep 0.5
+        done
+        alive=0; kill -0 "$launch_pid" 2>/dev/null && alive=1
+        kill "$launch_pid" 2>/dev/null; wait "$launch_pid" 2>/dev/null; launch_pid=""
+        set -e
+
+        # ── Rule 3: exactly the five, each from the copy's own Frameworks directory.
+        for l in "${LIBS[@]}"; do
+            want_path="${RUN_APP_REAL}/Contents/Frameworks/lib${l}.$(major_for "$l").dylib"
+            # Exact whole-line, fixed-string match: the path contains regex metacharacters.
+            if grep -qxF -- "$want_path" <<<"$mapped"; then
+                ok "mapped from the bundle: lib${l}.$(major_for "$l").dylib"
+            else
+                fail "lib${l}.$(major_for "$l").dylib is NOT mapped from ${RUN_APP_REAL}/Contents/Frameworks"
+            fi
+        done
+        outside="$(grep -vF "${RUN_APP_REAL}/Contents/Frameworks/" <<<"$mapped" | grep . || true)"
+        [ -z "$outside" ] || { fail "libav mapped from OUTSIDE the bundle:"; sed 's/^/        /' <<<"$outside"; }
+        if [ -z "$mapped" ]; then
+            say "        the process mapped no libav at all (alive at the end: ${alive}). Output:"
+            head -20 "$DYLD_LOG" 2>/dev/null | sed 's/^/        /' || true
+        fi
+
+        # DYLD_PRINT_LIBRARIES, when the runtime allowed it (unsigned builds): the same verdict.
+        DYLD_OUT="$(cat "$DYLD_LOG" 2>/dev/null || true)"
+        dyld_libav="$(find_lines "$DYLD_OUT" 'lib(avcodec|avformat|avutil|swscale|swresample)\.[0-9]+\.dylib')"
+        if [ -n "$dyld_libav" ]; then
+            dyld_out="$(grep -vF "/Contents/Frameworks/" <<<"$dyld_libav" || true)"
+            if [ -z "$dyld_out" ] && [ "$(grep -c . <<<"$dyld_libav")" -ge 5 ]; then
+                ok "DYLD_PRINT_LIBRARIES agrees: all libav loaded from Contents/Frameworks"
+            else
+                fail "DYLD_PRINT_LIBRARIES disagrees:"; sed 's/^/        /' <<<"$dyld_libav"
+            fi
+        else
+            say "  (DYLD_PRINT_LIBRARIES printed nothing — expected only under hardened runtime; lsof above is the evidence)"
+        fi
+
+        # ── Any Gatekeeper prompt while it ran fails the check, whatever else passed.
+        GK_LOG="$(/usr/bin/log show --start "$GK_SINCE" --style compact \
+                  --predicate 'process == "syspolicyd" AND eventMessage CONTAINS "Prompt shown"' 2>/dev/null || true)"
+        GK_PROMPTS="$(find_lines "$GK_LOG" 'Prompt shown')"
+        if [ -n "$GK_PROMPTS" ]; then
+            fail "Gatekeeper showed a prompt during the launch:"; sed 's/^/        /' <<<"$GK_PROMPTS"
+        else
+            ok "no Gatekeeper prompt logged since ${GK_SINCE}"
+        fi
     fi
 
     restore; trap - EXIT
-    rm -rf "$RUN_DIR"
     say ""
-    [ "$FAIL" -eq 0 ] && { ok "RELOCATABLE — no dependency on any build-tree path"; exit 0; }
+    [ "$FAIL" -eq 0 ] && [ "$launched" = "1" ] && { ok "RELOCATABLE — all five libav dylibs loaded from inside the bundle with every build-tree path unavailable"; exit 0; }
     die "the app is NOT relocatable — see ✗ above"
 fi
 
@@ -866,6 +989,7 @@ if [ "$MODE" = "provenance" ]; then
 fi
 
 if [ "$MODE" = "tarball" ]; then
+    assert_source_revision
     fetch_source
     make_source_tarball "$TARBALL_OUT"
     say ""
@@ -1235,6 +1359,8 @@ PROBE
 
     if has_line "$out" "^PARSER"$'\t'"h264$"; then ok "h264 parser registered"
     else fail "the h264 parser is NOT registered — the SRT path needs it"; fi
+    if has_line "$out" "^PARSER"$'\t'"hevc$"; then ok "hevc parser registered"
+    else fail "the hevc parser is NOT registered — CHANGE 5; HEVC over SRT needs it"; fi
 
     # ── The five consumers ─────────────────────────────────────────────────
     local c v
@@ -1377,6 +1503,9 @@ if [ "$MODE" = "build" ]; then
     for tool in git clang otool lipo; do
         command -v "$tool" >/dev/null 2>&1 || die "required tool not on PATH: ${tool}"
     done
+    # Before the compile, not at release time: a configure change without a revision bump is
+    # caught by the build that introduces it.
+    assert_source_revision
     fetch_source
     # One-time, and skipped once it has passed for this exact commit — the answer cannot change
     # while both the pin and the legacy tree stay put.

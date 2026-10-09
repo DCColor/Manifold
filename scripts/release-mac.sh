@@ -359,7 +359,7 @@ if ! contains "$SOURCE_URL" "$(cat "$ABOUT_SWIFT")"; then
        The pin moved and Attributions.ffmpegSourceURL was not updated with it. Fix the literal
        in App/AboutWindow.swift — build_ffmpeg.sh is the source of truth, not this copy."
 fi
-ok "About panel source URL matches the pin (${SOURCE_FILENAME})"
+ok "About panel source URL matches the pin and build revision (${SOURCE_FILENAME})"
 
 mkdir -p "$DIST_DIR" "${REPO_ROOT}/build"
 case "$DIST_DIR" in
@@ -1092,11 +1092,19 @@ else
     # resolve, the offer is not an offer. So the source goes up first: at no point is a binary
     # downloadable whose licence notice points at a 404.
     #
-    # ⚠️ THIS IS KEYED BY THE FFmpeg PIN, NOT BY THE MANIFOLD VERSION. The tarball is FFmpeg's
-    # source; it changes only when the pinned commit changes. Re-uploading 11 MB of identical
-    # bytes on every release would be waste, so a normal release costs ONE HTTP request and
-    # uploads nothing. Bumping the pin changes the filename, the HEAD misses, and exactly one
-    # upload happens automatically.
+    # ⚠️ THIS IS KEYED BY THE FFmpeg PIN AND THE BUILD REVISION, NOT BY THE MANIFOLD VERSION. The
+    # tarball is FFmpeg's source plus a BUILD.txt stating the configure line; it changes only when
+    # the pinned commit or the configure line changes, and build_ffmpeg.sh refuses to name a
+    # tarball whose configure line does not match its revision (SOURCE_REVISION, -rN in the
+    # filename). Re-uploading 11 MB of identical bytes on every release would be waste, so a
+    # normal release costs ONE HTTP request and uploads nothing. A new pin or revision changes
+    # the filename, the HEAD misses, and exactly one upload happens automatically.
+    #
+    # ⚠️ A PUBLISHED TARBALL IS NEVER OVERWRITTEN (decided 2026-10-09). Older builds' About panels
+    # print its URL, and its BUILD.txt describes them. `wrangler r2 object put` overwrites without
+    # asking, so the upload runs ONLY when the object is shown to be absent: HTTP 404 with the
+    # Worker's "Not found" body. A 404 from an unrouted endpoint ("Unknown endpoint"), a 5xx or a
+    # timeout proves nothing about the object, and the release stops instead of guessing.
     #
     # The filename carries the short SHA, so the URL the About panel prints and the object in
     # the bucket cannot name different versions — there is one string, derived from one pin.
@@ -1119,11 +1127,29 @@ else
     src_curl_status=$?
     set -e
 
+    # Only when the HEAD missed: the body of a GET tells an absent object from an unrouted path.
+    # Never fetched for a 200, which would download the whole tarball.
+    SRC_BODY=""
+    if [[ $src_curl_status -eq 0 && "$SRC_HTTP" == "404" ]]; then
+        set +e
+        # Captured whole and truncated in the shell, not `| head -c`: see the SIGPIPE note at
+        # `contains`. A 404 body is a few bytes.
+        SRC_BODY=$(curl -sS -L --max-time 30 "$SOURCE_URL" 2>/dev/null)
+        set -e
+        SRC_BODY="${SRC_BODY:0:200}"
+    fi
+
     if [[ $src_curl_status -eq 0 && "$SRC_HTTP" == "200" ]]; then
         ok "already published (HTTP 200) — nothing to upload"
         record "corresponding source:    already live, ${SOURCE_FILENAME}"
+    elif ! [[ $src_curl_status -eq 0 && "$SRC_HTTP" == "404" && "$SRC_BODY" == "Not found"* ]]; then
+        die "cannot establish whether ${SOURCE_FILENAME} is already published
+       (HTTP ${SRC_HTTP:-?}, curl status ${src_curl_status}, body: ${SRC_BODY:-<not read>}).
+       A published source tarball is never overwritten, so nothing is uploaded on a guess.
+       If the body says 'Unknown endpoint', the Worker does not route source/ — see
+       ThirdParty/ffmpeg/README.md. Otherwise retry when ${SOURCE_URL} answers 200 or 404."
     else
-        warn "not published yet (HTTP ${SRC_HTTP:-?}) — building and uploading it now"
+        warn "not published yet (HTTP 404, Not found) — building and uploading it now"
 
         SOURCE_TARBALL="${RUN_DIR}/${SOURCE_FILENAME}"
         "${REPO_ROOT}/scripts/build_ffmpeg.sh" --source-tarball "$SOURCE_TARBALL" \
