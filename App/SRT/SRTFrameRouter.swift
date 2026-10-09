@@ -53,7 +53,7 @@ import CoreVideo
 import Foundation
 import ManifoldCore   // LiveClock
 import ColorimetryModel   // SourceColorimetry (buffer tags), SourceColorProvenance
-import H264SPSColor       // the decoder's per-SPS colour reading
+import SPSColor       // the decoder's per-SPS colour reading
 import DisplayProviders   // LiveCushion — the packing rule and the readout's Buffer row
 import QuartzCore
 import VideoToolbox
@@ -742,7 +742,7 @@ final class SRTFrameRouter {
     /// The FIRST reading activates the route, carrying this colour (see the colorimetry block). A
     /// later reading only changes the tags here; `deliver` announces it to the renderer when the
     /// first frame decoded under it is due.
-    private func noteSPSColor(_ sps: H264SPSColor) {
+    private func noteSPSColor(_ sps: SPSColor) {
         let next = StreamColorimetry(sps: sps, isFullRange: formatRange.isFullRange,
                                      rangeDeclared: formatRange.declared)
         // Once per change. A repeat of the same SPS never reaches here (the decoder compares bytes);

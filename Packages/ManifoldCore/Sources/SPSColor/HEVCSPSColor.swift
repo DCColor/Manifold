@@ -1,0 +1,292 @@
+//
+//  HEVCSPSColor.swift
+//  SPSColor
+//
+//  The HEVC reader: what one H.265 SPS says about colour, from the VUI's `video_signal_type`, per
+//  axis (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 2). Returns the shared `SPSColor`.
+//
+//  ── WHY IT IS LONGER THAN THE H.264 READER ─────────────────────────────────────────────
+//
+//  In HEVC the colour fields come after almost everything else in the SPS, and much of what comes
+//  first has a length that depends on its own contents: `profile_tier_level` with its sub-layers,
+//  the HEVC scaling lists, and above all the short-term reference picture sets, where an
+//  inter-predicted set carries one flag per picture of the set BEFORE it. None of it is used here,
+//  and all of it has to be walked at exactly its width, or the colour fields are read from the
+//  wrong bits — a plausible NUMBER, which is worse than nothing.
+//
+//  Every count and size is checked against the bound the standard gives it, as the walk goes. Real
+//  streams sit well inside those bounds; a desynchronised parse almost never does, so the bounds
+//  are what turn a misread into `.malformed` rather than a wrong colour.
+//
+//  ── SCOPE ──────────────────────────────────────────────────────────────────────────────
+//
+//  Base layer only (decision 8): an SPS with `nuh_layer_id` > 0 has a different syntax and is
+//  `.notAnSPS`. The SPS extensions come AFTER the VUI, so they never need parsing. Nothing after
+//  `matrix_coefficients` is read. Never throws, never traps.
+//
+
+/// The HEVC reader. A namespace: the result is the codec-neutral `SPSColor`.
+public enum HEVCSPSColor {
+
+    /// Read `nal` — ONE SPS NAL unit, with its 2-byte NAL header, with NO start code and NO length
+    /// prefix. Never throws.
+    public static func parse<Bytes: Collection>(nal: Bytes) -> SPSColor where Bytes.Element == UInt8 {
+        walk(nal: nal).color
+    }
+
+    // MARK: - What the walk stepped over
+
+    /// Every structural field the walk passes on the way to the colour fields. NOT used by anything:
+    /// kept so the tests can check the walk against FFmpeg's `trace_headers` field by field, which
+    /// is far stronger than checking only the colour it ends on.
+    struct Walk: Equatable {
+        var maxSubLayersMinus1 = 0
+        var chromaFormatIdc = 0
+        var width = 0
+        var height = 0
+        var confWin = [0, 0, 0, 0]                      // left, right, top, bottom
+        var bitDepthLumaMinus8 = 0
+        var bitDepthChromaMinus8 = 0
+        var log2MaxPocLsbMinus4 = 0
+        var scalingListEnabled = false
+        var scalingListDataPresent = false
+        var pcmEnabled = false
+        var numDeltaPocs: [Int] = []                    // per short-term RPS, in order
+        var numInterPredicted = 0
+        var numLongTermRefPicsSps = 0
+        var aspectRatioIdc: Int? = nil
+        var sarWidth: Int? = nil
+        var sarHeight: Int? = nil
+    }
+
+    /// Deliberately broken readers, for the tests only: each must FAIL CLOSED (read undeclared) on
+    /// every fixture its defect touches, never produce a colour. (§6.10, Stage 2, prediction 3.)
+    enum Mutant {
+        case keepEmulationPrevention          // the 03 in 00 00 03 left in the payload
+        case skipShortTermRefPicSets          // num_short_term_ref_pic_sets read, the sets not walked
+        case interPredictionReadAsExplicit    // an inter-predicted set read as an explicit one
+    }
+
+    static func walk<Bytes: Collection>(nal: Bytes, mutant: Mutant? = nil) -> (color: SPSColor, walk: Walk)
+    where Bytes.Element == UInt8 {
+        var w = Walk()
+        // The 2-byte header (§7.3.1.2): forbidden_zero_bit, nal_unit_type(6), nuh_layer_id(6),
+        // nuh_temporal_id_plus1(3). Plus at least the VPS id and the sub-layer count.
+        guard nal.count >= 4 else { return (SPSColor(reach: .notAnSPS), w) }
+        let b0 = nal[nal.startIndex], b1 = nal[nal.index(after: nal.startIndex)]
+        guard b0 & 0x80 == 0,                           // forbidden_zero_bit
+              (b0 >> 1) & 0x3F == 33,                   // nal_unit_type 33 = SPS. A VPS or PPS must not parse as one.
+              ((b0 & 1) << 5) | (b1 >> 3) == 0,         // nuh_layer_id 0: base layer only (decision 8)
+              b1 & 0x07 != 0 else {                     // nuh_temporal_id_plus1 0 is forbidden
+            return (SPSColor(reach: .notAnSPS), w)
+        }
+        guard nal.count <= SPSColor.maximumSPSBytes else { return (SPSColor(reach: .malformed), w) }
+
+        let payload = nal.dropFirst(2)
+        var r = BitReader(rbsp: mutant == .keepEmulationPrevention ? Array(payload) : SPSColor.unescape(payload))
+        let color = readSPS(&r, &w, mutant)
+        return (color, w)
+    }
+
+    // MARK: - seq_parameter_set_rbsp(), H.265 §7.3.2.2.1, nuh_layer_id 0, up to the colour fields
+
+    private static func readSPS(_ r: inout BitReader, _ w: inout Walk, _ mutant: Mutant?) -> SPSColor {
+        let malformed = SPSColor(reach: .malformed)
+
+        _ = r.bits(4)                                   // sps_video_parameter_set_id
+        let maxSubLayersMinus1 = r.bits(3)              // sps_max_sub_layers_minus1
+        guard maxSubLayersMinus1 <= 6 else { return malformed }   // 7 is not allowed
+        w.maxSubLayersMinus1 = maxSubLayersMinus1
+        _ = r.bit()                                     // sps_temporal_id_nesting_flag
+        guard skipProfileTierLevel(&r, maxSubLayersMinus1: maxSubLayersMinus1) else { return malformed }
+
+        guard r.ue() <= 15 else { return malformed }    // sps_seq_parameter_set_id
+        let chromaFormatIdc = r.ue()
+        guard chromaFormatIdc <= 3 else { return malformed }
+        w.chromaFormatIdc = chromaFormatIdc
+        if chromaFormatIdc == 3 { _ = r.bit() }         // separate_colour_plane_flag
+        w.width = r.ue()                                // pic_width_in_luma_samples
+        w.height = r.ue()                               // pic_height_in_luma_samples
+        guard w.width > 0, w.height > 0 else { return malformed }
+        if r.bit() == 1 {                               // conformance_window_flag
+            w.confWin = [r.ue(), r.ue(), r.ue(), r.ue()] // left, right, top, bottom offsets
+        }
+        w.bitDepthLumaMinus8 = r.ue()
+        w.bitDepthChromaMinus8 = r.ue()
+        guard w.bitDepthLumaMinus8 <= 8, w.bitDepthChromaMinus8 <= 8 else { return malformed }
+        w.log2MaxPocLsbMinus4 = r.ue()                  // log2_max_pic_order_cnt_lsb_minus4
+        guard w.log2MaxPocLsbMinus4 <= 12 else { return malformed }
+
+        // Sub-layer ordering: one triple per sub-layer, or only the highest one's.
+        let orderingInfoPresent = r.bit()
+        var maxDecPicBufferingMinus1 = 0
+        for _ in (orderingInfoPresent == 1 ? 0 : maxSubLayersMinus1)...maxSubLayersMinus1 {
+            maxDecPicBufferingMinus1 = r.ue()           // sps_max_dec_pic_buffering_minus1
+            let reorder = r.ue()                        // sps_max_num_reorder_pics
+            _ = r.ue()                                  // sps_max_latency_increase_plus1
+            // MaxDpbSize is at most 16 (§A.4.2), and reordering cannot exceed the buffer.
+            guard maxDecPicBufferingMinus1 <= 15, reorder <= maxDecPicBufferingMinus1 else { return malformed }
+        }
+
+        // Block sizes (§7.4.3.2.1): CTB 16…64, transform blocks nested inside the coding blocks.
+        let minCbLog2 = r.ue() + 3                      // log2_min_luma_coding_block_size_minus3
+        let ctbLog2 = minCbLog2 + r.ue()                // log2_diff_max_min_luma_coding_block_size
+        let minTbLog2 = r.ue() + 2                      // log2_min_luma_transform_block_size_minus2
+        let maxTbLog2 = minTbLog2 + r.ue()              // log2_diff_max_min_luma_transform_block_size
+        let depthInter = r.ue()                         // max_transform_hierarchy_depth_inter
+        let depthIntra = r.ue()                         // max_transform_hierarchy_depth_intra
+        guard (4...6).contains(ctbLog2), minTbLog2 < minCbLog2, maxTbLog2 <= min(ctbLog2, 5),
+              depthInter <= ctbLog2 - minTbLog2, depthIntra <= ctbLog2 - minTbLog2 else { return malformed }
+
+        if r.bit() == 1 {                               // scaling_list_enabled_flag
+            w.scalingListEnabled = true
+            if r.bit() == 1 {                           // sps_scaling_list_data_present_flag
+                w.scalingListDataPresent = true
+                guard skipScalingListData(&r) else { return malformed }
+            }
+        }
+        _ = r.bit()                                     // amp_enabled_flag
+        _ = r.bit()                                     // sample_adaptive_offset_enabled_flag
+        if r.bit() == 1 {                               // pcm_enabled_flag
+            w.pcmEnabled = true
+            let pcmLuma = r.bits(4) + 1                 // pcm_sample_bit_depth_luma_minus1
+            let pcmChroma = r.bits(4) + 1               // pcm_sample_bit_depth_chroma_minus1
+            let minPcmLog2 = r.ue() + 3                 // log2_min_pcm_luma_coding_block_size_minus3
+            let maxPcmLog2 = minPcmLog2 + r.ue()        // log2_diff_max_min_pcm_luma_coding_block_size
+            _ = r.bit()                                 // pcm_loop_filter_disabled_flag
+            guard pcmLuma <= w.bitDepthLumaMinus8 + 8, pcmChroma <= w.bitDepthChromaMinus8 + 8,
+                  minPcmLog2 >= min(minCbLog2, 5), maxPcmLog2 <= min(ctbLog2, 5) else { return malformed }
+        }
+
+        // ── Short-term reference picture sets (§7.3.7) ──────────────────────────────────
+        let numShortTermRefPicSets = r.ue()
+        guard numShortTermRefPicSets <= 64 else { return malformed }
+        if mutant != .skipShortTermRefPicSets {
+            for idx in 0..<numShortTermRefPicSets {
+                guard let count = readShortTermRefPicSet(&r, idx: idx, previous: w.numDeltaPocs.last,
+                                                         maxDecPicBufferingMinus1: maxDecPicBufferingMinus1,
+                                                         interPredicted: &w.numInterPredicted, mutant: mutant)
+                else { return malformed }
+                w.numDeltaPocs.append(count)
+            }
+        }
+
+        if r.bit() == 1 {                               // long_term_ref_pics_present_flag
+            let count = r.ue()                          // num_long_term_ref_pics_sps
+            guard count <= 32 else { return malformed }
+            w.numLongTermRefPicsSps = count
+            for _ in 0..<count where !r.overrun {
+                _ = r.bits(w.log2MaxPocLsbMinus4 + 4)   // lt_ref_pic_poc_lsb_sps, u(v)
+                _ = r.bit()                             // used_by_curr_pic_lt_sps_flag
+            }
+        }
+        _ = r.bit()                                     // sps_temporal_mvp_enabled_flag
+        _ = r.bit()                                     // strong_intra_smoothing_enabled_flag
+
+        // ── vui_parameters(), H.265 §E.2.1 — up to the colour description only ─────────────
+        let vuiPresent = r.bit()
+        guard !r.overrun else { return malformed }
+        guard vuiPresent == 1 else { return SPSColor(reach: .noVUI) }
+
+        if r.bit() == 1 {                               // aspect_ratio_info_present_flag
+            let idc = r.bits(8)
+            w.aspectRatioIdc = idc
+            if idc == 255 {                             // Extended_SAR
+                w.sarWidth = r.bits(16)
+                w.sarHeight = r.bits(16)
+            }
+        }
+        if r.bit() == 1 { _ = r.bit() }                 // overscan_info_present → overscan_appropriate
+        return SPSColor.readVideoSignalType(&r)         // video_signal_type() to matrix_coefficients
+    }
+
+    // MARK: - profile_tier_level(1, sps_max_sub_layers_minus1), §7.3.3
+
+    /// The general profile is 88 bits and the level 8; each sub-layer may repeat either. With any
+    /// sub-layers at all, the flags are padded to eight entries with reserved_zero_2bits.
+    private static func skipProfileTierLevel(_ r: inout BitReader, maxSubLayersMinus1: Int) -> Bool {
+        _ = r.bits(88)                                  // general profile space … general_inbld_flag
+        _ = r.bits(8)                                   // general_level_idc
+        var profilePresent: [Bool] = [], levelPresent: [Bool] = []
+        for _ in 0..<maxSubLayersMinus1 {
+            profilePresent.append(r.bit() == 1)         // sub_layer_profile_present_flag[i]
+            levelPresent.append(r.bit() == 1)           // sub_layer_level_present_flag[i]
+        }
+        if maxSubLayersMinus1 > 0 {
+            for _ in maxSubLayersMinus1..<8 { _ = r.bits(2) }   // reserved_zero_2bits
+        }
+        for i in 0..<maxSubLayersMinus1 {
+            if profilePresent[i] { _ = r.bits(88) }     // sub_layer profile space … inbld
+            if levelPresent[i] { _ = r.bits(8) }        // sub_layer_level_idc[i]
+        }
+        return !r.overrun
+    }
+
+    // MARK: - scaling_list_data(), §7.3.4
+
+    /// Four sizes; six matrices each, except 32×32 where only matrixId 0 and 3 are coded. A matrix is
+    /// either predicted (a reference delta) or coded (a DC term for 16×16 and 32×32, then up to 64
+    /// deltas). Returns false when a value is outside the standard's range.
+    private static func skipScalingListData(_ r: inout BitReader) -> Bool {
+        for sizeId in 0..<4 {
+            let step = sizeId == 3 ? 3 : 1
+            for matrixId in stride(from: 0, to: 6, by: step) {
+                if r.bit() == 0 {                       // scaling_list_pred_mode_flag
+                    // scaling_list_pred_matrix_id_delta: 0…matrixId (in steps of 3 for 32×32)
+                    guard r.ue() <= matrixId / step else { return false }
+                } else {
+                    let coefNum = min(64, 1 << (4 + (sizeId << 1)))
+                    if sizeId > 1 {
+                        guard (-7...247).contains(r.se()) else { return false }   // scaling_list_dc_coef_minus8
+                    }
+                    for _ in 0..<coefNum {
+                        guard (-128...127).contains(r.se()), !r.overrun else { return false }   // scaling_list_delta_coef
+                    }
+                }
+                guard !r.overrun else { return false }
+            }
+        }
+        return true
+    }
+
+    // MARK: - st_ref_pic_set(stRpsIdx), §7.3.7, in the SPS (stRpsIdx < num_short_term_ref_pic_sets)
+
+    /// Returns the set's NumDeltaPocs, or nil when the set is malformed. An inter-predicted set
+    /// (always from the set before it, in the SPS) carries one used_by_curr_pic_flag per picture of
+    /// that set plus one, and a use_delta_flag after each 0; its own size is the number of entries
+    /// kept (use_delta_flag, inferred 1 when used_by_curr_pic_flag is 1). This count is the one
+    /// thing a later set needs, so it is the one thing kept.
+    private static func readShortTermRefPicSet(_ r: inout BitReader, idx: Int, previous: Int?,
+                                               maxDecPicBufferingMinus1: Int, interPredicted: inout Int,
+                                               mutant: Mutant?) -> Int? {
+        let interRefPicSetPrediction = idx != 0 && r.bit() == 1
+        if interRefPicSetPrediction && mutant != .interPredictionReadAsExplicit {
+            guard let previous else { return nil }
+            interPredicted += 1
+            // delta_idx_minus1 is present only in a slice header's own set; in the SPS the
+            // reference is always the set before.
+            _ = r.bit()                                 // delta_rps_sign
+            guard r.ue() <= 32767 else { return nil }   // abs_delta_rps_minus1: 0…2^15 − 1
+            var kept = 0
+            for _ in 0...previous {
+                if r.bit() == 1 {                       // used_by_curr_pic_flag[j]
+                    kept += 1
+                } else if r.bit() == 1 {                // use_delta_flag[j]
+                    kept += 1
+                }
+            }
+            // A decoded picture buffer holds at most 16 pictures (§A.4.2).
+            guard !r.overrun, kept <= 16 else { return nil }
+            return kept
+        }
+        let negative = r.ue()                           // num_negative_pics
+        guard negative <= maxDecPicBufferingMinus1 else { return nil }
+        let positive = r.ue()                           // num_positive_pics
+        guard positive <= maxDecPicBufferingMinus1 - negative else { return nil }
+        for _ in 0..<(negative + positive) {
+            guard r.ue() <= 32767 else { return nil }   // delta_poc_s0/s1_minus1: 0…2^15 − 1
+            _ = r.bit()                                 // used_by_curr_pic_s0/s1_flag
+        }
+        return r.overrun ? nil : negative + positive
+    }
+}

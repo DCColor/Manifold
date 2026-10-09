@@ -1934,6 +1934,7 @@ Run in this order. Each stage ships on its own.
   - Predicted: all three layers pass; H.264 `[SRT]` and `[SPS-COLOR]` lines identical to the commit
     before; an HEVC stream's refusal log reads `hevc Main 10 1920x1080` within about 1–2 s.
 - **Stage 2 — the HEVC SPS colour reader**, in the renamed codec-neutral target. Package only.
+  **Done 2026-10-09 (uncommitted), below: target `SPSColor`; every prediction met.**
   - Fixtures from x265, VideoToolbox and `hevc_metadata`, expected values from `trace_headers`. They
     cover sub-layers, scaling lists, inter-predicted reference picture sets, the conformance window,
     Extended_SAR, 4:2:2 and the reserved and partial cases.
@@ -2746,6 +2747,113 @@ left a `BUILD.txt` without `--enable-parser=hevc` behind the About panel's offer
 and the source URL gains `-r2`; not a release-notes item. **Defaults:** exported before the first launch; afterwards 15 run-added
 `NSWindow Frame` keys, each checked absent from the snapshot and deleted by name; the domain is
 dictionary-equal to the snapshot (1 141 keys). `streamBookmarks` was never written (every run dialled
+`MANIFOLD_SRT_DEBUG_URL`).
+
+#### Stage 2 — the HEVC SPS colour reader: predictions, written 2026-10-09 before the code
+
+**What changes (decision 4).** The `H264SPSColor` target becomes **`SPSColor`**: one codec-neutral
+target holding the shared bit reader and emulation-prevention removal, one result type `SPSColor`
+(`reach`, the three codes, `videoFullRangeFlag`, the per-axis verdicts and declared tables), and two
+readers that return it, `H264SPSColor.parse(nal:)` (the existing code, moved unchanged) and
+`HEVCSPSColor.parse(nal:)` (new). `H264SPSColor` stays as the H.264 reader's namespace, so its tests
+change only their `import`. The app's four users and project.yml follow the rename; nothing in the
+app calls the HEVC reader yet.
+
+**The HEVC reader (H.265 §7.3.2.2.1, §7.3.3, §7.3.4, §7.3.7, §E.2.1).** Only NAL type 33 with
+`nuh_layer_id` 0 and a non-zero `nuh_temporal_id_plus1` (decision 8: base layer only; anything else is
+`.notAnSPS`). It walks `profile_tier_level` with the sub-layer flags, the 2-bit padding and each
+sub-layer's 88-bit profile and 8-bit level; chroma format (and `separate_colour_plane_flag`); the size;
+the conformance window; bit depths; `log2_max_pic_order_cnt_lsb_minus4`; sub-layer ordering; the
+coding/transform block sizes; HEVC `scaling_list_data()`; PCM; every `st_ref_pic_set()`, inter-set
+prediction included (it keeps `NumDeltaPocs` per set, because a predicted set's flag count is the set
+before it plus one); the long-term reference pictures (`lt_ref_pic_poc_lsb_sps` at the POC LSB
+width); then the VUI to `matrix_coefficients`, and stops. Each count and range is checked against
+the standard's bound; a short, odd or out-of-range SPS returns `.malformed`, never a colour.
+
+**Fixtures, measured offline first** (each SPS's expected values generated from FFmpeg 8.1.1's
+`trace_headers`, never from this reader):
+- **x265 4.2 (real):** 709, PQ (with `hdr10`), HLG, 601, `5 / 6 / 5` (matrix 5), no colour
+  description, full range with no colour description, `temporal-layers=3` (3 sub-layers; sub-layer
+  profile/level flags 0, so the 2-bit padding path), `scaling-list=default` (enabled, no list data),
+  Main 4:2:2 10, Main 4:4:4 10, HLG at `preset slower`.
+- **VideoToolbox (real):** 8-bit plain (writes 2/2/2), Main 10 with PQ flags (writes **2/2/9**: only
+  the matrix, as the audit found), the same through `hevc_metadata` (9/16/9). All 1920×1088 with a
+  4-row conformance window, 4 explicit reference picture sets (`NumDeltaPocs` 4/1/2/3),
+  `scaling_list_enabled` 1 with no data, no sub-layer ordering info.
+- **`hevc_metadata` on x265 (real bitstreams, rewritten VUI):** 2/2/2, 9/2/9, 3/0/3, 200/100/99,
+  12/13/0, and `sample_aspect_ratio=256/1` (Extended_SAR).
+- **Synthetic, where no encoder here writes the syntax.** **x265 4.2 writes no SPS reference picture
+  sets** (`num_short_term_ref_pic_sets` 0 at every preset and GOP tried; its RPS go in slice headers),
+  so the brief's "x265's default inter-predicted RPS" do not exist in this x265. Also absent from every
+  encoder: PCM, long-term refs, scaling-list data, sub-layer profile/level bodies, no VUI, no
+  video_signal_type. Nine SPS were written field by field from x265 PQ's values (`scratchpad/s2/synth.py`):
+  HM's random-access GOP-8 RPS inter-predicted (7 predicted sets, two entries not used by the current
+  picture) and the same 8 sets explicit; 3 sub-layers with profile/level bodies; explicit scaling lists
+  (explicit, predicted and default matrices, DC coefficients); PCM; 3 long-term refs; no VUI; no
+  video_signal_type; and all of them at once with Extended_SAR and HLG. **Each is accepted by two
+  independent FFmpeg parsers**, CBS (`trace_headers`, which supplies the expected values) and the hevc
+  decoder's own SPS parser (no overread or error at `-loglevel debug`). A control with one bit flipped
+  inside the RPS made the decoder report "Overread in VUI", so the check would have caught a desync.
+  Same precedent as the H.264 `scalingLists` fixture.
+
+Every fixture has `00 00 03` in its `profile_tier_level`, before the colour fields.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | every fixture (21 real, 9 synthetic) | each field equals `trace_headers` | `reach`, the three codes and `videoFullRangeFlag`, **and every walked field** (sub-layers, chroma format, size, conformance window, bit depths, POC LSB width, scaling-list flags, PCM, `NumDeltaPocs` per set, inter-predicted count, long-term count, SAR) equal for all 30. Any mismatch fails |
+| 2 | every prefix of every fixture | undeclared or exact | **0 prefixes read a different colour**; every prefix that ends before `matrix_coefficients` is `.malformed` |
+| 3a | mutant: emulation prevention not removed, all 30 | fails closed | **0 wrong colours**: every fixture reads undeclared (the 2–3 escape bytes shift the parse by 16–24 bits) |
+| 3b | mutant: `st_ref_pic_set()` not walked (the count read, the sets skipped) | fails closed on the 6 fixtures with SPS RPS; the other 24 unaffected | the 6 (3 VideoToolbox, `synth_interRPS`, `synth_explicitRPS`, `synth_all`) read undeclared; **0 wrong colours** |
+| 3c | mutant (added): inter-set prediction read as explicit | fails closed on the 2 inter-predicted fixtures | **0 wrong colours** |
+| 4 | the H.264 tests after the rename | unchanged | the test file's diff is the `import` line; every test passes |
+| 5 | the app | builds and behaves identically | Profile build; syncD on HEAD `f4b6746` and the tree: `[SPS-COLOR]`, `[SRT] container` / `stream` / `video:` / `colorimetry` and `[SRT-AUDIO] stream` lines **identical text**; 0 holds on both |
+| 6 | gates | — | `swift test` all pass (252 + the new HEVC tests); soaklog 8 / 8 |
+
+#### Stage 2 — results, 2026-10-09 (unattended)
+
+**Code.** `Packages/ManifoldCore/Sources/SPSColor/`: `SPSColor.swift` (result type, CICP tables,
+`unescape`, `BitReader`, the shared `video_signal_type` tail), `H264SPSColor.swift` (the H.264
+reader, its logic unchanged, now a namespace returning `SPSColor`), `HEVCSPSColor.swift` (new).
+Moved with `git mv`, so history follows. The app's four users import `SPSColor` and take `SPSColor`
+values; `LiveVideoDecoder` still calls `H264SPSColor.parse(nal:)`. Nothing calls the HEVC reader yet.
+**Fixtures:** `Tests/SPSColorTests/HEVCSPSColorTests.swift`; generators in the session scratchpad
+(`s2/gen.sh`, `s2/synth.py`, `s2/swiftfx.py`, which writes the Swift literals from `trace_headers`).
+**Builds:** HEAD `f4b6746` = `.build-cc/s1-Profile` (built from the Stage 1 tree 6 min before the
+commit; its binary carries all three committed app changes, and no app file changed since);
+the tree = `.build-cc/s2-Profile`. **Logs:** `~/Desktop/manifold-soak/s2/repro/`.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | All 30 fixtures: `reach`, codes, `videoFullRangeFlag` **and the whole walk** equal `trace_headers` (VideoToolbox `NumDeltaPocs` 4/1/2/3; GOP-8 4/3/4/4/4/4/4/4 with 7 inter-predicted; 3 long-term refs; Extended_SAR 256/1). Per axis: VideoToolbox PQ reads `nil / nil / 9`, 9/2/9 reads `9 / nil / 9`, 12/13/0 reads `12 / 13 / 0`, 2/2/2 and both reserved sets undeclared | **PASS** |
+| 2 | Every prefix of all 30 fixtures: the exact reading, or `.malformed` / `.notAnSPS`; 0 different colours | **PASS** |
+| 3a | No emulation-prevention removal: all 30 read undeclared, 0 colours | **PASS** |
+| 3b | RPS not walked: the 6 fixtures with SPS RPS read undeclared; the other 24 read their true colour | **PASS** |
+| 3c | Inter-prediction read as explicit: `synth_interRPS` and `synth_all` undeclared; the other 28 true | **PASS** |
+| 4 | `H264SPSColorTests.swift`: the diff is the `import` line; 13 / 13 pass | **PASS** |
+| 5 | syncD, HEAD against the tree: the `[SRT]`, `[SRT-AUDIO] stream`, `[SPS-COLOR]` and `[SRT-BUFFER]` lines **identical text** (9 / 9); `[SPS-COLOR] SRT: primaries=1 (Rec.709) declared · transfer=1 … · matrix=1 … → tagged \| video_full_range_flag=0, range in use limited — agrees` on both; 0 holds on both; `[AV-CONTENT]` median −0.83 / −0.82 ms. Profile build, the same warnings as Stage 1's | **PASS** |
+| 6 | `swift test` **263 / 263** (252 + 11 new); `soaklog.test.mjs` 8 / 8 | **PASS** |
+
+**The tests were shown to fail.** Every test passed on the first run, so the reader was broken on
+purpose twice and restored byte-for-byte afterwards. (a) One reserved_zero_2bits pair dropped from
+the sub-layer padding: `x265_tl`, `synth_subLayers` and `synth_all` failed field and colour checks.
+(b) The scaling-list coefficient count off by one: `synth_scalingLists` and `synth_all` failed.
+Both broken readers still failed closed, reading `.malformed`, not a wrong colour.
+**Garbage:** 18 400 random SPS-typed buffers (4–95 bytes): 18 391 `.malformed`, **0 with any
+declared axis**.
+
+**Found on the way, recorded for Stage 3:**
+- **x265 4.2 writes no SPS reference picture sets**; its RPS are in the slice headers. The audit's
+  x265 random-access findings (CRA, RASL) are unaffected, but Stage 3's access-unit builder will meet
+  `short_term_ref_pic_set_sps_flag` 0 on every x265 slice. The SPS-level inter-predicted path is
+  covered by synthetic fixtures only.
+- **VideoToolbox HEVC Main 10 writes 2/2/9 when asked for PQ** (only the matrix), as the audit
+  found from the command line: a VideoToolbox sender's PQ arrives undeclared on primaries and
+  transfer unless something rewrites the VUI. OBS's path (Stage 6) may differ; it sets the
+  properties through VideoToolbox directly.
+
+**Defaults:** exported before the first launch; after the last quit, 2 run-added `NSWindow Frame`
+keys, each checked absent from the snapshot and deleted by name; the domain is dictionary-equal to
+the snapshot (1 141 keys). `streamBookmarks` was never written (every run dialled
 `MANIFOLD_SRT_DEBUG_URL`).
 
 ---

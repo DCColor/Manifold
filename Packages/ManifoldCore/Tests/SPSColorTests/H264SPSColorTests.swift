@@ -16,7 +16,7 @@
 //
 
 import XCTest
-@testable import H264SPSColor
+@testable import SPSColor
 
 final class H264SPSColorTests: XCTestCase {
 

@@ -47,7 +47,7 @@ import CoreVideo
 import Foundation
 import ManifoldCore      // UnfairLock — the priority-donating lock both telemetry locks use
 import ColorimetryModel  // SourceColorimetry — the buffer tags
-import H264SPSColor      // the decoder's per-SPS colour reading
+import SPSColor      // the decoder's per-SPS colour reading
 import DisplayProviders  // LiveCushion.Report — the readout's Buffer row
 import QuartzCore
 import VideoToolbox
@@ -763,7 +763,7 @@ final class WHEPFrameRouter {
     /// A new SPS has been read. DECODE QUEUE, from the decoder, before its access unit decodes — so
     /// the frames that follow are tagged with what they were encoded as. Logged once per change; the
     /// renderer hears about it from `deliver`, when the first frame decoded under it is due.
-    func noteSPSColor(_ sps: H264SPSColor) {
+    func noteSPSColor(_ sps: SPSColor) {
         let next = StreamColorimetry(sps: sps, isFullRange: false, rangeDeclared: false)
         guard !haveSPSColor || next != colorimetry else { return }
         haveSPSColor = true

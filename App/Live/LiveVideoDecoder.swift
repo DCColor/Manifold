@@ -57,7 +57,7 @@ import CoreGraphics
 import CoreMedia
 import CoreVideo
 import Foundation
-import H264SPSColor   // what each SPS declares about colour — handed to the transport, not used here
+import SPSColor   // what each SPS declares about colour — handed to the transport, not used here
 import ImageIO
 import QuartzCore   // CACurrentMediaTime — the monotonic clock the suppression window runs on
 import UniformTypeIdentifiers
@@ -105,7 +105,7 @@ final class LiveVideoDecoder {
     /// Here and not in each transport because both have the SPS in hand only on its way into this
     /// decoder, and the byte comparison that says "this is a new SPS" already lives here. The decoder
     /// does not act on the answer: colour is the transport's to state.
-    var onSPSColor: ((H264SPSColor) -> Void)?
+    var onSPSColor: ((SPSColor) -> Void)?
 
     /// Fires on the decode queue when the decoder needs an IDR it does not have: no format
     /// description yet, or a decode error forced a resync. The client turns this into a PLI.

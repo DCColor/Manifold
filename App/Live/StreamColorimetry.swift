@@ -34,7 +34,7 @@
 //
 
 import ColorimetryModel
-import H264SPSColor
+import SPSColor
 
 struct StreamColorimetry: Equatable {
 
@@ -61,9 +61,9 @@ struct StreamColorimetry: Equatable {
     let rangeDeclared: Bool
     /// The SPS reading this came from, kept for the log: it holds the raw numbers (a 2, a reserved 3)
     /// and how far the SPS got, which the verdict above has already discarded.
-    let sps: H264SPSColor
+    let sps: SPSColor
 
-    init(sps: H264SPSColor, isFullRange: Bool, rangeDeclared: Bool) {
+    init(sps: SPSColor, isFullRange: Bool, rangeDeclared: Bool) {
         self.sps = sps
         primaries = Axis(sps.primaries)
         transfer = Axis(sps.transfer)
