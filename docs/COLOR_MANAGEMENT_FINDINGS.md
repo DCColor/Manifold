@@ -2605,6 +2605,8 @@ keychain item was read for the passphrase; `streamBookmarks` was not written.
 `b16pyr`, the unseen-count baseline) and the clamp case's loss, which the renderer showed does not happen
 at 1.2 s against 1.0 s.
 
+**Committed as `5d623af`.**
+
 ---
 
 ## 7. Open and unverified

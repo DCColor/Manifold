@@ -23,7 +23,7 @@ held back until after release, and the numbered defect entries follow.
      **Buffer policy decided 2026-10-08** (§6.10, *Buffer policy — the review and its decisions*):
      defaults held for 1.0; Stage 0b-2a (the adaptive SRT cushion, the readout's Buffer row, the
      saved-advance check; `6132970`), then 0b-2b (the reorder term; built and run 2026-10-08, unattended
-     and on Cloudflare SRT, uncommitted: §6.10, *Stage 0b-2b — results* and *— attended*).
+     and on Cloudflare SRT, `5d623af`: §6.10, *Stage 0b-2b — results* and *— attended*).
    - **Trial L1 — WHEP cushion 0.30**, after 0b-2b (§6.10). Lowered only if it passes.
    - **Trial L2 — NDI desktop-audio lead 0.20**, which also finds the audio renderer's crackle
      threshold (between 40 and 150 ms of lead) on the Scarlett and the built-in output (§6.10).
@@ -741,7 +741,7 @@ audio lead (it does: 256 ms median against 250 + one refresh; see the NDI lead e
 - **Gating:** both are `#if DEBUG`, so absent from Release, present in Profile (tester) builds.
 - **Cost when present:** one closure call and one array append per displayed frame (~24/s), one
   sort of ~24 values and one log line per second.
-- **Second reader, added 2026-10-08 (Stage 0b-2b, uncommitted):** `SRTFrameRouter` installs it at
+- **Second reader, added 2026-10-08 (Stage 0b-2b, `5d623af`):** `SRTFrameRouter` installs it at
   route activation and logs one `[SRT-FLOW] pictures discarded unseen: … · shown out of order: … ·
   late by the reorder count: …` line at release: the renderer's count of pictures lost to the reorder
   window, beside the router's own model (`reorderExceedances`). `#if DEBUG`, with a `SelectionProbe`

@@ -172,3 +172,12 @@ Open questions:
 
 Depends on: unsure
 Size guess: Large
+
+Research notes (2026-10-08, unverified, check before committing):
+- Licence constraint: permissive only (MIT / Apache / CC-BY with attribution). No GPL.
+- Candidates:
+  - Apple SpeechAnalyzer / SpeechTranscriber (macOS 26): on-device, built into the OS, no model to ship or licence to manage. Unknowns: accuracy on difficult material, language coverage; ties the feature to macOS 26+.
+  - Whisper (MIT) via WhisperKit (Swift/Core ML, MIT) or whisper.cpp (Metal/Core ML, MIT). large-v3 for accuracy, large-v3-turbo for speed. Needs voice-activity detection to avoid hallucinated text in silence/music.
+  - NVIDIA Parakeet (CC-BY-4.0): very accurate and fast, narrower language coverage, Mac ports less mature.
+- Beyond transcription: subtitle line segmentation and timing (reading speed, line length, shot changes), export (SRT, WebVTT, possibly SCC/608), optional speaker labels (diarization model licences need checking).
+- Suggested first step: prototype with Apple's framework (no dependencies), benchmark against WhisperKit large-v3-turbo on real programme clips, decide from the accuracy gap.
