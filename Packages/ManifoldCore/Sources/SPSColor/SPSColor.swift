@@ -29,9 +29,9 @@
 //
 //  ── WHAT THE READERS DO NOT DO ─────────────────────────────────────────────────────────
 //
-//  They stop after `matrix_coefficients`. Everything before the VUI is stepped over at the width
-//  the standard gives it, never interpreted; nothing after the colour fields is read. SAR is
-//  stepped over too; applying it is a separate change.
+//  The colour readers stop after `matrix_coefficients`. Everything before the VUI is stepped over at
+//  the width the standard gives it, never interpreted. SAR is stepped over too; applying it is a
+//  separate change. HEVC's timing reader (SPSTiming.swift) continues the same walk to `timing_info`.
 //
 //  They NEVER throw and never trap. A short, truncated, mis-typed or desynchronised SPS returns
 //  `.malformed` (or `.notAnSPS`), and both read as undeclared on every axis — the caller's

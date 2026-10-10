@@ -21,8 +21,9 @@
 //  ── SCOPE ──────────────────────────────────────────────────────────────────────────────
 //
 //  Base layer only (decision 8): an SPS with `nuh_layer_id` > 0 has a different syntax and is
-//  `.notAnSPS`. The SPS extensions come AFTER the VUI, so they never need parsing. Nothing after
-//  `matrix_coefficients` is read. Never throws, never traps.
+//  `.notAnSPS`. The SPS extensions come AFTER the VUI, so they never need parsing. The colour walk
+//  reads nothing after `matrix_coefficients`; `timing` continues it to `vui_timing_info` (Stage 4).
+//  Never throws, never traps.
 //
 
 /// The HEVC reader. A namespace: the result is the codec-neutral `SPSColor`.
@@ -87,6 +88,73 @@ public enum HEVCSPSColor {
                              chromaFormatIdc: all.walk.chromaFormatIdc,
                              bitDepthLuma: all.walk.bitDepthLumaMinus8 + 8,
                              bitDepthChroma: all.walk.bitDepthChromaMinus8 + 8)
+    }
+
+    // MARK: - Timing (§6.10, Stage 4)
+
+    /// The SPS VUI's `vui_timing_info`, or nil when the SPS declares none or cannot be read that far.
+    /// The walk is the colour walk, continued past `video_signal_type`.
+    public static func timing<Bytes: Collection>(nal: Bytes) -> SPSTiming? where Bytes.Element == UInt8 {
+        // The same header and size checks as the colour walk, which `walkAll` makes; repeated here only
+        // because the reader has to be kept to continue from.
+        guard nal.count >= 4, nal.count <= SPSColor.maximumSPSBytes else { return nil }
+        let b0 = nal[nal.startIndex], b1 = nal[nal.index(after: nal.startIndex)]
+        guard b0 & 0x80 == 0, (b0 >> 1) & 0x3F == 33, ((b0 & 1) << 5) | (b1 >> 3) == 0, b1 & 0x07 != 0
+        else { return nil }
+        var r = BitReader(rbsp: SPSColor.unescape(nal.dropFirst(2)))
+        var w = Walk(), shape = Shape()
+        switch readSPS(&r, &w, &shape, nil).reach {
+        case .noVideoSignalType, .noColourDescription, .colourDescription: break
+        default: return nil
+        }
+        // vui_parameters(), §E.2.1, from chroma_loc_info_present_flag.
+        if r.bit() == 1 {                               // chroma_loc_info_present_flag
+            guard r.ue() <= 5, r.ue() <= 5 else { return nil }  // chroma_sample_loc_type_top/bottom_field
+        }
+        _ = r.bit()                                     // neutral_chroma_indication_flag
+        let fieldSequence = r.bit() == 1                // field_seq_flag
+        _ = r.bit()                                     // frame_field_info_present_flag
+        if r.bit() == 1 {                               // default_display_window_flag
+            for _ in 0..<4 { _ = r.ue() }               // def_disp_win_left/right/top/bottom_offset
+        }
+        guard r.bit() == 1, !r.overrun else { return nil }      // vui_timing_info_present_flag
+        return SPSTiming.read(&r, source: .sps, fieldSequence: fieldSequence)
+    }
+
+    /// A VPS's `vps_timing_info`, or nil when it declares none or cannot be read that far. ONE VPS NAL,
+    /// 2-byte header, no start code or length prefix. §7.3.2.1.
+    public static func vpsTiming<Bytes: Collection>(nal: Bytes) -> SPSTiming? where Bytes.Element == UInt8 {
+        guard nal.count >= 4, nal.count <= SPSColor.maximumSPSBytes else { return nil }
+        let b0 = nal[nal.startIndex], b1 = nal[nal.index(after: nal.startIndex)]
+        guard b0 & 0x80 == 0, (b0 >> 1) & 0x3F == 32,  // nal_unit_type 32 = VPS
+              ((b0 & 1) << 5) | (b1 >> 3) == 0, b1 & 0x07 != 0 else { return nil }
+        var r = BitReader(rbsp: SPSColor.unescape(nal.dropFirst(2)))
+        _ = r.bits(4)                                   // vps_video_parameter_set_id
+        _ = r.bits(2)                                   // vps_base_layer_internal/available_flag
+        _ = r.bits(6)                                   // vps_max_layers_minus1
+        let maxSubLayersMinus1 = r.bits(3)              // vps_max_sub_layers_minus1
+        guard maxSubLayersMinus1 <= 6 else { return nil }
+        _ = r.bit()                                     // vps_temporal_id_nesting_flag
+        guard r.bits(16) == 0xFFFF else { return nil }  // vps_reserved_0xffff_16bits
+        var shape = Shape()
+        guard skipProfileTierLevel(&r, maxSubLayersMinus1: maxSubLayersMinus1, shape: &shape) else { return nil }
+        let orderingInfoPresent = r.bit()               // vps_sub_layer_ordering_info_present_flag
+        for _ in (orderingInfoPresent == 1 ? 0 : maxSubLayersMinus1)...maxSubLayersMinus1 {
+            let buffering = r.ue()                      // vps_max_dec_pic_buffering_minus1
+            let reorder = r.ue()                        // vps_max_num_reorder_pics
+            _ = r.ue()                                  // vps_max_latency_increase_plus1
+            guard buffering <= 15, reorder <= buffering else { return nil }
+        }
+        let maxLayerId = r.bits(6)                      // vps_max_layer_id
+        let numLayerSetsMinus1 = r.ue()                 // vps_num_layer_sets_minus1: 0…1023
+        guard maxLayerId <= 62, numLayerSetsMinus1 <= 1023 else { return nil }
+        if numLayerSetsMinus1 > 0 {
+            for _ in 1...numLayerSetsMinus1 where !r.overrun {
+                _ = r.bits(maxLayerId + 1)              // layer_id_included_flag[i][0…vps_max_layer_id]
+            }
+        }
+        guard r.bit() == 1, !r.overrun else { return nil }      // vps_timing_info_present_flag
+        return SPSTiming.read(&r, source: .vps)
     }
 
     /// What `format` reads that `Walk` does not hold. Kept out of `Walk` so that the thirty

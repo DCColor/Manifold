@@ -16,6 +16,9 @@
 #   COPYINKF      1 = keep the non-key packets before the file's first keyframe (ffmpeg -copyinkf), so
 #                 a file cut mid-GOP reaches Manifold mid-GOP. ffmpeg's stream copy drops them by
 #                 default, which makes every run start on a keyframe (§6.10, Stage 3, the join fixture).
+#   LOSS          packet-loss outages, "<s after connect>:<ms>" pairs, space-separated (e.g. "20:300 40:600"):
+#                 the session runs through lossrelay.py (Manifold → :9000 relay → :9001 listener), which
+#                 drops every packet both ways for <ms>. Logged to <label>.loss.log (§6.10, Stage 4).
 #   SOAK_OUT      where <label>.manifold.log / .ffmpeg.log go (default ~/Desktop/manifold-soak/repro)
 # Needs UI scripting (Accessibility) for the process running it; osascript fails loudly without it.
 set -u
@@ -50,12 +53,20 @@ for i in {1..3}; do
   sleep 3
 done
 
+PORT=9000
+if [[ -n "${LOSS:-}" ]]; then
+  PORT=9001
+  lsof -nP -iUDP:9001 >/dev/null 2>&1 && { say_ "port 9001 busy — abort"; exit 2; }
+  python3 -I "${0:A:h}/lossrelay.py" 9000 9001 > "$D/$LABEL.loss.log" 2>&1 &
+  RPID=$!
+fi
+
 PESOPT="-pes_payload_size ${PES_PAYLOAD:-0}"; [[ ${PES_PAYLOAD:-0} == default ]] && PESOPT=""
 CATCHUP=""; [[ -n "${READRATE_CATCHUP:-}" ]] && CATCHUP="-readrate_catchup $READRATE_CATCHUP"
 INKF=""; [[ ${COPYINKF:-0} == 1 ]] && INKF="-copyinkf"
-say_ "serve $FILE on srt://127.0.0.1:9000 (listener)"
+say_ "serve $FILE on srt://127.0.0.1:$PORT (listener)${LOSS:+, through the loss relay on 9000}"
 ffmpeg -hide_banner -loglevel warning -readrate "${READRATE:-1}" ${=CATCHUP} -i "$FILE" -map 0:v -map 0:a -c copy ${=INKF} ${=PESOPT} -f mpegts \
-  'srt://127.0.0.1:9000?mode=listener' > "$FLOG" 2>&1 &
+  "srt://127.0.0.1:$PORT?mode=listener" > "$FLOG" 2>&1 &
 FPID=$!
 sleep 2
 
@@ -85,6 +96,18 @@ if [[ -n "${STALLS:-}" ]]; then
     done ) &
 fi
 
+if [[ -n "${LOSS:-}" ]]; then
+  ( t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+    for pair in ${=LOSS}; do
+      at=${pair%%:*}; ms=${pair##*:}
+      perl -MTime::HiRes=time,sleep -e "my \$d=$t0+$at-time; sleep(\$d) if \$d>0"
+      kill -USR1 $RPID 2>/dev/null || break
+      perl -MTime::HiRes=sleep -e "sleep($ms/1000)"
+      kill -USR2 $RPID
+      echo "+${at}s requested ${ms} ms" >> "$D/$LABEL.loss.log"
+    done ) &
+fi
+
 # Keep denying licence re-prompts until the file ends.
 while kill -0 $FPID 2>/dev/null; do deny; sleep 5; done
 say_ "ffmpeg ended ($(tail -1 "$FLOG" 2>/dev/null))"
@@ -92,4 +115,5 @@ sleep 20
 osascript -e 'tell application "Manifold" to quit' >/dev/null 2>&1; sleep 5; pkill -TERM -x Manifold 2>/dev/null
 for i in {1..10}; do pgrep -x Manifold >/dev/null || break; sleep 1; done
 pgrep -x Manifold >/dev/null && pkill -KILL -x Manifold
+[[ -n "${RPID:-}" ]] && { kill -TERM $RPID 2>/dev/null; sleep 1; }
 say_ "done: $(grep -c '\[AV-LAG\]' "$LOG") [AV-LAG] lines"

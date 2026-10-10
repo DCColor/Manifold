@@ -12,8 +12,8 @@
 //  unescaper, nothing. So this could not extend existing SPS handling; it had to bring its own.
 //
 //  It lives in App/H264 rather than in the WHEP transport because it is a property of H.264, not
-//  of WebRTC. SRT reaches the same decoder with the same parameter sets and would want the same
-//  answer; it simply does not need it today, because libavformat already tells it.
+//  of WebRTC. SRT reads its H.264 streams with it too (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 4):
+//  libavformat's rate there is measured from timestamps a server may have rewritten.
 //
 //  ── WHAT IT DOES NOT DO ────────────────────────────────────────────────────────────────
 //

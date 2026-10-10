@@ -1213,6 +1213,29 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 ---
 
+## ☐ PRE-RELEASE FIX (decided, Robbie, 2026-10-09; right after HEVC Stage 4 is committed) — PRE-EXISTING, SRT — on a stream with B-frames, sound runs ~35 ms off the picture for the first ~40 s
+
+**Status:** OPEN, measured, not diagnosed; **a pre-release fix, its own item, scheduled right after Stage 4 is committed** (Robbie, 2026-10-09). **Found:** HEVC Stage 4 (`COLOR_MANAGEMENT_FINDINGS.md`
+§6.10, *Found: on a stream with B-frames…*). **Affects:** any SRT stream with B-frames: x264 with
+B-frames, x265, and OBS x264 if its profile uses them. Not HEVC-specific. Constrained Baseline and Apple VT
+H.264 (no B-frames) do not show it, which is why no earlier SRT measurement did.
+
+- **What:** for the first ~20 s after connect, `[AV-CONTENT]` reads ~35 ms off, early or late depending
+  on the session. ~20 ms at 20–40 s, ≤ 3 ms by 60 s, < 1 ms by 90 s. LiveClock sits on its ±0.5 % rail
+  and the steering on its ±2000 ppm rail (`RATIO AT ITS RAIL`). No hold, splice or coarse event.
+- **Evidence:** the same sync clip as H.264 Baseline, H.264 + B-frames, and HEVC, timestamps identical
+  (`~/Desktop/manifold-soak/s4/repro/cal2-*`). The two B-frame encodes behave alike. The 1 Hz depth
+  samples scatter ±30 ms on them against ±6 ms on Baseline.
+- **Hypothesis:** the queue depth is sampled on the newest DECODED picture. On a reordered stream that is
+  often a B-frame older in presentation order than the newest picture queued, so the depth reads short by
+  up to the stream's reorder and the clock slews to refill a queue that is not short.
+- **Cost:** a calibration taken in the first minute reads the episode's tail (§6.10 item 5: +60 s
+  missed ±2 ms by 0.5; +120 s within 0.6). The saved-offset advance budget reads 0 meanwhile.
+- **Done means:** a B-frame stream's `[AV-CONTENT]` stays within ±2 ms from the first anchor, measured
+  with `cal.sh` on `h264b_160` and `hevc_160` (§6.10, Stage 4), and Baseline is unchanged.
+
+---
+
 ## ☐ OPEN 2026-10-08 — the NDI desktop-audio lead's doc comment still argues for 40 ms
 
 **Status:** OPEN, comment only. **Found:** the 2026-10-08 buffer review.

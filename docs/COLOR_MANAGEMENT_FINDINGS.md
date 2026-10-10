@@ -1963,7 +1963,9 @@ Run in this order. Each stage ships on its own.
     - whether every consumer of the live buffer (renderer, scopes, DeckLink v210, the promote) takes
       4:2:2 as is;
     - the 8 MB access-unit cap: an all-intra 4:2:2 10-bit frame can legitimately approach it.
-- **Stage 4 — robustness and sync on HEVC.**
+- **Stage 4 — robustness and sync on HEVC.** **Run 2026-10-09 (uncommitted), below:** frame rate from the
+  stream's declared timing; loss recovery and the soak met. The B-frame startup episode was found.
+  Follow source and Cloudflare are attended.
   - A mid-stream colour change gives one `[SPS-COLOR]` and one `source` line, hop as in §6.9.
   - Recovery at the next random-access picture after loss.
   - A 30-minute soak and calibration, non-Cloudflare first.
@@ -3004,6 +3006,315 @@ snapshot, deleted by name; nothing removed or changed; the domain is dictionary-
 
 **Stage 3: items 1–5 and 7–9 met. Item 6 is partly met: the rate and the derived mode pass, and the
 switch to Follow source needs one attended click.**
+
+#### Stage 4 — robustness, sync, frame rate: predictions, written 2026-10-09 before the code changed
+
+**Decided (Robbie, 2026-10-09):** frame rate for HEVC and H.264 over SRT uses the stream's own declared
+timing (SPS VUI, or the HEVC VPS) when present, falls back to the measured rate when absent, and logs once
+when they disagree. Server-agnostic: no per-server rules.
+
+**What changes.**
+- **`SPSTiming`** (new, in the `SPSColor` target): `H264SPSColor.timing(nal:)` continues the same walk past
+  the colour fields to `chroma_loc_info` and `timing_info` (rate = `time_scale` / 2 `num_units_in_tick`);
+  `HEVCSPSColor.timing(nal:)` continues to `default_display_window` and `vui_timing_info` (rate =
+  `time_scale` / `num_units_in_tick`); `HEVCSPSColor.vpsTiming(nal:)` reads `vps_timing_info`. A stream with
+  `field_seq_flag` 1 declares a field rate, which is not taken as a frame rate. Same fail-closed rules as the
+  colour reader: truncated or out of range → no declaration.
+- **`SRTFrameRouter`:** "measured" is today's `av_guess_frame_rate` figure, unchanged. On each new SPS (HEVC:
+  SPS, then VPS if the SPS has none) the declared rate, if plausible (1–240 fps), replaces it as the
+  published rate (DeckLink Follow source). One `[SRT-FORMAT]` line per new declared value; one line per
+  session when the stream declares nothing; **one line per session when declared and measured disagree by
+  more than 0.05 %**. The startup anchor's gap threshold stays on the measured rate (it is set before the
+  first SPS, and a threshold is not what the decision is about). `[SRT] video: … @ N fps` is the demuxer's
+  line and keeps the measured figure.
+- **The loss harness:** the repo had none for SRT (the WHEP work used real networks and Network Link
+  Conditioner, which needs an admin password). Added: `scripts/soak/repro/lossrelay.py`, a UDP relay between
+  Manifold and the listener that drops every packet, both directions, for given windows; `run.sh` gains
+  `LOSS="<s after connect>:<ms> …"`, which routes the session through it. An outage longer than the
+  120 ms SRT latency cannot be repaired by retransmission, so it reaches the demuxer as lost TS packets.
+
+**Measured offline first: who declares timing** (`trace_headers` on the first second of each stream):
+
+| sender | file | declared | rate |
+|---|---|---|---|
+| x265 (ffmpeg libx265, build 215) | `hevc_pq_x265`, `x265_b8_240`, and `x265_709` through MediaMTX | **SPS VUI**: 1/25, 1001/24000; VPS: none | 25.000, 23.976 |
+| VideoToolbox HEVC (ffmpeg `hevc_videotoolbox`) | `hevc_pq_vt`, `vt_pq_meta`, and `vt_pq_meta` through MediaMTX | **nothing** (VUI present, `vui_timing_info_present_flag` 0; VPS 0) | — |
+| x264 (ffmpeg libx264, core 165) | `syncD-23.976p-inj0`, `h264_lo` | **SPS VUI**: 1001/48000, 1/50 | 23.976, 25.000 |
+| OBS 32.2.2, Apple VT H.264 | `obs-709.ts`, `obs-pq.ts` (§6.9, the OBS re-check) | **nothing** (`timing_info_present_flag` 0) | — |
+| OBS → Cloudflare SRT output | `cfsrt-probe.ts` (2026-09-29; High profile, no encoder string in band) | **SPS VUI**: 1001/48000, `fixed_frame_rate_flag` 1 | 23.976 |
+| OBS VideoToolbox HEVC | — | not measured unattended; predicted **nothing** (the same VT encoder) | attended / Stage 6 |
+
+**Consequence, stated before the build: the rule as decided cannot fix the MediaMTX VideoToolbox case.** That
+stream declares no timing, so it falls back to the measured 50.000 (MediaMTX's made-up DTS). Item 1a below
+is therefore predicted to MISS. A sender that does declare is fixed through the same server
+(`vt_tick25`, item 1d).
+
+**Fixtures** (session scratchpad `s4/fx`): `cchange` (x265 Main 10, 10 s 709 1-1-1 / 10 s PQ 9-16-9, ×2 by
+concat, 3 changes, each at an IDR); `vt_tick25` (`vt_pq_meta` with `hevc_metadata=tick_rate=25/1`, VPS +
+VUI); `x265_tick50` (`hevc_pq_x265` with a wrong 50/1 written in); `hevc_soak` (the 33.4 min loop-exact
+23.976 soak clip `soak33.ts`, video re-encoded x265 Main 10 PQ, keyint 48 with `scenecut=0`, the AAC copied);
+`hevc_sync100` / `h264_sync100` (its first 100 s and the H.264 original's). Offline (`nals.py`): `hevc_sync100` IDR then a CRA every 45–50 AUs (~2 s), 0–3 RASL per CRA, max(pts − dts) **208.5 ms at AU 1**; `cchange` an IDR at each segment start and a CRA every 25 with 4 RASL, max(pts − dts) 240 ms.
+
+**Builds:** HEAD `a2e5ce1` (`.build-cc/s4head-Profile`, built from the clean tree before any edit) against
+the tree (`.build-cc/s4-Profile`), unsigned Profile. **Senders:** `run.sh` (listener), the running
+MediaMTX's SRT (`mtxrun.sh` from Stage 3). Unattended. Defaults exported before the first launch.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1a | `vt_pq_meta` through MediaMTX (Robbie's item: its true rate, not 50) | **50.000**, from the measured fallback: the stream declares nothing | Robbie's band: `[SRT-FORMAT]` and the D4a mode at 25.000 / 1080p25. **Predicted MISS.** Mine: the "declares no timing" line, published 50.000, identical to Stage 3 |
+| 1b | x265 on the listener (`hevc_pq_x265`, `x265_b8_240`) and through MediaMTX (`x265_709`) | declared 25.000 / 23.976 / 25.000, agreeing with measured | `[SRT-FORMAT] … declared by the stream (SPS VUI …)`; **no disagreement line**; D4a `→ mode 1080p25` / `1080p23.98`, as Stage 3 |
+| 1c | H.264: `syncD` (x264, declares) and `obs-709.ts` replayed on the listener (OBS VT, declares nothing) | syncD declared 23.976; OBS falls back to measured 23.976 | both publish 23.976 as at HEAD; D4a lines identical to HEAD; OBS: one "declares no timing" line; no disagreement line on either |
+| 1d | `vt_tick25` through MediaMTX | declared 25.000 (VPS + VUI), measured 50.000 | exactly **one** disagreement line naming 25.000 declared and 50.000 measured; published **25.000**; D4a `→ mode 1080p25` |
+| 1e | `x265_tick50` on the listener (a sender that declares the wrong rate) | declared 50.000, measured 25.000 | one disagreement line; published 50.000 (the rule takes the declaration); playback itself unchanged (pacing is by PTS): 0 holds, 0 decode errors |
+| 2 | `cchange` on the listener: 3 mid-stream colour changes on HEVC | one `[SPS-COLOR]` and one `[SCOPE-COLOR] source:` line per change; the renderer moves when the first new-colour frame is due | **4 `[SPS-COLOR]` lines** (first + 3) and **4 `source:` lines**, alternating 1-1-1 / 9-16-9; SPS read → `source:` hop **0.25–0.36 s** (§6.9 SRT: 0.263–0.300 at a 250 ms cushion; this stream's x265 reorder raises the cushion to ~290 ms); 0 decode errors, 0 RASL skipped, 0 holds, 0 out of order |
+| 3 | loss: `hevc_sync100` with `LOSS="20:300 40:600 60:1000"` | each outage loses TS packets; VideoToolbox fails a damaged picture or one that references it, the gate re-closes, and decoding resumes at the next CRA with its RASL skipped | per outage: **either** a decode error followed by `keyframe acquired (CRA …)` ≤ 2.2 s of stream after the outage ends (keyint 48 at 23.976 = 2.0 s) with that CRA's RASL skipped (0–3 per CRA in this fixture, offline) and **0 decode errors after it**, **or** no error at all (VideoToolbox concealed; recorded as such, and it would mean no RASL is skipped). Audio: holes ≈ the outage (±150 ms), ≤ 1 starvation hold per outage, 0 coarse re-anchors, 0 splices abandoned; `[AV-CONTENT]` median over 15 s after each recovery **within ±2 ms** of the median before the first outage |
+| 3b | the same with `vt_pq_meta`-style IDR-only stream? | — | **not run**: VideoToolbox's IDR-only streams have no RASL, and Stage 3's `mtx-looped` already shows IDR recovery |
+| 4 | 30-min HEVC soak, `hevc_soak` (one AAC frame per PES), listener; measure-only calibrations at +1 / +2 / +16 / +32 min | as the H.264 soaks (Stage 0 `soak-s0`, 0b-2a v2) | every calibration **within ±2 ms**; end − start **within ±5 ms**; `[AV-LAG]` slope after 180 s **within ±1 ppm** (H.264: +0.1); **0 starvation holds**, 0 coarse re-anchors, 0 splices; `[AV-CONTENT]` median within ±2 ms; 0 decode errors; cushion **258–259 ms BEFORE the first anchor** (offline: max(pts − dts) 208.5 ms, first reached at AU 1; + 50 ms), no later raise |
+| 5 | calibration, the sync clip as HEVC against H.264, same path, same day: `h264_sync100` ×2 and `hevc_sync100` ×2, alternating, each measure-only at +60 s | the same figure | **mean of the HEVC pair within ±2 ms of the mean of the H.264 pair** |
+| 6 | Cloudflare | **No.** Cloudflare's Stream Live docs name H.264 + AAC as the only ingest codecs (RTMPS and SRT) | attended: OBS VT HEVC Main 10 P010 Rec. 2100 PQ to the Cloudflare SRT ingest. If Cloudflare refuses or never outputs it, recorded plainly, no workaround. If it plays, one session with a calibration |
+| 7 | regression: syncD and hi8, HEAD against the tree | unchanged | `[SRT] container` / `stream` / `video:` / `colorimetry` / `decoded as`, `[SRT-AUDIO] stream`, `[SPS-COLOR]`, `[SRT-BUFFER]` **identical text**; the `[SRT-FORMAT]` lines differ on purpose (wording) and publish the same rate; syncD 0 holds, `[AV-CONTENT]` within ±2 ms of HEAD's same-day run |
+| 8 | gates | — | `swift test` all pass (266 + the new timing tests, field by field against `trace_headers`, plus truncation); `soaklog.test.mjs` 8 / 8; C harness 200 / 200; Profile build with the same warning set as HEAD |
+
+**Attended afterwards, one step at a time:** DeckLink Follow source (Stage 3's item 6), then Cloudflare.
+**What this stage could invalidate:** nothing measured on H.264 except the `[SRT-FORMAT]` wording; the
+published rate changes only where a stream's declaration disagrees with the demuxer's measurement.
+
+#### Stage 4 — results, 2026-10-09 (unattended)
+
+**As built, two changes from the plan above.**
+- **H.264 timing is read by the reader WHEP already had,** `ManifoldH264ParseSPSTiming`
+  (`App/H264/H264SPSTiming.c`, behind WHEP's Follow source since 0.6). It was found after the first build.
+  The first build carried a Swift H.264 reader beside it, a duplicate, and it was removed. `SPSTiming`
+  in the `SPSColor` target is HEVC only: `HEVCSPSColor.timing(nal:)` (SPS VUI) and `vpsTiming(nal:)`. The
+  rule is WHEP's rule. Only the threshold differs: 0.05 % here against WHEP's 2 %, because WHEP's
+  measurement is an estimate with a 2 % spread gate, and SRT's is libavformat's exact rational.
+- **Builds:** HEAD `.build-cc/s4head-Profile`; the first tree build `.build-cc/s4-Profile` (Swift H.264
+  reader), which ran every item below; the final tree `.build-cc/s4b-Profile` (the C reader for H.264),
+  on which the H.264 rate runs were repeated (*the final build*, below). The HEVC path is the same code
+  in both. All unsigned Profile, 11 warnings each, the same set as HEAD.
+- **Logs:** `~/Desktop/manifold-soak/s4/` (`repro/` listener, `mtx/` MediaMTX). Scripts and fixtures:
+  the session scratchpad `s4/`.
+
+**Who declares timing: the table above stands as measured** (x265 SPS VUI only; VideoToolbox HEVC
+nothing; x264 SPS VUI; OBS 32.2.2's Apple VT H.264 nothing; OBS through Cloudflare's SRT output SPS VUI,
+`fixed_frame_rate_flag` 1). OBS's VideoToolbox HEVC is still unmeasured.
+
+| # | result | verdict |
+|---|---|---|
+| 1a | `vt_pq_meta` through MediaMTX: `[SRT-FORMAT] frame rate 50.000 fps measured …`, then `the stream's SPS/VPS gives no frame rate — it declares no timing; publishing 50.000 fps measured`; D4a `→ mode 1080p50` | **MISS on Robbie's band, as predicted.** The decided rule cannot fix a stream that declares nothing. Mine: PASS |
+| 1b | x265 listener: `hevc_pq_x265` declared **25.000** (`SPS VUI num_units_in_tick=1 time_scale=25`), `x265_b8_240` **23.976** (1001/24000); through MediaMTX `x265_709` **25.000**, against a measured 25.000 (MediaMTX does not rewrite DTS on a stream with B-frames). No disagreement line. D4a `1080p25` / `1080p23.98` / `1080p25` | **PASS** |
+| 1c | `syncD` (x264): declared 23.976 (1001/48000, `fixed_frame_rate_flag=0`), measured 23.976. `obs-709.ts` (OBS VT H.264): `the stream's SPS gives no frame rate — it declares no timing; publishing 23.976 fps measured`. D4a lines **identical to HEAD** on both, and on hi8 (x264, 1/50 → 25.000) | **PASS** |
+| 1d | `vt_tick25` through MediaMTX: measured **50.000**, `declared 25.000 fps (SPS VUI num_units_in_tick=1 time_scale=25)`, **one** line `declared 25.000 fps and measured 50.000 fps disagree — using the declared rate`; D4a `→ mode 1080p25` | **PASS** |
+| 1e | `x265_tick50` on the listener: declared 50.000, measured 25.000, one disagreement line; published 50.000 (D4a `1080p50`); 0 holds, 0 decode errors | **PASS** (the rule takes the declaration, even a wrong one) |
+| 2 | `cchange`: **4 `[SPS-COLOR]` and 4 `[SCOPE-COLOR] source:` lines**, alternating 1-1-1 / 9-16-9; each new SPS a new format description that the session accepted (`kept`); 0 decode errors, 0 RASL skipped (each change is at an IDR), 0 holds. **Hops 0.342 / 0.320 / 0.236 s** | **PASS on the lines; MISS on the hop band** (0.25–0.36), by 14 ms low on the third. The band assumed a fixed 290 ms queue. This fixture's video arrives in bursts, so LiveClock spent the session on its ±0.5 % rail and the video queue swung **0.236–0.444 s**. Each hop equals the queue depth at that change (about 0.36, 0.35, 0.24 s from the 1 Hz `[LIVECLOCK]` lines). The renderer switches when the first new-colour frame is due, as designed. The 0.25–0.30 s figure of §6.9 was a quiet-queue figure |
+| 3 | `hevc_sync100`, outages 313 / 613 / 1014 ms (relay: 22 / 95 / 127 packets dropped towards Manifold), run twice (`loss`, `loss2`), H.264 control on the H.264 clip (`loss-h264`). See *loss*, below | **Video PASS** (both runs). **Audio: the ±2 ms band FAILS, and is the wrong test.** See below |
+| 7 | syncD 9 / 9, hi8 11 / 11 and `obs-709` 9 / 9 lines **identical text** HEAD against the tree; syncD `[AV-CONTENT]` median **−0.13 (HEAD) / −0.12 ms (tree)**, 0 holds each; hi8 336 before the anchor on both; D4a identical | **PASS** |
+
+##### Loss (item 3)
+
+**The harness is a finding in itself: below about 0.6 s, an outage is not loss on SRT.** The 313 and
+613 ms outages lost nothing. Every AU and every AAC frame arrived after the outage: libsrt's sender kept
+them and resent them, and the receiver had nothing later to skip them for. They reach Manifold as
+delivery stalls. Only the 1014 ms outage lost data on HEVC: 5 video AUs (2394 received of 2399) and
+4 AAC frames (`input axis HOLE 85.33 ms`). On the H.264 clip (428 kb/s against the HEVC clip's 910),
+even the 1 s outage was recovered in full: 2394 / 2394 AUs, 0 holes.
+
+**Video, both HEVC runs identical:** the stalls cost nothing but the hold. After the 1 s outage:
+`decode failed (-12909) — dropping to next keyframe` → `keyframe acquired (CRA, NAL 21) … its RASL
+pictures will be skipped` 3 ms later in arrival time (the backlog after the outage arrives at once, so
+the next CRA was already in hand) → session totals `dropped awaiting keyframe=8, RASL skipped=1, decode
+errors=1`. **One decode error, none after the CRA.** 2384 pictures from 2394 AUs.
+
+**Audio: one starvation hold per outage, each closed by one catch-up write, on both codecs.**
+
+| run | holds (held ms) | catch-up debt, ms | `[AV-CONTENT]` median, before the 1st outage / 15 s after each |
+|---|---|---|---|
+| `loss` (HEVC) | 3 (220, 410, 943) | 190, 410, 911, each `RECOVERED` | **+24.21** / −13.93 / +6.41 / −2.01 |
+| `loss2` (HEVC) | 3 | 187, 415, 785 | **+26.67** / −11.35 / +7.63 / −3.28 |
+| `loss-h264` | 3 | 65 (a whole-debt recovery drop), 253, 672 | +0.87 / −1.27 / +5.27 / +2.79 |
+
+0 coarse re-anchors, 0 splices abandoned, in all three. **The HEVC audio was 24–27 ms off BEFORE any
+outage**, so the band cannot isolate what loss does. That offset is not loss (next section). What the
+outages share across codecs: after the 613 ms stall both codecs sit ~5–8 ms late for the next 15 s.
+That is the catch-up's known residue (BUGS.md, *after a starvation hold of ≥ 1 s, 10–20 ms of the debt
+is folded*). It is not HEVC's.
+
+##### Found: on a stream with B-frames, LiveClock starts on its rail and the audio runs ~25 ms off for ~30 s
+
+Every session of the HEVC sync clip, with no loss at all, reads `[AV-CONTENT]` **+23 to +31 ms for the
+first ~20 s**, +8 to +10 ms at 23–40 s, and **−1 to −3 ms at 40–80 s**. The H.264 sync clip reads
+within ±1 ms throughout (`cal-*` runs, 10 to 20 s windows).
+
+- **The clock runs slow to refill a queue it reads as short.** LiveClock starts at depth 0.298 s,
+  target 0.259, and within a second reads 0.17–0.24 s (err −40 to −90 ms). It sits at its −0.5 % rail
+  for ~25–30 s (`[LIVECLOCK] publication starved … RAILED`; `[SRT-RESAMPLE] RATIO AT ITS RAIL — ρ−1
+  −2000 ppm`). The audio may follow at only ±0.2 %, so it ends up ahead of the picture until the clock
+  comes off the rail. This is the rail drain of 0b-1, in the other direction.
+- **The depth reads are noisy by about a B-frame.** HEVC's 1 Hz depth samples scatter ±40 ms around the
+  target. H.264 baseline's scatter ±12 ms.
+- **Hypothesis, not yet tested:** the depth is sampled on the most recently DECODED picture. On a
+  reordered stream that is often a B-frame up to 2–3 frames older in presentation order than the newest
+  picture queued. So the queue reads short, by up to the stream's typical reorder (median pts − dts here
+  is 83 ms).
+- **The control: it is the B-frames, not HEVC.** H.264 High with B-frames (`h264b_160`: the same clip,
+  x264 `-bf 3`, timestamps kept, and the same reorder shape as the HEVC clip: max 208.5 ms at AU 1,
+  median 83.4 ms) does the same. Its first-second depth minimum is 0.175 s, its sd ~30 ms, and it shows
+  the rail lines. The baseline clip has none of this (0.241 s, 6 ms, no rail).
+
+| run | `[AV-CONTENT]` median, ms: 3–20 s | 20–40 | 40–60 | 60–90 | 90–150 |
+|---|---|---|---|---|---|
+| H.264 baseline ×2 | +0.89 / +1.03 | +0.13 / −0.07 | −0.34 / −0.32 | +0.08 / −0.14 | −0.03 / −0.04 |
+| **H.264 + B-frames ×2** | **+35.97 / +37.55** | +16.73 / +18.01 | −1.51 / −1.94 | −2.40 / −2.41 | −0.42 / −0.43 |
+| **HEVC ×2** | **−35.36 / −36.63** | −19.82 / −22.41 | +1.75 / +0.63 | +3.06 / +3.29 | +0.93 / +0.73 |
+| HEVC soak | +32.05 | +12.33 | −3.09 | −1.50 (60–120) | +0.11 (after 60 s, whole soak) |
+
+- **Its sign varies by session** (+32 in the soak, −35 in `cal2-hevc` on the same fixture), and so
+  does the rail direction. Its size does not: ~35 ms for the first 20 s, ~20 at 20–40 s, ≤ 3 ms by 60 s,
+  < 1 ms by 90 s. No hold, splice or coarse event marks it, and the calibration's advance budget reads
+  0.0 ms meanwhile (`NOT APPLICABLE: … at most 0.0 ms available` at +1 and +16 min in the soak).
+- **Pre-existing, and not Stage 4's to fix.** It applies to any B-frame stream on SRT: x264 with
+  B-frames, OBS x264 (as far as its default profile uses them), and x265. The SRT H.264 measurements
+  until now used Constrained Baseline or Apple VT H.264 (Main, no B-frames), which is why no earlier
+  stage saw it. Stage 3's x265 runs were not looked at below +120 s. Recorded in BUGS.md. The hypothesis
+  above (the depth sampled on the newest decoded picture, not the newest presentation time queued) is
+  the place to start.
+
+##### Items 4 and 5, and the fixture I got wrong first
+
+**My first HEVC sync fixture was 20.38 ms off, and item 5's first run measured my fixture.** `gen.sh`
+re-encoded `soak33.ts` without `-copyts`, so ffmpeg re-based each stream separately. The video now
+started **41.711 ms** after the audio, where the source's video starts **21.333 ms** after it: the picture
+had moved **20.38 ms later** in the content. The first alternating calibrations read H.264 **−0.35 /
+−1.27 ms** and HEVC **−20.07 / −17.29 ms**, which is that shift plus the startup episode above. Every
+later HEVC sync run uses `hevc_soak2.ts`: `-copyts -enc_time_base:v demux -fps_mode passthrough
+-muxdelay 0 -muxpreload 0`, the first video PTS 127920 as in the source, the same start offsets. The
+first `loss` / `loss2` runs used the shifted fixture. The video verdict and the clock-side
+`[AV-CONTENT]` figures do not depend on content alignment: `[AV-CONTENT]` read −0.35 on the shifted HEVC
+fixture against +0.16 on H.264, run for run.
+
+| # | result | verdict |
+|---|---|---|
+| 4 | `hevc_soak2`, 33.4 min, listener, one AAC frame per PES: cushion **250 → 259 ms BEFORE the first anchor** (208.5 ms reorder + 50); calibrations at +1 / +2 / +16 / +32 min **+1.36 / −0.41 / +1.34 / +1.59 ms**, end − start **+0.23 ms**; `[AV-LAG]` slope after 180 s **+0.2 ppm** (audio−now +0.1); **0 starvation holds**, 0 coarse, 0 splices; `[AV-CONTENT]` audio−now median after 60 s **+0.11 ms** (p10 −1.84, p90 +2.04); **47 998 / 47 998 pictures, 0 decode errors**, 0 RASL skipped; one rail episode, 16.2 s at the start (the B-frame episode) | **PASS**, every band |
+| 5 | Re-run on timestamp-exact 160 s cuts (`h264_160`, `h264b_160`, `hevc_160`), alternating ×2, measure-only at +60 and +120 s. **+60 s:** H.264 −0.30 / −0.39 (mean −0.35); H.264 + B **+1.86 / +1.96** (mean +1.91); HEVC **−3.59 / −2.16** (mean −2.88). **+120 s:** H.264 −0.65 / −0.14 (−0.40); H.264 + B −0.76 / −1.04 (−0.90); HEVC −1.18 / −0.82 (**−1.00**). The soak, same path: +1.36 at +60 s, −0.41 at +120 s | **+60 s: MISS by 0.5 ms** (HEVC − H.264 = −2.53 ms; band ±2). H.264 with B-frames misses the same way on the other side (+2.26), so the residue is the B-frame startup episode, not HEVC. **+120 s: HEVC within 0.60 ms of H.264**, and within 0.10 ms of H.264 + B |
+| 8 | Final tree: `swift test` **273 / 273** (266 + 7 HEVC timing tests); `soaklog.test.mjs` 8 / 8; C harness 200 / 200; Profile build, 11 warnings, the same set as HEAD. **The timing tests were shown to fail:** with `neutral_chroma_indication_flag` removed from the HEVC walk, the sender and truncation tests fail (the run then trapped on a force-unwrap, since replaced by `XCTUnwrap`); the tree's reader was restored and re-run green | **PASS** |
+| 6 | Cloudflare | **not run** (attended) |
+
+**Item 5's 2.53 ms was a miss on the band as written.** It was read at +60 s, where the band put it.
+**Decided (Robbie, 2026-10-09): +120 s is item 5's comparison point** (HEVC within 0.60 ms: **PASS**). The
+B-frame start-up episode is a pre-release fix of its own, right after Stage 4 is committed (BUGS.md).
+
+#### Stage 4 — decisions after the unattended report (Robbie, 2026-10-09)
+
+1. **The fallback measurement changes:** with no declared timing, the rate comes from presentation
+   timestamps (e.g. the median interval of displayed pictures), not decode timestamps. Declared timing
+   still wins. Re-run 1a (MediaMTX VideoToolbox HEVC should read 25); declaring senders and H.264 unchanged.
+2. **Item 5 at +120 s; the B-frame start-up offset is a pre-release fix**, its own item after Stage 4.
+3. **SRT shows the DeckLink menu warning** when declared and measured disagree, as WHEP does.
+
+1 and 3 after the attended steps.
+
+#### Stage 4 — attended, 2026-10-09 20:41–20:46 (Robbie)
+
+**Step 1, DeckLink Follow source (Stage 3's item 6): PASS, on the card.** `.build-cc/s4b-Profile`, `x265_r240`
+(25p) on the listener; log `~/Desktop/manifold-soak/s4/att/repro/follow.manifold.log`. Source-derived mode
+`1080p25` while the saved manual pick (`1080p23.98`) held. Robbie picked the 1080p25 row on the way
+(`operator picked output mode 1080p25`), turned output on — `StartScheduledPlayback … free-running at
+1080p25`, 0 late, 0 dropped — then **Follow source (1080p25)**: `operator cleared the manual pick —
+following the source again (1080p25)` · `mode stays 1080p25 via follow source`. The stream ended before
+the re-pick of 1080p23.98 reached the app, so Follow source had cleared the key; after quit it was written
+back with the snapshot's value (read first: absent; snapshot `1080p23.98`), and one run-added `NSWindow
+Frame` key deleted. The domain is dictionary-equal to the original snapshot (1 141 keys).
+
+**Step 2, Cloudflare (item 6): NO. Cloudflare's SRT ingest does not carry HEVC.** Recorded plainly; no
+workaround. OBS 32.2.2, a duplicate of the "SRT Cloudflare" profile with P010, Rec. 2100 (PQ), Limited,
+Apple VT HEVC Hardware Encoder, Main 10, keyframe 2 s, 23.976. OBS reported connected at first, while
+the Cloudflare dashboard showed the input **connecting and disconnecting repeatedly**. Then OBS did the
+same, then **errored and would not reconnect**. This matches Cloudflare's Stream Live documentation: H.264
+and AAC are the only ingest codecs, for RTMPS and SRT alike. Manifold never dialled: the bookmark's
+passphrase read ended `OSStatus -128` when the app was quit with the keychain prompt open. So nothing was
+measured on the output side, and no calibration was possible. Log `s4/att/cf-hevc.manifold.log`. Defaults
+after: one run-added `NSWindow Frame` key deleted, dictionary-equal to the snapshot. **For Stage 6 and the
+user guide: HEVC over SRT needs a server that carries it (MediaMTX, a local listener); Cloudflare Stream
+Live does not.**
+
+#### Stage 4 — decisions 1 and 3: predictions, written 2026-10-09 before the build
+
+**What changes** (`SRTFrameRouter`): `av_guess_frame_rate` is no longer published; it stays in the startup
+anchor's gap threshold only, and is logged as the demuxer's guess. **Published = declared, else measured
+from presentation timestamps, else nil.** The measurement (`SRTPresentationRate`) takes the first 96 decoded
+pictures, sorts them into presentation order, and measures intervals ÷ span over the gaps that sit on one
+grid (WHEP's span method); it refuses when fewer than 75 % do. Until it settles (~4 s at 24p), a stream that
+declares nothing publishes no rate, as WHEP does. When declared and measured disagree by more than 0.05 %:
+one `[SRT-FORMAT] ⚠️` line and **the DeckLink menu advisory, WHEP's wording** ("Source declares … but is
+sending … — output follows the declared rate."), cleared at `deactivate` and by DeckLink when the source goes.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| D1 | 1a again: `vt_pq_meta` through MediaMTX | measured from PTS **25.000** after 96 pictures | `measured from presentation timestamps` 25.000 ± 0.01; D4a `→ mode 1080p25`; **never 1080p50**; no rate published before the measurement (the D4a line waits ~4 s) |
+| D2 | `vt_tick25` through MediaMTX | declared 25, measured 25 | **no disagreement line now** (Stage 4's line was MediaMTX's DTS, not the sender); D4a 1080p25 |
+| D3 | declaring senders: `hevc_pq_x265`, `x265_b8_240` (listener), `x265_709` (MediaMTX), syncD, hi8 | declared, published at once as before; the measurement agrees | `[SRT-FORMAT] … declared` and D4a lines **identical to the first Stage 4 build**; a `measured from presentation timestamps` line within 0.05 % of the declaration; no disagreement; syncD / hi8 identical-text set as HEAD |
+| D4 | H.264 that declares nothing: `obs-709.ts` | 23.976 measured, published ~4 s later than at HEAD | measured 23.976 ± 0.01; D4a ends at `1080p23.98` as HEAD; **the one change on H.264: the rate arrives after the measurement, not at the first picture** |
+| D5 | `x265_tick50` (declares 50, sends 25) | disagreement | exactly one `⚠️ declared 50.000 fps and measured 25.000 fps` line; published 50 (declared wins). The advisory itself is UI: dispatched in the same branch; seen in the DeckLink menu only attended |
+| D6 | the Cloudflare grid: the first 60 s of `cfsrt-probe.ts` (Cloudflare's SRT output, PTS on a 1 ms grid, declares 1001/48000) | measured within 0.05 % of 23.976 | **no false disagreement**; measured 23.976 ± 0.012 |
+| D7 | gates | — | `swift test` 273 / 273; soaklog 8 / 8; C harness 200 / 200; Profile build, the same 11 warnings |
+
+#### Stage 4 — decisions 1 and 3: results, 2026-10-09 21:00–21:40 (unattended)
+
+**Builds:** `.build-cc/s4c-Profile` (the first build), then `.build-cc/s4d-Profile`, the final tree, after
+D6 failed on s4c. 11 warnings each, the same set as HEAD. **Logs:** `~/Desktop/manifold-soak/s4/dec/` (s4c)
+and `s4/dec2/` (s4d).
+
+**D6 failed on the first build, and the fix is in the final one.** On Cloudflare's output the measurement
+REFUSED: `only 61 of 95 intervals on one grid (median 42.00 ms) — not one cadence`. Cloudflare stamps
+video on a 1 ms grid, so a 23.976 stream's gaps are 41, 42 and 43 ms. That is 2.4 % off the median, and
+the grid-fit band had WHEP's 2 % (right for 90 kHz RTP ticks, wrong for a 1 ms grid). A Cloudflare stream
+that declared nothing would have published no rate. The band is now ±15 % of an interval: it covers a
+1 ms grid to ~100 fps and stays far from the midpoint between multiples. The precision comes from the
+~4 s span (±1 ms is ~0.025 %), not from the band.
+
+**And the 12 s MediaMTX fixtures were too short for the measurement.** `mtxrun.sh` joins ~9 s into the
+publish, so the s4c MediaMTX runs saw 45–65 pictures, short of the 96 the window needs. They measured
+nothing, and the VT stream published no rate. That is correct behaviour on too little stream, but it
+tests nothing. The final build's MediaMTX runs use 60 s fixtures: `vt60` (VideoToolbox, the recipe of
+`vt_pq_meta`, declares nothing), `vt60_tick25` (+ `hevc_metadata=tick_rate=25/1`, VPS and VUI), and Stage 3's
+`x265_join` (60 s, declares 25).
+
+| # | result (final build unless stated) | verdict |
+|---|---|---|
+| D1 | `vt60` through MediaMTX: demuxer's guess 50.000 (logged, `startup anchor only`); `declares no timing; the rate will be measured …`; **`frame rate 25.000 fps measured from presentation timestamps (96 pictures …, median interval 40.000 ms, 95 of 95 intervals on the grid)`**; D4a **`→ mode 1080p25`**, the first and only D4a format line; no 1080p50 anywhere but the demuxer's own `[SRT] video:` report | **PASS: 1a now reads 25** |
+| D2 | `vt60_tick25` through MediaMTX: declared 25.000, measured 25.000, **no disagreement line** | **PASS** |
+| D3 | declared and measured agree, no disagreement, D4a as before: `hevc_pq_x265` 25/25, `hi8` 25/25, `x265_join` (MediaMTX) 25/25 on the final build; `x265_b8_240` 23.976/23.976 and syncD 23.976/23.976 on s4c (the measurement on 90 kHz timestamps is the same on both builds: 95 of 95 on the grid) | **PASS** |
+| D4 | `obs-709.ts` (OBS VT H.264, declares nothing): measured **23.976** (median 41.711 ms, 95 of 95); D4a `1080p23.98`, as HEAD. **The rate now arrives after 96 pictures (~4 s), not with the first picture**, the one change on H.264 | **PASS**, with that change |
+| D5 | `x265_tick50`: declared 50.000, measured 25.000, exactly one `⚠️ declared 50.000 fps and measured 25.000 fps (presentation timestamps) disagree — using the declared rate`; D4a `1080p50` | **PASS** on the log. The menu advisory is dispatched in the same branch; **not yet seen in the menu** (attended) |
+| D6 | `cf60` (Cloudflare's output, 1 ms grid, declares 1001/48000): **measured 23.976, 95 of 95 on the grid, no disagreement** (s4c: refused, above) | **PASS on the final build** |
+| D7 | `swift test` 273 / 273; soaklog 8 / 8; C harness 200 / 200; Profile build, 11 warnings, the same set as HEAD | **PASS** |
+
+0 starvation holds in every run. **Defaults:** 18 run-added `NSWindow Frame` keys, each absent from the
+snapshot, deleted by name; dictionary-equal to the snapshot (1 141 keys).
+
+##### The final build
+
+The H.264 path moved to `ManifoldH264ParseSPSTiming` after the runs above, so it was built again
+(`.build-cc/s4b-Profile`) and the rate runs were repeated: `b-syncD`, `b-hi8`, `b-obs709` (listener),
+`b-pq`, and `b-vtmeta` / `b-vttick25` (MediaMTX). Every `[SRT-FORMAT]` and D4a line reads as on the first
+build, word for word (the C reader gives the same three fields the Swift one did). syncD, hi8 and
+`obs-709` match HEAD's lines exactly (9 / 9, 11 / 11, 9 / 9). syncD `[AV-CONTENT]` **−0.08 ms**. 0 holds in all six.
+
+##### Defaults
+
+Exported before the first launch (1 141 keys; `manifold.decklink.manualOutputMode` `1080p23.98`). After
+the last quit: 33 run-added `NSWindow Frame` keys and nothing else. Each was checked absent from the
+snapshot and deleted by name. The domain is dictionary-equal to the snapshot (1 141 keys).
+`streamBookmarks` was never read or written.
+
+**Stage 4, unattended:**
+- **Met:** items 1b–1e, 4 and 7–8, and item 3's video half.
+- **Missed as predicted:** item 1a. The MediaMTX VideoToolbox stream declares no timing, so the decided
+  rule keeps the measured 50.
+- **Missed:** item 2's hop band, which was the wrong model; item 3's audio band, where pre-existing
+  effects swamp what it measures; item 5 at +60 s, by 0.5 ms. HEVC is within 0.6 ms of H.264 at +120 s.
+- **Found:** the B-frame startup episode, for H.264 and HEVC alike.
+- **Attended:** Follow source, then Cloudflare.
 
 ---
 

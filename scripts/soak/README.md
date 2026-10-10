@@ -184,6 +184,7 @@ zsh scripts/soak/repro/run.sh <label> <file.ts>                        # real ti
 READRATE=0.99997 zsh scripts/soak/repro/run.sh <label> <file.ts>       # content arriving 30 ppm slow
 STALLS="60:200 120:400" zsh scripts/soak/repro/run.sh <label> <file.ts>  # sender SIGSTOPped 200 ms at +60 s, …
 PES_PAYLOAD=default zsh scripts/soak/repro/run.sh <label> <file.ts>    # ffmpeg's own PES packing (several AAC frames)
+LOSS="20:300 60:1000" zsh scripts/soak/repro/run.sh <label> <file.ts>  # every packet dropped both ways for 300 ms at +20 s, … (lossrelay.py)
 zsh scripts/soak/repro/restamp.sh <in.ts> <out.ts>                     # video onto the exact frame grid
 python3 scripts/soak/analysis/avlag.py ~/Desktop/manifold-soak/repro/<label>.manifold.log
 ```

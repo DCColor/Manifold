@@ -58,6 +58,79 @@ import DisplayProviders   // LiveCushion — the packing rule and the readout's 
 import QuartzCore
 import VideoToolbox
 
+/// SRT's measured frame rate (§6.10 Stage 4, decision 1, Robbie, 2026-10-09): from PRESENTATION
+/// timestamps, never decode timestamps. A server may rewrite DTS (MediaMTX gives a 25 fps VideoToolbox
+/// HEVC stream DTS steps of 1800 and 5400 ticks, and libavformat's guess reads 50); the pictures' own PTS
+/// are the content's timing.
+///
+/// ONE WINDOW, MEASURED ONCE PER STREAM: the first `windowSize` decoded pictures, SORTED into
+/// presentation order — they are decoded in decode order, and on a stream with B-frames consecutive
+/// decoded PTS jump back and forth, so their gaps are not intervals. Sorted, the gaps are one interval
+/// each, or a whole multiple where a picture is missing (a skipped RASL, a loss, a B-frame decoded after
+/// the window closed). The rate is WHEP's span measurement (`WHEPFrameRateEstimator`): each gap rounded
+/// to a multiple of the median, intervals ÷ elapsed time, so a missing picture costs nothing.
+///
+/// REFUSES rather than guesses: if fewer than `minOnGrid` of the gaps sit within `gridTolerance` of a
+/// whole multiple of the median, the window is not one cadence, and nothing is published from it. SRT
+/// senders are constant-rate in practice; a refusal is a finding about the sender.
+private struct SRTPresentationRate {
+    /// ~4 s at 24p, ~1.6 s at 60p. Long enough that a sender on a 1 ms timestamp grid (Cloudflare's
+    /// SRT output) measures to ~0.025 %, inside the 0.05 % disagreement threshold.
+    static let windowSize = 96
+    /// How far a gap may sit from a whole multiple of the median and still count, as a fraction of one
+    /// interval. ⚠️ NOT WHEP's 2 %: WHEP's samples are 90 kHz RTP ticks, and Cloudflare's SRT output
+    /// stamps video on a 1 ms grid, so a 23.976 stream's gaps are 41, 42 and 43 ms — 2.4 % off the
+    /// median — and 2 % refused it (measured, §6.10 Stage 4, D6: 61 of 95 on the grid). 1 ms is 6 % of a
+    /// 60p interval; ±15 % covers a 1 ms grid to ~100 fps and stays far from the 50 % midpoint between
+    /// multiples. The precision comes from the span, not from this band: ±1 ms over ~4 s is ~0.025 %.
+    static let gridTolerance = 0.15
+    static let minOnGrid = 0.75
+
+    private var times: [Double] = []
+    /// The measured rate, or nil until measured (or when refused).
+    private(set) var rate: Double?
+    private(set) var described = ""
+    private var done = false
+
+    /// Feed one decoded picture's PTS, in seconds. True exactly once: when the window closes, measured
+    /// or refused — the caller's cue to log and publish.
+    mutating func record(_ seconds: Double) -> Bool {
+        guard !done, seconds.isFinite else { return false }
+        times.append(seconds)
+        guard times.count == Self.windowSize else { return false }
+        done = true
+        let sorted = times.sorted()
+        let gaps = zip(sorted.dropFirst(), sorted).map { $0 - $1 }.filter { $0 > 0 }
+        guard !gaps.isEmpty else { described = "no forward intervals"; return true }
+        let median = gaps.sorted()[gaps.count / 2]
+        var intervals = 0.0, span = 0.0, onGrid = 0
+        for gap in gaps {
+            let multiple = max(1, (gap / median).rounded())
+            guard abs(gap - multiple * median) / median <= Self.gridTolerance else { continue }
+            onGrid += 1
+            intervals += multiple
+            span += gap
+        }
+        let fraction = Double(onGrid) / Double(gaps.count)
+        guard fraction >= Self.minOnGrid, span > 0 else {
+            described = String(format: "%d pictures: only %d of %d intervals on one grid (median %.2f ms) — "
+                                       + "not one cadence", times.count, onGrid, gaps.count, median * 1000)
+            return true
+        }
+        rate = intervals / span
+        described = String(format: "%d pictures in presentation order, median interval %.3f ms, "
+                                   + "%d of %d intervals on the grid", times.count, median * 1000, onGrid, gaps.count)
+        return true
+    }
+
+    mutating func reset() {
+        times.removeAll(keepingCapacity: true)
+        rate = nil
+        described = ""
+        done = false
+    }
+}
+
 final class SRTFrameRouter {
 
     static let shared = SRTFrameRouter()
@@ -683,6 +756,8 @@ final class SRTFrameRouter {
         route.deactivate(renderer: renderer)
         // No picture, so no shape. On main, after the route teardown, where a size still hopping in
         // from the session thread cannot overtake it — see LiveDisplaySize's generation counter.
+        // The rate advisory describes this source, so it goes with it (DeckLink also clears it centrally).
+        DeckLinkService.shared.setSourceAdvisory(nil)
         LiveDisplaySize.shared.clear()
         NSLog("[SRT] display route released — file-playback clock restored")
     }
@@ -741,23 +816,34 @@ final class SRTFrameRouter {
 
         // ── THE SAME READING, PUBLISHED FOR THE DECKLINK OUTPUT MODE ────────────────────────
         //
-        // SRT is the ONE live transport with a declared rate, so it is the one that can drive
-        // "Follow source" on the card. This deliberately publishes the DECLARED value or NOTHING —
+        // SRT is the ONE live transport with a known rate, so it is the one that can drive
+        // "Follow source" on the card. This deliberately publishes a real rate or NOTHING —
         // never `anchorNominalRate`, which substitutes a 60 fps fallback when the demuxer had no
         // answer. That substitution is right for the anchor's gap threshold (a threshold wants a
         // number and 60 is the conservative one) and WRONG here: it would reconfigure a broadcast
         // output to 60p for a stream nobody measured, and the operator would have no way to tell
         // that from a real 60p source. Unknown stays unknown and the mode picker takes over.
-        publishedFrameRate = anchorRateWasDeclared ? guessed : nil
-        if let publishedFrameRate {
-            print(String(format: "[SRT-FORMAT] frame rate %.3f fps declared by the demuxer "
-                                 + "(av_guess_frame_rate) — DeckLink Follow source can use it",
-                         publishedFrameRate))
-        } else {
-            print("[SRT-FORMAT] frame rate NOT declared "
-                + "(av_guess_frame_rate returned \(guessed), outside \(Self.anchorPlausibleFrameRates)) — "
-                + "publishing no rate; DeckLink Follow source will be unavailable for this stream")
-        }
+        //
+        // ⚠️ `av_guess_frame_rate` is NOT PUBLISHED. It is measured from DECODE timestamps as they arrive,
+        // so a server that rewrites DTS moves it (MediaMTX gives a 25 fps VideoToolbox HEVC stream 50,
+        // §6.10 Stage 3). Decided (Robbie, 2026-10-09; §6.10 Stage 4): the published rate is the stream's
+        // own declaration (`noteDeclaredTiming`, from the first SPS), else a measurement from
+        // PRESENTATION timestamps (`notePresentationTime`, from the decoded pictures), else nothing. The
+        // demuxer's figure stays where it was set above, in the anchor's gap threshold, which is needed
+        // before any picture exists.
+        demuxerGuessedRate = anchorRateWasDeclared ? guessed : nil
+        publishedFrameRate = nil
+        declaredFrameRate = nil
+        presentationRate.reset()
+        timingCheckedSPS = nil
+        timingCheckedVPS = nil
+        announcedDeclaredRate = nil
+        announcedNoTiming = false
+        announcedRateDisagreement = false
+        print("[SRT-FORMAT] demuxer's frame-rate guess "
+            + (demuxerGuessedRate.map { String(format: "%.3f fps", $0) } ?? "none (\(guessed))")
+            + " (av_guess_frame_rate, from decode timestamps) — startup anchor only; the published rate is "
+            + "the stream's declaration, else measured from presentation timestamps")
 
         // The codec the C reader chose its builder by (`ManifoldSRTVideoFormat.codec`), so the decoder
         // and the builder cannot disagree. Anything else is refused on main before it matters.
@@ -899,6 +985,7 @@ final class SRTFrameRouter {
         let sps = accessUnit.sps.map { Data(bytes: $0, count: accessUnit.spsSize) }
 
         guard accessUnit.codec == ManifoldSRTVideoCodecHEVC else {
+            noteDeclaredTiming(sps: sps, vps: nil, hevc: false)
             let pps = accessUnit.pps.map { Data(bytes: $0, count: accessUnit.ppsSize) }
             decoder.decode(accessUnit: data,
                            sps: sps,
@@ -919,6 +1006,7 @@ final class SRTFrameRouter {
         }
 
         let vps = accessUnit.vps.map { Data(bytes: $0, count: accessUnit.vpsSize) }
+        noteDeclaredTiming(sps: sps, vps: vps, hevc: true)
         let ppsList = Self.unpackParameterSets(accessUnit.ppsList, size: accessUnit.ppsListSize)
         decoder.decode(accessUnit: data,
                        sps: sps,
@@ -967,6 +1055,98 @@ final class SRTFrameRouter {
         onFormatRefused?(banner)
         onFormatRefused = nil
         return false
+    }
+
+    /// The stream's own frame rate, from a new SPS (HEVC: its VUI, else the VPS). SESSION THREAD, before
+    /// the access unit carrying it is decoded, so the first delivered frame already publishes it.
+    ///
+    /// Decided (Robbie, 2026-10-09; §6.10 Stage 4): declared when present, else measured from
+    /// presentation timestamps; when both exist and disagree, one line and the DeckLink menu advisory,
+    /// as WHEP does. Nothing here knows which server it is talking to: a stream that declares a rate gets
+    /// it whatever path it took, and one that does not is measured on its pictures' own timing, which a
+    /// server rewriting DTS does not touch.
+    ///
+    /// H.264 is read by WHEP's reader (`ManifoldH264ParseSPSTiming`, App/H264/H264SPSTiming.c), HEVC by
+    /// `HEVCSPSColor.timing` / `vpsTiming`.
+    private func noteDeclaredTiming(sps: Data?, vps: Data?, hevc: Bool) {
+        guard let sps, !sps.isEmpty, sps != timingCheckedSPS || vps != timingCheckedVPS else { return }
+        timingCheckedSPS = sps
+        timingCheckedVPS = vps
+
+        // (the rate, the fields as coded) — or a reason there is no rate, for the log.
+        let rate: Double?
+        let described: String?
+        if hevc {
+            let timing = HEVCSPSColor.timing(nal: sps) ?? vps.flatMap { HEVCSPSColor.vpsTiming(nal: $0) }
+            rate = timing?.frameRate
+            described = timing?.described
+        } else {
+            let timing: ManifoldH264SPSTiming = sps.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                    return ManifoldH264SPSTiming()
+                }
+                return ManifoldH264ParseSPSTiming(base, sps.count)
+            }
+            rate = timing.valid ? timing.framesPerSecond : nil
+            described = timing.valid
+                ? "SPS VUI num_units_in_tick=\(timing.numUnitsInTick) time_scale=\(timing.timeScale) "
+                    + "fixed_frame_rate_flag=\(timing.fixedFrameRate ? 1 : 0)"
+                : nil
+        }
+        guard let declared = rate, Self.anchorPlausibleFrameRates.contains(declared) else {
+            // Nothing usable declared: the presentation-time measurement decides, once it has settled.
+            declaredFrameRate = nil
+            announcedDeclaredRate = nil
+            if !announcedNoTiming {
+                announcedNoTiming = true
+                let why = described.map { "its timing (\($0)) is not a frame rate" } ?? "it declares no timing"
+                print("[SRT-FORMAT] the stream's \(hevc ? "SPS/VPS" : "SPS") gives no frame rate — \(why); "
+                      + "the rate will be measured from presentation timestamps "
+                      + "(\(SRTPresentationRate.windowSize) pictures)")
+            }
+            settlePublishedRate()
+            return
+        }
+
+        declaredFrameRate = declared
+        if announcedDeclaredRate != declared {
+            announcedDeclaredRate = declared
+            print(String(format: "[SRT-FORMAT] frame rate %.3f fps declared by the stream (%@) — "
+                                 + "DeckLink Follow source uses it", declared, described ?? ""))
+        }
+        settlePublishedRate()
+    }
+
+    /// One decoded picture's presentation time → the measurement. SESSION THREAD, from `deliver`.
+    private func notePresentationTime(_ seconds: Double) {
+        guard presentationRate.record(seconds) else { return }
+        if let measured = presentationRate.rate {
+            print(String(format: "[SRT-FORMAT] frame rate %.3f fps measured from presentation timestamps (%@)",
+                         measured, presentationRate.described))
+        } else {
+            print("[SRT-FORMAT] frame rate NOT measured from presentation timestamps — "
+                + "\(presentationRate.described); "
+                + (declaredFrameRate == nil ? "publishing no rate (DeckLink Follow source unavailable)"
+                                            : "the declared rate stands, unchecked"))
+        }
+        settlePublishedRate()
+    }
+
+    /// Declared, else measured, else nil; and the one disagreement line and advisory. SESSION THREAD.
+    private func settlePublishedRate() {
+        // The same plausibility bound as everything else here: a 0.5 fps "cadence" is a stall pattern.
+        let measured = presentationRate.rate.flatMap { Self.anchorPlausibleFrameRates.contains($0) ? $0 : nil }
+        publishedFrameRate = declaredFrameRate ?? measured
+        guard let declared = declaredFrameRate, let measured,
+              abs(declared / measured - 1) > Self.rateDisagreementFraction, !announcedRateDisagreement else { return }
+        announcedRateDisagreement = true
+        print(String(format: "[SRT-FORMAT] ⚠️ declared %.3f fps and measured %.3f fps (presentation timestamps) "
+                             + "disagree — using the declared rate; the sender may be misconfigured",
+                     declared, measured))
+        // The UI half, WHEP's wording. DeckLink clears it when the source goes; `deactivate` does too.
+        let advisory = String(format: "Source declares %.3f fps but is sending %.3f fps — "
+                                      + "output follows the declared rate.", declared, measured)
+        DispatchQueue.main.async { DeckLinkService.shared.setSourceAdvisory(advisory) }
     }
 
     /// The reader's packed parameter-set run (4-byte big-endian length, then the NAL, repeated) as
@@ -1136,9 +1316,26 @@ final class SRTFrameRouter {
     private var anchorGapThreshold: Double = 0.5 / anchorFallbackFrameRate
     private var anchorRateWasDeclared = false
     private var anchorNominalRate: Double = anchorFallbackFrameRate
-    /// The rate handed to `LiveDisplaySize` for the DeckLink output mode: the DECLARED value, or nil.
+    /// The rate handed to `LiveDisplaySize` for the DeckLink output mode: the stream's declared rate,
+    /// else the demuxer's measured one, else nil (`noteDeclaredTiming`).
     /// ⚠️ NOT `anchorNominalRate` — see where this is set. Session thread, like every anchor field.
     private var publishedFrameRate: Double?
+    /// `av_guess_frame_rate` when plausible, else nil. Logged; NOT published (see `prepareDecoder`).
+    private var demuxerGuessedRate: Double?
+    /// The stream's declared rate (SPS / VPS), when plausible.
+    private var declaredFrameRate: Double?
+    /// The measurement from presentation timestamps: the fallback, and the declaration's check.
+    private var presentationRate = SRTPresentationRate()
+    /// The parameter sets the declaration was last read from, so it is read once per change.
+    private var timingCheckedSPS: Data?
+    private var timingCheckedVPS: Data?
+    /// One line per declared value, one "declares nothing" line and one disagreement line per session.
+    private var announcedDeclaredRate: Double?
+    private var announcedNoTiming = false
+    private var announcedRateDisagreement = false
+    /// Declared and measured "disagree" beyond 0.05 %: 24 against 23.976 is 0.1 %. The measurement spans
+    /// ~4 s of pictures, so even a sender on a 1 ms timestamp grid measures to within ~0.025 %.
+    private static let rateDisagreementFraction = 0.0005
     /// Host time of the previous DELIVERED frame, or nil when none has been delivered yet.
     private var lastArrivalHost: CFTimeInterval?
     private var deferralBeganHost: CFTimeInterval = 0
@@ -2004,10 +2201,11 @@ final class SRTFrameRouter {
         // site that would apply it (and `FrameEngine.setLiveDisplaySize` documents what the file
         // path's equivalent value does and does not include).
         //
-        // THE RATE TRAVELS WITH IT, from `publishedFrameRate` — the demuxer's declared value latched
-        // at stream open, or nil. It is stated on EVERY publish and not once at connect because
+        // THE RATE TRAVELS WITH IT, from `publishedFrameRate` — the stream's declared rate, else the
+        // rate measured from presentation timestamps, or nil (`settlePublishedRate`). It is stated on EVERY publish and not once at connect because
         // `LiveVideoFormat` is one value: a raster change mid-stream must re-state the rate or the
         // latch would deliver a format whose rate had gone missing.
+        notePresentationTime(CMTimeGetSeconds(pts))
         LiveDisplaySize.shared.publish(width: CVPixelBufferGetWidth(decoded),
                                        height: CVPixelBufferGetHeight(decoded),
                                        frameRate: publishedFrameRate)
