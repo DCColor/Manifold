@@ -828,7 +828,8 @@ final class SRTFrameRouter {
         // so a server that rewrites DTS moves it (MediaMTX gives a 25 fps VideoToolbox HEVC stream 50,
         // §6.10 Stage 3). Decided (Robbie, 2026-10-09; §6.10 Stage 4): the published rate is the stream's
         // own declaration (`noteDeclaredTiming`, from the first SPS), else a measurement from
-        // PRESENTATION timestamps (`notePresentationTime`, from the decoded pictures), else nothing. The
+        // PRESENTATION timestamps (`notePresentationTime`, from the decoded pictures), else nothing; and when
+        // the two clearly disagree, the measurement (`settlePublishedRate`). The
         // demuxer's figure stays where it was set above, in the anchor's gap threshold, which is needed
         // before any picture exists.
         demuxerGuessedRate = anchorRateWasDeclared ? guessed : nil
@@ -1061,10 +1062,10 @@ final class SRTFrameRouter {
     /// the access unit carrying it is decoded, so the first delivered frame already publishes it.
     ///
     /// Decided (Robbie, 2026-10-09; §6.10 Stage 4): declared when present, else measured from
-    /// presentation timestamps; when both exist and disagree, one line and the DeckLink menu advisory,
-    /// as WHEP does. Nothing here knows which server it is talking to: a stream that declares a rate gets
-    /// it whatever path it took, and one that does not is measured on its pictures' own timing, which a
-    /// server rewriting DTS does not touch.
+    /// presentation timestamps. When both exist and CLEARLY DISAGREE, the MEASURED rate wins (see
+    /// `settlePublishedRate`), with one line and the DeckLink menu advisory, as WHEP warns. Nothing here
+    /// knows which server it is talking to: the declaration is the stream's own, and the measurement is
+    /// its pictures' own timing, which a server rewriting DTS does not touch.
     ///
     /// H.264 is read by WHEP's reader (`ManifoldH264ParseSPSTiming`, App/H264/H264SPSTiming.c), HEVC by
     /// `HEVCSPSColor.timing` / `vpsTiming`.
@@ -1132,20 +1133,33 @@ final class SRTFrameRouter {
         settlePublishedRate()
     }
 
-    /// Declared, else measured, else nil; and the one disagreement line and advisory. SESSION THREAD.
+    /// Declared, else measured, else nil — except that a CLEAR disagreement goes to the measurement;
+    /// and the one disagreement line and advisory. SESSION THREAD.
+    ///
+    /// ⚠️ MEASURED WINS A DISAGREEMENT (decided, Robbie, 2026-10-09; §6.10 Stage 4). A stream that declares
+    /// 50 and carries 25 pictures a second would otherwise go to SDI as 1080p50 with every picture shown
+    /// twice; the measurement is the cadence actually on the wire. The declaration is published first
+    /// (it arrives with the first SPS, the measurement ~4 s later), so a mislabelled stream costs ONE
+    /// mode switch at start. A measurement that refused (an irregular cadence) leaves the declaration
+    /// standing. Untested: a pulldown-signalled stream (23.976 coded, 29.97 declared), where the
+    /// declaration may be the right output (BUGS.md).
     private func settlePublishedRate() {
         // The same plausibility bound as everything else here: a 0.5 fps "cadence" is a stall pattern.
         let measured = presentationRate.rate.flatMap { Self.anchorPlausibleFrameRates.contains($0) ? $0 : nil }
-        publishedFrameRate = declaredFrameRate ?? measured
         guard let declared = declaredFrameRate, let measured,
-              abs(declared / measured - 1) > Self.rateDisagreementFraction, !announcedRateDisagreement else { return }
+              abs(declared / measured - 1) > Self.rateDisagreementFraction else {
+            publishedFrameRate = declaredFrameRate ?? measured
+            return
+        }
+        publishedFrameRate = measured
+        guard !announcedRateDisagreement else { return }
         announcedRateDisagreement = true
         print(String(format: "[SRT-FORMAT] ⚠️ declared %.3f fps and measured %.3f fps (presentation timestamps) "
-                             + "disagree — using the declared rate; the sender may be misconfigured",
+                             + "disagree — using the measured rate; the sender may be misconfigured",
                      declared, measured))
         // The UI half, WHEP's wording. DeckLink clears it when the source goes; `deactivate` does too.
         let advisory = String(format: "Source declares %.3f fps but is sending %.3f fps — "
-                                      + "output follows the declared rate.", declared, measured)
+                                      + "output follows the measured rate.", declared, measured)
         DispatchQueue.main.async { DeckLinkService.shared.setSourceAdvisory(advisory) }
     }
 

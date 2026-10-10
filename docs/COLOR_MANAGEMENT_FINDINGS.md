@@ -3332,6 +3332,72 @@ H.264 Hardware, CBR 6000, keyframe 1 s, Main, B-frames off, AAC.
   HEVC. **The rule from now on:** never modify a tested profile for an experiment; duplicate it
   (`OBS_TEST_PROFILES.md`, which also proposes "HEVC Local" for Stage 6).
 
+#### Stage 4, decision 3 attended, and the disagreement rule reversed: predictions, written 2026-10-09 before the code changed
+
+**Attended (Robbie, 2026-10-09 ~22:04): the DeckLink menu warning, seen.** `.build-cc/s4d-Profile`,
+`join_tick50` (x265 60 s, 25 fps sent, `tick_rate=50/1` declared) on the listener; log
+`s4/att/repro/advisory.manifold.log`. The menu showed the row **"Follow source (1080p50)"** and at the
+bottom **"⚠️ Source declares 50.000 fps but is sending 25.000 fps — output follows the declared rate."**
+The signal line read the saved manual pick, `1080p23.98 · 10-bit 4:2:2 · Rec. 709`. **D5's advisory:
+PASS**, seen in the UI.
+
+**Decided (Robbie, 2026-10-09): measured wins when declared and measured clearly disagree** (beyond
+0.05 %), switching once when the measurement settles. Declared stays the fallback when the measurement
+refuses (an irregular cadence). The warning says the output follows the measured rate. Why: under
+declared-wins, a stream that says 50 and carries 25 goes to SDI as 1080p50 with every picture twice;
+measured-wins puts the cadence actually on the wire on SDI. Its cost: one mode switch at start on a
+mislabelled stream. The untested pulldown case (23.976 coded, 29.97 declared) is in BUGS.md.
+
+**What changes:** `settlePublishedRate` publishes the measured rate when the two disagree; the log line
+and the advisory say "measured". Before the measurement settles, the declared rate is published, so the
+first D4a format is the declared one.
+
+**Fixtures** (x264, 60 s, testsrc2 + 1 kHz AAC; the declarations rewritten with `h264_metadata`): `d5994_s2997`
+(29.97 sent, 59.94 declared), `d60_s30` (30 sent, 60 declared), `i5994_frame` (1080i59.94, MBAFF top
+field first, x264's own timing: 60000/1001 ticks = **29.97 frames declared**), `i5994_field` (the same
+stream, the field rate labelled as the frame rate: **59.94 declared**). Offline, every one sends a
+picture every 3003 (3000) ticks. Interlaced is coded as frames here, two fields per access unit.
+
+**The DeckLink mode table has no interlaced modes** (`resolveOutputMode` maps a rate to the nearest
+progressive mode), so 1080i59.94, the correct output for the interlaced pair, is not reachable under any
+rule.
+
+| # | stream | predicted Follow source (D4a source-derived mode) | pass band |
+|---|---|---|---|
+| R1 | `join_tick50` (50 declared, 25 sent) | **1080p50** at the first picture, then **1080p25** once the measurement settles (~4 s, plus the 2 s live-mode settle) | exactly one disagreement line saying the measured rate is used; D4a: one `1080p50` then one `1080p25`, no other mode |
+| R2 | `d5994_s2997` | 1080p59.94 → **1080p29.97** | as R1 |
+| R3 | `d60_s30` | 1080p60 → **1080p30** | as R1 |
+| R4 | `i5994_frame` | **1080p29.97** throughout (agree) | no disagreement; **MISS against the correct 1080i59.94, by construction** |
+| R5 | `i5994_field` | 1080p59.94 → **1080p29.97** | one disagreement; **MISS against 1080i59.94**, by construction |
+| R6 | regression: `hevc_pq_x265`, `hi8`, `cf60`, syncD (declare and agree); `obs-709` (declares nothing); `vt60` and `vt60_tick25` through MediaMTX | unchanged from the final build of decisions 1 and 3 | the same `[SRT-FORMAT]` and D4a lines; no disagreement |
+| R7 | gates | — | `swift test` 273 / 273; soaklog 8 / 8; C harness 200 / 200; Profile build with the same 11 warnings |
+
+#### The disagreement rule reversed: results, 2026-10-09 22:09–22:40 (unattended)
+
+**Build:** `.build-cc/s4e-Profile` (measured wins a clear disagreement), 11 warnings, the same set as HEAD.
+**Logs:** `~/Desktop/manifold-soak/s4/rev/`. The saved manual pick (1080p23.98) was in force and DeckLink output
+was OFF throughout. So the D4a "LIVE source format → mode" lines are the mode Follow source offers and would
+apply, and the card itself did not change.
+
+| # | stream | declared → measured | Follow source (D4a) | verdict |
+|---|---|---|---|---|
+| R1 | `join_tick50` | 50.000 → 25.000 | **1080p50** at the first picture, then `1080p25; holding 2.0s` → `live mode 1080p25 settled` | **PASS**: one disagreement line (`— using the measured rate`), one switch |
+| R2 | `d5994_s2997` | 59.940 → 29.970 | 1080p59.94 → **1080p29.97** (settled) | **PASS** |
+| R3 | `d60_s30` | 60.000 → 30.000 | 1080p60 → **1080p30** (settled) | **PASS** |
+| R4 | `i5994_frame` (1080i59.94, MBAFF, 29.97 frames declared) | 29.970 → 29.970, agree | **1080p29.97** throughout | as predicted; **MISS against the correct 1080i59.94**, by construction: no interlaced modes (BUGS.md) |
+| R5 | `i5994_field` (the same stream, 59.94 declared) | 59.940 → 29.970 | 1080p59.94 → **1080p29.97** (settled) | as predicted; **MISS against 1080i59.94** (BUGS.md) |
+| R6 | `hevc_pq_x265` 25/25, `hi8` 25/25, `cf60` 23.976/23.976, syncD 23.976/23.976; `obs-709` (measured 23.976); `vt60` (MediaMTX, measured 25.000); `vt60_tick25` 25/25 | unchanged | D4a as on the decisions 1 and 3 build: 1080p25 / 1080p25 / 1080p23.98 / 1080p23.98 / 1080p23.98 / 1080p25 / 1080p25 | **PASS**: no disagreement anywhere, 0 holds in every run |
+| R7 | `swift test` 273 / 273; soaklog 8 / 8; C harness 200 / 200; Profile build, the same 11 warnings | | | **PASS** |
+
+- **Every 2× case lands on the measured rate after one settled switch.** Every R run decoded with 0 holds
+  and 0 decode errors.
+- **The menu text is now "output follows the measured rate."** The log line says the same; it was not
+  re-read in the UI.
+- **New in BUGS.md:** interlaced live sources reach DeckLink as progressive (1080p29.97 for 1080i59.94).
+  The pulldown case (23.976 coded, 29.97 declared) is untested.
+- **Defaults:** 13 run-added `NSWindow Frame` keys (this run and the advisory session), each absent from the
+  snapshot, deleted by name; dictionary-equal to the snapshot (1 141 keys; `manualOutputMode` `1080p23.98`).
+
 ##### The final build
 
 The H.264 path moved to `ManifoldH264ParseSPSTiming` after the runs above, so it was built again

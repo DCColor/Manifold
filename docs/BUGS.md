@@ -1213,6 +1213,58 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 ---
 
+## ☐ OPEN 2026-10-09 — NOT HANDLED — interlaced live sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
+
+**Status:** OPEN, measured; not fixed (decided, Robbie, 2026-10-09: record, don't fix now). **Found:** §6.10
+Stage 4, the 2× family.
+
+- **What:** a 1080i59.94 SRT stream reaches DeckLink as **1080p29.97**. That holds whether its VUI timing says
+  29.97 frames (`i5994_frame`, x264's own timing) or labels the 59.94 field rate as the frame rate
+  (`i5994_field`). In the second case the declared 1080p59.94 is published first, then measured wins.
+- **The correct SDI output is 1080i59.94.** The rate is right (29.97 frames, 59.94 fields), but the scan is wrong:
+  - the card sends progressive frames carrying woven fields;
+  - downstream equipment sees a 1080p29.97 signal instead of interlaced.
+- **Why:**
+  1. `DeckLinkService.resolveOutputMode` maps a rate to the nearest standard rate in a table of
+     **progressive modes only**. No 1080i mode exists in `standardRates` or `selectableModes`.
+  2. Nothing tells it a source is interlaced. `LiveDisplaySize` carries width, height and rate only.
+  3. The SPS signals it (`frame_mbs_only_flag` 0, MBAFF here), and so does picture-timing SEI
+     (`pic_struct`), but neither is read for this.
+- **Not measured:** field-coded (PAFF) streams, where each access unit is one field and PTS steps at 59.94.
+  x264 cannot make them. The measurement would read 59.94 there and pick 1080p59.94: also wrong.
+- **Affects** every live transport's Follow source (SRT, WHEP, NDI, HLS publish the same three numbers), and the
+  file path if it has interlaced sources. Display in the window is a separate question (no deinterlace stage
+  was looked at here).
+
+**Done means:**
+- interlaced-ness reaches the mode decision from the stream's own signalling (SPS `frame_mbs_only_flag`,
+  `field_seq_flag`, picture-timing SEI), never from a server;
+- 1080i50 and 1080i59.94 modes exist and are chosen for such sources;
+- the card is verified on an SDI analyser or monitor for MBAFF and PAFF fixtures.
+
+---
+
+## ☐ CHECK 2026-10-09 — UNTESTED — SRT frame rate on a pulldown-signalled stream (23.976 coded, 29.97 declared)
+
+**Status:** UNTESTED, no fixture. **Why it matters:** the SRT frame-rate rule (`SRTFrameRouter.settlePublishedRate`,
+§6.10 Stage 4) publishes the stream's declared rate, but **the rate measured from presentation timestamps wins a
+clear disagreement** (decided, Robbie, 2026-10-09).
+- **The case:** a stream coded as 23.976 progressive pictures with pulldown signalled for 29.97 display. H.264
+  `pic_struct` frame doubling or tripling in picture timing SEI, with VUI timing at the 29.97 field cadence.
+- **What could happen:** it may declare 29.97 while its PTS step at 23.976 (or 29.97, depending on how the
+  encoder stamps it). If they disagree, measured wins, and DeckLink Follow source picks 1080p23.98, where the
+  sender intended 29.97 output.
+- **Which is right is not settled:** 23.98 carries the pictures as coded; 29.97 (really 1080i59.94) is
+  what the sender asked the display to do.
+
+**Done means:**
+- a pulldown fixture (x264 `--pulldown 32`, or a real broadcast encoder) played over SRT;
+- its declared and measured rates and the D4a mode recorded;
+- a decision on which rule applies, and if it differs from today's, the rule changed for that case only
+  (keyed on the stream's own `pic_struct` signalling, never on a server).
+
+---
+
 ## ☐ PRE-RELEASE FIX (decided, Robbie, 2026-10-09; right after HEVC Stage 4 is committed) — PRE-EXISTING, SRT — on a stream with B-frames, sound runs ~35 ms off the picture for the first ~40 s
 
 **Status:** OPEN, measured, not diagnosed; **a pre-release fix, its own item, scheduled right after Stage 4 is committed** (Robbie, 2026-10-09). **Found:** HEVC Stage 4 (`COLOR_MANAGEMENT_FINDINGS.md`
