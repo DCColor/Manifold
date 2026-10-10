@@ -7,12 +7,173 @@ changelog page. Format notes are at the bottom.
 
 ## Next release
 
-- WHEP from Cloudflare Stream keeps sound and picture in sync for long sessions: verified over four and a half hours, and with picture and sound arriving over SDI and sent through OBS.
-- Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
-- SRT and WHEP now show the colour the stream declares. A stream tagged HDR (PQ or HLG) is shown and scoped as HDR instead of as standard Rec. 709, and a stream that declares nothing is still treated as Rec. 709.
+Draft, covering everything since 0.8.4 (`dd3984b`). Only the `-` bullets under New, Improved, Fixed
+and Known limitations reach the update dialog. The uploader ignores sub-headings, this paragraph,
+the numbered Highlights and the changelog tables, so none of them are duplicated in the dialog. Keep
+a blank line between the last bullet and anything that follows it, or that text is glued onto the
+bullet.
+
+### Highlights
+
+1. **Sound and picture stay in sync on live streams.** SRT, WHEP and NDI were each out by a fixed or
+   drifting amount in 0.8.4. They now hold sync, verified over sessions of several hours.
+2. **Audio sync calibration and per-stream offsets**, in a new A/V menu: measure a stream's offset
+   with a Manifold sync clip, nudge it by the millisecond, and save it with the stream.
+3. **Live streams show the color they declare,** including PQ and HLG HDR over SRT and WHEP, and
+   HEVC now plays over SRT, including 10-bit HDR.
+4. **OS or Bypass, per window:** choose whether macOS color-manages the picture, and read exactly
+   what is happening between the source and your screen.
+5. **SRT is much sturdier:** faster to start, no more break-ups or missing sound with common encoders.
+
+### New
+
+- Display transform, per window: OS (macOS color-manages the picture for your display) or Bypass (the picture's values go to the screen untouched). Choose it from the control bar or the Color menu. A window in Bypass says so in its title.
+- A display chain readout shows the source's color and whether it was declared or assumed, the transform in use, your display and its curve, and for SRT and WHEP the amount of buffering.
 - HEVC (Main and Main 10, 4:2:0) now plays over SRT, including 10-bit HDR. HEVC 4:2:2 and 4:4:4 streams are refused with a message saying so, never quietly converted.
+- Audio offset for live streams, in the A/V menu: ⌥] and ⌥[ move the sound 1 ms later or earlier (add ⇧ for 10 ms). Save the offset with a saved stream and it comes back every time. A badge and the window title show when an offset is on.
+- Calibration (A/V ▸ Calibrate…): loop a Manifold sync clip on the sender and Manifold measures how far apart sound and picture are, then offers the correction. It never applies anything by itself. A/V ▸ Save Sync Clip… saves the clip that matches the stream's frame rate.
+
+### Improved
+
+- SRT and WHEP now show the color the stream declares. A stream tagged HDR (PQ or HLG) is shown and scoped as HDR instead of as standard Rec. 709. A stream that declares nothing is still treated as Rec. 709.
 - SRT streams start showing picture much sooner, especially at low bitrates. A static slate or bars feed used to take a minute or more to appear. It now takes a second or two.
-- Fixed: the scopes could keep showing an earlier source's colour settings (scale, gamut target and labels). This happened after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
+- WHEP from Cloudflare Stream keeps sound and picture in sync for long sessions: verified over four and a half hours, including with picture and sound sent out over SDI.
+- SRT buffering adapts to the sender. Encoders that send audio in large chunks, or use B-frames, get a slightly larger buffer automatically, and the chain readout says how much and why.
+- SDI output follows an SRT stream's own frame rate. If a stream labels its frame rate wrongly, the output follows the rate the stream actually runs at.
+
+### Fixed
+
+- Fixed: SRT sound played about 200 ms behind the picture.
+- Fixed: NDI sound played about a quarter of a second behind the picture.
+- Fixed: WHEP sound and picture were out by a different amount every session, and drifted further apart over long sessions.
+- Fixed: SRT sound from Cloudflare could sound distorted and gravelly.
+- Fixed: SRT streams from some encoders (ffmpeg, and likely hardware encoders) had no sound at all.
+- Fixed: SRT sound broke up on low-bitrate streams and with encoders that send audio in large chunks.
+- Fixed: after reconnecting, an SRT stream could stop about 17 seconds in with "The stream stopped sending video" while it was still playing.
+- Fixed: after an NDI or HLS stream ended, a file played next ran its picture about 0.2 s ahead of its sound.
+- Fixed: SDI audio dropped out every few seconds during file playback.
+- Fixed: streams using the BT.470BG color matrix, common from European encoders, were decoded with Rec. 709 coefficients, giving a small color shift.
+- Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
+
+### Known limitations
+
+- Known limitation: interlaced sources go out over SDI as progressive: a 1080i59.94 source is sent as 1080p29.97, with both fields woven into each frame. An interlaced NDI source arrives already deinterlaced by NDI.
+- Known limitation: SDI audio goes silent for up to about a tenth of a second at each seek, scrub release and loop point during file playback.
+- Known limitation: HLS streams in P3 or Rec. 2020 SDR are not yet labeled correctly, and NDI's Rec. 2020 SDR setting is shown with Rec. 709 primaries.
+- Known limitation: after a network stall of a second or more, live sound can stay 10–20 ms late for up to a minute before it settles.
+- Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
+
+### Detailed changelog
+
+Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a user would notice;
+**Unsure** rows carry the reason and need a decision before release.
+
+#### Live audio sync
+
+| Change | Commits | Visible? |
+|---|---|---|
+| SRT live audio cushion set to 0: SRT sound no longer ~200 ms behind the picture | `e318aa6` | Yes |
+| Live audio passes through a new sample-rate converter (polyphase, 64-tap) that steers sound onto the picture's clock, replacing the old clock-rate pushes that muted the renderer; removes periodic stutter on live audio | `a866e99` `b3d194d` `d8b8028` `b76dc3f` `e8f822e` | **Unsure**: the stutter removal is measured at the device output (resampler step 3), but it has no BUGS.md entry of its own |
+| Timeline jumps in the picture are followed by a short splice in the sound instead of a re-sync | `4443ab7` | **Unsure**: designed to be inaudible |
+| Stall recovery re-syncs with one cut or catch-up; residual splices repeated | `df2b493` | **Unsure**: no BUGS.md entry ties it to a symptom |
+| SRT: sound held, not glitched, when the renderer starves on a delivery stall | `d3b0831` | **Unsure**: BUGS.md L2294 still says OPEN in its heading, though its body says the fix is in |
+| LiveClock start-up realign: removes a ~100 ms burst on the first connect after launch | `46c75d4` | **Unsure**: affected settling, probably not audible |
+| WHEP audio timestamps on the 48 kHz sample axis | `4ef1254` | No (only mattered to the new converter) |
+| Dead rate and position constants removed | `be983a0` | No |
+
+#### Calibration and audio offsets (new in this release)
+
+| Change | Commits | Visible? |
+|---|---|---|
+| Per-source audio offset, applied by splice | `98d1f69` | Yes |
+| Per-bookmark offset, ⌥[ / ⌥] nudges, A/V badge, title marker | `f645dec` | Yes |
+| Offset advance limits judged on the queue's recent low point; range error shown under the field | `0694481` | Yes |
+| A saved sound-earlier offset is checked against the queue at the first anchor | `6132970` | Yes |
+| Sync clip generator and verification; bundled loop-exact H.264 + PCM clips; ProRes masters in whole code cycles | `dfe6463` `5a1eaf8` `a350dd8` | Yes |
+| Calibration mode: coded sync-clip matcher, sheet, A/V menu items | `23e8223` | Yes |
+| WHEP calibration measured on the video timeline | `dcfb702` | Yes (a fix inside the new feature; not listed under Fixed) |
+
+#### SRT
+
+| Change | Commits | Visible? |
+|---|---|---|
+| Audio timestamps counted in samples, not taken from the sender's millisecond grid: fixes gravelly Cloudflare audio | `3749918` | Yes |
+| AAC decode experiment with libavcodec, reverted to AudioToolbox the same day (no net change) | `167f7fe` `8c71bd2` | No |
+| Media-stall watchdog re-baselined at identification: no false "stopped sending video" after a reconnect | `f6c3d61` | Yes |
+| Multi-frame AAC packets split: sound from ffmpeg-style senders | `d3b0831` | Yes |
+| AAC probe no longer holds every packet at start: picture in about a second | `c32c074` | Yes |
+| Audio packing logged per packet (Stage 0b-1) | `d20ff96` | No |
+| Cushion sized to the sender's audio packing; Buffer row in the chain readout | `6132970` | Yes |
+| Cushion covers B-frame reordering | `5d623af` | Yes |
+| HEVC parser enabled in the FFmpeg build | `f4b6746` | No |
+| HEVC SPS color reader, codec-neutral SPSColor target | `fd657f7` | No (enables the next row) |
+| HEVC Main / Main 10 4:2:0 plays; 4:2:2 and 4:4:4 refused with a banner | `a2e5ce1` | Yes |
+| Declared frame rate with a timestamp-measured fallback | `ce3d828` | Yes |
+| Measured frame rate wins when it clearly disagrees with the declared one | `a8b70fa` | Yes |
+
+#### WHEP
+
+| Change | Commits | Visible? |
+|---|---|---|
+| Audio RTCP sender reports parsed (log only) | `af4ebe0` | No |
+| Manifold sends its own video RTCP (keyframe requests, receiver reports); sender reports selected by SSRC | `637120b` | **Unsure**: keyframe requests may speed recovery after loss, but BUGS.md L2564 says two servers ignore them |
+| Audio aligned to video with an RTCP sender-report line fit: per-session lip-sync offset and long-session drift fixed (verified on Cloudflare) | `76ae8a1` `14f4b89` | Yes |
+| Level-based queue correction at session start, then made observe-only | `1c901e4` `9e1724f` | No (net effect is diagnostic) |
+
+#### NDI
+
+| Change | Commits | Visible? |
+|---|---|---|
+| Picture held by the audio lead: NDI sound no longer ~250 ms late | `48ae1e8` `afcce50` | Yes |
+| Hold uses the sender's timecode skew (~27 ms early at 23.976 before) | `a159fd3` | Yes |
+| Falls back to the depth term when a sender's audio and video timecodes are on different clocks | `79b38e2` | Yes (for senders like Omniscope) |
+
+#### HLS
+
+| Change | Commits | Visible? |
+|---|---|---|
+| Renderer's clock restored on disconnect (NDI too): a file played afterwards is no longer ~195 ms out | `48ae1e8` | Yes |
+
+#### DeckLink / SDI
+
+| Change | Commits | Visible? |
+|---|---|---|
+| File playback feeds the SDI audio tap 250 ms ahead with a 4 s ring: no dropouts every few seconds | `109cfc3` | Yes. **Unsure on status**: the attended SDI check on the Resolve workstation is still pending (BUGS.md L1652) |
+| Follow source uses SRT's declared, then measured, frame rate | `ce3d828` `a8b70fa` | Yes |
+
+#### Color, display and scopes
+
+| Change | Commits | Visible? |
+|---|---|---|
+| Per-window display transform, OS and Bypass | `c34a17c` | Yes |
+| Transform pulldown, Bypass indicator, display chain readout | `55f8096` | Yes |
+| "— Bypass" in the window title; readout follows a macOS HDR profile change | `2443151` | Yes |
+| Source provenance (tagged / assumed / partly assumed / overridden) and full CICP in the readout, updated live | `6cb5460` | Yes |
+| Scope color driven by the renderer's source state: no stale scale, gamut or labels | `946417a` | Yes |
+| Declared color read from the H.264 SPS for SRT and WHEP | `418fcef` | Yes |
+| Matrix 5 (BT.470BG) treated as 601 | `95563f7` | Yes |
+| Colorimetry presets and tiers moved into the ColorimetryModel package | `07368d0` | No |
+
+#### App, menus and diagnostics
+
+| Change | Commits | Visible? |
+|---|---|---|
+| Debug menu hidden unless opted in | `4114995` | **Unsure**: 0.8.4 was build 18 and this landed 20 minutes later, bumping to build 19. If build 19 shipped as 0.8.4, users already have it; if not, 0.8.4 users lose a visible Debug menu |
+| Diagnostics export reports EDR headroom from potential, not current | `cf18894` | **Unsure**: only visible in Export Diagnostics output |
+| User-facing strings converted to American English ("Licenses" and others; BUGS.md, pre-ship checklist) | — | **Unsure**: verified 2026-09-21, but no commit or fix date is recorded |
+
+#### Internal (build, telemetry, probes, test tooling)
+
+| Change | Commits |
+|---|---|
+| Release configuration compiles again (`toneLock` declaration) | `d76bb21` |
+| Release-archive telemetry assertion corrected | `f9880b3` |
+| LiveClock telemetry no longer written to stderr in Release | `176ca03` |
+| Audio-mirror rate pin removed | `8379c10` |
+| DEBUG probes: destination color profile, paired timebase, A/V lag, A/V content, raw SR logging, WindowSizer deinit | `2db97b1` `61b9b69` `a90de72` `d3b0831` `c31ca83` `2c1da93` |
+| Soak, replay and DeckLink test tooling; MediaMTX `useAbsoluteTimestamp` mode | `8389dd9` `5041fb8` `54750ad` `9b10b68` `73ef624` `b35a810` |
+| Build hygiene: concurrency annotations, vendored-header warnings, ignore build folders | `f0969e4` `aa79682` `d055d07` |
+| Documentation only (findings, plans, BUGS.md, roadmap, user guide drafts) | the remaining 49 commits |
 
 ## 0.8.4
 

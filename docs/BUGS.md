@@ -34,8 +34,8 @@ held back until after release, and the numbered defect entries follow.
      scrub gesture from `AVPlayerItemVideoOutput`*, below). HEVC 4:2:2 10-bit over SRT is carried the
      same way. The renderer, scope and DeckLink work is done and measured once
      (`INTERLACED_FINDINGS.md` §7–8). Stage 3 (HEVC Main and
-     Main 10 at 4:2:0 play; 4:2:2 and 4:4:4 refused with a banner) built and run unattended 2026-10-09,
-     uncommitted; open from it: DeckLink Follow source on HEVC, one attended click (§6.10, *Stage 3 —
+     Main 10 at 4:2:0 play; 4:2:2 and 4:4:4 refused with a banner) built and run unattended 2026-10-09
+     (`a2e5ce1`); open from it: DeckLink Follow source on HEVC, one attended click (§6.10, *Stage 3 —
      results*, item 6).
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
@@ -1172,7 +1172,7 @@ audio, and possibly some hardware encoders. Codec-independent, so HEVC inherits 
 **Options, not decided:** §18.14's options A and B, or a target that adapts to the observed PES
 spacing.
 
-**2026-10-08, Stage 0b-1 (instrumentation, uncommitted):** `[SRT-AUDIO] packing` now logs the frames
+**2026-10-08, Stage 0b-1 (instrumentation, `d20ff96`):** `[SRT-AUDIO] packing` now logs the frames
 per PES when the count changes, and the session-end line carries the session figures (lo150 16.00 /
 341 ms, max 17; hi8 and hi25 8.00 / 171 ms). **The steering's rail episode at the start of hi8 and
 hi25 is not what starves the audio.** Those fixtures' video arrives in bursts, which gives the audio
@@ -1186,7 +1186,7 @@ session + 0.15 s), clamped to 1.0 s, grow-only, set before the first anchor when
 Signal is the PES duration, not the queue. Stage 0b-2a; design and predictions in §6.10, *Buffer
 policy — the review and its decisions*.
 
-**2026-10-08, Stage 0b-2a built and run (uncommitted):** hi8 / hi25 / hi8fine (171 ms per PES) raised to
+**2026-10-08, Stage 0b-2a built and run (`6132970`):** hi8 / hi25 / hi8fine (171 ms per PES) raised to
 321 ms before the anchor, **0 holds** (were 5–8), low-water ~80 ms. **lo150 (341 ms) still breaks up**:
 raised to 513 ms, 115 holds (were ~260), settled floor 30–34 ms. The settled floor fits cushion − 1.41 ×
 PES, so + 0.15 s is too small above ~0.3 s per PES; whether the rule scales with the PES is open
@@ -1447,7 +1447,7 @@ renderer's codes like everything else.
 
 ---
 
-## ✅ FIXED 2026-10-06 (uncommitted) — RELEASE-BLOCKING — WHEP calibration read what is heard minus the SR-line offset
+## ✅ FIXED 2026-10-06 (`dcfb702`) — RELEASE-BLOCKING — WHEP calibration read what is heard minus the SR-line offset
 
 **Found by `AUDIO_RESAMPLER_DESIGN.md` §19.15. Fixed and verified the same day (§19.15, "The fix, built and
 verified").**
@@ -1551,7 +1551,7 @@ verified").**
 
 ---
 
-## ✅ FIXED 2026-10-05 (uncommitted) — NDI hold: a sender whose two streams carry timecodes on DIFFERENT clocks gets a clamped, meaningless skew (Omniscope)
+## ✅ FIXED 2026-10-05 (`79b38e2`) — NDI hold: a sender whose two streams carry timecodes on DIFFERENT clocks gets a clamped, meaningless skew (Omniscope)
 
 **Found (`AUDIO_RESAMPLER_DESIGN.md` §19.13, follow-up):**
 - Omniscope's audio and video timecodes each keep time, but on different clocks. One is Unix-epoch,
@@ -1563,7 +1563,7 @@ verified").**
 - **Proposed, not built:** past a plausibility bound (outside −100…+200 ms, or |raw| > 1 s), fall back
   to DEPTH with the reason "the streams' timecodes are not on one clock", instead of clamping.
 - **Do not commit the −100 floor without it.**
-- **✅ Built (Robbie's decision, 2026-10-05 late; uncommitted).**
+- **✅ Built (Robbie's decision, 2026-10-05 late; `79b38e2`).**
   - Outside −100…+200 ms the session falls back to the depth for good, logging "timecodes not on
     one clock (raw skew …)". Inside, the skew is used as is. The clamp is gone.
   - Tests for the bounds, an epoch-scale pair and the latch. `swift test` 191 / 191; replays
@@ -1649,7 +1649,7 @@ terms, and the device confirms it (H1 + H3).**
 
 ---
 
-## ✅ FIXED 2026-10-05 (uncommitted; pending the attended SDI check on the Resolve workstation) — DeckLink SDI: the tap underruns during FILE playback (pre-existing; worse on AAC than PCM)
+## ✅ FIXED 2026-10-05 (`109cfc3`; pending the attended SDI check on the Resolve workstation) — DeckLink SDI: the tap underruns during FILE playback (pre-existing; worse on AAC than PCM)
 
 **Found in the attended session, measured unattended (`AUDIO_RESAMPLER_DESIGN.md` §19.10, "Two
 findings re-examined").**
@@ -1818,7 +1818,7 @@ listener), on today's build and on b35a810 alike, so pre-existing.
 
 ---
 
-## ✅ FIXED 2026-10-05 (uncommitted, awaiting Robbie) — the bundled sync clips drifted A/V by one AAC pad on every loop in OBS
+## ✅ FIXED 2026-10-05 (`5a1eaf8`, `a350dd8`) — the bundled sync clips drifted A/V by one AAC pad on every loop in OBS
 
 **`AUDIO_RESAMPLER_DESIGN.md` §19.11.**
 - **What it was:** the bundled H.264 / AAC MP4s decoded to one AAC frame of audio more than their
@@ -1862,7 +1862,7 @@ SR #1 only, so the question could not be answered from any earlier log.
 
 ---
 
-## ✅ FIXED 2026-09-29 (uncommitted, awaiting Robbie) — PRE-SHIP (MUST-FIX): SRT audio decodes nothing when a PES carries more than one ADTS frame
+## ✅ FIXED 2026-09-29 (`d3b0831`) — PRE-SHIP (MUST-FIX): SRT audio decodes nothing when a PES carries more than one ADTS frame
 
 **Status:** implemented and verified with ffmpeg as the sender (`AUDIO_RESAMPLER_DESIGN.md` §18.15):
 `AACFraming.ADTSWalk` plus a per-frame decode and stamp. On ffmpeg's default packing (5–7 frames per
@@ -2152,7 +2152,7 @@ splice (19.1), calibration mode (19.2), sync clips (19.3), manual control, HUD a
 (19.4). Manifold never applies an offset by itself (CLAUDE.md: no per-server correction).
 **Progress (2026-10-01):** stage A (the term and its splice, §19.7), stage B (the bookmark field, the
 nudge, the indicator, §19.8) and stage C (the sync clips, §19.9) are committed. **Stage D (calibration
-mode, §19.10) is built, uncommitted**: detectors in Release (calibration only), the coded matcher
+mode, §19.10) is built** (since committed, `23e8223`): detectors in Release (calibration only), the coded matcher
 with the mean score, the confidence rules, the sheet, the menu items and the bundled MP4 set. Left:
 the attended Monday items in §19.8 (NDI and Cloudflare with a clip, a device capture, the 90-minute
 Cloudflare SRT hold, the sheet and menu review) and the download URL above.
@@ -2291,9 +2291,14 @@ quantised (Cloudflare's SRT output stamps video on a 1 ms grid). Measured on Clo
 ---
 
 
-## ☐ OPEN 2026-09-29 — SRT via Cloudflare: device-output mutes (exact zero) that are not in the stream, at video delivery disturbances
+## ✅ FIXED 2026-09-29 (`d3b0831`) — SRT via Cloudflare: device-output mutes (exact zero) that are not in the stream, at video delivery disturbances
 
-**🔧 FIX IMPLEMENTED 2026-09-29 night, uncommitted, awaiting Robbie: option A, the starvation hold
+**Status (2026-10-09):** FIXED by the starvation hold, `d3b0831`. Verified on induced local stalls (below). The
+hold has since run in the attended SRT session (`AUDIO_RESAMPLER_DESIGN.md` §19.10, 2026-10-05). Not re-measured
+against the original Cloudflare reference-noise test (9 mutes in 20 min). The open items below stand, and the slow
+return after a long hold is its own entry (*after a starvation hold of ≥ 1 s…*).
+
+**🔧 FIX IMPLEMENTED 2026-09-29 night (`d3b0831`): option A, the starvation hold
 (`AUDIO_RESAMPLER_DESIGN.md` §18.16 design, §18.17 verification).**
 - The timebase holds (rate 0) when the queue would fall to 20 ms with no input, and restarts at
   the latest content that leaves 100 ms queued, never past the target. What it cannot reach (D) is
@@ -2402,7 +2407,7 @@ Manifold defect; a deeper FrameSync queue would only trade latency for it.
 ## ☐ OPEN 2026-09-28 — NDI and HLS leave the renderer's clock installed after disconnect; a file played afterwards runs its picture ~195 ms ahead of its audio
 
 **Status:** ☐ **OPEN — fix written 2026-09-28 and VERIFIED FOR NDI the same day; HLS not yet
-measured.** Uncommitted. **Affects:** any file played in a window after an NDI or HLS session in the
+measured.** Committed as `48ae1e8`. **Affects:** any file played in a window after an NDI or HLS session in the
 same launch. **Age:** since NDI's first
 receiver, `6952b98` (2026-07-14); HLS copied the pattern. Not a resampler regression.
 
@@ -2450,7 +2455,7 @@ after SRT or WHEP was also expanded as video range.
 A = B within 2.8 ms: file playback did not regress across resampler steps 3–7. C reproduces the
 +218 ms the step 8 NDI run's control read; that control is void.
 
-### The fix (2026-09-28, uncommitted)
+### The fix (2026-09-28, `48ae1e8`)
 
 `SavedDisplayProviders` (`Packages/ManifoldCore/Sources/DisplayProviders/`, a leaf target so
 `swift test` can reach it) saves the three providers from a renderer and restores them verbatim onto
@@ -2992,7 +2997,7 @@ anchor pins depth at the top of the per-frame sawtooth, so the start is up to ha
 loop can only remove it at 5 ms/s. (The "(2) half-frame low" mechanism above was retracted by
 measurement — see §10.9 item 2.)
 
-**PARTLY FIXED, 2026-09-24, not committed — §10.10.** During the startup fill (before the first
+**PARTLY FIXED, 2026-09-24 (`46c75d4`) — §10.10.** During the startup fill (before the first
 presentation), `LiveClock` now removes the depth offset by re-anchoring position at rate 1.0, in
 either direction, instead of by rate. It is reported as `Event.startupRealign`, so the ledger sees
 it. **Cold connects are fixed:** on MediaMTX, error at first presentation +88.7 → −1.1 ms, setRates
@@ -3455,8 +3460,8 @@ what Cloudflare's transcoder does to pacing, because it never touches it.
 
 ## ✅ FIXED 2026-09-23 — SRT desktop audio lagged its picture by ~200 ms, because the cushion was a stale argument
 
-**Status:** FIXED and verified the same day, by the same method that found it. Applied, **not yet
-committed**. Entry kept per this file's rule until the fix has been through a real session.
+**Status:** FIXED and verified the same day, by the same method that found it. Applied; committed as
+`e318aa6`. Entry kept per this file's rule until the fix has been through a real session.
 **Full write-up:** `docs/AV_SYNC_FINDINGS.md` §3.1.
 
 `SRTFrameRouter.swift:532` passes `beginLiveAudio?(Self.targetDepth)` — 0.250 s — under a comment
@@ -3549,7 +3554,7 @@ a target lead must never become an A/V offset — and NDI is still ~230 ms out a
 **Status:** OPEN — **fix written 2026-09-28, not yet verified in a real session.** Re-measured before
 the fix on 2026-09-28 against a valid file control: **+252 to +262 ms** (resampler step 8 NDI run).
 
-**The fix (uncommitted):** the audio side is unchanged — the timebase still runs `lead` behind the
+**The fix (`48ae1e8`):** the audio side is unchanged — the timebase still runs `lead` behind the
 pull clock, so the renderer still holds `lead` (250 ms) of audio. The PICTURE now runs the same
 `lead` behind the pull clock (`NDIService.pictureDelay`, rule in
 `Packages/ManifoldCore/Sources/DisplayProviders/PullSourcePictureDelay.swift`), so the A/V offset is
@@ -3582,7 +3587,7 @@ selection **250.2–262.4 ms, median 256.0**, 0 skipped — the design value (25
   OBS's own A/V is known to change across an output restart (`AV_SYNC_FINDINGS.md` §1.2b) and cannot
   be probed on NDI here.
 
-**FrameSync compensation, written 2026-09-28 (uncommitted, not yet measured):** the picture is now
+**FrameSync compensation, written 2026-09-28 (`afcce50`, not yet measured):** the picture is now
 held `lead + mean FrameSync audio depth` while the desktop plays the programme. The mean is
 `AudioQueueDepthEstimate` (DisplayProviders): time-weighted over a session's first second, then an
 EMA with τ 10 s, republished only when it moves ≥ 2 ms, clamped at 200 ms. It is fed once per pull on
