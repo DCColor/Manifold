@@ -38,6 +38,10 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   `docs/AV_SYNC_FINDINGS.md` §1.2.
 - The recorder's audio source is re-picked by hand after every Manifold launch. Start Audio Hijack
   only after Manifold has connected: started earlier, it can quit or relaunch Manifold.
+- OBS test profiles: `docs/OBS_TEST_PROFILES.md` says what each profile sends. Before an attended OBS
+  step, name the profile and check it against its row; afterwards, compare OBS's log with the row.
+  Never change a tested profile for an experiment: duplicate it and add a row first. Read OBS's
+  settings files read-only, and never copy a URL, stream key or passphrase out of them.
 
 ## Rules
 

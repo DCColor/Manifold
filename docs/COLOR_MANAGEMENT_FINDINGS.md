@@ -3292,6 +3292,46 @@ tests nothing. The final build's MediaMTX runs use 60 s fixtures: `vt60` (VideoT
 0 starvation holds in every run. **Defaults:** 18 run-added `NSWindow Frame` keys, each absent from the
 snapshot, deleted by name; dictionary-equal to the snapshot (1 141 keys).
 
+#### OBS profiles: what the attended sessions actually sent, and a change of plan (2026-10-09)
+
+**Audit.** Read-only, from OBS's logs and profile files, against what Manifold received. The profile
+table is `docs/OBS_TEST_PROFILES.md`.
+- **Every attended session in §6.10 received what its step said it sent:** 1920×1080 23.976, Rec. 709
+  1-1-1 limited, AAC-LC 48 kHz stereo, one AAC frame per PES, the SYNC scene.
+- **The encoders differed.**
+  - **Local OBS sessions** (SRT Local: 0b-2a, 0b-2a v2): Apple VT H.264 **Main**, B-frames off,
+    **0 ms** reorder.
+  - **Every Cloudflare SRT session** (Stage 0 item 6; 0b-2a `cf-1`; 0b-2b `cf-1`): OBS **x264 veryfast**,
+    CBR 6000, keyframe 1 s, no x264 options. That is x264's default **3 B-frames with a pyramid**. Manifold
+    received H.264 **High**, reordering up to **0.208 s**.
+- **The 0.208 s is real reordering, not an offset.** In Cloudflare's recorded output (`cfsrt-probe.ts`,
+  same profile): pts − dts takes 0 / 41 / 83 / 125 / 166 / 208 ms; 1 259 of 2 880 pictures carry a PTS
+  earlier than the picture before them in decode order; B-slices are present;
+  `max_num_reorder_frames` is 2.
+
+**Corrections to this section.**
+- Wherever §6.10 calls the 0.208 s reorder **Cloudflare's** (the buffer review's inventory, its
+  margins table, 0b-2b's prediction), it is **OBS x264's B-frames, passed through Cloudflare**.
+- 0b-2a's "local OBS with real programme audio" was the **sync clip** (scene SYNC). The packing figure
+  stands: it comes from OBS's audio encoder, not the content.
+
+**Change of plan (Robbie, 2026-10-09): the SRT Cloudflare profile is unified with the others.** Apple VT
+H.264 Hardware, CBR 6000, keyframe 1 s, Main, B-frames off, AAC.
+- **Cloudflare SRT sessions before 2026-10-09 used x264 veryfast with B-frames (0.208 s reorder).**
+  Cloudflare figures from now on are **not directly comparable** with them: reorder, cushion (259 ms),
+  start-up, and calibrations inside the first minute (the B-frame start-up episode in BUGS.md).
+- **B-frame coverage comes from the ffmpeg fixtures from now on:** `x265_*`, `h264b_160`, `hevc_160`,
+  `b*pyr`.
+- **Verified in OBS's files at ~22:00:** the profile holds those settings except the bitrate, which is not
+  stored (OBS's default applies: CBR 6000 by the evidence in `OBS_TEST_PROFILES.md`, flag 2). Not yet
+  streamed with them.
+- **HEVC SRT created** (Robbie, 2026-10-09 21:53) for Stage 6: Apple VT HEVC Main 10, 12000, keyframe 1 s,
+  B-frames off, P010 / Rec. 2100 (PQ) / Limited, SDR white 203, peak 1000, 23.976, publishing to the
+  local MediaMTX. Verified ~22:00; not yet run.
+- The HEVC attempt earlier that evening was made in this profile itself and had left it on Apple VT
+  HEVC. **The rule from now on:** never modify a tested profile for an experiment; duplicate it
+  (`OBS_TEST_PROFILES.md`, which also proposes "HEVC Local" for Stage 6).
+
 ##### The final build
 
 The H.264 path moved to `ManifoldH264ParseSPSTiming` after the runs above, so it was built again

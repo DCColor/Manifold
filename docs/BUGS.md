@@ -1217,7 +1217,7 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 **Status:** OPEN, measured, not diagnosed; **a pre-release fix, its own item, scheduled right after Stage 4 is committed** (Robbie, 2026-10-09). **Found:** HEVC Stage 4 (`COLOR_MANAGEMENT_FINDINGS.md`
 §6.10, *Found: on a stream with B-frames…*). **Affects:** any SRT stream with B-frames: x264 with
-B-frames, x265, and OBS x264 if its profile uses them. Not HEVC-specific. Constrained Baseline and Apple VT
+B-frames, x265, and OBS x264 at its defaults: **every Cloudflare SRT session before 2026-10-09** used it (docs/OBS_TEST_PROFILES.md). Not HEVC-specific. Constrained Baseline and Apple VT
 H.264 (no B-frames) do not show it, which is why no earlier SRT measurement did.
 
 - **What:** for the first ~20 s after connect, `[AV-CONTENT]` reads ~35 ms off, early or late depending
