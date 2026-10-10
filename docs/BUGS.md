@@ -37,8 +37,16 @@ held back until after release, and the numbered defect entries follow.
      readout (§6.4).
    - LUT loading (§6.4).
    - The Color control layout and hold-to-compare (§6.3; hold-to-compare is still open in §6.8).
-2. **The shortcut registry and its window**, first of what remains.
-3. **The release gate:**
+2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
+   registry. Interlaced files and their SDI pass-through come first, then the on-screen display options.
+   - **SDI pass-through first:** detect scan type and field order on both file paths; add 1080i50,
+     1080i59.94 and 1080i60 to the DeckLink mode table and to Follow source; send fields untouched.
+   - **Then the on-screen display options** (weave by default, plus deinterlace and single field), drawn
+     after the scopes' tap, so scopes and SDI keep measuring the original frame.
+   - **Interlaced streams are a later stage, possibly after 1.0.** See *interlaced live sources: DeckLink
+     Follow source picks a progressive mode*, below.
+3. **The shortcut registry and its window**, first of what remains.
+4. **The release gate:**
    - the sync leftovers;
    - the user guide;
    - the Release-build checks on the Resolve workstation;
