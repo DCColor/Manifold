@@ -28,7 +28,12 @@ held back until after release, and the numbered defect entries follow.
    - **Trial L2 — NDI desktop-audio lead 0.20**, which also finds the audio renderer's crackle
      threshold (between 40 and 150 ms of lead) on the Scarlett and the built-in output (§6.10).
    - Trial L3 (SRT floor 0.20) is NOT in 1.0: it waits until after HEVC Stage 3.
-   - HEVC over SRT, Stages 1–6, including Stage 3b (HEVC 4:2:2 10-bit) (§6.10). Stage 3 (HEVC Main and
+   - HEVC over SRT, Stages 1–6, including Stage 3b, now **"4:2:2 end to end"** (§6.10). Decided
+     (Robbie, 2026-10-09): Stage 3b takes in the 4:2:2 file half of the interlaced work. 4:2:2 file
+     sources decode to `x422`, scrub and playback together (the `x420` "TWO LOSSES" note in *feed the
+     scrub gesture from `AVPlayerItemVideoOutput`*, below). HEVC 4:2:2 10-bit over SRT is carried the
+     same way. The renderer, scope and DeckLink work is done and measured once
+     (`INTERLACED_FINDINGS.md` §7–8). Stage 3 (HEVC Main and
      Main 10 at 4:2:0 play; 4:2:2 and 4:4:4 refused with a banner) built and run unattended 2026-10-09,
      uncommitted; open from it: DeckLink Follow source on HEVC, one attended click (§6.10, *Stage 3 —
      results*, item 6).
@@ -38,17 +43,25 @@ held back until after release, and the numbered defect entries follow.
    - LUT loading (§6.4).
    - The Color control layout and hold-to-compare (§6.3; hold-to-compare is still open in §6.8).
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
-   registry. Interlaced files and their SDI pass-through come first, then the on-screen display options.
-   - **SDI pass-through first:** detect scan type and field order on both file paths; add 1080i50,
-     1080i59.94 and 1080i60 to the DeckLink mode table and to Follow source; send fields untouched.
-   - **Then the on-screen display options** (weave by default, plus deinterlace and single field), drawn
-     after the scopes' tap, so scopes and SDI keep measuring the original frame.
-   - **Interlaced streams are a later stage, possibly after 1.0.** See *interlaced live sources: DeckLink
-     Follow source picks a progressive mode*, below.
+   registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
+   sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
+   - **I1 — detect** scan type and field order on both file paths.
+   - **I2 — SDI 1080i:** 1080i50, 1080i59.94 and 1080i60 in the mode table, the picker and Follow source;
+     fields sent untouched. An interlaced 50/59.94/60 frame rate is halved to 25/29.97/30, logged.
+     Bottom-field-first HD files are sent untouched, with a warning.
+   - **I3 — per-field 4:2:0 colour** in the renderer. (The 4:2:2 file half is in HEVC Stage 3b, above.)
+   - **I4 — on-screen display options:** Weave (default), Field 1 / Field 2, deinterlace at frame rate.
+     Per window, not saved. Drawn after the scopes' tap, so scopes, SDI and export keep the original frame.
+   - **Not in 1.0:** I5 (true bob at field rate) and I6 (interlaced streams, including NDI's built-in
+     deinterlace). SD interlaced (480i/576i) is out of scope.
+   - **Open, read-only, later:** whether XDCAM HD422 and AVC-Intra MXF already play through AVFoundation
+     with the Pro Video Formats registered. Adding libav decoders is decided after that.
 3. **The shortcut registry and its window**, first of what remains.
 4. **The release gate:**
    - the sync leftovers;
-   - the user guide;
+   - the user guide, including a note that an interlaced NDI source is deinterlaced by the NDI SDK before
+     Manifold sees it, so the window, the scopes and SDI show NDI's deinterlaced picture (fixed in I6,
+     after 1.0; decided, Robbie, 2026-10-09);
    - the Release-build checks on the Resolve workstation;
    - the pre-ship cleanup (the pre-ship checklist below, including every temporary probe it lists).
 
@@ -1221,10 +1234,32 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 ---
 
-## ☐ OPEN 2026-10-09 — NOT HANDLED — interlaced live sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
+## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN, measured; not fixed (decided, Robbie, 2026-10-09: record, don't fix now). **Found:** §6.10
-Stage 4, the 2× family.
+**Status:** OPEN. Live: measured, not fixed. Files: audited from the source 2026-10-09, not run.
+**Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
+
+**Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
+Streams are I6, after 1.0. The decisions:
+1. Field-correct colour is in 1.0. The 4:2:2 file half merges into HEVC Stage 3b, "4:2:2 end to end"
+   (§6.10). Per-field 4:2:0 colour stays here as I3.
+2. Bottom-field-first HD files are sent untouched, with a warning.
+3. An interlaced 50/59.94/60 frame rate is halved to 25/29.97/30, logged.
+4. On-screen, 1.0 gets Weave, Field 1 / Field 2 and deinterlace at frame rate (I4); true bob after 1.0 (I5).
+5. The display setting is per window, not saved, default Weave.
+6. NDI's built-in deinterlace is fixed with streams (I6); the 1.0 user guide says so.
+7. XDCAM HD422 / AVC-Intra: a read-only check of the AVFoundation route first; decoders decided after.
+8. SD interlaced is out of scope.
+
+**What the 2026-10-09 audit added** (source-read, `INTERLACED_FINDINGS.md` §1–2):
+- **The file paths have the same miss.** Neither detects scan type or field order (no `field_order`, no
+  frame interlace flags, no FieldCount / FieldDetail), so an interlaced file also goes out progressive.
+- **Colour is not field-correct.** The `x420` decode contract and the progressive chroma upsample blend
+  the two fields' chroma, in the offscreen frame that the scopes and SDI read. Luma keeps the fields apart.
+- **NDI deinterlaces before Manifold sees the picture** (`allow_video_fields = false`), so for an
+  interlaced NDI source the scopes measure a deinterlaced frame.
+- **The progressive-only table was deliberate, on a wrong premise.** `DeckLinkBridge.mm` says "interlaced
+  is never selected (the decode path is progressive)"; the decode path delivers woven frames untouched.
 
 - **What:** a 1080i59.94 SRT stream reaches DeckLink as **1080p29.97**. That holds whether its VUI timing says
   29.97 frames (`i5994_frame`, x264's own timing) or labels the 59.94 field rate as the frame rate
@@ -1244,10 +1279,15 @@ Stage 4, the 2× family.
   file path if it has interlaced sources. Display in the window is a separate question (no deinterlace stage
   was looked at here).
 
-**Done means:**
+**Done means (files, 1.0):**
+- scan type and field order reach the mode decision from the file's own bitstream and container;
+- 1080i50, 1080i59.94 and 1080i60 exist and are chosen for such files;
+- the card is verified on the reference monitor with the TFF and BFF fixtures (`INTERLACED_FINDINGS.md`
+  P3–P5), and colour is field-correct (P6).
+
+**Done means (streams, I6, after 1.0):**
 - interlaced-ness reaches the mode decision from the stream's own signalling (SPS `frame_mbs_only_flag`,
-  `field_seq_flag`, picture-timing SEI), never from a server;
-- 1080i50 and 1080i59.94 modes exist and are chosen for such sources;
+  `field_seq_flag`, picture-timing SEI, NDI `frame_format_type`), never from a server;
 - the card is verified on an SDI analyser or monitor for MBAFF and PAFF fixtures.
 
 ---
@@ -5700,6 +5740,11 @@ chroma is subsampled vertically. `LibavFrameSource.convert` does both today, so 
 matches what is on screen exactly. **Stated so it is a known shared property rather than a later
 discovery** — and note that a route which "fixed" it on the scrub path alone would REINTRODUCE the
 divergence this work exists to remove.
+
+**SCHEDULED 2026-10-09 (Robbie), for 1.0:** the 4:2:2 half is fixed in HEVC Stage 3b, "4:2:2 end to end"
+(`COLOR_MANAGEMENT_FINDINGS.md` §6.10). 4:2:2 file sources decode to `x422` on scrub and playback together,
+so the byte-identity above holds. On interlaced 4:2:2 masters the loss also blends the two fields'
+chroma (`INTERLACED_FINDINGS.md` §1). The 12-bit truncation is not part of that stage.
 
 ⚠️ **MASTERING-DISPLAY METADATA IS PRESENT ON THE PQ FIXTURE AND THIS PATH DOES NOT CARRY IT.** It
 is decoded as frame side data and then dropped: `LibavFrameSource.convert` sets three attachments

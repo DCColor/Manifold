@@ -1911,7 +1911,8 @@ override Stage B. WHEP HEVC is out of scope (`ROADMAP_IDEAS.md`).
 7. ~~**HEVC 4:2:2 and 4:4:4 are refused at the gate with a banner.** "HEVC 4:2:2 10-bit over SRT"
    goes in `ROADMAP_IDEAS.md`.~~ **Revised (Robbie, 2026-10-07):** HDR shouldn't be shown at 4:2:0
    when the stream carries 4:2:2.
-   - **HEVC 4:2:2 10-bit is a pre-release stage, Stage 3b**, after Stage 3.
+   - **HEVC 4:2:2 10-bit is a pre-release stage, Stage 3b**, after Stage 3. **Widened (Robbie,
+     2026-10-09):** Stage 3b is now "4:2:2 end to end", files included (see Stage 3b below).
    - **The fallback**, where a Mac can't decode or carry 4:2:2: show it as 10-bit 4:2:0, **never
      silently**. The chain readout and a banner both say the picture was converted.
    - **4:4:4 stays refused**, with a banner.
@@ -1947,13 +1948,25 @@ Run in this order. Each stage ships on its own.
   - `[SCOPE-COLOR]` reads 9-16-9 and 9-18-9.
   - A mid-stream join of x265 starts at the next CRA with RASL dropped and no decode errors.
   - H.264 SRT and WHEP are unchanged.
-- **Stage 3b — HEVC 4:2:2 10-bit** (decision 7, revised). Pre-release. Moved here from
-  `ROADMAP_IDEAS.md`.
+- **Stage 3b — 4:2:2 end to end** (HEVC 4:2:2 10-bit over SRT, and 4:2:2 files) (decision 7,
+  revised). Pre-release. Moved here from `ROADMAP_IDEAS.md`. **Widened (Robbie, 2026-10-09):** the
+  4:2:2 file half of the interlaced work merges in here, so the renderer, scope and DeckLink work is
+  done and measured once (`INTERLACED_FINDINGS.md` §7–8). Per-field 4:2:0 colour is NOT part of
+  this stage; it stays with the interlaced work (I3).
   - **Why:** contribution encoders send 4:2:2 10-bit, and HDR shouldn't be shown at 4:2:0 when 4:2:2
     is available. Today the SRT promote path converts anything that isn't 10-bit 4:2:0 to `x420`,
-    which would resample 4:2:2 to 4:2:0 without saying so.
-  - **What:** decode HEVC Main 4:2:2 10 to a 4:2:2 pixel format and carry it end to end: the
+    which would resample 4:2:2 to 4:2:0 without saying so. Files have the same loss: the decode
+    contract is `x420` on both file paths. That halves vertical chroma on every 4:2:2 master (BUGS.md,
+    the `x420` "TWO LOSSES" note), and on interlaced masters it blends the two fields' chroma in the
+    frame the scopes and SDI read.
+  - **What, SRT:** decode HEVC Main 4:2:2 10 to a 4:2:2 pixel format and carry it end to end: the
     renderer, the scopes, DeckLink.
+  - **What, files:** decode 4:2:2 sources to `x422`: AVFoundation through VideoToolbox, libav through
+    sws to P210, and the DNx VideoToolbox decoder. Scrub and playback change together, so the scrub
+    frame stays byte-identical to the playback frame. The renderer already samples `x422`
+    (`MetalVideoRenderer.isTenBit`; chroma plane size taken from the buffer). Measured, not assumed.
+  - **Measured once, for both halves:** the field-split fixture (`INTERLACED_FINDINGS.md` P6) and a
+    progressive 4:2:2 chroma-detail check, through export (the texture SDI reads), on files and SRT.
   - **The fallback**, where the Mac can't decode or carry 4:2:2: convert to 10-bit 4:2:0, and say
     so in the chain readout and in a banner. Never silently.
   - **4:4:4 stays refused**, with a banner.
