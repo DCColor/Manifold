@@ -30,6 +30,10 @@ private struct ColorParams {
     /// Stage 3b S1 (D4): +½ luma pixel in normalized u for x422 (co-sited 4:2:2 chroma); exactly 0
     /// for every other format, so x420 and x444 take the arithmetic they always did.
     var chromaShiftU: Float = 0
+    /// 1 = this buffer was widened from an 8-bit source (`SourceBitDepth`): the shader takes each sample
+    /// to exactly ×4 (clears the two low bits) before anything else. 0 for every other buffer, which
+    /// then takes the arithmetic it always did. §6.10, *8-bit sources mapped exactly ×4*.
+    var eightBitSource: Int32 = 0
 }
 
 /// Matches the shader's CropRect struct (memory layout). The ACTIVE PICTURE's uv range inside the
@@ -1022,6 +1026,19 @@ final class MetalVideoRenderer {
         print("[CHROMA] " + ChromaReadout.text(carried: carriedPixelFormat, source: sourceChroma,
                                                reason: chromaReason, note: chromaNote))
         NotificationCenter.default.post(name: Self.chromaStateDidChange, object: self)
+    }
+
+    /// Whether the last buffer drawn was flagged 8-bit. RENDER THREAD only; nil before the first.
+    private var lastEightBitSource: Bool?
+
+    /// RENDER THREAD: one `[BITDEPTH]` line per change of the 8-bit flag, never per frame — so a run's
+    /// log says which frames the shader took to exactly ×4 (§6.10, *8-bit sources mapped exactly ×4*).
+    private func noteEightBitSource(_ eightBit: Bool) {
+        guard eightBit != lastEightBitSource else { return }
+        lastEightBitSource = eightBit
+        NSLog("[BITDEPTH] %@", eightBit
+              ? "8-bit source — samples taken to exactly ×4 (low two bits cleared)"
+              : "not flagged 8-bit — samples as decoded")
     }
 
     /// RENDER THREAD: note the format of the buffer about to be drawn; tell main only on change.
@@ -2788,6 +2805,12 @@ final class MetalVideoRenderer {
         // coordinates are buffer-normalized; the crop only narrows their range). x420 and x444 keep
         // exactly 0, and so exactly the arithmetic they had.
         if frameChroma == .c422 { params.chromaShiftU = 0.5 / Float(width) }
+        // THE 8-BIT FLAG, PER FRAME, FROM THE FRAME: the producer that knew the source's bit depth set
+        // it on this buffer (`SourceBitDepth`). Absent = not 8-bit = the arithmetic every 10-bit source
+        // always had.
+        let eightBit = SourceBitDepth.isEightBit(pixelBuffer)
+        if eightBit { params.eightBitSource = 1 }
+        noteEightBitSource(eightBit)
         encoder.setRenderPipelineState(pipelineState)
         // THE CROP, AND THE ONLY PLACE IT IS APPLIED. Bound unconditionally — a Metal vertex
         // function's buffer argument must always have something at its index, and the identity

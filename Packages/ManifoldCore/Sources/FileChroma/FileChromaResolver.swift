@@ -26,12 +26,18 @@ public struct ResolvedChroma: Equatable, Sendable {
     /// What the answer was read from, for the log: "ProRes apch", "avcC SPS chroma_format_idc 2",
     /// "libav yuv422p10le".
     public let basis: String
+    /// The file's SPS says 8 bits on both planes, so its AVFoundation frames are flagged for the shader's
+    /// exact ×4 (`SourceBitDepth`). False for every file whose bit depth is not KNOWN to be 8, and for
+    /// libav files, whose widening (sws) is already ×4.
+    public let eightBitSource: Bool
 
-    public init(pixelFormat: OSType, source: SourceChroma, reason: String?, basis: String) {
+    public init(pixelFormat: OSType, source: SourceChroma, reason: String?, basis: String,
+                eightBitSource: Bool = false) {
         self.pixelFormat = pixelFormat
         self.source = source
         self.reason = reason
         self.basis = basis
+        self.eightBitSource = eightBitSource
     }
 
     /// Before any file, and for a file whose format could not be read at all.
@@ -50,6 +56,7 @@ public struct ResolvedChroma: Equatable, Sendable {
         }
         return "[CHROMA-FILE] source \(src) (\(basis)) → \(ChromaReadout.fourCC(pixelFormat)) \(carried)"
             + (reason.map { " — \($0)" } ?? "")
+            + (eightBitSource ? " · 8-bit source (exact ×4)" : "")
     }
 }
 
@@ -68,17 +75,18 @@ public enum FileChromaResolver {
     /// before S2, so a codec with no table behaves exactly as it did. `force420` is the DEBUG switch
     /// (`MANIFOLD_FORCE_CHROMA_420`), pushed in from the app with its reason.
     public static func resolve(_ source: SourceChroma, basis: String,
-                               force420: Bool, forceReason: String) -> ResolvedChroma {
+                               force420: Bool, forceReason: String,
+                               eightBitSource: Bool = false) -> ResolvedChroma {
         guard case .declared(let chroma) = source else {
             return ResolvedChroma(pixelFormat: pixelFormat(for: .c420), source: source,
-                                  reason: nil, basis: basis)
+                                  reason: nil, basis: basis, eightBitSource: eightBitSource)
         }
         if force420, chroma > .c420 {
             return ResolvedChroma(pixelFormat: pixelFormat(for: .c420), source: source,
-                                  reason: forceReason, basis: basis)
+                                  reason: forceReason, basis: basis, eightBitSource: eightBitSource)
         }
         return ResolvedChroma(pixelFormat: pixelFormat(for: chroma), source: source,
-                              reason: nil, basis: basis)
+                              reason: nil, basis: basis, eightBitSource: eightBitSource)
     }
 
     // MARK: - AVFoundation files: the codec type, and the SPS in avcC / hvcC
@@ -127,22 +135,51 @@ public enum FileChromaResolver {
         }
     }
 
+    // MARK: - AVFoundation files: the bit depth, from the same SPS
+
+    /// Whether the file's SPS (in `avcC` / `hvcC`) says 8 bits on both planes. False for every other
+    /// codec, and for an SPS that cannot be read that far: the flag is never a guess (`SourceBitDepth`).
+    public static func eightBitSource(codecType: FourCharCode, atoms: [String: [UInt8]]) -> Bool {
+        switch fourCCName(codecType) {
+        case "avc1", "avc3":
+            guard let avcC = atoms["avcC"], let format = h264Format(avcC: avcC) else { return false }
+            return SourceBitDepth.isEightBit(luma: format.bitDepthLuma, chroma: format.bitDepthChroma)
+        case "hvc1", "hev1":
+            guard let hvcC = atoms["hvcC"], let format = hevcFormat(hvcC: hvcC) else { return false }
+            return SourceBitDepth.isEightBit(luma: format.bitDepthLuma, chroma: format.bitDepthChroma)
+        default:
+            return false
+        }
+    }
+
     /// The first SPS in an `avcC` (ISO/IEC 14496-15 §5.3.3.1): version, profile, compatibility,
     /// level, lengthSizeMinusOne, then `numOfSequenceParameterSets` (low 5 bits), each a 16-bit
     /// length and the NAL.
-    public static func h264ChromaFormatIdc(avcC: [UInt8]) -> Int? {
+    static func h264SPS(avcC: [UInt8]) -> ArraySlice<UInt8>? {
         guard avcC.count >= 8, avcC[0] == 1 else { return nil }
         let count = Int(avcC[5] & 0x1F)
         guard count > 0 else { return nil }
         let length = Int(avcC[6]) << 8 | Int(avcC[7])
         guard length > 0, 8 + length <= avcC.count else { return nil }
-        return H264SPSColor.chromaFormatIdc(nal: avcC[8..<(8 + length)])
+        return avcC[8..<(8 + length)]
+    }
+
+    public static func h264ChromaFormatIdc(avcC: [UInt8]) -> Int? {
+        h264SPS(avcC: avcC).flatMap { H264SPSColor.chromaFormatIdc(nal: $0) }
+    }
+
+    public static func h264Format(avcC: [UInt8]) -> SPSFormat? {
+        h264SPS(avcC: avcC).flatMap { H264SPSColor.format(nal: $0) }
+    }
+
+    public static func hevcChromaFormatIdc(hvcC: [UInt8]) -> Int? {
+        hevcFormat(hvcC: hvcC)?.chromaFormatIdc
     }
 
     /// The first SPS (NAL type 33) in an `hvcC` (ISO/IEC 14496-15 §8.3.3.1): 22 bytes of
     /// configuration, `numOfArrays`, then per array a type byte, a 16-bit count, and per NAL a 16-bit
     /// length and the NAL.
-    public static func hevcChromaFormatIdc(hvcC: [UInt8]) -> Int? {
+    public static func hevcFormat(hvcC: [UInt8]) -> HEVCSPSFormat? {
         guard hvcC.count >= 23 else { return nil }
         var at = 23
         for _ in 0..<Int(hvcC[22]) {
@@ -156,7 +193,7 @@ public enum FileChromaResolver {
                 at += 2
                 guard at + length <= hvcC.count else { return nil }
                 if type == 33, let format = HEVCSPSColor.format(nal: hvcC[at..<(at + length)]) {
-                    return format.chromaFormatIdc
+                    return format
                 }
                 at += length
             }

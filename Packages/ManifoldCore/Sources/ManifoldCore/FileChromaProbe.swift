@@ -31,19 +31,14 @@ enum FileChromaProbe {
 
     /// AVFoundation files: the codec type, and for H.264 / HEVC the SPS in `avcC` / `hvcC`.
     static func resolve(formatDescription fmt: CMFormatDescription) -> ResolvedChroma {
-        var atoms: [String: [UInt8]] = [:]
-        if let dict = CMFormatDescriptionGetExtension(
-                fmt, extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms)
-                as? [String: Any] {
-            for (key, value) in dict {
-                if let data = value as? Data { atoms[key] = [UInt8](data) }
-            }
-        }
+        let atoms = Self.atoms(of: fmt)
         let declared = FileChromaResolver.declared(codecType: CMFormatDescriptionGetMediaSubType(fmt),
                                                    atoms: atoms)
         let policy = FileChromaPolicy.current
         return FileChromaResolver.resolve(declared.source, basis: declared.basis,
-                                          force420: policy.force420, forceReason: policy.reason)
+                                          force420: policy.force420, forceReason: policy.reason,
+                                          eightBitSource: FileChromaResolver.eightBitSource(
+                                            codecType: CMFormatDescriptionGetMediaSubType(fmt), atoms: atoms))
     }
 
     /// libav files (DNx in `.mov`, every MXF): the first video stream's `pix_fmt`, through
@@ -77,7 +72,31 @@ enum FileChromaProbe {
         return failed("libav found no video stream")
     }
 
+    /// The format description's `SampleDescriptionExtensionAtoms`, as bytes.
+    static func atoms(of fmt: CMFormatDescription) -> [String: [UInt8]] {
+        var atoms: [String: [UInt8]] = [:]
+        if let dict = CMFormatDescriptionGetExtension(
+                fmt, extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms)
+                as? [String: Any] {
+            for (key, value) in dict {
+                if let data = value as? Data { atoms[key] = [UInt8](data) }
+            }
+        }
+        return atoms
+    }
+
     private static func failed(_ basis: String) -> ResolvedChroma {
         FileChromaResolver.resolve(.unknown, basis: basis, force420: false, forceReason: "")
+    }
+}
+
+/// The 8-bit flag's answer for a format description that is not a file's: an HLS item's video track
+/// (§6.10, *8-bit sources mapped exactly ×4*). The SAME reader the file resolver uses — the SPS in
+/// `avcC` / `hvcC`, 8 bits on both planes — so a stream and a file of the same encode get the same
+/// answer. False for anything it cannot read: the flag is never a guess (`SourceBitDepth`).
+public enum SourceBitDepthProbe {
+    public static func isEightBit(_ fmt: CMFormatDescription) -> Bool {
+        FileChromaResolver.eightBitSource(codecType: CMFormatDescriptionGetMediaSubType(fmt),
+                                          atoms: FileChromaProbe.atoms(of: fmt))
     }
 }

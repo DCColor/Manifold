@@ -35,7 +35,7 @@ Shared by every profile below unless stated otherwise:
 | **SRT Local** | The local SRT path. Manifold's "Local SRT" bookmark dials OBS; the saved-advance sessions (§6.10, 0b-2a and v2) | Custom; SRT **listener** on all interfaces, passphrase set | Apple VT H.264 Hardware; CBR **6000**; keyframe **1 s**; profile **Main**; **B-frames off** | NV12 / 709 / Limited | 23.976 | CoreAudio AAC, **320** kb/s, 48 kHz stereo | SYNC |
 | **SRT Local 2** | SRT publish to the local MediaMTX (§6.9 OBS colour re-check) | Custom; SRT **caller** to local MediaMTX (`publish` stream id) | Apple VT H.264 Hardware; CBR **6000**; keyframe **1 s**; **Main**; **B-frames off** | NV12 / 709 / Limited | 23.976 | CoreAudio AAC, **320**, 48 kHz | SYNC |
 | **SRT Cloudflare** | Cloudflare Stream Live over SRT. **Unified with the others from 2026-10-09** (below) | Custom; SRT **caller** to Cloudflare, passphrase set | **Apple VT H.264 Hardware; keyframe 1 s; Main; B-frames off** (verified ~22:00). Rate control and bitrate **not stored**, so OBS's defaults apply: CBR, and 6000 by the evidence below. ⚠️ Flag 2 | NV12 / 709 / Limited | 23.976 | CoreAudio AAC, **160**, 48 kHz | SYNC |
-| **HEVC SRT** | HDR over SRT: Stage 6 and any HDR session. Created 2026-10-09 21:53 | Custom; SRT **caller** to local MediaMTX, `publish` stream id (**the same path as SRT Local 2**: never stream both at once) | **Apple VT HEVC Hardware; Main 10; bitrate 12000** (rate control not stored: CBR by default); keyframe **1 s**; **B-frames off** | **P010 / Rec. 2100 (PQ) / Limited**; SDR white **203**, HDR peak **1000** | 23.976 | CoreAudio AAC, **320**, 48 kHz | SYNC |
+| **HEVC SRT** | HDR over SRT: Stage 6 and any HDR session. Created 2026-10-09 21:53 | Custom; SRT **caller** to local MediaMTX, `publish` stream id (**the same path as SRT Local 2**: never stream both at once) | **Apple VT HEVC Hardware; Main 10; bitrate 10000** (was 12000 until 2026-10-11, below; rate control not stored: CBR by default); keyframe **1 s**; **B-frames off** | **P010 / Rec. 2100 (PQ) / Limited**; SDR white **203**, HDR peak **1000** | 23.976 | CoreAudio AAC, **320**, 48 kHz | SYNC |
 | **WHIP Cloudflare** | Cloudflare over WHIP (WHEP tests) | WHIP to Cloudflare | Apple VT H.264 Hardware; keyframe **1 s**; Main; **B-frames off**; bitrate not stored (logged **CBR 6000** on 2026-10-06) | NV12 / 709 / Limited | 23.976 | **FFmpeg Opus, 256**, 48 kHz | SYNC |
 | **MediaMTX Local** | WHIP to the local MediaMTX (WHEP tests) | WHIP to local MediaMTX | **Apple VT H.264 Hardware**; keyframe **1 s**; Main; **B-frames off**; bitrate not stored. ⚠️ Flag 3 | NV12 / 709 / Limited | 23.976 | **FFmpeg Opus, 160**, 48 kHz | SYNC |
 | **NDI Bars (P2)** | §6.10 Stage 3b S1, P2: NDI chroma siting (attended 2026-10-10 21:44–21:47). **Sends NDI, not a stream.** Added 2026-10-10 after the session; verified ~22:10 (below) | **Nothing streamed:** the WHIP service it inherited (type `whip_custom`) was not started. The test path is DistroAV's **NDI Main Output "OBS PGM"**, which is global to OBS (`user.ini [NDIPlugin]`), not part of the profile | Inherited, unused: Apple VT H.264 Hardware; keyframe 1 s; Main; B-frames off; bitrate not stored | NV12 / 709 / Limited (the NDI output's own conversion is not established; Manifold received UYVY, 4:2:2) | 23.976 | Inherited, unused: FFmpeg Opus 256 | **Bars** (one Image source "Image": `build/chroma-fixtures/p2-bars.png`) |
@@ -101,7 +101,7 @@ Robbie on 2026-10-09 as "HEVC SRT"** and verified ~22:00 against the proposal:
 |---|---|---|
 | Destination | SRT caller, publish to local MediaMTX | ✅ SRT caller, `publish` to local MediaMTX (same path as SRT Local 2) |
 | Encoder | Apple VT HEVC Hardware, Main 10, keyframe 1 s, B-frames off | ✅ |
-| Bitrate | 6000 (from SRT Local) | **12000** (Robbie's "higher bitrate"); rate control not stored, CBR by default |
+| Bitrate | 6000 (from SRT Local) | **12000** (Robbie's "higher bitrate"); rate control not stored, CBR by default. **Lowered to 10000 on 2026-10-11** (next paragraph) |
 | Color Format / Space / Range | P010 / Rec. 2100 (PQ) / Limited | ✅ |
 | SDR white / HDR peak | 203 / 1000 | ✅ |
 | FPS, output | 23.976, 1920×1080 | ✅ |
@@ -115,6 +115,16 @@ Robbie on 2026-10-09 as "HEVC SRT"** and verified ~22:00 against the proposal:
   from presentation timestamps.
 
 Changing its name, destination or any value is a new row, not an edit to this one.
+
+
+**Bitrate 12000 → 10000, 2026-10-11 (Robbie).** Changed in OBS by Robbie and verified read-only in the profile's
+`streamEncoder.json` (saved 12:30): `bitrate 10000`, `keyint_sec 1`, `profile main10`, `bframes false`; rate
+control still not stored (CBR by default). **Why:** the local MediaMTX (1.21.1, `mediamtx-soak-abs.yml`) sent an
+SRT reader nothing at all above roughly 10–13 Mb/s in Stage 3b S3/S4 (lossless checkers at 12 and 64 Mb/s and
+H.264 4:4:4 at 12.9 and 17 Mb/s gave 0 bytes to ffmpeg as well as to Manifold; 10.4 Mb/s and below passed;
+`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b, S3 and S4 — results*, P9). 12000 sat inside that band; 10000 is
+at the highest rate measured to pass. The limit is MediaMTX's and was measured on ffmpeg-made streams, not on
+this OBS profile: the first session at 10000 should confirm it plays through MediaMTX.
 
 ## NDI Bars (P2): verified after its session
 

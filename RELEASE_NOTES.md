@@ -58,6 +58,7 @@ bullet.
 - Fixed: H.264 4:2:2 streams over SRT were shown at 4:2:0 color resolution without saying so.
 - Fixed: all-intra HEVC 4:2:0 streams over SRT (x265's "Main 10 Intra") were refused.
 - Fixed: DNxHR 444 files in a .mov could look slightly flat, with lifted blacks and weaker color. They now show at their true levels.
+- Fixed: 8-bit sources read slightly high on scopes (mid-grey 514, white 943); they now map exactly.
 - Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 
 ### Known limitations

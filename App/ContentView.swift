@@ -1854,7 +1854,15 @@ struct ContentView: View {
                 // `ofType: .web`, not `firstConnectable` — SRT bookmarks became connectable in 3e,
                 // so the general form can now return one, and ⌃⌥⇧H (which tears down WHEP and only
                 // WHEP) would then have no way to undo what ⌃⌥H did. ⌃⌥D is SRT's trigger.
-                if let bookmark = StreamBookmarkStore.shared.firstConnectable(ofType: .web),
+                //
+                // MANIFOLD_STREAM_DEBUG_URL (pre-ship removal, docs/BUGS.md): an unattended run dials
+                // this instead, through the same dispatch the Stream URL sheet uses (WHEP or HLS by
+                // the URL), so no bookmark is read and `streamBookmarks` is never touched. Unset,
+                // nothing changes. ⌃⌥D's `MANIFOLD_SRT_DEBUG_URL` is the same shape.
+                if let override = ProcessInfo.processInfo.environment["MANIFOLD_STREAM_DEBUG_URL"]
+                    .flatMap(URL.init(string:)) {
+                    connectToStreamURL(override, name: "Stream debug URL")
+                } else if let bookmark = StreamBookmarkStore.shared.firstConnectable(ofType: .web),
                    let url = StreamBookmarkStore.connectURL(for: bookmark) {
                     // Through the arbitration funnel, exactly like the shipping menu path. This
                     // used to call WHEPClient.connect directly and so retired nothing — a live SRT

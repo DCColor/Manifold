@@ -24,6 +24,9 @@ struct ColorParams {
     // EXACTLY 0.0 for x420 and x444, so those take the same arithmetic as before (u + 0.0 == u):
     // 4:2:0's own siting is a separate stage, and 4:4:4 has nothing to site.
     float chromaShiftU;
+    // Nonzero = this buffer was widened from an 8-bit source (see "8-bit sources" below). Mirrors
+    // ColorParams.eightBitSource in MetalVideoRenderer.swift.
+    int eightBitSource;
 };
 
 // MARK: - Sample domain (10-bit x420)
@@ -43,8 +46,9 @@ struct ColorParams {
 // sampler actually uses makes both exact: legal white 940 -> 1.0, neutral chroma 512 -> 0.0, no cast.
 //
 // (MetalVideoRenderer still has an .r8Unorm/.rg8Unorm branch for 8-bit buffers, but it is currently
-// UNREACHABLE — both decode paths request x420 — so no bit-depth uniform is needed here. If an 8-bit
-// decode path is ever reintroduced, these become per-depth and must be passed in.)
+// UNREACHABLE — every decode path requests a 10-bit carrier — so these constants are not per-depth.
+// If an 8-bit decode path is ever reintroduced, they become per-depth and must be passed in. An 8-bit
+// SOURCE in a 10-bit carrier is the next block's business, not this one's.)
 constexpr constant float kCodeMax     = 1023.984375;      // 65535/64 — max normalized 10-bit MSB-aligned code
 constexpr constant float kLumaBlack   = 64.0 / kCodeMax;  // legal luma floor  (was 16/255)
 constexpr constant float kLumaSwing   = kCodeMax / 876.0; // luma 64..940      (was 255/219)
@@ -57,6 +61,56 @@ constexpr constant float kFullLumaSwing = kCodeMax / 1023.0;   // full-range lum
 // Resolve's full-range chroma factor is a swing RATIO, so it is domain-independent: at 10-bit it is
 // 876/896, which is bit-for-bit the same number as the 8-bit 219/224. Left as-is deliberately.
 constexpr constant float kResolveChromaScale = 219.0 / 224.0;
+
+// MARK: - 8-bit sources (exactly ×4)
+//
+// Every 8-bit source reaches this shader in a 10-bit carrier, and VideoToolbox — its decoder asked for
+// x420 / x422, and VTPixelTransferSession from an IOSurface-backed source (the SRT / WHEP promotes) —
+// widens 8-bit FULL-SCALE (≈ v·1023/255), not BT.709 / BT.2100's ×4. Measured, every value lies in
+// 4v … 4v+3: mid-grey 128 → 514, white 235 → 943, neutral chroma 128 → 513 in x422
+// (COLOR_MANAGEMENT_FINDINGS.md §6.10, *S3/S4 follow-up*). So for a buffer the producer flagged 8-bit,
+// each sample is taken to floor(code/4)·4, which is exactly 4v for every one of those maps (the code
+// being the sample's top ten bits: below). NDI's transfer, from plain memory, is already ×4; its flag
+// changes nothing there (§6.10, *8-bit sources mapped exactly ×4*, E6′).
+//
+// ⚠️ PER TEXEL, BEFORE INTERPOLATION. 4:2:0 upsampling and the 4:2:2 co-siting shift both land between
+// chroma samples; clearing the bits of an interpolated value would floor a MEAN (514 between 512 and
+// 516 → 512). So chroma is filtered here by hand from four quantised texels. Luma needs no filter: the
+// fragment reads the centre of its own texel (the clean-aperture note below), so its sample IS the texel.
+//
+// ⚠️ TRUNCATE, NEVER ROUND. The 10-bit code of an MSB-aligned sample is its top ten bits (U >> 6), and
+// VideoToolbox's x422 output does NOT leave the low six bits zero: from an 8-bit source it writes a
+// 16-bit full-scale value (measured: Cb 240 → 963 + 63/64, mid-grey → 513 + 63/64; x420's are zero).
+// Rounding v·kCodeMax took 963.98 to 964, which then survived the clear (measured: Cb 963.9 on the
+// export). Truncated, every value measured is 4v … 4v+3. So this is floor(code / 4) · 4 with code the
+// truncation, in one floor: the fraction of v·kCodeMax/4 is at most (3 + 63/64)/4, and 1/1024 absorbs
+// float error below an exact multiple without reaching the next one.
+//
+// Unflagged buffers (every 10-bit source, libav files, which sws already widens ×4) never reach these.
+static inline float exactTimes4(float v) {
+    return floor(v * (kCodeMax * 0.25) + (1.0 / 1024.0)) * 4.0 / kCodeMax;
+}
+static inline float2 exactTimes4(float2 v) {
+    return float2(exactTimes4(v.x), exactTimes4(v.y));
+}
+
+// The bilinear filter `filter::linear` + `clamp_to_edge` would apply, over quantised texels. The
+// sub-texel fraction is snapped to 1/256, as the sampler's fixed-point weights are: the fractions this
+// shader asks for are 0, ¼, ½ and ¾ (exact), and the float error in reaching them must not leak in.
+static inline float2 sampleChromaExactTimes4(texture2d<float> tex, float2 uv) {
+    float2 size = float2(tex.get_width(), tex.get_height());
+    float2 p = uv * size - 0.5;
+    float2 i0 = floor(p);
+    float2 f = rint((p - i0) * 256.0) / 256.0;
+    int2 hi = int2(size) - 1;
+    uint2 a = uint2(clamp(int2(i0), int2(0), hi));
+    uint2 b = uint2(clamp(int2(i0) + 1, int2(0), hi));
+    float2 c00 = exactTimes4(tex.read(uint2(a.x, a.y)).rg);
+    float2 c10 = exactTimes4(tex.read(uint2(b.x, a.y)).rg);
+    float2 c01 = exactTimes4(tex.read(uint2(a.x, b.y)).rg);
+    float2 c11 = exactTimes4(tex.read(uint2(b.x, b.y)).rg);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
 
 // The ACTIVE PICTURE's uv range inside the decoded buffer — the encoded raster with the declared
 // clean aperture removed. Mirrors CropRect in MetalVideoRenderer.swift (field order + type must
@@ -130,7 +184,14 @@ fragment half4 passthroughFragment(VertexOut in [[stage_in]],
     constexpr sampler s(address::clamp_to_edge, filter::linear);
 
     float y  = lumaTex.sample(s, in.texCoord).r;
-    float2 cbcr = chromaTex.sample(s, in.texCoord + float2(params.chromaShiftU, 0.0)).rg;
+    float2 cbcr;
+    if (params.eightBitSource != 0) {
+        // An 8-bit source: every sample exactly ×4 (the block above).
+        y = exactTimes4(y);
+        cbcr = sampleChromaExactTimes4(chromaTex, in.texCoord + float2(params.chromaShiftU, 0.0));
+    } else {
+        cbcr = chromaTex.sample(s, in.texCoord + float2(params.chromaShiftU, 0.0)).rg;
+    }
 
     // Range handling. Chroma is ALWAYS centered (subtract the neutral, code 512) —
     // that's a chroma offset, not range expansion, and applies to both ranges.

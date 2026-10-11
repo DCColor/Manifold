@@ -2387,8 +2387,12 @@ final class SRTFrameRouter {
 
     /// Anything that is not already a 10-bit biplanar carrier → the carrier of THE CHROMA IT HAS, via
     /// the same VTPixelTransferSession shape NDI and WHEP use: 8-bit 4:2:0 → x420, 8-bit 4:2:2 → x422,
-    /// VideoToolbox's packed p422 / p444 → x422 / x444. The conversion changes layout and depth only;
-    /// the 8→10 promotion is an exact ×4 code shift, not a filter, and chroma is never resampled here.
+    /// VideoToolbox's packed p422 / p444 → x422 / x444. The conversion changes layout and depth only,
+    /// and chroma is never resampled here. The 8→10 promotion is NOT ×4: VideoToolbox widens
+    /// full-scale (≈ v·1023/255, between 4v and 4v+3; mid-grey 128 → 514, white 235 → 943 — measured,
+    /// §6.10, *S3/S4 follow-up*), exactly as its decoder does into x420 / x422. The decoder's 8-bit flag
+    /// is carried to the output, and the shader takes it back to exactly ×4 (`SourceBitDepth`; §6.10,
+    /// *8-bit sources mapped exactly ×4*).
     ///
     /// A NO-OP for x420 / x422 / x444: the decoder REQUESTS the SPS's own carrier (Stage 3b S3) and only
     /// falls back to VT's native choice if the session refuses it.
@@ -2462,6 +2466,8 @@ final class SRTFrameRouter {
             NSLog("[SRT] pixel transfer failed (%d)", status)
             return nil
         }
+        // The decoder flagged the source from its SPS; the transfer made a new buffer, so say it again.
+        SourceBitDepth.carry(from: source, to: destination)
 
         if !reportedPromote {
             reportedPromote = true

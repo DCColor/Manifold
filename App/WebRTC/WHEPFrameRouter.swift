@@ -1018,9 +1018,12 @@ final class WHEPFrameRouter {
 
     /// 8-bit → the renderer's 10-bit sample domain, via the SAME VTPixelTransferSession shape NDI
     /// uses (NDIService.convertToDisplayFormat). Destination is x420 — 10-bit biplanar 4:2:0 — so
-    /// 4:2:0 in becomes 4:2:0 out with no chroma resample; the 8→10 promotion is an exact ×4 code
-    /// shift, not a filter. That is the format the file path already produces and the format
-    /// PassthroughShader.metal's range-expansion constants (kCodeMax = 1023.984375) assume.
+    /// 4:2:0 in becomes 4:2:0 out with no chroma resample. That is the format the file path already
+    /// produces and the format PassthroughShader.metal's range-expansion constants (kCodeMax =
+    /// 1023.984375) assume. The 8→10 promotion is NOT ×4: VideoToolbox widens full-scale (≈ v·1023/255,
+    /// between 4v and 4v+3; mid-grey 128 → 514, white 235 → 943 — measured, §6.10, *S3/S4 follow-up*).
+    /// The decoder's 8-bit flag is carried to the output, and the shader takes it back to exactly ×4
+    /// (`SourceBitDepth`; §6.10, *8-bit sources mapped exactly ×4*).
     ///
     /// A NO-OP when VideoToolbox already gave us 10-bit: LiveVideoDecoder REQUESTS x420 output and
     /// only falls back to VT's native 8-bit choice if the session refuses it. When the request
@@ -1090,6 +1093,8 @@ final class WHEPFrameRouter {
             NSLog("[WHEP] pixel transfer failed (%d)", status)
             return nil
         }
+        // The decoder flagged the source from its SPS; the transfer made a new buffer, so say it again.
+        SourceBitDepth.carry(from: source, to: destination)
 
         if !reportedPromote {
             reportedPromote = true

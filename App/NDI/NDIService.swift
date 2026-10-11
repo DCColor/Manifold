@@ -40,8 +40,14 @@ import ColorimetryModel   // SourceColorimetry, ColorimetryOverride
 /// packed-422 shader path (a bigger change to the hot display path, and it re-opens the 8-bit
 /// constants problem the shader warns about), VideoToolbox converts UYVY into 'x422' —
 /// 10-bit biplanar 4:2:2. That lands in EXACTLY the domain the shader's constants assume, with no
-/// chroma decimation (4:2:2 in, 4:2:2 out; 'x420' would have thrown away half the chroma lines),
-/// and needs no shader edit. The 8→10-bit promotion is an exact ×4 code shift, not a resample.
+/// chroma decimation (4:2:2 in, 4:2:2 out; 'x420' would have thrown away half the chroma lines).
+/// The 8→10-bit promotion is not a resample, and on THIS path it is exactly ×4 — but only because of
+/// where the source lives. Measured (COLOR_MANAGEMENT_FINDINGS.md §6.10, *8-bit sources mapped exactly
+/// ×4*, E6′): from a buffer wrapping plain memory (the zero-copy wrap below) VideoToolbox shifts ×4 with
+/// the low bits zero; from an IOSurface-backed `2vuy` the same transfer widens full-scale (≈ v·1023/255:
+/// mid-grey 513, white 943, the low bits filled), as every other 8-bit route does. The output is flagged
+/// 8-bit anyway (`SourceBitDepth`): clearing a ×4 sample changes nothing, and if the source ever moves
+/// into an IOSurface (a copy instead of the wrap) the shader still lands on exactly ×4.
 ///
 /// The zero-copy wrap still earns its keep: it is the SOURCE of that transfer, so NDI's bytes are
 /// read straight out of the SDK's buffer with no intermediate memcpy, and the frame is handed back
@@ -798,6 +804,12 @@ final class NDIService: ObservableObject {
         // propagates, stamps a default, or leaves the buffer bare — and tagOutput logs what the
         // output really carried, so the claim stays checked instead of assumed.
         tagOutput(converted, with: info)
+        // The 8-bit flag, from the NDI frame's own format: the bridge wraps only UYVY, as '2vuy'
+        // (8-bit 4:2:2). Read from the buffer rather than assumed, so a deeper format admitted later
+        // is not flagged by default. Today's transfer is already ×4 (type comment), so this is
+        // insurance, measured byte-identical to HEAD.
+        SourceBitDepth.mark(converted, eightBit: CVPixelBufferGetPixelFormatType(frame.pixelBuffer)
+                                == kCVPixelFormatType_422YpCbCr8)
 
         let stamp = Self.monotonicNow()
         noteHoldTimecode(audio: false, stamp: stamp, timecode: frame.timecode, now: stamp)

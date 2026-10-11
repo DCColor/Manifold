@@ -4570,7 +4570,7 @@ shift") are wrong.
 3. **Ask for 8-bit, widen ×4 ourselves** in a Metal pass into `x4xx`: exact, the rest of the chain unchanged, one
    more pass per frame. `VTPixelTransferSession` cannot be that pass.
 
-`docs/BUGS.md`, *8-bit sources are widened to 10-bit full-scale*: OPEN, decision needed.
+`docs/BUGS.md`, *8-bit sources are widened to 10-bit full-scale*: OPEN, decision needed. (Decided and fixed the same day: *8-bit sources mapped exactly ×4*, below. **Corrected there, E6′:** NDI in the app is not affected. The `2vuy → x422` rows above used an IOSurface-backed source; NDI's wrap of plain memory transfers exactly ×4.)
 
 ##### Part 2 — refuse at once only on "unsupported format": predictions and results
 
@@ -4597,6 +4597,182 @@ over-cap unchanged; software H.264 4:2:2 refused after 3 keyframes; everything e
 | G | `swift test` **309 / 309** (+2 `LiveDecodeFailureTests`; the mutant "−8969 is unsupported" fails one); C harness 200 / 200 | **PASS** |
 
 **Defaults:** exported before the first launch (1 143 keys); the 22 launches added 22 `NSWindow Frame` keys and changed nothing else, each checked absent from the snapshot and deleted by name; dictionary-equal, `streamBookmarks` equal and never written. **Screenshots:** none. **Not committed.**
+
+#### 8-bit sources mapped exactly ×4 (option b): predictions, written 2026-10-11 15:45 before the code changed
+
+**Decided (Robbie, 2026-10-11):** keep the three-keyframe backstop (Part 2). Fix the widening with option (b):
+for an 8-bit source, clear the two low bits of each 10-bit sample in the shader, so 8-bit v reads exactly 4v.
+The per-frame "8-bit source" flag comes from where the bit depth is already known: the SPS (SRT, WHEP), the
+file chroma resolver (files), the NDI frame format (NDI). 10-bit sources untouched. Measure HLS too.
+
+**Estimated run:** ~4.5 h unattended, plus ~10 min attended for NDI (below). Code and unit tests ~1.5 h;
+two Profile builds (HEAD `314dd6e` from a clean worktree, and the tree) ~30 min; fixtures ~10 min; app runs
+~1.5 h (about 30 launches); docs ~30 min.
+
+**What changes.**
+- **The flag is a pixel-buffer attachment** (`ManifoldEightBitSource`), set on the buffer the renderer will
+  draw, so it travels with the frame: no source-level state that a frame of the previous source could be
+  drawn under. The renderer reads it per frame into `ColorParams`; absent means "not 8-bit", so every route
+  that does not set it is untouched.
+- **SRT and WHEP:** `LiveVideoDecoder` reads `bit_depth_luma` / `bit_depth_chroma` from the SPS it already
+  parses before each access unit (decode is synchronous), and flags its output when both are 8. The routers
+  carry the flag across a promote (`VTPixelTransferSession`, which widens the same way).
+- **Files:** the resolver reads the bit depth from the SPS in `avcC` / `hvcC`; FrameEngine flags each
+  AVFoundation frame, playback and scrub, when it is 8. ProRes and every codec without an SPS: no flag (no
+  claim). **libav files: no flag**: sws widens 8-bit exactly ×4 already (measured, Part 1).
+- **NDI:** flagged when the received buffer is 8-bit Y′CbCr (`2vuy`, which is what NDI delivers today).
+- **HLS:** no bit depth is known anywhere today, and the decoder's output carries nothing that tells 8-bit
+  from 10-bit (measured: identical attachments). Measured on HEAD first; if affected, flagged from the
+  current item's video format description (`avcC` / `hvcC`, the same reader as files).
+- **The shader:** for a flagged buffer, each sample is taken to `floor(code / 4) × 4` **per texel, before
+  chroma interpolation** (4:2:0 upsampling and the 4:2:2 co-siting shift both interpolate; clearing after
+  interpolation would floor a mean). Luma is read at texel centres, so it is quantised after the sample;
+  chroma is filtered by hand from four quantised texels with the same weights. Unflagged buffers take the
+  existing code unchanged.
+- **Logged once per change:** `[BITDEPTH]` from the renderer, so a run's log says which frames were treated
+  as 8-bit.
+- **Comments:** the SRT, WHEP and NDI "exact ×4 code shift" comments are corrected.
+- **Debug entry point:** `MANIFOLD_STREAM_DEBUG_URL` (DEBUG, launch environment only, pre-ship list):
+  ⌃⌥H dials it instead of the first saved web bookmark, dispatched by URL type (WHEP or HLS), so WHEP and
+  HLS can be run unattended without reading or writing `streamBookmarks`. Unset, nothing changes.
+
+**Fixtures:** S3/S4 follow-up's `bands8` (Y′ 16 / 128 / 235 neutral, and Y′ 128 with Cb 240 / Cr 16, bands
+centred at x 240 / 720 / 1200 / 1680) remade with a keyframe a second and no B-frames (so MediaMTX readers and
+WebRTC can join): 8-bit H.264 4:2:0 `.ts` and `.mov`, 8-bit H.264 4:2:2 `.ts`, the 10-bit 4:2:0 control holding
+the ×4 codes, and the 8-bit DNxHD MXF. **Correct:** 64 / 512 / 940, neutral 512, Cb 960 / Cr 64.
+**Servers:** a local ffmpeg SRT listener; the running MediaMTX 1.21.1 (SRT publish to `live`, read back over
+SRT, WHEP `:8889/live/whep` and HLS `:8888/live/index.m3u8`). No Cloudflare. **Measuring:** ⌃⌥E export
+(`.rgba16f`, which is what the scopes read: the same offscreen) and the DEBUG `.v210` (the SDI wire), band
+means over 80 × 80 px at each band centre (`bands.py`), and a per-pixel comparison against the 10-bit control.
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| E1 | SRT, 8-bit H.264 4:2:0, local listener AND through MediaMTX | `[BITDEPTH] 8-bit source` logged; export band means equal the 10-bit control's on the same build within ±0.05 code on Y, Cb and Cr at all four bands (the control: 64.0 / 511.8 / 940.0, the 0.2 at mid-grey being `bands.py`'s float readback, not a code); wire exactly 64 / 512 / 940, neutral 512 / 512, 960 / 64 at every sampled pixel; export `.rgba16f` identical to the control's on ≥ 99.9 % of pixels | any band outside; HEAD's 514 / 943.4 |
+| E2 | SRT, 8-bit H.264 4:2:2 (listener) | as E1, and neutral chroma 512 / 512 on export and wire (HEAD: 514 / 514), Cb 240 → 960 on export (HEAD 964.1) | otherwise |
+| E3 | WHEP, 8-bit H.264 4:2:0 via MediaMTX | as E1 | otherwise; or no WHEP picture (then recorded, not worked around) |
+| E4 | AVFoundation file, `bands8-h264.mov`: playback export, and the Chroma Scrub Bench's scrub export | as E1 on both; the two exports' `.rgba16f` md5-identical (scrub = playback) | otherwise |
+| E5 | HLS via MediaMTX | HEAD: affected (514 / 943, as inferred) or recorded as not measurable. Tree: as E1 if a format description is available; otherwise recorded as still affected, with the reason | — |
+| E6 | NDI, `2vuy → x422` (attended: steps in the results) | every flat bar's export and wire Y / Cb / Cr mean a multiple of 4 within ±0.1; HEAD's `p2` export not (e.g. 75 % white 722 rather than 720) | otherwise |
+| R1 | 10-bit sources untouched, HEAD against the tree: SRT `still-420-hevc10.ts`, `bands10-h264.ts`, `lines-422-h264.ts`, `checker-444-h264.ts`; files `bands10-h264.mov`, `still-420-hevc10.mov`, `lines-422-prores422hq.mov` | export `.rgba16f`, PNG and `.v210` **md5-identical**; no `[BITDEPTH] 8-bit` line | any byte |
+| R2 | libav 8-bit files untouched: `bands8-dnxhd.mxf`, and `lines-422-dnxhrhqx.mxf` (10-bit) | md5-identical to HEAD; no `[BITDEPTH] 8-bit` line | any byte |
+| G | Gates | `swift test` all pass (309 + new: bit depth from `avcC` / `hvcC` / the H.264 and HEVC SPS, each shown to fail on a mutant); C harness 200 / 200; Profile build with HEAD's warning set | otherwise |
+
+**What would change the plan:** a route whose 10-bit samples for an 8-bit source fall outside 4v … 4v+3
+(clearing would then be wrong, not exact: the fix would stop at that route); MediaMTX not serving WHEP or
+HLS for this publish (recorded as a server limit, not worked around).
+
+#### 8-bit sources mapped exactly ×4: results, 2026-10-11 15:45–16:40 (unattended; NDI attended part not yet run)
+
+**Builds** (unsigned Profile, `.build-cc/`): HEAD `314dd6e` from a clean copy (`git archive`, the vendored
+`ThirdParty` and the DeckLink SDK copied in, `xcodegen`), `e8head-Profile`; the tree, `e8-Profile`; and the final
+tree, `e8c-Profile`, after the two changes under *Changed during the stage*. All three with HEAD's 10-warning set.
+**Drivers** (session scratchpad): S3's `srt2.sh` and the follow-up's `file1.sh`, unchanged; a new `web1.sh` (publish
+to MediaMTX `live` over SRT, ⌃⌥H with `MANIFOLD_STREAM_DEBUG_URL`); `bench1.sh` (the Chroma Scrub Bench). **Measuring:**
+`scripts/chroma/bands.py` (new; the follow-up's `bands.py` with a per-pixel control comparison). **Fixtures:**
+`bands8` remade with a keyframe a second, no B-frames, VUI tags set by `h264_metadata` (*Found on the way*, 3); every
+encode checked to decode back to its own codes with libavcodec before use. 51 launches in all (30 on HEAD and the
+first tree build, 21 on the final build).
+
+| # | Result | Verdict |
+|---|---|---|
+| E1 | SRT 8-bit H.264 4:2:0, listener and MediaMTX: `[BITDEPTH] 8-bit source — samples taken to exactly ×4`; export **64.00 / 511.84 / 940.00**, chroma 512.00, Cb/Cr **960.08 / 64.02**; wire **64 / 512 / 940**, 512, **960 / 64** at every sampled pixel; export `.rgba16f` **100.000 %** pixel-identical to the 10-bit control's on both servers. HEAD: export 64.00 / **513.98 / 943.42**, wire 514 / 940 | **PASS** |
+| E2 | SRT 8-bit H.264 4:2:2 (listener), final build: as E1, neutral chroma **512 / 512** export and wire (HEAD **514 / 514**), Cb 240 → **960.08** export (HEAD 964.11); 99.896 % identical to the 4:2:0 control, the rest being 4:2:2 against 4:2:0 at the band edges (band means and wire identical). **The first tree build missed it:** Cb 963.92 (*Changed during the stage*, 1) | **PASS** on the final build |
+| E3 | WHEP 8-bit H.264 via MediaMTX, final build, High and Constrained Baseline twins: `decoded as 'x420'`, `[BITDEPTH] 8-bit source`, as E1, **100.000 %** identical to the control. Needed an Opus track in the publish: video-only, MediaMTX answered the offer `400 codecs not supported by client` (*Found on the way*, 2). HEAD not run (no unattended WHEP entry point on HEAD) | **PASS** |
+| E4 | AVFoundation `bands8-h264.mov`: playback export as E1, 100.000 % identical to the control (HEAD 513.98 / 943.42). The Bench's two exports (playback, then the scrub producer's frame after 61 scrubs) **md5-identical** to each other, both exact | **PASS** |
+| E5 | HLS via MediaMTX. **HEAD's behaviour** (the first tree build, which had not touched HLS; its 10-bit HLS export is byte-identical to the final build's): **513.98 / 943.42**, wire 514, so affected, as inferred. **Final build:** `[HLS] video track: 8-bit source (its SPS) — frames flagged for exact ×4`, as E1, 100.000 % identical to the control; 10-bit `not 8-bit — frames not flagged`, exact | **PASS** |
+| E6 | NDI | Not run attended; replaced by **E6′**, unattended (below) | see E6′ |
+| R1 | 10-bit, HEAD against the final build: SRT `bands10-h264`, `still-420-hevc10`, `lines-422-h264`, `checker-444-h264`; AVFoundation `bands10-h264.mov`, `still-420-hevc10.mov`, `lines-422-prores422hq.mov`: export PNG, `.rgba16f` and `.v210` **md5-identical**; each logs `[BITDEPTH] not flagged 8-bit` only | **PASS** |
+| R2 | libav `bands8-dnxhd.mxf` (8-bit) and `lines-422-dnxhrhqx.mxf`: **md5-identical** to HEAD, not flagged | **PASS** |
+| G | `swift test` **315 / 315** (309 + 3 `FileChromaTests` + 3 `SourceBitDepthTests`); **four mutants each fail** (bit depth ignored for H.264: 1 failure; for HEVC: 3; the flag never cleared: 3; luma depth only: 2), restored and green. C harness 200 / 200. HEAD's warning set on every build | **PASS** |
+
+**Scopes:** the four scope kernels read the same offscreen ring as the export, so they read what E1–E5 report. Not
+separately measured.
+
+**Changed during the stage, before the final build** (the predictions above are unchanged; these are results):
+1. **Truncate, never round.** VideoToolbox's `x422` output does not leave the low six bits of its 16-bit words zero:
+   from an 8-bit source it writes a full-scale 16-bit value (raw `VTDecompressionSession`, `bands8-h264-422`:
+   Cb 963 + 63/64, mid-grey 513 + 63/64, white 943 + 31/64; `x420` from the same stream: all zero). The first build
+   read the code as `rint(v · 1023.984)`, so 963.98 became 964 and survived the clear (E2's Cb 963.92). The code of an
+   MSB-aligned sample is its top ten bits, so the shader now truncates. Every value measured then lies in 4v … 4v+3.
+   Mid-grey and white had come out right on the first build only because 513.98 and 943.48 round to codes that
+   still clear to ×4.
+2. **HLS got its flag** once E5 measured it affected: the item's video track's format description, read on main
+   when the tracks change, through the files' own reader (`SourceBitDepthProbe`, ManifoldCore), and stamped on every
+   pulled frame. **Per rendition, not per frame:** on a ladder that mixes 8-bit and 10-bit renditions, a few frames
+   after a switch can be drawn under the previous answer (`HLSClient`'s comment states the cost). A ladder of one
+   depth is exact throughout.
+
+**Found on the way:**
+1. **A 10-bit 4:2:0 source asked for `x422`** also comes back with the low bits filled (VideoToolbox's upsampled
+   chroma, fractional), while a native 10-bit 4:2:2 source in `x422` has them zero. No route asks for that today
+   (the request follows the SPS's chroma). Recorded because the unflagged path normalises the whole 16-bit word.
+2. **MediaMTX (1.21.1) refuses Manifold's WHEP offer for a video-only publish** (`codecs not supported by client`)
+   and accepts it once the publish carries Opus. Manifold's offer is recvonly video + audio. Recorded, not worked
+   around (a server's behaviour, and every earlier WHEP session published audio).
+3. **Fixture trap:** ffmpeg's `-color_range` / `-colorspace` output options on a `rawvideo` input inserted an RGB
+   round trip (mid-grey 128 → 127, the Cb 240 / Cr 16 band clipped to 140 / 180 / 47). The tags are set with the
+   `h264_metadata` bitstream filter instead, which leaves the samples alone.
+4. **An 8-bit full-range H.264 file asked for video-range `x420`** comes back converted to video range and then
+   widened full-scale (white 943), so the clear still lands on ×4 of a video-range code. How the engine's range flag
+   treats such a file was not examined.
+
+**Not covered:** codecs without an SPS (MPEG-2, MPEG-4 Part 2, DV and the like in `.mov`) are not flagged, so their
+8-bit decodes still read 1–3 codes high; the `SyntheticLiveSource` harness (⌃⌥L, DEBUG) is not flagged either.
+
+**E6, the attended NDI step** (OBS profile **NDI Bars (P2)**; its row in `docs/OBS_TEST_PROFILES.md`: nothing
+streamed, DistroAV's NDI Main Output "OBS PGM" carrying the Image source `p2-bars.png`):
+1. Quit Manifold. In OBS select **Profile ▸ NDI Bars (P2)** and check it against its row: no stream started; the
+   scene shows the bars; Tools ▸ DistroAV NDI Settings ▸ Main Output on, named "OBS PGM".
+2. Launch the final build from Terminal, logging:
+   `".build-cc/e8c-Profile/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold" > ~/Desktop/ndi-e8c.log 2>&1 &`
+   (an unsigned build: Deny the licence prompt).
+3. Connect the NDI source "OBS PGM" from the streaming menu, wait 5 s, press **⌃⌥E**, then quit Manifold.
+4. Repeat 2 and 3 with `.build-cc/e8head-Profile/…` (log `~/Desktop/ndi-head.log`): HEAD's control.
+5. Afterwards compare OBS's log for the session with the row (no output started but NDI).
+6. Measure: for each log, `grep "\[EXPORT\] wrote" ~/Desktop/ndi-e8c.log` gives the PNG path; then
+   `python3 -I scripts/chroma/ndibars.py <that path without .png>`. **Pass:** the final build prints `ALL BARS ×4`
+   and its log has `[BITDEPTH] 8-bit source`; HEAD prints `NOT ALL ×4`. (E6's band corrected from ±0.1 to ±0.25 on
+   the export before any NDI run: the readback reads an exact 512 as 511.84 on every build, the 10-bit control too.
+   The wire stays exact.)
+
+**E6 unattended instead (Robbie, 2026-10-11): prediction, written 16:55 before the runs.** The steps above are
+replaced by the scratch NDI SDK sender (as in Stage A; rebuilt, the old source being gone with its scratchpad:
+`barsend.cpp`, NDI SDK 6.3.2) sending the same `p2-bars.png` 75 % bars as **8-bit UYVY** (BT.709 limited range,
+rounded; no colour metadata), the format NDI delivers and the bridge wraps as `2vuy`. OBS quit (Robbie), so the sender
+is the only source on the network (`NDIlib_find`: `MAC-STUDIO (E8 Bars)`, nothing else) and ⌃⌥N's first source is it.
+The codes sent, bars 0–7 (Y / Cb / Cr): 180/128/128, 168/44/136, 145/147/44, 133/63/52, 63/193/204, 51/109/212,
+28/212/120, 16/128/128. Measured with `scripts/chroma/ndibars.py` on a ⌃⌥E dump from each build.
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| E6′ | Final build (`e8c`) and HEAD (`e8head`), same sender | **Final:** `[BITDEPTH] 8-bit source`; `ALL BARS ×4` (export within ±0.25 of a multiple of 4, wire exactly one), and every bar within ±4 (one 8-bit code, allowing NDI's compression) of 4× the code sent, e.g. bar 0 Y 720, bar 7 64 / 512 / 512. **HEAD:** `NOT ALL ×4`, bar 0 Y 722 (180 · 1023/255 = 722.1) | the final build not ×4 on any bar; HEAD ×4 on every bar (then the check cannot tell them apart) |
+
+**E6′ — results, 2026-10-11 16:54–16:56 (unattended).** Sender `barsend` ("E8 Bars", 23.976, 90 s a run); ⌃⌥N connected
+to it on both builds (`[NDI] connected to "MAC-STUDIO (E8 Bars)" — UYVY, highest bandwidth, FrameSync`, `[CHROMA] 4:2:2
+… (x422)`); one ⌃⌥E each.
+
+| Build | `ndibars.py` | Verdict |
+|---|---|---|
+| Final (`e8c`) | `[BITDEPTH] 8-bit source`. **ALL BARS ×4**; every bar exactly 4× the code sent: export 720.14/512.00/512.00, 672.01/175.99/544.09, 579.91/588.12/176.06, 532.08/251.96/207.95, 252.02/771.92/816.05, 204.03/435.98/848.05, 112.00/847.93/480.00, 64.00/512.00/512.00; wire 720/512/512 … 64/512/512, every one 4× the sent code | **PASS** |
+| HEAD (`e8head`) | **ALL BARS ×4**, the same numbers: export `.rgba16f`, PNG and `.v210` **md5-identical** to the final build's | **FAIL as predicted**: HEAD was exact too |
+
+**Why HEAD was exact, measured:** the same `2vuy → x422` `VTPixelTransferSession`, on the same bars, from a source
+wrapping **plain memory** (`CVPixelBufferCreateWithBytes`, which is NDI's zero-copy wrap) comes back exactly ×4 with
+the low six bits zero (720 / 940 / 512, Cb 960); from an **IOSurface-backed** `2vuy` (what Part 1's probe made) it
+widens full-scale with the low bits filled (722 / 943 / 513, Cb 963). Rec. 709 tags on the source and a
+Metal-compatible destination change nothing. So **NDI in the app was never affected**: Part 1's NDI row describes the
+probe's buffer, not the app's path. The flag stays on NDI (clearing ×4 samples is a no-op, measured byte-identical);
+if the bridge ever copies into an IOSurface instead of wrapping, the shader still lands on ×4. NDIService's and the
+shader's comments now say this.
+
+**Defaults (E6′):** a second snapshot before the two NDI launches (1 143 keys); they added 2 `NSWindow Frame` keys and
+nothing else, deleted by name; dictionary-equal to the original snapshot. **OBS:** not used (quit by Robbie).
+
+**Defaults:** exported before the first launch (1 143 keys). The 51 launches added 51 `NSWindow Frame` keys
+and changed nothing else; each was checked absent from the snapshot and deleted by name. Dictionary-equal to the
+snapshot; `streamBookmarks` equal and never written (every stream run dialled `MANIFOLD_SRT_DEBUG_URL` or
+`MANIFOLD_STREAM_DEBUG_URL`). **Screenshots:** none. **OBS:** not used. **MediaMTX:** the instance already running
+(`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Not committed.**
 ---
 
 ## 7. Open and unverified

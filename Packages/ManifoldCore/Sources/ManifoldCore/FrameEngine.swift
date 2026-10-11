@@ -438,8 +438,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// or `x444`, 10-bit biplanar, video range, from `FileChromaProbe` once per load and BEFORE either
     /// decoder is built. Every consumer below reads `videoPixelFormat`, so the scrub producer and the
     /// playback source decode the same format by construction, never by two constants agreeing.
-    /// 8-bit sources decode cleanly into the 10-bit container. Range expansion stays in the shader
-    /// (the VideoRange label is just the container — raw values are preserved).
+    /// Range expansion stays in the shader (the VideoRange label is just the container). An 8-bit
+    /// source is NOT carried exactly: VideoToolbox widens it full-scale (≈ v·1023/255, not ×4), so its
+    /// AVFoundation frames are flagged (`eightBitSource`, `SourceBitDepth`) and the shader takes them
+    /// back to ×4 (§6.10, *8-bit sources mapped exactly ×4*). libav files are not flagged: sws is ×4.
     private var fileChroma: ResolvedChroma = .undetermined
     private var videoPixelFormat: OSType { fileChroma.pixelFormat }
     /// The first frame of a playback session is checked against the request once per file
@@ -1257,9 +1259,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             ? LibavScrubProducer(url: url, pixelFormat: videoPixelFormat,
                                  fileFormatDescription: libavFileFormatDescription)
             : AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
+        // The 8-bit flag, as playback sets it (`beginReading`): AVFoundation frames only.
+        let eightBit = !useLibav && fileChroma.eightBitSource
         scrubCoalescer = ScrubCoalescer(producer: producer) { [weak self] frame in
             guard let self else { return }
             guard self.scrubToken.isCurrent(token) else { return }   // ← the delivery-side check
+            SourceBitDepth.mark(frame.pixelBuffer, eightBit: eightBit)
             self.onScrubFrame?(frame.pixelBuffer, frame.pts)
         }
     }
@@ -1615,7 +1620,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         } ?? "the decoder would not start at \(ChromaReadout.fourCC(requested)); converted to 4:2:0"
         let fallback = ResolvedChroma(pixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
                                       source: fileChroma.source, reason: reason,
-                                      basis: fileChroma.basis + ", fallback")
+                                      basis: fileChroma.basis + ", fallback",
+                                      eightBitSource: fileChroma.eightBitSource)
         print("[CHROMA-FILE] ⚠️ FALLBACK: \(reason)")
         adoptFileChroma(fallback)
         deliveredFormatChecked = true
@@ -3865,7 +3871,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let checkFormat = !deliveredFormatChecked
         deliveredFormatChecked = true
         var firstFrame = checkFormat
+        // An 8-bit source's frames are flagged for the shader's exact ×4 (`SourceBitDepth`): the
+        // file's SPS said so, once per load. Every frame, so a frame always carries its own answer.
+        let eightBit = fileChroma.eightBitSource
         activeSource.onVideoFrame = { [weak self] sb in
+            if let pb = CMSampleBufferGetImageBuffer(sb) { SourceBitDepth.mark(pb, eightBit: eightBit) }
             if firstFrame {
                 firstFrame = false
                 if let pb = CMSampleBufferGetImageBuffer(sb) {

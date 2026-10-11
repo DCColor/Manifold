@@ -784,10 +784,11 @@ audio lead (it does: 256 ms median against 250 + one refresh; see the NDI lead e
 
 ---
 
-## ☐ PRE-SHIP: remove the `[AV-LAG]` telemetry and the `MANIFOLD_SRT_DEBUG_URL` override
+## ☐ PRE-SHIP: remove the `[AV-LAG]` telemetry and the `MANIFOLD_SRT_DEBUG_URL` and `MANIFOLD_STREAM_DEBUG_URL` overrides
 
 **Added 2026-09-29** for the SRT picture-drift repro (the "SRT: the picture drifts from its own
-timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
+timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** with
+`MANIFOLD_STREAM_DEBUG_URL` (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *8-bit sources mapped exactly ×4*).
 
 - **What it is:**
   - `MetalVideoRenderer.avLagAudioMinusClock`, `avLagProbe` and `avLagLastSample`.
@@ -797,10 +798,13 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11).
   - Wired in `WindowDeck.attachDeviceHooks`.
   - `ContentView`'s ⌃⌥D reads `MANIFOLD_SRT_DEBUG_URL`. When it is set, ⌃⌥D dials that URL instead of
     the first SRT bookmark, so no stored passphrase is read.
+  - `ContentView`'s ⌃⌥H reads `MANIFOLD_STREAM_DEBUG_URL` (added 2026-10-11). When it is set, ⌃⌥H dials
+    that URL instead of the first saved web bookmark, through `connectToStreamURL` (WHEP or HLS by the
+    URL), so WHEP and HLS can be run unattended without reading or writing `streamBookmarks`.
 - **Gating:** all `#if DEBUG`, so absent from Release (checked with `strings` on both builds) and
   present in Profile.
 - **Cost when present:** one engine call, one presented-handler and one log line per second. The
-  override costs nothing when unset.
+  overrides cost nothing when unset.
 - **Remove** once the SRT drift is fixed and verified, or keep `[AV-LAG]` as Profile telemetry by
   decision. It is the only in-app measure of picture against sound at the glass.
 - **Added 2026-09-29 evening, same removal decision** (§18.13, §18.14):
@@ -1276,9 +1280,28 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 ---
 
-## ☐ OPEN 2026-10-11 — DECISION NEEDED — PRE-EXISTING, SRT, WHEP, NDI, AVFOUNDATION FILES — 8-bit sources are widened to 10-bit full-scale (×1023/255), not ×4: mid-grey and white land 2–3 codes high
+## ✅ FIXED 2026-10-11 (commit to be filled in) — PRE-EXISTING, SRT, WHEP, HLS, AVFOUNDATION FILES (NOT NDI, CORRECTED) — 8-bit sources are widened to 10-bit full-scale (×1023/255), not ×4: mid-grey and white land 2–3 codes high
 
-**Status:** OPEN, measured, no code changed (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *S3/S4 follow-up*, part 1).
+**Status:** FIXED (commit to be filled in), option (b), decided by Robbie 2026-10-11. Measured in the app on SRT
+(listener and MediaMTX, 4:2:0 and 4:2:2), WHEP, HLS and AVFoundation files, playback and scrub: every band reads
+exactly the 10-bit control's codes, export and wire, 100 % pixel-identical to it on 4:2:0; 10-bit sources and libav
+files md5-identical to HEAD (§6.10, *8-bit sources mapped exactly ×4: results*). **NDI, corrected (E6′, unattended,
+scratch NDI SDK sender):** not affected in the app. HEAD already reads the 8-bit bars exactly ×4, and the final build's
+export is md5-identical to HEAD's. `VTPixelTransferSession` widens full-scale only from an IOSurface-backed source, and
+NDI's zero-copy wrap is plain memory. The "NDI" lines below came from a probe that used an IOSurface source.
+
+**The fix:** a per-frame "8-bit source" flag (`SourceBitDepth`, a pixel-buffer attachment) set where the bit depth is
+known: the SPS in `LiveVideoDecoder` (SRT and WHEP; the routers carry it across a promote), the file resolver's
+`avcC` / `hvcC` (AVFoundation playback and scrub; libav not flagged, sws is already ×4), the NDI frame's format
+(`2vuy`; a no-op today, kept in case the wrap becomes an IOSurface copy), and for HLS the item's video track's format description (per rendition: see `HLSClient`). For a flagged
+buffer the shader takes each sample to floor(code / 4) · 4, per texel before chroma interpolation, the code being the
+sample's top ten bits (truncated: VideoToolbox's `x422` fills the low six bits, and rounding them up broke 4:2:2 Cb on
+the first build). The SRT and WHEP comments that called the promotion "an exact ×4 code shift" are corrected. NDI's comment now says
+why its transfer is ×4 (plain memory) rather than claiming ×4 as a property of the transfer.
+**Not covered:** codecs without an SPS (MPEG-2, MPEG-4 Part 2, DV in `.mov`) are not flagged and still read 1–3 codes
+high on 8-bit; the DEBUG `SyntheticLiveSource` harness is not flagged.
+
+What was wrong (as measured, 2026-10-11, before the fix):
 
 - **What happens:** every 8-bit source that reaches the renderer through VideoToolbox — the decoder asked for
   `x420`/`x422`, or `VTPixelTransferSession` — is widened with a full-scale map (≈ x·1023/255, between 4x and

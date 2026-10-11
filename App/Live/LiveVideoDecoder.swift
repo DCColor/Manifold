@@ -152,6 +152,11 @@ final class LiveVideoDecoder {
     // than us doing it downstream. If the session refuses it, we fall back to VT's native
     // choice and say so loudly, because that fallback has the colour consequence above.
     //
+    // ⚠️ THAT PROMOTION IS NOT ×4. VideoToolbox widens 8-bit full-scale (≈ v·1023/255, measured between
+    // 4v and 4v+3: mid-grey 128 → 514, white 235 → 943). So every output of an 8-bit SPS is flagged
+    // (`SourceBitDepth`, in `handleDecoded`) and the shader clears the two low bits, which is exact
+    // (§6.10, *8-bit sources mapped exactly ×4*).
+    //
     // STAGE 3b S3/S4: THE REQUEST FOLLOWS THE SPS's CHROMA. x420 above was right for 4:2:0, and is
     // still what every 4:2:0 stream asks for (every WHEP stream). A 4:2:2 or 4:4:4 stream asks for
     // x422 / x444 instead, the 10-bit biplanar carriers the renderer samples natively (CLAUDE.md, the
@@ -165,6 +170,11 @@ final class LiveVideoDecoder {
 
     /// The current SPS's `chroma_format_idc`, nil until one is read (or if it cannot be). Decode queue.
     private var spsChromaFormatIdc: Int?
+    /// The current SPS says 8 bits on both planes, so every picture decoded under it is flagged for the
+    /// shader's exact ×4. False until an SPS is read, and for one that cannot be read that far: the flag
+    /// is never a guess. Decode queue; decode is synchronous, so a picture is flagged by the SPS it was
+    /// decoded under.
+    private var spsEightBit = false
 
     // MARK: - DEBUG: software decode (pre-ship list, docs/BUGS.md)
 
@@ -349,6 +359,7 @@ final class LiveVideoDecoder {
         currentMorePPS = []
         colorSPS = nil
         spsChromaFormatIdc = nil
+        spsEightBit = false
         usingHardwareDecoder = nil
         closeKeyframeGate()
         keyframeAskedAt = 0
@@ -402,9 +413,16 @@ final class LiveVideoDecoder {
             switch codec {
             case .h264:
                 spsChromaFormatIdc = H264SPSColor.chromaFormatIdc(nal: sps)
+                spsEightBit = H264SPSColor.format(nal: sps).map {
+                    SourceBitDepth.isEightBit(luma: $0.bitDepthLuma, chroma: $0.bitDepthChroma)
+                } ?? false
                 onSPSColor?(H264SPSColor.parse(nal: sps))
             case .hevc:
-                spsChromaFormatIdc = HEVCSPSColor.format(nal: sps)?.chromaFormatIdc
+                let format = HEVCSPSColor.format(nal: sps)
+                spsChromaFormatIdc = format?.chromaFormatIdc
+                spsEightBit = format.map {
+                    SourceBitDepth.isEightBit(luma: $0.bitDepthLuma, chroma: $0.bitDepthChroma)
+                } ?? false
                 onSPSColor?(HEVCSPSColor.parse(nal: sps))
             }
         }
@@ -815,6 +833,10 @@ final class LiveVideoDecoder {
         if shouldExport { exportRequested = false }
         lock.unlock()
         if shouldExport { exportStill(pixelBuffer, width: width, height: height, format: format) }
+
+        // The 8-bit flag, from the SPS this picture was decoded under. Stated both ways: VideoToolbox's
+        // pool recycles buffers, and a recycled one may carry a previous stream's answer.
+        SourceBitDepth.mark(pixelBuffer, eightBit: spsEightBit)
 
         // Step 4: WHEPFrameRouter.deliver — promote → LiveClock → renderer.enqueue. Called
         // synchronously on this (decode) queue, which is the handoff contract the router

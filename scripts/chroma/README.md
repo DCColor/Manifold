@@ -10,6 +10,8 @@ decisions, stages and predictions are in `docs/COLOR_MANAGEMENT_FINDINGS.md` §6
 | `vt.swift` | Raw `VTDecompressionSession` probe: hardware-only and software-only decode, native and requested pixel formats. **Run this on any Mac whose 4:2:2 / 4:4:4 decode is in question** (the M4 MacBook Air check). |
 | `avf-formats.swift` | `AVAssetReader` probe: which of `x420 x422 x444 sv22 sv44` each file delivers, its cost, and whether the chroma pattern survives. |
 | `measure.swift` | S2's numbers from one ⌃⌥E dump: the readback as 10-bit Y′CbCr (the dump's own kr/kb, limited range) and the v210 words, against `lines` (P3: rows within ±2 of their own line) or `checker` (P4 on the export, P5 512 ± tol on the wire). |
+| `bands.py` | The 8-bit ×4 check (§6.10, *8-bit sources mapped exactly ×4*): `bands8` / `bands10` band means from one ⌃⌥E dump (export) and the v210 wire's min..max; with a second (control) stem, the fraction of `.rgba16f` pixels identical to it. `python3 -I bands.py <stem> [control-stem]` |
+| `ndibars.py` | The same check on NDI's `p2-bars`: every flat bar's export and wire codes should be whole multiples of 4 (an 8-bit source mapped exactly ×4). `python3 -I ndibars.py <stem>` |
 | `v210ref.swift` | Re-runs a revision's `rgbToV210` on the GPU against a DEBUG v210 dump's readback (⌃⌥E in a Profile build writes `.v210`, `.rgba16f`, `.v210.json` beside the PNG) and compares. How P1 checks that the 4:2:0 wire did not change. |
 
 ## The patterns

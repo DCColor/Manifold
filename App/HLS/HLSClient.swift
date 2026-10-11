@@ -56,6 +56,7 @@ import Combine
 import CoreMedia
 import CoreVideo
 import ManifoldCore
+import ColorimetryModel   // SourceBitDepth — the per-frame 8-bit flag
 import DisplayProviders
 import QuartzCore
 
@@ -761,6 +762,27 @@ final class HLSClient: ObservableObject {
     /// looked exactly like a player that had.
     private var timeControlObservation: NSKeyValueObservation?
 
+    // ── THE 8-BIT FLAG (§6.10, *8-bit sources mapped exactly ×4*) ─────────────────────────────
+    //
+    // AVPlayer's decoder widens an 8-bit stream into x420 full-scale (≈ v·1023/255: mid-grey 514,
+    // white 943 — measured on this route), and its output carries nothing that tells 8-bit from 10-bit
+    // (measured: identical attachments). So the answer is read from the item's video track's format
+    // description (the SPS in `avcC` / `hvcC`, the reader files use) on MAIN when the tracks change,
+    // and every pulled frame is stamped with it on the tick.
+    //
+    // ⚠️ PER RENDITION, NOT PER FRAME. A ladder that mixes 8-bit and 10-bit renditions can draw a few
+    // frames of the new one under the old answer while the track list catches up: a 10-bit frame
+    // flagged 8-bit loses its two low bits for that moment, an 8-bit frame unflagged reads up to 3
+    // codes high. A ladder of one depth (every one measured) is exact throughout.
+    private var tracksObservation: NSKeyValueObservation?
+    private let eightBitLock = NSLock()
+    /// Written on MAIN, read on the display tick.
+    private var eightBitSourceLocked = false
+    private var eightBitSource: Bool {
+        get { eightBitLock.lock(); defer { eightBitLock.unlock() }; return eightBitSourceLocked }
+        set { eightBitLock.lock(); eightBitSourceLocked = newValue; eightBitLock.unlock() }
+    }
+
     /// 1 Hz, for the life of the connection, ARMED AT CONNECT AND NOT AT FIRST FRAME. See
     /// `heartbeatTick` — this is the reporting path that survives a stall.
     private var heartbeat: Timer?
@@ -922,6 +944,15 @@ final class HLSClient: ObservableObject {
             }
         }
 
+        // The 8-bit flag follows the item's video track (see `tracksObservation`). `.initial`, so a
+        // track list that is already there is read too.
+        tracksObservation = fresh.item.observe(\.tracks, options: [.initial, .new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == token, self.pull === fresh else { return }
+                self.readSourceBitDepth(of: fresh.item, token: token)
+            }
+        }
+
         // ARMED AT CONNECT, NOT AT FIRST FRAME — see `heartbeatTick`. A stream that never reaches
         // `.readyToPlay`, or that reaches it and then stalls, is exactly the case that most needs
         // reporting, and it is the case a frame-driven reporter cannot cover.
@@ -975,6 +1006,24 @@ final class HLSClient: ObservableObject {
         NSLog("%@", "[HLS] item is readyToPlay — pull armed, play() issued (state now "
             + "\(Self.describe(fresh.timeControlStatus)))")
     }
+
+    /// MAIN. The video track's bit depth, from its format description; one `[HLS]` line per change.
+    private func readSourceBitDepth(of item: AVPlayerItem, token: UInt64) {
+        guard let track = item.tracks.compactMap(\.assetTrack).first(where: { $0.mediaType == .video })
+        else { return }
+        Task { @MainActor [weak self] in
+            let formats = (try? await track.load(.formatDescriptions)) ?? []
+            guard let self, self.generation == token else { return }
+            let eightBit = formats.first.map(SourceBitDepthProbe.isEightBit) ?? false
+            guard eightBit != self.eightBitSource || !self.statedBitDepth else { return }
+            self.statedBitDepth = true
+            self.eightBitSource = eightBit
+            NSLog("%@", "[HLS] video track: " + (formats.isEmpty ? "no format description — not flagged 8-bit"
+                : eightBit ? "8-bit source (its SPS) — frames flagged for exact ×4" : "not 8-bit — frames not flagged"))
+        }
+    }
+    /// Whether `readSourceBitDepth` has logged for this connection. Main only.
+    private var statedBitDepth = false
 
     /// The app's decode contract, restated. `FrameEngine.videoPixelFormat` is private to the
     /// package, so the constant is spelled here — and it is asserted on the first frame
@@ -1206,6 +1255,9 @@ final class HLSClient: ObservableObject {
                                        frameRate: declared ?? frameRateEstimator.estimate)
 
         publishColorTagsIfChanged(of: pixelBuffer)
+        // The 8-bit flag (see `tracksObservation`), on every frame, both ways: the output's pool
+        // recycles buffers.
+        SourceBitDepth.mark(pixelBuffer, eightBit: eightBitSource)
 
         // NO CONVERSION. The buffer is already x420 — the format `AVPlayerItemVideoOutput` was
         // asked for and MEASURED to honour — so it goes straight to the enqueue the file paths use
@@ -1452,6 +1504,9 @@ final class HLSClient: ObservableObject {
     private func retirePull() {
         dispatchPrecondition(condition: .onQueue(.main))
         statusObservation = nil
+        tracksObservation = nil
+        eightBitSource = false
+        statedBitDepth = false
         // The playback assertion belongs to the pull being retired. Left installed it would report
         // the dying player's transition to `paused` as if it described the incoming stream — on a
         // swap, one line after the new one armed.
