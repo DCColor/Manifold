@@ -51,7 +51,7 @@
 import CoreMedia
 import CoreVideo
 import Foundation
-import ManifoldCore   // LiveClock
+import ManifoldCore   // LiveClock; HDR10StaticMetadata (the [HDR10-SEI] line)
 import ColorimetryModel   // SourceColorimetry (buffer tags), SourceColorProvenance
 import SPSColor       // the decoder's per-SPS colour reading
 import DisplayProviders   // LiveCushion — the packing rule and the readout's Buffer row
@@ -412,6 +412,17 @@ final class SRTFrameRouter {
     /// SPS whose format cannot be read or that is 4:0:0.
     private var admittedFormat: SPSFormat?
     private var sourceChroma: SourceChroma = .notStated
+
+    // MARK: - HDR10 SEI (SESSION THREAD only; §6.10, Stage 5, decision 6: LOG ONLY)
+    //
+    // The HEVC builder reads prefix SEI 137 (mastering display) and 144 (content light level) on the
+    // way past and keeps the stream's latest values; every access unit carries them. They are turned
+    // into `HDR10StaticMetadata` here and logged as `[HDR10-SEI]` ONCE PER CHANGE, compared per access
+    // unit, so x265's two SEI NALs (CLL, then MDCV) on one keyframe make one line. Nothing displays or
+    // renders from it (§6.2, no tone-map); `lastHDR10SEI` is held for a later readout.
+
+    /// What `[HDR10-SEI]` last said, this stream. nil until the stream carries any.
+    private(set) var lastHDR10SEI: HDR10StaticMetadata?
 
     // MARK: - The Chroma line and the fallback banner (SESSION THREAD only; Stage 3b S3)
 
@@ -818,6 +829,7 @@ final class SRTFrameRouter {
         formatRefused = false
         admittedFormat = nil
         sourceChroma = .notStated
+        lastHDR10SEI = nil
         statedChroma = nil
         self.onChromaFallback = onChromaFallback
         announcedChromaFallback = false
@@ -951,6 +963,7 @@ final class SRTFrameRouter {
         formatRefused = false
         admittedFormat = nil
         sourceChroma = .notStated
+        lastHDR10SEI = nil
         statedChroma = nil
         onChromaFallback = nil
         announcedChromaFallback = false
@@ -1053,6 +1066,7 @@ final class SRTFrameRouter {
         }
 
         // ── HEVC ───────────────────────────────────────────────────────────────────────────────
+        if let sei = accessUnit.hdr10SEI { noteHDR10SEI(sei.pointee) }   // read now: valid only in this call
         let vps = accessUnit.vps.map { Data(bytes: $0, count: accessUnit.vpsSize) }
         noteDeclaredTiming(sps: sps, vps: vps, hevc: true)
         let ppsList = Self.unpackParameterSets(accessUnit.ppsList, size: accessUnit.ppsListSize)
@@ -1067,6 +1081,56 @@ final class SRTFrameRouter {
                        morePPS: Array(ppsList.dropFirst()),
                        randomAccessType: accessUnit.randomAccessType,
                        rasl: accessUnit.rasl)
+    }
+
+    /// The stream's latest HDR10 SEI, once per access unit; one `[HDR10-SEI]` line when it differs from
+    /// what was last logged. SESSION THREAD. Log only.
+    private func noteHDR10SEI(_ raw: ManifoldHEVCHDR10SEI) {
+        let metadata = Self.hdr10Metadata(raw)
+        guard metadata != lastHDR10SEI else { return }
+        lastHDR10SEI = metadata
+        NSLog("%@", Self.hdr10Line(metadata))
+    }
+
+    /// The SEI's raw codes as `HDR10StaticMetadata`. THE REORDER IS HERE: the SEI codes its primaries
+    /// GREEN, BLUE, RED (c = 0, 1, 2; H.265 D.3.28, as SMPTE ST 2086), and the model holds R, G, B.
+    /// Chromaticity in units of 0.00002, mastering luminance in units of 0.0001 cd/m², CLL in cd/m².
+    static func hdr10Metadata(_ raw: ManifoldHEVCHDR10SEI) -> HDR10StaticMetadata {
+        var mastering: MasteringDisplayInfo?
+        if raw.hasMDCV {
+            func xy(_ x: UInt16, _ y: UInt16) -> CIExy { CIExy(x: Double(x) * 0.00002, y: Double(y) * 0.00002) }
+            let px = raw.displayPrimariesX, py = raw.displayPrimariesY
+            mastering = MasteringDisplayInfo(
+                hasPrimaries: true, hasLuminance: true,
+                red: xy(px.2, py.2), green: xy(px.0, py.0), blue: xy(px.1, py.1),
+                whitePoint: xy(raw.whitePointX, raw.whitePointY),
+                maxLuminance: Double(raw.maxDisplayMasteringLuminance) * 0.0001,
+                minLuminance: Double(raw.minDisplayMasteringLuminance) * 0.0001)
+        }
+        let contentLight = raw.hasCLL
+            ? ContentLightInfo(maxCLL: Int(raw.maxContentLightLevel), maxFALL: Int(raw.maxPicAverageLightLevel))
+            : nil
+        return HDR10StaticMetadata(mastering: mastering, contentLight: contentLight)
+    }
+
+    /// The `[HDR10-SEI]` line.
+    static func hdr10Line(_ m: HDR10StaticMetadata) -> String {
+        var parts: [String] = []
+        if let d = m.mastering {
+            parts.append("mastering display: R \(d.red.string) · G \(d.green.string) · B \(d.blue.string) "
+                + "(\(d.primariesName)) · white \(d.whitePoint.string) (\(d.whitePointName ?? "unnamed")) · "
+                + "\(HDR10StaticMetadata.nitsString(d.minLuminance)) – \(HDR10StaticMetadata.nitsString(d.maxLuminance))")
+        } else {
+            parts.append("mastering display: none")
+        }
+        if let c = m.contentLight {
+            func level(_ v: Int, _ unspecified: Bool) -> String { unspecified ? "unspecified" : "\(v) nits" }
+            parts.append("content light: MaxCLL \(level(c.maxCLL, c.maxCLLIsUnspecified)) · "
+                + "MaxFALL \(level(c.maxFALL, c.maxFALLIsUnspecified))")
+        } else {
+            parts.append("content light: none")
+        }
+        return "[HDR10-SEI] " + parts.joined(separator: " | ") + " — log only (not displayed, not used for rendering)"
     }
 
     /// The format gate, on one new SPS. SESSION THREAD. True when the stream may be decoded.

@@ -4773,6 +4773,78 @@ and changed nothing else; each was checked absent from the snapshot and deleted 
 snapshot; `streamBookmarks` equal and never written (every stream run dialled `MANIFOLD_SRT_DEBUG_URL` or
 `MANIFOLD_STREAM_DEBUG_URL`). **Screenshots:** none. **OBS:** not used. **MediaMTX:** the instance already running
 (`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Not committed.**
+
+#### Stage 5 — `[HDR10-SEI]`, HDR10 static metadata logged: predictions, written 2026-10-11 17:10 before the code changed
+
+**Decision 6 (2026-10-07): log only.** `[HDR10-SEI]` once per change, filling `HDR10StaticMetadata`; nothing
+displayed, nothing used for rendering (§6.2, no tone-map).
+
+**Estimated run:** ~1.5 h unattended. Code and C harness ~40 min; fixtures ~10 min; one Profile build (the control
+is the existing `e8c-Profile`, below) ~10 min; app runs (~12 launches) ~20 min; docs ~20 min.
+
+**What changes.**
+- **The C builder parses prefix SEI** (type 39) on the way past, after removing emulation prevention from a copy (the
+  NAL itself still goes to the decoder untouched): the `sei_message` loop (`ff`-extended payload type and size), and
+  for **137** (mastering display colour volume, exactly 24 bytes: three primaries **in the bitstream's G, B, R order**,
+  the white point, max and min luminance) and **144** (content light level, exactly 4 bytes: MaxCLL, MaxFALL) it keeps
+  the latest values. A payload of the wrong size, a size that runs past the NAL, or a NAL that ends inside the type or
+  size bytes stops that NAL's parse and is counted (`seiMalformed`); nothing is written from it. Suffix SEI (40) is
+  not read: 137 and 144 are prefix SEI by the standard (H.265 D.2.1's placement table).
+- **The access unit carries the latest values** (`hdr10SEI`, NULL on H.264). The SRT router compares them **once
+  per access unit** with what it last logged, so an MDCV and a CLL arriving as two SEI messages make one line, not
+  two. Reset per stream.
+- **The log line:** `[HDR10-SEI]` with the primaries in R, G, B order (named, `HDR10Gamut`), the white point
+  (named), the mastering luminance range, MaxCLL / MaxFALL (0 read as "unspecified", CTA-861.3), and "log only".
+  Units: chromaticity × 0.00002, luminance × 0.0001 cd/m² (H.265 D.3.28).
+
+**The control** is `e8c-Profile`, the tree just before this stage. HEAD `314dd6e` would differ from it only by the
+uncommitted 8-bit fix on 8-bit sources (above), so every "unchanged" comparison is made against `e8c`, and against
+HEAD as well for the 10-bit HEVC fixtures, where the 8-bit fix cannot act.
+
+**Fixtures** (x265 4.2, ffmpeg): `hdr10.ts`, Main 10, PQ / BT.2020 tags, `hdr10=1`,
+`master-display=G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,1)`, `max-cll=1000,400`, keyframe a
+second, with an AAC tone (so the audio and sync lines run); `hdr10-change.ts`, the same 5 s then 5 s with
+`max-cll=800,200` and a P3 mastering display (concatenated, no loop); `still-420-hevc10.ts` (x265 default, no SEI);
+`bands8-h264.ts` (H.264). **Servers:** the local ffmpeg SRT listener; MediaMTX for P1 as well.
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| P1 | `hdr10.ts`, listener and MediaMTX | **exactly one** `[HDR10-SEI]` line per run, through every keyframe and every `-stream_loop` wrap: primaries R 0.7080, 0.2920 · G 0.1700, 0.7970 · B 0.1310, 0.0460 (BT.2020) · white 0.3127, 0.3290 (D65) · mastering 0.0001–1000 nits · MaxCLL 1000, MaxFALL 400 | none, more than one, or any value off |
+| P2 | `still-420-hevc10.ts` (x265 default), `bands8-h264.ts` (H.264) | no `[HDR10-SEI]` line; `seiMalformed` 0 | any line |
+| P3 | `hdr10-change.ts` (no loop) | **exactly two** lines: the first as P1; the second at the change, MaxCLL 800 / MaxFALL 200, primaries named Display P3 (the model's label), white D65 | one, or three or more |
+| P4 | C harness: new cases (a real x265 MDCV + CLL NAL; G, B, R order kept raw; both in one NAL and in two; emulation prevention inside the payload; payload too short / too long / past the end; type or size bytes running off the end; a run of `0xFF`; 137 in a suffix SEI; a 1-byte SEI) | every case passes under ASan + UBSan, no crash; malformed ones counted and change nothing; the NAL still reaches the access unit byte-for-byte; the existing 200 checks unchanged | any failure or sanitizer report |
+| P5 | Everything else unchanged, `e8c` against the new build (and HEAD for the HEVC fixtures): `hdr10.ts`, `still-420-hevc10.ts`, `bands8-h264.ts` | export `.rgba16f`, PNG and `.v210` **md5-identical**; the `[SRT]`, `[SRT-DECODE]`, `[SPS-COLOR]`, `[CHROMA]`, `[BITDEPTH]` lines identical in text; the audio and sync lines (`[SRT-AUDIO]`, `[LIVECLOCK]`, `[AV-LAG]`) present in the same set, their figures within run-to-run spread; no line but `[HDR10-SEI]` new | any byte, or any other line new or missing |
+| G | Gates | `swift test` 315 / 315 (no Swift package code changes); C harness all pass; Profile build with HEAD's warning set | otherwise |
+
+**What would change the plan:** x265 not emitting 137 / 144 as prefix SEI (then the audit's premise is wrong and it
+is recorded first); MediaMTX stripping SEI (recorded as a server's behaviour; the listener run stands).
+
+#### Stage 5 — results, 2026-10-11 17:05–17:25 (unattended)
+
+**Build:** `e9-Profile` (the tree), unsigned Profile, HEAD's warning set. **Controls:** `e8c-Profile` and
+`e8head-Profile`. **HEAD moved during the stage:** the 8-bit fix was committed as `3c911fb` (Robbie, 17:00), and
+`e8c` was built from that same code, so the `e8c` control **is HEAD**; `e8head` is the commit before, `314dd6e`. **Driver:** S3's `srt2.sh`, copied as `srt3.sh` with two knobs (`MAP=-map 0` sends the audio too;
+`LOOP=` the listener's loop count). **x265 checked first** (`trace_headers` on `hdr10.ts`): every keyframe carries two
+prefix SEI NALs, **144 then 137**, sizes 4 and 24, primaries in G, B, R order (8500/39850, 6550/2300, 35400/14600),
+min luminance coded `00 00 03 00 01` (an emulation-prevention byte inside the payload). So the audit's premise holds.
+
+| # | Result | Verdict |
+|---|---|---|
+| P1 | `hdr10.ts`, listener, 25 s across 3 loop wraps (4 IDR, 27 CRA, 713 pictures): **one line**. Through MediaMTX (one wrap): **one line**. Both: `[HDR10-SEI] mastering display: R 0.7080, 0.2920 · G 0.1700, 0.7970 · B 0.1310, 0.0460 (BT.2020) · white 0.3127, 0.3290 (D65) · 0.0001 nits – 1000 nits \| content light: MaxCLL 1000 nits · MaxFALL 400 nits — log only (not displayed, not used for rendering)`. The primaries are named BT.2020 only because R, G and B landed in the right places: the G, B, R → R, G, B reorder, checked end to end | **PASS** |
+| P2 | `still-420-hevc10.ts` (x265 default) and `bands8-h264.ts`: **no line**. `seiMalformed` is not observable in the app: the session-totals line was left unchanged (P5), so the counter is shown by the harness only | **PASS** (the counter by harness) |
+| P3 | `hdr10-change.ts`, no loop: **exactly two lines**: the first as P1; the second at the change, `R 0.6800, 0.3200 · G 0.2650, 0.6900 · B 0.1500, 0.0600 (Display P3) · white 0.3127, 0.3290 (D65) · 0.0001 nits – 1000 nits \| content light: MaxCLL 800 nits · MaxFALL 200 nits` | **PASS** |
+| P4 | C harness **265 / 265** (200 + 65 new) under ASan + UBSan: x265's two real NALs (values raw, G, B, R kept; through the emulation-prevention byte; both NALs reach the access unit byte-for-byte; values persist into an AU without SEI); MDCV and CLL in one NAL; a malformed MDCV after a good one leaves the good values; user data skipped before a CLL; eleven malformed or unread cases (MDCV of 4 or 30 bytes, MDCV truncated, CLL truncated or 2 bytes, type or size `0xFF` running off the end, a 1-byte SEI, another payload past the end, trailing bits only, 137 in a suffix SEI): no values, counted where malformed, the NAL unchanged, no crash; H.264's access unit carries no HDR10 pointer. **Three mutants fail it:** emulation prevention not skipped (6 failures), primaries stored R, G, B in C (4), MDCV size and truncation unchecked (7); restored and green | **PASS** |
+| P5 | **Exports md5-identical** (PNG, `.rgba16f`, `.v210`), the tree against `e8c` on `hdr10-still.ts`, `still-420-hevc10.ts` and `bands8-h264.ts`, and against `314dd6e` on `hdr10-still.ts` and `still-420-hevc10.ts`. The `[SRT]`, `[SRT-DECODE]`, `[SPS-COLOR]`, `[CHROMA]`, `[BITDEPTH]` lines: the same text, apart from thread interleaving and the run-to-run timing figures in `startup anchor`, `startup realign` and `FREEZE-GUARD`; against `314dd6e`, the 8-bit fix's `[BITDEPTH]` line besides. Audio and sync on `hdr10-still.ts`: the same line counts on all three builds (44 `[SRT-AUDIO]`, 35 `[LIVECLOCK]`, 29 `[AV-LAG]`, 2 `[AV-CONTENT]`), `[AV-LAG]` av median +37.8 / +35.4 / +39.0 ms (tree / `e8c` / `314dd6e`). No line but `[HDR10-SEI]` new | **PASS** |
+| G | `swift test` 315 / 315; C harness 265 / 265; Profile build with HEAD's warning set | **PASS** |
+
+**Changed during the stage:** P5's first `hdr10.ts` exports differed between builds because the fixture is
+`testsrc2`, which moves, so each export caught a different frame. My fixture choice, not a regression. A static twin,
+`hdr10-still.ts` (`yuvtestsrc`, the same SEI and audio), was made for P5 and is byte-identical across all three builds.
+
+**Defaults:** exported before the first launch (1 143 keys); the 13 launches added 13 `NSWindow Frame` keys and
+nothing else, each deleted by name; dictionary-equal, `streamBookmarks` equal and never written (every run dialled
+`MANIFOLD_SRT_DEBUG_URL`). **Screenshots:** none. **OBS:** not used. **MediaMTX:** the running instance, path `live`,
+not reconfigured. **Not committed.**
 ---
 
 ## 7. Open and unverified

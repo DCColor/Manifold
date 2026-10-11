@@ -109,6 +109,9 @@ typedef struct {
     uint32_t       ppsCount;
     uint8_t        randomAccessType;   ///< The IRAP picture's nal_unit_type, 16–23; 0 when none.
     bool           rasl;               ///< A RASL picture (8, 9). See ManifoldHEVCRandomAccessGate.
+    /// The latest HDR10 SEI (MDCV / CLL) the stream has carried, raw, or NULL when none has been read.
+    /// Valid ONLY for the duration of the callback. Log only (§6.10, Stage 5, decision 6).
+    const ManifoldHEVCHDR10SEI *hdr10SEI;
 } ManifoldSRTAccessUnit;
 
 /// Fires inline on the submitting thread, once per access unit. Copy what you keep.

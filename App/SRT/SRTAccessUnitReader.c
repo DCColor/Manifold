@@ -110,6 +110,7 @@ static void MDSubmitHEVC(ManifoldSRTAccessUnitReader *reader, const uint8_t *ann
             .ppsCount             = contents.ppsCount,
             .randomAccessType     = contents.randomAccessType,
             .rasl                 = contents.rasl,
+            .hdr10SEI             = contents.hdr10SEI,
         };
         reader->handler(&accessUnit, reader->handlerContext);
     }

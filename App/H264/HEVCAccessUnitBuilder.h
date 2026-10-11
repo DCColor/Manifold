@@ -22,7 +22,10 @@
 //      more than one PPS id needs every one of them in the format description, or the slices that
 //      name the others fail to decode. 64 slots of 1 KB is cheap.
 //    * AUD (35), filler (38) → dropped, as on H.264.
-//    * prefix (39) and suffix (40) SEI → passed through UNPARSED. Stage 5 reads HDR10 SEI from here.
+//    * prefix (39) and suffix (40) SEI → passed through UNCHANGED. A prefix SEI is also READ on the way
+//      past (Stage 5, decision 6): payload 137 (mastering display colour volume) and 144 (content
+//      light level) are kept, latest values only, in ManifoldHEVCHDR10SEI. Log only: nothing decodes
+//      or renders from them. Malformed SEI is counted and ignored.
 //    * reserved and unspecified non-VCL types (41–63) → dropped, counted. A decoder ignores them by
 //      the standard's own rule, so dropping them cannot change a picture.
 //    * every VCL type (0–31), and EOS/EOB (36, 37) → appended with a 4-byte big-endian length.
@@ -57,6 +60,24 @@ extern "C" {
 /// pps_pic_parameter_set_id is ue(v) in 0…63 (H.265 §7.4.3.3.1).
 #define MANIFOLD_HEVC_MAX_PPS_COUNT 64
 
+/// HDR10 static metadata as the stream's prefix SEI last stated it (H.265 D.2.28 / D.3.28, D.2.35 /
+/// D.3.35), in the BITSTREAM's own units and order. Raw on purpose: the reorder to R, G, B and the
+/// unit conversion are the reader's (HDR10StaticMetadata), so this layer cannot get them wrong twice.
+typedef struct {
+    bool     hasMDCV;                       ///< A well-formed payload 137 has been read.
+    /// display_primaries_x / _y[c], c = 0, 1, 2 in the SEI's order: **GREEN, BLUE, RED** (as SMPTE
+    /// ST 2086 orders them), NOT R, G, B. Units of 0.00002.
+    uint16_t displayPrimariesX[3];
+    uint16_t displayPrimariesY[3];
+    uint16_t whitePointX;                   ///< Units of 0.00002.
+    uint16_t whitePointY;
+    uint32_t maxDisplayMasteringLuminance;  ///< Units of 0.0001 cd/m².
+    uint32_t minDisplayMasteringLuminance;  ///< Units of 0.0001 cd/m².
+    bool     hasCLL;                        ///< A well-formed payload 144 has been read.
+    uint16_t maxContentLightLevel;          ///< MaxCLL, cd/m². 0 = not indicated (CTA-861.3).
+    uint16_t maxPicAverageLightLevel;       ///< MaxFALL, cd/m². 0 = not indicated.
+} ManifoldHEVCHDR10SEI;
+
 /// A finished HEVC access unit. Every pointer aliases builder-owned storage and is valid until the
 /// next Append or Flush.
 typedef struct {
@@ -78,6 +99,9 @@ typedef struct {
     const uint8_t *ppsList;
     size_t         ppsListSize;
     uint32_t       ppsCount;
+    /// The latest HDR10 SEI the stream has carried (in this access unit or an earlier one), or NULL
+    /// when none has been read. Valid until the next Append or Flush, like every pointer here.
+    const ManifoldHEVCHDR10SEI *hdr10SEI;
 } ManifoldHEVCAccessUnitContents;
 
 typedef struct ManifoldHEVCAccessUnitBuilder ManifoldHEVCAccessUnitBuilder;
@@ -103,6 +127,11 @@ typedef struct {
     uint64_t nalMalformed;             ///< Shorter than the 2-byte header, or forbidden_zero_bit set
     uint64_t nalEmpty;
     uint64_t ppsIdUnreadable;          ///< A PPS whose id did not parse or exceeds 63, ignored
+
+    // ── Prefix SEI, read for HDR10 (Stage 5) ─────────────────────────────────
+    uint64_t seiMDCV;                  ///< Well-formed payload 137 messages read.
+    uint64_t seiCLL;                   ///< Well-formed payload 144 messages read.
+    uint64_t seiMalformed;             ///< Prefix SEI NALs whose message loop stopped on a bad type, size or payload
 
     // ── Access units ─────────────────────────────────────────────────────────
     uint64_t accessUnits;              ///< Emitted (non-empty AUs).

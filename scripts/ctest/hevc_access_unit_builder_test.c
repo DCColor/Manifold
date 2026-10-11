@@ -109,6 +109,178 @@ static int count(const uint8_t *run, size_t size) { int n = 0; while (nth(run, s
 
 // ── Cases ──────────────────────────────────────────────────────────────────────────────────
 
+// ── HDR10 SEI (Stage 5, decision 6) ────────────────────────────────────────────────────────
+
+// x265 4.2's own prefix SEI NALs from `hdr10=1` (master-display G(8500,39850)B(6550,2300)R(35400,14600)
+// WP(15635,16450)L(10000000,1), max-cll 1000,400), NAL header stripped. The MDCV carries an emulation
+// prevention byte inside min luminance (00 00 03 00 01 = 00 00 00 01).
+static const uint8_t X265_CLL[]  = { 0x90, 0x04, 0x03, 0xe8, 0x01, 0x90, 0x80 };
+static const uint8_t X265_MDCV[] = { 0x89, 0x18, 0x21, 0x34, 0x9b, 0xaa, 0x19, 0x96, 0x08, 0xfc, 0x8a, 0x48,
+                                     0x39, 0x08, 0x3d, 0x13, 0x40, 0x42, 0x00, 0x98, 0x96, 0x80, 0x00, 0x00,
+                                     0x03, 0x00, 0x01, 0x80 };
+
+/// The 24 MDCV bytes for a P3-D65 display, 1000 / 0.0001 nits: G(13250,34500) B(7500,3000) R(34000,16000).
+static const uint8_t P3_MDCV_PAYLOAD[24] = { 0x33, 0xC2, 0x86, 0xC4,  0x1D, 0x4C, 0x0B, 0xB8,  0x84, 0xD0, 0x3E, 0x80,
+                                             0x3D, 0x13, 0x40, 0x42,  0x00, 0x98, 0x96, 0x80,  0x00, 0x00, 0x00, 0x01 };
+
+/// Escapes an RBSP into NAL payload bytes (emulation prevention after two zero bytes).
+static size_t escape(const uint8_t *in, size_t n, uint8_t *out) {
+    size_t o = 0; int zeros = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (zeros >= 2 && in[i] <= 3) { out[o++] = 0x03; zeros = 0; }
+        out[o++] = in[i];
+        zeros = in[i] == 0 ? zeros + 1 : 0;
+    }
+    return o;
+}
+
+/// An access unit: parameter sets, then whatever SEI the caller put in `sei`, then an IDR slice.
+static void hdr10AU(ManifoldSRTAccessUnitReader *r, const Buf *sei, int64_t pts) {
+    Buf b = { .size = 0 };
+    nal(&b, 32, 0, VPS_A, sizeof VPS_A);
+    nal(&b, 33, 0, SPS_A, sizeof SPS_A);
+    nal(&b, 34, 0, PPS_0, sizeof PPS_0);
+    if (sei) put(&b, sei->bytes, sei->size);
+    nal(&b, 19, 0, SLICE, sizeof SLICE);
+    submit(r, &b, pts);
+}
+
+static ManifoldHEVCAccessUnitBuilderStats hevcStats(ManifoldSRTAccessUnitReader *r) {
+    ManifoldHEVCAccessUnitBuilderStats st; ManifoldSRTAccessUnitReaderCopyHEVCBuilderStats(r, &st); return st;
+}
+
+/// x265's two real NALs: read in G, B, R order, raw units, through the emulation prevention; the NALs
+/// themselves still reach the access unit byte-for-byte; the values persist into an AU without SEI.
+static void testHDR10RealX265(void) {
+    Sink s; ManifoldSRTAccessUnitReader *r = make(&s);
+    Buf sei = { .size = 0 };
+    nal(&sei, 39, 0, X265_CLL, sizeof X265_CLL);
+    nal(&sei, 39, 0, X265_MDCV, sizeof X265_MDCV);
+    hdr10AU(r, &sei, 90000);
+    CHECK(s.count == 1 && s.last.hdr10SEI != NULL, "an AU with HDR10 SEI");
+    // The pointer is only valid inside the callback; the harness reads the builder's copy through the
+    // next AU instead (below) — and checks the values via a second callback-time snapshot here.
+    const ManifoldHEVCAccessUnitBuilderStats st = hevcStats(r);
+    CHECK(st.seiMDCV == 1 && st.seiCLL == 1 && st.seiMalformed == 0, "one MDCV, one CLL, none malformed");
+    size_t n; const uint8_t *p;
+    CHECK(nth(s.data, s.dataSize, 0, &n, &p) == 39 && n == 2 + sizeof X265_CLL && memcmp(p + 2, X265_CLL, sizeof X265_CLL) == 0,
+          "the CLL SEI passed through unchanged");
+    CHECK(nth(s.data, s.dataSize, 1, &n, &p) == 39 && n == 2 + sizeof X265_MDCV && memcmp(p + 2, X265_MDCV, sizeof X265_MDCV) == 0,
+          "the MDCV SEI passed through unchanged, emulation prevention included");
+    ManifoldSRTAccessUnitReaderDestroy(r);
+}
+
+/// Snapshot of the SEI the handler saw, copied INSIDE the callback (the pointer's lifetime).
+typedef struct { Sink sink; bool have; ManifoldHEVCHDR10SEI hdr10; int seen; } HDRSink;
+static void hdrHandler(const ManifoldSRTAccessUnit *au, void *context) {
+    HDRSink *h = context;
+    handler(au, &h->sink);
+    h->seen++;
+    h->have = au->hdr10SEI != NULL;
+    if (au->hdr10SEI) h->hdr10 = *au->hdr10SEI;
+}
+static ManifoldSRTAccessUnitReader *makeHDR(HDRSink *h) {
+    memset(h, 0, sizeof *h);
+    ManifoldSRTAccessUnitReader *r = ManifoldSRTAccessUnitReaderCreate(ManifoldSRTVideoCodecHEVC);
+    ManifoldSRTAccessUnitReaderSetHandler(r, hdrHandler, h);
+    return r;
+}
+
+static void testHDR10Values(void) {
+    HDRSink h; ManifoldSRTAccessUnitReader *r = makeHDR(&h);
+    Buf sei = { .size = 0 };
+    nal(&sei, 39, 0, X265_CLL, sizeof X265_CLL);
+    nal(&sei, 39, 0, X265_MDCV, sizeof X265_MDCV);
+    hdr10AU(r, &sei, 90000);
+    const ManifoldHEVCHDR10SEI *v = &h.hdr10;
+    CHECK(h.have && v->hasMDCV && v->hasCLL, "both read");
+    CHECK(v->displayPrimariesX[0] == 8500 && v->displayPrimariesY[0] == 39850, "c=0 is GREEN, kept raw (%u, %u)",
+          v->displayPrimariesX[0], v->displayPrimariesY[0]);
+    CHECK(v->displayPrimariesX[1] == 6550 && v->displayPrimariesY[1] == 2300, "c=1 is BLUE");
+    CHECK(v->displayPrimariesX[2] == 35400 && v->displayPrimariesY[2] == 14600, "c=2 is RED");
+    CHECK(v->whitePointX == 15635 && v->whitePointY == 16450, "white point");
+    CHECK(v->maxDisplayMasteringLuminance == 10000000, "max luminance 1000 nits in 0.0001 units");
+    CHECK(v->minDisplayMasteringLuminance == 1, "min luminance through the emulation prevention byte (%u)",
+          v->minDisplayMasteringLuminance);
+    CHECK(v->maxContentLightLevel == 1000 && v->maxPicAverageLightLevel == 400, "MaxCLL / MaxFALL");
+    // An AU with no SEI still reports the stream's latest.
+    hdr10AU(r, NULL, 93754);
+    CHECK(h.seen == 2 && h.have && h.hdr10.maxContentLightLevel == 1000, "latest values persist");
+    // Both messages in ONE NAL, a different display: replaces the values.
+    uint8_t rbsp[64]; size_t k = 0;
+    rbsp[k++] = 137; rbsp[k++] = 24; memcpy(rbsp + k, P3_MDCV_PAYLOAD, 24); k += 24;
+    rbsp[k++] = 144; rbsp[k++] = 4; rbsp[k++] = 0x03; rbsp[k++] = 0x20; rbsp[k++] = 0x00; rbsp[k++] = 0xC8;  // 800, 200
+    rbsp[k++] = 0x80;
+    uint8_t esc[96]; const size_t e = escape(rbsp, k, esc);
+    Buf one = { .size = 0 }; nal(&one, 39, 0, esc, e);
+    hdr10AU(r, &one, 97508);
+    CHECK(h.hdr10.displayPrimariesX[0] == 13250 && h.hdr10.displayPrimariesX[2] == 34000, "P3 from one NAL");
+    CHECK(h.hdr10.maxContentLightLevel == 800 && h.hdr10.maxPicAverageLightLevel == 200, "CLL from the same NAL");
+    CHECK(h.hdr10.minDisplayMasteringLuminance == 1, "min luminance escaped by the harness, read back");
+    const ManifoldHEVCAccessUnitBuilderStats st = hevcStats(r);
+    CHECK(st.seiMDCV == 2 && st.seiCLL == 2 && st.seiMalformed == 0, "counts (%llu %llu %llu)",
+          (unsigned long long)st.seiMDCV, (unsigned long long)st.seiCLL, (unsigned long long)st.seiMalformed);
+    ManifoldSRTAccessUnitReaderDestroy(r);
+}
+
+/// One malformed SEI NAL payload (header excluded): never a crash, never a value, counted; the NAL
+/// still reaches the access unit unchanged.
+static void malformedCase(const char *what, uint8_t type, const uint8_t *payload, size_t n,
+                          bool expectMalformed) {
+    HDRSink h; ManifoldSRTAccessUnitReader *r = makeHDR(&h);
+    Buf sei = { .size = 0 }; nal(&sei, type, 0, payload, n);
+    hdr10AU(r, &sei, 90000);
+    const ManifoldHEVCAccessUnitBuilderStats st = hevcStats(r);
+    CHECK(h.seen == 1, "%s: the access unit still emitted", what);
+    CHECK(!h.have, "%s: no HDR10 values", what);
+    CHECK(st.seiMalformed == (expectMalformed ? 1u : 0u), "%s: malformed count %llu", what,
+          (unsigned long long)st.seiMalformed);
+    size_t len; const uint8_t *p;
+    CHECK(nth(h.sink.data, h.sink.dataSize, 0, &len, &p) == type && len == 2 + n && memcmp(p + 2, payload, n) == 0,
+          "%s: the NAL passed through unchanged", what);
+    ManifoldSRTAccessUnitReaderDestroy(r);
+}
+
+static void testHDR10Malformed(void) {
+    malformedCase("MDCV of 4 bytes", 39, SEI, sizeof SEI, true);            // the builder test's own SEI: 137, size 4
+    uint8_t tooLong[2 + 30 + 1] = { 137, 30 }; tooLong[32] = 0x80;
+    malformedCase("MDCV of 30 bytes", 39, tooLong, sizeof tooLong, true);
+    const uint8_t pastEnd[] = { 137, 24, 0x21, 0x34, 0x9b, 0xaa, 0x19, 0x96, 0x08, 0xfc, 0x8a, 0x48 };
+    malformedCase("MDCV truncated mid-payload", 39, pastEnd, sizeof pastEnd, true);
+    const uint8_t cllShort[] = { 144, 4, 0x03, 0xe8 };
+    malformedCase("CLL truncated", 39, cllShort, sizeof cllShort, true);
+    const uint8_t cllWrong[] = { 144, 2, 0x03, 0xe8, 0x80 };
+    malformedCase("CLL of 2 bytes", 39, cllWrong, sizeof cllWrong, true);
+    const uint8_t typeRun[] = { 0xFF, 0xFF, 0xFF };
+    malformedCase("payload type running off the end", 39, typeRun, sizeof typeRun, true);
+    const uint8_t sizeRun[] = { 137, 0xFF, 0xFF };
+    malformedCase("payload size running off the end", 39, sizeRun, sizeof sizeRun, true);
+    const uint8_t typeOnly[] = { 137 };
+    malformedCase("a 1-byte SEI: type, no size", 39, typeOnly, sizeof typeOnly, true);
+    const uint8_t otherPastEnd[] = { 5, 200, 0x11, 0x22 };
+    malformedCase("another payload past the end", 39, otherPastEnd, sizeof otherPastEnd, true);
+    const uint8_t trailingOnly[] = { 0x80 };
+    malformedCase("rbsp trailing bits only", 39, trailingOnly, sizeof trailingOnly, false);
+    malformedCase("137 in a SUFFIX SEI is not read", 40, X265_MDCV, sizeof X265_MDCV, false);
+
+    // A good MDCV, then a malformed one: the good values stand, nothing half-written.
+    HDRSink h; ManifoldSRTAccessUnitReader *r = makeHDR(&h);
+    Buf a = { .size = 0 }; nal(&a, 39, 0, X265_MDCV, sizeof X265_MDCV);
+    hdr10AU(r, &a, 90000);
+    Buf bad = { .size = 0 }; nal(&bad, 39, 0, pastEnd, sizeof pastEnd);
+    hdr10AU(r, &bad, 93754);
+    CHECK(h.have && h.hdr10.displayPrimariesX[2] == 35400 && h.hdr10.maxDisplayMasteringLuminance == 10000000,
+          "a malformed MDCV after a good one leaves the good values");
+    CHECK(hevcStats(r).seiMalformed == 1 && hevcStats(r).seiMDCV == 1, "one good, one malformed");
+    // Another payload (5, user data) skipped, then a CLL in the same NAL.
+    uint8_t rbsp[] = { 5, 3, 0xAA, 0xBB, 0xCC, 144, 4, 0x03, 0xE8, 0x01, 0x90, 0x80 };
+    Buf mixed = { .size = 0 }; nal(&mixed, 39, 0, rbsp, sizeof rbsp);
+    hdr10AU(r, &mixed, 97508);
+    CHECK(h.hdr10.hasCLL && h.hdr10.maxContentLightLevel == 1000 && h.hdr10.maxPicAverageLightLevel == 400,
+          "user data skipped, CLL read after it");
+    ManifoldSRTAccessUnitReaderDestroy(r);
+}
+
 /// NAL splitting: 3- and 4-byte start codes mixed, AUD dropped, both SEI kept, parameter sets out of
 /// band, lengths exact, emulation prevention untouched.
 static void testSplitting(void) {
@@ -369,6 +541,7 @@ static void testH264Unchanged(void) {
     CHECK(s.last.spsSize == 4 && s.last.ppsSize == 3 && s.last.vps == NULL && s.last.ppsList == NULL && s.last.ppsCount == 0,
           "H.264 parameter sets in sps/pps, HEVC fields empty");
     CHECK(s.dataSize == 4 + 3, "AUD dropped, IDR kept");
+    CHECK(s.last.hdr10SEI == NULL, "no HDR10 SEI on H.264");
     ManifoldHEVCAccessUnitBuilderStats st; ManifoldSRTAccessUnitReaderCopyHEVCBuilderStats(r, &st);
     CHECK(st.accessUnits == 0, "no HEVC builder on an H.264 reader");
     ManifoldSRTAccessUnitReaderDestroy(r);
@@ -383,6 +556,9 @@ int main(void) {
     testOversize();
     testGate();
     testH264Unchanged();
+    testHDR10RealX265();
+    testHDR10Values();
+    testHDR10Malformed();
     printf("hevc_access_unit_builder_test: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }
