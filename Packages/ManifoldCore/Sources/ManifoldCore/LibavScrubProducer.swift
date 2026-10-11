@@ -1,8 +1,10 @@
 import AVFoundation
 import CFFmpeg
+import ColorimetryModel   // ChromaReadout.fourCC
 
 /// The MXF half of the scrub seam: libav seeking, decoding one frame, and handing over a
-/// `CVPixelBuffer` in the app's own x420 contract.
+/// `CVPixelBuffer` in the file's resolved format, the one playback decodes to (`FileChromaProbe`;
+/// `x422` for HQX, `x444` for 4:4:4, Stage 3b S2).
 ///
 /// It exists because `AVPlayerScrubProducer` covers ProRes, H.264 and HEVC and covers **nothing**
 /// in MXF — AVFoundation has no MXF demuxer, so `FrameEngine.loadMXF` routes those files to libav
@@ -26,9 +28,13 @@ import CFFmpeg
 ///     deliberately so that scrub seeks could never disturb the playback decoder's position, and
 ///     that property has to survive the rewrite — a drag issues tens of seeks, and doing them on
 ///     the context the pump is reading from would be a data race and a stutter at once.
-///  4. **x420, not RGBA.** See `LibavPixelConversion.swsDestFormat`. The 8-bit RGBA `CGImage` is
-///     what made MXF HDR previews SDR *by construction*, and deleting it is how the deferred Part 3
-///     of the HDR scrub entry closes.
+///  4. **The playback format, not RGBA.** See `LibavPixelConversion.swsDestFormat`. The 8-bit RGBA
+///     `CGImage` is what made MXF HDR previews SDR *by construction*, and deleting it is how the
+///     deferred Part 3 of the HDR scrub entry closes.
+///  5. **DNxHR 4:4:4 decodes through Apple's plug-in, as playback does** (D9; docs/BUGS.md, *a DNxHR
+///     444 file's scrub frames come from libav*). Same condition (`DNxHRVideoToolboxDecoder
+///     .shouldRoute`), its own session, the same requested format; libav, whose colour is wrong on
+///     that profile, only if the session will not open or dies.
 ///
 /// ── THREADING ─────────────────────────────────────────────────────────────────────────────────
 ///
@@ -98,6 +104,8 @@ private final class Decoder: @unchecked Sendable {
     private var pool: CVPixelBufferPool?
     private var poolW = 0
     private var poolH = 0
+    /// The DNxHR 4:4:4 plug-in route (point 5). nil for every other file, and after a failure.
+    private var vtDecoder: DNxHRVideoToolboxDecoder?
 
     /// Read on `scrubQueue`, written on main at `close()`. A teardown request has to stop an
     /// in-flight decode from touching contexts that are about to be freed.
@@ -177,6 +185,16 @@ private final class Decoder: @unchecked Sendable {
             return false
         }
 
+        // Point 5: the same route decision playback makes, on the same two facts. The libav decoder
+        // above stays open as the fallback, exactly as in `LibavFrameSource`.
+        if DNxHRVideoToolboxDecoder.shouldRoute(codecID: par.pointee.codec_id, profile: par.pointee.profile) {
+            vtDecoder = DNxHRVideoToolboxDecoder(width: par.pointee.width, height: par.pointee.height,
+                                                 pixelFormat: cvFormat)
+            print("LibavScrubProducer: DNxHR 4:4:4 — "
+                + (vtDecoder != nil ? "scrub decodes through Apple's plug-in, as playback does"
+                                    : "plug-in session would not open; scrub decodes through libav"))
+        }
+
         self.fmtCtx = ctx
         self.codecCtx = cctx
         self.pkt = av_packet_alloc()
@@ -216,6 +234,10 @@ private final class Decoder: @unchecked Sendable {
             + Int64((seconds * Double(timeBase.den) / Double(timeBase.num)).rounded())
         av_seek_frame(fmtCtx, videoStreamIndex, target, AVSEEK_FLAG_BACKWARD)
         avcodec_flush_buffers(codecCtx)
+
+        if vtDecoder != nil, let viaPlugin = decodeViaVideoToolbox(at: seconds) {
+            return viaPlugin
+        }
 
         // Decode forward to the target, discarding anything earlier. DNxHR is ALL-INTRA, so the
         // BACKWARD seek lands on the target frame itself and this loop runs once — which is why
@@ -258,6 +280,37 @@ private final class Decoder: @unchecked Sendable {
         return ScrubFrame(pixelBuffer: pb, pts: framePts)
     }
 
+    /// Point 5, after the seek: read packets to the target and decode that one through the plug-in.
+    /// DNxHR is all-intra, so the first packet at or past the target IS the frame, and nothing before
+    /// it needs decoding. nil means "use libav": the route is gone (decoder failure, or the delivered
+    /// format is not the requested one) and the packet that failed has been handed to libav, so the
+    /// caller's loop decodes this position from it.
+    private func decodeViaVideoToolbox(at seconds: Double) -> ScrubFrame? {
+        guard let fmtCtx, let codecCtx, let pkt, let decoder = vtDecoder else { return nil }
+        while true {
+            if closed { return nil }
+            guard av_read_frame(fmtCtx, pkt) >= 0 else { return nil }
+            guard pkt.pointee.stream_index == videoStreamIndex else { av_packet_unref(pkt); continue }
+            let ts = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            let sec = Double(ts - startTimeTicks) * Double(timeBase.num) / Double(timeBase.den)
+            if sec + 1e-6 < seconds { av_packet_unref(pkt); continue }
+            let pts = CMTime(value: (ts - startTimeTicks) &* Int64(timeBase.num), timescale: timeBase.den)
+            let image = decoder.decode(packet: pkt, pts: pts, duration: .invalid)
+            if let image, CVPixelBufferGetPixelFormatType(image) == cvFormat {
+                av_packet_unref(pkt)
+                return ScrubFrame(pixelBuffer: image, pts: sec)
+            }
+            print("[DNX-VT] scrub: plug-in "
+                + (image == nil ? "decode failed" : "delivered \(ChromaReadout.fourCC(CVPixelBufferGetPixelFormatType(image!)))")
+                + " — scrub falls back to libav for the rest of this file")
+            decoder.shutdown()
+            vtDecoder = nil
+            _ = avcodec_send_packet(codecCtx, pkt)
+            av_packet_unref(pkt)
+            return nil
+        }
+    }
+
     /// A small pool, unlike playback's 20. Only one scrub frame is decoded at a time and the
     /// renderer holds at most the current one plus the last presented; 4 covers that with slack
     /// and keeps a 4K 10-bit (~16 MB) buffer from being reallocated on every position.
@@ -283,6 +336,8 @@ private final class Decoder: @unchecked Sendable {
     }
 
     private func freeOnQueue() {
+        vtDecoder?.shutdown()     // watchdogged (3 s): see DNxHRVideoToolboxDecoder.shutdown()
+        vtDecoder = nil
         if codecCtx != nil { avcodec_free_context(&codecCtx) }
         if fmtCtx != nil { avformat_close_input(&fmtCtx) }
         if pkt != nil { av_packet_free(&pkt) }

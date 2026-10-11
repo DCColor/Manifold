@@ -57,6 +57,11 @@ struct ManifoldApp: App {
         // build produced it is not evidence — see BuildInfo for why this is derived rather than
         // assumed, and why the "not valid for measurement" warning keys on -Onone and not on DEBUG.
         BuildInfo.logAtStartup()
+        // The DEBUG chroma switch (`MANIFOLD_FORCE_CHROMA_420`, Stage 3b) reaches the file resolver in
+        // ManifoldCore, which cannot see DEBUG under Profile. Always false in Release. Before any file
+        // can be opened.
+        FileChromaPolicy.set(force420: MetalVideoRenderer.forceChroma420,
+                             reason: MetalVideoRenderer.forceChroma420Reason)
         // D1: prove the DeckLink SDK links and the card is reachable — enumerate + log at startup.
         DeckLinkService.shared.logDevicesAtStartup()
         // …and restore the operator's manual output-mode pick BEFORE any source can be opened, so a
@@ -274,6 +279,8 @@ struct ManifoldApp: App {
                 ForcedVideoJumpCommand()
                 Divider()
                 NDIAudioWAVCaptureCommand()
+                Divider()
+                ChromaScrubBenchCommand()
             }
             }
             #endif
@@ -399,6 +406,51 @@ private struct NDIAudioToneTestCommand: View {
 ///
 /// Same `@ObservedObject` reasoning as the item above: the title has to track the service so the
 /// menu can show the elapsed time and size while recording.
+/// Debug ▸ Chroma Scrub Bench (⌃⌥⇧B) — Stage 3b S2's P6 and P7, unattended (pre-ship list,
+/// docs/BUGS.md). On the key deck's paused file: export the frame playback put on screen, then 60
+/// scrub positions at 20 Hz across the file (the scrub seam, exactly as a drag feeds it), then a
+/// scrub back to the paused position and a second export, which is the SCRUB producer's frame. Then
+/// the release, which prints the `[SCRUB]` latency line (with `MANIFOLD_SCRUB_STATS=1`). The two
+/// exports' `.rgba16f` are what P6 compares.
+private struct ChromaScrubBenchCommand: View {
+    var body: some View {
+        Button("Chroma Scrub Bench") { ChromaScrubBench.run() }
+            .keyboardShortcut("b", modifiers: [.control, .option, .shift])
+    }
+}
+
+@MainActor
+private enum ChromaScrubBench {
+    static func run() {
+        guard let deck = DeckRegistry.shared.keyDeck, let engine = deck.engine,
+              let renderer = deck.renderer, engine.hasMedia, engine.duration > 0 else {
+            NSLog("[SCRUB-BENCH] load a file in the key window first"); return
+        }
+        let home = engine.currentTime
+        let span = engine.duration * 0.9
+        print("[SCRUB-BENCH] begin \(engine.currentURL?.lastPathComponent ?? "?") at \(home)s")
+        Task { @MainActor in
+            print("[SCRUB-BENCH] export playback")
+            renderer.exportCurrentFrame()
+            // Export names carry whole seconds: two inside one second would share a name.
+            try? await Task.sleep(for: .milliseconds(1500))
+            // 60 positions at 20 Hz, spread over the file in a fixed scattered order (a golden-ratio
+            // walk), so no two neighbours are adjacent frames.
+            for i in 0..<60 {
+                engine.scrubSeek(to: (Double(i) * 0.618_034).truncatingRemainder(dividingBy: 1) * span)
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            engine.scrubSeek(to: home)
+            try? await Task.sleep(for: .milliseconds(1500))
+            print("[SCRUB-BENCH] export scrub")
+            renderer.exportCurrentFrame()
+            try? await Task.sleep(for: .milliseconds(1500))
+            engine.exactSeek(to: home)
+            print("[SCRUB-BENCH] end")
+        }
+    }
+}
+
 /// Debug ▸ Renderer Input — TEST 2. Toggles NDI's renderer input between its native shape
 /// (variable 480..530 samples at ~92 Hz) and WHEP's (fixed 960 at 50 Hz), which is known good
 /// through this exact renderer. A/B it live; the samples are identical either way, only the

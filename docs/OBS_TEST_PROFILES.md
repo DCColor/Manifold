@@ -38,6 +38,7 @@ Shared by every profile below unless stated otherwise:
 | **HEVC SRT** | HDR over SRT: Stage 6 and any HDR session. Created 2026-10-09 21:53 | Custom; SRT **caller** to local MediaMTX, `publish` stream id (**the same path as SRT Local 2**: never stream both at once) | **Apple VT HEVC Hardware; Main 10; bitrate 12000** (rate control not stored: CBR by default); keyframe **1 s**; **B-frames off** | **P010 / Rec. 2100 (PQ) / Limited**; SDR white **203**, HDR peak **1000** | 23.976 | CoreAudio AAC, **320**, 48 kHz | SYNC |
 | **WHIP Cloudflare** | Cloudflare over WHIP (WHEP tests) | WHIP to Cloudflare | Apple VT H.264 Hardware; keyframe **1 s**; Main; **B-frames off**; bitrate not stored (logged **CBR 6000** on 2026-10-06) | NV12 / 709 / Limited | 23.976 | **FFmpeg Opus, 256**, 48 kHz | SYNC |
 | **MediaMTX Local** | WHIP to the local MediaMTX (WHEP tests) | WHIP to local MediaMTX | **Apple VT H.264 Hardware**; keyframe **1 s**; Main; **B-frames off**; bitrate not stored. ⚠️ Flag 3 | NV12 / 709 / Limited | 23.976 | **FFmpeg Opus, 160**, 48 kHz | SYNC |
+| **NDI Bars (P2)** | §6.10 Stage 3b S1, P2: NDI chroma siting (attended 2026-10-10 21:44–21:47). **Sends NDI, not a stream.** Added 2026-10-10 after the session; verified ~22:10 (below) | **Nothing streamed:** the WHIP service it inherited (type `whip_custom`) was not started. The test path is DistroAV's **NDI Main Output "OBS PGM"**, which is global to OBS (`user.ini [NDIPlugin]`), not part of the profile | Inherited, unused: Apple VT H.264 Hardware; keyframe 1 s; Main; B-frames off; bitrate not stored | NV12 / 709 / Limited (the NDI output's own conversion is not established; Manifold received UYVY, 4:2:2) | 23.976 | Inherited, unused: FFmpeg Opus 256 | **Bars** (one Image source "Image": `build/chroma-fixtures/p2-bars.png`) |
 | **Recorder** | The Audio Hijack / device-measurement recorder instance (CLAUDE.md, *Test environment*; AV_SYNC_FINDINGS.md §1.2) | **Simple** mode, recording only | x264 veryfast, 6000 (Simple mode, recording quality "same as stream"), output **1280×720** | NV12 / 709 / Limited | 23.976 | AAC 160, 48 kHz | **AV Capture** (collection "AV Capture") |
 
 **Scenes.** Every streaming profile uses the scene collection **"Untitled"**.
@@ -114,3 +115,20 @@ Robbie on 2026-10-09 as "HEVC SRT"** and verified ~22:00 against the proposal:
   from presentation timestamps.
 
 Changing its name, destination or any value is a new row, not an edit to this one.
+
+## NDI Bars (P2): verified after its session
+
+Created by Robbie on 2026-10-10 at 21:41:41 (OBS log: `Created profile 'NDI Bars (P2)' (duplicate,
+NDI_Bars_P2)`) for §6.10's Stage 3b S1 P2, and used once, 21:44–21:52. Its row was added afterwards,
+not before the session as the rule above asks. Read ~22:10, read-only, from the profile's files and that
+session's log (`2026-10-10 21-41-16.txt`):
+- **A duplicate of WHIP Cloudflare.** `basic.ini` (secrets excluded from the read) and
+  `streamEncoder.json` are identical to WHIP Cloudflare's except `Name`; `service.json` is
+  `whip_custom`. The log shows **no stream output** in the session, so none of those settings were used.
+- **What was sent:** DistroAV (NDI runtime 6.0.1) **Main Output "OBS PGM"**, started 21:44:16, stopped
+  21:52:37, 12 014 frames. Canvas 1920×1080, 24000/1001, `format: NV12`, `YUV mode: Rec. 709/Partial`.
+  The NDI output is set in `user.ini`, not in the profile, so **any** profile sends it while it is on.
+- **Scene:** "Bars", added 21:41:58 to the collection "Untitled", holding one Image source "Image" with
+  `p2-bars.png` (two Media sources were added and removed first). It is not SYNC.
+- **Matches §6.10.** S1's results name the profile "NDI Bars (P2)" and the Image source `p2-bars.png`;
+  both are right.

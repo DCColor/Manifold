@@ -40,7 +40,8 @@ held back until after release, and the numbered defect entries follow.
      source, 4:4:4 files included, under the rule now in `CLAUDE.md`. Stages S1 (renderer and
      readout), S2 (files), S3 (SRT 4:2:2, HEVC and H.264), S4 (SRT 4:4:4), S5 (the OBS customer pass).
      Audit, decisions D1–D11 and predictions P1–P13: §6.10, *Stage 3b — 4:2:2 (and 4:4:4) end to end:
-     audit*.
+     audit*. **S1 committed (`c93be09`). S2 built and run unattended 2026-10-10, not committed** (§6.10,
+     *Stage 3b, S2 — results*).
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
@@ -901,9 +902,10 @@ to send Export Diagnostics for a sync problem.
 
 ---
 
-## ☐ PRE-SHIP: remove the Stage 3b DEBUG v210 dump and `MANIFOLD_FORCE_CHROMA_420`
+## ☐ PRE-SHIP: remove the Stage 3b DEBUG v210 dump, `MANIFOLD_FORCE_CHROMA_420`, the Chroma Scrub Bench and `[PLAYBACK-STATS]`
 
-**Added 2026-10-10** with Stage 3b S1 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b, S1*).
+**Added 2026-10-10** with Stage 3b S1 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b, S1*). **Widened
+2026-10-10** with S2 (the last two items; §6.10, *Stage 3b, S2*).
 
 - **What they are:**
   - **The v210 dump:** in DEBUG, ⌃⌥E also runs `rgbToV210` on the frame it exports and writes the raw
@@ -912,9 +914,20 @@ to send Export Diagnostics for a sync problem.
   - **`MANIFOLD_FORCE_CHROMA_420=1`** (launch environment, never `defaults`): every path that would carry
     4:2:2 or 4:4:4 converts to `x420` instead, and the chain readout names the switch. It is how the
     fallback (P10) is tested on a Mac that never needs it.
-- **Gating:** both `#if DEBUG`: absent from Release, present in Profile.
-- **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch.
-- **Remove** both before ship, or keep the dump as Profile telemetry by decision.
+    S2 carries it to files: the app pushes it into ManifoldCore at launch (`FileChromaPolicy`), and the
+    file banner is raised with the switch named.
+  - **Debug ▸ Chroma Scrub Bench** (⌃⌥⇧B, Debug menu only, so `MANIFOLD_DEBUG_MENU=1`): on the key
+    deck's paused file, exports the playback frame, drives 60 scrub positions at 20 Hz through
+    `FrameEngine.scrubSeek`, scrubs back and exports the scrub frame, then releases (the `[SCRUB]` line
+    with `MANIFOLD_SCRUB_STATS=1`). How S2's P6 and P7 run unattended.
+  - **`MANIFOLD_PLAYBACK_STATS=1`** (launch environment): a per-second `[PLAYBACK-STATS] presented=
+    dropped= late=` line from the renderer's frame selection while the transport runs. How P8 counts
+    late and dropped frames on file playback without a DeckLink card.
+- **Gating:** all four `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+  ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
+- **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
+  bench only on its menu item; the stats line one flag test per selected frame when off.
+- **Remove** all four before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -1290,9 +1303,13 @@ decode itself was measured offline, the app path was not run.
 
 ---
 
-## ☐ OPEN 2026-10-10 — SCHEDULED FOR 1.0 (Stage 3b, S2) — PRE-EXISTING, FILES — a DNxHR 444 file's scrub frames come from libav while playback uses Apple's plug-in
+## ✅ FIXED 2026-10-10 (Stage 3b S2, not committed) — PRE-EXISTING, FILES — a DNxHR 444 file's scrub frames came from libav while playback used Apple's plug-in
 
-**Status:** OPEN. Found by reading the source in the Stage 3b audit; not run.
+**Status:** FIXED in the working tree, not committed. Found by reading the source in the Stage 3b audit;
+**measured** in S2 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b, S2 — results*, P6): on HEAD
+`c93be09`, `checker-444-dnxhr444.mov` played through the plug-in (chroma 693/331 on row 0) and scrubbed
+through libav (512/512, grey), so the two exports differed. On S2 both decode through the plug-in at
+`x444` and the scrub export is md5-identical to the playback export.
 
 - **What happens:** `LibavFrameSource` sends DNxHR 4:4:4 (CID 1270) to `DNxHRVideoToolboxDecoder`
   because libav decodes it with the wrong colour (variable ACT: green and magenta). `LibavScrubProducer`
@@ -1300,7 +1317,31 @@ decode itself was measured offline, the app path was not run.
   colour while the played frame is right, which breaks the "scrub frame = playback frame" property the
   scrub producer exists for (*feed the scrub gesture from `AVPlayerItemVideoOutput`*, below).
 - **Fix:** Stage 3b S2 (D9): the scrub producer takes the plug-in route on the same condition
-  (`DNxHRVideoToolboxDecoder.shouldRoute`), decoding to `x444`.
+  (`DNxHRVideoToolboxDecoder.shouldRoute`), with its own session, decoding to `x444`. If the session
+  will not open, or a decode fails or delivers another format, scrub falls back to libav for the rest of
+  the file and says so (`[DNX-VT] scrub: …`), as playback does.
+
+---
+
+## ☐ OPEN 2026-10-10 — PRE-EXISTING, FILES — the DNxHR 4:4:4 plug-in route range-compresses a legal-range `.mov`: it synthesizes the Avid MXF's `ADHR` instead of using the file's own
+
+**Status:** OPEN. Found in Stage 3b S2 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *S2 — results*, P4).
+Not caused by S2: HEAD `c93be09` gives the same luma and chroma amplitude.
+
+- **What happens:** `DNxHRVideoToolboxDecoder` always builds its format description with the `ADHR`
+  atom measured on `Mixed Captions.mxf` (Avid-made, RGB, full range): `"0002"`, `[1270, 2, 3,
+  0x00010000, 0, 2]`. That is right for MXF, which carries no atom. A `.mov` carries its own, and
+  `checker-444-dnxhr444.mov` (ffmpeg, YUV 4:4:4 10-bit, legal range) has `"0001"`, `[1270, 2, 2,
+  0x00010000, 0, 0]`. Given the synthesized atom, the plug-in treats the file as full range and
+  compresses it: **luma 512 → 502** (64 + 512 × 876/1023) and **chroma × 0.856** about 512 (checker
+  691/334 where AVFoundation's own read of the same file gives 721/303). The engine's buffer range
+  for the route is `.videoLegal`, so nothing expands it back.
+- **Who sees it:** DNxHR 444 in `.mov` (`MediaInspector.requiresLibavDecode` sends DNx `.mov` to libav,
+  and the 444 profile to the plug-in). Whether real Resolve- or Avid-made 444 `.mov` files carry an
+  atom the plug-in reads as legal is not established: no such file is in the corpus.
+- **Fix, not made:** when the container has an `ADHR` (libav `extradata`, or AVFoundation's format
+  description for a `.mov`), pass the file's own atom; synthesize only when there is none (MXF). The
+  first-frame confirm and the buffer-range rule then need the atom's range, not a constant.
 
 ---
 
@@ -5926,6 +5967,16 @@ its NV12 default branch, which would write 8-bit 4:2:0 into a 4:2:2 buffer, goes
 truncation stays out (D5), and the reason is now measured, not just scoped:** a 16-bit container
 (`sv22`/`sv44`, P216/P416) would carry 12-bit at the same memory, but the `rgba16Float` offscreen holds
 about 11 significant bits above mid-grey and v210 is 10-bit, so 12-bit needs a float32 offscreen first.
+
+**THE 4:2:2 HALF IS DONE, 2026-10-10 (Stage 3b S2; working tree, not committed).** One resolver
+(`FileChromaProbe`, its tables in the `FileChroma` target) decides each file's format at load, before
+either decoder exists, and both read it: `x422` for 4:2:2, `x444` for 4:4:4, `x420` for 4:2:0 and for
+codecs with no table (D8). `LibavPixelConversion` writes P210/P410, and its NV12 default is gone.
+**Measured** (§6.10, *Stage 3b, S2 — results*): the lines-422 fixture keeps 1080 of 1080 chroma rows
+on every decode path (ProRes 422 HQ, H.264 and HEVC 4:2:2 on AVFoundation; ProRes 422 HQ MXF, DNxHR
+HQX MXF and `.mov` on libav), through export and the v210 output; HEAD kept 0 (540 on ProRes). The
+scrub frame is md5-identical to the playback frame on every 4:2:2 and 4:4:4 fixture, so the
+byte-identity above holds at native chroma. **Still true:** 12-bit sources are carried at 10 bits (D5).
 
 ⚠️ **MASTERING-DISPLAY METADATA IS PRESENT ON THE PQ FIXTURE AND THIS PATH DOES NOT CARRY IT.** It
 is decoded as frame side data and then dropped: `LibavFrameSource.convert` sets three attachments

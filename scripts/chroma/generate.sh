@@ -3,7 +3,7 @@
 # picture comes from ffmpeg's own sources (lavfi `nullsrc` + `geq`, `yuvtestsrc`, `testsrc2`). No media
 # goes in, and none comes out into the repo.
 #
-#   zsh scripts/chroma/generate.sh [group ...]     # all groups, or the ones named: 422 444 420 4k ndi
+#   zsh scripts/chroma/generate.sh [group ...]     # all groups, or the ones named: 422 444 420 4k ndi s2
 #
 # Output (gitignored): build/chroma-fixtures/   (CHROMA_FIXTURES_OUT overrides)
 #
@@ -28,7 +28,7 @@ set -eu
 HERE=${0:A:h}; REPO=${HERE:h:h}
 OUT=${CHROMA_FIXTURES_OUT:-$REPO/build/chroma-fixtures}; mkdir -p $OUT
 cd $OUT
-groups=($@); (( $#groups )) || groups=(422 444 420 4k ndi)
+groups=($@); (( $#groups )) || groups=(422 444 420 4k ndi s2)
 q=(-hide_banner -loglevel error -y)
 
 PAT_LINES="nullsrc=s=1920x1080:r=25:d=10,format=yuv422p10le,geq=lum=512:cb='if(mod(Y\,2)\,300\,724)':cr='if(mod(Y\,2)\,724\,300)'"
@@ -86,7 +86,15 @@ for g in $groups; do
     ffmpeg $q -f lavfi -i "nullsrc=s=1920x1080:d=1,format=gbrp,geq=r='191*(lt(trunc(X/240)\,2)+eq(trunc(X/240)\,4)+eq(trunc(X/240)\,5))':g='191*lt(trunc(X/240)\,4)':b='191*eq(mod(trunc(X/240)\,2)\,0)*lt(trunc(X/240)\,7)'" \
       -frames:v 1 -pix_fmt rgb24 p2-bars.png
     ;;
-  *) print -u2 "unknown group: $g (422 444 420 4k ndi)"; exit 2 ;;
+  s2)
+    # S2's P8 (memory and 60 s of play at 4K) and the D8 "chroma unknown" check. ~14 GB, ~4 min.
+    # 62 s so a 60 s play never reaches the end (the loop wrap is a re-seek, not a playback measure).
+    ffmpeg $q -f lavfi -i "testsrc2=s=3840x2160:r=25:d=62" -c:v dnxhd -profile:v dnxhr_hqx -pix_fmt yuv422p10le -f mxf 4k-422-dnxhrhqx-62s.mxf
+    ffmpeg $q -f lavfi -i "testsrc2=s=3840x2160:r=25:d=62" -c:v prores_ks -profile:v 4 -pix_fmt yuv444p10le 4k-444-prores4444-62s.mov
+    # MPEG-4 Part 2: a codec AVFoundation plays and the resolver has no table for (D8: x420, "unknown").
+    ffmpeg $q -f lavfi -i "testsrc2=s=1920x1080:r=25:d=5" -c:v mpeg4 -q:v 3 -pix_fmt yuv420p unknown-mpeg4.mov
+    ;;
+  *) print -u2 "unknown group: $g (422 444 420 4k ndi s2)"; exit 2 ;;
   esac
 done
 ls -l $OUT

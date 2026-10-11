@@ -74,6 +74,7 @@ import CoreMedia   // CMTimeGetSeconds — the NDI desktop-audio timebase read b
 import UniformTypeIdentifiers
 import ManifoldCore
 import StreamBookmarkModel
+import ColorimetryModel   // SourceChroma — the file's chroma to the renderer (Stage 3b S2)
 
 // MARK: - Exclusive devices
 
@@ -939,6 +940,12 @@ final class DeckRegistry {
             renderer?.setSourceColorSpace(
                 primaries: primaries, transfer: transfer, matrix: matrix,
                 provenance: .fromCodes(primaries: primaries, transfer: transfer, matrix: matrix))
+        }
+        // THE FILE'S CHROMA (Stage 3b S2, D10), on the same edges as the colour tags and for the same
+        // reason: the Chroma line describes this deck's file before its first frame, and stops
+        // describing it at unload. The carried format the renderer reads off the buffers itself.
+        engine.onSourceChroma = { [weak renderer] chroma, reason in
+            renderer?.setSourceChroma(chroma, reason: reason)
         }
         // THE SOURCE'S DECLARED GEOMETRY — `clap` and `pasp` — at the same site and per-window for
         // the same reason: this deck's engine describes this deck's file to this deck's renderer.

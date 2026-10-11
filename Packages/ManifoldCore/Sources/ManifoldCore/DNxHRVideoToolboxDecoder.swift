@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 import VideoToolbox
 import CFFmpeg
+import ColorimetryModel   // ChromaReadout.fourCC
 
 /// Whether Apple's Avid DNxHR plug-in decoder is present in THIS process.
 ///
@@ -132,19 +133,26 @@ final class DNxHRVideoToolboxDecoder {
     private var lastImage: CVPixelBuffer?
     private var lastStatus: OSStatus = noErr
 
+    /// The format requested, and therefore the one the first-frame confirm checks for.
+    let pixelFormat: OSType
+
     /// `nil` when no session could be opened — the caller must fall back to libav.
-    init?(width: Int32, height: Int32) {
+    ///
+    /// `pixelFormat` is the file's resolved format (`FileChromaProbe`): `x444` for DNxHR 444, its
+    /// native chroma (Stage 3b S2), or `x420` under the DEBUG force switch.
+    init?(width: Int32, height: Int32, pixelFormat: OSType) {
+        self.pixelFormat = pixelFormat
         guard let fd = Self.makeFormatDescription(width: width, height: height) else {
             print("[DNX-VT] could not build the format description — staying on libav")
             return nil
         }
         formatDescription = fd
 
-        // The decode contract, unchanged: 10-bit 4:2:0 video range. Requested explicitly rather
-        // than accepting the decoder's native `b64a`, so nothing downstream has to change.
+        // The file's resolved format: 10-bit biplanar video range at the source's own chroma
+        // (`x444`). Requested explicitly rather than accepting the decoder's native `b64a`, so the
+        // renderer takes it like any other biplanar buffer. Was `x420` until Stage 3b S2.
         let attrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey:
-                Int(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
+            kCVPixelBufferPixelFormatTypeKey: Int(pixelFormat),
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
         ]
         var callback = VTDecompressionOutputCallbackRecord(
@@ -170,7 +178,8 @@ final class DNxHRVideoToolboxDecoder {
             return nil
         }
         session = created
-        print("[DNX-VT] session opened for DNxHR 4:4:4 (CID 1270), requesting x420")
+        print("[DNX-VT] session opened for DNxHR 4:4:4 (CID 1270), requesting "
+            + ChromaReadout.fourCC(pixelFormat))
     }
 
     // MARK: - Decode

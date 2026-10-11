@@ -37,6 +37,27 @@ public enum H264SPSColor {
         return readSPS(&reader)
     }
 
+    // MARK: - The chroma format (§6.10, Stage 3b S2)
+
+    /// `chroma_format_idc` of one SPS NAL (same framing as `parse`): 0 monochrome, 1 4:2:0, 2 4:2:2,
+    /// 3 4:4:4. Coded only in the high-profile block; every other profile is 4:2:0 by definition
+    /// (§7.4.2.1.1: "When chroma_format_idc is not present, it shall be inferred to be equal to 1").
+    /// nil when this is not an SPS or it ends before the field.
+    public static func chromaFormatIdc<Bytes: Collection>(nal: Bytes) -> Int? where Bytes.Element == UInt8 {
+        guard nal.count >= 5, let header = nal.first, header & 0x80 == 0, header & 0x1F == 7,
+              nal.count <= SPSColor.maximumSPSBytes else { return nil }
+        var r = BitReader(rbsp: SPSColor.unescape(nal.dropFirst()))
+        let profileIdc = r.bits(8)
+        _ = r.bits(16)                                  // constraint flags, level_idc
+        guard r.ue() <= 31, !r.overrun else { return nil }
+        guard Self.highProfiles.contains(profileIdc) else { return 1 }
+        let idc = r.ue()
+        return r.overrun || idc > 3 ? nil : idc
+    }
+
+    /// The `profile_idc` values that code the high-profile block (chroma format, bit depths, scaling).
+    static let highProfiles: Set<Int> = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135]
+
     // MARK: - seq_parameter_set_data(), H.264 §7.3.2.1.1, up to the colour fields only
 
     private static func readSPS(_ r: inout BitReader) -> SPSColor {
@@ -49,7 +70,7 @@ public enum H264SPSColor {
 
         // The high-profile block, present ONLY for these profile_idc values. The most commonly
         // botched part of SPS parsing: getting the list wrong shifts everything after it.
-        if [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].contains(profileIdc) {
+        if highProfiles.contains(profileIdc) {
             let chromaFormatIdc = r.ue()
             guard chromaFormatIdc <= 3 else { return malformed }
             if chromaFormatIdc == 3 { _ = r.bit() }     // separate_colour_plane_flag

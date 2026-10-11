@@ -30,6 +30,9 @@ let package = Package(
         .library(name: "ColorimetryModel", targets: ["ColorimetryModel"]),
         // Linked by the APP target directly (project.yml), for SRT's and WHEP's declared colour.
         .library(name: "SPSColor", targets: ["SPSColor"]),
+        // ManifoldCore uses it (the file chroma resolver, §6.10 Stage 3b S2); a product so the tests
+        // and anything else can name it.
+        .library(name: "FileChroma", targets: ["FileChroma"]),
         // Linked by the APP target directly (project.yml), for App/SRT's audio decoder.
         .library(name: "AACFraming", targets: ["AACFraming"]),
         // Linked by the APP target directly (project.yml), for calibration mode's sheet, the flash
@@ -216,6 +219,26 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // A file's native chroma: the ProRes fourCC table, the SPS in avcC/hvcC, a libav pix_fmt's
+        // shifts, and the format that carries the answer (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10,
+        // Stage 3b S2). A leaf target for the same linking reason as the others: `swift test` cannot
+        // link ManifoldCore, which does the CoreMedia and libav reads and calls in here.
+        .target(
+            name: "FileChroma",
+            dependencies: ["ColorimetryModel", "SPSColor"],
+            path: "Sources/FileChroma",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "FileChromaTests",
+            dependencies: ["FileChroma", "ColorimetryModel", "SPSColor"],
+            path: "Tests/FileChromaTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // Splits one PES payload into its ADTS frames (docs/BUGS.md, "SRT audio decodes nothing
         // when a PES carries more than one ADTS frame"). A leaf target for the same reason as
         // RTCPWire: `swift test` must reach the byte layouts. The app links it through the
@@ -296,7 +319,7 @@ let package = Package(
         .target(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
-                           "FileAudioLookahead", "StartupRealign"],
+                           "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

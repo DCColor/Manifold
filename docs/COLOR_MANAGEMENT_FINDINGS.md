@@ -4174,6 +4174,145 @@ builds succeeded. **Defaults:** exported before the first launch (1 142 keys). T
 by name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. The HEAD worktree
 was removed. **Not committed.**
 
+#### Stage 3b, S2 — files at native chroma: predictions, written 2026-10-10 22:00 before the code changed
+
+**Estimated run:** ~5 h unattended (code ~1.5 h, two Profile builds, ~2–2.5 h of app runs, docs).
+
+**What changes:**
+- **One resolver, `FileChromaResolver`, run once per file at load,** before either decoder exists. Its
+  answer (carried format, declared chroma, reason) is held by `FrameEngine` and handed to the scrub
+  producer AND the playback source, so they cannot disagree. Inputs:
+  - **AVFoundation files:** ProRes by fourCC (`apco apcs apcn apch` 4:2:2; `ap4h ap4x` 4:4:4; ProRes RAW
+    unknown); H.264 (`avc1 avc3`) from the first SPS in `avcC`, `chroma_format_idc`; HEVC (`hvc1 hev1`)
+    from the first SPS in `hvcC`. Anything else (AVC-Intra, XDCAM, DVCPRO HD, MPEG-4…) is **unknown**:
+    carried as `x420`, readout "source chroma unknown" (D8).
+  - **libav files (DNx in `.mov`, every MXF):** from the stream's `pix_fmt` (`av_pix_fmt_desc_get`'s
+    `log2_chroma_w/h`; RGB is 4:4:4). Read in a probe that opens the container once at load; the result
+    goes to both decoders.
+  - **The debug switch `MANIFOLD_FORCE_CHROMA_420`** reaches the resolver from the app (ManifoldCore cannot
+    see `DEBUG` under Profile), which then carries `x420` with the switch named as the reason.
+- **AVF:** `FileFrameSource` and `AVPlayerScrubProducer` take the resolved format unchanged (`x422`/`x444`).
+- **libav:** `LibavPixelConversion` picks P010/P210/P410 from the frame's own `pix_fmt` against the buffer
+  it is filling. **The NV12 default goes**: a buffer format it does not know fails the fill (logged once)
+  instead of writing 8-bit 4:2:0 into it.
+- **DNxHR 444:** the plug-in session requests `x444`, and the first-frame confirm checks `x444`.
+  **`LibavScrubProducer` gets the same plug-in route** on the same condition (`shouldRoute`) with its own
+  session, so the scrub frame of a DNxHR 444 file is the plug-in's (D9).
+- **The Chroma line for files:** the engine states the resolver's answer to the renderer at the same
+  point it publishes the colour tags (before the first frame), and clears it at unload.
+- **The fallback:** when the decoder delivers a different format from the one requested (first frame of
+  playback), the engine says so in the readout's reason and in `playbackNotice`, and the next read and
+  the scrub producer take `x420` so the two stay equal. The force switch takes the same banner.
+- **DEBUG instruments (pre-ship list):** Debug ▸ Chroma Scrub Bench (`MANIFOLD_DEBUG_MENU=1`): exports the
+  paused playback frame, then 60 scrub positions at 20 Hz, then a scrub to the paused position and a
+  second export, and the `[SCRUB]` line. `MANIFOLD_PLAYBACK_STATS=1`: a per-second
+  `[PLAYBACK-STATS] presented= dropped= late=` line for file playback (dropped: frames discarded unseen
+  at selection; late: a frame selected more than one display period after its time).
+
+**Fixtures.** `scripts/chroma/generate.sh 422 444 420` (existing); new for P8, group `4k`: 62 s 4K
+DNxHR HQX MXF and 62 s 4K ProRes 4444 `.mov`. Real files (`/Volumes/DCCOLOR/TEST FLIP/`): `Mixed
+Captions.mxf` (DNxHR 444 12-bit), `OP1A Test.mxf` (HQX), `DNX As MOV 10bit.mov`, `M001C008_161207_R00H.mov`
+(ARRI ProRes 4444 XQ). Builds: HEAD `c93be09` (S1) and S2, unsigned Profile, own `.build-cc` paths.
+
+**Measuring.** Export = the ⌃⌥E `.rgba16f` readback, converted to Y′CbCr codes with the BT.709 limited
+matrix (the fixtures are untagged, so the renderer uses 709); wire = the `.v210` dump. A row passes P3
+when ≥ 99 % of its chroma samples are within ±2 codes of that row's source value (724/300 or 300/724).
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| P3 | lines-422 on ProRes 422 HQ `.mov` and H.264 4:2:2 Intra `.mov` and HEVC 4:2:2 `.mov` (AVF), ProRes 422 HQ MXF, DNxHR HQX MXF and DNxHR HQX `.mov` (libav): export AND wire | ≥ 99.9 % of rows (≥ 1079 / 1080) on all six, both | any below. HEAD, as the control: grey (H.264, HEVC, libav) or the even row's colour (ProRes) |
+| P4 | checker-444 through export: ProRes 4444 and 4444 XQ `.mov`, HEVC 4:4:4 `.mov` (AVF), ProRes 4444 MXF (libav); DNxHR 444 `.mov` (plug-in) | ProRes and HEVC ≥ 99.9 % of chroma samples within ±2; DNxHR 444 ≥ 96 % within ±4 | below |
+| P5 | checker-444 on the wire, the same five | Cb/Cr 512 ± 2 on ≥ 99.9 % of samples; DNxHR 444 within ±4 (lossy) | 724/300 (alias) |
+| P6 | Scrub frame = playback frame, every 4:2:2 / 4:4:4 fixture above | `.rgba16f` (and PNG) md5 identical | any byte |
+| P7 | Scrub `seek→deliver` mean at 20 Hz, 3 runs each, median of the three: 4K ProRes 422 HQ `.mov`, 1080 ProRes 4444 `.mov` (AVF); 4K HQX MXF, 1080 HQX MXF (libav) | AVF ≤ HEAD (+0.3 ms noise allowance, stated now); libav ≤ HEAD + 1 ms | worse |
+| P8 | 4K HQX MXF, footprint at 30 s of play, S2 − HEAD | +166 ± 60 MB (20 buffers × 8.3 MB) | outside |
+| P8 | 4K ProRes 4444 `.mov` and 4K HQX MXF, 60 s of play, `[PLAYBACK-STATS]` | dropped 0, late 0 (excluding the first second) | any |
+| P1 | 4:2:0 set (`still-420` H.264 and HEVC Main 10 `.mov`; the same as `.ts` over a local SRT listener) | export `.rgba16f`/PNG and `.v210` md5 identical to HEAD | any byte |
+| R1 | Chroma line, per file | 4:2:2 fixtures "4:2:2 10-bit (x422) — native"; 4:4:4 "4:4:4 10-bit (x444) — native · DeckLink v210…"; `still-420` "4:2:0 10-bit (x420) — native"; an unknown codec (MPEG-4 Part 2 `.mov`) "… source chroma unknown"; forced: "4:2:0 10-bit (x420) — 4:2:2 source, forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420" with the banner | otherwise |
+| R2 | Real files | `Mixed Captions.mxf` x444 native (plug-in, `[DNX-VT] … x444 confirmed`); `OP1A Test.mxf` and `DNX As MOV 10bit.mov` x422 native; ARRI 4444 XQ x444 native; all four play | otherwise |
+
+**What would change the plan:** the plug-in refusing `x444` (DNxHR 444 would then need its own decision:
+carry what it gives, or `x420` with the banner); AVFoundation refusing `x422`/`x444` on any fixture.
+
+#### Stage 3b, S2 — results, 2026-10-10 22:09–23:27 (unattended)
+
+**Builds:** HEAD `c93be09` from a clean worktree (vendored `ThirdParty` and the DeckLink SDK copied in,
+`xcodegen`), **plus the two DEBUG instruments only** (the Chroma Scrub Bench and `[PLAYBACK-STATS]`,
+84 lines, so P7 and P8 have a baseline): `.build-cc/c3s2head-Profile`. S2: `.build-cc/c3s2-Profile`.
+Both unsigned Profile; the same warning set (11, line numbers apart). The S2 binary was rebuilt once
+after the first batch (the banner's spelling, "color", and a timing line on the libav probe); three
+fixtures re-run on it gave exports byte-identical to the first build's. **Driver:** a scratch
+`run1.sh` (launch, Deny the licence prompt, `open -a` the file, Debug ▸ Chroma Scrub Bench or 62 s of
+play, quit) and `srt1.sh` (S1's local-listener pattern). **Measurement:** `scripts/chroma/measure.swift`.
+**Fixtures:** `generate.sh 422 444 420 s2`; real files from `/Volumes/DCCOLOR/TEST FLIP/`.
+
+| # | Result | Verdict |
+|---|---|---|
+| P3 | lines-422, rows within ±2 of their own line, **export / wire: 1080 / 1080 on all six paths** (ProRes 422 HQ, H.264 4:2:2 Intra, HEVC 4:2:2 on AVF; ProRes 422 HQ MXF, DNxHR HQX MXF, DNxHR HQX `.mov` on libav). HEAD: 540 (ProRes, the even row's colour) or 0 (grey) | **PASS** |
+| P4 | checker-444 through export, samples within the band: **ProRes 4444 XQ 100 %, HEVC 4:4:4 100 %; ProRes 4444 `.mov` 93.8 %, ProRes 4444 MXF 82.2 % (100 % at ±3); DNxHR 444 0 % at ±4** | **FAIL** (three of five) — causes below; none is a chroma loss in Manifold |
+| P5 | checker-444 on the wire, within 512 ± 2: **100 % on the four ProRes/HEVC files**; DNxHR 444 95.6 % at ±4. HEAD: 0 % on ProRes (the alias, 723/301) | ProRes/HEVC **PASS**; DNxHR **FAIL** against the band, and equal to what the fixture allows (below) |
+| P6 | Scrub export = playback export, `.rgba16f` and PNG md5: **identical on all eleven 4:2:2 / 4:4:4 fixtures** and the four real files. HEAD differs on `checker-444-dnxhr444.mov` and `Mixed Captions.mxf` (the D9 bug, now measured) | **PASS** |
+| P7 | Median of three `seek→deliver` means, S2 / HEAD: 4K ProRes 422 HQ 9.0 / 9.6; 1080 ProRes 4444 **10.5 / 10.0**; 4K HQX MXF 17.5 / 17.2; 1080 HQX MXF 10.6 / 10.0 ms | AVF 4K, both libav **PASS**; **1080 ProRes 4444 FAIL** by the stated rule (+0.5 against +0.3). Five more runs each, as extra data: median of eight 10.0 / 10.05 ms |
+| P8 | 4K HQX MXF footprint at 30 s: **S2 1285 MB, HEAD 1246 MB, +39 MB** (4K ProRes 4444: 596 / 608 MB) | **FAIL** (band +166 ± 60) — the model was wrong, below |
+| P8 | 60 s of play, `[PLAYBACK-STATS]` (59 one-second lines after the first): first runs had dropped 3 / late 18 (HQX) and dropped 11 / late 2 (4444), **all inside 30–32 s, on HEAD too** — the moment the driver ran `footprint` and `vmmap`, which suspends the process. **Re-run without the probes: dropped 0, late 0 on both files, both builds** (1510 / 1511 frames presented) | first runs **FAIL** as stated; the instrument's fault; clean runs **PASS** |
+| P1 | 4:2:0 regression set: `still-420-h264.mov`, `still-420-hevc10.mov` and `unknown-mpeg4.mov` (files), `still-420-h264.ts`, `still-420-hevc10.ts` (local SRT): **`.rgba16f`, PNG and `.v210` md5 identical to HEAD, all five** | **PASS** |
+| R1 | Chroma line: every 4:2:2 fixture `4:2:2 10-bit (x422) — native`; every 4:4:4 `4:4:4 10-bit (x444) — native · DeckLink v210 output: reduced once to 4:2:2 (halfband)`; `still-420` `4:2:0 10-bit (x420) — native`; MPEG-4 Part 2 `4:2:0 10-bit (x420) — source chroma unknown`. Forced (`MANIFOLD_FORCE_CHROMA_420=1`, ProRes 422 HQ and HQX MXF): `4:2:0 10-bit (x420) — 4:2:2 source, forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420`, and the banner shown (screenshot, deleted after reading): "This file's color is 4:2:2, but Manifold is showing it at 4:2:0 (forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420). The picture, scopes, SDI output and frame export carry 4:2:0 color resolution." The forced exports are md5-identical to HEAD's | **PASS** |
+| R2 | `Mixed Captions.mxf`: `[DNX-VT] … x444 confirmed (3840×2160)`, scrub through the plug-in too, Chroma `4:4:4 … native`, luma range 91…847 as on HEAD (VT's full→legal compression is the same at `x444`). `OP1A Test.mxf`, `DNX As MOV 10bit.mov`: `libav yuv422p10le → x422`, native. ARRI `M001C008_161207_R00H.mov`: `ProRes ap4x → x444`, native, scrub at 2944×2160 as before. All four play and scrub | **PASS** |
+
+**Why P4 failed, file by file.** Measured against each file's own decode, outside the app:
+- **ProRes 4444 `.mov` (93.8 %):** Apple's own `x444` decode of the fixture (AVAssetReader, no app code)
+  is 93.8 % within ±2 too; Manifold's export matches that decode within **0.18 codes** (half-float).
+  The band was set for the codec, not measured on it: ProRes 4444 at this bitrate moves 6 % of a
+  one-pixel checker by 3–4 codes. XQ does not.
+- **ProRes 4444 MXF (82.2 %):** libav's decode of it (ffmpeg 8.1.1, to `yuv444p10le`) is **82.216 %**
+  within ±2 and 100 % within ±3, exactly the export's figures. libav's ProRes decoder and its 12→10-bit
+  step differ from Apple's by a code.
+- **DNxHR 444 `.mov` (0 % at ±4):** **pre-existing, and not chroma resolution.** The checker survives
+  at `x444` (every sample on its own side of 512), but at **0.856 × its amplitude** (691/334 for
+  721/303), with **luma 512 → 502**. That is a full→legal compression (876/1023) of a file that is
+  legal range. The plug-in route builds its format description with the `ADHR` atom measured on the
+  Avid MXF (`"0002"`, 1270, 2, **3**, …, **2**); this `.mov` carries its own (`"0001"`, 1270, 2,
+  **2**, …, **0**), and AVFoundation reading the file with it gets 721/303 at 512. HEAD's export of the
+  same file has the same luma (501.9) and amplitude. New entry in `BUGS.md`. P5 on it: the wire's
+  95.584 % within 512 ± 4 equals the D3 halfband applied to libav's own decode of the fixture
+  (**95.576 %**): the wire carries what this lossy encode of a one-pixel checker allows. The band was
+  not measured on the fixture first.
+- **The cause I ruled out:** the 82 % first read on the `.mov` came partly from my tool comparing
+  unrounded float codes (726.1 is not "±2 of 724", though the wire carries 726). The tool now rounds
+  to the nearest code; every figure above is from the rounded version.
+
+**Why P8's memory band was wrong.** It assumed the libav pool of 20 buffers is resident (20 × 8.3 MB).
+`kCVPixelBufferPoolMinimumBufferCountKey` does not preallocate; the pool holds what is in flight, so
+the cost is a handful of 4K 4:2:2 buffers, +39 MB measured. On 4K ProRes 4444 (AVFoundation) the
+footprint was 12 MB lower at `x444` than HEAD's `x420`, within the run-to-run spread of one sample.
+
+**Load cost.** The libav probe (`FileChromaProbe.resolveLibav`, on the main actor, like
+`LibavFrameSource.open()`): 5.7 ms (1080 HQX MXF), 6.9 ms, 15.9 ms (DNxHR 444 `.mov`), 21.6 ms (4K HQX
+MXF). AVFoundation files read the format description they already have: no added cost.
+
+**Scrub cost elsewhere (single runs or extra data, outside P7's set).** 1080 fixtures: within ±1 ms of
+HEAD except **H.264 4:2:2 Intra 4.9 vs 9.1 ms** (native is cheaper, as the audit's table said) and
+**ProRes 4444 MXF 12.5 vs 10.0 ms** (P410 is three times P010's chroma). Real 4K HQX over SMB
+(`OP1A Test.mxf`, four runs each): median **21.3 vs 19.9 ms, +1.4 ms**. Mixed Captions scrubs through
+the plug-in now: 36.4 vs 28.0 ms (one run); that is the cost of the correct picture (D9).
+
+**Found on the way:**
+1. **AVFoundation scrub delivers 1 of 61 positions on the lossless HEVC fixtures** (`empty=60`), on HEAD
+   too. They have one keyframe (x265's default keyint 250 on a 250-frame file), so every
+   infinite-tolerance seek lands on frame 0 and the item output has no new buffer. Pre-existing, a
+   property of the fixture's GOP. P6 on them is still valid: the one delivered scrub frame is what the
+   second export shows (`[SCRUB-GEOM]` between the two exports).
+2. **The DNxHR 444 plug-in route range-compresses a legal-range `.mov`** (P4 above; `BUGS.md`).
+3. **HEAD's D9 bug, measured:** HEAD's scrub of `Mixed Captions.mxf` is not its playback frame.
+
+**Gates:** `swift test` (ManifoldCore) **298 / 298**, including 9 new `FileChromaTests` (the ProRes
+table, real `avcC`/`hvcC` from the fixtures, libav shifts, D8, the force switch); both Profile builds
+succeeded. **Defaults:** exported before the first launch (1 143 keys). The 94 launches added 94
+`NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted by
+name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. **OBS:** not used.
+The "NDI Bars (P2)" profile was verified from its files (`OBS_TEST_PROFILES.md`); S1's mention of it is
+correct. The HEAD worktree was removed. **Not committed.**
+
 ---
 
 ## 7. Open and unverified

@@ -40,6 +40,7 @@ bullet.
 - WHEP from Cloudflare Stream keeps sound and picture in sync for long sessions: verified over four and a half hours, including with picture and sound sent out over SDI.
 - SRT buffering adapts to the sender. Encoders that send audio in large chunks, or use B-frames, get a slightly larger buffer automatically, and the chain readout says how much and why.
 - SDI output follows an SRT stream's own frame rate. If a stream labels its frame rate wrongly, the output follows the rate the stream actually runs at.
+- 4:2:2 and 4:4:4 files (ProRes, DNxHD/DNxHR, H.264/HEVC 4:2:2) now keep their full color resolution through playback, scopes, SDI and export.
 
 ### Fixed
 

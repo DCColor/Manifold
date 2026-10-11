@@ -14,7 +14,7 @@ import CFFmpeg
 /// `AVSampleBufferRenderSynchronizer` is the master clock. Each emitted frame
 /// carries the file's real PTS (best-effort timestamp × stream timebase → CMTime),
 /// so the synchronizer and the Metal frameQueue (pts ≤ clock) select correctly.
-/// Frames convert to the proven 10-bit x420 contract. Seeking is av_seek_frame to
+/// Frames convert to the file's resolved 10-bit biplanar format. Seeking is av_seek_frame to
 /// the keyframe + avcodec_flush_buffers + decode-forward to the target.
 ///
 /// Lifecycle/currency matches Stage 1: gated by the engine's session token
@@ -77,8 +77,8 @@ public final class LibavFrameSource: @unchecked Sendable {
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
 
     private let url: URL
-    /// Decoded CVPixelBuffer format — the SAME parameter `FileFrameSource` carries.
-    /// M3b: 10-bit x420 (P010-compatible), keeping HQX's native 10-bit precision.
+    /// Decoded CVPixelBuffer format — the SAME parameter `FileFrameSource` carries: the file's
+    /// resolved format (`FileChromaProbe`), `x422` for HQX, `x444` for 4:4:4 (Stage 3b S2).
     private let pixelFormat: OSType
     /// Provides the readiness backpressure that paces the pump — same as the AVF source.
     private let pacingRenderer: AVSampleBufferVideoRenderer
@@ -100,7 +100,7 @@ public final class LibavFrameSource: @unchecked Sendable {
     private var vtDecoder: DNxHRVideoToolboxDecoder?
     /// Said once, not per frame.
     private var vtFallbackAnnounced = false
-    /// The x420 contract is CONFIRMED on the first frame rather than assumed. See `nextFrame()`.
+    /// The requested format is CONFIRMED on the first frame rather than assumed. See `nextFrame()`.
     private var vtFormatConfirmed = false
     /// What the FILE declared, kept so the buffer range can revert to it if the VT route falls back.
     private var declaredRangeAtOpen: MediaInspector.SourceColorRange = .untagged
@@ -254,7 +254,8 @@ public final class LibavFrameSource: @unchecked Sendable {
         if DNxHRVideoToolboxDecoder.isProfile444(codecID: cid, profile: par.pointee.profile) {
             if ProVideoDecoderAvailability.isAvailable {
                 self.vtDecoder = DNxHRVideoToolboxDecoder(width: par.pointee.width,
-                                                          height: par.pointee.height)
+                                                          height: par.pointee.height,
+                                                          pixelFormat: pixelFormat)
             }
             if self.vtDecoder == nil {
                 // Either the package is absent, or it is present and the session would not open.
@@ -492,18 +493,21 @@ public final class LibavFrameSource: @unchecked Sendable {
             // ⚠️ CONFIRMED, NOT ASSUMED — once per file. If the decoder ever hands back something
             // other than the contract, treat it as a failure and fall back rather than pushing an
             // unexpected format at the renderer.
+            //
+            // The confirm follows the request (Stage 3b S2): the file's resolved format, `x444`.
             if !vtFormatConfirmed {
                 vtFormatConfirmed = true
                 let got = CVPixelBufferGetPixelFormatType(pixelBuffer)
-                guard got == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange else {
-                    print("[DNX-VT] expected x420, got \(fourCCString(got)) — falling back to libav")
+                guard got == pixelFormat else {
+                    print("[DNX-VT] expected \(fourCCString(pixelFormat)), got \(fourCCString(got)) "
+                        + "— falling back to libav")
                     decoder.shutdown()
                     vtDecoder = nil
                     setRouteState(bufferRange: declaredRangeAtOpen,
                                   caveat: DNxHRVideoToolboxDecoder.PictureCaveat.short)
                     return nil
                 }
-                print("[DNX-VT] decoding DNxHR 4:4:4 through Apple's plug-in; x420 confirmed "
+                print("[DNX-VT] decoding DNxHR 4:4:4 through Apple's plug-in; \(fourCCString(got)) confirmed "
                     + "(\(CVPixelBufferGetWidth(pixelBuffer))×\(CVPixelBufferGetHeight(pixelBuffer)))")
             }
             skipToSeconds = -1
@@ -533,11 +537,11 @@ public final class LibavFrameSource: @unchecked Sendable {
         return CMTime(value: d &* Int64(timeBase.num), timescale: timeBase.den)
     }
 
-    // MARK: - AVFrame → x420 CVPixelBuffer / CMSampleBuffer (pumpQueue only)
+    // MARK: - AVFrame → CVPixelBuffer / CMSampleBuffer (pumpQueue only)
 
-    /// swscale does the whole format conversion (→ P010/x420 10-bit, 422→420
-    /// subsample, planar→biplanar) in one pass, straight into the pixel buffer's
-    /// planes — no intermediate copy, range preserved (the shader expands).
+    /// swscale does the whole format conversion (→ P010/P210/P410 at the file's own chroma,
+    /// planar→biplanar) in one pass, straight into the pixel buffer's planes — no intermediate
+    /// copy, range preserved (the shader expands).
     private func convert(_ frame: UnsafeMutablePointer<AVFrame>, pts: CMTime, duration: CMTime) -> CMSampleBuffer? {
         let W = Int(frame.pointee.width)
         let H = Int(frame.pointee.height)

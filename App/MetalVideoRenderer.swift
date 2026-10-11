@@ -955,6 +955,38 @@ final class MetalVideoRenderer {
     /// The reason a path gives when `forceChroma420` is what lowered its chroma.
     static let forceChroma420Reason = "forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420"
 
+    #if DEBUG
+    // MARK: - [PLAYBACK-STATS] (Stage 3b S2, P8; pre-ship list, docs/BUGS.md)
+
+    /// `MANIFOLD_PLAYBACK_STATS=1` (launch environment, never `defaults`): once a second while the
+    /// transport runs, what the display tick did with the frame queue. `dropped`: frames discarded
+    /// unseen because a newer one was already due. `late`: a frame selected on a tick although it was
+    /// already due on the tick before, so the decode had not delivered it in time. The question P8
+    /// asks of 4K 4:4:4 and HQX at native chroma: does the bigger buffer cost a frame.
+    static let playbackStatsEnabled = ProcessInfo.processInfo.environment["MANIFOLD_PLAYBACK_STATS"] == "1"
+    /// RENDER THREAD only.
+    private var playbackStatsLastNow: Double = -1
+    private var playbackStats = (presented: 0, dropped: 0, late: 0, since: CFTimeInterval(0))
+
+    /// RENDER THREAD. Called once per selected frame.
+    private func notePlaybackStats(pts: Double, dropped: Int, now: Double, prevNow: Double) {
+        guard Self.playbackStatsEnabled, isPausedProvider?() == false else { return }
+        let step = now - prevNow
+        // A seek moves the clock in one tick; a frame selected across it is not late.
+        let continuous = step > 0 && step < 0.1
+        playbackStats.presented += 1
+        playbackStats.dropped += dropped
+        if continuous, pts <= prevNow { playbackStats.late += 1 }
+        let t = CACurrentMediaTime()
+        if playbackStats.since == 0 { playbackStats.since = t }
+        if t - playbackStats.since >= 1 {
+            print(String(format: "[PLAYBACK-STATS] t=%.3f presented=%d dropped=%d late=%d pts=%.3f",
+                         now, playbackStats.presented, playbackStats.dropped, playbackStats.late, pts))
+            playbackStats = (0, 0, 0, t)
+        }
+    }
+    #endif
+
     /// What the source declared about its chroma, and why the carried chroma is lower when it is.
     /// MAIN THREAD. Set by the source through `setSourceChroma`, cleared by `liveSourceReleased`.
     private(set) var sourceChroma: SourceChroma = .notStated
@@ -2349,6 +2381,10 @@ final class MetalVideoRenderer {
         }
 
         guard let now = clock?() else { return }
+        #if DEBUG
+        let statsPrevNow = playbackStatsLastNow
+        playbackStatsLastNow = now
+        #endif
         // A live clock measuring its start-up window holds the picture (`LiveClock.presentationHoldFloor`).
         // Read before the queue lock, like the clock: it takes the clock's lock.
         let holdFloor = presentationHoldFloor?()
@@ -2461,6 +2497,7 @@ final class MetalVideoRenderer {
             #if DEBUG
             avLagProbe = nil
             onFrameSelected?(chosenPts, dropCount)
+            notePlaybackStats(pts: chosenPts, dropped: dropCount, now: now, prevNow: statsPrevNow)
             #endif
             // A frame satisfied the strict gate — the post-seek one-shot is moot. Clear it
             // so a seek that resolves normally (incl. seek-and-play) never touches the

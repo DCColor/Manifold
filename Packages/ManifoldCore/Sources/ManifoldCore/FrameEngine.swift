@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 import LiveAudioResample
 import SyncCalibration
 import FileAudioLookahead
+import ColorimetryModel   // SourceChroma — the chain readout's Chroma line (Stage 3b S2)
+import FileChroma
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -189,6 +191,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// default. Publishing nils on unload is what stops a failed open, or an emptied deck, from
     /// leaving the PREVIOUS file's colour space on the layer.
     public var onSourceColorTags: ((Int?, Int?, Int?) -> Void)?
+
+    /// THE FILE'S CHROMA, for the chain readout's Chroma line (Stage 3b S2, D10): what the file is,
+    /// and why the carried chroma is lower when it is. Published on the same edges as
+    /// `onSourceColorTags` (at load, before the first frame; `.notStated` at unload) and for the same
+    /// reason. The renderer holds it; the carried format it reads off the buffers itself.
+    public var onSourceChroma: ((SourceChroma, String?) -> Void)?
 
     /// THE SOURCE'S ENCODED RASTER AND ITS TWO GEOMETRY ATOMS — `clap` and `pasp` — published on
     /// exactly the same edges and for exactly the same reason as `onSourceColorTags` above; see
@@ -426,13 +434,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var libavAudioInfo: LibavAudioSource.AudioInfo?
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
-    /// Decoded video format requested at the decode-request site. A named property
-    /// rather than a magic constant so the sources/decoders can vary it.
-    /// M3b: 10-bit 420 biplanar (x420, raw video-range). 10-bit ProRes and DNxHR
-    /// HQX now flow through at full bit depth; 8-bit sources decode cleanly into the
-    /// 10-bit container. Range expansion stays in the shader (the VideoRange label
-    /// is just the container — raw values are preserved, exactly as the 8-bit path).
-    private let videoPixelFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+    /// THE FILE'S RESOLVED CHROMA (Stage 3b S2; CLAUDE.md, the native-chroma rule): `x420`, `x422`
+    /// or `x444`, 10-bit biplanar, video range, from `FileChromaProbe` once per load and BEFORE either
+    /// decoder is built. Every consumer below reads `videoPixelFormat`, so the scrub producer and the
+    /// playback source decode the same format by construction, never by two constants agreeing.
+    /// 8-bit sources decode cleanly into the 10-bit container. Range expansion stays in the shader
+    /// (the VideoRange label is just the container — raw values are preserved).
+    private var fileChroma: ResolvedChroma = .undetermined
+    private var videoPixelFormat: OSType { fileChroma.pixelFormat }
+    /// The first frame of a playback session is checked against the request once per file
+    /// (`checkDeliveredFormat`). Main only.
+    private var deliveredFormatChecked = false
     private var timeObserver: Any?
     private let videoPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.video")
     private let audioPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.audio")
@@ -997,6 +1009,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // colorspace at PRESENT time, so the next source's FIRST frame would be drawn through the
         // dead file's space and would stay that way until something presented again.
         onSourceColorTags?(nil, nil, nil)
+        // …and the chroma, for the same reason: the readout must not describe a departed file.
+        fileChroma = .undetermined
+        onSourceChroma?(.notStated, nil)
         // …AND THE GEOMETRY WITH IT, same rule one line down: a stale crop would take 32 px off a
         // file that never declared one, which is a worse failure than the padding it removes, and
         // a stale `pasp` would follow the next file into its exported filename.
@@ -1534,6 +1549,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // range (DNxHR/MXF ACLR) comes from libav's color_range, applied in
             // beginLibavReading — overriding the often-untagged AVFoundation read.
             useLibav = MediaInspector.requiresLibavDecode(fmt)
+            // ── THE FILE'S CHROMA, AT THE SAME POINT AND ON THE SAME ARGUMENT (Stage 3b S2) ──────
+            // Before `installScrubProducer` below and before `beginReading`: both read
+            // `videoPixelFormat`, so this one answer is what both decoders are built with. libav
+            // files are read from libav's `pix_fmt`, which the format description does not carry.
+            adoptFileChroma(useLibav ? FileChromaProbe.resolveLibav(url: url)
+                                     : FileChromaProbe.resolve(formatDescription: fmt))
         } else {
             sourceRange = .untagged
             // NO FORMAT DESCRIPTION IS ALSO AN ANSWER, and it must be published rather than
@@ -1543,6 +1564,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // NO FORMAT DESCRIPTION MEANS NEITHER ATOM IS DECLARED, which is an answer and must
             // be published for the same reason the nil codes are.
             onSourceGeometry?(0, 0, .undeclared, .undeclared)
+            adoptFileChroma(FileChromaResolver.resolve(.unknown, basis: "no format description",
+                                                       force420: false, forceReason: ""))
         }
         updateEffectiveRange()
 
@@ -1555,6 +1578,46 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         print("FrameEngine: loaded — duration \(self.duration)s, audio tracks: \(self.audioTracks.count) (monitoring \(self.audioTracks.isEmpty ? "none" : "#\(self.selectedAudioTrackIndex + 1)"))")
         await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    // MARK: - File chroma (Stage 3b S2)
+
+    /// Take the resolver's answer for this file: hold it (both decoders read it), log it, tell the
+    /// renderer, and, when it carries less than the file has, say so in the banner. NEVER SILENT
+    /// (CLAUDE.md): the only reduction the resolver makes on its own is the DEBUG force switch, and
+    /// that is named.
+    private func adoptFileChroma(_ resolved: ResolvedChroma) {
+        fileChroma = resolved
+        deliveredFormatChecked = false
+        print(resolved.logLine)
+        onSourceChroma?(resolved.source, resolved.reason)
+        if let reason = resolved.reason { raiseChromaNotice(source: resolved.source, reason: reason) }
+    }
+
+    /// The decoder did not deliver the format it was asked for (`delivered` nil: it would not start
+    /// at it). THE FALLBACK: from here on this file is carried at 4:2:0 by BOTH decoders, so scrub
+    /// and playback stay equal, and the readout and the banner say why.
+    private func chromaFallback(delivered: OSType?, requested: OSType) {
+        guard fileChroma.pixelFormat == requested,
+              requested != kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange else { return }
+        let reason = delivered.map {
+            "the decoder delivered \(ChromaReadout.fourCC($0)) instead of \(ChromaReadout.fourCC(requested)); "
+                + "converted to 4:2:0"
+        } ?? "the decoder would not start at \(ChromaReadout.fourCC(requested)); converted to 4:2:0"
+        let fallback = ResolvedChroma(pixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                                      source: fileChroma.source, reason: reason,
+                                      basis: fileChroma.basis + ", fallback")
+        print("[CHROMA-FILE] ⚠️ FALLBACK: \(reason)")
+        adoptFileChroma(fallback)
+        deliveredFormatChecked = true
+        installScrubProducer(for: currentURL, useLibav: useLibav)
+    }
+
+    private func raiseChromaNotice(source: SourceChroma, reason: String) {
+        let label: String
+        if case .declared(let c) = source { label = c.label } else { label = "higher-resolution" }
+        playbackNotice = "This file’s color is \(label), but Manifold is showing it at 4:2:0 (\(reason)). "
+            + "The picture, scopes, SDI output and frame export carry 4:2:0 color resolution."
     }
 
     /// The periodic clock observer that publishes `currentTime` and stops at the end.
@@ -1608,6 +1671,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.selectedAudioTrackIndex = 0
         self.rangeOverride = .auto
         self.useLibav = true
+        // The chroma first (Stage 3b S2): the scrub producer below and the playback source are both
+        // built with it. AVFoundation is blind to MXF, so it is libav's `pix_fmt`.
+        adoptFileChroma(FileChromaProbe.resolveLibav(url: url))
         // Both commit paths call this, so neither can forget it. MXF resolves to the LIBAV
         // producer inside — AVFoundation is blind to MXF for scrub exactly as it is for playback.
         installScrubProducer(for: url, useLibav: true)
@@ -3731,8 +3797,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // The file decode now flows through the FrameSource seam: FileFrameSource
         // owns the video output + pump and emits frames via onVideoFrame (wired to
-        // the consumers below). Always decode videoPixelFormat (420v, raw video-
-        // range): the file's stored values, unclipped — range handling happens in
+        // the consumers below). Always decode videoPixelFormat (the file's resolved
+        // x420/x422/x444, raw video-range — Stage 3b S2; the scrub producer reads the
+        // same value): the file's stored values, unclipped — range handling happens in
         // the shader via effectiveIsFullRange, never by a full-range decode (which
         // would pre-expand and clip super-white / sub-black content).
         // Currency is gated by the session token — the SAME monotonic authority the
@@ -3758,6 +3825,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // A failure here is the VIDEO's, and there is no longer anything to drop and retry without.
         guard newReader.startReading() else {
             NSLog("[PLAYBACK] video reader startReading failed: %@", String(describing: newReader.error))
+            // A reader that will not start at the file's native chroma gets ONE retry at 4:2:0, said
+            // in the readout and the banner (Stage 3b S2). Never silent, and never a second retry:
+            // a reader that fails at x420 too fails for a reason that is not chroma.
+            if videoPixelFormat != kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange {
+                chromaFallback(delivered: nil, requested: videoPixelFormat)
+                await beginReading(from: time, resumePlaying: resumePlaying)
+            }
             return
         }
         let reader = newReader
@@ -3773,7 +3847,23 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // the old pump's behavior, just routed through the protocol.
         let vRenderer = videoRenderer
         let frameTap = onVideoFrame
-        activeSource.onVideoFrame = { sb in
+        // The delivered format, checked once per file on the first frame (Stage 3b S2): the reader
+        // was ASKED for the resolved format, and a different answer is the fallback the readout and
+        // the banner must state. One flag read per frame on the pump queue; the check hops to main.
+        let requested = videoPixelFormat
+        let checkFormat = !deliveredFormatChecked
+        deliveredFormatChecked = true
+        var firstFrame = checkFormat
+        activeSource.onVideoFrame = { [weak self] sb in
+            if firstFrame {
+                firstFrame = false
+                if let pb = CMSampleBufferGetImageBuffer(sb) {
+                    let got = CVPixelBufferGetPixelFormatType(pb)
+                    if got != requested {
+                        Task { @MainActor [weak self] in self?.chromaFallback(delivered: got, requested: requested) }
+                    }
+                }
+            }
             vRenderer.enqueue(sb)
             frameTap?(sb)
         }

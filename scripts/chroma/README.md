@@ -6,9 +6,10 @@ decisions, stages and predictions are in `docs/COLOR_MANAGEMENT_FINDINGS.md` §6
 
 | File | What |
 |---|---|
-| `generate.sh` | Makes the fixtures into `build/chroma-fixtures/` (gitignored; ~2.8 GB, ~50 s on an M4 Max). Groups `422 444 420 4k ndi`. |
+| `generate.sh` | Makes the fixtures into `build/chroma-fixtures/` (gitignored; ~2.8 GB, ~50 s on an M4 Max, plus ~8 GB and ~2 min for `s2`). Groups `422 444 420 4k ndi s2`. |
 | `vt.swift` | Raw `VTDecompressionSession` probe: hardware-only and software-only decode, native and requested pixel formats. **Run this on any Mac whose 4:2:2 / 4:4:4 decode is in question** (the M4 MacBook Air check). |
 | `avf-formats.swift` | `AVAssetReader` probe: which of `x420 x422 x444 sv22 sv44` each file delivers, its cost, and whether the chroma pattern survives. |
+| `measure.swift` | S2's numbers from one ⌃⌥E dump: the readback as 10-bit Y′CbCr (the dump's own kr/kb, limited range) and the v210 words, against `lines` (P3: rows within ±2 of their own line) or `checker` (P4 on the export, P5 512 ± tol on the wire). |
 | `v210ref.swift` | Re-runs a revision's `rgbToV210` on the GPU against a DEBUG v210 dump's readback (⌃⌥E in a Profile build writes `.v210`, `.rgba16f`, `.v210.json` beside the PNG) and compares. How P1 checks that the 4:2:0 wire did not change. |
 
 ## The patterns
@@ -24,6 +25,15 @@ decisions, stages and predictions are in `docs/COLOR_MANAGEMENT_FINDINGS.md` §6
 - **ndi**: `p2-bars.png`, 75 % RGB bars 240 px wide, for an OBS Image source sent over NDI (S1's P2).
 - **4k**: 4K ProRes 422 HQ and HEVC 4:2:2 for cost; `4k-422-hevc-intra-overcap.ts` is ~16 MB a frame, over
   the 8 MB access-unit cap on purpose.
+- **s2**: 62 s 4K DNxHR HQX MXF and 4K ProRes 4444 `.mov` (S2's P8: memory and 60 s of play), and an
+  MPEG-4 Part 2 `.mov`, a codec with no chroma table (D8: carried 4:2:0, "source chroma unknown").
+
+## The S2 instruments (in the app, DEBUG; pre-ship list in `docs/BUGS.md`)
+
+- **Debug ▸ Chroma Scrub Bench** (⌃⌥⇧B; launch with `MANIFOLD_DEBUG_MENU=1 MANIFOLD_SCRUB_STATS=1`): on a
+  paused file, exports the playback frame, scrubs 60 positions at 20 Hz, scrubs back and exports the
+  scrub frame, then prints `[SCRUB]`. P6 compares the two exports' `.rgba16f`; P7 reads `[SCRUB]`.
+- **`MANIFOLD_PLAYBACK_STATS=1`**: `[PLAYBACK-STATS] presented= dropped= late=` once a second of play.
 
 ## Running
 
