@@ -384,22 +384,43 @@ final class SRTFrameRouter {
     /// ones instead of against WHEP's.
     private var decoder: LiveVideoDecoder?
 
-    // MARK: - The HEVC format gate (SESSION THREAD only)
+    // MARK: - The format gate (SESSION THREAD only)
     //
-    // DECISION 7 (§6.10, Stage 3): HEVC Main and Main 10 at 4:2:0 play; 4:2:2 and 4:4:4 are refused
-    // with a banner until Stage 3b; nothing is ever resampled to 4:2:0 to make it fit. The demuxer
-    // cannot say which — the parser's pixel format never reaches codecpar in this build, and its
-    // profile name is "Rext" for all three chroma formats — so the answer is the SPS's own, read by
-    // `HEVCSPSColor.format` BEFORE the access unit reaches the decoder. A refused stream is never
-    // decoded, so it cannot be converted by accident on the way to the screen.
+    // STAGE 3b S3/S4 (§6.10; D6, D7), replacing Stage 3's decision 7. BOTH CODECS, judged on the SPS's
+    // chroma format and bit depths, never on the profile's name: 4:2:0, 4:2:2 and 4:4:4 at up to 10
+    // bits are accepted and decoded at their own chroma (CLAUDE.md, the chroma rule); more than 10 bits
+    // is refused (D5). The demuxer cannot say which — the parser's pixel format never reaches codecpar
+    // in this build, and HEVC's profile name is "Rext" for every RExt format — so the answer is the
+    // SPS's own, read BEFORE the access unit reaches the decoder. Stage 3 asked for the Main / Main 10
+    // profile and so refused x265's all-intra "Main 10 Intra" at 4:2:0 (docs/BUGS.md); H.264 had no
+    // gate at all and its High 4:2:2 was converted to 4:2:0 silently (docs/BUGS.md).
+    //
+    // Whether VideoToolbox can DECODE what the gate admits is VideoToolbox's answer, not a table here:
+    // the decoder's `onUndecodable` refuses the stream with a banner (there is no libav decoder to
+    // fall back to). A refused stream is never decoded, so it cannot be converted on the way to the
+    // screen.
 
-    /// The SPS the gate last judged; a new one is judged again (a mid-stream change to 4:2:2 is
-    /// refused like a first one).
+    /// The SPS the gate last judged; a new one is judged again (a mid-stream change is judged like a
+    /// first one).
     private var formatCheckedSPS: Data?
-    /// Set once the gate refuses; every later access unit is dropped until the session ends.
+    /// Set once the gate (or the decoder) refuses; every later access unit is dropped until the session ends.
     private var formatRefused = false
     /// SRTClient's hop to main: banner and teardown, carrying its session generation.
     private var onFormatRefused: ((String) -> Void)?
+    /// What the last admitted SPS declared: the format (for a refusal's banner) and its chroma, which
+    /// is the Chroma line's source (Stage 3b S3). `.notStated` until an SPS is read, `.unknown` for an
+    /// SPS whose format cannot be read or that is 4:0:0.
+    private var admittedFormat: SPSFormat?
+    private var sourceChroma: SourceChroma = .notStated
+
+    // MARK: - The Chroma line and the fallback banner (SESSION THREAD only; Stage 3b S3)
+
+    /// What was last stated to the renderer, so it is stated once per change, not per frame.
+    private var statedChroma: (source: SourceChroma, carried: OSType, reason: String?, note: String?)?
+    /// SRTClient's hop to main for the fallback banner: shown WITHOUT disconnecting, and it survives
+    /// pictures (it is true while they flow). Once per session.
+    private var onChromaFallback: ((String) -> Void)?
+    private var announcedChromaFallback = false
 
     /// The decoder again, for MAIN's session-totals line. Under `stateLock`: `decoder` itself belongs
     /// to the session thread. The totals line can run AFTER `releaseSessionResources` (a peer close
@@ -421,6 +442,8 @@ final class SRTFrameRouter {
     private var transferSession: VTPixelTransferSession?
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolSize: (width: Int, height: Int) = (0, 0)
+    /// The pool's carrier (x420 / x422 / x444): a promote whose delivered chroma changes rebuilds it.
+    private var poolFormat: OSType = 0
     /// One line the first time a frame is promoted (or found already 10-bit), then silence.
     private var reportedPromote = false
 
@@ -776,9 +799,13 @@ final class SRTFrameRouter {
     ///
     /// `onRefused` is called on THIS thread, at most once, when the HEVC format gate refuses the
     /// stream (decision 7), with the banner's words.
+    ///
+    /// `onChromaFallback` is called on THIS thread, at most once, when a decoded picture carries less
+    /// chroma than its SPS declares (Stage 3b S3), with the banner's words. The stream stays up.
     func prepareDecoder(format: ManifoldSRTVideoFormat,
                         onColorimetry: @escaping (StreamColorimetry, _ first: Bool, _ delay: Double) -> Void,
-                        onRefused: @escaping (String) -> Void) {
+                        onRefused: @escaping (String) -> Void,
+                        onChromaFallback: @escaping (String) -> Void) {
         // AVColorRange: 0 unspecified, 1 MPEG/limited, 2 JPEG/full. UNDECLARED ASSUMES LIMITED: H.264
         // with no `video_full_range_flag` IS limited by the standard's own default.
         formatRange = (isFullRange: format.colorRange == 2, declared: format.colorRange != 0)
@@ -789,6 +816,11 @@ final class SRTFrameRouter {
         onFormatRefused = onRefused
         formatCheckedSPS = nil
         formatRefused = false
+        admittedFormat = nil
+        sourceChroma = .notStated
+        statedChroma = nil
+        self.onChromaFallback = onChromaFallback
+        announcedChromaFallback = false
         declaredVideoDelay = format.videoDelay
         reorderMaxSeconds = 0
         reorderExceedances = 0
@@ -867,6 +899,8 @@ final class SRTFrameRouter {
         // cause and an expected duration, rather than being wired to a no-op that reads as if a
         // request went out.
         decoder.onNeedsKeyframe = { [weak self] in self?.noteKeyframeWait() }
+        // VideoToolbox cannot decode this stream at all (Stage 3b S3): refuse it as the gate does.
+        decoder.onUndecodable = { [weak self] why in self?.refuseUndecodable(why) }
         // Each new SPS's colour, on this thread, before the access unit carrying it is decoded.
         decoder.onSPSColor = { [weak self] sps in self?.noteSPSColor(sps) }
         self.decoder = decoder
@@ -915,12 +949,18 @@ final class SRTFrameRouter {
         onFormatRefused = nil
         formatCheckedSPS = nil
         formatRefused = false
+        admittedFormat = nil
+        sourceChroma = .notStated
+        statedChroma = nil
+        onChromaFallback = nil
+        announcedChromaFallback = false
         haveSPSColor = false
         announcedColorimetry = nil
         onStreamColorimetry = nil
         transferSession = nil
         pixelBufferPool = nil
         poolSize = (0, 0)
+        poolFormat = 0
         reportedPromote = false
         framesDelivered = 0
         framesEnqueued = 0
@@ -992,6 +1032,13 @@ final class SRTFrameRouter {
         let data = Data(bytes: accessUnit.data, count: accessUnit.size)
         let sps = accessUnit.sps.map { Data(bytes: $0, count: accessUnit.spsSize) }
 
+        // The format gate first, on both codecs: a refused SPS never reaches the decoder.
+        guard !formatRefused else { return }
+        if let sps, sps != formatCheckedSPS {
+            formatCheckedSPS = sps
+            guard admitFormat(sps, hevc: accessUnit.codec == ManifoldSRTVideoCodecHEVC) else { return }
+        }
+
         guard accessUnit.codec == ManifoldSRTVideoCodecHEVC else {
             noteDeclaredTiming(sps: sps, vps: nil, hevc: false)
             let pps = accessUnit.pps.map { Data(bytes: $0, count: accessUnit.ppsSize) }
@@ -1006,13 +1053,6 @@ final class SRTFrameRouter {
         }
 
         // ── HEVC ───────────────────────────────────────────────────────────────────────────────
-        // The format gate first: a refused SPS never reaches the decoder.
-        guard !formatRefused else { return }
-        if let sps, sps != formatCheckedSPS {
-            formatCheckedSPS = sps
-            guard admitHEVCFormat(sps) else { return }
-        }
-
         let vps = accessUnit.vps.map { Data(bytes: $0, count: accessUnit.vpsSize) }
         noteDeclaredTiming(sps: sps, vps: vps, hevc: true)
         let ppsList = Self.unpackParameterSets(accessUnit.ppsList, size: accessUnit.ppsListSize)
@@ -1029,40 +1069,50 @@ final class SRTFrameRouter {
                        rasl: accessUnit.rasl)
     }
 
-    /// The HEVC format gate, on one new SPS. SESSION THREAD. True when the stream may be decoded.
+    /// The format gate, on one new SPS. SESSION THREAD. True when the stream may be decoded.
     ///
-    /// An SPS whose format cannot be read is let through: it is not a 4:2:2 stream we know of, and the
-    /// decoder's own format description will fail on it loudly if it is garbage.
-    private func admitHEVCFormat(_ sps: Data) -> Bool {
-        guard let format = HEVCSPSColor.format(nal: sps) else {
-            NSLog("[SRT] HEVC SPS: format unreadable (%d bytes) — passed to the decoder unjudged", sps.count)
+    /// An SPS whose format cannot be read is let through: it is not a stream we know to be out of
+    /// range, and the decoder's own format description (or VideoToolbox's session) will fail on it
+    /// loudly if it is garbage. Its chroma is then "unknown" in the readout, never a guess.
+    private func admitFormat(_ sps: Data, hevc: Bool) -> Bool {
+        let codecName = hevc ? "HEVC" : "H.264"
+        let read = hevc ? HEVCSPSColor.format(nal: sps)?.neutral : H264SPSColor.format(nal: sps)
+        guard let format = read else {
+            NSLog("[SRT] %@ SPS: format unreadable (%d bytes) — passed to the decoder unjudged", codecName, sps.count)
+            admittedFormat = nil
+            sourceChroma = .unknown
             return true
         }
-        let described = "\(format.profileName) (general_profile_idc \(format.generalProfileIdc)), "
-            + "\(format.chromaName), \(format.bitDepthLuma)-bit luma / \(format.bitDepthChroma)-bit chroma"
-        if format.isSupported420 {
-            NSLog("[SRT] HEVC SPS: %@ → accepted", described)
+        switch format.verdict {
+        case .accept:
+            NSLog("[SRT] %@ SPS: %@ → accepted", codecName, format.described)
+            admittedFormat = format
+            sourceChroma = ChromaSubsampling(chromaFormatIdc: format.chromaFormatIdc).map { .declared($0) } ?? .unknown
             return true
+        case .refuseBitDepth:
+            // NEVER TRUNCATED. The refusal is the whole of the handling: nothing below this line decodes.
+            NSLog("[SRT] %@ SPS: %@ → refusing: more than %d bits (D5); nothing is truncated to fit",
+                  codecName, format.described, SPSFormat.maximumBitDepth)
+            refuse("That stream is \(codecName) \(format.chromaName) \(format.depthName) — Manifold plays up to "
+                   + "10-bit over SRT (4:2:0, 4:2:2 and 4:4:4).")
+            return false
         }
+    }
 
-        // NEVER RESAMPLED. The refusal is the whole of the handling: nothing below this line decodes.
-        let depth = format.bitDepthLuma == format.bitDepthChroma
-            ? "\(format.bitDepthLuma)-bit" : "\(format.bitDepthLuma)/\(format.bitDepthChroma)-bit"
-        let banner: String
-        switch format.chromaFormatIdc {
-        case 2, 3:
-            banner = "That stream is HEVC \(format.chromaName) \(depth) — Manifold doesn’t play HEVC "
-                + "\(format.chromaName) over SRT yet. HEVC 4:2:0 (Main and Main 10) plays."
-        default:
-            banner = "That stream is HEVC \(format.profileName), \(format.chromaName) \(depth) — Manifold "
-                + "plays HEVC Main and Main 10 (4:2:0, up to 10-bit) over SRT."
-        }
-        NSLog("[SRT] HEVC SPS: %@ → refusing: Manifold plays HEVC Main and Main 10 at 4:2:0 over SRT; "
-              + "nothing is resampled to fit", described)
+    /// VideoToolbox cannot decode the admitted stream (the decoder's `onUndecodable`). SESSION THREAD.
+    private func refuseUndecodable(_ why: String) {
+        let what = admittedFormat.map { "\($0.codec.rawValue) \($0.profileName), \($0.chromaName) \($0.depthName)" }
+            ?? "this stream"
+        NSLog("[SRT] refusing %@: %@ — there is no other decoder to fall back to, and nothing is converted to fit",
+              what, why)
+        refuse("That stream is \(what) — this Mac’s VideoToolbox can’t decode it, and Manifold has no "
+               + "other decoder for it.")
+    }
+
+    private func refuse(_ banner: String) {
         formatRefused = true
         onFormatRefused?(banner)
         onFormatRefused = nil
-        return false
     }
 
     /// The stream's own frame rate, from a new SPS (HEVC: its VUI, else the VPS). SESSION THREAD, before
@@ -2312,6 +2362,7 @@ final class SRTFrameRouter {
             logFlowIfDue()
             return
         }
+        stateChroma(carried: CVPixelBufferGetPixelFormatType(promoted), renderer: renderer)
         // Tag the buffer every downstream consumer actually reads (shader matrix, layer colorspace,
         // scopes, EDR gate). A pooled buffer starts untagged and VT's attachment propagation is
         // measured behavior rather than a documented contract, so tagging the OUTPUT last is the
@@ -2334,22 +2385,20 @@ final class SRTFrameRouter {
 
     // MARK: - Promote (session thread)
 
-    /// 8-bit → the renderer's 10-bit sample domain, via the SAME VTPixelTransferSession shape NDI
-    /// and WHEP use. Destination is x420 — 10-bit biplanar 4:2:0 — so 4:2:0 in becomes 4:2:0 out
-    /// with no chroma resample; the 8→10 promotion is an exact ×4 code shift, not a filter.
+    /// Anything that is not already a 10-bit biplanar carrier → the carrier of THE CHROMA IT HAS, via
+    /// the same VTPixelTransferSession shape NDI and WHEP use: 8-bit 4:2:0 → x420, 8-bit 4:2:2 → x422,
+    /// VideoToolbox's packed p422 / p444 → x422 / x444. The conversion changes layout and depth only;
+    /// the 8→10 promotion is an exact ×4 code shift, not a filter, and chroma is never resampled here.
     ///
-    /// A NO-OP when VideoToolbox already gave us 10-bit: the decoder REQUESTS x420 output and only
-    /// falls back to VT's native 8-bit choice if the session refuses it.
+    /// A NO-OP for x420 / x422 / x444: the decoder REQUESTS the SPS's own carrier (Stage 3b S3) and only
+    /// falls back to VT's native choice if the session refuses it.
     ///
-    /// ⚠️ 4:2:2 IS NOT HANDLED, AND SRT IS THE TRANSPORT WHERE THAT WILL FIRST BITE. A real
-    /// contribution feed can be High 4:2:2 10-bit. The transfer session would resample it to 4:2:0
-    /// here — silently, and destructively for a chroma-critical monitoring tool. The decoder would
-    /// have to request x422 for such a stream and this destination would have to follow. Out of
-    /// scope for first-light; stated here so it is found rather than discovered.
+    /// Before Stage 3b S3 the destination was always x420, so a High 4:2:2 stream was resampled to
+    /// 4:2:0 here, silently (docs/BUGS.md). A format whose chroma `ChromaSubsampling(deliveredFormat:)`
+    /// does not know still goes to x420, as it always did, and the Chroma line says the carried chroma.
     private func promoteIfNeeded(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         let sourceFormat = CVPixelBufferGetPixelFormatType(source)
-        if sourceFormat == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            || sourceFormat == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange {
+        if ChromaSubsampling(pixelFormat: sourceFormat) != nil {
             if !reportedPromote {
                 reportedPromote = true
                 NSLog("[SRT] decoded as %@ — already in the renderer's 10-bit domain, no promote needed",
@@ -2360,6 +2409,8 @@ final class SRTFrameRouter {
 
         let width = CVPixelBufferGetWidth(source)
         let height = CVPixelBufferGetHeight(source)
+        let delivered = ChromaSubsampling(deliveredFormat: sourceFormat)
+        let destinationFormat = (delivered ?? .c420).carrierPixelFormat
 
         if transferSession == nil {
             var session: VTPixelTransferSession?
@@ -2373,9 +2424,9 @@ final class SRTFrameRouter {
         }
         guard let transferSession else { return nil }
 
-        if pixelBufferPool == nil || poolSize != (width, height) {
+        if pixelBufferPool == nil || poolSize != (width, height) || poolFormat != destinationFormat {
             let attrs: [CFString: Any] = [
-                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                kCVPixelBufferPixelFormatTypeKey: destinationFormat,
                 kCVPixelBufferWidthKey: width,
                 kCVPixelBufferHeightKey: height,
                 kCVPixelBufferMetalCompatibilityKey: true,
@@ -2394,6 +2445,7 @@ final class SRTFrameRouter {
             }
             pixelBufferPool = pool
             poolSize = (width, height)
+            poolFormat = destinationFormat
         }
         guard let pixelBufferPool else { return nil }
 
@@ -2413,10 +2465,44 @@ final class SRTFrameRouter {
 
         if !reportedPromote {
             reportedPromote = true
-            NSLog("[SRT] promoting %@ → 'x420' (10-bit 4:2:0) at %dx%d — the shader's sample domain",
-                  LiveVideoDecoder.formatName(sourceFormat), width, height)
+            let label = ChromaSubsampling(pixelFormat: destinationFormat)?.label ?? "?"
+            NSLog("[SRT] promoting %@ → '%@' (10-bit %@) at %dx%d — the shader's sample domain%@",
+                  LiveVideoDecoder.formatName(sourceFormat), ChromaReadout.fourCC(destinationFormat), label,
+                  width, height, delivered == nil ? "; its chroma is not in the table, so 4:2:0 as before" : "")
         }
         return destination
+    }
+
+    /// The Chroma line, from what this frame carries against what its SPS declared (Stage 3b S3). SESSION
+    /// THREAD, once per change. When the carried chroma is LOWER than the source's — the decode worked
+    /// but its native chroma could not be carried — the readout names why and the banner goes up once,
+    /// without disconnecting: carry what came, never silently (CLAUDE.md, the chroma rule).
+    private func stateChroma(carried: OSType, renderer: MetalVideoRenderer) {
+        let hardware = decoder?.usingHardwareDecoder
+        let note = hardware == false ? "software decode" : nil
+        var reason: String?
+        var lost: (source: ChromaSubsampling, carried: ChromaSubsampling)?
+        if case .declared(let declared) = sourceChroma,
+           let carriedChroma = ChromaSubsampling(pixelFormat: carried), carriedChroma < declared {
+            lost = (declared, carriedChroma)
+            reason = MetalVideoRenderer.forceChroma420
+                ? MetalVideoRenderer.forceChroma420Reason
+                : "VideoToolbox delivered \(ChromaReadout.fourCC(decoder?.snapshot().pixelFormat ?? carried)) "
+                    + "for the \(declared.label) request"
+        }
+        if let stated = statedChroma, stated.source == sourceChroma, stated.carried == carried,
+           stated.reason == reason, stated.note == note { return }
+        statedChroma = (sourceChroma, carried, reason, note)
+        renderer.setSourceChroma(sourceChroma, reason: reason, note: note)
+
+        guard let lost, !announcedChromaFallback else { return }
+        announcedChromaFallback = true
+        let banner = "This stream’s color is \(lost.source.label), but Manifold is showing it at "
+            + "\(lost.carried.label) (\(reason ?? "converted at decode")). The picture, scopes, SDI output "
+            + "and frame export carry \(lost.carried.label) color resolution."
+        NSLog("[SRT] CHROMA FALLBACK — %@ source carried as %@ (%@); banner: %@", lost.source.label,
+              ChromaReadout.fourCC(carried), reason ?? "converted at decode", banner)
+        onChromaFallback?(banner)
     }
 
     // MARK: - The cushion (Stages 0b-2a and 0b-2b)

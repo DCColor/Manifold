@@ -41,7 +41,8 @@ held back until after release, and the numbered defect entries follow.
      readout), S2 (files), S3 (SRT 4:2:2, HEVC and H.264), S4 (SRT 4:4:4), S5 (the OBS customer pass).
      Audit, decisions D1–D11 and predictions P1–P13: §6.10, *Stage 3b — 4:2:2 (and 4:4:4) end to end:
      audit*. **S1 committed (`c93be09`). S2 committed (`099ca1d`)** (§6.10,
-     *Stage 3b, S2 — results*).
+     *Stage 3b, S2 — results*). **S3 and S4 built and run unattended 2026-10-11, not committed** (§6.10,
+     *Stage 3b, S3 and S4 — results*); S5 (the OBS pass) is attended.
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
@@ -902,10 +903,11 @@ to send Export Diagnostics for a sync problem.
 
 ---
 
-## ☐ PRE-SHIP: remove the Stage 3b DEBUG v210 dump, `MANIFOLD_FORCE_CHROMA_420`, the Chroma Scrub Bench and `[PLAYBACK-STATS]`
+## ☐ PRE-SHIP: remove the Stage 3b DEBUG v210 dump, `MANIFOLD_FORCE_CHROMA_420`, `MANIFOLD_FORCE_SOFTWARE_DECODE`, the Chroma Scrub Bench and `[PLAYBACK-STATS]`
 
 **Added 2026-10-10** with Stage 3b S1 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b, S1*). **Widened
-2026-10-10** with S2 (the last two items; §6.10, *Stage 3b, S2*).
+2026-10-10** with S2 (the Bench and the stats line; §6.10, *Stage 3b, S2*). **Widened 2026-10-11** with S3/S4
+(`MANIFOLD_FORCE_SOFTWARE_DECODE`, and the force switch reaching SRT; §6.10, *Stage 3b, S3 and S4*).
 
 - **What they are:**
   - **The v210 dump:** in DEBUG, ⌃⌥E also runs `rgbToV210` on the frame it exports and writes the raw
@@ -915,7 +917,12 @@ to send Export Diagnostics for a sync problem.
     4:2:2 or 4:4:4 converts to `x420` instead, and the chain readout names the switch. It is how the
     fallback (P10) is tested on a Mac that never needs it.
     S2 carries it to files: the app pushes it into ManifoldCore at launch (`FileChromaPolicy`), and the
-    file banner is raised with the switch named.
+    file banner is raised with the switch named. S3 carries it to SRT: `LiveVideoDecoder` requests `x420`
+    for a 4:2:2 / 4:4:4 SPS, and the router's fallback (readout reason and banner, stream kept) runs.
+  - **`MANIFOLD_FORCE_SOFTWARE_DECODE=1`** (launch environment, never `defaults`): every live
+    `VTDecompressionSession` is built with the hardware decoder disabled. How S3 tests the Chroma line's
+    "software decode" note (HEVC 4:2:2 decodes in software) and the refusal of a stream VideoToolbox
+    cannot decode at all (H.264 4:2:2 has no software decoder) on a Mac that never needs either.
   - **Debug ▸ Chroma Scrub Bench** (⌃⌥⇧B, Debug menu only, so `MANIFOLD_DEBUG_MENU=1`): on the key
     deck's paused file, exports the playback frame, drives 60 scrub positions at 20 Hz through
     `FrameEngine.scrubSeek`, scrubs back and exports the scrub frame, then releases (the `[SCRUB]` line
@@ -923,11 +930,11 @@ to send Export Diagnostics for a sync problem.
   - **`MANIFOLD_PLAYBACK_STATS=1`** (launch environment): a per-second `[PLAYBACK-STATS] presented=
     dropped= late=` line from the renderer's frame selection while the transport runs. How P8 counts
     late and dropped frames on file playback without a DeckLink card.
-- **Gating:** all four `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+- **Gating:** all five `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
-- **Remove** all four before ship, or keep the dump and the stats line as Profile telemetry by decision.
+- **Remove** all five before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -1268,10 +1275,23 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 ---
 
-## ☐ OPEN 2026-10-10 — SCHEDULED FOR 1.0 (Stage 3b, S3) — PRE-EXISTING, SRT — an H.264 High 4:2:2 stream is converted to 4:2:0 without saying so
+## ✅ FIXED 2026-10-11 (commit to be filled in, Stage 3b S3) — PRE-EXISTING, SRT — an H.264 High 4:2:2 stream is converted to 4:2:0 without saying so
 
-**Status:** OPEN. Found by reading the source in the Stage 3b audit (§6.10, *Stage 3b — audit*); the
-decode itself was measured offline, the app path was not run.
+**Status:** FIXED (commit to be filled in). Found by reading the source in the Stage 3b audit (§6.10, *Stage 3b —
+audit*); **measured in the app 2026-10-11** (§6.10, *Stage 3b, S3 and S4 — results*, P9): on HEAD `2339d00`,
+`lines-422-h264.ts` over a local listener decoded to `x420`, the readout said "source chroma not stated", and
+every chroma row was 512/512 (0 / 1080 rows kept, export and wire).
+
+**The fix (S3, D7):** the SRT format gate now covers H.264 as well as HEVC and judges the SPS's chroma format
+and bit depth; `LiveVideoDecoder` requests the SPS's own chroma (`x422` for 4:2:2, `x444` for 4:4:4); the
+promote keeps the delivered chroma. Measured on the fixed build: `[SRT] H.264 SPS: High 4:2:2 (profile_idc
+122), 4:2:2, 10-bit … → accepted`, `requesting x422 … hardware decode: yes`, `[CHROMA] 4:2:2 10-bit (x422) —
+native`, **1080 / 1080 rows** on export and wire; H.264 High 4:4:4 Predictive to `x444`, the checker 100 %
+on export, 512 ± 2 on 100 % of the wire. Where VideoToolbox cannot decode it (no software decoder for H.264
+4:2:2/4:4:4, −8969), the stream is refused with a banner; where a picture decodes but carries less chroma
+than its SPS declares, the readout names why and a banner says so, and the stream stays up.
+
+What was wrong:
 
 - **What happens:** the HEVC format gate (`SRTFrameRouter.swift:1052`) refuses HEVC 4:2:2 and 4:4:4 with a
   banner, but **H.264 has no gate**. `LiveVideoDecoder` asks VideoToolbox for `x420`
@@ -1287,9 +1307,16 @@ decode itself was measured offline, the app path was not run.
 
 ---
 
-## ☐ OPEN 2026-10-10 — SCHEDULED FOR 1.0 (Stage 3b, S3) — SRT — a 4:2:0 HEVC stream in a Range Extensions profile is refused (x265 all-intra: "Main 10 Intra")
+## ✅ FIXED 2026-10-11 (commit to be filled in, Stage 3b S3) — SRT — a 4:2:0 HEVC stream in a Range Extensions profile is refused (x265 all-intra: "Main 10 Intra")
 
-**Status:** OPEN. Measured 2026-10-10 in Stage 3b S1's P1 runs, on HEAD `1bd07de` and S1 alike.
+**Status:** FIXED (commit to be filled in). Measured 2026-10-10 in Stage 3b S1's P1 runs, on HEAD `1bd07de` and S1
+alike. **Re-run 2026-10-11** (§6.10, *Stage 3b, S3 and S4 — results*, P11b) with `still-420-hevc10-intra.ts`
+(x265 `keyint=1`, 4:2:0 10-bit): HEAD `2339d00` refuses it as described below; the fixed build logs `Format
+Range Extensions (general_profile_idc 4), 4:2:0, 10-bit luma / 10-bit chroma → accepted`, decodes to `x420`
+in hardware, `[CHROMA] 4:2:0 10-bit (x420) — native`, 0 decode errors, and plays to the end. The gate judges
+`SPSFormat.verdict` (chroma format and bit depth, up to 10 bits), never the profile.
+
+What was wrong:
 
 - **What happens:** x265 with `keyint=1` at 4:2:0 10-bit signals "Main 10 Intra", which is a Range
   Extensions profile (`general_profile_idc 4`). The HEVC format gate logs `Format Range Extensions

@@ -426,8 +426,9 @@ public struct HEVCSPSFormat: Equatable, Sendable {
         return generalProfileIdc == 1 || generalProfileIdc == 2 || compatible(1) || compatible(2)
     }
 
-    /// HEVC Main or Main 10 at 4:2:0 and at most 10 bits: what Manifold plays over SRT today. 4:2:2 is
-    /// Stage 3b; 4:4:4 stays refused.
+    /// HEVC Main or Main 10 at 4:2:0 and at most 10 bits: Stage 3's gate. ⚠️ NO LONGER THE GATE: since
+    /// Stage 3b S3 the SRT gate judges `neutral.verdict` (chroma format and bit depth, not the profile,
+    /// so "Main 10 Intra" at 4:2:0 plays). Kept for the tests that pin what Stage 3 refused.
     public var isSupported420: Bool {
         isMainOrMain10 && chromaFormatIdc == 1 && bitDepthLuma <= 10 && bitDepthChroma <= 10
     }

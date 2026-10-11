@@ -991,6 +991,8 @@ final class MetalVideoRenderer {
     /// MAIN THREAD. Set by the source through `setSourceChroma`, cleared by `liveSourceReleased`.
     private(set) var sourceChroma: SourceChroma = .notStated
     private(set) var chromaReason: String?
+    /// A fact about the decode that is not a chroma loss ("software decode", SRT). Same lifetime.
+    private(set) var chromaNote: String?
 
     /// The pixel format of the last buffer drawn. Written on the RENDER thread (on change only),
     /// read on main by the readout, cleared on main at a live release: hence the lock.
@@ -1002,14 +1004,15 @@ final class MetalVideoRenderer {
 
     /// A source states its chroma (and, when it carries less than it has, why). Any thread; the
     /// state is held and announced on main, like `setSourceColorSpace`'s announcement.
-    func setSourceChroma(_ chroma: SourceChroma, reason: String? = nil) {
+    func setSourceChroma(_ chroma: SourceChroma, reason: String? = nil, note: String? = nil) {
         guard Thread.isMainThread else {
-            DispatchQueue.main.async { self.setSourceChroma(chroma, reason: reason) }
+            DispatchQueue.main.async { self.setSourceChroma(chroma, reason: reason, note: note) }
             return
         }
-        guard chroma != sourceChroma || reason != chromaReason else { return }
+        guard chroma != sourceChroma || reason != chromaReason || note != chromaNote else { return }
         sourceChroma = chroma
         chromaReason = reason
+        chromaNote = note
         announceChromaState()
     }
 
@@ -1017,7 +1020,7 @@ final class MetalVideoRenderer {
     /// same words the chain readout shows (one line per change, never per frame).
     private func announceChromaState() {
         print("[CHROMA] " + ChromaReadout.text(carried: carriedPixelFormat, source: sourceChroma,
-                                               reason: chromaReason))
+                                               reason: chromaReason, note: chromaNote))
         NotificationCenter.default.post(name: Self.chromaStateDidChange, object: self)
     }
 
@@ -1305,6 +1308,7 @@ final class MetalVideoRenderer {
         carriedLock.lock(); carriedPixelFormatLocked = nil; carriedLock.unlock()
         sourceChroma = .notStated
         chromaReason = nil
+        chromaNote = nil
         announceChromaState()
         NotificationCenter.default.post(name: Self.liveSourceDidRelease, object: self)
     }

@@ -59,7 +59,8 @@ import CoreGraphics
 import CoreMedia
 import CoreVideo
 import Foundation
-import SPSColor   // what each SPS declares about colour — handed to the transport, not used here
+import SPSColor   // what each SPS declares about colour — handed to the transport — and its chroma format
+import ColorimetryModel   // ChromaSubsampling — the output format a stream's chroma asks for (Stage 3b S3)
 import ImageIO
 import QuartzCore   // CACurrentMediaTime — the monotonic clock the suppression window runs on
 import UniformTypeIdentifiers
@@ -92,6 +93,11 @@ final class LiveVideoDecoder {
         var height = 0
         var pixelFormat: OSType = 0
         var lastDecodeError: OSStatus = noErr
+        /// What the session was asked to output (Stage 3b S3: the SPS's own chroma). 0 before a session.
+        var requestedPixelFormat: OSType = 0
+        /// `kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder`, read after each session
+        /// create. nil before a session, or if VideoToolbox did not answer.
+        var usingHardwareDecoder: Bool?
     }
 
     /// Fires on the decode queue with each decoded frame, carrying the SENDER-timeline PTS —
@@ -120,6 +126,17 @@ final class LiveVideoDecoder {
     /// every frame that arrives while we wait — see the suppression window for what that cost.
     var onNeedsKeyframe: (() -> Void)?
 
+    /// Fires on the decode queue AT MOST ONCE per decoder, when VideoToolbox cannot decode this stream
+    /// at all: every session create failed, or `undecodableAfterFailures` decodes in a row failed after
+    /// a session build with no picture ever coming out of it. The words say which, with the status.
+    ///
+    /// Stage 3b S3: the SRT gate admits every chroma format at up to 10 bits and leaves "can this Mac
+    /// decode it" to VideoToolbox's own answer — H.264 4:2:2 and 4:4:4 have no software decoder (−8969,
+    /// §6.10 audit), and other chips' hardware is not established. The build has no libav decoder, so
+    /// there is nothing to fall back to: the transport refuses the stream with a banner. WHEP does not
+    /// set it, and is unchanged.
+    var onUndecodable: ((String) -> Void)?
+
     // MARK: - Output pixel format
     //
     // x420 (10-bit 4:2:0 biplanar, video range) is REQUESTED even though the stream is 8-bit,
@@ -134,7 +151,57 @@ final class LiveVideoDecoder {
     // VideoToolbox does the 8→10 promotion in its own pipeline, which is cheaper and simpler
     // than us doing it downstream. If the session refuses it, we fall back to VT's native
     // choice and say so loudly, because that fallback has the colour consequence above.
-    private static let preferredPixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+    //
+    // STAGE 3b S3/S4: THE REQUEST FOLLOWS THE SPS's CHROMA. x420 above was right for 4:2:0, and is
+    // still what every 4:2:0 stream asks for (every WHEP stream). A 4:2:2 or 4:4:4 stream asks for
+    // x422 / x444 instead, the 10-bit biplanar carriers the renderer samples natively (CLAUDE.md, the
+    // chroma rule). VideoToolbox's NATIVE 10-bit output for those is packed (p422 / p444), which Metal
+    // cannot sample; asking for x422 / x444 costs the same and comes back directly (audit).
+    // `ChromaSubsampling.liveDecodeRequest` is the rule, in the package, so its tests reach it.
+    private var requestedPixelFormat: OSType {
+        ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: spsChromaFormatIdc,
+                                            force420: MetalVideoRenderer.forceChroma420)
+    }
+
+    /// The current SPS's `chroma_format_idc`, nil until one is read (or if it cannot be). Decode queue.
+    private var spsChromaFormatIdc: Int?
+
+    // MARK: - DEBUG: software decode (pre-ship list, docs/BUGS.md)
+
+    /// `MANIFOLD_FORCE_SOFTWARE_DECODE=1` (launch environment, NEVER `defaults`): build every session
+    /// with the hardware decoder disabled. How Stage 3b S3 tests, on a Mac that never needs them, the
+    /// readout's "software decode" note and the refusal of a stream VideoToolbox cannot decode at all
+    /// (H.264 4:2:2 has no software decoder). Always false in Release.
+    #if DEBUG
+    static let forceSoftwareDecode = ProcessInfo.processInfo.environment["MANIFOLD_FORCE_SOFTWARE_DECODE"] == "1"
+    #else
+    static let forceSoftwareDecode = false
+    #endif
+
+    // MARK: - Undecodable (Stage 3b S3)
+
+    /// Failed decode attempts, after a session build, with no picture ever decoded by that session,
+    /// before the stream is declared undecodable. ONE, the audit's rule ("create fails, or the first
+    /// frame errors"): the first attempt is always a whole random-access picture (the keyframe gate),
+    /// and VideoToolbox's answer for a format it has no decoder for is an error on exactly that picture
+    /// (−8969 for H.264 4:2:2 in software, measured). Three attempts were tried first and measured too
+    /// slow: at a 10 s GOP the stream sat black and connected for 30 s before anyone was told. A damaged
+    /// FIRST keyframe would also be refused; SRT's retransmission makes that rare, and the banner names
+    /// VideoToolbox's status so a retry can be judged.
+    static let undecodableAfterFailures = 1
+    private var failuresSinceSessionBuild = 0
+    private var framesSinceSessionBuild = 0
+    private var reportedUndecodable = false
+    /// Set by the output callback when the picture it was handed failed; read by `decode` after the
+    /// synchronous submit returns, so one attempt counts once whichever surface reported it.
+    private var callbackFailedThisDecode = false
+
+    /// Whether the current session decodes in hardware. nil before a session. Decode queue.
+    private(set) var usingHardwareDecoder: Bool?
+    /// What the current session was built to request. A new SPS whose chroma asks for a different
+    /// format needs a new session even when the old one would accept the format description: it
+    /// would go on delivering the old format (a stream switching to 4:2:2 kept at x420). Decode queue.
+    private var sessionRequestedPixelFormat: OSType = 0
 
     // MARK: - Codec
 
@@ -284,6 +351,8 @@ final class LiveVideoDecoder {
         currentVPS = nil
         currentMorePPS = []
         colorSPS = nil
+        spsChromaFormatIdc = nil
+        usingHardwareDecoder = nil
         closeKeyframeGate()
         keyframeAskedAt = 0
     }
@@ -334,8 +403,12 @@ final class LiveVideoDecoder {
         if let sps, !sps.isEmpty, sps != colorSPS {
             colorSPS = sps
             switch codec {
-            case .h264: onSPSColor?(H264SPSColor.parse(nal: sps))
-            case .hevc: onSPSColor?(HEVCSPSColor.parse(nal: sps))
+            case .h264:
+                spsChromaFormatIdc = H264SPSColor.chromaFormatIdc(nal: sps)
+                onSPSColor?(H264SPSColor.parse(nal: sps))
+            case .hevc:
+                spsChromaFormatIdc = HEVCSPSColor.format(nal: sps)?.chromaFormatIdc
+                onSPSColor?(HEVCSPSColor.parse(nal: sps))
             }
         }
 
@@ -414,11 +487,15 @@ final class LiveVideoDecoder {
         // decode order. The output callback runs before this call returns. See the file header
         // for why synchronous is structural here and not a bet on the sender's GOP structure.
         var infoFlags = VTDecodeInfoFlags()
+        callbackFailedThisDecode = false
         let status = VTDecompressionSessionDecodeFrame(session,
                                                        sampleBuffer: sampleBuffer,
                                                        flags: [],
                                                        frameRefcon: nil,
                                                        infoFlagsOut: &infoFlags)
+        if status != noErr || callbackFailedThisDecode {
+            noteFailedAttempt(status != noErr ? status : snapshot().lastDecodeError)
+        }
         if status != noErr {
             mutateStats {
                 $0.decodeErrors += 1
@@ -471,7 +548,8 @@ final class LiveVideoDecoder {
 
         // An existing session can often absorb a new format description (same resolution,
         // trivially different SPS). Asking is cheaper and less disruptive than tearing down.
-        if let session, VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: newFormat) {
+        if let session, sessionRequestedPixelFormat == requestedPixelFormat,
+           VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: newFormat) {
             NSLog("[\(logTag)] existing session accepts the new format description — kept")
             return
         }
@@ -572,10 +650,20 @@ final class LiveVideoDecoder {
 
     private func makeSession(for format: CMFormatDescription) {
         // Hardware is a REQUEST, not a requirement: `Enable…` lets VT fall back to software
-        // rather than fail creation, which `Require…` would do.
+        // rather than fail creation, which `Require…` would do. (DEBUG `forceSoftwareDecode`: disabled.)
         let specification: [CFString: Any] = [
-            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true
+            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: !Self.forceSoftwareDecode
         ]
+        failuresSinceSessionBuild = 0
+        framesSinceSessionBuild = 0
+        usingHardwareDecoder = nil
+        let preferred = requestedPixelFormat
+        let preferredName = ChromaReadout.fourCC(preferred)
+        let chromaLabel = ChromaSubsampling(pixelFormat: preferred)?.label ?? "?"
+        let spsChroma = spsChromaFormatIdc.flatMap(ChromaSubsampling.init(chromaFormatIdc:))
+        let forcedNote = MetalVideoRenderer.forceChroma420 && (spsChroma ?? .c420) > .c420
+            ? " — the SPS says \(spsChroma?.label ?? "?"); \(MetalVideoRenderer.forceChroma420Reason)" : ""
+        sessionRequestedPixelFormat = preferred
 
         // Output callback record. The C function pointer must not capture, so `self` travels
         // as an unretained refcon — safe because decode is synchronous on this queue, so the
@@ -600,7 +688,8 @@ final class LiveVideoDecoder {
             ] as CFDictionary
         }
 
-        for requested in [Self.preferredPixelFormat, nil] as [OSType?] {
+        var lastStatus: OSStatus = noErr
+        for requested in [preferred, nil] as [OSType?] {
             var created: VTDecompressionSession?
             let status = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault,
                                                       formatDescription: format,
@@ -610,26 +699,67 @@ final class LiveVideoDecoder {
                                                       decompressionSessionOut: &created)
             if status == noErr, let created {
                 session = created
-                mutateStats { $0.sessionBuilds += 1 }
                 // RealTime tells VT this is live: prefer low latency over throughput, and do
                 // not batch frames waiting for a fuller pipeline.
                 VTSessionSetProperty(created,
                                      key: kVTDecompressionPropertyKey_RealTime,
                                      value: kCFBooleanTrue)
+                // Hardware or software, VideoToolbox's own answer (Stage 3b S3): the transport puts
+                // "software decode" in the Chroma line when it is false.
+                // The Copy rule's +1 lands in a Swift-owned optional, which releases it.
+                var hardware: CFTypeRef?
+                let copied = withUnsafeMutablePointer(to: &hardware) {
+                    VTSessionCopyProperty(created,
+                                          key: kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+                                          allocator: kCFAllocatorDefault, valueOut: UnsafeMutableRawPointer($0))
+                }
+                if copied == noErr, let flag = hardware as? Bool {
+                    usingHardwareDecoder = flag
+                } else if copied == kVTPropertyNotSupportedErr {
+                    // MEASURED (§6.10, S3): Apple's hardware decoders answer this property (1); its
+                    // software decoders do not support it at all (−12900, before and after decoding),
+                    // with hardware disabled or not. Not supported is therefore the software decoder.
+                    usingHardwareDecoder = false
+                }
+                let hw = usingHardwareDecoder.map { $0 ? "yes" : "no" } ?? "unknown"
+                mutateStats {
+                    $0.sessionBuilds += 1
+                    $0.requestedPixelFormat = requested ?? 0
+                    $0.usingHardwareDecoder = self.usingHardwareDecoder
+                }
                 if requested == nil {
                     NSLog("""
-                          [\(logTag)] WARNING: VT would not output x420 — using its native format. \
-                          Step 4 will need MetalVideoRenderer's 8-bit branch, whose range-expansion \
-                          constants are still 10-bit-domain (see MetalVideoRenderer.swift ~L981).
+                          [\(logTag)] WARNING: VT would not output \(preferredName) — using its native format, \
+                          which the transport's promote converts. Hardware decode: \(hw).
                           """)
                 } else {
-                    NSLog("[\(logTag)] session created — requesting x420 output (10-bit 4:2:0), hardware preferred")
+                    NSLog("[\(logTag)] session created — requesting %@ output (10-bit %@)%@, hardware preferred; "
+                          + "hardware decode: %@", preferredName, chromaLabel, forcedNote, hw)
                 }
                 return
             }
+            lastStatus = status
             NSLog("[\(logTag)] VTDecompressionSessionCreate failed (%d)%@", status,
-                  requested != nil ? " for x420 — retrying with VT's native format" : "")
+                  requested != nil ? " for \(preferredName) — retrying with VT's native format" : "")
         }
+        reportUndecodable("VideoToolbox could not create a decoder for it (\(lastStatus))")
+    }
+
+    /// One failed decode attempt (submit or output callback). Decode queue.
+    private func noteFailedAttempt(_ status: OSStatus) {
+        guard framesSinceSessionBuild == 0 else { return }
+        failuresSinceSessionBuild += 1
+        guard failuresSinceSessionBuild >= Self.undecodableAfterFailures else { return }
+        reportUndecodable("VideoToolbox failed \(failuresSinceSessionBuild) pictures in a row "
+                          + "and decoded none (\(status))")
+    }
+
+    private func reportUndecodable(_ why: String) {
+        guard !reportedUndecodable else { return }
+        reportedUndecodable = true
+        NSLog("[\(logTag)] UNDECODABLE: %@ — %@", why,
+              onUndecodable != nil ? "the transport refuses the stream" : "no handler; frames keep being dropped")
+        onUndecodable?(why)
     }
 
     // MARK: - (4) Decoded frame → count, and optionally a PNG
@@ -639,6 +769,7 @@ final class LiveVideoDecoder {
                                imageBuffer: CVImageBuffer?,
                                pts: CMTime) {
         guard status == noErr else {
+            callbackFailedThisDecode = true
             mutateStats { $0.decodeErrors += 1; $0.lastDecodeError = status }
             // Surface 2: kVTVideoDecoderBadDataErr (-12909) from a corrupt reference picture
             // arrives HERE, on the output callback, not on the submit return — so this is where
@@ -664,6 +795,7 @@ final class LiveVideoDecoder {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        framesSinceSessionBuild += 1
         mutateStats {
             $0.framesDecoded += 1
             $0.width = width

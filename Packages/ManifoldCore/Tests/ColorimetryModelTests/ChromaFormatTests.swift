@@ -91,4 +91,49 @@ final class ChromaFormatTests: XCTestCase {
         XCTAssertEqual(ChromaReadout.text(carried: kCVPixelFormatType_422YpCbCr8, source: .notStated, reason: nil),
                        "2vuy — not a format the renderer samples")
     }
+
+    // MARK: - Live decode (Stage 3b S3/S4)
+
+    /// The request follows the SPS's chroma. A 4:2:0 SPS — every WHEP stream — asks for x420, exactly
+    /// what every live decode asked for before S3, so WHEP's decode is unchanged.
+    func testLiveDecodeRequestFollowsTheSPS() {
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 1, force420: false), x420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 2, force420: false), x422)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 3, force420: false), x444)
+        // No SPS yet, unreadable, or monochrome: x420, as before.
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: nil, force420: false), x420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 0, force420: false), x420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 7, force420: false), x420)
+        // The DEBUG switch lowers everything to x420 (P10).
+        for idc in [1, 2, 3] {
+            XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: idc, force420: true), x420)
+        }
+    }
+
+    /// The promote keeps the chroma a decoder delivered: 8-bit, packed and 16-bit formats map to their
+    /// own chroma, so 8-bit 4:2:2 is promoted to x422, never resampled to x420.
+    func testDeliveredFormatsKeepTheirChroma() {
+        let c420: [OSType] = [x420, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                              kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, 0x7034_3230]
+        let c422: [OSType] = [x422, kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_422YpCbCr8,
+                              kCVPixelFormatType_422YpCbCr10, 0x7034_3232, kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange]
+        let c444: [OSType] = [x444, kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_444YpCbCr10,
+                              0x7034_3434, kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange]
+        for pf in c420 { XCTAssertEqual(ChromaSubsampling(deliveredFormat: pf), .c420, ChromaReadout.fourCC(pf)) }
+        for pf in c422 { XCTAssertEqual(ChromaSubsampling(deliveredFormat: pf), .c422, ChromaReadout.fourCC(pf)) }
+        for pf in c444 { XCTAssertEqual(ChromaSubsampling(deliveredFormat: pf), .c444, ChromaReadout.fourCC(pf)) }
+        XCTAssertNil(ChromaSubsampling(deliveredFormat: kCVPixelFormatType_32BGRA))
+        XCTAssertEqual(ChromaSubsampling.c422.carrierPixelFormat, x422)
+        XCTAssertEqual(ChromaSubsampling(chromaFormatIdc: 0), nil)
+    }
+
+    /// "software decode" is a note, not a loss: it rides after the line, native or not.
+    func testReadoutSoftwareDecodeNote() {
+        XCTAssertEqual(ChromaReadout.text(carried: x422, source: .declared(.c422), reason: nil, note: "software decode"),
+                       "4:2:2 10-bit (x422) — native · software decode")
+        XCTAssertEqual(ChromaReadout.text(carried: x444, source: .declared(.c444), reason: nil, note: "software decode"),
+                       "4:4:4 10-bit (x444) — native · DeckLink v210 output: reduced once to 4:2:2 (halfband) · software decode")
+        XCTAssertEqual(ChromaReadout.text(carried: x420, source: .declared(.c420), reason: nil, note: nil),
+                       "4:2:0 10-bit (x420) — native")
+    }
 }

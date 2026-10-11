@@ -585,10 +585,17 @@ final class SRTClient: ObservableObject {
                         }
                     }
                 }, onRefused: { message in
-                    // SESSION THREAD. The HEVC format gate refused the stream's SPS (decision 7):
-                    // the banner and the teardown are main's, behind the format hop like the rest.
+                    // SESSION THREAD. The format gate refused the stream's SPS, or VideoToolbox cannot
+                    // decode it (Stage 3b S3): the banner and the teardown are main's, behind the
+                    // format hop like the rest.
                     DispatchQueue.main.async {
                         client.handleFormatRefused(generation: generation, message: message)
+                    }
+                }, onChromaFallback: { message in
+                    // SESSION THREAD. A picture carries less chroma than its SPS declares (Stage 3b
+                    // S3): a banner, and the stream stays up.
+                    DispatchQueue.main.async {
+                        client.handleChromaFallback(generation: generation, message: message)
                     }
                 })
                 DispatchQueue.main.async {
@@ -803,10 +810,10 @@ final class SRTClient: ObservableObject {
         // worst possible failure to debug. The codec test is the one the C reader chose its builder
         // by (`format.codec`), so the gate and the builder cannot disagree.
         //
-        // HEVC IS ONLY HALF-JUDGED HERE. The demuxer knows the profile name but not the chroma format
-        // ("Rext" covers 4:2:0, 4:2:2 and 4:4:4), so Main / Main 10 at 4:2:0 versus the rest is
-        // decided by the SPS itself, on the session thread, before the decoder sees it — see
-        // SRTFrameRouter's HEVC format gate and `handleFormatRefused` (§6.10, Stage 3, decision 7).
+        // THE FORMAT IS ONLY HALF-JUDGED HERE. The demuxer knows the profile name but not the chroma
+        // format or bit depth ("Rext" covers every RExt format), so those are decided by the SPS itself,
+        // on the session thread, before the decoder sees it — see SRTFrameRouter's format gate and
+        // `handleFormatRefused` (§6.10, Stage 3b S3/S4).
         let codec = Self.text(format.codecName)
         guard format.codec == ManifoldSRTVideoCodecH264 || format.codec == ManifoldSRTVideoCodecHEVC else {
             NSLog("[SRT] stream is %@ %@ %dx%d — this build decodes H.264 and HEVC only; refusing",
@@ -884,15 +891,26 @@ final class SRTClient: ObservableObject {
         }
     }
 
-    /// The HEVC format gate refused the stream's SPS: 4:2:2 or 4:4:4 (not yet; Stage 3b), or anything
-    /// else that is not Main or Main 10 at 4:2:0 (decision 7). The router has already stopped feeding
-    /// the decoder; this is the banner and the teardown, as the codec gate above does them.
+    /// The format gate refused the stream's SPS (more than 10 bits, D5), or VideoToolbox cannot decode
+    /// it at all (Stage 3b S3). The router has already stopped feeding the decoder; this is the banner
+    /// and the teardown, as the codec gate above does them.
     private func handleFormatRefused(generation: UInt64, message: String) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard isCurrent(generation, "format refused") else { return }
         guard session != nil else { return }
         showError(message)
         disconnect()
+    }
+
+    /// A decoded picture carries less chroma than the stream's SPS declares: the decode worked, its
+    /// native chroma could not be carried (Stage 3b S3; CLAUDE.md, the chroma rule: never silently).
+    /// The banner only — NO teardown, the picture is still the stream's — and it survives pictures,
+    /// because it is true while they flow. The Chroma line says the same, from the renderer.
+    private func handleChromaFallback(generation: UInt64, message: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isCurrent(generation, "chroma fallback") else { return }
+        guard session != nil else { return }
+        showError(message, survivesPictures: true)
     }
 
     /// The session thread has finished. Called on main, always after the decode side has already

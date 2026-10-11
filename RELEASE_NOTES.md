@@ -29,7 +29,7 @@ bullet.
 
 - Display transform, per window: OS (macOS color-manages the picture for your display) or Bypass (the picture's values go to the screen untouched). Choose it from the control bar or the Color menu. A window in Bypass says so in its title.
 - A display chain readout shows the source's color and whether it was declared or assumed, the transform in use, your display and its curve, and for SRT and WHEP the amount of buffering.
-- HEVC (Main and Main 10, 4:2:0) now plays over SRT, including 10-bit HDR. HEVC 4:2:2 and 4:4:4 streams are refused with a message saying so, never quietly converted.
+- HEVC now plays over SRT, including 10-bit HDR.
 - Audio offset for live streams, in the A/V menu: ⌥] and ⌥[ move the sound 1 ms later or earlier (add ⇧ for 10 ms). Save the offset with a saved stream and it comes back every time. A badge and the window title show when an offset is on.
 - Calibration (A/V ▸ Calibrate…): loop a Manifold sync clip on the sender and Manifold measures how far apart sound and picture are, then offers the correction. It never applies anything by itself. A/V ▸ Save Sync Clip… saves the clip that matches the stream's frame rate.
 
@@ -41,6 +41,7 @@ bullet.
 - SRT buffering adapts to the sender. Encoders that send audio in large chunks, or use B-frames, get a slightly larger buffer automatically, and the chain readout says how much and why.
 - SDI output follows an SRT stream's own frame rate. If a stream labels its frame rate wrongly, the output follows the rate the stream actually runs at.
 - 4:2:2 and 4:4:4 files (ProRes, DNxHD/DNxHR, H.264/HEVC 4:2:2) now keep their full color resolution through playback, scopes, SDI and export.
+- SRT now accepts HEVC and H.264 4:2:2 and 4:4:4 at full color resolution. A stream this Mac can't decode is refused with a message saying so, never quietly converted.
 
 ### Fixed
 
@@ -54,6 +55,8 @@ bullet.
 - Fixed: after an NDI or HLS stream ended, a file played next ran its picture about 0.2 s ahead of its sound.
 - Fixed: SDI audio dropped out every few seconds during file playback.
 - Fixed: streams using the BT.470BG color matrix, common from European encoders, were decoded with Rec. 709 coefficients, giving a small color shift.
+- Fixed: H.264 4:2:2 streams over SRT were shown at 4:2:0 color resolution without saying so.
+- Fixed: all-intra HEVC 4:2:0 streams over SRT (x265's "Main 10 Intra") were refused.
 - Fixed: DNxHR 444 files in a .mov could look slightly flat, with lifted blacks and weaker color. They now show at their true levels.
 - Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 
@@ -110,6 +113,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | HEVC parser enabled in the FFmpeg build | `f4b6746` | No |
 | HEVC SPS color reader, codec-neutral SPSColor target | `fd657f7` | No (enables the next row) |
 | HEVC Main / Main 10 4:2:0 plays; 4:2:2 and 4:4:4 refused with a banner | `a2e5ce1` | Yes |
+| HEVC and H.264 4:2:2 / 4:4:4 at native chroma (Stage 3b S3/S4): gate on the SPS's chroma and bit depth (RExt 4:2:0 "Main 10 Intra" accepted; H.264 gated), decode to `x422`/`x444`, refusal when VideoToolbox can't decode, fallback banner, software-decode note | (commit to be filled in) | Yes |
 | Declared frame rate with a timestamp-measured fallback | `ce3d828` | Yes |
 | Measured frame rate wins when it clearly disagrees with the declared one | `a8b70fa` | Yes |
 

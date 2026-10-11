@@ -248,7 +248,8 @@ final class DisplayChainModel: ObservableObject {
                                 buffer: LiveBufferReadout.report(for: renderer)?.text,
                                 chroma: renderer.map {
                                     ChromaReadout.text(carried: $0.carriedPixelFormat,
-                                                       source: $0.sourceChroma, reason: $0.chromaReason)
+                                                       source: $0.sourceChroma, reason: $0.chromaReason,
+                                                       note: $0.chromaNote)
                                 } ?? "no source")
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.

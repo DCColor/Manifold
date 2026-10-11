@@ -3,7 +3,7 @@
 # picture comes from ffmpeg's own sources (lavfi `nullsrc` + `geq`, `yuvtestsrc`, `testsrc2`). No media
 # goes in, and none comes out into the repo.
 #
-#   zsh scripts/chroma/generate.sh [group ...]     # all groups, or the ones named: 422 444 420 4k ndi s2
+#   zsh scripts/chroma/generate.sh [group ...]     # all groups, or the ones named: 422 444 420 4k ndi s2 s3
 #
 # Output (gitignored): build/chroma-fixtures/   (CHROMA_FIXTURES_OUT overrides)
 #
@@ -28,7 +28,7 @@ set -eu
 HERE=${0:A:h}; REPO=${HERE:h:h}
 OUT=${CHROMA_FIXTURES_OUT:-$REPO/build/chroma-fixtures}; mkdir -p $OUT
 cd $OUT
-groups=($@); (( $#groups )) || groups=(422 444 420 4k ndi s2)
+groups=($@); (( $#groups )) || groups=(422 444 420 4k ndi s2 s3)
 q=(-hide_banner -loglevel error -y)
 
 PAT_LINES="nullsrc=s=1920x1080:r=25:d=10,format=yuv422p10le,geq=lum=512:cb='if(mod(Y\,2)\,300\,724)':cr='if(mod(Y\,2)\,724\,300)'"
@@ -94,7 +94,15 @@ for g in $groups; do
     # MPEG-4 Part 2: a codec AVFoundation plays and the resolver has no table for (D8: x420, "unknown").
     ffmpeg $q -f lavfi -i "testsrc2=s=1920x1080:r=25:d=5" -c:v mpeg4 -q:v 3 -pix_fmt yuv420p unknown-mpeg4.mov
     ;;
-  *) print -u2 "unknown group: $g (422 444 420 4k ndi s2)"; exit 2 ;;
+  s3)
+    # S3/S4 (SRT at native chroma). 8-bit H.264 High 4:2:2: the lines' 10-bit codes 724/300 are 181/75
+    # ×4, so 8-bit holds them exactly and the promote's ×4 shift (or VideoToolbox's) restores them.
+    ffmpeg $q -f lavfi -i "$PAT_LINES" -c:v libx264 -profile:v high422 -pix_fmt yuv422p -qp 1 lines-422-h264-8bit.ts
+    # x265 ALL-INTRA at 4:2:0 10-bit signals "Main 10 Intra", a Range Extensions profile
+    # (general_profile_idc 4), which Stage 3's gate refused although it is 4:2:0 10-bit (docs/BUGS.md).
+    ffmpeg $q -f lavfi -i "$PAT_STILL420" -c:v libx265 -pix_fmt yuv420p10le -x265-params keyint=1:log-level=error still-420-hevc10-intra.ts
+    ;;
+  *) print -u2 "unknown group: $g (422 444 420 4k ndi s2 s3)"; exit 2 ;;
   esac
 done
 ls -l $OUT

@@ -41,6 +41,75 @@ public enum ChromaSubsampling: Int, Comparable, Sendable, CaseIterable {
         default: return nil
         }
     }
+
+    /// The 10-bit biplanar video-range format that carries this chroma: `x420`, `x422`, `x444` — the
+    /// renderer's sample domain (stored codes; the shader does any range expansion).
+    public var carrierPixelFormat: OSType {
+        switch self {
+        case .c420: return kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        case .c422: return kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+        case .c444: return kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+        }
+    }
+
+    /// An SPS's `chroma_format_idc` (H.264 and HEVC agree): 1 4:2:0, 2 4:2:2, 3 4:4:4. nil for 0
+    /// (monochrome: no chroma planes, and no format of ours names it) and anything else.
+    public init?(chromaFormatIdc idc: Int) {
+        switch idc {
+        case 1: self = .c420
+        case 2: self = .c422
+        case 3: self = .c444
+        default: return nil
+        }
+    }
+
+    /// The chroma ANY YCbCr format carries — 8-bit, 10-bit, biplanar, packed, either range — for the
+    /// live promote, which keeps the chroma a decoder delivered and changes only the layout and depth
+    /// (Stage 3b S3). nil for a format whose chroma this table does not know.
+    public init?(deliveredFormat pf: OSType) {
+        if let carried = ChromaSubsampling(pixelFormat: pf) { self = carried; return }
+        switch pf {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,             // 420v
+             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,              // 420f
+             kCVPixelFormatType_420YpCbCr8Planar,                         // y420
+             kCVPixelFormatType_420YpCbCr8PlanarFullRange,                // f420
+             Self.p420:
+            self = .c420
+        case kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange,             // 422v
+             kCVPixelFormatType_422YpCbCr8BiPlanarFullRange,              // 422f
+             kCVPixelFormatType_422YpCbCr8,                               // 2vuy
+             kCVPixelFormatType_422YpCbCr8_yuvs,                          // yuvs
+             kCVPixelFormatType_422YpCbCr10,                              // v210
+             Self.p422,                                                   // VT's native HEVC 4:2:2
+             kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange:            // sv22
+            self = .c422
+        case kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange,             // 444v
+             kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,              // 444f
+             kCVPixelFormatType_444YpCbCr10,                              // v410
+             Self.p444,
+             kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange:            // sv44
+            self = .c444
+        default:
+            return nil
+        }
+    }
+
+    /// VideoToolbox's native 10-bit hardware output: PACKED biplanar 4:2:0 / 4:2:2 / 4:4:4, which Metal
+    /// cannot sample as r16/rg16 (audit). CoreVideo's header names no constant for them.
+    static let p420: OSType = 0x7034_3230   // 'p420'
+    static let p422: OSType = 0x7034_3232   // 'p422'
+    static let p444: OSType = 0x7034_3434   // 'p444'
+
+    /// What a live decoder asks VideoToolbox for (Stage 3b S3/S4): the SPS's own chroma, in its 10-bit
+    /// biplanar carrier. `x420` when there is no SPS chroma to go by (none yet, unreadable, or 4:0:0) —
+    /// which is what every live decode requested before S3, so a 4:2:0 stream (every WHEP stream) asks
+    /// for exactly what it always did. `force420` is the DEBUG switch (`MANIFOLD_FORCE_CHROMA_420`).
+    public static func liveDecodeRequest(chromaFormatIdc idc: Int?, force420: Bool) -> OSType {
+        guard !force420, let idc, let chroma = ChromaSubsampling(chromaFormatIdc: idc) else {
+            return ChromaSubsampling.c420.carrierPixelFormat
+        }
+        return chroma.carrierPixelFormat
+    }
 }
 
 /// What a source has said about its chroma. Three states, for the same reason colour has its
@@ -93,13 +162,17 @@ public enum ChromaReadout {
     ///   - carried: the pixel format of the last buffer the renderer drew; nil before the first.
     ///   - source: what the source declared.
     ///   - reason: why the carried chroma is lower than the source's, when a path said so.
-    public static func text(carried: OSType?, source: SourceChroma, reason: String?) -> String {
+    ///   - note: a fact about the decode that is not a chroma loss, appended as " · note" — today only
+    ///     "software decode" (SRT, Stage 3b S3: VideoToolbox's session reports no hardware decoder).
+    public static func text(carried: OSType?, source: SourceChroma, reason: String?,
+                            note: String? = nil) -> String {
         guard let carried else { return "no picture" }
         guard let chroma = ChromaSubsampling(pixelFormat: carried) else {
-            return "\(fourCC(carried)) — not a format the renderer samples"
+            return "\(fourCC(carried)) — not a format the renderer samples" + (note.map { " · \($0)" } ?? "")
         }
         let head = "\(chroma.label) 10-bit (\(fourCC(carried)))"
-        let tail = chroma == .c444 ? " · DeckLink v210 output: reduced once to 4:2:2 (halfband)" : ""
+        let tail = (chroma == .c444 ? " · DeckLink v210 output: reduced once to 4:2:2 (halfband)" : "")
+            + (note.map { " · \($0)" } ?? "")
         switch source {
         case .notStated:
             return head + " — source chroma not stated" + tail

@@ -4040,8 +4040,8 @@ shifted left 6), and VideoToolbox delivered both on every ProRes/HEVC/H.264/DNx 
 |---|---|---|
 | **S1 — renderer and readout** | `x444`/`xf44` in `isTenBit`. Cosited chroma for `x422` in the shader (4:2:0 untouched). v210 chroma per source: 4:2:0 keeps the pair average, 4:2:2 takes the cosited sample (identity), 4:4:4 the D3 halfband. A Chroma line in the chain readout, held by the renderer. A DEBUG v210 dump and a DEBUG force-4:2:0 launch environment variable (no `defaults` write); both on the pre-ship list. | M, 2–3 d |
 | **S2 — files** | One chroma resolver: ProRes fourCC table, H.264/HEVC from the SPS in avcC/hvcC, DNx and MXF from libav `pix_fmt`; unknown codecs stay at 4:2:0 ("chroma unknown"). AVF and libav to `x422`/`x444`, scrub and playback together. DNx 444 to `x444`, and its scrub through the plug-in (D9). Fallback banner through `playbackNotice`. | M, 2–3 d |
-| **S3 — SRT 4:2:2** | HEVC and H.264 4:2:2 accepted, decoded to `x422`, promote passes it through. Refused with a banner when VideoToolbox cannot decode it. Fallback banner through `showError` without disconnecting. | S–M, 1–2 d |
-| **S4 — SRT 4:4:4** | Gate admits it; decode to `x444`. | S, ½ d |
+| **S3 — SRT 4:2:2** (**run 2026-10-11, uncommitted:** *S3 and S4 — results*, below) | HEVC and H.264 4:2:2 accepted, decoded to `x422`, promote passes it through. Refused with a banner when VideoToolbox cannot decode it. Fallback banner through `showError` without disconnecting. | S–M, 1–2 d |
+| **S4 — SRT 4:4:4** (**run with S3**) | Gate admits it; decode to `x444`. | S, ½ d |
 | **S5 — the OBS customer pass** | OBS P216 with Apple VT HEVC Main 4:2:2 10, to MediaMTX first, then Cloudflare. | attended |
 
 ##### Predictions
@@ -4384,6 +4384,131 @@ launch (1 143 keys, equal to S2's snapshot); the 22 launches added 22 `NSWindow 
 else, each checked absent from the snapshot and deleted by name; dictionary-equal, `streamBookmarks`
 equal and never written. **Screenshots:** none taken; the window-only rule is now in `CLAUDE.md`.
 **Not committed.**
+
+#### Stage 3b, S3 and S4 — SRT 4:2:2 and 4:4:4 at native chroma: predictions, written 2026-10-11 before the code changed
+
+**Estimated run:** ~6 h unattended. Code and unit tests ~1.5 h; two Profile builds (HEAD `2339d00` from a
+clean worktree, and the tree) ~25 min; fixtures ~20 min (the 33 min 4:2:2 soak encode is the long one);
+app runs ~2.5 h (P9 ~25 min, P10 ~10, P11 ~20, the B-frame check ~20, the P12 soak ~40); docs ~30 min.
+
+**What changes.**
+- **The gate judges the SPS, not the profile, on both codecs.** One codec-neutral `SPSFormat` (chroma
+  format, bit depths, profile for the log), read by `HEVCSPSColor.format` and a new `H264SPSColor.format`.
+  The rule: 4:2:0, 4:2:2 and 4:4:4 at up to 10 bits are accepted, whatever the profile is called (so x265's
+  "Main 10 Intra", RExt `general_profile_idc` 4, is accepted at 4:2:0 10-bit). More than 10 bits is refused
+  with a banner (D5). 4:0:0 is let through, carried as `x420` (VideoToolbox gives neutral chroma, which is
+  the picture), and its readout says "source chroma unknown": the `SourceChroma` model has no monochrome
+  case, and inventing one is not this stage. H.264 is gated for the first time (D7).
+- **Whether VideoToolbox can decode it is VideoToolbox's answer.** The decoder reports "undecodable" once,
+  when every session create fails, or when three decodes fail after a session build with no picture ever
+  decoded. The router then refuses as the gate does: banner, teardown. There is no libav decoder to fall
+  back to (audit).
+- **The decoder requests the SPS's own chroma**: `x420`, `x422` or `x444` from `chroma_format_idc` (4:0:0
+  → `x420`); under `MANIFOLD_FORCE_CHROMA_420=1`, `x420`. If VideoToolbox refuses the request, it falls back
+  to VT's native format as today. After create it reads `UsingHardwareAcceleratedVideoDecoder` and logs it.
+  The choice is a pure function in the package, so the WHEP path's request is shown by test to be `x420`
+  for every 4:2:0 SPS, as it always was.
+- **The promote** passes `x420`/`x422`/`x444` through and promotes anything else to the 10-bit biplanar
+  format of the chroma it actually carries (8-bit 4:2:2 → `x422`, packed `p422` → `x422`, 8-bit 4:2:0 →
+  `x420`). A format whose chroma it cannot tell goes to `x420`, as today, and the Chroma line says so.
+- **The Chroma line and the fallback.** The router states the stream's chroma to the renderer from the first
+  delivered frame (and again on any change): source = the SPS's, carried = what was delivered. When carried
+  < source ("decode works but native chroma can't be carried"), the readout names the reason, and a banner
+  goes up through `showError(…, survivesPictures: true)` without disconnecting. The force switch takes this
+  same path, so P10 exercises the real detection, not a separate branch.
+- **Software decode.** When `UsingHardwareAcceleratedVideoDecoder` is false the Chroma line gains
+  "· software decode". To test it, a DEBUG launch variable `MANIFOLD_FORCE_SOFTWARE_DECODE=1` (never
+  `defaults`; pre-ship list) builds the session with hardware disabled. It also tests the refusal: H.264
+  4:2:2/4:4:4 has no software decoder (−8969, audit).
+
+**Fixtures** (`scripts/chroma/generate.sh`, extended): the existing `lines-422-h264.ts` (x264 High 4:2:2,
+10-bit), `lines-422-hevc.ts` (x265 lossless Main 4:2:2 10), `checker-444-h264.ts` (High 4:4:4 Predictive,
+qp 0), `checker-444-hevc.ts`, `still-420-*.ts`, `4k-422-hevc-intra-overcap.ts`; new: `lines-422-h264-8bit.ts`
+(x264 High 4:2:2 8-bit), `still-420-hevc10-intra.ts` (x265 `keyint=1`, "Main 10 Intra"), and from the 23.976
+sync clip `hevc422_b3p_240.ts` / `h264_422_b3p_240.ts` (bframes 3, as step 3's) and the 33.4 min
+`hevc422_soak.ts` (x265 Main 4:2:2 10, keyint 48, `scenecut=0`, B-frames, the AAC copied; `hevc_soak2`'s
+recipe at 4:2:2). **Servers:** a local ffmpeg SRT listener (`srt1.sh` / `run.sh`) and the running MediaMTX
+1.21.1 (SRT `publish:live` → `read:live`). Cloudflare is not used (H.264 4:2:0 only, Stage 4 item 6).
+**Measuring:** `scripts/chroma/measure.swift` on the ⌃⌥E `.rgba16f` (export) and `.v210` (wire), as S2.
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| P9 | `lines-422-h264.ts`, `lines-422-h264-8bit.ts`, `lines-422-hevc.ts`, `checker-444-h264.ts`, `checker-444-hevc.ts`, each through the local listener AND through MediaMTX: the gate line reads `… 4:2:2` (or `4:4:4`) `… → accepted`; the session line requests `x422` (`x444`) with `hardware decode: yes`; the promote line says the frame is already `x422` (`x444`); `[CHROMA] 4:2:2 10-bit (x422) — native` (`4:4:4 … (x444) — native · DeckLink v210 …`) | all of it on all ten runs; lines: ≥ 1079 / 1080 rows within ±2 of their own line, export AND wire; checker: export ≥ 99.9 % of chroma samples within ±2 of the source, wire 512 ± 2 on ≥ 99.9 % | any `x420` request or "promoting … → 'x420'" line; any band missed. **HEAD, the control:** H.264 4:2:2 plays grey (0 rows), HEVC 4:2:2/4:4:4 refused at the gate; H.264 4:4:4 promoted to `x420`, export checker lost (the wire reads 512 there too, by averaging, so only the export tells) |
+| P10 | `MANIFOLD_FORCE_CHROMA_420=1` on `lines-422-hevc.ts` and `lines-422-h264.ts` (listener) | `[CHROMA] 4:2:0 10-bit (x420) — 4:2:2 source, forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420`; the banner shown (its text logged, and read from a window-only screenshot, deleted after); rows grey: ≤ 1 / 1080 rows within ±2 of their own line, ≥ 99 % of samples at 512 ± 2; still connected when the sender ends (no teardown line before it; `[SRT-FLOW]` enqueued climbing to the end) | any of those not so |
+| P10b | `MANIFOLD_FORCE_SOFTWARE_DECODE=1`: `lines-422-hevc.ts`; then `lines-422-h264.ts` | HEVC: `hardware decode: no`, `x422`, `[CHROMA] … — native · software decode`, rows as P9. H.264 4:2:2: refused with a banner naming it, disconnected, no picture | otherwise |
+| P11a | 4:2:0 regression, `still-420-h264.ts` and `still-420-hevc10.ts` (listener), HEAD against the tree | export `.rgba16f`, PNG and `.v210` **md5 identical**. The `[SRT]`, `[SRT-AUDIO]`, `[SPS-COLOR]` lines identical text, except three that change by design: the new `[SRT] H.264 SPS: … → accepted` line, the session line gaining `; hardware decode: yes`, and `[CHROMA]` reading `— native` where HEAD says `— source chroma not stated` | any byte; any other line different |
+| P11b | `still-420-hevc10-intra.ts` ("Main 10 Intra", 4:2:0 10-bit) | HEAD refuses it (`Format Range Extensions (general_profile_idc 4), 4:2:0, 10-bit … → refusing`). The tree: `→ accepted`, `x420`, `[CHROMA] 4:2:0 10-bit (x420) — native`, 0 decode errors, plays to the end | otherwise |
+| P11c | `4k-422-hevc-intra-overcap.ts` (~16 MB a frame) | every access unit over the 8 MB cap is discarded and counted (`oversize=` on the session-totals line > 0), no crash, no picture; the app quits cleanly | a crash, or a picture from a truncated access unit |
+| P12 | 30-min soak, `hevc422_soak.ts`, local ffmpeg listener (non-Cloudflare); measure-only calibrations at +1 / +2 / +16 / +32 min | `x422` native throughout; every calibration within ±2 ms of 0 (Stage 0's local soak read +0.23 / −1.45 / +2.50 / −0.16); end − start within ±5 ms; `[AV-LAG]` slope after 180 s within ±1 ppm; **0 starvation holds**, 0 coarse re-anchors, 0 decode errors | outside any |
+| B | B-frame start-up at 4:2:2: `hevc422_b3p_240.ts`, `h264_422_b3p_240.ts`, against this batch's `syncD` control on the tree | `startup realigns=1` on both; `[AV-CONTENT]` from +10 s median within ±2 ms of the control's, max \|x\| ≤ the control's max + 3 ms (step 3's band; its 4:2:0 bframes-3 runs met it) | outside |
+| R | WHEP, NDI, HLS | **No code of theirs changes**; the only shared piece is the decoder, whose request for a 4:2:0 SPS is `x420` (unit test). **Not run:** WHEP and HLS have no unattended entry point that does not write `streamBookmarks`, and NDI needs OBS (attended) | a diff touching their files, or the test failing |
+| G | Gates | `swift test` all pass (298 + new `SPSFormat` / gate / request tests, each shown to fail on a mutant); C harness 200 / 200; Profile build with HEAD's warning set | otherwise |
+
+**What would change the plan:** MediaMTX refusing RExt HEVC or H.264 High 4:2:2 (recorded, not worked
+around: it would be a server limit, and the listener runs still stand); VideoToolbox on this Mac refusing an
+`x422`/`x444` request it accepted in the audit.
+
+#### Stage 3b, S3 and S4 — results, 2026-10-11 00:55–03:15 (unattended)
+
+**Builds:** HEAD `2339d00` from a clean worktree (vendored `ThirdParty` and the DeckLink SDK copied in,
+`xcodegen`), `.build-cc/s3head-Profile`; the tree, `.build-cc/s3-Profile`; and the final tree,
+`.build-cc/s3b-Profile`, after the two changes under *Changed during the stage* (only the software and
+undecodable paths moved). All unsigned Profile; the same 10-warning set as HEAD. **Driver:** a scratch
+`srt2.sh` (S2's `srt1.sh` plus a MediaMTX mode that publishes to `live` first and joins mid-stream, and a
+launch environment for the DEBUG switches); `scripts/soak/repro/run.sh` and step 3's `cal.sh` for the B-frame
+and soak runs. Logs: the session scratchpad `s3/runs/` and `~/Desktop/manifold-soak/s3/`. **Measuring:**
+`scripts/chroma/measure.swift`, as S2.
+
+| # | Result | Verdict |
+|---|---|---|
+| P9 | **Listener, all five:** gate line `… 4:2:2` / `4:4:4 … → accepted` (H.264 `High 4:2:2 (profile_idc 122)` 10- and 8-bit, `High 4:4:4 Predictive (profile_idc 244)`; HEVC `Format Range Extensions (general_profile_idc 4)`); `requesting x422` / `x444 … hardware decode: yes`; `decoded as 'x422'` / `'x444'` — no promote; `[CHROMA] 4:2:2 10-bit (x422) — native` / `4:4:4 10-bit (x444) — native · DeckLink v210 output: reduced once to 4:2:2 (halfband)`. **Lines (H.264 10-bit, HEVC): 1080 / 1080 rows, export and wire. Checker (H.264, HEVC): export 100.000 % within ±2, wire 100.000 % at 512 ± 2.** No `x420` request and no promote line on any run. | **PASS** on four of five |
+| P9 | **8-bit H.264 4:2:2:** every row keeps its own colour (even rows 727/301, odd rows 301/727; luma 514), so the chroma resolution is native; but **0 / 1080 rows within ±2 of 724/300**. The offset is VideoToolbox's 8→10 expansion, not chroma: it scales by 1023/255, not ×4 (181 → 726.1, 75 → 300.9, 128 → 513.5), and HEAD's run of the same file has the same luma 514 (its chroma grey). Pre-existing on every 8-bit SRT stream, 4:2:0 included; the 4:2:0 regression set below is byte-identical to HEAD's | **FAIL against the band as written** (it assumed ×4); chroma resolution native. Not a chroma defect |
+| P9 | **Through MediaMTX** (twins with a keyframe a second, since a MediaMTX reader joins mid-stream): HEVC 4:2:2 lines **1080 / 1080**, export and wire; H.264 4:2:2 lines **1080 / 1080**, its export **md5-identical to the listener run**; 8-bit H.264 4:2:2 identical to its listener run (727/301, as above); HEVC 4:4:4 (a lossy qp 8 twin, below) export **99.933 %** within ±2, wire **100 %** at 512 ± 2; H.264 4:4:4 (a lossy qp 24 twin, 90 s, no loop) `x444` native, wire **99.994 %** at 512 ± 2, export 78.1 % within ±2 of the lossless checker (that is the qp-24 encode's own error on a one-pixel checker, not a resolution loss: every sample stays on its own side of 512). Same gate, session and `[CHROMA]` lines as on the listener | **PASS** where MediaMTX delivered the stream (every chroma format, both codecs) |
+| P9 | **MediaMTX's own limits, measured with ffmpeg as the reader too:** (1) a reader is closed with `too many reordered frames (11)` when an H.264 B-frame publish wraps an `ffmpeg -stream_loop` (the second pass's timestamps restart); the same 4:2:2 file published once reads cleanly, and the 90 s no-loop twins pass. (2) **It sends a reader nothing** above roughly 10–13 Mb/s on these streams: the lossless checkers (H.264 64 Mb/s, HEVC 12 Mb/s), H.264 4:4:4 at qp 8 (17 Mb/s) and qp 16 (12.9 Mb/s) give 0 bytes to ffmpeg as well as to Manifold; HEVC 4:4:4 qp 8 (5.3 Mb/s) and H.264 4:4:4 qp 24 (10.4 Mb/s) pass. Not chroma-specific (HEVC 4:2:0 was not tried at that rate) and not Manifold's; recorded, not worked around | server limits |
+| HEAD | Controls, listener: H.264 4:2:2 `x420`, `source chroma not stated`, **0 / 1080 rows** (grey, export and wire); HEVC 4:2:2 and 4:4:4 refused at Stage 3's gate; H.264 4:4:4 `x420`, export checker **0 %**, wire 100 % at 512 (by averaging, as predicted). | as predicted |
+| P10 | `MANIFOLD_FORCE_CHROMA_420=1`, HEVC and H.264 4:2:2: `requesting x420 … — the SPS says 4:2:2; forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420`; `[CHROMA] 4:2:0 10-bit (x420) — 4:2:2 source, forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420`; `[SRT] CHROMA FALLBACK — 4:2:2 source carried as x420 …; banner: This stream’s color is 4:2:2, but Manifold is showing it at 4:2:0 (forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420). The picture, scopes, SDI output and frame export carry 4:2:0 color resolution.`; **0 / 1080 rows**, every chroma sample 512/512; still connected at export, `[SRT-FLOW]` enqueued 25/s to the end. **The banner on screen**, from one window-only screenshot at +3 s on the final build (read, then deleted): the orange-triangle banner at the top of the window, word for word the logged text, over the grey picture. It auto-dismisses after 9 s, as every banner in that slot does (S2's file banner too); the Chroma line keeps saying it | **PASS** (all three; the stream stayed connected) |
+| P10b | `MANIFOLD_FORCE_SOFTWARE_DECODE=1` (final build): HEVC 4:2:2 `hardware decode: no`, `x422`, `[CHROMA] 4:2:2 10-bit (x422) — native · software decode`. H.264 4:2:2: the first picture fails (−8969), `UNDECODABLE … — the transport refuses the stream`, `[SRT] refusing H.264 High 4:2:2, 4:2:2 10-bit …`, banner "That stream is H.264 High 4:2:2, 4:2:2 10-bit — this Mac’s VideoToolbox can’t decode it, and Manifold has no other decoder for it.", disconnected, no picture. **Rows under software decode:** **1080 / 1080**, export and wire, on a keyint-25 twin at +13 s and +25 s. The first software runs exported 540 / 1080 (the top half grey) at +13 s on the one-keyframe fixture: that export was taken after the `-stream_loop` wrap, where the hardware decoder reports the broken second pass (−12909) and holds the last good picture, but the software decoder conceals it without an error. Outside the app, a raw software session decodes both the `.mov` and the `.ts` elementary stream (in-band VPS/SPS/PPS, as the app builds it) to the right rows on every frame | **PASS** on lines and refusal (after the two changes below); rows **PASS** |
+| P11a | `still-420-h264.ts`, `still-420-hevc10.ts`: export `.rgba16f`, PNG and `.v210` **md5-identical to HEAD**, on the first tree and again on the final build. Log lines: everything identical except the three predicted (the new `[SRT] H.264 SPS: High (profile_idc 100), 4:2:0, 8-bit … → accepted`; the session line's `; hardware decode: yes`; `[CHROMA] … — native`), plus two `[SRT-AUDIO]` start-up timing lines whose figures differ between any two runs. The HEVC gate line is word-for-word Stage 3's | **PASS** |
+| P11b | `still-420-hevc10-intra.ts`: HEAD `… Format Range Extensions (general_profile_idc 4), 4:2:0, 10-bit … → refusing`; the tree `→ accepted`, `x420` in hardware, `[CHROMA] 4:2:0 10-bit (x420) — native`, 0 decode errors, 356 pictures | **PASS** |
+| P11c | `4k-422-hevc-intra-overcap.ts`: `oversize=99` on the session-totals line (every access unit, ~16 MB each, discarded), 0 pictures, 1.57 GB received in 11 s; no crash, clean quit | **PASS** |
+| B | 4:2:2 B-frame start-up, against this batch's `syncD` control (tree): `hevc422_b3p_240` `startup realigns=1` (+64.5 ms), `h264_422_b3p_240` `startup realigns=1` (−61.4 ms) (step 3 at 4:2:0: +69.0 / −61.2). `[AV-CONTENT]` from +10 s, median / max \|x\|: **+0.23 / 2.82 ms** and **+0.29 / 3.48 ms**; control −0.13 / 2.75 (band: median ±2 of the control's, max ≤ 5.75). Cushion 259 before the anchor on both; 0 holds, 0 out of order, 0 decode errors; first picture +0.80 / +0.85 s after the first frame | **PASS** |
+| P12 | 33.4 min 4:2:2 HEVC soak (`hevc422_soak.ts`, timestamp-exact; final build), listener: `x422` native in hardware throughout; calibrations at +1 / +2 / +16 / +32 min **−0.85 / −0.76 / −1.60 / +1.47 ms**; end − start **+2.32 ms**; `[AV-LAG]` slope after 180 s **−0.01 ppm**; **0 starvation holds**, 0 coarse re-anchors, 0 splices, **0 decode errors**; `[AV-CONTENT]` median after 60 flashes +0.27 ms; cushion 259 before the anchor; 47 957 pictures selected, 4 discarded unseen, 0 out of order. (The first soak, on the 20 ms-shifted encode, below: the same drift and hold figures, −0.01 ppm, 0 holds, and its one calibration −20.71 ms, the fixture's own offset) | **PASS**, every band |
+| R | WHEP, NDI, HLS: no file of theirs changed; the decoder's request for a 4:2:0 SPS is `x420` (`testLiveDecodeRequestFollowsTheSPS`), so every WHEP decode asks for what it did. Not run, as predicted | as predicted |
+| G | `swift test` **307 / 307** (298 + 6 `SPSFormatTests` + 3 `ChromaFormatTests`), every new expected value from `trace_headers` on real encoder SPS; **four mutants each fail** (a 4:2:0-only gate: 7 failures; `separate_colour_plane_flag` not stepped over: 2; the request always `x420`: 2; 8-bit 4:2:2 promoted as 4:2:0: 1), restored and green. C harness 200 / 200. Both Profile builds with HEAD's warning set | **PASS** |
+
+**Changed during the stage, before the final build** (the predictions above are unchanged; these are results):
+1. **The undecodable rule went from three failed pictures to one.** Three is how it was predicted. Measured on
+   H.264 4:2:2 in software at the fixture's 10 s GOP, three attempts would mean ~30 s of black, connected
+   picture before the refusal; the first run ended before the second attempt. One failed first picture is the
+   audit's own rule ("create fails, or the first frame errors"). The first attempt is always a whole
+   random-access picture, and VideoToolbox answers a format it has no decoder for with an error on exactly
+   that picture. The cost: a first keyframe damaged in transit is refused too, with VideoToolbox's status in
+   the log. SRT's retransmission makes that rare.
+2. **"Software decode" comes from `kVTPropertyNotSupportedErr`.** Measured with a raw session: the hardware
+   decoders answer `UsingHardwareAcceleratedVideoDecoder` (1); the software decoders do not support the
+   property at all (−12900, before and after decoding, with RealTime on or off). The first build read that
+   as "unknown" and showed no note. The final build reads −12900 as software. The audit's `vt.swift` printed
+   a missing answer as `false`, which is why the audit reported `usingHW=false` for software sessions.
+
+**Found on the way:**
+- **The soak fixture's first encode was 20 ms out of sync, and the calibration caught it.** Re-encoding the
+  sync clip without `-copyts` moved the video 20.4 ms later against the audio (video − audio start 41.7 ms
+  against the source's 21.3). That soak's one calibration that ran read **−20.71 ms**, while `[AV-CONTENT]`
+  (which measures the pipeline, not the clip) read +0.13. The soak was re-run on a timestamp-exact encode
+  (step 3's recipe). The first soak's calibrations at +1 / +2 / +16 min did not run: the driver's
+  window-centre lookup had been rebuilt to print only the window id, so it never woke the controls.
+- **`ffmpeg -stream_loop` on a single-keyframe fixture breaks the second pass.** The second pass's IDR is
+  dropped, so hardware decode fails at the wrap (−12909, one line on the HEVC runs, then the last good picture
+  holds) and software decode conceals instead (the first P10b exports). Harness only: every P9, P10 and P11 export was taken before a wrap or from a held whole picture.
+- **VideoToolbox's 8→10 expansion is ×1023/255** (P9, 8-bit), on HEAD as on the tree.
+
+**S3 and S4, in one list:**
+- **Met:** P9 on every chroma format and both codecs, listener and MediaMTX; P10; P10b; P11a–c; B; P12; R; G.
+- **Missed as written:** P9's band on the 8-bit fixture (VideoToolbox's ×1023/255 expansion, pre-existing; its chroma is native).
+- **Server limits, recorded:** MediaMTX closes an H.264 reader at an `-stream_loop` wrap, and sends nothing above ~10–13 Mb/s.
+- **Changed during the stage:** undecodable after one failed first picture (was three); −12900 read as software decode.
+
+**Defaults:** exported before the first launch (1 143 keys). The runs (about 50 launches) added 51 `NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted by name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. **Screenshots:** three, window-only by the Manifold window's id (CLAUDE.md), all deleted. Two came at +10 s, after the banner had dismissed, and showed only the picture; the third, above, shows the banner. **OBS:** not used. **MediaMTX:** the instance already running (`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Not committed.**
 
 ---
 
