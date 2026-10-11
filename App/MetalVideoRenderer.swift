@@ -299,6 +299,12 @@ final class MetalVideoRenderer {
     /// bound is a plain backstop and there is no clock to re-anchor.
     var onQueueOverflow: ((_ newestPTS: Double, _ count: Int) -> Void)?
 
+    /// LIVE sources only: while it returns a PTS, the live clock is measuring its start-up window and
+    /// the picture is HELD — the tick selects and presents nothing, discards queued frames at or below
+    /// that PTS unseen, and still pushes its depth sample. nil (the closure, or its value) = select as
+    /// usual. Installed with `onDepthSample` by `LiveDisplayRoute`, removed with it.
+    var presentationHoldFloor: (() -> Double?)?
+
     /// Returns the engine's full-range chroma convention rawValue (0 = full-swing,
     /// 1 = Resolve). Read per-frame on the render thread (thread-safe accessor).
     /// Only affects the full-range path. When nil, defaults to 1 (Resolve).
@@ -2261,19 +2267,32 @@ final class MetalVideoRenderer {
         }
 
         guard let now = clock?() else { return }
+        // A live clock measuring its start-up window holds the picture (`LiveClock.presentationHoldFloor`).
+        // Read before the queue lock, like the clock: it takes the clock's lock.
+        let holdFloor = presentationHoldFloor?()
 
         queueLock.lock()
         // Find the newest frame with pts <= now.
         var chosen: CVPixelBuffer?
         var chosenPts: Double = -1
         var dropCount = 0
-        for (i, frame) in frameQueue.enumerated() {
-            if frame.pts <= now {
-                chosen = frame.pixelBuffer
-                chosenPts = frame.pts
-                dropCount = i
-            } else {
-                break
+        if let holdFloor {
+            // HELD: select nothing and present nothing, but go on sampling depth below — the hold
+            // exists to measure it. Pictures at or below the floor cannot become due even if the
+            // realign moves the clock back by its whole window; they are the pre-anchor backlog, and
+            // are discarded unseen rather than left to fill the queue.
+            var stale = 0
+            while stale < frameQueue.count, frameQueue[stale].pts <= holdFloor { stale += 1 }
+            if stale > 0 { frameQueue.removeFirst(stale) }
+        } else {
+            for (i, frame) in frameQueue.enumerated() {
+                if frame.pts <= now {
+                    chosen = frame.pixelBuffer
+                    chosenPts = frame.pts
+                    dropCount = i
+                } else {
+                    break
+                }
             }
         }
         // Remove everything up to and including the chosen frame (consumed + stale).

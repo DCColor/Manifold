@@ -3435,6 +3435,472 @@ snapshot and deleted by name. The domain is dictionary-equal to the snapshot (1 
 - **Found:** the B-frame startup episode, for H.264 and HEVC alike.
 - **Attended:** Follow source, then Cloudflare.
 
+#### The B-frame start-up offset (pre-release fix): step 1, the cause — 2026-10-10 (unattended; no code changed)
+
+**Verdict.**
+- **The cause is found and confirmed.** It is not the one hypothesised in BUGS.md. The depth is not
+  sampled on the newest decoded picture: the renderer reads the newest PRESENTATION time in its
+  PTS-sorted queue.
+- **The cause is how the clock is STARTED on a reordered stream.** It anchors on one decoded picture.
+  It then regulates the mean of a depth signal whose sawtooth is a mini-GOP wide, not one frame.
+- **The fix is not contained to how the clock or steering reads depth.** The model below shows that a
+  depth-reading change alone halves the error on one kind of start and doubles it on the other.
+- **Stopped after step 1, as the brief says.** No step-2 predictions were written and no code was
+  changed.
+
+**Builds and runs.**
+- **Build:** HEAD `0ab5684` (`.build-cc/bfhead-Profile`), unsigned Profile, the same 11 warnings as Stage 4.
+- **Runs:** one 240 s run per fixture on the listener (`run.sh`, one AAC frame per PES), unattended.
+- **Logs:** `~/Desktop/manifold-soak/bf/repro/head-*`.
+- **Fixtures, scripts and the analyser (`an.py`):** the session scratchpad `bf/`.
+
+**Fixtures.**
+- **Source:** the loop-exact 23.976 sync clip `soak33.ts`, first 240 s.
+- **Timestamps kept:** `-copyts -enc_time_base:v demux -fps_mode passthrough -muxdelay 0
+  -muxpreload 0`, the `hevc_soak2` recipe, so `[AV-CONTENT]` reads on every run.
+- **Encoding:** keyint 48, `scenecut=0`, AAC copied.
+- **Timestamps measured offline:** `framecrc`, decode order, 90 kHz.
+
+| fixture | encoder | max(pts − dts) | the newest PTS advances | in steps of (median / mean) |
+|---|---|---|---|---|
+| `ctl_240` (control) | the source, copied (no B-frames) | 0 | every picture | 41.7 / 41.7 ms |
+| `h264_b3p_240` | x264 `bframes=3:b-pyramid=normal` | 208.5 ms | every 3.7 pictures | 166.8 / 154.0 ms |
+| `hevc_b3p_240` | x265 Main 10 `bframes=3:b-pyramid=1` | 208.5 ms | every 3.8 pictures | 166.8 / 158.8 ms |
+| `h264_b8_240` | x264 `bframes=8:b-pyramid=normal:b-adapt=0` | 417.1 ms | every 6.9 pictures | 375.4 / 286.1 ms |
+| `hevc_b8_240` | x265 `bframes=8:b-pyramid=1:b-adapt=0` | 417.1 ms | every 7.7 pictures | 375.4 / 322.8 ms |
+
+**Results** (HEAD; the Stage 4 `cal2-*` logs on `h264b_160` / `hevc_160` read the same way and are included
+in the model check below):
+
+| run | anchored on (decode order) | start error: model / measured 1–3.5 s | clock slew 0.5–20 s | steering on its ±2000 ppm rail | `[AV-CONTENT]` median, ms: 3–10 · 10–20 · 20–40 · 40–60 · 60–90 · 90–150 · 150–240 |
+|---|---|---|---|---|---|
+| `ctl` | picture 25, pts − dts 0 | −2.5 / +1.0 ms | +8.4 ms | never | −2.14 · +0.16 · −0.17 · +1.99 · +0.88 · −0.32 · −0.48 |
+| `h264_b3p` | picture 25, the leading P (pts − dts 208.5) | **−72.0 / −69.7 ms** | −55.1 ms | 16–29 s (−) | +26.53 · **+39.38** · +12.53 · −1.99 · −2.65 · −0.45 · −0.19 |
+| `hevc_b3p` | picture 25, a B-ref (pts − dts 83.4) | **+56.3 / +41.5 ms** | +42.5 ms | 16–33 s (+) | −27.42 · **−40.76** · −20.02 · +1.78 · +3.53 · +1.24 · +0.37 |
+| `h264_b8` | picture 25, a B (pts − dts 41.7) | **+192.5 / +112.4 ms** | +69.0 ms (+125 by 40 s) | 16–99 s (+) | −28.70 · −53.20 · −82.84 · **−83.64** · −55.78 · −0.21 · +1.83 |
+| `hevc_b8` | picture 24, a B (pts − dts 0) | **+237.5 / +185.2 ms** | +96.7 ms (+139 by 40 s) | 16–123 s (+) | −29.07 · −55.56 · −96.57 · **−113.55** · −93.98 · −19.99 · +1.63 |
+
+- **Every run kept the rules:** cushion raised BEFORE the first anchor to the same values as 0b-2b
+  (259 / 467 ms), 0 shown out of order, 10–21 unseen (the baseline), 0 holds, 0 coarse events,
+  0 splices.
+- **The measured 1–3.5 s error trails the model** because the clock is already on its rail by then
+  (5 ms/s).
+- **The model gets every sign right.** Its size is within ~30 % on bframes 3. On bframes 8 the
+  measurement trails it further, because the clock has been on its rail longer by then.
+- **All fourteen B-frame runs sort into the model's two classes.** These are the four above and ten
+  older ones: Stage 4's `cal2-h264b-*`, `cal2-hevc-*`, `soak-hevc`, `loss`, `loss2` and `b8_240`, and
+  0b-2b's `b3pyr` and `b8pyr`. Each start-up summary's "max arrival lead" decides the class: ≤ 26 ms
+  means a negative error, ≥ 131 ms a positive one.
+- **The model's lead figures match the summaries:** +0.0 against +2.9–8.4 measured on leading-P starts,
+  and +125.1 against +131–133 on B-ref starts.
+
+**The cause, with references.**
+1. **The anchor is one decoded picture.**
+   - The SRT router anchors `LiveClock` on the first picture it had to wait for
+     (`SRTFrameRouter.swift:2086`, `anchorOrDefer` → `registerFrame` at `:2158`). `registerFrame` puts
+     `now()` at that picture's PTS minus the cushion (`LiveClock.swift:538`).
+   - Decode is synchronous, so pictures arrive in decode order (`LiveVideoDecoder.swift:42–52`).
+   - **The anchored picture's position in the mini-GOP decides everything.** Every run here anchored
+     on decode-order picture 24–25: the end of the ~1 s `find_stream_info` backlog. So the class is
+     set by the stream's GOP phase at the join, not by chance. x264 put a leading P there and x265 a
+     B-ref, on the same content. That is why "the sign varies by session": it varies by sender and
+     join point.
+2. **The depth the loop regulates is a mini-GOP-wide sawtooth.**
+   - `MetalVideoRenderer.swift:2306`: span = newest queued PTS − `now()` + Δ/2, where Δ is the
+     median gap between PTS-sorted neighbours (`:1982–1991`).
+   - On a reordered stream the newest PTS does not advance every picture. The leading picture (P or
+     reference B) jumps it by a whole step, then the B-frames fill in behind it. So the span falls for
+     a step (167 ms at bframes 3, 375 ms at bframes 8) and then jumps back up.
+   - **The Δ/2 correction assumes one-frame steps.** The regulated mean therefore sits (step − Δ)/2
+     below the top of the sawtooth: ~62 ms at bframes 3 and ~167 ms at bframes 8.
+   - **So the steady state the loop seeks is not where the anchor put the clock.**
+     - **Anchored on the leading picture** (the top): the depth reads ~(step − Δ)/2 short, and the
+       clock runs slow.
+     - **Anchored on a B-picture:** the depth reads deep by the leading picture's lead over it, less
+       that bias, and the clock runs fast.
+3. **The start-up realign that exists for exactly this never runs on SRT.**
+   - `LiveClock.swift:1445` removes the anchor's offset BY POSITION, but only while
+     `!hasPresentedOnce`.
+   - On SRT, the backlog pictures queued before the anchor are already due, so a picture is presented
+     on the first tick and `hasPresentedOnce` flips (`LiveClock.swift:1518`).
+   - Every SRT log here, Baseline included, says `first presentation +0.00x s after first frame ·
+     startup realigns=0`.
+   - On Baseline that costs nothing, because the anchor is the newest picture (error −2.5 ms).
+4. **So the error is removed by rate.**
+   - The P-loop (k 0.8, `LiveClock.swift:1466`) rails at ±0.5 % (`:98`) for any error above ~6 ms. It
+     takes ~12 s to remove 60 ms, and 40–60 s to remove 120–190 ms.
+
+**Why it settles over 20–90 s, and why the sound is what is off.**
+- **The clock's rate moves the picture.**
+  - `now()` runs 0.5 % slow or fast, so each picture is shown progressively later or earlier: ~55 ms
+    of picture latency over the first 12 s on `h264_b3p`, and ~140 ms over the first 40 s on `hevc_b8`.
+  - The picture's end position is the steady state's, and the change is invisible as motion.
+- **The sound follows the same line but may move only ±0.2 %** (the steering's bound,
+  `LiveAudioResampleSteering.swift:1381`). While the clock is on its rail, the gap between them grows at
+  ~3 ms/s:
+  - `h264_b3p`: +39 ms by +11 s;
+  - `hevc_b8`: −114 ms by +50 s.
+- **The steering then sits on its own rail until it has caught up:** 18 s on bframes 3, 88–112 s on
+  bframes 8.
+- **Its integral term overshoots** (i ≈ ±120 ppm when it leaves the rail). That leaves 2–4 ms of the
+  other sign at 40–90 s, which decays by ~90–150 s. That tail is BUGS.md's "≤ 3 ms by 60 s, < 1 ms by
+  90 s".
+- **In short:** the picture is moved (by design, slowly) and the sound arrives late at the same place.
+  The A/V offset is the sound's lag behind a picture move. **BUGS.md's ~35 ms is bframes 3. At
+  bframes 8 it is ~85–115 ms and lasts ~2 minutes.**
+
+**Steady state, after the episode.**
+- **The same sawtooth keeps the clock bang-bang.** On a rail in 74–95 of 118 s on bframes 3 and
+  112–114 on bframes 8, against 49 on the control. 1 Hz err sd 15–17 / 53–62 ms, against 7.
+- **It costs the sound nothing measurable.** `[AV-CONTENT]` over 150–240 s: sd 1.0–1.5 ms on every
+  B-frame run, against 1.7 ms on the control.
+
+**Interaction with the 0b-2b reorder term.**
+- **The term itself is untouched.** It raises the cushion before the anchor, to the same values as in
+  0b-2b.
+- **But the router's arithmetic assumes `now ≈ P − targetDepth` for the leading picture P**
+  (`SRTFrameRouter.swift:182`). The loop actually holds `now` (step − Δ)/2 further back: ~62 ms at
+  bframes 3, ~167 ms at bframes 8.
+- **So every B-frame margin measured since 0b-2b has included that hidden slack.** It is the likely
+  reason `b16at15` (1.2 s of reorder at the 1.0 s clamp) played clean.
+- **Any fix that changes the steady state must re-measure the reorder term.** A fix that only corrects
+  the start, and leaves the depth reading and the steady state alone, keeps every 0b-2b figure valid.
+
+**Interaction with calibration.**
+- **Inside the episode, a calibration reads the episode:**
+  - Stage 4 item 5's +60 s readings were the overshoot tail (+1.9 / −2.9 ms), and the advance budget
+    read 0.0 ms.
+  - On bframes 8, +60–75 s reads −65 / −103 ms and +105–120 s still reads −2.4 / −33 ms.
+- **From +120 s on bframes 3 and +150 s on bframes 8, it is within the control's own scatter.**
+
+**Why a depth-reading fix alone is not enough** (the model, same anchors):
+
+| | start error today | with Δ/2 replaced by half the newest-PTS step |
+|---|---|---|
+| leading-P start (`h264_b3p`, `cal2-h264b`) | −72.0 ms | **−9.4 ms** |
+| B-ref start (`hevc_b3p`, `cal2-hevc`) | +56.3 ms | **+118.9 ms** |
+| B start, bframes 8 (`h264_b8`) | +192.5 ms | **+359.3 ms** |
+
+- **No definition of depth can fix both classes.** The error is the anchored picture's own reorder
+  against the stream's leading picture, and only the anchored picture's role decides it.
+- **The anchor position has to be corrected.** That is start-up and anchor logic, which the brief
+  excluded.
+
+**What a fix would be (for decision).**
+- **Recommended:** let the start-up realign (`LiveClock.swift:1445`) work on SRT.
+  - Measure the depth's mean over one newest-PTS step and move the clock by position, before the first
+    picture is shown.
+  - The cushion always spans at least one step, since step ≲ reorder + Δ and cushion = reorder +
+    50 ms. So this costs no start-up time beyond withholding the pre-anchor backlog from the screen.
+  - It changes neither the depth reading nor the steady state, so 0b-2b's margins stand.
+  - **What it changes:** whether the pre-anchor backlog is presented (`hasPresentedOnce`); and the
+    position that the anchor and the audio's first mapping are given.
+- **Not recommended alone:**
+  - the half-step depth correction (the table above);
+  - a slower depth filter: it moves every live transport's loop and invalidates `LIVECLOCK_PRESETS.md`.
+- **For the brief's prediction 1, a band to reconsider:** today's control alone had 24 of 183
+  `[AV-CONTENT]` readings outside ±3 ms from +10 s (max 6.1 ms, a 40–75 s wander on a 1-frame
+  sawtooth). Stage 4's Baseline runs had 0, so the spread varies by session. A ±3 ms band per reading
+  would fail on HEAD's control.
+
+**The x264 Cloudflare calibrations (taken at +1:45 or later) do not need re-reading.**
+- **Those sessions were the `h264_b3p` class:** OBS x264 veryfast, 3 B-frames with a pyramid, 208 ms
+  of reorder.
+- **On the B-frame bframes 3 runs, the window a +1:45 calibration measures reads −1.23 and +0.29 ms,**
+  against −0.74 on the control. By +2:10 it reads −0.47 and +1.88.
+- **So the +1:45, +2:10 and +8 min figures (−57.76 / −57.93 / −54.23 ms) carry at most ~1–2 ms of the
+  episode.** That is inside the control's own ±2 ms, and far inside Cloudflare's day-to-day range.
+- **Caveat:** a Cloudflare calibration started before ~+90 s, or any session with a deeper pyramid,
+  would need re-reading.
+
+**Gates.** `swift test` 273 / 273; `soaklog.test.mjs` 8 / 8; C harness 200 / 200; Profile build, 11 warnings,
+the same set as Stage 4.
+
+**Defaults.**
+- **Before the first launch:** exported (1 142 keys).
+- **After the last quit:** 5 run-added `NSWindow Frame` keys and nothing else. Each was checked absent
+  from the snapshot, read, and deleted by name.
+- **The domain is dictionary-equal to the snapshot** (1 142 keys). `streamBookmarks` was never read or
+  written: every run dialled `MANIFOLD_SRT_DEBUG_URL`.
+
+#### The B-frame start-up offset, step 2 — the windowed start-up realign: predictions, written 2026-10-10 before the code changed
+
+**Decided (Robbie, 2026-10-10):**
+- Let the start-up realign run on SRT, by position, once one full step of depth has been seen and before
+  the first picture is shown.
+- The pre-anchor backlog is no longer put on screen.
+- The depth reading and the steady state are unchanged.
+
+**What changes.**
+- **`LiveClock`: an opt-in window**, `setStartupRealignWindow(_:)`. 0 is today's behaviour, and WHEP,
+  NDI and the synthetic harness keep it.
+  - With a window W > 0, from the anchor until the realign, the clock HOLDS the picture.
+  - It averages the raw depth samples (the same signal the loop regulates) over W from its first
+    sample.
+  - It then moves itself by position, mean − target, at unity rate: one `startupRealign` event, the
+    existing path, before the first presentation.
+  - Nothing else runs during the hold: no P-loop slew, no snap.
+  - A target step or a queue-full re-anchor during the hold restarts the window.
+- **The renderer: a hold seam.** While the clock holds, the tick selects nothing and presents nothing,
+  but still samples depth.
+  - Queued pictures that cannot become due even if the realign moves the clock back by a whole window
+    (pts ≤ now − W) are discarded unseen. That pre-anchor backlog is what HEAD put on screen at once.
+  - The seam is installed and removed by `LiveDisplayRoute` with the depth hook.
+- **`SRTFrameRouter`: W = one full step.** That is the largest advance of the newest PTS among the
+  pictures decoded before the anchor (decode order), capped at the cushion, and at least one nominal
+  frame interval. It is set before `registerFrame` anchors, and stated on the anchor line.
+  - Every SRT stream gets the hold, B-frames or not: one rule.
+- **The audio needs no change.** Its first anchor already waits for the first presentation (§2.7), so
+  it starts on the realigned line. `liveAudioPositionJump` already ignores start-up realigns.
+
+**What it does not change, against the brief's premise.**
+- **The hidden slack is not removed.** The loop still regulates the same mean, so the steady state
+  keeps the extra (step − Δ)/2 behind the leading picture.
+- **What goes is the start-up phase:**
+  - leading-P starts no longer begin ~60 ms short of that steady state;
+  - B starts no longer begin up to ~190 ms past it.
+- **So item 3 tests the reorder margins with the start-up over-fill gone.** That over-fill gave B starts
+  extra room for 20–100 s. Item 3 does not test them with the slack gone.
+
+**Fixtures:** the step-1 set (`ctl_240`, `h264_b3p_240`, `hevc_b3p_240`, `h264_b8_240`, `hevc_b8_240`);
+`syncD`; `soak33` (the one-frame soak fixture); 0b-2b's `b8pyr240`, `b16pyr240`, `b16at15x240`; 0b-2a's
+`hi8`, `hi25`, `lo150`; Stage 4's `hevc_soak2` for the 30-minute soak.
+
+Steps measured offline over each fixture's first 26 pictures (≈ the pre-anchor backlog):
+
+| fixture | largest step | the hold W predicted |
+|---|---|---|
+| syncD, soak33, ctl | 41.7 ms | **41.7 ms** |
+| `*_b3p_240`, `hevc_soak2` | 166.8 ms | **166.8 ms** |
+| hi8, hi25 | 160 ms (median 80) | **160 ms** |
+| lo150 | 160 ms | **160 ms** |
+| `*_b8_240`, `b8pyr240` | 375.4 ms | **375.4 ms** |
+| `b16pyr240` | 709 ms | **709 ms** (cushion 801) |
+| `b16at15x240` | 1 133 ms | **1 000 ms** (capped at the 1.0 s cushion) |
+
+**Builds:** HEAD `0ab5684` (`.build-cc/bfhead-Profile`, from step 1) against the tree (`.build-cc/bf-Profile`),
+unsigned Profile. **Runs:** HEAD gets syncD, soak33 with one calibration at +60 s, and the 30-minute
+soak; the tree gets everything. Unattended.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| 1 | B-frame fixtures, 240 s: H.264 and HEVC, bframes 3 and 8 | `startup realigns=1` on each, moved by about step 1's start error: **h264_b3p −55…−75 ms; hevc_b3p +35…+60; h264_b8 +110…+200; hevc_b8 +180…+240**. Afterwards no clock rail episode and no steering rail | **Robbie's band**, against the tree's own `ctl` run in the same batch: `[AV-CONTENT]` from +10 s, **median within ±2 ms of the control's median**, and **max \|x\| ≤ the control's max \|x\| + 3 ms**. Also: the log says `startup realigns=1`; no `RATIO AT ITS RAIL` line in the first 60 s |
+| 2 | No-B control: syncD and soak33, against HEAD's runs today | One realign line, **\|moved\| ≤ 15 ms** (a mean over 1 frame at 60 Hz ticks is ±Δ/4). Everything else as HEAD: cushion 250, no raise; 0 holds; the `[SRT]` / `[SRT-AUDIO]` / `[SPS-COLOR]` / `[SRT-BUFFER]` identical-text set. **One frame more start-up: the first picture comes ~42 ms + up to one tick after the anchor, not ~5 ms.** "No extra start-up delay" is met to one frame, not literally | syncD: `[AV-CONTENT]` median within ±2 ms of HEAD's same-day run; 0 holds; identical-text set. soak33: the +60 s calibration within ±2 ms of HEAD's same-day figure. First picture ≤ anchor + 0.042 s + 2 ticks |
+| 3 | Reorder margins at 240 s: `h264_b3p_240` (bframes 3), `b8pyr240`, `b16pyr240`, `b16at15x240` | Cushion as 0b-2b, before the anchor: **259 / 467 / 801 / 1000 ms**. **0 shown out of order, 0 holds** (0b-2b: 0 / 0 / 0 / 0). The risk is the first minute only, where B starts used to have the over-fill | **0 out of order, 0 holds on every one.** If any fails: stop and report (the reorder term may need adjusting) |
+| 4 | Calibrations at +60 and +120 s: `h264_b3p_240`, `hevc_b3p_240`, `h264_b8_240`, `hevc_b8_240` (`cal.sh`, measure-only) | +60 s reads as +120 s: the episode is gone | **\|(+60) − (+120)\| ≤ 2 ms** on each of the four |
+| 5 | 30-minute soak, `hevc_soak2` (B-frames, 208.5 ms reorder), HEAD and tree, calibrations at +1 / +2 / +16 / +32 min | Drift and holds unchanged. The tree's +1 min calibration no longer carries the episode | End − start within ±2 ms of HEAD's; `[AV-LAG]` slope after 180 s within ±0.5 ppm of HEAD's; **0 holds** on both; cushion 259 before the anchor on both. The tree's +1 / +2 min within ±2 ms of its +32 min |
+| 6 | First picture time | **≈ anchor + W + ≤ 1 display tick** (table above), against HEAD's ~anchor + 0.005 s | `first presentation` − anchor **≤ W + 2 display ticks (33 ms)** on every run, i.e. no later than HEAD by more than one step |
+| 7 | Coarse packing: hi8, hi25, lo150 (ffmpeg's default packing) | Cushions unchanged: **336 / 336 / 624 ms** before the anchor (the packing wins; reorder 200 ms → 250). The realign runs (x264 B-frames) | Cushion values exact; **0 holds**; low-water: hi8 / hi25 in 60–130 ms (0b-2a v2: 95.1 / 97.1), lo150 settled in 60–110 ms (64–66) |
+| 8 | gates | — | `swift test` all pass (273 + new `LiveClock` tests for the windowed realign: the hold, the mean, one event, no slew during it, restart on a target step, window 0 = today); soaklog 8 / 8; C harness 200 / 200; Profile build, the same 11 warnings |
+
+**What this stage could invalidate:**
+- the start-up figures of every B-frame SRT session (that is the point);
+- the unseen-picture baseline (~19 per connect at HEAD). Backlog discarded during the hold is not
+  counted by the DEBUG probe, so that baseline will fall;
+- the first-picture time on every SRT stream, by one step.
+
+Steady-state figures should not move.
+
+#### The B-frame start-up offset, step 2 — results, 2026-10-10 16:35–19:20 (unattended)
+
+**As built.**
+- The three pieces predicted above, and one addition: the window's arithmetic lives in a new leaf target,
+  `StartupRealign` (`StartupRealignWindow`), with 5 tests.
+  - The reason: `LiveClock` reads the host clock, and its module links libav, which no test bundle can
+    link. That is the same reason `FileAudioLookahead` is a leaf.
+  - The tests cover: one full step gives the sawtooth's mean at every phase; half a step depends on the
+    phase; the completing sample is excluded; restart; disabled.
+  - **Shown to fail:** with the completing sample folded into the mean, 3 of the 5 fail.
+- The hold, the release and "no slew during the hold" are not unit-tested. They are seen in the runs:
+  `startup realigns=1`, and `rate=1.0000` at the first presentation.
+- **Builds:**
+  - HEAD `.build-cc/bfhead-Profile`;
+  - the tree `.build-cc/bf-Profile`;
+  - a scratch probe variant `.build-cc/bfprobe-Profile`: the tree plus a per-tick depth and per-arrival
+    log for the first 6 s. Never in the source tree; the file was restored and checked after the build.
+  - All unsigned Profile, 11 warnings, the same set as HEAD.
+- **Logs:** `~/Desktop/manifold-soak/bf/repro/` (`bf-*` tree, `head-*` HEAD, `probe-*`).
+- **Run order:** the tree batch was stopped once, after `bf-hevc_b3p`, to run the probe (*Why*, below).
+  It then resumed on the same build, with a second control on each build added.
+
+| # | result | verdict |
+|---|---|---|
+| 1 | Realigns, before the first presentation, `startup realigns=1` each: **h264_b3p −50.3 ms, hevc_b3p −44.5 ms, h264_b8 +205.5 ms, hevc_b8 +203.6 ms** (hevc_b3p anchored on a P this time: picture 24, pts − dts 208.5; HEAD's run anchored on a B-ref). No steering `RATIO AT ITS RAIL` line in any tree run; HEAD had one at ~+16 s in every B-frame run. `[AV-CONTENT]` from +10 s, median / max \|x\|: **h264_b3p −0.36 / 10.06; hevc_b3p −0.27 / 8.72; h264_b8 +0.11 / 3.08; hevc_b8 −0.06 / 2.90** (HEAD: −0.37 / 40.94, +0.66 / 42.07, +0.12 / 88.42, −12.84 / 115.35). Tree controls: `bf-ctl` −0.68 / 9.98, `bf-ctl2` −0.32 / 7.31 | **PASS on Robbie's band**, all four, against either tree control. The realign sizes MISSED the predicted ranges by ~5 ms on h264_b3p and h264_b8; hevc_b3p was predicted on HEAD's anchor, not the one it took. **Against HEAD's controls (max 4.55 / 6.14) the bframes 3 runs would not pass:** their 3–10 s medians are +10.07 / +9.31 ms |
+| 2 | **syncD:** cushion 250, no raise; 0 holds; the identical-text set **7 / 7 identical** to HEAD's; `[AV-CONTENT]` median −0.32 ms over the session (HEAD −0.03 / −0.00 in two same-day runs); first picture +0.060 s after the anchor. **But one realign of +19.4 ms, and the start is worse:** 3–10 s median **+14.11 ms** (HEAD +0.78 / +3.95), max \|x\| from +10 s **11.62** (HEAD 3.58 / 3.50). **Control `ctl_240`, twice on each build:** realigns +15.1 / +14.2 ms; 3–10 s **+13.87 / +9.88** (HEAD −2.14 / −3.04); max from +10 s **9.98 / 7.31** (HEAD 6.14 / 4.55). **soak33 at +60 s:** +0.44 ms (HEAD +0.46) | **Written band: PASS** (median, holds, text, soak33 within ±2 ms, first picture ≤ 75 ms). **Realign \|moved\| ≤ 15 ms: FAIL** on syncD (19.4) and one control (15.1). **"Identical to HEAD apart from the realign line": FAIL.** Every no-B start is now ~10–14 ms off for its first ~10 s, where HEAD's was within ~4 ms |
+| 3 | 240 s margins: `h264_b3p_240` cushion 259, `b8pyr240` 467, `b16pyr240` 801, `b16at15x240` 1000, each BEFORE the anchor. **0 shown out of order and 0 holds on every one.** Unseen 2 / 13 / 26 / 23. `b16at15x240`: the model's late count 180, as 0b-2b | **PASS** |
+| 4 | +60 / +120 s calibrations: h264_b3p **+1.11 / −1.51** (Δ 2.62); hevc_b3p −1.17 / −0.93 (0.24); h264_b8 −0.71 / +0.48 (1.19); hevc_b8 −0.18 / −0.71 (0.53). HEAD at +60 s on bframes 8 read −65 / −103 ms (step 1) | **3 of 4 PASS; h264_b3p MISSES by 0.62 ms.** Its +60 s figure is the start's residual: after the realign the clock still read −48 ms (mean, 1–3.5 s) and slewed −34 ms by +20 s to remove it |
+| 5 | 30-minute soak, `hevc_soak2` (33.4 min), tree then HEAD, same day. Calibrations +1 / +2 / +16 / +32 min: **tree +0.91 / −0.68 / +0.32 / +0.56 ms**, HEAD **−4.09** / −0.30 / +0.82 / +0.28. End − start: tree −0.35, HEAD +4.37. +2 → +32 min: tree +1.24, HEAD +0.58. `[AV-LAG]` slope after 180 s: tree +0.02 ppm, HEAD +0.01 (this session's script; Stage 4's method read +0.2 on its run). **0 holds** on both; cushion 259 before the anchor on both; 0 out of order; tree realign +78.8 ms | **Slope, holds, cushion: PASS.** Tree +1 / +2 min within ±2 ms of its +32 min: **PASS.** **End − start within ±2 ms of HEAD's: MISS (4.72 apart)**, and the band was the wrong test: HEAD's own +1 min figure (−4.09) is the B-frame episode this stage removes. On the drift itself (+2 → +32 min) the two builds are 0.66 ms apart |
+| 6 | First picture after the anchor: ctl +0.064 / +0.065, syncD +0.060 (W 41.7); b3 +0.177 / +0.189 (166.8); b8 +0.398 / +0.400, b8pyr240 +0.397 (375.4); b16pyr240 +0.723 (709.0); b16at15x240 **+1.021** (1000, capped); hi8 +0.180, hi25 +0.178, lo150 +0.176 (160.0). HEAD: +0.002 to +0.008 s | **PASS**: every one ≤ W + 33 ms. b16at15 shows nothing for a full second |
+| 7 | hi8 / hi25: **336 ms** before the anchor; realign +69.6 / +74.2 ms; **0 holds**; low-water 84.7–90.1 / 83.5–92.6 ms. **lo150: 624 ms** before the anchor; realign **+278.2 ms**; **7 starvation holds, at +1.6 to +6.0 s**; low-water 23.6 → 38.1 → 57.4 → 62.0 → **65–72 ms from +60 s** | hi8 / hi25 **PASS** (60–130). **lo150 FAILS on holds** (0b-2a v2: 0). Settled low-water in band (60–110) |
+| 8 | `swift test` **278 / 278** (273 + 5 `StartupRealignTests`, shown to fail above); soaklog 8 / 8; C harness 200 / 200; Profile build, 11 warnings, the same set as HEAD | **PASS** |
+
+**Why the no-B starts got worse, and lo150 held: one step is one tooth, and one tooth is not the mean.**
+- **The probe** (`probe-h264_b3p`: per-tick depth and arrivals) shows the hold doing exactly what it
+  should:
+  - 22 samples at 120 Hz across one full 167 ms tooth, then one move by position, then release.
+  - `rate=1.0000` throughout the hold.
+- **The teeth are not alike.** The leading pictures arrive with jitter: their arrival leads run +59, +75,
+  +91, +110, +111, +120, +127 ms. Each tooth's height moves by that much.
+- **How long a window has to be.** Rebuilt rate-free from the probe's arrivals, a window's mean against
+  the long-run mean (1–6 s):
+  - **one step: sd 19.6 ms, max 48.9;**
+  - two steps: sd 12.1;
+  - four steps: sd 9.1;
+  - six steps (1.0 s): sd 7.1;
+  - twelve steps (2.0 s): sd 3.7, max 7.8.
+- **So a one-step window removes the structural B-frame offset (60–200 ms) and leaves a ±20 ms residual
+  of arrival jitter.** That is the bframes 3 result: 40 ms → ~10 ms.
+  - On bframes 8 the structural offset dominates and the tooth is longer, so the residual is
+    proportionally small: 115 ms → 3 ms.
+- **On a stream without B-frames the window is ONE FRAME.** It is taken from the pre-anchor backlog, which
+  is decoded in a burst, so every step there is one frame. But this sender delivers pictures in PAIRS (the
+  probe's arrivals: 0.092 / 0.093, 0.175 / 0.177, …), so the live tooth is ~83 ms.
+  - A 42 ms window sees its top half, ~+Δ/2 high. That is the systematic **+14…+19 ms** realign on all
+    three no-B runs, and the +10–14 ms first ten seconds.
+  - HEAD's no-B starts were within a few ms, because the anchor there is the newest picture, and the loop
+    removes the pair's ripple by rate.
+- **lo150 is bursty, low-rate video (150 kb/s).** One 160 ms step measured a burst. The realign overshot:
+  the clock read −152 ms just after the release, then −72…−112 for ~8 s.
+  - That moved the picture's line ~100 ms closer to the audio's lumpy arrivals (363 ms per PES), hence the
+    holds until the clock and steering pulled back (low-water 24 → 65 ms by +60 s).
+
+**What would fix it (for decision; not built).** Each option keeps the decided mechanism: a hold, then one
+move by position.
+- **A. A longer window: k steps, or at least ~1 s.**
+  - Error falls as above, to ±7 ms at 1 s.
+  - The cost is start-up time: the picture is held that long.
+  - It cures the no-B pair case, and probably lo150, since six bursts average out.
+  - Prediction 6's band would have to become "≤ max(W, 1 s)".
+- **B. Whole live teeth, not a time.** Start the window at the first advance of the newest PTS after the
+  anchor, and end it at the first advance at least W later.
+  - This makes the mean period-exact whatever the live tooth (pairs included).
+  - It fixes the no-B bias with a ~2-tooth hold (≤ ~170 ms there), but not jitter: a bframes 3 stream
+    still gets ±20 ms.
+- **C. B with a floor in teeth.** At least N whole teeth, e.g. N = 4: ±9 ms. That is 0.67 s at bframes 3,
+  1.5 s at bframes 8, ~0.33 s with no B-frames.
+- **D. Keep this build, but hold and realign only on a stream that reorders (max pts − dts > 0 at the
+  anchor).**
+  - No-B streams would go back to HEAD's behaviour exactly, backlog shown.
+  - B-frame streams keep this result.
+  - lo150 (x264 with B-frames) would still hold, so D alone is not enough.
+
+**Recommendation:** C with N = 4, and D's exemption unless the decision is to hold every stream alike. Both
+are changes to the decided "one full step", so they are not built.
+
+**Defaults.**
+- **Before the first step-2 launch:** exported (1 142 keys, dictionary-equal to step 1's restored domain).
+- **After the last quit:** 25 run-added `NSWindow Frame` keys and nothing else. Each was checked absent
+  from the snapshot, read, and deleted by name.
+- **The domain is dictionary-equal to the snapshot** (1 142 keys). `streamBookmarks` was never read or
+  written: every run dialled `MANIFOLD_SRT_DEBUG_URL`.
+
+**Step 2, unattended, in one list:**
+- **Met:**
+  - 1: Robbie's band, all four B-frame fixtures;
+  - 3: margins at bframes 3 / 8 / 16 and `b16at15`, 0 out of order, 0 holds;
+  - 6: first picture ≤ one step;
+  - 7 on hi8 / hi25;
+  - 8: gates;
+  - the written bands of 2;
+  - 5's drift, slope and holds.
+- **Missed:**
+  - 2's "identical to HEAD": every no-B start is ~10–14 ms worse for ~10 s, and the realign was over
+    15 ms on two of three no-B runs;
+  - 4 on h264_b3p (2.62 against 2);
+  - 7 on lo150 (7 holds);
+  - 5's end − start, a band that measured HEAD's episode.
+- **Cause of every miss:** a one-step window is one tooth. On a no-B stream it is half of the sender's
+  real (paired) tooth.
+- **Not committed. The window needs a decision** (*What would fix it*, above).
+
+#### The B-frame start-up offset, step 3 — four whole teeth, and no hold without reordering: predictions, written 2026-10-10 before the code changed
+
+**Decided (Robbie, 2026-10-10):**
+1. The start-up realign averages **at least 4 whole live teeth, counted from arrivals** (≈ 0.33 s no-B,
+   0.67 s bframes 3, 1.5 s bframes 8). Prediction 6's one-step start-up limit is relaxed accordingly.
+2. **Streams with no B-frames (no reordering seen before the anchor) skip the hold** and start exactly
+   as HEAD does.
+
+**What changes against step 2.**
+- **`StartupRealignWindow` counts teeth, not seconds.** A tooth starts where the newest queued PTS
+  advances, so this is counted from arrivals.
+  - The window opens at the first advance after the anchor and closes at the 4th advance after that.
+    The sample on the closing advance is excluded, so the mean covers exactly 4 whole teeth whatever
+    their length: pairs, adaptive B-frames, jitter.
+- **The hold's discard floor** becomes now − cushion: the realign can never move the clock back by more
+  than the cushion, since the mean depth is ≥ 0. The window no longer has a known length.
+- **A safety cap of 5 s on the hold.** It applies only if the teeth do not arrive (a stall at connect).
+  At the cap the picture is released with no realign, and the start-up line reads `startup realigns=0`.
+- **`SRTFrameRouter`:** if no decoded picture before the anchor came out of presentation order, the
+  window is 0. The clock then runs HEAD's path exactly: no hold, the backlog shown, the old first-tick
+  realign gated as at HEAD. One `[SRT] startup hold:` line says which applies.
+
+**Fixtures and builds:**
+- **Fixtures:** the step-1/2 fixtures. HEAD comparisons are today's runs (`head-*`), already recorded.
+- **Builds:** the tree `.build-cc/bf3-Profile`. Unsigned Profile, unattended.
+- **Estimated run time ≈ 45 min:**
+  - 4 × 240 s B-frame runs;
+  - syncD (300 s);
+  - hi8, hi25 (45 s each);
+  - lo150 (150 s);
+  - 2 calibration runs to +120 s;
+  - the build and gates.
+
+| # | what | predicted | pass band |
+|---|---|---|---|
+| S1 | `h264_b3p_240`, `hevc_b3p_240`, `h264_b8_240`, `hevc_b8_240` | `startup realigns=1`. Hold = wait for the first advance (≤ 1 tooth) + 4 teeth: **~0.7–0.9 s** on bframes 3, **~1.5–1.9 s** on bframes 8. The 4-tooth mean's error ~±9 ms (1 sd, the probe), so a 3–10 s `[AV-CONTENT]` of a few ms, not ~10 | Against this batch's syncD (the no-B control, now HEAD's behaviour): from +10 s, **median within ±2 ms of the control's, max \|x\| ≤ the control's max + 3 ms**; `startup realigns=1`; no steering `RATIO AT ITS RAIL` line |
+| S2 | syncD | **No hold, no realign**: one `[SRT] startup hold:` line saying none; `startup realigns=0`; first picture +0.00x s after the anchor, as HEAD | `startup realigns=0` and no `startup realign` line; first presentation − anchor ≤ 0.010 s; the identical-text set 7 / 7 against `head-syncD`; `[AV-CONTENT]` from +10 s median within ±2 ms of HEAD's (−0.04 / −0.09), max ≤ HEAD's max + 3 ms (3.58 → 6.58); 3–10 s median within HEAD's range ±3 ms (+0.78 / +3.95); 0 holds |
+| S3 | hi8, hi25, lo150 (default packing; x264 B-frames, so held) | Cushions **336 / 336 / 624 ms**. hi8 and lo150 use adaptive B-frames, so 4 teeth may span as little as ~4 frames: the hold may be short (0.2–0.7 s). lo150's overshoot should shrink with 4 teeth | Cushion values exact; **0 holds in the first 10 s** on all three (lo150 step 2: 7); hi8 / hi25 0 holds over the run |
+| S4 | Calibrations +60 / +120 s: `h264_b3p_240` (step 2: 2.62 ms) and `h264_b8_240` | +60 s reads as +120 s | **\|(+60) − (+120)\| ≤ 2 ms** on both |
+| S5 | First picture after the anchor, each fixture | B-frame: ~hold length (S1). No-B: as HEAD (+0.002–0.008 s) | Reported against HEAD; no band beyond S2's (decision 1 relaxes it) |
+| S6 | gates | — | `swift test` all pass (the window's tests rewritten for teeth, including a paired-arrival case, and shown to fail); soaklog 8 / 8; C harness 200 / 200; Profile build, the same 11 warnings |
+
+**Not re-run:**
+- the 30-min soak and soak33: the steady state is unchanged;
+- the margins at bframes 8 and 16, which depend on the steady state.
+- `b16at15`'s hold is now ~4 teeth of up to 1.13 s each, so it may reach the 5 s cap. Not tested here;
+  recorded as open.
+
+#### The B-frame start-up offset, step 3 — results, 2026-10-10 19:56–20:42 (unattended)
+
+**Build:**
+- `.build-cc/bf3-Profile`, 11 warnings, the same set as HEAD. Logs `~/Desktop/manifold-soak/bf/repro/s3-*`.
+- The window's tests were rewritten for teeth: 6 tests, including the paired-arrival case.
+- **Shown to fail:** with the closing sample folded into the mean, 3 fail; with the window opening
+  without an advance, all 6 fail (13 assertions). Both restored and re-run green.
+- **HEAD comparisons:** today's `head-*` runs.
+
+| # | result | verdict |
+|---|---|---|
+| S1 | `startup realigns=1` on all four: **h264_b3p −61.2 ms, hevc_b3p +69.0, h264_b8 +180.5, hevc_b8 +222.7**. No steering `RATIO AT ITS RAIL` line (HEAD: one at ~+16 s in each). `[AV-CONTENT]` 3–10 s median / from +10 s median / max \|x\|: **h264_b3p +0.75 / +0.17 / 3.42** (HEAD +26.53 / −0.37 / 40.94; step 2 +10.07 / −0.36 / 10.06); **hevc_b3p −0.22 / +0.27 / 2.94** (HEAD −27.42 / +0.66 / 42.07); **h264_b8 −4.84 / +0.42 / 7.63** (HEAD −28.70 / +0.12 / 88.42; step 2 max 3.08); **hevc_b8 −2.19 / +0.36 / 7.16** (HEAD −29.07 / −12.84 / 115.35; step 2 max 2.90). This batch's control (`s3-syncD`): median −0.00, max 3.76, so the band is median ±2, max ≤ 6.76 | **bframes 3: PASS, both**, now within the control's own spread from the start. **bframes 8: MISS, both, on max** (7.63 and 7.16 against 6.76, by 0.9 / 0.4 ms); medians pass. A −2…−5 ms start residual for the first ~10 s; step 2's single 375 ms tooth happened to land closer on its two runs |
+| S2 | `s3-syncD`: `[SRT] startup hold: none — no picture before the anchor came out of presentation order…`; **`startup realigns=0`, no realign line; first picture +0.005 s** (HEAD +0.005 / +0.002); identical-text set **7 / 7**; `[AV-CONTENT]` from +10 s median −0.00, max 3.76 (HEAD −0.04 / −0.09, max 3.58 / 3.50); 3–10 s +3.15 (HEAD +0.78 / +3.95); 0 holds; low-water 272.9–275.8 (HEAD 269–277) | **PASS**, every band: starts as HEAD does |
+| S3 | hi8 / hi25 / lo150: cushions **336 / 336 / 624 ms** before the anchor; realigns +82.7 / +78.2 / +214.8 ms; **0 holds on all three, over the whole run** (lo150 step 2: 7 in its first 6 s). lo150 low-water per 10 s window: **48.4** (to +10 s), 55.2, 60.9, then 61.6–68.6 from +40 s; hi8 76.3–90.9, hi25 82.7–89.7 | **PASS** on cushions and holds. lo150's first-window low-water (48.4) is below 0b-2a v2's settled band (60–110), with no hold; in band from +30 s |
+| S4 | h264_b3p: **−1.19 / +0.16 ms** (Δ 1.35; step 2 2.62). h264_b8: the batch's +120 s calibration did not run (Robbie clicked elsewhere on the desktop and took focus from the driver's menu click); its +60 s read −2.78. Re-run: **−1.90 / +0.55** (Δ 2.45) | **h264_b3p PASS. h264_b8 MISS by 0.45 ms**: S1's residual, still in the +60 s figure (−1.9 / −2.8 in two runs) |
+| S5 | First picture after the anchor (HEAD today): syncD **+0.005** (+0.002–0.005); h264_b3p **+0.844**, hevc_b3p **+0.804** (+0.006 / +0.000); h264_b8 **+1.016**, hevc_b8 **+1.055** (+0.006 / +0.002); hi8 **+0.420**, hi25 **+0.251**, lo150 **+0.704** (0b-2a v2, HEAD then: +0.001 each) | Reported (decision 1 relaxes the limit). bframes 8 is under the ~1.5 s estimate because its steps average 286 ms, not 375 (GOP boundaries) |
+| S6 | `swift test` **279 / 279** (273 + 6 `StartupRealignTests`); soaklog 8 / 8; C harness 200 / 200; Profile build, 11 warnings, the same set as HEAD | **PASS** |
+
+**Reading it.**
+- **The no-B regression of step 2 is gone.** Those streams start exactly as HEAD does.
+- **lo150's holds are gone.**
+- **bframes 3 now starts within the control's spread:** max 2.9–3.4 ms from +10 s, against HEAD's 41–42.
+- **bframes 8 is down from 88–115 ms to ~7 ms, but misses the band by under 1 ms on max, and the
+  calibration band by 0.45 ms.**
+- **The cause of both misses is one thing:** the four-tooth mean's predicted residual (~±9 ms, 1 sd),
+  showing as −2…−5 ms for the first ~10 s.
+- **A longer window would close it:** the probe's figures give ~±7 ms at 1 s and ~±4 at 2 s. That is a
+  decision, not built.
+
+**Defaults:**
+- **Before the first launch:** exported (1 142 keys).
+- **After:** 11 run-added `NSWindow Frame` keys and nothing else, each checked absent, read, and deleted by
+  name.
+- **Dictionary-equal to the snapshot** (1 142 keys). `streamBookmarks` never read or written.
+
+**Step 3, in one list:**
+- **Met:** S2, S3, S6; S1 and S4 on bframes 3.
+- **Missed by under 1 ms:** S1 on bframes 8 (max), and S4 on h264_b8.
+- **Not committed.**
+
 ---
 
 ## 7. Open and unverified

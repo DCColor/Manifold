@@ -1,5 +1,6 @@
 import Foundation
 import QuartzCore
+import StartupRealign
 
 /// A free-running presentation clock for LIVE push sources (WHEP, and later SRT/HLS).
 ///
@@ -268,6 +269,43 @@ public final class LiveClock: @unchecked Sendable {
     /// Smallest startup-fill offset worth a re-anchor. See the startup-fill block in
     /// `updateDepthLocked`.
     private static let startupRealignFloor = 0.001
+
+    /// The windowed start-up realign's window and its samples; 0 teeth = off (the realign at the first
+    /// control tick, as before). See the windowed block in `updateDepthLocked`. Per-STREAM: set by
+    /// the transport before its anchor, cleared by `reset()`. Guarded by `lock`.
+    private var startupWindow = StartupRealignWindow(teeth: 0)
+    /// The window has been measured (and the realign made, if it was worth one), or the hold hit its
+    /// cap. Ends the hold.
+    private var startupWindowDone = false
+    /// Host time of the hold's first depth sample: the cap is measured from it.
+    private var startupHoldStart: Double?
+    /// The longest the picture is ever held waiting for its teeth. Four teeth take ~0.33 s with no
+    /// B-frames, ~0.7 s at bframes 3 and ~1.5 s at bframes 8; a stream whose teeth do not arrive (a
+    /// stall at connect) must not be held indefinitely. At the cap the picture is released with no
+    /// realign, and the loop removes the anchor's offset by rate, as before this window existed.
+    private static let startupHoldCapSeconds = 5.0
+
+    /// Opt in to the windowed start-up realign for this stream: hold the picture from the anchor until
+    /// the depth has been averaged over `teeth` whole teeth of its sawtooth, then remove the anchor's
+    /// offset by position. Call before the anchor (`registerFrame`); 0 or fewer turns it off. SRT asks
+    /// for 4 on a stream that reorders, 0 on one that does not (`SRTFrameRouter`). Safe from any thread.
+    public func setStartupRealignTeeth(_ teeth: Int) {
+        lock.lock()
+        startupWindow = StartupRealignWindow(teeth: teeth)
+        lock.unlock()
+    }
+
+    /// While the windowed realign holds the picture: the PTS at or below which a queued picture can
+    /// be discarded unseen. That is the cushion behind the clock: the realign moves it back by at most
+    /// the cushion (the mean depth is never negative), so nothing at or below the floor can become due
+    /// again. nil when nothing is held — the renderer selects and presents as usual. Read by the
+    /// renderer once per display tick, before it takes its queue lock.
+    public func presentationHoldFloor() -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard startupWindow.isEnabled, !startupWindowDone, !hasPresentedOnce,
+              let aPTS = anchorSenderPTS, let aHost = anchorHostTime else { return nil }
+        return aPTS + (hostNow() - aHost) * rate - targetDepth
+    }
 
     /// Consecutive ineligible ticks required before the guard may fire. A floor against a
     /// single-tick blip; the wall-time hold below is what actually discriminates.
@@ -1164,6 +1202,8 @@ public final class LiveClock: @unchecked Sendable {
             overThresholdSince = nil
             ineligibleTicks = 0
             ineligibleSince = nil
+            // Nor does a start-up window half-measured against the old position.
+            startupWindow.restart()
         }
         // Unanchored: nothing to rebase — the next `registerFrame` will anchor against the new
         // setpoint on its own. (The stepper deliberately leaves `startupDepth` alone: it is the
@@ -1333,6 +1373,58 @@ public final class LiveClock: @unchecked Sendable {
             return (event, periodicLogIfDue(t))
         }
 
+        // ── THE WINDOWED START-UP REALIGN: MEASURE ONE STEP OF DEPTH, THEN MOVE BY POSITION ─────
+        //
+        // Opt-in (`setStartupRealignTeeth`). On a stream that reorders its pictures, the newest
+        // queued PTS advances only when a leading picture arrives, so the depth is a sawtooth one
+        // mini-GOP wide, and the anchor — ONE picture, anywhere in that mini-GOP — lands up to the
+        // reorder away from the sawtooth's mean, which is what the loop below regulates. The
+        // ordinary realign further down reads the EMA at the first control tick, before the
+        // sawtooth has been seen, and on SRT it never ran at all: the pre-anchor backlog was due
+        // at once, so a picture was on screen on the first tick. Measured: 40–115 ms of lip-sync
+        // error for 20–150 s (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, *The B-frame start-up offset*).
+        //
+        // So, while the window is open, the picture is HELD (`presentationHoldFloor`, which the
+        // renderer asks every tick) and the raw depth samples are averaged over whole teeth of the
+        // sawtooth, counted from where the newest PTS advances (`StartupRealignWindow`), so the mean
+        // is the sawtooth's whatever the anchor's phase and whatever the teeth' length. Then ONE move
+        // by position, at unity, through the same event the ordinary realign reports.
+        // Nothing else runs meanwhile — no snap, no slew: the window measures the anchor's offset,
+        // and a rate change inside it would move what is being measured.
+        //
+        // The arithmetic mean of the raw span, not the EMA: the loop regulates the EMA, whose
+        // long-run mean IS the raw span's, and over one window the EMA still carries the anchor's
+        // first sample. The window restarts on anything that moves the clock under it (a target
+        // step, a queue-full re-anchor).
+        if startupWindow.isEnabled, !startupWindowDone, !hasPresentedOnce {
+            if startupHoldStart == nil { startupHoldStart = t }
+            if let start = startupHoldStart, t - start >= Self.startupHoldCapSeconds {
+                // The teeth did not come. Release with no realign: the loop takes it from here.
+                startupWindowDone = true
+                lastControlHost = nil
+                return (nil, periodicLogIfDue(t))
+            }
+            guard let newest = newestPTS,
+                  let mean = startupWindow.add(span: spanSeconds, newest: newest) else {
+                return (nil, periodicLogIfDue(t))
+            }
+            // The window is complete (the sample that completed it is not in the mean).
+            startupWindowDone = true
+            let excess = mean - targetDepth
+            smoothedDepth = targetDepth
+            lastControlHost = nil
+            guard abs(excess) >= Self.startupRealignFloor else { return (nil, periodicLogIfDue(t)) }
+            let mappedNow = anchorSenderPTS! + (t - anchorHostTime!) * rate
+            setMappingLocked(senderPTS: mappedNow + excess, hostTime: t, rate: 1.0)
+            #if DEBUG || MANIFOLD_TELEMETRY
+            startupRealigns += 1
+            startupRealignNet += excess
+            #endif
+            return (.startupRealign(StartupRealignEvent(jumped: excess, depthBefore: mean,
+                                                        target: targetDepth)),
+                    periodicLogIfDue(t))
+        }
+
         // ── COARSE OUTER LOOP: snap-to-live ─────────────────────────────────────────────────
         //
         // Evaluated at the FULL sample rate, before the controlHz gate, because the excursion
@@ -1442,7 +1534,9 @@ public final class LiveClock: @unchecked Sendable {
         //
         // Reported as an `Event` so the surplus ledger's `recordClockJump` sees it — an unreported
         // +100 ms re-anchor would put the ledger's residual outside its maxSlew × elapsed bound.
-        if newestPTS != nil, !hasPresentedOnce {
+        // A windowed clock never reaches here before its first presentation: the block above holds
+        // the picture until its own realign, and the release is what presents.
+        if newestPTS != nil, !hasPresentedOnce, !startupWindow.isEnabled {
             let excess = depth - targetDepth
             // Below 1 ms there is nothing worth publishing a mapping for: it is under a
             // fortieth of a frame and a tenth of the audio mirror's position tolerance.
@@ -1643,6 +1737,8 @@ public final class LiveClock: @unchecked Sendable {
         // is continuing, not restarting.
         ineligibleTicks = 0
         ineligibleSince = nil
+        // A start-up window in progress restarts from the new position.
+        startupWindow.restart()
 
         let jumped = depthBefore - target
         return .overflowReanchor(OverflowEvent(jumped: jumped, queued: count,
@@ -1846,6 +1942,10 @@ public final class LiveClock: @unchecked Sendable {
         ineligibleSince = nil
         hasPresentedOnce = false
         firstPresentationPending = false
+        // The windowed realign is per-STREAM too: the transport opts in again before its next anchor.
+        startupWindow = StartupRealignWindow(teeth: 0)
+        startupWindowDone = false
+        startupHoldStart = nil
         #if DEBUG || MANIFOLD_TELEMETRY
         startupOriginPTS = nil; startupOriginHost = nil; startupPresentHost = nil
         startupPreMaxLead = -.infinity; startupPostMaxLead = -.infinity; startupPostFrames = 0

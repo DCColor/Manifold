@@ -652,9 +652,12 @@ final class SRTFrameRouter {
         clock.onMappingTick = { [weak self] mapping in
             self?.mirrorLiveAudio?(mapping, true)
         }
-        // ⚠️ AND THE FIRST PRESENTATION: the audio's first anchor waits for it (§2.7). SRT has no
-        // startup realigns by construction (§10.10), so here the gate costs only the few ms between
-        // the first mapping and the first presentation — this transport is its no-regression check.
+        // ⚠️ AND THE FIRST PRESENTATION: the audio's first anchor waits for it (§2.7). On a stream
+        // that reorders, the clock holds the picture for four teeth of depth after the anchor and
+        // realigns by position before releasing it (`anchorOrDefer`, the start-up hold), so this gate
+        // is what puts the audio's first anchor on the REALIGNED line: the realign itself is never
+        // seen by the audio. Without reordering there is no hold, and the gate costs the few ms between
+        // the first mapping and the first presentation, as before.
         clock.onFirstPresentation = { [weak self] mapping in
             self?.liveAudioPresented?(mapping)
         }
@@ -806,6 +809,8 @@ final class SRTFrameRouter {
         deferredFrames = 0
         deferralBeganHost = 0
         deferralFirstPTS = 0
+        startupNewestPTS = nil
+        startupReordered = false
         // `guessedFrameRate` is `av_guess_frame_rate`, which is 0 when libavformat could not work
         // one out — common on a short probe. Anything outside a plausible range is treated the same
         // way as absent: an implausible rate is a worse basis for a threshold than a known guess.
@@ -926,6 +931,8 @@ final class SRTFrameRouter {
         startupAnchored = false
         lastArrivalHost = nil
         deferredFrames = 0
+        startupNewestPTS = nil
+        startupReordered = false
         lastFlowLogHost = 0
         lastFlowLogEnqueued = 0
         telemetry.reset()
@@ -1355,6 +1362,13 @@ final class SRTFrameRouter {
     private var deferralBeganHost: CFTimeInterval = 0
     private var deferralFirstPTS: Double = 0
     private var deferredFrames = 0
+    /// The newest PTS among the pictures decoded before the anchor, and whether any of them came out
+    /// BEHIND it — the stream reorders, so it gets the start-up hold (`anchorOrDefer`). Session
+    /// thread, per stream.
+    private var startupNewestPTS: Double?
+    private var startupReordered = false
+    /// Whole teeth of the depth sawtooth the start-up hold averages (decided, Robbie, 2026-10-10).
+    private static let startupHoldTeeth = 4
 
     /// Called from `deliver` for every frame until the anchor is taken. Returns the presentation PTS.
     ///
@@ -2155,6 +2169,31 @@ final class SRTFrameRouter {
         // frame later in real time and skipped no content at all.
         let discarded = max(0, senderPTS - deferralFirstPTS)
         let netJump = discarded - heldFor
+
+        // ── THE START-UP HOLD: FOUR WHOLE TEETH, ON A STREAM THAT REORDERS ────────────────────
+        // The clock anchors on THIS picture, which on a stream that reorders can sit anywhere in its
+        // mini-GOP, while the depth the loop regulates is a sawtooth one mini-GOP wide. So the clock
+        // holds the picture, averages the depth over four whole teeth of that sawtooth, counted from
+        // arrivals, and removes the anchor's offset by position before anything is shown (`LiveClock`'s
+        // windowed realign; docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, *The B-frame start-up offset*).
+        // Four, not one: the teeth differ with arrival jitter, ±20 ms for one, ±9 for four.
+        //
+        // A stream that showed no reordering before the anchor starts exactly as it did before the
+        // hold existed (decided, Robbie, 2026-10-10): its anchor is its newest picture, so it has no
+        // offset to remove, and step 2 measured a hold there making the start worse, not better.
+        let holdTeeth = startupReordered ? Self.startupHoldTeeth : 0
+        clock.setStartupRealignTeeth(holdTeeth)
+        if startupReordered {
+            NSLog("""
+                  [SRT] startup hold: %d whole teeth — pictures before the anchor came out of \
+                  presentation order, so the picture is held while the depth is averaged over %d teeth \
+                  of its sawtooth, and the anchor's offset is removed by position before it is shown.
+                  """, holdTeeth, holdTeeth)
+        } else {
+            NSLog("[SRT] startup hold: none — no picture before the anchor came out of presentation "
+                + "order, so the clock starts on its anchor with no hold, as it always has.")
+        }
+
         let presentationPTS = clock.registerFrame(senderPTS: senderPTS)
         telemetry.recordClockJump(netJump)
 
@@ -2248,6 +2287,13 @@ final class SRTFrameRouter {
         if startupAnchored {
             presentationPTS = clock.registerFrame(senderPTS: senderPTS)
         } else {
+            // Decode order: a picture that comes out behind the newest one already decoded means the
+            // stream reorders, and gets the start-up hold. This picture counts — it may be the anchor.
+            if let newest = startupNewestPTS {
+                if senderPTS < newest { startupReordered = true } else { startupNewestPTS = senderPTS }
+            } else {
+                startupNewestPTS = senderPTS
+            }
             presentationPTS = anchorOrDefer(senderPTS: senderPTS,
                                             arrivalHost: CACurrentMediaTime(), clock: clock)
         }

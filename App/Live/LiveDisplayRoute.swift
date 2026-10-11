@@ -210,6 +210,10 @@ final class LiveDisplayRoute {
                                           presented: sample.hadEligibleFrame)
             onDepth(sample, event)
         }
+        // The clock's start-up hold (`LiveClock.presentationHoldFloor`). nil unless the source opted
+        // the clock into a windowed realign (SRT does); for every other source this always says
+        // "not held". Same capture rule as the depth hook.
+        renderer.presentationHoldFloor = { [clock] in clock.presentationHoldFloor() }
 
         // QUEUE-FULL → CLOCK RE-ANCHOR. Runs on the SOURCE thread (renderer.enqueue's caller),
         // after the renderer's queue lock is released. Dropping the oldest frame removes no
@@ -301,6 +305,7 @@ final class LiveDisplayRoute {
         guard let host = saved.restore() else { return }
 
         host.onDepthSample = nil
+        host.presentationHoldFloor = nil
         host.onQueueOverflow = nil   // must not outlive the clock it re-anchors
         host.maxQueuedOverride = nil
 
@@ -309,6 +314,7 @@ final class LiveDisplayRoute {
                 + "providers onto the renderer they came from, and stripping this route's seams "
                 + "off the current one. Neither window is cross-wired.")
             renderer.onDepthSample = nil
+            renderer.presentationHoldFloor = nil
             renderer.onQueueOverflow = nil
             renderer.maxQueuedOverride = nil
         }

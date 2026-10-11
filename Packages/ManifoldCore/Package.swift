@@ -254,6 +254,24 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // LiveClock's windowed start-up realign: the mean of one window of depth samples
+        // (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, *The B-frame start-up offset*). A leaf target for
+        // the same linking reason as FileAudioLookahead: `swift test` cannot link ManifoldCore.
+        .target(
+            name: "StartupRealign",
+            path: "Sources/StartupRealign",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "StartupRealignTests",
+            dependencies: ["StartupRealign"],
+            path: "Tests/StartupRealignTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The file audio pumps' tap look-ahead (docs/AUDIO_RESAMPLER_DESIGN.md §19.12): the tap is
         // filled 250 ms past what the system renderer has taken, so SDI never waits on the muted
         // renderer's refill timer. A leaf target (CoreMedia only) for the same linking reason as
@@ -278,7 +296,7 @@ let package = Package(
         .target(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
-                           "FileAudioLookahead"],
+                           "FileAudioLookahead", "StartupRealign"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.
