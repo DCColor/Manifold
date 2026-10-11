@@ -27,6 +27,9 @@ private struct ColorParams {
     var d: Float  // Cb -> B
     var isFullRange: Int32        // 0 = video/legal (expand), 1 = full (passthrough)
     var chromaConvention: Int32   // full-range only: 0 = full-swing (÷255), 1 = Resolve (×219/224)
+    /// Stage 3b S1 (D4): +½ luma pixel in normalized u for x422 (co-sited 4:2:2 chroma); exactly 0
+    /// for every other format, so x420 and x444 take the arithmetic they always did.
+    var chromaShiftU: Float = 0
 }
 
 /// Matches the shader's CropRect struct (memory layout). The ACTIVE PICTURE's uv range inside the
@@ -102,6 +105,9 @@ private struct RGBToV210Params {
     var dstRowWords: UInt32
     var kr: Float          // YCbCr matrix luma coeff for R (from source colorMatrixCode)
     var kb: Float          // YCbCr matrix luma coeff for B
+    /// `V210ChromaMode` of the frame being converted (Stage 3b S1): pair average for 4:2:0 (as
+    /// before), the co-sited sample for 4:2:2, the D3 halfband for 4:4:4.
+    var chromaMode: UInt32 = V210ChromaMode.pairAverage.rawValue
 }
 
 /// BT YCbCr matrix (Kr, Kb) selected STRICTLY by the source CICP matrix-coefficient code (D5) —
@@ -398,15 +404,22 @@ final class MetalVideoRenderer {
     private var offscreenWriteIndex = 0             // render thread only
     private let offscreenIndexLock = NSLock()
     private var offscreenReadableIndex = -1         // guarded: set in render completion, read by consumers
+    /// The chroma of the buffer rendered into the READABLE slot, published with the index under the
+    /// same lock (Stage 3b S1). The offscreen is RGB; this is the only record of how much chroma the
+    /// picture had, and the v210 output's reduction (`V210ChromaMode`) depends on it.
+    private var offscreenReadableChroma: ChromaSubsampling?
 
     /// The most-recently-COMPLETED offscreen frame — the single source of truth for export,
     /// CPU readback, and GPU scopes. Nil until the first render completes. Same name as the
     /// old single texture, so all readers are unchanged; only renderPixelBuffer writes the
     /// ring directly.
-    private var offscreenTexture: MTLTexture? {
+    private var offscreenTexture: MTLTexture? { readableOffscreen()?.texture }
+
+    /// The readable slot and the chroma rendered into it, read together so they are the same frame.
+    private func readableOffscreen() -> (texture: MTLTexture, chroma: ChromaSubsampling?)? {
         offscreenIndexLock.lock(); defer { offscreenIndexLock.unlock() }
         guard offscreenReadableIndex >= 0, offscreenReadableIndex < offscreenRing.count else { return nil }
-        return offscreenRing[offscreenReadableIndex]
+        return (offscreenRing[offscreenReadableIndex], offscreenReadableChroma)
     }
 
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
@@ -922,6 +935,70 @@ final class MetalVideoRenderer {
     /// A notification costs that file nothing and reaches a per-window observer directly.
     static let sourceColorStateDidChange = Notification.Name("ManifoldSourceColorStateDidChange")
 
+    /// Posted on the **main thread** when the chain readout's Chroma line has moved: the chroma the
+    /// renderer is drawing, what the source declared, or the reason they differ. `object` is the
+    /// renderer. Stage 3b S1 (D10): the renderer is the ONLY thing that feeds that line.
+    static let chromaStateDidChange = Notification.Name("ManifoldChromaStateDidChange")
+
+    // MARK: - Chroma (Stage 3b — native chroma end to end; CLAUDE.md)
+
+    /// DEBUG only, read once at launch from the environment and NEVER from `defaults`:
+    /// `MANIFOLD_FORCE_CHROMA_420=1` makes every path that would carry 4:2:2 or 4:4:4 convert to
+    /// x420 instead, so the fallback's readout and banner can be tested on a Mac that never needs
+    /// them (P10). Pre-ship removal (docs/BUGS.md). Always false in Release.
+    static let forceChroma420Variable = "MANIFOLD_FORCE_CHROMA_420"
+    #if DEBUG
+    static let forceChroma420 = ProcessInfo.processInfo.environment[forceChroma420Variable] == "1"
+    #else
+    static let forceChroma420 = false
+    #endif
+    /// The reason a path gives when `forceChroma420` is what lowered its chroma.
+    static let forceChroma420Reason = "forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420"
+
+    /// What the source declared about its chroma, and why the carried chroma is lower when it is.
+    /// MAIN THREAD. Set by the source through `setSourceChroma`, cleared by `liveSourceReleased`.
+    private(set) var sourceChroma: SourceChroma = .notStated
+    private(set) var chromaReason: String?
+
+    /// The pixel format of the last buffer drawn. Written on the RENDER thread (on change only),
+    /// read on main by the readout, cleared on main at a live release: hence the lock.
+    private let carriedLock = NSLock()
+    private var carriedPixelFormatLocked: OSType?
+    var carriedPixelFormat: OSType? {
+        carriedLock.lock(); defer { carriedLock.unlock() }; return carriedPixelFormatLocked
+    }
+
+    /// A source states its chroma (and, when it carries less than it has, why). Any thread; the
+    /// state is held and announced on main, like `setSourceColorSpace`'s announcement.
+    func setSourceChroma(_ chroma: SourceChroma, reason: String? = nil) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.setSourceChroma(chroma, reason: reason) }
+            return
+        }
+        guard chroma != sourceChroma || reason != chromaReason else { return }
+        sourceChroma = chroma
+        chromaReason = reason
+        announceChromaState()
+    }
+
+    /// MAIN THREAD. Post the change, and log the readout's own text, so an unattended run reads the
+    /// same words the chain readout shows (one line per change, never per frame).
+    private func announceChromaState() {
+        print("[CHROMA] " + ChromaReadout.text(carried: carriedPixelFormat, source: sourceChroma,
+                                               reason: chromaReason))
+        NotificationCenter.default.post(name: Self.chromaStateDidChange, object: self)
+    }
+
+    /// RENDER THREAD: note the format of the buffer about to be drawn; tell main only on change.
+    private func noteCarriedPixelFormat(_ pf: OSType) {
+        carriedLock.lock()
+        let changed = carriedPixelFormatLocked != pf
+        carriedPixelFormatLocked = pf
+        carriedLock.unlock()
+        guard changed else { return }
+        DispatchQueue.main.async { self.announceChromaState() }
+    }
+
     /// Posted on the **main thread** when a live source has let go of this renderer — after its
     /// source colour has been cleared. `object` is the renderer. `ScopeColorFeed` blanks the
     /// window's scope traces on it, which is the one trace wipe HLS ever had.
@@ -1192,6 +1269,11 @@ final class MetalVideoRenderer {
     /// nothing to repaint.
     func liveSourceReleased() {
         setSourceColorSpace(primaries: nil, transfer: nil, matrix: nil, provenance: .assumed)
+        // The departed stream's chroma goes with its colour: the readout must not describe it.
+        carriedLock.lock(); carriedPixelFormatLocked = nil; carriedLock.unlock()
+        sourceChroma = .notStated
+        chromaReason = nil
+        announceChromaState()
         NotificationCenter.default.post(name: Self.liveSourceDidRelease, object: self)
     }
 
@@ -2527,7 +2609,12 @@ final class MetalVideoRenderer {
         // casting grays. In practice both decode paths request x420, so the r8/rg8 branch
         // below is currently unreachable; reviving it means making those constants
         // per-bit-depth (a uniform), not just flipping the texture format.
-        let is10Bit = Self.isTenBit(CVPixelBufferGetPixelFormatType(pixelBuffer))
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        let is10Bit = Self.isTenBit(pixelFormat)
+        // Stage 3b: what this frame carries, for the readout (on change only) and, per ring slot,
+        // for the v210 output's chroma reduction.
+        noteCarriedPixelFormat(pixelFormat)
+        let frameChroma = ChromaSubsampling(pixelFormat: pixelFormat)
         let lumaFormat: MTLPixelFormat = is10Bit ? .r16Unorm : .r8Unorm
         let chromaFormat: MTLPixelFormat = is10Bit ? .rg16Unorm : .rg8Unorm
 
@@ -2656,6 +2743,10 @@ final class MetalVideoRenderer {
               let encoder = cmdBuffer.makeRenderCommandEncoder(descriptor: passDesc) else { return }
 
         var params = colorParams(for: pixelBuffer)
+        // CO-SITED 4:2:2 (D4): half a luma pixel, in the BUFFER's normalized u (the texture
+        // coordinates are buffer-normalized; the crop only narrows their range). x420 and x444 keep
+        // exactly 0, and so exactly the arithmetic they had.
+        if frameChroma == .c422 { params.chromaShiftU = 0.5 / Float(width) }
         encoder.setRenderPipelineState(pipelineState)
         // THE CROP, AND THE ONLY PLACE IT IS APPLIED. Bound unconditionally — a Metal vertex
         // function's buffer argument must always have something at its index, and the identity
@@ -2749,6 +2840,7 @@ final class MetalVideoRenderer {
             #endif
             self.offscreenIndexLock.lock()
             self.offscreenReadableIndex = writeIndex
+            self.offscreenReadableChroma = frameChroma
             self.offscreenIndexLock.unlock()
             self.onFrameRendered?()
             // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
@@ -3006,6 +3098,12 @@ final class MetalVideoRenderer {
     // 10-10-10-2). exportCurrentFrame unpacks this raw form to a 16-bit PNG (rgba16FloatToRGBA16).
     func readbackRenderedFrame() -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
         guard let src = offscreenTexture else { return nil }
+        return readback(src)
+    }
+
+    /// The readback itself, of a slot the caller already holds (the DEBUG v210 dump needs the
+    /// export and the dump to be the SAME frame).
+    private func readback(_ src: MTLTexture) -> (bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
         let width = src.width
         let height = src.height
 
@@ -3328,9 +3426,10 @@ final class MetalVideoRenderer {
         deckLinkConverting = true
         deckLinkLock.unlock()
 
-        guard let pipeline = deckLinkPipelineState, let src = offscreenTexture else {
+        guard let pipeline = deckLinkPipelineState, let readable = readableOffscreen() else {
             deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
         }
+        let src = readable.texture
         // Native-res-only guard: never convert a mismatched size (would misalign / need scaling).
         if src.width != outSize.w || src.height != outSize.h {
             deckLinkLock.lock()
@@ -3376,7 +3475,8 @@ final class MetalVideoRenderer {
         var params = RGBToV210Params(srcWidth: UInt32(src.width), srcHeight: UInt32(src.height),
                                      dstWidth: UInt32(outSize.w), dstHeight: UInt32(outSize.h),
                                      dstRowWords: UInt32(deckLinkRowBytes / 4),
-                                     kr: m.kr, kb: m.kb)
+                                     kr: m.kr, kb: m.kb,
+                                     chromaMode: V210ChromaMode(carrying: readable.chroma).rawValue)
         enc.setComputePipelineState(pipeline)
         enc.setTexture(src, index: 0)
         enc.setBuffer(back, offset: 0, index: 0)
@@ -3522,10 +3622,14 @@ final class MetalVideoRenderer {
     /// Desktop, tagged with the layer's source-derived colorspace so a
     /// non-color-managed app (e.g. Resolve) reads the raw code values. Manual only.
     func exportCurrentFrame() {
-        guard let frame = readbackRenderedFrame() else {
+        // ONE SLOT, READ ONCE: the PNG and (DEBUG) the v210 dump below are the same frame.
+        guard let readable = readableOffscreen(), let frame = readback(readable.texture) else {
             print("[EXPORT] no rendered frame yet"); return
         }
         let (bytes, width, height, bytesPerRow) = frame
+        #if DEBUG
+        let v210Dump = makeV210Dump(of: readable.texture, chroma: readable.chroma)
+        #endif
 
         // CRITICAL: tag with the SOURCE-derived colorspace (CoreMedia709), NOT deviceRGB/sRGB —
         // so the consumer reads the raw code values under the file's real colorspace.
@@ -3646,11 +3750,77 @@ final class MetalVideoRenderer {
                 print("[EXPORT] \(width)x\(height) native pixels (not desqueezed)"
                     + " | pixel aspect \(pixelAspect.displayString)"
                     + " | pHYs \(properties == nil ? "omitted (nothing declared)" : "written")")
+                #if DEBUG
+                Self.writeV210Dump(v210Dump, readback: bytes, readbackBytesPerRow: bytesPerRow, besidePNG: url)
+                #endif
             } else {
                 print("[EXPORT] PNG finalize failed")
             }
         }
     }
+
+    #if DEBUG
+    // MARK: - DEBUG v210 dump (Stage 3b S1; pre-ship removal, docs/BUGS.md)
+
+    /// What the DeckLink output would carry for one offscreen slot: the SAME `rgbToV210` pipeline and
+    /// uniforms `pushDeckLinkConvert` uses, at the slot's own raster (no output mode needed, so it
+    /// runs without a card). How P1–P5 read the SDI bytes (COLOR_MANAGEMENT_FINDINGS.md §6.10).
+    struct V210Dump {
+        let bytes: Data
+        let width: Int, height: Int, rowBytes: Int
+        let chromaMode: V210ChromaMode
+        let kr: Float, kb: Float
+    }
+
+    private func makeV210Dump(of src: MTLTexture, chroma: ChromaSubsampling?) -> V210Dump? {
+        guard let pipeline = deckLinkPipelineState else { print("[V210-DUMP] no v210 pipeline"); return nil }
+        let w = src.width, h = src.height, rowBytes = Self.v210RowBytes(width: w)
+        guard let buf = device.makeBuffer(length: rowBytes * h, options: .storageModeShared),
+              let cmd = commandQueue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder()
+        else { print("[V210-DUMP] could not allocate"); return nil }
+        let m = ycbcrKrKb(forMatrixCode: sourceMatrixCode)
+        let mode = V210ChromaMode(carrying: chroma)
+        var params = RGBToV210Params(srcWidth: UInt32(w), srcHeight: UInt32(h),
+                                     dstWidth: UInt32(w), dstHeight: UInt32(h),
+                                     dstRowWords: UInt32(rowBytes / 4), kr: m.kr, kb: m.kb,
+                                     chromaMode: mode.rawValue)
+        enc.setComputePipelineState(pipeline)
+        enc.setTexture(src, index: 0)
+        enc.setBuffer(buf, offset: 0, index: 0)
+        enc.setBytes(&params, length: MemoryLayout<RGBToV210Params>.stride, index: 1)
+        let tpg = MTLSize(width: 16, height: 16, depth: 1)
+        let tgs = MTLSize(width: (((w + 5) / 6) + 15) / 16, height: (h + 15) / 16, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
+        enc.endEncoding()
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        return V210Dump(bytes: Data(bytes: buf.contents(), count: rowBytes * h),
+                        width: w, height: h, rowBytes: rowBytes, chromaMode: mode, kr: m.kr, kb: m.kb)
+    }
+
+    /// Beside the PNG: `<stem>.v210` (raw, rowBytes stride), `<stem>.rgba16f` (the raw offscreen
+    /// readback the dump and the PNG came from) and `<stem>.v210.json` (what a reader needs).
+    private static func writeV210Dump(_ dump: V210Dump?, readback: [UInt8], readbackBytesPerRow: Int,
+                                      besidePNG png: URL) {
+        guard let dump else { return }
+        let stem = png.deletingPathExtension()
+        let v210URL = stem.appendingPathExtension("v210")
+        let rawURL = stem.appendingPathExtension("rgba16f")
+        let meta: [String: Any] = ["width": dump.width, "height": dump.height, "rowBytes": dump.rowBytes,
+                                   "chromaMode": Int(dump.chromaMode.rawValue), "kr": dump.kr, "kb": dump.kb,
+                                   "readbackBytesPerRow": readbackBytesPerRow]
+        do {
+            try dump.bytes.write(to: v210URL)
+            try Data(readback).write(to: rawURL)
+            try JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys])
+                .write(to: stem.appendingPathExtension("v210.json"))
+            print("[V210-DUMP] wrote \(v210URL.path) \(dump.width)x\(dump.height) rowBytes=\(dump.rowBytes)"
+                + " chromaMode=\(dump.chromaMode) kr=\(dump.kr) kb=\(dump.kb) | readback \(rawURL.lastPathComponent)")
+        } catch {
+            print("[V210-DUMP] write failed: \(error)")
+        }
+    }
+    #endif
 
     /// Read the YCbCr matrix from the pixel buffer's attachment and return the
     /// RGB conversion coefficients. Defaults to Rec.709 if absent/unknown.
@@ -3700,7 +3870,8 @@ final class MetalVideoRenderer {
     /// True for the 10-bit biplanar CV formats whose planes are 16-bit-per-sample (10 bits
     /// high-aligned) — i.e. the ones the shader's 10-bit-domain constants are written for.
     ///
-    /// The 4:2:2 pair (x422 / xf22) is here for the NDI receive path: NDI's 8-bit packed UYVY is
+    /// The 4:2:2 pair (x422 / xf22) is here for the NDI receive path (and, from Stage 3b, every 4:2:2
+    /// source): NDI's 8-bit packed UYVY is
     /// converted to x422 on arrival precisely BECAUSE it puts the samples in this domain, where
     /// the existing shader math is already correct. The subsampling differs from x420 but the
     /// SAMPLE ENCODING — which is all this predicate is about — is identical.
@@ -3709,6 +3880,10 @@ final class MetalVideoRenderer {
             || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
             || pf == kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
             || pf == kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
+            // Stage 3b S1: 4:4:4 (x444 / xf44), the same MSB-aligned 10-bit encoding with a
+            // full-size chroma plane. Without these a 4:4:4 buffer fell into the 8-bit branch.
+            || pf == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+            || pf == kCVPixelFormatType_444YpCbCr10BiPlanarFullRange
     }
 
     /// One-time complaint about a pixel format this renderer can't sample (a packed/single-plane

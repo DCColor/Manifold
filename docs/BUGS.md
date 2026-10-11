@@ -36,7 +36,11 @@ held back until after release, and the numbered defect entries follow.
      (`INTERLACED_FINDINGS.md` §7–8). Stage 3 (HEVC Main and
      Main 10 at 4:2:0 play; 4:2:2 and 4:4:4 refused with a banner) built and run unattended 2026-10-09
      (`a2e5ce1`); open from it: DeckLink Follow source on HEVC, one attended click (§6.10, *Stage 3 —
-     results*, item 6).
+     results*, item 6). **Widened again and audited (Robbie, 2026-10-10):** native chroma for every
+     source, 4:4:4 files included, under the rule now in `CLAUDE.md`. Stages S1 (renderer and
+     readout), S2 (files), S3 (SRT 4:2:2, HEVC and H.264), S4 (SRT 4:4:4), S5 (the OBS customer pass).
+     Audit, decisions D1–D11 and predictions P1–P13: §6.10, *Stage 3b — 4:2:2 (and 4:4:4) end to end:
+     audit*.
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
@@ -897,6 +901,23 @@ to send Export Diagnostics for a sync problem.
 
 ---
 
+## ☐ PRE-SHIP: remove the Stage 3b DEBUG v210 dump and `MANIFOLD_FORCE_CHROMA_420`
+
+**Added 2026-10-10** with Stage 3b S1 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b, S1*).
+
+- **What they are:**
+  - **The v210 dump:** in DEBUG, ⌃⌥E also runs `rgbToV210` on the frame it exports and writes the raw
+    v210 (`.v210`) and the raw `rgba16Float` readback (`.rgba16f`) next to the PNG, with a `[V210-DUMP]`
+    line. It is how P1–P5 read the SDI bytes without a capture card.
+  - **`MANIFOLD_FORCE_CHROMA_420=1`** (launch environment, never `defaults`): every path that would carry
+    4:2:2 or 4:4:4 converts to `x420` instead, and the chain readout names the switch. It is how the
+    fallback (P10) is tested on a Mac that never needs it.
+- **Gating:** both `#if DEBUG`: absent from Release, present in Profile.
+- **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch.
+- **Remove** both before ship, or keep the dump as Profile telemetry by decision.
+
+---
+
 # Post-release list
 
 **Not defects, and deliberately not before release.** Work that was decided on but would change
@@ -1231,6 +1252,70 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
   placed; −250 ms on a 340 ms lead → refused with queue 340 / available 180; the boundary at the
   available figure; nothing enqueued → placed as before. The live check needs the bookmark's keychain
   prompt answered, so it is in the attended part (§6.10, *Stage 0b-2a — results*, item 7).
+
+---
+
+## ☐ OPEN 2026-10-10 — SCHEDULED FOR 1.0 (Stage 3b, S3) — PRE-EXISTING, SRT — an H.264 High 4:2:2 stream is converted to 4:2:0 without saying so
+
+**Status:** OPEN. Found by reading the source in the Stage 3b audit (§6.10, *Stage 3b — audit*); the
+decode itself was measured offline, the app path was not run.
+
+- **What happens:** the HEVC format gate (`SRTFrameRouter.swift:1052`) refuses HEVC 4:2:2 and 4:4:4 with a
+  banner, but **H.264 has no gate**. `LiveVideoDecoder` asks VideoToolbox for `x420`
+  (`LiveVideoDecoder.swift:137`), and anything else that comes back is promoted to `x420`
+  (`SRTFrameRouter.swift:2378`). A High 4:2:2 contribution feed therefore plays at 4:2:0, with no banner
+  and nothing in the readout. The promote's own comment says so (`:2344`).
+- **How bad:** measured offline on the lines-422 fixture, an `x420` decode of H.264 4:2:2 puts every
+  chroma row at 512/512: fine vertical colour detail turns grey, on the scopes and SDI as well.
+- **Where it can't happen at all:** H.264 4:2:2 and 4:4:4 have no VideoToolbox software decoder (−8969),
+  so on a Mac without the hardware decoder the stream does not decode, today or after the fix.
+- **Fix:** Stage 3b S3 (D7): gate H.264 on `chroma_format_idc`, decode 4:2:2 to `x422`, refuse with a
+  banner when VideoToolbox can't decode it.
+
+---
+
+## ☐ OPEN 2026-10-10 — SCHEDULED FOR 1.0 (Stage 3b, S3) — SRT — a 4:2:0 HEVC stream in a Range Extensions profile is refused (x265 all-intra: "Main 10 Intra")
+
+**Status:** OPEN. Measured 2026-10-10 in Stage 3b S1's P1 runs, on HEAD `1bd07de` and S1 alike.
+
+- **What happens:** x265 with `keyint=1` at 4:2:0 10-bit signals "Main 10 Intra", which is a Range
+  Extensions profile (`general_profile_idc 4`). The HEVC format gate logs `Format Range Extensions
+  (general_profile_idc 4), 4:2:0, 10-bit luma / 10-bit chroma → refusing` and shows the banner, though the
+  stream is exactly what Manifold plays. `HEVCSPSColor.format`'s `isSupported420` asks for the Main or
+  Main 10 profile, not for 4:2:0 at up to 10 bits.
+- **Who sends it:** all-intra contribution encoders, and any encoder that signals a RExt profile for 4:2:0.
+- **Fix:** S3 rewrites the gate anyway (4:2:2 in, H.264 gated): judge `chroma_format_idc` and bit depth,
+  and let VideoToolbox's own session create be the test of whether it decodes. Re-run with
+  `x265 keyint=1` at 4:2:0 10-bit.
+
+---
+
+## ☐ OPEN 2026-10-10 — SCHEDULED FOR 1.0 (Stage 3b, S2) — PRE-EXISTING, FILES — a DNxHR 444 file's scrub frames come from libav while playback uses Apple's plug-in
+
+**Status:** OPEN. Found by reading the source in the Stage 3b audit; not run.
+
+- **What happens:** `LibavFrameSource` sends DNxHR 4:4:4 (CID 1270) to `DNxHRVideoToolboxDecoder`
+  because libav decodes it with the wrong colour (variable ACT: green and magenta). `LibavScrubProducer`
+  has no such route, so it decodes the same file through libav. The scrub frame would then be the wrong
+  colour while the played frame is right, which breaks the "scrub frame = playback frame" property the
+  scrub producer exists for (*feed the scrub gesture from `AVPlayerItemVideoOutput`*, below).
+- **Fix:** Stage 3b S2 (D9): the scrub producer takes the plug-in route on the same condition
+  (`DNxHRVideoToolboxDecoder.shouldRoute`), decoding to `x444`.
+
+---
+
+## ☐ FIXTURE CAVEAT 2026-10-10 — Apple's DNx plug-in misdecodes ffmpeg-made DNxHR HQX `.mov`
+
+**Not a Manifold defect, and not user-visible:** Manifold sends DNx 4:2:2 to libav
+(`MediaInspector.requiresLibavDecode`), and the plug-in only takes DNxHR 444 (CID 1270).
+
+- **Measured:** `scripts/chroma/generate.sh`'s `lines-422-dnxhrhqx.mov` (ffmpeg 8.1.1 `dnxhd`,
+  `dnxhr_hqx`). Read through `AVAssetReader` with the Pro Video Formats decoders registered, its chroma
+  rows come back 774/250, 154/870, 907/117, 102/922 against the source's 724/300 alternation, and 0 of
+  1080 rows match. libav decodes the same file to the exact source codes, and so does the MXF copy.
+- **So:** never judge Apple's DNx plug-in with an ffmpeg-made DNx file. For the plug-in, use camera or
+  Avid-made DNxHR 444 (`Mixed Captions.mxf`).
+- **Not established:** whether it is the plug-in or ffmpeg's encoder that departs from the DNxHR spec.
 
 ---
 
@@ -5832,6 +5917,15 @@ divergence this work exists to remove.
 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10). 4:2:2 file sources decode to `x422` on scrub and playback together,
 so the byte-identity above holds. On interlaced 4:2:2 masters the loss also blends the two fields'
 chroma (`INTERLACED_FINDINGS.md` §1). The 12-bit truncation is not part of that stage.
+
+**AUDITED 2026-10-10, AND WIDENED (Robbie):** every source keeps its native chroma, 4:4:4 included
+(§6.10, *Stage 3b — 4:2:2 (and 4:4:4) end to end: audit*). Measured on the lines-422 fixture: libav's sws
+to P010 turns every chroma row grey (512/512), and to P210 is lossless (round trip md5-identical); P410
+likewise for 4:4:4. The libav half is stage S2: `LibavPixelConversion.swsDestFormat` gains P210/P410, and
+its NV12 default branch, which would write 8-bit 4:2:0 into a 4:2:2 buffer, goes. **The 12-bit
+truncation stays out (D5), and the reason is now measured, not just scoped:** a 16-bit container
+(`sv22`/`sv44`, P216/P416) would carry 12-bit at the same memory, but the `rgba16Float` offscreen holds
+about 11 significant bits above mid-grey and v210 is 10-bit, so 12-bit needs a float32 offscreen first.
 
 ⚠️ **MASTERING-DISPLAY METADATA IS PRESENT ON THE PQ FIXTURE AND THIS PATH DOES NOT CARRY IT.** It
 is decoded as frame side data and then dropped: `LibavFrameSource.convert` sets three attachments

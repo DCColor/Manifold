@@ -229,6 +229,7 @@ struct DisplayChainReadout: View {
                 .font(.headline)
 
             row("Source",    model.chain.source)
+            row("Chroma",    model.chain.chroma)
             row("Transform", model.chain.transform)
             row("Display",   model.chain.display)
             if let buffer = model.chain.buffer {

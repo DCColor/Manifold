@@ -72,4 +72,12 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   `spaceReadout` are written only by `ScopeColorFeed`, from the renderer. A new transport or a
   colorimetry override reaches the scope headers by reaching the renderer. Per-transport scope
   writes are how the headers came to describe a previous source (2026-10-06).
+- Chroma is native end to end. Manifold supports 4:2:0, 4:2:2 and 4:4:4 natively: every source is
+  decoded at its own chroma resolution (4:2:0 → `x420`, 4:2:2 → `x422`, 4:4:4 → `x444`) and carried
+  unchanged to the renderer, scopes, window and export. Scrub and playback take the format from the
+  same resolver, so their frames stay byte-identical. Chroma is reduced only where an output requires
+  it, once, at that output, with a proper filter. Today that is only the DeckLink output, which uses
+  v210 (4:2:2). SDI itself carries 4:4:4; 4:4:4 SDI output is a roadmap idea. Where a Mac or path
+  can't keep native chroma, the chain readout and a banner say so. Never silently. Audit and stages:
+  `docs/COLOR_MANAGEMENT_FINDINGS.md` §6.10, Stage 3b (decided 2026-10-10).
 - Never add Co-Authored-By or any AI authorship trailer to commit messages or PR descriptions.

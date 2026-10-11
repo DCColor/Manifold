@@ -1,6 +1,21 @@
 ## HEVC 4:2:2 10-bit over SRT
 Moved into the plan (2026-10-07): COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3b.
 
+## 4:4:4 SDI output
+Status: idea (2026-10-10)
+Version: ?
+
+What: 10- and 12-bit RGB 4:4:4 output on the DeckLink 8K Pro; SDI link configuration (single, dual or
+quad link); follow-source vs manual choice in the DeckLink menu.
+
+Why: send 4:4:4 sources to reference monitors at full chroma. SDI itself carries 4:4:4 (3G HD 4:4:4;
+6G/12G UHD 4:4:4 single-link; dual and quad link). Manifold's output is 4:2:2 only because DeckLink
+output uses v210 today. For 1.0 it stays v210, and 4:4:4 sources are reduced once at that output with
+the D3 halfband (COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3b).
+
+Depends on: native chroma decode (Stage 3b, S1–S2). 12-bit needs the float32 offscreen deferred in D5.
+Size guess: ?
+
 ## HEVC over WHEP
 Status: idea (2026-10-07)
 Version: ?

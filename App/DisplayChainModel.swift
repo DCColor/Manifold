@@ -24,6 +24,7 @@ import AppKit
 import SwiftUI
 import CoreGraphics
 import ManifoldCore
+import ColorimetryModel   // ChromaReadout — the Chroma line (Stage 3b S1)
 
 /// The three lines of the chain readout, plus the sentence underneath them.
 struct DisplayChain: Equatable {
@@ -38,6 +39,9 @@ struct DisplayChain: Equatable {
     /// The live push source's buffer — "250 ms + SRT 120 ms", and any raise with its reason
     /// (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, decision 5). nil without one (a file, NDI, HLS).
     var buffer: String? = nil
+    /// The chroma the renderer is drawing, against what the source declared (Stage 3b S1, D10):
+    /// "4:2:2 10-bit (x422) — native", or the loss and its reason. From the renderer only.
+    var chroma: String = "—"
 }
 
 @MainActor
@@ -97,6 +101,17 @@ final class DisplayChainModel: ObservableObject {
         // Filtered on the renderer the same way the two above filter on the window.
         observers.append(NotificationCenter.default.addObserver(
             forName: MetalVideoRenderer.sourceColorStateDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let r = note.object as? MetalVideoRenderer,
+                      r === self.deck?.renderer else { return }
+                self.refresh()
+            }
+        })
+        // And the Chroma row: the renderer's carried format changed, or a source declared its chroma
+        // (Stage 3b S1). Same per-renderer filter.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: MetalVideoRenderer.chromaStateDidChange, object: nil, queue: .main
         ) { [weak self] note in
             MainActor.assumeIsolated {
                 guard let self, let r = note.object as? MetalVideoRenderer,
@@ -230,7 +245,11 @@ final class DisplayChainModel: ObservableObject {
 
         let next = DisplayChain(source: sourceLine, transform: transformLine,
                                 display: displayLine, verdict: verdict, isConverting: converting,
-                                buffer: LiveBufferReadout.report(for: renderer)?.text)
+                                buffer: LiveBufferReadout.report(for: renderer)?.text,
+                                chroma: renderer.map {
+                                    ChromaReadout.text(carried: $0.carriedPixelFormat,
+                                                       source: $0.sourceChroma, reason: $0.chromaReason)
+                                } ?? "no source")
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
         if next != chain { chain = next }

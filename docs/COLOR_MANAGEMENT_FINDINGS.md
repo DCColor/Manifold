@@ -1914,8 +1914,13 @@ override Stage B. WHEP HEVC is out of scope (`ROADMAP_IDEAS.md`).
    - **HEVC 4:2:2 10-bit is a pre-release stage, Stage 3b**, after Stage 3. **Widened (Robbie,
      2026-10-09):** Stage 3b is now "4:2:2 end to end", files included (see Stage 3b below).
    - **The fallback**, where a Mac can't decode or carry 4:2:2: show it as 10-bit 4:2:0, **never
-     silently**. The chain readout and a banner both say the picture was converted.
-   - **4:4:4 stays refused**, with a banner.
+     silently**. The chain readout and a banner both say the picture was converted. **Sharpened by the
+     audit (2026-10-10):** the build has no libav HEVC or H.264 decoder, so a stream VideoToolbox
+     cannot decode is refused with a banner (there is nothing to convert). The 4:2:0 fallback is for a
+     stream that decodes but whose 4:2:2 or 4:4:4 cannot be carried.
+   - ~~**4:4:4 stays refused**, with a banner.~~ **Revised (Robbie, 2026-10-10, D6):** 4:4:4 opens on
+     SRT as Stage 3b's S4. VideoToolbox decodes HEVC Main 4:4:4 10 in hardware on the M4 Max, so the
+     refusal had become policy, not capability.
 8. **Multi-layer HEVC: the base layer (`nuh_layer_id` 0) only.**
 9. **A C unit-test harness** for the new HEVC access-unit builder.
 
@@ -1969,13 +1974,21 @@ Run in this order. Each stage ships on its own.
     progressive 4:2:2 chroma-detail check, through export (the texture SDI reads), on files and SRT.
   - **The fallback**, where the Mac can't decode or carry 4:2:2: convert to 10-bit 4:2:0, and say
     so in the chain readout and in a banner. Never silently.
-  - **4:4:4 stays refused**, with a banner.
-  - **Open questions:**
-    - which Macs' VideoToolbox decodes HEVC 4:2:2 10-bit, and to which pixel formats — measured,
-      not assumed;
-    - whether every consumer of the live buffer (renderer, scopes, DeckLink v210, the promote) takes
-      4:2:2 as is;
-    - the 8 MB access-unit cap: an all-intra 4:2:2 10-bit frame can legitimately approach it.
+  - ~~**4:4:4 stays refused**, with a banner.~~ Opened on SRT as S4 (D6, 2026-10-10).
+  - ~~**Open questions:**~~ **Answered by the audit of 2026-10-10** (*Stage 3b — 4:2:2 (and 4:4:4) end
+    to end: audit*, at the end of §6.10). **Widened again (Robbie, 2026-10-10):** 4:4:4 files are in,
+    under the native-chroma rule now in `CLAUDE.md`: every source decoded at its own chroma resolution
+    and carried unchanged; chroma reduced only where an output requires it. The stage is now S1–S5.
+    - which Macs' VideoToolbox decodes HEVC 4:2:2 10-bit, and to which pixel formats: the M4 Max does,
+      in hardware, natively to packed `p422`, and to `x422` on request. Other chips are not established;
+      the M4 MacBook Air needs `scripts/chroma/vt.swift`.
+    - whether every consumer takes 4:2:2 as is: the renderer, scopes, export and the v210 convert do
+      (NDI already delivers `x422`); the SRT promote does not.
+    - the 8 MB access-unit cap: kept. 8 MB a frame is 1.6 Gb/s at 25p.
+  - **SDI wording.** SDI itself carries 4:4:4 (3G HD 4:4:4; 6G/12G UHD 4:4:4 single-link; dual and quad
+    link). Manifold's SDI output is 4:2:2 only because its DeckLink output uses v210. For 1.0 it stays
+    v210, and 4:4:4 sources are reduced once at that output with the D3 filter. 4:4:4 SDI output is in
+    `ROADMAP_IDEAS.md`, *4:4:4 SDI output*.
 - **Stage 4 — robustness and sync on HEVC.** **Run 2026-10-09 (uncommitted), below:** frame rate from the
   stream's declared timing; loss recovery and the soak met. The B-frame startup episode was found.
   Follow source and Cloudflare are attended.
@@ -3900,6 +3913,266 @@ are changes to the decided "one full step", so they are not built.
 - **Met:** S2, S3, S6; S1 and S4 on bframes 3.
 - **Missed by under 1 ms:** S1 on bframes 8 (max), and S4 on h264_b8.
 - **Not committed.**
+
+#### Stage 3b — 4:2:2 (and 4:4:4) end to end: audit, 2026-10-10 (read-only; no app code changed)
+
+*Measured on an M4 Max, macOS 26.5.1, Pro Video Formats installed, with fixtures and probes now in
+`scripts/chroma/` (README there). Line references checked against `1bd07de`; re-read the source before
+acting on one.*
+
+**The rule this stage now serves** (Robbie, 2026-10-10; in `CLAUDE.md`): Manifold supports 4:2:0, 4:2:2
+and 4:4:4 natively. Every source is decoded at its own chroma resolution and carried unchanged to the
+renderer, scopes, window and export. Chroma is reduced only where an output requires it, once, at that
+output, with a proper filter. Today that is only the DeckLink output, which uses v210 (4:2:2). **SDI
+itself is not limited to 4:2:2:** 3G HD 4:4:4, 6G/12G UHD 4:4:4 single-link and dual/quad link all
+carry 4:4:4. 4:4:4 SDI output is an idea in `ROADMAP_IDEAS.md`, not 1.0.
+
+##### Where chroma is forced to 4:2:0 today
+
+| Path | Site | What replacing it takes |
+|---|---|---|
+| One constant for all file consumers | `FrameEngine.swift:435` (`let videoPixelFormat = x420`) → `:1236-1237` (scrub), `:1873` (libav), `:3746` (AVF) | A per-file format chosen at load by ONE resolver, read by scrub and playback both, so they stay byte-identical by construction |
+| AVF playback / scrub | `FileFrameSource.swift:75`, `AVPlayerScrubProducer.swift:92` | Nothing local: they take what they are handed |
+| libav playback / scrub | `LibavPixelConversion.swift:24-32` | ⚠️ **Its default branch is NV12.** Handing it `x422` today writes 8-bit 4:2:0 into a 10-bit 4:2:2 buffer. Add P210 and P410, chosen from the frame's `pix_fmt` by one function both clients call |
+| DNx VideoToolbox decoder | `DNxHRVideoToolboxDecoder.swift:147`; confirm at `LibavFrameSource.swift:498` | **4:4:4 only** (CID 1270), so it never sees 4:2:2: DNxHR HQX goes through libav. Request `x444`; the confirm follows the request |
+| SRT decode | `LiveVideoDecoder.swift:137` | Format from the SPS's `chroma_format_idc`. `H264SPSColor` parses it and discards it (`H264SPSColor.swift:53`) |
+| SRT promote | `SRTFrameRouter.swift:2351, 2378` | Pass `x422`/`x444` through; promote 8-bit 4:2:2 to `x422` |
+| SRT gate | `SRTFrameRouter.swift:1052` (HEVC). **No H.264 gate at all** | Admit 4:2:2 (S3) and 4:4:4 (S4); gate H.264 too |
+| Not changing | HLS (`HLSClient.swift:982`), WHEP, Synthetic: 4:2:0 sources. NDI already delivers `x422` (`NDIService.swift:2694`) | — |
+
+**The renderer.** It already takes `x422`, proven in production by NDI: textures come from `isTenBit`
+(`MetalVideoRenderer.swift:3707-3711`), the chroma plane size from the buffer (`:2549-2550`). Everything
+downstream reads the `rgba16Float` offscreen ring (`:164`, `:395`) at source raster: the four scopes, the
+display copy, ⌃⌥E export and the v210 convert. So once the shader is right, those are native for free.
+`rgbToV210` reads each row on its own (`PassthroughShader.metal:544`), so vertical chroma survives to the
+wire. **Not accepted today: `x444`/`xf44`** (missing from `isTenBit`, so they fall into the 8-bit texture
+branch). **4:2:2 is halved only at decode and at the SRT promote.** The v210 encoder halves horizontally,
+which is the one reduction the rule allows, but with a 2-tap pair average (`PassthroughShader.metal:525`):
+fine for 4:2:0, not a proper filter for 4:4:4.
+
+**Chroma siting (existing behaviour).** `passthroughFragment` samples chroma as if centre-sited
+(`:122-125`). Standard 4:2:2 is left-cosited. With today's pair average a 4:2:2 source reaches the v210
+output as `0.75·C[k] + 0.125·(C[k−1] + C[k+1])`. H.264/HEVC 4:2:0 is also horizontally cosited by default,
+so 4:2:0 carries the same quarter-sample offset; that is its own later stage (D4).
+
+##### Measured
+
+**Today's halving differs by decoder** (lines-422 and checker-444, through `AVAssetReader` and libav):
+- Apple's ProRes decoder **point-samples**: 4:2:2 lines keep the even rows' colour; a 4:4:4 checker
+  becomes a **solid colour** (aliasing).
+- H.264, HEVC and libav's sws **average**: the lines turn neutral grey (Cb/Cr 512/512 on every row).
+- Native requests keep everything: `x422` 1080/1080 chroma rows on ProRes, H.264 4:2:2 and HEVC 4:2:2;
+  `x444` the whole checker on ProRes 4444 and 4444 XQ; libav sws to P210 and P410 is lossless (round
+  trip md5-identical).
+
+**Native is cheaper** (ms per frame, `AVAssetReader`, M4 Max):
+
+| Source | as `x420` | native |
+|---|---|---|
+| ProRes 422 HQ 1080 / 4K | 1.53 / 3.54 | 0.48 / 1.08 (`x422`) |
+| HEVC 4:2:2 4K long-GOP | 3.47 | 2.11 (`x422`) |
+| ProRes 4444 1080 | 1.65 | 0.58 (`x444`) |
+| libav sws, 4K | 7.1 (P010) | 6.3 (P210) |
+| HEVC 4:2:0 file, forced to `x422` | 0.54 native | 2.14 |
+
+The last row is why the format follows the source rather than being raised for everything.
+
+**VideoToolbox (raw session, `vt.swift`):**
+- **Hardware, M4 Max:** HEVC Main 4:2:2 10, Main 4:4:4 10, H.264 High 4:2:2 10, High 4:4:4 10.
+- **Native hardware output is packed** (`p422`/`p444`), which Metal cannot sample as r16/rg16. Asking for
+  `x422`/`x444` costs the same and comes back directly. Always request it.
+- **Software:** HEVC 4:2:2 and 4:4:4 yes (1.5 ms 1080, 3.4 ms 4K); **H.264 4:2:2/4:4:4 none** (−8969).
+- **Other chips are not established.** Web sources conflict or are silent; Apple's spec pages say only
+  "HEVC". The M4 MacBook Air is unmeasured (same media-engine generation as the M4 Max; inference only).
+- `VTIsHardwareDecodeSupported` answers per codec, not per chroma format. Not usable for this.
+- **The build has no libav HEVC or H.264 decoder** (`build_ffmpeg.sh:258-266`).
+
+**Detecting "can't decode" for the fallback:**
+- **Create fails, or the first frame errors:** the stream cannot be decoded. Refuse with a banner; there
+  is nothing to convert to 4:2:0.
+- **Delivered format ≠ requested:** the real fallback. Carry what came, say it in the chain readout and a
+  banner.
+- **`UsingHardwareAcceleratedVideoDecoder` false:** log it and show "software decode". Not a chroma
+  fallback: `x420` is not cheaper.
+
+**Cost.** Per buffer, 1080 / 4K: `x420` 6.2 / 24.9 MB, `x422` 8.3 / 33.2 MB, `x444` 12.4 / 49.8 MB. The
+offscreen ring (2 × 66 MB at 4K) and the v210 buffers do not change. libav pool of 20 at 4K: 498 MB
+today, 664 MB (4:2:2), 995 MB (4:4:4). SRT queue of up to 30 at 1080 4:2:2: 187 → 249 MB. Bandwidth at
+4K60: 3.0 → 4.0 GB/s (4:2:2), 6.0 GB/s (4:4:4), at most 5 % of an M4's 120 GB/s. **Scrub should get
+faster** (the table above), or at worst stay level.
+
+**The 8 MB access-unit cap stays.** 8 MB a frame is 1.6 Gb/s at 25p. `4k-422-hevc-intra-overcap.ts`
+(~16 MB a frame) is its negative test.
+
+**12-bit (D5).** Not unavoidable at decode: `sv22`/`sv44` (and libav's P216/P416) carry 12-bit at the
+same memory as `x422`/`x444`, on the same code scale the shader uses (`sv22` luma 4096–60160 = 64–940
+shifted left 6), and VideoToolbox delivered both on every ProRes/HEVC/H.264/DNx fixture. But the
+`rgba16Float` offscreen holds 11 significant bits (a step of 1/2048 above mid-grey, coarser than 12-bit's
+1/3504), and v210 is 10-bit. Real 12-bit needs a float32 offscreen at twice the memory: its own decision.
+
+**Found on the way:**
+1. **DNxHR 444 scrub decodes through libav** (`LibavScrubProducer` has no VT route), while playback uses
+   the plug-in. So the scrub frame of a DNxHR 444 file is libav's wrong colour. By reading; not run.
+2. **Apple's DNx plug-in misdecodes ffmpeg-made DNxHR HQX `.mov`** (774/250 where libav and the source
+   are 724/300). Not user-visible: DNx 4:2:2 goes to libav. A fixture caveat (BUGS.md).
+3. **SRT H.264 High 4:2:2 is converted to 4:2:0 silently today** (BUGS.md).
+4. **XAVC in MXF cannot play at all:** no libav H.264 decoder (interlaced decision 7).
+
+##### Decisions (Robbie, 2026-10-10)
+
+| # | Decision |
+|---|---|
+| D1 | **Native chroma per source:** `x420` for 4:2:0, `x422` for 4:2:2, `x444` for 4:4:4, chosen per file or stream. |
+| D2 | **4:4:4 files are in S1–S2.** |
+| D3 | **4:4:4 → v210 uses a 7-tap cosited halfband**, `[−1, 0, 9, 16, 9, 0, −1] / 32`, centred on the even pixel. |
+| D4 | **Cosited siting for 4:2:2 now.** 4:2:0 siting stays as it is (unchanged) and gets its own later stage. NDI (already `x422`) shifts by half a pixel, which is a correction. |
+| D5 | **12-bit stays out** until a float32 offscreen is decided on its own. |
+| D6 | **4:4:4 opens on SRT** as S4. |
+| D7 | **H.264 High 4:2:2 and 4:4:4 are gated on SRT** in S3. |
+| D8 | **Unknown AVF codecs** (AVC-Intra, XDCAM HD422, DVCPRO HD…) stay at 4:2:0, with "chroma unknown" in the readout. |
+| D9 | **DNxHR 444 scrub moves to the VT plug-in** in S2. |
+| D10 | **The chain readout gets a Chroma line,** fed by the renderer only, as colour is. |
+| D11 | **The native-chroma rule goes into `CLAUDE.md`.** |
+
+##### Staged plan
+
+| Stage | What | Size |
+|---|---|---|
+| **S1 — renderer and readout** | `x444`/`xf44` in `isTenBit`. Cosited chroma for `x422` in the shader (4:2:0 untouched). v210 chroma per source: 4:2:0 keeps the pair average, 4:2:2 takes the cosited sample (identity), 4:4:4 the D3 halfband. A Chroma line in the chain readout, held by the renderer. A DEBUG v210 dump and a DEBUG force-4:2:0 launch environment variable (no `defaults` write); both on the pre-ship list. | M, 2–3 d |
+| **S2 — files** | One chroma resolver: ProRes fourCC table, H.264/HEVC from the SPS in avcC/hvcC, DNx and MXF from libav `pix_fmt`; unknown codecs stay at 4:2:0 ("chroma unknown"). AVF and libav to `x422`/`x444`, scrub and playback together. DNx 444 to `x444`, and its scrub through the plug-in (D9). Fallback banner through `playbackNotice`. | M, 2–3 d |
+| **S3 — SRT 4:2:2** | HEVC and H.264 4:2:2 accepted, decoded to `x422`, promote passes it through. Refused with a banner when VideoToolbox cannot decode it. Fallback banner through `showError` without disconnecting. | S–M, 1–2 d |
+| **S4 — SRT 4:4:4** | Gate admits it; decode to `x444`. | S, ½ d |
+| **S5 — the OBS customer pass** | OBS P216 with Apple VT HEVC Main 4:2:2 10, to MediaMTX first, then Cloudflare. | attended |
+
+##### Predictions
+
+| # | Stage | Prediction | Pass | Fail |
+|---|---|---|---|---|
+| P1 | S1 | The 4:2:0 regression set (`still-420` H.264 and HEVC Main 10, as files and over a local SRT listener): ⌃⌥E export and the v210 dump unchanged from HEAD | md5 identical | any byte |
+| P2 | S1 | NDI: v210 chroma equals the source's 4:2:2 chroma; the picture's chroma moves half a pixel left (attended; direction corrected 2026-10-10 before measurement, see *S1 — results*) | ≥ 99.9 % of chroma samples within ±1 code | otherwise |
+| P3 | S2 | lines-422 on all five decode paths (ProRes 422 HQ, H.264 4:2:2, HEVC 4:2:2 on AVF; ProRes 422 HQ and DNxHR HQX MXF on libav), through export and the v210 dump. Today: grey (H.264, HEVC, libav) or even-row colour (ProRes) | ≥ 99.9 % of rows within ±2 codes of their own line | otherwise |
+| P4 | S2 | checker-444 through export | ProRes ≥ 99.9 % within ±2; DNxHR 444 ≥ 96 % within ±4 (its own decode measured 96.4 %) | below |
+| P5 | S2 | checker-444 on the v210 dump | Cb/Cr 512 ± 2 (no alias) | 724/300 on the wire |
+| P6 | S2 | Scrub frame = playback frame on every 4:2:2 / 4:4:4 fixture | export md5 identical | any byte |
+| P7 | S2 | Scrub latency at 20 Hz | AVF ≤ HEAD; libav ≤ HEAD + 1 ms | worse |
+| P8 | S2 | 4K HQX memory +166 ± 60 MB; 4K ProRes 4444 and HQX play 60 s | 0 late, 0 dropped | any |
+| P9 | S3 | lines-422 HEVC and H.264 over a local SRT listener: `accepted`, `x422`, hardware true; rows as P3 | as stated | any `x420` or promote line |
+| P10 | S3 | Forced fallback: readout and banner shown, rows go grey | all three | any missing |
+| P11 | S3 | 4:2:0 SRT log lines and export unchanged; the over-cap access unit counted and logged, no crash | identical / no crash | otherwise |
+| P12 | S3 | 30-min 4:2:2 soak against a non-Cloudflare server | calibrations within ±2 ms, drift within ±5 ms | outside |
+| P13 | S5 | The OBS stream reads `hevc Rext`, 4:2:2 10-bit accepted, `x422`, readout "native" | as stated | otherwise |
+
+**Needs Robbie:** the M4 MacBook Air check (`scripts/chroma/vt.swift` on `lines-422-hevc.mov`,
+`lines-422-h264-intra.mov`, `checker-444-hevc.mov`; pass is `HW-only: usingHW=true … x422`, `x444` for the
+last); the S5 OBS pass, on a *duplicated* profile with its row added to `OBS_TEST_PROFILES.md` first; the
+P2 NDI check.
+
+#### Stage 3b, S1 — renderer and readout: predictions, written 2026-10-10 before the code changed
+
+**What changes:**
+- **`isTenBit`** takes `x444`/`xf44`.
+- **The shader** samples `x422` chroma cosited: the chroma coordinate moves +½ luma pixel, so luma pixel
+  2k reads chroma sample k exactly and 2k+1 reads the mean of k and k+1. Passed as a uniform;
+  0 for every other format, so `x420` and `x444` take the same arithmetic as today.
+- **v210 chroma per source**, from the format of the buffer rendered into that offscreen slot, published
+  with the slot: `x420` (and anything not 4:2:2 / 4:4:4) the pair average as today; `x422` the even
+  pixel's own chroma (identity); `x444` the D3 halfband, edge-replicated.
+- **The chain readout's Chroma line,** from the renderer: the carried format, the source's declared
+  chroma when one is stated, and the reason when they differ. NDI declares 4:2:2. Files and SRT declare
+  in S2/S3; until then their line reads "source chroma not stated".
+- **`MANIFOLD_FORCE_CHROMA_420=1`** (DEBUG, launch environment, never `defaults`): NDI converts to `x420`
+  instead of `x422`, and the readout names the switch as the reason. S2/S3 apply it to their resolvers.
+- **DEBUG v210 dump:** ⌃⌥E also runs `rgbToV210` on the same readback frame, at its own raster and with
+  its own slot's chroma mode, and writes the raw v210 next to the PNG (`.v210`), with a `[V210-DUMP]` log
+  line. Independent of DeckLink output, so it runs on this Mac unattended.
+
+**P1 — the 4:2:0 regression set, unattended.** Builds: HEAD `1bd07de` and S1, both unsigned Profile in
+their own `.build-cc` paths. Fixtures: `still-420-h264.mov`, `still-420-hevc10.mov` (files, first frame,
+paused), `still-420-h264.ts`, `still-420-hevc10.ts` (local SRT listener, static picture). HEAD has no
+v210 dump, so the dump also writes the raw `rgba16Float` readback (`.rgba16f`), and
+`scripts/chroma/v210ref.swift` runs HEAD's own `rgbToV210`, compiled from `git show
+1bd07de:App/PassthroughShader.metal`, on it on the GPU. A CPU copy of the kernel could not be byte-exact
+(fused multiply-adds round differently at .5 boundaries); the same kernel on the same GPU can.
+- **Export PNG:** md5 identical HEAD vs S1, all four. **Fail:** any byte.
+- **v210 dump on 4:2:0:** S1's in-app dump identical to HEAD's kernel on the same readback. **Fail:** any
+  byte.
+- **Readout:** "4:2:0 10-bit (x420) — source chroma not stated" on all four.
+
+**P2 — NDI, attended, at the end.** Predicted: the Chroma line reads "4:2:2 10-bit (x422) — native"; the
+v210 dump's chroma equals the source's UYVY chroma ×4 within ±1 code on ≥ 99.9 % of samples; the
+export's chroma moves half a pixel ~~right~~ **left** against HEAD on a sharp vertical colour edge (the
+correction; direction corrected before measurement, see *S1 — results*).
+With `MANIFOLD_FORCE_CHROMA_420=1`: "4:2:0 10-bit (x420) — 4:2:2 source, forced to 4:2:0 by
+MANIFOLD_FORCE_CHROMA_420". **Fail:** any of those not so.
+
+#### Stage 3b, S1 — results, 2026-10-10 21:20–22:00 (unattended); P2 attended 21:44–21:47
+
+**Builds:** HEAD `1bd07de`, from a clean worktree (vendored `ThirdParty` and the DeckLink SDK copied in,
+`xcodegen`), `.build-cc/s1head-Profile`; S1, `.build-cc/s1-Profile`. Both unsigned Profile; the same
+warning set (10 distinct; only a timestamp differs). **Driver:** a scratch copy of the
+`scripts/soak/repro/run.sh` pattern: launch, Deny the licence prompt, `open -a` (files) or ⌃⌥D on a local
+ffmpeg SRT listener, then ⌃⌥E and quit. Fixtures: `scripts/chroma/generate.sh 420`.
+
+| # | Result | Verdict |
+|---|---|---|
+| P1 export | `still-420-h264.mov`, `still-420-hevc10.mov` (files), `still-420-h264.ts`, `still-420-hevc10.ts` (SRT): **PNG md5 identical HEAD vs S1, all four**. Two S1 SRT runs give the same bytes, so the live path is repeatable at this level. | **PASS** |
+| P1 v210 | HEAD's `rgbToV210` (`git show 1bd07de:App/PassthroughShader.metal`, through `scripts/chroma/v210ref.swift`) on each S1 readback: **byte-identical to S1's in-app dump**, all four plus the repeat. Re-checked after the halfband edge change below, against the final tree's kernel and with a fresh file and SRT run on the final binary: identical. | **PASS** |
+| P1 readout | `[CHROMA] 4:2:0 10-bit (x420) — source chroma not stated` on every run. | **PASS** |
+| P2 | NDI, attended (Robbie): OBS, profile "NDI Bars (P2)", Image source `p2-bars.png`, three launches through the scratch `p2.sh` (HEAD, S1, S1 with `MANIFOLD_FORCE_CHROMA_420=1`). Details below. | **PASS** |
+
+**P2 in detail** (row 540, the seven bar edges; ⌃⌥E exports and their `.rgba16f` readbacks):
+- **Readout:** S1 `[CHROMA] 4:2:2 10-bit (x422) — native`; forced `[CHROMA] 4:2:0 10-bit (x420) — 4:2:2
+  source, forced to 4:2:0 by MANIFOLD_FORCE_CHROMA_420`, with `[NDI] display pool: … x420 … FORCED`. Both
+  as predicted. Between sources the line reads `no picture`.
+- **Chroma moves half a pixel left; luma does not move.** On the unclamped readback, S1 against the forced
+  run (which samples horizontally as HEAD does): Cb edges move **−0.498 to −0.501 px** at all seven edges;
+  luma edges |Δ| ≤ 0.026 px. HEAD's and the forced run's export edges agree to 0.001 px.
+  ⚠️ **Read edges off the readback, not the PNG.** On the 16-bit export, luma appeared to move by up to
+  0.24 px at some edges. That is the export's [0, 1] clamp (E2) acting on out-of-range RGB at mixed-chroma
+  edges, not the picture.
+- **The co-sited identity, against an independent run:** S1's even-pixel chroma, taken as the source's
+  samples C[k] and resampled the old way, reproduces the forced run's picture on **11 496 / 11 496** chroma
+  samples within ±1 code (worst 0.20; rows 100, 540, 900, Cb and Cr). So S1's even pixels carry the source's
+  4:2:2 chroma, and mode 1 puts exactly those on the wire: the tree's kernel on each readback is
+  **byte-identical** to the in-app dump (S1, `chromaMode=cosited`; forced, `pairAverage`).
+- **HEAD vs forced, whole frame:** 4 846 of 6 220 800 components differ (0.08 %), at most 4 codes, in 10
+  columns near three bar edges and on a 4-rows-on, 4-off pattern. That is vertical chroma: HEAD carries
+  4:2:2 and the forced run averages row pairs to 4:2:0. It is the expected difference, not a horizontal
+  effect.
+- **Defaults:** `p2.sh` snapshotted the domain (1 143 keys: one more `NSWindow Frame` key than P1 left,
+  from a launch between the runs) and deleted the 3 window-frame keys the runs added. Dictionary-equal to
+  its snapshot; `streamBookmarks` equal.
+
+**The new kernel branches, offline** (the tree's shader on synthetic offscreens; S1 has no 4:2:2 or 4:4:4
+source but NDI, so modes 1 and 2 cannot run unattended in the app yet):
+- **4:4:4 one-pixel checker:** mode 0 (pair average) 512, mode 1 (point) 724 (the alias), mode 2
+  (halfband) **512 at every even pixel**.
+- **4:2:2 source after the co-sited upsample (a chroma ramp):** mode 1 returns the source's chroma within
+  **±1 code** (half-float rounding of the RGB offscreen). Today's pair average on the same data is off by
+  up to 40 codes.
+- **Flat chroma:** every mode returns it unchanged.
+
+**Changed during the stage, before P1 was re-checked:** the halfband first extended the border by
+**replication**. The offline checker read 499 and 618 at the two edges, where 512 is right, because
+replication breaks a one-pixel alternation. It now **mirrors** about the edge pixel (−1 → 1, W → W−2), the
+extension a symmetric odd-length filter needs: 512 everywhere. Mode 0 is untouched, and P1 was re-run on
+the result.
+
+**P2's direction, corrected before measurement.** The prediction said the chroma moves half a pixel
+right. Worked through: today pixel 2k reads chroma texel coordinate k − ¼ (0.75·C[k] + 0.25·C[k−1]), which
+places chroma half a luma pixel right of where co-sited chroma belongs; with the shift it reads C[k]. A
+chroma edge therefore moves **left** by half a pixel. The band is unchanged.
+
+**Found on the way:** an all-intra x265 HEVC stream at 4:2:0 10-bit signals "Main 10 Intra", a Range
+Extensions profile (`general_profile_idc 4`), and Stage 3's gate refuses it, because the gate keys on the
+profile, not the chroma format and bit depth (BUGS.md). The fixture now uses lossless x265, which stays
+Main 10. S3's gate change covers it.
+
+**Gates:** `swift test` (ManifoldCore) **289 / 289**, including 10 new `ChromaFormatTests`; both Profile
+builds succeeded. **Defaults:** exported before the first launch (1 142 keys). The runs added 13
+`NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted
+by name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. The HEAD worktree
+was removed. **Not committed.**
 
 ---
 

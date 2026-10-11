@@ -18,10 +18,18 @@ struct ColorParams {
     float d;  // Cb -> B
     int isFullRange;       // 0 = video/legal range (expand), nonzero = full range (passthrough)
     int chromaConvention;  // full-range chroma only: 0 = full-swing (no scale), 1 = Resolve (x219/224)
+    // Stage 3b S1 (D4): +½ luma pixel, in the buffer's normalized u, for x422 — standard 4:2:2 chroma
+    // is CO-SITED with the even luma sample, and the unshifted sample treats it as centre-sited.
+    // With the shift, luma pixel 2k reads chroma sample k exactly and 2k+1 the mean of k and k+1.
+    // EXACTLY 0.0 for x420 and x444, so those take the same arithmetic as before (u + 0.0 == u):
+    // 4:2:0's own siting is a separate stage, and 4:4:4 has nothing to site.
+    float chromaShiftU;
 };
 
 // MARK: - Sample domain (10-bit x420)
 //
+// (Stage 3b: x422 and x444 are sampled too — the SAME 10-bit MSB-aligned encoding, only the chroma plane's
+// size differs, so everything below holds for them unchanged. Native chroma: CLAUDE.md.)
 // The decode contract is ALWAYS x420 (kCVPixelFormatType_420YpCbCr10BiPlanar*, both the AVFoundation
 // and libav paths), whose 10-bit samples are MSB-ALIGNED in a 16-bit word and are sampled here as
 // .r16Unorm / .rg16Unorm. So Metal normalizes a 10-bit code C as:
@@ -122,7 +130,7 @@ fragment half4 passthroughFragment(VertexOut in [[stage_in]],
     constexpr sampler s(address::clamp_to_edge, filter::linear);
 
     float y  = lumaTex.sample(s, in.texCoord).r;
-    float2 cbcr = chromaTex.sample(s, in.texCoord).rg;
+    float2 cbcr = chromaTex.sample(s, in.texCoord + float2(params.chromaShiftU, 0.0)).rg;
 
     // Range handling. Chroma is ALWAYS centered (subtract the neutral, code 512) —
     // that's a chroma offset, not range expansion, and applies to both ranges.
@@ -513,6 +521,8 @@ struct RGBToV210Params {
     uint dstRowWords;   // v210 row stride in 32-bit WORDS (= rowBytes/4; 4K = 10240/4 = 2560)
     float kr;           // BT YCbCr matrix luma coeff for R (selected by source colorMatrixCode)
     float kb;           // BT YCbCr matrix luma coeff for B
+    uint chromaMode;    // V210ChromaMode (ColorimetryModel): 0 pair average (4:2:0, as before),
+                        // 1 co-sited sample (4:2:2), 2 the D3 halfband (4:4:4)
 };
 
 // 10-bit LIMITED-range luma (Y' 64..940). Same scale for every matrix; only the yf weights differ.
@@ -524,6 +534,10 @@ static inline uint v210_Y(float yf) {
 // 1.4746). Cb/Cr 64..960.
 static inline uint v210_C(float c0, float yf0, float c1, float yf1, float denom) {
     float cn = 0.5 * ((c0 - yf0) + (c1 - yf1)) / denom;   // normalized [-0.5, 0.5]
+    return uint(clamp(round(512.0 + 896.0 * cn), 64.0, 960.0));
+}
+// One already-normalized chroma value [-0.5, 0.5] → its 10-bit code. Modes 1 and 2.
+static inline uint v210_Cn(float cn) {
     return uint(clamp(round(512.0 + 896.0 * cn), 64.0, 960.0));
 }
 
@@ -539,7 +553,8 @@ static inline uint v210_C(float c0, float yf0, float c1, float yf1, float denom)
 //   Word1 = Y1  | (Cb2<<10) | (Y2<<20)
 //   Word2 = Cr2 | (Y3<<10) | (Cb4<<20)
 //   Word3 = Y4  | (Cr4<<10) | (Y5<<20)
-// Chroma is 4:2:2: Cb0/Cr0 from px0&1, Cb2/Cr2 from px2&3, Cb4/Cr4 from px4&5 (averaged).
+// Chroma is 4:2:2: for a 4:2:0 source Cb0/Cr0 from px0&1, Cb2/Cr2 from px2&3, Cb4/Cr4 from px4&5
+// (averaged); for 4:2:2 and 4:4:4 sources see `chromaMode` below.
 // One thread per 6-pixel group; writes 4 words at row*dstRowWords + groupX*4.
 kernel void rgbToV210(texture2d<float, access::read> offscreen [[texture(0)]],
                       device uint *dst               [[buffer(0)]],
@@ -570,12 +585,56 @@ kernel void rgbToV210(texture2d<float, access::read> offscreen [[texture(0)]],
 
     const uint Y0 = v210_Y(yf[0]), Y1 = v210_Y(yf[1]), Y2 = v210_Y(yf[2]);
     const uint Y3 = v210_Y(yf[3]), Y4 = v210_Y(yf[4]), Y5 = v210_Y(yf[5]);
-    const uint Cb0 = v210_C(c[0].b, yf[0], c[1].b, yf[1], denomB);
-    const uint Cr0 = v210_C(c[0].r, yf[0], c[1].r, yf[1], denomR);
-    const uint Cb2 = v210_C(c[2].b, yf[2], c[3].b, yf[3], denomB);
-    const uint Cr2 = v210_C(c[2].r, yf[2], c[3].r, yf[3], denomR);
-    const uint Cb4 = v210_C(c[4].b, yf[4], c[5].b, yf[5], denomB);
-    const uint Cr4 = v210_C(c[4].r, yf[4], c[5].r, yf[5], denomR);
+
+    // ── CHROMA, PER SOURCE (Stage 3b S1, D3/D4) ──────────────────────────────────────────────
+    // The offscreen is RGB, so the kernel cannot see how much chroma the picture had; the renderer
+    // passes it per frame (`chromaMode`, from the buffer rendered into that ring slot).
+    uint Cb0, Cr0, Cb2, Cr2, Cb4, Cr4;
+    if (p.chromaMode == 1u) {
+        // 4:2:2 SOURCE: the even pixel's own chroma. The shader's co-sited upsample put chroma
+        // sample k exactly on pixel 2k, so this returns the source's chroma: nothing is reduced.
+        Cb0 = v210_Cn((c[0].b - yf[0]) / denomB); Cr0 = v210_Cn((c[0].r - yf[0]) / denomR);
+        Cb2 = v210_Cn((c[2].b - yf[2]) / denomB); Cr2 = v210_Cn((c[2].r - yf[2]) / denomR);
+        Cb4 = v210_Cn((c[4].b - yf[4]) / denomB); Cr4 = v210_Cn((c[4].r - yf[4]) / denomR);
+    } else if (p.chromaMode == 2u) {
+        // 4:4:4 SOURCE: the one reduction, with a proper filter (D3). A 7-tap co-sited halfband,
+        // [-1, 0, 9, 16, 9, 0, -1] / 32, centred on each even pixel; unity at DC, zero at Nyquist, so
+        // a one-pixel chroma alternation reduces to its mean instead of aliasing onto the wire. Reads
+        // pixels x0-3 … x0+7, MIRRORED about the edge pixel (-1 → 1, W → W-2): the extension a
+        // symmetric odd-length filter needs. Edge REPLICATION breaks a one-pixel alternation at the
+        // border (measured: 499 and 618 where 512 is right). Taps restated from
+        // V210ChromaMode.halfbandTaps.
+        const int lastX = int(p.srcWidth) - 1;
+        float cbN[11], crN[11];
+        for (int i = 0; i < 11; i++) {
+            int sx = int(x0) + i - 3;
+            sx = sx < 0 ? -sx : (sx > lastX ? 2 * lastX - sx : sx);
+            sx = clamp(sx, 0, lastX);   // a raster narrower than 4 px: never read out of bounds
+            const float3 px = offscreen.read(uint2(uint(sx), sy)).rgb;
+            const float  py = kr * px.r + kg * px.g + kb * px.b;
+            cbN[i] = (px.b - py) / denomB;
+            crN[i] = (px.r - py) / denomR;
+        }
+        // Centre of output pair j (pixel x0+2j) is index 3+2j.
+        float hb[6];
+        for (int j = 0; j < 3; j++) {
+            const int m = 3 + 2 * j;
+            hb[2 * j]     = (16.0 * cbN[m] + 9.0 * (cbN[m - 1] + cbN[m + 1]) - (cbN[m - 3] + cbN[m + 3])) / 32.0;
+            hb[2 * j + 1] = (16.0 * crN[m] + 9.0 * (crN[m - 1] + crN[m + 1]) - (crN[m - 3] + crN[m + 3])) / 32.0;
+        }
+        Cb0 = v210_Cn(hb[0]); Cr0 = v210_Cn(hb[1]);
+        Cb2 = v210_Cn(hb[2]); Cr2 = v210_Cn(hb[3]);
+        Cb4 = v210_Cn(hb[4]); Cr4 = v210_Cn(hb[5]);
+    } else {
+        // 4:2:0, and anything else: today's pair average, unchanged, so the 4:2:0 wire is
+        // byte-for-byte what it was (P1). Its siting is a separate stage (D4).
+        Cb0 = v210_C(c[0].b, yf[0], c[1].b, yf[1], denomB);
+        Cr0 = v210_C(c[0].r, yf[0], c[1].r, yf[1], denomR);
+        Cb2 = v210_C(c[2].b, yf[2], c[3].b, yf[3], denomB);
+        Cr2 = v210_C(c[2].r, yf[2], c[3].r, yf[3], denomR);
+        Cb4 = v210_C(c[4].b, yf[4], c[5].b, yf[5], denomB);
+        Cr4 = v210_C(c[4].r, yf[4], c[5].r, yf[5], denomR);
+    }
 
     const uint w0 = Cb0 | (Y0 << 10) | (Cr0 << 20);
     const uint w1 = Y1  | (Cb2 << 10) | (Y2 << 20);

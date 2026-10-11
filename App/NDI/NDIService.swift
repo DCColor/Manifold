@@ -518,6 +518,11 @@ final class NDIService: ObservableObject {
         // connect" hardcode would do on a second connect.
         resetColorimetry()
         renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1, provenance: .assumed)
+        // NDI's UYVY is 4:2:2 by definition, and it is carried as x422 (`convertToDisplayFormat`).
+        // Stated to the renderer so the chain readout can say "native", or name the switch that
+        // lowered it (Stage 3b S1).
+        renderer.setSourceChroma(.declared(.c422),
+                                 reason: MetalVideoRenderer.forceChroma420 ? MetalVideoRenderer.forceChroma420Reason : nil)
 
         // Range is a SEPARATE axis from colorimetry and NDI does not signal it: UYVY is video-range
         // by definition. Pin the shader to legal-range expansion rather than letting it read the
@@ -2690,8 +2695,12 @@ final class NDIService: ObservableObject {
         guard let transferSession else { return nil }
 
         if pixelBufferPool == nil || poolSize != (width, height) {
+            // DEBUG `MANIFOLD_FORCE_CHROMA_420`: the fallback under test (P10), said in the readout.
+            let carried = MetalVideoRenderer.forceChroma420
+                ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                : kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
             let attrs: [CFString: Any] = [
-                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+                kCVPixelBufferPixelFormatTypeKey: carried,
                 kCVPixelBufferWidthKey: width,
                 kCVPixelBufferHeightKey: height,
                 kCVPixelBufferMetalCompatibilityKey: true,
@@ -2705,7 +2714,9 @@ final class NDIService: ObservableObject {
             }
             pixelBufferPool = pool
             poolSize = (width, height)
-            NSLog("[NDI] display pool: \(width)x\(height) x422 (10-bit biplanar 4:2:2)")
+            NSLog("[NDI] display pool: \(width)x\(height) %@", MetalVideoRenderer.forceChroma420
+                  ? "x420 (10-bit biplanar 4:2:0) — FORCED by MANIFOLD_FORCE_CHROMA_420"
+                  : "x422 (10-bit biplanar 4:2:2)")
         }
         guard let pixelBufferPool else { return nil }
 
