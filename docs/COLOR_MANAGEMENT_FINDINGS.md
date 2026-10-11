@@ -4506,10 +4506,97 @@ and soak runs. Logs: the session scratchpad `s3/runs/` and `~/Desktop/manifold-s
 - **Met:** P9 on every chroma format and both codecs, listener and MediaMTX; P10; P10b; P11a–c; B; P12; R; G.
 - **Missed as written:** P9's band on the 8-bit fixture (VideoToolbox's ×1023/255 expansion, pre-existing; its chroma is native).
 - **Server limits, recorded:** MediaMTX closes an H.264 reader at an `-stream_loop` wrap, and sends nothing above ~10–13 Mb/s.
-- **Changed during the stage:** undecodable after one failed first picture (was three); −12900 read as software decode.
+- **Changed during the stage:** undecodable after one failed first picture (was three); −12900 read as software decode. (The first of these is refined in *S3/S4 follow-up*, below.)
 
 **Defaults:** exported before the first launch (1 143 keys). The runs (about 50 launches) added 51 `NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted by name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. **Screenshots:** three, window-only by the Manifold window's id (CLAUDE.md), all deleted. Two came at +10 s, after the banner had dismissed, and showed only the picture; the third, above, shows the banner. **OBS:** not used. **MediaMTX:** the instance already running (`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Not committed.**
 
+
+#### S3/S4 follow-up — 8-bit widening (read-only) and the refusal rule, 2026-10-11 12:30–12:55 (unattended)
+
+S3/S4 is committed (`0b06de1`). Two follow-ups (Robbie): measure the 8→10-bit widening S3 found on the 8-bit
+4:2:2 fixture, without changing code; and refuse at once only on an "unsupported format" answer.
+
+##### Part 1 — 8-bit sources are widened full-scale, not ×4 (read-only)
+
+**Fixture:** `bands8`, four 480 px bands at 8-bit Y′ 16 / 128 / 235 with neutral chroma, and Y′ 128 with
+Cb 240 / Cr 16 (lossless where it matters: the bands are flat). Made as 8-bit H.264 High 4:2:0 `.ts` and `.mov`,
+8-bit High 4:2:2 `.ts`, 8-bit DNxHD MXF, and a 10-bit control holding the ×4 codes. **Correct** (BT.709/BT.2100
+limited range): ×4, so 64 / 512 / 940 and Cb 960 / Cr 64.
+
+**At the decoder, outside the app** (band codes Y/Cb/Cr; in-band SPS/PPS as SRT and WHEP build it, and
+`AVAssetReader` as the AVFoundation file route reads it):
+
+| Source → what is asked for | Y 16 / 128 / 235 | neutral Cb/Cr; Cb 240 / Cr 16 |
+|---|---|---|
+| 8-bit 4:2:0 → `x420` (SRT, WHEP, AVF files today) | 64 / **514** / **943** | 512; 960 / 64 |
+| 8-bit 4:2:0 → `x422` | 64 / 512 / 940 | 512; 960 / 64 |
+| 8-bit 4:2:2 → `x422` (S3's path) | 64 / **513** / **943** | **513**; **963** / 64 |
+| 8-bit 4:2:2 → `x420` | 64 / 514 / 943 | 512; 960 / 64 |
+| 8-bit → `420v` / `422v` | 16 / 128 / 235 | 128; 240 / 16 (the source's own codes) |
+| 10-bit 4:2:0 → `x420` / `x422` | 64 / 512 / 940 | exact |
+| `VTPixelTransferSession` `420v → x420` (the live promote) | 64 / 514 / 943 | 512; 960 / 64 |
+| `VTPixelTransferSession` `422v → x422`, and `2vuy → x422` (NDI) | 64 / 513 / 943 | 513; 963 / 64 |
+
+So whenever VideoToolbox widens 8 → 10 bits without also changing the chroma layout, it uses a full-scale map
+(≈ x·1023/255; every value measured lies in 4x … 4x+3). Black is exact; mid-grey is +1 or +2; white +3.
+
+**In the app** (`.build-cc/s3b-Profile` = `0b06de1`; ⌃⌥E readback and the DEBUG v210 dump; band means):
+
+| Route | export Y 16 / 128 / 235 | wire Y | chroma |
+|---|---|---|---|
+| SRT, 8-bit H.264 4:2:0 | 64.0 / **514.0** / **943.4** | 64 / 514 / 940 | exact |
+| AVFoundation file, the same as `.mov` | 64.0 / 514.0 / 943.4 | 64 / 514 / 940 | exact |
+| SRT, 8-bit H.264 4:2:2 | 64.2 / 513.9 / 943.8 | 64 / 514 / 940 | neutral **514 / 514** (export and wire); Cb 240 → 964.1 export, 960 wire |
+| libav file, 8-bit DNxHD (sws) | 64.0 / 511.8 / 940.0 | 64 / 512 / 940 | exact |
+| SRT and file, 10-bit control | 64.0 / 511.8 / 940.0 | 64 / 512 / 940 | exact |
+
+The wire hides white's +3 because `rgbToV210` clamps luma to 64–940 (`PassthroughShader.metal:530`); it does not
+hide mid-grey's +2. The export (and the scopes, which read the same offscreen) show white at 943.
+
+**Scope:** every 8-bit source VideoToolbox widens: SRT and WHEP H.264 (all of OBS's VideoToolbox H.264), the
+AVFoundation file route, and NDI (UYVY through `VTPixelTransferSession`). WHEP and NDI are measured outside the
+app on their exact conversion (the same in-band decode; the same `2vuy → x422` transfer), not in it. HLS is by
+inference (AVPlayer delivers `x420`), not measured. Not affected: 10-bit sources, and libav files. S1's P2 (NDI)
+passed its "±1 code" band with this offset inside it. The SRT and WHEP promotes' comments ("an exact ×4 code
+shift") are wrong.
+
+**Options, not built:**
+1. **Ask for 8-bit and sample 8-bit** (`420v` / `422v`, measured exact): no conversion anywhere; the renderer's
+   8-bit texture branch exists but is unreachable today and its range constants are 10-bit-domain, so it needs
+   shader work and its own measurement. NDI would hand over its UYVY (or `422v`) the same way.
+2. **Correct in the shader:** for a buffer whose source is 8-bit, drop the two low bits (`code & ~3`) before range
+   expansion. Exact for every map measured above, free at run time; needs a per-buffer "8-bit source" flag that
+   is right (SPS / `avcC` / `hvcC` bit depth; NDI always 8-bit). A 10-bit source flagged 8-bit would lose 2 bits.
+3. **Ask for 8-bit, widen ×4 ourselves** in a Metal pass into `x4xx`: exact, the rest of the chain unchanged, one
+   more pass per frame. `VTPixelTransferSession` cannot be that pass.
+
+`docs/BUGS.md`, *8-bit sources are widened to 10-bit full-scale*: OPEN, decision needed.
+
+##### Part 2 — refuse at once only on "unsupported format": predictions and results
+
+**The constraint found first:** VideoToolbox's software H.264 4:2:2 failure, −8969, is the legacy twin of
+−12909, `kVTVideoDecoderBadDataErr` (`VTErrors.h`: "c.f. -8969"). The code a damaged keyframe gives. So "refuse
+only on unsupported" cannot by itself refuse that stream. **Built:** `LiveDecodeFailure` (ColorimetryModel):
+−12906, −12910 and −8970 refuse at once (as does a session create that fails for every request); any other
+failure keeps the stream and waits for the next random-access picture, and only **three random-access pictures in
+a row failing, with nothing ever decoded,** refuse it. The backstop is mine, not asked for: without it the
+software H.264 4:2:2 stream is black and connected again, as before S3. Robbie to confirm.
+
+**Predicted, before the runs:** a damaged first keyframe plays from the next one (and `0b06de1` refuses it);
+over-cap unchanged; software H.264 4:2:2 refused after 3 keyframes; everything else byte-identical to S3.
+**Fixtures:** `badkey-h264.ts` / `badkey-hevc.ts`, 4:2:0, 1 s GOP, the first IDR's NAL truncated to 20 % (libavcodec:
+"error while decoding MB … concealing … in I frame"). **Build:** `.build-cc/s3c-Profile`, same 10 warnings.
+
+| # | Result | Verdict |
+|---|---|---|
+| D1 | `badkey-h264` / `badkey-hevc`: `decode failed (-12909)`, then `first picture(s) failed (-12909, a data error; 1 of 3) — keeping the stream`; decoding resumes at the next random-access picture (HEVC: `CRA, NAL 21`, its RASL skipped); 278 / 277 pictures, export written | **PASS** |
+| D2 | The same two on `0b06de1`: `UNDECODABLE … (-12909)`, `refusing H.264 High, 4:2:0 8-bit` / `HEVC Main 10, 4:2:0 10-bit`, disconnected. **The S3 rule refused a good stream with one damaged keyframe** | confirms the fix was needed |
+| D3 | Over-cap: `oversize=99`, no picture, no refusal, no crash | **PASS** |
+| D4 | `MANIFOLD_FORCE_SOFTWARE_DECODE=1`, H.264 4:2:2 (1 s GOP twin): −8969 on three keyframes (two in the identification backlog 0.1 s apart, the third in real time), then `UNDECODABLE … 3 random-access pictures`, refused; **1.1 s** from the first keyframe. HEVC 4:2:2 in software plays, 1080 / 1080 rows | **PASS** |
+| D5 | Regression on `s3c`: `still-420-h264`, `still-420-hevc10`, `still-420-hevc10-intra`, `lines-422-hevc`, `lines-422-h264`, `checker-444-h264`, `checker-444-hevc` (listener): export `.rgba16f` and `.v210` **md5-identical** to the S3 runs; the forced-4:2:0 fallback run identical, banner logged | **PASS** |
+| G | `swift test` **309 / 309** (+2 `LiveDecodeFailureTests`; the mutant "−8969 is unsupported" fails one); C harness 200 / 200 | **PASS** |
+
+**Defaults:** exported before the first launch (1 143 keys); the 22 launches added 22 `NSWindow Frame` keys and changed nothing else, each checked absent from the snapshot and deleted by name; dictionary-equal, `streamBookmarks` equal and never written. **Screenshots:** none. **Not committed.**
 ---
 
 ## 7. Open and unverified

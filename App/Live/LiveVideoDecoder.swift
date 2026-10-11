@@ -127,7 +127,7 @@ final class LiveVideoDecoder {
     var onNeedsKeyframe: (() -> Void)?
 
     /// Fires on the decode queue AT MOST ONCE per decoder, when VideoToolbox cannot decode this stream
-    /// at all: every session create failed, or `undecodableAfterFailures` decodes in a row failed after
+    /// at all: every session create failed, or `noteFailedAttempt`'s rule (`LiveDecodeFailure`) says so after
     /// a session build with no picture ever coming out of it. The words say which, with the status.
     ///
     /// Stage 3b S3: the SRT gate admits every chroma format at up to 10 bits and leaves "can this Mac
@@ -180,15 +180,12 @@ final class LiveVideoDecoder {
 
     // MARK: - Undecodable (Stage 3b S3)
 
-    /// Failed decode attempts, after a session build, with no picture ever decoded by that session,
-    /// before the stream is declared undecodable. ONE, the audit's rule ("create fails, or the first
-    /// frame errors"): the first attempt is always a whole random-access picture (the keyframe gate),
-    /// and VideoToolbox's answer for a format it has no decoder for is an error on exactly that picture
-    /// (−8969 for H.264 4:2:2 in software, measured). Three attempts were tried first and measured too
-    /// slow: at a 10 s GOP the stream sat black and connected for 30 s before anyone was told. A damaged
-    /// FIRST keyframe would also be refused; SRT's retransmission makes that rare, and the banner names
-    /// VideoToolbox's status so a retry can be judged.
-    static let undecodableAfterFailures = 1
+    /// Failed decode attempts, after a session build, with no picture ever decoded by that session.
+    /// What one means is `LiveDecodeFailure`'s rule (ColorimetryModel): an unsupported-format status
+    /// refuses the stream at once; a data error waits for the next random-access picture, and only
+    /// `LiveDecodeFailure.dataFailuresBeforeRefusal` of those in a row refuse it. S3 first refused on ANY
+    /// first failure, which also refused a stream whose first keyframe was merely damaged (§6.10, S3/S4
+    /// follow-up); before S3 nothing was ever refused, and a stream VideoToolbox cannot decode sat black.
     private var failuresSinceSessionBuild = 0
     private var framesSinceSessionBuild = 0
     private var reportedUndecodable = false
@@ -749,9 +746,19 @@ final class LiveVideoDecoder {
     private func noteFailedAttempt(_ status: OSStatus) {
         guard framesSinceSessionBuild == 0 else { return }
         failuresSinceSessionBuild += 1
-        guard failuresSinceSessionBuild >= Self.undecodableAfterFailures else { return }
-        reportUndecodable("VideoToolbox failed \(failuresSinceSessionBuild) pictures in a row "
-                          + "and decoded none (\(status))")
+        switch LiveDecodeFailure(status: status) {
+        case .unsupportedFormat:
+            reportUndecodable("VideoToolbox has no decoder for its format (\(status))")
+        case .data:
+            guard failuresSinceSessionBuild >= LiveDecodeFailure.dataFailuresBeforeRefusal else {
+                NSLog("[\(logTag)] first picture(s) failed (%d, a data error; %d of %d) — keeping the stream "
+                      + "and waiting for the next random-access picture", status, failuresSinceSessionBuild,
+                      LiveDecodeFailure.dataFailuresBeforeRefusal)
+                return
+            }
+            reportUndecodable("VideoToolbox failed \(failuresSinceSessionBuild) random-access pictures in a row "
+                              + "and decoded none (\(status))")
+        }
     }
 
     private func reportUndecodable(_ why: String) {

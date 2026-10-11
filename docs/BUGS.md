@@ -41,8 +41,9 @@ held back until after release, and the numbered defect entries follow.
      readout), S2 (files), S3 (SRT 4:2:2, HEVC and H.264), S4 (SRT 4:4:4), S5 (the OBS customer pass).
      Audit, decisions D1–D11 and predictions P1–P13: §6.10, *Stage 3b — 4:2:2 (and 4:4:4) end to end:
      audit*. **S1 committed (`c93be09`). S2 committed (`099ca1d`)** (§6.10,
-     *Stage 3b, S2 — results*). **S3 and S4 built and run unattended 2026-10-11, not committed** (§6.10,
-     *Stage 3b, S3 and S4 — results*); S5 (the OBS pass) is attended.
+     *Stage 3b, S2 — results*). **S3 and S4 built and run unattended 2026-10-11** (§6.10,
+     *Stage 3b, S3 and S4 — results*); **committed (`0b06de1`)**; its refusal rule refined 2026-10-11,
+     uncommitted (§6.10, *S3/S4 follow-up*). S5 (the OBS pass) is attended.
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
@@ -1275,9 +1276,38 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 ---
 
-## ✅ FIXED 2026-10-11 (commit to be filled in, Stage 3b S3) — PRE-EXISTING, SRT — an H.264 High 4:2:2 stream is converted to 4:2:0 without saying so
+## ☐ OPEN 2026-10-11 — DECISION NEEDED — PRE-EXISTING, SRT, WHEP, NDI, AVFOUNDATION FILES — 8-bit sources are widened to 10-bit full-scale (×1023/255), not ×4: mid-grey and white land 2–3 codes high
 
-**Status:** FIXED (commit to be filled in). Found by reading the source in the Stage 3b audit (§6.10, *Stage 3b —
+**Status:** OPEN, measured, no code changed (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *S3/S4 follow-up*, part 1).
+
+- **What happens:** every 8-bit source that reaches the renderer through VideoToolbox — the decoder asked for
+  `x420`/`x422`, or `VTPixelTransferSession` — is widened with a full-scale map (≈ x·1023/255, between 4x and
+  4x+3), not BT.709/BT.2100's ×4. Black (16 → 64) is exact; mid-grey 128 → **514** (or 513); white 235 →
+  **943**. Chroma is exact on 8-bit 4:2:0 → `x420`, and full-scale too on 8-bit 4:2:2 → `x422` and on NDI's
+  `2vuy` → `x422` (neutral 128 → 513/514, 240 → 963).
+- **Where, measured:** SRT 8-bit H.264 (every OBS stream; x264 8-bit) and the AVFoundation file route (8-bit
+  H.264 `.mov`) give export 64 / 514 / 943.4 and SDI wire 64 / 514 / **940** (`rgbToV210` clamps luma to
+  64–940, hiding white's +3 but not mid-grey's +2). 8-bit 4:2:2 over SRT also puts neutral chroma at 514/514.
+  **WHEP** uses the same decoder and request (the in-band route measured outside the app gives the same codes;
+  not run in the app). **NDI**'s `2vuy → x422` transfer measured outside the app: 513 / 943, chroma 513 / 963.
+  **Not affected:** 10-bit sources (exact), and libav files (sws widens 8-bit DNxHD exactly ×4). HLS is by
+  inference affected (AVPlayer delivers `x420`), not measured.
+- **Wrong comments:** the SRT and WHEP promotes describe `VTPixelTransferSession`'s 8→10 as "an exact ×4 code
+  shift". It is not; corrected when the fix lands.
+- **How bad:** 2–3 codes of 1023 on luma (≈ 0.3 %), a 1–2 code chroma offset on 4:2:2 and NDI. Visible on the
+  waveform (white above 940 on export and scopes) and in any code-value comparison; not by eye.
+- **Options** (the decision): (a) request VideoToolbox's 8-bit format (`420v`/`422v`, measured exact) and let
+  the renderer sample 8-bit planes with 8-bit constants — no conversion anywhere; the shader's 8-bit branch
+  exists but is unreachable today and its constants are 10-bit-domain. (b) Keep `x4xx` and drop the two low
+  bits for 8-bit sources in the shader (`code & ~3`): exact for every map measured (all lie in 4x…4x+3), free,
+  but needs a correct per-buffer "8-bit source" flag. (c) Request `420v`/`422v` and widen ×4 in our own Metal
+  pass: exact, one more pass. `VTPixelTransferSession` cannot do it (it is where NDI's offset comes from).
+
+---
+
+## ✅ FIXED 2026-10-11 (`0b06de1`, Stage 3b S3) — PRE-EXISTING, SRT — an H.264 High 4:2:2 stream is converted to 4:2:0 without saying so
+
+**Status:** FIXED (`0b06de1`). Found by reading the source in the Stage 3b audit (§6.10, *Stage 3b —
 audit*); **measured in the app 2026-10-11** (§6.10, *Stage 3b, S3 and S4 — results*, P9): on HEAD `2339d00`,
 `lines-422-h264.ts` over a local listener decoded to `x420`, the readout said "source chroma not stated", and
 every chroma row was 512/512 (0 / 1080 rows kept, export and wire).
@@ -1289,7 +1319,12 @@ promote keeps the delivered chroma. Measured on the fixed build: `[SRT] H.264 SP
 native`, **1080 / 1080 rows** on export and wire; H.264 High 4:4:4 Predictive to `x444`, the checker 100 %
 on export, 512 ± 2 on 100 % of the wire. Where VideoToolbox cannot decode it (no software decoder for H.264
 4:2:2/4:4:4, −8969), the stream is refused with a banner; where a picture decodes but carries less chroma
-than its SPS declares, the readout names why and a banner says so, and the stream stays up.
+than its SPS declares, the readout names why and a banner says so, and the stream stays up. **Refined
+2026-10-11 (uncommitted):** `0b06de1` refused on the first failed picture, which also refused a stream whose
+first keyframe was only damaged (measured: H.264 and HEVC, first IDR truncated). Now an unsupported-format
+status refuses at once and a data error waits for the next random-access picture; −8969 is VideoToolbox's
+*bad data* code, so this case is refused after three failed random-access pictures (1.1 s on a 1 s GOP,
+measured). §6.10, *S3/S4 follow-up*.
 
 What was wrong:
 
@@ -1307,9 +1342,9 @@ What was wrong:
 
 ---
 
-## ✅ FIXED 2026-10-11 (commit to be filled in, Stage 3b S3) — SRT — a 4:2:0 HEVC stream in a Range Extensions profile is refused (x265 all-intra: "Main 10 Intra")
+## ✅ FIXED 2026-10-11 (`0b06de1`, Stage 3b S3) — SRT — a 4:2:0 HEVC stream in a Range Extensions profile is refused (x265 all-intra: "Main 10 Intra")
 
-**Status:** FIXED (commit to be filled in). Measured 2026-10-10 in Stage 3b S1's P1 runs, on HEAD `1bd07de` and S1
+**Status:** FIXED (`0b06de1`). Measured 2026-10-10 in Stage 3b S1's P1 runs, on HEAD `1bd07de` and S1
 alike. **Re-run 2026-10-11** (§6.10, *Stage 3b, S3 and S4 — results*, P11b) with `still-420-hevc10-intra.ts`
 (x265 `keyint=1`, 4:2:0 10-bit): HEAD `2339d00` refuses it as described below; the fixed build logs `Format
 Range Extensions (general_profile_idc 4), 4:2:0, 10-bit luma / 10-bit chroma → accepted`, decodes to `x420`
@@ -1350,9 +1385,9 @@ through libav (512/512, grey), so the two exports differed. On S2 both decode th
 
 ---
 
-## ✅ FIXED 2026-10-11 (`<commit>`) — PRE-EXISTING, FILES — the DNxHR 4:4:4 plug-in route range-compressed a legal-range `.mov`: it synthesized the Avid MXF's `ADHR` instead of using the file's own
+## ✅ FIXED 2026-10-11 (`2339d00`) — PRE-EXISTING, FILES — the DNxHR 4:4:4 plug-in route range-compressed a legal-range `.mov`: it synthesized the Avid MXF's `ADHR` instead of using the file's own
 
-**Status:** FIXED, not yet committed (commit to be filled in). Found in Stage 3b S2
+**Status:** FIXED (`2339d00`). Found in Stage 3b S2
 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *S2 — results*, P4). Not caused by S2: HEAD `c93be09` gives the
 same luma and chroma amplitude. **Fix and measurement:** §6.10, *DNxHR 444 `.mov`: the plug-in's format
 description from the file*. `DNxHRVideoToolboxDecoder` now takes the file's own format description

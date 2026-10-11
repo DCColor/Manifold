@@ -113,7 +113,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | HEVC parser enabled in the FFmpeg build | `f4b6746` | No |
 | HEVC SPS color reader, codec-neutral SPSColor target | `fd657f7` | No (enables the next row) |
 | HEVC Main / Main 10 4:2:0 plays; 4:2:2 and 4:4:4 refused with a banner | `a2e5ce1` | Yes |
-| HEVC and H.264 4:2:2 / 4:4:4 at native chroma (Stage 3b S3/S4): gate on the SPS's chroma and bit depth (RExt 4:2:0 "Main 10 Intra" accepted; H.264 gated), decode to `x422`/`x444`, refusal when VideoToolbox can't decode, fallback banner, software-decode note | (commit to be filled in) | Yes |
+| HEVC and H.264 4:2:2 / 4:4:4 at native chroma (Stage 3b S3/S4): gate on the SPS's chroma and bit depth (RExt 4:2:0 "Main 10 Intra" accepted; H.264 gated), decode to `x422`/`x444`, refusal when VideoToolbox can't decode, fallback banner, software-decode note | `0b06de1` | Yes |
 | Declared frame rate with a timestamp-measured fallback | `ce3d828` | Yes |
 | Measured frame rate wins when it clearly disagrees with the declared one | `a8b70fa` | Yes |
 
