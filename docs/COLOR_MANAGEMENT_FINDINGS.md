@@ -4313,6 +4313,78 @@ name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never writte
 The "NDI Bars (P2)" profile was verified from its files (`OBS_TEST_PROFILES.md`); S1's mention of it is
 correct. The HEAD worktree was removed. **Not committed.**
 
+#### DNxHR 444 `.mov`: the plug-in's format description from the file — predictions, written 2026-10-10 23:35 before the code changed
+
+**Estimated run:** ~1 h unattended. **The bug:** `BUGS.md`, *the DNxHR 4:4:4 plug-in route
+range-compresses a legal-range `.mov`* (found in S2 above; pre-existing on HEAD).
+
+**What changes.** `DNxHRVideoToolboxDecoder` takes the file's own format description when it has one:
+for a `.mov`, the one AVFoundation already read at load (codec `AVdh`, the file's `ADHR`, `ACLR` and
+colour extensions), passed through `FrameEngine` to both `LibavFrameSource` and `LibavScrubProducer`.
+MXF has none (AVFoundation cannot open it, and libav's `extradata` is empty), so it keeps today's
+synthesized description, unchanged. The buffer range stays `.videoLegal` on the route: VideoToolbox
+delivers video range either way, and on a legal file that is the file's own codes.
+
+**References, measured first** (outside the app, on `checker-444-dnxhr444.mov`): libav's decode, luma
+mean **512.00**, mean |Cb − 512| 213.9, checker within ±4 **69.5 %**; AVFoundation's read through the
+same plug-in with the file's own `ADHR`, luma **511.68**, |Cb − 512| 211.5 (**0.989 ×** libav's), checker
+within ±2 49.3 %, within ±4 **85.7 %**. **The two decoders agree within ±2 on only 56.2 % of chroma
+samples**: it is a lossy encode of a one-pixel checker and they round it differently. So the brief's
+"within ±2 of libav's decode" can hold for the mean levels, not per sample. P4's S2 band (≥ 96 % within
+±4) is above what either decoder gives this file.
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| 1a | DNxHR 444 `.mov`, export and wire: luma mean against libav's 512.00 (today 502) | within ±2 | outside |
+| 1b | Chroma amplitude, mean \|Cb − 512\| against libav's (today 0.856 ×) | 0.989 ± 0.02 × | outside |
+| 1c | Per sample against libav, within ±2 (the brief's wording) | ≥ 99.9 % | **predicted FAIL: ~56 %**, the two decoders' own disagreement |
+| 1d | Per sample against AVFoundation's read of the same file (same plug-in, same atom) | ≥ 99.9 % within ±2 | below |
+| 1e | P4's band on DNxHR 444 (≥ 96 % within ±4) | met | **predicted FAIL: 85.7 ± 1 %**, the fixture's best decode |
+| 1f | P5 on it, wire within 512 ± 4 | ≥ 95 % (S2: 95.6 %) | below |
+| 2 | DNxHR 444 MXF (`Mixed Captions.mxf`): export `.rgba16f`, PNG, `.v210` against the pre-fix build. **"HEAD" here is the S2 working tree before this fix** (`.build-cc/c3s2-Profile`); the committed `c93be09` decodes it at `x420`, so it cannot be byte-equal by design. There are no DNxHR 444 MXF fixtures in S2's set (the 444 MXF fixture is ProRes) | md5 identical, `[DNX-VT]` still "synthesized" | any byte |
+| 3 | Scrub = playback on every DNx file (`checker-444-dnxhr444.mov`, `lines-422-dnxhrhqx.mov`/`.mxf`, `Mixed Captions.mxf`, `OP1A Test.mxf`, `DNX As MOV 10bit.mov`/`12bit.mov`) | md5 identical | any byte |
+| 4 | Every other S2 fixture, the 4:2:0 set (files and SRT), and the HQX files (not routed to the plug-in) | md5 identical to the pre-fix build | any byte |
+
+#### DNxHR 444 `.mov`: the plug-in's format description from the file — results, 2026-10-10 23:50 – 10-11 00:10 (unattended)
+
+**Builds:** the fix, `.build-cc/c3dnx-Profile`; the baseline is the pre-fix S2 build `.build-cc/c3s2-Profile`
+(its runs above, plus one new baseline run on `DNX As MOV 12bit.mov`). Unsigned Profile, same warning set.
+**Driver:** S2's `run1.sh` / `srt1.sh`; 22 launches. Comparisons: `measure.swift`, plus scratch probes for
+1a–1d (the export against libav's `yuv444p10le` dump and against an `AVAssetReader` `x444` read).
+
+| # | Result | Verdict |
+|---|---|---|
+| 1a | Luma mean, export **511.93** (wire 512.0) against libav's 512.00. Pre-fix 501.99 | **PASS** |
+| 1b | Chroma amplitude **0.989 ×** libav's. Pre-fix 0.846 × | **PASS** |
+| 1c | Per sample against libav within ±2: **50.0 %** | **FAIL, as predicted**: the two decoders' own disagreement (56 % between AVFoundation and libav) |
+| 1d | Per sample against AVFoundation's own read of the file: **100.000 % within ±2** (max \|Δ\| 1.07, mean 0.57 codes, unrounded) | **PASS** |
+| 1e | P4 band (≥ 96 % within ±4): **74.6 %** | P4 **FAIL, as predicted**; my figure (85.7 ± 1) **FAIL** too, see below |
+| 1f | Wire within 512 ± 4: **93.75 %** | **FAIL** (≥ 95 %), same cause as 1e |
+| 2 | `Mixed Captions.mxf`: `.rgba16f`, PNG and `.v210` **md5 identical** to the pre-fix build; `[DNX-VT] format description: synthesized (MXF-derived ADHR; the file carries none)` on playback and scrub | **PASS** |
+| 3 | Scrub = playback, md5, on every DNx file: `checker-444-dnxhr444.mov` (now `the file's own` on both decoders), `lines-422-dnxhrhqx.mov` / `.mxf`, `Mixed Captions.mxf`, `OP1A Test.mxf`, `DNX As MOV 10bit.mov` / `12bit.mov` | **PASS** |
+| 4 | Every other S2 fixture (13), the ARRI 4444 XQ, the HQX files, and the SRT 4:2:0 pair: **all three exports md5 identical** to the pre-fix build. Only `checker-444-dnxhr444.mov` changed | **PASS** |
+
+**What the fix does on the bug's file:** the picture is no longer range-compressed: luma 512, chroma at
+full amplitude (722/303 where it was 691/334). The renderer's buffer range rule (`.videoLegal` on the
+route) is right as it stands, since VideoToolbox's output is video range and on this file it carries the
+file's own codes.
+
+**Why 1e and 1f missed my band (an open check, not this bug).** The export matches the plug-in's own
+decode within ±2 everywhere (1d), but not exactly: mean 0.57 codes, max 1.07, and the chroma amplitude
+0.15 codes larger. A one-pixel checker decoded with 3–4 codes of error sits on the ±4 edge, so that
+shift moves ~11 % of samples across it (85.7 % → 74.6 %). On ProRes 4444 `x444` the same comparison is
+0.13 / 0.18. **Ruled out:** the decode (a raw `VTDecompressionSession` built as the route builds it is
+byte-identical to `AVAssetReader`); the buffer's tags (709 / 709 / 709 on both files); range (legal on
+both, no full-range chroma convention); a different frame (all frames of the fixture are byte-identical).
+**Not established:** where in the render a sub-code difference appears for these buffers and not
+ProRes's. `BUGS.md`, CHECK.
+
+**Gates:** `swift test` 298 / 298; the Profile build succeeded. **Defaults:** exported before the first
+launch (1 143 keys, equal to S2's snapshot); the 22 launches added 22 `NSWindow Frame` keys and nothing
+else, each checked absent from the snapshot and deleted by name; dictionary-equal, `streamBookmarks`
+equal and never written. **Screenshots:** none taken; the window-only rule is now in `CLAUDE.md`.
+**Not committed.**
+
 ---
 
 ## 7. Open and unverified

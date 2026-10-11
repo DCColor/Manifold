@@ -80,6 +80,9 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// Decoded CVPixelBuffer format — the SAME parameter `FileFrameSource` carries: the file's
     /// resolved format (`FileChromaProbe`), `x422` for HQX, `x444` for 4:4:4 (Stage 3b S2).
     private let pixelFormat: OSType
+    /// The file's own video format description (a `.mov`'s, read by AVFoundation), for the DNxHR
+    /// 4:4:4 plug-in route; nil for MXF. See `DNxHRVideoToolboxDecoder.init`.
+    private let fileFormatDescription: CMVideoFormatDescription?
     /// Provides the readiness backpressure that paces the pump — same as the AVF source.
     private let pacingRenderer: AVSampleBufferVideoRenderer
     private let pumpQueue: DispatchQueue
@@ -180,10 +183,12 @@ public final class LibavFrameSource: @unchecked Sendable {
 
     public init(url: URL,
                 pixelFormat: OSType,
+                fileFormatDescription: CMVideoFormatDescription? = nil,
                 pacingRenderer: AVSampleBufferVideoRenderer,
                 pumpQueue: DispatchQueue) {
         self.url = url
         self.pixelFormat = pixelFormat
+        self.fileFormatDescription = fileFormatDescription
         self.pacingRenderer = pacingRenderer
         self.pumpQueue = pumpQueue
     }
@@ -255,7 +260,8 @@ public final class LibavFrameSource: @unchecked Sendable {
             if ProVideoDecoderAvailability.isAvailable {
                 self.vtDecoder = DNxHRVideoToolboxDecoder(width: par.pointee.width,
                                                           height: par.pointee.height,
-                                                          pixelFormat: pixelFormat)
+                                                          pixelFormat: pixelFormat,
+                                                          fileFormatDescription: fileFormatDescription)
             }
             if self.vtDecoder == nil {
                 // Either the package is absent, or it is present and the session would not open.

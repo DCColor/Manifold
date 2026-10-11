@@ -54,6 +54,7 @@ bullet.
 - Fixed: after an NDI or HLS stream ended, a file played next ran its picture about 0.2 s ahead of its sound.
 - Fixed: SDI audio dropped out every few seconds during file playback.
 - Fixed: streams using the BT.470BG color matrix, common from European encoders, were decoded with Rec. 709 coefficients, giving a small color shift.
+- Fixed: DNxHR 444 files in a .mov could look slightly flat, with lifted blacks and weaker color. They now show at their true levels.
 - Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 
 ### Known limitations

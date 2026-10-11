@@ -125,6 +125,19 @@ final class DNxHRVideoToolboxDecoder {
         return status == noErr ? fd : nil
     }
 
+    /// The file's description, if it is one the plug-in can take: a DNx codec type and an `ADHR`
+    /// atom (the one field measured necessary, above). Anything else is not used, and the caller
+    /// synthesizes, so a `.mov` with an unexpected description behaves exactly as it did.
+    private static func usableFileDescription(_ fd: CMVideoFormatDescription) -> CMVideoFormatDescription? {
+        let dnx: Set<FourCharCode> = [0x41566468, 0x4156646E]          // 'AVdh', 'AVdn'
+        guard dnx.contains(CMFormatDescriptionGetMediaSubType(fd)),
+              let atoms = CMFormatDescriptionGetExtension(
+                fd, extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms)
+                as? [String: Any],
+              atoms["ADHR"] is Data else { return nil }
+        return fd
+    }
+
     // MARK: - Lifecycle
 
     private var session: VTDecompressionSession?
@@ -140,13 +153,27 @@ final class DNxHRVideoToolboxDecoder {
     ///
     /// `pixelFormat` is the file's resolved format (`FileChromaProbe`): `x444` for DNxHR 444, its
     /// native chroma (Stage 3b S2), or `x420` under the DEBUG force switch.
-    init?(width: Int32, height: Int32, pixelFormat: OSType) {
+    ///
+    /// `fileFormatDescription` is the FILE'S OWN description when it has one: a `.mov`'s, as
+    /// AVFoundation read it at load (`AVdh` with the file's `ADHR`, `ACLR` and colour extensions).
+    /// ⚠️ IT WINS OVER THE SYNTHESIZED ONE, AND THAT IS THE FIX FOR A RANGE BUG (docs/BUGS.md, *the
+    /// DNxHR 4:4:4 plug-in route range-compresses a legal-range `.mov`*). The synthesized atom was
+    /// measured on an Avid RGB full-range MXF; handed a legal-range YUV `.mov`, the plug-in
+    /// compressed it as if it were full range (luma 512 → 502, colour difference × 0.856). MXF has
+    /// no description of its own (AVFoundation cannot open it, libav's `extradata` is empty), so it
+    /// passes nil and keeps the synthesized one, exactly as before.
+    init?(width: Int32, height: Int32, pixelFormat: OSType,
+          fileFormatDescription: CMVideoFormatDescription? = nil) {
         self.pixelFormat = pixelFormat
-        guard let fd = Self.makeFormatDescription(width: width, height: height) else {
+        let fileOwn = fileFormatDescription.flatMap(Self.usableFileDescription)
+        guard let fd = fileOwn ?? Self.makeFormatDescription(width: width, height: height) else {
             print("[DNX-VT] could not build the format description — staying on libav")
             return nil
         }
         formatDescription = fd
+        print("[DNX-VT] format description: " + (fileOwn != nil
+            ? "the file's own (ADHR/ACLR/colour as written)"
+            : "synthesized (MXF-derived ADHR; the file carries none)"))
 
         // The file's resolved format: 10-bit biplanar video range at the source's own chroma
         // (`x444`). Requested explicitly rather than accepting the decoder's native `b64a`, so the

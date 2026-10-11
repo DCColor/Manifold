@@ -61,8 +61,8 @@ public final class LibavScrubProducer: ScrubFrameProducer {
     /// design exists to pay at load rather than on the first grab. Requests arriving before it
     /// finishes are held by the coalescer, not dropped: `isReady` gates them and `onReadyChanged`
     /// releases them.
-    public init(url: URL, pixelFormat: OSType) {
-        decoder = Decoder(url: url, cvFormat: pixelFormat)
+    public init(url: URL, pixelFormat: OSType, fileFormatDescription: CMVideoFormatDescription? = nil) {
+        decoder = Decoder(url: url, cvFormat: pixelFormat, fileFormatDescription: fileFormatDescription)
         decoder.openAsync { [weak self] ok in
             guard let self, ok else { return }
             self.isReady = true
@@ -90,6 +90,8 @@ private final class Decoder: @unchecked Sendable {
 
     private let url: URL
     private let cvFormat: OSType
+    /// The file's own description for the plug-in route (point 5), the one playback uses; nil for MXF.
+    private let fileFormatDescription: CMVideoFormatDescription?
     /// Serial. `.userInitiated` because a human is dragging.
     private let scrubQueue = DispatchQueue(label: "com.graviton.manifold.scrub.libav", qos: .userInitiated)
 
@@ -121,9 +123,10 @@ private final class Decoder: @unchecked Sendable {
         return -Int32(bitPattern: tag)
     }()
 
-    init(url: URL, cvFormat: OSType) {
+    init(url: URL, cvFormat: OSType, fileFormatDescription: CMVideoFormatDescription?) {
         self.url = url
         self.cvFormat = cvFormat
+        self.fileFormatDescription = fileFormatDescription
     }
 
     deinit { freeOnQueue() }
@@ -189,7 +192,8 @@ private final class Decoder: @unchecked Sendable {
         // above stays open as the fallback, exactly as in `LibavFrameSource`.
         if DNxHRVideoToolboxDecoder.shouldRoute(codecID: par.pointee.codec_id, profile: par.pointee.profile) {
             vtDecoder = DNxHRVideoToolboxDecoder(width: par.pointee.width, height: par.pointee.height,
-                                                 pixelFormat: cvFormat)
+                                                 pixelFormat: cvFormat,
+                                                 fileFormatDescription: fileFormatDescription)
             print("LibavScrubProducer: DNxHR 4:4:4 — "
                 + (vtDecoder != nil ? "scrub decodes through Apple's plug-in, as playback does"
                                     : "plug-in session would not open; scrub decodes through libav"))

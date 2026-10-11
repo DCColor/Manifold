@@ -42,6 +42,10 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   step, name the profile and check it against its row; afterwards, compare OBS's log with the row.
   Never change a tested profile for an experiment: duplicate it and add a row first. Read OBS's
   settings files read-only, and never copy a URL, stream key or passphrase out of them.
+- Screenshots capture the Manifold window only, by its window ID (`screencapture -x -o -l <id>`, the id
+  from `CGWindowListCopyWindowInfo` for the owner "Manifold"), never the whole desktop: other windows on
+  this Mac hold private conversations and credentials. If the window cannot be found, take no screenshot.
+  Delete a screenshot once what it shows is recorded in text.
 
 ## Rules
 

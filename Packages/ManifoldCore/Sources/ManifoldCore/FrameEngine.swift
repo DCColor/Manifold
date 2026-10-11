@@ -445,6 +445,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The first frame of a playback session is checked against the request once per file
     /// (`checkDeliveredFormat`). Main only.
     private var deliveredFormatChecked = false
+    /// The video format description AVFoundation read for a libav-routed `.mov` (DNx), handed to both
+    /// libav decoders for the DNxHR 4:4:4 plug-in route: the file's own `ADHR`, range and colour
+    /// instead of the MXF-derived synthesis (docs/BUGS.md, the DNxHR 444 `.mov` range entry). nil for
+    /// MXF and for every AVFoundation-decoded file. Set at load, cleared at unload.
+    private var libavFileFormatDescription: CMVideoFormatDescription?
     private var timeObserver: Any?
     private let videoPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.video")
     private let audioPumpQueue = DispatchQueue(label: "com.graviton.manifold.pump.audio")
@@ -1011,6 +1016,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         onSourceColorTags?(nil, nil, nil)
         // …and the chroma, for the same reason: the readout must not describe a departed file.
         fileChroma = .undetermined
+        libavFileFormatDescription = nil
         onSourceChroma?(.notStated, nil)
         // …AND THE GEOMETRY WITH IT, same rule one line down: a stale crop would take 32 px off a
         // file that never declared one, which is a worse failure than the padding it removes, and
@@ -1248,7 +1254,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // path any more, and therefore no second display path, no second colour-management mode,
         // and no format a scope cannot sample.
         let producer: ScrubFrameProducer = useLibav
-            ? LibavScrubProducer(url: url, pixelFormat: videoPixelFormat)
+            ? LibavScrubProducer(url: url, pixelFormat: videoPixelFormat,
+                                 fileFormatDescription: libavFileFormatDescription)
             : AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
         scrubCoalescer = ScrubCoalescer(producer: producer) { [weak self] frame in
             guard let self else { return }
@@ -1515,6 +1522,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // 420v; the override drives the shader's expansion via effectiveIsFullRange.
         rangeOverride = .auto
         useLibav = false
+        libavFileFormatDescription = nil
         if let formats = try? await vTrack.load(.formatDescriptions), let fmt = formats.first {
             sourceRange = MediaInspector.sourceColorRange(for: fmt)
             // ── THE DISPLAY'S COLOUR STATE, ESTABLISHED HERE AND NOT FROM `metadata` ─────────
@@ -1549,6 +1557,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // range (DNxHR/MXF ACLR) comes from libav's color_range, applied in
             // beginLibavReading — overriding the often-untagged AVFoundation read.
             useLibav = MediaInspector.requiresLibavDecode(fmt)
+            libavFileFormatDescription = useLibav ? fmt : nil
             // ── THE FILE'S CHROMA, AT THE SAME POINT AND ON THE SAME ARGUMENT (Stage 3b S2) ──────
             // Before `installScrubProducer` below and before `beginReading`: both read
             // `videoPixelFormat`, so this one answer is what both decoders are built with. libav
@@ -1671,6 +1680,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.selectedAudioTrackIndex = 0
         self.rangeOverride = .auto
         self.useLibav = true
+        libavFileFormatDescription = nil                  // MXF: no description of its own
         // The chroma first (Stage 3b S2): the scrub producer below and the playback source are both
         // built with it. AVFoundation is blind to MXF, so it is libav's `pix_fmt`.
         adoptFileChroma(FileChromaProbe.resolveLibav(url: url))
@@ -1937,6 +1947,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         if libavSource == nil {
             let source = LibavFrameSource(url: url,
                                           pixelFormat: videoPixelFormat,
+                                          fileFormatDescription: libavFileFormatDescription,
                                           pacingRenderer: videoRenderer,
                                           pumpQueue: videoPumpQueue)
             do {

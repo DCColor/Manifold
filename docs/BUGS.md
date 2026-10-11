@@ -40,7 +40,7 @@ held back until after release, and the numbered defect entries follow.
      source, 4:4:4 files included, under the rule now in `CLAUDE.md`. Stages S1 (renderer and
      readout), S2 (files), S3 (SRT 4:2:2, HEVC and H.264), S4 (SRT 4:4:4), S5 (the OBS customer pass).
      Audit, decisions D1–D11 and predictions P1–P13: §6.10, *Stage 3b — 4:2:2 (and 4:4:4) end to end:
-     audit*. **S1 committed (`c93be09`). S2 built and run unattended 2026-10-10, not committed** (§6.10,
+     audit*. **S1 committed (`c93be09`). S2 committed (`099ca1d`)** (§6.10,
      *Stage 3b, S2 — results*).
    - The colour override, Stages B–E (§6.9).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
@@ -1303,9 +1303,9 @@ decode itself was measured offline, the app path was not run.
 
 ---
 
-## ✅ FIXED 2026-10-10 (Stage 3b S2, not committed) — PRE-EXISTING, FILES — a DNxHR 444 file's scrub frames came from libav while playback used Apple's plug-in
+## ✅ FIXED 2026-10-10 (`099ca1d`, Stage 3b S2) — PRE-EXISTING, FILES — a DNxHR 444 file's scrub frames came from libav while playback used Apple's plug-in
 
-**Status:** FIXED in the working tree, not committed. Found by reading the source in the Stage 3b audit;
+**Status:** FIXED (`099ca1d`). Found by reading the source in the Stage 3b audit;
 **measured** in S2 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b, S2 — results*, P6): on HEAD
 `c93be09`, `checker-444-dnxhr444.mov` played through the plug-in (chroma 693/331 on row 0) and scrubbed
 through libav (512/512, grey), so the two exports differed. On S2 both decode through the plug-in at
@@ -1323,10 +1323,19 @@ through libav (512/512, grey), so the two exports differed. On S2 both decode th
 
 ---
 
-## ☐ OPEN 2026-10-10 — PRE-EXISTING, FILES — the DNxHR 4:4:4 plug-in route range-compresses a legal-range `.mov`: it synthesizes the Avid MXF's `ADHR` instead of using the file's own
+## ✅ FIXED 2026-10-11 (`<commit>`) — PRE-EXISTING, FILES — the DNxHR 4:4:4 plug-in route range-compressed a legal-range `.mov`: it synthesized the Avid MXF's `ADHR` instead of using the file's own
 
-**Status:** OPEN. Found in Stage 3b S2 (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *S2 — results*, P4).
-Not caused by S2: HEAD `c93be09` gives the same luma and chroma amplitude.
+**Status:** FIXED, not yet committed (commit to be filled in). Found in Stage 3b S2
+(`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *S2 — results*, P4). Not caused by S2: HEAD `c93be09` gives the
+same luma and chroma amplitude. **Fix and measurement:** §6.10, *DNxHR 444 `.mov`: the plug-in's format
+description from the file*. `DNxHRVideoToolboxDecoder` now takes the file's own format description
+when it has one (a `.mov`'s, as AVFoundation read it at load, with its `ADHR`, `ACLR` and colour
+extensions), through `FrameEngine` to both `LibavFrameSource` and `LibavScrubProducer`; MXF has none and
+keeps the synthesized description, byte-identical to before. On the fixture: luma 502 → **511.93**,
+chroma amplitude 0.846 → **0.989 ×** libav's, and the export within ±2 of AVFoundation's own read on 100 %
+of samples. Every other fixture and real file is md5-identical to the pre-fix build.
+
+The original report:
 
 - **What happens:** `DNxHRVideoToolboxDecoder` always builds its format description with the `ADHR`
   atom measured on `Mixed Captions.mxf` (Avid-made, RGB, full range): `"0002"`, `[1270, 2, 3,
@@ -1339,9 +1348,23 @@ Not caused by S2: HEAD `c93be09` gives the same luma and chroma amplitude.
 - **Who sees it:** DNxHR 444 in `.mov` (`MediaInspector.requiresLibavDecode` sends DNx `.mov` to libav,
   and the 444 profile to the plug-in). Whether real Resolve- or Avid-made 444 `.mov` files carry an
   atom the plug-in reads as legal is not established: no such file is in the corpus.
-- **Fix, not made:** when the container has an `ADHR` (libav `extradata`, or AVFoundation's format
-  description for a `.mov`), pass the file's own atom; synthesize only when there is none (MXF). The
-  first-frame confirm and the buffer-range rule then need the atom's range, not a constant.
+- **Fix (made 2026-10-11):** the file's own description when the container has one (AVFoundation's,
+  for a `.mov`); synthesized only when there is none (MXF). The buffer-range rule did not need to
+  change: VideoToolbox delivers video range either way, and on a legal file those are the file's codes.
+
+---
+
+## ☐ CHECK 2026-10-11 — UNEXPLAINED, ≤ 1 CODE — a DNxHR 444 `.mov`'s export differs from the plug-in's own decode by up to 1.07 codes of chroma
+
+**Status:** OPEN check. Found measuring the fix above (§6.10, *DNxHR 444 `.mov` … results*, 1e/1f).
+- **Measured:** `checker-444-dnxhr444.mov`, export against `AVAssetReader`'s `x444` read of the same frame:
+  mean 0.57, max 1.07 codes, chroma amplitude +0.15 codes. ProRes 4444 through the same comparison: 0.13 /
+  0.18. Enough to move ~11 % of a lossy checker across a ±4 band; not visible in a picture.
+- **Ruled out:** the decode (a raw `VTDecompressionSession` built as the route builds it equals
+  `AVAssetReader` byte for byte), the buffer tags (709 on both), range, the full-range chroma convention,
+  and frame choice.
+- **Next:** read the renderer's input for this buffer (plane strides and the texture path for `x444` off
+  the route's session) against the decoded planes, on one frame.
 
 ---
 
@@ -5968,7 +5991,7 @@ truncation stays out (D5), and the reason is now measured, not just scoped:** a 
 (`sv22`/`sv44`, P216/P416) would carry 12-bit at the same memory, but the `rgba16Float` offscreen holds
 about 11 significant bits above mid-grey and v210 is 10-bit, so 12-bit needs a float32 offscreen first.
 
-**THE 4:2:2 HALF IS DONE, 2026-10-10 (Stage 3b S2; working tree, not committed).** One resolver
+**THE 4:2:2 HALF IS DONE, 2026-10-10 (Stage 3b S2, `099ca1d`).** One resolver
 (`FileChromaProbe`, its tables in the `FileChroma` target) decides each file's format at load, before
 either decoder exists, and both read it: `x422` for 4:2:2, `x444` for 4:4:4, `x420` for 4:2:0 and for
 codecs with no table (D8). `LibavPixelConversion` writes P210/P410, and its NV12 default is gone.
