@@ -533,6 +533,9 @@ final class StreamBookmarkStore: ObservableObject {
     ///    log to connect the two. `JSONEncoder` on this type should not throw — every field is
     ///    trivially Codable — which is the reason to log it rather than to assume it away, since
     ///    an occurrence would mean the type had changed into something that can.
+    ///
+    /// The bytes come from `StreamBookmark.storeEncoding` (sorted keys), so saving an unchanged list
+    /// writes back exactly what was read (docs/BUGS.md, the key-order entry).
     private func persist() {
         guard !storedDataUnreadable else {
             NSLog("""
@@ -542,7 +545,7 @@ final class StreamBookmarkStore: ObservableObject {
             return
         }
         do {
-            UserDefaults.standard.set(try JSONEncoder().encode(bookmarks), forKey: Self.key)
+            UserDefaults.standard.set(try StreamBookmark.storeEncoding(bookmarks), forKey: Self.key)
         } catch {
             NSLog("[STREAMS] ⚠️ could not encode %d stream bookmark(s) — NOTHING WAS SAVED: %@",
                   bookmarks.count, String(describing: error))

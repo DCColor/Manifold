@@ -129,9 +129,9 @@ final class StreamBookmarkMigrationTests: XCTestCase {
                 XCTAssertEqual(ColorimetryOverride(storageID: b.colorOverride, on: transport(b.type)), .auto, label)
             }
             // Re-encoded, the same entries as stored: equal as parsed objects, and equal byte for byte
-            // once keys are sorted. Raw bytes cannot be compared: `JSONEncoder`'s key order changes
-            // from one process to the next, so the store re-orders every entry's keys on every save,
-            // on every build (docs/BUGS.md, Stage D's entry).
+            // once keys are sorted. Raw bytes cannot be compared here: a plain `JSONEncoder`'s key order
+            // changes from one process to the next. The store writes sorted keys (`storeEncoding`,
+            // tested below), so its raw bytes do round-trip.
             XCTAssertEqual(try sortedJSON(try JSONEncoder().encode(list)), try sortedJSON(blob), label)
             XCTAssertFalse(String(decoding: try JSONEncoder().encode(list), as: UTF8.self).contains("colorOverride"))
         }
@@ -178,6 +178,40 @@ final class StreamBookmarkMigrationTests: XCTestCase {
         let four = try JSONDecoder().decode([LegacyBookmark].self, from: data)
         XCTAssertEqual(four.map(\.id), list.map(\.id))
         XCTAssertEqual(four.map(\.urlString), list.map(\.urlString))
+    }
+
+    // MARK: - The store's encoding (sorted keys, docs/BUGS.md key-order entry)
+
+    /// A load and a save of an unchanged list give back the stored bytes, raw, every time.
+    func testALoadSaveCycleIsByteIdentical() throws {
+        var list = try JSONDecoder().decode([StreamBookmark].self, from: preColorBlob)
+        list[1].colorOverride = "rec2020-pq"
+        let stored = try StreamBookmark.storeEncoding(list)
+        var bytes = stored
+        for _ in 0..<20 {
+            bytes = try StreamBookmark.storeEncoding(try JSONDecoder().decode([StreamBookmark].self, from: bytes))
+            XCTAssertEqual(bytes, stored)
+        }
+        XCTAssertEqual(try StreamBookmark.storeEncoding(list), stored, "the same list encodes the same bytes")
+    }
+
+    /// A list an earlier build wrote (keys in any order) is re-ordered once, and that is all: the result
+    /// is the stored bytes with each object's keys sorted, byte for byte, escaping included.
+    func testTheFirstSaveOnlyReordersKeys() throws {
+        for (blob, label) in [(preFeatureBlob, "four-field"), (preColorBlob, "with audioOffsetMs")] {
+            let list = try JSONDecoder().decode([StreamBookmark].self, from: blob)
+            let sortedAsStored = try JSONSerialization.data(
+                withJSONObject: try JSONSerialization.jsonObject(with: blob), options: [.sortedKeys])
+            XCTAssertEqual(try StreamBookmark.storeEncoding(list), sortedAsStored, label)
+        }
+        // A blob whose keys are out of order, as the unsorted encoder could write it.
+        let shuffled = Data("""
+        [{"type":"srt","urlString":"srt:\\/\\/127.0.0.1:9000","audioOffsetMs":80,"name":"Local SRT","id":"9B8A7C6D-5E4F-4321-8765-0123456789AB","colorOverride":"rec709"}]
+        """.utf8)
+        let list = try JSONDecoder().decode([StreamBookmark].self, from: shuffled)
+        XCTAssertEqual(String(decoding: try StreamBookmark.storeEncoding(list), as: UTF8.self), """
+        [{"audioOffsetMs":80,"colorOverride":"rec709","id":"9B8A7C6D-5E4F-4321-8765-0123456789AB","name":"Local SRT","type":"srt","urlString":"srt:\\/\\/127.0.0.1:9000"}]
+        """)
     }
 
     /// Unknown, empty, null and non-string values read as Auto and never fail the list. A known preset

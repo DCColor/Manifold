@@ -100,9 +100,9 @@ public struct StreamBookmark: Codable, Identifiable, Equatable, Sendable {
     /// Stage D): `ColorimetryOverride.storageID`, a RAW STRING, not the enum — this target does not
     /// know the presets, and a preset added by a later build must not make this entry undecodable.
     /// **nil = Auto, and Auto is stored as ABSENT**, the `audioOffsetMs` rule: an untouched bookmark
-    /// round-trips unchanged. (Unchanged as content and as sorted bytes. The store's `JSONEncoder`
-    /// re-orders keys on every save, on every build: docs/BUGS.md, 2026-10-12.) The app reads it through `ColorimetryOverride(storageID:on:)`,
-    /// which turns absent, empty, unknown or not-offered-on-this-transport into Auto.
+    /// round-trips unchanged, byte for byte (`storeEncoding`). The app reads it through
+    /// `ColorimetryOverride(storageID:on:)`, which turns absent, empty, unknown or
+    /// not-offered-on-this-transport into Auto.
     ///
     /// Kept VERBATIM, unknown strings included: a downgraded build that loads a newer build's preset
     /// shows Auto and writes the string back unchanged, so going back a version and returning loses
@@ -138,4 +138,23 @@ public struct StreamBookmark: Codable, Identifiable, Equatable, Sendable {
 
     /// Host for secondary display. NEVER the path — it can carry the stream key.
     public var displayHost: String { url?.host ?? "—" }
+}
+
+extension StreamBookmark {
+    /// The stored form of the list: what `StreamBookmarkStore.persist()` writes to `streamBookmarks`.
+    ///
+    /// SORTED KEYS, so the same list always writes the same bytes. A plain `JSONEncoder` writes an
+    /// object's keys in an order that changes from one process to the next, and between entries within
+    /// one encode (measured, COLOR_MANAGEMENT_FINDINGS.md §6.9 Stage D): every save re-ordered every
+    /// entry, untouched ones included, so "an untouched bookmark round-trips byte-for-byte" held only
+    /// after sorting. With this, a load and a save of an unchanged list give back the stored bytes.
+    ///
+    /// Nothing else changes: the same escaping as before (slashes escaped, non-ASCII as UTF-8), and no
+    /// reader depends on key order, so older builds decode it as before. A list written by an earlier
+    /// build is re-ordered once, at its first save here; its content is unchanged.
+    public static func storeEncoding(_ list: [StreamBookmark]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(list)
+    }
 }
