@@ -33,6 +33,9 @@ struct ManifoldApp: App {
         // only worth doing if the tap is already listening when that banner is emitted. Installed
         // here rather than in a scene, because a scene body runs after startup logging has begun.
         LogTap.shared.install()
+        // Colour S2: hold-to-compare's key monitor. App-level because a hold needs key-up and
+        // `ContentView` can take no more modifiers (§6.7); see HoldToCompare.swift.
+        MainActor.assumeIsolated { HoldToCompare.shared.install() }
         #if DEBUG
         // ⚠️ THE ONLY THING THAT TURNS [LIVECLOCK] ON, AND IT IS `#if DEBUG` ON PURPOSE.
         //

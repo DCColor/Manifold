@@ -55,7 +55,13 @@ struct DisplayTransformControl: View {
             //
             // Outside the menu label it is an ordinary view and keeps its colours, the same way
             // the scopes-tray button keeps its green.
-            if isBypass { bypassBadge }
+            // Colour S2: while a hold is showing another mode, its badge replaces the Bypass one —
+            // the picture is not in the chosen mode, and that is what has to be said.
+            if let held = chrome.heldDisplayTransform {
+                compareBadge(held)
+            } else if isBypass {
+                bypassBadge
+            }
 
             Menu {
                 menuContent
@@ -75,6 +81,7 @@ struct DisplayTransformControl: View {
         // Keeps the chain's Transform line honest when the mode is changed from the Color MENU
         // rather than from this pulldown. `chrome` is observed, so this fires for both routes.
         .onChange(of: chrome.displayTransform) { _, _ in chainModel.refresh() }
+        .onChange(of: chrome.heldDisplayTransform) { _, _ in chainModel.refresh() }
         // ⚠️ TIER 3 IS PRESENTED FROM HERE, NOT FROM `ContentView`. The presentation modifier has
         // to live on a view in this file — see the header on why `ContentView` cannot take one.
         .popover(isPresented: $showChain, arrowEdge: .bottom) {
@@ -113,6 +120,24 @@ struct DisplayTransformControl: View {
         .accessibilityAddTraits(.isStaticText)
     }
 
+    /// Colour S2 — the hold-to-compare marker, amber like the Bypass badge and a sibling of the menu
+    /// for the same measured reason (inside the menu label it would be stripped to white).
+    private func compareBadge(_ held: DisplayTransformMode) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "hand.raised.fill")
+                .imageScale(.small)
+            Text("COMPARING: \(held.compareLabel)")
+                .font(.system(size: 10, weight: .heavy, design: .rounded))
+                .fixedSize()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(Color.orange))
+        .foregroundStyle(.black)
+        .accessibilityLabel("Comparing against \(held.compareLabel) while the key is held")
+        .accessibilityAddTraits(.isStaticText)
+    }
+
     /// The menu's own label — tier 1's "mode name in the control bar". Kept plain, because
     /// anything styled here is stripped by the borderless menu style; the marker is the badge.
     @ViewBuilder
@@ -141,7 +166,7 @@ struct DisplayTransformControl: View {
             Text(Self.rowLabel("As macOS Shows It", "what your client will see"))
         }
         Toggle(isOn: binding(for: .reference)) {
-            Text(Self.rowLabel("Reference", "correct for grading"))
+            Text(Self.rowLabel("Reference", "BT.1886, as a reference monitor shows it"))
         }
         Divider()
         Toggle(isOn: binding(for: .bypass)) {

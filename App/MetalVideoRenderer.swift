@@ -1136,6 +1136,19 @@ final class MetalVideoRenderer {
     /// `pendingColorState` at the top of the tick, exactly like the layer's colorspace.
     private var activeReference: ReferenceShaderParams?
 
+    /// Colour S2 — the key event that started or ended a hold, so the render thread can log when the
+    /// first frame drawn in the new state actually reaches the glass. Main parks it with the colour state
+    /// (under `refreshLock`); the render thread takes both in the same locked read, so the stamp
+    /// can only attach to the state it belongs to.
+    private var pendingCompareStamp: (time: CFTimeInterval, label: String)?
+    /// RENDER THREAD ONLY.
+    private var activeCompareStamp: (time: CFTimeInterval, label: String)?
+
+    /// MAIN. Colour S2: stamp a hold's key event before the mode change it causes.
+    func markCompareEvent(_ label: String, at time: CFTimeInterval) {
+        refreshLock.lock(); pendingCompareStamp = (time, label); refreshLock.unlock()
+    }
+
     /// MAIN. The Reference decision for the current source on this window's display, or nil outside
     /// Reference. The chain readout's Transform line is `referencePlan?.summary`.
     private(set) var referencePlan: ReferencePlan?
@@ -2398,6 +2411,8 @@ final class MetalVideoRenderer {
         refreshLock.lock()
         let colorState = pendingColorState
         pendingColorState = nil
+        let compareStamp = pendingCompareStamp
+        pendingCompareStamp = nil
         let drawableSize = pendingDrawableSize
         pendingDrawableSize = nil
         let geometry = pendingGeometry
@@ -2431,6 +2446,7 @@ final class MetalVideoRenderer {
             metalLayer.wantsExtendedDynamicRangeContent = colorState.wantsEDR
             CATransaction.commit()
             activeReference = colorState.reference
+            if let compareStamp { activeCompareStamp = compareStamp }
             // ORDERING, STATED WHERE IT CAN BE CHECKED — the line the first-frame bug is read off.
             //
             // `presents=0` means this source's colour state reached the layer before any of its
@@ -3041,6 +3057,24 @@ final class MetalVideoRenderer {
         let rpCommitEnd = CACurrentMediaTime()
         #endif
 
+        // Colour S2: the first present under a held (or released) state reports when it was handed to
+        // the compositor (the `present()` call, render thread) and, when Core Animation reports it, when it
+        // reached the glass. `presentedTime` reads 0 when the frame was not shown OR when the system does
+        // not report it, so a 0 is stated as "not reported", never as a measurement.
+        if let stamp = activeCompareStamp {
+            activeCompareStamp = nil
+            let presentCall = CACurrentMediaTime()
+            print(String(format: "[COMPARE] %@: first frame under the new state handed to present() %.1f ms after the key event",
+                         stamp.label, (presentCall - stamp.time) * 1000))
+            drawable.addPresentedHandler { d in
+                let shown = d.presentedTime
+                if shown > 0 {
+                    print(String(format: "[COMPARE] %@: on glass %.1f ms after the key event", stamp.label, (shown - stamp.time) * 1000))
+                } else {
+                    print("[COMPARE] \(stamp.label): presentedTime not reported (0) for that frame")
+                }
+            }
+        }
         presentDrawable(drawable, on: cmdBuffer)
         // Counted HERE and not in `presentDrawable`, deliberately: this counter answers "did the
         // colour state reach the layer before this SOURCE's first frame?", and a black-frame present

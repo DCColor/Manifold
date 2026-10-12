@@ -83,6 +83,15 @@ enum DisplayTransformMode: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Colour S2: the word after "COMPARING:" in the title and the badge while a hold shows this mode.
+    var compareLabel: String {
+        switch self {
+        case .os:        return "macOS"
+        case .reference: return "Reference"
+        case .bypass:    return "Bypass"
+        }
+    }
+
     /// Short form for logs and diagnostics.
     var logLabel: String {
         switch self {

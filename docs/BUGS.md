@@ -61,11 +61,14 @@ held back until after release, and the numbered defect entries follow.
      - **S1** — Phase 3, Reference: **BT.1886** with each display's black and white luminance (Lb = 0 is exactly
        2.4), and a per-display "calibrated to Rec.709 / BT.1886" setting, default off. On a calibrated display
        Reference sends the code values untouched. **Built and run unattended 2026-10-12; every unattended
-       prediction passed; not committed** (§6.11, *S1 — results*). Open: the attended LG items (S1-5 by eye,
-       S1-6 with the HDR switch, S1-9), clicking the popover's calibration section, and whether to keep the
-       "correct for grading" subtitle.
+       prediction passed; committed (`532c83f`)** (§6.11, *S1 — results*). Open: the attended LG items (S1-5 by eye,
+       S1-6 with the HDR switch, S1-9) and clicking the popover's calibration section. The Reference subtitle is
+       now "BT.1886, as a reference monitor shows it" (Robbie, 2026-10-12).
      - **S2** — hold-to-compare: the other of macOS and Reference; Shift-hold compares against Bypass. The key
-       is chosen in the shortcut registry.
+       is chosen in the shortcut registry. **Built and run unattended 2026-10-12 with a TEMPORARY key, backslash;
+       every prediction passed (on-glass timing measured on live playback only; Core Animation reports none
+       for a paused re-present); not committed** (§6.11, *S2 — results*). ⚠️ **Pre-ship: the temporary key
+       must be replaced by the registry's choice** (`HoldToCompare.keyCode`).
      - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
        four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below).
      - **S4** — Phase 5, the HDR headroom readout and its log on a display change. No headroom cap: the

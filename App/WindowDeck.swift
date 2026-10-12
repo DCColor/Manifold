@@ -344,6 +344,9 @@ final class WindowDeck: ObservableObject {
         }
         // `chrome` is weak and nil before the window is configured; a nil chrome is the default
         // mode, so an absent marker is the right answer during that gap rather than a guess.
+        // Colour S2: during a hold the title says what is being compared, in place of the Bypass
+        // marker (the picture is then NOT in the chosen mode). Both come back on release.
+        if let held = chrome?.heldDisplayTransform { return title + " — COMPARING: " + held.compareLabel }
         return chrome?.displayTransform == .bypass ? title + " — Bypass" : title
     }
 
@@ -727,8 +730,26 @@ final class DeckRegistry {
     ///   and naming it removes any dependence on what `NSApp.keyWindow` reports while an `NSMenu`
     ///   is tracking. Both routes still land here, which is what the §6.7 constraint requires —
     ///   the constraint is that there is ONE mutator, not that it can only ever mean the key deck.
-    func setDisplayTransform(_ mode: DisplayTransformMode, on deck: WindowDeck? = nil) {
+    ///
+    /// - Parameter temporary: **colour S2, hold-to-compare.** `true` shows `mode` WITHOUT choosing
+    ///   it: `chrome.displayTransform` (the checkmark, the pulldown, the label) does not move, and
+    ///   `chrome.heldDisplayTransform` carries the mode being shown. Passing the CHOSEN mode with
+    ///   `temporary: true` ends the hold. Still this one function, so the §6.7 constraint holds for
+    ///   the hold too: the renderer is only ever told from here.
+    func setDisplayTransform(_ mode: DisplayTransformMode, on deck: WindowDeck? = nil, temporary: Bool = false) {
         guard let deck = deck ?? keyDeck, let chrome = deck.chrome else { return }
+        if temporary {
+            let held: DisplayTransformMode? = (mode == chrome.displayTransform) ? nil : mode
+            guard chrome.heldDisplayTransform != held else { return }
+            chrome.heldDisplayTransform = held
+            deck.renderer?.setDisplayTransform(held ?? chrome.displayTransform)
+            // No `DisplayTransformMenuState` refresh: the checkmark reads the CHOSEN mode, which a
+            // hold does not change.
+            deck.applyWindowTitle()
+            return
+        }
+        // A real choice ends any hold in progress.
+        chrome.heldDisplayTransform = nil
         chrome.displayTransform = mode
         // The renderer re-presents the current frame itself, so this reaches a PAUSED picture —
         // see `MetalVideoRenderer.setDisplayTransform`, and the 2026-08-11 first-frame entry in

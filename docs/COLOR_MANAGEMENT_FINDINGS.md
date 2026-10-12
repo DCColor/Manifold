@@ -5446,8 +5446,8 @@ checks (display roles, above).
 | Stage | Depends on | What |
 |---|---|---|
 | **S0** pre-checks | — | Read-only, unattended: the LG's profile primaries (HDR off); the colourspace dump probe on every primaries/transfer pair including (9, 1), (9, 14), 11 and 6; the tags on Robbie's Rec.2020 SDR test file; ffmpeg fixtures 9-1-9, 9-14-9, 11, 6 and case (g). **If the LG's primaries are not Rec.709, stop before S1.** |
-| **S1** Phase 3: Reference + the per-display setting — **built and run unattended 2026-10-12, not committed; results under *S1 — results*, below** | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — correct for grading*; the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
-| **S2** hold-to-compare | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
+| **S1** Phase 3: Reference + the per-display setting — **built and run unattended 2026-10-12, committed `532c83f`; results under *S1 — results*, below** | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — BT.1886, as a reference monitor shows it* (changed from §6.3's "correct for grading", 2026-10-12); the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
+| **S2** hold-to-compare — **built and run unattended 2026-10-12, not committed; results under *S2 — results*, below** | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
 | **S3** Phase 4: primaries + case (g) | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
 | **S4** Phase 5: headroom readout | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
 | **S5** Custom + the file Interpretation button | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
@@ -5598,7 +5598,7 @@ and change nothing else.** The container's tags still drive the picture; the use
 
 #### S1 — Reference (BT.1886) and the per-display calibrated setting: results, 2026-10-12 (unattended)
 
-**Not committed.** Base `a9f80d4`. Pixel checks on the **ASUS only**, macOS HDR OFF on both displays (read, not set);
+**Committed `532c83f`** (Robbie). Base `a9f80d4`. Pixel checks on the **ASUS only**, macOS HDR OFF on both displays (read, not set);
 no display setting touched. Every capture is window-only by the Manifold window id, and each was deleted once its
 numbers were recorded below. Outputs in the gitignored `build/colour-s1/`: `gpu-harness.txt`, `run/diffs.txt`,
 `run/score_*.txt`, `run/pred_*.json`, `run/pred_time.txt`, `run/pred_extra.txt`, the per-capture patch medians
@@ -5691,9 +5691,8 @@ a fresh launch afterwards (`run/pred_time.txt`).
   and the live re-plan on toggle are unseen.
 - **Reference after a relaunch is untested.** `WindowChrome.displayTransform` neither seeds nor writes back, so it
   should reset to OS as Bypass does.
-- **The subtitle "correct for grading"** is §6.3's decided wording. Given the display roles (the LG is not used for
-  grading; reference monitoring is over SDI), it may want changing, for example to "what is in the file" (§6.1's
-  question for Reference). Left for Robbie.
+- ~~**The subtitle "correct for grading"**~~ **Changed 2026-10-12 (Robbie) to "BT.1886, as a reference monitor
+  shows it"**, with S2.
 - **On a profile-described display, a Rec.2020 SDR source still loses its primaries** under Reference, because
   Reference keeps today's declaration and `makeColorSpace` flattens (9, 1) and (9, 14) to 709 (§7.3). S3 fixes
   that. On a calibrated display, Reference already converts 2020 → 709 correctly (E2).
@@ -5709,6 +5708,91 @@ is **dictionary-equal to the snapshot**, and `streamBookmarks` is equal and was 
 window-only, all deleted after scoring. Two were viewed (the first wedge capture, to check the geometry, and the
 Reference capture with the scopes tray open, to check the scopes were drawn), and both are deleted. **Exports:**
 written to the Desktop by ⌃⌥E and moved into `build/colour-s1/run/exports/`; nothing left on the Desktop.
+
+#### S2 — hold-to-compare: results, 2026-10-12 (unattended)
+
+**Not committed.** Base `532c83f` (S1, committed by Robbie 17:49, before S2 started). Pixel checks on the **ASUS only**,
+macOS HDR off (read, not set), no display setting touched, window-only captures deleted after scoring.
+Predictions were written before the first S2 launch (`build/colour-s2/predictions.txt`). Outputs in the
+gitignored `build/colour-s2/`: `run/diffs.txt`, `run/state.txt` and `run/state_hls.txt` (title and checkmark at
+each step), `run/exports.txt`, and the app logs `run/a.log` and `run/hls.log`.
+
+**Also in this change (Robbie, 2026-10-12):** the Reference row's subtitle is now
+**"BT.1886, as a reference monitor shows it"**, replacing §6.3's "correct for grading".
+
+##### What was built
+
+- **`App/HoldToCompare.swift`** — an app-level `NSEvent` local monitor for key-down and key-up, installed once
+  from `ManifoldApp.init`. A hold needs key-up, which `.keyboardShortcut` never delivers, and `ContentView` takes
+  no new modifiers (§6.7).
+  - **⚠️ Temporary key: backslash** (key code 42). The final key is decided in the shortcut registry.
+  - **Plain hold:** the other of macOS and Reference. From Bypass, a plain hold shows macOS.
+  - **Shift-hold:** Bypass. From Bypass, Shift-hold does nothing.
+  - The monitor steps aside while a text field is first responder.
+  - **A hold always ends:** on key-up, or when the window stops being key, the app stops being active, or a
+    menu opens (a tracking menu takes the key-up).
+  - **A missed key-up never leaves the window stuck.** A fresh key-down during a recorded hold ends that hold
+    and starts the new one. A hold already ended by a real choice is forgotten.
+- **`WindowChrome.heldDisplayTransform`** — the mode shown while held, separate from the chosen
+  `displayTransform`. Never persisted.
+- **`DeckRegistry.setDisplayTransform(_:on:temporary:)`** — still the one mutator. With `temporary: true` it sets
+  or clears the held mode and tells the renderer, without touching the chosen mode or the menu state. A real
+  choice clears any hold.
+- **Title:** ` — COMPARING: macOS | Reference | Bypass` while held. This replaces the Bypass marker while held,
+  because the picture is then not in Bypass. Any override suffix stays.
+- **Badge:** an amber `COMPARING: …` capsule beside the pulldown, in place of the Bypass badge while held.
+- **Readout:** the Transform line describes the held mode and ends in `(held)`. The control observes the held
+  mode inside its own file, with no `ContentView` change.
+- **`[COMPARE]` log:** hold and release with timestamps. On the render thread, the first frame drawn in the new
+  state logs when it was handed to `present()`, and when it reached the glass if Core Animation reports it.
+
+##### Results
+
+| # | Prediction | Result | Verdict |
+|---|---|---|---|
+| P1 | First frame in the new state on glass within one source frame of the key event (24p: 41.7 ms), from the log | **Live HLS, playing:** on glass **32.2 / 33.5 / 25.7 ms** after the key event (three of four events; the fourth, a release, was not reported). **Paused file:** handed to `present()` **1.1 – 8.7 ms** after the key event in all 10 events, but `presentedTime` read **0 for every paused re-present**, so on-glass time is not measured there | **PASS where measured** (live). Paused: `present()` within 9 ms; glass not reported |
+| P2 | On release: 0 codes against the capture before the hold | **0 codes, 0 pixels** in all four cases: macOS → hold Reference; Reference → hold macOS; macOS → Shift-hold Bypass; Bypass → hold macOS | **PASS** |
+| P3 | While held, the picture IS the compared mode | Held capture vs the same mode chosen from the menu: **0 codes** in all four cases. Sanity: held Reference vs macOS **21 codes, 96.9 %** | **PASS** |
+| P4 | Checkmark unchanged during and after the hold | The Color menu's mark char, read through accessibility at every step: stays on the chosen mode in every hold, file and live | **PASS** |
+| P5 | Title says COMPARING while held; afterwards exactly as before, Bypass and override suffixes included | File: `wedge.mov` → `— COMPARING: Reference` → `wedge.mov`; `— COMPARING: macOS` from Reference; `— COMPARING: Bypass`; from Bypass `wedge.mov — Bypass` → `— COMPARING: macOS` → `— Bypass`. **Live HLS with the override set (⌃⌥C):** `Stream debug URL — Color 709` → `… — Color 709 — COMPARING: Reference` → `… — Color 709`; with Bypass, `… — Color 709 — Bypass` → `… — COMPARING: macOS` → `… — Color 709 — Bypass` | **PASS** |
+| P6 | Scopes, SDI and export unaffected while held | ⌃⌥E during a hold and without one: PNG, v210 dump, rgba16f readback and the v210 sidecar are all **byte-identical** (and the same hashes as S1's exports). Scopes tray: held vs not held differ only in rows 0–404 (the picture); **0 tray rows** differ | **PASS** |
+| P7 | OS mode against HEAD `a9f80d4`: 0 codes | **0 codes, 0 pixels.** The baseline build is `a9f80d4`, from before S1, so this covers S1 and S2 together | **PASS** |
+
+**Tests and build:** `swift test` 331 / 331 (no package change in S2). The Profile build is clean. There is no
+unit test for the hold logic: it lives in `App/`, which `swift test` does not reach (§6.9 finding 9).
+
+##### Found while building it — recorded because two of them were real defects
+
+1. **The first scored run was unusable and is discarded.**
+   - System Events cannot hold a non-modifier key: `key down (key code 42)` sends a press and a release
+     8–11 ms apart.
+   - A CGEvent posted by a compiled helper never reached the app.
+   - The hold rig that works posts CGEvents through `osascript -l JavaScript`.
+   - Even with it, one key-down and one key-up were lost when a key event followed a System Events menu click
+     too closely. The scored run leaves a 1 s settle before each key-down and checks each hold by its title;
+     it needed **no retries**.
+2. **A lost key-up left the window stuck comparing, and the next key-down was then ignored.** A menu pick ended
+   the hold, but the monitor still recorded it. Fixed before scoring: a fresh key-down ends any recorded hold,
+   an already-ended hold is forgotten, and a menu opening ends the hold.
+3. **`presentedTime` reads 0 on every paused re-present.** The first wording logged that as "DROPPED, not
+   shown", but the capture showed the picture had changed. That would have been an instrument reporting a
+   failure for reasons unconnected to the thing measured. The log now says "not reported" and gives the
+   `present()` time beside it. Why paused presents are unreported (the layer presents with transaction) is not
+   established.
+
+##### Open after S2
+
+- **The key.** Backslash is temporary; the shortcut registry decides the real one.
+- **On-glass time for a paused picture** is not measured: Core Animation does not report it on that path.
+- **Full screen** has no title, so a hold there shows only the badge, and only while the control bar is
+  awake. That is the same gap §6.8 records for Bypass.
+- **Attended:** a hold judged by eye on the LG, with the S1 LG items.
+
+**Defaults:** exported before the first S2 launch (1 143 keys). The launches added 14 `NSWindow Frame …` keys and
+nothing else; each was checked absent from the snapshot and deleted by name. The domain is **dictionary-equal to
+the snapshot**, and `streamBookmarks` is equal and was never written. The live check dialled
+`MANIFOLD_STREAM_DEBUG_URL` (a local HLS of the wedge, `127.0.0.1:8765`, stopped afterwards), so no bookmark was
+read. **Exports** were moved from the Desktop into `build/colour-s2/run/exports/`.
 
 ---
 

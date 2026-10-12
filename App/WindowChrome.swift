@@ -172,6 +172,17 @@ final class WindowChrome: ObservableObject {
     /// is no key, nothing in `Key`, and nothing to read at startup.
     @Published var displayTransform: DisplayTransformMode = DisplayTransformMode.defaultMode
 
+    /// Colour S2, hold-to-compare (§6.11 decision 3): the mode shown WHILE A KEY IS HELD, or nil.
+    ///
+    /// Deliberately a second property and not a write to `displayTransform`: the chosen mode — the
+    /// menu checkmark, the pulldown's tick, the control-bar label — must not move during a hold, and
+    /// the hold must always end back where it started. Written only by
+    /// `DeckRegistry.setDisplayTransform(_:on:temporary: true)`. Never persisted.
+    @Published var heldDisplayTransform: DisplayTransformMode? = nil
+
+    /// What the picture is actually being drawn with: the held mode during a hold, else the chosen.
+    var effectiveDisplayTransform: DisplayTransformMode { heldDisplayTransform ?? displayTransform }
+
     /// Overlay (floating auto-hide HUD) vs docked (fixed bar). Stored per window like the rest —
     /// but see `adoptExternalControlMode` below: it has no per-window control surface YET, so today
     /// it still tracks the app-wide Settings picker in every open window.

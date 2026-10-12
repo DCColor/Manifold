@@ -145,7 +145,9 @@ final class DisplayChainModel: ObservableObject {
     /// never called per frame.
     func refresh() {
         guard let deck else { return }
-        let mode = deck.chrome?.displayTransform ?? .os
+        // Colour S2: during a hold the chain describes what is ON SCREEN, and says it is held.
+        let held = deck.chrome?.heldDisplayTransform
+        let mode = held ?? deck.chrome?.displayTransform ?? .os
         let renderer = deck.renderer
 
         // ── SOURCE ──────────────────────────────────────────────────────────────────────────
@@ -198,7 +200,7 @@ final class DisplayChainModel: ObservableObject {
         }
 
         // ── TRANSFORM ───────────────────────────────────────────────────────────────────────
-        let transformLine: String
+        var transformLine: String
         switch mode {
         case .os:     transformLine = "As macOS shows it — source colorspace declared to the layer"
         case .bypass: transformLine = "Bypass — no colorspace declared, no conversion"
@@ -207,6 +209,7 @@ final class DisplayChainModel: ObservableObject {
         case .reference:
             transformLine = renderer?.referencePlan?.summary ?? "Reference — no source yet"
         }
+        if held != nil { transformLine += " (held)" }
 
         // ── DISPLAY ─────────────────────────────────────────────────────────────────────────
         // Resolved from THIS window's screen. `NSScreen.main` would be wrong the moment a second
