@@ -1981,7 +1981,7 @@ Run in this order. Each stage ships on its own.
     and carried unchanged; chroma reduced only where an output requires it. The stage is now S1–S5.
     - which Macs' VideoToolbox decodes HEVC 4:2:2 10-bit, and to which pixel formats: the M4 Max does,
       in hardware, natively to packed `p422`, and to `x422` on request. Other chips are not established;
-      the M4 MacBook Air needs `scripts/chroma/vt.swift`.
+      the M4 MacBook Air is checked on the release build (release gate, `docs/BUGS.md`).
     - whether every consumer takes 4:2:2 as is: the renderer, scopes, export and the v210 convert do
       (NDI already delivers `x422`); the SRT promote does not.
     - the 8 MB access-unit cap: kept. 8 MB a frame is 1.6 Gb/s at 25p.
@@ -4062,9 +4062,9 @@ shifted left 6), and VideoToolbox delivered both on every ProRes/HEVC/H.264/DNx 
 | P12 | S3 | 30-min 4:2:2 soak against a non-Cloudflare server | calibrations within ±2 ms, drift within ±5 ms | outside |
 | P13 | S5 | The OBS stream reads `hevc Rext`, 4:2:2 10-bit accepted, `x422`, readout "native" | as stated | otherwise |
 
-**Needs Robbie:** the M4 MacBook Air check (`scripts/chroma/vt.swift` on `lines-422-hevc.mov`,
-`lines-422-h264-intra.mov`, `checker-444-hevc.mov`; pass is `HW-only: usingHW=true … x422`, `x444` for the
-last); the S5 OBS pass, on a *duplicated* profile with its row added to `OBS_TEST_PROFILES.md` first; the
+**Needs Robbie:** ~~the M4 MacBook Air check (`scripts/chroma/vt.swift` on …)~~ moved 2026-10-12 to the
+release gate in `docs/BUGS.md` (*Release scope — 1.0*, item 4): the same three fixtures, opened in the
+release build on the Air and the Resolve workstation, read off the Chroma line, no dev tooling; the S5 OBS pass, on a *duplicated* profile with its row added to `OBS_TEST_PROFILES.md` first; the
 P2 NDI check.
 
 #### Stage 3b, S1 — renderer and readout: predictions, written 2026-10-10 before the code changed

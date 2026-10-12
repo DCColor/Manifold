@@ -70,6 +70,23 @@ held back until after release, and the numbered defect entries follow.
      Manifold sees it, so the window, the scopes and SDI show NDI's deinterlaced picture (fixed in I6,
      after 1.0; decided, Robbie, 2026-10-09);
    - the Release-build checks on the Resolve workstation;
+   - **the 4:2:2 / 4:4:4 decode check, on the release build, on the M4 MacBook Air and on the Resolve
+     workstation** (moved here 2026-10-12 from the "Needs Robbie" line of Stage 3b in
+     `COLOR_MANAGEMENT_FINDINGS.md` §6.10, which asked for `scripts/chroma/vt.swift`). It requires no dev tooling:
+     no Xcode, no `swiftc`, no ffmpeg, no launch environment variables. Copy three fixtures from
+     `build/chroma-fixtures/` on the build Mac (3 MB together; `scripts/chroma/generate.sh 422 444` makes
+     them if they are missing):
+     - `lines-422-hevc.mov`: HEVC 4:2:2 10-bit
+     - `lines-422-h264-intra.mov`: H.264 High 4:2:2 10-bit, all-intra
+     - `checker-444-hevc.mov`: HEVC 4:4:4 10-bit
+
+     Open each one in the release build and read the **Chroma** line in the chain readout. Pass is
+     `4:2:2 10-bit (x422) — native` for the first two and `4:4:4 10-bit (x444) — native · DeckLink v210
+     output: …` for the third. A `— 4:2:2 source, …` / `— 4:4:4 source, …` wording, the fallback banner,
+     or `· software decode` on the line means that Mac does not decode it natively in hardware. Record
+     which, per file, per Mac. H.264 4:2:2 / 4:4:4 has no software decoder, so on a Mac without the
+     hardware decoder the H.264 file is refused with a banner instead of falling back. That counts as
+     an answer, not a failure of the check.
    - the pre-ship cleanup (the pre-ship checklist below, including every temporary probe it lists).
 
 ---

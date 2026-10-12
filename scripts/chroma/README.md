@@ -7,7 +7,7 @@ decisions, stages and predictions are in `docs/COLOR_MANAGEMENT_FINDINGS.md` §6
 | File | What |
 |---|---|
 | `generate.sh` | Makes the fixtures into `build/chroma-fixtures/` (gitignored; ~2.8 GB, ~50 s on an M4 Max, plus ~8 GB and ~2 min for `s2`). Groups `422 444 420 4k ndi s2 s3`. |
-| `vt.swift` | Raw `VTDecompressionSession` probe: hardware-only and software-only decode, native and requested pixel formats. **Run this on any Mac whose 4:2:2 / 4:4:4 decode is in question** (the M4 MacBook Air check). |
+| `vt.swift` | Raw `VTDecompressionSession` probe: hardware-only and software-only decode, native and requested pixel formats. **Run this on any Mac whose 4:2:2 / 4:4:4 decode is in question.** The M4 MacBook Air check itself is now a release-build check that needs no tooling (`docs/BUGS.md`, release gate). |
 | `avf-formats.swift` | `AVAssetReader` probe: which of `x420 x422 x444 sv22 sv44` each file delivers, its cost, and whether the chroma pattern survives. |
 | `measure.swift` | S2's numbers from one ⌃⌥E dump: the readback as 10-bit Y′CbCr (the dump's own kr/kb, limited range) and the v210 words, against `lines` (P3: rows within ±2 of their own line) or `checker` (P4 on the export, P5 512 ± tol on the wire). |
 | `bands.py` | The 8-bit ×4 check (§6.10, *8-bit sources mapped exactly ×4*): `bands8` / `bands10` band means from one ⌃⌥E dump (export) and the v210 wire's min..max; with a second (control) stem, the fraction of `.rgba16f` pixels identical to it. `python3 -I bands.py <stem> [control-stem]` |
