@@ -169,4 +169,20 @@ final class ColorimetryModelTests: XCTestCase {
             XCTAssertEqual(ColorimetryOverride.available(on: t).first, .auto)
         }
     }
+
+    /// Stage D: a saved string is applied only where the picker would offer it.
+    func testSavedStorageIDIsLimitedToTheTransportsPresets() {
+        for t in ColorimetryTransport.allCases {
+            for preset in ColorimetryOverride.allCases {
+                let read = ColorimetryOverride(storageID: preset.storageID, on: t)
+                XCTAssertEqual(read, ColorimetryOverride.available(on: t).contains(preset) ? preset : .auto,
+                               "\(preset) on \(t)")
+            }
+            XCTAssertEqual(ColorimetryOverride(storageID: "aces-cct", on: t), .auto)
+            XCTAssertEqual(ColorimetryOverride(storageID: "", on: t), .auto)
+            XCTAssertEqual(ColorimetryOverride(storageID: nil, on: t), .auto)
+        }
+        XCTAssertEqual(ColorimetryOverride(storageID: "rec2020-sdr", on: .srt), .auto)
+        XCTAssertEqual(ColorimetryOverride(storageID: "rec2020-sdr", on: .ndi), .rec2020SDR)
+    }
 }

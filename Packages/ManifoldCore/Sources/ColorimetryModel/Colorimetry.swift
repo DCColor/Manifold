@@ -199,6 +199,14 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
         self = Self.allCases.first { $0.storageID != nil && $0.storageID == storageID } ?? .auto
     }
 
+    /// The preset a saved stream on `transport` applies: `init(storageID:)`, and Auto for a preset
+    /// the transport does not offer (Rec.2020 SDR on SRT, WHEP or HLS, decision 3). A stored string is
+    /// never applied past the picker's own rule.
+    public init(storageID: String?, on transport: ColorimetryTransport) {
+        let preset = Self(storageID: storageID)
+        self = Self.available(on: transport).contains(preset) ? preset : .auto
+    }
+
     // MARK: - Availability
 
     /// The presets a transport offers, in picker and ⌃⌥C order.

@@ -776,6 +776,20 @@ final class StreamBookmarkStore: ObservableObject {
         return .success(updated)
     }
 
+    /// "Save to Bookmark" for the colorimetry override (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9,
+    /// Stage D): `storageID` is `ColorimetryOverride.storageID`, nil for Auto, which removes the key.
+    /// Only that field changes; same whole-array write and same refusal as `setAudioOffset`.
+    @discardableResult
+    func setColorOverride(_ storageID: String?, forBookmark id: UUID) -> Result<StreamBookmark, StreamValidationError> {
+        guard !storedDataUnreadable else { return .failure(.storeUnreadable) }
+        guard let index = bookmarks.firstIndex(where: { $0.id == id }) else { return .failure(.noLongerSaved) }
+        var updated = bookmarks[index]
+        updated.colorOverride = storageID
+        bookmarks[index] = updated
+        persist()
+        return .success(updated)
+    }
+
     /// 0 is stored as ABSENT: nil = 0, and a bookmark whose offset is 0 is byte-for-byte a bookmark
     /// that never had one. "Never written unless the user sets it" then holds for a reset too.
     static func storedAudioOffset(_ ms: Int?) -> Int? { ms == 0 ? nil : ms }

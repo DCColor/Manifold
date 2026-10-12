@@ -1610,16 +1610,18 @@ final class DeckRegistry {
     /// carry the stream key, which is why the bookmark rows pass the name they display.
     ///
     /// `bookmark`: the saved stream this connect came from, if any — its audio offset is the
-    /// session's starting value (docs/AUDIO_RESAMPLER_DESIGN.md §19.8). nil (NDI, a pasted URL, the
-    /// DEBUG ⌃⌥D override) = a session value only, starting at 0.
+    /// session's starting value (docs/AUDIO_RESAMPLER_DESIGN.md §19.8), and so is its colorimetry
+    /// override on SRT and WHEP (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9, Stage D). nil (NDI, a pasted
+    /// URL, the DEBUG ⌃⌥D override) = session values only, starting at 0 and Auto.
     func connectLive(_ source: LiveSource, from deck: WindowDeck, label: String? = nil,
                      bookmark: StreamBookmark? = nil, _ standUp: () -> Void) {
         claim(.live(source), by: deck, label: label) {
             // After the claim is granted and before the transport opens its audio session, so the
             // first anchor places the value with no splice.
             deck.audioOffset.prepare(source: source, bookmark: bookmark)
-            // Every connect starts on Auto (§6.9 Stage B; per-bookmark save is Stage D).
-            deck.colorOverride.prepare(source: source)
+            // The bookmark's saved override, or Auto (§6.9 Stages B and D). Before the transport
+            // opens, so the first frame is decoded under it.
+            deck.colorOverride.prepare(source: source, bookmark: bookmark)
             standUp()
         }
     }

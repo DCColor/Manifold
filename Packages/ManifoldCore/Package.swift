@@ -172,7 +172,9 @@ let package = Package(
         ),
         .testTarget(
             name: "StreamBookmarkModelTests",
-            dependencies: ["StreamBookmarkModel"],
+            // ColorimetryModel for the Stage D tests only: a stored override string read as the app
+            // reads it. The model target itself stays a leaf.
+            dependencies: ["StreamBookmarkModel", "ColorimetryModel"],
             path: "Tests/StreamBookmarkModelTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)

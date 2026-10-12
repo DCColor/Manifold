@@ -1558,9 +1558,9 @@ Run in this order.
 - **Stage B — SRT override, per session.** Done 2026-10-12, committed `4bc42b4` (*Stage B*, below).
   - The override goes through `setSourceColorSpace(…, provenance: .overridden)`.
   - The scopes need no extra work: they follow the renderer since `946417a`.
-- **Stage C — WHEP override, per session.** Same pattern as Stage B. Done 2026-10-12, uncommitted (*Stage C*,
-  below).
-- **Stage D — save per bookmark for SRT, WHEP and HLS.**
+- **Stage C — WHEP override, per session.** Same pattern as Stage B. Done 2026-10-12, committed `631ad92`
+  (*Stage C*, below).
+- **Stage D — save per bookmark for SRT, WHEP and HLS.** Done 2026-10-12, uncommitted (*Stage D*, below).
   - Add an optional raw-string field to `StreamBookmark`, decoded tolerantly.
   - Add migration tests.
   - Save and Revert in the live menu.
@@ -1918,7 +1918,7 @@ launch, restored after the last quit, dictionary-equal (1 143 keys). `streamBook
 The Rec.2020 SDR preset stays NDI-only (decision 3). An override on SRT is not saved: a reconnect starts on
 Auto, by design until Stage D.
 
-#### Stage C — WHEP override, per session: done 2026-10-12, uncommitted
+#### Stage C — WHEP override, per session: done 2026-10-12, committed `631ad92`
 
 **What changed.** Stage B's pattern, on WHEP.
 
@@ -1987,6 +1987,96 @@ its first SPS, so there is always a reading to compare with.
 
 **Still open after Stage C.** Stage D (save per bookmark for SRT, WHEP and HLS) and E (HLS, after decision
 6's code fix). WHEP overrides are not saved: a reconnect starts on Auto, by design until Stage D.
+
+#### Stage D — save per bookmark (SRT, WHEP, HLS): done 2026-10-12, uncommitted
+
+**What changed.**
+
+- **The field.** `StreamBookmark.colorOverride: String?`, the Stage A `storageID` (`rec709`, `rec2020-pq`,
+  `rec2020-hlg`, `p3d65-pq`, `rec2020-sdr`). A raw string, so the bookmark target stays a leaf and a preset
+  added later cannot make an entry undecodable (finding 7). **Auto is stored as absent**, the
+  `audioOffsetMs` rule. `StreamBookmark` gained a hand-written `init(from:)` that decodes every other field
+  exactly as the synthesized one did and reads `colorOverride` with `try?`: a value that is not a string
+  reads as nil and never fails the entry, so it never fails the list. Encoding stays synthesized.
+- **Reading it.** `ColorimetryOverride(storageID:on:)` (new, `ColorimetryModel`): absent, empty, unknown, or a
+  preset the transport does not offer (Rec.2020 SDR on SRT, WHEP, HLS: decision 3) → Auto. An unknown string
+  is **kept verbatim** in the bookmark: a downgraded build shows Auto and writes it back unchanged. Only a
+  Save replaces it.
+- **On connect.** `DeckRegistry.connectLive` passes the bookmark to `LiveColorOverrideModel.prepare(source:
+  bookmark:)`, which starts the session on the saved value, replacing Stage B/C's reset to Auto when a value is
+  saved. It is handed to the frame router before the transport opens. On SRT it rides the activation (Stage
+  B). On WHEP the activation still states assumed 709, and the first decoded frame announces the override
+  through the timed hop, about 0.5 s later (Stage C's design: WHEP activates before media). Log: `[SRT-COLOR] /
+  [WHEP-COLOR] override → <preset> (CICP p-t-m) — from the saved stream`, or the unchanged `→ Auto (new
+  connection)` when nothing is saved. A stored string this transport won't apply is logged once: `the saved
+  stream’s color override “…” is not offered on this transport — Auto`.
+- **Save and Revert** (decision 5) are in the Color control's menu, below the Stream section, the A/V menu's
+  pattern: `Save <preset> to “<name>”` and `Revert to Saved (<preset>)`, both greyed when the session equals
+  the saved value. Without a bookmark (a pasted URL, the debug URLs): `Not a saved stream: this override lasts
+  for this connection only`. Saving Auto removes the key. `StreamBookmarkStore.setColorOverride` is the only
+  writer: one field, the store's whole-array write, the same `storedDataUnreadable` refusal as
+  `setAudioOffset`. The Stream Sources sheet has no field. Its `update` mutates the entry in place, so an
+  edit there keeps the saved override.
+- **HLS** stores and loads the field (`savedOverride` is set at connect) and applies nothing: Stage E. Its
+  Color control is still not shown, so nothing can save one yet.
+- **NDI** stays session-only: no bookmark, no Save section.
+
+**Rig.** Unattended. HEAD `631ad92` (`8bd71836…`, Stage C's final binary) against the tree (`8d511618…`). After
+the runs, a two-line comment was added to `StreamBookmark.swift` (the key-order note). The rebuilt binary is
+`a0fef8e3…`; the runs were not repeated on it. The 320 package tests were run on the final tree. Stage
+C's harness, scratchpad copy; MediaMTX 1.21.1 from a scratchpad config, as in Stage C. Window on the ASUS at
+875×492, pixel checks only. **The Color menu is driven, not typed into blind:** the readout button's frame
+comes from Accessibility (its title holds ` · `), a real click opens it, and nothing is typed until a
+Manifold menu window (layer 101) is on screen. Items are picked by type-select and Return, and every pick is
+checked against its log line. System Events cannot press the button itself: its title starts with U+FFFC
+(the palette glyph), and every reference it builds is re-resolved by that name and fails. **Defaults:** the
+full domain exported first (1 143 keys). `streamBookmarks` (1 196 bytes, SHA-256 `4466c076…`, the same as
+§19.8 of the resampler doc recorded) stashed, re-read and matched before a three-entry scratch list
+(`D-SRT`, `D-WHEP`, `D-HLS`) was written over it. The scratch blob was encoded by the real type. Restored
+byte for byte at the end; see *Restore*, below.
+
+**Predictions** (written 2026-10-12, before the code changed):
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| 1a | Pre-offset blob and HEAD-era blob (with `audioOffsetMs`) | colour field nil → Auto; re-encoded identical with sorted keys; no `colorOverride` key | otherwise |
+| 1b | New blob | round-trips; only the entries set carry the key; Auto removes it | otherwise |
+| 1c | HEAD's five-field decoder on a new blob | every field equal | throws or differs |
+| 1d | Unknown string, `""`, a number, `null` | the list decodes; those read Auto; a known preset beside them keeps its value; an unknown string is re-encoded verbatim | any throw or wrong preset |
+| 2 | Scratch SRT and WHEP bookmarks: ⌃⌥C to 2020 PQ, Save, reconnect | `→ Rec.2020 PQ … from the saved stream`; one `[SCOPE-COLOR] … PQ … overridden (CICP 9-16-9)`; amber ≥ 100 px, commonest 255,146,48; title `<name> — Color 2020 PQ`; key on that entry only. HLG then Revert → PQ. Save Auto removes the key; next reconnect `→ Auto (new connection)`, no suffix | any missing |
+| 3 | Byte identity | after Save PQ then Save Auto, the blob equals the scratch blob; the untouched entries never change; the real blob, decoded and re-encoded read-only, identical | any byte differs |
+| 4 | Against HEAD: debug-URL connects (no bookmark), SRT and WHEP, untagged and declared PQ; NDI preset sweep | colour lines, exports (md5) and titles identical | any difference |
+
+**Results — all four PASS. P3 passes as entry content and sorted bytes, not raw bytes: see below.**
+
+| # | Result |
+|---|---|
+| 1 | `swift test`: StreamBookmarkModelTests 7 (3 + 4 new), ColorimetryModelTests +1 (`testSavedStorageIDIsLimitedToTheTransportsPresets`). All pass. 1a–1d as predicted, including a number, `null` and an object under the key in the same list as a valid preset. |
+| 2 | **SRT** (`D-SRT`): Save → `[SRT-COLOR] saved Rec.2020 PQ (HDR10) to the saved stream`; the blob gains `"colorOverride":"rec2020-pq"` on `D-SRT` only. HLG, then Revert → `override → Rec.2020 PQ` + one PQ `source` line. Reconnect: `override → Rec.2020 PQ (HDR10) (CICP 9-16-9) — from the saved stream`, then exactly one `[SCOPE-COLOR] source: Rec. 2020 · PQ (ST 2084) — overridden (CICP 9-16-9)` at activation (no `renderer now`: it rode the activation). **512 amber px, commonest 255,146,48**, title `D-SRT — Color 2020 PQ`. The menu after reconnect has PQ ticked and Save and Revert greyed; with HLG in force it reads `Save Rec.2020 HLG to “D-SRT”` / `Revert to Saved (Rec.2020 PQ (HDR10))`, both enabled. Save Auto → key gone; reconnect → `→ Auto (new connection)`, title `D-SRT`, 0 amber. **WHEP** (`D-WHEP`): the same, except at reconnect: activation `assumed (CICP 1-1-1)`, then `[SCOPE-COLOR] … PQ … overridden` + `[WHEP-COLOR] renderer now` **+0.50 s** later, at the first frame. 512 amber, title `D-WHEP — Color 2020 PQ`. **Pixels:** the export under the saved override equals the export under the session override, 0 differing in `.png`, `.rgba16f` and `.v210`, on both transports. All four are `b003066a…` (PNG), the same pixels as Stages B and C's PQ exports. No keystroke or menu pick dropped. |
+| 3 | **Entries:** the untouched entries' content (sorted-key SHA per entry) never changed through either run. After Save Auto, the whole list's sorted-key SHA was the start's again (`23fd8fdc…`) on both transports. **The real blob, read-only**: 7 entries, 4 keys each, decoded and re-encoded by the new type and by HEAD's, sorted-key identical, no `colorOverride` written. **Raw bytes are not identical, on either build, and cannot be:** see below. |
+| 4 | Stage C's scenarios on both builds, debug URLs (no bookmark, so `→ Auto (new connection)` on both): **SRT untagged** 31 colour lines, **SRT declared PQ** 22, **WHEP untagged** 32, **WHEP declared PQ** 23. All **identical** HEAD vs tree. 30 export files (`.png`, `.rgba16f`, `.v210`), **0 differing**. Titles identical. **NDI**, Stage A's sweep: 7 steps, 88 `[NDI]`/`[EDR]` lines, identical per step and per thread; 10 `[SCOPE-COLOR]` identical; titles identical (`… — Color 709` … `— Color 2020 SDR`, then none). 0 keystrokes dropped in the ten runs. |
+
+**Found: the store re-orders every entry's keys on every save, on every build.** Foundation's `JSONEncoder`
+(no `.sortedKeys`) writes an object's keys in an order that changes from one process to the next, and even
+between entries within one encode. Measured: a scratch tool encoding one value six times gave three orders.
+In the app, the scratch blob's raw SHA changed with every save (`14425b95…` → `49546fbb…` → `30225255…`) while
+its sorted-key SHA came back to `23fd8fdc…`. HEAD's type re-encoding the real blob is not raw-identical
+either. Nothing reads key order, so no data is at risk, but "byte-for-byte" in the `audioOffsetMs` comments and
+in §19.8's test means sorted bytes. Two Stage D tests first asserted raw bytes and failed on exactly this; they
+now compare sorted bytes. BUGS.md: *stream bookmarks re-order their JSON keys on every save*. Not fixed
+here: it changes how every save writes the user's list (Robbie's call).
+
+**Going back a build drops a saved override if that build saves.** A pre-Stage D build reads the list (test
+1c), but its synthesized `Codable` drops the unknown key when it writes the list again, after any save or edit
+there. The override goes; the list stays. Same as `audioOffsetMs` going back past §19.8.
+
+**Restore.** With Manifold and MediaMTX stopped, the stash was written back and read again: `streamBookmarks`
+SHA-256 **`4466c076…`**, the stash's. No other key had changed. The runs had added 23 `NSWindow Frame SwiftUI…`
+keys, one per launch; they were deleted by name. The domain is then **dictionary-equal** to the first export,
+1 143 keys. Screenshots were deleted once their results were recorded here.
+
+**Still open after Stage D.** Stage E (HLS, after decision 6's code fix) applies the saved HLS value, which
+is already loaded. NDI stays session-only (decision 1).
 
 ### 6.10 HEVC over SRT — audit and decisions, 2026-10-07
 
@@ -2156,9 +2246,12 @@ Run in this order. Each stage ships on its own.
 - **Then override Stage B** (§6.9). **Done 2026-10-12**, `4bc42b4`: §6.9, *Stage B*. The SRT override takes
   the mid-stream colour update this section's Stage SPS work built (`LiveDisplayRoute.updateColorimetry`),
   timed the same way, and is md5-neutral at Auto on HEVC 4:2:2 10-bit, H.264 4:2:2 8-bit and H.264 4:2:0.
-- **Then override Stage C** (§6.9), WHEP. **Done 2026-10-12**, uncommitted: §6.9, *Stage C*. Stage SPS's WHEP
+- **Then override Stage C** (§6.9), WHEP. **Done 2026-10-12**, `631ad92`: §6.9, *Stage C*. Stage SPS's WHEP
   reading (declared colour from the SPS, announced when the first frame under it is due) is what the override
   sits on, through the same timed hop.
+- **Then override Stage D** (§6.9), save per bookmark. **Done 2026-10-12**, uncommitted: §6.9, *Stage D*. A saved
+  override is handed to the frame router before the transport opens: on SRT it rides the activation, on WHEP
+  it is the first announcement, through the same hop.
 
 #### Stage 0 — the identification fix: predictions, written 2026-10-07 before the code changed
 

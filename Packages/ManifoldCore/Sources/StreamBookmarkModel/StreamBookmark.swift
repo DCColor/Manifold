@@ -96,11 +96,38 @@ public struct StreamBookmark: Codable, Identifiable, Equatable, Sendable {
     /// stays ABSENT from the stored JSON and an untouched bookmark round-trips byte-for-byte.
     /// The range (−250…+500) is the steering's constant, checked where the value is entered.
     public var audioOffsetMs: Int?
+    /// The saved colorimetry override for this stream (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9,
+    /// Stage D): `ColorimetryOverride.storageID`, a RAW STRING, not the enum — this target does not
+    /// know the presets, and a preset added by a later build must not make this entry undecodable.
+    /// **nil = Auto, and Auto is stored as ABSENT**, the `audioOffsetMs` rule: an untouched bookmark
+    /// round-trips unchanged. (Unchanged as content and as sorted bytes. The store's `JSONEncoder`
+    /// re-orders keys on every save, on every build: docs/BUGS.md, 2026-10-12.) The app reads it through `ColorimetryOverride(storageID:on:)`,
+    /// which turns absent, empty, unknown or not-offered-on-this-transport into Auto.
+    ///
+    /// Kept VERBATIM, unknown strings included: a downgraded build that loads a newer build's preset
+    /// shows Auto and writes the string back unchanged, so going back a version and returning loses
+    /// nothing. Only a Save from the live menu replaces it.
+    public var colorOverride: String?
 
     public init(id: UUID = UUID(), name: String, urlString: String, type: StreamType,
-                audioOffsetMs: Int? = nil) {
+                audioOffsetMs: Int? = nil, colorOverride: String? = nil) {
         self.id = id; self.name = name; self.urlString = urlString; self.type = type
         self.audioOffsetMs = audioOffsetMs
+        self.colorOverride = colorOverride
+    }
+
+    /// Synthesized, except that `colorOverride` NEVER FAILS THE ENTRY: a value that is not a string
+    /// (a hand edit, a future shape) reads as nil = Auto, and one bad field cannot cost the user the
+    /// list (`StreamBookmarkStore.storedDataUnreadable`). Every other field decodes exactly as the
+    /// synthesized init did; encoding stays synthesized (`encodeIfPresent` for the optionals).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        urlString = try c.decode(String.self, forKey: .urlString)
+        type = try c.decode(StreamType.self, forKey: .type)
+        audioOffsetMs = try c.decodeIfPresent(Int.self, forKey: .audioOffsetMs)
+        colorOverride = (try? c.decodeIfPresent(String.self, forKey: .colorOverride)) ?? nil
     }
 
     /// The URL AS PERSISTED — no passphrase, by construction (see `StreamBookmarkStore.add`). This

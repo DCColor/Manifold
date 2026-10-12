@@ -46,8 +46,10 @@ held back until after release, and the numbered defect entries follow.
      uncommitted (§6.10, *S3/S4 follow-up*). S5 (the OBS pass) is attended.
    - The colour override, Stages B–E (§6.9). **Stage B (SRT, per session) built and run unattended
      2026-10-12, all seven predictions passed, committed (`4bc42b4`)** (§6.9, *Stage B*). **Stage C (WHEP,
-     per session) built and run unattended 2026-10-12, all seven passed, uncommitted** (§6.9, *Stage C*;
-     one log-label defect found by P5 and fixed before the results). Next: D (save per bookmark), E (HLS).
+     per session) built and run unattended 2026-10-12, all seven passed, committed (`631ad92`)** (§6.9,
+     *Stage C*; one log-label defect found by P5 and fixed before the results). **Stage D (save per
+     bookmark) built and run unattended 2026-10-12, all four predictions passed, uncommitted** (§6.9,
+     *Stage D*). Next: E (HLS).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
    - LUT loading (§6.4).
@@ -1048,6 +1050,26 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 - **Not before release:** this deinit is on the launch path that once left windows invisible.
 
 ---
+
+## ☐ OPEN 2026-10-12 — PRE-EXISTING, ALL BUILDS — stream bookmarks re-order their JSON keys on every save
+
+- **What:** `StreamBookmarkStore.persist()` encodes with a plain `JSONEncoder()`. Foundation writes an
+  object's keys in an order that changes from one process to the next, and between entries within one encode.
+  So every save rewrites every entry's keys in a new order, including entries nobody touched.
+- **Measured** (§6.9, *Stage D*): one value encoded six times by a scratch tool gave three key orders. In the
+  app, the scratch list's raw SHA-256 changed with every save, while its sorted-key SHA returned exactly to the
+  start after Save Auto. The real 1 196-byte list, re-encoded read-only by HEAD's type, is not raw-identical
+  either.
+- **Impact:** none on the data. Nothing reads key order, and every build decodes every order. What it breaks
+  is the claim "an untouched bookmark round-trips byte-for-byte" (`StreamBookmark.audioOffsetMs`'s comment,
+  §19.8's test): that holds for sorted bytes, not raw ones. Any byte-identity check on this key has to sort
+  first. Stage D's tests do.
+- **Fix, if wanted:** `.sortedKeys` on the store's encoder makes the stored bytes deterministic. It changes the
+  bytes of every user's list once, on the first save after the update, and is harmless to older builds. Not
+  made in Stage D: it changes how the user's list is written (Robbie's call). It also bears on the export
+  in the durability item above, where deterministic bytes make a diffable file.
+- **Related:** going back to a pre-Stage D build drops a saved colour override if that build then saves the
+  list. It reads the list, but its synthesized `Codable` writes back only the keys it knows. The list stays.
 
 ## ✅ FIXED 2026-10-07 (`418fcef`) — PRE-EXISTING, ALL BUILDS — SRT colour always reads UNDECLARED: the vendored FFmpeg has no H.264 decoder
 

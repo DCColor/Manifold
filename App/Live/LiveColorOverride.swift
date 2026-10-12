@@ -8,13 +8,19 @@
 //    * NDI: on `NDIService`, for the session, as before. This model only forwards to it, so NDI's
 //      behaviour is unchanged.
 //    * SRT: HERE, one per window (the `LiveAudioOffsetModel` pattern). Set up in
-//      `DeckRegistry.connectLive`, reset to Auto on every connect, session-only until Stage D saves it
-//      per bookmark. Applied through `SRTFrameRouter.setColorimetryOverride`, which tags the buffers
+//      `DeckRegistry.connectLive` from the bookmark the stream was connected from (Stage D), or Auto
+//      for anything without one. Applied through `SRTFrameRouter.setColorimetryOverride`, which tags the buffers
 //      and tells the renderer from the same value (finding 10), through `setSourceColorSpace(…,
 //      provenance: .overridden)` — so the chain readout and the scopes (`ScopeColorFeed`) follow it
 //      with no work of their own.
 //    * WHEP (Stage C): HERE too, the same way, through `WHEPFrameRouter.setColorimetryOverride`.
-//    * HLS (Stage E): none yet. `offersOverride` says so, and the control is not shown for it.
+//    * HLS (Stage E): none yet. `offersOverride` says so, and the control is not shown for it. The
+//      bookmark's saved value is loaded (`savedOverride`) but not applied until Stage E.
+//
+//  SAVE TO BOOKMARK (Stage D, decision 5): Save and Revert in the Color control's menu, as the audio
+//  offset's are in the A/V menu. Nothing else writes it; the Stream Sources sheet has no field. Stored as
+//  `StreamBookmark.colorOverride` (`ColorimetryOverride.storageID`), Auto as absent. NDI has no bookmark
+//  and stays session-only.
 //
 //  THE TITLE SUFFIX (decision 4): " — Color 2020 PQ" while an override is in force, on any transport,
 //  NDI included (`WindowDeck.windowTitle`). Nothing is drawn over the picture.
@@ -24,6 +30,7 @@
 
 import SwiftUI
 import ColorimetryModel
+import StreamBookmarkModel
 
 // MARK: - The session value, per window
 
@@ -33,6 +40,11 @@ final class LiveColorOverrideModel: ObservableObject {
     @Published private(set) var sessionOverride: ColorimetryOverride = .auto
     /// The transport this window last connected.
     @Published private(set) var source: LiveSource?
+    /// The bookmark this connect came from, and its saved override at connect or at the last save
+    /// (Auto when it has none, or one this transport does not offer).
+    @Published private(set) var bookmarkID: UUID?
+    @Published private(set) var bookmarkName: String?
+    @Published private(set) var savedOverride: ColorimetryOverride = .auto
 
     private weak var deck: WindowDeck?
 
@@ -75,13 +87,32 @@ final class LiveColorOverrideModel: ObservableObject {
 
     // MARK: Connect
 
-    /// A connect is starting from this window (`DeckRegistry.connectLive`, the one funnel). Every
-    /// connect starts on Auto: the override is for this connection only until Stage D.
-    func prepare(source: LiveSource) {
+    /// A connect is starting from this window (`DeckRegistry.connectLive`, the one funnel). The
+    /// session starts on the bookmark's saved override (Stage D), or on Auto for anything without one
+    /// (NDI, a pasted URL, the DEBUG ⌃⌥D/⌃⌥H overrides). Handed to the frame router BEFORE the transport
+    /// opens, so the first decoded frame is already under it: on SRT it rides the activation, on WHEP
+    /// it is the first announcement (§6.9 Stages B, C).
+    func prepare(source: LiveSource, bookmark: StreamBookmark?) {
         self.source = source
-        sessionOverride = .auto
-        if let tag = Self.logTag(source) {
-            Self.apply(.auto, on: source)
+        bookmarkID = bookmark?.id
+        bookmarkName = bookmark?.name
+        savedOverride = ColorimetryOverride(storageID: bookmark?.colorOverride, on: Self.transport(source))
+        guard let tag = Self.logTag(source) else {
+            sessionOverride = .auto   // NDI's is on NDIService; HLS applies nothing until Stage E
+            deck?.applyWindowTitle()
+            return
+        }
+        sessionOverride = savedOverride
+        Self.apply(sessionOverride, on: source)
+        if let stored = bookmark?.colorOverride, savedOverride == .auto {
+            // Kept verbatim in the bookmark; Auto here. Never applied past the picker's rule.
+            NSLog("[%@] the saved stream’s color override “%@” is not offered on this transport — Auto",
+                  tag, stored)
+        }
+        if let p = sessionOverride.preset {
+            NSLog("[%@] override → %@ (CICP %d-%d-%d) — from the saved stream",
+                  tag, sessionOverride.label, p.primaries, p.transfer, p.matrix)
+        } else {
             NSLog("[%@] override → Auto (new connection)", tag)
         }
         deck?.applyWindowTitle()
@@ -126,6 +157,35 @@ final class LiveColorOverrideModel: ObservableObject {
         let all = ColorimetryOverride.available(on: Self.transport(source))
         let i = all.firstIndex(of: current(for: source)) ?? 0
         set(all[(i + 1) % all.count], on: source)
+    }
+
+    // MARK: Save to bookmark (Stage D)
+
+    /// The transports whose override is saved per bookmark from this menu: SRT and WHEP today, HLS
+    /// with Stage E. NDI is session-only (decision 1).
+    static func savesOverride(_ source: LiveSource) -> Bool { logTag(source) != nil }
+
+    /// The session's override differs from the bookmark's: Save and Revert have something to do.
+    var differsFromSaved: Bool { bookmarkID != nil && sessionOverride != savedOverride }
+
+    /// Persist the session's override into the bookmark this connect came from. Auto removes the key.
+    func saveToBookmark() {
+        guard let id = bookmarkID, let source, let tag = Self.logTag(source) else { return }
+        let saving = sessionOverride
+        switch StreamBookmarkStore.shared.setColorOverride(saving.storageID, forBookmark: id) {
+        case .success(let b):
+            savedOverride = ColorimetryOverride(storageID: b.colorOverride, on: Self.transport(source))
+            NSLog("[%@] saved %@ to the saved stream", tag, saving.label)
+        case .failure(let e):
+            NSLog("[%@] notice: %@", tag, e.message)
+            deck?.engine?.playbackNotice = e.message
+        }
+    }
+
+    /// Back to the bookmark's saved override (Auto for none).
+    func revertToSaved() {
+        guard let source else { return }
+        set(savedOverride, on: source)
     }
 
     /// The window-title suffix's words while an override is in force, or nil.
@@ -253,6 +313,20 @@ struct ColorInterpretationControl: View {
         }
         Section("Stream") {
             Button(streamStatusLine) {}.disabled(true)
+        }
+        // Save and Revert, as the A/V menu has them for the audio offset (§6.9 Stage D, decision 5).
+        // SRT and WHEP; NDI's override is for the session only.
+        if LiveColorOverrideModel.savesOverride(source) {
+            Section {
+                if let name = model.bookmarkName {
+                    Button("Save \(model.current(for: source).label) to “\(name)”") { model.saveToBookmark() }
+                        .disabled(!model.differsFromSaved)
+                    Button("Revert to Saved (\(model.savedOverride.label))") { model.revertToSaved() }
+                        .disabled(!model.differsFromSaved)
+                } else {
+                    Text("Not a saved stream: this override lasts for this connection only")
+                }
+            }
         }
     }
 
