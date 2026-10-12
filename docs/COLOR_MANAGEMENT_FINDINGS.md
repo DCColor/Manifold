@@ -1555,7 +1555,7 @@ Run in this order.
   - SRT and WHEP report declared or assumed for each axis.
   - Correct the "SRT can state the truth" comments.
   - Check again whether OBS → SRT really declares nothing.
-- **Stage B — SRT override, per session.**
+- **Stage B — SRT override, per session.** Done 2026-10-12, uncommitted (*Stage B*, below).
   - The override goes through `setSourceColorSpace(…, provenance: .overridden)`.
   - The scopes need no extra work: they follow the renderer since `946417a`.
 - **Stage C — WHEP override, per session.** Same pattern as Stage B.
@@ -1621,7 +1621,7 @@ FFmpeg build did not change.
   when the first picture is presented.
 - **A later SPS** that changes the colour re-tags buffers from the next decoded frame. The renderer
   hears through the new `LiveDisplayRoute.updateColorimetry`, which calls `setSourceColorSpace` and
-  which Stage B will reuse. That hop is timed for the presentation of the first new-colour frame, so
+  which Stage B reuses (it does: the override takes the same hop, *Stage B* below). That hop is timed for the presentation of the first new-colour frame, so
   the ~0.25 s (SRT) or ~0.4 s (WHEP) of old frames still queued are not drawn under the new colour.
 - **The log:** `[SPS-COLOR]` once per change, per axis, with the SPS's raw number beside the verdict.
   It also gives `video_full_range_flag` against the range in use. Range is still each transport's
@@ -1836,6 +1836,87 @@ dictionary-equal (1 141 keys); `streamBookmarks` was not written.
 - **MediaMTX's HLS of the Baseline test stream** failed to open in AVFoundation (CoreMedia −12927).
   It was not investigated; bipbop was used for the HLS regression instead.
 
+#### Stage B — SRT override, per session: done 2026-10-12, uncommitted
+
+**What changed.**
+
+- **Where it lives.** `LiveColorOverrideModel` (new, `App/Live/LiveColorOverride.swift`), one per window
+  (`WindowDeck.colorOverride`), the `LiveAudioOffsetModel` pattern. `DeckRegistry.connectLive` calls
+  `prepare(source:)`, which resets it to Auto on every connect. Session-only; Stage D saves it per bookmark.
+  For NDI the model only forwards to `NDIService`, whose override is unchanged (decision 1).
+- **How it applies.** The model hands the preset to `SRTFrameRouter.setColorimetryOverride`, held under
+  `stateLock`. `deliver` reads it once per decoded frame beside the clock. The frame's colour is the SPS
+  reading with the override applied (`StreamColorimetry.applying`, through `SourceColorimetry.resolve`).
+  The buffer tags state it. When it differs from what the renderer was told, Stage SPS's timed hop
+  announces it for that frame's presentation, through `LiveDisplayRoute.updateColorimetry` →
+  `setSourceColorSpace(…, provenance: .overridden)`. So both halves of finding 10 change together, and the
+  scopes follow through `ScopeColorFeed` with no work of their own. An override set before the first SPS
+  rides the activation. The SPS reading itself never carries the override, so `[SPS-COLOR]` is untouched.
+- **It takes effect with the next decoded frame.** A sender that has stopped sending gets the change when
+  it resumes, as with an SPS change.
+- **Presets:** `ColorimetryOverride.available(on: .srt)`, so no Rec.2020 SDR (decision 3). Auto returns to
+  what the stream declares.
+- **The Color control** moved out of `ContentView` into `ColorInterpretationControl` (same file), unchanged
+  in body. It reads NDI's colorimetry from `NDIService` and SRT's from `SRTClient.colorimetry`, which now
+  publishes the reading with the override applied. `ContentView` gained no modifiers (§6.7): one element,
+  gated on `LiveColorOverrideModel.offersOverride` (NDI, SRT), and the five NDI-only properties left. ⌃⌥C
+  goes through `colorOverride.cycle(on:)`. Before the first SPS the face reads `— · Waiting for the stream`.
+- **The title suffix** (decision 4): ` — Color 2020 PQ` (`shortLabel`), before the A/V suffix, while an
+  override is in force and this deck owns the stream. On all four transports, NDI included; WHEP and HLS
+  cannot have one yet. NDI's title follows through the arbitration pass on `NDIService.objectWillChange`.
+- **The log:** `[SRT-COLOR] override → <preset> (CICP p-t-m)` when the user changes it, `[SRT-COLOR] override
+  → Auto (new connection)` at connect, and `[SRT-COLOR] renderer now: …` when the renderer takes it. The
+  mid-stream SPS line is unchanged.
+
+**Rig.** Unattended, unsigned Profile builds: HEAD `3f54b42` (SHA-256 `a113e023…`) against the tree
+(`7b0408bd…`). SRT: ffmpeg listener on 127.0.0.1:9710, connected with ⌃⌥D and `MANIFOLD_SRT_DEBUG_URL`. NDI:
+the scratch NDI SDK sender rebuilt (`barsend.cpp`, SDK 6.3.2): "B Bars", 1920×1080 25p 8-bit UYVY 75 %
+bars, no metadata, the only source on the network. The window was on the ASUS PA147 at 875×492. The ASUS is
+for pixel-value checks only; nothing here was judged by eye. **Fixtures:** 1280×720/25 SMPTE HD bars, x264
+High, AAC. `bars_untagged.ts` carries no `video_signal_type` (`trace_headers`). `bars_pq.ts` is the same
+slices with only the SPS VUI rewritten to 9/16/9 by `h264_metadata`, so both decode to identical pixels
+(ffmpeg's decode md5-equal). P7 used `build/chroma-fixtures/`. **Defaults:** exported before the first
+launch, restored after the last quit, dictionary-equal (1 143 keys). `streamBookmarks` was never written.
+`defaults import` merges: the 19 window-frame keys the runs added had to be deleted by name.
+
+**Predictions** were written before any code changed (2026-10-12):
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| 1 | Untagged H.264 SRT; ⌃⌥C ×2 to 2020 PQ | exactly one `[SCOPE-COLOR] source: … PQ … overridden (CICP 9-16-9)`; readout `CICP 9-16-9 — overridden`; face `2020 PQ (ST 2084) · Overridden`, amber ≥ 100 px; title `SRT debug URL — Color 2020 PQ` | any missing or different |
+| 2 | Declared PQ (Auto) vs untagged + 2020 PQ override, same bars | ⌃⌥E export 0 differing; ASUS OS-mode window capture 0 codes; controls 0; sanity (untagged Auto vs untagged + PQ) > 0 | any non-zero on the pair; sanity 0 voids |
+| 3 | Back to Auto | declared PQ: `tagged (CICP 9-16-9)`; untagged: tier `assumed`, scope line `(CICP –-–-–)` (SRT tells the renderer an undeclared axis as nil; the readout prints those as 1-1-1, the buffers are tagged 1-1-1) | otherwise |
+| 4 | Override at 2020 PQ, disconnect, reconnect | control Auto, no suffix, one `→ Auto (new connection)` | the override survives |
+| 5 | Lines per change | 1 `[SRT-COLOR] override` + 1 `[SCOPE-COLOR] source` each; 0 `[SPS-COLOR]`; nothing when nothing changes | extra or missing |
+| 6 | NDI, ⌃⌥C through all six back to Auto, HEAD vs tree | `[NDI]`/`[EDR]` identical per step, per thread; `[SCOPE-COLOR]` identical; tree title suffix per preset, none at Auto | any line differs; suffix wrong |
+| 7 | Auto on SRT: H.264 4:2:0 8-bit, HEVC 4:2:2 10-bit, H.264 4:2:2 8-bit | exports md5-identical HEAD vs tree; colour lines identical | any md5 differs |
+
+**Results — all seven PASS.**
+
+| # | Result |
+|---|---|
+| 1 | One `[SCOPE-COLOR] source: Rec. 2020 · PQ (ST 2084) — overridden (CICP 9-16-9)`. Face `2020 PQ (ST 2084) · Overridden`, **512 amber px**, commonest pixel **255,146,48**, the same tint Stage A measured on NDI. Title `SRT debug URL — Color 2020 PQ`. The readout was not opened (see below); the scope line carries the same codes and tier. |
+| 2 | **Pair: 0 / 3 686 400** in the export PNG; `.rgba16f` and `.v210` md5-identical. **ASUS window capture: 0 codes** (0 / 1 722 000). Controls, each case 5 s apart: 0 everywhere. **Sanity: window 228 codes, 82.96 % of pixels** (Stage A: 228, 83.02 %); export 44.02 % of pixels. |
+| 3 | Declared PQ back to Auto: `Rec. 2020 · PQ (ST 2084) — tagged (CICP 9-16-9)`, face `2020 PQ (ST 2084) · Declared`. Untagged back to Auto: `Rec. 709 · Rec. 709 — assumed (CICP –-–-–)`, face `709 709 · Assumed`, 0 amber px. |
+| 4 | After disconnect with 2020 PQ in force and a reconnect: `[SRT-COLOR] override → Auto (new connection)`, face `709 709 · Assumed`, 0 amber px, title `SRT debug URL`. The untagged reconnect logs no `source` line: its state equals the cleared state (Stage SPS's untagged row). |
+| 5 | Untagged run: 7 changes → **7** `override` lines, **7** `renderer now`, **7** `source` (+1 at disconnect). Declared run: 5 → 5 / 5 / 5. `[SPS-COLOR]` once per connect, never from an override. **0 colour lines in 10 s idle** with the override held. Change → renderer: **+0.55 to +0.83 s** (12 changes; the `override` line to the `source` line). That is the queue, not a lag in the override: ffmpeg packs 363 ms of AAC per PES, so the cushion rose to **624 ms** before the first anchor (`[SRT-BUFFER] cushion 250 → 624 ms`), and the hop waits for the first re-tagged frame to be due, as designed. |
+| 6 | HEAD ×2 and tree ×2: 7 steps, 88 `[NDI]`/`[EDR]` lines each, **identical** per step and per thread; 10 `[SCOPE-COLOR]` lines, **identical**. Tree titles: `MAC-STUDIO (B Bars) — Color 709`, `… 2020 PQ`, `… 2020 HLG`, `… P3 PQ`, `… 2020 SDR`, then no suffix at Auto. HEAD: no suffix ever. **The Color control's pixels on NDI, HEAD vs tree, 0 codes** at Auto and at 2020 PQ (it moved files). |
+| 7 | All nine export files (`.png`, `.rgba16f`, `.v210` × three fixtures) **md5-identical** HEAD vs tree. 19 colour lines (`[SPS-COLOR]`, `[SCOPE-COLOR]`, `[CHROMA]`, `[SRT] colorimetry`) each, identical. The tree adds only its three `→ Auto (new connection)` lines. |
+
+**Harness, for the next stage (C).**
+
+- **Keystrokes drop.** One ⌃⌥C and two ⌃⌥E were lost in one run, the way Stage A's T1 was. Every keystroke
+  is now checked against the log line it must produce and retried; no result above rests on an unchecked
+  keystroke. The void run was discarded.
+- **The chain readout was not read.** It is a popover behind the display-transform menu. Driving it through
+  Accessibility was tried and dropped: a missed click put typed letters into the app as shortcuts. The
+  `[SCOPE-COLOR]` line has matched the readout in every earlier run, and the face states the tier.
+- **After a forced quit the next launch restores no window.** ⌘N gives one. The harness presses it.
+
+**Still open after Stage B.** Stage C (WHEP), D (save per bookmark), E (HLS, after decision 6's code fix).
+The Rec.2020 SDR preset stays NDI-only (decision 3). An override on SRT is not saved: a reconnect starts on
+Auto, by design until Stage D.
+
 ### 6.10 HEVC over SRT — audit and decisions, 2026-10-07
 
 **Why here:** HEVC is how 10-bit HDR (Main 10, PQ and HLG) reaches Manifold over SRT. OBS's H.264
@@ -2001,7 +2082,9 @@ Run in this order. Each stage ships on its own.
   - OBS P010, Rec. 2100, VideoToolbox HEVC Main 10 → MediaMTX.
   - Predicted: 10-bit, 9-16-9, MDCV and CLL present.
   - The user guide and the tester notes stop saying "H.264 only".
-- **Then override Stage B** (§6.9).
+- **Then override Stage B** (§6.9). **Done 2026-10-12**, uncommitted: §6.9, *Stage B*. The SRT override takes
+  the mid-stream colour update this section's Stage SPS work built (`LiveDisplayRoute.updateColorimetry`),
+  timed the same way, and is md5-neutral at Auto on HEVC 4:2:2 10-bit, H.264 4:2:2 8-bit and H.264 4:2:0.
 
 #### Stage 0 — the identification fix: predictions, written 2026-10-07 before the code changed
 
@@ -4882,7 +4965,7 @@ chroma would be ≈ 500 / 520.
 | L2 | **HEVC SRT 422, Lines 422, through export (⌃⌥E `.rgba16f`) and SDI (the `.v210` wire dump):** the rows survive OBS's compositor (4:2:2 keeps every row's chroma): **≥ 99.9 % of rows (≥ 1079 / 1080) within ± 2 codes of their own line**, the line being the median of the even rows and of the odd rows; even and odd differ by > 100 codes in Cb and in Cr. The medians land within ± 6 of the expected values above (scored separately: it tests OBS's conversion, not Manifold) | rows ≥ 1079 / 1080, export AND wire | fewer. If OBS's compositor does not keep the lines, what it does is recorded (blur, averaging, offset) and the Manifold verdict rests on L1 and on the S3 fixture results |
 | C1 | **One calibration on SYNC, HEVC SRT**, measure-only (Cancel), taken at **≥ +120 s** after connect (the comparison point decided in Stage 4) | within ± 3 ms of the HEVC file figure at +120 s, **−1.00 ms** (`hevc_160` pair): **−4.00 … +2.00** | outside |
 | C2 | **One calibration on SYNC, HEVC SRT 422**, the same way | within ± 3 ms of the 4:2:2 HEVC soak's +2 min figure, **−0.76 ms**: **−3.76 … +2.24** | outside |
-| V | **ASUS visual check (Robbie)**, HEVC SRT, HDR wedge, the ASUS PA147 in HDR mode: (a) the bottom row's patches 40–43 (245, 389, 620, 983 nits) visibly brighter than the window chrome's SDR white, each step distinct; patches above the display's own peak (from 44, 1560 nits, upward) may merge, which is expected (no tone-map, §6.2); (b) the top two rows (patches 0–15, 0.0002–0.06 nits) step up from black, not lifted grey, and patch 0 is black; (c) the SYNC scene's white looks like ordinary SDR white, not glaring and not dim; (d) the chain readout shows the PQ tag and an EDR headroom figure | Robbie's yes on (a)–(d) | any no, recorded as Robbie describes it |
+| V | **Visual check (Robbie)**, HEVC SRT, HDR wedge, on the **LG with HDR on**. ⚠️ Corrected 2026-10-12: this row was written as "ASUS visual check … the ASUS PA147 in HDR mode". The ASUS is SDR-only and uncalibrated; the check was made on the LG, as the result below says (CLAUDE.md, *Test environment*). (a) the bottom row's patches 40–43 (245, 389, 620, 983 nits) visibly brighter than the window chrome's SDR white, each step distinct; patches above the display's own peak (from 44, 1560 nits, upward) may merge, which is expected (no tone-map, §6.2); (b) the top two rows (patches 0–15, 0.0002–0.06 nits) step up from black, not lifted grey, and patch 0 is black; (c) the SYNC scene's white looks like ordinary SDR white, not glaring and not dim; (d) the chain readout shows the PQ tag and an EDR headroom figure | Robbie's yes on (a)–(d) | any no, recorded as Robbie describes it |
 
 **Expected risks, recorded rather than worked around:** MediaMTX sends a reader nothing above ~10–13 Mb/s (S3/S4, P9);
 OBS's CBR 10000 is at that edge, so a stall with OBS still sending is that limit, confirmed with ffmpeg as the reader.

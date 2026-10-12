@@ -259,6 +259,11 @@ final class WindowDeck: ObservableObject {
     /// `DeckRegistry.connectLive`, edited by the nudge keys and `AudioOffsetControl`.
     private(set) lazy var audioOffset = LiveAudioOffsetModel(deck: self)
 
+    /// This window's colorimetry override for its live connect (docs/COLOR_MANAGEMENT_FINDINGS.md
+    /// §6.9, Stage B): held here for SRT, forwarded to NDIService for NDI. Set up by
+    /// `DeckRegistry.connectLive`, edited by the Color control and ⌃⌥C.
+    private(set) lazy var colorOverride = LiveColorOverrideModel(deck: self)
+
     /// This window's calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.10): the sheet's state and
     /// the run, whose detectors exist only while it listens. Opened from the A/V menu.
     private(set) lazy var calibration = SyncCalibrationModel(deck: self)
@@ -317,6 +322,11 @@ final class WindowDeck: ObservableObject {
     ///      drawn over the picture. Only while this deck owns a live source, so a value left in the
     ///      model after a disconnect never shows. Full screen has no marker: the same accepted limit.
     ///
+    ///   6. **A live stream with a colorimetry override in force appends " — Color 2020 PQ"**, before
+    ///      the A/V suffix, on every transport, NDI included (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9,
+    ///      decision 4). The Color control's amber hides with the overlay HUD; this does not. Only
+    ///      while this deck owns the live source, like case 5.
+    ///
     /// ⚠️ NEVER A URL, for a stream. A stream path can carry the stream key, and this string goes
     /// into the Window menu, into Mission Control, and into any screenshot of either. That is the
     /// same rule the bookmark rows and the standing message already follow.
@@ -326,6 +336,9 @@ final class WindowDeck: ObservableObject {
         else if let live = DeckRegistry.shared.liveLabel(for: self) { base = live }
         else { base = "Manifold" }
         var title = base
+        if let live = DeckRegistry.shared.liveSource(for: self), let color = colorOverride.titleSuffix(for: live) {
+            title += " — " + color
+        }
         if DeckRegistry.shared.liveLabel(for: self) != nil, audioOffset.isAvailable, audioOffset.sessionMs != 0 {
             title += " — " + LiveAudioOffsetModel.indicator(audioOffset.sessionMs)
         }
@@ -1605,8 +1618,20 @@ final class DeckRegistry {
             // After the claim is granted and before the transport opens its audio session, so the
             // first anchor places the value with no splice.
             deck.audioOffset.prepare(source: source, bookmark: bookmark)
+            // Every connect starts on Auto (§6.9 Stage B; per-bookmark save is Stage D).
+            deck.colorOverride.prepare(source: source)
             standUp()
         }
+    }
+
+    /// The live source THIS deck owns, or nil when it owns none.
+    @MainActor
+    func liveSource(for deck: WindowDeck) -> LiveSource? {
+        let id = ObjectIdentifier(deck)
+        for (key, claim) in claims where claim.deck == id {
+            if case .live(let source) = key { return source }
+        }
+        return nil
     }
 
     /// What to call the live source THIS deck owns, or nil when it owns none.

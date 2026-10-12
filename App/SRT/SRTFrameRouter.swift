@@ -268,6 +268,21 @@ final class SRTFrameRouter {
     // `targetDepth` of them. So the announcement is timed for the presentation of the first new-colour
     // frame (`deliver`), not for its decode: the two halves land together, to within the hop, rather
     // than a quarter-second of old pictures being drawn under the new colour.
+    //
+    // ── THE USER'S OVERRIDE TAKES THE SAME ROAD (§6.9, Stage B) ────────────────────────────
+    //
+    // The override is held here under `stateLock` (`setColorimetryOverride`, from the window's
+    // `LiveColorOverrideModel`) and read once per decoded frame in `deliver`, beside the clock. That
+    // frame's colour is the SPS reading with the override applied (`StreamColorimetry.applying`): its
+    // buffer tags say it, and when it differs from what the renderer was told, the same timed hop as a
+    // mid-stream SPS change tells the renderer for that frame's presentation. So an override changes
+    // the buffer tags and the renderer's codes together (finding 10), and the frames already queued
+    // under the old colour are drawn under it. An override set before the first SPS rides the
+    // activation. The SPS reading itself (`colorimetry`) never carries the override, so `[SPS-COLOR]`
+    // and its once-per-change guard are untouched by it.
+    //
+    // ⚠️ IT TAKES EFFECT WITH THE NEXT DECODED FRAME. A sender that has stopped sending gets the
+    // change when it resumes. Same as an SPS change, and there is no picture to be wrong meanwhile.
 
     // MARK: - The route's per-source configuration
 
@@ -363,6 +378,12 @@ final class SRTFrameRouter {
     /// Range as codecpar states it, latched at `prepareDecoder`. The SPS does not set it (see the
     /// colorimetry block).
     private var formatRange: (isFullRange: Bool, declared: Bool) = (false, false)
+    /// The user's colour override (Stage B). Under `stateLock`: main writes it, the session thread
+    /// reads it once per frame in `deliver`. Reset to `.auto` at every connect by the window's model.
+    private var colorOverride: ColorimetryOverride = .auto
+    /// The colour the frame being delivered is tagged with: the SPS reading with the override applied.
+    /// Session thread only; set in `deliver` before the promote, which tags its source with it.
+    private var frameColorimetry = StreamColorimetry.undeclared(isFullRange: false, rangeDeclared: false)
     /// Whether this stream has had an SPS read yet. The FIRST reading activates the route.
     private var haveSPSColor = false
     /// What the renderer has been (or is about to be) told, so `deliver` can see a change. nil until
@@ -751,12 +772,23 @@ final class SRTFrameRouter {
     /// The stream's SPS colour changed mid-stream. MAIN, from SRTClient, timed for the first
     /// new-colour frame's presentation. The buffer tags already changed on the session thread; this
     /// is the renderer's half (`LiveDisplayRoute.updateColorimetry`).
-    func updateColorimetry(_ colorimetry: StreamColorimetry) {
+    ///
+    /// `byOverride`: the user's override changed and the SPS did not (Stage B), so the log says that
+    /// rather than "mid-stream".
+    func updateColorimetry(_ colorimetry: StreamColorimetry, byOverride: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
         stateLock.lock(); let active = liveClock != nil; stateLock.unlock()
         guard active else { return }
         route.updateColorimetry(colorimetry.route(undeclaredAxisCode: nil))
-        NSLog("[SRT] colorimetry changed mid-stream: %@", colorimetry.summary)
+        NSLog(byOverride ? "[SRT-COLOR] renderer now: %@" : "[SRT] colorimetry changed mid-stream: %@",
+              colorimetry.summary)
+    }
+
+    /// The user's colour override for this connection (Stage B). MAIN, from the window's
+    /// `LiveColorOverrideModel`. Applied from the next decoded frame — see the colorimetry block.
+    func setColorimetryOverride(_ override: ColorimetryOverride) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stateLock.withLock { colorOverride = override }
     }
 
     /// SRT releases the display. Restores the file-path providers verbatim so playback can resume,
@@ -939,8 +971,10 @@ final class SRTFrameRouter {
         NSLog("%@", next.spsColorLine(transport: "SRT"))
         guard !haveSPSColor else { return }
         haveSPSColor = true
-        announcedColorimetry = next.route(undeclaredAxisCode: nil)
-        onStreamColorimetry?(next, true, 0)
+        // An override set before the first SPS (Stage B) rides the activation.
+        let effective = next.applying(stateLock.withLock { colorOverride })
+        announcedColorimetry = effective.route(undeclaredAxisCode: nil)
+        onStreamColorimetry?(effective, true, 0)
     }
 
     /// Release everything the session thread owns. SESSION THREAD, from onEnded — the last instant
@@ -2348,10 +2382,13 @@ final class SRTFrameRouter {
         stateLock.lock()
         let clock = liveClock
         let renderer = self.renderer
+        let override = colorOverride
         stateLock.unlock()
         // Not active (a frame racing activate, or arriving after deactivate). Counting it and
         // dropping it is correct.
         guard let clock, let renderer else { logFlowIfDue(); return }
+        // This frame's colour: the SPS it was decoded under, with the user's override (Stage B).
+        frameColorimetry = colorimetry.applying(override)
 
         // THE PICTURE'S SHAPE, from the DECODED buffer and not from `format.width/height`. The
         // codecpar dimensions are read once, at `avformat_find_stream_info` time, and describe what
@@ -2414,11 +2451,12 @@ final class SRTFrameRouter {
 
         // A COLOUR CHANGE REACHES THE RENDERER WHEN ITS FIRST FRAME IS DUE. This frame was decoded
         // under a later SPS than the renderer has been told about; the frames ahead of it in the
-        // queue were not. See the colorimetry block.
-        let stated = colorimetry.route(undeclaredAxisCode: nil)
+        // queue were not. See the colorimetry block. An override change (Stage B) is announced the
+        // same way, from the first frame tagged with it.
+        let stated = frameColorimetry.route(undeclaredAxisCode: nil)
         if let announced = announcedColorimetry, stated != announced {
             announcedColorimetry = stated
-            onStreamColorimetry?(colorimetry, false, LiveDisplayRoute.secondsUntilDue(presentationPTS, clock))
+            onStreamColorimetry?(frameColorimetry, false, LiveDisplayRoute.secondsUntilDue(presentationPTS, clock))
         }
 
         guard let promoted = promoteIfNeeded(decoded) else {
@@ -2432,8 +2470,8 @@ final class SRTFrameRouter {
         // measured behavior rather than a documented contract, so tagging the OUTPUT last is the
         // ordering that holds either way — NDIService.tagOutput's reasoning, verbatim. What is
         // stamped is what the SPS this frame was decoded under DECLARED, and 709 for any axis it did
-        // not; the provenance of that choice is in its `[SPS-COLOR]` line.
-        colorimetry.bufferTags.apply(to: promoted)
+        // not; the provenance of that choice is in its `[SPS-COLOR]` line. Or the user's override.
+        frameColorimetry.bufferTags.apply(to: promoted)
 
         guard let sampleBuffer = Self.makeSampleBuffer(
                 promoted,
@@ -2523,7 +2561,7 @@ final class SRTFrameRouter {
 
         // Tag the SOURCE before the transfer, so VT converts from a buffer whose colorimetry is
         // stated rather than absent. (The output is re-tagged after, in `deliver` — see there.)
-        colorimetry.bufferTags.apply(to: source)
+        frameColorimetry.bufferTags.apply(to: source)
 
         let status = VTPixelTransferSessionTransferImage(transferSession, from: source, to: destination)
         guard status == noErr else {

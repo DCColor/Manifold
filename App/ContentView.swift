@@ -2,7 +2,6 @@ import SwiftUI
 import ManifoldCore
 import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
 import StreamBookmarkModel
-import ColorimetryModel   // the colorimetry override presets and their per-transport availability
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -1684,7 +1683,7 @@ struct ContentView: View {
             // ⌃⌥C cycles the colorimetry override. The toolbar picker is the real control; this is
             // a keyboard path for driving it hands-off (and for A/B-ing a preset against the picture
             // without moving the pointer, which is how you actually judge one).
-            Button("") { cycleNDIColorimetryOverride() }
+            Button("") { deck.colorOverride.cycle(on: activeLiveSource) }
                 .keyboardShortcut("c", modifiers: [.control, .option])
         }
         .opacity(0)
@@ -1992,13 +1991,6 @@ struct ContentView: View {
         }
     }
 
-    private func cycleNDIColorimetryOverride() {
-        guard ndi.isConnected else { return }
-        let all = ColorimetryOverride.available(on: .ndi)
-        let i = all.firstIndex(of: ndi.colorimetryOverride) ?? 0
-        NDIService.shared.setColorimetryOverride(all[(i + 1) % all.count])
-    }
-
     // MARK: - Audio track selection
 
     /// Short face/menu description of audio track `index` — "Stereo", "5.1 SMPTE", "6 ch".
@@ -2056,7 +2048,7 @@ struct ContentView: View {
     }
 
     /// Audio track — which of the file's audio tracks is MONITORED. Split face (readout + lone
-    /// chevron) mirroring `colorControl`; see the note there on why the chevron must be its own
+    /// chevron) mirroring `ColorInterpretationControl` (LiveColorOverride.swift); see the note there on why the chevron must be its own
     /// Menu label rather than a trailing element.
     ///
     /// ── SHOWN DISABLED RATHER THAN HIDDEN WHEN THERE IS NO CHOICE ─────────────────────────────
@@ -2139,136 +2131,6 @@ struct ContentView: View {
         Section {
             Button("Speakers, meters and SDI all follow this track") {}.disabled(true)
         }
-    }
-
-    /// Color — the color-interpretation control: how Manifold reads the incoming color, and the
-    /// user's power to override that reading. This is a source-AGNOSTIC control by design. Today it
-    /// hosts a single section — the live stream's colorimetry override — because stream content is
-    /// all there is to interpret right now. When files gain color-management modes (Bypass /
-    /// Embedded / Match-QuickTime) they become a SECOND section in this SAME menu, not a new control:
-    /// file and stream are two answers to one question ("what color is this, really?"), so they
-    /// belong under one "Color" roof. Build here, don't restructure later — the seam is marked below.
-    ///
-    /// The face states the EFFECTIVE interpretation and its tier, because the honest thing and the
-    /// useful thing are the same sentence here — "709 · Assumed" tells the user both what the scopes
-    /// are doing and that nobody actually verified it. The chevron (matching the streaming / DeckLink
-    /// split-buttons) makes it read as a menu you OPEN, not a passive readout. An override turns the
-    /// control amber: something on screen is a human assertion, not a reading, and that should never
-    /// look like the neutral resting state.
-    ///
-    /// Most NDI senders declare nothing (OmniScope declares nothing at all), so for the common case
-    /// the colorimetry section is not a corner-case escape hatch — it is how the stream's colorimetry
-    /// gets set.
-    private var colorControl: some View {
-        // Two-part split face mirroring the streaming / DeckLink controls: a readout element + a
-        // lone-chevron menu. The chevron MUST be its own borderlessButton Menu label, not the
-        // trailing item of a multi-element label — `.menuStyle(.borderlessButton)` reserves and
-        // clips a trailing region for its disclosure indicator, and `.menuIndicator(.hidden)` hides
-        // the drawn arrow but not the clip, so a chevron sitting at a rich label's trailing edge is
-        // swallowed (the 3b bug: palette + text showed, chevron didn't). A lone chevron sits at its
-        // label's leading edge with only empty, harmlessly-clipped space after it — which is exactly
-        // why the streaming / DeckLink chevrons render. Both halves open the SAME presets, so the
-        // whole face stays clickable; the readout half also reads the effective colorimetry + tier.
-        //
-        // ⚠️ THE AMBER IS APPLIED TO THE LEAF `Text`s, AND `Image` IS WRAPPED IN ONE — MEASURED.
-        //
-        // `.foregroundStyle(…)` on this HStack is what the code used to do, and §6.8 measured the
-        // result: **max(r − b) = 0 across the whole face** while the label read "Overridden".
-        // `.menuStyle(.borderlessButton)` strips a LABEL's foreground, exactly as it strips a
-        // label's background (§6.8's Bypass-badge defect), and the control bar's own white wins.
-        //
-        // Five alternatives were measured in an isolated harness before this one was written:
-        // `.foregroundStyle` inside the label (STRIPPED — white), `.foregroundColor` on the
-        // leaves (the `Text` colours, the `Image` does NOT — a half-orange control), `.tint` on
-        // the Menu (colours both — but it also repaints the menu's own SELECTION HIGHLIGHT, which
-        // is the system accent's job), `HStack { Text(Image); Text }` (colours both and then
-        // **SWALLOWS THE TEXT ENTIRELY** — see below), and ONE CONCATENATED `Text`, which is what
-        // is here: it colours, it keeps its sizes, and it leaves the menu's accent alone.
-        //
-        // ⚠️ THE SWALLOWED-TEXT TRAP IS THE ONE ALREADY DOCUMENTED ABOVE, FROM THE OTHER SIDE.
-        // The note on the chevron says a borderless menu "reserves and clips a trailing region
-        // for its disclosure indicator", so a chevron at a rich label's trailing edge disappears.
-        // Wrapping the symbol in a `Text` turns this label into a MIXED one — a text-like element
-        // beside a view — and the same clip then eats the READOUT instead. Measured: the face
-        // dropped from 214 pt wide to 28, the glyph alone. A single `Text` is not a mixed label,
-        // so it is not clipped; the per-run `.font` keeps the glyph at its old size and the
-        // readout in the same monospaced caption.
-        HStack(spacing: 2) {
-            Menu {
-                colorStreamColorimetrySection
-            } label: {
-                (Text(Image(systemName: "paintpalette")).font(.system(size: 13))
-                 + Text("  ")
-                 + Text(ndiColorimetryFaceLabel).font(.system(.caption, design: .monospaced)))
-                    .foregroundColor(colorControlTint)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-
-            // The interactive affordance — same size-8 chevron.down as the streaming / DeckLink
-            // controls, so the control reads as a menu you open, not a passive readout.
-            Menu {
-                colorStreamColorimetrySection
-                // SEAM: a future file color-management section (Bypass / Embedded / Match-QuickTime)
-                // drops into colorStreamColorimetrySection's peer set — same menu, same control —
-                // when files gain those modes. Nothing is stubbed today (an inert row would read as
-                // broken); the structure is simply ready.
-            } label: {
-                Text(Image(systemName: "chevron.down")).font(.system(size: 8))
-                    .foregroundColor(colorControlTint)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-        }
-        .help("Color interpretation — Auto trusts the stream; a preset asserts it (⌃⌥C cycles)")
-    }
-
-    /// Amber when something on screen is a human assertion rather than a reading, the control
-    /// bar's own white otherwise. Applied per leaf — see the note on `colorControl`.
-    private var colorControlTint: Color {
-        ndi.colorInfo.isOverridden ? Color.orange : .white.opacity(0.9)
-    }
-
-    /// The live stream's colorimetry override — the one color-interpretation section with content
-    /// today. Presets assert a colorimetry; the "Stream" subsection keeps the sender's own claim
-    /// visible so an override reads as CONTRADICTING a declaration rather than filling a silence.
-    /// Same ColorimetryOverride path and tagging as before — relocated into the Color control,
-    /// logic untouched.
-    @ViewBuilder private var colorStreamColorimetrySection: some View {
-        Section("Colorimetry") {
-            Picker("Colorimetry", selection: ndiColorimetryBinding) {
-                ForEach(ColorimetryOverride.available(on: .ndi)) { option in
-                    Text(option.label).tag(option)
-                }
-            }
-            .pickerStyle(.inline)
-        }
-        Section("Stream") {
-            Button(ndiStreamStatusLine) {}.disabled(true)
-        }
-    }
-
-    /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "709 · Declared".
-    private var ndiColorimetryFaceLabel: String {
-        let info = ndi.colorInfo
-        return "\(SourceColorimetry.primariesName(info.primaries.code).replacingOccurrences(of: "Rec.", with: "")) "
-             + "\(SourceColorimetry.transferName(info.transfer.code).replacingOccurrences(of: "Rec.", with: "")) · \(info.tier)"
-    }
-
-    /// The stream's own claim, independent of the override — an absence stated as an absence.
-    private var ndiStreamStatusLine: String {
-        let d = ndi.declaredColorInfo
-        guard d.isDeclared else { return "Declares no colorimetry" }
-        return "Declares \(SourceColorimetry.primariesName(d.primaries.code)) · "
-             + "\(SourceColorimetry.transferName(d.transfer.code)) · "
-             + "\(SourceColorimetry.matrixName(d.matrix.code))"
-    }
-
-    private var ndiColorimetryBinding: Binding<ColorimetryOverride> {
-        Binding(get: { ndi.colorimetryOverride },
-                set: { NDIService.shared.setColorimetryOverride($0) })
     }
 
     /// Route the device picker through selectDevice (which cleanly stop/restarts if output is ON).
@@ -2490,7 +2352,7 @@ struct ContentView: View {
     /// The chevron loads/replaces/clears the sidecar and picks the position preset. Lit green while
     /// captions are showing, same on/off language as loop and the scopes tray.
     ///
-    /// The chevron MUST stay the LONE element of the Menu's label — see the note on `colorControl`:
+    /// The chevron MUST stay the LONE element of the Menu's label — see the note on `ColorInterpretationControl` (LiveColorOverride.swift):
     /// `.menuStyle(.borderlessButton)` clips a trailing region for its disclosure indicator, and
     /// `.menuIndicator(.hidden)` hides the arrow but not the clip, so a chevron at a rich label's
     /// trailing edge gets swallowed.
@@ -3167,10 +3029,11 @@ struct ContentView: View {
                 // Color — the color-interpretation control (source-agnostic). It hosts an ASSERTION
                 // about the source, so it lives with the actions, not in the inspector (which reports
                 // what things ARE). Today its only section is the live stream's colorimetry override,
-                // so it's gated to NDI: it has nothing to say about a file yet (file color-management
-                // modes are the future second section). Same appearance rule as before.
-                if activeLiveSource == .ndi {
-                    colorControl
+                // so it's gated to the transports that have one (NDI, SRT): it has nothing to say about
+                // a file yet (file color-management modes are the future second section). One element,
+                // no modifiers (§6.7) — see LiveColorOverride.swift.
+                if let live = activeLiveSource, LiveColorOverrideModel.offersOverride(live) {
+                    ColorInterpretationControl(source: live, model: deck.colorOverride)
                 }
 
                 // Display transform (§6.3 tiers 1–3) — Phase 2b. Next to the Color control because
@@ -3179,7 +3042,7 @@ struct ContentView: View {
                 // adjacent controls rather than merged, because "keeping them visibly separate is
                 // what stops 'Embedded' creeping back in as a concept."
                 //
-                // ⚠️ NOT GATED ON `activeLiveSource` the way `colorControl` is. That gate exists
+                // ⚠️ NOT GATED ON `activeLiveSource` the way the Color control is. That gate exists
                 // because the interpretation control has nothing to say about a FILE yet; this one
                 // has everything to say about a file — §6.5 and §6.6 were measured on file
                 // playback, and gating it to NDI would put the mode out of reach of its main case.

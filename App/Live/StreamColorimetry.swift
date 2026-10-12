@@ -27,6 +27,12 @@
 //  from each buffer's tags; everything else takes its colour from `setSourceColorSpace`. Both are
 //  derived here, from ONE value, so they cannot describe different streams.
 //
+//  THE USER'S OVERRIDE (§6.9, Stage B: SRT) rides on the same value, so it reaches both halves too.
+//  `applying(_:)` returns this reading with a preset attached; `route` and `bufferTags` then state
+//  the preset, labelled `overridden`, through `SourceColorimetry.resolve` (the one place an override
+//  meets a declaration). The SPS reading underneath is kept, so `declaredTags` can still say what the
+//  stream declared while the override is in force. `.auto` changes nothing, byte for byte.
+//
 //  RANGE IS NOT READ FROM THE SPS. Each transport fixes its range as it did before (SRT from
 //  `codecpar->color_range`, WHEP pinned to limited). `video_full_range_flag` is logged beside the
 //  range in use, and whether they agree, and nothing acts on it — Stage SPS records, it does not
@@ -62,9 +68,13 @@ struct StreamColorimetry: Equatable {
     /// The SPS reading this came from, kept for the log: it holds the raw numbers (a 2, a reserved 3)
     /// and how far the SPS got, which the verdict above has already discarded.
     let sps: SPSColor
+    /// The user's assertion over the SPS reading (Stage B). `.auto` asserts nothing. WHEP never sets
+    /// it yet (Stage C).
+    let override: ColorimetryOverride
 
-    init(sps: SPSColor, isFullRange: Bool, rangeDeclared: Bool) {
+    init(sps: SPSColor, isFullRange: Bool, rangeDeclared: Bool, override: ColorimetryOverride = .auto) {
         self.sps = sps
+        self.override = override
         primaries = Axis(sps.primaries)
         transfer = Axis(sps.transfer)
         matrix = Axis(sps.matrix)
@@ -77,9 +87,16 @@ struct StreamColorimetry: Equatable {
         StreamColorimetry(sps: .undeclared, isFullRange: isFullRange, rangeDeclared: rangeDeclared)
     }
 
+    /// The same SPS reading with `override` in force. The reading itself is untouched.
+    func applying(_ override: ColorimetryOverride) -> StreamColorimetry {
+        StreamColorimetry(sps: sps, isFullRange: isFullRange, rangeDeclared: rangeDeclared,
+                          override: override)
+    }
+
     /// Which honesty tier this sits in, from the axes' own `declared` flags rather than the codes.
-    /// No user override exists on SRT or WHEP yet (Stages B and C), so `.overridden` cannot arise.
+    /// An active override outranks both (`overridden`); WHEP cannot have one yet (Stage C).
     var sourceProvenance: SourceColorProvenance {
+        if override.preset != nil { return .overridden }
         switch [primaries, transfer, matrix].filter(\.declared).count {
         case 0:  return .assumed
         case 3:  return .tagged
@@ -90,6 +107,11 @@ struct StreamColorimetry: Equatable {
     /// What the renderer is told. `undeclaredAxisCode` is how THIS transport spells an undeclared
     /// axis — see point 1 in the header. The tier is the same whichever spelling is used.
     func route(undeclaredAxisCode: Int?) -> LiveDisplayRoute.Colorimetry {
+        if let p = override.preset {
+            return LiveDisplayRoute.Colorimetry(primaries: p.primaries, transfer: p.transfer,
+                                                matrix: p.matrix, isFullRange: isFullRange,
+                                                provenance: .overridden)
+        }
         func code(_ a: Axis) -> Int? { a.declared ? a.code : undeclaredAxisCode }
         return LiveDisplayRoute.Colorimetry(primaries: code(primaries),
                                             transfer: code(transfer),
@@ -98,8 +120,15 @@ struct StreamColorimetry: Equatable {
                                             provenance: sourceProvenance)
     }
 
-    /// What gets stamped on every pixel buffer. Cannot be nil — see point 2 in the header.
+    /// What gets stamped on every pixel buffer. Cannot be nil — see point 2 in the header. With an
+    /// override in force, the preset, through the shared `resolve`.
     var bufferTags: SourceColorimetry {
+        SourceColorimetry.resolve(declared: declaredTags, override: override)
+    }
+
+    /// What the STREAM said, whatever the override: declared axes as declared, the rest assumed 709.
+    /// The Color control's "Stream" line reads this.
+    var declaredTags: SourceColorimetry {
         func axis(_ a: Axis, _ name: String) -> ColorimetryAxis {
             a.declared ? .declaredValue(a.code, name) : .assumed(a.code)
         }
@@ -121,9 +150,11 @@ struct StreamColorimetry: Equatable {
         let range = rangeDeclared
             ? (isFullRange ? "range=full (declared)" : "range=limited (declared)")
             : "range=UNDECLARED → assuming limited"
-        return axis("primaries", primaries, SourceColorimetry.primariesName(primaries.code)) + "  "
+        let stream = axis("primaries", primaries, SourceColorimetry.primariesName(primaries.code)) + "  "
              + axis("transfer", transfer, SourceColorimetry.transferName(transfer.code)) + "  "
              + axis("matrix", matrix, SourceColorimetry.matrixName(matrix.code)) + "  " + range
+        guard let p = override.preset else { return stream }
+        return "OVERRIDDEN → \(override.label) (CICP \(p.primaries)-\(p.transfer)-\(p.matrix)); the stream: " + stream
     }
 
     /// The `[SPS-COLOR]` line: per axis, the SPS's raw number, the verdict and why; then the tier;

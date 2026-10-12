@@ -123,13 +123,12 @@ final class SRTClient: ObservableObject {
         lastErrorSurvivesPictures = false
     }
 
-    /// What the stream's SPS declared about its colour (`StreamColorimetry`, §6.9 Stage SPS). nil
-    /// while nothing is streaming, and until the first SPS has been read.
+    /// What the stream's SPS declared about its colour (`StreamColorimetry`, §6.9 Stage SPS), with
+    /// the user's override applied (Stage B) — what the renderer has been told. nil while nothing is
+    /// streaming, and until the first SPS has been read. The SPS reading alone is `declaredTags`.
     ///
-    /// ⚠️ NO LONGER READ BY THE SCOPES, and as of 2026-10-06 read by nothing. It used to feed the
-    /// scope headers through an `.onChange` in ContentView; those now read the RENDERER, which
-    /// `SRTFrameRouter.activate` already states this colorimetry to (`ScopeColorFeed`, and the
-    /// source-colour rule in CLAUDE.md). Kept as the transport's own published declaration.
+    /// ⚠️ NOT READ BY THE SCOPES. They read the RENDERER (`ScopeColorFeed`, and the source-colour rule
+    /// in CLAUDE.md). The Color control reads it, for its face and its "Stream" line.
     @Published private(set) var colorimetry: StreamColorimetry?
 
     // MARK: - State (main thread)
@@ -883,11 +882,14 @@ final class SRTClient: ObservableObject {
         // No session, or the codec gate refused the stream: there is no display to configure.
         guard session != nil, haveVideoStream else { return }
 
+        let previous = self.colorimetry
         self.colorimetry = colorimetry
         if first {
             SRTFrameRouter.shared.activate(format: format, colorimetry: colorimetry)
         } else {
-            SRTFrameRouter.shared.updateColorimetry(colorimetry)
+            // The same SPS reading under a different override: the user's change, not the stream's.
+            let byOverride = previous.map { $0.applying(.auto) == colorimetry.applying(.auto) } ?? false
+            SRTFrameRouter.shared.updateColorimetry(colorimetry, byOverride: byOverride)
         }
     }
 
