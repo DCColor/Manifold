@@ -53,10 +53,24 @@ held back until after release, and the numbered defect entries follow.
      fixes and sorted bookmark keys as separate pieces; every prediction passed; committed (`f926f47` sorted keys,
      `5ed306f` the HLS codes and the override)** (§6.9, *Stage E*).
      The override is now on all four transports.
-   - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
-     readout (§6.4).
-   - LUT loading (§6.4).
-   - The Color control layout and hold-to-compare (§6.3; hold-to-compare is still open in §6.8).
+   - **The remaining colour work, planned as S0–S6** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11: audit, decisions
+     and predictions; decided, Robbie, 2026-10-12). In this order:
+     - **S0** — read-only pre-checks: the LG's profile primaries, the colourspace probe on every
+       primaries/transfer pair, the tags on the Rec.2020 SDR test file, and the ffmpeg fixtures (9-1-9, 9-14-9,
+       11, 6, case (g)).
+     - **S1** — Phase 3, Reference: **BT.1886** with each display's black and white luminance (Lb = 0 is exactly
+       2.4), and a per-display "calibrated to Rec.709 / BT.1886" setting, default off. On a calibrated display
+       Reference sends the code values untouched.
+     - **S2** — hold-to-compare: the other of macOS and Reference; Shift-hold compares against Bypass. The key
+       is chosen in the shortcut registry.
+     - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
+       four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below).
+     - **S4** — Phase 5, the HDR headroom readout and its log on a display change. No headroom cap: the
+       no-tone-map decision stands.
+     - **S5** — Custom (per-axis interpretation) and the Interpretation button and override on files. The
+       Color control stays two buttons.
+     - **S6** — LUT loading: `.cube`, in Interpretation (window, scopes, SDI and export see it; tags follow the
+       LUT's output space), one slot per window, kept across sources, cleared at quit, Recent LUTs saved.
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:

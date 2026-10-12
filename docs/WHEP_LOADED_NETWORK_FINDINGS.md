@@ -39,8 +39,8 @@ Connection: Wi-Fi (Herndon, VA)
 
 Two things about machine 2 are worth recording beyond the streaming question:
 
-- **EDR headroom `potential=2.000`.** More headroom than the WOLED reference display, which
-  reports `potential=1.000`. Relevant to the colour work rather than to anything here, but this
+- **EDR headroom `potential=2.000`.** More headroom than the LG WOLED desktop display (calibrated,
+  not a reference monitor), which reports `potential=1.000`. Relevant to the colour work rather than to anything here, but this
   is where it was first observed. It may deserve a home in `COLOR_MANAGEMENT_FINDINGS.md`.
 - **The NDI runtime is absent.** First machine on which that path has been exercised at all. No
   NDI run is included below; the absence is recorded so a later reader knows the path was

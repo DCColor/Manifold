@@ -434,7 +434,7 @@ picture was looked at, on each of two displays.
 
 | Display | Assigned profile rTRC | max abs deviation from source | Predicted | Observed |
 |---|---|---|---|---|
-| LG TV SSCR2 — the reference desktop | `para` ft=0, γ **1.960999** | **1.145e-05** at x=0.601 | nothing to show | no visible change |
+| LG TV SSCR2 — the calibrated desktop display | `para` ft=0, γ **1.960999** | **1.145e-05** at x=0.601 | nothing to show | no visible change |
 | ASUS PA147 | `curv` count=1024 table; **sRGB to 7.6e-06** | **4.962e-02** at x=0.656 | visible | visible — bypass slightly darker |
 
 Both predictions held. Four findings, in ascending order of how much they matter:
@@ -443,7 +443,7 @@ Both predictions held. Four findings, in ascending order of how much they matter
 is identical in both rows — same file, same `kCGColorSpaceCoreMedia709`, same 660 bytes. Everything
 that varies is downstream.
 
-**2. The reference desktop lands on BT.1886 — half by design, half by nothing.** The panel is set
+**2. The calibrated desktop display lands on BT.1886 — half by design, half by nothing.** The panel is set
 to the display's built-in **Rec.709 preset**, deliberately, as the base for calibration. That part
 is a considered choice and not luck. What is *not* chosen is the other half: macOS's default
 profile for that display is a parametric encoding of **γ1.960999**, against the source's `curv`
@@ -451,8 +451,8 @@ profile for that display is a parametric encoding of **γ1.960999**, against the
 transform identity in all but name, which is what lets the code values reach the panel untouched so
 the chosen preset can do its job.
 
-So two independent decisions compose correctly: one the colourist made in the display's menu, one
-Apple made on his behalf in an EDID-derived profile he never opened. **Manifold is aware of
+So two independent decisions compose correctly: one made in the display's menu, one
+Apple made on the user's behalf in an EDID-derived profile nobody opened. **Manifold is aware of
 neither, and would not notice if either changed.**
 
 ⚠️ **The fragility is the point.** A firmware revision that alters the EDID, a macOS update that
@@ -721,7 +721,7 @@ differ (primaries and white point), but the TRC does not.
 conversion" predicts and is a second, independent confirmation of §6.6's finding. **It is OS that
 moves**, 149 → 170.
 
-> ⚠️ **THE CONSEQUENCE FOR THE REFERENCE DESKTOP, STATED PLAINLY.** §6.5 described two independent
+> ⚠️ **THE CONSEQUENCE FOR THE CALIBRATED DESKTOP DISPLAY (THE LG), STATED PLAINLY.** §6.5 described two independent
 > decisions composing correctly — a chosen Rec.709 panel preset, and an unchosen EDID-derived
 > γ1.9609 profile that makes ColorSync a no-op. **Turning on macOS HDR destroys the second one**,
 > ColorSync starts doing real work, and the code values the chosen preset is there to receive no
@@ -5349,7 +5349,255 @@ committed.**
 
 ---
 
+### 6.11 Remaining colour work for 1.0 — audit, decisions and staged plan, 2026-10-12
+
+**Where this sits:** the plan for everything colour that release scope item 1 still holds (`BUGS.md`, *Release
+scope — 1.0*): Phases 3–5 (§6.4), LUT loading, the Color control layout and hold-to-compare. It replaces §6.4's
+Phase 3–5 paragraphs as the working plan; §6.4 stays as the record of how the phasing was first decided. The audit
+was read-only, against `afce81e`.
+
+#### What the audit found that the plan depends on
+
+1. **Why no headroom was logged on 2026-10-11 (§6.10, Stage 6, V).** `logEDRHeadroom` is called at startup
+   (`App/MetalVideoRenderer.swift:1543`) and from `setSourceColorSpace` on a source load or an EDR opt-in flip
+   (`:1459`). A display's HDR switch is neither, so nothing logs. The chain readout has no headroom line at all
+   (`App/DisplayChainModel.swift` reads no EDR value). The "9.1e-06" read that evening is the Display line's
+   sRGB-match figure, printed because macOS hands the LG an sRGB-TRC profile in HDR mode (§6.7). The log also
+   resolves its screen from `NSApp.mainWindow` (`:1569`), not the renderer's own window (BUGS.md hazard rule 3).
+2. **Reference on the LG is the §6.6 policy question, and it now blocks Phase 3.** The LG's profile says
+   γ1.961 and its panel preset applies BT.1886. A Reference mode that trusts that profile applies the 2.4 decode
+   and then has the panel apply its own EOTF on top of an encoding meant for γ1.961: about γ2.94 in all, too
+   dark. On a display calibrated in its own hardware, Reference must send the code values untouched.
+3. **The LG's profile primaries had never been read.** Phases 0–2 measured the TRC on a grey wedge only, which
+   is blind to primaries. S0 below reads them.
+4. **Where each piece sits in the chain.** The display-only seam is `displayCopyFragment`
+   (`App/PassthroughShader.metal:295`), downstream of the offscreen ring that the scopes, the DeckLink v210
+   convert and the export read. The interpretation seam is `passthroughFragment` (`:180`), upstream of all of
+   them. The drawable is `rgba16Float` (`MetalVideoRenderer.swift:174`).
+5. **Primaries are an enumerated pair table** (`makeColorSpace`, `MetalVideoRenderer.swift:1595`): (12, _),
+   (9, 16), (9, 18), (1, 1), else 709. Rec.2020 SDR (9, 1) and (9, 14), DCI-P3 (11) and the 601 primaries (5, 6)
+   all fall to 709. The CIE scope keeps its own table (`App/CIEScope.swift:176`), which BUGS.md (*an unrecognised
+   CICP primaries code silently becomes 709*) says must become one table, not two patched copies.
+6. **The bar today** (screenshots `~/Desktop/manifold-shots/file-bar.png` and `stream-bar.png`, not in this
+   repo): on a stream, two buttons, Interpretation (`709 709 · Assumed`) and Display transform (`macOS`); on a
+   file, only `macOS`. `ColorInterpretationControl` is gated to live sources (`App/ContentView.swift:3053`);
+   `DisplayTransformControl` to any source (`:3071`).
+
+#### Decisions (Robbie, 2026-10-12)
+
+1. **Calibrated-display setting: per display, default off.** On for the LG, off for the ASUS.
+2. **Reference curve: BT.1886**, the EOTF with the display's black and white luminance, *amended the same day
+   from pure 2.4*. With a true-black display (Lb = 0) it is exactly 2.4; on a panel with a raised black it lifts
+   the shadows as BT.1886 intends. Where Lb and Lw come from: below.
+3. **Hold-to-compare compares against the other of macOS and Reference.** Shift-hold compares against Bypass.
+   The key itself is chosen in the shortcut registry.
+4. **The LUT sits in Interpretation for 1.0.** The window, scopes, SDI and export all see it. The tags follow
+   the LUT's output space through the single colour setter (`setSourceColorSpace`, per CLAUDE.md); the Source
+   line still describes the source. One LUT slot per window.
+5. **LUT persistence: per window, kept across source changes, cleared at quit**, with a saved Recent LUTs list.
+6. **Layout: two buttons** (as today), and files get the Interpretation button.
+7. **Custom** (primaries, transfer and matrix chosen independently) **and the file override are in 1.0.**
+8. **No custom headroom cap.** A readout only; the 2026-08-28 no-tone-map decision stands.
+
+**Display roles, restated (Robbie, 2026-10-12).** The LG is a calibrated, HDR-capable UI/desktop display: close
+to reference, **not** a reference monitor and not used for grading. True reference monitoring is over SDI to a
+reference monitor. By-eye checks on the LG are sanity checks, not reference judgements. The ASUS stays a
+pixel-value instrument only (§6.6). CLAUDE.md carries the same wording.
+
+#### Where Lb and Lw come from — proposal (decision 2)
+
+- **Part of the per-display setting (decision 1).** One record per display, keyed by the CoreGraphics vendor,
+  model and serial numbers (an `NSScreen` name alone is not unique):
+  - *Calibrated to Rec.709 / BT.1886 in the display* — on / off, default **off**.
+  - *White* Lw, cd/m², default **100**.
+  - *Black* Lb, cd/m², default **0**.
+- **Lb = 0 is exactly 2.4.** BT.1886's `b` term is then 0 and `a` is Lw, so the curve is V^2.4 at any Lw.
+  Only the ratio Lb/Lw changes the shape; Lw on its own does nothing.
+- **Calibrated ON** — the display applies its own EOTF, so Reference sends the code values untouched (for a
+  709 source, what Bypass sends). Lb and Lw are kept but greyed out, and the readout says the display applies
+  them.
+- **Calibrated OFF** — the shader computes BT.1886 light, normalised black-to-white, and encodes it for the
+  declared profile:
+
+  ```
+  L(V) = a · max(V + b, 0)^2.4,   a = (Lw^(1/2.4) − Lb^(1/2.4))^2.4,   b = Lb^(1/2.4) / (Lw^(1/2.4) − Lb^(1/2.4))
+  D    = (L(V) − Lb) / (Lw − Lb)          // 0 at black, 1 at white
+  out  = D^(1/γ_declared)                 // γ read from the installed profile's rTRC, 1.961 for 709 and P3
+  ```
+
+  The declaration stays exactly as today (§6.6). The values come from the user's calibration report; no API
+  reports a panel's black, so nothing is guessed.
+- **The readout's Transform line** names the curve and its inputs: `Reference — BT.1886, Lw 100 · Lb 0 (= γ2.4)`.
+
+Normalised drive D at Lw = 100, computed:
+
+| V | 0.02 | 0.05 | 0.10 | 0.20 | 0.50 | 0.90 | 1.00 |
+|---|---|---|---|---|---|---|---|
+| Lb 0 (= V^2.4) | 0.00008 | 0.00075 | 0.00398 | 0.02101 | 0.18946 | 0.77657 | 1 |
+| Lb 0.05 | 0.00073 | 0.00259 | 0.00812 | 0.03005 | 0.20879 | 0.78522 | 1 |
+| Lb 0.10 | 0.00100 | 0.00332 | 0.00965 | 0.03323 | 0.21526 | 0.78806 | 1 |
+
+#### Staged plan
+
+Order kept from §6.4 (3 → 4 → 5). Reference reads γ from whichever profile is installed, so Phase 4 does not
+force Phase 3 to be redone. All pixel checks are on the **ASUS**; by-eye checks are on the **LG** and are sanity
+checks (display roles, above).
+
+| Stage | Depends on | What |
+|---|---|---|
+| **S0** pre-checks | — | Read-only, unattended: the LG's profile primaries (HDR off); the colourspace dump probe on every primaries/transfer pair including (9, 1), (9, 14), 11 and 6; the tags on Robbie's Rec.2020 SDR test file; ffmpeg fixtures 9-1-9, 9-14-9, 11, 6 and case (g). **If the LG's primaries are not Rec.709, stop before S1.** |
+| **S1** Phase 3: Reference + the per-display setting | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — correct for grading*; the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
+| **S2** hold-to-compare | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
+| **S3** Phase 4: primaries + case (g) | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
+| **S4** Phase 5: headroom readout | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
+| **S5** Custom + the file Interpretation button | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
+| **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. |
+
+#### Predictions, with pass / fail bands
+
+**S1 — Reference.** Written before any code.
+
+1. ASUS, OS vs the build before S1: **0 codes**. Anything else fails.
+2. ASUS, calibrated OFF, Lb 0: black and white equal OS (±1 code); every patch between is darker than OS; the
+   largest gap is in the lower mid-tones; every patch is within **±1 code** of the §6.6 simulation path run
+   with the 2.4 decode, computed by the probe before the build. **Equal to OS (0 codes) is the §6.6 trap and
+   fails.** Equal to the raw power curve with ColorSync's conversion skipped also fails.
+3. ASUS, Lb 0 against a direct V^2.4 implementation: **0 codes** (Lb = 0 is exactly 2.4).
+4. ASUS, Lb 0.10 / Lw 100: black (D = 0) and white equal Lb 0 (±1 code); shadows lighter than Lb 0, in the
+   ratio the table above gives (≈ 2.4× the drive at V = 0.10, ≈ 1.6× at 0.20); every patch within **±1 code**
+   of the probe's prediction for those values.
+5. LG, calibrated ON: Reference = OS = Bypass, **0 codes**, on the wedge and on a colour patch file.
+6. LG, calibrated ON, with macOS HDR switched on by Robbie: Reference stays at 0 codes from its HDR-off capture
+   while OS moves about 21 codes (§6.7). Attended.
+7. Sub-black and superwhite patches: no NaN, no black or magenta pixels.
+8. Scopes, SDI (v210) and export: **0 codes** between OS, Reference and Bypass.
+9. LG, by eye (sanity check, not a reference judgement): with calibrated ON, a shadow-detail file looks as it
+   does in OS; with calibrated OFF it looks clearly too dark in the shadows.
+
+**S2 — hold-to-compare.**
+
+1. The swap shows within one frame of key-down, measured from the log.
+2. On release: **0 codes** against a capture taken before the hold (ASUS).
+3. The checkmark and the saved mode never move; the title suffixes are correct after release.
+
+**S3 — primaries.**
+
+1. Offline (probe): (9, 1) and (9, 14) give a profile with 2020 primaries and a γ1.961 TRC; 11 gives DCI-P3
+   primaries; 6 gives SMPTE-C; (12, _), (9, 16), (9, 18) and (1, 1) are unchanged (CFEqual to today's).
+2. ASUS, 9-1-9 fixture: grey patches **0 codes** before vs after; saturated patches move in the direction a
+   2020 → display conversion predicts, within **±2 codes** of the probe's prediction.
+3. Unchanged pairs (709, P3-D65, PQ, HLG): **0 codes** against HEAD.
+4. Case (g): the decoded frame's matrix tag logged beside the renderer's codes, on both decode paths. Pass is
+   either "agree on every path" or the shader moved to the renderer's codes; a disagreement left in place fails.
+5. LG, by eye (sanity): Robbie's Rec.2020 SDR file is visibly less washed-out than on the build before S3.
+
+**S4 — headroom.**
+
+1. LG, HDR off: potential 1.0, wording `display is in SDR mode`.
+2. LG, HDR on (Robbie toggles): potential ≈ **8.97** (±0.5; it follows brightness), shown within 1 s, no reload,
+   readout open, and one `[EDR] headroom` line on the window's own screen.
+3. A grant (current > 1.0) on a PQ source: **an open question, not pass/fail.** Expected 1.0 again (§6.7); if
+   so, the cause is chased before S4 closes.
+
+**S5 — Custom and the file override.**
+
+1. Unit tests: every per-axis combination maps to the S3 table.
+2. A file override moves the scope headers, the readout and the SDI tag together; Auto is **0 codes** against
+   HEAD.
+
+**S6 — LUT.**
+
+1. Identity 33³: **0 codes** at 10-bit, export and v210.
+2. A Resolve-exported LUT on the colour fixture against Resolve's own render: within **±2 codes** at 10-bit.
+3. A malformed `.cube` is refused with a banner; no partial load.
+4. The tags follow the LUT's output space: scope headers and SDI tag change; the Source line does not.
+
+#### Needs Robbie
+
+- One LG session after S1, S2 and S4 (~20 min): S1-6, S1-9, S4-2. Robbie toggles macOS HDR.
+- About 10 min after S3: S3-5 with the Rec.2020 SDR test file.
+- About 10 min after S6: a trusted LUT and its Resolve render; LG and SDI sanity look.
+
+#### S0 — results, 2026-10-12 (read-only, unattended)
+
+No app code changed; no display setting touched (macOS HDR was confirmed OFF on both displays by
+`potential = 1.0`, read, not set). Outputs and the tools that made them are in the gitignored
+`build/colour-s0/`: `display-primaries.txt`, `pair-probe.txt`, `flip-file-tags.txt`, `fixtures-verify.txt`,
+the two display ICCs, `fixtures/`, and `displayprims.swift`, `pairprobe.swift`, `filetags.swift`,
+`make_patches.py`, `make_fixtures.sh`.
+
+**1. The LG's profile primaries are Rec.709. S1 is not blocked.** `LG TV SSCR2`, ICC v4, 524 bytes, HDR off.
+With the profile's `chad` undone: R (0.6397, 0.3301), G (0.2998, 0.5996), B (0.1504, 0.0596), white
+(0.3125, 0.3291). Every coordinate is within **0.0004** of Rec.709 / D65, which is the s15Fixed16 and
+adaptation round-off. So OS mode does no gamut conversion on the LG in SDR, and §6.5's identity holds for colour
+as well as for grey. (The ASUS's v2 profile stores the same D50-adapted primaries as the LG's to 4 decimals.)
+
+**2. The pair probe** (today's `makeColorSpace`, a verbatim copy, against the same codes passed to CoreVideo one
+axis at a time; primaries D65-relative, Bradford-undone where a v2 profile has no `chad`):
+
+| CICP | Today | Independent axes |
+|---|---|---|
+| 1-1-1 | CoreMedia709, γ1.961 | **CFEqual to today** |
+| 12-1-1 | "Apple P3", γ1.961, P3 primaries exact | **CFEqual to today** |
+| 12-16-9, 9-16-9, 9-18-9 | DisplayP3_PQ, 2100 PQ, 2100 HLG (v4, `cicp`) | **CFEqual to today** |
+| 9-1-9 | ⚠️ **CFEqual to CoreMedia709** — 709 primaries | "QuickTime 'nclc' Video (9,1,9)", γ1.961, **2020 primaries exact** |
+| 9-14-9 | ⚠️ **CFEqual to CoreMedia709** | "UHD", γ1.961, **2020 primaries exact** |
+| 11-1-1 | ⚠️ **CFEqual to CoreMedia709** | γ1.961, R (0.6807, 0.3189) G (0.2812, 0.6742) B (0.1488, 0.0577) |
+| 6-6-6 | ⚠️ **CFEqual to CoreMedia709** | "Composite NTSC", γ1.961, **SMPTE-C exact** |
+| 5-6-5 | ⚠️ **CFEqual to CoreMedia709** | "Composite PAL", γ1.961, **EBU 3213 exact** |
+
+- **Independent axes give every pair its primaries, with the same γ1.961 TRC**, and leave the five pairs that
+  work today byte-for-byte as they are. That is S3's design confirmed offline, and it means S1's γ is 1.961 for
+  every SDR source.
+- **Code 11 is DCI-P3 with its white adapted to D65.** The three primaries above are exactly DCI-P3 Bradford-adapted
+  from the DCI white (0.314, 0.351) to D65 (computed independently, to 4 decimals). So CoreVideo treats DCI white
+  as display white — relative colorimetric. S3 should say so in the readout rather than treat it as a defect.
+- **(9, 14) and (9, 1) build different profiles** ("UHD" vs "nclc (9,1,9)"), same primaries and same TRC. S3's
+  test should compare their contents, not CFEqual.
+
+**3. Robbie's Rec.2020 SDR test file** (`/Volumes/DCCOLOR/TEST FLIP/2020_709_NoAudio.mov`, read in place, not
+copied; md5, size, mtime and mode identical before and after). ProRes 422 HQ, 3840×2160, 25p, 4:2:2 10-bit,
+limited range, 24.04 s, written by DaVinci Resolve Studio. **9-1-9 in all three places read**: the format
+description, every decoded buffer (frames 0–2, `x422`), and ffmpeg's ProRes decoder. So it is a clean 9-1-9
+fixture for S3, with no case (g) disagreement in it. **Today it renders with 709 primaries** (row 9-1-9 above).
+
+**4. Fixtures** (`build/colour-s0/fixtures/`, 1920×1080, 25p, 2 s; a 6 × 3 chart in `patches.json`: greys 0, 10,
+25, 50, 75, 100 %, and R G B C M Y at 100 % and 50 %). Every tag verified at the format description, the decoded
+buffer and, for H.264, the SPS VUI (`fixtures-verify.txt`):
+
+| File | Codec | Container / format description | SPS VUI |
+|---|---|---|---|
+| `patches-1-1-1-prores.mov` | ProRes 422 HQ | 1-1-1 (control) | — |
+| `patches-9-1-9-prores.mov` | ProRes 422 HQ | 9-1-9 | — |
+| `patches-9-14-9-prores.mov` | ProRes 422 HQ | ffmpeg 9-14-9; **CoreMedia reads 9-1-9** | — |
+| `patches-9-14-9-h264.mov` | H.264 High | ffmpeg 9-14-9; **CoreMedia reads 9-1-9** | 9 / 14 / 9 |
+| `patches-11-1-1-prores.mov` | ProRes 422 HQ | 11-1-1 (`DCI_P3`) | — |
+| `patches-6-6-6-prores.mov` | ProRes 422 HQ | 6 primaries (`SMPTE_C`), 601 matrix; transfer read as 709 | — |
+| `caseg-colr2020-vui709-h264.mov` | H.264 High | **9-1-9** | **1 / 1 / 1** |
+
+- The first attempt wrote no primaries or transfer (ffmpeg read `bt2020nc/unknown/unknown`): the encoder takes
+  colour from the frames, so output options were overridden. Fixed with `setparams` at the end of the filter
+  chain, and verified as above.
+- **CoreMedia respells transfer 14 as 709** in a file's format description and on its buffers, as Stage E found
+  for HLS. So a file can never deliver 14 on the AVFoundation path; 14 arrives only from the SPS reader (SRT,
+  WHEP), the NDI preset and the libav path.
+
+**5. Case (g), first reading — not the disagreement BUGS.md feared, but a different one.** On the case (g)
+fixture, AVFoundation's format description **and** every decoded buffer both say **9-1-9**: CoreMedia takes the
+container's `colr` over the bitstream's VUI for both. So on the AVFoundation path, the two places the app reads
+(`colorParams(for:)` and the renderer's codes) **agree**, and the shader and the scopes would use the same
+(2020) matrix. What disagrees is the container against the bitstream, and the app cannot see that on this path.
+The pixels in this fixture were encoded with the 709 matrix, so a file mistagged this way is decoded with the
+wrong matrix everywhere, as it would be in any CoreMedia player. Two limits: this was read through
+`AVAssetReader`, not the app's `AVPlayerItemVideoOutput`; and the libav path (MXF / DNxHR) was not exercised.
+S3 keeps the case (g) check for that path, and adds a decision: whether to log a container-vs-VUI disagreement
+when the SPS reader can see one.
+
+---
+
 ## 7. Open and unverified
+
+*The remaining colour work for 1.0 — decisions, staged plan S0–S6 and predictions — is §6.11.*
 
 1. ~~**The destination question.**~~ ✅ **Answered by Phase 1 — see §6.6.** Recorded here because
    this item drove the phasing and the correction matters.

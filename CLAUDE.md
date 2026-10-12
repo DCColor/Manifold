@@ -42,10 +42,13 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   step, name the profile and check it against its row; afterwards, compare OBS's log with the row.
   Never change a tested profile for an experiment: duplicate it and add a row first. Read OBS's
   settings files read-only, and never copy a URL, stream key or passphrase out of them.
-- Displays on the Mac Studio. **LG**: SDR and HDR, calibrated. Use it for any HDR viewing and for anything
-  judged by eye. **ASUS (PA147)**: Rec. 709 SDR only, uncalibrated. Use it only for pixel-value checks (the
-  OS-mode byte comparisons, the γ1.961 double-apply check), never for judging colour or HDR. A plan or
-  prediction that puts an HDR or by-eye check on the ASUS is wrong; move it to the LG.
+- Displays on the Mac Studio. **LG**: a calibrated, HDR-capable UI/desktop display (SDR and HDR). Close to
+  reference, but NOT a reference monitor and not used for grading. Use it for any HDR viewing and for
+  by-eye checks, which are sanity checks, never reference judgements. **ASUS (PA147)**: Rec. 709 SDR only,
+  uncalibrated. Use it only for pixel-value checks (the OS-mode byte comparisons, the γ1.961 double-apply
+  check), never for judging colour or HDR. A plan or prediction that puts an HDR or by-eye check on the
+  ASUS is wrong; move it to the LG. **True reference monitoring is over SDI to a reference monitor**; no
+  desktop display is the reference.
 - Screenshots capture the Manifold window only, by its window ID (`screencapture -x -o -l <id>`, the id
   from `CGWindowListCopyWindowInfo` for the owner "Manifold"), never the whole desktop: other windows on
   this Mac hold private conversations and credentials. If the window cannot be found, take no screenshot.
