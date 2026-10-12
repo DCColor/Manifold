@@ -14,8 +14,10 @@
 //      provenance: .overridden)` — so the chain readout and the scopes (`ScopeColorFeed`) follow it
 //      with no work of their own.
 //    * WHEP (Stage C): HERE too, the same way, through `WHEPFrameRouter.setColorimetryOverride`.
-//    * HLS (Stage E): none yet. `offersOverride` says so, and the control is not shown for it. The
-//      bookmark's saved value is loaded (`savedOverride`) but not applied until Stage E.
+//    * HLS (Stage E): HERE too, through `HLSClient.setColorimetryOverride`. HLS re-reads the stream's
+//      colour from every frame, so the override wins inside `publishColorTagsIfChanged`, over a
+//      rendition change, and every vended frame is re-tagged. An HLS→HLS swap is a new connect: it
+//      starts on the NEW bookmark's saved value, or Auto (decided 2026-10-12, §6.9 Stage E).
 //
 //  SAVE TO BOOKMARK (Stage D, decision 5): Save and Revert in the Color control's menu, as the audio
 //  offset's are in the A/V menu. Nothing else writes it; the Stream Sources sheet has no field. Stored as
@@ -50,29 +52,30 @@ final class LiveColorOverrideModel: ObservableObject {
 
     init(deck: WindowDeck) { self.deck = deck }
 
-    /// The transports with an override today. NDI's lives on NDIService, SRT's and WHEP's here.
+    /// The transports with an override. NDI's lives on NDIService, SRT's, WHEP's and HLS's here.
     static func offersOverride(_ source: LiveSource) -> Bool {
         switch source {
-        case .ndi, .srt, .web: return true
-        case .hls:             return false   // Stage E
+        case .ndi, .srt, .web, .hls: return true
         }
     }
 
     /// The log tag for a transport whose override is held here.
     private static func logTag(_ source: LiveSource) -> String? {
         switch source {
-        case .srt:       return "SRT-COLOR"
-        case .web:       return "WHEP-COLOR"
-        case .ndi, .hls: return nil
+        case .srt: return "SRT-COLOR"
+        case .web: return "WHEP-COLOR"
+        case .hls: return "HLS-COLOR"
+        case .ndi: return nil
         }
     }
 
     /// Hand the override to the transport that applies it.
     private static func apply(_ override: ColorimetryOverride, on source: LiveSource) {
         switch source {
-        case .srt:       SRTFrameRouter.shared.setColorimetryOverride(override)
-        case .web:       WHEPFrameRouter.shared.setColorimetryOverride(override)
-        case .ndi, .hls: break
+        case .srt: SRTFrameRouter.shared.setColorimetryOverride(override)
+        case .web: WHEPFrameRouter.shared.setColorimetryOverride(override)
+        case .hls: HLSClient.shared.setColorimetryOverride(override)
+        case .ndi: break
         }
     }
 
@@ -91,14 +94,15 @@ final class LiveColorOverrideModel: ObservableObject {
     /// session starts on the bookmark's saved override (Stage D), or on Auto for anything without one
     /// (NDI, a pasted URL, the DEBUG ⌃⌥D/⌃⌥H overrides). Handed to the frame router BEFORE the transport
     /// opens, so the first decoded frame is already under it: on SRT it rides the activation, on WHEP
-    /// it is the first announcement (§6.9 Stages B, C).
+    /// it is the first announcement (§6.9 Stages B, C), on HLS it is stated at connect (Stage E).
+    /// An HLS→HLS swap comes through here too, so it starts on the new bookmark's value.
     func prepare(source: LiveSource, bookmark: StreamBookmark?) {
         self.source = source
         bookmarkID = bookmark?.id
         bookmarkName = bookmark?.name
         savedOverride = ColorimetryOverride(storageID: bookmark?.colorOverride, on: Self.transport(source))
         guard let tag = Self.logTag(source) else {
-            sessionOverride = .auto   // NDI's is on NDIService; HLS applies nothing until Stage E
+            sessionOverride = .auto   // NDI's is on NDIService
             deck?.applyWindowTitle()
             return
         }
@@ -123,9 +127,8 @@ final class LiveColorOverrideModel: ObservableObject {
     /// The override in force on `source` in this window.
     func current(for source: LiveSource) -> ColorimetryOverride {
         switch source {
-        case .ndi:       return NDIService.shared.colorimetryOverride
-        case .srt, .web: return self.source == source ? sessionOverride : .auto
-        case .hls:       return .auto
+        case .ndi:             return NDIService.shared.colorimetryOverride
+        case .srt, .web, .hls: return self.source == source ? sessionOverride : .auto
         }
     }
 
@@ -135,7 +138,7 @@ final class LiveColorOverrideModel: ObservableObject {
         switch source {
         case .ndi:
             NDIService.shared.setColorimetryOverride(override)   // the title follows via arbitration
-        case .srt, .web:
+        case .srt, .web, .hls:
             guard self.source == source, override != sessionOverride, let tag = Self.logTag(source) else { return }
             sessionOverride = override
             Self.apply(override, on: source)
@@ -146,8 +149,6 @@ final class LiveColorOverrideModel: ObservableObject {
                 NSLog("[%@] override → Auto — the stream’s own color from the next decoded frame", tag)
             }
             deck?.applyWindowTitle()
-        case .hls:
-            return
         }
     }
 
@@ -161,8 +162,8 @@ final class LiveColorOverrideModel: ObservableObject {
 
     // MARK: Save to bookmark (Stage D)
 
-    /// The transports whose override is saved per bookmark from this menu: SRT and WHEP today, HLS
-    /// with Stage E. NDI is session-only (decision 1).
+    /// The transports whose override is saved per bookmark from this menu: SRT, WHEP and HLS. NDI is
+    /// session-only (decision 1).
     static func savesOverride(_ source: LiveSource) -> Bool { logTag(source) != nil }
 
     /// The session's override differs from the bookmark's: Save and Revert have something to do.
@@ -203,6 +204,7 @@ struct ColorInterpretationControl: View {
     @ObservedObject private var ndi = NDIService.shared
     @ObservedObject private var srt = SRTClient.shared
     @ObservedObject private var whep = WHEPClient.shared
+    @ObservedObject private var hls = HLSClient.shared
 
     /// Color — the color-interpretation control: how Manifold reads the incoming color, and the
     /// user's power to override that reading. This is a source-AGNOSTIC control by design. Today it
@@ -315,7 +317,7 @@ struct ColorInterpretationControl: View {
             Button(streamStatusLine) {}.disabled(true)
         }
         // Save and Revert, as the A/V menu has them for the audio offset (§6.9 Stage D, decision 5).
-        // SRT and WHEP; NDI's override is for the session only.
+        // SRT, WHEP and HLS; NDI's override is for the session only.
         if LiveColorOverrideModel.savesOverride(source) {
             Section {
                 if let name = model.bookmarkName {
@@ -331,14 +333,14 @@ struct ColorInterpretationControl: View {
     }
 
     /// What the renderer has been told (`effective`) and what the stream said (`declared`). NDI's from
-    /// NDIService; SRT's and WHEP's from their clients, which publish the reading with the override
-    /// applied. nil on SRT until the first SPS has been read.
+    /// NDIService; SRT's, WHEP's and HLS's from their clients, which publish the reading with the
+    /// override applied. nil on SRT until the first SPS has been read, on HLS until the first frame.
     private var reading: (effective: SourceColorimetry, declared: SourceColorimetry)? {
         switch source {
         case .ndi: return (ndi.colorInfo, ndi.declaredColorInfo)
         case .srt: return srt.colorimetry.map { ($0.bufferTags, $0.declaredTags) }
         case .web: return whep.colorimetry.map { ($0.bufferTags, $0.declaredTags) }
-        case .hls: return nil
+        case .hls: return hls.colorimetry
         }
     }
 

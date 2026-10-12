@@ -32,7 +32,7 @@ bullet.
 - HEVC now plays over SRT, including 10-bit HDR.
 - Audio offset for live streams, in the A/V menu: ⌥] and ⌥[ move the sound 1 ms later or earlier (add ⇧ for 10 ms). Save the offset with a saved stream and it comes back every time. A badge and the window title show when an offset is on.
 - Calibration (A/V ▸ Calibrate…): loop a Manifold sync clip on the sender and Manifold measures how far apart sound and picture are, then offers the correction. It never applies anything by itself. A/V ▸ Save Sync Clip… saves the clip that matches the stream's frame rate.
-- SRT and WHEP streams can now have their color interpretation overridden, like NDI: pick Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG or P3-D65 PQ from the Color control, or press ⌃⌥C. Auto goes back to what the stream declares. Save it with a saved stream from the Color menu and it comes back every time you connect; Revert to Saved returns to it.
+- SRT, WHEP and HLS streams can now have their color interpretation overridden, like NDI: pick Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG or P3-D65 PQ from the Color control, or press ⌃⌥C. Auto goes back to what the stream declares. Save it with a saved stream from the Color menu and it comes back every time you connect; Revert to Saved returns to it.
 - While a color override is on, on any stream, the window title says so (for example "— Color 2020 PQ").
 
 ### Improved
@@ -61,13 +61,14 @@ bullet.
 - Fixed: all-intra HEVC 4:2:0 streams over SRT (x265's "Main 10 Intra") were refused.
 - Fixed: DNxHR 444 files in a .mov could look slightly flat, with lifted blacks and weaker color. They now show at their true levels.
 - Fixed: 8-bit sources read slightly high on scopes (mid-grey 514, white 943); they now map exactly.
+- Fixed: HLS streams in P3 were shown with Rec. 709 colors while the scopes said P3.
 - Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 
 ### Known limitations
 
 - Known limitation: interlaced sources go out over SDI as progressive: a 1080i59.94 source is sent as 1080p29.97, with both fields woven into each frame. An interlaced NDI source arrives already deinterlaced by NDI.
 - Known limitation: SDI audio goes silent for up to about a tenth of a second at each seek, scrub release and loop point during file playback.
-- Known limitation: HLS streams in P3 or Rec. 2020 SDR are not yet labeled correctly, and NDI's Rec. 2020 SDR setting is shown with Rec. 709 primaries.
+- Known limitation: NDI's Rec. 2020 SDR color setting is shown with Rec. 709 primaries.
 - Known limitation: after a network stall of a second or more, live sound can stay 10–20 ms late for up to a minute before it settles.
 - Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
 
@@ -142,6 +143,8 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Change | Commits | Visible? |
 |---|---|---|
 | Renderer's clock restored on disconnect (NDI too): a file played afterwards is no longer ~195 ms out | `48ae1e8` | Yes |
+| P3-D65 read as CICP 12 (was 11, drawn as 709); the BT.2020 transfer constant as 14 (was 1; CoreMedia never sends it for H.264/HEVC, so no visible change) | uncommitted (piece 2) | Yes (P3 streams) |
+| Color override on HLS, saved per bookmark; held across rendition changes; an HLS→HLS swap starts on the new stream's saved value | uncommitted (override Stage E) | Yes |
 
 #### DeckLink / SDI
 
@@ -180,6 +183,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | LiveClock telemetry no longer written to stderr in Release | `176ca03` |
 | Audio-mirror rate pin removed | `8379c10` |
 | DEBUG probes: destination color profile, paired timebase, A/V lag, A/V content, raw SR logging, WindowSizer deinit | `2db97b1` `61b9b69` `a90de72` `d3b0831` `c31ca83` `2c1da93` |
+| Saved streams written with sorted JSON keys, so an unchanged list saves back byte for byte (each list is re-ordered once at its first save; content unchanged) | uncommitted (piece 1) |
 | Soak, replay and DeckLink test tooling; MediaMTX `useAbsoluteTimestamp` mode | `8389dd9` `5041fb8` `54750ad` `9b10b68` `73ef624` `b35a810` |
 | Build hygiene: concurrency annotations, vendored-header warnings, ignore build folders | `f0969e4` `aa79682` `d055d07` |
 | Documentation only (findings, plans, BUGS.md, roadmap, user guide drafts) | the remaining 49 commits |

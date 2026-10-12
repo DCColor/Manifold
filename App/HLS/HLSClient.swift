@@ -797,7 +797,37 @@ final class HLSClient: ObservableObject {
     /// One-shot, so the start-up fault is stated once rather than once a second forever.
     private var announcedStartFailure = false
     private var armedAt: Double = 0
-    private var lastPublishedCICP: (Int?, Int?, Int?)?
+    /// The stream's own codes as last read from a vended buffer: the `[HLS] colour signalling` line
+    /// fires when they change. Display tick only.
+    private var lastDeclaredCICP: (Int?, Int?, Int?)?
+    /// What the renderer was last told, as the codes and whether they were the user's override. A
+    /// change of either is a `setSourceColorSpace`. Display tick only, and also written at connect.
+    private var lastPublishedColour: (codes: (Int?, Int?, Int?), overridden: Bool)?
+
+    // ── THE COLOUR OVERRIDE (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9, Stage E) ──────────────────
+    //
+    // Set on MAIN by the owning window's `LiveColorOverrideModel` (the bookmark's saved value at
+    // connect, ⌃⌥C or the Color menu after), read once per pulled frame on the display tick. Not reset
+    // here: every connect, an HLS→HLS swap included, goes through `DeckRegistry.connectLive`, which
+    // sets it first (the new bookmark's saved value, or Auto).
+    private let overrideLock = UnfairLock()
+    private var colorimetryOverrideLocked: ColorimetryOverride = .auto
+    private var colorimetryOverride: ColorimetryOverride {
+        get { overrideLock.lock(); defer { overrideLock.unlock() }; return colorimetryOverrideLocked }
+        set { overrideLock.lock(); colorimetryOverrideLocked = newValue; overrideLock.unlock() }
+    }
+
+    /// What the stream declared and what the renderer was told (the override applied), for the Color
+    /// control's face and its "Stream" line. nil from connect until the first frame, and after release.
+    /// MAIN. Nothing else reads it: the scopes and the readout follow the renderer.
+    @Published private(set) var colorimetry: (effective: SourceColorimetry, declared: SourceColorimetry)?
+
+    /// The override for this connection. MAIN. Takes effect with the next pulled frame, which is
+    /// re-tagged and, when the renderer's codes change, announced (`publishColorTagsIfChanged`).
+    func setColorimetryOverride(_ override: ColorimetryOverride) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        colorimetryOverride = override
+    }
 
     private static func monotonicNow() -> Double { CACurrentMediaTime() }
 
@@ -884,12 +914,23 @@ final class HLSClient: ObservableObject {
         haveLoggedFirstFrame = false
         haveReachedPlaying = false
         armedAt = 0
-        lastPublishedCICP = nil
+        lastDeclaredCICP = nil
+        lastPublishedColour = nil
+        colorimetry = nil
 
         // Start on the ASSUMED default (709 SDR), replaced from the buffer's own CICP on the first
         // frame that carries any. Same rule and same reason as NDI's: a "set it once at connect"
         // hardcode would hand the NEXT stream the previous one's colorimetry.
-        renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1, provenance: .assumed)
+        //
+        // An override already in force (the bookmark's saved value, Stage E) is stated here instead,
+        // as SRT's rides its activation: the first frame then finds the renderer already told.
+        if let p = colorimetryOverride.preset {
+            lastPublishedColour = ((p.primaries, p.transfer, p.matrix), true)
+            renderer.setSourceColorSpace(primaries: p.primaries, transfer: p.transfer, matrix: p.matrix,
+                                         provenance: .overridden)
+        } else {
+            renderer.setSourceColorSpace(primaries: 1, transfer: 1, matrix: 1, provenance: .assumed)
+        }
 
         // x420 is 10-bit VIDEO range by definition, so the shader expands legal range. Pinned here
         // rather than read from the file transport's override, which describes a file that may not
@@ -1316,21 +1357,76 @@ final class HLSClient: ObservableObject {
     /// mechanism that makes the file case stick is what makes this one self-clear in ~16–40 ms.
     /// **If a live source ever gains a freeze/pause, this stops being bounded and becomes the
     /// stuck case** — that is the condition to re-read this note under, not the arithmetic.
+    ///
+    /// ── THE OVERRIDE (§6.9, Stage E) WINS HERE, INSIDE THE COMPARISON ──────────────────────────
+    ///
+    /// The stream's codes are still read from every buffer FIRST, so the "Stream" line and the
+    /// signalling log keep following the stream under an override. What the renderer is told is the
+    /// override's preset while one is in force, and "same as last time" compares THAT, with whether
+    /// it was an override: a rendition change under an override changes nothing the renderer sees,
+    /// and the override's own change (or its return to Auto) is announced like a rendition change,
+    /// landing one frame late the same way. At Auto this is the code above, unchanged.
+    ///
+    /// Both halves (§6.9 finding 10): the frame itself is re-tagged with the preset, every frame,
+    /// before it is wrapped and enqueued, because the shader takes its YCbCr matrix from the buffer.
+    /// MEASURED SAFE ON AVPlayer's BUFFERS (Stage E): `AVPlayerItemVideoOutput` recycles ~20 buffers,
+    /// and every vend comes with its attachments reset (a stamped PQ never read back, nor a marker
+    /// key of our own, across ~370 vends), so a stamp cannot leak into the next frame's reading.
     private func publishColorTagsIfChanged(of buffer: CVPixelBuffer) {
         let codes = Self.cicp(of: buffer)
-        if let last = lastPublishedCICP, last == codes { return }
-        lastPublishedCICP = codes
+        let override = colorimetryOverride
+        let declaredChanged = lastDeclaredCICP.map { $0 != codes } ?? true
+        if declaredChanged {
+            lastDeclaredCICP = codes
+            NSLog("%@", "[HLS] colour signalling: primaries=\(codes.0.map(String.init) ?? "—") "
+                + "transfer=\(codes.1.map(String.init) ?? "—") matrix=\(codes.2.map(String.init) ?? "—")"
+                + (codes == (1, 1, 1) ? " (Rec.709 SDR)" : ""))
+        }
+        let preset = override.preset
+        if let preset {
+            SourceColorimetry(primaries: .overridden(preset.primaries), transfer: .overridden(preset.transfer),
+                              matrix: .overridden(preset.matrix)).apply(to: buffer)
+        }
+        let publish: (codes: (Int?, Int?, Int?), overridden: Bool) =
+            preset.map { (($0.primaries, $0.transfer, $0.matrix), true) } ?? (codes, false)
+        let publishChanged = lastPublishedColour.map { $0.codes != publish.codes || $0.overridden != publish.overridden } ?? true
+        let wasOverridden = lastPublishedColour?.overridden ?? false
+        if publishChanged { lastPublishedColour = publish }
+        guard declaredChanged || publishChanged else { return }
+
+        let declared = Self.declaredColorimetry(codes)
+        let effective = SourceColorimetry.resolve(declared: declared, override: override)
         DispatchQueue.main.async { [weak self] in
             guard let self, self.pull != nil else { return }
-            // `Self.cicp(of:)` returns nil for an attachment the buffer does not carry, so the
-            // codes are the resolution here — the file rule, not NDI's.
-            self.renderer?.setSourceColorSpace(
-                primaries: codes.0, transfer: codes.1, matrix: codes.2,
-                provenance: .fromCodes(primaries: codes.0, transfer: codes.1, matrix: codes.2))
+            if publishChanged {
+                // `Self.cicp(of:)` returns nil for an attachment the buffer does not carry, so the
+                // codes are the resolution here — the file rule, not NDI's.
+                self.renderer?.setSourceColorSpace(
+                    primaries: publish.codes.0, transfer: publish.codes.1, matrix: publish.codes.2,
+                    provenance: publish.overridden
+                        ? .overridden
+                        : .fromCodes(primaries: publish.codes.0, transfer: publish.codes.1, matrix: publish.codes.2))
+            }
+            self.colorimetry = (effective, declared)
         }
-        NSLog("%@", "[HLS] colour signalling: primaries=\(codes.0.map(String.init) ?? "—") "
-            + "transfer=\(codes.1.map(String.init) ?? "—") matrix=\(codes.2.map(String.init) ?? "—")"
-            + (codes == (1, 1, 1) ? " (Rec.709 SDR)" : ""))
+        // An override's change, or its return to Auto, rather than the stream's.
+        if publishChanged, publish.overridden || wasOverridden {
+            let c = publish.codes
+            NSLog("%@", "[HLS-COLOR] renderer now: "
+                + (preset != nil ? override.label : "the stream’s own color")
+                + " (CICP \(c.0.map(String.init) ?? "–")-\(c.1.map(String.init) ?? "–")-\(c.2.map(String.init) ?? "–"))")
+        }
+    }
+
+    /// The stream's own codes as a `SourceColorimetry`: an axis the buffer carries is declared, an
+    /// absent one is assumed 709 — what the Color control's "Stream" line says.
+    private static func declaredColorimetry(_ codes: (Int?, Int?, Int?)) -> SourceColorimetry {
+        func axis(_ code: Int?, _ name: (Int) -> String) -> ColorimetryAxis {
+            code.map { .declaredValue($0, name($0)) } ?? .assumed(1)
+        }
+        return SourceColorimetry(primaries: axis(codes.0, SourceColorimetry.primariesName),
+                                 transfer: axis(codes.1, SourceColorimetry.transferName),
+                                 matrix: axis(codes.2, SourceColorimetry.matrixName))
     }
 
     // MARK: - Reporting
@@ -1554,6 +1650,7 @@ final class HLSClient: ObservableObject {
         rateDisagreementActive = false
         DeckLinkService.shared.setSourceAdvisory(nil)
         LiveDisplaySize.shared.clear()
+        colorimetry = nil
         NSLog("[HLS] disconnected")
     }
 
@@ -1603,7 +1700,10 @@ final class HLSClient: ObservableObject {
             case kCVImageBufferColorPrimaries_EBU_3213:     return 5
             case kCVImageBufferColorPrimaries_SMPTE_C:      return 6
             case kCVImageBufferColorPrimaries_ITU_R_2020:   return 9
-            case kCVImageBufferColorPrimaries_P3_D65:       return 11
+            // 12, NOT 11. CICP 11 is DCI-P3; P3-D65 is 12, the code the renderer's `makeColorSpace`,
+            // the files' MediaInspector and the P3-D65 PQ preset use. 11 fell to `makeColorSpace`'s
+            // default arm and drew a P3 stream as 709 (docs/BUGS.md, closed 2026-10-12).
+            case kCVImageBufferColorPrimaries_P3_D65:       return 12
             default:                                        return nil
             }
         }()
@@ -1614,11 +1714,14 @@ final class HLSClient: ObservableObject {
             case kCVImageBufferTransferFunction_ITU_R_709_2:      return 1
             case kCVImageBufferTransferFunction_SMPTE_240M_1995:  return 7
             case kCVImageBufferTransferFunction_sRGB:             return 13
-            // ⚠️ 1, NOT 14. CICP 14/15 ("BT.2020 10/12-bit") name the SAME transfer CURVE as 709 at
-            // greater precision; the renderer's table (1=709, 13=sRGB, 16=PQ, 18=HLG) keys off the
-            // curve. Reporting 14 would fall through to the gamma-2.4 default — the same picture,
-            // by accident rather than on purpose — so the curve is named directly.
-            case kCVImageBufferTransferFunction_ITU_R_2020:       return 1
+            // 14, the code NDI, SRT and WHEP give the BT.2020 SDR transfer (docs/BUGS.md, closed
+            // 2026-10-12). It is the 709 curve; every consumer that keys off the curve draws 14 as it
+            // draws 1 (`makeColorSpace`'s default arm, the CIE scope's γ2.4, EDR off, an SDR ruler).
+            // MEASURED: CoreMedia respells transfer 14 as `ITU_R_709_2` on the vended buffer (H.264),
+            // and 14 and 15 the same way in a file's format description (H.264, HEVC), so a 2020 SDR
+            // stream reads 9-1-9 here, as the same file does; this arm is for a buffer that does carry
+            // the constant.
+            case kCVImageBufferTransferFunction_ITU_R_2020:       return 14
             case kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ: return 16
             case kCVImageBufferTransferFunction_ITU_R_2100_HLG:   return 18
             default:                                              return nil

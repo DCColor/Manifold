@@ -48,8 +48,10 @@ held back until after release, and the numbered defect entries follow.
      2026-10-12, all seven predictions passed, committed (`4bc42b4`)** (§6.9, *Stage B*). **Stage C (WHEP,
      per session) built and run unattended 2026-10-12, all seven passed, committed (`631ad92`)** (§6.9,
      *Stage C*; one log-label defect found by P5 and fixed before the results). **Stage D (save per
-     bookmark) built and run unattended 2026-10-12, all four predictions passed, uncommitted** (§6.9,
-     *Stage D*). Next: E (HLS).
+     bookmark) built and run unattended 2026-10-12, all four predictions passed, committed (`42ad140`)** (§6.9,
+     *Stage D*). **Stage E (HLS) built and run unattended 2026-10-12, with the HLS P3 and BT.2020 transfer code
+     fixes and sorted bookmark keys as separate pieces; every prediction passed; uncommitted** (§6.9, *Stage E*).
+     The override is now on all four transports.
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
    - LUT loading (§6.4).
@@ -823,6 +825,10 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** 
   - `ContentView`'s ⌃⌥H reads `MANIFOLD_STREAM_DEBUG_URL` (added 2026-10-11). When it is set, ⌃⌥H dials
     that URL instead of the first saved web bookmark, through `connectToStreamURL` (WHEP or HLS by the
     URL), so WHEP and HLS can be run unattended without reading or writing `streamBookmarks`.
+  - ⌃⌥H also reads `MANIFOLD_STREAM_DEBUG_BOOKMARK` (added 2026-10-12, colour override Stage E). When it
+    is set and the debug URL is not, ⌃⌥H dials the saved stream of that name, of any type, as its row in
+    the streaming menu would; a comma list dials the next name on each press (`DebugBookmarkCursor`). It
+    reads `streamBookmarks` and writes nothing; the runs that used it put a scratch list in place first.
 - **Gating:** all `#if DEBUG`, so absent from Release (checked with `strings` on both builds) and
   present in Profile.
 - **Cost when present:** one engine call, one presented-handler and one log line per second. The
@@ -1051,7 +1057,25 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ OPEN 2026-10-12 — PRE-EXISTING, ALL BUILDS — stream bookmarks re-order their JSON keys on every save
+## ✅ FIXED 2026-10-12 (commit to be filled in) — PRE-EXISTING, ALL BUILDS — stream bookmarks re-order their JSON keys on every save
+
+**Fixed:** the store writes sorted keys, through `StreamBookmark.storeEncoding` (StreamBookmarkModel), which
+`StreamBookmarkStore.persist()` now calls. Same escaping as before; only the order is fixed. Verified 2026-10-12
+(`COLOR_MANAGEMENT_FINDINGS.md` §6.9, *Stage E*, piece 1):
+- **Unit tests** (StreamBookmarkModelTests, 9, two new): a load/save cycle of an unchanged list is raw
+  byte-identical, 20 times over; a list an earlier build wrote comes back as its own bytes with each object's
+  keys sorted (Foundation's `.sortedKeys` reserialization), byte for byte; a deliberately shuffled entry comes
+  back in sorted order. The seven existing migration tests pass unchanged.
+- **Across processes:** one list encoded in 6 separate processes: plain `JSONEncoder` 6 different SHAs,
+  `storeEncoding` 1.
+- **The real list, read-only** (1 196 bytes, `4466c076…`): the first save would write 1 196 bytes equal to
+  the stored bytes with keys sorted, and nothing else; a second load/save is identical; no key added. That
+  one-time re-order (to `8821c6c8…`) is the only effect on a user's list.
+- **In the app** (Stage E's save run): after Save PQ and then Save Auto, the scratch list's **raw** SHA-256 is
+  the start's again (`312e555b…`), where Stage D could show only sorted equality.
+
+
+**The original entry:**
 
 - **What:** `StreamBookmarkStore.persist()` encodes with a plain `JSONEncoder()`. Foundation writes an
   object's keys in an order that changes from one process to the next, and between entries within one encode.
@@ -1734,10 +1758,26 @@ H.264 (no B-frames) do not show it, which is why no earlier SRT measurement did.
 
 ---
 
-## ☐ OPEN 2026-10-06 — HLS maps P3-D65 primaries to CICP 11, not 12
+## ✅ FIXED 2026-10-12 (commit to be filled in) — HLS maps P3-D65 primaries to CICP 11, not 12
 
-**Status:** OPEN, found by reading (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, finding 5). Not yet observed:
-no P3-tagged HLS stream has been played. **Fix:** its own commit, ahead of Stage E (decision 6).
+**Fixed:** `HLSClient.cicp(of:)` maps `kCVImageBufferColorPrimaries_P3_D65` to **12**. Its own commit, ahead
+of Stage E (decision 6). **Observed before the fix, then verified** with a P3-tagged HLS stream (x264 bars, SPS
+VUI rewritten to 12/1/1 by `h264_metadata`, live HLS from ffmpeg on a local server) and an MP4 of the same
+bitstream with a matching `colr` atom (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, *Stage E*, piece 2):
+
+| | `[HLS] colour signalling` | `[SCOPE-COLOR] source` | layer (`[EDR] layer colorspace`) |
+|---|---|---|---|
+| HEAD `42ad140`, HLS | `primaries=11 transfer=1 matrix=1` | `DCI-P3 · Rec. 709 — tagged (CICP 11-1-1)` | `kCGColorSpaceCoreMedia709` |
+| tree, HLS | `primaries=12 …` | `P3 D65 · Rec. 709 — tagged (CICP 12-1-1)` | ICC desc "Apple P3" (wide gamut) |
+| the same tags as a file, both builds | — | `P3 D65 · Rec. 709 — tagged (CICP 12-1-1)` | ICC desc "Apple P3" |
+
+So the defect was real as read: HEAD drew a P3 stream as 709 while the CIE header named a P3 gamut. The chain
+readout prints the renderer's codes and tier, which these lines log (it was not read through the UI; see §6.9).
+**Pixels** (ASUS window, OS mode, 875×492; all-intra fixtures, so every frame is identical): tree HLS vs the
+P3 file **0 differing**; HEAD HLS vs the P3 file **37.39 % of pixels, worst Δ 99**. The export's pixel values
+are the same on both builds; the PNG's embedded profile is now P3 instead of 709.
+
+**The original entry:**
 
 - **What:** `HLSClient.cicp(of:)` maps `kCVImageBufferColorPrimaries_P3_D65` to **11**
   (`App/HLS/HLSClient.swift:1551`). CICP 11 is DCI-P3; P3-D65 is **12**. The rest of the app uses 12
@@ -1753,10 +1793,24 @@ no P3-tagged HLS stream has been played. **Fix:** its own commit, ahead of Stage
 
 ---
 
-## ☐ OPEN 2026-10-06 — HLS reports the BT.2020 SDR transfer as 1, and NDI's Rec.2020 SDR preset as 14
+## ✅ FIXED 2026-10-12 (commit to be filled in) — HLS reports the BT.2020 SDR transfer as 1, and NDI's Rec.2020 SDR preset as 14
 
-**Status:** OPEN, found by reading (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, finding 5). **Belongs with
-Phase 4** (§6.4, §7.3), which handles transfer independently of primaries.
+**Fixed (decided by Robbie 2026-10-12, ahead of Phase 4):** `HLSClient.cicp(of:)` maps
+`kCVImageBufferTransferFunction_ITU_R_2020` to **14**, the code NDI's preset, the SPS reader (SRT, WHEP) and the
+libav file path give it. Every consumer draws 14 as it draws 1: `makeColorSpace`'s default arm for (9, 14) as
+for (9, 1), the CIE scope's γ2.4, EDR off, the SDR ruler. **Measured, and it narrows the entry
+(§6.9, *Stage E*, piece 2): AVFoundation never emits that constant for these inputs.** CoreMedia respells
+transfer 14 as `ITU_R_709_2` on the buffer `AVPlayerItemVideoOutput` vends (H.264), and 14 and 15 the same way
+in a file's format description (H.264, HEVC, with or without a `colr` atom). So a 9/14/9 HLS stream reads
+**9-1-9** on HEAD and on the tree, and an MP4 of the same bitstream reads 9-1-9 too: HLS and files agree, and
+the exports are md5-identical HEAD vs tree. The new arm is for a buffer that does carry the constant; none was
+found.
+
+**Still open, elsewhere:** 14 has no name in `MediaInspector.transferName` (it prints "—"), which shows on
+NDI's Rec.2020 SDR preset (§6.8 *Still open*, and the NDI entry below). Not changed here: no HLS or file input
+reaches 14.
+
+**The original entry:**
 
 - **What:** `HLSClient.cicp(of:)` maps `kCVImageBufferTransferFunction_ITU_R_2020` to **1**
   (`App/HLS/HLSClient.swift:1566`). The comment there says this is deliberate: the renderer's transfer
@@ -1781,15 +1835,21 @@ Phase 4** (§6.4, §7.3), which handles transfer independently of primaries.
   scopes and readout use the 2020 codes. The user asked for 2020 and the picture is not shown as 2020,
   and nothing says so.
 - **Decision:** NDI keeps the preset for now. SRT, WHEP and HLS do not offer it until §7.3 is fixed. SRT's
-  override (Stage B, 2026-10-12) and WHEP's (Stage C) offer the other four presets only, through
-  `available(on:)`.
+  override (Stage B, 2026-10-12), WHEP's (Stage C) and HLS's (Stage E) offer the other four presets only,
+  through `available(on:)`.
   **When §7.3 is fixed, enable it on all four transports**, and verify (9,14) on the layer.
 
 ---
 
-## ☐ OPEN 2026-10-06 — UNEXERCISED — the HLS 601 rendition step has not been run on device since 946417a
+## ☐ OPEN 2026-10-06 — PARTLY EXERCISED 2026-10-12 — the HLS 601 rendition step has not been run on device since 946417a
 
 **Status:** not a known defect, a gap in verification. **Found:** 2026-10-06, scope-colour device run.
+**Partly exercised 2026-10-12** (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, *Stage E*, E3): a local two-rung ladder
+(720p tagged 1/1/1, 360p tagged 6/6/6) and a throttling server moved AVPlayer down and back up. At Auto each
+step gave exactly one `[SCOPE-COLOR] source` line, both ways: `SMPTE-C · Rec. 709 — tagged (CICP 6-1-6)` going
+down and `Rec. 709 · Rec. 709 — tagged (CICP 1-1-1)` going up, the renderer state `ScopeColorFeed` carries to
+the headers. **Still not checked:** the headers, readout and vectorscope target as drawn, and the one-frame
+bound. The ladder and server are in Stage E's rig, ready to reuse.
 
 - **What:** HLS is the only source whose declared colour changes mid-session. `publishColorTagsIfChanged`
   (`App/HLS/HLSClient.swift:1267`) calls `setSourceColorSpace` on every change, and since `946417a`
@@ -1802,6 +1862,24 @@ Phase 4** (§6.4, §7.3), which handles transfer independently of primaries.
   601-tagged). Confirm that the headers, the readout and the vectorscope target follow the step both
   ways. Check that the first frame after the step is the only one presented under the old state
   (the bound the `publishColorTagsIfChanged` comment describes).
+
+---
+
+## ☐ OPEN 2026-10-12 — PRE-EXISTING — an untagged HLS stream reads as declared Rec.709
+
+**Status:** found by measurement in colour override Stage E (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, *Stage E*).
+Not changed there. **Affects:** HLS only; HEAD the same.
+
+- **What:** for an H.264 HLS stream whose SPS has no `video_signal_type`, the buffers `AVPlayerItemVideoOutput`
+  vends carry `ITU_R_709_2` on all three colour axes (measured, 371/371 frames, and in the app). `HLSClient`
+  reads what the buffer carries, so the stream is `tagged (CICP 1-1-1)` in the readout and `709 709 · Declared`
+  on the Color control, where the same stream over SRT is `assumed` and WHEP `assumed (CICP 1-1-1)`.
+- **Impact:** the picture is right (the assumed default is 709 anyway). The tier is wrong: the readout claims a
+  declaration the stream never made, and an HLS stream that declares 709 cannot be told from one that declares
+  nothing. Stage SPS found VideoToolbox inventing a 601 triple for the same case on raw decode; AVPlayer's
+  output invents 709 instead.
+- **To decide:** whether HLS should read the SPS itself (the item's video track's format description, which
+  the 8-bit flag already reads per rendition) to tell "declared" from "AVFoundation's default". Not urgent.
 
 ---
 

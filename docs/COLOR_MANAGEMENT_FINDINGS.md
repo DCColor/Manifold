@@ -1503,7 +1503,7 @@ hold. Where the audit's line number had drifted, the corrected one is given belo
       |---|---|---|
       | NDI → NDI | Swapped in place. | Reset, because `start(with:)` calls `resetColorimetry()` (`NDIService.swift:518`, `:714`). |
       | SRT → SRT | Full teardown, then a new session (`App/SRT/SRTClient.swift:442-474`). | Starts fresh. |
-      | HLS → HLS | Swapped in place (`App/HLS/HLSClient.swift:800-831`). | Stage E must decide whether it carries over or resets. |
+      | HLS → HLS | Swapped in place (`App/HLS/HLSClient.swift:800-831`). | Reset to the new bookmark's saved value, or Auto (decided in Stage E, 2026-10-12). |
       | WHEP → WHEP | Refused while a session runs (`App/WebRTC/WHEPClient.swift:135-153`). | Not reached. |
 13. **The Color control and its amber indicator are NDI-only.**
     - The control is shown only when NDI is live: `App/ContentView.swift:3163`, not ~3236 as the
@@ -1560,11 +1560,12 @@ Run in this order.
   - The scopes need no extra work: they follow the renderer since `946417a`.
 - **Stage C — WHEP override, per session.** Same pattern as Stage B. Done 2026-10-12, committed `631ad92`
   (*Stage C*, below).
-- **Stage D — save per bookmark for SRT, WHEP and HLS.** Done 2026-10-12, uncommitted (*Stage D*, below).
+- **Stage D — save per bookmark for SRT, WHEP and HLS.** Done 2026-10-12, committed `42ad140` (*Stage D*, below).
   - Add an optional raw-string field to `StreamBookmark`, decoded tolerantly.
   - Add migration tests.
   - Save and Revert in the live menu.
-- **Stage E — HLS override.** The P3 code fix (decision 6) lands before it.
+- **Stage E — HLS override.** The P3 code fix (decision 6) lands before it. Done 2026-10-12, uncommitted, with
+  the P3 fix, the BT.2020 transfer code and sorted bookmark keys as separate pieces (*Stage E*, below).
 
 **Measured before Stage B ships:** both answered in Stage SPS, below.
 - Does VideoToolbox convert pixels when SRT or WHEP source buffers are tagged PQ, HLG or 2020? If
@@ -1988,7 +1989,7 @@ its first SPS, so there is always a reading to compare with.
 **Still open after Stage C.** Stage D (save per bookmark for SRT, WHEP and HLS) and E (HLS, after decision
 6's code fix). WHEP overrides are not saved: a reconnect starts on Auto, by design until Stage D.
 
-#### Stage D — save per bookmark (SRT, WHEP, HLS): done 2026-10-12, uncommitted
+#### Stage D — save per bookmark (SRT, WHEP, HLS): done 2026-10-12, committed `42ad140`
 
 **What changed.**
 
@@ -2076,7 +2077,147 @@ keys, one per launch; they were deleted by name. The domain is then **dictionary
 1 143 keys. Screenshots were deleted once their results were recorded here.
 
 **Still open after Stage D.** Stage E (HLS, after decision 6's code fix) applies the saved HLS value, which
-is already loaded. NDI stays session-only (decision 1).
+is already loaded. NDI stays session-only (decision 1). **Done in Stage E**, below.
+
+#### Stage E — HLS override, with the two HLS code fixes and sorted bookmark keys: done 2026-10-12, uncommitted
+
+Three pieces, each its own commit (commits to be filled in):
+
+1. **Sorted bookmark keys** (BUGS.md, the key-order entry). `StreamBookmark.storeEncoding` (StreamBookmarkModel)
+   encodes with `.sortedKeys`; `StreamBookmarkStore.persist()` calls it. Same escaping, no new key.
+2. **HLS colour codes** (BUGS.md, two entries; decision 6). `HLSClient.cicp(of:)`: P3-D65 → **12** (was 11),
+   the BT.2020 transfer constant → **14** (was 1).
+3. **The HLS override** (this stage proper).
+
+**What changed (piece 3).**
+
+- **Where it lives:** `LiveColorOverrideModel`, as SRT's and WHEP's: `offersOverride(.hls)`, log tag
+  `[HLS-COLOR]`, applied through `HLSClient.setColorimetryOverride` (main; read once per pulled frame under
+  `overrideLock`). Presets from `available(on: .hls)`: no Rec.2020 SDR (decision 3). The Color control, the
+  title suffix, ⌃⌥C, and Save / Revert to Saved work as on SRT and WHEP; the control reads
+  `HLSClient.colorimetry` (effective and declared, published on main; nil until the first frame).
+- **Finding 4, the override wins inside `publishColorTagsIfChanged`.** The stream's codes are still read from
+  every vended buffer first, so the `[HLS] colour signalling` line and the control's "Stream" line keep
+  following the stream (a rendition change under an override is logged and changes nothing else). What the
+  renderer is told is the preset while one is in force, and "same as last time" now compares **what the
+  renderer was told and whether it was an override** (`lastPublishedColour`), apart from the stream's own codes
+  (`lastDeclaredCICP`). At Auto the two coincide and the code path is HEAD's, line for line.
+- **Finding 10, both halves.** With an override in force every vended frame is re-tagged with the preset
+  (`SourceColorimetry.apply(to:)`, the SRT/WHEP tags) before it is wrapped and enqueued, because the shader
+  takes its YCbCr matrix from the buffer.
+- **Finding 15, one frame late, kept.** The renderer hears through the same `main.async` hop as a rendition
+  change, so the frame that carries the change is presented under the previous state and the next tick
+  re-presents it. Measured change → `[SCOPE-COLOR] source` **5–38 ms** (28 changes), inside one 40 ms frame
+  plus the hop. HLS has no presentation queue, so no timed hop is needed (SRT +0.55–0.83 s, WHEP +0.41–0.48 s).
+- **At connect** an override already in force (a saved one) is stated to the renderer in place of the assumed
+  709, as SRT's rides its activation, so the first frame finds it already told: one `source` line, not two.
+- **Finding 12, the open question: an HLS→HLS swap RESETS to the new bookmark's saved value, or Auto when it
+  has none** (decided 2026-10-12). Every connect, a swap included, goes through `DeckRegistry.connectLive` →
+  `prepare`, so this needed no code of its own; `HLSClient.connect` does not touch the override. Carrying an
+  override across would assert a colour about a stream nobody has looked at, and it would make a swap behave
+  differently from disconnect-then-connect.
+- **Harness, DEBUG only (pre-ship removal, BUGS.md):** ⌃⌥H reads `MANIFOLD_STREAM_DEBUG_BOOKMARK`, a saved
+  stream's name (any type) or a comma list dialled in turn, so the saved override and the swap can be driven
+  unattended.
+
+**Re-stamping AVPlayer's buffers, checked first** (a scratch AVPlayer + `AVPlayerItemVideoOutput`, x420, local
+live HLS): the output recycles about 20 buffers across ~370 vends, and **every vend comes with its attachments
+reset**. With 2020/PQ/2020 stamped on every buffer, plus a marker key of our own, 0 of 371 reads came back with
+a stamp or the marker; the stream's own tags were read every time (709 and untagged streams, 15 s each; and
+1 560 vends across a ladder). The stamp touches only attachments, so the pixels and AVPlayer's own playback are
+unaffected. **No side effect found.**
+
+**Found on the way, recorded and not changed:**
+
+- **AVFoundation says 709 for an untagged HLS stream.** The vended buffers of an H.264 stream with no
+  `video_signal_type` carry ITU_R_709_2 on all three axes, so HLS reads it `tagged (CICP 1-1-1)` and the face
+  says `709 709 · Declared`, where SRT says `assumed`. HEAD does the same; the picture is the assumed one
+  either way. BUGS.md.
+- **CoreMedia respells transfer 14 (and 15) as 709**, on the vended buffer and in a file's format
+  description (H.264 and HEVC, with or without a `colr` atom). So piece 2's 14 is not reached by any stream
+  made here; a 9/14/9 stream reads 9-1-9, as the same file does.
+- **The 601 rung reads `SMPTE_C · 709 · 601`** (CICP 6-1-6): transfer 6 respelled 709, as Stage SPS found.
+
+**Rig.** Unattended, unsigned Profile builds: HEAD `42ad140` (SHA-256 `a0fef8e3…`, the same binary Stage D
+recorded) against the tree (`92cdfae3…`). Window on the ASUS PA147 at 875×492: pixel checks only, nothing judged
+by eye. Stage D's harness (every keystroke and menu pick checked against its log line; none dropped).
+**HLS:** ffmpeg's `hls` muxer writing live playlists (2 s segments, 6 in the window) from looped fixtures by
+stream copy, served by a threaded Python server on 127.0.0.1:8100; bipbop was not needed. **Fixtures:**
+1280×720/25 SMPTE HD bars, x264 High, **all-intra at QP 12** so every decoded frame is identical (500/500
+frame md5s), AAC; the variants are the same slices with only the SPS VUI rewritten by `h264_metadata`
+(untagged, 1/1/1, 9/16/9, 12/1/1, 9/14/9), and MP4s of each with a matching `colr` atom. **Ladder:** 720p
+CBR 3 Mb/s tagged 1/1/1 and 360p CBR 300 kb/s tagged 6/6/6, one ffmpeg, a master playlist with the true
+bandwidths; the server throttles segment responses to 150 kB/s while a flag file exists, which moves AVPlayer
+down and, when lifted, back up. **Files** were opened into the running build with `open -a`, played and
+paused before exporting. **SRT, WHEP, NDI:** Stage D's scenarios and fixtures, MediaMTX 1.21.1 from a
+scratchpad config, the scratch NDI sender. **Defaults:** the domain exported first (1 143 keys);
+`streamBookmarks` (1 196 bytes, `4466c076…`) stashed, re-read and matched, then a three-entry scratch list
+(`E-HLS` untagged, `E-HLS-B` 709 with HLG saved, `E-HLS-C` PQ), written by the new type (sorted), over it.
+Restored byte for byte at the end (*Restore*, below).
+
+**A harness fault, caught by a control and re-run.** The first fixtures were ordinary x264 GOPs, which decode
+to **5 distinct frames** (450 of one, plus periodic P/B variants). An untagged control export differed from its
+own first export by 93 samples, which exposed it. Every HLS pixel run was repeated on the all-intra fixtures;
+the results below are from those. (Stage B–D's SRT/WHEP fixtures decode to a single frame; their results
+stand.) A first file run also exported black: a file opened by LaunchServices presents no frame until it
+plays. **The chain readout was not read through the UI**, as in Stages B–D: it is a popover the harness could
+not open on this bar's layout, and typing blind risks shortcuts. It prints the renderer's codes and tier, which
+`[EDR] source tags`, `[EDR] layer colorspace` and `[SCOPE-COLOR] source` log.
+
+**Predictions** (written 2026-10-12, before the code changed; 2b revised, and 2c withdrawn, after the CoreMedia
+measurement above and before any run):
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| 1a | Unit: store encoding, decode→encode, repeated | raw bytes identical; the 7 existing migration tests pass unchanged | any differ |
+| 1b | One value encoded in 6 processes | 1 SHA (plain `JSONEncoder`: several) | > 1 |
+| 1c | The real list, read-only | the new bytes are the stored bytes with keys sorted, byte-equal; content equal; no key added | anything else differs |
+| 1d | App: Save PQ then Save Auto on the scratch list | the raw SHA returns to the start | differs |
+| 2a | P3-D65 HLS (12/1/1) | HEAD `11-1-1`, 709 layer; tree `12-1-1`, P3 layer, = the MP4 with the same tags (lines and pixels) | tree ≠ file |
+| 2b | 2020 SDR HLS (9/14/9) | HEAD, tree and file all 9-1-9; exports HEAD vs tree md5-identical; tree = file | otherwise |
+| E1 | Untagged HLS, ⌃⌥C ×2 → 2020 PQ | one `source: … PQ … overridden (CICP 9-16-9)`; face `2020 PQ (ST 2084) · Overridden`, amber ≥ 100 px, commonest 255,146,48; title `Stream debug URL — Color 2020 PQ` | any missing |
+| E2 | Declared PQ (Auto) vs untagged + PQ override | export (`.png`, `.rgba16f`, `.v210`) 0; ASUS window 0 codes; controls 0; sanity > 0 | non-zero pair; sanity 0 voids |
+| E3 | 2020 PQ held across ladder steps (720p 709 ↔ 360p 601) | each step: `rendition changed` and `colour signalling` logged, **0** `source` lines, face and title held; at Auto the headers follow the 601 step | a `source` line, or the override lost |
+| E4 | Back to Auto | the `source` line HEAD logs for that stream | otherwise |
+| E5 | Lines per change | 1 `[HLS-COLOR] override` + 1 `renderer now` + 1 `source`; 0 in 10 s idle; change → renderer within a few frames | extra or missing |
+| E6 | Saved bookmark: Save PQ, reconnect | `→ … from the saved stream`, one PQ `source` at connect, amber, title `E-HLS — Color 2020 PQ`, key on that entry only; Save Auto removes it; reconnect Auto | otherwise |
+| E7 | Swap A (session PQ) → B (HLG saved) → C (nothing saved) | B reads HLG, C reads Auto | the override carries over |
+| E8 | Re-stamp side effects | a stamp never reads back as the stream's declaration | it does |
+| E9 | Regression | SRT, WHEP, NDI identical to HEAD; HLS at Auto (untagged, 709, PQ, 2020 SDR) colour lines identical and exports md5-identical; P3 differs only as 2a | any other difference |
+
+**Results — all pass.**
+
+| # | Result |
+|---|---|
+| 1a | StreamBookmarkModelTests **9 pass** (7 + `testALoadSaveCycleIsByteIdentical`, `testTheFirstSaveOnlyReordersKeys`): 20 load/save cycles raw-identical; both earlier shapes come back as their own bytes with keys sorted; a shuffled entry comes back sorted. **322 package tests pass** on the final tree. |
+| 1b | Plain `JSONEncoder`: **6 SHAs in 6 processes**. `storeEncoding`: **1**. |
+| 1c | 7 entries, 4 keys each: the first save would write **1 196 bytes = the stored bytes with keys sorted** (`4466c076…` → `8821c6c8…`); a second load/save identical; no `colorOverride` written. That re-order is the only effect on a user's list. |
+| 1d | Save PQ (`0900f9ce…`), then Save Auto: **raw SHA `312e555b…`, the start's**, in both save runs. Untouched entries' content never changed. |
+| 2a | **HEAD:** `[HLS] colour signalling: primaries=11`, `DCI-P3 · Rec. 709 — tagged (CICP 11-1-1)`, layer `kCGColorSpaceCoreMedia709`: **a P3 stream drawn as 709 while the CIE header named P3, as the audit read it.** **Tree:** `12-1-1`, `P3 D65 · Rec. 709 — tagged`, layer ICC "Apple P3", the three lines the P3 file gives on either build. **Pixels:** ASUS window, tree HLS vs the file **0**; HEAD HLS vs the file **37.39 % of pixels, worst Δ 99**. The export's pixel values are the same on both builds (`.rgba16f` and `.v210` md5-identical); only the PNG's embedded profile changes, 709 → P3. |
+| 2b | HEAD, tree and the file: `9-1-9`, `Rec. 2020 · Rec. 709 — tagged`, 709 layer. HEAD vs tree: 13 colour lines identical, 6 exports md5-identical; tree vs file: exports and window 0. No change, as revised. |
+| E1 | One `source: Rec. 2020 · PQ (ST 2084) — overridden (CICP 9-16-9)`. Face `2020 PQ (ST 2084) · Overridden`, **401 amber px, commonest 255,146,48** (the SRT/WHEP/NDI tint; this bar is laid out differently, hence not 512). Title `Stream debug URL — Color 2020 PQ`. |
+| E2 | **Pair 0** in `.png`, `.rgba16f`, `.v210`; **ASUS window 0 codes**. Controls 0 (six pairs). Sanity: window **228 codes, 82.96 %**; export 44.02 % of pixels. |
+| E3 | Under 2020 PQ the ladder stepped **four times** (720p→360p→720p→360p… in both directions): each a `rendition changed`, a `colour signalling` (`1-1-1` ↔ `6-1-6`) and **0** `source` lines; amber 401 px on both rungs; title held. At Auto: down gives one `SMPTE-C · Rec. 709 — tagged (CICP 6-1-6)`, up one `Rec. 709 … (CICP 1-1-1)`. Auto chosen on the 360p rung returns to `6-1-6`. |
+| E4 | Declared PQ → `tagged (CICP 9-16-9)`, face `· Declared`; untagged → `tagged (CICP 1-1-1)` (see *Found*: AVFoundation's 709). Both are HEAD's connect lines for those streams. |
+| E5 | 28 user changes → **28 `override`, 28 `renderer now`, 28 `source`** (across the untagged, PQ, save, ladder and swap runs). **0 lines in 10 s idle.** Change → `source` **5–38 ms**. `[HLS] colour signalling` only when the stream's codes change. |
+| E6 | Save → `[HLS-COLOR] saved Rec.2020 PQ (HDR10) to the saved stream`; `"colorOverride":"rec2020-pq"` on `E-HLS` only. HLG, then Revert → PQ. Reconnect → `override → Rec.2020 PQ (HDR10) (CICP 9-16-9) — from the saved stream` and **exactly one** PQ `source`, at connect; 401 amber px; title `E-HLS — Color 2020 PQ`. The menu: Auto and four presets (no 2020 SDR), Stream `Declares Rec.709 · Rec.709 · Rec.709`, `Save Rec.2020 HLG to “E-HLS”` / `Revert to Saved (Rec.2020 PQ (HDR10))` enabled with HLG in force, both greyed after the reconnect. Save Auto → key gone; reconnect → `→ Auto (new connection)`, title `E-HLS`, 0 amber. |
+| E7 | A at 2020 PQ (session) → B: `override → Rec.2020 HLG … — from the saved stream`, one HLG `source`, title `E-HLS-B — Color 2020 HLG`, 383 amber px. B → C: `→ Auto (new connection)`, C's own `tagged (CICP 9-16-9)`, title `E-HLS-C`, 0 amber. (Each swap also logs one cleared `source` line from the swap's retire-first step, as before.) |
+| E8 | The probe above, and in the app: across every run, `colour signalling` only ever named the fixture's own tags, and the first reading after Auto was the stream's. |
+| E9 | **SRT** untagged 31 / declared PQ 22 colour lines, **WHEP** 32 / 23: identical; 30 exports, 0 differ; titles identical. **NDI**: 7 steps, 88 `[NDI]`/`[EDR]` lines per step and per thread, 10 `[SCOPE-COLOR]`: identical; titles identical. **HLS at Auto**: untagged, 709, PQ, 2020 SDR: 13 colour lines each identical (the tree adds only `[HLS-COLOR] override → Auto (new connection)`), 6 exports each md5-identical. P3: the four lines of 2a, and the PNG's embedded profile. |
+
+**Seen, by design, and worth knowing.** An override changed while no frames arrive (a stalled stream) reaches
+the renderer with the next frame, as on SRT and WHEP. In the first ladder run a throttle stalled the 720p rung
+for 15 s: HLG and P3 never reached the renderer, Auto landed when frames resumed, and in between the title had
+already dropped its suffix (it follows the session value) while the face still read PQ (it follows the
+renderer).
+
+**Restore.** With Manifold, MediaMTX and the HLS server stopped, `streamBookmarks` was read (the scratch list,
+`312e555b…`) and the stash written back: SHA-256 **`4466c076…`**, the stash's. The runs had added 43 `NSWindow
+Frame SwiftUI…` keys, deleted by name. The domain is then **dictionary-equal** to the first export, 1 143 keys.
+Screenshots were deleted once recorded here.
+
+**Still open after Stage E.** The override is done on all four transports. Rec.2020 SDR stays NDI-only until
+§7.3 (decision 3). The chain readout has not been read through the UI in Stages B–E.
 
 ### 6.10 HEVC over SRT — audit and decisions, 2026-10-07
 
@@ -2249,9 +2390,13 @@ Run in this order. Each stage ships on its own.
 - **Then override Stage C** (§6.9), WHEP. **Done 2026-10-12**, `631ad92`: §6.9, *Stage C*. Stage SPS's WHEP
   reading (declared colour from the SPS, announced when the first frame under it is due) is what the override
   sits on, through the same timed hop.
-- **Then override Stage D** (§6.9), save per bookmark. **Done 2026-10-12**, uncommitted: §6.9, *Stage D*. A saved
+- **Then override Stage D** (§6.9), save per bookmark. **Done 2026-10-12**, `42ad140`: §6.9, *Stage D*. A saved
   override is handed to the frame router before the transport opens: on SRT it rides the activation, on WHEP
   it is the first announcement, through the same hop.
+- **Then override Stage E** (§6.9), HLS. **Done 2026-10-12**, uncommitted: §6.9, *Stage E*. HLS has no
+  presentation queue, so it needs no timed hop: the override wins in `publishColorTagsIfChanged` and lands one
+  frame late like a rendition change (5–38 ms measured), and every vended frame is re-tagged. The 8-bit flag is
+  stamped after the colour tags, unchanged. With it, HLS's P3-D65 code is 12 and its BT.2020 transfer code 14.
 
 #### Stage 0 — the identification fix: predictions, written 2026-10-07 before the code changed
 

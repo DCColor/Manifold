@@ -256,6 +256,14 @@ private final class RendererStore: ObservableObject {
     let renderer: MetalVideoRenderer? = MetalVideoRenderer()
 }
 
+#if DEBUG
+/// ⌃⌥H's `MANIFOLD_STREAM_DEBUG_BOOKMARK` list position (pre-ship removal, docs/BUGS.md).
+@MainActor enum DebugBookmarkCursor {
+    private static var index = 0
+    static func next() -> Int { defer { index += 1 }; return index }
+}
+#endif
+
 struct ContentView: View {
 
     /// THIS WINDOW'S playback engine. `@StateObject`, not `@ObservedObject` on a parameter: each
@@ -1858,9 +1866,19 @@ struct ContentView: View {
                 // this instead, through the same dispatch the Stream URL sheet uses (WHEP or HLS by
                 // the URL), so no bookmark is read and `streamBookmarks` is never touched. Unset,
                 // nothing changes. ⌃⌥D's `MANIFOLD_SRT_DEBUG_URL` is the same shape.
+                // MANIFOLD_STREAM_DEBUG_BOOKMARK (same removal) dials the saved stream of that NAME, of any
+                // type, as its row in the streaming menu would: the colour override's per-bookmark runs on
+                // HLS, which ⌃⌥H's web-only default cannot reach (§6.9 Stage E). A comma list dials the
+                // next name on each press, so an HLS→HLS swap can be driven.
                 if let override = ProcessInfo.processInfo.environment["MANIFOLD_STREAM_DEBUG_URL"]
                     .flatMap(URL.init(string:)) {
                     connectToStreamURL(override, name: "Stream debug URL")
+                } else if let names = ProcessInfo.processInfo.environment["MANIFOLD_STREAM_DEBUG_BOOKMARK"]?
+                            .split(separator: ",").map(String.init),
+                          let name = names.isEmpty ? nil : names[DebugBookmarkCursor.next() % names.count],
+                          let bookmark = StreamBookmarkStore.shared.bookmarks.first(where: { $0.name == name }),
+                          let url = StreamBookmarkStore.connectURL(for: bookmark) {
+                    connectToStreamURL(url, name: bookmark.name, bookmark: bookmark)
                 } else if let bookmark = StreamBookmarkStore.shared.firstConnectable(ofType: .web),
                    let url = StreamBookmarkStore.connectURL(for: bookmark) {
                     // Through the arbitration funnel, exactly like the shipping menu path. This
@@ -3029,7 +3047,7 @@ struct ContentView: View {
                 // Color — the color-interpretation control (source-agnostic). It hosts an ASSERTION
                 // about the source, so it lives with the actions, not in the inspector (which reports
                 // what things ARE). Today its only section is the live stream's colorimetry override,
-                // so it's gated to the transports that have one (NDI, SRT, WHEP): it has nothing to say about
+                // so it's gated to the transports that have one (NDI, SRT, WHEP, HLS): it has nothing to say about
                 // a file yet (file color-management modes are the future second section). One element,
                 // no modifiers (§6.7) — see LiveColorOverride.swift.
                 if let live = activeLiveSource, LiveColorOverrideModel.offersOverride(live) {
