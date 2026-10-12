@@ -143,8 +143,8 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Change | Commits | Visible? |
 |---|---|---|
 | Renderer's clock restored on disconnect (NDI too): a file played afterwards is no longer ~195 ms out | `48ae1e8` | Yes |
-| P3-D65 read as CICP 12 (was 11, drawn as 709); the BT.2020 transfer constant as 14 (was 1; CoreMedia never sends it for H.264/HEVC, so no visible change) | uncommitted (piece 2) | Yes (P3 streams) |
-| Color override on HLS, saved per bookmark; held across rendition changes; an HLS→HLS swap starts on the new stream's saved value | uncommitted (override Stage E) | Yes |
+| P3-D65 read as CICP 12 (was 11, drawn as 709); the BT.2020 transfer constant as 14 (was 1; CoreMedia never sends it for H.264/HEVC, so no visible change) | `5ed306f` | Yes (P3 streams) |
+| Color override on HLS, saved per bookmark; held across rendition changes; an HLS→HLS swap starts on the new stream's saved value | `5ed306f` | Yes |
 
 #### DeckLink / SDI
 
@@ -183,7 +183,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | LiveClock telemetry no longer written to stderr in Release | `176ca03` |
 | Audio-mirror rate pin removed | `8379c10` |
 | DEBUG probes: destination color profile, paired timebase, A/V lag, A/V content, raw SR logging, WindowSizer deinit | `2db97b1` `61b9b69` `a90de72` `d3b0831` `c31ca83` `2c1da93` |
-| Saved streams written with sorted JSON keys, so an unchanged list saves back byte for byte (each list is re-ordered once at its first save; content unchanged) | uncommitted (piece 1) |
+| Saved streams written with sorted JSON keys, so an unchanged list saves back byte for byte (each list is re-ordered once at its first save; content unchanged) | `f926f47` |
 | Soak, replay and DeckLink test tooling; MediaMTX `useAbsoluteTimestamp` mode | `8389dd9` `5041fb8` `54750ad` `9b10b68` `73ef624` `b35a810` |
 | Build hygiene: concurrency annotations, vendored-header warnings, ignore build folders | `f0969e4` `aa79682` `d055d07` |
 | Documentation only (findings, plans, BUGS.md, roadmap, user guide drafts) | the remaining 49 commits |

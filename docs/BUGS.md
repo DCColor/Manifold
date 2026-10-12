@@ -43,14 +43,15 @@ held back until after release, and the numbered defect entries follow.
      audit*. **S1 committed (`c93be09`). S2 committed (`099ca1d`)** (§6.10,
      *Stage 3b, S2 — results*). **S3 and S4 built and run unattended 2026-10-11** (§6.10,
      *Stage 3b, S3 and S4 — results*); **committed (`0b06de1`)**; its refusal rule refined 2026-10-11,
-     uncommitted (§6.10, *S3/S4 follow-up*). S5 (the OBS pass) is attended.
+     committed (`314dd6e`) (§6.10, *S3/S4 follow-up*). S5 (the OBS pass) is attended.
    - The colour override, Stages B–E (§6.9). **Stage B (SRT, per session) built and run unattended
      2026-10-12, all seven predictions passed, committed (`4bc42b4`)** (§6.9, *Stage B*). **Stage C (WHEP,
      per session) built and run unattended 2026-10-12, all seven passed, committed (`631ad92`)** (§6.9,
      *Stage C*; one log-label defect found by P5 and fixed before the results). **Stage D (save per
      bookmark) built and run unattended 2026-10-12, all four predictions passed, committed (`42ad140`)** (§6.9,
      *Stage D*). **Stage E (HLS) built and run unattended 2026-10-12, with the HLS P3 and BT.2020 transfer code
-     fixes and sorted bookmark keys as separate pieces; every prediction passed; uncommitted** (§6.9, *Stage E*).
+     fixes and sorted bookmark keys as separate pieces; every prediction passed; committed (`f926f47` sorted keys,
+     `5ed306f` the HLS codes and the override)** (§6.9, *Stage E*).
      The override is now on all four transports.
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
@@ -1057,7 +1058,7 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in) — PRE-EXISTING, ALL BUILDS — stream bookmarks re-order their JSON keys on every save
+## ✅ FIXED 2026-10-12 (`f926f47`) — PRE-EXISTING, ALL BUILDS — stream bookmarks re-order their JSON keys on every save
 
 **Fixed:** the store writes sorted keys, through `StreamBookmark.storeEncoding` (StreamBookmarkModel), which
 `StreamBookmarkStore.persist()` now calls. Same escaping as before; only the order is fixed. Verified 2026-10-12
@@ -1373,9 +1374,9 @@ has no gap Manifold added, against 28 gaps in 10.8 s on the 2026-10-07 HEAD reco
 
 ---
 
-## ✅ FIXED 2026-10-11 (commit to be filled in) — PRE-EXISTING, SRT, WHEP, HLS, AVFOUNDATION FILES (NOT NDI, CORRECTED) — 8-bit sources are widened to 10-bit full-scale (×1023/255), not ×4: mid-grey and white land 2–3 codes high
+## ✅ FIXED 2026-10-11 (`3c911fb`) — PRE-EXISTING, SRT, WHEP, HLS, AVFOUNDATION FILES (NOT NDI, CORRECTED) — 8-bit sources are widened to 10-bit full-scale (×1023/255), not ×4: mid-grey and white land 2–3 codes high
 
-**Status:** FIXED (commit to be filled in), option (b), decided by Robbie 2026-10-11. Measured in the app on SRT
+**Status:** FIXED (`3c911fb`), option (b), decided by Robbie 2026-10-11. Measured in the app on SRT
 (listener and MediaMTX, 4:2:0 and 4:2:2), WHEP, HLS and AVFoundation files, playback and scrub: every band reads
 exactly the 10-bit control's codes, export and wire, 100 % pixel-identical to it on 4:2:0; 10-bit sources and libav
 files md5-identical to HEAD (§6.10, *8-bit sources mapped exactly ×4: results*). **NDI, corrected (E6′, unattended,
@@ -1436,7 +1437,7 @@ native`, **1080 / 1080 rows** on export and wire; H.264 High 4:4:4 Predictive to
 on export, 512 ± 2 on 100 % of the wire. Where VideoToolbox cannot decode it (no software decoder for H.264
 4:2:2/4:4:4, −8969), the stream is refused with a banner; where a picture decodes but carries less chroma
 than its SPS declares, the readout names why and a banner says so, and the stream stays up. **Refined
-2026-10-11 (uncommitted):** `0b06de1` refused on the first failed picture, which also refused a stream whose
+2026-10-11 (`314dd6e`):** `0b06de1` refused on the first failed picture, which also refused a stream whose
 first keyframe was only damaged (measured: H.264 and HEVC, first IDR truncated). Now an unsupported-format
 status refuses at once and a data error waits for the next random-access picture; −8969 is VideoToolbox's
 *bad data* code, so this case is refused after three failed random-access pictures (1.1 s on a 1 s GOP,
@@ -1640,10 +1641,12 @@ clear disagreement** (decided, Robbie, 2026-10-09).
 
 ---
 
-## ☐ PRE-RELEASE FIX (decided, Robbie, 2026-10-09; right after HEVC Stage 4 is committed) — PRE-EXISTING, SRT — on a stream with B-frames, sound runs 35–40 ms off the picture for ~40 s at bframes 3, and 84–114 ms off for ~2 minutes on deep pyramids (bframes 8)
+## ✅ FIXED 2026-10-10 (`1bd07de`) — PRE-RELEASE FIX (decided, Robbie, 2026-10-09; right after HEVC Stage 4 is committed) — PRE-EXISTING, SRT — on a stream with B-frames, sound runs 35–40 ms off the picture for ~40 s at bframes 3, and 84–114 ms off for ~2 minutes on deep pyramids (bframes 8)
 
-**Status:** OPEN, **DIAGNOSED 2026-10-10** (§6.10, *The B-frame start-up offset: step 1*).
-- **Fix BUILT, uncommitted**, in its step-3 form (Robbie, 2026-10-10): a start-up realign by position
+**Status:** ✅ **FIXED 2026-10-10 (`1bd07de`)**, **DIAGNOSED 2026-10-10** (§6.10, *The B-frame start-up offset: step 1*).
+Two bands were missed, each by under 1 ms (below): bframes 8 max 7.2–7.6 ms against a band of 6.8 (HEAD 88–115),
+and one +60 / +120 s calibration pair 2.45 ms apart against a band of 2. Both are the four-tooth mean's residual.
+- **Fix BUILT, committed (`1bd07de`)**, in its step-3 form (Robbie, 2026-10-10): a start-up realign by position
   over **4 whole teeth**, counted from arrivals, on streams that reorder; **no hold at all on streams that
   do not**. §6.10, *step 3 — results*.
 - **Step 3 met:**
@@ -1758,10 +1761,10 @@ H.264 (no B-frames) do not show it, which is why no earlier SRT measurement did.
 
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in) — HLS maps P3-D65 primaries to CICP 11, not 12
+## ✅ FIXED 2026-10-12 (`5ed306f`) — HLS maps P3-D65 primaries to CICP 11, not 12
 
-**Fixed:** `HLSClient.cicp(of:)` maps `kCVImageBufferColorPrimaries_P3_D65` to **12**. Its own commit, ahead
-of Stage E (decision 6). **Observed before the fix, then verified** with a P3-tagged HLS stream (x264 bars, SPS
+**Fixed:** `HLSClient.cicp(of:)` maps `kCVImageBufferColorPrimaries_P3_D65` to **12**. Committed with Stage E
+in `5ed306f` (decision 6 had planned it as its own commit, ahead of Stage E). **Observed before the fix, then verified** with a P3-tagged HLS stream (x264 bars, SPS
 VUI rewritten to 12/1/1 by `h264_metadata`, live HLS from ffmpeg on a local server) and an MP4 of the same
 bitstream with a matching `colr` atom (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, *Stage E*, piece 2):
 
@@ -1793,7 +1796,7 @@ are the same on both builds; the PNG's embedded profile is now P3 instead of 709
 
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in) — HLS reports the BT.2020 SDR transfer as 1, and NDI's Rec.2020 SDR preset as 14
+## ✅ FIXED 2026-10-12 (`5ed306f`) — HLS reports the BT.2020 SDR transfer as 1, and NDI's Rec.2020 SDR preset as 14
 
 **Fixed (decided by Robbie 2026-10-12, ahead of Phase 4):** `HLSClient.cicp(of:)` maps
 `kCVImageBufferTransferFunction_ITU_R_2020` to **14**, the code NDI's preset, the SPS reader (SRT, WHEP) and the
@@ -11207,6 +11210,10 @@ measurement (live HLS: 2025545 frames scheduled, real=0f) and FIXED.**
 live source on SDI produces black pictures and silence — and **the video defect is why the audio
 one went unnoticed for so long: there was never a live SDI picture to monitor against.** Nobody
 sits watching a black raster wondering why it is also silent.
+
+> **Superseded by the fix (2026-09-18, this entry's heading and Status).** The paragraph below was written
+> while only the audio half was fixed. The video half is now fixed too; it is kept as the record of that
+> interval, not as the current state.
 
 ⚠️ **DO NOT FIX ONE AND DECLARE LIVE SDI WORKING — AND THE AUDIO HALF IS NOW THE ONE THAT IS
 FIXED.** The audio gate has been corrected; **this VIDEO entry is still OPEN**, so a live source on

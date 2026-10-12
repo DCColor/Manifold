@@ -1564,8 +1564,8 @@ Run in this order.
   - Add an optional raw-string field to `StreamBookmark`, decoded tolerantly.
   - Add migration tests.
   - Save and Revert in the live menu.
-- **Stage E — HLS override.** The P3 code fix (decision 6) lands before it. Done 2026-10-12, uncommitted, with
-  the P3 fix, the BT.2020 transfer code and sorted bookmark keys as separate pieces (*Stage E*, below).
+- **Stage E — HLS override.** The P3 code fix (decision 6) lands before it. Done 2026-10-12, committed `5ed306f`
+  with the P3 fix and the BT.2020 transfer code; sorted bookmark keys separately, `f926f47` (*Stage E*, below).
 
 **Measured before Stage B ships:** both answered in Stage SPS, below.
 - Does VideoToolbox convert pixels when SRT or WHEP source buffers are tagged PQ, HLG or 2020? If
@@ -2079,9 +2079,9 @@ keys, one per launch; they were deleted by name. The domain is then **dictionary
 **Still open after Stage D.** Stage E (HLS, after decision 6's code fix) applies the saved HLS value, which
 is already loaded. NDI stays session-only (decision 1). **Done in Stage E**, below.
 
-#### Stage E — HLS override, with the two HLS code fixes and sorted bookmark keys: done 2026-10-12, uncommitted
+#### Stage E — HLS override, with the two HLS code fixes and sorted bookmark keys: done 2026-10-12, committed `f926f47`, `5ed306f`
 
-Three pieces, each its own commit (commits to be filled in):
+Three pieces. Piece 1 is `f926f47`; pieces 2 and 3 were committed together as `5ed306f`:
 
 1. **Sorted bookmark keys** (BUGS.md, the key-order entry). `StreamBookmark.storeEncoding` (StreamBookmarkModel)
    encodes with `.sortedKeys`; `StreamBookmarkStore.persist()` calls it. Same escaping, no new key.
@@ -2319,18 +2319,18 @@ Run in this order. Each stage ships on its own.
   *Buffer policy — the review and its decisions, 2026-10-08*, below: 0b-2a, then 0b-2b (the reorder
   term), then L1 and L2.
 - **Stage 1 — the HEVC parser in the FFmpeg build.** The gate still refuses HEVC. **Done 2026-10-09
-  (uncommitted), below; every prediction met.**
+  (`f4b6746`), below; every prediction met.**
   - Predicted: all three layers pass; H.264 `[SRT]` and `[SPS-COLOR]` lines identical to the commit
     before; an HEVC stream's refusal log reads `hevc Main 10 1920x1080` within about 1–2 s.
 - **Stage 2 — the HEVC SPS colour reader**, in the renamed codec-neutral target. Package only.
-  **Done 2026-10-09 (uncommitted), below: target `SPSColor`; every prediction met.**
+  **Done 2026-10-09 (`fd657f7`), below: target `SPSColor`; every prediction met.**
   - Fixtures from x265, VideoToolbox and `hevc_metadata`, expected values from `trace_headers`. They
     cover sub-layers, scaling lists, inter-predicted reference picture sets, the conformance window,
     Extended_SAR, 4:2:2 and the reserved and partial cases.
   - Predicted: every field matches; truncated SPS read undeclared, never a wrong colour; mutants fail
     closed.
 - **Stage 3 — the HEVC access-unit builder** (with its C test harness), a codec-selected reader, the
-  decoder's VPS, and the gate opens for 4:2:0 HEVC. **Done 2026-10-09 (uncommitted), below: every
+  decoder's VPS, and the gate opens for 4:2:0 HEVC. **Done 2026-10-09 (`a2e5ce1`), below: every
   prediction met except item 6's Follow-source switch, which needs one attended click.**
   - Predicted: x265 PQ/HLG/709 and VideoToolbox streams decode to `x420` with no promote.
   - `[SCOPE-COLOR]` reads 9-16-9 and 9-18-9.
@@ -2372,7 +2372,7 @@ Run in this order. Each stage ships on its own.
     link). Manifold's SDI output is 4:2:2 only because its DeckLink output uses v210. For 1.0 it stays
     v210, and 4:4:4 sources are reduced once at that output with the D3 filter. 4:4:4 SDI output is in
     `ROADMAP_IDEAS.md`, *4:4:4 SDI output*.
-- **Stage 4 — robustness and sync on HEVC.** **Run 2026-10-09 (uncommitted), below:** frame rate from the
+- **Stage 4 — robustness and sync on HEVC.** **Run 2026-10-09 (`ce3d828`), below:** frame rate from the
   stream's declared timing; loss recovery and the soak met. The B-frame startup episode was found.
   Follow source and Cloudflare are attended.
   - A mid-stream colour change gives one `[SPS-COLOR]` and one `source` line, hop as in §6.9.
@@ -2393,7 +2393,7 @@ Run in this order. Each stage ships on its own.
 - **Then override Stage D** (§6.9), save per bookmark. **Done 2026-10-12**, `42ad140`: §6.9, *Stage D*. A saved
   override is handed to the frame router before the transport opens: on SRT it rides the activation, on WHEP
   it is the first announcement, through the same hop.
-- **Then override Stage E** (§6.9), HLS. **Done 2026-10-12**, uncommitted: §6.9, *Stage E*. HLS has no
+- **Then override Stage E** (§6.9), HLS. **Done 2026-10-12**, `5ed306f`: §6.9, *Stage E*. HLS has no
   presentation queue, so it needs no timed hop: the override wins in `publishColorTagsIfChanged` and lands one
   frame late like a rendition change (5–38 ms measured), and every vended frame is re-tagged. The 8-bit flag is
   stamped after the colour tags, unchanged. With it, HLS's P3-D65 code is 12 and its BT.2020 transfer code 14.
@@ -4307,7 +4307,7 @@ are changes to the decided "one full step", so they are not built.
 **Step 3, in one list:**
 - **Met:** S2, S3, S6; S1 and S4 on bframes 3.
 - **Missed by under 1 ms:** S1 on bframes 8 (max), and S4 on h264_b8.
-- **Not committed.**
+- **Committed as `1bd07de`.**
 
 #### Stage 3b — 4:2:2 (and 4:4:4) end to end: audit, 2026-10-10 (read-only; no app code changed)
 
@@ -4435,7 +4435,7 @@ shifted left 6), and VideoToolbox delivered both on every ProRes/HEVC/H.264/DNx 
 |---|---|---|
 | **S1 — renderer and readout** | `x444`/`xf44` in `isTenBit`. Cosited chroma for `x422` in the shader (4:2:0 untouched). v210 chroma per source: 4:2:0 keeps the pair average, 4:2:2 takes the cosited sample (identity), 4:4:4 the D3 halfband. A Chroma line in the chain readout, held by the renderer. A DEBUG v210 dump and a DEBUG force-4:2:0 launch environment variable (no `defaults` write); both on the pre-ship list. | M, 2–3 d |
 | **S2 — files** | One chroma resolver: ProRes fourCC table, H.264/HEVC from the SPS in avcC/hvcC, DNx and MXF from libav `pix_fmt`; unknown codecs stay at 4:2:0 ("chroma unknown"). AVF and libav to `x422`/`x444`, scrub and playback together. DNx 444 to `x444`, and its scrub through the plug-in (D9). Fallback banner through `playbackNotice`. | M, 2–3 d |
-| **S3 — SRT 4:2:2** (**run 2026-10-11, uncommitted:** *S3 and S4 — results*, below) | HEVC and H.264 4:2:2 accepted, decoded to `x422`, promote passes it through. Refused with a banner when VideoToolbox cannot decode it. Fallback banner through `showError` without disconnecting. | S–M, 1–2 d |
+| **S3 — SRT 4:2:2** (**run 2026-10-11, committed `0b06de1`:** *S3 and S4 — results*, below) | HEVC and H.264 4:2:2 accepted, decoded to `x422`, promote passes it through. Refused with a banner when VideoToolbox cannot decode it. Fallback banner through `showError` without disconnecting. | S–M, 1–2 d |
 | **S4 — SRT 4:4:4** (**run with S3**) | Gate admits it; decode to `x444`. | S, ½ d |
 | **S5 — the OBS customer pass** (**run 2026-10-11, attended:** *S5 and Stage 6 — results*, below; MediaMTX only, since Cloudflare's SRT ingest carries no HEVC, Stage 4) | OBS P216 with Apple VT HEVC Main 4:2:2 10, to MediaMTX first, then Cloudflare. | attended |
 
@@ -4567,7 +4567,7 @@ Main 10. S3's gate change covers it.
 builds succeeded. **Defaults:** exported before the first launch (1 142 keys). The runs added 13
 `NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted
 by name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. The HEAD worktree
-was removed. **Not committed.**
+was removed. **Committed as `c93be09`.**
 
 #### Stage 3b, S2 — files at native chroma: predictions, written 2026-10-10 22:00 before the code changed
 
@@ -4706,7 +4706,7 @@ succeeded. **Defaults:** exported before the first launch (1 143 keys). The 94 l
 `NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted by
 name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. **OBS:** not used.
 The "NDI Bars (P2)" profile was verified from its files (`OBS_TEST_PROFILES.md`); S1's mention of it is
-correct. The HEAD worktree was removed. **Not committed.**
+correct. The HEAD worktree was removed. **Committed as `099ca1d`.**
 
 #### DNxHR 444 `.mov`: the plug-in's format description from the file — predictions, written 2026-10-10 23:35 before the code changed
 
@@ -4778,7 +4778,7 @@ ProRes's. `BUGS.md`, CHECK.
 launch (1 143 keys, equal to S2's snapshot); the 22 launches added 22 `NSWindow Frame` keys and nothing
 else, each checked absent from the snapshot and deleted by name; dictionary-equal, `streamBookmarks`
 equal and never written. **Screenshots:** none taken; the window-only rule is now in `CLAUDE.md`.
-**Not committed.**
+**Committed as `2339d00`.**
 
 #### Stage 3b, S3 and S4 — SRT 4:2:2 and 4:4:4 at native chroma: predictions, written 2026-10-11 before the code changed
 
@@ -4903,7 +4903,7 @@ and soak runs. Logs: the session scratchpad `s3/runs/` and `~/Desktop/manifold-s
 - **Server limits, recorded:** MediaMTX closes an H.264 reader at an `-stream_loop` wrap, and sends nothing above ~10–13 Mb/s.
 - **Changed during the stage:** undecodable after one failed first picture (was three); −12900 read as software decode. (The first of these is refined in *S3/S4 follow-up*, below.)
 
-**Defaults:** exported before the first launch (1 143 keys). The runs (about 50 launches) added 51 `NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted by name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. **Screenshots:** three, window-only by the Manifold window's id (CLAUDE.md), all deleted. Two came at +10 s, after the banner had dismissed, and showed only the picture; the third, above, shows the banner. **OBS:** not used. **MediaMTX:** the instance already running (`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Not committed.**
+**Defaults:** exported before the first launch (1 143 keys). The runs (about 50 launches) added 51 `NSWindow Frame` keys and changed nothing else; each was checked absent from the snapshot and deleted by name. Dictionary-equal to the snapshot; `streamBookmarks` equal and never written. **Screenshots:** three, window-only by the Manifold window's id (CLAUDE.md), all deleted. Two came at +10 s, after the banner had dismissed, and showed only the picture; the third, above, shows the banner. **OBS:** not used. **MediaMTX:** the instance already running (`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Committed as `0b06de1`.**
 
 
 #### S3/S4 follow-up — 8-bit widening (read-only) and the refusal rule, 2026-10-11 12:30–12:55 (unattended)
@@ -4991,7 +4991,7 @@ over-cap unchanged; software H.264 4:2:2 refused after 3 keyframes; everything e
 | D5 | Regression on `s3c`: `still-420-h264`, `still-420-hevc10`, `still-420-hevc10-intra`, `lines-422-hevc`, `lines-422-h264`, `checker-444-h264`, `checker-444-hevc` (listener): export `.rgba16f` and `.v210` **md5-identical** to the S3 runs; the forced-4:2:0 fallback run identical, banner logged | **PASS** |
 | G | `swift test` **309 / 309** (+2 `LiveDecodeFailureTests`; the mutant "−8969 is unsupported" fails one); C harness 200 / 200 | **PASS** |
 
-**Defaults:** exported before the first launch (1 143 keys); the 22 launches added 22 `NSWindow Frame` keys and changed nothing else, each checked absent from the snapshot and deleted by name; dictionary-equal, `streamBookmarks` equal and never written. **Screenshots:** none. **Not committed.**
+**Defaults:** exported before the first launch (1 143 keys); the 22 launches added 22 `NSWindow Frame` keys and changed nothing else, each checked absent from the snapshot and deleted by name; dictionary-equal, `streamBookmarks` equal and never written. **Screenshots:** none. **Committed as `314dd6e`.**
 
 #### 8-bit sources mapped exactly ×4 (option b): predictions, written 2026-10-11 15:45 before the code changed
 
@@ -5167,7 +5167,7 @@ nothing else, deleted by name; dictionary-equal to the original snapshot. **OBS:
 and changed nothing else; each was checked absent from the snapshot and deleted by name. Dictionary-equal to the
 snapshot; `streamBookmarks` equal and never written (every stream run dialled `MANIFOLD_SRT_DEBUG_URL` or
 `MANIFOLD_STREAM_DEBUG_URL`). **Screenshots:** none. **OBS:** not used. **MediaMTX:** the instance already running
-(`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Not committed.**
+(`mediamtx-soak-abs.yml`), path `live`, not reconfigured. **Committed as `3c911fb`.**
 
 #### Stage 5 — `[HDR10-SEI]`, HDR10 static metadata logged: predictions, written 2026-10-11 17:10 before the code changed
 
@@ -5193,7 +5193,7 @@ is the existing `e8c-Profile`, below) ~10 min; app runs (~12 launches) ~20 min; 
   Units: chromaticity × 0.00002, luminance × 0.0001 cd/m² (H.265 D.3.28).
 
 **The control** is `e8c-Profile`, the tree just before this stage. HEAD `314dd6e` would differ from it only by the
-uncommitted 8-bit fix on 8-bit sources (above), so every "unchanged" comparison is made against `e8c`, and against
+then-uncommitted 8-bit fix on 8-bit sources (above; since committed as `3c911fb`), so every "unchanged" comparison is made against `e8c`, and against
 HEAD as well for the 10-bit HEVC fixtures, where the 8-bit fix cannot act.
 
 **Fixtures** (x265 4.2, ffmpeg): `hdr10.ts`, Main 10, PQ / BT.2020 tags, `hdr10=1`,
@@ -5239,7 +5239,7 @@ min luminance coded `00 00 03 00 01` (an emulation-prevention byte inside the pa
 **Defaults:** exported before the first launch (1 143 keys); the 13 launches added 13 `NSWindow Frame` keys and
 nothing else, each deleted by name; dictionary-equal, `streamBookmarks` equal and never written (every run dialled
 `MANIFOLD_SRT_DEBUG_URL`). **Screenshots:** none. **OBS:** not used. **MediaMTX:** the running instance, path `live`,
-not reconfigured. **Not committed.**
+not reconfigured. **Committed as `11cf9e8`.**
 #### Stage 3b S5 and Stage 6 — the OBS customer passes (4:2:2 and HDR): predictions, written 2026-10-11 ~17:45 before any streaming (attended, Robbie)
 
 **Estimated run:** ~2.5 h attended (setup and scene checks ~20 min; HEVC SRT, three scenes and a calibration ~45 min;
