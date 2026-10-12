@@ -943,6 +943,32 @@ to send Export Diagnostics for a sync problem.
 
 ---
 
+## ☐ PRE-SHIP: OBS offset re-check — is the ~78 ms on OBS's HDR path, or a Manifold regression?
+
+**Added 2026-10-11 (Robbie).** **The task:**
+1. One SYNC calibration on **SRT Local** (H.264, SDR), to compare with earlier local OBS figures.
+2. The same on **HEVC SRT** (P010), with a SYNC-only scene collection.
+
+The aim is to confirm that the ~78 ms seen on 2026-10-11 is OBS's HDR path, and not a Manifold regression. The OBS
+causes to tell apart: the CPU copy at P010/P216, the HEVC encoder, or the scene load. About 15 minutes, attended.
+
+- **What was seen:** the calibrations on HEVC SRT and HEVC SRT 422 read **−79.07** and **−78.45 ms**. In
+  `[AV-CONTENT]`, OBS's own timestamps put the sync clip's flash **77–78 ms after its beep**, before Manifold
+  touched them. Manifold held `audio−now` within 0.3 ms of zero. Taking the in-stream offset out leaves
+  −1.11 / −1.53 ms, as the file-based HEVC figures. `COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b S5 and
+  Stage 6 — results*, row C.
+- **Why it gates release:** that analysis says the offset is in OBS's stream, but it has not been shown on a
+  path with a known-good history. Until it has, a Manifold regression on the OBS path is not ruled out.
+- **How:** profiles as `OBS_TEST_PROFILES.md` says. A SYNC-only collection is a new collection, not an edit to
+  "Untitled". Name each profile before the session and compare OBS's log with its row afterwards. Take the
+  calibration measure-only (Cancel), at ≥ +120 s. Read the flash − beep offset in the stream's timestamps from
+  `[AV-CONTENT]` as well as the calibration figure.
+- **Done when:** both figures are recorded in §6.10, and either:
+  - SRT Local reads as the earlier local OBS figures and HEVC SRT on the SYNC-only collection names the cause, or
+  - the offset turns out to be Manifold's, which then becomes a defect entry here.
+
+---
+
 # Post-release list
 
 **Not defects, and deliberately not before release.** Work that was decided on but would change
