@@ -25,7 +25,7 @@ Record any difference in the session's findings.
 
 Shared by every profile below unless stated otherwise:
 - Canvas and output: **1920×1080, 23.976 (24000/1001)**.
-- Video colour: **NV12 / Rec. 709 / Limited ("Partial")**, except HEVC SRT. SDR white level 300 and HDR
+- Video colour: **NV12 / Rec. 709 / Limited ("Partial")**, except HEVC SRT and HEVC SRT 422. SDR white level 300 and HDR
   nominal peak 1000 are stored, but unused at Rec. 709.
 - Audio: **48 kHz stereo**.
 - Output mode: Advanced.
@@ -36,6 +36,7 @@ Shared by every profile below unless stated otherwise:
 | **SRT Local 2** | SRT publish to the local MediaMTX (§6.9 OBS colour re-check) | Custom; SRT **caller** to local MediaMTX (`publish` stream id) | Apple VT H.264 Hardware; CBR **6000**; keyframe **1 s**; **Main**; **B-frames off** | NV12 / 709 / Limited | 23.976 | CoreAudio AAC, **320**, 48 kHz | SYNC |
 | **SRT Cloudflare** | Cloudflare Stream Live over SRT. **Unified with the others from 2026-10-09** (below) | Custom; SRT **caller** to Cloudflare, passphrase set | **Apple VT H.264 Hardware; keyframe 1 s; Main; B-frames off** (verified ~22:00). Rate control and bitrate **not stored**, so OBS's defaults apply: CBR, and 6000 by the evidence below. ⚠️ Flag 2 | NV12 / 709 / Limited | 23.976 | CoreAudio AAC, **160**, 48 kHz | SYNC |
 | **HEVC SRT** | HDR over SRT: Stage 6 and any HDR session. Created 2026-10-09 21:53 | Custom; SRT **caller** to local MediaMTX, `publish` stream id (**the same path as SRT Local 2**: never stream both at once) | **Apple VT HEVC Hardware; Main 10; bitrate 10000** (was 12000 until 2026-10-11, below; rate control not stored: CBR by default); keyframe **1 s**; **B-frames off** | **P010 / Rec. 2100 (PQ) / Limited**; SDR white **203**, HDR peak **1000** | 23.976 | CoreAudio AAC, **320**, 48 kHz | SYNC |
+| **HEVC SRT 422** | §6.10 Stage 3b **S5** (the OBS 4:2:2 customer pass). Created 2026-10-11 17:01:50 as a duplicate of HEVC SRT; added here 2026-10-11 ~17:40, before its first session | Custom; SRT **caller** to local MediaMTX, `publish` stream id: `service.json` **byte-identical to HEVC SRT's** (the same path as HEVC SRT and SRT Local 2: never stream two at once) | **Apple VT HEVC Hardware; profile `main42210` (Main 4:2:2 10); bitrate 10000** (rate control not stored: CBR by default); keyframe **1 s**; **B-frames off** | **P216 / Rec. 2100 (PQ) / Limited**; SDR white **203**, HDR peak **1000** | 23.976 | CoreAudio AAC, **320**, 48 kHz | SYNC; **HDR wedge**; **Lines 422** (below) |
 | **WHIP Cloudflare** | Cloudflare over WHIP (WHEP tests) | WHIP to Cloudflare | Apple VT H.264 Hardware; keyframe **1 s**; Main; **B-frames off**; bitrate not stored (logged **CBR 6000** on 2026-10-06) | NV12 / 709 / Limited | 23.976 | **FFmpeg Opus, 256**, 48 kHz | SYNC |
 | **MediaMTX Local** | WHIP to the local MediaMTX (WHEP tests) | WHIP to local MediaMTX | **Apple VT H.264 Hardware**; keyframe **1 s**; Main; **B-frames off**; bitrate not stored. ⚠️ Flag 3 | NV12 / 709 / Limited | 23.976 | **FFmpeg Opus, 160**, 48 kHz | SYNC |
 | **NDI Bars (P2)** | §6.10 Stage 3b S1, P2: NDI chroma siting (attended 2026-10-10 21:44–21:47). **Sends NDI, not a stream.** Added 2026-10-10 after the session; verified ~22:10 (below) | **Nothing streamed:** the WHIP service it inherited (type `whip_custom`) was not started. The test path is DistroAV's **NDI Main Output "OBS PGM"**, which is global to OBS (`user.ini [NDIPlugin]`), not part of the profile | Inherited, unused: Apple VT H.264 Hardware; keyframe 1 s; Main; B-frames off; bitrate not stored | NV12 / 709 / Limited (the NDI output's own conversion is not established; Manifold received UYVY, 4:2:2) | 23.976 | Inherited, unused: FFmpeg Opus 256 | **Bars** (one Image source "Image": `build/chroma-fixtures/p2-bars.png`) |
@@ -142,3 +143,51 @@ session's log (`2026-10-10 21-41-16.txt`):
   `p2-bars.png` (two Media sources were added and removed first). It is not SYNC.
 - **Matches §6.10.** S1's results name the profile "NDI Bars (P2)" and the Image source `p2-bars.png`;
   both are right.
+
+## HEVC SRT and HEVC SRT 422: verified before the S5 / Stage 6 session (2026-10-11 ~17:40)
+
+Read-only, from both profiles' `basic.ini` (secret lines excluded), `streamEncoder.json`, `recordEncoder.json`
+and the service type only, and from OBS's log `2026-10-11 17-01-32.txt`.
+
+| Setting | HEVC SRT | HEVC SRT 422 |
+|---|---|---|
+| `basic.ini` | saved 17:01:50 (when the duplicate was made); contents match its row | saved 17:02:35. Differs from HEVC SRT's **only** in `Name`, `ColorFormat` (`P216`) and a missing `FFExtension=mp4` (the FFmpeg-output recording extension, unused) |
+| Encoder | `com.apple.videotoolbox.videoencoder.ave.hevc` | the same |
+| `streamEncoder.json` | `keyint_sec 1`, `bframes false`, `profile main10`, `bitrate 10000` (saved 12:30, unchanged) | `keyint_sec 1`, `bframes false`, `profile main42210`, `bitrate 10000` (saved 17:02:35) |
+| Colour | `P010`, `2100PQ`, `Partial`, SDR white 203, HDR peak 1000 | `P216`, `2100PQ`, `Partial`, 203, 1000 |
+| Canvas / output / FPS | 1920×1080 / 1920×1080, `24 NTSC` | the same |
+| Audio | CoreAudio AAC, track 1 320, 48 kHz stereo | the same |
+| Service | `rtmp_custom` (OBS's type for a custom server, SRT included); `service.json` byte-identical between the two | — |
+| Recording encoder (not a test path) | VT HEVC `main42210`, 7000 | the same |
+
+**OBS's log agrees:** `Created profile 'HEVC SRT 422' (duplicate, HEVC_SRT_422)` at 17:01:50; the video reset at
+17:02:35 reads `format: P216`, `YUV mode: Rec. 2100 (PQ)/Partial`, 1920×1080, 24000/1001, and **`P010 texture
+support not available`** (with P010 it reads `enabled`): at P216 OBS hands frames to the encoder through its CPU
+copy path, not as a texture. Neither profile has streamed yet.
+
+**Scenes for the session** (collection "Untitled", global to every profile):
+- **SYNC**: as above.
+- **HDR wedge**: one Media source, `docs/color-fixtures/wedge-pq-24track.mov` (ProRes 422 HQ, 1920×1080, **24.000**
+  fps, 4 s, PQ / BT.2020 / limited, tagged), looping. A synthetic grey wedge, not camera footage; it peaks at exactly
+  PQ 1.0 (10 000 nits).
+- **Lines 422**: one Media source, `build/chroma-fixtures/lines-422-prores422hq.mov` (ProRes 422 HQ, 1920×1080, 25
+  fps, 10 s, untagged; Y 512, rows alternating Cb/Cr 724/300 and 300/724), looping, transform reset (1920×1080 at
+  0,0, no scaling).
+
+## HEVC SRT and HEVC SRT 422: first sessions, 2026-10-11 20:41–21:00 (Robbie, attended)
+
+Compared with each row after the session, using OBS's log `2026-10-11 17-01-32.txt`. **Both match.**
+- **Encoder block:** VT HEVC in hardware, `CBR`, `bitrate 10000`, `keyint 1 (s)`, `profile main10` / `main42210`.
+  OBS printed `rc_max_bitrate 6000` with `limit_bitrate off`, so that cap is not applied.
+- **Video reset:** `format: P010` / `P216`; `YUV mode: Rec. 2100 (PQ)/Partial`; 24000/1001.
+- **Audio:** AAC 320, 48 kHz.
+- **Muxer:** `hevc, p010le` / `p216le (tv, bt2020nc/bt2020/smpte2084)`.
+
+Session results:
+- **10000 plays through MediaMTX** (the open point above). Mean 11.0 Mb/s, 0 % retransmitted, 0 % dropped, over
+  250 s and 902 s.
+- **No HDR10 SEI in the bitstream.** OBS logs mastering display P3, 0–1000 nits and MaxCLL / MaxFALL 1000 / 1000
+  only as muxer side data, which MPEG-TS does not carry.
+- **The sync clip arrives with its flash ~78 ms after its beep** in OBS's own timestamps, on both profiles. Cause on
+  the OBS side not established.
+- **Profiles left unchanged.** Results: `COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b S5 and Stage 6 — results*.

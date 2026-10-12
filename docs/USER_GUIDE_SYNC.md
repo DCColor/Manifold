@@ -472,9 +472,31 @@ The server's name stays, so we can tell which service you were using.
   - **HDR:** Color Format P010 (10-bit), Color Space Rec. 2100 PQ or HLG, Color Range Limited, SDR
     White Level 203 nits (BT.2408 reference white; OBS defaults to 300), HDR Nominal Peak 1000, a
     10-bit encoder (HEVC Main 10).
+  - **Confirmed for HDR over SRT, PQ (2026-10-11, OBS 32.2.2 to MediaMTX;** `COLOR_MANAGEMENT_FINDINGS.md`
+    §6.10, *Stage 3b S5 and Stage 6 — results*; profiles in `OBS_TEST_PROFILES.md`): Settings ▸
+    Advanced ▸ Video: **Color Format P010, Color Space Rec. 2100 (PQ), Color Range Limited, SDR White
+    Level 203, HDR Nominal Peak Level 1000**. Settings ▸ Output (Advanced) ▸ Streaming: **Apple VT HEVC
+    Hardware Encoder, profile Main 10, CBR, keyframe interval 1 s, B-frames off**, bitrate 10000; custom
+    SRT output. Expected readout: Source `Rec. 2020 · PQ (ST 2084) · Rec. 2020 · limited — CICP 9-16-9
+    — tagged`, Chroma `4:2:0 10-bit (x420) — native`. An SDR source in the OBS scene arrives at the
+    203-nit level, and PQ content passes through unchanged.
+  - **4:2:2 (confirmed the same day):** the same, with **Color Format P216** and **profile Main 4:2:2
+    10**. Expected Chroma line `4:2:2 10-bit (x422) — native`. Needs a Mac whose VideoToolbox encodes
+    HEVC 4:2:2 (the M4 Max does).
+  - **Say that OBS sends no HDR10 metadata over SRT.** It knows the values (mastering display P3,
+    0–1000 nits, MaxCLL/MaxFALL 1000/1000 from the HDR Nominal Peak setting), but they are not in the
+    bitstream, so Manifold's `[HDR10-SEI]` line stays silent. Nothing in Manifold uses the metadata today.
+  - **Bitrate:** keep it at 10000 or below through MediaMTX 1.21.1, which sends a reader nothing above
+    roughly 10–13 Mb/s (§6.10, S3/S4). 10000 played for 19 minutes without a gap from the server.
   - **Say that H.264 HDR from OBS is 8-bit,** so expect banding (measured 2026-10-07,
     `COLOR_MANAGEMENT_FINDINGS.md` §6.9, *The OBS re-check*).
-  - **Say that HEVC over SRT is not supported yet** (planned before release).
+  - ~~**Say that HEVC over SRT is not supported yet** (planned before release).~~ Supported (Stages 1–6,
+    §6.10).
+  - **Re-check before writing the sync advice:** on 2026-10-11 OBS's own stream put the sync clip's
+    flash **77–78 ms after its beep** in the timestamps it sent (both HEVC profiles), so the calibration
+    read −79 / −78 ms while Manifold's playback held the stream's timing to within 1 ms. The cause on
+    the OBS side is not established (Robbie's hypothesis: the many media sources in that scene
+    collection). Earlier OBS H.264 sessions should be compared before the guide says anything about it.
   - **Write it after** colorimetry override Stages B–C.
 
 ### Claims to re-check before this ships

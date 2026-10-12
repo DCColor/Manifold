@@ -1997,7 +1997,7 @@ Run in this order. Each stage ships on its own.
   - A 30-minute soak and calibration, non-Cloudflare first.
 - **Stage 5 — `[HDR10-SEI]`.** x265 `hdr10=1` gives one line: mastering 0.0001–1000 nits,
   MaxCLL/MaxFALL 1000/400. Nothing is logged without SEI.
-- **Stage 6 — the OBS customer pass and the docs.**
+- **Stage 6 — the OBS customer pass and the docs.** **Run 2026-10-11 (attended), with S5:** *Stage 3b S5 and Stage 6 — results*, at the end of §6.10. 10-bit, 9-16-9 met; OBS sends **no** MDCV or CLL.
   - OBS P010, Rec. 2100, VideoToolbox HEVC Main 10 → MediaMTX.
   - Predicted: 10-bit, 9-16-9, MDCV and CLL present.
   - The user guide and the tester notes stop saying "H.264 only".
@@ -4042,7 +4042,7 @@ shifted left 6), and VideoToolbox delivered both on every ProRes/HEVC/H.264/DNx 
 | **S2 — files** | One chroma resolver: ProRes fourCC table, H.264/HEVC from the SPS in avcC/hvcC, DNx and MXF from libav `pix_fmt`; unknown codecs stay at 4:2:0 ("chroma unknown"). AVF and libav to `x422`/`x444`, scrub and playback together. DNx 444 to `x444`, and its scrub through the plug-in (D9). Fallback banner through `playbackNotice`. | M, 2–3 d |
 | **S3 — SRT 4:2:2** (**run 2026-10-11, uncommitted:** *S3 and S4 — results*, below) | HEVC and H.264 4:2:2 accepted, decoded to `x422`, promote passes it through. Refused with a banner when VideoToolbox cannot decode it. Fallback banner through `showError` without disconnecting. | S–M, 1–2 d |
 | **S4 — SRT 4:4:4** (**run with S3**) | Gate admits it; decode to `x444`. | S, ½ d |
-| **S5 — the OBS customer pass** | OBS P216 with Apple VT HEVC Main 4:2:2 10, to MediaMTX first, then Cloudflare. | attended |
+| **S5 — the OBS customer pass** (**run 2026-10-11, attended:** *S5 and Stage 6 — results*, below; MediaMTX only, since Cloudflare's SRT ingest carries no HEVC, Stage 4) | OBS P216 with Apple VT HEVC Main 4:2:2 10, to MediaMTX first, then Cloudflare. | attended |
 
 ##### Predictions
 
@@ -4845,6 +4845,113 @@ min luminance coded `00 00 03 00 01` (an emulation-prevention byte inside the pa
 nothing else, each deleted by name; dictionary-equal, `streamBookmarks` equal and never written (every run dialled
 `MANIFOLD_SRT_DEBUG_URL`). **Screenshots:** none. **OBS:** not used. **MediaMTX:** the running instance, path `live`,
 not reconfigured. **Not committed.**
+#### Stage 3b S5 and Stage 6 — the OBS customer passes (4:2:2 and HDR): predictions, written 2026-10-11 ~17:45 before any streaming (attended, Robbie)
+
+**Estimated run:** ~2.5 h attended (setup and scene checks ~20 min; HEVC SRT, three scenes and a calibration ~45 min;
+HEVC SRT 422, two scenes and a calibration ~40 min; the ASUS check ~10 min; docs and gates ~30 min).
+
+**Build:** `.build-cc/obs6-Profile`, unsigned Profile, from HEAD `11cf9e8` (Stage 5 committed; clean tree). **Sender:**
+OBS 32.2.2, profiles **HEVC SRT** (P010) and **HEVC SRT 422** (P216), both verified ~17:40 against
+`OBS_TEST_PROFILES.md` (the 422 row added first). **Server:** the running MediaMTX 1.21.1
+(`mediamtx-soak-abs.yml`, path `live`, not reconfigured): OBS publishes, Manifold reads with
+`MANIFOLD_SRT_DEBUG_URL` (no bookmark, so `streamBookmarks` is never read or written). **Scenes:** SYNC, HDR wedge
+(`docs/color-fixtures/wedge-pq-24track.mov`), Lines 422 (`build/chroma-fixtures/lines-422-prores422hq.mov`, transform
+reset). **Independent check of the bitstream:** ffmpeg 8.1.1 `trace_headers` on the same stream read from MediaMTX over
+RTSP (this ffmpeg has no SRT; MediaMTX passes SEI through, Stage 5 P1).
+
+**No measurement counts until the session is verified:** OBS's log for that stream (encoder block: HEVC, profile,
+bitrate 10000, keyframe 1 s, B-frames off; `format:` P010 / P216; `YUV mode: Rec. 2100 (PQ)/Partial`; 24000/1001;
+AAC 320) matches the profile's row, and Manifold's `[SRT]` gate line, `[SPS-COLOR]` and `[CHROMA]` say what the row
+says was sent.
+
+**Expected values worked out first.** OBS converts an SDR source into the PQ canvas with SDR white at 203 nits:
+white → PQ 0.5806 → **Y′ code 572.7** (limited 10-bit). The Lines 422 rows (Y 512, Cb/Cr 724/300 and 300/724, read as
+Rec. 709, untagged) come out, through OBS's sRGB-curve linearisation, BT.709 → BT.2020 primaries, ×203 nits, PQ and the
+BT.2020 matrix, at **even Y/Cb/Cr ≈ 452 / 568 / 481, odd ≈ 448 / 431 / 559** (a pure 2.4 curve would give 445 / 571 /
+480 and 440 / 428 / 562). Both rows' RGB lie inside Rec. 709, so nothing clips. Averaged vertically (4:2:0) the two rows'
+chroma would be ≈ 500 / 520.
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| H1 | **HEVC SRT, SYNC:** gate `hevc Main 10 … 4:2:0, 10-bit → accepted`; `requesting x420 … hardware decode: yes`; decoded `x420`, no promote; `[SPS-COLOR]` and `[SCOPE-COLOR]` **9-16-9**, limited; `[CHROMA] 4:2:0 10-bit (x420) — native`; the chain readout's Source line `Rec. 2020 · PQ (ST 2084) · Rec. 2020 · limited — CICP 9-16-9 — tagged` and the scope headers both PQ / 2020; frame rate **23.976** (no VUI timing predicted, as ffmpeg's `hevc_videotoolbox`: measured from timestamps) | all of it; frame rate 23.976 ± 0.01 | any `x420`-promote line, other CICP, readout and scopes disagreeing, or the rate off |
+| H2 | **SDR at 203 nits:** the SYNC clip's white sits at the 203-nit line on the PQ-nits waveform ruler; in a ⌃⌥E export the brightest flat white reads **Y′ 573 ± 4** (≈ 195–211 nits), black 64 ± 2 | as stated | white outside 569–577 (e.g. 100 nits = 509, or 300 nits = 610, which would mean OBS used the profile-wide 300 white) |
+| H3 | **HDR10 SEI from OBS: predicted yes.** Exactly **one** `[HDR10-SEI]` line per HEVC session, and `trace_headers` shows SEI 137 and 144 at keyframes. Values, predicted from OBS's VideoToolbox plug-in (it builds both from the HDR peak setting; from memory of its source, so scored separately): primaries **Display P3**, white **D65**, mastering **0 – 1000 nits**, **MaxCLL 1000, MaxFALL 1000**. Logged as it comes, or its absence recorded | a line, one per session (values recorded whatever they are) | no line (then `trace_headers` decides whether OBS sent none or Manifold missed it), or more than one with nothing changed |
+| H4 | **HEVC SRT, HDR wedge:** the readout and scopes as H1; in an export the 48 patches read their source codes (66 … 940) **± 2** (OBS's canvas carries PQ through without tone-mapping at a peak of 1000) | ≥ 46 / 48 within ± 2 | otherwise; a ceiling near 722 (1000 nits) would mean OBS clips at its HDR peak, recorded as OBS's behaviour |
+| H5 | **4:2:0 control, HEVC SRT, Lines 422:** the rows lose their alternation, since P010 halves vertical chroma | fewer than 10 / 1080 rows within ± 2 of the even/odd values in L2; chroma near ≈ 500 / 520 | rows survive (then OBS or VT is not subsampling as P010 says) |
+| L1 | **HEVC SRT 422, SYNC:** gate `… Format Range Extensions (general_profile_idc 4), 4:2:2, 10-bit → accepted`; `requesting x422 … hardware decode: yes`; decoded `x422`, no promote; `[CHROMA] 4:2:2 10-bit (x422) — native`; 9-16-9; 23.976; `[HDR10-SEI]` as H3 (P13) | all of it | any `x420` request, promote line or other CICP |
+| L2 | **HEVC SRT 422, Lines 422, through export (⌃⌥E `.rgba16f`) and SDI (the `.v210` wire dump):** the rows survive OBS's compositor (4:2:2 keeps every row's chroma): **≥ 99.9 % of rows (≥ 1079 / 1080) within ± 2 codes of their own line**, the line being the median of the even rows and of the odd rows; even and odd differ by > 100 codes in Cb and in Cr. The medians land within ± 6 of the expected values above (scored separately: it tests OBS's conversion, not Manifold) | rows ≥ 1079 / 1080, export AND wire | fewer. If OBS's compositor does not keep the lines, what it does is recorded (blur, averaging, offset) and the Manifold verdict rests on L1 and on the S3 fixture results |
+| C1 | **One calibration on SYNC, HEVC SRT**, measure-only (Cancel), taken at **≥ +120 s** after connect (the comparison point decided in Stage 4) | within ± 3 ms of the HEVC file figure at +120 s, **−1.00 ms** (`hevc_160` pair): **−4.00 … +2.00** | outside |
+| C2 | **One calibration on SYNC, HEVC SRT 422**, the same way | within ± 3 ms of the 4:2:2 HEVC soak's +2 min figure, **−0.76 ms**: **−3.76 … +2.24** | outside |
+| V | **ASUS visual check (Robbie)**, HEVC SRT, HDR wedge, the ASUS PA147 in HDR mode: (a) the bottom row's patches 40–43 (245, 389, 620, 983 nits) visibly brighter than the window chrome's SDR white, each step distinct; patches above the display's own peak (from 44, 1560 nits, upward) may merge, which is expected (no tone-map, §6.2); (b) the top two rows (patches 0–15, 0.0002–0.06 nits) step up from black, not lifted grey, and patch 0 is black; (c) the SYNC scene's white looks like ordinary SDR white, not glaring and not dim; (d) the chain readout shows the PQ tag and an EDR headroom figure | Robbie's yes on (a)–(d) | any no, recorded as Robbie describes it |
+
+**Expected risks, recorded rather than worked around:** MediaMTX sends a reader nothing above ~10–13 Mb/s (S3/S4, P9);
+OBS's CBR 10000 is at that edge, so a stall with OBS still sending is that limit, confirmed with ffmpeg as the reader.
+OBS's media source plays the sync clip through its own decoder, so the OBS path's calibration carries any audio/video
+offset of OBS's own; if C1 and C2 miss by the same amount, that is recorded as the sender's offset.
+
+**Defaults:** exported before the first launch, compared after the last; `streamBookmarks` never written.
+**Screenshots:** window-only by the Manifold window id, deleted once recorded.
+
+#### Stage 3b S5 and Stage 6 — results, 2026-10-11 20:38–21:00 (attended, Robbie, ~20 min)
+
+**Run as tightened by Robbie** (about 25 min of attended time): for each profile, connect and read the log, then
+export one frame each of HDR Wedge and Lines 422, then take one calibration on SYNC at least 120 s after connect.
+After both profiles, a display look; all analysis afterwards. **This left out the planned SYNC export** (H2 is
+scored from the Lines frame instead, below). The display look was made on the **LG with HDR on**, not on the ASUS:
+the ASUS PA147 is not an HDR display. Build `.build-cc/obs6-Profile` (HEAD `11cf9e8`). Manifold dialled
+`MANIFOLD_SRT_DEBUG_URL` (MediaMTX `read:live`) with ⌃⌥D. Logs: `~/Desktop/manifold-soak/obs6/hevc420.manifold.log`
+(connect 20:41:26) and `hevc422.manifold.log` (connect 20:46:56). Exports are in `obs6/exports/`, and the bitstream
+trace in `obs6/hevc420.trace.txt`.
+
+**Both sessions verified before anything was scored.** OBS's log (`2026-10-11 17-01-32.txt`) shows `Switched to
+profile 'HEVC SRT'` and then `'HEVC SRT 422'`, each followed by a video reset reading 1920×1080, 24000/1001,
+`format: P010` / `P216` and `YUV mode: Rec. 2100 (PQ)/Partial`. Each stream started with VT HEVC in hardware: `CBR`,
+`bitrate 10000`, `keyint 1 (s)`, `profile main10` / `main42210`, and AAC 320 at 48 kHz. The muxer's stream line
+reads `hevc, p010le` / `p216le (tv, bt2020nc/bt2020/smpte2084)`. Each matches its row in `OBS_TEST_PROFILES.md`.
+Manifold's gate, `[SPS-COLOR]` and `[CHROMA]` lines say the same (H1, L1).
+- **SRT session summaries:** 250.8 s and 902.4 s, both at a mean of 11.0 Mb/s, with 0.0 % retransmitted and
+  0.0 % dropped.
+- **MediaMTX delivered the whole time at CBR 10000:** `recvTimeouts=0`.
+- **OBS lagged 6 frames to rendering stalls** in the 4:2:2 session (L3, below).
+
+| # | Result | Verdict |
+|---|---|---|
+| H1 | `[SRT] video: hevc Main 10 1920x1080`. `HEVC SPS: Main 10 (general_profile_idc 2), 4:2:0, 10-bit … → accepted`. `[SPS-COLOR]` 9 / 16 / 9 declared → tagged, limited ("agrees"). `[SCOPE-COLOR] source: Rec. 2020 · PQ (ST 2084) — tagged (CICP 9-16-9)`. `requesting x420 … hardware decode: yes`, then `decoded as 'x420' … no promote needed`. `[CHROMA] 4:2:0 10-bit (x420) — native`. The SPS declares no timing (as predicted), and the rate is **23.976, measured from timestamps** (95 / 95 intervals on the grid, median 41.711 ms). Robbie read the chain readout's Source line as Rec. 2020, PQ, limited, 9-16-9, and it agrees with the scope binding. DeckLink took `1080p23.98` | **PASS** |
+| H2 | **No SYNC export was taken** (the tightened run). Scored from the Lines 422 frame instead: Lines is an SDR source composited the same way. Measured Y′ **450** on both rows. The model gives **452 / 448 at 203-nit white**, 485 / 481 at 300 and 395 / 391 at 100, and Cb/Cr agree within 2–3 codes (H-L2 below). So OBS placed SDR at 203 nits, not at the profile-wide 300. Robbie, by eye on the LG in HDR: SYNC's flash is "brighter, maybe 200–300 vs 100" | **PASS by inference**: the 573 ± 4 white measurement was not made |
+| H3 | **OBS sends no HDR10 SEI.** There was no `[HDR10-SEI]` line in either session (4 min and 15 min, a keyframe every second). `trace_headers` on the stream from MediaMTX (RTSP, 2.5 s, 332 NALs) shows SEI only of **payload type 5** (user data unregistered, one per keyframe), with no 137 and no 144. **OBS does hold the values.** Its muxer logs them as stream side data: mastering display r(0.6800, 0.3200) g(0.2650, 0.6900) b(0.1500, 0.0600) wp(0.3127, 0.3290), 0–1000 nits, MaxCLL 1000, MaxFALL 1000. These are **exactly the predicted values** (Display P3, D65, 0–1000, 1000 / 1000). MPEG-TS has no field for that side data, though, and VideoToolbox did not write it into the bitstream. Manifold was right to log nothing | **FAIL** (predicted yes). The predicted values are confirmed in OBS's log, not on the wire |
+| H4 | HDR Wedge: **48 / 48 patches at their source code exactly** (66 … 940; centre 60 % median), in export AND on the v210 wire, on **both** profiles. There is no ceiling at 722 (1000 nits): OBS passes PQ through to 10 000 nits with no tone-map and no clip at its HDR peak setting | **PASS** |
+| H5 | HEVC SRT (P010), Lines 422: **the alternation is gone**. Even and odd rows both read Y/Cb/Cr **450 / 532 / 524**, uniform (1072 / 1080 rows within ± 2 of that one colour), and **0 rows** are near L2's even/odd values. The "≈ 500 / 520" note in the prediction assumed averaging in code values. OBS's 4:2:0 conversion lands at 532 / 524 (consistent with averaging in linear light; not established) | **PASS** (the band). The side note's numbers were wrong |
+| L1 | `[SRT] video: hevc Rext 1920x1080`. `HEVC SPS: Format Range Extensions (general_profile_idc 4), 4:2:2, 10-bit … → accepted`. 9-16-9 tagged, limited. `requesting x422 output (10-bit 4:2:2) … hardware decode: yes`, then `decoded as 'x422' … no promote needed`. `[CHROMA] 4:2:2 10-bit (x422) — native`. Rate measured from timestamps, 23.976. No `[HDR10-SEI]` (H3). **This is P13 (S5)** | **PASS** |
+| L2 | HEVC SRT 422, Lines 422, export and wire **byte-for-byte the same story**: **every row is uniform across the width** (standard deviation 0 in every row) and **every row keeps its own colour**. Even rows read Cb 559–571 / Cr 478–490 and odd rows Cb 427–438 / Cr 552–563, at least 120 codes apart in Cb on every row. The medians (even **450 / 567 / 482**, odd **450 / 433 / 560**) land within 2 of the expected 452 / 568 / 481 and 448 / 431 / 559, so **OBS's compositor keeps the lines**. But only **569 / 1080 rows** are within ± 2 of their line's median. **All 1080 are within ± 8**. The offsets repeat every 32 rows, identically in every 64×64 block column. That pattern is a 32×32 transform's quantisation at 10 Mb/s on a one-row chroma pattern: the encoder's loss, not a resolution loss (S3's fixtures were lossless, which is why ± 2 held there). Not proven without OBS's bitstream | **FAIL against the band as written** (± 2). Chroma resolution native end to end; median model check **PASS** |
+| L3 | **Not predicted:** a single **41 ms starvation hold** at 20:57:19 (+10:23) in the 4:2:2 session. It came during the display look (the window moved between displays, and HDR was turned on on the LG). Just before it: `[SRT-JITTER] underruns=20, worst deficit 0.076 s`, with video depth down to 0.05 s. OBS logged **6 frames lagged to rendering stalls**. Everything points to the sender, but the stall is not tied to the HDR switch by timestamp | recorded |
+| C1 | HEVC SRT, at +180 s (20:44:27): **−79.07 ms** (10 / 10 pairs, p10 −79.68, p90 −78.51) | **FAIL as written** (−4.00 … +2.00) |
+| C2 | HEVC SRT 422, at +8 min (20:55:00): **−78.45 ms** (p10 −78.92, p90 −77.04) | **FAIL as written** (−3.76 … +2.24) |
+| C | **Why: the offset is in OBS's stream.** `[AV-CONTENT]` reads the sync clip's beep and flash in the **stream's own timestamps**: flash − beep **+77.96 ms** median (n 90, p10 75.62, p90 77.96) and **+76.92 ms** (n 477, 75.36 / 78.04). Manifold's playback held `audio−now` at **+0.16 / −0.26 ms** median. **Taking the in-stream offset out leaves −1.11 ms and −1.53 ms**: within 0.11 and 0.77 ms of the file figures (−1.00, −0.76), well inside ± 3. The two profiles agree within 0.6 ms, so the offset is not the codec or the chroma. Where OBS adds ~78 ms between its media source's audio and video is not established. Robbie's hypothesis: the many scenes and media sources in the collection | Manifold **PASS** on the residual; sender offset recorded |
+| V | **LG TV with HDR on** (the ASUS is SDR-only). (a) the highlight patches 245–983 nits: **"def bright"**. (b) blacks: patch 0 black; **row 1 (0.0002–0.009 nits) shows no visible steps**, and steps start **about halfway along row 2** (≈ 0.03 nits). Those levels are below what this panel can show; the export reads every patch exactly (H4). (c) SYNC white: "more or less; brighter, maybe 200–300 vs 100". (d) readout: **Rec. 2020 · PQ · limited · 9-16-9**. Headroom: Robbie read **"9.1e-06"** from the readout. That is not a headroom value, and is probably another line's figure (the display-curve fit prints numbers of that form). **No `[EDR] headroom` line was logged after the HDR switch.** The only one is at source load, with HDR off: current 1.0, potential 1.0 on "LG TV SSCR2". A window-only screenshot was taken to read the line, but the readout was hidden in it; it was deleted | (a), (c), (d) **yes**. (b) **partly**: as above. **The headroom figure is unread** |
+
+**Also seen:**
+- **The OBS stream reports `reorder max=0.100s` with B-frames off.** The cushion stayed 250 ms.
+- **The first session at 10000 played through MediaMTX** (the open point in `OBS_TEST_PROFILES.md`).
+
+**In one list:**
+- **Met:** H1, H4, H5, L1 (P13), H2 by inference; the calibrations once the in-stream offset is taken out.
+- **Missed as written:**
+  - H3: OBS sends no HDR10 SEI over SRT.
+  - L2's ± 2 band: encoder loss, with chroma native.
+  - C1 and C2: OBS's own ~78 ms offset in the stream.
+- **Unread:** the EDR headroom after the HDR switch.
+- **Open:**
+  - the OBS-side 78 ms offset (compare earlier OBS H.264 sessions, and a scene collection holding only SYNC);
+  - whether an `[EDR] headroom` line should follow a display's HDR switch;
+  - L2 on a lossless or higher-rate OBS encode, if MediaMTX's limit allows.
+
+**Defaults:** exported before the first launch (1 143 keys). The two launches added two `NSWindow Frame` keys and
+nothing else. Each was checked absent from the snapshot and deleted by name. The domain is dictionary-equal to the
+snapshot, and `streamBookmarks` is equal and was never written. **Screenshots:** one, window-only by the Manifold
+window id; it showed only the picture (the readout was hidden) and was deleted. **OBS:** profiles unchanged; two
+scenes added to "Untitled" (HDR Wedge, Lines 422). **MediaMTX:** the running instance, not reconfigured. **Not
+committed.**
+
 ---
 
 ## 7. Open and unverified
