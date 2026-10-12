@@ -68,7 +68,9 @@ struct DisplayTransformControl: View {
         }
         .help(isBypass
               ? "Display transform: BYPASS — no colour management. Diagnostic only."
-              : "Display transform: as macOS shows it — what your client will see")
+              : (mode == .reference
+                 ? "Display transform: Reference — BT.1886 for this display"
+                 : "Display transform: as macOS shows it — what your client will see"))
         .onAppear { chainModel.bind(deck: deck) }
         // Keeps the chain's Transform line honest when the mode is changed from the Color MENU
         // rather than from this pulldown. `chrome` is observed, so this fires for both routes.
@@ -117,22 +119,19 @@ struct DisplayTransformControl: View {
     private var label: some View {
         HStack(spacing: 4) {
             Image(systemName: "display")
-            Text(isBypass ? "Bypass" : "macOS")
+            Text(isBypass ? "Bypass" : (mode == .reference ? "Reference" : "macOS"))
                 .font(.system(size: 10, weight: .medium, design: .rounded))
                 .fixedSize()
         }
         .accessibilityLabel(isBypass
                             ? "Display transform: Bypass, no colour management"
-                            : "Display transform: as macOS shows it")
+                            : (mode == .reference ? "Display transform: Reference, BT.1886"
+                                                  : "Display transform: as macOS shows it"))
     }
 
     // MARK: Tier 2 — the pulldown
 
-    /// §6.3's pulldown, minus Reference.
-    ///
-    /// ⚠️ **NO Reference ENTRY, NOT EVEN DISABLED.** It is Phase 3 and does not exist; a greyed
-    /// row advertising a mode that cannot be chosen is a support question, and a placeholder is how
-    /// a stub gets written. `DisplayTransformMode` has two cases for the same reason.
+    /// §6.3's pulldown. Reference since colour S1 (§6.11), with §6.3's subtitle.
     ///
     /// The separator before Bypass is load-bearing and §6.3 says so: it "says 'different kind of
     /// thing' before anyone reads a word."
@@ -140,6 +139,9 @@ struct DisplayTransformControl: View {
     private var menuContent: some View {
         Toggle(isOn: binding(for: .os)) {
             Text(Self.rowLabel("As macOS Shows It", "what your client will see"))
+        }
+        Toggle(isOn: binding(for: .reference)) {
+            Text(Self.rowLabel("Reference", "correct for grading"))
         }
         Divider()
         Toggle(isOn: binding(for: .bypass)) {
@@ -253,6 +255,10 @@ struct DisplayChainReadout: View {
             // transform, so they measure what is in the file and are immune to this control. "A
             // user who sees the picture change and the waveform hold still will otherwise read it
             // as a bug."
+            // Colour S1: this display's calibration — per DISPLAY, not per window (§6.11 decision 1).
+            Divider()
+            DisplayCalibrationSection(screen: model.currentScreen)
+
             Divider()
             Text("Scopes are unaffected by this setting — they measure the file, not the display.")
                 .font(.caption)
@@ -273,6 +279,61 @@ struct DisplayChainReadout: View {
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// MARK: - Colour S1: this display's calibration
+
+/// "Is this display calibrated to Rec.709 / BT.1886, and what are its white and black?" — §6.11,
+/// decisions 1 and 2. Inside the chain readout because that is where the display is already named,
+/// so the statement is made about the display the user is looking at, and it costs no new surface:
+/// no new control-bar item, no new modifier on `ContentView`.
+///
+/// Per DISPLAY: the same record applies to every window on that display, and moving a window to
+/// another display shows that display's record. Default off, Lw 100, Lb 0 (= gamma 2.4). The
+/// white and black fields are greyed while "calibrated" is on, because the display applies them.
+struct DisplayCalibrationSection: View {
+    let screen: NSScreen?
+    @ObservedObject private var store = DisplayCalibrationStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let screen {
+                let cal = store.calibration(for: screen)
+                Text("This display — \(screen.localizedName)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Toggle("Calibrated to Rec.709 / BT.1886 in the display", isOn: Binding(
+                    get: { cal.calibrated },
+                    set: { var c = cal; c.calibrated = $0; store.set(c, for: screen) }))
+                    .font(.caption)
+                HStack(spacing: 12) {
+                    nitsField("White", value: cal.whiteNits) { var c = cal; c.whiteNits = $0; store.set(c, for: screen) }
+                    nitsField("Black", value: cal.blackNits) { var c = cal; c.blackNits = $0; store.set(c, for: screen) }
+                }
+                .disabled(cal.calibrated)
+                Text(cal.calibrated
+                     ? "Reference sends the code values untouched; the display applies BT.1886."
+                     : "Reference applies BT.1886 from these values. Black 0 is exactly gamma 2.4.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("No display").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func nitsField(_ label: String, value: Double, set: @escaping (Double) -> Void) -> some View {
+        HStack(spacing: 4) {
+            Text(label).font(.caption)
+            TextField(label, value: Binding(get: { value }, set: set),
+                      format: .number.precision(.fractionLength(0...3)))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+                .frame(width: 64)
+            Text("cd/m²").font(.caption2).foregroundStyle(.secondary)
         }
     }
 }

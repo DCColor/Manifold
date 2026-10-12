@@ -11,6 +11,7 @@ struct MetalSurfaceView: NSViewRepresentable {
         view.wantsLayer = true
         view.metalLayer = renderer.metalLayer
         view.renderer = renderer
+        renderer.hostView = view
         view.layer = renderer.metalLayer
         renderer.metalLayer.frame = view.bounds
         return view
@@ -18,6 +19,7 @@ struct MetalSurfaceView: NSViewRepresentable {
 
     func updateNSView(_ nsView: MetalHostView, context: Context) {
         nsView.renderer = renderer
+        renderer.hostView = nsView
         renderer.metalLayer.frame = nsView.bounds
     }
 }
@@ -29,6 +31,15 @@ final class MetalHostView: NSView {
     /// tree and the renderer by the deck, and neither outlives the window — a strong reference here
     /// would close a cycle through `renderer.metalLayer === self.layer`.
     weak var renderer: MetalVideoRenderer?
+
+    /// Colour S1: the Reference plan depends on which DISPLAY this window is on, so the renderer is
+    /// told when the view arrives in a window (it then learns the screen) and re-plans if it is in
+    /// Reference. Later screen moves arrive as `NSWindow.didChangeScreenNotification`.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        renderer?.hostView = self
+        renderer?.hostViewDidMoveToWindow()
+    }
 
     override func layout() {
         super.layout()

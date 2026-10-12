@@ -299,6 +299,60 @@ fragment half4 displayCopyFragment(DisplayCopyVertexOut in [[stage_in]],
     return src.sample(s, in.uv);
 }
 
+// ── THE REFERENCE DISPLAY TRANSFORM — colour S1, docs/COLOR_MANAGEMENT_FINDINGS.md §6.11 ─────────
+//
+// A SEPARATE FRAGMENT, NOT A UNIFORM ON `displayCopyFragment`, so OS and Bypass keep the identity copy
+// above and cannot change: they never run this function. Same vertex stage, same sampler, same
+// resample; only the colour arithmetic after the sample differs. Like the copy, it writes the
+// DRAWABLE, so the scopes, the DeckLink v210 convert and the export (all of which read the offscreen)
+// never see it.
+//
+// Two modes, chosen on the CPU (`MetalVideoRenderer.referencePlan`):
+//
+//   0 — BT.1886 FOR A DISPLAY DESCRIBED BY ITS PROFILE. D = BT.1886 drive from Lb/Lw (normalised
+//       black-to-white), then encoded for the curve the DECLARED SOURCE profile carries:
+//       out = D^(1/γ_declared). The layer keeps today's source declaration (§6.6), so ColorSync
+//       linearises with γ_declared, recovers D, and converts it for the display.
+//       ⚠️ THE §6.6 TRAP: applying 2.4 here and then declaring γ2.4 would be undone by ColorSync and
+//       look exactly like OS. The declaration is deliberately left alone; only this encode changes.
+//   1 — A DISPLAY CALIBRATED TO REC.709 / BT.1886 IN ITS OWN HARDWARE, WITH WIDE-GAMUT PRIMARIES.
+//       The layer declares nothing (no conversion), and this converts the source primaries to 709 in
+//       2.4-linear light and re-encodes with 1/2.4. A 709 source on a calibrated display never comes
+//       here: it takes the identity copy, so its code values reach the display untouched.
+//
+// Sub-black clamps to 0 before any fractional power, so nothing can become NaN. Superwhite passes.
+struct ReferenceParams {
+    float a;            // BT.1886 a, Lw normalised to 1
+    float b;            // BT.1886 b
+    float blackRatio;   // Lb / Lw
+    float invGamma;     // 1 / γ of the declared source profile (mode 0)
+    uint  mode;         // 0 = BT.1886 for the profile, 1 = calibrated display, primaries → 709
+    uint  pad0, pad1, pad2;
+    float4 row0;        // mode 1: source → Rec.709 linear matrix, rows (w unused)
+    float4 row1;
+    float4 row2;
+};
+
+fragment half4 displayReferenceFragment(DisplayCopyVertexOut in [[stage_in]],
+                                        texture2d<float, access::sample> src [[texture(0)]],
+                                        constant ReferenceParams& p [[buffer(0)]]) {
+    constexpr sampler s(coord::normalized, address::clamp_to_edge,
+                        filter::linear, mip_filter::none);
+    float4 c = src.sample(s, in.uv);
+    float3 v = c.rgb;
+    float3 outRGB;
+    if (p.mode == 0) {
+        float3 l = p.a * pow(max(v + p.b, 0.0), 2.4);
+        float3 d = max((l - p.blackRatio) / (1.0 - p.blackRatio), 0.0);
+        outRGB = pow(d, p.invGamma);
+    } else {
+        float3 lin = pow(max(v, 0.0), 2.4);
+        float3 lin709 = float3(dot(p.row0.xyz, lin), dot(p.row1.xyz, lin), dot(p.row2.xyz, lin));
+        outRGB = pow(max(lin709, 0.0), 1.0 / 2.4);
+    }
+    return half4(half3(outRGB), half(c.a));
+}
+
 // MARK: - GPU scopes (Phase 1 prototype: luma waveform)
 
 // Uniforms for waveformKernel. Mirrors WaveformParams in MetalVideoRenderer.swift

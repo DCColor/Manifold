@@ -21,13 +21,15 @@ bullet.
    with a Manifold sync clip, nudge it by the millisecond, and save it with the stream.
 3. **Live streams show the color they declare,** including PQ and HLG HDR over SRT and WHEP, and
    HEVC now plays over SRT, including 10-bit HDR.
-4. **OS or Bypass, per window:** choose whether macOS color-manages the picture, and read exactly
-   what is happening between the source and your screen.
+4. **macOS, Reference or Bypass, per window:** see the picture as macOS shows it, with the BT.1886
+   curve a reference monitor uses, or with no color management, and read exactly what is happening
+   between the source and your screen.
 5. **SRT is much sturdier:** faster to start, no more break-ups or missing sound with common encoders.
 
 ### New
 
 - Display transform, per window: OS (macOS color-manages the picture for your display) or Bypass (the picture's values go to the screen untouched). Choose it from the control bar or the Color menu. A window in Bypass says so in its title.
+- Reference display transform, per window: the picture shown with the BT.1886 curve a reference monitor uses (gamma 2.4 on a display with a true black). Choose it from the control bar or the Color menu. In the transform chain readout you can tell Manifold, per display, that the display is calibrated to Rec. 709 / BT.1886 (then Reference sends the picture's values untouched), or enter the display's white and black so Reference follows BT.1886 for it. Scopes, SDI output and exported frames are unaffected by the display transform.
 - A display chain readout shows the source's color and whether it was declared or assumed, the transform in use, your display and its curve, and for SRT and WHEP the amount of buffering.
 - HEVC now plays over SRT, including 10-bit HDR.
 - Audio offset for live streams, in the A/V menu: ⌥] and ⌥[ move the sound 1 ms later or earlier (add ⇧ for 10 ms). Save the offset with a saved stream and it comes back every time. A badge and the window title show when an offset is on.

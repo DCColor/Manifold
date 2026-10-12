@@ -60,7 +60,10 @@ held back until after release, and the numbered defect entries follow.
        11, 6, case (g)).
      - **S1** — Phase 3, Reference: **BT.1886** with each display's black and white luminance (Lb = 0 is exactly
        2.4), and a per-display "calibrated to Rec.709 / BT.1886" setting, default off. On a calibrated display
-       Reference sends the code values untouched.
+       Reference sends the code values untouched. **Built and run unattended 2026-10-12; every unattended
+       prediction passed; not committed** (§6.11, *S1 — results*). Open: the attended LG items (S1-5 by eye,
+       S1-6 with the HDR switch, S1-9), clicking the popover's calibration section, and whether to keep the
+       "correct for grading" subtitle.
      - **S2** — hold-to-compare: the other of macOS and Reference; Shift-hold compares against Bypass. The key
        is chosen in the shortcut registry.
      - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
@@ -1855,6 +1858,9 @@ reaches 14.
   override (Stage B, 2026-10-12), WHEP's (Stage C) and HLS's (Stage E) offer the other four presets only,
   through `available(on:)`.
   **When §7.3 is fixed, enable it on all four transports**, and verify (9,14) on the layer.
+- **Reference (S1, 2026-10-12) narrows this on a CALIBRATED display only:** there Reference converts Rec.2020
+  primaries to 709 itself (measured, §6.11 *S1 — results*, E2). On a profile-described display, and in OS, the
+  layer is still tagged 709 primaries until S3.
 
 ---
 

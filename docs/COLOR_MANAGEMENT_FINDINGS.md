@@ -5446,7 +5446,7 @@ checks (display roles, above).
 | Stage | Depends on | What |
 |---|---|---|
 | **S0** pre-checks | — | Read-only, unattended: the LG's profile primaries (HDR off); the colourspace dump probe on every primaries/transfer pair including (9, 1), (9, 14), 11 and 6; the tags on Robbie's Rec.2020 SDR test file; ffmpeg fixtures 9-1-9, 9-14-9, 11, 6 and case (g). **If the LG's primaries are not Rec.709, stop before S1.** |
-| **S1** Phase 3: Reference + the per-display setting | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — correct for grading*; the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
+| **S1** Phase 3: Reference + the per-display setting — **built and run unattended 2026-10-12, not committed; results under *S1 — results*, below** | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — correct for grading*; the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
 | **S2** hold-to-compare | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
 | **S3** Phase 4: primaries + case (g) | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
 | **S4** Phase 5: headroom readout | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
@@ -5590,8 +5590,125 @@ container's `colr` over the bitstream's VUI for both. So on the AVFoundation pat
 The pixels in this fixture were encoded with the 709 matrix, so a file mistagged this way is decoded with the
 wrong matrix everywhere, as it would be in any CoreMedia player. Two limits: this was read through
 `AVAssetReader`, not the app's `AVPlayerItemVideoOutput`; and the libav path (MXF / DNxHR) was not exercised.
-S3 keeps the case (g) check for that path, and adds a decision: whether to log a container-vs-VUI disagreement
-when the SPS reader can see one.
+S3 keeps the case (g) check for that path.
+
+**Decided for S3 (Robbie, 2026-10-12):** when the app's own bitstream reader (the SPS colour reader, and the
+HEVC SPS reader) can see a container/bitstream colour disagreement, **log it and show it in the chain readout,
+and change nothing else.** The container's tags still drive the picture; the user decides through the override.
+
+#### S1 — Reference (BT.1886) and the per-display calibrated setting: results, 2026-10-12 (unattended)
+
+**Not committed.** Base `a9f80d4`. Pixel checks on the **ASUS only**, macOS HDR OFF on both displays (read, not set);
+no display setting touched. Every capture is window-only by the Manifold window id, and each was deleted once its
+numbers were recorded below. Outputs in the gitignored `build/colour-s1/`: `gpu-harness.txt`, `run/diffs.txt`,
+`run/score_*.txt`, `run/pred_*.json`, `run/pred_time.txt`, `run/pred_extra.txt`, the per-capture patch medians
+(`run/*.json`), the app logs (`run/*.log`) and `run/exports/`.
+
+##### What was built
+
+- **`DisplayTransformMode.reference`** (`App/DisplayTransform.swift`), between OS and Bypass. Pulldown row
+  **Reference — "correct for grading"** (§6.3's subtitle; see *Open* below), Color menu item
+  **Reference (BT.1886)**, control-bar label **Reference**. Every change goes through
+  `DeckRegistry.setDisplayTransform` (unchanged). **No new `ContentView` modifiers.**
+- **A separate shader, `displayReferenceFragment`** (`App/PassthroughShader.metal`), with its own pipeline state
+  (`displayReferencePipelineState`). OS and Bypass still bind `displayCopyFragment` and nothing else. It runs at
+  the display stage, after the offscreen, so the scopes, SDI and export cannot see it.
+- **`ReferencePlan`** (`App/ReferencePlan.swift`): one pure decision from five facts (transfer code, primaries
+  code, the declared source colorspace, the display's calibration, the display's name). The renderer installs
+  it, and the readout and the log print it.
+  - **PQ / HLG:** exactly OS.
+  - **Calibrated display:**
+    - 709 primaries: no colorspace is declared and the identity copy runs, so the code values go out untouched.
+    - P3-D65 (12) or Rec.2020 (9) primaries: still no colorspace declared, but the shader converts the
+      primaries to 709 in 2.4-linear light and re-encodes with 1/2.4.
+  - **Display described by its profile (the default):** the shader computes the BT.1886 drive from Lb/Lw and
+    encodes it with 1/γ, where γ is parsed from the declared source profile. Today's source colorspace stays
+    declared, which is §6.6's design.
+  - **A source profile whose curve is not one power law:** refused. The picture shows as OS and the readout and
+    log say so. Never seen for an SDR source.
+  - The curve is chosen from the renderer's `sourceTransferCode`, so an override reaches it (§6.9 finding 11).
+- **BT.1886 and the calibration record** in the `ColorimetryModel` package (`ReferenceTransform.swift`), with
+  9 unit tests: `BT1886`, `DisplayCalibration`, and `ReferenceGamut` (matrices built from the published xy, not
+  typed in).
+- **The per-display setting** (`App/DisplayCalibrationStore.swift`):
+  - **Key:** the CoreGraphics vendor, model and serial numbers (the ASUS reads `1715-5153-89785`, the LG
+    `7789-49352-16843009`).
+  - **Storage:** JSON under one defaults key, `displayCalibrations`. Every write reads the table and merges into
+    it. An entry equal to the default is removed, so an untouched display leaves no trace.
+  - **Re-planning:** happens when the window changes screen, when a screen's profile changes, and when the
+    setting changes.
+- **Where the setting lives — minimal surface.** A *This display — <name>* section at the bottom of the existing
+  transform-chain popover (`DisplayCalibrationSection`). It has a *Calibrated to Rec.709 / BT.1886 in the display*
+  toggle, and White / Black fields in cd/m², which are greyed while calibrated is on. No new control-bar item and
+  no new window: the popover already names the display the window is on, so the statement is made about that
+  display.
+- **The readout's Transform line** is the plan's own summary. As printed in this run:
+  - `Reference — BT.1886, Lw 100 · Lb 0 (= γ2.4), encoded for the declared γ1.961, source colorspace declared to the layer`
+  - `Reference — display calibrated to Rec.709 / BT.1886: code values sent untouched, no colorspace declared (Lb/Lw applied by the display)`
+  - `Reference — PQ passed to macOS unchanged (on HDR, Reference = As macOS shows it)`
+- **A defect found and fixed before the results.** The renderer first resolved its screen through
+  `metalLayer.delegate`. That is not the hosting view: `MetalSurfaceView` assigns the layer directly. So no screen
+  was found, every display read as uncalibrated, and the first run's log line named no display. The renderer now
+  holds a weak `hostView`, which `MetalHostView` sets (including in `viewDidMoveToWindow`). Every result below is
+  from the fixed build, and the log names `"ASUS PA147"`.
+
+##### Results
+
+**The rig.** The Profile build of the tree, and HEAD (`a9f80d4`) built separately from `git archive` into the
+scratchpad. Wedge `docs/color-fixtures/wedge.mov`, window 875×492 on the ASUS, with the picture filling it and no
+title bar. Captures are 8-bit, sampled as the inner-half median of each of the 48 patches.
+
+**The prediction method**, fixed before any scored Reference capture: ColorSync's conversion on this display is
+*measured*, not modelled. OS feeds it each patch's signal V and the capture records F(V). Reference feeds it
+u = D(V)^(1/1.960938), so the prediction is F(u), interpolated (PCHIP) between the 48 measured OS points.
+
+⚠️ **The first Reference capture, at 17:34:10, was taken before the predictions existed:** a shell error stopped
+them being written. It was discarded unscored. Predictions were written at 17:34:26, and the scored capture is from
+a fresh launch afterwards (`run/pred_time.txt`).
+
+| # | Prediction (§6.11) | Result | Verdict |
+|---|---|---|---|
+| S1-1 | ASUS, OS vs the build before S1: 0 codes | **0 codes, 0 pixels** over the whole window (HEAD `a9f80d4` vs tree). OS → Bypass → Reference → OS round trip: **0**. OS on a later launch: **0** | **PASS** |
+| S1-2 | Lb 0: black and white equal OS; every patch between darker; largest gap in the lower mid-tones; every patch within ±1 of the prediction; equal to OS fails (the trap); equal to the raw power curve fails | Worst error **0.93 codes**, **0 / 48** outside ±1. Black 0 / 0 and white 255 / 255 against OS. **44 / 44** mid patches darker. Largest gap **20 codes at V 0.35**. Against OS: **21 codes on 96.9 % of pixels**, so not the trap. Against the "conversion skipped" model V^1.224: up to **11.8 codes** away, so not that failure | **PASS** |
+| S1-3 | Lb 0 = a direct 2.4 implementation: 0 codes | GPU harness (`gpu-harness.txt`): the shipped `displayReferenceFragment`, its text extracted from the `.metal` file, against `pow(pow(V, 2.4), 1/γ)`, same vertex stage, rgba16Float, 1 100 texels from −0.05 to 1.05: **0 texels differ in any bit**. Unit test: `BT1886.drive` is `pow(V, 2.4)` exactly at 1 024 points | **PASS** |
+| S1-4 | Lb 0.10 / Lw 100: black and white equal Lb 0; shadows lighter, as computed; ±1 code of the probe | Worst error **0.92 codes**, **0 / 48** outside ±1. **44 / 44** mid patches lighter than Lb 0. White 255 / 255. The darkest patch (V 0.0023; the wedge has no V = 0 patch) reads **2** against Lb 0's 0, and the prediction was 2.0. True black (D(0) = 0) is shown by the unit test and the harness. GPU vs CPU formula: **0.47 codes at 10-bit** worst (half precision) | **PASS** |
+| S1-5 | LG, calibrated ON: Reference = OS = Bypass, 0 codes | **Not run on the LG**: this run allows pixel checks on the ASUS only. The mechanism, on the ASUS declared calibrated: **Reference = Bypass, 0 codes, 0 pixels**, on two separate Bypass captures. On the LG with HDR off, OS = Bypass was measured in §6.7, so Reference = OS = Bypass follows there. That is inferred, not measured | **PASS (mechanism, ASUS)**; LG not measured |
+| S1-6 | LG, calibrated ON, macOS HDR switched on: Reference holds at 0, OS moves ~21 | **Not run.** Attended, and needs the HDR switch | — |
+| S1-7 | Sub-black and superwhite: no NaN, no black or magenta | GPU harness: 50 sub-black inputs all give **0**; 50 superwhite inputs give **1.00098 – 1.0615**, finite; **0 NaN** in both modes. Not captured on screen: no fixture in hand carries sub-black or superwhite codes | **PASS (shader)** |
+| S1-8 | Scopes, SDI (v210) and export: 0 codes between OS, Reference and Bypass | ⌃⌥E in each mode. The export PNG, the v210 dump (the DeckLink convert) and the rgba16f readback are **byte-identical across all three modes** (one md5 each). Scopes tray open, 720×591 window: every differing pixel is in **rows 0–404, the 720×405 picture**. The tray (waveform, parade) is **identical** in all three modes | **PASS** |
+| S1-9 | LG by eye: calibrated ON looks as OS; calibrated OFF clearly too dark in the shadows | **Not run.** Attended | — |
+| E1 | *Added before capture:* PQ wedge, Reference vs OS: 0 codes | **0 codes, 0 pixels** | **PASS** |
+| E2 | *Added before capture:* 9-1-9 chart, ASUS declared calibrated, Reference vs Bypass. Greys ±1; 100 % primaries identical; 50 % R → 157–158, 50 % G → ≈ 134 ±1, 50 % B → ≈ 134 ±1 | Greys and all 100 % patches **identical**. 50 % R **158**, G **135**, B **134**. C, M, Y 50 % move as expected (M 156 / 133) | **PASS** |
+
+**Tests and build:** `swift test` **331 / 331**, including the 9 new ones. The Profile build is clean.
+
+##### Open after S1
+
+- **Attended, on the LG** (one ~20-minute session, with S2 and S4 if they are ready): S1-5 by pixels is not
+  allowed, so it becomes a by-eye sanity check; S1-6 (Robbie toggles HDR); S1-9.
+- **The popover's calibration section was not driven by clicking.** The store was exercised through the defaults
+  key the section writes, and the renderer re-planned from it, by its log. Typing in the fields, the greyed state,
+  and the live re-plan on toggle are unseen.
+- **Reference after a relaunch is untested.** `WindowChrome.displayTransform` neither seeds nor writes back, so it
+  should reset to OS as Bypass does.
+- **The subtitle "correct for grading"** is §6.3's decided wording. Given the display roles (the LG is not used for
+  grading; reference monitoring is over SDI), it may want changing, for example to "what is in the file" (§6.1's
+  question for Reference). Left for Robbie.
+- **On a profile-described display, a Rec.2020 SDR source still loses its primaries** under Reference, because
+  Reference keeps today's declaration and `makeColorSpace` flattens (9, 1) and (9, 14) to 709 (§7.3). S3 fixes
+  that. On a calibrated display, Reference already converts 2020 → 709 correctly (E2).
+- **DCI-P3 (11), SMPTE-C (6) and EBU (5) on a calibrated display** take the identity copy: no primaries conversion
+  until S3.
+- **Window title:** Reference adds no suffix. It is the correct mode, not a diagnostic one, so it does not need
+  Bypass's standing marker.
+
+**Defaults:** exported before the first launch (1 143 keys). `displayCalibrations` was confirmed absent, then
+written before each of the calibrated runs and deleted after them. The ten launches added ten
+`NSWindow Frame …` keys and nothing else; each was checked absent from the snapshot and deleted by name. The domain
+is **dictionary-equal to the snapshot**, and `streamBookmarks` is equal and was never written. **Screenshots:**
+window-only, all deleted after scoring. Two were viewed (the first wedge capture, to check the geometry, and the
+Reference capture with the scopes tray open, to check the scopes were drawn), and both are deleted. **Exports:**
+written to the Desktop by ⌃⌥E and moved into `build/colour-s1/run/exports/`; nothing left on the Desktop.
 
 ---
 

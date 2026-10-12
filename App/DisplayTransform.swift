@@ -8,15 +8,13 @@
 //  rejected the name "Embedded": reading the file's tags is what every mode does, so the name
 //  pointed at the wrong axis.
 //
-//  ── WHY THERE ARE TWO CASES HERE AND NOT THREE ──────────────────────────────────────────────
+//  ── THREE CASES SINCE COLOUR S1 (2026-10-12, §6.11) ─────────────────────────────────────────
 //
-//  §6.4's Phase 2 is "infrastructure, with OS and Bypass only", and Reference is Phase 3. Both
-//  cases below are reachable and neither needs any colour science: OS is today's behaviour made
-//  explicit, and Bypass is the REMOVAL of an assignment. Reference is the one that needs a shader
-//  EOTF, and adding its case now would put an unreachable arm in every switch in the app —
-//  which is an invitation to fill it with a stub that silently renders as OS.
+//  Phase 2 shipped OS and Bypass only, deliberately: an unreachable Reference arm would have invited
+//  a stub that silently rendered as OS. S1 adds `.reference`, built and measured, so every switch on
+//  this type now has three real arms.
 //
-//  ⚠️ WHEN REFERENCE ARRIVES, READ §6.6's TRAP FIRST. A shader that applies BT.1886 2.4 and then
+//  ⚠️ §6.6's TRAP, WHICH REFERENCE IS BUILT AROUND. A shader that applies BT.1886 2.4 and then
 //  declares γ2.4 has its work undone — ColorSync converts straight back to display encoding and
 //  the net light is as if nothing had happened. Measured: 10 codes on the LG. It looks like a
 //  Reference mode that does nothing, which is much harder to notice than one that looks broken.
@@ -52,6 +50,15 @@ enum DisplayTransformMode: String, CaseIterable, Identifiable, Sendable {
     /// macOS application does, so it is the honest answer to "what will my client see?".
     case os
 
+    /// BT.1886 from this display's black and white (Lb 0 = exactly gamma 2.4), applied in a separate
+    /// shader before today's source declaration — §6.11, decisions 1 and 2. On a display the user has
+    /// declared calibrated to Rec.709 / BT.1886, the code values go out untouched with no colorspace
+    /// declared (wide-gamut primaries converted to 709 first). PQ and HLG: identical to `.os` (§6.2).
+    ///
+    /// ⚠️ DESKTOP ONLY, like the other two: the scopes, SDI and export read the offscreen, upstream
+    /// of the stage that applies it.
+    case reference
+
     /// Install no colorspace at all: `CAMetalLayer.colorspace = nil`. **No conversion is
     /// performed** — measured in Phase 1 (§6.6) to the limit it can be measured.
     ///
@@ -70,16 +77,18 @@ enum DisplayTransformMode: String, CaseIterable, Identifiable, Sendable {
     /// Phase 2b and lives in the control bar, not here.
     var menuTitle: String {
         switch self {
-        case .os:     return "As macOS Shows It"
-        case .bypass: return "Bypass — No Colour Management"
+        case .os:        return "As macOS Shows It"
+        case .reference: return "Reference (BT.1886)"
+        case .bypass:    return "Bypass — No Colour Management"
         }
     }
 
     /// Short form for logs and diagnostics.
     var logLabel: String {
         switch self {
-        case .os:     return "OS"
-        case .bypass: return "BYPASS"
+        case .os:        return "OS"
+        case .reference: return "REFERENCE"
+        case .bypass:    return "BYPASS"
         }
     }
 

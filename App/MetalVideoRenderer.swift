@@ -335,6 +335,11 @@ final class MetalVideoRenderer {
     /// blit. Identity transform today; it exists to prove the structure is free and bit-exact.
     /// Optional so a failure to build it falls back to the blit rather than killing the renderer.
     private let displayCopyPipelineState: MTLRenderPipelineState?
+    /// Colour S1 — the Reference display stage (`displayReferenceFragment`). A SEPARATE pipeline, so
+    /// OS and Bypass keep `displayCopyPipelineState` and cannot change: they never bind this one.
+    /// nil if it failed to build, in which case Reference falls back to the identity copy and the
+    /// log says so once.
+    private let displayReferencePipelineState: MTLRenderPipelineState?
     private var textureCache: CVMetalTextureCache!
 
     // GPU scopes. Compute pipelines for the scope kernels + REUSABLE device histogram
@@ -720,6 +725,20 @@ final class MetalVideoRenderer {
         } else {
             self.displayCopyPipelineState = nil
         }
+        // Colour S1 — same vertex stage and attachment format as the copy; only the fragment differs.
+        if let rv = library.makeFunction(name: "displayCopyVertex"),
+           let rf = library.makeFunction(name: "displayReferenceFragment") {
+            let rdesc = MTLRenderPipelineDescriptor()
+            rdesc.vertexFunction = rv
+            rdesc.fragmentFunction = rf
+            rdesc.colorAttachments[0].pixelFormat = Self.renderPixelFormat
+            self.displayReferencePipelineState = try? device.makeRenderPipelineState(descriptor: rdesc)
+        } else {
+            self.displayReferencePipelineState = nil
+        }
+        if displayReferencePipelineState == nil {
+            print("[REFERENCE] ⚠️ the Reference pipeline failed to build — Reference will show the identity copy")
+        }
 
         // GPU scope compute pipelines (same default library). Non-fatal if either fails —
         // that scope simply falls back to its CPU path; the display path is unaffected.
@@ -845,10 +864,50 @@ final class MetalVideoRenderer {
         guard cacheStatus == kCVReturnSuccess else {
             print("MetalVideoRenderer: texture cache creation failed (\(cacheStatus))"); return nil
         }
+        installReferenceObservers()
     }
 
     deinit {
+        referenceObservers.forEach { NotificationCenter.default.removeObserver($0) }
         stop()
+    }
+
+    // MARK: - Colour S1: what moves the Reference plan without a source change
+
+    /// The view hosting `metalLayer`, set by `MetalHostView`. Weak: the view tree owns the view.
+    ///
+    /// ⚠️ NOT `metalLayer.delegate`. `MetalSurfaceView` assigns the layer to the view directly, and
+    /// the layer's delegate is then not the view — measured in S1: resolving through the delegate
+    /// found no screen, so every display read as uncalibrated and the log named no display.
+    weak var hostView: NSView?
+
+    /// The screen this renderer's window is on.
+    private var hostingScreen: NSScreen? { hostView?.window?.screen }
+
+    /// MAIN. The host view has a window now (or a different one): re-plan if in Reference.
+    func hostViewDidMoveToWindow() {
+        guard displayTransform == .reference else { return }
+        publishColorState()
+        sourceColorStateChanged()
+    }
+
+    /// The Reference plan depends on the DISPLAY (its calibration, its profile) as well as the
+    /// source, so it is recomputed when the window moves screen, when a display's profile changes,
+    /// and when the user edits a display's calibration. Cheap, and a no-op outside Reference.
+    private func installReferenceObservers() {
+        let nc = NotificationCenter.default
+        let names: [Notification.Name] = [NSWindow.didChangeScreenNotification,
+                                          NSWindow.didChangeScreenProfileNotification,
+                                          DisplayCalibrationStore.didChange]
+        for name in names {
+            referenceObservers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                guard let self, self.displayTransform == .reference else { return }
+                // A window notification for ANOTHER window says nothing about this one.
+                if let w = note.object as? NSWindow, w !== self.hostView?.window { return }
+                self.publishColorState()
+                self.sourceColorStateChanged()
+            })
+        }
     }
 
     // MARK: - The display raster
@@ -1067,8 +1126,20 @@ final class MetalVideoRenderer {
         /// itself being nil, one level up. Collapsing the two would make Bypass unreachable.
         let colorSpace: CGColorSpace?
         let wantsEDR: Bool
+        /// Colour S1. nil = the identity copy (OS, Bypass, and the Reference cases that need no
+        /// shader). Installed with the colorspace, on the render thread, so a frame is never drawn
+        /// with one and declared with the other.
+        let reference: ReferenceShaderParams?
     }
     private var pendingColorState: PendingColorState?
+    /// RENDER THREAD ONLY. The Reference shader parameters in force, installed from
+    /// `pendingColorState` at the top of the tick, exactly like the layer's colorspace.
+    private var activeReference: ReferenceShaderParams?
+
+    /// MAIN. The Reference decision for the current source on this window's display, or nil outside
+    /// Reference. The chain readout's Transform line is `referencePlan?.summary`.
+    private(set) var referencePlan: ReferencePlan?
+    private var referenceObservers: [NSObjectProtocol] = []
 
     /// ── THE TWO INPUTS THE INSTALLED COLOUR STATE IS COMPUTED FROM. MAIN THREAD ONLY. ────────
     ///
@@ -1260,6 +1331,9 @@ final class MetalVideoRenderer {
         print("[EDR] display transform → \(mode.logLabel)"
             + (mode == .bypass ? "  ⚠️ DIAGNOSTIC — no colour management, never correct (§6.1)" : ""))
         publishColorState()
+        // The readout's Transform line comes from `referencePlan`, which exists only after the
+        // publish above.
+        sourceColorStateChanged()
     }
 
     /// Park the colour state computed from BOTH inputs, for the render thread to install.
@@ -1285,10 +1359,33 @@ final class MetalVideoRenderer {
         // destination as the source IS an identity transform, so both models predict every
         // observation. What is settled is that `nil` substitutes nothing ELSE — sRGB, the
         // plausible candidate, is ruled out.
-        let installed: CGColorSpace? = (displayTransform == .os) ? cs : nil
+        let installed: CGColorSpace?
+        var reference: ReferenceShaderParams? = nil
+        switch displayTransform {
+        case .os:
+            installed = cs
+            referencePlan = nil
+        case .bypass:
+            installed = nil
+            referencePlan = nil
+        case .reference:
+            // Colour S1. The plan reads the renderer's `sourceTransferCode` / `sourcePrimariesCode`
+            // — never the buffer tags — so an override reaches the display transform as it reaches
+            // everything else (§6.9 finding 11).
+            let screen = hostingScreen
+            let plan = ReferencePlan.make(transferCode: sourceTransferCode, primariesCode: sourcePrimariesCode,
+                                          sourceColorSpace: cs,
+                                          calibration: DisplayCalibrationStore.shared.calibration(for: screen),
+                                          displayName: screen?.localizedName)
+            if plan != referencePlan { print(plan.logLine) }
+            referencePlan = plan
+            installed = plan.layerColorSpace
+            reference = plan.shader
+        }
 
         refreshLock.lock()
-        pendingColorState = PendingColorState(colorSpace: installed, wantsEDR: sourceWantsEDR)
+        pendingColorState = PendingColorState(colorSpace: installed, wantsEDR: sourceWantsEDR,
+                                              reference: reference)
         pendingRefresh = true
         refreshLock.unlock()
     }
@@ -1438,10 +1535,19 @@ final class MetalVideoRenderer {
         // compared ICC encodings as strings, and `recordPTSContinuity` comparing Doubles): a log
         // that describes the intent instead of the installed state sends someone hunting a shift
         // that is not where the line says it is.
-        print("[EDR] layer colorspace = "
-            + (displayTransform == .os
-               ? "\(csName)  (wideGamut=\(cs.isWideGamutRGB))"
-               : "nil — BYPASS, no conversion  (source derived \(csName))"))
+        let layerLine: String
+        switch displayTransform {
+        case .os:
+            layerLine = "\(csName)  (wideGamut=\(cs.isWideGamutRGB))"
+        case .bypass:
+            layerLine = "nil — BYPASS, no conversion  (source derived \(csName))"
+        case .reference:
+            layerLine = referencePlan?.layerColorSpace == nil
+                ? "nil — REFERENCE on a calibrated display, no conversion  (source derived \(csName))"
+                : "\(csName)  (wideGamut=\(cs.isWideGamutRGB))  — REFERENCE"
+                  + (referencePlan?.shader == nil ? ", identity copy" : ", BT.1886 shader")
+        }
+        print("[EDR] layer colorspace = " + layerLine)
         print("[EDR] wantsExtendedDynamicRangeContent = \(isHDRTransfer)"
             + (isHDRTransfer ? "  (HDR transfer \(transfer!) → EDR ON)" : "  (SDR source → EDR OFF, unchanged path)"))
 
@@ -2324,6 +2430,7 @@ final class MetalVideoRenderer {
             metalLayer.colorspace = colorState.colorSpace
             metalLayer.wantsExtendedDynamicRangeContent = colorState.wantsEDR
             CATransaction.commit()
+            activeReference = colorState.reference
             // ORDERING, STATED WHERE IT CAN BE CHECKED — the line the first-frame bug is read off.
             //
             // `presents=0` means this source's colour state reached the layer before any of its
@@ -2847,7 +2954,22 @@ final class MetalVideoRenderer {
         // convert, or the frame export — all of which read the offscreen ring.
         //
         // Falls back to the blit if the pipeline failed to build, so the display path is never lost.
-        if let copyPipeline = displayCopyPipelineState {
+        //
+        // COLOUR S1: Reference binds its OWN pipeline here and nowhere else. `activeReference` is nil
+        // in OS and Bypass, so those two take exactly the branch they always took.
+        if var reference = activeReference, let refPipeline = displayReferencePipelineState {
+            let refDesc = MTLRenderPassDescriptor()
+            refDesc.colorAttachments[0].texture = drawable.texture
+            refDesc.colorAttachments[0].loadAction = .dontCare   // every texel is written
+            refDesc.colorAttachments[0].storeAction = .store
+            if let refEnc = cmdBuffer.makeRenderCommandEncoder(descriptor: refDesc) {
+                refEnc.setRenderPipelineState(refPipeline)
+                refEnc.setFragmentTexture(offscreen, index: 0)
+                refEnc.setFragmentBytes(&reference, length: MemoryLayout<ReferenceShaderParams>.stride, index: 0)
+                refEnc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                refEnc.endEncoding()
+            }
+        } else if let copyPipeline = displayCopyPipelineState {
             let copyDesc = MTLRenderPassDescriptor()
             copyDesc.colorAttachments[0].texture = drawable.texture
             copyDesc.colorAttachments[0].loadAction = .dontCare   // every texel is written

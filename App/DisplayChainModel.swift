@@ -202,6 +202,10 @@ final class DisplayChainModel: ObservableObject {
         switch mode {
         case .os:     transformLine = "As macOS shows it — source colorspace declared to the layer"
         case .bypass: transformLine = "Bypass — no colorspace declared, no conversion"
+        // Colour S1: the renderer's own plan, so the line names the curve and the Lb/Lw IN USE —
+        // the same object that decided the picture, never a re-derivation.
+        case .reference:
+            transformLine = renderer?.referencePlan?.summary ?? "Reference — no source yet"
         }
 
         // ── DISPLAY ─────────────────────────────────────────────────────────────────────────
@@ -255,6 +259,9 @@ final class DisplayChainModel: ObservableObject {
         // notification during a view update.
         if next != chain { chain = next }
     }
+
+    /// The screen this window is on — the display the readout's calibration section edits.
+    var currentScreen: NSScreen? { deck?.window?.screen }
 
     /// The display's assigned profile. `CGDisplayCopyColorSpace` first, matching what
     /// `MetalVideoRenderer`'s `[CSPROBE]` destination probe resolves, so the readout and the probe
