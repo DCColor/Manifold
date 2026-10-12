@@ -3029,7 +3029,7 @@ struct ContentView: View {
                 // Color — the color-interpretation control (source-agnostic). It hosts an ASSERTION
                 // about the source, so it lives with the actions, not in the inspector (which reports
                 // what things ARE). Today its only section is the live stream's colorimetry override,
-                // so it's gated to the transports that have one (NDI, SRT): it has nothing to say about
+                // so it's gated to the transports that have one (NDI, SRT, WHEP): it has nothing to say about
                 // a file yet (file color-management modes are the future second section). One element,
                 // no modifiers (§6.7) — see LiveColorOverride.swift.
                 if let live = activeLiveSource, LiveColorOverrideModel.offersOverride(live) {

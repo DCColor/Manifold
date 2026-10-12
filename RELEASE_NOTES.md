@@ -32,7 +32,7 @@ bullet.
 - HEVC now plays over SRT, including 10-bit HDR.
 - Audio offset for live streams, in the A/V menu: ⌥] and ⌥[ move the sound 1 ms later or earlier (add ⇧ for 10 ms). Save the offset with a saved stream and it comes back every time. A badge and the window title show when an offset is on.
 - Calibration (A/V ▸ Calibrate…): loop a Manifold sync clip on the sender and Manifold measures how far apart sound and picture are, then offers the correction. It never applies anything by itself. A/V ▸ Save Sync Clip… saves the clip that matches the stream's frame rate.
-- SRT streams can now have their color interpretation overridden, like NDI: pick Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG or P3-D65 PQ from the Color control, or press ⌃⌥C. Auto goes back to what the stream declares. The override lasts for the connection.
+- SRT and WHEP streams can now have their color interpretation overridden, like NDI: pick Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG or P3-D65 PQ from the Color control, or press ⌃⌥C. Auto goes back to what the stream declares. The override lasts for the connection.
 - While a color override is on, on any stream, the window title says so (for example "— Color 2020 PQ").
 
 ### Improved

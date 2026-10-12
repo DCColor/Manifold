@@ -1555,10 +1555,11 @@ Run in this order.
   - SRT and WHEP report declared or assumed for each axis.
   - Correct the "SRT can state the truth" comments.
   - Check again whether OBS → SRT really declares nothing.
-- **Stage B — SRT override, per session.** Done 2026-10-12, uncommitted (*Stage B*, below).
+- **Stage B — SRT override, per session.** Done 2026-10-12, committed `4bc42b4` (*Stage B*, below).
   - The override goes through `setSourceColorSpace(…, provenance: .overridden)`.
   - The scopes need no extra work: they follow the renderer since `946417a`.
-- **Stage C — WHEP override, per session.** Same pattern as Stage B.
+- **Stage C — WHEP override, per session.** Same pattern as Stage B. Done 2026-10-12, uncommitted (*Stage C*,
+  below).
 - **Stage D — save per bookmark for SRT, WHEP and HLS.**
   - Add an optional raw-string field to `StreamBookmark`, decoded tolerantly.
   - Add migration tests.
@@ -1836,7 +1837,7 @@ dictionary-equal (1 141 keys); `streamBookmarks` was not written.
 - **MediaMTX's HLS of the Baseline test stream** failed to open in AVFoundation (CoreMedia −12927).
   It was not investigated; bipbop was used for the HLS regression instead.
 
-#### Stage B — SRT override, per session: done 2026-10-12, uncommitted
+#### Stage B — SRT override, per session: done 2026-10-12, committed `4bc42b4`
 
 **What changed.**
 
@@ -1916,6 +1917,76 @@ launch, restored after the last quit, dictionary-equal (1 143 keys). `streamBook
 **Still open after Stage B.** Stage C (WHEP), D (save per bookmark), E (HLS, after decision 6's code fix).
 The Rec.2020 SDR preset stays NDI-only (decision 3). An override on SRT is not saved: a reconnect starts on
 Auto, by design until Stage D.
+
+#### Stage C — WHEP override, per session: done 2026-10-12, uncommitted
+
+**What changed.** Stage B's pattern, on WHEP.
+
+- **The model** (`LiveColorOverrideModel`) now offers the override on `.web`, with its own log tag
+  (`[WHEP-COLOR]`). Reset to Auto on every connect, session-only; title suffix and ⌃⌥C unchanged in shape.
+- **`WHEPFrameRouter`** holds the override under `stateLock` (`setColorimetryOverride`) and reads it once per
+  decoded frame in `deliver`. The frame's colour (`frameColorimetry`) is the SPS reading with the override
+  applied; it tags the buffer and the promote's source, and when it differs from what the renderer was told,
+  the existing timed hop (`applyColorimetry`) announces it for that frame's presentation. Presets from
+  `available(on: .whep)`.
+- **`WHEPClient.colorimetry`** (new, published, main): what the renderer has been told, with the override.
+  Undeclared from activation (which states assumed 709) until the first announcement; nil after release. The
+  Color control reads it for its face and "Stream" line.
+- **The log:** `[WHEP-COLOR] override → …` at a change and `→ Auto (new connection)` at connect; `[WHEP-COLOR]
+  renderer now: …` when the renderer takes an override change; `[WHEP] colorimetry from the stream's SPS: …`
+  stays for an SPS change.
+
+**WHEP differs from SRT in one visible way:** it activates before any media, stating assumed 709 with
+undeclared axes spelled as 1, so an untagged stream reads `assumed (CICP 1-1-1)` where SRT reads `–-–-–`
+(Stage SPS, point 1 of `StreamColorimetry`'s header). Predicted that way.
+
+**Rig.** Unattended. HEAD `4bc42b4` (SHA-256 `7b0408bd…`, the same binary as Stage B's tree) against the
+tree (final `8bd71836…`). MediaMTX 1.21.1, run from a copy of `~/Desktop/mediamtx/mediamtx.yml` in the
+scratchpad with only the log lines changed (stdout only), so the original config and its log file were not
+touched. ffmpeg published Stage B's bars over SRT (`publish:live`, port 8890) with the AAC re-encoded to
+**Opus**; Manifold read `http://127.0.0.1:8889/live/whep` through ⌃⌥H and `MANIFOLD_STREAM_DEBUG_URL`. P7
+added a High 10 PQ stream. Window on the ASUS at 875×492, pixel checks only. Stage B's harness, every
+keystroke checked against its log line (one connect was dropped and retried). Defaults exported first,
+restored after, dictionary-equal (1 143 keys); `streamBookmarks` never written; the runs added 14 window-frame
+keys, deleted by name.
+
+**Predictions** (written 2026-10-12, before the code changed):
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| 1 | Untagged WHEP; ⌃⌥C ×2 to 2020 PQ | one `[SCOPE-COLOR] source: Rec. 2020 · PQ (ST 2084) — overridden (CICP 9-16-9)`; face `2020 PQ (ST 2084) · Overridden`, amber ≥ 100 px, commonest 255,146,48; title `Stream debug URL — Color 2020 PQ` | any missing or different |
+| 2 | Declared PQ (Auto) vs untagged + 2020 PQ override | export (`.png`, `.rgba16f`, `.v210`) 0 differing; ASUS OS-mode window capture 0 codes; controls 0; sanity > 0 | any non-zero on the pair; sanity 0 voids |
+| 3 | Back to Auto | declared: `tagged (CICP 9-16-9)`, `· Declared`; untagged: `assumed (CICP 1-1-1)`, `709 709 · Assumed` | otherwise |
+| 4 | 2020 PQ, disconnect (⌃⌥⇧H), reconnect | one `→ Auto (new connection)`; face Auto, 0 amber; no suffix | the override survives |
+| 5 | Lines per change | 1 `override` + 1 `renderer now` + 1 `[SCOPE-COLOR] source` each; 0 `[SPS-COLOR]`; 0 lines in 10 s idle; untagged connect: 1 `assumed (1-1-1)` at activation, nothing from the SPS | extra or missing |
+| 6 | SRT and NDI against HEAD | SRT (Stage B's two scenarios): exports md5-identical, `[SRT-COLOR]`/`[SCOPE-COLOR]`/`[SPS-COLOR]` identical; NDI per step, per thread identical, titles identical | any difference |
+| 7 | WHEP at Auto: untagged 8-bit, PQ 8-bit, High 10 PQ | exports md5-identical HEAD vs tree; colour lines identical | any difference |
+
+**Results — all seven PASS, P5 after one fix.**
+
+| # | Result |
+|---|---|
+| 1 | One `source: Rec. 2020 · PQ (ST 2084) — overridden (CICP 9-16-9)`. Face `2020 PQ (ST 2084) · Overridden`, **512 amber px, commonest 255,146,48** (as SRT and NDI). Title `Stream debug URL — Color 2020 PQ`. |
+| 2 | **Pair 0** in the export PNG, `.rgba16f` and `.v210`; **ASUS window capture 0 codes**. Controls 0. Sanity: window **228 codes, 82.96 %**, export 44.02 % of pixels. The WHEP exports are byte-identical to Stage B's SRT ones (`b003066a…` pixels). |
+| 3 | Declared back to Auto: `tagged (CICP 9-16-9)`, `· Declared`. Untagged: `assumed (CICP 1-1-1)`, `709 709 · Assumed`, 0 amber. |
+| 4 | `[WHEP-COLOR] override → Auto (new connection)`; face `709 709 · Assumed`, 0 amber; title `Stream debug URL`. |
+| 5 | Untagged: 7 changes → **7 / 7 / 7**; scope lines 11 = 1 activation + 7 + 1 disconnect + 1 reactivation + 1 at quit. Declared: 5 → **5 / 5 / 5**, plus its one real `colorimetry from the stream's SPS` (the first SPS, tagged 9-16-9). `[SPS-COLOR]` once per connect. 0 colour lines in 10 s idle. Change → renderer **+0.41 to +0.48 s** (12 changes): WHEP's 0.40 s target plus up to a frame, as designed. |
+| 6 | SRT: 15 export files 0 differing; 31 and 22 colour lines identical; titles identical. NDI: 88 lines per step and per thread identical, 10 `[SCOPE-COLOR]` identical, titles identical (both builds have Stage B's suffix). |
+| 7 | All nine export files md5-identical HEAD vs tree; 17 colour lines identical. |
+
+**P5's first run missed, and the miss was a real log defect.** 7 changes gave 6 `renderer now` lines: the first
+change on the untagged stream (Auto → Rec.709) was logged as `[WHEP] colorimetry from the stream's SPS`. The
+renderer, buffers and scopes were right; only the label was wrong. **Cause:** "was this an override change?"
+compared the new reading with the last announced one, and an untagged stream never announces its SPS (it
+equals activation's assumption), so there was nothing to compare with. A first fix compared against a
+synthetic undeclared reading and missed again: whole readings differ in the SPS's raw parse even when they
+say the same colour. **Fix:** compare what the renderer is told at Auto (`route(undeclaredAxisCode: 1)`), with
+activation's `.assumedRec709SDR` before any announcement. Every result above is from the fixed build; A and B
+were re-run on it. SRT's equivalent (`SRTClient.handleStreamColorimetry`) cannot hit this: SRT activates on
+its first SPS, so there is always a reading to compare with.
+
+**Still open after Stage C.** Stage D (save per bookmark for SRT, WHEP and HLS) and E (HLS, after decision
+6's code fix). WHEP overrides are not saved: a reconnect starts on Auto, by design until Stage D.
 
 ### 6.10 HEVC over SRT — audit and decisions, 2026-10-07
 
@@ -2082,9 +2153,12 @@ Run in this order. Each stage ships on its own.
   - OBS P010, Rec. 2100, VideoToolbox HEVC Main 10 → MediaMTX.
   - Predicted: 10-bit, 9-16-9, MDCV and CLL present.
   - The user guide and the tester notes stop saying "H.264 only".
-- **Then override Stage B** (§6.9). **Done 2026-10-12**, uncommitted: §6.9, *Stage B*. The SRT override takes
+- **Then override Stage B** (§6.9). **Done 2026-10-12**, `4bc42b4`: §6.9, *Stage B*. The SRT override takes
   the mid-stream colour update this section's Stage SPS work built (`LiveDisplayRoute.updateColorimetry`),
   timed the same way, and is md5-neutral at Auto on HEVC 4:2:2 10-bit, H.264 4:2:2 8-bit and H.264 4:2:0.
+- **Then override Stage C** (§6.9), WHEP. **Done 2026-10-12**, uncommitted: §6.9, *Stage C*. Stage SPS's WHEP
+  reading (declared colour from the SPS, announced when the first frame under it is due) is what the override
+  sits on, through the same timed hop.
 
 #### Stage 0 — the identification fix: predictions, written 2026-10-07 before the code changed
 

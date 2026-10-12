@@ -67,6 +67,17 @@ final class WHEPClient: ObservableObject {
     /// Dismiss a shown connection error (the banner's close button).
     func clearError() { lastError = nil }
 
+    /// What the renderer has been told about the stream's colour (`StreamColorimetry`, §6.9 Stage SPS),
+    /// with the user's override applied (Stage C). Undeclared from activation until the first SPS,
+    /// which is what activation states; nil while nothing is streaming. Written on main by
+    /// `WHEPFrameRouter`. The Color control reads it, for its face and its "Stream" line; the scopes
+    /// read the renderer (`ScopeColorFeed`).
+    @Published private(set) var colorimetry: StreamColorimetry?
+    func noteColorimetry(_ colorimetry: StreamColorimetry?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if self.colorimetry != colorimetry { self.colorimetry = colorimetry }
+    }
+
     // MARK: - State
 
     private var session: ManifoldWHEPSession?

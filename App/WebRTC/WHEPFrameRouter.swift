@@ -531,6 +531,20 @@ final class WHEPFrameRouter {
     /// What the renderer has been told: `.assumedRec709SDR` at activation, then whatever `deliver`
     /// announced. Decode queue only; reset with the rest in `releaseResources`.
     private var announcedColorimetry = LiveDisplayRoute.Colorimetry.assumedRec709SDR
+    /// The reading behind `announcedColorimetry` (nil = activation's assumption), so `deliver` can tell
+    /// an override change from an SPS change for the log. Decode queue only.
+    private var announcedReading: StreamColorimetry?
+    /// The colour the frame being delivered is tagged with: the SPS reading with the user's override
+    /// applied (Stage C). Decode queue only; set in `deliver` before the promote, which tags with it.
+    private var frameColorimetry = StreamColorimetry.undeclared(isFullRange: false, rangeDeclared: false)
+    /// The user's colour override (§6.9 Stage C, the SRT pattern of Stage B). Under `stateLock`: main
+    /// writes it (`setColorimetryOverride`, from the window's `LiveColorOverrideModel`), the decode
+    /// queue reads it once per frame in `deliver`. Reset to `.auto` at every connect by that model.
+    ///
+    /// ⚠️ IT TAKES EFFECT WITH THE NEXT DECODED FRAME, through the same timed hop as an SPS change, so
+    /// the buffer tags and the renderer's codes change together (finding 10). An override set before
+    /// the first frame rides the first announcement.
+    private var colorOverride: ColorimetryOverride = .auto
 
     // MARK: - Promote state (decode queue only)
 
@@ -745,6 +759,7 @@ final class WHEPFrameRouter {
 
         NSLog("[WHEP] display route ACTIVE — LiveClock target=%.3fs, maxQueued=30, colorimetry assumed 709 SDR until the stream's SPS is read",
               Self.targetDepth)
+        WHEPClient.shared.noteColorimetry(.undeclared(isFullRange: false, rangeDeclared: false))
         publishBufferReadout(clock: clock)
     }
 
@@ -774,13 +789,27 @@ final class WHEPFrameRouter {
     /// The renderer's half of a colour change. MAIN, timed by `deliver`. `clock` is the route's clock
     /// when the change was seen: a hop that outlives its stream (a disconnect, or a reconnect inside
     /// the delay) finds a different clock or none, and does nothing.
-    private func applyColorimetry(_ colorimetry: LiveDisplayRoute.Colorimetry, summary: String,
-                                  for clock: LiveClock) {
+    ///
+    /// `byOverride`: the user's override changed and the SPS did not (Stage C), so the log says that.
+    private func applyColorimetry(_ colorimetry: LiveDisplayRoute.Colorimetry, reading: StreamColorimetry,
+                                  byOverride: Bool, for clock: LiveClock) {
         dispatchPrecondition(condition: .onQueue(.main))
         stateLock.lock(); let current = liveClock === clock; stateLock.unlock()
         guard current else { return }
         route.updateColorimetry(colorimetry)
-        NSLog("[WHEP] colorimetry from the stream's SPS: %@ (%@)", summary, colorimetry.provenance.label)
+        WHEPClient.shared.noteColorimetry(reading)
+        if byOverride {
+            NSLog("[WHEP-COLOR] renderer now: %@ (%@)", reading.summary, colorimetry.provenance.label)
+        } else {
+            NSLog("[WHEP] colorimetry from the stream's SPS: %@ (%@)", reading.summary, colorimetry.provenance.label)
+        }
+    }
+
+    /// The user's colour override for this connection (Stage C). MAIN, from the window's
+    /// `LiveColorOverrideModel`. Applied from the next decoded frame — see `colorOverride`.
+    func setColorimetryOverride(_ override: ColorimetryOverride) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stateLock.lock(); colorOverride = override; stateLock.unlock()
     }
 
     /// WHEP releases the display. Restores the file-path providers verbatim so playback can resume,
@@ -815,6 +844,7 @@ final class WHEPFrameRouter {
         // has nothing to restore.
         if let renderer { LiveBufferReadout.publish(nil, renderer: renderer, logPrefix: "WHEP") }
         route.deactivate(renderer: renderer)
+        WHEPClient.shared.noteColorimetry(nil)
         // No picture, so no shape. Ordered AFTER the route teardown and on main, where it cannot be
         // overtaken by a size still hopping in from the decode queue — see LiveDisplaySize's
         // generation counter.
@@ -840,6 +870,7 @@ final class WHEPFrameRouter {
         colorimetry = .undeclared(isFullRange: false, rangeDeclared: false)
         haveSPSColor = false
         announcedColorimetry = .assumedRec709SDR
+        announcedReading = nil
         framesDelivered = 0
         framesEnqueued = 0
         promoteFailures = 0
@@ -917,10 +948,13 @@ final class WHEPFrameRouter {
         stateLock.lock()
         let clock = liveClock
         let renderer = self.renderer
+        let override = colorOverride
         stateLock.unlock()
         // Not active (a frame racing activate, or arriving after deactivate). Counting it and
         // dropping it is correct — step 3b's counters keep working with no display route at all.
         guard let clock, let renderer else { logFlowIfDue(); return }
+        // This frame's colour: the SPS it was decoded under, with the user's override (Stage C).
+        frameColorimetry = colorimetry.applying(override)
 
         // THE PICTURE'S SHAPE. From the DECODED buffer rather than the format description, and
         // per frame rather than at connect, for two reasons: the format description is built from
@@ -980,13 +1014,21 @@ final class WHEPFrameRouter {
         // included, since activation stated an assumption. The frames still queued ahead of this one
         // were decoded under the old SPS; timing the hop for this frame's presentation keeps the
         // renderer's half and the buffer tags describing the same pictures. An untagged stream reads
-        // as `.assumedRec709SDR` and never hops.
-        let stated = colorimetry.route(undeclaredAxisCode: 1)
+        // as `.assumedRec709SDR` and never hops. An override change (Stage C) is announced the same
+        // way, from the first frame tagged with it.
+        let reading = frameColorimetry
+        let stated = reading.route(undeclaredAxisCode: 1)
         if stated != announcedColorimetry {
+            // Compared as what the renderer is told at Auto, not as whole readings: the SPS's raw parse
+            // differs between two SPS that say the same colour. Before any announcement the renderer holds
+            // activation's assumption: an untagged stream never announces its SPS, so its first override
+            // change compares against that (measured: it was logged as an SPS change).
+            let before = (announcedReading?.applying(.auto).route(undeclaredAxisCode: 1)) ?? .assumedRec709SDR
+            let byOverride = before == reading.applying(.auto).route(undeclaredAxisCode: 1)
             announcedColorimetry = stated
-            let summary = colorimetry.summary
+            announcedReading = reading
             DispatchQueue.main.asyncAfter(deadline: .now() + LiveDisplayRoute.secondsUntilDue(presentationPTS, clock)) { [weak self] in
-                self?.applyColorimetry(stated, summary: summary, for: clock)
+                self?.applyColorimetry(stated, reading: reading, byOverride: byOverride, for: clock)
             }
         }
 
@@ -1000,7 +1042,8 @@ final class WHEPFrameRouter {
         // measured behavior rather than a documented contract, so tagging the OUTPUT last is the
         // ordering that holds either way — NDIService.tagOutput's reasoning, verbatim. What is
         // stamped is what the SPS this frame was decoded under declared, 709 for any axis it did not.
-        colorimetry.bufferTags.apply(to: promoted)
+        // Or the user's override.
+        frameColorimetry.bufferTags.apply(to: promoted)
 
         guard let sampleBuffer = Self.makeSampleBuffer(
                 promoted,
@@ -1086,7 +1129,7 @@ final class WHEPFrameRouter {
 
         // Tag the SOURCE before the transfer, so VT converts from a buffer whose colorimetry is
         // stated rather than absent. (The output is re-tagged after, in `deliver` — see there.)
-        colorimetry.bufferTags.apply(to: source)
+        frameColorimetry.bufferTags.apply(to: source)
 
         let status = VTPixelTransferSessionTransferImage(transferSession, from: source, to: destination)
         guard status == noErr else {

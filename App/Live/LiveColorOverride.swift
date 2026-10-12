@@ -13,8 +13,8 @@
 //      and tells the renderer from the same value (finding 10), through `setSourceColorSpace(…,
 //      provenance: .overridden)` — so the chain readout and the scopes (`ScopeColorFeed`) follow it
 //      with no work of their own.
-//    * WHEP (Stage C) and HLS (Stage E): none yet. `offersOverride` says so, and the control is not
-//      shown for them.
+//    * WHEP (Stage C): HERE too, the same way, through `WHEPFrameRouter.setColorimetryOverride`.
+//    * HLS (Stage E): none yet. `offersOverride` says so, and the control is not shown for it.
 //
 //  THE TITLE SUFFIX (decision 4): " — Color 2020 PQ" while an override is in force, on any transport,
 //  NDI included (`WindowDeck.windowTitle`). Nothing is drawn over the picture.
@@ -38,11 +38,29 @@ final class LiveColorOverrideModel: ObservableObject {
 
     init(deck: WindowDeck) { self.deck = deck }
 
-    /// The transports with an override today. NDI's lives on NDIService, SRT's here.
+    /// The transports with an override today. NDI's lives on NDIService, SRT's and WHEP's here.
     static func offersOverride(_ source: LiveSource) -> Bool {
         switch source {
-        case .ndi, .srt:  return true
-        case .web, .hls:  return false   // Stages C and E
+        case .ndi, .srt, .web: return true
+        case .hls:             return false   // Stage E
+        }
+    }
+
+    /// The log tag for a transport whose override is held here.
+    private static func logTag(_ source: LiveSource) -> String? {
+        switch source {
+        case .srt:       return "SRT-COLOR"
+        case .web:       return "WHEP-COLOR"
+        case .ndi, .hls: return nil
+        }
+    }
+
+    /// Hand the override to the transport that applies it.
+    private static func apply(_ override: ColorimetryOverride, on source: LiveSource) {
+        switch source {
+        case .srt:       SRTFrameRouter.shared.setColorimetryOverride(override)
+        case .web:       WHEPFrameRouter.shared.setColorimetryOverride(override)
+        case .ndi, .hls: break
         }
     }
 
@@ -62,9 +80,9 @@ final class LiveColorOverrideModel: ObservableObject {
     func prepare(source: LiveSource) {
         self.source = source
         sessionOverride = .auto
-        if source == .srt {
-            SRTFrameRouter.shared.setColorimetryOverride(.auto)
-            NSLog("[SRT-COLOR] override → Auto (new connection)")
+        if let tag = Self.logTag(source) {
+            Self.apply(.auto, on: source)
+            NSLog("[%@] override → Auto (new connection)", tag)
         }
         deck?.applyWindowTitle()
     }
@@ -75,8 +93,8 @@ final class LiveColorOverrideModel: ObservableObject {
     func current(for source: LiveSource) -> ColorimetryOverride {
         switch source {
         case .ndi:       return NDIService.shared.colorimetryOverride
-        case .srt:       return self.source == .srt ? sessionOverride : .auto
-        case .web, .hls: return .auto
+        case .srt, .web: return self.source == source ? sessionOverride : .auto
+        case .hls:       return .auto
         }
     }
 
@@ -86,18 +104,18 @@ final class LiveColorOverrideModel: ObservableObject {
         switch source {
         case .ndi:
             NDIService.shared.setColorimetryOverride(override)   // the title follows via arbitration
-        case .srt:
-            guard self.source == .srt, override != sessionOverride else { return }
+        case .srt, .web:
+            guard self.source == source, override != sessionOverride, let tag = Self.logTag(source) else { return }
             sessionOverride = override
-            SRTFrameRouter.shared.setColorimetryOverride(override)
+            Self.apply(override, on: source)
             if let p = override.preset {
-                NSLog("[SRT-COLOR] override → %@ (CICP %d-%d-%d) — applied from the next decoded frame",
-                      override.label, p.primaries, p.transfer, p.matrix)
+                NSLog("[%@] override → %@ (CICP %d-%d-%d) — applied from the next decoded frame",
+                      tag, override.label, p.primaries, p.transfer, p.matrix)
             } else {
-                NSLog("[SRT-COLOR] override → Auto — the stream’s own color from the next decoded frame")
+                NSLog("[%@] override → Auto — the stream’s own color from the next decoded frame", tag)
             }
             deck?.applyWindowTitle()
-        case .web, .hls:
+        case .hls:
             return
         }
     }
@@ -124,6 +142,7 @@ struct ColorInterpretationControl: View {
     @ObservedObject var model: LiveColorOverrideModel
     @ObservedObject private var ndi = NDIService.shared
     @ObservedObject private var srt = SRTClient.shared
+    @ObservedObject private var whep = WHEPClient.shared
 
     /// Color — the color-interpretation control: how Manifold reads the incoming color, and the
     /// user's power to override that reading. This is a source-AGNOSTIC control by design. Today it
@@ -238,13 +257,14 @@ struct ColorInterpretationControl: View {
     }
 
     /// What the renderer has been told (`effective`) and what the stream said (`declared`). NDI's from
-    /// NDIService; SRT's from SRTClient, which publishes the reading with the override applied. nil on
-    /// SRT until the first SPS has been read.
+    /// NDIService; SRT's and WHEP's from their clients, which publish the reading with the override
+    /// applied. nil on SRT until the first SPS has been read.
     private var reading: (effective: SourceColorimetry, declared: SourceColorimetry)? {
         switch source {
         case .ndi: return (ndi.colorInfo, ndi.declaredColorInfo)
         case .srt: return srt.colorimetry.map { ($0.bufferTags, $0.declaredTags) }
-        case .web, .hls: return nil
+        case .web: return whep.colorimetry.map { ($0.bufferTags, $0.declaredTags) }
+        case .hls: return nil
         }
     }
 

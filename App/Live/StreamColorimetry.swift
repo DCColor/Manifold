@@ -27,7 +27,7 @@
 //  from each buffer's tags; everything else takes its colour from `setSourceColorSpace`. Both are
 //  derived here, from ONE value, so they cannot describe different streams.
 //
-//  THE USER'S OVERRIDE (§6.9, Stage B: SRT) rides on the same value, so it reaches both halves too.
+//  THE USER'S OVERRIDE (§6.9, Stage B: SRT; Stage C: WHEP) rides on the same value, so it reaches both halves too.
 //  `applying(_:)` returns this reading with a preset attached; `route` and `bufferTags` then state
 //  the preset, labelled `overridden`, through `SourceColorimetry.resolve` (the one place an override
 //  meets a declaration). The SPS reading underneath is kept, so `declaredTags` can still say what the
@@ -68,8 +68,7 @@ struct StreamColorimetry: Equatable {
     /// The SPS reading this came from, kept for the log: it holds the raw numbers (a 2, a reserved 3)
     /// and how far the SPS got, which the verdict above has already discarded.
     let sps: SPSColor
-    /// The user's assertion over the SPS reading (Stage B). `.auto` asserts nothing. WHEP never sets
-    /// it yet (Stage C).
+    /// The user's assertion over the SPS reading (SRT Stage B, WHEP Stage C). `.auto` asserts nothing.
     let override: ColorimetryOverride
 
     init(sps: SPSColor, isFullRange: Bool, rangeDeclared: Bool, override: ColorimetryOverride = .auto) {
@@ -94,7 +93,7 @@ struct StreamColorimetry: Equatable {
     }
 
     /// Which honesty tier this sits in, from the axes' own `declared` flags rather than the codes.
-    /// An active override outranks both (`overridden`); WHEP cannot have one yet (Stage C).
+    /// An active override outranks both (`overridden`).
     var sourceProvenance: SourceColorProvenance {
         if override.preset != nil { return .overridden }
         switch [primaries, transfer, matrix].filter(\.declared).count {

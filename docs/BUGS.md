@@ -45,8 +45,9 @@ held back until after release, and the numbered defect entries follow.
      *Stage 3b, S3 and S4 — results*); **committed (`0b06de1`)**; its refusal rule refined 2026-10-11,
      uncommitted (§6.10, *S3/S4 follow-up*). S5 (the OBS pass) is attended.
    - The colour override, Stages B–E (§6.9). **Stage B (SRT, per session) built and run unattended
-     2026-10-12, all seven predictions passed, uncommitted** (§6.9, *Stage B*). Next: C (WHEP), D (save per
-     bookmark), E (HLS).
+     2026-10-12, all seven predictions passed, committed (`4bc42b4`)** (§6.9, *Stage B*). **Stage C (WHEP,
+     per session) built and run unattended 2026-10-12, all seven passed, uncommitted** (§6.9, *Stage C*;
+     one log-label defect found by P5 and fixed before the results). Next: D (save per bookmark), E (HLS).
    - Colour Phases 3–5: the Reference transform; primaries and Rec.2020 SDR; the HDR headroom
      readout (§6.4).
    - LUT loading (§6.4).
@@ -1758,7 +1759,8 @@ Phase 4** (§6.4, §7.3), which handles transfer independently of primaries.
   scopes and readout use the 2020 codes. The user asked for 2020 and the picture is not shown as 2020,
   and nothing says so.
 - **Decision:** NDI keeps the preset for now. SRT, WHEP and HLS do not offer it until §7.3 is fixed. SRT's
-  override (Stage B, 2026-10-12) offers the other four presets only, through `available(on: .srt)`.
+  override (Stage B, 2026-10-12) and WHEP's (Stage C) offer the other four presets only, through
+  `available(on:)`.
   **When §7.3 is fixed, enable it on all four transports**, and verify (9,14) on the layer.
 
 ---
