@@ -230,7 +230,7 @@ final class StreamBookmarkMigrationTests: XCTestCase {
         let list = try JSONDecoder().decode([StreamBookmark].self, from: blob)
         XCTAssertEqual(list.map(\.name), ["a", "b", "c", "d", "e", "f", "g"], "the whole list decodes")
         XCTAssertEqual(list.map { ColorimetryOverride(storageID: $0.colorOverride, on: transport($0.type)) },
-                       [.auto, .auto, .auto, .auto, .auto, .auto, .rec2020HLG])
+                       [.auto, .auto, .auto, .auto, .auto, .rec2020SDR, .rec2020HLG])
         XCTAssertEqual(list.map(\.colorOverride), ["aces-cct", "", nil, nil, nil, "rec2020-sdr", "rec2020-hlg"])
         let raw = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(list)) as! [[String: Any]]
         XCTAssertEqual(raw[0]["colorOverride"] as? String, "aces-cct", "an unknown string is kept")

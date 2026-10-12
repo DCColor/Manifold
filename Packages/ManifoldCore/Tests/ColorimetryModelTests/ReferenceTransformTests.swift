@@ -100,10 +100,17 @@ final class ReferenceTransformTests: XCTestCase {
         for w in ReferenceGamut.apply(m, [1, 1, 1]) { XCTAssertEqual(w, 1, accuracy: 1e-9) }
     }
 
-    /// Only 9 and 12 convert in S1; 709, unknown and the codes S3 owns return nil.
-    func testOnlyP3And2020Convert() {
-        for code: Int? in [nil, 1, 2, 5, 6, 11, 255] {
+    /// Colour S3: every primaries code in the table converts; 709, absent and unknown do not.
+    func testEveryNon709TableEntryConverts() {
+        for code: Int? in [nil, 1, 2, 4, 7, 10, 22, 255] {
             XCTAssertNil(ReferenceGamut.toRec709(fromPrimariesCode: code), "code \(String(describing: code))")
+        }
+        for code in [5, 6, 9, 11, 12] {
+            guard let m = ReferenceGamut.toRec709(fromPrimariesCode: code) else {
+                return XCTFail("code \(code) has no conversion")
+            }
+            // White preserved: every rendered set is on D65.
+            for w in ReferenceGamut.apply(m, [1, 1, 1]) { XCTAssertEqual(w, 1, accuracy: 1e-9, "code \(code)") }
         }
     }
 }

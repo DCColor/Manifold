@@ -42,6 +42,8 @@ struct DisplayChain: Equatable {
     /// The chroma the renderer is drawing, against what the source declared (Stage 3b S1, D10):
     /// "4:2:2 10-bit (x422) — native", or the loss and its reason. From the renderer only.
     var chroma: String = "—"
+    /// Colour S3: the file's container tags against its own bitstream, when they disagree. nil otherwise.
+    var tags: String? = nil
 }
 
 @MainActor
@@ -179,7 +181,8 @@ final class DisplayChainModel: ObservableObject {
             // The earlier form printed transfer first and primaries second while calling the
             // numbers "CICP p/t", so the words and the numbers disagreed about which axis was
             // which — readable only if you already knew the answer.
-            let p = MediaInspector.primariesName(forCode: pCode ?? 1)
+            // Colour S3: the name of the primaries AS DRAWN — "DCI-P3 adapted to D65" for 11 (S0).
+            let p = ColorPrimaries(cicp: pCode ?? 1)?.renderedName ?? MediaInspector.primariesName(forCode: pCode ?? 1)
             let t = MediaInspector.transferName(forCode: tCode ?? 1)
             let m = MediaInspector.matrixName(forCode: mCode ?? 1)
 
@@ -257,9 +260,15 @@ final class DisplayChainModel: ObservableObject {
                                     ChromaReadout.text(carried: $0.carriedPixelFormat,
                                                        source: $0.sourceChroma, reason: $0.chromaReason,
                                                        note: $0.chromaNote)
-                                } ?? "no source")
+                                } ?? "no source",
+                                tags: renderer?.sourceColorNote)
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
+        // Colour S3: the Source and Tags lines in the log, once per change, so an unattended run reads
+        // the readout's own words rather than a screenshot of them.
+        if next.source != chain.source || next.tags != chain.tags {
+            print("[CHAIN] Source: \(next.source)" + (next.tags.map { " | Tags: \($0)" } ?? ""))
+        }
         if next != chain { chain = next }
     }
 

@@ -198,6 +198,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// reason. The renderer holds it; the carried format it reads off the buffers itself.
     public var onSourceChroma: ((SourceChroma, String?) -> Void)?
 
+    /// A CONTAINER / BITSTREAM COLOUR DISAGREEMENT, for the chain readout (colour S3): the readout's
+    /// line when the file's container tags and its own SPS (in `avcC` / `hvcC`) state different values,
+    /// else nil. Published on the same edges as `onSourceColorTags`, nil at unload. It changes nothing
+    /// about the picture: the container's tags still drive it (§6.11, *Decided for S3*).
+    public var onSourceColorNote: ((String?) -> Void)?
+
     /// THE SOURCE'S ENCODED RASTER AND ITS TWO GEOMETRY ATOMS — `clap` and `pasp` — published on
     /// exactly the same edges and for exactly the same reason as `onSourceColorTags` above; see
     /// that comment for the argument, this one adds only what is specific to geometry.
@@ -1016,6 +1022,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // colorspace at PRESENT time, so the next source's FIRST frame would be drawn through the
         // dead file's space and would stay that way until something presented again.
         onSourceColorTags?(nil, nil, nil)
+        onSourceColorNote?(nil)
         // …and the chroma, for the same reason: the readout must not describe a departed file.
         fileChroma = .undetermined
         libavFileFormatDescription = nil
@@ -1546,6 +1553,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // headers are re-derived, which genuinely do belong to the full inspection.
             let codes = MediaInspector.colorCodes(for: fmt)
             onSourceColorTags?(codes.primaries, codes.transfer, codes.matrix)
+            // ── THE CONTAINER AGAINST THE FILE'S OWN BITSTREAM (colour S3) ──────────────────────
+            // Where the SPS reader can see into the file (H.264 / HEVC), compare and say so. Logged
+            // and shown, never acted on: the codes above stay what drives the picture.
+            let bitstream = BitstreamColorCheck.check(
+                codecType: CMFormatDescriptionGetMediaSubType(fmt), atoms: FileChromaProbe.atoms(of: fmt),
+                container: codes)
+            if let bitstream { print(bitstream.logLine) }
+            onSourceColorNote?(bitstream?.readout)
             // ── THE ACTIVE PICTURE, ESTABLISHED AT THE SAME POINT AND ON THE SAME ARGUMENT ────
             //
             // Every clause of the paragraph above applies unchanged: same format description,
@@ -1575,6 +1590,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // skipped: leaving the previous file's codes standing is the stale-colour bug in its
             // purest form. nils resolve to the renderer's 709 default.
             onSourceColorTags?(nil, nil, nil)
+            onSourceColorNote?(nil)
             // NO FORMAT DESCRIPTION MEANS NEITHER ATOM IS DECLARED, which is an answer and must
             // be published for the same reason the nil codes are.
             onSourceGeometry?(0, 0, .undeclared, .undeclared)

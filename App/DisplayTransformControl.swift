@@ -256,6 +256,9 @@ struct DisplayChainReadout: View {
                 .font(.headline)
 
             row("Source",    model.chain.source)
+            if let tags = model.chain.tags {
+                row("Tags", tags)
+            }
             row("Chroma",    model.chain.chroma)
             row("Transform", model.chain.transform)
             row("Display",   model.chain.display)

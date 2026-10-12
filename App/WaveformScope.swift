@@ -53,14 +53,11 @@ func ycbcrMatrixLabel(_ code: Int?) -> String {
 }
 
 /// Short gamut label for the SOURCE-PRIMARIES vectorscope graticule — driven by colorPrimariesCode
-/// (the gamut whose primaries place the boxes), INDEPENDENT of the matrix. Canonical "Rec." form to
-/// match the other surfaces; P3 has no "Rec." form and stays "P3". nil/2/unknown → "Rec. 709".
+/// (the gamut whose primaries place the boxes), INDEPENDENT of the matrix. The name comes from
+/// `ColorimetryTable` (colour S3), so it is the gamut the picture is drawn with: nil/2/unknown →
+/// "Rec. 709"; 11 → "DCI-P3"; 5 / 6 → "EBU 3213" / "SMPTE-C".
 func gamutPrimariesLabel(_ code: Int?) -> String {
-    switch code {
-    case 9:      return "Rec. 2020"
-    case 11, 12: return "P3"          // DCI-P3 / Display P3 — no "Rec." form
-    default:     return "Rec. 709"    // Rec.709 / sRGB (also 1 / nil / 2 / unknown)
-    }
+    ColorPrimaries.resolve(code).name
 }
 
 // MARK: - Trace brightness mapping (shared by all scopes)

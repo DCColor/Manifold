@@ -3,6 +3,7 @@ import CoreGraphics
 import Metal
 import Combine
 import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Debug too)
+import ColorimetryModel   // ColorimetryTable — the one primaries table (colour S3)
 
 /// Per-mode plot bounds for the CIE plane — the SINGLE source of truth shared by the kernel
 /// dispatch (computeCIEGPU) and the graticule/scatter mapping, so overlay + scatter align in BOTH
@@ -139,50 +140,42 @@ final class CIEScopeModel: ObservableObject {
         let g: (x: CGFloat, y: CGFloat)
         let b: (x: CGFloat, y: CGFloat)
         let color: Color
+
+        init(_ primaries: ColorPrimaries, name: String, color: Color) {
+            let set = primaries.rendered
+            self.name = name
+            self.r = (CGFloat(set.red.x), CGFloat(set.red.y))
+            self.g = (CGFloat(set.green.x), CGFloat(set.green.y))
+            self.b = (CGFloat(set.blue.x), CGFloat(set.blue.y))
+            self.color = color
+        }
     }
 
     /// 709 / P3 / 2020 gamut triangles (xy primaries). Visibility per-triangle (show709/…).
+    /// The chromaticities are `ColorimetryTable`'s (colour S3): the scope holds no primaries of its own.
     static let gamuts: [Gamut] = [
-        Gamut(name: "709",  r: (0.640, 0.330), g: (0.300, 0.600), b: (0.150, 0.060),
-              color: Color(white: 0.85)),
-        Gamut(name: "P3",   r: (0.680, 0.320), g: (0.265, 0.690), b: (0.150, 0.060),
-              color: Color(red: 0.35, green: 0.85, blue: 1.0)),   // cyan
-        Gamut(name: "2020", r: (0.708, 0.292), g: (0.170, 0.797), b: (0.131, 0.046),
-              color: Color(red: 1.0, green: 0.75, blue: 0.30))     // amber
+        Gamut(.rec709, name: "709", color: Color(white: 0.85)),
+        Gamut(.p3D65, name: "P3", color: Color(red: 0.35, green: 0.85, blue: 1.0)),      // cyan
+        Gamut(.rec2020, name: "2020", color: Color(red: 1.0, green: 0.75, blue: 0.30))   // amber
     ]
 
     /// D65 white point (xy).
-    static let whiteXY: (x: CGFloat, y: CGFloat) = (0.3127, 0.3290)
+    static let whiteXY: (x: CGFloat, y: CGFloat) = (CGFloat(PrimariesSet.d65.x), CGFloat(PrimariesSet.d65.y))
 
-    /// The gamut a CICP PRIMARIES code names, as chromaticities — the same mapping
-    /// `gamutPrimariesLabel` makes to a string and `VectorscopeScopeModel.graticuleKrKb` makes to a
-    /// (Kr,Kb) pair, resolved here to the xy data all three are ultimately about.
+    /// The gamut a CICP PRIMARIES code names, as chromaticities, from `ColorimetryTable` — the same
+    /// table the layer's colorspace (`makeColorSpace`) and the CIE kernel's RGB→XYZ matrix are built
+    /// from, so all three describe the picture that is shown.
     ///
-    /// ⚠️ LIVES HERE BECAUSE `gamuts` LIVES HERE. The vectorscope's user colour targets need a
-    /// RGB→XYZ matrix for the source gamut to convert an sRGB entry into the source's primaries, and
-    /// the alternative was a second table of primaries — or, worse, a Swift transcription of
-    /// `cieRGBtoXYZ`'s three matrices from PassthroughShader.metal. Those matrices are DERIVABLE
-    /// from these chromaticities plus `whiteXY` (verified: the derivation reproduces the shader's P3
-    /// and 2020 rows to ~1e-7, and 709's to 2e-4 — the published 709 matrix is a rounded one), so
-    /// deriving is what keeps ONE statement of where each primary actually is. The GPU copy stays
-    /// where it is; a shader cannot call this.
+    /// The vectorscope's user colour targets need a RGB→XYZ matrix for the source gamut to convert an
+    /// sRGB entry into the source's primaries; they derive it from these chromaticities plus
+    /// `whiteXY`.
     ///
-    /// P3 covers both DCI (11) and Display P3 (12), matching `gamutPrimariesLabel` and the shader —
-    /// the DCI white-point nuance is deferred in all three places, not just this one. Everything
-    /// unrecognised is 709, which is the same fallback every other CICP reader in this app takes.
-    /// Looked up BY NAME rather than by index into `gamuts`: the array's order is a drawing order
-    /// (and `triangleVisible` already keys off these same names), so an index here would break
-    /// silently the first time a fourth gamut was inserted anywhere but the end.
+    /// The RENDERED set: every entry on D65. DCI-P3 (11) is DCI-P3 adapted to D65, as CoreVideo draws
+    /// it (S0); 5 and 6 are EBU 3213 and SMPTE-C (before S3, both were 709 here and P3 covered 11).
+    /// Absent and unknown codes are 709, the fallback every CICP reader in this app takes.
     static func gamut(forPrimariesCode code: Int?) -> Gamut {
-        let name: String
-        switch code {
-        case 9:      name = "2020"
-        case 11, 12: name = "P3"
-        default:     name = "709"      // Rec.709 / sRGB / unknown
-        }
-        // The `??` is unreachable while `gamuts` contains 709, and is 709-shaped rather than a crash
-        // because a missing table entry should mislocate a user's target, not take the window down.
-        return gamuts.first { $0.name == name } ?? gamuts[0]
+        let p = ColorPrimaries.resolve(code)
+        return Gamut(p, name: p.name, color: Color(white: 0.85))
     }
 
     // MARK: - Plane sizing

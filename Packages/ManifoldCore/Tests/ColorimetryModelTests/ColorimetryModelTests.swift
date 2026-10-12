@@ -159,10 +159,10 @@ final class ColorimetryModelTests: XCTestCase {
         // NDI: exactly today's list, in today's order — the picker and the ⌃⌥C cycle.
         XCTAssertEqual(ColorimetryOverride.available(on: .ndi),
                        [.auto, .rec709, .rec2020PQ, .rec2020HLG, .p3d65PQ, .rec2020SDR])
-        // Rec.2020 SDR hidden until §7.3 is fixed (decision 3).
+        // Colour S3: §7.3 is fixed, so Rec.2020 SDR is offered on SRT, WHEP and HLS too, same order.
         for t in [ColorimetryTransport.srt, .whep, .hls] {
             XCTAssertEqual(ColorimetryOverride.available(on: t),
-                           [.auto, .rec709, .rec2020PQ, .rec2020HLG, .p3d65PQ], "\(t)")
+                           [.auto, .rec709, .rec2020PQ, .rec2020HLG, .p3d65PQ, .rec2020SDR], "\(t)")
         }
         // Every transport offers Auto first, so a fresh connection's value is always selectable.
         for t in ColorimetryTransport.allCases {
@@ -182,7 +182,8 @@ final class ColorimetryModelTests: XCTestCase {
             XCTAssertEqual(ColorimetryOverride(storageID: "", on: t), .auto)
             XCTAssertEqual(ColorimetryOverride(storageID: nil, on: t), .auto)
         }
-        XCTAssertEqual(ColorimetryOverride(storageID: "rec2020-sdr", on: .srt), .auto)
-        XCTAssertEqual(ColorimetryOverride(storageID: "rec2020-sdr", on: .ndi), .rec2020SDR)
+        for t in ColorimetryTransport.allCases {
+            XCTAssertEqual(ColorimetryOverride(storageID: "rec2020-sdr", on: t), .rec2020SDR, "\(t)")
+        }
     }
 }

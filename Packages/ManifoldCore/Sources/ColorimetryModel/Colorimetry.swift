@@ -200,8 +200,8 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
     }
 
     /// The preset a saved stream on `transport` applies: `init(storageID:)`, and Auto for a preset
-    /// the transport does not offer (Rec.2020 SDR on SRT, WHEP or HLS, decision 3). A stored string is
-    /// never applied past the picker's own rule.
+    /// the transport does not offer. Since colour S3 every transport offers every preset, but the rule
+    /// stays: a stored string is never applied past the picker's own rule.
     public init(storageID: String?, on transport: ColorimetryTransport) {
         let preset = Self(storageID: storageID)
         self = Self.available(on: transport).contains(preset) ? preset : .auto
@@ -211,15 +211,12 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
 
     /// The presets a transport offers, in picker and ⌃⌥C order.
     ///
-    /// Rec.2020 SDR is NDI-only until §7.3 is fixed (decision 3): `makeColorSpace` has no arm for
-    /// (9,14), so the layer is tagged 709 primaries and the preset does not do what it says. NDI
-    /// keeps it because it already shipped it; the other three do not gain a known-broken preset.
-    /// When §7.3 is fixed, every transport returns `allCases`.
+    /// Every transport offers every preset. Rec.2020 SDR was NDI-only until §7.3 was fixed (§6.9,
+    /// decision 3): `makeColorSpace` had no arm for (9, 14), so the layer was tagged 709 primaries and
+    /// the preset did not do what it said. Colour S3 builds each axis from `ColorimetryTable`, so (9, 14)
+    /// draws with 2020 primaries — the same space as a declared (9, 1) — on every transport.
     public static func available(on transport: ColorimetryTransport) -> [ColorimetryOverride] {
-        switch transport {
-        case .ndi:              return allCases
-        case .srt, .whep, .hls: return allCases.filter { $0 != .rec2020SDR }
-        }
+        allCases
     }
 }
 

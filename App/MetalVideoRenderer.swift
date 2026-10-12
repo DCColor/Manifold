@@ -82,20 +82,21 @@ private struct VectorscopeParams {
 }
 
 /// Matches the shader's CIEParams struct (memory layout). GPU CIE chromaticity scope — a
-/// planeW×planeH 2-D u'v' histogram. `primariesCode`/`transferCode` are the source's CICP
-/// codes (RGB→XYZ matrix + EOTF choice); u/v Min/Max are the u'v' plane bounds.
+/// planeW×planeH 2-D u'v' histogram. `curve` and `rgbToXYZ` come from `ColorimetryTable` (colour S3):
+/// the shader holds no primaries of its own. u/v Min/Max are the u'v' plane bounds.
 private struct CIEParams {
     var width: UInt32          // source (offscreen) width
     var height: UInt32         // source (offscreen) height
     var planeW: UInt32         // histogram width  (u' axis)
     var planeH: UInt32         // histogram height (v' axis)
-    var primariesCode: Int32   // CICP primaries (1=709, 9=2020, 11/12=P3); default→709
-    var transferCode: Int32    // CICP transfer  (1=709, 13=sRGB, 16=PQ, 18=HLG); default→gamma 2.4
+    var curve: Int32           // `ScopeCurve`: 0 = γ2.4, 13 = sRGB, 16 = PQ, 18 = HLG
     var useUV: UInt32          // 1 = u'v' (Stage A; xy deferred)
     var uMin: Float            // u' plane lower bound
     var uMax: Float            // u' plane upper bound
     var vMin: Float            // v' plane lower bound
     var vMax: Float            // v' plane upper bound
+    /// Linear source RGB → XYZ, row-major, from the source's primaries in the table.
+    var rgbToXYZ: (Float, Float, Float, Float, Float, Float, Float, Float, Float)
 }
 
 /// Matches the shader's RGBToV210Params struct (memory layout). DeckLink RGB→v210 (10-bit YUV
@@ -979,6 +980,24 @@ final class MetalVideoRenderer {
     /// `SourceColorProvenance`. Seeded to `.assumed`, which is what a renderer with no source is.
     private(set) var sourceColorProvenance: SourceColorProvenance = .assumed
 
+    /// Colour S3: the file's container tags disagree with its own bitstream (`BitstreamColorCheck`), in
+    /// the readout's words; nil when they agree, when the reader cannot see the bitstream, and for
+    /// every live source. A readout fact ONLY — it changes no code above and reaches no scope: the
+    /// container's tags still drive the picture (§6.11, *Decided for S3*).
+    private(set) var sourceColorNote: String?
+
+    /// MAIN THREAD (hops if not). Set by the file load path on the same edges as the colour tags.
+    func setSourceColorNote(_ note: String?) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.setSourceColorNote(note) }
+            return
+        }
+        guard note != sourceColorNote else { return }
+        sourceColorNote = note
+        if let note { print("[COLOR-BITSTREAM] readout: " + note) }
+        sourceColorStateChanged()
+    }
+
     /// The range the shader is actually applying, or **nil when no source has stated one**.
     ///
     /// Read from `isFullRangeProvider` — the same closure the shader reads — rather than from a
@@ -1431,6 +1450,7 @@ final class MetalVideoRenderer {
     /// nothing to repaint.
     func liveSourceReleased() {
         setSourceColorSpace(primaries: nil, transfer: nil, matrix: nil, provenance: .assumed)
+        setSourceColorNote(nil)
         // The departed stream's chroma goes with its colour: the readout must not describe it.
         carriedLock.lock(); carriedPixelFormatLocked = nil; carriedLock.unlock()
         sourceChroma = .notStated
@@ -1711,38 +1731,23 @@ final class MetalVideoRenderer {
     /// the CoreMedia-family space (correct 709 toe, matches reference) but fed from
     /// stable source tags, not the flaky per-frame buffer. Absent/nil/unknown tags
     /// fall back to the full 709 attachment set; never returns nil.
+    ///
+    /// ── COLOUR S3: EACH AXIS FROM THE ONE TABLE ─────────────────────────────────────────────
+    ///
+    /// This was a switch over (primaries, transfer) PAIRS — (12, _), (9, 16), (9, 18), (1, 1), else
+    /// 709 — so every pair it did not list lost its primaries: Rec.2020 SDR (9, 1) and (9, 14), DCI-P3
+    /// (11), SMPTE-C (6) and EBU (5) were all drawn with 709 primaries (§7.3). Each axis now comes from
+    /// `ColorimetryTable` (ColorimetryModel), the same table the CIE scope reads. Measured offline over
+    /// 960 triples (`build/colour-s3/s3-probe.txt`): the only spaces that change are primaries 5, 6, 9
+    /// and 11 under an SDR transfer; the other 704 are CFEqual and ICC-byte-identical to the switch.
     private static func makeColorSpace(primaries: Int?, transfer: Int?, matrix: Int?) -> CGColorSpace? {
-        let p709 = kCVImageBufferColorPrimaries_ITU_R_709_2
-        let t709 = kCVImageBufferTransferFunction_ITU_R_709_2
-        let m709 = kCVImageBufferYCbCrMatrix_ITU_R_709_2
-
-        let prim: CFString
-        let trans: CFString
-        let mat: CFString
-
-        switch (primaries, transfer) {
-        case (12, _):   // Display P3 (P3 D65) primaries; transfer/matrix from source else 709
-            prim = kCVImageBufferColorPrimaries_P3_D65
-            trans = transferAttachment(transfer) ?? t709
-            mat = matrixAttachment(matrix) ?? m709
-        case (9, 16):   // Rec.2020 + PQ
-            prim = kCVImageBufferColorPrimaries_ITU_R_2020
-            trans = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-            mat = kCVImageBufferYCbCrMatrix_ITU_R_2020
-        case (9, 18):   // Rec.2020 + HLG
-            prim = kCVImageBufferColorPrimaries_ITU_R_2020
-            trans = kCVImageBufferTransferFunction_ITU_R_2100_HLG
-            mat = kCVImageBufferYCbCrMatrix_ITU_R_2020
-        case (1, 1):    // Rec.709 full set
-            prim = p709; trans = t709; mat = m709
-        default:        // absent / nil / unknown / unspecified -> 709
-            prim = p709; trans = t709; mat = m709
-        }
-
+        let layer = ColorimetryTable.layerAttachments(primaries: primaries, transfer: transfer, matrix: matrix)
+        if let why = layer.hdrFallback { print("[EDR] ⚠️ " + why) }
+        let a = layer.coreVideo
         let dict: [CFString: Any] = [
-            kCVImageBufferColorPrimariesKey: prim,
-            kCVImageBufferTransferFunctionKey: trans,
-            kCVImageBufferYCbCrMatrixKey: mat
+            kCVImageBufferColorPrimariesKey: a.primaries,
+            kCVImageBufferTransferFunctionKey: a.transfer,
+            kCVImageBufferYCbCrMatrixKey: a.matrix
         ]
         if let cs = CVImageBufferCreateColorSpaceFromAttachments(dict as CFDictionary)?.takeRetainedValue() {
             return cs
@@ -1812,25 +1817,6 @@ final class MetalVideoRenderer {
         text = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
         guard !text.isEmpty else { return "<unnamed, ICC desc empty>" }
         return "<unnamed> ICC desc “\(text.prefix(60))”"
-    }
-
-    /// MediaInspector transfer code -> CV transfer attachment, or nil if unknown.
-    private static func transferAttachment(_ code: Int?) -> CFString? {
-        switch code {
-        case 1:  return kCVImageBufferTransferFunction_ITU_R_709_2
-        case 16: return kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
-        case 18: return kCVImageBufferTransferFunction_ITU_R_2100_HLG
-        default: return nil
-        }
-    }
-
-    /// MediaInspector matrix code -> CV matrix attachment, or nil if unknown.
-    private static func matrixAttachment(_ code: Int?) -> CFString? {
-        switch code {
-        case 1: return kCVImageBufferYCbCrMatrix_ITU_R_709_2
-        case 9: return kCVImageBufferYCbCrMatrix_ITU_R_2020
-        default: return nil
-        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════
@@ -3480,8 +3466,8 @@ final class MetalVideoRenderer {
 
     /// GPU CIE chromaticity histogram (Phase 4). A planeW×planeH 2-D u'v' histogram, layout
     /// hist[row*planeW + col] (v' up — the row flip is in-kernel). The RGB→XYZ matrix + EOTF
-    /// are selected from the STORED source CICP codes (sourcePrimariesCode/sourceTransferCode,
-    /// nil → 709). Thin wrapper over dispatchScopeKernel; non-fatal if the pipeline is nil (the
+    /// come from `ColorimetryTable` for the STORED source CICP codes (sourcePrimariesCode /
+    /// sourceTransferCode, nil → 709). Thin wrapper over dispatchScopeKernel; non-fatal if the pipeline is nil (the
     /// CIE scope simply doesn't draw — display unaffected).
     @discardableResult
     func computeCIEGPU(
@@ -3491,12 +3477,15 @@ final class MetalVideoRenderer {
         guard let src = offscreenTexture else { return false }
         // Mode + plane bounds from the single shared source of truth (also used by the graticule).
         let bounds = CIEPlaneBounds.forMode(useUV: cieUseUV)
+        // Colour S3: the matrix and the curve from the one table — the same primaries the layer's
+        // colorspace was built with (`makeColorSpace`), so the scope plots the picture that is shown.
+        let m = ColorPrimaries.resolve(sourcePrimariesCode).rendered.rgbToXYZ.flatMap { $0.map(Float.init) }
         var params = CIEParams(width: UInt32(src.width), height: UInt32(src.height),
                                planeW: UInt32(planeW), planeH: UInt32(planeH),
-                               primariesCode: Int32(sourcePrimariesCode ?? 1),
-                               transferCode: Int32(sourceTransferCode ?? 1),
+                               curve: ScopeCurve(transferCode: sourceTransferCode).rawValue,
                                useUV: cieUseUV ? 1 : 0,
-                               uMin: bounds.aMin, uMax: bounds.aMax, vMin: bounds.bMin, vMax: bounds.bMax)
+                               uMin: bounds.aMin, uMax: bounds.aMax, vMin: bounds.bMin, vMax: bounds.bMax,
+                               rgbToXYZ: (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]))
         return dispatchScopeKernel(
             pipeline: ciePipelineState, buffer: &cieHistogramBuffer, count: planeW * planeH,
             setParams: { $0.setBytes(&params, length: MemoryLayout<CIEParams>.stride, index: 1) },

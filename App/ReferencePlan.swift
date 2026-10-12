@@ -76,7 +76,7 @@ struct ReferencePlan: Equatable {
         // A display calibrated in its own hardware.
         if cal.calibrated {
             if let m = ReferenceGamut.toRec709(fromPrimariesCode: primariesCode) {
-                let gamut = primariesCode == 9 ? "Rec.2020" : "P3-D65"
+                let gamut = ColorPrimaries.resolve(primariesCode).renderedName
                 var p = ReferenceShaderParams(a: 1, b: 0, blackRatio: 0, invGamma: 1 / 2.4, mode: 1)
                 p.row0 = SIMD4(Float(m[0][0]), Float(m[0][1]), Float(m[0][2]), 0)
                 p.row1 = SIMD4(Float(m[1][0]), Float(m[1][1]), Float(m[1][2]), 0)

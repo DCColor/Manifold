@@ -134,16 +134,14 @@ extension SourceColorimetry {
 
     // MARK: - CICP -> CoreVideo attachments
 
+    /// From `ColorimetryTable` (colour S3), the table the layer's colorspace is built from. Before S3 this
+    /// was its own switch, which had no entry for 11 (DCI-P3) and tagged it 709.
     private static func primariesAttachment(_ code: Int) -> CFString {
-        switch code {
-        case 9:  return kCVImageBufferColorPrimaries_ITU_R_2020
-        case 6:  return kCVImageBufferColorPrimaries_SMPTE_C
-        case 5:  return kCVImageBufferColorPrimaries_EBU_3213
-        case 12: return kCVImageBufferColorPrimaries_P3_D65
-        default: return kCVImageBufferColorPrimaries_ITU_R_709_2
-        }
+        ColorPrimaries.resolve(code).coreVideo
     }
 
+    /// The buffer keeps the source's own transfer code: 14 is tagged `ITU_R_2020` here, although the
+    /// layer's colorspace spells it as the 709 curve (`TransferCurve.coreVideo`).
     private static func transferAttachment(_ code: Int) -> CFString {
         switch code {
         case 16: return kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
@@ -157,11 +155,7 @@ extension SourceColorimetry {
     /// is tagged `ITU_R_601_4`, CoreVideo's 601 matrix, because it IS that matrix — the tag is what the
     /// shader's `colorParams` decodes with.
     private static func matrixAttachment(_ code: Int) -> CFString {
-        switch YCbCrMatrix(cicp: code) {
-        case .rec2020: return kCVImageBufferYCbCrMatrix_ITU_R_2020
-        case .rec601:  return kCVImageBufferYCbCrMatrix_ITU_R_601_4
-        case .rec709:  return kCVImageBufferYCbCrMatrix_ITU_R_709_2
-        }
+        YCbCrMatrix(cicp: code).coreVideo
     }
 
     /// Stamp the three CICP attachments onto a pixel buffer.

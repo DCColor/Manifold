@@ -1704,6 +1704,8 @@ final class HLSClient: ObservableObject {
             // the files' MediaInspector and the P3-D65 PQ preset use. 11 fell to `makeColorSpace`'s
             // default arm and drew a P3 stream as 709 (docs/BUGS.md, closed 2026-10-12).
             case kCVImageBufferColorPrimaries_P3_D65:       return 12
+            // 11 is its own entry since colour S3 (`ColorimetryTable`: DCI-P3 adapted to D65).
+            case kCVImageBufferColorPrimaries_DCI_P3:       return 11
             default:                                        return nil
             }
         }()
@@ -1716,7 +1718,7 @@ final class HLSClient: ObservableObject {
             case kCVImageBufferTransferFunction_sRGB:             return 13
             // 14, the code NDI, SRT and WHEP give the BT.2020 SDR transfer (docs/BUGS.md, closed
             // 2026-10-12). It is the 709 curve; every consumer that keys off the curve draws 14 as it
-            // draws 1 (`makeColorSpace`'s default arm, the CIE scope's γ2.4, EDR off, an SDR ruler).
+            // draws 1 (`ColorimetryTable`'s 709-curve entry, the CIE scope's γ2.4, EDR off, an SDR ruler).
             // MEASURED: CoreMedia respells transfer 14 as `ITU_R_709_2` on the vended buffer (H.264),
             // and 14 and 15 the same way in a file's format description (H.264, HEVC), so a 2020 SDR
             // stream reads 9-1-9 here, as the same file does; this arm is for a buffer that does carry

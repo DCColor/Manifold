@@ -32,10 +32,11 @@ bullet.
 - Reference display transform, per window: the picture shown with the BT.1886 curve a reference monitor uses (gamma 2.4 on a display with a true black). Choose it from the control bar or the Color menu. In the transform chain readout you can tell Manifold, per display, that the display is calibrated to Rec. 709 / BT.1886 (then Reference sends the picture's values untouched), or enter the display's white and black so Reference follows BT.1886 for it. Scopes, SDI output and exported frames are unaffected by the display transform.
 - Hold to compare: hold \ to see the other of macOS and Reference while the key is down, or Shift-\ to see Bypass. Let go and the window is back where it was. The window title and an amber badge say what you are comparing against. (The key may change before release.)
 - A display chain readout shows the source's color and whether it was declared or assumed, the transform in use, your display and its curve, and for SRT and WHEP the amount of buffering.
+- The display chain readout warns when an H.264 or HEVC file's container color tags disagree with what its own bitstream declares. The container's tags are still used; the color override can assert the other.
 - HEVC now plays over SRT, including 10-bit HDR.
 - Audio offset for live streams, in the A/V menu: ⌥] and ⌥[ move the sound 1 ms later or earlier (add ⇧ for 10 ms). Save the offset with a saved stream and it comes back every time. A badge and the window title show when an offset is on.
 - Calibration (A/V ▸ Calibrate…): loop a Manifold sync clip on the sender and Manifold measures how far apart sound and picture are, then offers the correction. It never applies anything by itself. A/V ▸ Save Sync Clip… saves the clip that matches the stream's frame rate.
-- SRT, WHEP and HLS streams can now have their color interpretation overridden, like NDI: pick Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG or P3-D65 PQ from the Color control, or press ⌃⌥C. Auto goes back to what the stream declares. Save it with a saved stream from the Color menu and it comes back every time you connect; Revert to Saved returns to it.
+- SRT, WHEP and HLS streams can now have their color interpretation overridden, like NDI: pick Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG, P3-D65 PQ or Rec. 2020 SDR from the Color control, or press ⌃⌥C. Auto goes back to what the stream declares. Save it with a saved stream from the Color menu and it comes back every time you connect; Revert to Saved returns to it.
 - While a color override is on, on any stream, the window title says so (for example "— Color 2020 PQ").
 
 ### Improved
@@ -65,13 +66,13 @@ bullet.
 - Fixed: DNxHR 444 files in a .mov could look slightly flat, with lifted blacks and weaker color. They now show at their true levels.
 - Fixed: 8-bit sources read slightly high on scopes (mid-grey 514, white 943); they now map exactly.
 - Fixed: HLS streams in P3 were shown with Rec. 709 colors while the scopes said P3.
+- Fixed: Rec. 2020 SDR, DCI-P3, SMPTE-C and EBU sources were shown with Rec. 709 primaries, so they looked less saturated than they are. Each is now shown with its own primaries, and the CIE scope plots it the same way. DCI-P3 is shown with its white adapted to D65, and the readout says so.
 - Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 
 ### Known limitations
 
 - Known limitation: interlaced sources go out over SDI as progressive: a 1080i59.94 source is sent as 1080p29.97, with both fields woven into each frame. An interlaced NDI source arrives already deinterlaced by NDI.
 - Known limitation: SDI audio goes silent for up to about a tenth of a second at each seek, scrub release and loop point during file playback.
-- Known limitation: NDI's Rec. 2020 SDR color setting is shown with Rec. 709 primaries.
 - Known limitation: after a network stall of a second or more, live sound can stay 10–20 ms late for up to a minute before it settles.
 - Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
 
@@ -168,6 +169,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Declared color read from the H.264 SPS for SRT and WHEP | `418fcef` | Yes |
 | Matrix 5 (BT.470BG) treated as 601 | `95563f7` | Yes |
 | Colorimetry presets and tiers moved into the ColorimetryModel package | `07368d0` | No |
+| One primaries / transfer / matrix table for the layer colorspace and the CIE scope: Rec.2020 SDR, DCI-P3, SMPTE-C and EBU get their own primaries; Rec.2020 SDR override on SRT, WHEP and HLS; container/bitstream colour disagreement in the readout (colour S3) | (commit to be filled in) | Yes |
 
 #### App, menus and diagnostics
 

@@ -491,16 +491,15 @@ kernel void vectorscopeKernel(texture2d<float, access::read> offscreen [[texture
 // MARK: - GPU scopes (Phase 4: CIE chromaticity)
 
 // Uniforms for cieKernel. Mirrors CIEParams in MetalVideoRenderer.swift (field order + type
-// must match exactly). planeW/planeH is the 2-D histogram size; primariesCode/transferCode
-// are the source's CICP codes (select the RGB→XYZ matrix + the EOTF); u/v Min/Max are the
-// u'v' plane bounds (shared with the graticule draw code so scatter + overlay align).
+// must match exactly). planeW/planeH is the 2-D histogram size; `curve` and `rgbToXYZ` come from
+// `ColorimetryTable` on the host (colour S3) — this file holds no primaries of its own; u/v Min/Max
+// are the u'v' plane bounds (shared with the graticule draw code so scatter + overlay align).
 struct CIEParams {
     uint  width;         // source (offscreen) width in pixels
     uint  height;        // source (offscreen) height in pixels
     uint  planeW;        // histogram width  (horizontal axis)
     uint  planeH;        // histogram height (vertical axis)
-    int   primariesCode; // CICP primaries (1=709, 9=2020, 11/12=P3); default→709
-    int   transferCode;  // CICP transfer  (1=709, 13=sRGB, 16=PQ, 18=HLG); default→gamma 2.4
+    int   curve;         // ScopeCurve: 0 = gamma 2.4, 13 = sRGB, 16 = PQ, 18 = HLG
     uint  useUV;         // 1 = CIE 1976 u'v', 0 = CIE 1931 xy
     // Plane bounds. GENERIC per-axis bounds (not literally u'/v'): the host fills them with the
     // active mode's bounds — u'v' (0/0.62, 0/0.60) or xy (0/0.75, 0/0.85). u* = horizontal
@@ -509,6 +508,7 @@ struct CIEParams {
     float uMax;          // horizontal-axis upper bound
     float vMin;          // vertical-axis lower bound
     float vMax;          // vertical-axis upper bound
+    float rgbToXYZ[9];   // linear source RGB -> XYZ, row-major, from the source's primaries
 };
 
 // sRGB EOTF (piecewise) — transferCode 13.
@@ -541,38 +541,20 @@ static inline float cieHlgInvOETF(float e) {
     return (e <= 0.5) ? (e * e / 3.0) : ((exp((e - c) / a) + b) / 12.0);
 }
 
-static inline float cieLinearize(float e, int transferCode) {
-    switch (transferCode) {
+static inline float cieLinearize(float e, int curve) {
+    switch (curve) {
         case 13: return cieSrgbEOTF(e);                 // sRGB
         case 16: return ciePqEOTF(e);                   // PQ / ST 2084
         case 18: return cieHlgInvOETF(e);               // HLG
-        default: return pow(max(e, 0.0), 2.4);          // 709 (1) / unknown → gamma 2.4
+        default: return pow(max(e, 0.0), 2.4);          // 709 family / unknown → gamma 2.4
     }
 }
 
-// Linear source-primaries RGB → CIE XYZ. Rows are the standard RGB→XYZ matrices; selected by
-// CICP primaries code (matrix, NOT the YCbCr matrix — primaries are independent of it).
-static inline float3 cieRGBtoXYZ(float3 rgb, int primariesCode) {
-    float3 r0, r1, r2;   // matrix rows
-    switch (primariesCode) {
-        case 9:   // Rec.2020
-            r0 = float3(0.6369580, 0.1446169, 0.1688809);
-            r1 = float3(0.2627002, 0.6779981, 0.0593017);
-            r2 = float3(0.0000000, 0.0280727, 1.0609851);
-            break;
-        case 11:  // DCI-P3 — treated as P3-D65 for now (DCI white-point nuance deferred)
-        case 12:  // Display P3 (P3-D65)
-            r0 = float3(0.4865709, 0.2656677, 0.1982173);
-            r1 = float3(0.2289746, 0.6917385, 0.0792869);
-            r2 = float3(0.0000000, 0.0451134, 1.0439444);
-            break;
-        default:  // Rec.709 / sRGB (1, 13) and fallback
-            r0 = float3(0.4124564, 0.3575761, 0.1804375);
-            r1 = float3(0.2126729, 0.7151522, 0.0721750);
-            r2 = float3(0.0193339, 0.1191920, 0.9503041);
-            break;
-    }
-    return float3(dot(r0, rgb), dot(r1, rgb), dot(r2, rgb));
+// Linear source-primaries RGB → CIE XYZ, with the host's matrix (primaries, NOT the YCbCr matrix).
+static inline float3 cieRGBtoXYZ(float3 rgb, constant CIEParams &p) {
+    return float3(p.rgbToXYZ[0] * rgb.r + p.rgbToXYZ[1] * rgb.g + p.rgbToXYZ[2] * rgb.b,
+                  p.rgbToXYZ[3] * rgb.r + p.rgbToXYZ[4] * rgb.g + p.rgbToXYZ[5] * rgb.b,
+                  p.rgbToXYZ[6] * rgb.r + p.rgbToXYZ[7] * rgb.g + p.rgbToXYZ[8] * rgb.b);
 }
 
 // CIE chromaticity scope: per-pixel u'v' scatter on the SOURCE-primaries, transfer-ENCODED
@@ -588,12 +570,12 @@ kernel void cieKernel(texture2d<float, access::read> offscreen [[texture(0)]],
 
     float4 c = offscreen.read(gid);
     // Linearize the transfer-encoded source RGB (primaries preserved — no gamut change).
-    float3 lin = float3(cieLinearize(c.r, p.transferCode),
-                        cieLinearize(c.g, p.transferCode),
-                        cieLinearize(c.b, p.transferCode));
+    float3 lin = float3(cieLinearize(c.r, p.curve),
+                        cieLinearize(c.g, p.curve),
+                        cieLinearize(c.b, p.curve));
     if (any(isnan(lin))) return;
 
-    float3 xyz = cieRGBtoXYZ(lin, p.primariesCode);
+    float3 xyz = cieRGBtoXYZ(lin, p);
 
     // Project to the active chromaticity space. `a` = horizontal coord, `b` = vertical coord.
     float a, b;

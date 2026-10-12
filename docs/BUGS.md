@@ -70,7 +70,15 @@ held back until after release, and the numbered defect entries follow.
        for a paused re-present); not committed** (§6.11, *S2 — results*). ⚠️ **Pre-ship: the temporary key
        must be replaced by the registry's choice** (`HoldToCompare.keyCode`).
      - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
-       four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below).
+       four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below). **Built and run
+       unattended 2026-10-12; not committed** (commit to be filled in) (§6.11, *S3 — results*). The table is in
+       `ColorimetryModel` (`ColorimetryTable.swift`) and feeds `makeColorSpace`, the CIE scope, the vectorscope's
+       targets and Reference's gamut conversion. Every unchanged pair is 0 codes against HEAD; 9-1-9, 9-14-9 and
+       11 are within ±2 codes of prediction; the Rec.2020 SDR override equals a declared 9-1-9 stream on SRT, WHEP
+       and HLS. Container/bitstream disagreement is logged and shown (decided, Robbie). **Found by the run, not
+       fixed (S3 changes no matrix):** the shader's 601 decode over-saturates by ×1.138, and files lose the 601
+       and BT.470BG matrix codes (both below). Open: S3-5 by eye on the LG (attended); 6 and 5 amounts outside
+       ±2 (direction right).
      - **S4** — Phase 5, the HDR headroom readout and its log on a display change. No headroom cap: the
        no-tone-map decision stands.
      - **S5** — Custom (per-axis interpretation) and the Interpretation button and override on files. The
@@ -1848,7 +1856,15 @@ reaches 14.
 
 ---
 
-## ☐ OPEN 2026-10-06 — NDI's Rec.2020 SDR override is flattened to 709 primaries
+## ✅ FIXED 2026-10-12 (commit to be filled in) — NDI's Rec.2020 SDR override is flattened to 709 primaries
+
+**Fixed by colour S3** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S3 — results*). `makeColorSpace` now builds each
+axis from `ColorimetryTable`, so (9, 14) gets 2020 primaries: it builds exactly the space a declared (9, 1) gets
+(`QuickTime 'nclc' Video (9,1,9)`). `available(on:)` returns every preset on every transport. Measured on the
+ASUS: an undeclared chart stream with the Rec.2020 SDR override equals the same stream declared 9-1-9 in its SPS,
+**0 codes**, on SRT, WHEP (MediaMTX) and HLS; the readout reads `Rec. 2020 · Rec. 2020 SDR · Rec. 2020 — CICP
+9-14-9 — overridden`. NDI itself was not run (no NDI sender in the unattended rig); it uses the same renderer path.
+The entry as it stood:
 
 **Status:** OPEN, known limitation, kept on purpose (`COLOR_MANAGEMENT_FINDINGS.md` §6.9, decision 3).
 **Fixed by** Phase 4 (§7.3).
@@ -1909,7 +1925,25 @@ Not changed there. **Affects:** HLS only; HEAD the same.
 
 ---
 
-## ☐ OPEN 2026-10-06 — UNVERIFIED — check in colour Phase 4: a file's container tags vs its decoded frames' tags
+## ☐ OPEN 2026-10-06 — PARTLY ANSWERED 2026-10-12 (S0, S3) — a file's container tags vs its decoded frames' tags
+
+**Where it stands (2026-10-12):**
+- **AVFoundation path, container vs buffers:** they agree. CoreMedia takes the container's `colr` over the VUI
+  for the format description and every decoded buffer (S0, the case (g) fixture), so the shader and the
+  scopes use the same matrix there.
+- **Container vs the file's own bitstream:** now logged (`[COLOR-BITSTREAM]`) and shown in the chain readout
+  (a *Tags* line), for H.264 and HEVC files, where the app's SPS reader can see the `avcC` / `hvcC`. Nothing else
+  changes: the container's tags still drive the picture (decided, Robbie, 2026-10-12). Measured on the case (g)
+  fixture (§6.11, *S3 — results*). Live sources have no container to disagree with; HLS has no bitstream reader.
+- **⚠️ But the disagreement this entry feared DOES happen on the AVFoundation path, for a different reason:** a
+  file tagged with the 601 matrix is decoded by the shader as 601 (from the buffer's `ITU_R_601_4`) while the
+  renderer's matrix code is nil, so the scopes and the DeckLink encode use 709. See *a file's 601 matrix code is
+  lost*, below. **So the §6.11 S3-4 pass condition ("agree on every path, or the shader moved to the renderer's
+  codes") is not met.**
+- **libav path (MXF / DNx):** still not exercised.
+
+The entry as it was written:
+
 
 **Status:** a possibility found by reading, never observed. **Check it in Phase 4** (primaries and
 transfer handled independently, `COLOR_MANAGEMENT_FINDINGS.md` §6.4), which needs the same fixtures.
@@ -1935,6 +1969,64 @@ ffmpeg, e.g. `-colorspace bt709` in the bitstream and a 2020 `colr` atom), on bo
 and the libav path; log `attachmentSummary` of a decoded frame beside the renderer's codes. **Done
 means:** either the two are shown to agree on every path, or the shader takes its matrix from the
 renderer's codes like everything else.
+
+---
+
+## ☐ OPEN 2026-10-12 — the shader decodes 601-tagged buffers with ×1.138 too much chroma
+
+**Found by colour S3** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S3 — results*), on the 6-6-6 chart fixture; measured
+in HEAD `e5a1909` and in the S3 tree alike, so it predates S3. Not fixed: S3 changes no matrix.
+
+- **What:** `MetalVideoRenderer.colorParams(for:)` has three coefficient sets. 709 (`a` 1.5748, `d` 1.8556) and
+  2020 (`a` 1.4746) are 2(1 − Kr) and 2(1 − Kb), unscaled. The 601 set (`a` 1.5960, `b` 0.3917, `c` 0.8129,
+  `d` 2.0172) is the same thing multiplied by **255/224 = 1.1384**: the textbook limited-range 601 constants, which
+  already include the chroma range scale the shader applies separately. So a 601-tagged buffer's chroma is scaled
+  twice.
+- **Measured:** the 6-6-6 chart in HEAD reads R 50 % → 151 and B 50 % → 154 where a correct decode gives 139 (grey
+  50 % is 139, untouched). A model of the shader's 601 decode with chroma ×255/224 matches HEAD within **3 codes**
+  on all 18 patches; a standard 601 decode misses by 15.
+- **Reaches:** every buffer whose `YCbCrMatrix` attachment is `ITU_R_601_4`: 601-tagged files (SD material), HLS
+  601 renditions (bipbop's SD rung), NDI `bt_601`, SRT / WHEP streams declaring matrix 5 or 6. The picture, the
+  offscreen, and so the scopes, SDI and export, are all ~14 % too saturated on them.
+- **Fix (proposed, not made):** the 601 constants divided by 255/224 (1.4020, 0.3441, 0.7141, 1.7720), better
+  derived from `YCbCrMatrix` like the scope maths, so the three cannot drift again. Needs its own prediction: the
+  6-6-6 chart to F(V) within ±2.
+
+---
+
+## ☐ OPEN 2026-10-12 — a file's 601 and BT.470BG matrix codes are lost, so its scopes and SDI use 709 while the picture uses 601
+
+**Found by colour S3** (§6.11, *S3 — results*). Pre-existing. Not fixed: S3 changes no matrix.
+
+- **What:** `MediaInspector.colorTags` maps the format description's `YCbCrMatrix` through a table with
+  `ITU_R_709_2`, `ITU_R_2020`, `SMPTE_240M_1995` and **`SMPTE_C`**, which is a primaries constant, not a matrix
+  one. `ITU_R_601_4`, the constant CoreMedia actually uses, is missing, and so is matrix 5 (CoreMedia's
+  `YCbCrMatrix#5`). Both come back nil.
+- **Measured:** the 6-6-6 and 5-6-5 chart fixtures reach the renderer as **6-1-1** and **5-1-1, partly assumed**
+  (`[CHAIN]` lines). The renderer's matrix code is then the 709 default.
+- **Consequence:** on a 601-tagged file the shader decodes with 601 (it reads the buffer's `ITU_R_601_4`), while
+  the scope maths, the DeckLink v210 encode and the readout use 709. That is exactly the case (g) disagreement,
+  reached by a mapping gap rather than a mistagged file. A BT.470BG (5) file is decoded with 709 everywhere,
+  because the buffer's `YCbCrMatrix#5` is not 601 to the shader either (5-6-5 chart: HEAD matches a 709 decode of
+  a 601 encode within 3.6 codes).
+- **Fix (proposed, not made):** `ITU_R_601_4` → 6 in the matrix map (and drop `SMPTE_C` from it), `YCbCrMatrix#5`
+  → 5; and decide with the entry above whether the shader should take its matrix from the renderer's code (the
+  case (g) entry's second option).
+
+---
+
+## ☐ OPEN 2026-10-12 — known limitation: PQ or HLG on primaries other than 2020 or P3-D65 keeps the Rec.709 SDR space
+
+**Found by colour S3's offline probe** (§6.11, *S3 — results*; `build/colour-s3/s3-probe.txt`). Unchanged from
+before S3, now logged.
+
+- **What:** asked for PQ or HLG with 709, DCI-P3, SMPTE-C or EBU primaries (e.g. 1-16-1, 11-16-1),
+  `CVImageBufferCreateColorSpaceFromAttachments` builds a v2 profile called "HDR (PQ)" / "HDR (HLG)" with a γ1.8
+  curve and no `cicp` tag, which would draw PQ code values as γ1.8 SDR. So `ColorimetryTable.layerAttachments`
+  keeps the pre-S3 answer, the full Rec.709 SDR set, and the renderer logs `[EDR] ⚠️ PQ on … primaries: CoreVideo
+  has no HDR colorspace for these primaries`. The EDR opt-in still keys off the transfer, as before.
+- **To decide:** whether to build such a source as (9, 16) / (9, 18) with a primaries conversion in the shader,
+  or to say so in the readout. Rare in practice (P3-D65 PQ is 12-16-x, which works).
 
 ---
 
@@ -7117,7 +7209,16 @@ so the request is recognised rather than absorbed.
   applies to its negotiated latency.
 ---
 
-## ⏸ BANKED: an unrecognised CICP primaries code silently becomes 709, and the fallback is written twice
+## ✅ FIXED 2026-10-12 (commit to be filled in): an unrecognised CICP primaries code silently becomes 709, and the fallback is written twice
+
+**Fixed by colour S3** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S3 — results*), the way this entry asked: ONE table,
+`ColorimetryTable` in the `ColorimetryModel` package, answers what a primaries, transfer or matrix code means.
+`makeColorSpace`, the CIE kernel's RGB→XYZ matrix and curve (now passed in from the host; the shader holds no
+primaries), `CIEScopeModel.gamut(forPrimariesCode:)` and its triangles, `gamutPrimariesLabel`, Reference's gamut
+conversion and the live buffer tags all read it. Codes 5, 6, 9, 11 and 12 have their own primaries; unknown codes
+still resolve to 709, now in one place. Not moved: `VectorscopeScopeModel.graticuleKrKb` (a matrix question, not a
+primaries one) and the transports' log-name tables. ⚠️ The matrix-axis claim below ("NOT AFFECTED") holds for
+streams but **not for files**: see *a file's 601 matrix code is lost*, added 2026-10-12. The entry as it stood:
 
 **Status:** BANKED, not fixed. **NOT an HLS bug** — pre-existing, app-wide, and deliberately left
 alone while HLS was built. **Found:** 2026-09-08, on the first live HLS run, which is the first

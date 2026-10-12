@@ -5448,7 +5448,7 @@ checks (display roles, above).
 | **S0** pre-checks | — | Read-only, unattended: the LG's profile primaries (HDR off); the colourspace dump probe on every primaries/transfer pair including (9, 1), (9, 14), 11 and 6; the tags on Robbie's Rec.2020 SDR test file; ffmpeg fixtures 9-1-9, 9-14-9, 11, 6 and case (g). **If the LG's primaries are not Rec.709, stop before S1.** |
 | **S1** Phase 3: Reference + the per-display setting — **built and run unattended 2026-10-12, committed `532c83f`; results under *S1 — results*, below** | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — BT.1886, as a reference monitor shows it* (changed from §6.3's "correct for grading", 2026-10-12); the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
 | **S2** hold-to-compare — **built and run unattended 2026-10-12, not committed; results under *S2 — results*, below** | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
-| **S3** Phase 4: primaries + case (g) | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
+| **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, not committed; results under *S3 — results*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
 | **S4** Phase 5: headroom readout | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
 | **S5** Custom + the file Interpretation button | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
 | **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. |
@@ -5794,6 +5794,140 @@ the snapshot**, and `streamBookmarks` is equal and was never written. The live c
 `MANIFOLD_STREAM_DEBUG_URL` (a local HLS of the wedge, `127.0.0.1:8765`, stopped afterwards), so no bookmark was
 read. **Exports** were moved from the Desktop into `build/colour-s2/run/exports/`.
 
+#### S3 — primaries: results, 2026-10-12 (unattended)
+
+**Not committed** (commit to be filled in). Base `e5a1909` (S2). Pixel checks on the **ASUS only**, macOS HDR off on
+both displays (`potential` 1.0, read, not set); no display setting touched. Every capture was window-only, by the
+Manifold window id, and was deleted once its numbers were recorded below; two were viewed (the first chart capture,
+for the geometry, and a crop of the HLS control bar, below). Predictions were written before the first S3 launch
+(`build/colour-s3/predictions.txt`, 18:32:32). Outputs in the gitignored `build/colour-s3/`: `s3-probe.txt`,
+`pred_chart.json` / `.txt`, `matrices.json`, `run/diffs.txt`, `run/score.txt`, `run/rescore.txt`,
+`run/streams_diffs.txt`, the per-run app logs and patch medians, the four new fixtures (`fixtures/`, made by
+`make_fixtures_s3.sh`), the stream fixtures (`fx/`) and the rig (`tools/`).
+
+**Estimated before the run:** 3–4 hours. Actual: about 1 hour, 18:15–19:10, the builds and device runs included.
+
+##### What was built
+
+- **`ColorimetryTable`** (`Packages/ManifoldCore/Sources/ColorimetryModel/ColorimetryTable.swift`): the one table.
+  - **Primaries** (`ColorPrimaries`): 1, 5 (EBU 3213), 6 (SMPTE-C), 9, 11 (DCI-P3), 12. Each has its published xy
+    and white, and a **rendered** set on D65. Only DCI-P3 moves: it is Bradford-adapted from the DCI white to D65,
+    which is what CoreVideo builds for code 11 (S0, to 4 decimals; now a unit test). The readout names it
+    **"DCI-P3 adapted to D65"**. Unknown and absent codes resolve to 709, in this one place.
+  - **Transfer** (`TransferCurve`): the 709 curve under 1, 6, 14 and 15; PQ; HLG. **14 and 15 are attached as
+    `ITU_R_709_2`**: `ITU_R_2020` builds a different profile ("UHD") with the 4th decimal of the primaries and
+    white rounded differently, so (1, 14) and (12, 14) would no longer have been byte-identical to (1, 1) and
+    (12, 1). Spelled as 709, (9, 14) builds exactly (9, 1)'s space. The buffer tags keep 14. sRGB (13), linear (8)
+    and other codes are drawn with the 709 curve, as before (*Open*, below).
+  - **Matrix**: `YCbCrMatrix`, unchanged, now with its CoreVideo constant.
+  - **One exception, logged:** PQ or HLG on primaries other than 2020 or P3-D65 keeps the pre-S3 709 SDR space
+    (`hdrFallback`, printed as `[EDR] ⚠️ …`). Handed those, CoreVideo builds a v2 "HDR (PQ)" profile with a γ1.8
+    curve and no `cicp`, which would be a new wrong picture. BUGS.md has the entry.
+  - **Names:** transfer 14 reads **"Rec. 2020 SDR"** (it printed "—"), 15 "Rec. 2020 SDR (12-bit)", 6 "BT.601".
+    `MediaInspector.primariesName` / `transferName` now delegate here.
+- **Consumers, all reading the table:** `makeColorSpace` (the pair switch is gone); the CIE kernel, which now takes
+  its RGB→XYZ matrix and its curve from the host in `CIEParams` (the shader holds no primaries);
+  `CIEScopeModel.gamuts` and `gamut(forPrimariesCode:)`; `gamutPrimariesLabel`; `ReferenceGamut.toRec709` (Reference
+  on a calibrated display now converts 5, 6 and 11 as well as 9 and 12); the live buffer tags' primaries and matrix
+  (adds 11); HLS's buffer reader (adds `DCI_P3` → 11).
+- **Rec.2020 SDR on every transport:** `ColorimetryOverride.available(on:)` returns all presets. A saved
+  `rec2020-sdr` now applies on SRT, WHEP and HLS.
+- **Container / bitstream disagreement** (`FileChroma/BitstreamColorCheck.swift`, decided for S3): on an H.264 or
+  HEVC file, the SPS in `avcC` / `hvcC` is read with the SPS colour readers and compared with the container's codes,
+  axis by axis, only where both declare. Transfer 1 / 6 / 14 / 15 count as one curve (CoreMedia respells 14 as 1)
+  and matrix 5 / 6 as one matrix. One `[COLOR-BITSTREAM]` line per such file; a disagreement adds a **Tags** line
+  to the chain readout. The picture, the scopes and every code are unchanged: the container still drives them.
+- **`[CHAIN] Source: …`** is logged once per change of the readout's Source or Tags line, so an unattended run reads
+  the readout's own words.
+- **Tests:** `swift test` **344 / 344** (331 before): 9 in `ColorimetryTableTests` (the old pairs build the old
+  attachments; S0's fallbacks get their own primaries; 14 = 1; the HDR fallback; axis independence; the DCI-P3
+  adaptation against S0's numbers; the CIE matrices against the shader's old ones; codes; names), 4 in
+  `BitstreamColorCheckTests` on the real `avcC` boxes of S0's case (g) and 9-14-9 H.264 fixtures, and the
+  availability, saved-preset and Reference gamut tests updated. The Profile build is clean.
+
+##### The offline probe (S3-1), before any wiring
+
+Today's `makeColorSpace` (a verbatim copy) against the table, over **960 triples** (primaries nil, 1, 2, 4, 5, 6, 7,
+9, 10, 11, 12, 22 × transfer nil, 1, 2, 6, 8, 13, 14, 15, 16, 18 × matrix nil, 0, 1, 2, 5, 6, 7, 9), CFEqual and ICC
+bytes: **704 identical; 256 changed, and every changed one is primaries 5, 6, 9 or 11 under an SDR transfer.** All
+1-x, 12-x, 9-16-x and 9-18-x triples are identical, so the matrix axis never moved the space. The first draft of the
+table changed 544: transfer 14 on every primaries, and PQ / HLG on 709-class primaries. That is where the two rules
+above came from. (9, 14, 9) builds `QuickTime 'nclc' Video (9,1,9)`, 2020 primaries, γ1.960938.
+
+##### Results
+
+**The rig.** The Profile build of the tree, and HEAD `e5a1909` built from `git archive` in the scratchpad (vendored
+libraries and the DeckLink SDK linked in, xcodegen). One launch per build opened all 14 files in turn (each open made
+a new window, positioned at 875×492 on the ASUS; the capture took the frontmost, whose title matched every file).
+The S0 chart (6 × 3) is sampled as the inner-half median of each cell.
+
+**The prediction method**, fixed before any capture (`pred.py`): the display shows F(V) per channel before S3 (every
+code here was CoreMedia709), and F(enc(clip(M · dec(V)))) after it, with dec / enc γ1.960938, M the table's
+primaries → 709 matrix (the ASUS profile's primaries are 709, S0), and F ColorSync's measured response on the ASUS
+(S1's 48-patch OS wedge, PCHIP).
+
+| # | Prediction | Result | Verdict |
+|---|---|---|---|
+| P1 / S3-1 | Offline: (9, 1), (9, 14) → 2020 primaries and γ1.961; 11 → DCI-P3; 6 → SMPTE-C; the old pairs unchanged | As above: only 5, 6, 9 and 11 under SDR change; 704 / 960 identical; 11 = DCI-P3 adapted to D65 | **PASS** |
+| P2 / S3-2 | 9-1-9 chart: greys 0 codes vs HEAD; saturated within ±2 of the prediction, in the predicted direction | Greys **0 codes**. **0 / 18** patches outside ±2, worst **1.06**. R 50 % 139 → **175** (pred. 174.5), G 50 % → 147, B 50 % → 147; 100 % primaries clip and do not move | **PASS** |
+| P2, instrument | HEAD within ±2 of F(V) on every patch | Greys yes. Saturated: **no**, up to **17 codes**, and the 709 control shows the same (pure green → R 17, blue → G 5, cyan → R 11), identically in HEAD and the tree. The ASUS profile's own conversion adds cross-talk the per-channel F does not model. It does not touch the S3 scores: where it appears, S3's conversion takes that channel below 0 and it clips | **FAIL** (instrument; recorded) |
+| P3 / S3-3 | Unchanged pairs vs HEAD, whole window: 0 codes | 1-1-1, wedge.mov, 12-1-1 (P3-D65), wedge-pq (9-16-9), 9-18-9 (HLG), 1-14-1: **0 codes, 0 pixels** each | **PASS** |
+| P4 | 11-1-1, 6-6-6, 5-6-5: greys 0; saturated within ±2 | **11-1-1: 0 / 18** outside ±2, worst **0.84**; readout `DCI-P3 adapted to D65 · Rec. 709 · Rec. 709 — CICP 11-1-1`. **6-6-6 and 5-6-5: greys 0 codes; every saturated patch moves the predicted way, but 7 / 18 and 5 / 18 patches are outside ±2 (worst 6.8 and 6.2 codes)**, and only once the signal was re-derived after the fact. Those two fixtures do not carry the signal the prediction assumed: see the two pre-existing defects below | 11: **PASS**. 6 and 5: **direction PASS, amount FAIL** |
+| P5 | 9-14-9 ProRes = 9-1-9 ProRes, 0 codes; H.264 within ±2; `[COLOR-BITSTREAM]` agree; no Tags line | ProRes vs 9-1-9: **0 codes, 0 pixels**. H.264: **0 / 18** outside ±2, worst **1.43**. `container 9-1-9 · avcC SPS 9-14-9 — agree`; no Tags line | **PASS** |
+| P6 | Case (g): DISAGREE on primaries and matrix; Tags line; drawn from the container | `[COLOR-BITSTREAM] container 9-1-9 · avcC SPS 1-1-1 — ⚠️ DISAGREE on primaries, matrix — container used, nothing changed`; the readout's Tags line says so. Greys **0 codes** vs HEAD. Saturated: within ±2 (worst **0.90**) of the prediction with the signal re-derived after the fact (709 encode, 2020 decode, as in both builds) | **PASS** |
+| P7 | The Flip file: 2020 primaries, readout says so; neutral pixels ≥ 99 % unchanged; file untouched | `[EDR] layer colorspace = … "QuickTime 'nclc' Video (9,1,9)"`; `[CHAIN] Source: Rec. 2020 · Rec. 709 · Rec. 2020 · limited — CICP 9-1-9 — tagged`. vs HEAD: **99.2 %** of pixels differ, worst 64 codes; all **39 053** saturated pixels moved. Neutral: **96.8 %** of the 1 798 pixels neutral within 1 code stayed within 1 code (58 moved). md5 `6b26fc10…`, size, mtime and mode identical before and after | Primaries and readout **PASS**; the 99 % neutral band **FAIL** (96.8 %): near-neutral pixels with a 1-code spread are amplified by the 2020 → 709 matrix, which the band did not allow for |
+| P8 | Rec.2020 SDR override on SRT, WHEP, HLS = a declared 9-1-9 stream, 0 codes | One H.264 encode with a 9-1-9 VUI, and a copy with the colour description set to unspecified (`h264_metadata`, slices identical). Undeclared + ⌃⌥C ×5 → `override → Rec.2020 SDR (CICP 9-14-9)`, title `— Color 2020 SDR`, readout `Rec. 2020 · Rec. 2020 SDR · Rec. 2020 — CICP 9-14-9 — overridden`. Against the declared stream on Auto: **SRT 0 codes, 0 pixels; WHEP 0; HLS 0 over the picture rows 0–439.** Frame-to-frame noise within one session is up to 3 codes on ~0.18 % of pixels, so second captures differ by that much. Sanity: undeclared on Auto differs from declared by up to 100 codes on 62 % | **PASS** |
+| P9 | S1 Reference and S2 hold unaffected | wedge.mov: Reference tree vs HEAD **0**; OS tree vs HEAD **0**; held `\` from macOS vs Reference chosen **0**; release vs before **0**; title `wedge.mov — COMPARING: Reference` and back | **PASS** |
+| P10 | Tests and build | **344 / 344**; Profile build clean | **PASS** |
+
+**HLS, the control bar.** The bar stayed up in every HLS capture, unlike SRT and WHEP. Every difference of more
+than 3 codes between the HLS captures sat in rows 445–462, the bar's text: one crop of that strip was viewed, and
+deleted, and it shows the Color control reading `2020 709 · Declared` against `2020 2020 (SDR) · Overridden`. The
+picture rows above it are 0 codes apart.
+
+##### Two pre-existing defects the 601 fixtures exposed — NOT fixed (S3 changes no matrix)
+
+Both are in BUGS.md, with the fix proposed and a prediction to make first.
+
+1. **The shader's 601 coefficients carry an extra ×255/224 (1.1384).** `colorParams(for:)`'s 709 and 2020 sets are
+   2(1 − Kr), 2(1 − Kb) unscaled; the 601 set is the textbook limited-range one, scaled again. The 6-6-6 chart in
+   HEAD (and the tree) reads R 50 % → 151, B 50 % → 154 against 139; a model with that extra gain matches HEAD
+   within **3 codes** on all 18 patches, a standard 601 decode misses by 15. Every 601-tagged buffer is ~14 %
+   too saturated: SD files, HLS's SD rungs, NDI `bt_601`, streams declaring matrix 5 or 6.
+2. **Files lose the 601 and BT.470BG matrix codes.** `MediaInspector.colorTags` maps `SMPTE_C` (a primaries
+   constant) rather than `ITU_R_601_4`, and has no entry for `YCbCrMatrix#5`. The 6-6-6 and 5-6-5 files reach the
+   renderer as **6-1-1** and **5-1-1, partly assumed**. On a 601 file the shader decodes 601 (from the buffer) while
+   the scopes, the DeckLink encode and the readout use 709. **That is the case (g) disagreement, on the AVFoundation
+   path, through a mapping gap.** So §6.11's S3-4 pass condition is **not met**; what S3 built is the decided
+   container-vs-bitstream readout, which is a different question.
+
+With the signal each fixture actually decodes to (re-derived after the fact, the same in both builds), the S3
+primaries change on 6 and 5 is right in direction on every patch, and within 7 codes. The remaining misses sit at
+channels near 0 and near 255, where the ASUS's own cross-talk (the instrument row above) is largest. That is
+plausible, not established.
+
+##### Open after S3
+
+- **S3-5, attended (~10 min):** the Flip file on the LG, by eye, against the build before S3.
+- **The two matrix defects above**, each with its own predictions; the case (g) S3-4 condition waits on the second.
+- **The libav path** (MXF / DNx) for case (g): still not exercised.
+- **sRGB (13) and linear (8)** are drawn on the display with the 709 curve, as before; the CIE scope linearises 13
+  with sRGB. Not changed: no S3 prediction covered them.
+- **PQ / HLG on 709-class primaries** keep the 709 SDR space, now logged (BUGS.md).
+- **Not measured here:** Reference on a 2020 SDR source on a profile-described display (it should now keep 2020
+  primaries, because Reference keeps the declaration); Reference's new 5 / 6 / 11 conversions on a calibrated
+  display; the CIE scope's plot (its 709 matrix moved by up to 2.3e-4, about 1e-5 in u′v′; 5, 6, 11 now plot with
+  their own primaries); NDI's Rec.2020 SDR (no NDI sender in the rig; same renderer path).
+- **Not moved to the table:** `VectorscopeScopeModel.graticuleKrKb` (a matrix question) and the transports' log-name
+  tables.
+
+**Defaults:** exported before the first S3 launch (1 143 keys; `displayCalibrations` absent, and never written).
+The nine launches added nine `NSWindow Frame …` keys and nothing else; each was checked absent from the snapshot and
+deleted by name. The domain is **dictionary-equal to the snapshot**, and `streamBookmarks` is equal and was never
+written. Streams were dialled through `MANIFOLD_SRT_DEBUG_URL` and `MANIFOLD_STREAM_DEBUG_URL` (local ffmpeg SRT
+listener, local MediaMTX, a local HTTP server for HLS, all stopped afterwards), so no bookmark was read. No exports
+were made. **The Flip file** was opened in place, read-only: md5, size, mtime and mode identical before and after.
+
 ---
 
 ## 7. Open and unverified
@@ -5825,7 +5959,10 @@ read. **Exports** were moved from the Desktop into `build/colour-s2/run/exports/
 2. **Actual display light output was never measured.** §2's ratios are curve arithmetic. No
    photometer, no measured display response. The claim is about what the profile asks for.
 
-3. **`makeColorSpace` flattens (9, 1) — Rec.2020 SDR — to `kCGColorSpaceCoreMedia709`**, silently
+3. ✅ **FIXED by colour S3, 2026-10-12** (§6.11, *S3 — results*; commit to be filled in): every axis now comes from
+   one table, and (9, 1), (9, 14), 11, 6 and 5 get their own primaries. Measured on the ASUS. The item as it stood:
+
+   **`makeColorSpace` flattens (9, 1) — Rec.2020 SDR — to `kCGColorSpaceCoreMedia709`**, silently
    dropping 2020 primaries, because the `switch` enumerates *pairs* and (9,1) falls to the default
    arm. **Banked, not fixed:** verifying it needs a 2020-SDR fixture the corpus does not have.
    It belongs with a colour-correctness pass that handles primaries and transfer **independently**

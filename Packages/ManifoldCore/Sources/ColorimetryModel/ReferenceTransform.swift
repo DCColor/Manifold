@@ -89,62 +89,18 @@ public struct BT1886: Equatable, Sendable {
 
 /// The source-primaries → Rec.709 conversion a display calibrated to Rec.709 needs, in linear light.
 ///
-/// Only P3-D65 (12) and Rec.2020 (9) have an entry. Every other code returns nil: 1 needs none, and
-/// 5, 6 and 11 are left to S3, where primaries are handled independently (§6.11). Built from the
-/// published xy primaries and D65, so there is no hand-typed matrix to get wrong.
+/// Every code with primaries other than 709 in `ColorimetryTable` has an entry: P3-D65 (12), Rec.2020
+/// (9) and, since colour S3, DCI-P3 adapted to D65 (11), SMPTE-C (6) and EBU 3213 (5). 1, absent and
+/// unknown return nil: those are drawn as 709 and need none. Built from the table's xy, so there is no
+/// hand-typed matrix to get wrong and no second copy of the primaries.
 public enum ReferenceGamut {
-    public typealias Matrix3 = [[Double]]
+    public typealias Matrix3 = ColorMatrix3
 
     public static func toRec709(fromPrimariesCode code: Int?) -> Matrix3? {
-        switch code {
-        case 12: return conversion(from: p3D65, to: rec709)
-        case 9:  return conversion(from: rec2020, to: rec709)
-        default: return nil
-        }
+        ColorPrimaries(cicp: code)?.toRec709
     }
 
-    /// xy of R, G, B.
-    public typealias Primaries = [(Double, Double)]
-    public static let rec709: Primaries  = [(0.640, 0.330), (0.300, 0.600), (0.150, 0.060)]
-    public static let p3D65: Primaries   = [(0.680, 0.320), (0.265, 0.690), (0.150, 0.060)]
-    public static let rec2020: Primaries = [(0.708, 0.292), (0.170, 0.797), (0.131, 0.046)]
-    public static let d65 = (0.3127, 0.3290)
-
-    public static func conversion(from src: Primaries, to dst: Primaries) -> Matrix3 {
-        multiply(inverse(rgbToXYZ(dst)), rgbToXYZ(src))
-    }
-
-    static func rgbToXYZ(_ p: Primaries) -> Matrix3 {
-        func xyz(_ xy: (Double, Double)) -> [Double] { [xy.0 / xy.1, 1, (1 - xy.0 - xy.1) / xy.1] }
-        let cols = p.map(xyz)
-        let m: Matrix3 = (0..<3).map { r in (0..<3).map { c in cols[c][r] } }
-        let s = apply(inverse(m), xyz(d65))
-        return (0..<3).map { r in (0..<3).map { c in m[r][c] * s[c] } }
-    }
-
-    public static func apply(_ m: Matrix3, _ v: [Double]) -> [Double] {
-        (0..<3).map { r in (0..<3).reduce(0.0) { $0 + m[r][$1] * v[$1] } }
-    }
-
-    static func multiply(_ a: Matrix3, _ b: Matrix3) -> Matrix3 {
-        (0..<3).map { r in (0..<3).map { c in (0..<3).reduce(0.0) { $0 + a[r][$1] * b[$1][c] } } }
-    }
-
-    static func inverse(_ m: Matrix3) -> Matrix3 {
-        let c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1]
-        let c01 = m[0][2] * m[2][1] - m[0][1] * m[2][2]
-        let c02 = m[0][1] * m[1][2] - m[0][2] * m[1][1]
-        let c10 = m[1][2] * m[2][0] - m[1][0] * m[2][2]
-        let c11 = m[0][0] * m[2][2] - m[0][2] * m[2][0]
-        let c12 = m[0][2] * m[1][0] - m[0][0] * m[1][2]
-        let c20 = m[1][0] * m[2][1] - m[1][1] * m[2][0]
-        let c21 = m[0][1] * m[2][0] - m[0][0] * m[2][1]
-        let c22 = m[0][0] * m[1][1] - m[0][1] * m[1][0]
-        let det = m[0][0] * c00 + m[0][1] * c10 + m[0][2] * c20
-        return [[c00 / det, c01 / det, c02 / det],
-                [c10 / det, c11 / det, c12 / det],
-                [c20 / det, c21 / det, c22 / det]]
-    }
+    public static func apply(_ m: Matrix3, _ v: [Double]) -> [Double] { ColorMatrix.apply(m, v) }
 }
 
 // `pow` without importing Foundation into every client of this target.

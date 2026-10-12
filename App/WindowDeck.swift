@@ -975,6 +975,11 @@ final class DeckRegistry {
                 primaries: primaries, transfer: transfer, matrix: matrix,
                 provenance: .fromCodes(primaries: primaries, transfer: transfer, matrix: matrix))
         }
+        // A CONTAINER / BITSTREAM COLOUR DISAGREEMENT (colour S3), on the same edges as the colour tags:
+        // a readout line only, never a change to the codes above.
+        engine.onSourceColorNote = { [weak renderer] note in
+            renderer?.setSourceColorNote(note)
+        }
         // THE FILE'S CHROMA (Stage 3b S2, D10), on the same edges as the colour tags and for the same
         // reason: the Chroma line describes this deck's file before its first frame, and stops
         // describing it at unload. The carried format the renderer reads off the buffers itself.
