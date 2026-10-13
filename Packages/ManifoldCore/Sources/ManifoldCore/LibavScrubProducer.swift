@@ -104,6 +104,9 @@ private final class Decoder: @unchecked Sendable {
     private var timeBase = AVRational(num: 1, den: 600)
     private var startTimeTicks: Int64 = 0
     private var pool: CVPixelBufferPool?
+    /// The container's colour (`codecpar`, at open), tagged onto every scrub buffer exactly as the playback source
+    /// tags its own, so the scrub frame and the playback frame stay the same pixels (`ContainerColorPolicy`).
+    private var containerColor: LibavPixelConversion.ContainerColor?
     private var poolW = 0
     private var poolH = 0
     /// The DNxHR 4:4:4 plug-in route (point 5). nil for every other file, and after a failure.
@@ -167,6 +170,7 @@ private final class Decoder: @unchecked Sendable {
             return false
         }
         avcodec_parameters_to_context(cctx, par)
+        containerColor = LibavPixelConversion.ContainerColor(par)
 
         // ── THE THREADING DECISION, WRITTEN WHERE IT TAKES EFFECT ────────────────────────────
         // FF_THREAD_SLICE (=2). Point 1 in the header: frame threading adds a frame of delay per
@@ -276,7 +280,8 @@ private final class Decoder: @unchecked Sendable {
 
         let W = Int(frame.pointee.width), H = Int(frame.pointee.height)
         guard let pb = makePixelBuffer(width: W, height: H),
-              LibavPixelConversion.fillPixelBuffer(pb, from: frame, cvFormat: cvFormat) else { return nil }
+              LibavPixelConversion.fillPixelBuffer(pb, from: frame, cvFormat: cvFormat,
+                                                   container: containerColor) else { return nil }
         // ⚠️ THE DELIVERED TIME, NOT THE REQUESTED ONE — `ScrubFrame.pts` is defined as what the
         // decoder actually produced. On all-intra those are the same frame, which is the point of
         // the accuracy measurement; carrying the real value anyway is what keeps the DeckLink audio

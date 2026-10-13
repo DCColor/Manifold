@@ -79,9 +79,11 @@ held back until after release, and the numbered defect entries follow.
        fixed (S3 changes no matrix):** the shader's 601 decode over-saturates by ×1.138, and files lose the 601
        and BT.470BG matrix codes (both below). Open: S3-5 by eye on the LG (attended); 6 and 5 amounts outside
        ±2 (direction right). **Both 601 defects fixed in the S3 follow-up, built and run unattended 2026-10-12, not
-       committed** (commit to be filled in) (§6.11, *S3 follow-up — the two 601 defects*). The decoded offscreen of 601
+       committed (`500e58d`)** (§6.11, *S3 follow-up — the two 601 defects*). **MXF / DNx now take colour from the
+       container (decided, Robbie): built and run 2026-10-12, not committed** (commit to be filled in) (§6.11, *MXF / DNx:
+       the container drives the picture*); case (g) S3-4 passes on both paths. The decoded offscreen of 601
        files is now within 4 10-bit codes of nominal (was 130–159 off); scopes, SDI and readout say 601. Case (g)'s
-       S3-4 condition is met on the AVFoundation path and **not on the libav path** (the case (g) entry, below). The
+       S3-4 condition was then met on the AVFoundation path only; the MXF / DNx change above closes it. The
        stream test fixtures are now seamless (`docs/color-fixtures/make_stream_fixtures.sh`): no loop clicks, no
        rail episode.
      - **S4** — Phase 5, the HDR headroom readout and its log on a display change. No headroom cap: the
@@ -1930,7 +1932,21 @@ Not changed there. **Affects:** HLS only; HEAD the same.
 
 ---
 
-## ☐ OPEN 2026-10-06 — AVFOUNDATION PATH AGREES; LIBAV PATH DISAGREES (2026-10-12) — a file's container tags vs its decoded frames' tags
+## ✅ FIXED 2026-10-12 (commit to be filled in) — a file's container tags vs its decoded frames' tags
+
+**Fixed** (§6.11, *MXF / DNx: the container drives the picture*), as decided (Robbie, 2026-10-12): the libav path takes
+each colour axis the container states from the container (`ContainerColorPolicy`, ColorimetryModel; the stream's
+`codecpar`, read at open), on the libav route, the DNxHR 4:4:4 VideoToolbox route and the scrub producer alike. An
+axis the container does not state follows the decoder, as before. A disagreement is logged once per file
+(`[LIBAV-COLOR] … ⚠️ DISAGREE on matrix — container used`) and shown on the readout's Tags line; the override covers a
+container that is wrong. Measured: `[MATRIX] … — agree` on **every one of the 35 files run**, both paths (the 601 DNxHR
+MXF now decodes 601; its offscreen is within 9 10-bit codes of nominal, 8-bit source; was 161 off). **S3-4 passes on
+both paths.** One real file changes: `MXF NCLc Matrix/cs709-g24.mxf`, whose descriptor says 9-16-9 and whose DNx
+header says matrix 709 (it now decodes with the 2020 matrix, and says so). Every other file: 0 codes. Correction to
+what this entry said below: ffmpeg's DNx decoder does not stamp 709 on every frame; it reads the DNxHR header's colour
+field (9 on the `cs2020_*` files, 1 on ffmpeg-made files). The entry as it stood:
+
+**Was: AVFOUNDATION PATH AGREES; LIBAV PATH DISAGREES (2026-10-12).**
 
 **Update, 2026-10-12 (S3 follow-up, §6.11):** measured with the new `[MATRIX]` line.
 - **AVFoundation path: agree on all 15 files run**, including 601 and BT.470BG files now that their codes are carried.
@@ -1990,7 +2006,7 @@ renderer's codes like everything else.
 
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in) — the shader decodes 601-tagged buffers with ×1.138 too much chroma
+## ✅ FIXED 2026-10-12 (`500e58d`) — the shader decodes 601-tagged buffers with ×1.138 too much chroma
 
 **Fixed** (§6.11, *S3 follow-up — the two 601 defects*). The coefficients now come from `YCbCrMatrix.decodeCoefficients`:
 601 is 1.4020 / 0.3441 / 0.7141 / 1.7720, unscaled like 709 and 2020 (which were always right and are bit-identical).
@@ -2020,7 +2036,7 @@ in HEAD `e5a1909` and in the S3 tree alike, so it predates S3. Not fixed: S3 cha
 
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in) — a file's 601 and BT.470BG matrix codes are lost, so its scopes and SDI use 709 while the picture uses 601
+## ✅ FIXED 2026-10-12 (`500e58d`) — a file's 601 and BT.470BG matrix codes are lost, so its scopes and SDI use 709 while the picture uses 601
 
 **Fixed** (§6.11, *S3 follow-up — the two 601 defects*). One reading of a CoreVideo matrix tag,
 `YCbCrMatrix.cicpCode(forCoreVideo:)`, used by `MediaInspector`, the shader's `colorParams` and the HLS buffer reader:

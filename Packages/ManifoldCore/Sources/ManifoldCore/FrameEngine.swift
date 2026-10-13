@@ -2045,6 +2045,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // for the whole of the load — and `applyLibavMetadata` (which does carry these
                 // codes) is both later and behind a SwiftUI update pass.
                 onSourceColorTags?(info.primariesCode, info.transferCode, info.matrixCode)
+                // The container drives this path's picture now (`ContainerColorPolicy`). Where the decoder's frames
+                // state something else (ffmpeg's DNxHR decoder: bt709 on every frame), the readout's Tags line says
+                // so, as it does for an H.264 / HEVC file's bitstream. The note is cleared at unload (`stop()`).
+                onSourceColorNote?(nil)
+                source.onColorDisagreement = { [weak self] line in
+                    Task { @MainActor in self?.onSourceColorNote?(line) }
+                }
                 // AND CLEAR THE GEOMETRY, at this path's equivalent point and above the pump.
                 // libav decodes with `apply_cropping` on by default, so a frame off this path has
                 // already had any declared aperture removed — the renderer must not remove it a

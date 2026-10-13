@@ -50,6 +50,57 @@ enum LibavPixelConversion {
             components: Int(desc.pointee.nb_components))
     }
 
+    /// The colour the CONTAINER states for the video stream (its `codecpar`, read at open): the side that drives
+    /// the picture (`ContainerColorPolicy`; decided 2026-10-12). Raw CICP codes, as libav's enums are.
+    struct ContainerColor: Equatable, Sendable {
+        let primaries: Int
+        let transfer: Int
+        let matrix: Int
+
+        init(_ par: UnsafeMutablePointer<AVCodecParameters>) {
+            primaries = Int(par.pointee.color_primaries.rawValue)
+            transfer = Int(par.pointee.color_trc.rawValue)
+            matrix = Int(par.pointee.color_space.rawValue)
+        }
+
+        /// What one frame's buffer is tagged with: per axis, the container's statement, else the frame's own.
+        func resolved(frame: UnsafeMutablePointer<AVFrame>)
+            -> (primaries: AVColorPrimaries, transfer: AVColorTransferCharacteristic, matrix: AVColorSpace) {
+            let f = Self.decoder(frame)
+            return (AVColorPrimaries(rawValue: UInt32(ContainerColorPolicy.resolve(container: primaries, decoder: f.primaries, .primaries))),
+                    AVColorTransferCharacteristic(rawValue: UInt32(ContainerColorPolicy.resolve(container: transfer, decoder: f.transfer, .transfer))),
+                    AVColorSpace(rawValue: UInt32(ContainerColorPolicy.resolve(container: matrix, decoder: f.matrix, .matrix))))
+        }
+
+        /// The frame's own statement, as the decoder made it.
+        static func decoder(_ frame: UnsafeMutablePointer<AVFrame>) -> (primaries: Int, transfer: Int, matrix: Int) {
+            (Int(frame.pointee.color_primaries.rawValue), Int(frame.pointee.color_trc.rawValue),
+             Int(frame.pointee.colorspace.rawValue))
+        }
+
+        /// Where the decoder's frame states something different from the container (empty when they agree).
+        func disagreements(frame: UnsafeMutablePointer<AVFrame>) -> [ColorAxisDisagreement] {
+            ContainerColorPolicy.disagreements(container: (primaries, transfer, matrix), decoder: Self.decoder(frame))
+        }
+
+        var triple: String { "\(primaries)-\(transfer)-\(matrix)" }
+    }
+
+    /// Stamp the container's statements onto a buffer that did NOT come through `fillPixelBuffer` (the DNxHR 4:4:4
+    /// VideoToolbox route), axis by axis; an axis the container does not state keeps whatever the decoder put there.
+    static func stampContainerColor(_ pb: CVPixelBuffer, _ c: ContainerColor) {
+        if ContainerColorPolicy.isStated(c.matrix, .matrix) {
+            attach(pb, key: kCVImageBufferYCbCrMatrixKey, value: cvMatrix(AVColorSpace(rawValue: UInt32(c.matrix))))
+        }
+        if ContainerColorPolicy.isStated(c.primaries, .primaries) {
+            attach(pb, key: kCVImageBufferColorPrimariesKey, value: cvPrimaries(AVColorPrimaries(rawValue: UInt32(c.primaries))))
+        }
+        if ContainerColorPolicy.isStated(c.transfer, .transfer) {
+            attach(pb, key: kCVImageBufferTransferFunctionKey,
+                   value: cvTransfer(AVColorTransferCharacteristic(rawValue: UInt32(c.transfer))))
+        }
+    }
+
     static func cvMatrix(_ s: AVColorSpace) -> CFString {
         switch s {
         case AVCOL_SPC_BT2020_NCL, AVCOL_SPC_BT2020_CL: return kCVImageBufferYCbCrMatrix_ITU_R_2020
@@ -111,9 +162,13 @@ enum LibavPixelConversion {
     /// the same picture. `LibavThumbnailSource` did the opposite (expanded to full on the way to
     /// RGBA) because a `CGImage` has no shader behind it; that is one of the two reasons its
     /// output could never match the played frame.
+    ///
+    /// The colour tags are the CONTAINER's where it states them (`container`), else the frame's (2026-10-12). nil
+    /// `container` keeps the frame's on every axis.
     static func fillPixelBuffer(_ pixelBuffer: CVPixelBuffer,
                                 from frame: UnsafeMutablePointer<AVFrame>,
-                                cvFormat: OSType) -> Bool {
+                                cvFormat: OSType,
+                                container: ContainerColor?) -> Bool {
         let W = Int(frame.pointee.width), H = Int(frame.pointee.height)
         let srcFmt = AVPixelFormat(frame.pointee.format)
         guard let dstFmt = swsDestFormat(for: cvFormat) else {
@@ -155,9 +210,14 @@ enum LibavPixelConversion {
         CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
         guard scaled > 0 else { return false }
 
-        attach(pixelBuffer, key: kCVImageBufferYCbCrMatrixKey, value: cvMatrix(frame.pointee.colorspace))
-        attach(pixelBuffer, key: kCVImageBufferColorPrimariesKey, value: cvPrimaries(frame.pointee.color_primaries))
-        attach(pixelBuffer, key: kCVImageBufferTransferFunctionKey, value: cvTransfer(frame.pointee.color_trc))
+        // ⚠️ THE CONTAINER'S COLOUR, NOT THE DECODER'S, WHERE THE CONTAINER STATES IT. ffmpeg's DNxHR decoder stamps
+        // every frame `bt709`; tagged from the frame, a DNx MXF whose descriptor says 601 or 2020 was decoded with the
+        // 709 matrix while the scopes, SDI and readout used the descriptor's (COLOR_MANAGEMENT_FINDINGS.md §6.11).
+        let tags = container?.resolved(frame: frame)
+            ?? (primaries: frame.pointee.color_primaries, transfer: frame.pointee.color_trc, matrix: frame.pointee.colorspace)
+        attach(pixelBuffer, key: kCVImageBufferYCbCrMatrixKey, value: cvMatrix(tags.matrix))
+        attach(pixelBuffer, key: kCVImageBufferColorPrimariesKey, value: cvPrimaries(tags.primaries))
+        attach(pixelBuffer, key: kCVImageBufferTransferFunctionKey, value: cvTransfer(tags.transfer))
         return true
     }
 

@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 @preconcurrency import AVFoundation
 import CFFmpeg
+import ColorimetryModel   // ContainerColorPolicy — the container drives the picture
 
 /// A `FrameSource` that decodes with static libav (FFmpeg) instead of
 /// AVFoundation/VideoToolbox — for formats VT can't decode (DNxHR → -12906).
@@ -105,6 +106,15 @@ public final class LibavFrameSource: @unchecked Sendable {
     private var vtFallbackAnnounced = false
     /// The requested format is CONFIRMED on the first frame rather than assumed. See `nextFrame()`.
     private var vtFormatConfirmed = false
+    /// The colour the CONTAINER states (the video stream's `codecpar`, read at open). Every buffer is tagged with
+    /// it where it states an axis, on both decode routes (`ContainerColorPolicy`, decided 2026-10-12).
+    private var containerColor: LibavPixelConversion.ContainerColor?
+    /// The first decoded frame is compared with the container once per file: one `[LIBAV-COLOR]` line, and
+    /// `onColorDisagreement` when they differ. pumpQueue only.
+    private var containerChecked = false
+    /// The readout's Tags line when the container and the decoder disagree. Called at most once per file, from the
+    /// pump queue; the engine hops to main.
+    public var onColorDisagreement: ((String) -> Void)?
     /// What the FILE declared, kept so the buffer range can revert to it if the VT route falls back.
     private var declaredRangeAtOpen: MediaInspector.SourceColorRange = .untagged
     private let bufferRangeLock = NSLock()
@@ -218,6 +228,7 @@ public final class LibavFrameSource: @unchecked Sendable {
         }
         guard vIdx >= 0, let par, let stream else { avformat_close_input(&ctx); throw LibavError.noVideoStream }
 
+        containerColor = LibavPixelConversion.ContainerColor(par)
         let cid = par.pointee.codec_id
         guard let codec = avcodec_find_decoder(cid) else { avformat_close_input(&ctx); throw LibavError.noDecoder }
         guard let cctx = avcodec_alloc_context3(codec) else { avformat_close_input(&ctx); throw LibavError.noDecoder }
@@ -517,6 +528,9 @@ public final class LibavFrameSource: @unchecked Sendable {
                     + "(\(CVPixelBufferGetWidth(pixelBuffer))×\(CVPixelBufferGetHeight(pixelBuffer)))")
             }
             skipToSeconds = -1
+            // The plug-in's buffer carries VideoToolbox's tags; the container's statements go on top, as on the
+            // libav route. (This route decodes without an AVFrame, so there is no decoder statement to compare.)
+            if let containerColor { LibavPixelConversion.stampContainerColor(pixelBuffer, containerColor) }
             return Self.makeSampleBuffer(pixelBuffer, pts: pts, duration: duration)
         }
     }
@@ -559,8 +573,25 @@ public final class LibavFrameSource: @unchecked Sendable {
         // frame have to be the same pixels through the same conversion or the whole argument for
         // the producer collapses; two copies of this is how they would drift apart silently.
         guard LibavPixelConversion.fillPixelBuffer(pixelBuffer, from: frame,
-                                                   cvFormat: pixelFormat) else { return nil }
+                                                   cvFormat: pixelFormat, container: containerColor) else { return nil }
+        checkContainerAgainstDecoder(frame)
         return Self.makeSampleBuffer(pixelBuffer, pts: pts, duration: duration)
+    }
+
+    /// Once per file, on the first frame the libav route converts: the container's statement against the decoder's.
+    /// Logged either way; a disagreement also goes to the readout. Nothing changes on account of it — the buffers
+    /// already carry the container's statement.
+    private func checkContainerAgainstDecoder(_ frame: UnsafeMutablePointer<AVFrame>) {
+        guard !containerChecked, let containerColor else { return }
+        containerChecked = true
+        let decoder = LibavPixelConversion.ContainerColor.decoder(frame)
+        let d = containerColor.disagreements(frame: frame)
+        let name = codecCtx.flatMap { avcodec_get_name($0.pointee.codec_id) }.map { String(cString: $0) } ?? "libav"
+        print("[LIBAV-COLOR] container \(containerColor.triple) · \(name) decoder frame "
+            + "\(decoder.primaries)-\(decoder.transfer)-\(decoder.matrix) — "
+            + (d.isEmpty ? "agree (axes the container does not state follow the decoder)"
+                         : "⚠️ DISAGREE on " + d.map(\.axis.rawValue).joined(separator: ", ") + " — container used"))
+        if let line = ContainerColorPolicy.readout(d, decoder: name) { onColorDisagreement?(line) }
     }
 
     private func ensurePool(width: Int, height: Int) -> CVPixelBufferPool? {

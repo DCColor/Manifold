@@ -5448,7 +5448,7 @@ checks (display roles, above).
 | **S0** pre-checks | — | Read-only, unattended: the LG's profile primaries (HDR off); the colourspace dump probe on every primaries/transfer pair including (9, 1), (9, 14), 11 and 6; the tags on Robbie's Rec.2020 SDR test file; ffmpeg fixtures 9-1-9, 9-14-9, 11, 6 and case (g). **If the LG's primaries are not Rec.709, stop before S1.** |
 | **S1** Phase 3: Reference + the per-display setting — **built and run unattended 2026-10-12, committed `532c83f`; results under *S1 — results*, below** | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — BT.1886, as a reference monitor shows it* (changed from §6.3's "correct for grading", 2026-10-12); the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
 | **S2** hold-to-compare — **built and run unattended 2026-10-12, not committed; results under *S2 — results*, below** | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
-| **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, committed `94961b9`; the 601 follow-up not committed; results under *S3 — results* and *S3 follow-up*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
+| **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, committed `94961b9`; the 601 follow-up committed `500e58d`; MXF / DNx container colour not committed; results under *S3 — results*, *S3 follow-up* and *MXF / DNx*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
 | **S4** Phase 5: headroom readout | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
 | **S5** Custom + the file Interpretation button | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
 | **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. |
@@ -5944,7 +5944,7 @@ The fixtures were replaced by seamless ones (`docs/color-fixtures/make_stream_fi
 
 #### S3 follow-up — the two 601 defects: results, 2026-10-12 (unattended)
 
-**Not committed** (commit to be filled in). Base `94961b9` (S3). Pixel checks on the **ASUS only**, macOS HDR off (read,
+**Committed `500e58d`** (Robbie). Base `94961b9` (S3). Pixel checks on the **ASUS only**, macOS HDR off (read,
 not set). Captures were window-only and deleted after scoring; none was viewed. Predictions Q1–Q9 were written before
 the first launch (`build/colour-s3/run601/predictions.txt`, 19:50). Outputs in the gitignored `build/colour-s3/run601/`:
 `diffs.txt`, `score601.txt`, `export_decode.txt`, `streams_score.txt`, `flip_model.txt`, the app logs and patch medians,
@@ -6000,7 +6000,7 @@ BASE = the S3 tree with the old coefficients, the old file map and the old HLS s
 
 ##### Found, not fixed
 
-- **libav path, case (g):** the picture follows the DNx decoder's `bt709`, everything else the MXF descriptor. S3's
+- ~~**libav path, case (g)**~~ **Fixed: see *MXF / DNx: the container drives the picture*, below.** As found: the picture follows the DNx decoder's `bt709`, everything else the MXF descriptor. S3's
   decision was "the container drives the picture" (AVFoundation does this by construction). Making the libav path do
   the same means tagging its buffers from the stream's resolved codes, not `frame->colorspace`; and logging, as on
   H.264 and HEVC files, when the two differ. That is a change to which side drives the picture on every DNx / MXF file,
@@ -6017,6 +6017,53 @@ name. The domain is **dictionary-equal to the snapshot**, and `streamBookmarks` 
 Streams were dialled through the debug URLs (local ffmpeg listener, local MediaMTX, a local HTTP server; all stopped).
 **Exports** (⌃⌥E, for the SDI `kr`/`kb` and the offscreen readback) were moved from the Desktop into the run folder,
 scored, and deleted. **The Flip file** was read in place: stat identical before and after.
+
+#### MXF / DNx: the container drives the picture — results, 2026-10-12 (unattended)
+
+**Decided (Robbie, 2026-10-12):** the MXF / DNx (libav) path takes colour from the container, as the AVFoundation
+path does and as S3 decided; the decoder's statement is ignored where the container states colour. Where the two
+disagree, the readout says so; the override covers a wrong container.
+
+**Not committed** (commit to be filled in). Base `500e58d` (the 601 fix). Pixel checks on the **ASUS only**, macOS HDR
+off (read, not set). Window-only captures, deleted after scoring; none viewed. Predictions M1–M5 were written before
+the code changed and before any launch (`build/colour-s3/runmxf/predictions.txt`, 21:17). Outputs in the gitignored
+`build/colour-s3/runmxf/`: `diffs.txt`, `export_decode.txt`, the app logs.
+
+**Estimated before the run:** about 1 hour. Actual: about 45 minutes, 21:10–21:55.
+
+##### What was built
+
+- **`ContainerColorPolicy`** (ColorimetryModel): per axis, the container's code if it is a statement (H.273: not
+  unspecified, not reserved; matrix 0 counts), else the decoder's; `disagreements` where both state and differ
+  (transfer 1 / 6 / 14 / 15 and matrix 5 / 6 count as the same); the readout line. 4 unit tests.
+- **The libav path** (`LibavPixelConversion.ContainerColor`, from the stream's `codecpar` at open): `fillPixelBuffer`
+  tags each buffer with the resolved codes, for playback and the scrub producer alike, so scrub and playback stay the
+  same pixels. The DNxHR 4:4:4 VideoToolbox route stamps the container's statements on its buffers too (it has no
+  AVFrame, so no comparison there).
+- **`[LIBAV-COLOR]`**, once per file on the first libav frame: the container's triple, the decoder's, `agree` or
+  `⚠️ DISAGREE on <axes> — container used`. A disagreement goes to the readout's Tags line (`onColorDisagreement` →
+  `onSourceColorNote`), cleared at unload as before.
+- **Tests:** `swift test` **352 / 352**. Profile build clean.
+
+##### Results
+
+| # | Prediction | Result | Verdict |
+|---|---|---|---|
+| M1 | The 601 DNxHR MXF decodes 601; picture, scopes, SDI and readout agree; offscreen within 4 codes of nominal; Tags line; one `[LIBAV-COLOR]` | `[LIBAV-COLOR] container 6-1-5 · dnxhd decoder frame 6-1-1 — ⚠️ DISAGREE on matrix — container used`; `[MATRIX] picture decodes Rec. 601 … use Rec. 601 (CICP 5) — agree` (HEAD: DISAGREE, picture 709); SDI `kr=0.299 kb=0.114`; Tags `⚠️ container disagrees with the dnxhd decoder: matrix 5 vs 1 — …`. Offscreen R 50 % **0.501 / 0.001 / 0.000** (HEAD 0.544 / 0.050 / −0.007). Worst patch **9 codes** (HEAD 161): this file is **8-bit** DNxHR HQ, where one chroma step is 4 codes before the matrix's gain; the 4-code band was carried over from the 10-bit ProRes files | Decode and agreement **PASS**; the 4-code band **FAIL** (8-bit quantization, mis-set band) |
+| M2 | 709 MXF / DNx files, TREE vs HEAD: 0 codes; `[MATRIX]` agree | 0 codes, 0 pixels on: the 709 DNxHR chart, **Mixed Captions.mxf**, OP1A Test.mxf, DNX As MOV 10bit.mov, the S2 DNx fixtures (lines-422-dnxhrhqx `.mov` and `.mxf`, checker-444-dnxhr444.mov, 4k-422-dnxhrhqx-62s.mxf), the ProRes MXFs (lines-422, checker-444). `[MATRIX]` agree on all. Their containers say 709 or nothing (`[LIBAV-COLOR] … 1-1-1`, `2-2-1`, `2-2-2`). Mixed Captions and checker-444-dnxhr444 take the VideoToolbox route (no `[LIBAV-COLOR]` line, by design) | **PASS** |
+| M3 | Every AVFoundation file: 0 codes vs HEAD | The 11 S0 / S3 charts, case (g), wedge, PQ wedge, the Flip file: **0 codes, 0 pixels** each | **PASS** |
+| M4 | Containers stating a non-709 matrix: `cs2020_pq`, `cs2020_hlg`, `cs2020_g24`, `cs709-g24` change | **Wrong for three of the four.** ffmpeg's DNx decoder does not stamp 709 on every frame: it reads the DNxHR header's colour field, which says 9 on the three `cs2020_*` files. They already agreed (`[LIBAV-COLOR] container 9-16-9 · decoder 9-16-9 — agree`) and are **0 codes**. **`cs709-g24.mxf` changes** (up to 108 codes, 16.6 % of pixels): descriptor 9-16-9, DNx header matrix 709 (`9-16-1`), so it now decodes with the 2020 matrix, and the readout's Tags line says `matrix 9 vs 1`. Its name suggests 709 content in a container tagged 2020 PQ; the override is the remedy, as decided. Files stating only primaries / transfer, or nothing (csp3-pq 12-16-2, csdcip3_g26 / MONO / ST_51 2-17-2, 10152502.999_SUB 9-1-2): **0 codes**, no disagreement | One file changes, as the decision intends; reported |
+| S3-4 | Case (g): agree on every path | `[MATRIX] … — agree` on **all 35 files**, AVFoundation and libav | **PASS** |
+| M5 | Tests and build | **352 / 352**; Profile build clean | **PASS** |
+
+**Not exercised:** a file where the container states a matrix and the VideoToolbox (DNxHR 4:4:4) route is taken. The
+stamp is the same code path's statement, but no 4:4:4 DNx file with a non-709 container was in hand.
+
+**Defaults:** exported before the first launch (1 143 keys; `displayCalibrations` absent, never written). The four
+launches added four `NSWindow Frame …` keys and nothing else; each was checked absent from the snapshot and deleted
+by name. The domain is **dictionary-equal to the snapshot**; `streamBookmarks` equal and never written. **Exports**
+(⌃⌥E on the 601 MXF and `cs2020_pq`) were moved from the Desktop, scored and deleted. Files on
+`/Volumes/DCCOLOR/TEST FLIP/` were opened in place, read-only.
 
 ---
 
