@@ -49,6 +49,10 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   check), never for judging colour or HDR. A plan or prediction that puts an HDR or by-eye check on the
   ASUS is wrong; move it to the LG. **True reference monitoring is over SDI to a reference monitor**; no
   desktop display is the reference.
+- Test media under `/Volumes/DCCOLOR/TEST FLIP` may have had its colour metadata changed on purpose (Flip demos),
+  so a file's name may not match its tags. The file's own tags are the truth; its name is only a hint. Report a
+  name/tag mismatch as a finding, not a defect (e.g. `MXF NCLc Matrix/cs709-g24.mxf`, `docs/color-fixtures/README.md`).
+  **Never modify, retag or rewrite files on that volume**: open them read-only, in place.
 - Screenshots capture the Manifold window only, by its window ID (`screencapture -x -o -l <id>`, the id
   from `CGWindowListCopyWindowInfo` for the owner "Manifold"), never the whole desktop: other windows on
   this Mac hold private conversations and credentials. If the window cannot be found, take no screenshot.
