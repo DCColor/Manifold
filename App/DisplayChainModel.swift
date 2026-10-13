@@ -44,6 +44,9 @@ struct DisplayChain: Equatable {
     var chroma: String = "—"
     /// Colour S3: the file's container tags against its own bitstream, when they disagree. nil otherwise.
     var tags: String? = nil
+    /// Colour S4: this window's display's EDR headroom — "headroom 8.97 of 8.97", or "display is in SDR
+    /// mode". From the renderer's own sample of its window's screen, the one the `[EDR]` log prints.
+    var headroom: String = "—"
 }
 
 @MainActor
@@ -114,6 +117,17 @@ final class DisplayChainModel: ObservableObject {
         // (Stage 3b S1). Same per-renderer filter.
         observers.append(NotificationCenter.default.addObserver(
             forName: MetalVideoRenderer.chromaStateDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let r = note.object as? MetalVideoRenderer,
+                      r === self.deck?.renderer else { return }
+                self.refresh()
+            }
+        })
+        // And the Headroom row (colour S4): the renderer re-read its window's screen and it moved — HDR
+        // switched, the window moved display, brightness. Same per-renderer filter.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: MetalVideoRenderer.displayHeadroomDidChange, object: nil, queue: .main
         ) { [weak self] note in
             MainActor.assumeIsolated {
                 guard let self, let r = note.object as? MetalVideoRenderer,
@@ -261,13 +275,19 @@ final class DisplayChainModel: ObservableObject {
                                                        source: $0.sourceChroma, reason: $0.chromaReason,
                                                        note: $0.chromaNote)
                                 } ?? "no source",
-                                tags: renderer?.sourceColorNote)
+                                tags: renderer?.sourceColorNote,
+                                headroom: HeadroomReadout.text(renderer?.displayHeadroom))
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
         // Colour S3: the Source and Tags lines in the log, once per change, so an unattended run reads
         // the readout's own words rather than a screenshot of them.
         if next.source != chain.source || next.tags != chain.tags {
             print("[CHAIN] Source: \(next.source)" + (next.tags.map { " | Tags: \($0)" } ?? ""))
+        }
+        // On a screen change too: two SDR displays read the same words, and the log must still say
+        // which display the line now describes (S4's timing reads this line).
+        if next.headroom != chain.headroom || next.display != chain.display {
+            print("[CHAIN] Headroom: \(next.headroom)" + (screen.map { " on \"\($0.localizedName)\"" } ?? ""))
         }
         if next != chain { chain = next }
     }

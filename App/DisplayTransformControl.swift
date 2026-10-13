@@ -262,6 +262,7 @@ struct DisplayChainReadout: View {
             row("Chroma",    model.chain.chroma)
             row("Transform", model.chain.transform)
             row("Display",   model.chain.display)
+            row("Headroom",  model.chain.headroom)
             if let buffer = model.chain.buffer {
                 row("Buffer", buffer)
             }

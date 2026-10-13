@@ -866,10 +866,13 @@ final class MetalVideoRenderer {
             print("MetalVideoRenderer: texture cache creation failed (\(cacheStatus))"); return nil
         }
         installReferenceObservers()
+        installHeadroomMonitor()
     }
 
     deinit {
         referenceObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        headroomObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        headroomTimer?.invalidate()
         stop()
     }
 
@@ -885,8 +888,10 @@ final class MetalVideoRenderer {
     /// The screen this renderer's window is on.
     private var hostingScreen: NSScreen? { hostView?.window?.screen }
 
-    /// MAIN. The host view has a window now (or a different one): re-plan if in Reference.
+    /// MAIN. The host view has a window now (or a different one): read that window's headroom, and
+    /// re-plan if in Reference.
     func hostViewDidMoveToWindow() {
+        sampleHeadroom(context: "window on screen")
         guard displayTransform == .reference else { return }
         publishColorState()
         sourceColorStateChanged()
@@ -909,6 +914,73 @@ final class MetalVideoRenderer {
                 self.sourceColorStateChanged()
             })
         }
+    }
+
+    // MARK: - Colour S4: the headroom of this window's display
+
+    /// Posted on the **main thread** when `displayHeadroom` moves visibly. `object` is the renderer.
+    /// A notification for the same reason as `sourceColorStateDidChange`: `ContentView` takes no new
+    /// modifiers.
+    static let displayHeadroomDidChange = Notification.Name("ManifoldDisplayHeadroomDidChange")
+
+    /// MAIN. The last EDR reading of THIS window's screen, and that screen's name. The chain readout's
+    /// Headroom line and the `[EDR] headroom (display change …)` log both come from this one sample.
+    private(set) var displayHeadroom: EDRHeadroom?
+    private var displayHeadroomScreenID: CGDirectDisplayID?
+    private var headroomObservers: [NSObjectProtocol] = []
+    private var headroomTimer: Timer?
+
+    /// ── WHY A TIMER AS WELL AS NOTIFICATIONS ─────────────────────────────────────────────────
+    ///
+    /// Moving the window arrives as `didChangeScreen`, and the macOS HDR switch as a profile or
+    /// screen-parameters change (§6.7 measured the switch reassigning the LG's profile). A brightness
+    /// change moves `potential` and posts nothing at all, and nor does a grant moving `current`. So a
+    /// half-second read of two numbers on the window's own screen backs the notifications up, which
+    /// keeps every case inside S4's "within 1 s". It logs and posts only on a change the readout would
+    /// SHOW (`EDRHeadroom.differsVisibly`), so a quiet display costs two property reads and no output.
+    /// Whichever path sees a change first logs it; the other then finds nothing to say.
+    private func installHeadroomMonitor() {
+        let nc = NotificationCenter.default
+        let windowEvents: [(Notification.Name, String)] = [
+            (NSWindow.didChangeScreenNotification, "display change — window moved"),
+            (NSWindow.didChangeScreenProfileNotification, "display change — profile changed"),
+        ]
+        for (name, context) in windowEvents {
+            headroomObservers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                // A window notification for ANOTHER window says nothing about this one.
+                guard let self, let w = note.object as? NSWindow, w === self.hostView?.window else { return }
+                self.sampleHeadroom(context: context)
+            })
+        }
+        headroomObservers.append(nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                object: nil, queue: .main) { [weak self] _ in
+            self?.sampleHeadroom(context: "display change — screen parameters")
+        })
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.sampleHeadroom(context: "display change — headroom moved")
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        headroomTimer = timer
+    }
+
+    /// MAIN. Read this window's screen; on a visible change (or a different screen), store, log once
+    /// and post. No window yet means nothing to read and nothing to say.
+    private func sampleHeadroom(context: String) {
+        guard let screen = hostingScreen else { return }
+        let reading = EDRHeadroom(current: Double(screen.maximumExtendedDynamicRangeColorComponentValue),
+                                  potential: Double(screen.maximumPotentialExtendedDynamicRangeColorComponentValue),
+                                  reference: Double(screen.maximumReferenceExtendedDynamicRangeColorComponentValue))
+        let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        let movedScreen = id != displayHeadroomScreenID
+        if !movedScreen, let last = displayHeadroom, !reading.differsVisibly(from: last) { return }
+        // ⚠️ THE CONTEXT COMES FROM WHAT CHANGED, NOT FROM WHICH EVENT ARRIVED FIRST. Measured: a move
+        // between displays posts `didChangeScreenProfile` BEFORE `didChangeScreen`, so the first S4 run
+        // logged every move as "profile changed".
+        let said = (movedScreen && displayHeadroomScreenID != nil) ? "display change — window moved" : context
+        displayHeadroom = reading
+        displayHeadroomScreenID = id
+        Self.logEDRHeadroom(context: said, screen: screen)
+        NotificationCenter.default.post(name: Self.displayHeadroomDidChange, object: self)
     }
 
     // MARK: - The display raster
@@ -1595,8 +1667,10 @@ final class MetalVideoRenderer {
         // a line that would be read later as evidence of a load that never happened.
         let edrFlipped = (lastLoggedEDROptIn != nil && lastLoggedEDROptIn != isHDRTransfer)
         if isFirstForSource || edrFlipped {
+            // Colour S4: THIS window's screen (BUGS.md hazard rule 3), not the app's main window.
             Self.logEDRHeadroom(context: isFirstForSource ? "source load"
-                                                          : "EDR opt-in changed mid-source")
+                                                          : "EDR opt-in changed mid-source",
+                                screen: Thread.isMainThread ? hostingScreen : nil)
             lastLoggedEDROptIn = isHDRTransfer
         }
 
@@ -1703,9 +1777,11 @@ final class MetalVideoRenderer {
     /// hazard section records the same error costing a working instrument once already, in the
     /// other direction — "the metric is inert on this machine" concluded while the display sat in
     /// SDR mode the whole time. Three states, stated separately, is what stops it recurring.
-    private static func logEDRHeadroom(context: String) {
-        // Prefer the screen actually hosting the app; fall back to main.
-        let screen = NSApp?.mainWindow?.screen ?? NSApp?.windows.first?.screen ?? NSScreen.main
+    ///
+    /// `screen` is the renderer's own window's screen where the caller has one (colour S4). Only the
+    /// startup line, which runs before any window exists, falls back to the app's main window.
+    private static func logEDRHeadroom(context: String, screen own: NSScreen? = nil) {
+        let screen = own ?? NSApp?.mainWindow?.screen ?? NSApp?.windows.first?.screen ?? NSScreen.main
         guard let s = screen else { print("[EDR] headroom (\(context)): no screen"); return }
         let cur = s.maximumExtendedDynamicRangeColorComponentValue
         let pot = s.maximumPotentialExtendedDynamicRangeColorComponentValue

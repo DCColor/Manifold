@@ -80,14 +80,20 @@ held back until after release, and the numbered defect entries follow.
        and BT.470BG matrix codes (both below). Open: S3-5 by eye on the LG (attended); 6 and 5 amounts outside
        ±2 (direction right). **Both 601 defects fixed in the S3 follow-up, built and run unattended 2026-10-12, not
        committed (`500e58d`)** (§6.11, *S3 follow-up — the two 601 defects*). **MXF / DNx now take colour from the
-       container (decided, Robbie): built and run 2026-10-12, not committed** (commit to be filled in) (§6.11, *MXF / DNx:
+       container (decided, Robbie): built and run 2026-10-12, committed `638b05c`** (§6.11, *MXF / DNx:
        the container drives the picture*); case (g) S3-4 passes on both paths. The decoded offscreen of 601
        files is now within 4 10-bit codes of nominal (was 130–159 off); scopes, SDI and readout say 601. Case (g)'s
        S3-4 condition was then met on the AVFoundation path only; the MXF / DNx change above closes it. The
        stream test fixtures are now seamless (`docs/color-fixtures/make_stream_fixtures.sh`): no loop clicks, no
        rail episode.
      - **S4** — Phase 5, the HDR headroom readout and its log on a display change. No headroom cap: the
-       no-tone-map decision stands.
+       no-tone-map decision stands. **Built and run unattended 2026-10-13, not committed** (§6.11, *S4 —
+       results*). The readout has a Headroom row (`display is in SDR mode` / `headroom 8.97 of 8.97`, plus
+       ` — none granted` when the display offers headroom that nothing holds), from the window's own screen.
+       `[EDR] headroom (display change …)` logs once per change. Unattended U1–U4 pass: both displays read SDR
+       mode at potential 1.0; a move between displays updates the line in under 270 ms with one log line;
+       0 codes against HEAD in OS, Reference and Bypass. Open: S4-2 (HDR on, ≈ 8.97) and S4-3 (a grant on PQ),
+       both in the attended LG session.
      - **S5** — Custom (per-axis interpretation) and the Interpretation button and override on files. The
        Color control stays two buttons.
      - **S6** — LUT loading: `.cube`, in Interpretation (window, scopes, SDI and export see it; tags follow the
@@ -1932,7 +1938,7 @@ Not changed there. **Affects:** HLS only; HEAD the same.
 
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in) — a file's container tags vs its decoded frames' tags
+## ✅ FIXED 2026-10-12 (`638b05c`) — a file's container tags vs its decoded frames' tags
 
 **Fixed** (§6.11, *MXF / DNx: the container drives the picture*), as decided (Robbie, 2026-10-12): the libav path takes
 each colour axis the container states from the container (`ContainerColorPolicy`, ColorimetryModel; the stream's
@@ -5331,6 +5337,11 @@ was observed during a drag** on the same machine.
    the LG. A probe that opens its own window may sample a different screen than the app does;
    `MetalVideoRenderer.logEDRHeadroom` uses `NSApp.mainWindow?.screen` and the scrub diagnostic uses
    the host view's own `window?.screen`. Same property, potentially different screen.
+   **Fixed by colour S4 (2026-10-13, not committed):** every `[EDR] headroom` line except the startup one
+   (which runs before any window exists) now reads the renderer's own window's screen and names it.
+   It also logs on a display change: a window move, a profile or screen-parameters change, or a visible
+   move in the values, which a 0.5 s read catches for brightness. COLOR_MANAGEMENT_FINDINGS.md §6.11,
+   *S4 — results*.
 4. **A separate instrument IS genuinely unavailable and this correction does not rescue it:**
    `CARenderer` renders NOTHING in this environment — an opaque red background into a `bgra8Unorm`
    target reads all zeros, which has nothing to do with EDR or display mode. Do not confuse the two

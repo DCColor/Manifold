@@ -5337,7 +5337,8 @@ Manifold's gate, `[SPS-COLOR]` and `[CHROMA]` lines say the same (H1, L1).
 - **Unread:** the EDR headroom after the HDR switch.
 - **Open:**
   - the OBS-side 78 ms offset (compare earlier OBS H.264 sessions, and a scene collection holding only SYNC);
-  - whether an `[EDR] headroom` line should follow a display's HDR switch;
+  - ~~whether an `[EDR] headroom` line should follow a display's HDR switch~~ — **yes, built in colour S4** (§6.11, *S4 —
+    results*); measured on a window move, and the HDR switch itself waits for the LG session (S4-2);
   - L2 on a lossless or higher-rate OBS encode, if MediaMTX's limit allows.
 
 **Defaults:** exported before the first launch (1 143 keys). The two launches added two `NSWindow Frame` keys and
@@ -5448,8 +5449,8 @@ checks (display roles, above).
 | **S0** pre-checks | — | Read-only, unattended: the LG's profile primaries (HDR off); the colourspace dump probe on every primaries/transfer pair including (9, 1), (9, 14), 11 and 6; the tags on Robbie's Rec.2020 SDR test file; ffmpeg fixtures 9-1-9, 9-14-9, 11, 6 and case (g). **If the LG's primaries are not Rec.709, stop before S1.** |
 | **S1** Phase 3: Reference + the per-display setting — **built and run unattended 2026-10-12, committed `532c83f`; results under *S1 — results*, below** | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — BT.1886, as a reference monitor shows it* (changed from §6.3's "correct for grading", 2026-10-12); the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
 | **S2** hold-to-compare — **built and run unattended 2026-10-12, not committed; results under *S2 — results*, below** | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
-| **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, committed `94961b9`; the 601 follow-up committed `500e58d`; MXF / DNx container colour not committed; results under *S3 — results*, *S3 follow-up* and *MXF / DNx*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
-| **S4** Phase 5: headroom readout | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
+| **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, committed `94961b9`; the 601 follow-up committed `500e58d`; MXF / DNx container colour committed `638b05c`; results under *S3 — results*, *S3 follow-up* and *MXF / DNx*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
+| **S4** Phase 5: headroom readout — **built and run unattended 2026-10-13, not committed; results under *S4 — results*, below. S4-2 and S4-3 wait for the LG session** | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
 | **S5** Custom + the file Interpretation button | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
 | **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. |
 
@@ -6024,7 +6025,7 @@ scored, and deleted. **The Flip file** was read in place: stat identical before 
 path does and as S3 decided; the decoder's statement is ignored where the container states colour. Where the two
 disagree, the readout says so; the override covers a wrong container.
 
-**Not committed** (commit to be filled in). Base `500e58d` (the 601 fix). Pixel checks on the **ASUS only**, macOS HDR
+**Committed `638b05c`.** Base `500e58d` (the 601 fix). Pixel checks on the **ASUS only**, macOS HDR
 off (read, not set). Window-only captures, deleted after scoring; none viewed. Predictions M1–M5 were written before
 the code changed and before any launch (`build/colour-s3/runmxf/predictions.txt`, 21:17). Outputs in the gitignored
 `build/colour-s3/runmxf/`: `diffs.txt`, `export_decode.txt`, the app logs.
@@ -6070,6 +6071,66 @@ launches added four `NSWindow Frame …` keys and nothing else; each was checked
 by name. The domain is **dictionary-equal to the snapshot**; `streamBookmarks` equal and never written. **Exports**
 (⌃⌥E on the 601 MXF and `cs2020_pq`) were moved from the Desktop, scored and deleted. Files on
 `/Volumes/DCCOLOR/TEST FLIP/` were opened in place, read-only.
+
+#### S4 — headroom readout: results, 2026-10-13 (unattended)
+
+**Not committed.** Base `16a592f` (app code as `638b05c`). Pixel checks on the **ASUS only**. macOS HDR was off on both
+displays (`potential` 1.0, read, not set), and no display setting was touched. Captures were window-only, by the
+Manifold window id, and deleted after scoring with their pixel dumps; none were viewed. Predictions U1–U4, plus H1
+and H2 (S4-2 and S4-3 above), were written after the build and before any launch
+(`build/colour-s4/predictions.txt`, 10:14:30). Outputs are in the gitignored `build/colour-s4/run/`: `diffs.txt`, the
+app logs and step timings of both builds, and the first tree run's log (`tree_s4_run1.log`), which is discarded below.
+
+**Estimated before the run:** 75–90 minutes. **Actual:** about 40 minutes. The launches ran 10:14–10:26.
+
+##### What was built
+
+- **`EDRHeadroom` and `HeadroomReadout`** (`ColorimetryModel/HeadroomReadout.swift`). The line's wording:
+  - `display is in SDR mode` when `potential` ≤ 1.0001. This keys on `potential` only, never on `current` (§6.7).
+  - Otherwise `headroom <current> of <potential>`, to two places.
+  - With ` — none granted` appended when the display offers headroom and `current` is 1.0, so §6.7's
+    offered-but-not-granted state cannot read as an SDR display.
+  - The change test, `differsVisibly`, is judged at the readout's precision. 6 unit tests.
+- **The renderer reads its own window's screen** (`MetalVideoRenderer`, *Colour S4*):
+  - **When it reads:** when the view arrives in a window; on `didChangeScreen` and `didChangeScreenProfile` for
+    its own window; on `didChangeScreenParameters`; and every **0.5 s**. A brightness change and a grant post
+    no notification, so the timer is what keeps both inside 1 s.
+  - **Logging:** it logs `[EDR] headroom (<context>)` and posts `displayHeadroomDidChange` only when the reading
+    moves visibly or the screen changes, so a quiet display produces no output.
+  - **The context comes from what changed.** A move between displays posts `didChangeScreenProfile` before
+    `didChangeScreen`, so the first run labelled every move "profile changed". Now a different screen ID logs
+    `display change — window moved`.
+- **The source-load `[EDR] headroom` line now names the renderer's own window's screen**, not `NSApp.mainWindow`'s.
+  This closes audit item 1's second half, BUGS.md hazard rule 3. Only the startup line, which runs before any
+  window exists, keeps the old fallback.
+- **The readout has a Headroom row**, under Display, filled from the renderer's sample (the one the log prints).
+  `[CHAIN] Headroom: … on "<screen>"` logs when the line or its screen changes. Nothing writes a headroom value
+  anywhere: no cap (decision 8), no tone-map. **No new `ContentView` modifiers.**
+- **Tests:** `swift test` **358 / 358** (352 + 6). The Profile build is clean.
+
+##### Results
+
+| # | Prediction | Result | Verdict |
+|---|---|---|---|
+| U1 | LG, HDR off: `display is in SDR mode`, potential 1.0 | `[CHAIN] Headroom: display is in SDR mode on "LG TV SSCR2"`; `[EDR] headroom … on "LG TV SSCR2": current=1.0000 potential=1.0000` | **PASS** |
+| U2 | ASUS, HDR off: the same | `… display is in SDR mode on "ASUS PA147"`; potential 1.0000 | **PASS** |
+| U3 | A move between displays updates the line within 1 s and logs once | 6 moves (3 round trips, System Events by position). The line named the new screen after **239–268 ms** from issuing the move, every time within the `osascript` call itself (238–268 ms), so the true latency is at most that. **Exactly one** `[EDR] headroom (display change — window moved)` line per move, each on the new screen. Idle 20 s before and 10 s after: **0** headroom lines | **PASS** |
+| U4 | Nothing else changes: tree vs HEAD, OS, Reference and Bypass, 0 codes | `wedge.mov` OS, Reference and Bypass; the 9-1-9 ProRes chart, OS; the PQ wedge, OS and Bypass: **0 codes, 0 pixels** each. The PQ wedge after the six moves against HEAD's: **0 codes** | **PASS** |
+| S4-2 (H1) | LG, HDR on: potential ≈ 8.97 ±0.5, shown within 1 s, no reload | **Not run.** Attended, in the LG session with S1 and S2; Robbie toggles HDR | — |
+| S4-3 (H2) | A grant (current > 1.0) on a PQ source | **Not run.** An open question; the readout would say `headroom 1.00 of 8.97 — none granted` if §6.7 repeats | — |
+
+**The first tree run is discarded.** Its U3 measurement could not see the readout move: the `[CHAIN]` line logged only
+when the line's words changed, and both displays read the same words. It now also logs on a screen change. That run's
+one-`[EDR]`-line-per-move count was already right (6 of 6); only the label was wrong (above). U4 was re-scored on the
+second run, after the fix.
+
+**Not exercised:** the readout drawn in the popover (its text was read from the model's log, not seen); a brightness
+change and the macOS HDR switch, both needing a display setting (S4-2); the 0.5 s timer's own path (no change happened
+for it to see; every update came from a notification).
+
+**Defaults:** exported before the first launch (1 143 keys; `displayCalibrations` absent, never written). The three
+launches added three `NSWindow Frame …` keys and nothing else. Each was checked absent from the snapshot and deleted
+by name. The domain is **dictionary-equal to the snapshot**; `streamBookmarks` equal and never written.
 
 ---
 

@@ -32,6 +32,7 @@ bullet.
 - Reference display transform, per window: the picture shown with the BT.1886 curve a reference monitor uses (gamma 2.4 on a display with a true black). Choose it from the control bar or the Color menu. In the transform chain readout you can tell Manifold, per display, that the display is calibrated to Rec. 709 / BT.1886 (then Reference sends the picture's values untouched), or enter the display's white and black so Reference follows BT.1886 for it. Scopes, SDI output and exported frames are unaffected by the display transform.
 - Hold to compare: hold \ to see the other of macOS and Reference while the key is down, or Shift-\ to see Bypass. Let go and the window is back where it was. The window title and an amber badge say what you are comparing against. (The key may change before release.)
 - A display chain readout shows the source's color and whether it was declared or assumed, the transform in use, your display and its curve, and for SRT and WHEP the amount of buffering.
+- The display chain readout shows your display's HDR headroom: "display is in SDR mode" when macOS HDR is off for that display, or how much headroom it offers (for example "headroom 8.97 of 8.97"). It follows the window to another display and updates on its own when HDR is switched or the brightness changes. It only reports: Manifold does not cap or tone-map the picture.
 - The display chain readout warns when an H.264 or HEVC file's container color tags disagree with what its own bitstream declares. The container's tags are still used; the color override can assert the other.
 - HEVC now plays over SRT, including 10-bit HDR.
 - Audio offset for live streams, in the A/V menu: ⌥] and ⌥[ move the sound 1 ms later or earlier (add ⇧ for 10 ms). Save the offset with a saved stream and it comes back every time. A badge and the window title show when an offset is on.
@@ -173,7 +174,8 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Matrix 5 (BT.470BG) treated as 601 | `95563f7` | Yes |
 | Colorimetry presets and tiers moved into the ColorimetryModel package | `07368d0` | No |
 | 601 decode: the shader's 601 coefficients no longer expand chroma twice (×1.138); files carry the 601 and BT.470BG matrix codes; one reading of a matrix tag; `[MATRIX]` agreement log (colour S3 follow-up) | `500e58d` |
-| MXF / DNx files take colour from the container, as AVFoundation files do; a container / decoder disagreement is logged and shown in the readout (`ContainerColorPolicy`) | (commit to be filled in) | Yes | Yes |
+| MXF / DNx files take colour from the container, as AVFoundation files do; a container / decoder disagreement is logged and shown in the readout (`ContainerColorPolicy`) | `638b05c` | Yes | Yes |
+| HDR headroom row in the display chain readout, from the window's own screen; `[EDR] headroom` logged once per display change (window moved, HDR switched, brightness), no reload (colour S4) | (not committed) | Yes |
 | One primaries / transfer / matrix table for the layer colorspace and the CIE scope: Rec.2020 SDR, DCI-P3, SMPTE-C and EBU get their own primaries; Rec.2020 SDR override on SRT, WHEP and HLS; container/bitstream colour disagreement in the readout (colour S3) | `94961b9` | Yes |
 
 #### App, menus and diagnostics
