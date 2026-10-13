@@ -71,14 +71,19 @@ held back until after release, and the numbered defect entries follow.
        must be replaced by the registry's choice** (`HoldToCompare.keyCode`).
      - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
        four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below). **Built and run
-       unattended 2026-10-12; not committed** (commit to be filled in) (§6.11, *S3 — results*). The table is in
+       unattended 2026-10-12; committed (`94961b9`)** (§6.11, *S3 — results*). The table is in
        `ColorimetryModel` (`ColorimetryTable.swift`) and feeds `makeColorSpace`, the CIE scope, the vectorscope's
        targets and Reference's gamut conversion. Every unchanged pair is 0 codes against HEAD; 9-1-9, 9-14-9 and
        11 are within ±2 codes of prediction; the Rec.2020 SDR override equals a declared 9-1-9 stream on SRT, WHEP
        and HLS. Container/bitstream disagreement is logged and shown (decided, Robbie). **Found by the run, not
        fixed (S3 changes no matrix):** the shader's 601 decode over-saturates by ×1.138, and files lose the 601
        and BT.470BG matrix codes (both below). Open: S3-5 by eye on the LG (attended); 6 and 5 amounts outside
-       ±2 (direction right).
+       ±2 (direction right). **Both 601 defects fixed in the S3 follow-up, built and run unattended 2026-10-12, not
+       committed** (commit to be filled in) (§6.11, *S3 follow-up — the two 601 defects*). The decoded offscreen of 601
+       files is now within 4 10-bit codes of nominal (was 130–159 off); scopes, SDI and readout say 601. Case (g)'s
+       S3-4 condition is met on the AVFoundation path and **not on the libav path** (the case (g) entry, below). The
+       stream test fixtures are now seamless (`docs/color-fixtures/make_stream_fixtures.sh`): no loop clicks, no
+       rail episode.
      - **S4** — Phase 5, the HDR headroom readout and its log on a display change. No headroom cap: the
        no-tone-map decision stands.
      - **S5** — Custom (per-axis interpretation) and the Interpretation button and override on files. The
@@ -1856,7 +1861,7 @@ reaches 14.
 
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in) — NDI's Rec.2020 SDR override is flattened to 709 primaries
+## ✅ FIXED 2026-10-12 (`94961b9`) — NDI's Rec.2020 SDR override is flattened to 709 primaries
 
 **Fixed by colour S3** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S3 — results*). `makeColorSpace` now builds each
 axis from `ColorimetryTable`, so (9, 14) gets 2020 primaries: it builds exactly the space a declared (9, 1) gets
@@ -1925,9 +1930,22 @@ Not changed there. **Affects:** HLS only; HEAD the same.
 
 ---
 
-## ☐ OPEN 2026-10-06 — PARTLY ANSWERED 2026-10-12 (S0, S3) — a file's container tags vs its decoded frames' tags
+## ☐ OPEN 2026-10-06 — AVFOUNDATION PATH AGREES; LIBAV PATH DISAGREES (2026-10-12) — a file's container tags vs its decoded frames' tags
 
-**Where it stands (2026-10-12):**
+**Update, 2026-10-12 (S3 follow-up, §6.11):** measured with the new `[MATRIX]` line.
+- **AVFoundation path: agree on all 15 files run**, including 601 and BT.470BG files now that their codes are carried.
+  S3-4 is met there.
+- **libav path (DNx / MXF): DISAGREE.** A DNxHR MXF whose descriptor says bt470bg (601) is decoded with **709**:
+  ffmpeg's DNxHR decoder stamps every frame `color_space bt709`, the libav path tags its buffers from the frame
+  (`LibavPixelConversion.swift:158`, `cvMatrix(frame.pointee.colorspace)`), and the renderer's codes come from the
+  stream's `codecpar` (the container). So the picture decodes 709 while the scopes, SDI and readout use 601. A 709 MXF
+  agrees. **S3-4 is not met on this path.**
+- **Fix (proposed, needs a decision):** tag the libav buffers from the stream's resolved codes (the container), as
+  AVFoundation does and as S3 decided ("the container drives the picture"). Log and show the decoder's differing value,
+  as H.264 / HEVC files now do. It changes the picture of every DNx / MXF file whose descriptor and decoder differ, which
+  is why it was not made inside the 601 change.
+
+**Where it stood (2026-10-12, S3):**
 - **AVFoundation path, container vs buffers:** they agree. CoreMedia takes the container's `colr` over the VUI
   for the format description and every decoded buffer (S0, the case (g) fixture), so the shader and the
   scopes use the same matrix there.
@@ -1972,7 +1990,15 @@ renderer's codes like everything else.
 
 ---
 
-## ☐ OPEN 2026-10-12 — the shader decodes 601-tagged buffers with ×1.138 too much chroma
+## ✅ FIXED 2026-10-12 (commit to be filled in) — the shader decodes 601-tagged buffers with ×1.138 too much chroma
+
+**Fixed** (§6.11, *S3 follow-up — the two 601 defects*). The coefficients now come from `YCbCrMatrix.decodeCoefficients`:
+601 is 1.4020 / 0.3441 / 0.7141 / 1.7720, unscaled like 709 and 2020 (which were always right and are bit-identical).
+The cause was as below: the textbook limited-range 601 constants on top of the shader's own 255/224 chroma expansion,
+on both range branches. Measured from the ⌃⌥E offscreen readback: 6-6-6 and 5-6-5 charts within **4 10-bit codes** of
+nominal (were 130 and 159 off); every non-601 source **0 codes** against the build before. On SRT, WHEP and HLS the
+601 chart's R 50 % now shows 135 (predicted 135.0; was 146). The entry as it stood:
+
 
 **Found by colour S3** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S3 — results*), on the 6-6-6 chart fixture; measured
 in HEAD `e5a1909` and in the S3 tree alike, so it predates S3. Not fixed: S3 changes no matrix.
@@ -1994,7 +2020,15 @@ in HEAD `e5a1909` and in the S3 tree alike, so it predates S3. Not fixed: S3 cha
 
 ---
 
-## ☐ OPEN 2026-10-12 — a file's 601 and BT.470BG matrix codes are lost, so its scopes and SDI use 709 while the picture uses 601
+## ✅ FIXED 2026-10-12 (commit to be filled in) — a file's 601 and BT.470BG matrix codes are lost, so its scopes and SDI use 709 while the picture uses 601
+
+**Fixed** (§6.11, *S3 follow-up — the two 601 defects*). One reading of a CoreVideo matrix tag,
+`YCbCrMatrix.cicpCode(forCoreVideo:)`, used by `MediaInspector`, the shader's `colorParams` and the HLS buffer reader:
+`ITU_R_601_4` → 6, `YCbCrMatrix#5` → 5 (and any `#n`). Measured: the 6-6-6 and 5-6-5 files reach the renderer as
+**6-1-6** and **5-1-5, tagged**; `[MATRIX] … — agree` on 601; SDI encode `kr=0.299 kb=0.114`; the readout names the
+601 matrix. A new `[MATRIX]` log line puts the picture's matrix beside the scopes'/SDI's on every change. The entry as
+it stood:
+
 
 **Found by colour S3** (§6.11, *S3 — results*). Pre-existing. Not fixed: S3 changes no matrix.
 
@@ -2012,6 +2046,26 @@ in HEAD `e5a1909` and in the S3 tree alike, so it predates S3. Not fixed: S3 cha
 - **Fix (proposed, not made):** `ITU_R_601_4` → 6 in the matrix map (and drop `SMPTE_C` from it), `YCbCrMatrix#5`
   → 5; and decide with the entry above whether the shader should take its matrix from the renderer's code (the
   case (g) entry's second option).
+
+---
+
+## ☐ OPEN 2026-10-12 — WHEP and HLS draw their first frame before the renderer has the stream's colour codes
+
+**Found by the `[MATRIX]` line** (§6.11, *S3 follow-up*), in the build before the 601 fix and after it alike.
+- **What:** on connect, the first frame arrives tagged with the stream's matrix (601 or 2020) while the renderer still
+  holds the assumed 709 codes: `[MATRIX] picture decodes Rec. 601 … use Rec. 709 (CICP 1) — ⚠️ DISAGREE`, then
+  `agree` on the next change, about a frame later. SRT does not do it.
+- **Consequence:** for that frame, the scopes (and an SDI frame, if output is on) use the 709 matrix and the assumed
+  primaries. One frame; not seen on screen in a measurement.
+- **To decide:** publish the stream's codes before its first frame, as files do (`FrameEngine.onSourceColorTags`).
+
+---
+
+## ☐ OPEN 2026-10-12 — UNINVESTIGATED — WHEP: a 2.5 ms silence at session start
+
+Every WHEP session in S3 and its follow-up (MediaMTX, Opus) logs one resampler hole of 120 frames in its first window:
+the first audio buffer is 840 samples (17.5 ms) instead of 960. Once per session, at the start; never at a loop seam.
+Probably the Opus pre-skip trim meeting the first buffer. Not investigated.
 
 ---
 
@@ -7209,7 +7263,7 @@ so the request is recognised rather than absorbed.
   applies to its negotiated latency.
 ---
 
-## ✅ FIXED 2026-10-12 (commit to be filled in): an unrecognised CICP primaries code silently becomes 709, and the fallback is written twice
+## ✅ FIXED 2026-10-12 (`94961b9`): an unrecognised CICP primaries code silently becomes 709, and the fallback is written twice
 
 **Fixed by colour S3** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S3 — results*), the way this entry asked: ONE table,
 `ColorimetryTable` in the `ColorimetryModel` package, answers what a primaries, transfer or matrix code means.

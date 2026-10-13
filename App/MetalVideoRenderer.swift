@@ -4033,10 +4033,35 @@ final class MetalVideoRenderer {
 
     /// Read the YCbCr matrix from the pixel buffer's attachment and return the
     /// RGB conversion coefficients. Defaults to Rec.709 if absent/unknown.
+    ///
+    /// The attachment is read through `YCbCrMatrix.cicpCode(forCoreVideo:)` and the coefficients come from
+    /// `YCbCrMatrix.decodeCoefficients` — the reading and the table the file reader and the scope maths use,
+    /// so the picture and the scopes decode a tag the same way. Before 2026-10-12 this matched only
+    /// `ITU_R_601_4` / `ITU_R_2020` (CoreMedia's `YCbCrMatrix#5` fell to 709) and carried its own 601
+    /// constants, which were the limited-range ones and so expanded 601 chroma twice (§6.11).
+    /// RENDER THREAD. The last `[MATRIX]` line printed, so it prints once per change, never per frame.
+    private var lastMatrixAgreement: String?
+
+    /// RENDER THREAD. One `[MATRIX]` line whenever the pair changes: the matrix the PICTURE decodes with
+    /// (this buffer's tag) beside the one the scope maths, the DeckLink encode and the readout use (the
+    /// renderer's `sourceMatrixCode`). This is the case (g) check (§6.11, S3-4): the two must agree, and
+    /// the line says so, or says DISAGREE with both readings.
+    private func noteMatrixAgreement(picture: YCbCrMatrix, tag: String?) {
+        let code = sourceMatrixCode
+        let rest = YCbCrMatrix(cicp: code)
+        let line = "[MATRIX] picture decodes \(picture.label) (buffer tag \(tag ?? "none")) · scopes, SDI and "
+            + "readout use \(rest.label) (CICP \(code.map(String.init) ?? "absent → 709")) — "
+            + (picture == rest ? "agree" : "⚠️ DISAGREE")
+        guard line != lastMatrixAgreement else { return }
+        lastMatrixAgreement = line
+        print(line)
+    }
+
     private func colorParams(for pixelBuffer: CVPixelBuffer) -> ColorParams {
-        let matrix = (CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String) ?? ""
-        let m601 = kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String
-        let m2020 = kCVImageBufferYCbCrMatrix_ITU_R_2020 as String
+        let tag = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String
+        let pictureMatrix = YCbCrMatrix(cicp: YCbCrMatrix.cicpCode(forCoreVideo: tag))
+        let k = pictureMatrix.decodeCoefficients
+        noteMatrixAgreement(picture: pictureMatrix, tag: tag)
 
         // Range flag comes from ENGINE STATE (override + source range), NOT the
         // buffer format. The buffer is always 420v raw (unclipped); the engine
@@ -4047,18 +4072,7 @@ final class MetalVideoRenderer {
         // Only consulted by the full-range branch; nil defaults to Resolve.
         let chromaConv: Int32 = chromaConventionProvider?() ?? 1
 
-        // Coefficients per matrix. Standard derivations from Kr/Kb.
-        switch matrix {
-        case m601:
-            // Rec.601: Kr=0.299, Kb=0.114
-            return ColorParams(a: 1.5960, b: 0.3917, c: 0.8129, d: 2.0172, isFullRange: isFull, chromaConvention: chromaConv)
-        case m2020:
-            // Rec.2020: Kr=0.2627, Kb=0.0593
-            return ColorParams(a: 1.4746, b: 0.1646, c: 0.5714, d: 1.8814, isFullRange: isFull, chromaConvention: chromaConv)
-        default:
-            // Rec.709 (default): Kr=0.2126, Kb=0.0722
-            return ColorParams(a: 1.5748, b: 0.1873, c: 0.4681, d: 1.8556, isFullRange: isFull, chromaConvention: chromaConv)
-        }
+        return ColorParams(a: k.a, b: k.b, c: k.c, d: k.d, isFullRange: isFull, chromaConvention: chromaConv)
     }
 
     /// Read the content's transfer function from the pixel buffer attachment.

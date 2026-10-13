@@ -72,3 +72,34 @@ from `CVImageBufferCreateColorSpaceFromAttachments` by `dump_colorspaces.swift`.
 the app's own layer-colorspace derivation produces for each source tagging, kept so a change in
 that derivation shows up as a diff against a known-good profile rather than as a subtle
 on-screen difference nobody notices.
+
+## Seamless chart streams (SRT, WHEP, HLS)
+
+```bash
+bash docs/color-fixtures/make_stream_fixtures.sh          # → build/stream-fixtures/ (gitignored)
+```
+
+The S0 6 × 3 chart (`make_patches.py`, greys and 100 % / 50 % R G B C M Y) as 1280 × 720 H.264 in three colour
+variants: `919` (SPS VUI 9/1/9), `undecl` (the same slices with the colour description set to unspecified) and
+`666` (6/6/6, encoded through the 601 matrix). Each comes as `chart_V_aac.ts` (SRT, HLS), `chart_V_opus.ts`
+(publishing into MediaMTX for WHEP) and `hls_chart_V/` (10-loop VOD).
+
+**They loop without a seam.** The loop is 8.000 s: whole frames on every stream (200 video, 375 AAC, 400
+Opus) and whole cycles of the 1 kHz tone. The audio is encoded three loops long and only the middle loop's
+packets are kept, so the file has no AAC priming or end padding. AAC is one frame per PES. The script ends by
+copy-looping three passes and printing each stream's span and PTS steps (`tspes.py`): every step is nominal.
+Decoded once after a copy loop, the tone has no larger step at a seam than anywhere else. (Decoding with
+`ffmpeg -stream_loop` instead shows a click at each seam. That click is ffmpeg flushing its decoder on every
+pass, not the file.)
+
+**Send them the same way, or the packing is lost again:**
+
+```bash
+ffmpeg -re -stream_loop -1 -i chart_919_aac.ts -c copy -pes_payload_size 0 -f mpegts \
+  "srt://127.0.0.1:9710?mode=listener&pkt_size=1316"
+```
+
+Why: S3's first stream fixtures (a 6 s AAC loop, eight AAC frames per PES) put an 11 ms run of exact zeros and
+a cut in the tone at every loop. They also made every SRT harness run start with the resampler on its rail,
+because coarse audio packing makes a re-sender's video bursty (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *The rail
+drain*). The script's header has the details.

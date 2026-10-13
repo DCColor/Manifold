@@ -293,12 +293,11 @@ public enum MediaInspector {
             "SMPTE_ST_428_1": ("ST 428-1", 17),
             "SMPTE_240M_1995": ("SMPTE 240M", 7)
         ]
-        let matrixMap: [String: (String, Int)] = [
-            "ITU_R_709_2": ("Rec. 709", 1),
-            "ITU_R_2020": ("Rec. 2020", 9),
-            "SMPTE_240M_1995": ("SMPTE 240M", 7),
-            "SMPTE_C": ("SMPTE-C / 170M", 6)
-        ]
+        // The matrix through `YCbCrMatrix.cicpCode(forCoreVideo:)`, the reading the shader's per-buffer
+        // matrix uses too. ⚠️ This was its own map until 2026-10-12, keyed `SMPTE_C` (a PRIMARIES constant)
+        // instead of `ITU_R_601_4`, and without CoreMedia's `YCbCrMatrix#5`: a 601 or BT.470BG file reached
+        // the renderer with no matrix code, so its scopes, SDI and readout used 709 while the picture
+        // decoded 601 (§6.11, the two 601 defects).
 
         let primRaw = ext(kCMFormatDescriptionExtension_ColorPrimaries)
         let transRaw = ext(kCMFormatDescriptionExtension_TransferFunction)
@@ -306,7 +305,9 @@ public enum MediaInspector {
 
         let prim = primRaw.map { primMap[$0] ?? ($0, -1) }
         let trans = transRaw.map { transferMap[$0] ?? ($0, -1) }
-        let matrix = matrixRaw.map { matrixMap[$0] ?? ($0, -1) }
+        let matrix: (String, Int)? = matrixRaw.map { raw in
+            YCbCrMatrix.cicpCode(forCoreVideo: raw).map { (matrixName(forCode: $0), $0) } ?? (raw, -1)
+        }
 
         func name(_ t: (String, Int)?) -> String { t?.0 ?? "—" }
         func code(_ t: (String, Int)?) -> Int? {

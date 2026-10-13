@@ -66,6 +66,8 @@ bullet.
 - Fixed: DNxHR 444 files in a .mov could look slightly flat, with lifted blacks and weaker color. They now show at their true levels.
 - Fixed: 8-bit sources read slightly high on scopes (mid-grey 514, white 943); they now map exactly.
 - Fixed: HLS streams in P3 were shown with Rec. 709 colors while the scopes said P3.
+- Fixed: sources using the Rec. 601 color matrix (SD material, some HLS renditions, streams that declare 601) were shown about 14 % too saturated, and so were their scopes, SDI output and exported frames.
+- Fixed: files tagged with the Rec. 601 or BT.470BG matrix were measured by the scopes and sent over SDI as Rec. 709, and the readout said the matrix was assumed. Picture, scopes, SDI and readout now all use the file's matrix.
 - Fixed: Rec. 2020 SDR, DCI-P3, SMPTE-C and EBU sources were shown with Rec. 709 primaries, so they looked less saturated than they are. Each is now shown with its own primaries, and the CIE scope plots it the same way. DCI-P3 is shown with its white adapted to D65, and the readout says so.
 - Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
 
@@ -169,7 +171,8 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Declared color read from the H.264 SPS for SRT and WHEP | `418fcef` | Yes |
 | Matrix 5 (BT.470BG) treated as 601 | `95563f7` | Yes |
 | Colorimetry presets and tiers moved into the ColorimetryModel package | `07368d0` | No |
-| One primaries / transfer / matrix table for the layer colorspace and the CIE scope: Rec.2020 SDR, DCI-P3, SMPTE-C and EBU get their own primaries; Rec.2020 SDR override on SRT, WHEP and HLS; container/bitstream colour disagreement in the readout (colour S3) | (commit to be filled in) | Yes |
+| 601 decode: the shader's 601 coefficients no longer expand chroma twice (×1.138); files carry the 601 and BT.470BG matrix codes; one reading of a matrix tag; `[MATRIX]` agreement log (colour S3 follow-up) | (commit to be filled in) | Yes |
+| One primaries / transfer / matrix table for the layer colorspace and the CIE scope: Rec.2020 SDR, DCI-P3, SMPTE-C and EBU get their own primaries; Rec.2020 SDR override on SRT, WHEP and HLS; container/bitstream colour disagreement in the readout (colour S3) | `94961b9` | Yes |
 
 #### App, menus and diagnostics
 

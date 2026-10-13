@@ -1731,14 +1731,10 @@ final class HLSClient: ObservableObject {
         }()
 
         let matrix: Int? = {
+            // The one reading of the tag (`YCbCrMatrix.cicpCode`), shared with the shader and the file
+            // reader; it also reads CoreMedia's `YCbCrMatrix#5` as BT.470BG.
             guard let m = attachment(kCVImageBufferYCbCrMatrixKey) else { return nil }
-            switch m {
-            case kCVImageBufferYCbCrMatrix_ITU_R_709_2:     return 1
-            case kCVImageBufferYCbCrMatrix_ITU_R_601_4:     return 6
-            case kCVImageBufferYCbCrMatrix_SMPTE_240M_1995: return 7
-            case kCVImageBufferYCbCrMatrix_ITU_R_2020:      return 9
-            default:                                        return nil
-            }
+            return YCbCrMatrix.cicpCode(forCoreVideo: m as String)
         }()
 
         return (primaries, transfer, matrix)
