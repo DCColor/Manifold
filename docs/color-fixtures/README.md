@@ -103,3 +103,21 @@ Why: S3's first stream fixtures (a 6 s AAC loop, eight AAC frames per PES) put a
 a cut in the tone at every loop. They also made every SRT harness run start with the resampler on its rail,
 because coarse audio packing makes a re-sender's video bursty (`COLOR_MANAGEMENT_FINDINGS.md` §6.10, *The rail
 drain*). The script's header has the details.
+
+## The container / bitstream disagreement fixture (`cs709-g24.mxf`)
+
+`/Volumes/DCCOLOR/TEST FLIP/MXF NCLc Matrix/cs709-g24.mxf` is **mistagged on purpose**. It is not in this repo, and it
+must **not be retagged**. Its MXF descriptor says **9-16-9** (Rec. 2020 · PQ · Rec. 2020), carried over from a Flip demo.
+Its content and its DNxHR header are **709**, gamma 2.4 (`[LIBAV-COLOR] container 9-16-9 · dnxhd decoder frame 9-16-1`).
+It is the fixture for a container / bitstream disagreement on the MXF / DNx path (`COLOR_MANAGEMENT_FINDINGS.md` §6.11,
+*MXF / DNx: the container drives the picture*).
+
+**Expected result, which is correct behaviour and not a defect:**
+- The picture decodes with the **container's matrix** (Rec. 2020), so it looks wrong: the container drives the picture,
+  as decided on 2026-10-12.
+- `[MATRIX] … — agree` on Rec. 2020: picture, scopes, SDI and readout agree.
+- `[LIBAV-COLOR] … ⚠️ DISAGREE on matrix — container used`, logged once.
+- The readout's Tags line shows `⚠️ container disagrees with the dnxhd decoder: matrix 9 vs 1 — …`.
+
+The colour override is how a user asserts the true colour of a file like this one.
+
