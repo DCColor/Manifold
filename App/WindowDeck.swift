@@ -264,6 +264,22 @@ final class WindowDeck: ObservableObject {
     /// `DeckRegistry.connectLive`, edited by the Color control and ⌃⌥C.
     private(set) lazy var colorOverride = LiveColorOverrideModel(deck: self)
 
+    /// This window's colour override for its FILE (colour S5, §6.11): per window, Auto again when a new
+    /// file opens. Every file colour tag reaches the renderer through it (`FileColorOverride.swift`).
+    private(set) lazy var fileColor = FileColorOverrideModel(deck: self)
+
+    /// The override in force on this window's source, in the title's words ("2020 SDR", "Custom 9·1·6"),
+    /// or nil on Auto. The chain readout's Source line names it beside "overridden" (colour S5).
+    var interpretationLabel: String? {
+        let o = DeckRegistry.shared.liveSource(for: self).map { colorOverride.current(for: $0) } ?? fileColor.override
+        return o == .auto ? nil : o.shortLabel
+    }
+
+    /// ⌃⌥C: the live stream's override when this window shows one, else the file's (colour S5).
+    func cycleColorOverride(live: LiveSource?) {
+        if let live { colorOverride.cycle(on: live) } else { fileColor.cycle() }
+    }
+
     /// This window's calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.10): the sheet's state and
     /// the run, whose detectors exist only while it listens. Opened from the A/V menu.
     private(set) lazy var calibration = SyncCalibrationModel(deck: self)
@@ -336,7 +352,10 @@ final class WindowDeck: ObservableObject {
         else if let live = DeckRegistry.shared.liveLabel(for: self) { base = live }
         else { base = "Manifold" }
         var title = base
-        if let live = DeckRegistry.shared.liveSource(for: self), let color = colorOverride.titleSuffix(for: live) {
+        if let live = DeckRegistry.shared.liveSource(for: self) {
+            if let color = colorOverride.titleSuffix(for: live) { title += " — " + color }
+        } else if let color = fileColor.titleSuffix {
+            // Colour S5: a file's override, in the same words.
             title += " — " + color
         }
         if DeckRegistry.shared.liveLabel(for: self) != nil, audioOffset.isAvailable, audioOffset.sessionMs != 0 {
@@ -968,12 +987,15 @@ final class DeckRegistry {
         // deck's engine describes this deck's file to this deck's layer. The engine calls it on
         // main, before it starts reading, so the layer knows what it is looking at before a frame
         // can exist. See `FrameEngine.onSourceColorTags`.
-        engine.onSourceColorTags = { [weak renderer] primaries, transfer, matrix in
-            // `.fromCodes` is CORRECT HERE and the type says when it is: a file's undeclared axis
-            // arrives as nil from the format description, so the codes are the resolution.
-            renderer?.setSourceColorSpace(
-                primaries: primaries, transfer: transfer, matrix: matrix,
-                provenance: .fromCodes(primaries: primaries, transfer: transfer, matrix: matrix))
+        // Colour S5: through the window's file override, which makes the one `setSourceColorSpace` call —
+        // the file's codes with `.fromCodes` on Auto (a file's undeclared axis arrives as nil from the
+        // format description, so the codes are the resolution), the override's otherwise.
+        engine.onSourceColorTags = { [weak deck] primaries, transfer, matrix in
+            deck?.fileColor.fileTags(primaries: primaries, transfer: transfer, matrix: matrix)
+        }
+        // A new file resets the window's file override to Auto, before its tags arrive (decided 2026-10-13).
+        engine.onSourceCommitted = { [weak deck] url in
+            deck?.fileColor.fileCommitted(url)
         }
         // A CONTAINER / BITSTREAM COLOUR DISAGREEMENT (colour S3), on the same edges as the colour tags:
         // a readout line only, never a change to the codes above.

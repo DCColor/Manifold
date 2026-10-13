@@ -875,7 +875,15 @@ final class DeckLinkService: ObservableObject {
         // Display label tracks the current source whether or not output is on (it's the signal that
         // output produces / would produce). DISPLAY ONLY — does not touch the actual tag.
         let label = Self.colorspaceLabel(forPrimaries: primariesCode)
-        DispatchQueue.main.async { self.colorspaceLabel = label }
+        // Colour S5: the SDI tag in the log, once per change, so an unattended run reads what the output
+        // tags (or would tag) beside the picture, scopes and readout it must agree with.
+        DispatchQueue.main.async {
+            if self.colorspaceLabel != label {
+                NSLog("[DeckLink] colorspace → %@ (primaries %@)%@", label,
+                      primariesCode.map(String.init) ?? "absent", self.isOutputting ? "" : " — output off: the tag it would send")
+            }
+            self.colorspaceLabel = label
+        }
         // Re-tag the live output signal only if currently playing.
         guard isOutputting else { return }
         queue.async { self.bridge.setOutputColorspaceForPrimaries(primariesCode ?? 1) }

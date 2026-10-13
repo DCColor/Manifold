@@ -39,6 +39,9 @@ bullet.
 - Calibration (A/V ▸ Calibrate…): loop a Manifold sync clip on the sender and Manifold measures how far apart sound and picture are, then offers the correction. It never applies anything by itself. A/V ▸ Save Sync Clip… saves the clip that matches the stream's frame rate.
 - SRT, WHEP and HLS streams can now have their color interpretation overridden, like NDI: pick Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG, P3-D65 PQ or Rec. 2020 SDR from the Color control, or press ⌃⌥C. Auto goes back to what the stream declares. Save it with a saved stream from the Color menu and it comes back every time you connect; Revert to Saved returns to it.
 - While a color override is on, on any stream, the window title says so (for example "— Color 2020 PQ").
+- Files have the Color control too: override how a file's color is read (Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG, P3-D65 PQ, Rec. 2020 SDR, or Custom), or press ⌃⌥C. The override is for that window and goes back to Auto when you open another file. The picture, the scopes, the SDI output's color tag and the chain readout all change together, and the window title says so.
+- Custom color interpretation, on files and on every stream type: choose the primaries, transfer and matrix separately from the Color control. Combinations Manifold can't display as stated (PQ or HLG on primaries other than Rec. 2020 or P3 D65) are greyed out with the reason. A Custom choice shows as, for example, "Color Custom 9·1·6" in the title, and can be saved with a saved stream like the other overrides.
+- "Reset to File's Tags" (or "Reset to Stream's Tags") at the top of the Color control undoes an override at once, without reopening. It is greyed out when nothing is overridden.
 
 ### Improved
 
@@ -175,7 +178,9 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Colorimetry presets and tiers moved into the ColorimetryModel package | `07368d0` | No |
 | 601 decode: the shader's 601 coefficients no longer expand chroma twice (×1.138); files carry the 601 and BT.470BG matrix codes; one reading of a matrix tag; `[MATRIX]` agreement log (colour S3 follow-up) | `500e58d` |
 | MXF / DNx files take colour from the container, as AVFoundation files do; a container / decoder disagreement is logged and shown in the readout (`ContainerColorPolicy`) | `638b05c` | Yes | Yes |
-| HDR headroom row in the display chain readout, from the window's own screen; `[EDR] headroom` logged once per display change (window moved, HDR switched, brightness), no reload (colour S4) | (not committed) | Yes |
+| HDR headroom row in the display chain readout, from the window's own screen; `[EDR] headroom` logged once per display change (window moved, HDR switched, brightness), no reload (colour S4) | `6d85ef2` | Yes |
+| The Color control for files: presets, Custom, Reset, ⌃⌥C; per window, back to Auto on a new file; one colour setter, so picture, scopes, SDI tag and readout move together (colour S5) | (not committed) | Yes |
+| Custom interpretation (primaries · transfer · matrix from the S3 table) on files and every transport; saved per bookmark as `custom:p-t-m`, read as Auto by older builds; Reset to File's / Stream's Tags (colour S5) | (not committed) | Yes |
 | One primaries / transfer / matrix table for the layer colorspace and the CIE scope: Rec.2020 SDR, DCI-P3, SMPTE-C and EBU get their own primaries; Rec.2020 SDR override on SRT, WHEP and HLS; container/bitstream colour disagreement in the readout (colour S3) | `94961b9` | Yes |
 
 #### App, menus and diagnostics

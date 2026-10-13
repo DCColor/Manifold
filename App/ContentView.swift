@@ -795,17 +795,12 @@ struct ContentView: View {
             // Derive the Metal layer colorspace once per source from the
             // inspector's authoritative color tags (not per-frame from buffers).
             if let meta {
-                metalRenderer?.setSourceColorSpace(
-                    primaries: meta.colorPrimariesCode,
-                    transfer: meta.transferFunctionCode,
-                    matrix: meta.colorMatrixCode,
-                    // A file's absent CICP is nil here too — same rule as the engine's own tag
-                    // callback in `WindowDeck`, and the two must agree or the readout flickers
-                    // between tiers as the second one lands.
-                    provenance: .fromCodes(primaries: meta.colorPrimariesCode,
-                                           transfer: meta.transferFunctionCode,
-                                           matrix: meta.colorMatrixCode)
-                )
+                // Through the window's file override (colour S5), as the engine's own tag edge is in
+                // `WindowDeck`: on Auto the same `.fromCodes` call as before, so the two still agree and
+                // the readout does not flicker between tiers; with an override, the override stays.
+                deck.fileColor.fileTags(primaries: meta.colorPrimariesCode,
+                                        transfer: meta.transferFunctionCode,
+                                        matrix: meta.colorMatrixCode)
                 // D5: if DeckLink output is running, re-tag its colorspace from the new primaries
                 // (the encoding matrix follows the matrix code automatically, per converted frame).
                 //
@@ -1691,7 +1686,7 @@ struct ContentView: View {
             // ⌃⌥C cycles the colorimetry override. The toolbar picker is the real control; this is
             // a keyboard path for driving it hands-off (and for A/B-ing a preset against the picture
             // without moving the pointer, which is how you actually judge one).
-            Button("") { deck.colorOverride.cycle(on: activeLiveSource) }
+            Button("") { deck.cycleColorOverride(live: activeLiveSource) }
                 .keyboardShortcut("c", modifiers: [.control, .option])
         }
         .opacity(0)
@@ -3046,13 +3041,10 @@ struct ContentView: View {
 
                 // Color — the color-interpretation control (source-agnostic). It hosts an ASSERTION
                 // about the source, so it lives with the actions, not in the inspector (which reports
-                // what things ARE). Today its only section is the live stream's colorimetry override,
-                // so it's gated to the transports that have one (NDI, SRT, WHEP, HLS): it has nothing to say about
-                // a file yet (file color-management modes are the future second section). One element,
-                // no modifiers (§6.7) — see LiveColorOverride.swift.
-                if let live = activeLiveSource, LiveColorOverrideModel.offersOverride(live) {
-                    ColorInterpretationControl(source: live, model: deck.colorOverride)
-                }
+                // what things ARE). The live stream's override on NDI, SRT, WHEP and HLS; the file's since
+                // colour S5 (§6.11, decision 6). One element, no modifiers (§6.7): the slot picks which, so
+                // this body does not grow a branch — see LiveColorOverride.swift.
+                ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia)
 
                 // Display transform (§6.3 tiers 1–3) — Phase 2b. Next to the Color control because
                 // they are the two halves §6.3 names: that one is INTERPRETATION (what the source

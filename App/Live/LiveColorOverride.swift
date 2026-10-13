@@ -27,6 +27,10 @@
 //  THE TITLE SUFFIX (decision 4): " — Color 2020 PQ" while an override is in force, on any transport,
 //  NDI included (`WindowDeck.windowTitle`). Nothing is drawn over the picture.
 //
+//  COLOUR S5 (§6.11, decision 7): Custom — `.custom(p, t, m)`, three pickers — on every transport, saved
+//  per bookmark as `custom:p-t-m` in the same field; a Reset item at the top of the menu; and the same
+//  control for files (`ColorInterpretationSlot`, `FileColorOverride.swift`).
+//
 //  American spelling in every user-facing word here (docs/BUGS.md, the American English entry).
 //
 
@@ -132,9 +136,10 @@ final class LiveColorOverrideModel: ObservableObject {
         }
     }
 
-    /// Ask for `override` on `source`. A preset the transport does not offer is ignored.
+    /// Ask for `override` on `source`. A preset the transport does not offer is ignored; a supported Custom
+    /// is offered on every transport (colour S5, decided 2026-10-13).
     func set(_ override: ColorimetryOverride, on source: LiveSource) {
-        guard ColorimetryOverride.available(on: Self.transport(source)).contains(override) else { return }
+        guard ColorimetryOverride.isOffered(override, on: Self.transport(source)) else { return }
         switch source {
         case .ndi:
             NDIService.shared.setColorimetryOverride(override)   // the title follows via arbitration
@@ -198,9 +203,33 @@ final class LiveColorOverrideModel: ObservableObject {
 
 // MARK: - The Color control
 
+/// Which source the Interpretation control speaks for (colour S5): the window's live stream, or its file.
+enum InterpretationSubject: Equatable {
+    case live(LiveSource)
+    case file
+}
+
+/// The control bar's ONE element for the Interpretation control (colour S5, decision 6). It picks the
+/// subject here so `ContentView`'s body keeps a single element and no new branch (§6.7): the live stream
+/// when this window shows one with an override, else the window's file, else nothing.
+struct ColorInterpretationSlot: View {
+    let deck: WindowDeck
+    let live: LiveSource?
+    let hasFile: Bool
+
+    var body: some View {
+        if let live, LiveColorOverrideModel.offersOverride(live) {
+            ColorInterpretationControl(subject: .live(live), model: deck.colorOverride, fileModel: deck.fileColor)
+        } else if live == nil, hasFile {
+            ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor)
+        }
+    }
+}
+
 struct ColorInterpretationControl: View {
-    let source: LiveSource
+    let subject: InterpretationSubject
     @ObservedObject var model: LiveColorOverrideModel
+    @ObservedObject var fileModel: FileColorOverrideModel
     @ObservedObject private var ndi = NDIService.shared
     @ObservedObject private var srt = SRTClient.shared
     @ObservedObject private var whep = WHEPClient.shared
@@ -228,6 +257,9 @@ struct ColorInterpretationControl: View {
     /// Moved out of ContentView for Stage B (§6.9), when it gained SRT: one element there, no
     /// modifiers (§6.7). The body below is unchanged; only where it reads the colorimetry from moved
     /// (`reading`, per transport).
+    ///
+    /// Colour S5 (§6.11, decisions 6 and 7): files have it too, and both gain Custom — primaries, transfer
+    /// and matrix chosen separately, from the S3 table's values — and a Reset item at the top.
     var body: some View {
         // Two-part split face mirroring the streaming / DeckLink controls: a readout element + a
         // lone-chevron menu. The chevron MUST be its own borderlessButton Menu label, not the
@@ -264,7 +296,7 @@ struct ColorInterpretationControl: View {
         // readout in the same monospaced caption.
         HStack(spacing: 2) {
             Menu {
-                colorStreamColorimetrySection
+                menuContent
             } label: {
                 (Text(Image(systemName: "paintpalette")).font(.system(size: 13))
                  + Text("  ")
@@ -278,11 +310,7 @@ struct ColorInterpretationControl: View {
             // The interactive affordance — same size-8 chevron.down as the streaming / DeckLink
             // controls, so the control reads as a menu you open, not a passive readout.
             Menu {
-                colorStreamColorimetrySection
-                // SEAM: a future file color-management section (Bypass / Embedded / Match-QuickTime)
-                // drops into colorStreamColorimetrySection's peer set — same menu, same control —
-                // when files gain those modes. Nothing is stubbed today (an inert row would read as
-                // broken); the structure is simply ready.
+                menuContent
             } label: {
                 Text(Image(systemName: "chevron.down")).font(.system(size: 8))
                     .foregroundColor(colorControlTint)
@@ -291,34 +319,75 @@ struct ColorInterpretationControl: View {
             .menuIndicator(.hidden)
             .fixedSize()
         }
-        .help("Color interpretation — Auto trusts the stream; a preset asserts it (⌃⌥C cycles)")
+        .help(subject == .file
+              ? "Color interpretation — Auto trusts the file’s tags; a preset or Custom asserts them (⌃⌥C cycles the presets)"
+              : "Color interpretation — Auto trusts the stream; a preset or Custom asserts it (⌃⌥C cycles the presets)")
     }
 
+    // MARK: The subject
+
+    /// The override in force for this control's subject.
+    private var current: ColorimetryOverride {
+        switch subject {
+        case .live(let s): return model.current(for: s)
+        case .file:        return fileModel.override
+        }
+    }
+
+    private func choose(_ o: ColorimetryOverride) {
+        switch subject {
+        case .live(let s): model.set(o, on: s)
+        case .file:        fileModel.set(o)
+        }
+    }
+
+    /// The codes on screen now — Custom's pickers start from them. nil on a stream that has not stated
+    /// its colour yet.
+    private var effectiveCodes: (primaries: Int, transfer: Int, matrix: Int)? {
+        switch subject {
+        case .live:
+            return reading.map { ($0.effective.primaries.code, $0.effective.transfer.code, $0.effective.matrix.code) }
+        case .file:
+            return fileModel.effective
+        }
+    }
 
     /// Amber when something on screen is a human assertion rather than a reading, the control
     /// bar's own white otherwise. Applied per leaf — see the note on `body`.
     private var colorControlTint: Color {
-        reading?.effective.isOverridden == true ? Color.orange : .white.opacity(0.9)
+        let overridden: Bool
+        switch subject {
+        case .live: overridden = reading?.effective.isOverridden == true
+        case .file: overridden = fileModel.override != .auto
+        }
+        return overridden ? Color.orange : .white.opacity(0.9)
     }
 
-    /// The live stream's colorimetry override — the one color-interpretation section with content
-    /// today. Presets assert a colorimetry; the "Stream" subsection keeps the sender's own claim
-    /// visible so an override reads as CONTRADICTING a declaration rather than filling a silence.
-    @ViewBuilder private var colorStreamColorimetrySection: some View {
+    // MARK: The menu
+
+    /// Reset first (Robbie, 2026-10-13): undo an override without reopening, greyed on Auto. The final
+    /// shortcut is the shortcut registry's. Then the presets, Custom, the source's own claim, and — for a
+    /// saved stream — Save and Revert.
+    @ViewBuilder private var menuContent: some View {
+        Section {
+            Button(subject == .file ? "Reset to File’s Tags" : "Reset to Stream’s Tags") { choose(.auto) }
+                .disabled(current == .auto)
+        }
         Section("Colorimetry") {
-            Picker("Colorimetry", selection: overrideBinding) {
-                ForEach(ColorimetryOverride.available(on: LiveColorOverrideModel.transport(source))) { option in
-                    Text(option.label).tag(option)
+            Picker("Colorimetry", selection: presetBinding) {
+                ForEach(presets) { option in
+                    Text(option.label).tag(Optional(option))
                 }
             }
             .pickerStyle(.inline)
         }
-        Section("Stream") {
-            Button(streamStatusLine) {}.disabled(true)
+        customSection
+        Section(subject == .file ? "File" : "Stream") {
+            Button(statusLine) {}.disabled(true)
         }
         // Save and Revert, as the A/V menu has them for the audio offset (§6.9 Stage D, decision 5).
-        // SRT, WHEP and HLS; NDI's override is for the session only.
-        if LiveColorOverrideModel.savesOverride(source) {
+        // SRT, WHEP and HLS; NDI's override is for the session only, and a file's is per window.
+        if case .live(let source) = subject, LiveColorOverrideModel.savesOverride(source) {
             Section {
                 if let name = model.bookmarkName {
                     Button("Save \(model.current(for: source).label) to “\(name)”") { model.saveToBookmark() }
@@ -332,10 +401,121 @@ struct ColorInterpretationControl: View {
         }
     }
 
+    private var presets: [ColorimetryOverride] {
+        switch subject {
+        case .live(let s): return ColorimetryOverride.available(on: LiveColorOverrideModel.transport(s))
+        case .file:        return ColorimetryOverride.allCases
+        }
+    }
+
+    /// nil while Custom is in force, so no preset row is checked.
+    private var presetBinding: Binding<ColorimetryOverride?> {
+        Binding(get: { current.isCustom ? nil : current },
+                set: { if let o = $0 { choose(o) } })
+    }
+
+    // MARK: Custom (colour S5, decision 7)
+
+    /// Three pickers, one per axis, each offering only the S3 table's values (`CustomColorimetry`). A value
+    /// that would make a combination the table cannot draw as stated (PQ / HLG on non-HDR primaries) is
+    /// greyed, and says why, so a Custom label never names a curve the picture is not drawn with.
+    ///
+    /// A SECTION OF THREE submenus rather than a "Custom ▸" menu of them: the three axes are visible in the
+    /// menu itself, and the section header says when Custom is in force.
+    ///
+    /// ⚠️ EACH AXIS IS A MENU OF TOGGLES, NOT A `Picker` — MEASURED. The first build used three `Picker`s:
+    /// in a menu their rows ignore `.disabled`, so PQ read enabled at primaries 709 (Accessibility
+    /// `enabled` true on all six) and choosing it did nothing — refused by the model, silently. A `Toggle`
+    /// row in a menu draws the checkmark and honours `.disabled`, as the Reset button does.
+    ///
+    /// ⚠️ FOR AN UNATTENDED RUN: synthetic mouse moves, clicks and arrow keys do not open these submenus,
+    /// while the same clicks choose the preset rows. Accessibility does: the open menu hangs off the face's
+    /// menu button, found by index, and a value is pressed with
+    /// `click menu item "Rec. 2020 — 9" of menu 1 of menu item "Primaries" of …`.
+    @ViewBuilder private var customSection: some View {
+        Section(current.isCustom ? "Custom — " + current.shortLabel.replacingOccurrences(of: "Custom ", with: "") + " in use"
+                                 : "Custom") {
+            axisMenu("Primaries", 0, CustomColorimetry.primaries)
+            axisMenu("Transfer", 1, CustomColorimetry.transfers)
+            axisMenu("Matrix", 2, CustomColorimetry.matrices)
+        }
+        .disabled(effectiveCodes == nil)
+    }
+
+    private func axisMenu(_ title: String, _ axis: Int, _ values: [Int]) -> some View {
+        Menu(title) {
+            ForEach(values, id: \.self) { c in
+                let allowed = allows(axis, c)
+                Toggle(Self.axisName(axis, c) + (allowed ? "" : " — " + (CustomColorimetry.refusal(replacing(axis, c)) ?? "")),
+                       // ⚠️ THE NEW VALUE OF THE TOGGLE IS IGNORED — MEASURED. Off a preset, the checkmarks sit
+                       // on the codes on screen, and clicking a checked row turns its toggle OFF: reading the
+                       // bool made "Custom from 2020 PQ, keep primaries 2020" do nothing. Any click on an
+                       // allowed row means "Custom, with this value on this axis".
+                       isOn: Binding(get: { axisValue(axis) == c },
+                                     set: { _ in
+                                         if let o = ColorimetryOverride.customIfSupported(replacing(axis, c)), o != current {
+                                             choose(o)
+                                         }
+                                     }))
+                    .disabled(!allowed)
+            }
+        }
+    }
+
+    /// Where Custom starts: the Custom triple in force, else what is on screen, with any axis the table
+    /// does not list taken as the value it is drawn with (709).
+    private var customSeed: (primaries: Int, transfer: Int, matrix: Int) {
+        if current.isCustom, let t = current.preset { return t }
+        let e = effectiveCodes ?? (1, 1, 1)
+        return (CustomColorimetry.primaries.contains(e.primaries) ? e.primaries : 1,
+                CustomColorimetry.transfers.contains(e.transfer) ? e.transfer : 1,
+                CustomColorimetry.matrices.contains(e.matrix) ? e.matrix : 1)
+    }
+
+    private func replacing(_ axis: Int, _ value: Int) -> (primaries: Int, transfer: Int, matrix: Int) {
+        var t = customSeed
+        switch axis {
+        case 0: t.primaries = value
+        case 1: t.transfer = value
+        default: t.matrix = value
+        }
+        return t
+    }
+
+    private func allows(_ axis: Int, _ value: Int) -> Bool { CustomColorimetry.isSupported(replacing(axis, value)) }
+
+    /// The value the axis's checkmark sits on: the Custom triple's, else what is on screen.
+    private func axisValue(_ axis: Int) -> Int {
+        let t = customSeed
+        return axis == 0 ? t.primaries : (axis == 1 ? t.transfer : t.matrix)
+    }
+
+    /// The S3 table's own names, with the CICP code the label and the bookmark use.
+    static func axisName(_ axis: Int, _ code: Int) -> String {
+        let name: String
+        switch axis {
+        case 0: name = ColorimetryTable.primariesName(forCode: code)
+        case 1: name = ColorimetryTable.transferName(forCode: code)
+        default:
+            switch code {
+            case 1:  name = "Rec. 709"
+            case 5:  name = "BT.470BG (601)"
+            case 6:  name = "SMPTE 170M (601)"
+            case 9:  name = "Rec. 2020 NCL"
+            default: name = "—"
+            }
+        }
+        return "\(name) — \(code)"
+    }
+
+    // MARK: Reading
+
     /// What the renderer has been told (`effective`) and what the stream said (`declared`). NDI's from
     /// NDIService; SRT's, WHEP's and HLS's from their clients, which publish the reading with the
-    /// override applied. nil on SRT until the first SPS has been read, on HLS until the first frame.
+    /// override applied. nil on SRT until the first SPS has been read, on HLS until the first frame,
+    /// and for a file (which reads `fileModel`).
     private var reading: (effective: SourceColorimetry, declared: SourceColorimetry)? {
+        guard case .live(let source) = subject else { return nil }
         switch source {
         case .ndi: return (ndi.colorInfo, ndi.declaredColorInfo)
         case .srt: return srt.colorimetry.map { ($0.bufferTags, $0.declaredTags) }
@@ -344,24 +524,44 @@ struct ColorInterpretationControl: View {
         }
     }
 
-    /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "709 · Declared".
+    /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "Custom 9·1·6 · Overridden".
     private var faceLabel: String {
-        guard let info = reading?.effective else { return "— · Waiting for the stream" }
-        return "\(SourceColorimetry.primariesName(info.primaries.code).replacingOccurrences(of: "Rec.", with: "")) "
-             + "\(SourceColorimetry.transferName(info.transfer.code).replacingOccurrences(of: "Rec.", with: "")) · \(info.tier)"
+        let tier: String
+        let p: Int, t: Int
+        switch subject {
+        case .live:
+            guard let info = reading?.effective else { return "— · Waiting for the stream" }
+            if case .live(let s) = subject, model.current(for: s).isCustom, info.isOverridden {
+                return model.current(for: s).shortLabel + " · " + info.tier
+            }
+            (p, t, tier) = (info.primaries.code, info.transfer.code, info.tier)
+        case .file:
+            if fileModel.override.isCustom { return fileModel.override.shortLabel + " · Overridden" }
+            let d = fileModel.declared
+            let stated = [d.primaries, d.transfer, d.matrix].compactMap { $0 }.count
+            tier = fileModel.override != .auto ? "Overridden" : (stated == 0 ? "Assumed" : "Declared")
+            (p, t) = (fileModel.effective.primaries, fileModel.effective.transfer)
+        }
+        return "\(SourceColorimetry.primariesName(p).replacingOccurrences(of: "Rec.", with: "")) "
+             + "\(SourceColorimetry.transferName(t).replacingOccurrences(of: "Rec.", with: "")) · \(tier)"
     }
 
-    /// The stream's own claim, independent of the override — an absence stated as an absence.
-    private var streamStatusLine: String {
-        guard let d = reading?.declared else { return "Has not stated its color yet" }
-        guard d.isDeclared else { return "Declares no colorimetry" }
-        return "Declares \(SourceColorimetry.primariesName(d.primaries.code)) · "
-             + "\(SourceColorimetry.transferName(d.transfer.code)) · "
-             + "\(SourceColorimetry.matrixName(d.matrix.code))"
-    }
-
-    private var overrideBinding: Binding<ColorimetryOverride> {
-        Binding(get: { model.current(for: source) },
-                set: { model.set($0, on: source) })
+    /// The source's own claim, independent of the override — an absence stated as an absence.
+    private var statusLine: String {
+        switch subject {
+        case .live:
+            guard let d = reading?.declared else { return "Has not stated its color yet" }
+            guard d.isDeclared else { return "Declares no colorimetry" }
+            return "Declares \(SourceColorimetry.primariesName(d.primaries.code)) · "
+                 + "\(SourceColorimetry.transferName(d.transfer.code)) · "
+                 + "\(SourceColorimetry.matrixName(d.matrix.code))"
+        case .file:
+            let d = fileModel.declared
+            guard d.primaries != nil || d.transfer != nil || d.matrix != nil else { return "Tags no colorimetry" }
+            func n(_ c: Int?, _ f: (Int) -> String) -> String { c.map(f) ?? "not stated" }
+            return "Tagged \(n(d.primaries, SourceColorimetry.primariesName)) · "
+                 + "\(n(d.transfer, SourceColorimetry.transferName)) · "
+                 + "\(n(d.matrix, SourceColorimetry.matrixName))"
+        }
     }
 }

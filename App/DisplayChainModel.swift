@@ -209,7 +209,10 @@ final class DisplayChainModel: ObservableObject {
             // nil. §6.8's Phase 2c part 1: NDI and WHEP resolve before they publish, so a nil-test
             // here called an assumption and a user override alike "tagged". `SourceColorProvenance`
             // carries the answer from the site that actually knows it.
-            let tier = (renderer?.sourceColorProvenance ?? .assumed).label
+            let provenance = renderer?.sourceColorProvenance ?? .assumed
+            // Colour S5: an override says which — "overridden (Custom 9·1·6)", in the title's words.
+            let tier = provenance.label
+                + (provenance == .overridden ? deck.interpretationLabel.map { " (\($0))" } ?? "" : "")
 
             sourceLine = "\(p) · \(t) · \(m) · \(range)"
                        + " — CICP \(pCode ?? 1)-\(tCode ?? 1)-\(mCode ?? 1)"

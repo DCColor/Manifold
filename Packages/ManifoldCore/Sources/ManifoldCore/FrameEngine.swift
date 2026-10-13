@@ -192,6 +192,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// leaving the PREVIOUS file's colour space on the layer.
     public var onSourceColorTags: ((Int?, Int?, Int?) -> Void)?
 
+    /// A NEW FILE HAS BEEN COMMITTED — called on the main actor at the start of `loadAsset`'s commit
+    /// phase, after `currentURL` is set and BEFORE the new file's `onSourceColorTags`. Colour S5: the
+    /// window's file override resets to Auto here (decided 2026-10-13, per window, not remembered per
+    /// file), so the new file's own tags are the first thing the renderer is told. A refused load never
+    /// reaches the commit, so the file still on screen keeps its override.
+    public var onSourceCommitted: ((URL) -> Void)?
+
     /// THE FILE'S CHROMA, for the chain readout's Chroma line (Stage 3b S2, D10): what the file is,
     /// and why the carried chroma is lower when it is. Published on the same edges as
     /// `onSourceColorTags` (at load, before the first frame; `.notStated` at unload) and for the same
@@ -1461,6 +1468,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // ══════════ PHASE 2 — COMMIT. THE PREVIOUS SOURCE ENDS HERE. ══════════
 
         currentURL = url
+        onSourceCommitted?(url)
         // A new file gets a clean slate for the degraded-playback notice: the previous file's
         // "video only" banner must not persist onto one whose audio reads fine. NOT done in phase
         // 1: a refused load must leave the current file's notice alone, since that file is still

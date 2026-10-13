@@ -166,6 +166,22 @@ final class StreamBookmarkMigrationTests: XCTestCase {
         XCTAssertEqual(try sortedJSON(try JSONEncoder().encode(list)), try sortedJSON(preColorBlob))
     }
 
+    /// Colour S5: a Custom choice is stored verbatim as `custom:p-t-m` in the same field, round-trips
+    /// through the store's encoding, restores on every transport, and Auto still removes the key.
+    func testACustomOverrideIsStoredInTheSameField() throws {
+        var list = try JSONDecoder().decode([StreamBookmark].self, from: preColorBlob)
+        let custom = ColorimetryOverride.customIfSupported((9, 1, 9))!
+        for i in list.indices { list[i].colorOverride = custom.storageID }
+        let data = try StreamBookmark.storeEncoding(list)
+        let back = try JSONDecoder().decode([StreamBookmark].self, from: data)
+        XCTAssertEqual(back, list)
+        let raw = try JSONSerialization.jsonObject(with: data) as! [[String: Any]]
+        for e in raw { XCTAssertEqual(e["colorOverride"] as? String, "custom:9-1-9") }
+        for b in back { XCTAssertEqual(ColorimetryOverride(storageID: b.colorOverride, on: transport(b.type)), custom) }
+        for i in list.indices { list[i].colorOverride = ColorimetryOverride.auto.storageID }
+        XCTAssertEqual(try sortedJSON(try JSONEncoder().encode(list)), try sortedJSON(preColorBlob))
+    }
+
     /// A blob written by this build reads in a pre-Stage D build: the extra key is ignored and every
     /// other field is equal. (That build, saving, would drop the key: the override goes, the list stays.)
     func testANewBlobDecodesInAnOlderBuild() throws {

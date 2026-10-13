@@ -124,11 +124,11 @@ public enum ColorimetryTransport: CaseIterable, Sendable {
 /// still set INDEPENDENTLY and correctly by each preset — note P3-D65 PQ, which carries a
 /// 709-class matrix, not a P3 one.
 ///
-/// EXTENSION POINT: an `.custom(SourceColorimetry)` case (independent axis pickers) is the obvious
-/// next step and is deliberately NOT built. It slots in without touching any caller: `preset` is
-/// the only thing that maps a case to a triple, and `SourceColorimetry.resolve` is the only thing
-/// that consumes it. Pickers already iterate `available(on:)` rather than `allCases`, which is what
-/// a payload case would have required anyway.
+/// CUSTOM (colour S5, §6.11 decision 7): `.custom(p, t, m)`, three axes chosen separately, each from the
+/// S3 table's supported values (`CustomColorimetry`). It slots in where the extension point said it would:
+/// `preset` maps it to its triple like any preset, so every transport and `SourceColorimetry.resolve`
+/// take it with no change of their own. `allCases` stays the PRESETS (Auto first) — the picker rows and
+/// ⌃⌥C's cycle; Custom is reached through its own three pickers, never by cycling.
 public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable {
     /// Trust the stream: declared if it declared, assumed-709 if it didn't. The default.
     case auto
@@ -137,6 +137,19 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
     case rec2020HLG
     case p3d65PQ
     case rec2020SDR
+    /// Colour S5: the user's own triple. Only supported triples are ever built (`custom(_:)`), so a
+    /// stored or typed value outside the S3 table never reaches a transport.
+    case custom(primaries: Int, transfer: Int, matrix: Int)
+
+    /// The presets, Auto first. NOT Custom: see the type's note.
+    public static let allCases: [ColorimetryOverride] = [.auto, .rec709, .rec2020PQ, .rec2020HLG, .p3d65PQ, .rec2020SDR]
+
+    /// A Custom override for this triple, or nil when the S3 table does not support it.
+    public static func customIfSupported(_ t: (primaries: Int, transfer: Int, matrix: Int)) -> ColorimetryOverride? {
+        CustomColorimetry.isSupported(t) ? .custom(primaries: t.primaries, transfer: t.transfer, matrix: t.matrix) : nil
+    }
+
+    public var isCustom: Bool { if case .custom = self { return true }; return false }
 
     public var id: String { storageID ?? "auto" }
 
@@ -150,6 +163,7 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
         case .rec2020HLG: return (9, 18, 9)     // 2020 · HLG · 2020
         case .p3d65PQ:    return (12, 16, 1)    // P3-D65 primaries · PQ · 709-CLASS MATRIX (not P3)
         case .rec2020SDR: return (9, 14, 9)     // 2020 · 2020 SDR transfer (the 709 curve) · 2020
+        case let .custom(p, t, m): return (p, t, m)
         }
     }
 
@@ -161,6 +175,7 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
         case .rec2020HLG: return "Rec.2020 HLG"
         case .p3d65PQ:    return "P3-D65 PQ"
         case .rec2020SDR: return "Rec.2020 SDR"
+        case .custom:     return shortLabel
         }
     }
 
@@ -173,6 +188,7 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
         case .rec2020HLG: return "2020 HLG"
         case .p3d65PQ:    return "P3 PQ"
         case .rec2020SDR: return "2020 SDR"
+        case let .custom(p, t, m): return "Custom \(p)·\(t)·\(m)"
         }
     }
 
@@ -189,13 +205,19 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
         case .rec2020HLG: return "rec2020-hlg"
         case .p3d65PQ:    return "p3d65-pq"
         case .rec2020SDR: return "rec2020-sdr"
+        case let .custom(p, t, m): return "\(CustomColorimetry.storagePrefix)\(p)-\(t)-\(m)"
         }
     }
 
     /// The preset a stored string names. Absent, empty or unknown → `.auto`, never a throw: a
     /// bookmark written by a later build (a preset this build does not have) must still load, and
     /// the honest reading of a word we don't know is "assert nothing".
+    ///
+    /// Colour S5: `custom:<p>-<t>-<m>`, read tolerantly — anything malformed or outside the S3 table is
+    /// Auto. A build from before S5 matches whole strings against its presets only, so it reads any
+    /// `custom:` string as Auto with no change of its own.
     public init(storageID: String?) {
+        if let t = CustomColorimetry.parse(storageID), let c = Self.customIfSupported(t) { self = c; return }
         self = Self.allCases.first { $0.storageID != nil && $0.storageID == storageID } ?? .auto
     }
 
@@ -204,7 +226,14 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
     /// stays: a stored string is never applied past the picker's own rule.
     public init(storageID: String?, on transport: ColorimetryTransport) {
         let preset = Self(storageID: storageID)
-        self = Self.available(on: transport).contains(preset) ? preset : .auto
+        self = Self.isOffered(preset, on: transport) ? preset : .auto
+    }
+
+    /// True when `transport` takes `override`: a preset it lists, or any supported Custom (decided
+    /// 2026-10-13: Custom on every transport and on files).
+    public static func isOffered(_ override: ColorimetryOverride, on transport: ColorimetryTransport) -> Bool {
+        if let t = override.preset, override.isCustom { return CustomColorimetry.isSupported(t) }
+        return available(on: transport).contains(override)
     }
 
     // MARK: - Availability
@@ -286,5 +315,45 @@ public struct SourceColorimetry: Equatable, Sendable {
         return SourceColorimetry(primaries: .overridden(p.primaries),
                                  transfer: .overridden(p.transfer),
                                  matrix: .overridden(p.matrix))
+    }
+}
+
+/// Colour S5: the values Custom offers on each axis — exactly the S3 table's supported codes
+/// (`ColorPrimaries`, `TransferCurve`, `YCbCrMatrix`), in picker order — and the one rule that refuses a
+/// combination: PQ or HLG on primaries CoreVideo has no HDR space for. `ColorimetryTable.layerAttachments`
+/// would draw those as Rec.709 SDR (its `hdrFallback`), so the readout would name a curve the picture is
+/// not drawn with. Refused here instead, so a Custom label never describes a picture it is not.
+public enum CustomColorimetry {
+    public static let primaries: [Int] = [1, 5, 6, 9, 11, 12]
+    public static let transfers: [Int] = [1, 6, 14, 15, 16, 18]
+    public static let matrices: [Int]  = [1, 5, 6, 9]
+
+    /// The bookmark spelling's prefix: `custom:9-1-6`. A storage format: never rename it.
+    public static let storagePrefix = "custom:"
+
+    public static func isSupported(_ t: (primaries: Int, transfer: Int, matrix: Int)) -> Bool {
+        guard primaries.contains(t.primaries), transfers.contains(t.transfer), matrices.contains(t.matrix)
+        else { return false }
+        return refusal(t) == nil
+    }
+
+    /// Why a combination of supported axis values is refused, in the menu's words; nil when it is allowed.
+    public static func refusal(_ t: (primaries: Int, transfer: Int, matrix: Int)) -> String? {
+        let hdr = TransferCurve(cicp: t.transfer)?.isHDR ?? false
+        guard hdr, t.primaries != 9, t.primaries != 12 else { return nil }
+        return "PQ and HLG need Rec. 2020 or P3 D65 primaries"
+    }
+
+    /// `custom:<p>-<t>-<m>` → the triple, or nil for anything else (no prefix, wrong count, not numbers).
+    public static func parse(_ storageID: String?) -> (primaries: Int, transfer: Int, matrix: Int)? {
+        guard let s = storageID, s.hasPrefix(storagePrefix) else { return nil }
+        let parts = s.dropFirst(storagePrefix.count).split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, let p = Int(parts[0]), let t = Int(parts[1]), let m = Int(parts[2]) else { return nil }
+        return (p, t, m)
+    }
+
+    /// Every supported triple, for the unit tests and nothing else.
+    public static var allSupported: [(primaries: Int, transfer: Int, matrix: Int)] {
+        primaries.flatMap { p in transfers.flatMap { t in matrices.map { m in (p, t, m) } } }.filter(isSupported)
     }
 }

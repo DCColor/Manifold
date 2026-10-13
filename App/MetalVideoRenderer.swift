@@ -1221,8 +1221,14 @@ final class MetalVideoRenderer {
         /// shader). Installed with the colorspace, on the render thread, so a frame is never drawn
         /// with one and declared with the other.
         let reference: ReferenceShaderParams?
+        /// Colour S5. The CICP matrix the PICTURE decodes with while the source state is `.overridden`,
+        /// else nil (the buffer's own tag, as always). Installed with the rest, so a frame is never
+        /// decoded under one override and declared under another.
+        let decodeMatrix: Int?
     }
     private var pendingColorState: PendingColorState?
+    /// RENDER THREAD ONLY. The override's matrix in force (`PendingColorState.decodeMatrix`), or nil.
+    private var activeDecodeMatrix: Int?
     /// RENDER THREAD ONLY. The Reference shader parameters in force, installed from
     /// `pendingColorState` at the top of the tick, exactly like the layer's colorspace.
     private var activeReference: ReferenceShaderParams?
@@ -1488,8 +1494,13 @@ final class MetalVideoRenderer {
         }
 
         refreshLock.lock()
+        // Colour S5: an override's matrix decodes the picture. A stream's override already re-tags its
+        // buffers, so for a stream this is the tag it carries anyway; a FILE's buffers keep the file's tag,
+        // and without this a file override would move the scopes, SDI and readout but not the picture.
+        // Never set on Auto, so every un-overridden source decodes exactly as before.
+        let decodeMatrix = sourceColorProvenance == .overridden ? (sourceMatrixCode ?? 1) : nil
         pendingColorState = PendingColorState(colorSpace: installed, wantsEDR: sourceWantsEDR,
-                                              reference: reference)
+                                              reference: reference, decodeMatrix: decodeMatrix)
         pendingRefresh = true
         refreshLock.unlock()
     }
@@ -2508,6 +2519,7 @@ final class MetalVideoRenderer {
             metalLayer.wantsExtendedDynamicRangeContent = colorState.wantsEDR
             CATransaction.commit()
             activeReference = colorState.reference
+            activeDecodeMatrix = colorState.decodeMatrix
             if let compareStamp { activeCompareStamp = compareStamp }
             // ORDERING, STATED WHERE IT CAN BE CHECKED — the line the first-frame bug is read off.
             //
@@ -4135,9 +4147,12 @@ final class MetalVideoRenderer {
 
     private func colorParams(for pixelBuffer: CVPixelBuffer) -> ColorParams {
         let tag = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String
-        let pictureMatrix = YCbCrMatrix(cicp: YCbCrMatrix.cicpCode(forCoreVideo: tag))
+        // Colour S5: under an override the override's matrix, which is the renderer's own code — the one
+        // the scopes, SDI and readout use — so the `[MATRIX]` line agrees by construction and says why.
+        let pictureMatrix = YCbCrMatrix(cicp: activeDecodeMatrix ?? YCbCrMatrix.cicpCode(forCoreVideo: tag))
         let k = pictureMatrix.decodeCoefficients
-        noteMatrixAgreement(picture: pictureMatrix, tag: tag)
+        noteMatrixAgreement(picture: pictureMatrix,
+                            tag: activeDecodeMatrix.map { "\(tag ?? "none"), overridden → CICP \($0)" } ?? tag)
 
         // Range flag comes from ENGINE STATE (override + source range), NOT the
         // buffer format. The buffer is always 420v raw (unclipped); the engine

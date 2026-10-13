@@ -78,8 +78,8 @@ held back until after release, and the numbered defect entries follow.
        and HLS. Container/bitstream disagreement is logged and shown (decided, Robbie). **Found by the run, not
        fixed (S3 changes no matrix):** the shader's 601 decode over-saturates by ×1.138, and files lose the 601
        and BT.470BG matrix codes (both below). Open: S3-5 by eye on the LG (attended); 6 and 5 amounts outside
-       ±2 (direction right). **Both 601 defects fixed in the S3 follow-up, built and run unattended 2026-10-12, not
-       committed (`500e58d`)** (§6.11, *S3 follow-up — the two 601 defects*). **MXF / DNx now take colour from the
+       ±2 (direction right). **Both 601 defects fixed in the S3 follow-up, built and run unattended 2026-10-12, committed
+       `500e58d`** (§6.11, *S3 follow-up — the two 601 defects*). **MXF / DNx now take colour from the
        container (decided, Robbie): built and run 2026-10-12, committed `638b05c`** (§6.11, *MXF / DNx:
        the container drives the picture*); case (g) S3-4 passes on both paths. The decoded offscreen of 601
        files is now within 4 10-bit codes of nominal (was 130–159 off); scopes, SDI and readout say 601. Case (g)'s
@@ -87,7 +87,7 @@ held back until after release, and the numbered defect entries follow.
        stream test fixtures are now seamless (`docs/color-fixtures/make_stream_fixtures.sh`): no loop clicks, no
        rail episode.
      - **S4** — Phase 5, the HDR headroom readout and its log on a display change. No headroom cap: the
-       no-tone-map decision stands. **Built and run unattended 2026-10-13, not committed** (§6.11, *S4 —
+       no-tone-map decision stands. **Built and run unattended 2026-10-13, committed `6d85ef2`** (§6.11, *S4 —
        results*). The readout has a Headroom row (`display is in SDR mode` / `headroom 8.97 of 8.97`, plus
        ` — none granted` when the display offers headroom that nothing holds), from the window's own screen.
        `[EDR] headroom (display change …)` logs once per change. Unattended U1–U4 pass: both displays read SDR
@@ -95,7 +95,22 @@ held back until after release, and the numbered defect entries follow.
        0 codes against HEAD in OS, Reference and Bypass. Open: S4-2 (HDR on, ≈ 8.97) and S4-3 (a grant on PQ),
        both in the attended LG session.
      - **S5** — Custom (per-axis interpretation) and the Interpretation button and override on files. The
-       Color control stays two buttons.
+       Color control stays two buttons. **Built and run unattended 2026-10-13, not committed** (§6.11, *S5 —
+       results*).
+       - **Decided (Robbie, 2026-10-13):** file overrides are per window and reset to Auto on a new file;
+         Custom is on every transport and on files; it is saved per bookmark as `custom:p-t-m`, which older
+         builds read as Auto; a Reset item sits at the top, greyed on Auto.
+       - **Custom:** the S3 table's values only. PQ and HLG on non-HDR primaries are greyed, with the reason.
+       - **The file override:** goes through the one colour setter, and the renderer decodes with the
+         override's matrix, so picture, scopes, SDI tag and readout move together.
+       - **Results:** P1–P9 pass.
+         - A 709 file under Custom 9-1-9 equals a file retagged 9-1-9, byte for byte, through the exports.
+         - Custom 9-1-9 equals the Rec.2020 SDR preset.
+         - 16 files on Auto, and SRT, WHEP, HLS and NDI presets: 0 codes against HEAD.
+         - A Custom bookmark restores, and HEAD reads it as Auto.
+         - `streamBookmarks` restored to `4466c076…`.
+       - ⚠️ **Pre-ship:** Reset's keyboard shortcut is the shortcut registry's to decide. It has none yet.
+       - **Open:** SDI on a running output; by eye on the LG.
      - **S6** — LUT loading: `.cube`, in Interpretation (window, scopes, SDI and export see it; tags follow the
        LUT's output space), one slot per window, kept across sources, cleared at quit, Recent LUTs saved.
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
@@ -5308,6 +5323,26 @@ operation, and **an un-opted-in layer must not be described as "what it did befo
 that phrasing was in the code comment briefly and is wrong. Part 1 is also the precondition for
 either opt-in: both properties act on HDR-TAGGED content, and tagging it is what part 1 does.
 
+### ⚠️ MEASUREMENT HAZARDS FOUND IN COLOUR S5 (2026-10-13) — unattended runs
+
+Three traps that each produced a plausible wrong number during S5 (COLOR_MANAGEMENT_FINDINGS.md §6.11, *S5 — results*,
+*Found while building and running it*):
+
+1. **AVPlayer replays a cached HLS URL across launches.** A fixture served at a URL an earlier run used is not what
+   plays: the player reported the old 80 s playlist while the server served a new 300 s one, stalled at about 20 s,
+   and every colour override after that waited for a frame that never came. Captures then show one frame throughout,
+   which looks like "0 codes". **Never reuse an HLS fixture URL with different content;** check the `[HLS] VOD
+   playlist (finite duration …)` line against the fixture.
+2. **A window can move onto the LG by itself after a stream connects** (it resizes to the stream). A capture taken
+   there is through the LG's profile, not the ASUS's. S4's `[EDR] headroom (display change — window moved) on "…"`
+   line records the move; check the last such line before every capture names the ASUS.
+3. **Synthetic mouse and arrow-key input does not open the Color menu's submenus** (Custom's Primaries / Transfer /
+   Matrix), though the same clicks choose its top-level rows. Use Accessibility: find the face's menu button by
+   index (its title starts U+FFFC, so a by-name reference fails), then
+   `click menu item "<row>" of menu 1 of menu item "<submenu>" of menu 1 of <button>`. Read `enabled` the same way.
+   A multi-frame (GOP) stream fixture also makes captures from different moments differ by a few codes: use an
+   all-intra or single-frame fixture for any 0-codes claim.
+
 ### ⚠️ MEASUREMENT HAZARD — `maximumExtendedDynamicRangeColorComponentValue` AND DISPLAY MODE
 
 **Recorded because it already cost us a working instrument once, on 2026-08-27, and it will do it
@@ -5337,7 +5372,7 @@ was observed during a drag** on the same machine.
    the LG. A probe that opens its own window may sample a different screen than the app does;
    `MetalVideoRenderer.logEDRHeadroom` uses `NSApp.mainWindow?.screen` and the scrub diagnostic uses
    the host view's own `window?.screen`. Same property, potentially different screen.
-   **Fixed by colour S4 (2026-10-13, not committed):** every `[EDR] headroom` line except the startup one
+   **Fixed by colour S4 (2026-10-13, `6d85ef2`):** every `[EDR] headroom` line except the startup one
    (which runs before any window exists) now reads the renderer's own window's screen and names it.
    It also logs on a display change: a window move, a profile or screen-parameters change, or a visible
    move in the values, which a 0.5 s read catches for brightness. COLOR_MANAGEMENT_FINDINGS.md §6.11,

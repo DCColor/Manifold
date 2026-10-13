@@ -5450,8 +5450,8 @@ checks (display roles, above).
 | **S1** Phase 3: Reference + the per-display setting — **built and run unattended 2026-10-12, committed `532c83f`; results under *S1 — results*, below** | S0 | `DisplayTransformMode.reference`; a separate fragment function, so the OS pipeline is unchanged by construction; pulldown row *Reference — BT.1886, as a reference monitor shows it* (changed from §6.3's "correct for grading", 2026-10-12); the setting with Lb and Lw. The curve is chosen from `sourceTransferCode` (§6.9 finding 11). PQ and HLG: Reference = OS (§6.2). |
 | **S2** hold-to-compare — **built and run unattended 2026-10-12, not committed; results under *S2 — results*, below** | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
 | **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, committed `94961b9`; the 601 follow-up committed `500e58d`; MXF / DNx container colour committed `638b05c`; results under *S3 — results*, *S3 follow-up* and *MXF / DNx*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
-| **S4** Phase 5: headroom readout — **built and run unattended 2026-10-13, not committed; results under *S4 — results*, below. S4-2 and S4-3 wait for the LG session** | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
-| **S5** Custom + the file Interpretation button | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
+| **S4** Phase 5: headroom readout — **built and run unattended 2026-10-13, committed `6d85ef2`; results under *S4 — results*, below. S4-2 and S4-3 wait for the LG session** | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
+| **S5** Custom + the file Interpretation button — **built and run unattended 2026-10-13, not committed; results under *S5 — results*, below** | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
 | **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. |
 
 #### Predictions, with pass / fail bands
@@ -5505,6 +5505,9 @@ checks (display roles, above).
 1. Unit tests: every per-axis combination maps to the S3 table.
 2. A file override moves the scope headers, the readout and the SDI tag together; Auto is **0 codes** against
    HEAD.
+
+The full S5 predictions, P1–P9 with their bands, are under *S5 — results*, below (written 2026-10-13 10:44, before any
+launch).
 
 **S6 — LUT.**
 
@@ -6074,7 +6077,7 @@ by name. The domain is **dictionary-equal to the snapshot**; `streamBookmarks` e
 
 #### S4 — headroom readout: results, 2026-10-13 (unattended)
 
-**Not committed.** Base `16a592f` (app code as `638b05c`). Pixel checks on the **ASUS only**. macOS HDR was off on both
+**Committed `6d85ef2`** (Robbie). Base `16a592f` (app code as `638b05c`). Pixel checks on the **ASUS only**. macOS HDR was off on both
 displays (`potential` 1.0, read, not set), and no display setting was touched. Captures were window-only, by the
 Manifold window id, and deleted after scoring with their pixel dumps; none were viewed. Predictions U1–U4, plus H1
 and H2 (S4-2 and S4-3 above), were written after the build and before any launch
@@ -6131,6 +6134,136 @@ for it to see; every update came from a notification).
 **Defaults:** exported before the first launch (1 143 keys; `displayCalibrations` absent, never written). The three
 launches added three `NSWindow Frame …` keys and nothing else. Each was checked absent from the snapshot and deleted
 by name. The domain is **dictionary-equal to the snapshot**; `streamBookmarks` equal and never written.
+
+#### S5 — Custom and the file Interpretation control: results, 2026-10-13 (unattended)
+
+**Decided (Robbie, 2026-10-13):**
+- **File overrides:** per window, reset to Auto when a new file opens, not remembered per file.
+- **Custom everywhere:** on every transport and on files. On a stream bookmark it is saved in the existing Stage D
+  field as `custom:<p>-<t>-<m>`, read tolerantly so older builds see Auto.
+- **Values:** Custom choices come only from the S3 table's supported values.
+- **Reset:** a Reset item at the top of the control whenever an override is active, greyed on Auto. Its keyboard
+  shortcut is the shortcut registry's to decide.
+
+**Not committed.** Base `6d85ef2` (S4). Pixel checks on the **ASUS only**. macOS HDR was off (`potential` 1.0, read,
+not set), and no display setting was touched. Captures were window-only, by the Manifold window id. Menu captures
+were taken by the Manifold menu window's own id. All were deleted after scoring, with their pixel dumps and the
+exports.
+
+Predictions P1–P9 were written after the unit tests and the first build, before any launch
+(`build/colour-s5/predictions.txt`, 10:44). Outputs are in the gitignored `build/colour-s5/`:
+- `final/` — every scored tree result on the final binary, `score_files.txt`, `score_p7.txt`;
+- `run/` — HEAD's runs, the live runs, `score_live*.txt`;
+- `rep_srt/`;
+- the discarded runs, each in its own folder (below).
+
+**Estimated before the run:** 3–3.5 hours. **Actual:** about 2 h 15 min, 10:30–12:45. The live and bookmark
+instruments took most of it (below).
+
+##### What was built
+
+- **Custom in the model** (`ColorimetryModel/Colorimetry.swift`). `ColorimetryOverride.custom(primaries:transfer:matrix:)`,
+  built only through `customIfSupported`.
+  - **`CustomColorimetry`:** the axis values are exactly the S3 table's — primaries 1·5·6·9·11·12, transfer
+    1·6·14·15·16·18, matrix 1·5·6·9. One combination rule: PQ or HLG on primaries other than 2020 or P3-D65 is
+    refused, with a reason. The table would draw those as 709 SDR (`hdrFallback`), so the label would name a curve
+    the picture is not drawn with.
+  - **The presets are unchanged.** `allCases` stays the six presets, so the picker rows, ⌃⌥C's cycle and every
+    existing test are unchanged.
+  - **Storage:** `custom:p-t-m` in the same `colorOverride` field. Anything malformed, or outside the table, reads
+    as Auto. A build from before S5 matches whole preset strings only, so it reads any `custom:` string as Auto with
+    no change of its own.
+  - **Labels:** `Custom 9·1·6` (primaries · transfer · matrix).
+  - **Transports:** every transport already applied `.preset`, so SRT, WHEP, HLS and NDI take Custom with no
+    transport change. `LiveColorOverrideModel.set` now accepts it (`isOffered`).
+- **The file override** (`App/FileColorOverride.swift`, per window). It sits between the file's tags and the one
+  colour setter:
+  - **Both tag edges go through it:** the engine's load edge and `ContentView`'s metadata observer. That observer's
+    re-assert, called straight on the renderer, would have undone an override, because its provenance differs.
+  - **New file:** the engine's new `onSourceCommitted` (FrameEngine, at the load's commit, before the new file's
+    tags) resets the override to Auto. A refused load never reaches it.
+  - **SDI tag:** re-tagged through `DeckLinkService.sourceColorChanged`, for the deck the card follows.
+  - **⌃⌥C:** cycles a file's presets when no stream is shown.
+  - **Title:** ` — Color Custom 9·1·9`.
+- **The renderer decodes with an override's matrix** (`PendingColorState.decodeMatrix`). A stream's override
+  re-tags its buffers, but a file's buffers keep the file's tag; without this, a file override would move the
+  scopes, SDI and readout but not the picture.
+  - It is installed with the rest of the colour state on the render thread, and nil on Auto. So an un-overridden
+    source decodes exactly as before (P4, P8).
+  - `[MATRIX]` says so: `buffer tag ITU_R_709_2, overridden → CICP 9 … — agree`.
+- **The control** (`ColorInterpretationSlot` / `ColorInterpretationControl`, `App/Live/LiveColorOverride.swift`).
+  It is one element in `ContentView`, so **no new modifiers**: the slot picks the live stream or the file. Two
+  buttons as before (decision 6). The menu, top to bottom:
+  - **Reset to File's Tags / Reset to Stream's Tags**, greyed on Auto.
+  - **The presets.**
+  - **A *Custom* section with three submenus**, *Primaries*, *Transfer* and *Matrix*. The rows are named
+    `Rec. 2020 — 9`, a refused value is greyed with its reason, and the section header reads
+    `Custom — 9·1·9 in use`.
+  - **The source's own claim.**
+  - **Save and Revert** for a saved stream.
+  - **The face reads** `Custom 9·1·9 · Overridden`, amber.
+- **Readout:** the Source line's tier names the override, e.g. `— overridden (Custom 9·1·9)`.
+- **`[DeckLink] colorspace → …`** is logged once per change, so an unattended run reads the SDI tag beside the rest.
+- **Tests:** `swift test` **368 / 368**. That is 358, plus 9 Custom tests, plus 1 bookmark test (a `custom:` string
+  round-trips in the store's encoding). The Profile build is clean.
+
+##### Results
+
+| # | Prediction | Result | Verdict |
+|---|---|---|---|
+| P1 | Every supported Custom combination maps to the S3 table; 32 refused; `custom:p-t-m` round-trips; malformed → Auto; HEAD's reader sees Auto | **112** supported combinations, each axis equal to `ColorPrimaries` / `TransferCurve` / `YCbCrMatrix` of its own code, none with a fallback. The **32** PQ/HLG-on-1·5·6·11 combinations are exactly the ones `layerAttachments` falls back on, and are refused. Round-trip for all 112. 12 malformed or unsupported strings → Auto. HEAD's whole-string preset match, restated, reads every `custom:` string as Auto | **PASS** |
+| P2 | 709 ProRes chart → Custom 9-1-9 through the menu's pickers = a copy retagged 9-1-9 (container `colr` and ProRes header, `-c copy`; decoded Y'CbCr SHA-256 identical), and picture, scopes, SDI tag and readout move together | Window **0 codes**. Export rgba16f and v210 **byte-identical**, v210 kr/kb **0.2627 / 0.0593**, PNG ICC equal. `[SCOPE-COLOR] source: Rec. 2020 · Rec. 709 — overridden (CICP 9-1-9)`; `[DeckLink] colorspace → Rec. 2020 (primaries 9)`; `[CHAIN] Source: … CICP 9-1-9 — overridden (Custom 9·1·9)`; `[MATRIX] … overridden → CICP 9 … agree`; title `— Color Custom 9·1·9`. Sanity: Custom vs Auto on the same file **82 codes** | **PASS** |
+| P3 | Custom 9-1-9 = the Rec.2020 SDR preset (9-14-9, by ⌃⌥C) | Window **0 codes**; exports byte-identical | **PASS** |
+| P4 | File Auto vs HEAD: 0 codes | **0 codes, 0 px** on 16 files: the 709 and retagged charts, 9-1-9, 9-14-9 (ProRes, H.264), 11-1-1, 6-6-6, 5-6-5, 12-1-1, 9-18-9, 1-14-1, case (g), the 6-6-6 and 1-1-1 DNxHR MXFs, the wedge, the PQ wedge. Exports byte-identical | **PASS** |
+| P5 | A new file resets to Auto | In the **same window** (id unchanged), File ▸ Open Recent ▸ `wedge.mov` over Custom 9·1·1: `[FILE-COLOR] override → Auto (new file: wedge.mov)`, title without the suffix, picture **0 codes** against HEAD's wedge | **PASS** |
+| P6 | Reset → Auto at once; greyed on Auto | Reset after Custom: **0 codes** against the capture before the override. Accessibility `enabled`: **false** on Auto, **true** with Custom. Pressing it on Auto: no `[FILE-COLOR]` line. On SRT and HLS, Reset to Stream's Tags reached the renderer (`renderer now: the stream’s own color`); SRT 0 codes against Auto | **PASS** |
+| P7 | Custom saved on a bookmark restores on reconnect; an older reader sees Auto | Save from the menu stored `colorOverride=custom:9-1-9` (`bm.py`). Reconnect: `override → Custom 9·1·9 (CICP 9-1-9) — from the saved stream`, title and `Revert to Saved (Custom 9·1·9)`. Pixels on a single-frame HLS: restored **0 codes** against the same Custom chosen in the session. **HEAD** on that bookmark: `the saved stream’s color override “custom:9-1-9” is not offered on this transport — Auto`, picture **0 codes** against the tree's Auto. Sanity Custom vs Auto **101 codes** | **PASS** |
+| P8 | SRT, WHEP, HLS, NDI presets unchanged | Auto and 2020 PQ (⌃⌥C), tree vs HEAD: **0 codes** on all four. SRT and WHEP were scored on single-frame fixtures (below); NDI on the scratch bars sender; HLS and the first SRT run on the GOP chart, where they happened to land on the same frame. Sanity Auto vs PQ 126–255 codes on each | **PASS** |
+| P9 | `streamBookmarks` restored; defaults equal | Stash **1 196 bytes, SHA-256 `4466c076…`**, re-read and matched; written back, read back `4466c076…`. 49 `NSWindow Frame …` keys added by the launches, each checked absent from the snapshot and deleted by name; domain **dictionary-equal** (1 143 keys) | **PASS** |
+
+##### Found while building and running it
+
+1. **Picker rows in a menu ignore `.disabled`.** The first build used three `Picker`s. PQ read enabled at primaries
+   709 (Accessibility, all six rows `true`), and choosing it did nothing: the model refused it silently, which is
+   what "never silently" rules out. Each axis is now a menu of `Toggle`s, which honour `.disabled`. Measured after
+   the change: PQ and HLG `false` at 1·1·1, titled with the reason, and pressing one changes nothing.
+2. **Clicking an already-checked Custom row did nothing.** Off a preset, the checkmarks sit on the codes on screen.
+   From 2020 PQ, "keep primaries 2020" turned that toggle off, and the setter read the bool. Any click on an allowed
+   row now chooses that triple. Found on SRT (*Custom ▸ Primaries ▸ Rec. 2020* dropped three times). All P2–P7
+   numbers above are from the final binary; the file runs were repeated on it.
+3. **Synthetic input cannot open these submenus.** Mouse moves, clicks and arrow keys fail, while the same clicks
+   choose a preset row. Neither layout opened (nested `Custom ▸`, or the section of three). Accessibility works:
+   the open menu hangs off the face's menu button, found by index rather than by name (its title starts U+FFFC), and
+   a value is pressed with `click menu item "Rec. 2020 — 9" of menu 1 of menu item "Primaries" of menu 1 of mb`.
+   That is how every Custom choice above was made.
+4. **Discarded runs, kept for the record.** None of them is the code under test:
+   - **`run/run1_pickers/`** is the Picker build, before (1).
+   - **`run/run1_live_gop/`** holds the first SRT and WHEP runs, on the chart fixture that decodes to **10 distinct
+     frames**. WHEP's 2–19 codes were two different frames; on Stage E's single-frame bars it is 0.
+   - **`run/head_srt/`**: HEAD's second SRT session **was captured on the LG.** The window resized onto it after
+     connecting; S4's `[EDR] headroom (display change — window moved) on "LG TV SSCR2"` line is what showed it. A
+     check of all 70 captures found these two and no others. Re-run on the ASUS: 0 codes.
+   - **`final/p7b_short_fixture`, `p7b_looped_fixture_stalled`, `p7b_wrong_server`, `p7b_cached_url`** are four
+     P7 pixel runs. The fixture ended; then a looped copy broke AVPlayer's timeline; then a stale HTTP server held
+     the port; then — with the right server — **AVPlayer replayed a cached copy of a URL used earlier** (it reported
+     the old 80 s playlist while the server served 300 s), stalled at about 20 s, and every override after that
+     waited for a frame. In each, the restored and session captures were the same frame, which the sanity check
+     exposed. The scored run used an all-intra single-frame HLS at a never-used URL.
+5. **The Color menu shows "Colorimetry" twice:** the section title and the inline picker's own label. This is the
+   menu's code from before S5, unchanged; not fixed here.
+6. **An HLS override waits for the next decoded frame.** On a stalled or paused HLS stream, a preset, Custom and
+   Reset alike wait until frames resume (Stage E recorded the same for presets). A file override applies at once.
+
+##### Not exercised
+
+- **The SDI tag on a running output.** There was no DeckLink output; the tag was read from the label the output
+  would send, and the matrix from the v210 export.
+- **Custom on WHEP and NDI.** It takes the same `.preset` path as SRT and HLS, where it was run; WHEP and NDI ran
+  presets only.
+- **By eye on the LG.** No reason to expect a difference from the pixel results; a sanity look can join the
+  batched LG session.
+- **Saving Custom from a stream with no bookmark.** The control says the override lasts for the connection, as
+  before.
 
 ---
 
