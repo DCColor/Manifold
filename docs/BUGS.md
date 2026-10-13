@@ -117,6 +117,19 @@ held back until after release, and the numbered defect entries follow.
          fixed.
      - **S6** — LUT loading: `.cube`, in Interpretation (window, scopes, SDI and export see it; tags follow the
        LUT's output space), one slot per window, kept across sources, cleared at quit, Recent LUTs saved.
+       **Audited and decided 2026-10-13** (§6.11, *S6 — LUT: audit, decisions and plan*):
+       - **Decided (Robbie, 2026-10-13):** trilinear and tetrahedral as an app-wide setting, default tetrahedral (D1);
+         input outside the domain clamped (D2); the LUT a third input to `publishColorState`, with source codes and
+         picture codes, and the CLAUDE.md colour-setter rule amended in L2 (D3); output space = the presets + Custom,
+         default Same as source, remembered per LUT (D4); caps 65³ / 65 536 (D5); Bypass LUT, no hold key (D6);
+         unknown keywords ignored and named (D7); no video-levels toggle (D8); no drag-and-drop (D9).
+       - **Stages:** L0 parser, CPU reference and generator (package only) → L1 shader → L2 tags → L3 UI → L4 the
+         Resolve match (Robbie, ~15 min).
+       - **Predictions P1–P9.** P2's identity check excludes superwhite and sub-black, which the clamp moves.
+     - **S7** — output HDR signalling, **pre-release, after S6** (D10, decided 2026-10-13): SDI VPID colorimetry and
+       transfer (SDR / HLG / PQ), and the HDMI HDR InfoFrame on the DeckLink's HDMI daughter card (EOTF plus static
+       metadata), from the file's HDR10 metadata or the stream's `[HDR10-SEI]`, with stated defaults when a PQ source
+       carries none. Scope: *SDI and HDMI never signal PQ or HLG*, below.
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
@@ -2107,6 +2120,52 @@ it stood:
 Every WHEP session in S3 and its follow-up (MediaMTX, Opus) logs one resampler hole of 120 frames in its first window:
 the first audio buffer is 840 samples (17.5 ms) instead of 960. Once per session, at the start; never at a loop seam.
 Probably the Opus pre-skip trim meeting the first buffer. Not investigated.
+
+---
+
+## ☐ OPEN 2026-10-13 — SCHEDULED PRE-RELEASE AS COLOUR S7 — PRE-EXISTING, ALL BUILDS — SDI and HDMI never signal PQ or HLG
+
+**What is wrong.** The DeckLink output tags each frame with `bmdDeckLinkFrameMetadataColorspace` only
+(`App/DeckLink/DeckLinkBridge.mm:796`, set from the primaries code by `setOutputColorspaceForPrimaries`). No EOTF,
+no static HDR metadata, no `bmdFrameContainsHDRMetadata` flag. A PQ or HLG source reaches SDI tagged Rec.2020 with
+nothing saying it is HDR. A reference monitor that follows the signal stays in SDR, and someone sets the EOTF by hand.
+Nothing in `App/DeckLink` mentions HDMI.
+
+**Why nobody reported it.** The SDI checks to date were SDR, or read the tag from the log. Found by reading the code
+during the colour S6 audit (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S6 — LUT: audit, decisions and plan*, finding 6).
+
+**Scope of S7 (decided, Robbie, 2026-10-13; corrected the same day to include HDMI):**
+- **SDI:** the VPID's colorimetry and transfer characteristic, SDR, HLG or PQ. Through
+  `bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc` (CTA-861.3's 0–7) with `bmdFrameContainsHDRMetadata`, beside
+  the colorspace already set.
+- **HDMI:** the HDR InfoFrame on the HDMI daughter card. EOTF plus static metadata, meaning mastering primaries, white
+  point, min and max mastering luminance, MaxCLL and MaxFALL (`bmdDeckLinkFrameMetadataHDRDisplayPrimaries*`,
+  `…WhitePoint*`, `…Min/MaxDisplayMasteringLuminance`, `…MaximumContentLightLevel`,
+  `…MaximumFrameAverageLightLevel`).
+- **Two separate fields, never derived from each other (clarified, Robbie, 2026-10-13):**
+  - **Signal colorimetry** (the SDI VPID's colorimetry, the HDMI InfoFrame's colorimetry) follows the **picture's
+    primaries** (S6's D3): the source's own, or a LUT's stated output space, because the wire carries the post-LUT
+    picture. So an HDR10 source signals **Rec.2020**: the 2020 container that Netflix and Amazon deliverables require.
+  - **Mastering display primaries** (in the static metadata) come from the source's HDR10 metadata. When the source
+    carries none they default to **P3-D65**: content limited to P3 inside the 2020 container.
+  - ⚠️ A 2020 signal does not imply 2020 mastering primaries, and P3 mastering primaries do not make the signal P3.
+    Neither field is filled from the other, in the code or in a default.
+- **Values:** from the file's HDR10 metadata (`HDR10StaticMetadata`, `ManifoldCore/HDR10Metadata.swift`) or the
+  stream's `[HDR10-SEI]` values (`App/SRT/SRTFrameRouter.swift:441`). The EOTF follows the **picture** codes (S6's
+  D3), so a PQ LUT on an SDR source signals PQ.
+- **Defaults when a PQ source carries none (proposed):**
+
+  | Field | Default |
+  |---|---|
+  | Mastering display primaries (static metadata only; the signal colorimetry stays the picture's, above) | P3-D65 |
+  | White point | D65 (0.3127, 0.3290) |
+  | Max mastering luminance | 1000 cd/m² |
+  | Min mastering luminance | 0.0050 cd/m² |
+  | MaxCLL, MaxFALL | Not sent (CTA-861.3's "unknown") |
+
+  ⚠️ The SDK documents those two as 1–65535, so S7 first checks that unset is accepted. HLG sends the EOTF only. The
+  readout and the log say when defaults were sent.
+- **The attended check:** on the reference monitor, which should switch EOTF on its own (SDI and HDMI each).
 
 ---
 

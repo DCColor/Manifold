@@ -5452,7 +5452,8 @@ checks (display roles, above).
 | **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, committed `94961b9`; the 601 follow-up committed `500e58d`; MXF / DNx container colour committed `638b05c`; results under *S3 — results*, *S3 follow-up* and *MXF / DNx*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
 | **S4** Phase 5: headroom readout — **built and run unattended 2026-10-13, committed `6d85ef2`; results under *S4 — results*, below. S4-2 and S4-3 wait for the LG session** | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
 | **S5** Custom + the file Interpretation button — **built and run unattended 2026-10-13, committed `6be1938`; results under *S5 — results*, below** | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
-| **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. |
+| **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. **Audited and decided 2026-10-13; staged as L0–L4 under *S6 — LUT: audit, decisions and plan*, below. Interpolation corrected there: trilinear and tetrahedral, default tetrahedral (D1).** |
+| **S7** output HDR signalling | S6 | SDI VPID colorimetry and transfer (SDR / HLG / PQ), and the HDMI HDR InfoFrame (EOTF + static metadata) on the DeckLink's HDMI daughter card. Pre-release (D10). Scope under *S6 — LUT: audit, decisions and plan*, D10, and in `BUGS.md`. |
 
 #### Predictions, with pass / fail bands
 
@@ -5509,7 +5510,8 @@ checks (display roles, above).
 The full S5 predictions, P1–P9 with their bands, are under *S5 — results*, below (written 2026-10-13 10:44, before any
 launch).
 
-**S6 — LUT.**
+**S6 — LUT.** ⚠️ **Superseded 2026-10-13 by P1–P9 under *S6 — LUT: audit, decisions and plan*, below.** Item 1 as
+written cannot pass: a 0–1 LUT clamps superwhite (D2), so the wedge's 1.00098 patch moves. P2 there carries the exclusion.
 
 1. Identity 33³: **0 codes** at 10-bit, export and v210.
 2. A Resolve-exported LUT on the colour fixture against Resolve's own render: within **±2 codes** at 10-bit.
@@ -6264,6 +6266,200 @@ instruments took most of it (below).
   batched LG session.
 - **Saving Custom from a stream with no bookmark.** The control says the override lasts for the connection, as
   before.
+
+#### S6 — LUT: audit, decisions and plan, 2026-10-13
+
+**The audit** was read-only, against `988c312`. It changed nothing, and launched nothing.
+
+##### What the audit found that the plan depends on
+
+1. **The seam exists.** `passthroughFragment` (`App/PassthroughShader.metal:180`) ends with full-range R′G′B′ (lines
+   236–238), just before the narrowing to `half4`. That value goes into the offscreen ring, which the scopes, the
+   v210 convert, the export and the display copy all read. A LUT placed there reaches all of them, as decision 4 asks.
+2. **The signal there is already in Resolve's domain.** Legal 64 → 0.0 and 940 → 1.0, full-range 0 → 0.0, non-linear,
+   after the interpreted matrix, unclamped (superwhite 1.00098 survives). Resolve works in full-range 0–1 too: a
+   Video-levels clip is scaled 64–940 → 0–1 on input, and LUTs act on that. **So a Resolve LUT applies to the offscreen
+   value as it is, with no rescaling.** The classic pitfall is applying it to code/1023, which puts black at 0.0626:
+   about 6 % lifted blacks and a contrast error.
+3. **One set of codes means two things today.** The renderer's `source*Code` are read as "what the picture is" by:
+   - the scope headers (`ScopeColorFeed.swift:104`);
+   - the SDI tag (`DeckLinkService.swift:711`, `:874`, `:1078`);
+   - the v210 matrix (`MetalVideoRenderer.swift:3771`);
+   - the export ICC (`sourceDerivedColorSpace`, `:3946`);
+   - the EDR opt-in (`:1598`);
+   - Reference's plan (`:1484`).
+
+   They are also read as "what the source is" by the Source line (`DisplayChainModel.swift:173`) and the override's
+   decode matrix (`:1501`). A LUT splits the two meanings.
+4. **The colour state already has two inputs.** `setSourceColorSpace` and `setDisplayTransform` both go through
+   `publishColorState` (`:1460`), which parks one `PendingColorState` for the render thread. A LUT fits as a third.
+5. **Not sandboxed.** `App/Manifold.entitlements` holds only `disable-library-validation`. Recent LUTs need plain
+   bookmark data, not security-scoped bookmarks.
+6. **The SDI output never signals PQ or HLG.** `DeckLinkBridge.mm:796` sets only `bmdDeckLinkFrameMetadataColorspace`.
+   No EOTF, no static HDR metadata, and no HDMI handling anywhere in `App/DeckLink`. Recorded nowhere before this audit.
+   See D10.
+7. **Resolve's 3D LUT interpolation is a project setting**: *Project Settings › Color Management › 3D Lookup Table
+   Interpolation*, Trilinear or Tetrahedral. Its default was not confirmed; Robbie reads it from his project.
+8. **Metal's linear sampler is not used for the LUT.** Apple GPUs snap filter weights to 1/256 (the note at
+   `PassthroughShader.metal:91`), and the sampler needs a half-texel offset. The shader interpolates by hand, with
+   `read()` and float32 weights, as the 8-bit chroma path already does.
+
+##### Decisions (Robbie, 2026-10-13)
+
+1. **D1 — Interpolation:** both trilinear and tetrahedral, as an app-wide setting, **default tetrahedral**. Robbie
+   confirms against his Resolve project's setting.
+2. **D2 — Input outside the LUT's domain is clamped**, as Resolve does at the LUT boundary.
+3. **D3 — The LUT is a third input to `publishColorState`.** The renderer carries **source codes** (what
+   `setSourceColorSpace` received: the Source line, the decode matrix, provenance) and **picture codes** (the LUT's
+   output space if a LUT is loaded, else the source codes: the layer, EDR, scope headers, SDI tag, v210 matrix, export
+   ICC, Reference, CIE). Without a LUT the two are identical. **The CLAUDE.md colour-setter rule is amended in L2**,
+   when the LUT's setter exists; amending it before would name a function that is not there.
+4. **D4 — Output-space picker:** the Interpretation presets plus Custom, default **Same as source**, remembered per
+   LUT in Recent LUTs.
+5. **D5 — Caps:** 3D up to 65³, 1D up to 65 536 entries. Larger is refused with a banner.
+6. **D6 — A Bypass LUT item** that keeps the LUT loaded. No hold key in 1.0.
+7. **D7 — Unknown keywords are ignored and named**, with their line numbers, in the readout and the log.
+8. **D8 — No video-levels toggle in 1.0.** A vendor "legal-in" LUT looks as it does in Resolve: flat.
+9. **D9 — No drag-and-drop in 1.0.**
+10. **D10 — Output HDR signalling is a pre-release stage, S7, after S6**, covering both outputs (corrected the same
+    day: the DeckLink has an HDMI daughter card):
+    - **SDI:** the VPID's colorimetry and transfer characteristic (SDR / HLG / PQ). Through the SDK's
+      `bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc` with `bmdFrameContainsHDRMetadata`, beside the colorspace
+      the bridge already sets.
+    - **HDMI:** the HDR InfoFrame: EOTF plus static metadata, meaning mastering primaries, white point, minimum and
+      maximum mastering luminance, MaxCLL and MaxFALL (the `bmdDeckLinkFrameMetadataHDR*` keys).
+    - **Two separate fields, never derived from each other (clarified, Robbie, 2026-10-13):**
+      - **Signal colorimetry** (the SDI VPID's colorimetry, the HDMI InfoFrame's colorimetry) follows the **picture's
+        primaries** (D3): the source's own, or a LUT's stated output space, because the wire carries the post-LUT
+        picture. An HDR10 source signals **Rec.2020**: the 2020 container that Netflix and Amazon deliverables require.
+      - **Mastering display primaries** (in the static metadata) come from the source's HDR10 metadata. When the
+        source carries none they default to **P3-D65**: content limited to P3 inside the 2020 container.
+      - ⚠️ A 2020 signal does not imply 2020 mastering primaries, and P3 mastering primaries do not make the signal P3.
+        Neither field is filled from the other, in the code or in a default.
+    - **Where the values come from:** the file's HDR10 metadata (`HDR10StaticMetadata`, `ManifoldCore/HDR10Metadata.swift`)
+      or the stream's `[HDR10-SEI]` values (`App/SRT/SRTFrameRouter.swift:441`), taken from the **picture** codes
+      (D3), so a PQ LUT on an SDR source signals PQ.
+    - **Defaults when a PQ source carries none (proposed):**
+
+      | Field | Default |
+      |---|---|
+      | Mastering display primaries (static metadata only; the signal colorimetry stays the picture's, above) | P3-D65 |
+      | White point | D65 (0.3127, 0.3290) |
+      | Max mastering luminance | 1000 cd/m² |
+      | Min mastering luminance | 0.0050 cd/m² |
+      | MaxCLL, MaxFALL | Not sent (CTA-861.3's "unknown") |
+
+      ⚠️ The SDK documents MaxCLL / MaxFALL as 1–65535, so S7 checks whether leaving them unset is accepted before
+      relying on it. HLG sends the EOTF only, with no static metadata. The readout and the log say when the defaults
+      were sent.
+    - Recorded in `BUGS.md` (release scope, and its own entry).
+
+##### Staged plan
+
+| Stage | What | Who |
+|---|---|---|
+| **L0** | The `.cube` parser as its own ManifoldCore target (`LUTCube`); a CPU reference evaluator (trilinear, tetrahedral, shaper, domain, clamp) that defines what L1's shader must compute; unit tests on a corpus of good and malformed files; the Python generator for synthetic LUTs with expected outputs (`scripts/lut/make_synthetic_luts.py`) | Unattended |
+| **L1** | The shader stage under a Metal function constant (off = today's code), both interpolations, shader + 3D, `rgba32Float` 3D texture. A minimal Load and Remove. Output space = the source's | Unattended |
+| **L2** | Source / picture codes (D3), the output-space picker, and the tags: scopes, SDI, v210, export ICC, EDR. The CLAUDE.md rule amendment | Unattended |
+| **L3** | Recent LUTs, Bypass LUT, the readout line, title suffix ` — LUT name.cube`, amber face, refusal banners | Unattended |
+| **L4** | The Resolve match, plus the SDI and LG sanity looks | Robbie, ~15 min |
+| **S7** | Output HDR signalling, SDI and HDMI (D10) | Unattended, then an attended look on the reference monitor |
+
+##### Predictions P1–P9, with pass / fail bands
+
+1. **P1 — No LUT vs HEAD:** **0 codes** on window, export and v210, on S5's 16 files and the four transports' presets.
+2. **P2 — Identity** 33³, 65³, a 1D of 1024 and a shaper + 3D identity: **0 codes** at 10-bit on export and v210, **for
+   pixels inside the LUT's domain**. Superwhite and sub-black are clamped (D2) and land exactly at 940 and 64. This
+   exclusion is what replaces the old item 1, which the wedge's 1.00098 patch would fail.
+3. **P3 — Synthetic LUTs** (R/B swap, invert, gain 0.5, a 1D γ2 curve, a matrix as 3D): within **±0.5 code** of the
+   generator, and exact at lattice points.
+4. **P4 — The levels guard:** a 1D LUT stepping 0 → 1 at 0.03. Legal black (64) comes out at 0. If the LUT is
+   wrongly applied to code/1023 (black at 0.0626), black comes out at 1. Pass / fail, no band.
+5. **P5 — Which interpolation is running:** the r·g·b discriminator, where trilinear and tetrahedral differ by a known
+   amount. Measured difference within **±0.5 code** of the generator's, in each mode.
+6. **P6 — Refusal:** every malformed file in the corpus refused with a banner. The previous LUT is unchanged:
+   **0 codes**.
+7. **P7 — Tags:** a 709 source with a LUT stated as 2020 PQ output. Scope headers, the SDI log line, v210 kr/kb
+   (0.2627 / 0.0593), the export ICC and EDR all move. The Source line does not.
+8. **P8 — Performance at 4K:** **< 1.5 ms** of added GPU time. No dropped frames beyond the baseline at 4K60.
+9. **P9 — Resolve match:** max **≤ 2 codes** at 10-bit on every pixel and mean |error| **≤ 0.5**, both measured as the
+   change from a baseline: the same frame rendered with the LUT's node bypassed. Anything over 2 fails.
+
+##### Needs Robbie (L4, ~15 min)
+
+1. **Resolve setup:** DaVinci YRGB, not colour-managed. Note the project's 3D LUT interpolation setting. S5's 709 ProRes
+   chart, clip levels Auto.
+2. **The LUTs:** one LUT on a single node, nothing else, twice: a trusted vendor LUT (65³ if possible), and a
+   Resolve-generated one (right-click the node › Generate LUT › 33 Point Cube).
+3. **The renders:** each one twice, with the LUT and with the node bypassed. Deliver: single clip, TIFF, RGB 16-bit, Data
+   Levels Full, one frame; note its timecode. Not on TEST FLIP.
+4. **Sanity looks:** one on the LG and one over SDI.
+
+##### L0 predictions, written 2026-10-13 before any code
+
+- **L0-P1 — Good corpus:** every good file parses. Kind, sizes, domains, title and row count match the file. The first,
+  last and one middle value equal `Float(text)` exactly.
+- **L0-P2 — Refusals:** each refusal case is refused with its own named error and the right line number; zero accepted.
+  A slot holding a previous LUT is unchanged (`==`) after every failed load.
+- **L0-P3 — Line endings:** LF, CRLF, bare CR, and LF with a UTF-8 BOM all give the same table (`==`).
+- **L0-P4 — Unknown keywords:** ignored and listed with line numbers. The table equals the same file without them.
+- **L0-P5 — Caps:** 65³, 2³, 1D 65 536 and 1D 2 accepted; 66³, 1³, 1D 65 537 and 1D 1 refused.
+- **L0-P6 — The CPU reference against the generator:**
+  - affine LUTs equal the analytic function within **1e-6** on every probe, in both interpolations;
+  - every synthetic LUT is within **1e-6** of the Python generator's expected values in both modes (about 1e-12
+    expected);
+  - the r·g·b discriminator at (½, ½, ½) gives trilinear 0.125 and tetrahedral 0.5, a difference of 0.375 ± 1e-9;
+  - out-of-domain probes are clamped;
+  - the levels-guard LUT maps 0.0 → 0 and 64/1023 → 1.
+- **L0-P7 — Parse time:** a 65³ file parses in **≤ 0.5 s** under `swift test` (the target is built `-O`). Over 1 s fails.
+- **L0-P8 — The whole suite:** 368 existing tests plus the new ones all pass; no existing test changed.
+
+##### L0 — results, 2026-10-13 (unattended, package only, not committed)
+
+No app launch, no display or defaults change. Built on `988c312` plus the S6 docs.
+
+**What was built:**
+- **The `LUTCube` target** (`Packages/ManifoldCore/Sources/LUTCube`; a leaf, `-O`; a `LUTCube` library product for L1):
+  - `CubeLUT.parse` / `load(contentsOf:)` read both dialects. Each of the refusal cases has its own
+    `CubeLUTError` with the line number and the banner's words.
+  - `CubeLUTSlot`: the parse finishes before one assignment, so a failed load leaves the slot unchanged.
+  - Unknown keywords are kept in `ignored`, with line numbers (D7).
+- **The CPU reference** (`CubeLUTEvaluator.swift`): the contract L1's shader is scored against.
+  - Trilinear and tetrahedral, default tetrahedral (D1).
+  - The domain clamp (D2); a NaN input reads as the domain minimum.
+  - The shaper feeds the 3D table.
+- **`scripts/lut/make_synthetic_luts.py`** (standard library only):
+  - **Default set:** 15 LUTs plus `expected.json`, committed as fixtures (the whole Fixtures folder is ~700 KB). It is deterministic: a re-run
+    gives byte-identical files.
+  - **`--l1` set:** identity 33³ and 65³, 1D 1024, shaper + 33³, swap, invert, gain, γ2, matrix, the levels guard,
+    the discriminator. Written to the gitignored `build/colour-s6/l1-synth/`.
+  - Its interpolation is written separately from the Swift one.
+- **The corpus** (`Tests/LUTCubeTests/Fixtures`): 12 good files and 33 malformed ones. The "shaped like" files are
+  hand-written to each writer's layout; **none is a file Resolve, OCIO, Nuke or a vendor wrote**. Real files come at L4.
+
+**Results:**
+
+| # | Result | Verdict |
+|---|---|---|
+| L0-P1 | All 12 good files: kind, sizes, domains, title, first, middle and last values as stated | **PASS** |
+| L0-P2 | All 33 malformed files refused with the named error and line. The test requires a row for every file in `bad/`. The slot is unchanged after every refusal, including a file that fails on its last row | **PASS** |
+| L0-P3 | CRLF, CR, BOM + LF and BOM + CRLF all `==` LF. Line numbers count CRLF as one break | **PASS** |
+| L0-P4 | `LUT_IN_VIDEO_RANGE` (line 2) and `FOO_BAR` (line 3) listed; table equal to the twin without them | **PASS** |
+| L0-P5 | 65³, 2³, 1D 65 536 and 1D 2 accepted; 66³, 1³, 1D 65 537 and 1D 1 refused | **PASS** |
+| L0-P6 | 1 267 probes × 2 modes. Max \|Swift − Python\| **4.4e-16**; affine max \|Swift − analytic\| **5.7e-8**. Discriminator 0.125 / 0.5. Clamp and levels guard as predicted | **PASS** |
+| L0-P7 | 65³ (6.6 MB of text): **0.053 s**, best of 3 | **PASS** |
+| L0-P8 | `swift test`: **392 / 392** (368 + 24), no existing test changed | **PASS** |
+
+**Checks on the instrument:**
+- A swapped weight in one tetrahedral branch fails L0-P6, by up to 0.04, on the probes that branch serves. The tests
+  can fail.
+- One assertion of my own was wrong before the first run, and was corrected before running. Tetrahedral on the neutral
+  axis interpolates the diagonal nodes linearly, so a 9³ table of r·g at 0.3 gives 0.09375, not 0.09. Trilinear gives
+  0.09, because r·g is multilinear. The test now asserts both.
+
+**Open after L0:**
+- Real files (a Resolve export, a vendor LUT) through the parser: at L4, or earlier if Robbie drops some in.
+- `Float("1e39")` gives +inf, so it is refused as non-finite (measured). There is no separate "out of range" message.
 
 ---
 

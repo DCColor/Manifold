@@ -37,7 +37,9 @@ let package = Package(
         .library(name: "AACFraming", targets: ["AACFraming"]),
         // Linked by the APP target directly (project.yml), for calibration mode's sheet, the flash
         // detector in the renderer, and the bundled sync clips. ManifoldCore uses it too (the beep tap).
-        .library(name: "SyncCalibration", targets: ["SyncCalibration"])
+        .library(name: "SyncCalibration", targets: ["SyncCalibration"]),
+        // The `.cube` LUT parser and its CPU reference evaluator (colour S6, L0). Linked by the APP target from L1.
+        .library(name: "LUTCube", targets: ["LUTCube"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -316,6 +318,28 @@ let package = Package(
             path: "Tests/FileAudioLookaheadTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
+            ]
+        ),
+        // A `.cube` LUT (docs/COLOR_MANAGEMENT_FINDINGS.md §6.11, *S6 — LUT*): the parser, which builds the
+        // whole table or refuses the file, and the CPU reference evaluator that defines what the shader computes
+        // (L1 is scored against it). A leaf target, no dependencies, so `swift test` reaches all of it. -O like
+        // ScopeCompute: a 65³ file is 274 625 rows, and the parse time is one of L0's predictions.
+        .target(
+            name: "LUTCube",
+            path: "Sources/LUTCube",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-O"])
+            ]
+        ),
+        .testTarget(
+            name: "LUTCubeTests",
+            dependencies: ["LUTCube"],
+            path: "Tests/LUTCubeTests",
+            resources: [.copy("Fixtures")],
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-O"])
             ]
         ),
         .target(

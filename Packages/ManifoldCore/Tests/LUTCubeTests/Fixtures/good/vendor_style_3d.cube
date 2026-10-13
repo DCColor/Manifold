@@ -1,0 +1,37 @@
+#
+# Shaped like a camera vendor's LogX -> Rec.709 LUT (hand-written, 3³; not a vendor's file)
+# Tabs, exponents, trailing comments, blank lines, out-of-range outputs.
+#
+
+TITLE "Vendor LogX to Rec709 # v1"
+
+LUT_3D_SIZE 3
+
+-1.0e-02	0  0.0   # first row
+0.5	0  0.0
+1.05	0  0.0
+-1.0e-02	5.0E-01  0.0
+0.5	5.0E-01  0.0
+1.05	5.0E-01  0.0
+-1.0e-02	1  0.0
+0.5	1  0.0
+1.05	1  0.0
+-1.0e-02	0  0.5
+0.5	0  0.5
+1.05	0  0.5
+-1.0e-02	5.0E-01  0.5
+0.5	5.0E-01  0.5
+1.05	5.0E-01  0.5
+-1.0e-02	1  0.5
+0.5	1  0.5
+1.05	1  0.5
+-1.0e-02	0  1.0
+0.5	0  1.0
+1.05	0  1.0
+-1.0e-02	5.0E-01  1.0
+0.5	5.0E-01  1.0
+1.05	5.0E-01  1.0
+-1.0e-02	1  1.0
+0.5	1  1.0
+1.05	1  1.0
+
