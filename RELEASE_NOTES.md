@@ -179,8 +179,8 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | 601 decode: the shader's 601 coefficients no longer expand chroma twice (×1.138); files carry the 601 and BT.470BG matrix codes; one reading of a matrix tag; `[MATRIX]` agreement log (colour S3 follow-up) | `500e58d` |
 | MXF / DNx files take colour from the container, as AVFoundation files do; a container / decoder disagreement is logged and shown in the readout (`ContainerColorPolicy`) | `638b05c` | Yes | Yes |
 | HDR headroom row in the display chain readout, from the window's own screen; `[EDR] headroom` logged once per display change (window moved, HDR switched, brightness), no reload (colour S4) | `6d85ef2` | Yes |
-| The Color control for files: presets, Custom, Reset, ⌃⌥C; per window, back to Auto on a new file; one colour setter, so picture, scopes, SDI tag and readout move together (colour S5) | (not committed) | Yes |
-| Custom interpretation (primaries · transfer · matrix from the S3 table) on files and every transport; saved per bookmark as `custom:p-t-m`, read as Auto by older builds; Reset to File's / Stream's Tags (colour S5) | (not committed) | Yes |
+| The Color control for files: presets, Custom, Reset, ⌃⌥C; per window, back to Auto on a new file; one colour setter, so picture, scopes, SDI tag and readout move together (colour S5) | `6be1938` | Yes |
+| Custom interpretation (primaries · transfer · matrix from the S3 table) on files and every transport; saved per bookmark as `custom:p-t-m`, read as Auto by older builds; Reset to File's / Stream's Tags (colour S5) | `6be1938` | Yes |
 | One primaries / transfer / matrix table for the layer colorspace and the CIE scope: Rec.2020 SDR, DCI-P3, SMPTE-C and EBU get their own primaries; Rec.2020 SDR override on SRT, WHEP and HLS; container/bitstream colour disagreement in the readout (colour S3) | `94961b9` | Yes |
 
 #### App, menus and diagnostics

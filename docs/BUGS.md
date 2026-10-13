@@ -95,7 +95,7 @@ held back until after release, and the numbered defect entries follow.
        0 codes against HEAD in OS, Reference and Bypass. Open: S4-2 (HDR on, ≈ 8.97) and S4-3 (a grant on PQ),
        both in the attended LG session.
      - **S5** — Custom (per-axis interpretation) and the Interpretation button and override on files. The
-       Color control stays two buttons. **Built and run unattended 2026-10-13, not committed** (§6.11, *S5 —
+       Color control stays two buttons. **Built and run unattended 2026-10-13, committed `6be1938`** (§6.11, *S5 —
        results*).
        - **Decided (Robbie, 2026-10-13):** file overrides are per window and reset to Auto on a new file;
          Custom is on every transport and on files; it is saved per bookmark as `custom:p-t-m`, which older
@@ -111,6 +111,10 @@ held back until after release, and the numbered defect entries follow.
          - `streamBookmarks` restored to `4466c076…`.
        - ⚠️ **Pre-ship:** Reset's keyboard shortcut is the shortcut registry's to decide. It has none yet.
        - **Open:** SDI on a running output; by eye on the LG.
+       - **Minor, from before S5:** the Color menu shows the heading "Colorimetry" twice: the section
+         title, then the inline preset picker's own label. The code predates S5 and S5 left it as it
+         was. Found by reading the menu through Accessibility (§6.11, *S5 — results*, finding 5). Not
+         fixed.
      - **S6** — LUT loading: `.cube`, in Interpretation (window, scopes, SDI and export see it; tags follow the
        LUT's output space), one slot per window, kept across sources, cleared at quit, Recent LUTs saved.
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut

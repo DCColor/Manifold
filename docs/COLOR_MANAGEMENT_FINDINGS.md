@@ -5451,7 +5451,7 @@ checks (display roles, above).
 | **S2** hold-to-compare — **built and run unattended 2026-10-12, not committed; results under *S2 — results*, below** | S1 | Hold: the other of macOS and Reference while held; Shift-hold: Bypass. Through `DeckRegistry.setDisplayTransform` with a transient flag (still the one mutator, §6.7); the checkmark does not move. Title and badge read amber `COMPARING: …` while held; the readout's Transform line says `(held)`. |
 | **S3** Phase 4: primaries + case (g) — **built and run unattended 2026-10-12, committed `94961b9`; the 601 follow-up committed `500e58d`; MXF / DNx container colour committed `638b05c`; results under *S3 — results*, *S3 follow-up* and *MXF / DNx*, below** | S0, the test file | One primaries / transfer / matrix table, each axis independent, in the `ColorimetryModel` package, used by `makeColorSpace` and the CIE scope. Rec.2020 SDR on all four transports (`available(on:)`). A name for transfer 14. Case (g) fixed or shown clean. |
 | **S4** Phase 5: headroom readout — **built and run unattended 2026-10-13, committed `6d85ef2`; results under *S4 — results*, below. S4-2 and S4-3 wait for the LG session** | — | A readout line (`headroom 8.97 of 8.97` / `display is in SDR mode`); refresh and `[EDR] headroom` log on a display change, from the window's own screen. No cap (decision 8). |
-| **S5** Custom + the file Interpretation button — **built and run unattended 2026-10-13, not committed; results under *S5 — results*, below** | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
+| **S5** Custom + the file Interpretation button — **built and run unattended 2026-10-13, committed `6be1938`; results under *S5 — results*, below** | S3 | Per-axis pickers; files get the Interpretation button and override (per window, not saved). |
 | **S6** LUT | S3 | `.cube` 1D, 3D, and 1D shaper + 3D, up to 65³; parser in a ManifoldCore package; 3D texture, trilinear, in `passthroughFragment`; output space chosen per LUT (default: the source's); readout line, title suffix, amber badge; Recent LUTs saved. |
 
 #### Predictions, with pass / fail bands
@@ -6145,7 +6145,7 @@ by name. The domain is **dictionary-equal to the snapshot**; `streamBookmarks` e
 - **Reset:** a Reset item at the top of the control whenever an override is active, greyed on Auto. Its keyboard
   shortcut is the shortcut registry's to decide.
 
-**Not committed.** Base `6d85ef2` (S4). Pixel checks on the **ASUS only**. macOS HDR was off (`potential` 1.0, read,
+**Committed `6be1938`** (Robbie). Base `6d85ef2` (S4). Pixel checks on the **ASUS only**. macOS HDR was off (`potential` 1.0, read,
 not set), and no display setting was touched. Captures were window-only, by the Manifold window id. Menu captures
 were taken by the Manifold menu window's own id. All were deleted after scoring, with their pixel dumps and the
 exports.

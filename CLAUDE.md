@@ -74,6 +74,10 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   write, restore it after. This rule exists because `streamBookmarks` was erased during
   LIVECLOCK verification and there was no way back: no snapshots, no Time Machine, no
   store-side backup. See the stream-bookmark durability item in `docs/BUGS.md`.
+- Any command sequence that writes macOS defaults must stop at the first failure: chain with
+  `&&` or run under `set -e`, never `;`. Every `defaults write` must be preceded, in the same
+  sequence, by a read that succeeded. A `;` chain once let a write run after its input had
+  failed to build, and it wrote an empty value (colour S5, 2026-10-13; the stash restored it).
 - Manifold is server-agnostic. Implement the protocol standard, never a specific server's
   behaviour: no code path may branch on which server or vendor it is talking to. Where a
   server deviates from the standard, fall back to the pre-existing behaviour and log the
