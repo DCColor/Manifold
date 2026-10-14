@@ -177,6 +177,10 @@ targets:
       # App/Live/CalibrationMode and the renderer's flash tap.
       - package: ManifoldCore
         product: SyncCalibration
+      # The `.cube` LUT parser and its CPU reference (COLOR_MANAGEMENT_FINDINGS.md §6.11, *S6 — LUT*) — a
+      # leaf target so `swift test` can reach it. Used by the renderer and App/InterpretationLUT.swift.
+      - package: ManifoldCore
+        product: LUTCube
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,

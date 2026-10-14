@@ -37,6 +37,7 @@
 import SwiftUI
 import ColorimetryModel
 import StreamBookmarkModel
+import LUTCube   // colour S6: CubeInterpolation, for the LUT section
 
 // MARK: - The session value, per window
 
@@ -219,9 +220,9 @@ struct ColorInterpretationSlot: View {
 
     var body: some View {
         if let live, LiveColorOverrideModel.offersOverride(live) {
-            ColorInterpretationControl(subject: .live(live), model: deck.colorOverride, fileModel: deck.fileColor)
+            ColorInterpretationControl(subject: .live(live), model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut)
         } else if live == nil, hasFile {
-            ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor)
+            ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut)
         }
     }
 }
@@ -230,6 +231,9 @@ struct ColorInterpretationControl: View {
     let subject: InterpretationSubject
     @ObservedObject var model: LiveColorOverrideModel
     @ObservedObject var fileModel: FileColorOverrideModel
+    /// Colour S6: the window's LUT slot, and the app-wide interpolation (D1).
+    @ObservedObject var lut: InterpretationLUTModel
+    @ObservedObject private var lutSetting = LUTInterpolationSetting.shared
     @ObservedObject private var ndi = NDIService.shared
     @ObservedObject private var srt = SRTClient.shared
     @ObservedObject private var whep = WHEPClient.shared
@@ -382,6 +386,7 @@ struct ColorInterpretationControl: View {
             .pickerStyle(.inline)
         }
         customSection
+        lutSection
         Section(subject == .file ? "File" : "Stream") {
             Button(statusLine) {}.disabled(true)
         }
@@ -412,6 +417,27 @@ struct ColorInterpretationControl: View {
     private var presetBinding: Binding<ColorimetryOverride?> {
         Binding(get: { current.isCustom ? nil : current },
                 set: { if let o = $0 { choose(o) } })
+    }
+
+    // MARK: LUT (colour S6, L1)
+
+    /// Minimal for L1: load, remove, and the app-wide interpolation. The LUT applies after the interpretation
+    /// above, to whatever source this window shows, and stays across a change of source (decision 5). Recent
+    /// LUTs, Bypass and the output space come in L2 and L3.
+    @ViewBuilder private var lutSection: some View {
+        Section(lut.name.map { "LUT — \($0) · \(lut.shape ?? "")" } ?? "LUT") {
+            Button("Load LUT…") { lut.chooseFile() }
+            Button("Remove LUT") { lut.remove() }
+                .disabled(lut.name == nil)
+            Menu("LUT Interpolation") {
+                ForEach(CubeInterpolation.allCases, id: \.self) { mode in
+                    // Any click chooses that mode (a checked row's toggle-off is ignored, as Custom's rows are).
+                    Toggle(mode == .tetrahedral ? "Tetrahedral" : "Trilinear",
+                           isOn: Binding(get: { lutSetting.interpolation == mode },
+                                         set: { _ in lutSetting.interpolation = mode }))
+                }
+            }
+        }
     }
 
     // MARK: Custom (colour S5, decision 7)

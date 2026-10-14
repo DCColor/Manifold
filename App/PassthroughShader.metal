@@ -159,6 +159,97 @@ vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]],
     return out;
 }
 
+// MARK: - The Interpretation LUT (colour S6, L1 — docs/COLOR_MANAGEMENT_FINDINGS.md §6.11, *S6 — LUT*)
+//
+// ⚠️ OFF BY CONSTRUCTION, NOT BY A BRANCH. The three constants are set only when the renderer builds a LUT
+// pipeline (`MetalVideoRenderer.makeLUTInstall`). The everyday pipeline is specialised with an EMPTY
+// constant set (Metal will not build one from the unspecialised function), so none is defined, `kLUTOn` is
+// false, the LUT arguments do not exist, and the compiler is left with the fragment as it was before S6
+// (P1: 0 codes).
+//
+// THE CONTRACT IS `LUTCube`'s CPU REFERENCE (`CubeLUTEvaluator.swift`), line for line:
+//   t = clamp((x − min) / (max − min), 0, 1)   — D2: input outside the domain is clamped
+//   p = t·(n − 1),  i = min(⌊p⌋, n − 2),  f = p − i
+// 1D per channel, linear; 3D trilinear (8 nodes) or tetrahedral (4, by the order of fr, fg, fb — the same
+// six branches and the same tie-breaking as the reference, which is what makes the discriminator agree).
+//
+// ⚠️ BY HAND, WITH read() AND float WEIGHTS — NOT A LINEAR SAMPLER. Apple GPUs snap filter weights to 1/256
+// (the 8-bit chroma note above), and a sampled 3D LUT needs a half-texel offset that is the classic source
+// of a shifted LUT. Reading the nodes needs neither. Input is the R′G′B′ the decode just produced — the
+// offscreen's own domain, legal 64 → 0.0 and 940 → 1.0, which is Resolve's (§6.11, *S6*, finding 2).
+constant bool lutHasShaper   [[function_constant(0)]];
+constant bool lutHasCube     [[function_constant(1)]];
+constant bool lutTetrahedral [[function_constant(2)]];
+constant bool kLUTShaper      = is_function_constant_defined(lutHasShaper) && lutHasShaper;
+constant bool kLUTCube        = is_function_constant_defined(lutHasCube) && lutHasCube;
+constant bool kLUTOn          = kLUTShaper || kLUTCube;
+constant bool kLUTTetrahedral = is_function_constant_defined(lutTetrahedral) && lutTetrahedral;
+
+// Mirrors LUTShaderParams in MetalVideoRenderer.swift (field order + type must match exactly).
+struct LUTParams {
+    float4 shaperMin;   // xyz used
+    float4 shaperMax;
+    float4 cubeMin;
+    float4 cubeMax;
+    uint   shaperSize;
+    uint   cubeSize;
+    uint   pad0, pad1;
+};
+
+/// One axis: the lower node and the fraction towards the next.
+static inline float lutPosition(float x, float lo, float hi, uint n, thread uint &i) {
+    float t = clamp((x - lo) / (hi - lo), 0.0f, 1.0f);
+    float p = t * float(n - 1);
+    i = min(uint(floor(p)), n - 2);
+    return p - float(i);
+}
+
+static inline float3 lutShaper(float3 v, device const float4 *rows, constant LUTParams &p) {
+    float3 out;
+    for (uint c = 0; c < 3; c++) {
+        uint i;
+        float f = lutPosition(v[c], p.shaperMin[c], p.shaperMax[c], p.shaperSize, i);
+        float a = rows[i][c], b = rows[i + 1][c];
+        out[c] = a + (b - a) * f;
+    }
+    return out;
+}
+
+static inline float3 lutCubeTrilinear(float3 v, texture3d<float, access::read> t, constant LUTParams &p) {
+    uint r0, g0, b0;
+    float fr = lutPosition(v.r, p.cubeMin.r, p.cubeMax.r, p.cubeSize, r0);
+    float fg = lutPosition(v.g, p.cubeMin.g, p.cubeMax.g, p.cubeSize, g0);
+    float fb = lutPosition(v.b, p.cubeMin.b, p.cubeMax.b, p.cubeSize, b0);
+    #define N(dr, dg, db) t.read(uint3(r0 + dr, g0 + dg, b0 + db)).rgb
+    float3 c00 = N(0, 0, 0) * (1 - fr) + N(1, 0, 0) * fr;
+    float3 c10 = N(0, 1, 0) * (1 - fr) + N(1, 1, 0) * fr;
+    float3 c01 = N(0, 0, 1) * (1 - fr) + N(1, 0, 1) * fr;
+    float3 c11 = N(0, 1, 1) * (1 - fr) + N(1, 1, 1) * fr;
+    #undef N
+    float3 c0 = c00 * (1 - fg) + c10 * fg;
+    float3 c1 = c01 * (1 - fg) + c11 * fg;
+    return c0 * (1 - fb) + c1 * fb;
+}
+
+static inline float3 lutCubeTetrahedral(float3 v, texture3d<float, access::read> t, constant LUTParams &p) {
+    uint r0, g0, b0;
+    float fr = lutPosition(v.r, p.cubeMin.r, p.cubeMax.r, p.cubeSize, r0);
+    float fg = lutPosition(v.g, p.cubeMin.g, p.cubeMax.g, p.cubeSize, g0);
+    float fb = lutPosition(v.b, p.cubeMin.b, p.cubeMax.b, p.cubeSize, b0);
+    #define N(dr, dg, db) t.read(uint3(r0 + dr, g0 + dg, b0 + db)).rgb
+    float3 c000 = N(0, 0, 0), c111 = N(1, 1, 1);
+    if (fr > fg) {
+        if (fg > fb)      return c000 * (1 - fr) + N(1, 0, 0) * (fr - fg) + N(1, 1, 0) * (fg - fb) + c111 * fb;
+        else if (fr > fb) return c000 * (1 - fr) + N(1, 0, 0) * (fr - fb) + N(1, 0, 1) * (fb - fg) + c111 * fg;
+        else              return c000 * (1 - fb) + N(0, 0, 1) * (fb - fr) + N(1, 0, 1) * (fr - fg) + c111 * fg;
+    } else {
+        if (fb > fg)      return c000 * (1 - fb) + N(0, 0, 1) * (fb - fg) + N(0, 1, 1) * (fg - fr) + c111 * fr;
+        else if (fb > fr) return c000 * (1 - fg) + N(0, 1, 0) * (fg - fb) + N(0, 1, 1) * (fb - fr) + c111 * fr;
+        else              return c000 * (1 - fg) + N(0, 1, 0) * (fg - fr) + N(1, 1, 0) * (fr - fb) + c111 * fb;
+    }
+    #undef N
+}
+
 // E1: returns half4, matching the rgba16Float render target.
 //
 // This is NOT cosmetic and NOT a precision downgrade — it is REQUIRED for correctness.
@@ -180,7 +271,11 @@ vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]],
 fragment half4 passthroughFragment(VertexOut in [[stage_in]],
                                      texture2d<float> lumaTex   [[texture(0)]],
                                      texture2d<float> chromaTex [[texture(1)]],
-                                     constant ColorParams &params [[buffer(0)]]) {
+                                     constant ColorParams &params [[buffer(0)]],
+                                     // Colour S6: present only in the LUT pipelines (function constants).
+                                     texture3d<float, access::read> lutCube [[texture(2), function_constant(kLUTCube)]],
+                                     device const float4 *lutShaperRows   [[buffer(1), function_constant(kLUTShaper)]],
+                                     constant LUTParams &lutParams         [[buffer(2), function_constant(kLUTOn)]]) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
 
     float y  = lumaTex.sample(s, in.texCoord).r;
@@ -229,6 +324,19 @@ fragment half4 passthroughFragment(VertexOut in [[stage_in]],
     float r = y + params.a * cr;
     float g = y - params.b * cb - params.c * cr;
     float b = y + params.d * cb;
+
+    // Colour S6, L1: the Interpretation LUT, on the R′G′B′ just computed. Compiled in ONLY in the LUT
+    // pipelines (the function constants below); the pipeline built without constant values is this
+    // function as it was before S6, so a window with no LUT runs exactly today's code.
+    if (kLUTOn) {
+        float3 v = float3(r, g, b);
+        if (kLUTShaper) { v = lutShaper(v, lutShaperRows, lutParams); }
+        if (kLUTCube) {
+            v = kLUTTetrahedral ? lutCubeTetrahedral(v, lutCube, lutParams)
+                                : lutCubeTrilinear(v, lutCube, lutParams);
+        }
+        return half4(half3(v), 1.0h);
+    }
 
     // Narrow to half HERE (round-to-nearest) rather than letting the ROP truncate — see the
     // header comment. NOT clamped: the rgba16Float target carries >1.0 and negatives, which is

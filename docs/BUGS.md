@@ -126,6 +126,12 @@ held back until after release, and the numbered defect entries follow.
        - **Stages:** L0 parser, CPU reference and generator (package only) → L1 shader → L2 tags → L3 UI → L4 the
          Resolve match (Robbie, ~15 min).
        - **Predictions P1–P9.** P2's identity check excludes superwhite and sub-black, which the clamp moves.
+       - **L0 committed (`1afb801`).** **L1 built and run unattended 2026-10-13, not committed** (§6.11, *L1 — results*):
+         the shader stage behind function constants (off = HEAD's exports byte for byte on 16 files), trilinear and
+         tetrahedral by hand, shaper + 3D, the clamp, Load LUT… / Remove LUT, the app-wide interpolation. P1, P2, P3,
+         P5, U1–U4 pass. P8: no dropped or late frames at 4K with 65³ in either mode; offline, 65³ **trilinear** adds
+         1.75 ms on worst-case noise (band 1.5 ms), tetrahedral 1.41 ms, a smooth picture under 0.3 ms.
+         ⚠️ **Check at the release gate:** 4K playback with a 65³ trilinear LUT on the M4 MacBook Air.
      - **S7** — output HDR signalling, **pre-release, after S6** (D10, decided 2026-10-13): SDI VPID colorimetry and
        transfer (SDR / HLG / PQ), and the HDMI HDR InfoFrame on the DeckLink's HDMI daughter card (EOTF plus static
        metadata), from the file's HDR10 metadata or the stream's `[HDR10-SEI]`, with stated defaults when a PQ source

@@ -6461,6 +6461,120 @@ No app launch, no display or defaults change. Built on `988c312` plus the S6 doc
 - Real files (a Resolve export, a vendor LUT) through the parser: at L4, or earlier if Robbie drops some in.
 - `Float("1e39")` gives +inf, so it is refused as non-finite (measured). There is no separate "out of range" message.
 
+##### L1 — predictions, written 2026-10-13 before any launch
+
+**What L1 is:** the shader stage behind function constants, trilinear and tetrahedral by hand from an `rgba32Float`
+3D texture, shader + 3D, the input clamp (D2); the app-wide interpolation, default tetrahedral (D1); a minimal
+Load LUT… / Remove LUT in the Interpretation menu; output space = the source's (tags move in L2). The parse and the GPU
+tables are built off the main thread, and the LUT is installed with the pending colour state.
+
+**Instruments:** S5's harness on the **ASUS**: window-only captures, ⌃⌥E exports (PNG, the raw `rgba16f` offscreen, and
+the `v210` the SDI output would carry), and Accessibility presses in the Interpretation menu. LUT outputs are predicted
+by the L0 generator's Python evaluation, applied to the no-LUT export's own float values. **An in-domain pixel** has
+all three channels in [0, 1] in the no-LUT export. **Baseline:** HEAD `1afb801` (L0, committed by Robbie between
+turns; its app code is `988c312`'s).
+
+| # | What | Band: pass / fail |
+|---|---|---|
+| **P1** | No LUT loaded: tree vs HEAD, on S5's 16 files | Window **0 codes**; exports (`rgba16f`, `v210`) **byte-identical** |
+| **P2** | Identity LUTs (33³, 65³, 1D 1024, 1D 4096 shaper + 33³) on the wedge and the 709 chart, both interpolations | In-domain: `v210` **0 codes**; `rgba16f` within **1 half-float ULP**, ≥ 99.9 % bit-identical. Out-of-domain channels clamped to **exactly 0 / 1** (D2). A non-zero `v210` code on an in-domain pixel fails |
+| **P3** | Synthetic LUTs (R/B swap, invert, gain 0.5, 1D γ2, matrix) on the chart | Every pixel within **±0.5 code** at 10-bit of the generator's prediction |
+| **P5** | The r·g·b discriminator, trilinear vs tetrahedral | Measured difference within **±0.5 code** of the predicted one per pixel. With no setting stored, tetrahedral |
+| **P8** | Performance at 3840×2160 | Added GPU time **< 1.5 ms** (offline bench on the app's own `default.metallib`). 4K playback with 65³: dropped + late (`[PLAYBACK-STATS]`) ≤ the no-LUT run's + 1 over 30 s |
+| U1 | Remove LUT | **0 codes** against never loading one |
+| U2 | A file change | The LUT stays applied (log, and the picture against the same LUT loaded fresh: 0 codes) |
+| U3 | Off the main thread; a refused file | `[LUT] loaded … parsed off the main thread`; a malformed file refused, picture **0 codes** against before |
+| U4 | Defaults | Domain dictionary-equal afterwards. Any key the run adds is deleted by name, after a read confirms it was absent from the snapshot |
+
+##### L1 — results, 2026-10-13 (unattended, not committed)
+
+Pixel checks on the **ASUS only**; both displays read SDR (EDR potential 1.0, read, not set). Captures were window-only,
+by the Manifold window's id. Every capture, export and pixel dump was deleted after scoring. Logs, events and scores
+are in the gitignored `build/colour-s6/run/`. **Estimated:** 3–3.5 h. **Actual:** about 1¼ h by the file timestamps.
+
+**What was built:**
+- **The shader** (`App/PassthroughShader.metal`): three function constants (`lutHasShaper`, `lutHasCube`,
+  `lutTetrahedral`).
+  - The LUT arguments (`texture(2)` 3D, `buffer(1)` shaper rows, `buffer(2)` `LUTParams`) exist only when their
+    constant is on.
+  - `lutPosition`, `lutShaper`, `lutCubeTrilinear` and `lutCubeTetrahedral` follow `CubeLUTEvaluator.swift` line
+    for line: the same clamp (D2), the same six tetrahedral branches and tie-breaks, `read()` and float weights,
+    no sampler.
+  - The LUT runs on the R′G′B′ the decode has just produced, before the narrowing to `half4`, so the offscreen
+    carries it to the window, the scopes, the v210 and the export.
+- **The renderer** (`MetalVideoRenderer.swift`):
+  - `makeLUTInstall` builds the specialised pipeline, an `rgba32Float` 3D texture and a `float4` shaper buffer.
+    It runs on any thread, and a buffer is used because a 65 536-row shaper is longer than a 1D texture may be.
+  - `setInterpretationLUT` (MAIN) publishes the LUT with the colour state, and `PendingColorState.lut` installs it
+    at the top of the render tick, beside the colorspace.
+  - **No source edge clears it** (decision 5).
+- **The model** (`App/InterpretationLUT.swift`):
+  - `InterpretationLUTModel` per `WindowDeck`. Parse and GPU build run off the main thread; a newer request
+    supersedes an older one; a refusal is an alert sheet, which L3 replaces with the banner.
+  - `LUTInterpolationSetting` is app-wide. Its defaults key `lutInterpolation` is absent until the user chooses,
+    and an absent key means tetrahedral (D1).
+- **The menu:** a *LUT* section in the Interpretation menu: *Load LUT…*, *Remove LUT*, *LUT Interpolation ▸
+  Tetrahedral / Trilinear*. The section title names the LUT and its shape.
+- **The link:** `project.yml` links the `LUTCube` product.
+
+**Found before any launch, and fixed:** the pipeline built from the unspecialised `passthroughFragment` is refused by
+Metal once the fragment declares function constants ("Use newFunctionWithName:constantValues:"). The offline bench hit
+it first; the app's own `init` would have failed with no picture. The everyday pipeline is now specialised with an
+**empty** constant set: nothing is defined, so `kLUTOn` is false and the LUT path is compiled out. P1 is the proof.
+
+**Results:**
+
+| # | Result | Verdict |
+|---|---|---|
+| P1 | 16 / 16 files: window **0 codes**; `rgba16f`, `v210` and the v210 header **byte-identical** to HEAD `1afb801` | **PASS** |
+| P2 | 13 identity runs (33³ and 65³ in both modes, 1D 1024, 1D 4096 + 33³ in both modes; chart and wedge): in-domain pixels **100 % bit-identical**, `v210` **0 codes**. On the chart, 1.38 M channels above 1.0 (to 1.256) all land **exactly** on 1.0 and 1.50 M below 0 (to −0.358) **exactly** on 0 | **PASS** |
+| P3 | Max \|measured − predicted\|: swap **0.000**, invert **0.250**, gain **0.000**, 1D γ2 **0.327**, matrix **0.500** codes. The matrix's 0.5 is the half float's own rounding above 1.0, where one ULP is one 10-bit code; on outputs inside [0, 1] it is 0.350 | **PASS** (matrix at the band's edge) |
+| P5 | Tetrahedral vs prediction **0.000**; trilinear **0.361**; the difference tri − tet within **0.361** codes of the predicted one, whose largest value is 384 codes. Back to tetrahedral: exports identical. The first load logged `· tetrahedral` with no key stored | **PASS** |
+| P8 | **In the app:** 4K 25p ProRes 4444, 30 s per segment: no LUT 0 dropped / 0 late; 65³ tetrahedral 0 / 0; 65³ trilinear 0 / 0; no LUT again 0 / 0. **Offline** (the app's `default.metallib`, M4 Max, 3840×2160, median of 150): see the table below | **PASS in the app. Offline: PASS for tetrahedral (the default) and 33³; FAIL for 65³ trilinear on the noise source (+1.75 ms > 1.5)** |
+| U1 | Remove LUT: exports byte-identical to never loading one | **PASS** |
+| U2 | In the **same window** (File ▸ Open Recent; id 9982 before and after): the LUT carried from the chart to the wedge is byte-identical to the same LUT loaded fresh on the wedge | **PASS** (second run; see 2 below) |
+| U3 | Every parse logged `parsed off the main thread` (65³ in 0.060 s). `row_nan.cube` refused while a LUT was applied: the sheet read *Couldn't load "row_nan.cube" — Line 3 holds an infinite or not-a-number value. Nothing was loaded. "product_3d_2.cube" is still applied.* Exports byte-identical to before | **PASS** |
+| U4 | Domain **dictionary-equal** to the snapshot (1145 keys, `streamBookmarks` `4466c076`) after a key-by-key restore (below) | **PASS** |
+
+**P8 offline, added GPU time per frame at 3840×2160:**
+
+| Variant | Noise source (every pixel random) | Smooth source |
+|---|---|---|
+| 33³ trilinear | +0.75 ms | +0.28 ms |
+| 33³ tetrahedral | +0.64 ms | +0.15 ms |
+| 65³ trilinear | **+1.75 ms** | +0.28 ms |
+| 65³ tetrahedral | +1.41 ms | +0.16 ms |
+| 1D 1024 | +0.08 ms | +0.02 ms |
+| 1D 4096 + 65³ tetrahedral | +1.40 ms | +0.16 ms |
+
+The no-LUT pipeline itself takes 0.137 / 0.071 ms. The noise source is the worst case for a 3D table's cache; a real
+picture behaves like the smooth one. The bench also ran the identity check on both sources: in-domain ≥ 99.977 %
+bit-identical, within 1 half-float ULP, and every out-of-range channel clamped exactly.
+
+**Found while running:**
+1. **The wedge has no superwhite.** All its pixels are inside [0, 1], so the prediction's "the wedge's 1.00098" was
+   wrong about the fixture. The chart covers the clamp on both sides instead, with larger excursions.
+2. **`open -a` opens a new window each time.** The window id changes on every open. The first U2 therefore loaded the
+   LUT in one window and opened the wedge in another, where *Remove LUT* was rightly greyed (three dropped attempts).
+   U2 was re-run with File ▸ Open Recent in the same window. S5's P5 already knew this; the L1 run script did not.
+3. **The 62 s playback fixture ran out** 2 s into the third 30 s segment. Those two segments were re-run in a second
+   launch (`tree_perf2`).
+4. **The defaults restore's first attempt passed every key as one argument.** zsh does not split an unquoted
+   variable. That made-up key was in neither snapshot, so the tool's read check passed vacuously and its write deleted
+   a key that did not exist. The domain was confirmed equal to the post-run export, and the tool now takes keys from a
+   file and refuses any key in neither snapshot. The restore then read all 9 keys and found them as recorded. It
+   deleted the 6 `NSWindow Frame` keys and `lutInterpolation`, each absent from the snapshot. It put back
+   `NSOSPLastRootDirectory` and `NSWindow Frame GoToSheet`, which the open panel and its Go-to-folder sheet change.
+   **Every later run that drives Load LUT… changes those two keys.**
+
+**Open after L1:**
+- **65³ trilinear on worst-case content exceeds the 1.5 ms band** (+1.75 ms at 4K on the M4 Max). It costs nothing
+  measurable in real 4K playback here. Not changed in L1. On a smaller GPU (the M4 MacBook Air in the release gate)
+  it should be measured with the 4K playback check.
+- Output space = the source's until L2.
+- The refusal sheet is temporary until L3's banner.
+- Not exercised: a live source with a LUT, and SDI on a running output (the v210 was read from the export).
+
 ---
 
 ## 7. Open and unverified

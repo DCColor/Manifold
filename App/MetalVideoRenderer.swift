@@ -13,6 +13,7 @@ import CryptoKit     // ⚠️ SPIKE — SHA-256 for the [CSPROBE] source-vs-des
 import ManifoldCore      // UnfairLock — priority-donating lock for the live frame queue
 import ColorimetryModel   // SourceColorProvenance — the source colour tier the readout prints
 import SyncCalibration   // calibration mode's flash detector (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
+import LUTCube           // colour S6: the Interpretation LUT's tables (docs/COLOR_MANAGEMENT_FINDINGS.md §6.11)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
 // UnfairLock.swift) because LiveClock needs the same primitive and ManifoldCore cannot depend on
@@ -332,6 +333,8 @@ final class MetalVideoRenderer {
     /// never waits behind scope buffers (removes the latent playback-delay risk).
     private let scopeCommandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
+    /// Colour S6, L1: the library the LUT pipelines are specialised from (`makeLUTInstall`).
+    private let shaderLibrary: MTLLibrary
     /// ⚠️ EXPERIMENT 2 SCAFFOLD — the display-only copy stage that replaces the offscreen→drawable
     /// blit. Identity transform today; it exists to prove the structure is free and bit-exact.
     /// Optional so a failure to build it falls back to the blit rather than killing the renderer.
@@ -700,8 +703,13 @@ final class MetalVideoRenderer {
         guard let library = device.makeDefaultLibrary() else {
             print("MetalVideoRenderer: no default library (shader not compiled in?)"); return nil
         }
+        // ⚠️ SPECIALISED WITH NO CONSTANT DEFINED, NOT `makeFunction(name:)` — MEASURED (colour S6, L1). The
+        // fragment declares the LUT's function constants, and Metal refuses to build a pipeline from the
+        // unspecialised function ("Use newFunctionWithName:constantValues:"). An empty set defines none of
+        // them, so `kLUTOn` is false and the LUT path is compiled out: the everyday fragment is the one
+        // before S6 (P1, 0 codes against HEAD).
         guard let vfn = library.makeFunction(name: "passthroughVertex"),
-              let ffn = library.makeFunction(name: "passthroughFragment") else {
+              let ffn = try? library.makeFunction(name: "passthroughFragment", constantValues: MTLFunctionConstantValues()) else {
             print("MetalVideoRenderer: shader functions not found"); return nil
         }
 
@@ -783,6 +791,7 @@ final class MetalVideoRenderer {
         dlQueue.label = "com.graviton.manifold.decklink"
         self.deckLinkCommandQueue = dlQueue
         self.pipelineState = pipeline
+        self.shaderLibrary = library
 
         metalLayer.device = device
         metalLayer.pixelFormat = Self.renderPixelFormat
@@ -1225,8 +1234,16 @@ final class MetalVideoRenderer {
         /// else nil (the buffer's own tag, as always). Installed with the rest, so a frame is never
         /// decoded under one override and declared under another.
         let decodeMatrix: Int?
+        /// Colour S6, L1. The window's Interpretation LUT, or nil. Installed with the rest, so a frame is
+        /// never drawn with a LUT the colour state it was published with did not include.
+        let lut: InterpretationLUTInstall?
     }
     private var pendingColorState: PendingColorState?
+    /// RENDER THREAD ONLY. The LUT in force (`PendingColorState.lut`), or nil: the everyday pipeline.
+    private var activeLUT: InterpretationLUTInstall?
+    /// MAIN. The window's LUT, published with every colour state (decision 5: kept across source changes,
+    /// so no source edge clears it). Set only through `setInterpretationLUT`.
+    private(set) var interpretationLUT: InterpretationLUTInstall?
     /// RENDER THREAD ONLY. The override's matrix in force (`PendingColorState.decodeMatrix`), or nil.
     private var activeDecodeMatrix: Int?
     /// RENDER THREAD ONLY. The Reference shader parameters in force, installed from
@@ -1500,7 +1517,8 @@ final class MetalVideoRenderer {
         // Never set on Auto, so every un-overridden source decodes exactly as before.
         let decodeMatrix = sourceColorProvenance == .overridden ? (sourceMatrixCode ?? 1) : nil
         pendingColorState = PendingColorState(colorSpace: installed, wantsEDR: sourceWantsEDR,
-                                              reference: reference, decodeMatrix: decodeMatrix)
+                                              reference: reference, decodeMatrix: decodeMatrix,
+                                              lut: interpretationLUT)
         pendingRefresh = true
         refreshLock.unlock()
     }
@@ -2520,6 +2538,10 @@ final class MetalVideoRenderer {
             CATransaction.commit()
             activeReference = colorState.reference
             activeDecodeMatrix = colorState.decodeMatrix
+            if colorState.lut !== activeLUT {
+                activeLUT = colorState.lut
+                print("[LUT] render thread: " + (activeLUT.map { "drawing with \($0.logLabel)" } ?? "no LUT — the everyday pipeline"))
+            }
             if let compareStamp { activeCompareStamp = compareStamp }
             // ORDERING, STATED WHERE IT CAN BE CHECKED — the line the first-frame bug is read off.
             //
@@ -3008,7 +3030,17 @@ final class MetalVideoRenderer {
         let eightBit = SourceBitDepth.isEightBit(pixelBuffer)
         if eightBit { params.eightBitSource = 1 }
         noteEightBitSource(eightBit)
-        encoder.setRenderPipelineState(pipelineState)
+        // Colour S6, L1: a LUT's own pipeline (the same fragment, specialised with the LUT on), or the
+        // everyday one. Nothing else in this pass changes with it.
+        if let lut = activeLUT {
+            encoder.setRenderPipelineState(lut.pipeline)
+            if let cube = lut.cube { encoder.setFragmentTexture(cube, index: 2) }
+            if let shaper = lut.shaper { encoder.setFragmentBuffer(shaper, offset: 0, index: 1) }
+            var lutParams = lut.params
+            encoder.setFragmentBytes(&lutParams, length: MemoryLayout<LUTShaderParams>.stride, index: 2)
+        } else {
+            encoder.setRenderPipelineState(pipelineState)
+        }
         // THE CROP, AND THE ONLY PLACE IT IS APPLIED. Bound unconditionally — a Metal vertex
         // function's buffer argument must always have something at its index, and the identity
         // rect is the correct something for a source with no cropping `clap`.
@@ -4221,5 +4253,120 @@ final class MetalVideoRenderer {
         guard status == kCVReturnSuccess, let cvTexture,
               let texture = CVMetalTextureGetTexture(cvTexture) else { return nil }
         return texture
+    }
+}
+
+// MARK: - The Interpretation LUT (colour S6, L1 — docs/COLOR_MANAGEMENT_FINDINGS.md §6.11, *S6 — LUT*)
+
+/// Mirrors `LUTParams` in PassthroughShader.metal (field order + type must match exactly).
+struct LUTShaderParams {
+    var shaperMin: SIMD4<Float>
+    var shaperMax: SIMD4<Float>
+    var cubeMin: SIMD4<Float>
+    var cubeMax: SIMD4<Float>
+    var shaperSize: UInt32
+    var cubeSize: UInt32
+    var pad0: UInt32 = 0
+    var pad1: UInt32 = 0
+}
+
+/// A LUT ready to draw with: the fragment specialised for it, its tables on the GPU, its parameters.
+/// Immutable once built, so the render thread can hold it while main replaces it. Built off the main
+/// thread (`MetalVideoRenderer.makeLUTInstall`), installed with the colour state.
+final class InterpretationLUTInstall {
+    let name: String
+    let lut: CubeLUT
+    let interpolation: CubeInterpolation
+    let pipeline: MTLRenderPipelineState
+    /// The 3D table as an `rgba32Float` 3D texture, read with `read()` (never sampled).
+    let cube: MTLTexture?
+    /// The 1D table, one `float4` per row. A buffer, not a 1D texture: a 65 536-row shaper is longer than
+    /// a 1D texture may be.
+    let shaper: MTLBuffer?
+    let params: LUTShaderParams
+
+    init(name: String, lut: CubeLUT, interpolation: CubeInterpolation, pipeline: MTLRenderPipelineState,
+         cube: MTLTexture?, shaper: MTLBuffer?, params: LUTShaderParams) {
+        (self.name, self.lut, self.interpolation, self.pipeline) = (name, lut, interpolation, pipeline)
+        (self.cube, self.shaper, self.params) = (cube, shaper, params)
+    }
+
+    /// `name.cube — 3D 33³ · tetrahedral`
+    var logLabel: String { "\(name) — \(lut.shapeDescription) · \(interpolation.rawValue)" }
+}
+
+extension MetalVideoRenderer {
+
+    /// ANY THREAD. Build everything the GPU needs for `lut`: the specialised pipeline, the 3D texture, the
+    /// shaper buffer. Nothing here touches renderer state, so it runs off the main thread with the parse.
+    /// nil, with the reason logged, if Metal refuses any part — and then nothing is installed.
+    func makeLUTInstall(_ lut: CubeLUT, name: String, interpolation: CubeInterpolation) -> InterpretationLUTInstall? {
+        let constants = MTLFunctionConstantValues()
+        var hasShaper = lut.shaper != nil, hasCube = lut.cube != nil, tetra = interpolation == .tetrahedral
+        constants.setConstantValue(&hasShaper, type: .bool, index: 0)
+        constants.setConstantValue(&hasCube, type: .bool, index: 1)
+        constants.setConstantValue(&tetra, type: .bool, index: 2)
+        let pipeline: MTLRenderPipelineState
+        do {
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = shaderLibrary.makeFunction(name: "passthroughVertex")
+            desc.fragmentFunction = try shaderLibrary.makeFunction(name: "passthroughFragment", constantValues: constants)
+            desc.colorAttachments[0].pixelFormat = Self.renderPixelFormat
+            pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            print("[LUT] ⚠️ the LUT pipeline failed to build — nothing installed: \(error)")
+            return nil
+        }
+
+        var params = LUTShaderParams(shaperMin: .zero, shaperMax: .one, cubeMin: .zero, cubeMax: .one,
+                                     shaperSize: 0, cubeSize: 0)
+        var shaperBuffer: MTLBuffer?
+        if let s = lut.shaper {
+            var rows = [SIMD4<Float>](repeating: .zero, count: s.size)
+            for i in 0..<s.size { let r = s.row(i); rows[i] = SIMD4(r.x, r.y, r.z, 0) }
+            shaperBuffer = device.makeBuffer(bytes: rows, length: rows.count * MemoryLayout<SIMD4<Float>>.stride,
+                                             options: .storageModeShared)
+            guard shaperBuffer != nil else { print("[LUT] ⚠️ could not allocate the shaper — nothing installed"); return nil }
+            params.shaperMin = SIMD4(s.domain.min, 0); params.shaperMax = SIMD4(s.domain.max, 1)
+            params.shaperSize = UInt32(s.size)
+        }
+        var cubeTexture: MTLTexture?
+        if let c = lut.cube {
+            let d = MTLTextureDescriptor()
+            d.textureType = .type3D
+            d.pixelFormat = .rgba32Float
+            (d.width, d.height, d.depth) = (c.size, c.size, c.size)
+            d.usage = .shaderRead
+            d.storageMode = .shared
+            guard let t = device.makeTexture(descriptor: d) else {
+                print("[LUT] ⚠️ could not allocate the 3D table — nothing installed"); return nil
+            }
+            // Red fastest, then green, then blue: the file's order IS the texture's (x, y, z) order.
+            let n = c.size
+            var texels = [Float](repeating: 0, count: n * n * n * 4)
+            for k in 0..<(n * n * n) {
+                texels[4 * k] = c.values[3 * k]; texels[4 * k + 1] = c.values[3 * k + 1]
+                texels[4 * k + 2] = c.values[3 * k + 2]; texels[4 * k + 3] = 1
+            }
+            texels.withUnsafeBytes {
+                t.replace(region: MTLRegionMake3D(0, 0, 0, n, n, n), mipmapLevel: 0, slice: 0,
+                          withBytes: $0.baseAddress!, bytesPerRow: n * 16, bytesPerImage: n * n * 16)
+            }
+            cubeTexture = t
+            params.cubeMin = SIMD4(c.domain.min, 0); params.cubeMax = SIMD4(c.domain.max, 1)
+            params.cubeSize = UInt32(n)
+        }
+        return InterpretationLUTInstall(name: name, lut: lut, interpolation: interpolation, pipeline: pipeline,
+                                        cube: cubeTexture, shaper: shaperBuffer, params: params)
+    }
+
+    /// MAIN. The window's Interpretation LUT, or nil to remove it. Published with the colour state, so the
+    /// render thread installs it at the top of a tick, with the colorspace, and re-presents the frame on
+    /// screen. Output space = the source's for now (L1): no tag moves; L2 splits source and picture codes.
+    func setInterpretationLUT(_ install: InterpretationLUTInstall?) {
+        guard install !== interpretationLUT else { return }
+        interpretationLUT = install
+        print("[LUT] " + (install.map { "set: \($0.logLabel)" } ?? "removed"))
+        publishColorState()
     }
 }

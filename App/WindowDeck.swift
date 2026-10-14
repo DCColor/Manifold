@@ -268,6 +268,10 @@ final class WindowDeck: ObservableObject {
     /// file opens. Every file colour tag reaches the renderer through it (`FileColorOverride.swift`).
     private(set) lazy var fileColor = FileColorOverrideModel(deck: self)
 
+    /// This window's Interpretation LUT (colour S6, §6.11): one slot per window, kept across source changes,
+    /// gone at quit (decision 5). `InterpretationLUT.swift`.
+    private(set) lazy var lut = InterpretationLUTModel(deck: self)
+
     /// The override in force on this window's source, in the title's words ("2020 SDR", "Custom 9·1·6"),
     /// or nil on Auto. The chain readout's Source line names it beside "overridden" (colour S5).
     var interpretationLabel: String? {
