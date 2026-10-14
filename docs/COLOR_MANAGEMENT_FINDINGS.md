@@ -6803,7 +6803,7 @@ was deleted after scoring. Logs, events, `words.jsonl` and `score.txt` are in th
 - **By eye on the LG**; it can join L4.
 
 **Open after L3:**
-- **The window title keeps a departed file's name.** After a live takeover and after the stream ends, `displayName`
+- ✅ **Fixed 2026-10-14** (`BUGS.md`, the title entry): ~~**The window title keeps a departed file's name.**~~ After a live takeover and after the stream ends, `displayName`
   reads `engine.metadata`, which is never cleared. The title then names a file that is no longer loaded, and while
   the stream plays it names the file rather than the stream (`BUGS.md`). Not changed here.
 - L4: the Resolve match, and the SDI and LG sanity looks (Robbie).

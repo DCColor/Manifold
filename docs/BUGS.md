@@ -154,12 +154,59 @@ held back until after release, and the numbered defect entries follow.
            to no LUT, and back), the words in every state, no source, P1 (16 files byte-identical to HEAD), defaults
            and gates all pass.
          - **One miss, not L3's code:** the title's base name after a stream (below).
-     - **Window title keeps a departed file's name** (found in L3, 2026-10-14; not fixed). `WindowDeck.displayName`
+     - ✅ **FIXED 2026-10-14, commit `<to be filled in>`.** ~~**Window title keeps a departed file's name** (found in L3, 2026-10-14; not fixed).~~ `WindowDeck.displayName`
        reads `engine.metadata`, which nothing clears. After a live takeover the title still names the file: while
        the stream plays, and after it ends, when the window has no source. The Window menu and Mission Control
        then name a file that is not loaded. Measured: `patches-1-1-1-prores.mov — LUT swap_rb_3d_33.cube` during
        and after an SRT session. The LUT suffix was right. The fix belongs with the title's name rules: clear the
        metadata at `stop()`, or have the title prefer the live label while a stream is owned.
+       - **Predictions, written 2026-10-14 before any launch** (fix: `displayName` reads only `currentURL`, which
+         `stop()` clears; an unnamed stream is named by its URL's host, never its URL). Window title read by
+         Accessibility on the ASUS, in one window, through a sequence: **file → stream → teardown → file**. The stream
+         is ⌃⌥D against a local ffmpeg SRT listener (`MANIFOLD_SRT_DEBUG_URL=srt://127.0.0.1:9000`, unnamed). The
+         baseline is the L3 tree's build (the bug present); exports are compared with HEAD.
+
+         | # | State | Band: the title exactly, or fail |
+         |---|---|---|
+         | T1 | the 709 chart opened | `patches-1-1-1-prores.mov` |
+         | T2 | + swap LUT, file Color Rec.2020 SDR, display Bypass | `patches-1-1-1-prores.mov — Color 2020 SDR — LUT swap_rb_3d_33.cube — Bypass`; held: `… — LUT swap_rb_3d_33.cube — COMPARING: macOS` |
+         | T3 | ⌃⌥D, connected | `127.0.0.1 — LUT swap_rb_3d_33.cube — Bypass`; after ⇧⌥] (+10 ms): `127.0.0.1 — LUT swap_rb_3d_33.cube — A/V +10 ms — Bypass` |
+         | T4 | ⌃⌥⇧D, torn down | `Manifold — LUT swap_rb_3d_33.cube — Bypass` |
+         | T5 | the chart again, File ▸ Open Recent, same window | `patches-1-1-1-prores.mov — LUT swap_rb_3d_33.cube — Bypass` |
+         | B | the same sequence on the baseline | T3 and T4 name `patches-1-1-1-prores.mov` (shows the instrument can fail) |
+         | E | no LUT, L2's 16 files | `rgba16f`, `v210`, `v210.json` byte-identical to HEAD, PNG ICC equal, window 0 codes |
+         | D | defaults | dictionary-equal to the snapshot, `streamBookmarks` hash unchanged |
+         | G | gates | `swift test` 405 / 405; Profile build with HEAD's warning set |
+       - **The fix:**
+         - `WindowDeck.displayName` reads only `engine.currentURL`, which `stop()` clears, so the title names a file
+           only while one is loaded. The metadata's `fileName` is the same string from both producers
+           (`FrameEngine.swift:1742`, `MediaInspector.swift:15`), so nothing is lost.
+         - An unnamed stream (a pasted URL, the DEBUG ⌃⌥D / ⌃⌥H overrides) is named by its URL's **host**
+           (`ContentView.hostLabel`), never its URL, whose path or query can carry a key. The overrides' made-up
+           labels ("SRT debug URL", "Stream debug URL") are gone.
+         - The suffix code is unchanged. The standing message and the arbiter's log, which also read `displayName`,
+           now stop naming a departed file too.
+       - **Results, 2026-10-14** (ASUS, Accessibility title reads; window-only captures, deleted after scoring;
+         `build/colour-s6/titlerun/`). **Estimated** 1–1½ h; **actual** about 35 min from the predictions to the
+         first defaults restore, plus about 15 min for the rerun of E against HEAD `0c777a6`.
+
+         | # | Measured | Verdict |
+         |---|---|---|
+         | T1 | `patches-1-1-1-prores.mov` | **PASS** |
+         | T2 | `patches-1-1-1-prores.mov — Color 2020 SDR — LUT swap_rb_3d_33.cube — Bypass`; held `… — LUT swap_rb_3d_33.cube — COMPARING: macOS`; released, back to the first | **PASS** |
+         | T3 | `127.0.0.1 — LUT swap_rb_3d_33.cube — Bypass`; after ⇧⌥], `127.0.0.1 — LUT swap_rb_3d_33.cube — A/V +10 ms — Bypass` | **PASS** |
+         | T4 | `Manifold — LUT swap_rb_3d_33.cube — Bypass` | **PASS** |
+         | T5 | `patches-1-1-1-prores.mov — LUT swap_rb_3d_33.cube — Bypass`, one window | **PASS** |
+         | B | baseline: T3 `patches-1-1-1-prores.mov — LUT … — Bypass` and T4 `patches-1-1-1-prores.mov — LUT … — Bypass` (the bug); T1, T2, T5 as the fix | **PASS** (the instrument fails the bug) |
+         | E | 16 / 16 files: exports byte-identical, ICC equal, window 0 codes, against HEAD `0c777a6` (L3, committed between turns: the baseline build is its code) and against `e9b3407` | **PASS** |
+         | D | Two runs. 13 keys: 11 added (10 `NSWindow Frame …` and `recentLUTs`) and 2 changed (`NSOSPLastRootDirectory`, `NSWindow Frame GoToSheet`) were read first, then deleted or written back; domain dictionary-equal, 1 145 keys, `streamBookmarks` `4466c076`; the HEAD rerun changed 2 keys, restored the same way | **PASS** |
+         | G | `swift test` 405 / 405; Profile build, HEAD's warning set | **PASS** |
+
+         **Instrument faults in the first attempt (kept in `fix-run1`, `base-run1`), not results:**
+         - The Bypass press found no button, because the previous menu was still closing. The driver now retries.
+         - On the fix's first run, ⌃⌥⇧D never reached the app (no `[SRT] tearing down`), so its T4 was read with the
+           stream still up. The driver now presses until the log shows the release.
+         - Not exercised: a named bookmark (the code passes `bookmark.name` unchanged), NDI, WHEP and HLS.
      - **S7** — output HDR signalling, **pre-release, after S6** (D10, decided 2026-10-13): SDI VPID colorimetry and
        transfer (SDR / HLG / PQ), and the HDMI HDR InfoFrame on the DeckLink's HDMI daughter card (EOTF plus static
        metadata), from the file's HDR10 metadata or the stream's `[HDR10-SEI]`, with stated defaults when a PQ source

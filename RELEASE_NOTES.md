@@ -57,6 +57,7 @@ bullet.
 ### Fixed
 
 - Fixed: SRT sound played about 200 ms behind the picture.
+- Fixed: during and after a live stream, the window's name in the Window menu and Mission Control still showed the file that was open before it. It now shows the stream's saved name (or its server's address if it has none) while streaming, and "Manifold" once the stream ends.
 - Fixed: NDI sound played about a quarter of a second behind the picture.
 - Fixed: WHEP sound and picture were out by a different amount every session, and drifted further apart over long sessions.
 - Fixed: SRT sound from Cloudflare could sound distorted and gravelly.

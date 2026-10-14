@@ -300,10 +300,14 @@ final class WindowDeck: ObservableObject {
     /// it), so the registry falls back to the name recorded at claim time and then to an honest
     /// "another window". Deliberately NOT a `??` chain at the call site: guessing is what produced
     /// the fallback bugs this stage exists to clean up.
+    ///
+    /// ⚠️ ONLY WHILE A FILE IS LOADED: `currentURL`, which `stop()` clears. It used to read `engine.metadata`
+    /// first, and nothing ever clears that, so after a live takeover — and after the stream ended — the title,
+    /// the standing message and the arbiter's log still named the departed file (found in colour S6 L3, BUGS.md).
+    /// The URL's last path component IS the name: both metadata producers set `fileName` from it, so reading
+    /// the URL alone loses nothing and cannot go stale.
     var displayName: String? {
-        if let name = engine?.metadata?.fileName, !name.isEmpty { return name }
-        if let url = engine?.currentURL { return url.lastPathComponent }
-        return nil
+        engine?.currentURL?.lastPathComponent
     }
 
     /// What this window is called in the Window menu and in Mission Control.
@@ -1884,9 +1888,8 @@ private final class DeckHostView: NSView {
     ///     phase, synchronously, and `displayName` already falls back to its `lastPathComponent`,
     ///     so this is what makes the correct name appear at load time rather than when metadata
     ///     lands. It is also cleared by `stop()`, so it carries the unload edge too.
-    ///   * `metadata` — the refinement. Same string in practice (both producers set
-    ///     `fileName = url.lastPathComponent`), subscribed so the derivation cannot silently
-    ///     depend on which of the two arrived.
+    ///   * `metadata` — no longer read by `displayName` (it was never cleared, so it named a departed
+    ///     file; colour S6 L3). Still subscribed: it costs one coalesced re-derivation per load.
     ///   * `hasMedia` — belt to the URL's braces. Every path that sets it also sets `currentURL`,
     ///     so it adds no edge that is reachable today; it is here so a future load path that
     ///     establishes media without going through `currentURL` cannot leave a window unnamed.

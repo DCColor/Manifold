@@ -1867,7 +1867,7 @@ struct ContentView: View {
                 // next name on each press, so an HLS→HLS swap can be driven.
                 if let override = ProcessInfo.processInfo.environment["MANIFOLD_STREAM_DEBUG_URL"]
                     .flatMap(URL.init(string:)) {
-                    connectToStreamURL(override, name: "Stream debug URL")
+                    connectToStreamURL(override)   // unnamed: the title names its host
                 } else if let names = ProcessInfo.processInfo.environment["MANIFOLD_STREAM_DEBUG_BOOKMARK"]?
                             .split(separator: ",").map(String.init),
                           let name = names.isEmpty ? nil : names[DebugBookmarkCursor.next() % names.count],
@@ -1959,9 +1959,11 @@ struct ContentView: View {
                 // One lookup, used for BOTH the URL and the name another window would be shown —
                 // two lookups could disagree if the store changed between them.
                 // The override has no bookmark, so its audio offset is a session value only (§19.8).
-                DeckRegistry.shared.connectLive(.srt, from: deck, label: override != nil ? "SRT debug URL" : bookmark?.name,
+                let target = override ?? saved ?? Self.srtDebugTarget
+                // A bookmark's name, else the target's host (unnamed, like a pasted URL).
+                DeckRegistry.shared.connectLive(.srt, from: deck, label: bookmark?.name ?? Self.hostLabel(target),
                                                 bookmark: bookmark) {
-                    LiveSource.connectSRT(to: override ?? saved ?? Self.srtDebugTarget)
+                    LiveSource.connectSRT(to: target)
                 }
             }
             .keyboardShortcut("d", modifiers: [.control, .option])
@@ -2548,6 +2550,14 @@ struct ContentView: View {
         }
     }
 
+    /// What an unnamed stream is called in the window title: its URL's host ("127.0.0.1",
+    /// "customer-x.cloudflarestream.com"), or nil (then the transport's name). Only the host: a path or query can
+    /// carry a stream key or passphrase, and the title reaches the Window menu, Mission Control and screenshots.
+    static func hostLabel(_ url: URL) -> String? {
+        guard let host = url.host, !host.isEmpty else { return nil }
+        return host
+    }
+
     /// Connect to a bookmarked or pasted stream URL. Shared by the menu rows and the sheet so the
     /// takeover rule can't diverge.
     ///
@@ -2568,6 +2578,9 @@ struct ContentView: View {
     /// `bookmark`: the saved stream, when the connect came from one — its audio offset starts the
     /// session (docs/AUDIO_RESAMPLER_DESIGN.md §19.8). nil = a session value only.
     private func connectToStreamURL(_ url: URL, name: String? = nil, bookmark: StreamBookmark? = nil) {
+        // The window's name for this stream: the bookmark's, else the URL's HOST — never the URL, whose path or
+        // query can carry a stream key or passphrase (the `windowTitle` rule).
+        let name = (name?.isEmpty == false ? name : nil) ?? Self.hostLabel(url)
         switch StreamType.detect(url) {
         case .web:
             DeckRegistry.shared.connectLive(.web, from: deck, label: name, bookmark: bookmark) {
