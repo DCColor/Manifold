@@ -6683,7 +6683,130 @@ carries `.disabled`; measured: `enabled=false` with no LUT (the run's last menu 
   nil)`) with a LUT still loaded reports the LUT's space in the scope headers. Nothing is drawn then, and the LUT
   stays across sources (decision 5), but the headers name a space with no picture. L3's readout should say "no
   source" there.
-- Recent LUTs remembering the output space per LUT (D4) is L3.
+- Recent LUTs remembering the output space per LUT (D4) is L3. **Done in L3** (below), as is the "no source" item above.
+
+##### L3 — predictions, written 2026-10-14 00:25 before any launch
+
+**What L3 is (D4, D6, D7, P6):** all in the Interpretation menu's LUT section, no new `ContentView` modifier.
+- **Recent LUTs ▸**: a new defaults key `recentLUTs` holding each file's path, plain bookmark data and stated output
+  space, newest first, at most 10; *Clear Menu*. A load from anywhere restores the output space remembered for that
+  file. A missing file is a greyed row.
+- **Bypass LUT**: keeps the LUT loaded and hands the renderer no LUT.
+- **The readout line**: the chain readout's LUT row, the menu's last row and `[CHAIN] LUT:`, e.g. `swap_rb_3d_33.cube —
+  3D 33³ · tetrahedral · out Rec.2020 PQ (HDR10) (stated)`, with unknown keywords named.
+- **The title suffix** ` — LUT name.cube` (` (bypassed)`), and the Color control's face ` + LUT` in amber.
+- **Refusals**: the window's banner (`engine.playbackNotice`) instead of L1's sheet.
+- **From L2's open item**: with no source (`WindowDeck.hasSource`: no file and no live stream owned), the Source line,
+  the CIE header and the readout's LUT line say "no source", and the scope models get the cleared source codes, not
+  the LUT's stated space.
+
+**Estimated:** 2½–3½ h (stated before starting): code ~1 h, build and tests ~20 min, the unattended run ~1 h, docs ~30 min.
+
+**Instruments:** L2's rig, on the **ASUS only**. Window-only captures by window id; ⌃⌥E exports (`rgba16f`, `v210`,
+`v210.json`, PNG with its ICC); Accessibility for the menu, the window title, the banner text and the face's frame;
+the app log. **Amber** is measured on a window capture taken with the control bar up, over the face's frame:
+`max(r − b)` (§6.8's measure). **No source** is reached by a live connect and disconnect: ⌃⌥D with
+`MANIFOLD_SRT_DEBUG_URL=srt://127.0.0.1:9000` against a local ffmpeg SRT listener (`chart_919_aac.ts`), then ⌃⌥⇧D.
+No bookmark is read, so there is no keychain prompt. The previous-LUT check uses `swap_rb_3d_33.cube`, so a change
+would be visible. **Baseline:** HEAD `e9b3407`, built from a worktree. **Defaults:** snapshot first, `streamBookmarks`
+hashed, every added key deleted by name after a read, every changed key written back from the snapshot.
+
+| # | What | Band: pass / fail |
+|---|---|---|
+| **L3-P6** | 15 malformed files (`empty`, `comments_only`, `not_utf8`, `data_before_size`, `size_66_3d`, `size_65537_1d`, `size_1_3d`, `row_nan`, `row_inf`, `row_not_a_number`, `row_four_values`, `too_few_rows`, `too_many_rows`, `domain_inverted`, `keyword_after_data`), each loaded over swap at 2020 PQ | **15 / 15** `[LUT] banner: Couldn’t load “…”` lines carrying that file's `CubeLUTError` message and naming swap as still applied; the banner text read in the window by Accessibility; no sheet. After all 15: `rgba16f`, `v210`, `v210.json` **byte-identical** to the export before them (**0 codes**); title, readout line and output space unchanged. One acceptance, one moved byte, or one missing banner fails |
+| **L3-R** | Recent LUTs across a relaunch | Before quit: swap stated 2020 PQ, then `unknown_keywords.cube` and `missing_copy.cube` (a copy of the identity) at Same as Source. `missing_copy.cube` deleted, relaunch: rows newest first, `missing_copy.cube — missing` with Accessibility `enabled = false`, the other two enabled, swap's row showing `out 2020 PQ`. Loading swap from Recent LUTs logs `output space Rec.2020 PQ (HDR10), remembered`; its export **byte-identical** to the pre-quit swap-at-PQ export. *Clear Menu*: rows gone, `recentLUTs` absent from the domain. No crash anywhere. Any one of these failing fails R |
+| **L3-B** | Bypass | With swap at 2020 PQ: Bypass → `rgba16f`, `v210`, `v210.json` **byte-identical** to the no-LUT export, PNG ICC equal, window **0 codes** against the no-LUT capture, and the `[SCOPE-COLOR]` / `[DeckLink]` / `[EDR] layer` lines back to the no-LUT text. The LUT stays loaded: *Remove LUT* enabled, the readout says `BYPASSED`. Un-bypass → exports **byte-identical** to before the bypass. Any byte fails |
+| **L3-W** | Words in each state | No LUT: title has no LUT suffix, face white (`max(r − b)` < 40), no readout line. Applied (Same as Source and 2020 PQ): title ` — LUT name.cube`, face reads `+ LUT` and is amber (`max(r − b)` > 150), readout `out same as source` / `out Rec.2020 PQ (HDR10) (stated)`. Bypassed: ` (bypassed)`, `+ LUT off`, white, `BYPASSED — not applied`. `unknown_keywords.cube`: the readout names `LUT_IN_VIDEO_RANGE (line 2)` and `FOO_BAR (line 3)` |
+| **L3-N** | No source | swap at 2020 PQ, SRT connected then torn down: `[SCOPE-COLOR] … no source`, `[CHAIN] Source: no source`, `[CHAIN] LUT: … · no source`, title `Manifold — LUT swap_rb_3d_33.cube`. Naming `Rec. 2020 · PQ` in any header after the teardown fails. While connected: the LUT applies to the stream and the headers name `— LUT output (CICP 9-16-9)` |
+| **L3-P1** | No LUT vs HEAD, L2's 16 files | Window **0 codes**; `rgba16f`, `v210`, `v210.json` **byte-identical**; PNG ICC equal |
+| **L3-D** | Defaults | Domain **dictionary-equal** to the snapshot; `streamBookmarks` hash unchanged |
+| **G** | Gates | `swift test` 397 + 8 new (`RecentLUTsTests`), all pass, each shown to fail on a mutant; Profile build with HEAD's warning set |
+
+##### L3 — results, 2026-10-14 (unattended, not committed)
+
+Pixel checks on the **ASUS only**; both displays read SDR (EDR potential 1.0; read, not set). Every capture was
+window-only, by the Manifold window's id, with the window on the ASUS (`-1880 30 875 492`). Every capture and export
+was deleted after scoring. Logs, events, `words.jsonl` and `score.txt` are in the gitignored `build/colour-s6/l3run/`.
+**Estimated:** 2½–3½ h. **Actual:** about 50 min, from the first code read (00:14) to the defaults restore (01:03).
+
+**What was built:**
+- **`LUTCube`** (package, tested):
+  - `RecentLUTList`, the stored value: newest first, at most 10, one entry per file. `decode` returns **nil** for
+    anything it cannot read, including an entry with an unknown key, and the store then writes nothing.
+  - `LUTReadout.line`, the readout text. A 1D-only table reads `linear`, because that is what the shader runs.
+    Ignored keywords are named, the first four plus "+N more". With no source, no output space is named.
+  - Eight tests.
+- **`InterpretationLUTModel`** (`App/InterpretationLUT.swift`):
+  - It keeps the built install. Every change goes through one `push()`: renderer, SDI re-tag, title, and one colour
+    announcement, so the readout re-reads even when no picture code moves.
+  - **Bypass** hands the renderer `nil` and Same as Source; un-bypass hands back the **same install object**. A new
+    load, Remove and an interpolation change behave as before. A rebuild while bypassed stays bypassed.
+  - A load takes the output space Recent LUTs remember for that path. Changing the output space updates the entry.
+  - A refusal is the window's banner (`engine.playbackNotice`, the slot the Color control's other notices use).
+    The alert sheet is gone.
+- **`RecentLUTStore`**:
+  - It re-reads the key before every write and never writes over an unreadable value.
+  - Plain bookmark data, resolved `.withoutUI, .withoutMounting`, falling back to the path. A file neither finds is
+    listed as `— missing`, greyed.
+  - The list re-resolves when the app becomes active.
+- **The menu** (the LUT section of the Interpretation menu): *Load LUT…*, *Recent LUTs ▸* (rows, *Clear Menu*),
+  *Bypass LUT*, *Remove LUT*, *LUT Output Space ▸*, *LUT Interpolation ▸*, then the readout as a disabled row. The
+  section title adds `· bypassed`.
+- **Words:**
+  - The face appends ` + LUT` and turns amber while a LUT is applied, ` + LUT off` and stays white while bypassed.
+  - The title appends ` — LUT name.cube`, plus ` (bypassed)`.
+  - The chain readout gains a **LUT** row and logs `[CHAIN] LUT:` on change.
+- **No source** (L2's open item):
+  - `WindowDeck.hasSource`: a file, or a live stream this deck owns that the renderer has not released.
+  - The chain readout's Source line and verdict, `ScopeColorFeed` (the cleared source codes and "no source") and the
+    readout read it.
+  - `applyWindowTitle`, which every source edge already reaches, re-announces when it flips.
+  - CLAUDE.md's scope-state sentence names this case.
+
+**Found while running, and fixed:**
+1. **For one millisecond after an SRT teardown, the scope header named the LUT's space.**
+   - `liveSourceReleased` clears the codes while the deck still owns the stream, so the first announcement saw a
+     source and logged `[SCOPE-COLOR] source: Rec. 2020 · PQ (ST 2084) — LUT output`. "No source" followed when the
+     arbiter let go. That fails L3-N's band.
+   - The fix: the renderer sets `liveSourceWasReleased` before its clearing call, and any later
+     `setSourceColorSpace` clears it. `hasSource` reads it.
+   - The rerun's first header after ⌃⌥⇧D is `no source`. The first run is kept in `l3run/a-run1`.
+2. **Instrument faults, not results:**
+   - The face's `max(r − b)` over its whole frame read **63 on the white face**, because the bar is translucent and
+     the chart shows through it. The measure moved to the text pixels (max channel ≥ 200), scored on their median.
+     Recorded before the scored run; the first, aborted attempt is in `l3run/a-aborted`.
+   - The banner is drawn but not exposed to Accessibility: 15 of 15 reads found nothing while the log had all 15. It
+     was confirmed on one window capture, then read for every file by Vision OCR on a window-only capture, deleted
+     after reading.
+   - The Recent LUTs listing used `it` as an AppleScript loop variable (reserved) and failed. It was re-run as run c.
+3. **Recent LUTs worked across a relaunch before it was asked to.** The rerun's first load of swap came up at 2020 PQ,
+   remembered from the first run. So that run's "applied, Same as Source" step read PQ, and Same as Source's words are
+   scored from the first run and the `unknown_keywords` / `missing_copy` steps.
+
+**Results** (HEAD `e9b3407` vs the tree):
+
+| # | Result | Verdict |
+|---|---|---|
+| L3-P6 | **15 / 15** refused, each with its own `CubeLUTError` message. 15 `[LUT] banner:` lines, each naming the file and `“swap_rb_3d_33.cube” is still applied.` The banner read in the window by OCR for all 15, e.g. *Couldn't load "row_nan.cube": Line 3 holds an infinite or not-a-number value. Nothing was loaded. "swap_rb_3d_33.cube" is still applied.* 0 sheets. Export after all 15 **byte-identical** to before (`rgba16f` `553012f19949`, `v210` `6744d84ca274`, `json`, ICC `63cd9f4a`): **0 codes**. Title, readout and output space unchanged | **PASS** |
+| L3-R | **In the session:** swap from *Recent LUTs* came back at 2020 PQ, export byte-identical to swap at PQ. **Across a relaunch:** `[LUT] swap_rb_3d_33.cube: output space Rec.2020 PQ (HDR10), remembered by Recent LUTs`, export byte-identical to the pre-quit one. Rows after a relaunch (run c), newest first: `unknown_keywords.cube — good`, **`missing_copy.cube — missing` (enabled = false)**, `swap_rb_3d_33.cube — l1-synth · out 2020 PQ`. Pressing the missing row changed nothing, with no crash. *Clear Menu*: `Recent LUTs cleared (3)`, only a greyed *Clear Menu* left, and `recentLUTs` absent from the domain | **PASS** |
+| L3-B | Bypass at 2020 PQ: `rgba16f`, `v210`, `json` **byte-identical** to no LUT, ICC equal (`a1096ca4`), window **0 codes, 0 px** (control: swap vs no LUT 255 codes on 382 524 px). `[EDR] layer` `CoreMedia709`, EDR off, `[SCOPE-COLOR] Rec. 709 · Rec. 709 — tagged (CICP 1-1-1)`, `[DeckLink] → Rec. 709`: the no-LUT text. Bypass checked, *Remove LUT* enabled, readout `BYPASSED — not applied`. Un-bypass: exports **byte-identical** to before | **PASS** |
+| L3-W | No LUT: title `patches-1-1-1-prores.mov`, readout row `LUT: none`, face text median r − b **0**. Applied: ` — LUT swap_rb_3d_33.cube`, `709 709 · Declared + LUT`, **185–193** (amber). Readout `… · out same as source` / `… · out Rec.2020 PQ (HDR10) (stated)`. Bypassed: ` (bypassed)`, `+ LUT off`, **0**, `BYPASSED — not applied`. `unknown_keywords.cube`: `… · ignored: LUT_IN_VIDEO_RANGE (line 2), FOO_BAR (line 3)` | **PASS** |
+| L3-N | SRT (local ffmpeg listener, `chart_919_aac.ts`): while connected, `[SCOPE-COLOR] … — LUT output (CICP 9-16-9)` and `[CHAIN] Source … CICP 9-1-9 — tagged`; the face `2020 709 · Declared + LUT`. After ⌃⌥⇧D: `[SCOPE-COLOR] source: no source`, `[CHAIN] Source: no source`, `[CHAIN] LUT: swap_rb_3d_33.cube — 3D 33³ · tetrahedral · no source`; no `Rec. 2020 · PQ` header after the teardown (after the fix). **The title read `patches-1-1-1-prores.mov — LUT swap_rb_3d_33.cube`, not `Manifold — …`**: `displayName` reads `engine.metadata`, which nothing clears (a pre-existing defect, below) | **PASS** on the headers and the readout; **FAIL** on the title's base name (not L3's code) |
+| L3-P1 | 16 / 16 files: `rgba16f`, `v210`, `json` **byte-identical**, ICC equal, window **0 codes**. All 122 coded tag lines the **same text**. The only differences are the empty window's bind, `no source` in place of `Rec. 709 · Rec. 709 — assumed (CICP –-–-–)` (17), and one such `assumed` line as the file arrives (14): the intended change | **PASS** |
+| L3-D | `streamBookmarks` 1 196 B `4466c076` before and after. The runs added 9 `NSWindow Frame …` keys and changed `NSOSPLastRootDirectory` and `NSWindow Frame GoToSheet`. All 11 were read first, then deleted or written back. `recentLUTs` was absent after *Clear Menu*. Domain **dictionary-equal**, 1 145 keys | **PASS** |
+| G | `swift test` **405 / 405** (397 + 8). Mutants: decode accepting unknown keys, and the readout ignoring "no source", each fail one test. Profile build: HEAD's 11-warning set exactly (HEAD built from a worktree) | **PASS** |
+
+**Not exercised:**
+- **SDI on a running output** (the tag is the `[DeckLink]` line, as in L2).
+- **A volume that unmounts under a recent LUT.** Missing was tested by deleting the file.
+- **A stored `recentLUTs` this version cannot read.** Unit-tested (`decode` → nil), not launched against.
+- **By eye on the LG**; it can join L4.
+
+**Open after L3:**
+- **The window title keeps a departed file's name.** After a live takeover and after the stream ends, `displayName`
+  reads `engine.metadata`, which is never cleared. The title then names a file that is no longer loaded, and while
+  the stream plays it names the file rather than the stream (`BUGS.md`). Not changed here.
+- L4: the Resolve match, and the SDI and LG sanity looks (Robbie).
 
 ---
 

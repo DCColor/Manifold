@@ -260,6 +260,9 @@ struct DisplayChainReadout: View {
                 row("Tags", tags)
             }
             row("Chroma",    model.chain.chroma)
+            if let lut = model.chain.lut {
+                row("LUT", lut)
+            }
             row("Transform", model.chain.transform)
             row("Display",   model.chain.display)
             row("Headroom",  model.chain.headroom)

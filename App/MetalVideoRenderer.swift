@@ -1057,6 +1057,11 @@ final class MetalVideoRenderer {
     /// STRICTLY from this field (never inferred from primaries). nil/2/unknown → 709.
     private(set) var sourceMatrixCode: Int?
 
+    /// Colour S6, L3. MAIN. A live source has let go (`liveSourceReleased`) and no source has stated its colour
+    /// since. `WindowDeck.hasSource` reads it, because the deck still owns the stream while the release announces.
+    private(set) var liveSourceWasReleased = false
+    private var releasingLiveSource = false
+
     /// Where the three codes above came from. Stated by the caller, **never derived here** — see
     /// `SourceColorProvenance`. Seeded to `.assumed`, which is what a renderer with no source is.
     private(set) var sourceColorProvenance: SourceColorProvenance = .assumed
@@ -1640,7 +1645,13 @@ final class MetalVideoRenderer {
     /// the pending clear first and drops the retained frame, so the re-present this sets has
     /// nothing to repaint.
     func liveSourceReleased() {
+        // Colour S6, L3: released BEFORE the clearing call announces, so the readout and the scope headers read
+        // "no source" at once. Without it the deck still owned the stream for that announcement, and the scope
+        // header named the LUT's stated space for a millisecond after the teardown (measured, L3 run a).
+        liveSourceWasReleased = true
+        releasingLiveSource = true
         setSourceColorSpace(primaries: nil, transfer: nil, matrix: nil, provenance: .assumed)
+        releasingLiveSource = false
         setSourceColorNote(nil)
         // The departed stream's chroma goes with its colour: the readout must not describe it.
         carriedLock.lock(); carriedPixelFormatLocked = nil; carriedLock.unlock()
@@ -1653,6 +1664,9 @@ final class MetalVideoRenderer {
 
     func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?,
                              provenance: SourceColorProvenance) {
+        // Colour S6, L3: any source stating its colour ends the released state (`liveSourceReleased` sets it,
+        // around its own clearing call). Before the no-op guard: a new source can state the cleared codes.
+        if !releasingLiveSource { liveSourceWasReleased = false }
         // A RE-ASSERT OF THE SAME CODES IS A NO-OP. The metadata observer now arrives second with
         // the values the load path already published; without this it would re-post the state,
         // re-render a frame and print the [EDR] block a second time per source.

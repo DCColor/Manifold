@@ -49,6 +49,7 @@ final class ScopeColorFeed: ObservableObject {
         let matrix: Int?
         let provenance: SourceColorProvenance
         let statedByLUT: Bool
+        let sourcePresent: Bool
     }
     private var written: Written?
 
@@ -106,12 +107,19 @@ final class ScopeColorFeed: ObservableObject {
     /// Write the six scope fields from the renderer's picture colour (its source colour unless a LUT states one). Called on every colour
     /// announcement, on bind, and by `updateScopeSampling` when a scope (re)starts.
     func refresh(trigger: String = "reseed") {
-        guard let renderer = deck?.renderer else { return }
-        let now = Written(primaries: renderer.picturePrimariesCode,
-                          transfer: renderer.pictureTransferCode,
-                          matrix: renderer.pictureMatrixCode,
-                          provenance: renderer.sourceColorProvenance,
-                          statedByLUT: renderer.pictureStatedByLUT)
+        guard let deck, let renderer = deck.renderer else { return }
+        // Colour S6, L3: with no source there is no picture to describe. The renderer's picture codes are then
+        // a LUT's stated space if one is loaded (the LUT stays across sources), so the cleared SOURCE codes are
+        // written instead, and the header says "no source" rather than naming that space. With a source: the
+        // picture codes, as since L2.
+        let present = deck.hasSource
+        let now = present
+            ? Written(primaries: renderer.picturePrimariesCode, transfer: renderer.pictureTransferCode,
+                      matrix: renderer.pictureMatrixCode, provenance: renderer.sourceColorProvenance,
+                      statedByLUT: renderer.pictureStatedByLUT, sourcePresent: true)
+            : Written(primaries: renderer.sourcePrimariesCode, transfer: renderer.sourceTransferCode,
+                      matrix: renderer.sourceMatrixCode, provenance: renderer.sourceColorProvenance,
+                      statedByLUT: false, sourcePresent: false)
         guard now != written else { return }
         written = now
 
@@ -120,8 +128,10 @@ final class ScopeColorFeed: ObservableObject {
         parade?.sourceTransferCode = now.transfer
         vectorscope?.sourceMatrixCode = now.matrix
         vectorscope?.sourcePrimariesCode = now.primaries
-        let header = Self.cieHeader(primaries: now.primaries, transfer: now.transfer,
-                                    provenance: now.provenance, statedByLUT: now.statedByLUT)
+        let header = now.sourcePresent
+            ? Self.cieHeader(primaries: now.primaries, transfer: now.transfer,
+                             provenance: now.provenance, statedByLUT: now.statedByLUT)
+            : "no source"
         cie?.spaceReadout = header
 
         func code(_ c: Int?) -> String { c.map(String.init) ?? "–" }

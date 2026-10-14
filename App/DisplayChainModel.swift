@@ -47,6 +47,9 @@ struct DisplayChain: Equatable {
     /// Colour S4: this window's display's EDR headroom — "headroom 8.97 of 8.97", or "display is in SDR
     /// mode". From the renderer's own sample of its window's screen, the one the `[EDR]` log prints.
     var headroom: String = "—"
+    /// Colour S6, L3 (D7): the window's LUT — "name.cube — 3D 33³ · tetrahedral · out Rec.2020 PQ (HDR10)
+    /// (stated)" — or nil with none. `InterpretationLUTModel.readoutLine`.
+    var lut: String? = nil
 }
 
 @MainActor
@@ -175,7 +178,11 @@ final class DisplayChainModel: ObservableObject {
         let sourceCS = renderer?.sourceDerivedColorSpace
         let mCode = renderer?.sourceMatrixCode
         let sourceLine: String
-        if sourceCS == nil && pCode == nil && tCode == nil && mCode == nil {
+        // Colour S6, L3: a cleared deck holds nil codes, as an untagged file does, so the codes cannot say there is
+        // no source; the deck can (`hasSource`). Without it the line named the 709 defaults, and with a LUT stated
+        // the scopes named the LUT's space, over no picture at all.
+        let present = deck.hasSource
+        if !present || (sourceCS == nil && pCode == nil && tCode == nil && mCode == nil) {
             sourceLine = "no source"
         } else {
             // ⚠️ NAMES THE CODES THE RENDERER IS ACTUALLY USING, NOT THE TAG. An untagged file has
@@ -253,7 +260,7 @@ final class DisplayChainModel: ObservableObject {
         var converting = false
         // Colour S6, L2: the verdict compares what reaches the LAYER, which is the picture's colorspace (the
         // source's unless a LUT states its output). The Source line above stays the source's.
-        if mode == .os, let displayCurve, let pictureCS = renderer?.pictureDerivedColorSpace {
+        if mode == .os, present, let displayCurve, let pictureCS = renderer?.pictureDerivedColorSpace {
             let sourceCurve = ICCTransferCurve.parseRTRC(colorSpace: pictureCS)
             // ⚠️ NUMERIC, over [0,1] — never a comparison of ICC encodings. §6.5's probe made
             // exactly that mistake and reported "TRCs differ, A/B should be visible" for two
@@ -281,7 +288,8 @@ final class DisplayChainModel: ObservableObject {
                                                        note: $0.chromaNote)
                                 } ?? "no source",
                                 tags: renderer?.sourceColorNote,
-                                headroom: HeadroomReadout.text(renderer?.displayHeadroom))
+                                headroom: HeadroomReadout.text(renderer?.displayHeadroom),
+                                lut: deck.lut.readoutLine)
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
         // Colour S3: the Source and Tags lines in the log, once per change, so an unattended run reads
@@ -291,6 +299,9 @@ final class DisplayChainModel: ObservableObject {
         }
         // On a screen change too: two SDR displays read the same words, and the log must still say
         // which display the line now describes (S4's timing reads this line).
+        if next.lut != chain.lut {
+            print("[CHAIN] LUT: " + (next.lut ?? "none"))
+        }
         if next.headroom != chain.headroom || next.display != chain.display {
             print("[CHAIN] Headroom: \(next.headroom)" + (screen.map { " on \"\($0.localizedName)\"" } ?? ""))
         }

@@ -347,6 +347,9 @@ final class WindowDeck: ObservableObject {
     ///      decision 4). The Color control's amber hides with the overlay HUD; this does not. Only
     ///      while this deck owns the live source, like case 5.
     ///
+    ///   7. **A loaded LUT appends " — LUT name.cube"** after the colour suffix, " (bypassed)" while
+    ///      bypassed, with or without a source (colour S6, L3): the LUT stays across sources.
+    ///
     /// ⚠️ NEVER A URL, for a stream. A stream path can carry the stream key, and this string goes
     /// into the Window menu, into Mission Control, and into any screenshot of either. That is the
     /// same rule the bookmark rows and the standing message already follow.
@@ -362,6 +365,8 @@ final class WindowDeck: ObservableObject {
             // Colour S5: a file's override, in the same words.
             title += " — " + color
         }
+        // Colour S6, L3: the window's LUT, on any source and with none — " — LUT name.cube", "(bypassed)".
+        if let lutWords = lut.titleSuffix { title += " — " + lutWords }
         if DeckRegistry.shared.liveLabel(for: self) != nil, audioOffset.isAvailable, audioOffset.sessionMs != 0 {
             title += " — " + LiveAudioOffsetModel.indicator(audioOffset.sessionMs)
         }
@@ -398,7 +403,25 @@ final class WindowDeck: ObservableObject {
     func applyWindowTitle() {
         let title = windowTitle
         if window?.title != title { window?.title = title }
+        // Colour S6, L3: every source edge (a file loading or unloading, a stream connecting or going) passes
+        // through here, so this is where "has a source" is noticed. The readout and the scope headers read it
+        // (`hasSource`); one colour announcement makes them re-read when it flips.
+        let present = hasSource
+        if present != lastHasSource {
+            lastHasSource = present
+            renderer?.sourceColorStateChanged()
+        }
     }
+
+    /// Colour S6, L3: this window shows a source — a file, or a live stream it owns. **Not** "the renderer has
+    /// colour codes": an untagged file and a cleared deck both hold nil codes. With no source the chain readout
+    /// and the scope headers say "no source", and name no LUT output space (§6.11, L2's open item).
+    /// A released live stream is no source even before the arbiter lets go of it (`liveSourceWasReleased`).
+    var hasSource: Bool {
+        engine?.currentURL != nil
+            || (DeckRegistry.shared.liveSource(for: self) != nil && renderer?.liveSourceWasReleased != true)
+    }
+    private var lastHasSource: Bool?
 
     /// Coalesce a title re-derivation onto the next main-actor turn.
     ///

@@ -234,6 +234,7 @@ struct ColorInterpretationControl: View {
     /// Colour S6: the window's LUT slot, and the app-wide interpolation (D1).
     @ObservedObject var lut: InterpretationLUTModel
     @ObservedObject private var lutSetting = LUTInterpolationSetting.shared
+    @ObservedObject private var recentLUTs = RecentLUTStore.shared
     @ObservedObject private var ndi = NDIService.shared
     @ObservedObject private var srt = SRTClient.shared
     @ObservedObject private var whep = WHEPClient.shared
@@ -304,7 +305,7 @@ struct ColorInterpretationControl: View {
             } label: {
                 (Text(Image(systemName: "paintpalette")).font(.system(size: 13))
                  + Text("  ")
-                 + Text(faceLabel).font(.system(.caption, design: .monospaced)))
+                 + Text(faceLabel + lut.faceSuffix).font(.system(.caption, design: .monospaced)))
                     .foregroundColor(colorControlTint)
             }
             .menuStyle(.borderlessButton)
@@ -364,7 +365,8 @@ struct ColorInterpretationControl: View {
         case .live: overridden = reading?.effective.isOverridden == true
         case .file: overridden = fileModel.override != .auto
         }
-        return overridden ? Color.orange : .white.opacity(0.9)
+        // Colour S6, L3: an applied LUT is an assertion too (the face reads "+ LUT"); a bypassed one is not.
+        return overridden || lut.isApplied ? Color.orange : .white.opacity(0.9)
     }
 
     // MARK: The menu
@@ -419,15 +421,31 @@ struct ColorInterpretationControl: View {
                 set: { if let o = $0 { choose(o) } })
     }
 
-    // MARK: LUT (colour S6, L1)
+    // MARK: LUT (colour S6, L1; L3)
 
-    /// Load, remove, the output space (L2) and the app-wide interpolation. The LUT applies after the
-    /// interpretation above, to whatever source this window shows, and stays across a change of source
-    /// (decision 5). Recent LUTs and Bypass come in L3.
+    /// Load, Recent LUTs, Bypass, remove, the output space (L2) and the app-wide interpolation, then the readout
+    /// line. The LUT applies after the interpretation above, to whatever source this window shows, and stays
+    /// across a change of source (decision 5).
+    ///
+    /// L3: rows that can be greyed are `Button`s and `Toggle`s, which honour `.disabled` in a menu (S5, L2); a
+    /// missing recent file is a greyed row, never a load. The readout row is a disabled `Button`, as the File line
+    /// is, so its words are readable by Accessibility.
     @ViewBuilder private var lutSection: some View {
         Section(lut.name.map { "LUT — \($0) · \(lut.shape ?? "")"
-                               + (lut.outputSpace == .auto ? "" : " → \(lut.outputSpace.shortLabel)") } ?? "LUT") {
+                               + (lut.outputSpace == .auto ? "" : " → \(lut.outputSpace.shortLabel)")
+                               + (lut.bypassed ? " · bypassed" : "") } ?? "LUT") {
             Button("Load LUT…") { lut.chooseFile() }
+            Menu("Recent LUTs") {
+                ForEach(recentLUTs.rows) { row in
+                    Button(row.title) { if let url = row.url { lut.load(url) } }
+                        .disabled(row.url == nil)
+                }
+                if !recentLUTs.rows.isEmpty { Divider() }
+                Button("Clear Menu") { recentLUTs.clear() }
+                    .disabled(recentLUTs.rows.isEmpty)
+            }
+            Toggle("Bypass LUT", isOn: Binding(get: { lut.bypassed }, set: { lut.setBypassed($0) }))
+                .disabled(lut.name == nil)
             Button("Remove LUT") { lut.remove() }
                 .disabled(lut.name == nil)
             outputSpaceMenu
@@ -439,6 +457,7 @@ struct ColorInterpretationControl: View {
                                          set: { _ in lutSetting.interpolation = mode }))
                 }
             }
+            Button("LUT: " + (lut.readoutLine ?? "none")) {}.disabled(true)
         }
     }
 

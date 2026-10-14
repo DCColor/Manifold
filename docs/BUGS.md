@@ -140,8 +140,26 @@ held back until after release, and the numbered defect entries follow.
          amended. P1 (16 files byte-identical to HEAD with no LUT), P2, P4, P5, P7, P8 and the gates pass; P6 by
          reading. Not exercised: SDI on a running output, a live source with a LUT, Custom as the output space
          through the menu.
-         - **Open:** with no source and a LUT stating its output, the scope headers name the LUT's space. L3's
-           readout should say "no source".
+         - ~~**Open:** with no source and a LUT stating its output, the scope headers name the LUT's space. L3's
+           readout should say "no source".~~ **Fixed in L3.**
+         L2 since committed (`e9b3407`).
+       - **L3 built and run unattended 2026-10-14, not committed** (§6.11, *L3 — results*):
+         - **What it adds:** Recent LUTs (`recentLUTs`: path, bookmark, output space; never written over when
+           unreadable; Clear Menu; a missing file greyed). Bypass LUT (keeps the LUT loaded; the no-LUT path while
+           bypassed). The readout line (the chain readout's LUT row, the menu, `[CHAIN] LUT`), the title suffix, the
+           amber "+ LUT" face, and refusal banners in place of L1's sheet.
+         - **No source:** the readout and the scope headers say "no source" (`WindowDeck.hasSource`), including the
+           moment of a live teardown.
+         - **Results:** P6 (15 / 15 refused with a banner, 0 codes), Recents across a relaunch, Bypass (byte-identical
+           to no LUT, and back), the words in every state, no source, P1 (16 files byte-identical to HEAD), defaults
+           and gates all pass.
+         - **One miss, not L3's code:** the title's base name after a stream (below).
+     - **Window title keeps a departed file's name** (found in L3, 2026-10-14; not fixed). `WindowDeck.displayName`
+       reads `engine.metadata`, which nothing clears. After a live takeover the title still names the file: while
+       the stream plays, and after it ends, when the window has no source. The Window menu and Mission Control
+       then name a file that is not loaded. Measured: `patches-1-1-1-prores.mov — LUT swap_rb_3d_33.cube` during
+       and after an SRT session. The LUT suffix was right. The fix belongs with the title's name rules: clear the
+       metadata at `stop()`, or have the title prefer the live label while a stream is owned.
      - **S7** — output HDR signalling, **pre-release, after S6** (D10, decided 2026-10-13): SDI VPID colorimetry and
        transfer (SDR / HLG / PQ), and the HDMI HDR InfoFrame on the DeckLink's HDMI daughter card (EOTF plus static
        metadata), from the file's HDR10 metadata or the stream's `[HDR10-SEI]`, with stated defaults when a PQ source
