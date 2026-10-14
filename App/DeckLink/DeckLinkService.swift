@@ -706,9 +706,10 @@ final class DeckLinkService: ObservableObject {
         isOutputting = true
         applyAudioRouting()   // D4b-3: ENABLE transition — with .sdi (the default), the Mac goes silent
         let deviceIndex = selectedDeviceIndex
-        // D5 output-signal TAG ← source PRIMARIES code ONLY (never the matrix; the kernel picks the
-        // encoding matrix from the matrix code, independently). nil → 709.
-        let primariesCode = renderer?.sourcePrimariesCode ?? 1
+        // D5 output-signal TAG ← the picture's PRIMARIES code ONLY (never the matrix; the kernel picks the
+        // encoding matrix from the matrix code, independently). nil → 709. Colour S6, L2: the PICTURE codes —
+        // the wire carries the post-LUT picture, so a LUT's stated output space is what it is tagged as.
+        let primariesCode = renderer?.picturePrimariesCode ?? 1
         let mode = currentMode   // D4a: display mode derived from the current source (or default)
         queue.async {
             self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode, primariesCode: primariesCode)
@@ -870,8 +871,11 @@ final class DeckLinkService: ObservableObject {
     /// (independent of output state), and — if output is running — re-applies the colorspace TAG
     /// from the new primaries. Both read colorPrimariesCode ONLY (the encoding matrix follows the
     /// matrix code, separately). Call after setSourceColorSpace.
+    ///
+    /// Colour S6, L2: reads the renderer's PICTURE primaries, and is also called when a LUT or its stated output
+    /// space moves them (`InterpretationLUTModel`).
     func sourceColorChanged() {
-        let primariesCode = renderer?.sourcePrimariesCode
+        let primariesCode = renderer?.picturePrimariesCode
         // Display label tracks the current source whether or not output is on (it's the signal that
         // output produces / would produce). DISPLAY ONLY — does not touch the actual tag.
         let label = Self.colorspaceLabel(forPrimaries: primariesCode)
@@ -1075,7 +1079,7 @@ final class DeckLinkService: ObservableObject {
         }
 
         let deviceIndex = selectedDeviceIndex
-        let primariesCode = renderer?.sourcePrimariesCode ?? 1
+        let primariesCode = renderer?.picturePrimariesCode ?? 1   // the picture's (L2)
         print("DeckLink D4a: RE-ESTABLISHING SDI output at \(mode.label) via \(source) [\(trigger)]")
         queue.async {
             // Race-safe stop (clear running → StopScheduledPlayback → unset callback → DisableVideoOutput

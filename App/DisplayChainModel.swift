@@ -251,8 +251,10 @@ final class DisplayChainModel: ObservableObject {
         // ── THE VERDICT ─────────────────────────────────────────────────────────────────────
         var verdict: String?
         var converting = false
-        if mode == .os, let displayCurve, let sourceCS {
-            let sourceCurve = ICCTransferCurve.parseRTRC(colorSpace: sourceCS)
+        // Colour S6, L2: the verdict compares what reaches the LAYER, which is the picture's colorspace (the
+        // source's unless a LUT states its output). The Source line above stays the source's.
+        if mode == .os, let displayCurve, let pictureCS = renderer?.pictureDerivedColorSpace {
+            let sourceCurve = ICCTransferCurve.parseRTRC(colorSpace: pictureCS)
             // ⚠️ NUMERIC, over [0,1] — never a comparison of ICC encodings. §6.5's probe made
             // exactly that mistake and reported "TRCs differ, A/B should be visible" for two
             // spellings of one curve. `maxDeviation` is the shared arithmetic.

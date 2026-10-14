@@ -16,6 +16,11 @@
 //  reaching the renderer — there is nothing per transport to wire and therefore nothing to forget.
 //  CLAUDE.md states the rule.
 //
+//  COLOUR S6, L2 (§6.11 D3): the headers and the maths describe the PICTURE — the renderer's `picture*Code`s,
+//  which are its source codes unless a LUT states its output space. A LUT reaches the headers the same way a
+//  source does: through the renderer (`setInterpretationLUT`), announced on the same notification. The CIE
+//  header's tier then reads "LUT output" rather than the source's provenance, since the source did not say it.
+//
 //  ⚠️ NO `.onChange` IN `ContentView` — that body is at the type-checker's limit (§6.7). This binds
 //  from the `.onAppear` that already exists, and observes NotificationCenter, exactly as
 //  `DisplayChainModel.bind` does.
@@ -43,6 +48,7 @@ final class ScopeColorFeed: ObservableObject {
         let transfer: Int?
         let matrix: Int?
         let provenance: SourceColorProvenance
+        let statedByLUT: Bool
     }
     private var written: Written?
 
@@ -97,14 +103,15 @@ final class ScopeColorFeed: ObservableObject {
 
     // MARK: Write
 
-    /// Write the six scope fields from the renderer's source colour. Called on every colour
+    /// Write the six scope fields from the renderer's picture colour (its source colour unless a LUT states one). Called on every colour
     /// announcement, on bind, and by `updateScopeSampling` when a scope (re)starts.
     func refresh(trigger: String = "reseed") {
         guard let renderer = deck?.renderer else { return }
-        let now = Written(primaries: renderer.sourcePrimariesCode,
-                          transfer: renderer.sourceTransferCode,
-                          matrix: renderer.sourceMatrixCode,
-                          provenance: renderer.sourceColorProvenance)
+        let now = Written(primaries: renderer.picturePrimariesCode,
+                          transfer: renderer.pictureTransferCode,
+                          matrix: renderer.pictureMatrixCode,
+                          provenance: renderer.sourceColorProvenance,
+                          statedByLUT: renderer.pictureStatedByLUT)
         guard now != written else { return }
         written = now
 
@@ -114,7 +121,7 @@ final class ScopeColorFeed: ObservableObject {
         vectorscope?.sourceMatrixCode = now.matrix
         vectorscope?.sourcePrimariesCode = now.primaries
         let header = Self.cieHeader(primaries: now.primaries, transfer: now.transfer,
-                                    provenance: now.provenance)
+                                    provenance: now.provenance, statedByLUT: now.statedByLUT)
         cie?.spaceReadout = header
 
         func code(_ c: Int?) -> String { c.map(String.init) ?? "–" }
@@ -126,9 +133,10 @@ final class ScopeColorFeed: ObservableObject {
     /// axis prints its resolved 709, not a dash — §6.8's rule) plus the one tier word the chain
     /// readout prints. "Rec. 2020 · PQ (ST 2084) — overridden". Per-axis provenance is not carried:
     /// the renderer's tier is per source (accepted 2026-10-06).
+    /// Colour S6, L2: "— LUT output" when a LUT's stated output space supplied the codes.
     static func cieHeader(primaries: Int?, transfer: Int?,
-                          provenance: SourceColorProvenance) -> String {
+                          provenance: SourceColorProvenance, statedByLUT: Bool = false) -> String {
         "\(MediaInspector.primariesName(forCode: primaries ?? 1)) · "
-            + "\(MediaInspector.transferName(forCode: transfer ?? 1)) — \(provenance.label)"
+            + "\(MediaInspector.transferName(forCode: transfer ?? 1)) — \(statedByLUT ? "LUT output" : provenance.label)"
     }
 }

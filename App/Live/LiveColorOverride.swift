@@ -421,14 +421,16 @@ struct ColorInterpretationControl: View {
 
     // MARK: LUT (colour S6, L1)
 
-    /// Minimal for L1: load, remove, and the app-wide interpolation. The LUT applies after the interpretation
-    /// above, to whatever source this window shows, and stays across a change of source (decision 5). Recent
-    /// LUTs, Bypass and the output space come in L2 and L3.
+    /// Load, remove, the output space (L2) and the app-wide interpolation. The LUT applies after the
+    /// interpretation above, to whatever source this window shows, and stays across a change of source
+    /// (decision 5). Recent LUTs and Bypass come in L3.
     @ViewBuilder private var lutSection: some View {
-        Section(lut.name.map { "LUT — \($0) · \(lut.shape ?? "")" } ?? "LUT") {
+        Section(lut.name.map { "LUT — \($0) · \(lut.shape ?? "")"
+                               + (lut.outputSpace == .auto ? "" : " → \(lut.outputSpace.shortLabel)") } ?? "LUT") {
             Button("Load LUT…") { lut.chooseFile() }
             Button("Remove LUT") { lut.remove() }
                 .disabled(lut.name == nil)
+            outputSpaceMenu
             Menu("LUT Interpolation") {
                 ForEach(CubeInterpolation.allCases, id: \.self) { mode in
                     // Any click chooses that mode (a checked row's toggle-off is ignored, as Custom's rows are).
@@ -436,6 +438,79 @@ struct ColorInterpretationControl: View {
                            isOn: Binding(get: { lutSetting.interpolation == mode },
                                          set: { _ in lutSetting.interpolation = mode }))
                 }
+            }
+        }
+    }
+
+    // MARK: LUT output space (colour S6, L2, D4)
+
+    /// What the LUT's output IS: Same as Source (the default), a preset, or Custom. It becomes the picture's codes
+    /// (D3) — layer, EDR, scopes, SDI tag, v210 matrix, export ICC, Reference, CIE — while the Source line and the
+    /// interpretation above stay the source's. Greyed with no LUT. A fixed title, so an unattended run can press
+    /// it by name; the checkmarks carry the choice, and the section title names a stated space.
+    ///
+    /// Rows are `Toggle`s, as Custom's are (a `Picker` row in a menu ignores `.disabled`, S5), and any click on a
+    /// row chooses it (a checked row's toggle-off is ignored).
+    ///
+    /// ⚠️ GREYED PER ROW, NOT ON THE `Menu` — MEASURED. `.disabled` on the submenu itself left it and its rows
+    /// reading enabled (Accessibility) with no LUT loaded, and a press would have done nothing, silently. Each row
+    /// carries `.disabled` instead, which a `Toggle` row honours.
+    @ViewBuilder private var outputSpaceMenu: some View {
+        Menu("LUT Output Space") {
+            Toggle("Same as Source", isOn: outputBinding(.auto))
+                .disabled(lut.name == nil)
+            ForEach(ColorimetryOverride.allCases.filter { $0 != .auto }) { o in
+                Toggle(o.label, isOn: outputBinding(o))
+                    .disabled(lut.name == nil)
+            }
+            Section(lut.outputSpace.isCustom
+                    ? "Custom — " + lut.outputSpace.shortLabel.replacingOccurrences(of: "Custom ", with: "") + " in use"
+                    : "Custom") {
+                outputAxisMenu("Primaries", 0, CustomColorimetry.primaries)
+                outputAxisMenu("Transfer", 1, CustomColorimetry.transfers)
+                outputAxisMenu("Matrix", 2, CustomColorimetry.matrices)
+            }
+        }
+    }
+
+    private func outputBinding(_ o: ColorimetryOverride) -> Binding<Bool> {
+        Binding(get: { lut.outputSpace == o }, set: { _ in lut.setOutputSpace(o) })
+    }
+
+    /// Where a Custom output space starts: the stated space's triple, else the source's codes on screen (any axis
+    /// the table does not list taken as 709, as `customSeed` does).
+    private var outputSeed: (primaries: Int, transfer: Int, matrix: Int) {
+        if let t = lut.outputSpace.preset { return t }
+        let e = effectiveCodes ?? (1, 1, 1)
+        return (CustomColorimetry.primaries.contains(e.primaries) ? e.primaries : 1,
+                CustomColorimetry.transfers.contains(e.transfer) ? e.transfer : 1,
+                CustomColorimetry.matrices.contains(e.matrix) ? e.matrix : 1)
+    }
+
+    private func outputReplacing(_ axis: Int, _ value: Int) -> (primaries: Int, transfer: Int, matrix: Int) {
+        var t = outputSeed
+        switch axis {
+        case 0: t.primaries = value
+        case 1: t.transfer = value
+        default: t.matrix = value
+        }
+        return t
+    }
+
+    private func outputAxisMenu(_ title: String, _ axis: Int, _ values: [Int]) -> some View {
+        Menu(title) {
+            ForEach(values, id: \.self) { c in
+                let t = outputReplacing(axis, c)
+                let allowed = CustomColorimetry.isSupported(t)
+                Toggle(Self.axisName(axis, c) + (allowed ? "" : " — " + (CustomColorimetry.refusal(t) ?? "")),
+                       isOn: Binding(get: {
+                                         let s = outputSeed
+                                         return lut.outputSpace.isCustom && (axis == 0 ? s.primaries : (axis == 1 ? s.transfer : s.matrix)) == c
+                                     },
+                                     set: { _ in
+                                         if let o = ColorimetryOverride.customIfSupported(t) { lut.setOutputSpace(o) }
+                                     }))
+                    .disabled(!allowed || lut.name == nil)
             }
         }
     }

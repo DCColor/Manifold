@@ -6575,6 +6575,116 @@ bit-identical, within 1 half-float ULP, and every out-of-range channel clamped e
 - The refusal sheet is temporary until L3's banner.
 - Not exercised: a live source with a LUT, and SDI on a running output (the v210 was read from the export).
 
+##### L2 — predictions, written 2026-10-13 22:51 before any code
+
+**What L2 is (D3, D4):** the LUT becomes the third input to `publishColorState`. The renderer carries **source codes**
+(what `setSourceColorSpace` received: the Source line, the override's decode matrix, provenance) and **picture codes**
+(the LUT's stated output space while a LUT is loaded, otherwise the source codes). The picture codes drive the layer
+colorspace, the EDR opt-in, the scope headers (`ScopeColorFeed`) and the scope maths, the SDI tag, the v210 matrix, the
+export ICC, Reference's plan and the CIE scope. An *Output Space* picker in the LUT section: *Same as Source* (the
+default, and what every new load starts at until L3's Recent LUTs remember it), the presets, and Custom. The CLAUDE.md
+colour-setter rule is amended.
+
+**Estimated:** 2½–3½ h: code ~1 h, build and tests ~15 min, the unattended ASUS run ~1–1½ h, docs ~30 min.
+
+**Instruments:** as L1. ASUS only, window-only captures by window id, ⌃⌥E exports (PNG with its ICC, `rgba16f`, `v210`,
+`v210.json` with kr/kb), Accessibility presses in the Interpretation menu, the app log (`[SCOPE-COLOR]`,
+`[DeckLink] colorspace`, `[CHAIN] Source`, `[EDR]`, `[REFERENCE]`, `[MATRIX]`). No DeckLink output: the SDI tag is the
+`[DeckLink] colorspace → …` line (the tag the output sends, or would send), as in S5. **Baseline:** HEAD `cdff752`.
+Defaults: the S5/L1 rules (snapshot, `streamBookmarks` hashed, every added key deleted by name after a read).
+
+| # | What | Band: pass / fail |
+|---|---|---|
+| **L2-P1** | No LUT: tree vs HEAD on S5's 16 files | Window **0 codes**; `rgba16f`, `v210`, `v210.json` **byte-identical**; PNG ICC bytes equal. `[SCOPE-COLOR]`, `[DeckLink] colorspace`, `[CHAIN] Source` and `[EDR] layer colorspace` / `wantsExtendedDynamicRangeContent` lines the same text. Any difference fails |
+| **L2-P2** | *Same as Source*: identity 33³ on the 709 chart and on `patches-9-1-9` | Every tag line above the same text as with no LUT; v210 kr/kb and the PNG ICC equal to the no-LUT export's. Any tag moving fails |
+| **L2-P7** | The 709 chart (1-1-1) with identity 33³ stated **Rec.2020 PQ (HDR10)** | `[SCOPE-COLOR]` `Rec. 2020 · PQ (ST 2084) — LUT output (CICP 9-16-9)`; `[DeckLink] colorspace → Rec.2020 (primaries 9)`; `v210.json` kr/kb **0.2627 / 0.0593**; PNG ICC = the PQ wedge's (9-16-9) ICC bytes; `wantsExtendedDynamicRangeContent = true`; **`[CHAIN] Source` unchanged** (`… CICP 1-1-1 — tagged`). `rgba16f` **byte-identical** to the same LUT at *Same as Source* (the output space tags the picture, it does not change it). Back to *Same as Source*: every tag returns to the no-LUT text. Any one of these failing fails P7 |
+| **L2-P4** | Overrides and Custom, with and without a LUT | **Without:** file Custom 9-1-9 on the 709 chart: `rgba16f`, `v210` byte-identical to HEAD doing the same. **With 2020 PQ stated:** Custom 9-1-9 moves the Source line to `… CICP 9-1-9 — overridden (Custom 9·1·9)` and `[MATRIX]` to a 2020 decode, while scopes, SDI and v210 stay 9-16-9 / 0.2627; `rgba16f` byte-identical to Custom 9-1-9 + the LUT at *Same as Source*. **Remove LUT:** scopes and SDI return to 9-1-9 `— overridden`. Any code from the wrong side fails |
+| **L2-P5** | Reference and hold-to-compare | With 2020 PQ stated: Reference logs `[REFERENCE] PQ source … identical to OS`, and the Reference capture is **0 codes** from the OS capture. At *Same as Source* the plan is the 709 one (not PQ). Holding Reference from OS logs the same PQ plan. A 709 plan with PQ stated, or a PQ plan at *Same as Source*, fails |
+| **L2-P6** | CIE scope | Its header is the `[SCOPE-COLOR]` line (P7). The kernel's matrix and curve read the same picture codes; checked by reading the code, not measured |
+| **L2-P8** | Defaults | Domain **dictionary-equal** to the snapshot; `streamBookmarks` hash unchanged |
+| **G** | Gates | `swift test`: 392 + new picture-code tests, all pass, each new test shown to fail on a mutant; Profile build with HEAD's warning set |
+
+##### L2 — results, 2026-10-13 (unattended, not committed)
+
+Pixel checks on the **ASUS only**. Both displays read SDR (EDR potential 1.0; read, not set). Every capture was
+window-only, by the Manifold window's id, and every window sat on the ASUS (`-1880 30 875 492`; a run stops if it
+does not). Captures, exports and pixel dumps were deleted after scoring. Logs, events and `score.txt` are in the
+gitignored `build/colour-s6/l2run/`. **Estimated:** 2½–3½ h. **Actual:** about 50 min, from the first code read to
+the defaults restore.
+
+**What was built:**
+- **`PictureCodes`** (`ColorimetryModel/PictureCodes.swift`): the rule as a pure function. No LUT or Same as Source →
+  the source codes. A preset or a supported Custom → its triple, every axis. An unsupported Custom → the source codes.
+  Five tests.
+- **The renderer** (`MetalVideoRenderer.swift`):
+  - `picture*Code`, `pictureStatedByLUT`, `pictureDerivedColorSpace`, `pictureWantsEDR` and `lutOutputSpace`.
+    `resolvePictureCodes` is their only writer. It is called by `setSourceColorSpace` and by
+    `setInterpretationLUT(_:outputSpace:)`, the LUT's setter, which now takes the output space.
+  - With nothing stated, `pictureDerivedColorSpace` **is** `sourceDerivedColorSpace`, the same object. P1 is the
+    proof that the no-LUT path is unchanged.
+  - Picture codes now drive: `publishColorState` (layer, EDR, Reference's plan), the waveform and vectorscope
+    kr/kb, the CIE kernel's matrix and curve, the v210 convert and dump, and the export ICC. The decode matrix
+    stays on the source codes.
+  - `[MATRIX]` still checks the decode against the source. When a stated output's matrix differs, it adds
+    `· after the LUT, scopes and SDI use Rec. 2020 (its stated output)`.
+  - The `[EDR] layer colorspace` and `wantsExtendedDynamicRangeContent` lines name the picture. When a LUT
+    states it, they add `— the LUT's stated output space, CICP 9-16-9 (source 1-1-1)`; otherwise the text is as
+    before. A change of picture codes logs `[LUT] picture codes → …`, and the headroom line when EDR flips.
+- **Consumers:** `ScopeColorFeed` writes the picture codes; its CIE header reads `— LUT output` when a LUT states
+  them. `DeckLinkService`'s three tag reads use picture primaries. The chain readout's verdict compares the picture's
+  colorspace with the display's. **The Source line is unchanged.**
+- **The model and menu:** `InterpretationLUTModel.outputSpace`; a new load starts at Same as Source, and Remove
+  resets it. Every change re-tags SDI for the deck the card follows. *LUT Output Space ▸* holds Same as Source,
+  the five presets, and a Custom section of three axis submenus (refused values greyed with the reason). The LUT
+  section title adds `→ 2020 PQ` when a space is stated.
+- **CLAUDE.md:** the colour-setter rule now describes source and picture codes.
+
+**Found while building it:** `.disabled` on the *LUT Output Space* `Menu` was not honoured. With no LUT, Accessibility
+read it enabled, and a press would have done nothing, silently. This is S5's `Picker` finding again. Each row now
+carries `.disabled`; measured: `enabled=false` with no LUT (the run's last menu press).
+
+**Results** (HEAD `cdff752` vs the tree; the LUT is the L1 generator's `identity_3d_33.cube`):
+
+| # | Result | Verdict |
+|---|---|---|
+| L2-P1 | 16 / 16 files: window **0 codes, 0 px**; `rgba16f`, `v210`, `v210.json` **byte-identical**; PNG ICC equal; every `[SCOPE-COLOR]`, `[DeckLink]`, `[CHAIN] Source`, `[EDR]` and `[MATRIX]` line the **same text** (6–9 lines per file) | **PASS** |
+| L2-P2 | Same as Source on the 709 chart and `patches-9-1-9`: loading the LUT logged **no** `[SCOPE-COLOR]`, `[DeckLink]`, `[EDR] layer` or `[CHAIN] Source` line (nothing moved). kr/kb and ICC equal to the no-LUT export: 0.2126 / 0.0722, 660 B `a1096ca4` (chart); 0.2627 / 0.0593, 632 B `4dffe28a` (9-1-9) | **PASS** |
+| L2-P7 | 2020 PQ stated on the 709 chart: `[SCOPE-COLOR] source: Rec. 2020 · PQ (ST 2084) — LUT output (CICP 9-16-9)`; `[DeckLink] colorspace → Rec. 2020 (primaries 9)`; kr/kb **0.2627 / 0.0593**; PNG ICC 13 300 B `63cd9f4a`, **byte-equal to the PQ wedge's export ICC**; `wantsExtendedDynamicRangeContent = true`; layer `kCGColorSpaceITUR_2100_PQ`. **No `[CHAIN] Source` line** (the line logs on change only; it still reads `… CICP 1-1-1 — tagged`). `rgba16f` **identical** to Same as Source's; `v210` differs (2020 matrix). Back to Same as Source: every line returned to the no-LUT text, and the export equals the first Same as Source export byte for byte | **PASS** |
+| L2-P4 | **Without a LUT:** Custom 9-1-9 by the axis menus, tree vs HEAD: window 0 codes; `rgba16f`, `v210`, `json` identical. **With 2020 PQ stated:** Custom 9·1·1 then 9·1·9 moved the Source line to `… CICP 9-1-9 — overridden (Custom 9·1·9)` and `[MATRIX]` to `picture decodes Rec. 2020 (… overridden → CICP 9)`, while scopes stayed `9-16-9 — LUT output`, layer PQ, kr/kb 0.2627. `rgba16f` identical to Custom 9-1-9 + Same as Source. **Remove LUT:** `[SCOPE-COLOR] Rec. 2020 · Rec. 709 — overridden (CICP 9-1-9)`, layer the 9-1-9 nclc space | **PASS** |
+| L2-P5 | 2020 PQ stated: Reference logged `[REFERENCE] PQ source on "ASUS PA147": identical to OS`; capture **0 codes** from OS. Hold from OS: `[COMPARE] hold ↓ OS → REFERENCE` with the same PQ plan, 0 codes from OS. Same as Source: Reference logged the BT.1886 plan (`encoded for declared γ1.960938`), **51 codes** from OS on 241 309 px; the hold capture equal to the Reference capture (0 codes) | **PASS** |
+| L2-P6 | The CIE header is the `[SCOPE-COLOR]` text above. The kernel reads `picturePrimariesCode` / `pictureTransferCode` (read in the code; not measured) | **PASS by reading** |
+| L2-P8 | `streamBookmarks` 1 196 B `4466c076` before and after. The runs added 7 `NSWindow Frame …` keys (each read, absent from the snapshot, deleted by name) and changed `NSOSPLastRootDirectory` and `NSWindow Frame GoToSheet` (each read, then written back from the snapshot). Domain **dictionary-equal**, 1 145 keys | **PASS** |
+| G | `swift test` **397 / 397** (392 + 5 `PictureCodesTests`). Two mutants each fail (ignoring `lutLoaded`: 23 failures; no support check: 4). Profile build: HEAD's 11-warning set exactly | **PASS** |
+
+**Found while running:**
+1. **The first hold did nothing.** My compiled CGEvent helper's key events never reached the app, which S2 had
+   already recorded. The scored run posts them through `osascript -l JavaScript`, as S2's rig does.
+2. **A shell `cmp` reported every pair different in the trial run.** zsh does not split `$p`, so it compared missing
+   files. That was an instrument fault, not a result. Scoring moved to Python, and a negative control (two files
+   whose lines must differ) shows the line comparison can fail.
+3. **The 709 chart and its 9-1-9 retag give byte-identical `v210`**, on HEAD and on the tree. Each decodes and
+   re-encodes with one matrix, so the source's Y′CbCr round-trips unchanged; only the kr/kb in the `json` differ. It
+   is why P7's `v210` change is meaningful: there the decode is 709 and the encode 2020.
+4. **One export's `.v210`, `.rgba16f` and `.v210.json` were also left on the Desktop** (HEAD's `m666`), byte-equal to
+   the copies the driver had moved. They were deleted. The cause was not found; the scored copies are complete and
+   P1 compared them.
+
+**Not exercised:**
+- **SDI on a running output.** There was no DeckLink output: the tag is the `[DeckLink] colorspace` line and the
+  matrix is the v210 export, as in S5.
+- **A live source with a LUT.** The picture codes follow `setSourceColorSpace` from any transport, but only files
+  ran.
+- **Custom as the output space.** It takes `PictureCodes.resolve` like a preset (unit-tested); only presets ran
+  through the menu.
+- **By eye on the LG.** Nothing here is a judgement of colour; it can join L4's sanity look.
+
+**Open after L2:**
+- **With no source and a LUT stating its output, the picture codes are the LUT's.** A cleared deck (`(nil, nil,
+  nil)`) with a LUT still loaded reports the LUT's space in the scope headers. Nothing is drawn then, and the LUT
+  stays across sources (decision 5), but the headers name a space with no picture. L3's readout should say "no
+  source" there.
+- Recent LUTs remembering the output space per LUT (D4) is L3.
+
 ---
 
 ## 7. Open and unverified

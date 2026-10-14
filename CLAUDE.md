@@ -85,12 +85,21 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   streaming fix is verified against at least one non-Cloudflare server (local OBS SRT, NDI,
   or MediaMTX for WHIP/WHEP) before it is committed. Constants must not be tuned from a
   single server's traces.
-- Source colour changes only through `MetalVideoRenderer.setSourceColorSpace` (and a live teardown
-  only through `SavedDisplayProviders.restore`, which clears it). Nothing writes scope colour state
+- The renderer carries two sets of colour codes. **Source codes** (`source*Code`, what the source is)
+  change only through `MetalVideoRenderer.setSourceColorSpace` (and a live teardown only through
+  `SavedDisplayProviders.restore`, which clears it). They drive the Source line, an override's decode
+  matrix and provenance. **Picture codes** (`picture*Code`, what the picture is) are the Interpretation
+  LUT's stated output space while a LUT is loaded, otherwise the source codes. The LUT and its output
+  space change only through `MetalVideoRenderer.setInterpretationLUT`, and only `resolvePictureCodes`
+  (called by those two setters) writes the picture codes. The picture codes drive the layer colourspace,
+  EDR, the scope headers and scope maths, the SDI tag, the v210 matrix, the export ICC, Reference's plan
+  and the CIE scope. With no LUT, or at Same as Source, the two sets are identical. Code that describes
+  the picture reads picture codes; code that describes the source reads source codes
+  (`docs/COLOR_MANAGEMENT_FINDINGS.md` §6.11, S6 D3, amended in L2). Nothing writes scope colour state
   directly: the scope models' `sourceMatrixCode`, `sourceTransferCode`, `sourcePrimariesCode` and
-  `spaceReadout` are written only by `ScopeColorFeed`, from the renderer. A new transport or a
-  colorimetry override reaches the scope headers by reaching the renderer. Per-transport scope
-  writes are how the headers came to describe a previous source (2026-10-06).
+  `spaceReadout` are written only by `ScopeColorFeed`, from the renderer's picture codes. A new
+  transport, a colorimetry override or a LUT reaches the scope headers by reaching the renderer.
+  Per-transport scope writes are how the headers came to describe a previous source (2026-10-06).
 - Chroma is native end to end. Manifold supports 4:2:0, 4:2:2 and 4:4:4 natively: every source is
   decoded at its own chroma resolution (4:2:0 → `x420`, 4:2:2 → `x422`, 4:4:4 → `x444`) and carried
   unchanged to the renderer, scopes, window and export. Scrub and playback take the format from the
