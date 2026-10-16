@@ -447,6 +447,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var libavAudioInfo: LibavAudioSource.AudioInfo?
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
+    /// This file is read through libav because AVFoundation exposes no video track for it and its video
+    /// `stsd` is longer than its entries (`ContainerSlackRoute`). Decided in phase 1, set at the commit,
+    /// and the ONLY thing that turns on the ProRes VideoToolbox route in the libav sources. False for
+    /// every file AVFoundation can play.
+    private var containerSlackRoute = false
+    /// The routed file's AVFoundation asset — no video track — kept ONLY to read its metadata
+    /// (`mergeContainerRouteMetadata`). Never decoded from; `asset` stays nil, as for MXF.
+    private var containerRouteMetadataAsset: AVURLAsset?
+    /// The routed file's video sample-entry fourCC (libav's `codec_tag`), for the inspector's codec name.
+    private var containerRouteSampleEntry: FourCharCode = 0
     /// THE FILE'S RESOLVED CHROMA (Stage 3b S2; CLAUDE.md, the native-chroma rule): `x420`, `x422`
     /// or `x444`, 10-bit biplanar, video range, from `FileChromaProbe` once per load and BEFORE either
     /// decoder is built. Every consumer below reads `videoPixelFormat`, so the scrub producer and the
@@ -582,6 +592,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// range — the same derivation a fresh open performs.
     public func reinspect() async {
         guard let url = currentURL else { return }
+        // A routed file's video facts come from libav and its other rows from the kept asset; a fresh
+        // AVFoundation read would replace both with an inspection that has no video track. Refresh the
+        // AVFoundation rows only. A file rewritten in place (remuxed, which repairs it) needs reopening.
+        if containerSlackRoute { mergeContainerRouteMetadata(url: url); return }
         let freshAsset = AVURLAsset(url: url)
         let newTc = MediaInspector.timecode(for: url)
         let newMeta = await MediaInspector.metadata(for: freshAsset, url: url)
@@ -1033,6 +1047,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // …and the chroma, for the same reason: the readout must not describe a departed file.
         fileChroma = .undetermined
         libavFileFormatDescription = nil
+        containerSlackRoute = false
+        containerRouteMetadataAsset = nil
         onSourceChroma?(.notStated, nil)
         // …AND THE GEOMETRY WITH IT, same rule one line down: a stale crop would take 32 px off a
         // file that never declared one, which is a worse failure than the padding it removes, and
@@ -1271,7 +1287,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // and no format a scope cannot sample.
         let producer: ScrubFrameProducer = useLibav
             ? LibavScrubProducer(url: url, pixelFormat: videoPixelFormat,
-                                 fileFormatDescription: libavFileFormatDescription)
+                                 fileFormatDescription: libavFileFormatDescription,
+                                 proResVideoToolbox: containerSlackRoute)
             : AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
         // The 8-bit flag, as playback sets it (`beginReading`): AVFoundation frames only.
         let eightBit = !useLibav && fileChroma.eightBitSource
@@ -1434,35 +1451,55 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // ── AVFOUNDATION OPENED THE CONTAINER BUT EXPOSES NO VIDEO TRACK ──────────────────────
         // Not "the codec is unsupported" — the track is absent from the asset entirely, so there
-        // is nothing to decode and nothing we can configure our way out of. MEASURED cause on the
-        // file that prompted this: a QuickTime whose video `stsd` carries 8 trailing zero bytes
-        // that parse as a box with SIZE 0 ("extends to end of file"). AVFoundation rejects the
-        // sample description and drops the track; libav ignores the padding and reads the file
-        // fine, which is why other applications open it and Quick Look — also AVFoundation — does
-        // not. Removing exactly those 8 bytes makes the track appear, and injecting them into a
-        // working file makes it vanish, so the mechanism is established rather than inferred.
+        // is nothing for AVFoundation to decode. MEASURED cause on the file that prompted this
+        // (docs/BUGS.md, *A video `stsd` longer than its entries hides the video track*): a
+        // QuickTime whose video `stsd` declares 8 bytes more than its one sample entry. AVFoundation
+        // rejects the table and drops the whole track. It is the size MISMATCH that is refused, not
+        // a zero-sized box: 1 to 16 bytes of slack, zeros or 0xFF, all hide the track, and removing
+        // exactly the slack brings it back. libav reads past it, which is why a stream-copy remux
+        // repairs the file and why QuickTime Player and Quick Look (both AVFoundation) cannot open it.
         //
-        // This is ALSO where an R3D lands, and every other container AVFoundation declines: it is
-        // the one question that separates "there is a picture in here" from "there is not", and it
-        // is asked BEFORE anything is torn down. Asking it here is what makes the refusal cost the
+        // So this branch now asks the box scanner what is wrong — HERE and nowhere else, after
+        // AVFoundation has already said there is no video track, so a file AVFoundation can play
+        // never reaches it. 8 or more bytes of slack: the file is read through libav, ProRes decoded
+        // by VideoToolbox, nothing written to disk (`ContainerSlackRoute`). Anything else is refused
+        // with a banner that says what the scan found. Not a `.mov` / `.mp4` (an R3D, every other
+        // container AVFoundation declines): the original refusal, unchanged.
+        //
+        // All of it is asked BEFORE anything is torn down, which is what makes a refusal cost the
         // user nothing.
         //
         // ⚠️ THE ASSET IS OPENED ONCE AND CARRIED INTO PHASE 2. Re-creating it after the commit
         // would ask the file system the same question twice and — worse — leave the possibility of
-        // the two answers differing.
+        // the two answers differing. A routed file carries it too, for its metadata only.
         var vettedAsset: AVURLAsset?
         var vettedTrack: AVAssetTrack?
+        var containerRoute = false
+        var containerRouteEntry: FourCharCode = 0
         if !isMXF {
             let asset = AVURLAsset(url: url)
-            guard let vTrack = try? await asset.loadTracks(withMediaType: .video).first else {
-                NSLog("[PLAYBACK] no video track — AVFoundation exposes no readable video track for "
-                    + "%@; the container may declare a malformed sample description. Not loading — "
-                    + "the deck keeps what it had.", url.lastPathComponent)
-                rejectLoad(notice: "This file couldn’t be opened — its video track is unreadable.")
-                return
+            if let vTrack = try? await asset.loadTracks(withMediaType: .video).first {
+                vettedAsset = asset
+                vettedTrack = vTrack
+            } else {
+                // Off the main actor: the scan reads the movie box and libav opens the file.
+                switch await Task.detached(priority: .userInitiated, operation: { ContainerSlackRoute.vet(url: url) }).value {
+                case .route(_, _, let sampleEntry):
+                    vettedAsset = asset
+                    containerRoute = true
+                    containerRouteEntry = sampleEntry
+                case .refuse(let notice):
+                    NSLog("[PLAYBACK] no video track — refusing %@. Not loading — the deck keeps what it had.",
+                          url.lastPathComponent)
+                    rejectLoad(notice: notice)
+                    return
+                case .notApplicable:
+                    NSLog("[PLAYBACK] no video track — AVFoundation exposes no readable video track for "
+                        + "%@. Not loading — the deck keeps what it had.", url.lastPathComponent)
+                    rejectLoad(notice: "This file couldn’t be opened — its video track is unreadable.")
+                    return
+                }
             }
-            vettedAsset = asset
-            vettedTrack = vTrack
         }
 
         // ══════════ PHASE 2 — COMMIT. THE PREVIOUS SOURCE ENDS HERE. ══════════
@@ -1476,6 +1513,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         playbackNotice = nil
         pictureCaveat = nil
         audioFallbackAnnounced = false
+        containerSlackRoute = containerRoute
+        containerRouteMetadataAsset = nil
 
         // Retire any inspection Tasks still in flight from a previous load before starting this one.
         loadGeneration &+= 1
@@ -1500,6 +1539,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             self.asset = nil
             self.videoTrack = nil
             await loadMXF(url: url, autoplay: autoplay)
+            return
+        }
+
+        // The container route: AVFoundation has the file but not its video track (phase 1).
+        if containerSlackRoute, let metadataAsset = vettedAsset {
+            self.asset = nil
+            self.videoTrack = nil
+            await loadContainerSlackRoute(url: url, metadataAsset: metadataAsset,
+                                          sampleEntry: containerRouteEntry, autoplay: autoplay)
             return
         }
 
@@ -1702,6 +1750,54 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// at all — MXF routes DIRECTLY to libav (not an AVFoundation-attempt-then-fall-
     /// back). All the facts AVFoundation normally supplies (duration, size, fps,
     /// color) are read from libav in `beginLibavReading` (gated on `videoTrack == nil`).
+    /// A `.mov` whose video track AVFoundation cannot see (`ContainerSlackRoute`): the MXF shape — libav
+    /// demuxes and supplies the video facts — with ProRes decoded by VideoToolbox, and AVFoundation still
+    /// reading what it can (creation date, creator, software, chapters, captions) for the inspector.
+    private func loadContainerSlackRoute(url: URL, metadataAsset: AVURLAsset, sampleEntry: FourCharCode,
+                                         autoplay: Bool) async {
+        self.hasMedia = true
+        self.tcInfo = MediaInspector.timecode(for: url)   // the tmcd atom walk is unaffected by the stsd
+        self.audioTracks = []                              // libav picks the stream, as for MXF
+        self.selectedAudioTrackIndex = 0
+        self.rangeOverride = .auto
+        self.useLibav = true
+        libavFileFormatDescription = nil                  // AVFoundation has none for this track
+        containerRouteMetadataAsset = metadataAsset
+        containerRouteSampleEntry = sampleEntry
+        adoptFileChroma(FileChromaProbe.resolveLibav(url: url))
+        installScrubProducer(for: url, useLibav: true)
+        installTimeObserverIfNeeded()
+        // Non-blocking, auto-dismissed. Raised after the commit's clean slate above, so it is this file's.
+        playbackNotice = ContainerSlackRoute.notice
+        await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    /// What AVFoundation can still read from a routed file, laid over libav's video facts. libav's
+    /// metadata (`applyLibavMetadata`) supplies everything about the picture; these are the rows the
+    /// asset supplies for any `.mov` and libav does not. Published only if the load is still current.
+    private func mergeContainerRouteMetadata(url: URL) {
+        guard let asset = containerRouteMetadataAsset else { return }
+        let generation = loadGeneration
+        Task { [weak self] in
+            let av = await MediaInspector.metadata(for: asset, url: url)
+            await MainActor.run {
+                guard let self, self.loadGeneration == generation, var meta = self.metadata else { return }
+                // The codec by its sample entry, as the inspector names it for any `.mov` ("ProRes 4444",
+                // not libav's "prores").
+                if self.containerRouteSampleEntry != 0 {
+                    meta.codecName = MediaInspector.codecName(fourCC: self.containerRouteSampleEntry)
+                }
+                meta.creationDate = av.creationDate
+                meta.creator = av.creator
+                meta.software = av.software
+                meta.chapters = av.chapters
+                if meta.textTracks.isEmpty { meta.textTracks = av.textTracks }
+                if meta.startTimecode == nil { meta.startTimecode = av.startTimecode }
+                self.metadata = meta
+            }
+        }
+    }
+
     private func loadMXF(url: URL, autoplay: Bool) async {
         self.hasMedia = true
         self.tcInfo = MediaInspector.timecode(for: url)   // nil for MXF; harmless
@@ -1978,6 +2074,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             let source = LibavFrameSource(url: url,
                                           pixelFormat: videoPixelFormat,
                                           fileFormatDescription: libavFileFormatDescription,
+                                          proResVideoToolbox: containerSlackRoute,
                                           pacingRenderer: videoRenderer,
                                           pumpQueue: videoPumpQueue)
             do {
@@ -2076,6 +2173,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 if videoTrack == nil {
                     applyLibavMetadata(info, url: url)
                     applyLibavTextTracks(url: url)
+                    // A routed .mov: AVFoundation still reads the rest (chapters, creation date, captions).
+                    if containerSlackRoute { mergeContainerRouteMetadata(url: url) }
                 }
                 print("FrameEngine: libav opened — \(info.width)x\(info.height), "
                     + "src \(info.sourcePixelFormat), range \(info.rangeName), "

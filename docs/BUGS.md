@@ -1212,6 +1212,81 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
+## ☐ DECISION: ProRes MXF decodes in software (libav), ~30–41 ms of CPU a frame at 2K 4444
+
+**Added 2026-10-16**, measured while building the container route below. Not changed by it.
+
+- **What:** an MXF's ProRes is demuxed and decoded by libav (`--enable-decoder=prores`) and converted by swscale.
+  VideoToolbox is used on the libav path for DNxHR 4:4:4 and, since 2026-10-16, for a `.mov` taken by the
+  container route — never for MXF.
+- **Measured** (bundled FFmpeg, the two ARRI ProRes 4444 2048×1152 clips, threads as `LibavFrameSource`): libav's
+  software decoder **0.82 s CPU / 27 frames (~30 ms a frame) and 1.06 s / 26 (~41 ms)**. The same packets through
+  `ProResVideoToolboxDecoder`: **0.7–0.8 ms a frame**, byte-identical to AVFoundation's decode of a remux. The
+  software decode is not byte-identical to that (swscale), though it is a correct picture.
+- **The decision:** route MXF ProRes through `ProResVideoToolboxDecoder` too. MXF reports no `codec_tag`, so the
+  sample-entry type would have to come from libav's profile; and the change would move every ProRes MXF's pixels,
+  so it needs its own regression run against the MXF corpus.
+
+---
+
+## ✅ FIXED 2026-10-16 (uncommitted) — PRE-EXISTING, ALL BUILDS — A video `stsd` longer than its entries hides the video track
+
+**Fixed:** a `.mov` / `.mp4` that AVFoundation opens but exposes no video track for is now asked about by a box
+scanner, and ONLY then (`FrameEngine.loadAsset`, the no-video branch). A video `stsd` with 8 or more bytes past its
+entries is read through the libav path, ProRes decoded by VideoToolbox (`ContainerSlackRoute`,
+`ProResVideoToolboxDecoder`, a separate route beside DNxHR's in `LibavFrameSource` and `LibavScrubProducer`).
+Nothing is written to disk. A `[CONTAINER]` line logs the deviation and a non-blocking notice says "This file's
+container has a sample-description size error; Manifold is reading around it." AVFoundation still supplies what it
+can read of the file (creation date, creator, software, chapters, captions); libav the video facts. Every other
+no-video `.mov` / `.mp4` is refused with a banner that says what the scan found. The scanner is the leaf target
+`ContainerRepair`, with tests (10). Verified 2026-10-16, tree vs HEAD `ce38f4b`:
+
+- **The two ARRI clips and the July TEST FLIP copy of A027:** native 4:4:4 (`x444`), Rec. 709 1-1-1, limited.
+  ⌃⌥E exports (`rgba16f`, `v210`) **byte-identical** to the stream-copy remux opened normally, at every frame
+  compared (A026 frames 0, 1, 12, 13, 23, 24, 25 and the last; A027 and the copy 0, 13 and the last). The same
+  `[CHAIN] Source`, `[MATRIX]`, `[EDR]`, `[CHROMA]` and DeckLink lines.
+- **Playback** (30 s of the clip stream-copied end to end with the same 8 bytes; 20 s of 4K ProRes 4444 XQ with
+  them): **0 dropped, 0 late**, as the clean twins on AVFoundation. App CPU 6.6 vs 6.8 s, 5.3 vs 4.7 s.
+- **Scrub** (three 3 s drags each, `MANIFOLD_SCRUB_STATS`): seek→deliver p50 within ±0.4 ms of the clean twin
+  (Joey 30 s 6.9–7.2 vs 7.0–7.2 ms; 4K XQ 7.1–7.5 vs 7.1–7.3 ms; the clip itself 6.9–7.0 vs 6.8–7.1 ms).
+- **Normal files never take it:** S5's 16 files, exports and colour lines byte-identical to HEAD, **0 `[CONTAINER]`
+  lines**; both DNxHR MXFs among them. The scanner reports no slack on any of 171 corpus files except the four
+  copies of the two defective clips (by SHA-256), TEST FLIP included.
+- **Refusals:** 1, 4 and 7 bytes of slack, an audio-only `.mov`, a truncated `.mov` with no movie box, and a sample
+  entry that overruns its table: each refused with its own banner, the app still running.
+
+**Open after this fix:**
+- **1–7 bytes of slack is refused, by scope.** libav reads past any slack; 8 is the measured case. Routing 1–7 is
+  a one-line change in `ContainerSlackRoute.minimumSlack` and a re-run of the refusal set.
+- **The libav path does not read `pasp` or `clap`**, as already stated at `applyLibavMetadata` for MXF. A routed
+  file shows Pixel Aspect "Not declared" where its remux shows "1:1 (square, declared)", the PNG export omits
+  `pHYs`, and an anamorphic file with slack would draw squeezed. Pixels are unaffected.
+- **Range row:** libav reports "Video (Legal)" for a routed ProRes `.mov` where AVFoundation reads the remux as
+  "Untagged". The picture is the same (both expand legal → full); the row is libav's claim, not the file's.
+- **The inspector has no vendor-metadata section.** AVFoundation reads the clips' 63 items (`com.arri.camera.*`)
+  on both paths, but no file shows them. A section for them is new work.
+
+**The original diagnosis:**
+
+- **What:** two ARRI ALEXA Mini ProRes 4444 clips (Joey, `A026C001_171116_R022.mov`, `A027C021_171116_R022.mov`),
+  rewrapped by FFmpeg `Lavf57.25.100`, open in no AVFoundation consumer on macOS 26.5.1: Manifold refused them
+  ("its video track is unreadable"), QuickTime Player has no picture, Quick Look makes no thumbnail, Spotlight lists
+  the codecs as "Timecode". The asset lists only the `tmcd` track.
+- **Cause, measured both ways:** the video `stsd` is 1 744 bytes; its header (16) and its one `ap4h` entry (1 720)
+  account for 1 736. Removing exactly those 8 zero bytes makes the track appear (all frames, all 63 metadata
+  items); adding 1–16 bytes, zeros or 0xFF, to a working remux makes it vanish. So it is the size mismatch that is
+  refused, not a zero-sized box (the earlier comment at the refusal said so; corrected). libav ignores the slack,
+  which is why a stream-copy remux (ffmpeg, Flip) repairs the file. Nothing else in the files is unusual.
+- **Not a regression:** the refusal dates from `1fb345f` (2026-07-28) and a Release build from before the 4:2:2 /
+  4:4:4 work (`099ca1d`) refuses identically, as does `MANIFOLD_FORCE_CHROMA_420=1`. The July copy of A027 on TEST
+  FLIP is byte-identical to Joey's, so the July diagnosis was this clip. Not the August audio `-50` either: these
+  clips have no audio track.
+- **Rejected on the way:** an `AVAssetResourceLoader` proxy serving the corrected bytes. AVAssetReader over a
+  resource-loader asset fails (-11800 / -12876) after 1–9 frames whenever it is read at 20 ms a frame or slower,
+  patched or not, while AVPlayer over the same proxy plays every frame.
+
+---
+
 ## ✅ FIXED 2026-10-12 (`f926f47`) — PRE-EXISTING, ALL BUILDS — stream bookmarks re-order their JSON keys on every save
 
 **Fixed:** the store writes sorted keys, through `StreamBookmark.storeEncoding` (StreamBookmarkModel), which

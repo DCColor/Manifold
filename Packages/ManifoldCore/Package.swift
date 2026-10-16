@@ -342,10 +342,30 @@ let package = Package(
                 .unsafeFlags(["-O"])
             ]
         ),
+        // A video `stsd` declared longer than its entries (docs/BUGS.md, "A video `stsd` longer than
+        // its entries hides the video track"). The box scanner only: it reads the movie box and says
+        // what it found. A leaf target, Foundation only, so `swift test` reaches it with synthetic
+        // movies; ManifoldCore asks it only after AVFoundation has exposed no video track.
+        .target(
+            name: "ContainerRepair",
+            path: "Sources/ContainerRepair",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "ContainerRepairTests",
+            dependencies: ["ContainerRepair"],
+            path: "Tests/ContainerRepairTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .target(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
-                           "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel"],
+                           "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
+                           "ContainerRepair"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

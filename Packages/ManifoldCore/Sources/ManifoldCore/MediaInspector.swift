@@ -186,7 +186,12 @@ public enum MediaInspector {
     /// Map the track's FourCC codec code to a friendly name (seeded from Flip's
     /// proven list; falls back to the raw code for anything unmapped).
     private static func codecName(for fmt: CMFormatDescription) -> String {
-        let code = CMFormatDescriptionGetMediaSubType(fmt)
+        codecName(fourCC: CMFormatDescriptionGetMediaSubType(fmt))
+    }
+
+    /// The same names by sample-entry fourCC, for a file whose format description AVFoundation could not
+    /// build (`ContainerSlackRoute`: libav reads the fourCC from the `.mov` sample entry instead).
+    static func codecName(fourCC code: FourCharCode) -> String {
         let map: [FourCharCode: String] = [
             fourCC("avc1"): "H.264", fourCC("avc3"): "H.264",
             fourCC("hvc1"): "H.265", fourCC("hev1"): "H.265",

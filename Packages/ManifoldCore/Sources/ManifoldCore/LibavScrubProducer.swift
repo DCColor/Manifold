@@ -61,8 +61,12 @@ public final class LibavScrubProducer: ScrubFrameProducer {
     /// design exists to pay at load rather than on the first grab. Requests arriving before it
     /// finishes are held by the coalescer, not dropped: `isReady` gates them and `onReadyChanged`
     /// releases them.
-    public init(url: URL, pixelFormat: OSType, fileFormatDescription: CMVideoFormatDescription? = nil) {
-        decoder = Decoder(url: url, cvFormat: pixelFormat, fileFormatDescription: fileFormatDescription)
+    /// `proResVideoToolbox`: the engine's container route (`ContainerSlackRoute`) — ProRes scrub frames decode
+    /// through VideoToolbox, as that file's playback does. False for every other file.
+    public init(url: URL, pixelFormat: OSType, fileFormatDescription: CMVideoFormatDescription? = nil,
+                proResVideoToolbox: Bool = false) {
+        decoder = Decoder(url: url, cvFormat: pixelFormat, fileFormatDescription: fileFormatDescription,
+                          proResVideoToolbox: proResVideoToolbox)
         decoder.openAsync { [weak self] ok in
             guard let self, ok else { return }
             self.isReady = true
@@ -111,6 +115,10 @@ private final class Decoder: @unchecked Sendable {
     private var poolH = 0
     /// The DNxHR 4:4:4 plug-in route (point 5). nil for every other file, and after a failure.
     private var vtDecoder: DNxHRVideoToolboxDecoder?
+    /// The ProRes VideoToolbox route, for a file the engine's container route sent here; nil otherwise and
+    /// after a failure. Separate from `vtDecoder` so the DNxHR route is untouched.
+    private let proResVideoToolbox: Bool
+    private var proResDecoder: ProResVideoToolboxDecoder?
 
     /// Read on `scrubQueue`, written on main at `close()`. A teardown request has to stop an
     /// in-flight decode from touching contexts that are about to be freed.
@@ -126,10 +134,11 @@ private final class Decoder: @unchecked Sendable {
         return -Int32(bitPattern: tag)
     }()
 
-    init(url: URL, cvFormat: OSType, fileFormatDescription: CMVideoFormatDescription?) {
+    init(url: URL, cvFormat: OSType, fileFormatDescription: CMVideoFormatDescription?, proResVideoToolbox: Bool) {
         self.url = url
         self.cvFormat = cvFormat
         self.fileFormatDescription = fileFormatDescription
+        self.proResVideoToolbox = proResVideoToolbox
     }
 
     deinit { freeOnQueue() }
@@ -202,6 +211,13 @@ private final class Decoder: @unchecked Sendable {
                 + (vtDecoder != nil ? "scrub decodes through Apple's plug-in, as playback does"
                                     : "plug-in session would not open; scrub decodes through libav"))
         }
+        // The container route's ProRes: the same decision playback makes, on the same flag.
+        if proResVideoToolbox {
+            proResDecoder = ProResVideoToolboxDecoder(par, pixelFormat: cvFormat)
+            print("LibavScrubProducer: container route — "
+                + (proResDecoder != nil ? "ProRes scrub decodes through VideoToolbox, as playback does"
+                                        : "no VideoToolbox session; scrub decodes ProRes through libav"))
+        }
 
         self.fmtCtx = ctx
         self.codecCtx = cctx
@@ -245,6 +261,9 @@ private final class Decoder: @unchecked Sendable {
 
         if vtDecoder != nil, let viaPlugin = decodeViaVideoToolbox(at: seconds) {
             return viaPlugin
+        }
+        if proResDecoder != nil, let viaVT = decodeViaProRes(at: seconds) {
+            return viaVT
         }
 
         // Decode forward to the target, discarding anything earlier. DNxHR is ALL-INTRA, so the
@@ -320,6 +339,37 @@ private final class Decoder: @unchecked Sendable {
         }
     }
 
+    /// The container route's ProRes after the seek: the first packet at or past the target is the frame
+    /// (ProRes is all-intra). Tagged with the container's colour as playback's buffers are, so a scrub
+    /// frame and a playback frame of this file are the same pixels with the same tags. nil means "use
+    /// libav", with the failed packet already handed to it.
+    private func decodeViaProRes(at seconds: Double) -> ScrubFrame? {
+        guard let fmtCtx, let codecCtx, let pkt, let decoder = proResDecoder else { return nil }
+        while true {
+            if closed { return nil }
+            guard av_read_frame(fmtCtx, pkt) >= 0 else { return nil }
+            guard pkt.pointee.stream_index == videoStreamIndex else { av_packet_unref(pkt); continue }
+            let ts = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            let sec = Double(ts - startTimeTicks) * Double(timeBase.num) / Double(timeBase.den)
+            if sec + 1e-6 < seconds { av_packet_unref(pkt); continue }
+            let pts = CMTime(value: (ts - startTimeTicks) &* Int64(timeBase.num), timescale: timeBase.den)
+            let image = decoder.decode(packet: pkt, pts: pts, duration: .invalid)
+            if let image, CVPixelBufferGetPixelFormatType(image) == cvFormat {
+                av_packet_unref(pkt)
+                if let containerColor { LibavPixelConversion.stampContainerColor(image, containerColor) }
+                return ScrubFrame(pixelBuffer: image, pts: sec)
+            }
+            print("[PRORES-VT] scrub: "
+                + (image == nil ? "decode failed" : "delivered \(ChromaReadout.fourCC(CVPixelBufferGetPixelFormatType(image!)))")
+                + " — scrub falls back to libav for the rest of this file")
+            decoder.shutdown()
+            proResDecoder = nil
+            _ = avcodec_send_packet(codecCtx, pkt)
+            av_packet_unref(pkt)
+            return nil
+        }
+    }
+
     /// A small pool, unlike playback's 20. Only one scrub frame is decoded at a time and the
     /// renderer holds at most the current one plus the last presented; 4 covers that with slack
     /// and keeps a 4K 10-bit (~16 MB) buffer from being reallocated on every position.
@@ -347,6 +397,8 @@ private final class Decoder: @unchecked Sendable {
     private func freeOnQueue() {
         vtDecoder?.shutdown()     // watchdogged (3 s): see DNxHRVideoToolboxDecoder.shutdown()
         vtDecoder = nil
+        proResDecoder?.shutdown() // watchdogged likewise
+        proResDecoder = nil
         if codecCtx != nil { avcodec_free_context(&codecCtx) }
         if fmtCtx != nil { avformat_close_input(&fmtCtx) }
         if pkt != nil { av_packet_free(&pkt) }

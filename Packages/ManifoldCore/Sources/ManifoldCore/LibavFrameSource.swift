@@ -104,6 +104,13 @@ public final class LibavFrameSource: @unchecked Sendable {
     private var vtDecoder: DNxHRVideoToolboxDecoder?
     /// Said once, not per frame.
     private var vtFallbackAnnounced = false
+    /// The ProRes VideoToolbox route — ONLY for a file the engine routed here because AVFoundation could not
+    /// see its video track (`ContainerSlackRoute`); nil for every other file, and after a failure. Separate
+    /// from `vtDecoder` so the DNxHR route is untouched. See `ProResVideoToolboxDecoder`.
+    private let proResVideoToolbox: Bool
+    private var proResDecoder: ProResVideoToolboxDecoder?
+    private var proResFallbackAnnounced = false
+    private var proResFormatConfirmed = false
     /// The requested format is CONFIRMED on the first frame rather than assumed. See `nextFrame()`.
     private var vtFormatConfirmed = false
     /// The colour the CONTAINER states (the video stream's `codecpar`, read at open). Every buffer is tagged with
@@ -194,11 +201,13 @@ public final class LibavFrameSource: @unchecked Sendable {
     public init(url: URL,
                 pixelFormat: OSType,
                 fileFormatDescription: CMVideoFormatDescription? = nil,
+                proResVideoToolbox: Bool = false,
                 pacingRenderer: AVSampleBufferVideoRenderer,
                 pumpQueue: DispatchQueue) {
         self.url = url
         self.pixelFormat = pixelFormat
         self.fileFormatDescription = fileFormatDescription
+        self.proResVideoToolbox = proResVideoToolbox
         self.pacingRenderer = pacingRenderer
         self.pumpQueue = pumpQueue
     }
@@ -280,6 +289,16 @@ public final class LibavFrameSource: @unchecked Sendable {
                 // is about to decode this and the colour will be wrong.
                 print("[DNX-VT] DNxHR 4:4:4 with no usable plug-in decoder — libav will decode it "
                     + "and the colour will be wrong. Telling the user.")
+            }
+        }
+        // ── THE PRORES ROUTE: asked for by the engine, never decided here ──
+        // Only a file `ContainerSlackRoute` sent to libav arrives with the flag set. The libav decoder
+        // opened above stays as the fallback, exactly as for DNxHR.
+        if proResVideoToolbox {
+            proResDecoder = ProResVideoToolboxDecoder(par, pixelFormat: pixelFormat)
+            if proResDecoder == nil {
+                print("[PRORES-VT] no VideoToolbox session for this stream — libav's software ProRes decoder "
+                    + "will decode it")
             }
         }
 
@@ -411,6 +430,8 @@ public final class LibavFrameSource: @unchecked Sendable {
         // decoder process has died, so closing a file can never stall the deck indefinitely.
         vtDecoder?.shutdown()
         vtDecoder = nil
+        proResDecoder?.shutdown()
+        proResDecoder = nil
         pool = nil
     }
 
@@ -432,6 +453,7 @@ public final class LibavFrameSource: @unchecked Sendable {
         guard let fmtCtx, let codecCtx, let pkt, let frame else { return nil }
         // ⚠️ ONE Bool TEST — this is the whole per-frame cost on files that do not take the route.
         if vtDecoder != nil, let sb = nextFrameViaVideoToolbox() { return sb }
+        if proResDecoder != nil, let sb = nextFrameViaProRes() { return sb }
         while true {
             let ret = avcodec_receive_frame(codecCtx, frame)
             if ret == 0 {
@@ -530,6 +552,63 @@ public final class LibavFrameSource: @unchecked Sendable {
             skipToSeconds = -1
             // The plug-in's buffer carries VideoToolbox's tags; the container's statements go on top, as on the
             // libav route. (This route decodes without an AVFrame, so there is no decoder statement to compare.)
+            if let containerColor { LibavPixelConversion.stampContainerColor(pixelBuffer, containerColor) }
+            return Self.makeSampleBuffer(pixelBuffer, pts: pts, duration: duration)
+        }
+    }
+
+    /// The ProRes route: libav reads the packet, VideoToolbox decodes it. Same contract as
+    /// `nextFrameViaVideoToolbox`: nil means "fall back", with the failed packet already handed to libav.
+    ///
+    /// Differs from the DNxHR route in two ways only. There is no caveat to raise on fallback: libav's
+    /// ProRes decoder decodes correctly, just in software and through swscale. And the buffer's range does
+    /// not move: ProRes is coded legal, and VideoToolbox's video-range output is that same legal signal.
+    private func nextFrameViaProRes() -> CMSampleBuffer? {
+        guard let fmtCtx, let codecCtx, let pkt, let decoder = proResDecoder else { return nil }
+        while true {
+            let rret = av_read_frame(fmtCtx, pkt)
+            if rret < 0 { return nil }                          // EOF: let the libav loop drain
+            guard pkt.pointee.stream_index == videoStreamIndex else {
+                av_packet_unref(pkt); continue
+            }
+            let ts = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            let sec = ptsSeconds(ts)
+            // ProRes is all-intra: a pre-target packet is dropped without decoding it.
+            if skipToSeconds >= 0, sec + 1e-6 < skipToSeconds {
+                av_packet_unref(pkt); continue
+            }
+            let pts = ptsCMTime(ts)
+            let duration = pkt.pointee.duration > 0
+                ? CMTime(value: pkt.pointee.duration &* Int64(timeBase.num), timescale: timeBase.den)
+                : CMTime.invalid
+
+            guard let pixelBuffer = decoder.decode(packet: pkt, pts: pts, duration: duration) else {
+                if !proResFallbackAnnounced {
+                    proResFallbackAnnounced = true
+                    print("[PRORES-VT] decode failed — libav's software ProRes decoder takes the rest of this file")
+                }
+                decoder.shutdown()
+                proResDecoder = nil
+                _ = avcodec_send_packet(codecCtx, pkt)
+                av_packet_unref(pkt)
+                return nil
+            }
+            av_packet_unref(pkt)
+
+            if !proResFormatConfirmed {
+                proResFormatConfirmed = true
+                let got = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                guard got == pixelFormat else {
+                    print("[PRORES-VT] expected \(fourCCString(pixelFormat)), got \(fourCCString(got)) "
+                        + "— libav's software ProRes decoder takes this file")
+                    decoder.shutdown()
+                    proResDecoder = nil
+                    return nil
+                }
+                print("[PRORES-VT] decoding through VideoToolbox; \(fourCCString(got)) confirmed "
+                    + "(\(CVPixelBufferGetWidth(pixelBuffer))×\(CVPixelBufferGetHeight(pixelBuffer)))")
+            }
+            skipToSeconds = -1
             if let containerColor { LibavPixelConversion.stampContainerColor(pixelBuffer, containerColor) }
             return Self.makeSampleBuffer(pixelBuffer, pts: pts, duration: duration)
         }
