@@ -79,6 +79,25 @@ final class SampleDescriptionSlackTests: XCTestCase {
         }
     }
 
+    /// The routing policy on the same controls: every slack from 1 to 16 bytes is read around, and nothing
+    /// that is not slack ever is.
+    func testPolicyRoutesEverySlackAndNothingElse() {
+        XCTAssertEqual(SampleDescriptionSlackPolicy.minimumRoutedSlack, 1)
+        for n in 1...16 {
+            let m = movie([trak(handler: "vide", stsd: stsd([entry()], slack: [UInt8](repeating: 0, count: n)))])
+            XCTAssertTrue(SampleDescriptionSlackPolicy.routes(scan(m)), "slack \(n)")
+        }
+        var bad = entry(); bad.replaceSubrange(0..<4, with: be32(500))
+        let refused: [SampleDescriptionFinding] = [
+            scan(movie([trak(handler: "vide", stsd: stsd([entry()]))])),                 // consistent
+            scan(movie([trak(handler: "soun", stsd: stsd([entry("lpcm")]))])),           // no video track
+            scan(box("ftyp", Array("qt  ".utf8)) + box("mdat", [1, 2, 3])),              // no movie box
+            scan(movie([trak(handler: "vide", stsd: stsd([bad]))])),                     // malformed
+            .slack([]),
+        ]
+        for f in refused { XCTAssertFalse(SampleDescriptionSlackPolicy.routes(f), "\(f)") }
+    }
+
     func testOnlyVideoTracksAreJudged() {
         // An audio track's slack is not this defect's business; the video track is consistent.
         let m = movie([trak(handler: "soun", stsd: stsd([entry("lpcm")], slack: [0, 0, 0, 0, 0, 0, 0, 0])),

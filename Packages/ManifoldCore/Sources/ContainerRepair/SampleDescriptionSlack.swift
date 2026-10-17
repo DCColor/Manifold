@@ -25,9 +25,9 @@
 //  ── WHAT IS DONE WITH THE ANSWER ───────────────────────────────────────────────────────────────
 //
 //  `FrameEngine` asks this ONLY after AVFoundation has exposed no video track for a `.mov` / `.mp4`.
-//  Slack of 8 bytes or more routes the file to the libav path, which reads past it, with ProRes
-//  decoded by VideoToolbox (`ContainerSlackRoute`, `ProResVideoToolboxDecoder`). Anything else is
-//  refused with a banner that says what the scan found. Nothing is ever written to the file.
+//  Any slack (`SampleDescriptionSlackPolicy`) routes the file to the libav path, which reads past it,
+//  with ProRes decoded by VideoToolbox (`ContainerSlackRoute`, `ProResVideoToolboxDecoder`). Anything
+//  else is refused with a banner that says what the scan found. Nothing is ever written to the file.
 //
 //  ⚠️ THIS FILE ONLY READS. Two ways of handing AVFoundation corrected bytes were measured on
 //  2026-10-16 before the libav route was chosen. A same-size patch (`stsd` shrunk by the slack, the
@@ -73,6 +73,24 @@ public enum SampleDescriptionFinding: Equatable, Sendable {
     /// A box inside the movie overruns its parent, or an entry's size is impossible. Named so the
     /// banner can say what is wrong; never routed.
     case malformed(String)
+}
+
+/// Which findings the engine reads around. Here, beside the scanner, so `swift test` reaches it.
+public enum SampleDescriptionSlackPolicy {
+
+    /// The least slack that is routed. ONE BYTE: libav reads past any slack, and the 1-, 4- and 7-byte
+    /// copies of the ARRI clip open and play exactly like the 8-byte original (measured 2026-10-16). The
+    /// floor was 8 while a same-size patch was the plan, because the freed bytes had to hold a `free` box
+    /// header; that plan was rejected and the floor went with it.
+    public static let minimumRoutedSlack: UInt64 = 1
+
+    /// True when every video `stsd` with slack has at least `minimumRoutedSlack` bytes of it. Nothing but
+    /// `.slack` is ever routed: a consistent table, a malformed movie, no video track or no movie box
+    /// are refused.
+    public static func routes(_ finding: SampleDescriptionFinding) -> Bool {
+        guard case .slack(let slacks) = finding, !slacks.isEmpty else { return false }
+        return slacks.allSatisfy { $0.slackBytes >= minimumRoutedSlack }
+    }
 }
 
 public enum SampleDescriptionSlackScanner {

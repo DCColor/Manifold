@@ -73,6 +73,13 @@ public final class LibavFrameSource: @unchecked Sendable {
         /// that need to tell "the file said legal" from "the file said nothing" must read
         /// `declaredRange`. Same shape and same reasoning as `KeychainRead.value`.
         public var isFullRange: Bool { declaredRange == .full }
+        /// The range above came from libav's DECODER, not the container: the container stated none
+        /// (`color_range` unspecified before `avformat_find_stream_info`) and the decoder filled one in
+        /// while probing. MEASURED: ProRes in a `.mov` with an `nclc` box reads 0 before and 1 (MPEG)
+        /// after; the MXFs read 1 before and after, from their descriptor. The inspector says "assumed"
+        /// (`applyLibavMetadata`), as the chain readout does for an assumed axis. The render decision is
+        /// unchanged: `declaredRange` still drives it, and an assumed legal range expands as untagged does.
+        public let rangeAssumed: Bool
     }
 
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
@@ -220,6 +227,15 @@ public final class LibavFrameSource: @unchecked Sendable {
     public func open() throws -> StreamInfo {
         var ctx: UnsafeMutablePointer<AVFormatContext>? = nil
         guard avformat_open_input(&ctx, url.path, nil, nil) == 0, ctx != nil else { throw LibavError.open }
+        // What the CONTAINER states, read before the stream-info probe lets a decoder fill it in.
+        let containerRange: AVColorRange = {
+            for i in 0..<Int(ctx!.pointee.nb_streams) {
+                if let p = ctx!.pointee.streams[i]?.pointee.codecpar, p.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
+                    return p.pointee.color_range
+                }
+            }
+            return AVCOL_RANGE_UNSPECIFIED
+        }()
         guard avformat_find_stream_info(ctx, nil) >= 0 else { avformat_close_input(&ctx); throw LibavError.open }
 
         var vIdx: Int32 = -1
@@ -350,12 +366,14 @@ public final class LibavFrameSource: @unchecked Sendable {
         // a stated answer — the two can never disagree, because the second reader is not asked
         // unless the first abstained. See MXFDeclaredRange for why that is deliberate.
         let declaredRange: MediaInspector.SourceColorRange
-        let rangeProvenance: String
+        var rangeProvenance: String
+        let rangeAssumed = (range == AVCOL_RANGE_JPEG || range == AVCOL_RANGE_MPEG)
+            && containerRange == AVCOL_RANGE_UNSPECIFIED
         switch range {
         case AVCOL_RANGE_JPEG:
-            declaredRange = .full;       rangeProvenance = "libav"
+            declaredRange = .full;       rangeProvenance = rangeAssumed ? "libav decoder; the container states none" : "libav"
         case AVCOL_RANGE_MPEG:
-            declaredRange = .videoLegal; rangeProvenance = "libav"
+            declaredRange = .videoLegal; rangeProvenance = rangeAssumed ? "libav decoder; the container states none" : "libav"
         default:
             declaredRange = MXFDeclaredRange.read(url: url)
             rangeProvenance = declaredRange == .untagged
@@ -387,7 +405,8 @@ public final class LibavFrameSource: @unchecked Sendable {
             primariesCode: cicp(par.pointee.color_primaries.rawValue),
             transferCode: cicp(par.pointee.color_trc.rawValue),
             matrixCode: cicp(par.pointee.color_space.rawValue),
-            startTimecode: startTimecode)
+            startTimecode: startTimecode,
+            rangeAssumed: rangeAssumed)
     }
 
     /// Seek to `time` and arm the continuous decode pump for this session. The pump

@@ -1212,6 +1212,48 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
+## ☐ OPEN — PRE-EXISTING, ALL BUILDS — frame-stepping on the AVFoundation file path lands one frame early
+
+**Added 2026-10-16**, found while matching exports frame by frame for the stsd-slack fix. Its own stage next; not
+fixed.
+
+- **What:** on a file AVFoundation plays (the ordinary path), → from frame 0 does not move the picture, every later
+  step shows frame n−1, and the last frame cannot be reached by stepping at all. Measured at HEAD (`ce38f4b` and
+  `cbaa8ae`) on the ARRI A026 remux (27 frames, 23.976): steps 0 and 1 export the same picture; steps 26, 27 and
+  28 all export frame 25; playing to the end shows frame 26. The libav path (MXF, a routed `.mov`) lands on frame n
+  and reaches the last frame.
+- **Reproduce:** open a 23.976 ProRes `.mov` paused at frame 0, press → once, ⌃⌥E before and after: the exports are
+  byte-identical. Step to the end and compare with an export after playing to the end: they differ.
+- **Code path:** `FrameEngine.stepFrame(by:)` → `drainPendingSteps()` → `beginReading(from: target)`, the
+  AVFoundation reader started at the target. The target is `base + frames / fps`, with `fps` =
+  `metadata.frameRate`, which on this path is AVFoundation's `nominalFrameRate`, a Float: 23.976024627…, not
+  24000/1001. So `n / fps` lands about 1.2 ns BEFORE frame n's presentation time (n × 1001/24000): 0.04170833220
+  against 0.04170833333 for frame 1, likewise at 13 and 26. The reader then presents the frame whose interval holds
+  the target, which is frame n−1. The end clamp, `totalFrames / fps`, is short of the last frame the same way. The
+  libav path survives the same arithmetic because its seek keeps a 1 µs tolerance (`sec + 1e-6 < skipToSeconds` in
+  `LibavFrameSource.nextFrame`).
+- **Likely fix (for its stage):** step on the track's timescale (frame index × frame duration as a `CMTime`) rather
+  than on `Double(frames) / fps`, or give the AVFoundation seek the same tolerance. Measure on 23.976, 29.97 and
+  integer rates; stepping, timecode entry and the end clamp all read `fps`.
+
+---
+
+## ☐ OPEN — PRE-EXISTING, libav PATH (MXF, routed `.mov`) — `pasp` and `clap` are not read
+
+**Added 2026-10-16.** Stated in the code at `applyLibavMetadata` for MXF since the libav path was built; recorded here
+because the stsd-slack route made a `.mov` take it too.
+
+- **What:** the libav path publishes no geometry (`onSourceGeometry?(0, 0, .undeclared, .undeclared)`) and `StreamInfo`
+  carries no pixel aspect or aperture. The inspector reads Pixel Aspect "Not declared" and shows no Display Aspect
+  row; the PNG export omits `pHYs`; an anamorphic MXF, or an anamorphic `.mov` with slack, draws squeezed.
+- **Measured:** the routed ARRI A026 shows "Not declared" where its remux, opened normally, shows "1:1 (square,
+  declared)". Pixels are unaffected (exports byte-identical).
+- **What is available:** libav reads both. `AVStream.sample_aspect_ratio` (and `codecpar.sample_aspect_ratio`) carry
+  the `.mov` `pasp` and the MXF aspect; libav crops on decode (`apply_cropping`), so the clean aperture must be read
+  and not applied a second time. Wiring them in moves the geometry of every MXF, so it needs its own regression run.
+
+---
+
 ## ☐ DECISION: ProRes MXF decodes in software (libav), ~30–41 ms of CPU a frame at 2K 4444
 
 **Added 2026-10-16**, measured while building the container route below. Not changed by it.
@@ -1229,11 +1271,11 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ✅ FIXED 2026-10-16 (uncommitted) — PRE-EXISTING, ALL BUILDS — A video `stsd` longer than its entries hides the video track
+## ✅ FIXED 2026-10-16 (`cbaa8ae`) — PRE-EXISTING, ALL BUILDS — A video `stsd` longer than its entries hides the video track
 
 **Fixed:** a `.mov` / `.mp4` that AVFoundation opens but exposes no video track for is now asked about by a box
-scanner, and ONLY then (`FrameEngine.loadAsset`, the no-video branch). A video `stsd` with 8 or more bytes past its
-entries is read through the libav path, ProRes decoded by VideoToolbox (`ContainerSlackRoute`,
+scanner, and ONLY then (`FrameEngine.loadAsset`, the no-video branch). A video `stsd` with bytes past its
+entries (8 or more at `cbaa8ae`, any since the follow-up below) is read through the libav path, ProRes decoded by VideoToolbox (`ContainerSlackRoute`,
 `ProResVideoToolboxDecoder`, a separate route beside DNxHR's in `LibavFrameSource` and `LibavScrubProducer`).
 Nothing is written to disk. A `[CONTAINER]` line logs the deviation and a non-blocking notice says "This file's
 container has a sample-description size error; Manifold is reading around it." AVFoundation still supplies what it
@@ -1255,14 +1297,21 @@ no-video `.mov` / `.mp4` is refused with a banner that says what the scan found.
 - **Refusals:** 1, 4 and 7 bytes of slack, an audio-only `.mov`, a truncated `.mov` with no movie box, and a sample
   entry that overruns its table: each refused with its own banner, the app still running.
 
+**Follow-ups, 2026-10-16 (uncommitted, after `cbaa8ae`):**
+- **Any slack is routed now, not 8 or more.** The floor only mattered for the rejected same-size patch.
+  `SampleDescriptionSlackPolicy.minimumRoutedSlack` is 1, in `ContainerRepair` beside the scanner so the tests reach
+  it (1–16 routed; consistent, malformed, no video track and no movie box never). The 1-, 4- and 7-byte copies of
+  A026 open through the route with VideoToolbox, their first frame, frame 13 and end-of-play exports byte-identical
+  to the 8-byte copy's; 30 s with 1 byte plays with 0 dropped, 0 late, as its clean twin. S5's 16 files and the
+  routed clip are byte-identical to `cbaa8ae`, with no `[CONTAINER]` line on any normal file.
+- **The Range row says when it is assumed.** On the libav path the range now carries where it came from: libav reads
+  the container's `color_range` before `avformat_find_stream_info`, and a range only the decoder supplied is shown
+  "Video (Legal) — assumed", as the chain readout words an assumed axis. MEASURED: ProRes in a `.mov` reads 0 before
+  the probe and 1 (MPEG) after; the MXFs read 1 before and after, so an MXF's row is unchanged. The render decision
+  is unchanged (exports byte-identical).
+
 **Open after this fix:**
-- **1–7 bytes of slack is refused, by scope.** libav reads past any slack; 8 is the measured case. Routing 1–7 is
-  a one-line change in `ContainerSlackRoute.minimumSlack` and a re-run of the refusal set.
-- **The libav path does not read `pasp` or `clap`**, as already stated at `applyLibavMetadata` for MXF. A routed
-  file shows Pixel Aspect "Not declared" where its remux shows "1:1 (square, declared)", the PNG export omits
-  `pHYs`, and an anamorphic file with slack would draw squeezed. Pixels are unaffected.
-- **Range row:** libav reports "Video (Legal)" for a routed ProRes `.mov` where AVFoundation reads the remux as
-  "Untagged". The picture is the same (both expand legal → full); the row is libav's claim, not the file's.
+- **The libav path does not read `pasp` or `clap`** — its own entry above, shared with MXF.
 - **The inspector has no vendor-metadata section.** AVFoundation reads the clips' 63 items (`com.arri.camera.*`)
   on both paths, but no file shows them. A section for them is new work.
 

@@ -14,17 +14,12 @@ import ContainerRepair
 ///
 /// ── THE ROUTE ────────────────────────────────────────────────────────────────────────────────────
 ///
-/// A video `stsd` with 8 or more bytes past its entries goes to the libav path, which reads past the
-/// slack, with ProRes decoded by VideoToolbox (`ProResVideoToolboxDecoder`). Nothing is written to disk.
+/// A video `stsd` with any bytes past its entries (`SampleDescriptionSlackPolicy`) goes to the libav path,
+/// which reads past the slack, with ProRes decoded by VideoToolbox (`ProResVideoToolboxDecoder`). Nothing
+/// is written to disk.
 /// MEASURED on the two ARRI clips that prompted it: every frame byte-identical to a stream-copy remux
 /// decoded by AVFoundation, at playback pace and slower; scrub 0.8–1.2 ms median.
-///
-/// ⚠️ THE 8-BYTE FLOOR IS SCOPE, NOT NECESSITY. libav reads past any slack. 8 is the measured case
-/// (both clips carry exactly 8) and the decided scope (2026-10-16); 1–7 is refused with the banner
-/// below and could be routed later with no other change.
 enum ContainerSlackRoute {
-
-    static let minimumSlack: UInt64 = 8
 
     /// The containers the scanner understands. Anything else that AVFoundation shows no video for (an
     /// R3D, an AVI) keeps the engine's existing refusal and never reaches the scanner.
@@ -53,9 +48,11 @@ enum ContainerSlackRoute {
         switch finding {
         case .slack(let slacks):
             let least = slacks.map(\.slackBytes).min() ?? 0
-            guard least >= minimumSlack else {
+            // Every slack is routed today (minimum 1); the refusal stays so the floor can move without
+            // leaving a slack file with no banner.
+            guard SampleDescriptionSlackPolicy.routes(finding) else {
                 NSLog("[CONTAINER] %@: %llu byte%@ of slack, under the %llu routed — refusing",
-                      name, least, least == 1 ? "" : "s", minimumSlack)
+                      name, least, least == 1 ? "" : "s", SampleDescriptionSlackPolicy.minimumRoutedSlack)
                 return .refuse(notice: "This file couldn’t be opened — its video sample-description table is "
                     + "\(least) byte\(least == 1 ? "" : "s") longer than its entries, a container error macOS "
                     + "won’t read past. Remuxing it (for example ffmpeg -c copy) fixes it.")

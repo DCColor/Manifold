@@ -1461,8 +1461,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         //
         // So this branch now asks the box scanner what is wrong — HERE and nowhere else, after
         // AVFoundation has already said there is no video track, so a file AVFoundation can play
-        // never reaches it. 8 or more bytes of slack: the file is read through libav, ProRes decoded
-        // by VideoToolbox, nothing written to disk (`ContainerSlackRoute`). Anything else is refused
+        // never reaches it. Any slack: the file is read through libav, ProRes decoded by
+        // VideoToolbox, nothing written to disk (`ContainerSlackRoute`). Anything else is refused
         // with a banner that says what the scan found. Not a `.mov` / `.mp4` (an R3D, every other
         // container AVFoundation declines): the original refusal, unchanged.
         //
@@ -1853,6 +1853,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // Bool, so the libav path could print "Video (Legal)" for a file that had said nothing —
         // a positive claim the file never made. `.untagged` renders as "Untagged".
         meta.colorRange = info.declaredRange.displayName
+        // …and when only libav's decoder supplied it, say it was assumed, as the chain readout does for an
+        // assumed axis (`StreamInfo.rangeAssumed`; ProRes in a routed `.mov`). The file declared nothing.
+        if info.rangeAssumed { meta.colorRange += " — assumed" }
         meta.startTimecode = info.startTimecode   // MXF Material Package TC (libav)
         // Same HDR10 reader the AVFoundation path uses, so the inspector's HDR10 section
         // reads identically whichever backend supplied the rest of the metadata.
