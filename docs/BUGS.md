@@ -1249,7 +1249,7 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
-## ✅ FIXED 2026-10-17 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — repeated frame-step presses get lost
+## ✅ FIXED 2026-10-17 (`8e42636`) — PRE-EXISTING, ALL BUILDS — repeated frame-step presses get lost
 
 **Fixed:** the steps own the position. `FrameEngine.stepFrameIndex` is the frame the last accepted press went to;
 the next press steps from it (`FrameGrid.frame(steppingFromIndex:by:)`, clamped to the first and last frames), and

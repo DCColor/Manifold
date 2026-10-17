@@ -61,6 +61,7 @@ bullet.
 - Fixed: SRT sound played about 200 ms behind the picture.
 - Fixed: stepping frame by frame (← / →) through 23.976, 29.97 and 59.94 fps files showed the previous frame: the first → didn't move the picture and the last frame couldn't be reached. Each step now lands on its frame.
 - Fixed: a frame step (← / →) could occasionally come to rest one to three frames past the frame stepped to, most often with 50 and 60 fps material.
+- Fixed: tapping → or ← quickly could skip a step, so five taps sometimes moved only two to four frames. Every press now moves exactly one frame, however fast you tap.
 - Fixed: on MXF and DNx files, a typed timecode showed the frame after the one typed, the last frame couldn't be reached by typing, and releasing the scrubber could land one frame late. They now land on the exact frame.
 - Fixed: some camera files rewrapped by older tools (for example ARRI ProRes clips) couldn't be opened because their container has a sample-description size error, which QuickTime Player and Quick Look can't open either. Manifold now reads around the error, says so, and leaves the file unchanged. Files with other container errors are refused with a message saying what is wrong.
 - Fixed: during and after a live stream, the window's name in the Window menu and Mission Control still showed the file that was open before it. It now shows the stream's saved name (or its server's address if it has none) while streaming, and "Manifold" once the stream ends.
