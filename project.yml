@@ -181,6 +181,10 @@ targets:
       # leaf target so `swift test` can reach it. Used by the renderer and App/InterpretationLUT.swift.
       - package: ManifoldCore
         product: LUTCube
+      # The transport bar's scrubber and its playhead style (Ball / Line) — a leaf target so `swift test`
+      # can measure the line against the stock slider. Used by App/TransportScrubber.swift only.
+      - package: ManifoldCore
+        product: PlayheadSlider
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,

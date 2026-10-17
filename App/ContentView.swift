@@ -2786,15 +2786,17 @@ struct ContentView: View {
                     .help(position ? "Go to timecode — click, or type a number"
                                    : (positionWhy ?? ""))
 
-                Slider(
-                    value: Binding(
-                        get: { isScrubbing ? scrubValue : engine.currentTime },
-                        set: { newValue in
-                            scrubValue = newValue
-                            engine.scrubSeek(to: newValue)
-                        }
-                    ),
-                    in: 0...max(engine.duration, 0.1),
+                // THE PLAYHEAD. A `TransportScrubber`, not a `Slider`, so it can draw the playhead
+                // as a Ball or a Line (Settings ▸ Interface Options). Same contract as the Slider it
+                // replaced — the value, the per-move setter, the editing bracket below are unchanged —
+                // and the Ball is that Slider's knob, byte for byte. See TransportScrubber.
+                TransportScrubber(
+                    value: isScrubbing ? scrubValue : engine.currentTime,
+                    range: 0...max(engine.duration, 0.1),
+                    onChange: { newValue in
+                        scrubValue = newValue
+                        engine.scrubSeek(to: newValue)
+                    },
                     onEditingChanged: { editing in
                         if editing {
                             #if DEBUG

@@ -39,7 +39,9 @@ let package = Package(
         // detector in the renderer, and the bundled sync clips. ManifoldCore uses it too (the beep tap).
         .library(name: "SyncCalibration", targets: ["SyncCalibration"]),
         // The `.cube` LUT parser and its CPU reference evaluator (colour S6, L0). Linked by the APP target from L1.
-        .library(name: "LUTCube", targets: ["LUTCube"])
+        .library(name: "LUTCube", targets: ["LUTCube"]),
+        // Linked by the APP target directly (project.yml), for the transport bar's scrubber.
+        .library(name: "PlayheadSlider", targets: ["PlayheadSlider"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -357,6 +359,24 @@ let package = Package(
             name: "ContainerRepairTests",
             dependencies: ["ContainerRepair"],
             path: "Tests/ContainerRepairTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The transport bar's scrubber and its playhead style (Ball / Line, 2026-10-16): an NSSlider
+        // whose cell overrides only `drawKnob`. A leaf target, AppKit only, so `swift test` can measure
+        // the line against a stock NSSliderCell — its centre, and the value a click or drag lands on.
+        .target(
+            name: "PlayheadSlider",
+            path: "Sources/PlayheadSlider",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "PlayheadSliderTests",
+            dependencies: ["PlayheadSlider"],
+            path: "Tests/PlayheadSliderTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

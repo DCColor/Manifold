@@ -3,6 +3,7 @@ import AppKit
 import UniformTypeIdentifiers
 import StreamBookmarkModel
 import ManifoldCore
+import PlayheadSlider
 
 /// How the transport controls are presented.
 /// Where **Open…** puts a file: into the window you invoked it from, or into a new one.
@@ -1281,6 +1282,10 @@ struct SettingsView: View {
     // the toggle decides what an untouched key shows.
     @AppStorage("autoplayOnLoad") private var autoplayOnLoad: Bool = false
     @AppStorage(OpenDestination.defaultsKey) private var openDestination: OpenDestination = .thisWindow
+    // The playhead's look, app-wide. Same keys and defaults as `TransportScrubber` (both read
+    // `PlayheadStyle`), and written only here.
+    @AppStorage(PlayheadStyle.defaultsKey) private var playheadStyle: PlayheadStyle = PlayheadStyle.defaultStyle
+    @AppStorage(PlayheadStyle.colorDefaultsKey) private var playheadLineHex = PlayheadStyle.defaultColorHex
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
@@ -1502,6 +1507,18 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.inline)
+
+                // The playhead's look only: both styles are the same control, so a click or a drag
+                // lands on the same frame in either (TransportScrubber). Applies to every window at once.
+                Picker("Playhead", selection: $playheadStyle) {
+                    ForEach(PlayheadStyle.allCases) { style in
+                        Text(style.label).tag(style)
+                    }
+                }
+                .pickerStyle(.segmented)
+                if playheadStyle == .line {
+                    ColorPicker("Playhead line color", selection: colorBinding($playheadLineHex), supportsOpacity: false)
+                }
 
                 Toggle("Autoplay on open", isOn: $autoplayOnLoad)
 
