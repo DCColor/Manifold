@@ -1212,29 +1212,41 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ OPEN — PRE-EXISTING, ALL BUILDS — frame-stepping on the AVFoundation file path lands one frame early
+## ☐ OPEN — PRE-EXISTING, ALL BUILDS — at 875–900 pt the control row is cut off at both edges
 
-**Added 2026-10-16**, found while matching exports frame by frame for the stsd-slack fix. Its own stage next; not
-fixed.
+**Added 2026-10-16**, seen while checking the line playhead (`b4a0389`) at small window sizes. Not fixed. The same
+in both playhead styles, so not caused by it.
 
-- **What:** on a file AVFoundation plays (the ordinary path), → from frame 0 does not move the picture, every later
-  step shows frame n−1, and the last frame cannot be reached by stepping at all. Measured at HEAD (`ce38f4b` and
-  `cbaa8ae`) on the ARRI A026 remux (27 frames, 23.976): steps 0 and 1 export the same picture; steps 26, 27 and
-  28 all export frame 25; playing to the end shows frame 26. The libav path (MXF, a routed `.mov`) lands on frame n
-  and reaches the last frame.
-- **Reproduce:** open a 23.976 ProRes `.mov` paused at frame 0, press → once, ⌃⌥E before and after: the exports are
-  byte-identical. Step to the end and compare with an export after playing to the end: they differ.
-- **Code path:** `FrameEngine.stepFrame(by:)` → `drainPendingSteps()` → `beginReading(from: target)`, the
-  AVFoundation reader started at the target. The target is `base + frames / fps`, with `fps` =
-  `metadata.frameRate`, which on this path is AVFoundation's `nominalFrameRate`, a Float: 23.976024627…, not
-  24000/1001. So `n / fps` lands about 1.2 ns BEFORE frame n's presentation time (n × 1001/24000): 0.04170833220
-  against 0.04170833333 for frame 1, likewise at 13 and 26. The reader then presents the frame whose interval holds
-  the target, which is frame n−1. The end clamp, `totalFrames / fps`, is short of the last frame the same way. The
-  libav path survives the same arithmetic because its seek keeps a 1 µs tolerance (`sec + 1e-6 < skipToSeconds` in
-  `LibavFrameSource.nextFrame`).
-- **Likely fix (for its stage):** step on the track's timescale (frame index × frame duration as a `CMTime`) rather
-  than on `Double(frames) / fps`, or give the AVFoundation seek the same tolerance. Measure on 23.976, 29.97 and
-  integer rates; stepping, timecode entry and the end clamp all read `fps`.
+- **What:** at window widths of 875–900 pt the bottom control row is wider than the window, and its ends are
+  clipped. Overlay at 875 × 492 (the window's minimum): the folder and play buttons are cut off on the left and
+  the display-transform control (`macOS`) on the right. Docked at 900 × 581: the leading and trailing timecode
+  readouts are cut off (`00:00` and `06:00:` show). The scrubber itself draws and works.
+- **Why the scrubber survives:** in Overlay the HUD is capped at 760 pt and the scrubber stays 540 pt at every
+  window size, so it is never what gives way; the row of fixed-width buttons beside it is.
+- **Likely fix (for its stage):** a minimum window width that fits the row, or a row that drops or folds its
+  least-used controls below a width. The row's width grows whenever a control is added, so whichever is chosen
+  needs to be measured from the row, not hard-coded.
+
+---
+
+## ☐ OPEN — PRE-EXISTING, ALL BUILDS — a paused step or seek can come to rest one or two frames past its target
+
+**Added 2026-10-16**, found while measuring the frame-stepping fix below. Not fixed; not caused by that fix.
+
+- **What:** occasionally, after → (or any paused rebuild), the picture that stays on screen — and that ⌃⌥E exports — is
+  one or two frames AFTER the frame the engine moved to. The engine's position is right: the next step continues from
+  it and shows the correct frame. Seen 3 times in ~29 instrumented 30-step runs on the synthetic rate fixtures, at 50
+  and 60 fps: stepping to frame 16 at 50 fps showed frame 18, held for over a second.
+- **The log says how:** each occurrence prints `[ScopeSeek] paused-seek overshoot: nearest.pts=0.3600 now=0.3200
+  → relaxed render`. The frames at the target (0.32, 0.34) were not in the renderer's queue when the paused tick ran,
+  so the relaxed-render fallback in `MetalVideoRenderer.displayTick` drew the earliest frame it had, which was later.
+  A flush arriving after the new reader's first frames is the likely way they went missing; not yet confirmed.
+- **Why it is pre-existing:** at 50 and 60 fps one frame is a whole number of 600ths, so the fixed engine hands the
+  reader exactly the start HEAD did. The same class shows at the end of a long-GOP file: on `2997p.mov` (H.264 with
+  B-frames, 87 549 frames), → at the last frame re-seeks into the final GOP and comes to rest on a different picture,
+  with byte-identical exports from HEAD `b4a0389` and the fixed tree.
+- **Likely fix (for its stage):** make the relaxed render accept only a frame at the clock (within half a frame), and
+  find why the target frames leave the queue. Measure with the step harness's per-step export, not by eye.
 
 ---
 
@@ -1268,6 +1280,69 @@ because the stsd-slack route made a `.mov` take it too.
 - **The decision:** route MXF ProRes through `ProResVideoToolboxDecoder` too. MXF reports no `codec_tag`, so the
   sample-entry type would have to come from libav's profile; and the change would move every ProRes MXF's pixels,
   so it needs its own regression run against the MXF corpus.
+
+---
+
+## ✅ FIXED 2026-10-16 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — frame-stepping on the AVFoundation file path lands one frame early
+
+**Fixed:** on the AVFoundation path a frame step now moves on the track's own frame times. `FrameGrid` (a leaf target,
+CoreMedia only, 7 tests) holds frame 0's time and the exact frame duration (`minFrameDuration`, e.g. 1001/24000) and
+names frames by index; `FrameEngine.stepFrame` steps from the frame on screen to the one `frames` away, clamped to the
+last frame, and `drainPendingSteps` starts the reader at that frame as a `CMTime`. `totalFrames` counts from the grid.
+A `[STEP]` line at load says which way a file steps. Unchanged: the libav path (its 1 µs tolerance already landed),
+seek, scrub and playback (they still start the reader at `time` in 600ths), and timecode entry (its +0.25-frame nudge
+already landed).
+
+**There were two causes, not one.** The entry below named the Float `nominalFrameRate` (~1.2 ns early). The reader
+start was the larger one: `CMTime(seconds:preferredTimescale: 600)` put 23.976 frame 1 at 25/600 s = 0.0416667 s,
+inside frame 0 (which ends at 0.0417083 s). Measured offline with a reader started exactly as the engine started it:
+23.976, 29.97 and 59.94 delivered frame n−1 at n = 1, 2, 15 and 29; 24, 25 and 60 delivered n, since their frame
+duration is a whole number of 600ths. So the bug was NTSC rates only.
+
+**Verified 2026-10-16**, tree vs HEAD `b4a0389`, unattended, window-only, exports read and deleted:
+
+- **Synthetic fixtures, 23.976 / 24 / 25 / 29.97 / 30 / 50 / 59.94 / 60** (ProRes 422 HQ, 30 frames, each frame a grey
+  that names its index, read back from the export's v210 dump): → from 0 shows 1, ← shows 0, ← at 0 stays, 30 × →
+  shows 1…29 then 29. **All 8 pass** on the final build. HEAD at 23.976 / 29.97 / 59.94: → from 0 shows 0, every
+  step n−1, the last frame never reached (ends 28, 28).
+- **Real files** (TEST FLIP, read-only): `2398p.mov` — step 1 differs from frame 0, ←→ at the end returns to the last
+  frame, → at the end stays (HEAD: step 1 byte-identical to frame 0, ←→ misses the last frame). `25p.mov` the same
+  on both builds. `2997p.mov` (H.264, drop-frame timecode) step 1 moves (HEAD: does not); → at its last frame
+  is the open overshoot entry above, identical on both builds.
+- **libav path:** `A027C021_171116_R022.mov` (routed): all five step exports byte-identical to HEAD.
+- **Playback, scrub and seek unchanged:** the 16-file colour set, exports at open and after a seek, **96 / 96
+  byte-identical** to HEAD (`png`, `rgba16f`, `v210`); presented fps the same.
+- **Variable rate:** stated, not fixed. A track whose `minFrameDuration` is more than 1e-4 from its nominal rate gets
+  no grid and steps the old way, with a `[STEP]` line saying so: `IMG_5070.MOV` (iPhone HEVC, nominal 119.95 fps,
+  fastest frame 1/126.3 s) steps, but ←→ at its end does not return to the last frame. Drop-frame is only a label
+  and steps like any 29.97 file.
+- **Run noise, for the next person to use the harness:** keys posted to the app are occasionally dropped (seen as a
+  repeated frame and a lag that never recovers; with logging on, the engine received fewer presses than were sent),
+  and the overshoot above. Neither is the step arithmetic: in 26 instrumented runs the engine never lost a step.
+
+**The entry as it was opened:**
+
+**Added 2026-10-16**, found while matching exports frame by frame for the stsd-slack fix. Its own stage next; not
+fixed.
+
+- **What:** on a file AVFoundation plays (the ordinary path), → from frame 0 does not move the picture, every later
+  step shows frame n−1, and the last frame cannot be reached by stepping at all. Measured at HEAD (`ce38f4b` and
+  `cbaa8ae`) on the ARRI A026 remux (27 frames, 23.976): steps 0 and 1 export the same picture; steps 26, 27 and
+  28 all export frame 25; playing to the end shows frame 26. The libav path (MXF, a routed `.mov`) lands on frame n
+  and reaches the last frame.
+- **Reproduce:** open a 23.976 ProRes `.mov` paused at frame 0, press → once, ⌃⌥E before and after: the exports are
+  byte-identical. Step to the end and compare with an export after playing to the end: they differ.
+- **Code path:** `FrameEngine.stepFrame(by:)` → `drainPendingSteps()` → `beginReading(from: target)`, the
+  AVFoundation reader started at the target. The target is `base + frames / fps`, with `fps` =
+  `metadata.frameRate`, which on this path is AVFoundation's `nominalFrameRate`, a Float: 23.976024627…, not
+  24000/1001. So `n / fps` lands about 1.2 ns BEFORE frame n's presentation time (n × 1001/24000): 0.04170833220
+  against 0.04170833333 for frame 1, likewise at 13 and 26. The reader then presents the frame whose interval holds
+  the target, which is frame n−1. The end clamp, `totalFrames / fps`, is short of the last frame the same way. The
+  libav path survives the same arithmetic because its seek keeps a 1 µs tolerance (`sec + 1e-6 < skipToSeconds` in
+  `LibavFrameSource.nextFrame`).
+- **Likely fix (for its stage):** step on the track's timescale (frame index × frame duration as a `CMTime`) rather
+  than on `Double(frames) / fps`, or give the AVFoundation seek the same tolerance. Measure on 23.976, 29.97 and
+  integer rates; stepping, timecode entry and the end clamp all read `fps`.
 
 ---
 

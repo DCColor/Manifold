@@ -9,6 +9,7 @@ import SyncCalibration
 import FileAudioLookahead
 import ColorimetryModel   // SourceChroma — the chain readout's Chroma line (Stage 3b S2)
 import FileChroma
+import FrameGrid
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -142,6 +143,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// key needs these at all.
     private var pendingStepTarget: Double?
     private var stepDrainRunning = false
+
+    /// The video track's exact frame times, when the file is on the AVFoundation path and its track is constant-rate;
+    /// nil otherwise (libav path, variable-rate, no media). Frame-stepping and `totalFrames` use it instead of
+    /// `Double(n) / fps`, which landed every NTSC-rate step one frame early (docs/BUGS.md, "frame-stepping on the
+    /// AVFoundation file path lands one frame early"; the arithmetic is `FrameGrid`'s note). Without it — the libav
+    /// path, whose seek tolerance already lands, and a variable-rate track, which has no single frame duration —
+    /// both keep the old arithmetic.
+    public private(set) var frameGrid: FrameGrid?
     // JKL shuttle transport rate (transient session state — not persisted).
     // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
     // synchronizer directly; reverse is a best-effort jog (see setShuttleRate).
@@ -633,6 +642,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         guard let vTrack = try? await freshAsset.loadTracks(withMediaType: .video).first else { return }
         self.videoTrack = vTrack
+        if !useLibav { frameGrid = await Self.makeFrameGrid(for: vTrack, url: url) }
         // A re-inspect follows a rewrite of the SAME file, so the track set is usually identical —
         // keep the monitored track if the new asset still has one at that index, rather than
         // yanking a colourist back to track 1 because the file was re-wrapped underneath them.
@@ -882,6 +892,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
         setShuttleRate(0)
         let base = pendingStepTarget ?? currentTime
+        // ── THE AVFoundation PATH STEPS ON THE TRACK'S OWN FRAME TIMES ───────────────────────────
+        // From the frame on screen at `base` to the one `frames` away, clamped to the last frame that exists, and
+        // `currentTime` set to that frame's exact time; the drain hands the reader the same frame as a `CMTime`.
+        // The arithmetic below this branch landed every NTSC-rate step one frame early (see `frameGrid`).
+        if !useLibav, let grid = frameGrid {
+            let target = grid.seconds(ofFrame: grid.frame(steppingFrom: base, by: frames))
+            currentTime = target
+            pendingStepTarget = target
+            guard !stepDrainRunning else { return }
+            stepDrainRunning = true
+            Task { await drainPendingSteps() }
+            return
+        }
         // ⚠️ THE CEILING IS THE LAST FRAME, NOT `duration`, and the two are not the same instant.
         // `duration` is the end of the last frame's interval — one frame TIME past the last frame's
         // presentation time — so clamping there parked the playhead on a frame index that does not
@@ -898,6 +921,24 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         Task { await drainPendingSteps() }
     }
 
+    /// The track's frame grid, or nil — with a `[STEP]` line either way, so a file that steps the old way says why.
+    private static func makeFrameGrid(for track: AVAssetTrack, url: URL) async -> FrameGrid? {
+        guard let (range, minDuration, nominal) = try? await track.load(.timeRange, .minFrameDuration, .nominalFrameRate)
+        else {
+            print("[STEP] \(url.lastPathComponent): track timing unreadable — stepping on the nominal rate")
+            return nil
+        }
+        guard let grid = FrameGrid(origin: range.start, frameDuration: minDuration,
+                                   trackDuration: range.duration, nominalFrameRate: nominal) else {
+            print("[STEP] \(url.lastPathComponent): no constant frame duration (min \(minDuration.value)/\(minDuration.timescale), "
+                  + "nominal \(nominal) fps) — variable rate or unreadable; stepping on the nominal rate")
+            return nil
+        }
+        print("[STEP] \(url.lastPathComponent): frame \(minDuration.value)/\(minDuration.timescale) s, "
+              + "\(grid.frameCount) frames, origin \(range.start.value)/\(range.start.timescale)")
+        return grid
+    }
+
     /// Rebuild to the newest requested position until no newer one has arrived. See `stepFrame`.
     private func drainPendingSteps() async {
         defer { stepDrainRunning = false }
@@ -908,7 +949,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // was open when they were typed, and seeking the NEW file to them would be nonsense.
             // Same generation authority the inspection Tasks use.
             guard loadGeneration == generation, hasMedia else { return }
-            await beginReading(from: target, resumePlaying: false)
+            // On the grid the target is a frame's exact time; the reader starts at that frame as a `CMTime`, not at
+            // `target` rounded to 600ths (which put 23.976 frame 1 at 25/600 s, inside frame 0).
+            let exactStart = useLibav ? nil : frameGrid.map { $0.time(ofFrame: $0.frame(atSeconds: target)) }
+            await beginReading(from: target, resumePlaying: false, exactStart: exactStart)
         }
     }
 
@@ -1012,6 +1056,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // would become the accumulator's base for the first step of the NEXT source (see
         // `stepFrame`), so a step in a freshly loaded file would start from the old one's position.
         pendingStepTarget = nil
+        frameGrid = nil
         // A full teardown must leave NO transport readout from the departed source: the same
         // incoherence we fixed for scopes (blank-on-disconnect). duration + tcInfo drive the
         // scrubber range and the source/end-timecode readouts; without this a file→stream takeover
@@ -1223,6 +1268,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     public var totalFrames: Int {
+        // The last frame's index. On the grid, counted from the track (see `frameGrid`); the ceiling a step clamps to.
+        if !useLibav, let grid = frameGrid { return grid.lastIndex }
         let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
         return max(Int((duration * fps).rounded()) - 1, 0)
     }
@@ -1522,6 +1569,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // …and any frame step the PREVIOUS file had outstanding, for the reason given in `stop()`.
         // The bump above is what makes a drain loop already running notice and retire itself.
         pendingStepTarget = nil
+        frameGrid = nil                                  // the previous file's frames; rebuilt below if AVFoundation
 
         // New file: retire any prior libav sources (bound to the old file). The
         // per-file libav video+audio sources are created lazily in beginLibavReading.
@@ -1634,6 +1682,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // beginLibavReading — overriding the often-untagged AVFoundation read.
             useLibav = MediaInspector.requiresLibavDecode(fmt)
             libavFileFormatDescription = useLibav ? fmt : nil
+            // The frame grid, for this path only (see `frameGrid`). Read here, before `beginReading`, so the first
+            // step has it.
+            frameGrid = useLibav ? nil : await Self.makeFrameGrid(for: vTrack, url: url)
             // ── THE FILE'S CHROMA, AT THE SAME POINT AND ON THE SAME ARGUMENT (Stage 3b S2) ──────
             // Before `installScrubProducer` below and before `beginReading`: both read
             // `videoPixelFormat`, so this one answer is what both decoders are built with. libav
@@ -3908,7 +3959,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return settings
     }
 
-    private func beginReading(from time: Double, resumePlaying: Bool) async {
+    /// `exactStart`, when given, is where the reader starts instead of `time` in 600ths — a frame step's exact frame
+    /// time (`drainPendingSteps`). Every other caller passes none, and reads exactly as before.
+    private func beginReading(from time: Double, resumePlaying: Bool, exactStart: CMTime? = nil) async {
         if useLibav {
             await beginLibavReading(from: time, resumePlaying: resumePlaying)
             return
@@ -3942,7 +3995,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         guard let newReader = try? AVAssetReader(asset: asset) else {
             print("FrameEngine: reader create failed"); return
         }
-        let start = CMTime(seconds: time, preferredTimescale: 600)
+        let start = exactStart ?? CMTime(seconds: time, preferredTimescale: 600)
         newReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
 
         // The file decode now flows through the FrameSource seam: FileFrameSource
@@ -3980,7 +4033,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // a reader that fails at x420 too fails for a reason that is not chroma.
             if videoPixelFormat != kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange {
                 chromaFallback(delivered: nil, requested: videoPixelFormat)
-                await beginReading(from: time, resumePlaying: resumePlaying)
+                await beginReading(from: time, resumePlaying: resumePlaying, exactStart: exactStart)
             }
             return
         }

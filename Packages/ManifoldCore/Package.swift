@@ -41,7 +41,9 @@ let package = Package(
         // The `.cube` LUT parser and its CPU reference evaluator (colour S6, L0). Linked by the APP target from L1.
         .library(name: "LUTCube", targets: ["LUTCube"]),
         // Linked by the APP target directly (project.yml), for the transport bar's scrubber.
-        .library(name: "PlayheadSlider", targets: ["PlayheadSlider"])
+        .library(name: "PlayheadSlider", targets: ["PlayheadSlider"]),
+        // ManifoldCore uses it (frame-stepping on the AVFoundation path); a product so the tests can name it.
+        .library(name: "FrameGrid", targets: ["FrameGrid"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -381,11 +383,29 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // A constant-rate track's exact frame times (docs/BUGS.md, "frame-stepping on the AVFoundation file path
+        // lands one frame early"). A leaf target, CoreMedia only, for the same linking reason as the others:
+        // `swift test` cannot link ManifoldCore, which steps on it.
+        .target(
+            name: "FrameGrid",
+            path: "Sources/FrameGrid",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "FrameGridTests",
+            dependencies: ["FrameGrid"],
+            path: "Tests/FrameGridTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .target(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
-                           "ContainerRepair"],
+                           "ContainerRepair", "FrameGrid"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.
