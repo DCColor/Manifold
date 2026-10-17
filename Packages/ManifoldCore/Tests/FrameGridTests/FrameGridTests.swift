@@ -128,4 +128,27 @@ final class FrameGridTests: XCTestCase {
             }
         }
     }
+
+    /// N presses chained on the index move exactly N frames, both ways, and stop on the first and last frames
+    /// (docs/BUGS.md, "repeated frame-step presses get lost").
+    func testChainedPressesMoveExactlyNFramesAndClamp() {
+        let d = CMTime(value: 1001, timescale: 60000)
+        guard let g = FrameGrid(origin: .zero, frameDuration: d, trackDuration: CMTimeMultiply(d, multiplier: 360),
+                                nominalFrameRate: Float(60000.0 / 1001.0)) else { return XCTFail("no grid") }
+        for n in [1, 5, 30, 200] {
+            var i = 0
+            for _ in 0..<n { i = g.frame(steppingFromIndex: i, by: 1) }
+            XCTAssertEqual(i, n, "\(n) presses forward")
+            for _ in 0..<n { i = g.frame(steppingFromIndex: i, by: -1) }
+            XCTAssertEqual(i, 0, "\(n) presses back")
+        }
+        var i = 357
+        for _ in 0..<5 { i = g.frame(steppingFromIndex: i, by: 1) }
+        XCTAssertEqual(i, 359, "stops on the last frame")
+        i = 2
+        for _ in 0..<5 { i = g.frame(steppingFromIndex: i, by: -1) }
+        XCTAssertEqual(i, 0, "stops on the first frame")
+        XCTAssertEqual(g.frame(steppingFromIndex: 10, by: Int.max), 359)
+        XCTAssertEqual(g.frame(steppingFromIndex: 10, by: Int.min), 0)
+    }
 }

@@ -143,6 +143,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// key needs these at all.
     private var pendingStepTarget: Double?
     private var stepDrainRunning = false
+    /// The frame the last accepted step went to, while nothing else has moved the playhead: what the next press
+    /// steps FROM. nil until a step, and cleared by everything else that moves the playhead (play, shuttle, seek,
+    /// scrub, typed timecode, load, stop: `releaseStepPosition()`).
+    ///
+    /// ⚠️ WHY NOT `currentTime`. The clock observer writes `currentTime` from the synchronizer, deferred through a
+    /// `Task`, and while paused it can land a value from before the latest rebuild re-anchored the clock. MEASURED
+    /// 2026-10-17 (59.94 DNx MXF, held →): presses at f19 and f20, then the observer wrote f18 and the next press
+    /// stepped from it: two frames lost. On the AVFoundation path the clock is also anchored in 600ths, which at NTSC
+    /// rates floors to the frame BEFORE the one shown. An index the steps own cannot drift (docs/BUGS.md, "repeated
+    /// frame-step presses get lost").
+    private var stepFrameIndex: Int?
 
     /// The video track's exact frame times: on the AVFoundation path from a constant-rate track, on the libav path
     /// from libav's exact rational rate (`makeLibavFrameGrid`, since 2026-10-17); nil for a variable-rate track and
@@ -839,6 +850,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// forward-only reader can't decode backward — see startReverseJog).
     public func setShuttleRate(_ rate: Float) {
         let clamped = max(-maxShuttleRate, min(maxShuttleRate, rate))
+        if clamped != 0 { releaseStepPosition() }   // the playhead is about to move by itself
         if clamped >= 0 { stopReverseJog() }
         shuttleRate = clamped
         applyAudioMute()
@@ -914,7 +926,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // The arithmetic below this branch landed every NTSC-rate step one frame early (see `frameGrid`). The libav
         // path steps on its own grid too since 2026-10-17; `beginLibavReading` starts at the same exact frame.
         if let grid = frameGrid {
-            let target = grid.seconds(ofFrame: grid.frame(steppingFrom: base, by: frames))
+            // From the frame the previous press went to, when there was one and nothing else has moved the playhead
+            // since (`stepFrameIndex`); else from the frame on screen. Every press moves exactly `frames`, clamped.
+            let index = grid.frame(steppingFromIndex: stepFrameIndex ?? grid.frame(atSeconds: base), by: frames)
+            stepFrameIndex = index
+            let target = grid.seconds(ofFrame: index)
             currentTime = target
             pendingStepTarget = target
             guard !stepDrainRunning else { return }
@@ -979,6 +995,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         print("[STEP] \(url.lastPathComponent): libav frame \(fd.value)/\(fd.timescale) s, \(grid.frameCount) frames "
               + "(\(info.videoFrameCount == nil ? "container duration" : info.videoFrameCountBasis)), origin 0")
         return grid
+    }
+
+    /// Something other than a step moved the playhead: the next press steps from the frame on screen, and the clock
+    /// observer publishes `currentTime` again. See `stepFrameIndex`.
+    private func releaseStepPosition() {
+        stepFrameIndex = nil
     }
 
     /// Rebuild to the newest requested position until no newer one has arrived. See `stepFrame`.
@@ -1098,6 +1120,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // would become the accumulator's base for the first step of the NEXT source (see
         // `stepFrame`), so a step in a freshly loaded file would start from the old one's position.
         pendingStepTarget = nil
+        stepFrameIndex = nil
         frameGrid = nil
         // A full teardown must leave NO transport readout from the departed source: the same
         // incoherence we fixed for scopes (blank-on-disconnect). duration + tcInfo drive the
@@ -1171,6 +1194,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     public func seek(to seconds: Double) {
+        releaseStepPosition()
         let clamped = max(0, min(seconds, duration))
         Task { await beginReading(from: clamped, resumePlaying: isPlaying) }
     }
@@ -1325,6 +1349,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// (the in-flight latch, the media-distance gate, the generation stamp) is gone from it; the
     /// coalescer owns the first, deleted the second, and the token below replaces the third.
     public func scrubSeek(to seconds: Double) {
+        releaseStepPosition()
         let clamped = max(0, min(seconds, duration))
         currentTime = clamped
         // libav: the frame whose interval holds the position, at its exact time — the frame the release
@@ -1616,6 +1641,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // …and any frame step the PREVIOUS file had outstanding, for the reason given in `stop()`.
         // The bump above is what makes a drain loop already running notice and retire itself.
         pendingStepTarget = nil
+        stepFrameIndex = nil
         frameGrid = nil                                  // the previous file's frames; rebuilt below if AVFoundation
 
         // New file: retire any prior libav sources (bound to the old file). The
@@ -1837,6 +1863,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                         self.shuttleRate = 0
                         self.applyAudioMute()
                     }
+                } else if !self.isPlaying, self.stepFrameIndex != nil {
+                    // Paused on a step: the step owns `currentTime` (its frame's exact time). A clock value from
+                    // before the latest rebuild must not overwrite it (see `stepFrameIndex`).
+                    return
                 } else {
                     self.currentTime = t
                 }

@@ -1249,7 +1249,58 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
-## ✅ FIXED 2026-10-17 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — a typed timecode lands one frame late on MXF and every libav-decoded file
+## ✅ FIXED 2026-10-17 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — repeated frame-step presses get lost
+
+**Fixed:** the steps own the position. `FrameEngine.stepFrameIndex` is the frame the last accepted press went to;
+the next press steps from it (`FrameGrid.frame(steppingFromIndex:by:)`, clamped to the first and last frames), and
+the clock observer leaves `currentTime` alone while it is held. Everything else that moves the playhead releases it
+(`releaseStepPosition()`: play and shuttle, `seek` and so a typed timecode or a scrub release, `scrubSeek`, load,
+`stop`). The drain, its coalescing and the reader rebuild are unchanged, so a step costs what it did.
+
+**Verified 2026-10-17**, Profile, tree vs HEAD `d94afac`, Mac Studio. Fixtures (scratch, 720p `testsrc2`, every frame
+distinct): ProRes `.mov` (AVFoundation) and DNx MXF (libav) at 23.976, 29.97, 50 and 59.94. Presses posted as HID
+CGEvents (separate taps, or a held key as one key-down plus autorepeat key-downs); every trial's export identified by
+hash against a typed-timecode export of the expected frame (exact since `d94afac`).
+
+| Check | Result |
+|---|---|
+| Taps 0.6 s / 0.25 s / 0.1 s apart (5 presses; 20; 5 back from the last frame; 5 forward from two before it; 3 back from frame 0) | **120/120 exact** (16, 24, 80), both paths, all four rates; the end and the start clamp stop on the last and first frames |
+| Held key, 30 events, forward and back | 90 ms repeat: **24/24 exact**, 30 of 30 received each time. 30 ms repeat: 8/8 on the frame the received presses call for (30 received at three rates, 29 at 59.94) |
+| Under load (30 windows open, 59.94, taps 0.1 s, holds 30 ms), same trials both builds | tree **30/30**; HEAD **27/30**: received 28 → frame 27 twice (AVFoundation), received 23 → frame 21 (libav) |
+| Clean build (instrumentation removed), 23.976 and 59.94, both paths | **32/32** on the expected frame |
+| Overshoot (the `6054cc3` rules) | no trial landed past its frame |
+| Single-step latency, the rebuild a press triggers | p50 0.28 ms, p90 4.5 ms (704 rebuilds) against HEAD 0.26 / 3.9 ms (200): unchanged; the fix adds no work to the rebuild |
+| Playback and scrub vs HEAD | the frame at open on all 8 files, and the Chroma Scrub Bench's playback and scrub frames at frame 10 (4 files): **byte-identical**. Scrub p50 9.5–10.6 ms (HEAD 9.5–10.2); play 0 dropped, 0 late, both builds |
+
+- **Not the app's, and not changed:** macOS drops auto-repeat key-downs the app has not consumed. Under load it
+  delivered 22–24 of 30 at a 30 ms repeat on the DNx MXF, in both builds; idle at 90 ms it delivered all of them.
+  A held key moves exactly one frame for every repeat the app RECEIVES; repeats the system discards never arrive.
+- **HEAD at 0.1 s idle** landed all 40 of its five-press trials: the loss needs the observer's write to fall between
+  two presses, which an idle app rarely gives it. The earlier failures (frames 2–4 of 5) were on a loaded app.
+
+**Added 2026-10-17**, found while verifying the libav frame grid (*a typed timecode lands one frame late*, below).
+
+- **What:** five → presses 0.6 s apart can stop on frame 2–4 instead of 5, on AVFoundation and libav files, in HEAD
+  `d94afac` and before it. 1.5 s apart, every press lands. A held key loses frames the same way.
+- **Measured** (instrumented build, every press and every clock-observer write of `currentTime` logged; 59.94 DNx
+  MXF, a held → at 30 ms): presses reached f19 and f20 (the second coalesced into the same drain), then the observer
+  wrote `currentTime` = 0.3003 s (f18), a clock value from before the rebuild re-anchored it, and the next press
+  stepped from f18. Two presses lost, with every press received.
+- **Cause:** `stepFrame` steps from `pendingStepTarget ?? currentTime`. The drain clears `pendingStepTarget` before
+  awaiting the reader rebuild, so a press that arrives later steps from `currentTime`, and the periodic time
+  observer (0.1 s, deferred through a `Task`) can overwrite that with a stale clock value. On the AVFoundation path
+  the clock is anchored in 600ths, which at NTSC rates floors to the frame before the one shown. Either way the next
+  press steps from the wrong frame.
+- **A second, separate loss:** macOS drops auto-repeat key-downs that the app has not consumed yet: 30 events posted
+  as a held key at 30 ms arrive as 27–29, while 30 separate taps at the same spacing all arrive. The app cannot count
+  events it never receives.
+- **The fix plan, as decided:** the steps own the position. An index records the frame the last press went to, the
+  next press steps from it, and the clock observer does not overwrite `currentTime` while a step holds it.
+  Everything else that moves the playhead releases it.
+
+---
+
+## ✅ FIXED 2026-10-17 (`d94afac`) — PRE-EXISTING, ALL BUILDS — a typed timecode lands one frame late on MXF and every libav-decoded file
 
 **Fixed:** the libav path has a frame grid, and every libav seek starts on one of its frames exactly.
 
@@ -1282,7 +1333,8 @@ because the stsd-slack route made a `.mov` take it too.
 - **Found while verifying, not changed (PRE-EXISTING, both paths):** five → presses 0.6 s apart can stop on frame
   2–4 instead of 5, in both builds and on AVFoundation files as well (HEAD's 29.97 ProRes `.mov`: frame 3; 59.94:
   frame 2 on the tree's `.mov`, frame 5 on HEAD's). 1.5 s apart, every press lands. A step taken while the previous
-  one's rebuild is still running appears to be lost; it needs its own entry.
+  one's rebuild is still running appears to be lost; it needs its own entry. (Fixed: *repeated frame-step presses
+  get lost*, above.)
 - **Measuring note:** reopening a file opens a new window each time, and after ~120 the app slows to ~1.5 s a
   scrub. Measure scrub in a fresh session.
 
@@ -1360,7 +1412,7 @@ fallback, as it does behind the DNxHR 4:4:4 route. DNx and every other codec on 
 
 ---
 
-## ✅ FIXED 2026-10-17 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — a paused step or seek can come to rest one or two frames past its target
+## ✅ FIXED 2026-10-17 (`6054cc3`) — PRE-EXISTING, ALL BUILDS — a paused step or seek can come to rest one or two frames past its target
 
 **Fixed:** the renderer's frame queue no longer evicts the frame a paused picture is waiting for, and its paused-seek
 fallback no longer draws a frame a whole interval past the clock. Both rules are `FrameQueuePolicy` (a leaf target,

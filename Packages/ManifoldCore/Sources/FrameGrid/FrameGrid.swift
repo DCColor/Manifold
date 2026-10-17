@@ -71,7 +71,13 @@ public struct FrameGrid: Equatable, Sendable {
 
     /// The frame `frames` away from the one at `seconds`, clamped to 0…lastIndex.
     public func frame(steppingFrom seconds: Double, by frames: Int) -> Int {
-        let (sum, overflow) = frame(atSeconds: seconds).addingReportingOverflow(frames)
+        frame(steppingFromIndex: frame(atSeconds: seconds), by: frames)
+    }
+
+    /// The frame `frames` away from frame `index`, clamped to 0…lastIndex. What a press steps on when the previous
+    /// press's frame is known (`FrameEngine.stepFrameIndex`): no time in between, so nothing to drift.
+    public func frame(steppingFromIndex index: Int, by frames: Int) -> Int {
+        let (sum, overflow) = index.addingReportingOverflow(frames)
         if overflow { return frames < 0 ? 0 : lastIndex }
         return min(max(sum, 0), lastIndex)
     }
