@@ -457,10 +457,25 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Set in `loadAsset` when the file's codec needs the libav path (DNxHR).
     private var useLibav = false
     /// This file is read through libav because AVFoundation exposes no video track for it and its video
-    /// `stsd` is longer than its entries (`ContainerSlackRoute`). Decided in phase 1, set at the commit,
-    /// and the ONLY thing that turns on the ProRes VideoToolbox route in the libav sources. False for
-    /// every file AVFoundation can play.
+    /// `stsd` is longer than its entries (`ContainerSlackRoute`). Decided in phase 1, set at the commit;
+    /// with an MXF, the only thing that turns on the ProRes VideoToolbox route in the libav sources
+    /// (`proResVideoToolbox(for:)`). False for every file AVFoundation can play.
     private var containerSlackRoute = false
+    /// Whether the libav sources decode this file's ProRes through VideoToolbox (`ProResVideoToolboxDecoder`):
+    /// an MXF, or a `.mov` the container route sent to libav — every ProRes Manifold reads through libav.
+    /// The sources act on it only for a ProRes stream, so a DNx MXF decodes exactly as before. libav's
+    /// software ProRes decoder stays open behind it as the fallback. Decided 2026-10-16 (docs/BUGS.md,
+    /// *ProRes MXF decodes in software*). False for every file AVFoundation plays.
+    private func proResVideoToolbox(for url: URL) -> Bool {
+        containerSlackRoute || url.pathExtension.lowercased() == "mxf"
+    }
+    /// Whether that route also does what libav's decoder did for the file before it: tag each buffer per axis from the
+    /// container, else the ProRes frame header, and run the once-per-file `[LIBAV-COLOR]` check against the header.
+    /// True for an MXF, which libav decoded until 2026-10-17, so its tags, log line and readout are unchanged. False for
+    /// the container route, which has decoded through VideoToolbox since it began and keeps exactly what it had.
+    private func proResHeaderColor(for url: URL) -> Bool {
+        !containerSlackRoute && url.pathExtension.lowercased() == "mxf"
+    }
     /// The routed file's AVFoundation asset — no video track — kept ONLY to read its metadata
     /// (`mergeContainerRouteMetadata`). Never decoded from; `asset` stays nil, as for MXF.
     private var containerRouteMetadataAsset: AVURLAsset?
@@ -1335,7 +1350,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let producer: ScrubFrameProducer = useLibav
             ? LibavScrubProducer(url: url, pixelFormat: videoPixelFormat,
                                  fileFormatDescription: libavFileFormatDescription,
-                                 proResVideoToolbox: containerSlackRoute)
+                                 proResVideoToolbox: proResVideoToolbox(for: url),
+                                 proResHeaderColor: proResHeaderColor(for: url))
             : AVPlayerScrubProducer(url: url, pixelFormat: videoPixelFormat)
         // The 8-bit flag, as playback sets it (`beginReading`): AVFoundation frames only.
         let eightBit = !useLibav && fileChroma.eightBitSource
@@ -2128,7 +2144,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             let source = LibavFrameSource(url: url,
                                           pixelFormat: videoPixelFormat,
                                           fileFormatDescription: libavFileFormatDescription,
-                                          proResVideoToolbox: containerSlackRoute,
+                                          proResVideoToolbox: proResVideoToolbox(for: url),
+                                          proResHeaderColor: proResHeaderColor(for: url),
                                           pacingRenderer: videoRenderer,
                                           pumpQueue: videoPumpQueue)
             do {

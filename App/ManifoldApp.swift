@@ -55,6 +55,11 @@ struct ManifoldApp: App {
         if ProcessInfo.processInfo.environment["MANIFOLD_PIN_RESAMPLER_RATIO"] == "1" {
             FrameEngine.setLiveAudioRatioPinned(true)
         }
+        // The ProRes VideoToolbox route's refusal hook (`open` or `decode:N`): how its libav fallback is tested
+        // on a Mac where VideoToolbox never refuses. Before any file can be opened. Pre-ship removal (docs/BUGS.md).
+        if let spec = ProcessInfo.processInfo.environment["MANIFOLD_PRORES_VT_REFUSE"] {
+            ProResVideoToolboxRefusal.set(spec)
+        }
         #endif
         // FIRST LINE OF EVERY LOG, before anything else can emit. A log that cannot state which
         // build produced it is not evidence — see BuildInfo for why this is derived rather than

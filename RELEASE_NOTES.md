@@ -54,6 +54,7 @@ bullet.
 - SDI output follows an SRT stream's own frame rate. If a stream labels its frame rate wrongly, the output follows the rate the stream actually runs at.
 - 4:2:2 and 4:4:4 files (ProRes, DNxHD/DNxHR, H.264/HEVC 4:2:2) now keep their full color resolution through playback, scopes, SDI and export.
 - SRT now accepts HEVC and H.264 4:2:2 and 4:4:4 at full color resolution. A stream this Mac can't decode is refused with a message saying so, never quietly converted.
+- ProRes MXF decodes through Apple's hardware-accelerated decoder: faster and identical to the same ProRes in .mov.
 
 ### Fixed
 

@@ -5,16 +5,17 @@ import VideoToolbox
 import CFFmpeg
 import ColorimetryModel   // ChromaReadout.fourCC
 
-/// ProRes packets read by libav, decoded by VideoToolbox — the route a `.mov` takes when AVFoundation
-/// cannot see its video track (docs/BUGS.md, *A video `stsd` longer than its entries hides the video
-/// track*; `ContainerSlackRoute`).
+/// ProRes packets read by libav, decoded by VideoToolbox — every ProRes Manifold reads through libav: an
+/// MXF's ProRes essence, and a `.mov` the container route sends to libav because AVFoundation cannot see
+/// its video track (docs/BUGS.md, *A video `stsd` longer than its entries hides the video track*;
+/// `ContainerSlackRoute`). MXF since 2026-10-17 (docs/BUGS.md, *ProRes MXF decodes in software*).
 ///
-/// ── ⚠️ ONLY FOR FILES THE CONTAINER ROUTE SENDS HERE ────────────────────────────────────────────
+/// ── ⚠️ ONLY WHERE THE ENGINE ASKS, AND ONLY FOR PRORES ─────────────────────────────────────────
 ///
 /// `LibavFrameSource` and `LibavScrubProducer` build one of these only when the engine passes
-/// `proResVideoToolbox: true`, which it does only for a file routed by `ContainerSlackRoute`. ProRes
-/// in MXF still decodes through libav's software decoder, exactly as before: moving it here is a
-/// separate decision (docs/BUGS.md, *ProRes MXF decodes in software*).
+/// `proResVideoToolbox: true` (`FrameEngine.proResVideoToolbox(for:)`: an MXF, or a file routed by
+/// `ContainerSlackRoute`), and only for a ProRes stream. Every other codec on those paths, DNx
+/// included, never reaches this type.
 ///
 /// ── WHY VIDEOTOOLBOX AND NOT libav's PRORES DECODER ───────────────────────────────────────────────
 ///
@@ -26,10 +27,39 @@ import ColorimetryModel   // ChromaReadout.fourCC
 ///
 /// Same shape as `DNxHRVideoToolboxDecoder` — one packet in, one image out, synchronous — and
 /// deliberately a separate type, so the DNxHR route is not touched.
+/// TEST HOOK for the software fallback, set by the app at launch from `MANIFOLD_PRORES_VT_REFUSE` and only in a DEBUG
+/// build (ManifoldCore cannot see DEBUG under Profile, so the app decides; never set in Release). `open` refuses every
+/// session, as a Mac whose VideoToolbox will not open one would; `decode:N` fails the Nth decode of each session
+/// (N ≥ 1), as a decoder that dies mid-file would. Either way the caller's libav fallback runs. Pre-ship removal
+/// list, docs/BUGS.md.
+public enum ProResVideoToolboxRefusal {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var state: (open: Bool, decodeAt: Int?) = (false, nil)
+
+    /// `spec`: `open` or `decode:N`; anything else clears the hook.
+    public static func set(_ spec: String) {
+        var s: (open: Bool, decodeAt: Int?) = (false, nil)
+        if spec == "open" { s.open = true }
+        else if spec.hasPrefix("decode:"), let n = Int(spec.dropFirst(7)), n >= 1 { s.decodeAt = n }
+        lock.lock(); state = s; lock.unlock()
+        print("[PRORES-VT] test hook MANIFOLD_PRORES_VT_REFUSE=\(spec): "
+            + (s.open ? "every session refused" : s.decodeAt.map { "decode \($0) of each session fails" } ?? "off"))
+    }
+
+    static var current: (open: Bool, decodeAt: Int?) {
+        lock.lock(); defer { lock.unlock() }; return state
+    }
+}
+
 final class ProResVideoToolboxDecoder {
 
     /// The ProRes sample-entry types VideoToolbox decodes. libav's `codec_tag` is the `.mov` sample
     /// entry's fourCC; RAW (`aprn`, `aprh`) is not ProRes to libav's `prores` decoder and is excluded.
+    ///
+    /// MXF has no sample entry. libav's `mxfdec` sets the same `codec_tag` from the picture essence coding
+    /// UL's byte 14 (SMPTE RDD 44: 1 Proxy … 6 4444 XQ), so an MXF that states its ProRes profile the
+    /// standard way arrives here exactly as a `.mov` does. One that states no standard ProRes UL arrives
+    /// with no tag, and stays on libav (the init logs it).
     static let codecTypes: Set<FourCharCode> = [
         0x6170636F,  // 'apco'  422 Proxy
         0x61706373,  // 'apcs'  422 LT
@@ -47,6 +77,17 @@ final class ProResVideoToolboxDecoder {
         return codecTypes.contains(t) ? t : nil
     }
 
+    /// The test hook's state (`ProResVideoToolboxRefusal`), read once per session.
+    private let refusal = ProResVideoToolboxRefusal.current
+    private var decodeCount = 0
+
+    /// The colour this packet's frame header states (`ProResFrameHeader`): what libav's decoder would report for
+    /// it. nil for a packet that is not a ProRes frame.
+    static func headerColor(_ packet: UnsafeMutablePointer<AVPacket>) -> (primaries: Int, transfer: Int, matrix: Int)? {
+        guard let data = packet.pointee.data, packet.pointee.size > 0 else { return nil }
+        return ProResFrameHeader.color(UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
+    }
+
     private var session: VTDecompressionSession?
     private let formatDescription: CMVideoFormatDescription
     private var lastImage: CVPixelBuffer?
@@ -61,7 +102,17 @@ final class ProResVideoToolboxDecoder {
     /// afterwards (`LibavPixelConversion.stampContainerColor`), as on every libav route.
     init?(_ par: UnsafeMutablePointer<AVCodecParameters>, pixelFormat: OSType) {
         self.pixelFormat = pixelFormat
-        guard let type = Self.codecType(par) else { return nil }
+        guard let type = Self.codecType(par) else {
+            if par.pointee.codec_id == AV_CODEC_ID_PRORES {
+                print("[PRORES-VT] the container states no ProRes sample-entry type (codec_tag "
+                    + "\(String(format: "0x%08X", par.pointee.codec_tag))) — staying on libav")
+            }
+            return nil
+        }
+        if ProResVideoToolboxRefusal.current.open {
+            print("[PRORES-VT] session refused by the test hook (MANIFOLD_PRORES_VT_REFUSE=open) — staying on libav")
+            return nil
+        }
         let interlaced: Bool = {
             switch par.pointee.field_order {
             case AV_FIELD_TT, AV_FIELD_BB, AV_FIELD_TB, AV_FIELD_BT: return true
@@ -115,6 +166,11 @@ final class ProResVideoToolboxDecoder {
     /// One packet, one image; nil means "fall back to libav".
     func decode(packet: UnsafeMutablePointer<AVPacket>, pts: CMTime, duration: CMTime) -> CVPixelBuffer? {
         guard let session, let data = packet.pointee.data, packet.pointee.size > 0 else { return nil }
+        decodeCount += 1
+        if let n = refusal.decodeAt, decodeCount == n {
+            print("[PRORES-VT] decode \(n) failed by the test hook (MANIFOLD_PRORES_VT_REFUSE=decode:\(n))")
+            return nil
+        }
         let size = Int(packet.pointee.size)
         var blockBuffer: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(

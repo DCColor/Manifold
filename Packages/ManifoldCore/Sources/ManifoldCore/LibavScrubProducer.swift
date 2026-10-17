@@ -61,12 +61,15 @@ public final class LibavScrubProducer: ScrubFrameProducer {
     /// design exists to pay at load rather than on the first grab. Requests arriving before it
     /// finishes are held by the coalescer, not dropped: `isReady` gates them and `onReadyChanged`
     /// releases them.
-    /// `proResVideoToolbox`: the engine's container route (`ContainerSlackRoute`) — ProRes scrub frames decode
-    /// through VideoToolbox, as that file's playback does. False for every other file.
+    /// `proResVideoToolbox`: an MXF, or the engine's container route (`ContainerSlackRoute`) — ProRes scrub
+    /// frames decode through VideoToolbox, as that file's playback does. False for every other file; no effect
+    /// on a stream that is not ProRes.
+    /// `proResHeaderColor`: an MXF — its ProRes scrub frames are tagged as libav's decoder tagged them (container per
+    /// axis, else the frame header), as playback's are.
     public init(url: URL, pixelFormat: OSType, fileFormatDescription: CMVideoFormatDescription? = nil,
-                proResVideoToolbox: Bool = false) {
+                proResVideoToolbox: Bool = false, proResHeaderColor: Bool = false) {
         decoder = Decoder(url: url, cvFormat: pixelFormat, fileFormatDescription: fileFormatDescription,
-                          proResVideoToolbox: proResVideoToolbox)
+                          proResVideoToolbox: proResVideoToolbox, proResHeaderColor: proResHeaderColor)
         decoder.openAsync { [weak self] ok in
             guard let self, ok else { return }
             self.isReady = true
@@ -115,9 +118,10 @@ private final class Decoder: @unchecked Sendable {
     private var poolH = 0
     /// The DNxHR 4:4:4 plug-in route (point 5). nil for every other file, and after a failure.
     private var vtDecoder: DNxHRVideoToolboxDecoder?
-    /// The ProRes VideoToolbox route, for a file the engine's container route sent here; nil otherwise and
-    /// after a failure. Separate from `vtDecoder` so the DNxHR route is untouched.
+    /// The ProRes VideoToolbox route, for ProRes in an MXF or in a file the engine's container route sent
+    /// here; nil otherwise and after a failure. Separate from `vtDecoder` so the DNxHR route is untouched.
     private let proResVideoToolbox: Bool
+    private let proResHeaderColor: Bool
     private var proResDecoder: ProResVideoToolboxDecoder?
 
     /// Read on `scrubQueue`, written on main at `close()`. A teardown request has to stop an
@@ -134,11 +138,13 @@ private final class Decoder: @unchecked Sendable {
         return -Int32(bitPattern: tag)
     }()
 
-    init(url: URL, cvFormat: OSType, fileFormatDescription: CMVideoFormatDescription?, proResVideoToolbox: Bool) {
+    init(url: URL, cvFormat: OSType, fileFormatDescription: CMVideoFormatDescription?, proResVideoToolbox: Bool,
+         proResHeaderColor: Bool) {
         self.url = url
         self.cvFormat = cvFormat
         self.fileFormatDescription = fileFormatDescription
         self.proResVideoToolbox = proResVideoToolbox
+        self.proResHeaderColor = proResHeaderColor
     }
 
     deinit { freeOnQueue() }
@@ -211,10 +217,10 @@ private final class Decoder: @unchecked Sendable {
                 + (vtDecoder != nil ? "scrub decodes through Apple's plug-in, as playback does"
                                     : "plug-in session would not open; scrub decodes through libav"))
         }
-        // The container route's ProRes: the same decision playback makes, on the same flag.
-        if proResVideoToolbox {
+        // ProRes in an MXF or the container route: the same decision playback makes, on the same flag.
+        if proResVideoToolbox, par.pointee.codec_id == AV_CODEC_ID_PRORES {
             proResDecoder = ProResVideoToolboxDecoder(par, pixelFormat: cvFormat)
-            print("LibavScrubProducer: container route — "
+            print("LibavScrubProducer: ProRes — "
                 + (proResDecoder != nil ? "ProRes scrub decodes through VideoToolbox, as playback does"
                                         : "no VideoToolbox session; scrub decodes ProRes through libav"))
         }
@@ -339,7 +345,7 @@ private final class Decoder: @unchecked Sendable {
         }
     }
 
-    /// The container route's ProRes after the seek: the first packet at or past the target is the frame
+    /// The ProRes route after the seek: the first packet at or past the target is the frame
     /// (ProRes is all-intra). Tagged with the container's colour as playback's buffers are, so a scrub
     /// frame and a playback frame of this file are the same pixels with the same tags. nil means "use
     /// libav", with the failed packet already handed to it.
@@ -353,10 +359,15 @@ private final class Decoder: @unchecked Sendable {
             let sec = Double(ts - startTimeTicks) * Double(timeBase.num) / Double(timeBase.den)
             if sec + 1e-6 < seconds { av_packet_unref(pkt); continue }
             let pts = CMTime(value: (ts - startTimeTicks) &* Int64(timeBase.num), timescale: timeBase.den)
+            let headerColor = proResHeaderColor ? ProResVideoToolboxDecoder.headerColor(pkt) : nil
             let image = decoder.decode(packet: pkt, pts: pts, duration: .invalid)
             if let image, CVPixelBufferGetPixelFormatType(image) == cvFormat {
                 av_packet_unref(pkt)
-                if let containerColor { LibavPixelConversion.stampContainerColor(image, containerColor) }
+                if let headerColor {
+                    LibavPixelConversion.stampResolvedColor(image, containerColor, decoder: headerColor)
+                } else if let containerColor {
+                    LibavPixelConversion.stampContainerColor(image, containerColor)
+                }
                 return ScrubFrame(pixelBuffer: image, pts: sec)
             }
             print("[PRORES-VT] scrub: "

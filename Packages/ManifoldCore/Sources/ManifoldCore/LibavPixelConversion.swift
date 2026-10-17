@@ -101,6 +101,26 @@ enum LibavPixelConversion {
         }
     }
 
+    /// Tag a buffer the ProRes VideoToolbox route decoded exactly as `fillPixelBuffer` tags libav's frame of the same
+    /// packet: per axis the container's statement, else the decoder's, and all three keys written. For ProRes the
+    /// decoder's statement is the frame header's three codes (`ProResFrameHeader`), which is all libav's `prores`
+    /// decoder reports. A key `fillPixelBuffer` would leave unset (a code CoreVideo has no name for) is removed, so
+    /// nothing VideoToolbox attached on its own survives where libav's buffer would carry nothing.
+    static func stampResolvedColor(_ pb: CVPixelBuffer, _ c: ContainerColor?,
+                                   decoder d: (primaries: Int, transfer: Int, matrix: Int)) {
+        let p = c.map { ContainerColorPolicy.resolve(container: $0.primaries, decoder: d.primaries, .primaries) } ?? d.primaries
+        let t = c.map { ContainerColorPolicy.resolve(container: $0.transfer, decoder: d.transfer, .transfer) } ?? d.transfer
+        let m = c.map { ContainerColorPolicy.resolve(container: $0.matrix, decoder: d.matrix, .matrix) } ?? d.matrix
+        attach(pb, key: kCVImageBufferYCbCrMatrixKey, value: cvMatrix(AVColorSpace(rawValue: UInt32(m))))
+        replace(pb, key: kCVImageBufferColorPrimariesKey, value: cvPrimaries(AVColorPrimaries(rawValue: UInt32(p))))
+        replace(pb, key: kCVImageBufferTransferFunctionKey,
+                value: cvTransfer(AVColorTransferCharacteristic(rawValue: UInt32(t))))
+    }
+
+    private static func replace(_ pb: CVPixelBuffer, key: CFString, value: CFString?) {
+        if let value { CVBufferSetAttachment(pb, key, value, .shouldPropagate) } else { CVBufferRemoveAttachment(pb, key) }
+    }
+
     static func cvMatrix(_ s: AVColorSpace) -> CFString {
         switch s {
         case AVCOL_SPC_BT2020_NCL, AVCOL_SPC_BT2020_CL: return kCVImageBufferYCbCrMatrix_ITU_R_2020

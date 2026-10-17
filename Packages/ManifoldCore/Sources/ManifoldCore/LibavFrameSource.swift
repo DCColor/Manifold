@@ -111,10 +111,13 @@ public final class LibavFrameSource: @unchecked Sendable {
     private var vtDecoder: DNxHRVideoToolboxDecoder?
     /// Said once, not per frame.
     private var vtFallbackAnnounced = false
-    /// The ProRes VideoToolbox route — ONLY for a file the engine routed here because AVFoundation could not
-    /// see its video track (`ContainerSlackRoute`); nil for every other file, and after a failure. Separate
-    /// from `vtDecoder` so the DNxHR route is untouched. See `ProResVideoToolboxDecoder`.
+    /// The ProRes VideoToolbox route — ONLY for ProRes in a file the engine asks it for (an MXF, or a `.mov`
+    /// routed here because AVFoundation could not see its video track, `ContainerSlackRoute`); nil for every
+    /// other file and codec, and after a failure. Separate from `vtDecoder` so the DNxHR route is untouched.
+    /// See `ProResVideoToolboxDecoder`.
     private let proResVideoToolbox: Bool
+    /// MXF: tag and check the route's buffers as libav's decoder did (`FrameEngine.proResHeaderColor(for:)`).
+    private let proResHeaderColor: Bool
     private var proResDecoder: ProResVideoToolboxDecoder?
     private var proResFallbackAnnounced = false
     private var proResFormatConfirmed = false
@@ -209,12 +212,14 @@ public final class LibavFrameSource: @unchecked Sendable {
                 pixelFormat: OSType,
                 fileFormatDescription: CMVideoFormatDescription? = nil,
                 proResVideoToolbox: Bool = false,
+                proResHeaderColor: Bool = false,
                 pacingRenderer: AVSampleBufferVideoRenderer,
                 pumpQueue: DispatchQueue) {
         self.url = url
         self.pixelFormat = pixelFormat
         self.fileFormatDescription = fileFormatDescription
         self.proResVideoToolbox = proResVideoToolbox
+        self.proResHeaderColor = proResHeaderColor
         self.pacingRenderer = pacingRenderer
         self.pumpQueue = pumpQueue
     }
@@ -308,9 +313,10 @@ public final class LibavFrameSource: @unchecked Sendable {
             }
         }
         // ── THE PRORES ROUTE: asked for by the engine, never decided here ──
-        // Only a file `ContainerSlackRoute` sent to libav arrives with the flag set. The libav decoder
-        // opened above stays as the fallback, exactly as for DNxHR.
-        if proResVideoToolbox {
+        // An MXF, or a file `ContainerSlackRoute` sent to libav, arrives with the flag set; only its ProRes
+        // takes the route (DNx and every other codec keep the decode they had). The libav decoder opened
+        // above stays as the fallback, exactly as for DNxHR.
+        if proResVideoToolbox, cid == AV_CODEC_ID_PRORES {
             proResDecoder = ProResVideoToolboxDecoder(par, pixelFormat: pixelFormat)
             if proResDecoder == nil {
                 print("[PRORES-VT] no VideoToolbox session for this stream — libav's software ProRes decoder "
@@ -600,6 +606,9 @@ public final class LibavFrameSource: @unchecked Sendable {
             let duration = pkt.pointee.duration > 0
                 ? CMTime(value: pkt.pointee.duration &* Int64(timeBase.num), timescale: timeBase.den)
                 : CMTime.invalid
+            // MXF: what libav's decoder would have said about this frame's colour, its frame header (read before the
+            // packet is unreferenced below). nil on the container route, which keeps the container-only tagging.
+            let headerColor = proResHeaderColor ? ProResVideoToolboxDecoder.headerColor(pkt) : nil
 
             guard let pixelBuffer = decoder.decode(packet: pkt, pts: pts, duration: duration) else {
                 if !proResFallbackAnnounced {
@@ -628,7 +637,14 @@ public final class LibavFrameSource: @unchecked Sendable {
                     + "(\(CVPixelBufferGetWidth(pixelBuffer))×\(CVPixelBufferGetHeight(pixelBuffer)))")
             }
             skipToSeconds = -1
-            if let containerColor { LibavPixelConversion.stampContainerColor(pixelBuffer, containerColor) }
+            // MXF: tagged as libav's frame of this packet would be, and checked against the container once per file,
+            // as libav's route did: same policy, same `[LIBAV-COLOR]` line, same readout.
+            if let headerColor {
+                LibavPixelConversion.stampResolvedColor(pixelBuffer, containerColor, decoder: headerColor)
+                checkContainer(againstDecoder: headerColor)
+            } else if let containerColor {
+                LibavPixelConversion.stampContainerColor(pixelBuffer, containerColor)
+            }
             return Self.makeSampleBuffer(pixelBuffer, pts: pts, duration: duration)
         }
     }
@@ -680,10 +696,16 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// Logged either way; a disagreement also goes to the readout. Nothing changes on account of it — the buffers
     /// already carry the container's statement.
     private func checkContainerAgainstDecoder(_ frame: UnsafeMutablePointer<AVFrame>) {
+        checkContainer(againstDecoder: LibavPixelConversion.ContainerColor.decoder(frame))
+    }
+
+    /// The same check from the decoder's three codes, for the ProRes VideoToolbox route, which has no libav frame:
+    /// its codes are the frame header's, which is what libav's decoder would have put on the frame.
+    private func checkContainer(againstDecoder decoder: (primaries: Int, transfer: Int, matrix: Int)) {
         guard !containerChecked, let containerColor else { return }
         containerChecked = true
-        let decoder = LibavPixelConversion.ContainerColor.decoder(frame)
-        let d = containerColor.disagreements(frame: frame)
+        let d = ContainerColorPolicy.disagreements(
+            container: (containerColor.primaries, containerColor.transfer, containerColor.matrix), decoder: decoder)
         let name = codecCtx.flatMap { avcodec_get_name($0.pointee.codec_id) }.map { String(cString: $0) } ?? "libav"
         print("[LIBAV-COLOR] container \(containerColor.triple) · \(name) decoder frame "
             + "\(decoder.primaries)-\(decoder.transfer)-\(decoder.matrix) — "

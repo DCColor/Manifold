@@ -1118,11 +1118,15 @@ to send Export Diagnostics for a sync problem.
   - **`MANIFOLD_PLAYBACK_STATS=1`** (launch environment): a per-second `[PLAYBACK-STATS] presented=
     dropped= late=` line from the renderer's frame selection while the transport runs. How P8 counts
     late and dropped frames on file playback without a DeckLink card.
-- **Gating:** all five `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+  - **`MANIFOLD_PRORES_VT_REFUSE=open` / `=decode:N`** (launch environment, added 2026-10-17): the ProRes
+    VideoToolbox route refuses its sessions, or fails its Nth decode, so the libav fallback can be tested
+    (*ProRes MXF decodes in software*, above). Set by the app under `#if DEBUG` (`ProResVideoToolboxRefusal` ships
+    in ManifoldCore, never set in Release).
+- **Gating:** all six `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
-- **Remove** all five before ship, or keep the dump and the stats line as Profile telemetry by decision.
+- **Remove** all six before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -1245,7 +1249,45 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
-## ☐ DECISION: ProRes MXF decodes in software (libav), ~30–41 ms of CPU a frame at 2K 4444
+## ✅ DONE 2026-10-17 (commit: to be filled in) — DECISION: ProRes MXF decodes in software (libav), ~30–41 ms of CPU a frame at 2K 4444
+
+**Done:** an MXF's ProRes essence now decodes through `ProResVideoToolboxDecoder` at native chroma, in playback
+(`LibavFrameSource`) and scrub (`LibavScrubProducer`). libav's software ProRes decoder stays open behind it as the
+fallback, as it does behind the DNxHR 4:4:4 route. DNx and every other codec on the libav path are untouched.
+
+- **The gate:** `FrameEngine.proResVideoToolbox(for:)`, true for an MXF and for the container route. The sources act on
+  it only for `AV_CODEC_ID_PRORES`. The sample-entry type is libav's `codec_tag`: contrary to the note below, libav
+  8.1.1's `mxfdec` does set it for ProRes, from byte 14 of the RDD 44 picture essence coding UL (`apco` … `ap4x`).
+  Every ProRes MXF in the corpus and every ffmpeg-written one carries it. An MXF that states no standard ProRes UL
+  arrives with no tag, logs `[PRORES-VT] the container states no ProRes sample-entry type` and stays on libav (no
+  fixture exercises this).
+- **Colour, unchanged from libav:** libav's `prores` decoder reports a frame's colour as the frame header's three
+  bytes (RDD 36), read raw. For an MXF (`FrameEngine.proResHeaderColor(for:)`) the route reads the same bytes
+  (`ProResFrameHeader`, ColorimetryModel, 6 tests), tags each buffer per axis exactly as `fillPixelBuffer` does
+  (`LibavPixelConversion.stampResolvedColor`: container where stated, else the header), and runs the same
+  once-per-file `[LIBAV-COLOR]` check and readout. The container route keeps its container-only tagging and no
+  check, exactly as before: its ARRI clips' headers say 0-0-0, and the policy would read matrix 0 as a stated
+  disagreement, a readout warning those files never had.
+- **Test hook:** `MANIFOLD_PRORES_VT_REFUSE=open` (every session refused) or `=decode:N` (the Nth decode of each
+  session fails), DEBUG only, set by the app (`ProResVideoToolboxRefusal`). On the pre-ship removal list.
+
+**Verified 2026-10-17**, Profile, tree vs HEAD `6054cc3`, Mac Studio, ⌃⌥E exports (`.rgba16f` and the DEBUG `.v210`):
+
+| Check | Result |
+|---|---|
+| Accuracy: 8 ProRes MXFs (Premiere ProRes LT 4K MXF from TEST FLIP; S2 `checker-444-prores4444`, `lines-422-prores422hq`; new 1080i 422, 4K 4444 XQ 62 s, 4K 422 HQ 62 s, a container-2020/PQ-vs-bitstream-709 conflict, a container-states-matrix-only clip) against their `ffmpeg -c copy` `.mov` remux opened through AVFoundation, first frame, frame 12 and last frame | **24/24 byte-identical**, both files. The moving fixtures' frames differ from each other, so the frames are matched, not just the pictures |
+| Pixels against HEAD's software decode | moved, as predicted below: ≤ 3.5 codes in 1023 (7 on the 1080i clip) on 0.1–20 % of values; `lines-422` unchanged |
+| Playback, 60 s, `[PLAYBACK-STATS]` | 4K 4444 XQ and 4K 422 HQ: **0 dropped, 0 late**, HEAD and tree |
+| CPU over the 60 s (Manifold + `VTDecoderXPCService`) | 422 HQ **49.6 s → 13.5 + 1.1 s** (34.2 → 9.9 ms a frame, 3.4×); 4444 XQ **65.6 s → 13.7 + 1.2 s** (45.3 → 10.3 ms, 4.4×). Most of what remains is not decode: VT's own process spent ~0.8 ms a frame |
+| Scrub, Chroma Scrub Bench, seek→deliver p50 / p90 | 422 HQ 16.5 / 18.3 → **10.8 / 13.9 ms**; 4444 XQ 22.2 / 24.3 → **10.9 / 13.6 ms**. 61/61 delivered |
+| Colour and metadata | `[CHAIN]`, `[MATRIX]`, `[EDR]`, `[CHROMA]`, `[CHROMA-FILE]`, `[SCOPE-COLOR]`, `[LIBAV-COLOR]` identical to HEAD on all 8; only the two `[PRORES-VT]` lines added. Container wins on the conflict clip (`9-16-9` vs decoder `1-1-1`, readout warning as HEAD). Inspector (Premiere MXF, window screenshot): every row as HEAD, Start TC `01:00:00:00` |
+| Untouched routes, tree vs HEAD, first frame and frame 12 | byte-identical: OP1A Test, Mixed Captions (DNxHR 444 VT route), H_nofill_dnx, 10152502.999 (DNxHD 1080i), cs2020_pq, DNX As MOV 10bit, 444 Bars, hdr10_prores, H264.mp4, hdr10_hevc, both ARRI stsd-slack clips and the TEST FLIP A027 copy (logs identical too). MPEG-2, XAVC and J2K MXF have no decoder in the vendored FFmpeg in either build |
+| Fallback | `open`: sessions refused, libav decodes, exports byte-identical to HEAD's software decode. `decode:40`: playback falls back mid-file with one line and no dropped frame; scrub falls back with one line; no crash |
+
+- **Found while verifying, not changed (PRE-EXISTING, libav path, HEAD too):** timecode entry seeks to
+  `(frame + 0.25) / rate` and the libav sources drop every frame whose pts is before that, so on an MXF or any libav
+  file a typed timecode lands **one frame late** (`[ScopeSeek] paused-seek overshoot: nearest.pts=0.5200 now=0.4900`
+  for frame 12 at 25 fps). AVFoundation files land exactly. Fixing it moves DNx frames, so it needs its own entry.
 
 **Added 2026-10-16**, measured while building the container route below. Not changed by it.
 
