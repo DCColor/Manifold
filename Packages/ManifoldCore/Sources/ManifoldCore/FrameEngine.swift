@@ -144,12 +144,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var pendingStepTarget: Double?
     private var stepDrainRunning = false
 
-    /// The video track's exact frame times, when the file is on the AVFoundation path and its track is constant-rate;
-    /// nil otherwise (libav path, variable-rate, no media). Frame-stepping and `totalFrames` use it instead of
-    /// `Double(n) / fps`, which landed every NTSC-rate step one frame early (docs/BUGS.md, "frame-stepping on the
-    /// AVFoundation file path lands one frame early"; the arithmetic is `FrameGrid`'s note). Without it — the libav
-    /// path, whose seek tolerance already lands, and a variable-rate track, which has no single frame duration —
-    /// both keep the old arithmetic.
+    /// The video track's exact frame times: on the AVFoundation path from a constant-rate track, on the libav path
+    /// from libav's exact rational rate (`makeLibavFrameGrid`, since 2026-10-17); nil for a variable-rate track and
+    /// with no media. Frame-stepping and `totalFrames` use it instead of `Double(n) / fps`, which landed every
+    /// NTSC-rate step one frame early (docs/BUGS.md, "frame-stepping on the AVFoundation file path lands one frame
+    /// early"; the arithmetic is `FrameGrid`'s note), and every libav seek starts at one of its frames (docs/BUGS.md,
+    /// "a typed timecode lands one frame late on MXF and every libav-decoded file"). Without it, a variable-rate
+    /// track, which has no single frame duration, keeps the old arithmetic.
     public private(set) var frameGrid: FrameGrid?
     // JKL shuttle transport rate (transient session state — not persisted).
     // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
@@ -910,8 +911,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // ── THE AVFoundation PATH STEPS ON THE TRACK'S OWN FRAME TIMES ───────────────────────────
         // From the frame on screen at `base` to the one `frames` away, clamped to the last frame that exists, and
         // `currentTime` set to that frame's exact time; the drain hands the reader the same frame as a `CMTime`.
-        // The arithmetic below this branch landed every NTSC-rate step one frame early (see `frameGrid`).
-        if !useLibav, let grid = frameGrid {
+        // The arithmetic below this branch landed every NTSC-rate step one frame early (see `frameGrid`). The libav
+        // path steps on its own grid too since 2026-10-17; `beginLibavReading` starts at the same exact frame.
+        if let grid = frameGrid {
             let target = grid.seconds(ofFrame: grid.frame(steppingFrom: base, by: frames))
             currentTime = target
             pendingStepTarget = target
@@ -951,6 +953,31 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         print("[STEP] \(url.lastPathComponent): frame \(minDuration.value)/\(minDuration.timescale) s, "
               + "\(grid.frameCount) frames, origin \(range.start.value)/\(range.start.timescale)")
+        return grid
+    }
+
+    /// The libav path's grid: one frame is the inverse of libav's guessed rate as a rational, frame 0 is the engine
+    /// timeline's 0 (the sources subtract the stream's start time), and the count is the VIDEO stream's
+    /// (`StreamInfo.videoFrameCount`), falling back to the container's duration. libav states one rate, so there is
+    /// no average to test it against: the grid is treated as constant-rate, which every file on this path (MXF, DNx
+    /// and ProRes) is. A `[STEP]` line says what it was built from.
+    private static func makeLibavFrameGrid(_ info: LibavFrameSource.StreamInfo, url: URL) -> FrameGrid? {
+        guard let fd = info.frameDuration else {
+            print("[STEP] \(url.lastPathComponent): libav states no frame rate — stepping on the nominal rate")
+            return nil
+        }
+        let count = info.videoFrameCount ?? Int((info.durationSeconds / fd.seconds).rounded())
+        let rate = Float(Double(fd.timescale) / Double(fd.value))
+        guard count >= 1,
+              let grid = FrameGrid(origin: .zero, frameDuration: fd,
+                                   trackDuration: CMTimeMultiply(fd, multiplier: Int32(clamping: count)),
+                                   nominalFrameRate: rate) else {
+            print("[STEP] \(url.lastPathComponent): libav timing unusable (frame \(fd.value)/\(fd.timescale), "
+                  + "\(count) frames) — stepping on the nominal rate")
+            return nil
+        }
+        print("[STEP] \(url.lastPathComponent): libav frame \(fd.value)/\(fd.timescale) s, \(grid.frameCount) frames "
+              + "(\(info.videoFrameCount == nil ? "container duration" : info.videoFrameCountBasis)), origin 0")
         return grid
     }
 
@@ -1284,7 +1311,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     public var totalFrames: Int {
         // The last frame's index. On the grid, counted from the track (see `frameGrid`); the ceiling a step clamps to.
-        if !useLibav, let grid = frameGrid { return grid.lastIndex }
+        if let grid = frameGrid { return grid.lastIndex }
         let fps = (metadata?.frameRate ?? 0) > 0 ? metadata!.frameRate : 24
         return max(Int((duration * fps).rounded()) - 1, 0)
     }
@@ -1300,7 +1327,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public func scrubSeek(to seconds: Double) {
         let clamped = max(0, min(seconds, duration))
         currentTime = clamped
-        scrubCoalescer?.submit(clamped)
+        // libav: the frame whose interval holds the position, at its exact time — the frame the release
+        // (`exactSeek` → `beginLibavReading`) will show. Unsnapped, the scrub producer showed the NEXT frame for any
+        // position part-way through one, for the reason `beginLibavReading` gives. AVFoundation is unchanged.
+        let target = useLibav ? (frameGrid.map { $0.seconds(ofFrame: $0.frame(atSeconds: clamped)) } ?? clamped) : clamped
+        scrubCoalescer?.submit(target)
     }
 
     /// On scrub release (or a discrete seek): do the real reader rebuild.
@@ -2247,6 +2278,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     // A routed .mov: AVFoundation still reads the rest (chapters, creation date, captions).
                     if containerSlackRoute { mergeContainerRouteMetadata(url: url) }
                 }
+                // The libav path's frame grid, from the decoder's own timeline: before the arm below, so the first
+                // seek, step and typed timecode land on its frames.
+                frameGrid = Self.makeLibavFrameGrid(info, url: url)
                 print("FrameEngine: libav opened — \(info.width)x\(info.height), "
                     + "src \(info.sourcePixelFormat), range \(info.rangeName), "
                     + "matrix \(info.matrixName), audio=\(info.hasAudio)")
@@ -2342,9 +2376,18 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // establish audio currency identically rather than by two different rules.
         let audioSession = audioSessionToken
         let audioToken = audioSession.next()
-        synchronizer.setRate(0, time: CMTime(seconds: time, preferredTimescale: 600))
-        libavSource?.arm(fromSeconds: time, isCurrent: { session.isCurrent(token) })
-        libavAudioSource?.arm(fromSeconds: time, isCurrent: { audioSession.isCurrent(audioToken) })
+        // ── THE START IS A FRAME'S EXACT TIME, NOT `time` ─────────────────────────────────────────────────────
+        // The libav sources keep the first frame whose pts is at or after the start. Started at `time` itself, a
+        // time part-way into frame N (a typed timecode's quarter-frame nudge, a mid-frame scrub release) dropped
+        // frame N and showed N+1, and the clock, anchored in 600ths, sat off the frame (docs/BUGS.md, "a typed
+        // timecode lands one frame late on MXF and every libav-decoded file"). From the grid: the frame whose
+        // interval holds `time`, as the AVFoundation reader presents, and the clock on that frame exactly.
+        let start: CMTime = frameGrid.map { $0.time(ofFrame: $0.frame(atSeconds: time)) }
+            ?? CMTime(seconds: time, preferredTimescale: 600)
+        let startSeconds = frameGrid == nil ? time : start.seconds
+        synchronizer.setRate(0, time: start)
+        libavSource?.arm(fromSeconds: startSeconds, isCurrent: { session.isCurrent(token) })
+        libavAudioSource?.arm(fromSeconds: startSeconds, isCurrent: { audioSession.isCurrent(audioToken) })
         if resumePlaying { play() }
     }
 

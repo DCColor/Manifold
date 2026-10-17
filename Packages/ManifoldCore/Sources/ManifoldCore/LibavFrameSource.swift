@@ -80,6 +80,15 @@ public final class LibavFrameSource: @unchecked Sendable {
         /// (`applyLibavMetadata`), as the chain readout does for an assumed axis. The render decision is
         /// unchanged: `declaredRange` still drives it, and an assumed legal range expands as untagged does.
         public let rangeAssumed: Bool
+        /// One frame, exactly: the inverse of libav's guessed rate as a rational (1001/24000 s at 23.976), for the
+        /// engine's frame grid (`FrameGrid`). nil when libav has no rate.
+        public let frameDuration: CMTime?
+        /// The VIDEO stream's frame count: its `nb_frames` when the container states it, else its own duration over
+        /// one frame; nil when neither is known (the engine then counts from `durationSeconds`, the container's,
+        /// which can include audio past the last picture).
+        public let videoFrameCount: Int?
+        /// Which of the above `videoFrameCount` came from, for the `[STEP]` line.
+        public let videoFrameCountBasis: String
     }
 
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
@@ -345,6 +354,17 @@ public final class LibavFrameSource: @unchecked Sendable {
         // r_frame_rate / codec timebase so we get 23.976 like the .mov path.
         let fr = av_guess_frame_rate(ctx, stream, nil)
         let frameRate = fr.den != 0 ? Double(fr.num) / Double(fr.den) : 0
+        let frameDuration: CMTime? = (fr.num > 0 && fr.den > 0)
+            ? CMTime(value: CMTimeValue(fr.den), timescale: CMTimeScale(fr.num)) : nil
+        let (videoFrameCount, videoFrameCountBasis): (Int?, String) = {
+            if stream.pointee.nb_frames > 0 { return (Int(stream.pointee.nb_frames), "stream nb_frames") }
+            let d = stream.pointee.duration
+            if d > 0, d != Int64.min, let fd = frameDuration {
+                let seconds = Double(d) * Double(stream.pointee.time_base.num) / Double(stream.pointee.time_base.den)
+                return (Int((seconds / fd.seconds).rounded()), "stream duration")
+            }
+            return (nil, "container duration")
+        }()
         var codecName = String(cString: avcodec_get_name(cid))
         if codecName == "dnxhd" { codecName = "DNxHR" }
         func cicp(_ raw: some BinaryInteger) -> Int? {   // 0 reserved, 2 unspecified → nil
@@ -412,7 +432,10 @@ public final class LibavFrameSource: @unchecked Sendable {
             transferCode: cicp(par.pointee.color_trc.rawValue),
             matrixCode: cicp(par.pointee.color_space.rawValue),
             startTimecode: startTimecode,
-            rangeAssumed: rangeAssumed)
+            rangeAssumed: rangeAssumed,
+            frameDuration: frameDuration,
+            videoFrameCount: videoFrameCount,
+            videoFrameCountBasis: videoFrameCountBasis)
     }
 
     /// Seek to `time` and arm the continuous decode pump for this session. The pump

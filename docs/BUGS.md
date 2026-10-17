@@ -1249,7 +1249,62 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
-## ✅ DONE 2026-10-17 (commit: to be filled in) — DECISION: ProRes MXF decodes in software (libav), ~30–41 ms of CPU a frame at 2K 4444
+## ✅ FIXED 2026-10-17 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — a typed timecode lands one frame late on MXF and every libav-decoded file
+
+**Fixed:** the libav path has a frame grid, and every libav seek starts on one of its frames exactly.
+
+- **The grid:** `FrameEngine.makeLibavFrameGrid`, built at the libav open (before the first arm) from
+  `StreamInfo.frameDuration` (the inverse of `av_guess_frame_rate`, as a rational: 1001/24000 s at 23.976) and
+  `StreamInfo.videoFrameCount` (the video stream's `nb_frames`, else its own duration, else the container's). Origin
+  0, the engine timeline the sources already use. A `[STEP]` line names the frame, the count and its basis.
+- **The seek:** `beginLibavReading` starts at the grid's time for the frame whose interval holds the target, and
+  anchors the clock on that exact `CMTime` instead of the target in 600ths. Every libav seek goes through it: a
+  typed timecode, a step, a scrub release, a plain seek, playback start (frame 0, unchanged). `TimecodeEntry` and its
+  quarter-frame nudge are untouched; the floor turns the nudge back into the frame typed (`FrameGridTests`, 1 test).
+- **Stepping and `totalFrames`** on the libav path now use the grid, as the AVFoundation path does since 7565a9b.
+- **Scrub:** `scrubSeek` hands a libav scrub producer the same frame's exact time, so a scrub frame and the frame
+  its release shows are one frame. AVFoundation scrub is unchanged.
+
+**Verified 2026-10-17**, Profile, tree vs HEAD `1972f0e`, Mac Studio, ⌃⌥E exports (`.rgba16f` and `.v210`). Fixtures
+(scratch, 720p `testsrc2`, every frame distinct): ProRes MXF, DNx MXF and DNx `.mov` at 23.976, 25, 29.97 NDF,
+29.97 DF (70 s, so a timecode crosses the first minute) and 59.94, each with a ProRes `.mov` of identical packets
+(`framemd5`) opened through AVFoundation as the by-index reference.
+
+| Check | Result |
+|---|---|
+| Typed first, mid and last frame (37 or 1800 `00:01:00;02` DF; 95/99/119/2097 `00:01:09;29` DF/239) | **45/45 land exactly.** ProRes MXF: 15/15 byte-identical to the AVFoundation reference at the same timecode. DNx MXF and `.mov`: 30/30 identical to the frame HEAD reaches (HEAD typed N−1 lands on N, its `[ScopeSeek]` pts confirming), or to frame 0 at open. HEAD's 59.94 DNx `.mov` did not land N−1 → N, so it was not a valid reference; the tree's frames there equal the DNx MXF's (same essence), which are. 0 `[ScopeSeek]` overshoot lines on the tree (121 on HEAD) |
+| HEAD, typed last frame | the picture does not move (frame 0 after open), all 10 MXFs: now the last frame |
+| AVFoundation `.mov`, tree vs HEAD | open, first, mid, last, one step: **25/25 byte-identical** |
+| Stepping | one step: **20/20 identical to HEAD**, and on libav equal to the AVFoundation frame. Five steps 1.5 s apart: frame 5 on every file, both builds. Five steps 0.6 s apart: lost steps in both builds, AVFoundation included (see below) |
+| Scrub (Chroma Scrub Bench at a typed frame) | **improved.** Tree: playback and scrub frames are both frame N (23.976 frame 37; DF frame 1800, ProRes and DNx MXF); the clock sits on the frame (1.5432083 s, 60.06 s). HEAD: both N+1. AVFoundation identical. p50 9.3–9.9 ms (HEAD 9.9–10.1), 61/61 delivered |
+| Playback | the frame at open: **20/20 byte-identical to HEAD**. 60 s of 29.97 DF DNx and ProRes MXF: 0 dropped, 0 late, both builds |
+
+- **Found while verifying, not changed (PRE-EXISTING, both paths):** five → presses 0.6 s apart can stop on frame
+  2–4 instead of 5, in both builds and on AVFoundation files as well (HEAD's 29.97 ProRes `.mov`: frame 3; 59.94:
+  frame 2 on the tree's `.mov`, frame 5 on HEAD's). 1.5 s apart, every press lands. A step taken while the previous
+  one's rebuild is still running appears to be lost; it needs its own entry.
+- **Measuring note:** reopening a file opens a new window each time, and after ~120 the app slows to ~1.5 s a
+  scrub. Measure scrub in a fresh session.
+
+**Added 2026-10-17**, found while verifying the ProRes MXF route (*ProRes MXF decodes in software*, below).
+
+- **What:** typing a timecode on an MXF (ProRes or DNx), a DNx `.mov` or a container-routed `.mov` shows the frame
+  AFTER the one typed. AVFoundation files land exactly. The last frame cannot be reached by typing at all: its seek
+  goes past every frame and the picture stays where it was.
+- **Measured** (HEAD `1972f0e`): frame 12 at 25 fps logs `[ScopeSeek] paused-seek overshoot: nearest.pts=0.5200
+  now=0.4900`, and the export is frame 13, byte-identical to the `.mov` remux's frame 13; the same at 23.976 and 29.97.
+- **Cause:** `TimecodeEntry` seeks to `(frame + 0.25) / rate`, a quarter-frame nudge that is right for an
+  AVFoundation reader (it presents the frame whose interval holds the time). The libav sources do not: they drop
+  every frame whose pts is earlier than the seek time, so frame N itself is dropped and N+1 is the first kept. The
+  libav clock is also anchored at the time in 1/600 s, the rounding 7565a9b removed from the AVFoundation reader.
+  The libav path has no frame grid: stepping uses `Double(frames) / fps` and a frame count from the duration.
+- **The fix plan, as decided:** the libav path gets a `FrameGrid` from libav's exact rational rate, and every libav
+  seek starts at the exact time of the frame that holds the target (as the AVFoundation reader's `exactStart` does
+  since 7565a9b). This moves DNx and MXF frames to the correct frame, which is intended.
+
+---
+
+## ✅ DONE 2026-10-17 (`1972f0e`) — DECISION: ProRes MXF decodes in software (libav), ~30–41 ms of CPU a frame at 2K 4444
 
 **Done:** an MXF's ProRes essence now decodes through `ProResVideoToolboxDecoder` at native chroma, in playback
 (`LibavFrameSource`) and scrub (`LibavScrubProducer`). libav's software ProRes decoder stays open behind it as the
@@ -1288,6 +1343,7 @@ fallback, as it does behind the DNxHR 4:4:4 route. DNx and every other codec on 
   `(frame + 0.25) / rate` and the libav sources drop every frame whose pts is before that, so on an MXF or any libav
   file a typed timecode lands **one frame late** (`[ScopeSeek] paused-seek overshoot: nearest.pts=0.5200 now=0.4900`
   for frame 12 at 25 fps). AVFoundation files land exactly. Fixing it moves DNx frames, so it needs its own entry.
+  (Fixed: *a typed timecode lands one frame late on MXF and every libav-decoded file*, above.)
 
 **Added 2026-10-16**, measured while building the container route below. Not changed by it.
 

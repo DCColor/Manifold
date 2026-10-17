@@ -109,4 +109,23 @@ final class FrameGridTests: XCTestCase {
         XCTAssertNotNil(FrameGrid(origin: .zero, frameDuration: d, trackDuration: long, nominalFrameRate: Float(24000.0 / 1001.0)))
         XCTAssertNil(FrameGrid(origin: .zero, frameDuration: d, trackDuration: long, nominalFrameRate: 24))
     }
+
+    /// A typed timecode seeks to `(n + 0.25) / rate` (TimecodeEntry). On the libav path the start is the grid's frame
+    /// for that time, so it must name frame n at every rate, late in a long file too, and its exact time must be
+    /// frame n's (docs/BUGS.md, "a typed timecode lands one frame late on MXF and every libav-decoded file").
+    func testQuarterFrameNudgeNamesTheFrameTyped() {
+        for (value, scale) in [(1001, 24000), (1, 24), (1, 25), (1001, 30000), (1001, 60000)] as [(Int64, Int32)] {
+            let d = CMTime(value: value, timescale: scale)
+            let rate = Double(scale) / Double(value)
+            let count = 216_000
+            guard let g = FrameGrid(origin: .zero, frameDuration: d,
+                                    trackDuration: CMTimeMultiply(d, multiplier: Int32(count)),
+                                    nominalFrameRate: Float(rate)) else { return XCTFail("no grid at \(rate)") }
+            for n in [0, 1, 12, 1485, count - 2, count - 1] {
+                let typed = (Double(n) + 0.25) / rate
+                XCTAssertEqual(g.frame(atSeconds: typed), n, "\(rate) fps, frame \(n)")
+                XCTAssertEqual(g.time(ofFrame: g.frame(atSeconds: typed)), CMTimeMultiply(d, multiplier: Int32(n)))
+            }
+        }
+    }
 }
