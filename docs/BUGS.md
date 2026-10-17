@@ -1229,27 +1229,6 @@ in both playhead styles, so not caused by it.
 
 ---
 
-## ☐ OPEN — PRE-EXISTING, ALL BUILDS — a paused step or seek can come to rest one or two frames past its target
-
-**Added 2026-10-16**, found while measuring the frame-stepping fix below. Not fixed; not caused by that fix.
-
-- **What:** occasionally, after → (or any paused rebuild), the picture that stays on screen — and that ⌃⌥E exports — is
-  one or two frames AFTER the frame the engine moved to. The engine's position is right: the next step continues from
-  it and shows the correct frame. Seen 3 times in ~29 instrumented 30-step runs on the synthetic rate fixtures, at 50
-  and 60 fps: stepping to frame 16 at 50 fps showed frame 18, held for over a second.
-- **The log says how:** each occurrence prints `[ScopeSeek] paused-seek overshoot: nearest.pts=0.3600 now=0.3200
-  → relaxed render`. The frames at the target (0.32, 0.34) were not in the renderer's queue when the paused tick ran,
-  so the relaxed-render fallback in `MetalVideoRenderer.displayTick` drew the earliest frame it had, which was later.
-  A flush arriving after the new reader's first frames is the likely way they went missing; not yet confirmed.
-- **Why it is pre-existing:** at 50 and 60 fps one frame is a whole number of 600ths, so the fixed engine hands the
-  reader exactly the start HEAD did. The same class shows at the end of a long-GOP file: on `2997p.mov` (H.264 with
-  B-frames, 87 549 frames), → at the last frame re-seeks into the final GOP and comes to rest on a different picture,
-  with byte-identical exports from HEAD `b4a0389` and the fixed tree.
-- **Likely fix (for its stage):** make the relaxed render accept only a frame at the clock (within half a frame), and
-  find why the target frames leave the queue. Measure with the step harness's per-step export, not by eye.
-
----
-
 ## ☐ OPEN — PRE-EXISTING, libav PATH (MXF, routed `.mov`) — `pasp` and `clap` are not read
 
 **Added 2026-10-16.** Stated in the code at `applyLibavMetadata` for MXF since the libav path was built; recorded here
@@ -1283,7 +1262,76 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
-## ✅ FIXED 2026-10-16 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — frame-stepping on the AVFoundation file path lands one frame early
+## ✅ FIXED 2026-10-17 (commit: to be filled in) — PRE-EXISTING, ALL BUILDS — a paused step or seek can come to rest one or two frames past its target
+
+**Fixed:** the renderer's frame queue no longer evicts the frame a paused picture is waiting for, and its paused-seek
+fallback no longer draws a frame a whole interval past the clock. Both rules are `FrameQueuePolicy` (a leaf target,
+5 tests that replay the traced bursts), called from `MetalVideoRenderer`:
+
+- **The cause, found by tracing every enqueue, flush, trim and render:** not decode-ahead, B-frame reorder or flush
+  timing. After a step the pacing renderer (paused) accepts frames as fast as the reader decodes them; on small frames
+  that is 13–15 frames in ~3 ms, before any display tick has consumed the target. The queue's bound is 12
+  (`defaultMaxQueued`) and its backstop dropped the OLDEST frame, which was the target. The tick then found nothing at
+  the clock, and the fallback drew the earliest survivor, 1–3 frames late; nothing would ever refill the dropped
+  frames, so it stayed. Traced at 60 fps: 13 frames enqueued, `TRIM oldest pts=0.1167`, `[ScopeSeek] … nearest.pts=
+  0.1333 now=0.1167 → relaxed render`.
+- **Fix 1, the cause:** a PAUSED file trims its NEWEST frames instead (`FrameQueuePolicy.trimEnd`). Live sources are
+  never paused (every live route sets `isPausedProvider = { false }`), so their drop-oldest backstop and the overflow
+  report to the live clock are unchanged.
+- **Fix 2, the backstop:** the fallback refuses a frame one whole interval or more past the clock and keeps waiting
+  for the target (`FrameQueuePolicy.relaxedRenderAllowed`). A fraction of a frame past the clock (libav's mid-frame
+  seek) is still drawn, as before.
+- **Fix 3, a second way in:** `FileFrameSource` re-checks its session after `copyNextSampleBuffer`, so a retired
+  reader's frame, decoded ahead of the old position, cannot land in the new session's queue after its flush. Not seen
+  in any trace (0 late emits in ~15 000 steps), but nothing stopped it.
+- **Cost, stated:** when a paused burst exceeds 12 frames, the dropped future frames are missing if play resumes at
+  once: up to a 1–3 frame skip early in playback. Only small, fast-decoding frames burst that far (the synthetic
+  320×180 fixtures); the real files traced burst ~6 and never reach the bound. Before, the same bursts lost the frame
+  on screen.
+
+**Verified 2026-10-17**, tree vs HEAD `7565a9b`, unattended, window-only, exports and their side files deleted:
+
+- **Overshoots, same instrument before and after** (a per-step trace of what was rendered; 29-step sweeps, steps
+  0.15 s and 0.4 s apart): **before, 15 wrong resting frames in 108 runs** (3 132 steps at 50 / 59.94 / 60: 11
+  overshoots, 4 targets never drawn, 29 trims of the target); **after, 0 in 408 runs** (11 642 steps at 50 /
+  59.94 / 60 and 23.976 as control), with the paused trim firing 98 times and keeping the target every time.
+- **Step latency, keypress to target on screen:** median 25.0 ms, p95 29.3 ms before; median 24.6–25.1 ms, p95
+  29.3 ms after. Unchanged.
+- **Exports by index** (the grey-per-index fixtures): 12 / 12 runs exact at 50, 59.94, 60 and 23.976.
+- **Long-GOP:** synthetic H.264 and HEVC with B-frames (GOP 12; the HEVC with open-GOP leading pictures, frames 21–23
+  decoded after the I-frame at 24) at 23.976, 29.97 and 59.94: every step lands on its index, the last frame
+  included, 12 / 12 runs (HEAD 6 / 6 as well: their bursts never reach the bound). `2997p.mov` (H.264, 87 549
+  frames) with the end really reached: ←→ returns to the last frame and → stays there, byte-identical on both builds.
+- **Playback, scrub and seek unchanged:** the 16-file colour set, exports at open and after a seek, **96 / 96
+  byte-identical** to HEAD; `2398p.mov` and `2997p.mov` step exports byte-identical to HEAD.
+
+**Corrected 2026-10-17:** this entry was opened saying → at the last frame of `2997p.mov` came to rest on a different
+picture. That was the harness: its end-of-file entry (`+999999`) is read as timecode fields on a file with timecode
+and landed at 643 s of 2 921 s, so the "different picture" was → correctly moving one frame. There is no long-GOP
+end-of-file bug.
+
+**The entry as it was opened:**
+
+**Added 2026-10-16**, found while measuring the frame-stepping fix below. Not fixed; not caused by that fix.
+
+- **What:** occasionally, after → (or any paused rebuild), the picture that stays on screen — and that ⌃⌥E exports — is
+  one or two frames AFTER the frame the engine moved to. The engine's position is right: the next step continues from
+  it and shows the correct frame. Seen 3 times in ~29 instrumented 30-step runs on the synthetic rate fixtures, at 50
+  and 60 fps: stepping to frame 16 at 50 fps showed frame 18, held for over a second.
+- **The log says how:** each occurrence prints `[ScopeSeek] paused-seek overshoot: nearest.pts=0.3600 now=0.3200
+  → relaxed render`. The frames at the target (0.32, 0.34) were not in the renderer's queue when the paused tick ran,
+  so the relaxed-render fallback in `MetalVideoRenderer.displayTick` drew the earliest frame it had, which was later.
+  A flush arriving after the new reader's first frames is the likely way they went missing; not yet confirmed.
+- **Why it is pre-existing:** at 50 and 60 fps one frame is a whole number of 600ths, so the fixed engine hands the
+  reader exactly the start HEAD did. The same class shows at the end of a long-GOP file: on `2997p.mov` (H.264 with
+  B-frames, 87 549 frames), → at the last frame re-seeks into the final GOP and comes to rest on a different picture,
+  with byte-identical exports from HEAD `b4a0389` and the fixed tree.
+- **Likely fix (for its stage):** make the relaxed render accept only a frame at the clock (within half a frame), and
+  find why the target frames leave the queue. Measure with the step harness's per-step export, not by eye.
+
+---
+
+## ✅ FIXED 2026-10-16 (`7565a9b`) — PRE-EXISTING, ALL BUILDS — frame-stepping on the AVFoundation file path lands one frame early
 
 **Fixed:** on the AVFoundation path a frame step now moves on the track's own frame times. `FrameGrid` (a leaf target,
 CoreMedia only, 7 tests) holds frame 0's time and the exact frame duration (`minFrameDuration`, e.g. 1001/24000) and
@@ -1307,8 +1355,11 @@ duration is a whole number of 600ths. So the bug was NTSC rates only.
   step n−1, the last frame never reached (ends 28, 28).
 - **Real files** (TEST FLIP, read-only): `2398p.mov` — step 1 differs from frame 0, ←→ at the end returns to the last
   frame, → at the end stays (HEAD: step 1 byte-identical to frame 0, ←→ misses the last frame). `25p.mov` the same
-  on both builds. `2997p.mov` (H.264, drop-frame timecode) step 1 moves (HEAD: does not); → at its last frame
-  is the open overshoot entry above, identical on both builds.
+  on both builds. `2997p.mov` (H.264, drop-frame timecode) step 1 moves (HEAD: does not).
+  **Corrected 2026-10-17:** this entry first said → at 2997p's last frame showed a wrong picture. The harness never
+  reached the end: its `+999999` entry is read as timecode fields on a file with timecode, and landed at 643 s of
+  2921 s, so the "wrong picture" was → correctly moving one frame. Long-GOP stepping, the end included, is measured
+  in the overshoot entry's fix (2026-10-17).
 - **libav path:** `A027C021_171116_R022.mov` (routed): all five step exports byte-identical to HEAD.
 - **Playback, scrub and seek unchanged:** the 16-file colour set, exports at open and after a seek, **96 / 96
   byte-identical** to HEAD (`png`, `rgba16f`, `v210`); presented fps the same.

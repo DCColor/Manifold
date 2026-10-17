@@ -111,6 +111,11 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
                     // so the renderer doesn't spin on an exhausted reader.
                     renderer.stopRequestingMediaData(); return
                 }
+                // Re-checked AFTER the decode: `copyNextSampleBuffer` takes milliseconds, and a step or seek
+                // can retire this session and flush the renderer inside it. Emitting then would put the
+                // retired reader's frame — one decoded AHEAD of the old position, so usually later than the
+                // new target — into the new session's queue (docs/BUGS.md, the paused-step overshoot).
+                guard current() else { return }
                 emit?(next)
             }
         }

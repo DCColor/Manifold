@@ -13,6 +13,7 @@ import CryptoKit     // ⚠️ SPIKE — SHA-256 for the [CSPROBE] source-vs-des
 import ManifoldCore      // UnfairLock — priority-donating lock for the live frame queue
 import ColorimetryModel   // SourceColorProvenance — the source colour tier the readout prints
 import SyncCalibration   // calibration mode's flash detector (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
+import FrameQueuePolicy  // the paused-picture rules: which end a full queue trims, when the seek fallback may draw
 import LUTCube           // colour S6: the Interpretation LUT's tables (docs/COLOR_MANAGEMENT_FINDINGS.md §6.11)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
@@ -2440,7 +2441,24 @@ final class MetalVideoRenderer {
         // renderer freezes. So: report the overflow to the live source, which re-anchors the CLOCK.
         // Captured under the lock, fired after it (see below) — never call out under queueLock.
         var overflow: (newestPTS: Double, count: Int)?
-        if frameQueue.count > maxQueued {
+        // ── A PAUSED FILE KEEPS ITS OLDEST FRAMES ────────────────────────────────────────────────
+        //
+        // While a file is paused the oldest queued frame is the one the pinned clock is waiting for: a
+        // step or seek flushes the queue and the new reader delivers the target first. Dropping oldest
+        // dropped exactly that frame. Measured 2026-10-16 (docs/BUGS.md, "a paused step or seek can come
+        // to rest one or two frames past its target"): on small, fast-decoding frames the pacing renderer
+        // accepts 13–15 frames in ~3 ms after a step, before any tick has consumed the target; the 13th
+        // evicted it, and the relaxed render below drew the next survivor, 1–3 frames late, for good.
+        //
+        // So a paused file drops its NEWEST frames instead (`FrameQueuePolicy.trimEnd`, with its tests): future
+        // frames, which matter only if play resumes, against the frame on screen now. Live sources are never paused
+        // (`isPausedProvider = { false }` on every live route), so their drop-oldest backstop and its
+        // overflow report to the clock are untouched. The paused read is the synchronizer's rate:
+        // lock-free and cheap under `queueLock`.
+        if frameQueue.count > maxQueued,
+           FrameQueuePolicy.trimEnd(paused: isPausedProvider?() == true) == .newest {
+            frameQueue.removeLast(frameQueue.count - maxQueued)
+        } else if frameQueue.count > maxQueued {
             frameQueue.removeFirst(frameQueue.count - maxQueued)
             if let newest = frameQueue.last?.pts { overflow = (newest, frameQueue.count) }
         }
@@ -2852,7 +2870,20 @@ final class MetalVideoRenderer {
                 // at most once per seek (cleared on render); the paused-only guard keeps
                 // normal playback pacing on the strict gate above. Decoder-agnostic.
                 queueLock.lock()
-                let nearest = frameQueue.first
+                var nearest = frameQueue.first
+                // ── NEVER A WHOLE FRAME LATE ──────────────────────────────────────────────────────
+                // This fallback exists for a seek whose first frame lands a FRACTION of a frame past
+                // the pinned clock (libav's seek delivers the first frame at or after the time, so a
+                // mid-frame seek gets the next one). A frame a whole interval or more past the clock is
+                // never that: it means the frame at the clock has not arrived (or was lost), and drawing
+                // the later one is the overshoot docs/BUGS.md records. So wait for it: leave the one-shot
+                // armed and the queue as it is (`FrameQueuePolicy.relaxedRenderAllowed`, with its tests).
+                if let first = nearest,
+                   !FrameQueuePolicy.relaxedRenderAllowed(nearestPts: first.pts,
+                                                          secondPts: frameQueue.count >= 2 ? frameQueue[1].pts : nil,
+                                                          now: now) {
+                    nearest = nil
+                }
                 if nearest != nil { frameQueue.removeFirst() }
                 queueLock.unlock()
                 if let nearest {

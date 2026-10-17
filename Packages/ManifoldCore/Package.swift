@@ -43,7 +43,9 @@ let package = Package(
         // Linked by the APP target directly (project.yml), for the transport bar's scrubber.
         .library(name: "PlayheadSlider", targets: ["PlayheadSlider"]),
         // ManifoldCore uses it (frame-stepping on the AVFoundation path); a product so the tests can name it.
-        .library(name: "FrameGrid", targets: ["FrameGrid"])
+        .library(name: "FrameGrid", targets: ["FrameGrid"]),
+        // Linked by the APP target directly (project.yml), for the renderer's paused-picture rules.
+        .library(name: "FrameQueuePolicy", targets: ["FrameQueuePolicy"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -397,6 +399,24 @@ let package = Package(
             name: "FrameGridTests",
             dependencies: ["FrameGrid"],
             path: "Tests/FrameGridTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The renderer's two paused-picture rules — which end a full queue trims, and when the paused-seek fallback
+        // may draw (docs/BUGS.md, "a paused step or seek can come to rest one or two frames past its target"). A leaf
+        // target, no dependencies, so `swift test` can replay the traced bursts; the renderer is app code.
+        .target(
+            name: "FrameQueuePolicy",
+            path: "Sources/FrameQueuePolicy",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "FrameQueuePolicyTests",
+            dependencies: ["FrameQueuePolicy"],
+            path: "Tests/FrameQueuePolicyTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

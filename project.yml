@@ -185,6 +185,10 @@ targets:
       # can measure the line against the stock slider. Used by App/TransportScrubber.swift only.
       - package: ManifoldCore
         product: PlayheadSlider
+      # The renderer's paused-picture rules (docs/BUGS.md, the paused-step overshoot) — a leaf target so `swift test`
+      # can replay the traced bursts. Used by App/MetalVideoRenderer.swift only.
+      - package: ManifoldCore
+        product: FrameQueuePolicy
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,
