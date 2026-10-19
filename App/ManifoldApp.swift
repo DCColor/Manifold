@@ -33,6 +33,13 @@ struct ManifoldApp: App {
         // only worth doing if the tap is already listening when that banner is emitted. Installed
         // here rather than in a scene, because a scene body runs after startup logging has begun.
         LogTap.shared.install()
+        // Privacy P1: the URLSession.shared disk cache (licence replies, WHEP request URLs) goes,
+        // before anything can make a request. Our own requests no longer write one.
+        PrivateURLSession.removeLegacyDiskCache()
+        PrivateURLSession.makeDefaultCacheMemoryOnly()
+        // Privacy P1: NDI discovery starts when an "NDI" submenu OPENS, which SwiftUI does not
+        // report (see NDIMenuOpenWatcher.swift).
+        NDIMenuOpenWatcher.install()
         // Colour S2: hold-to-compare's key monitor. App-level because a hold needs key-up and
         // `ContentView` can take no more modifiers (§6.7); see HoldToCompare.swift.
         MainActor.assumeIsolated { HoldToCompare.shared.install() }

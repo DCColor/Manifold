@@ -59,6 +59,8 @@ import Combine
 import Foundation
 import CryptoKit
 import ManifoldCore   // ManifoldCoreBuild — the package reporting its OWN telemetry state
+import PrivacyRedaction // DiagnosticsRedaction — the scrub, moved to the package in privacy P1
+import LicenseRecord    // LicenseRecordSync — the legacy plist keys, reported by presence only
 import SwiftUI
 
 // MARK: - Line formatting
@@ -510,8 +512,10 @@ enum LogPartitioner {
 ///     * WHEPClient.swift:168 — "endpoint host %@ (path withheld — it carries the stream key)".
 ///       The Cloudflare path is never printed. The WHEP resource from the Location header is
 ///       likewise announced without its value (line 539).
-///     * SRTClient.swift:497 — the streamid goes through `redactedStreamId`, which blanks the
-///       `s=` token of SRT's `#!::` access-control syntax.
+///     * SRTClient.swift:497 — the streamid goes through `redactedStreamId`, which withholds a
+///       freeform id whole and every `#!::` value except `m` and `t` (privacy P1).
+///     * Privacy P1 added: the WHEP selected ICE pair's addresses, NDI source addresses and the
+///       NDI sending host, and libdatachannel's own log lines, all withheld at the source.
 ///     * SRTClient.swift:501 — logs the NAMES of ignored URL parameters, never their values.
 ///
 ///   LAYER 2, this. Pattern-matched over the whole assembled document — captured log, machine
@@ -526,71 +530,70 @@ enum LogPartitioner {
 /// ⚠️ LENGTH IS NOT A LEAK WE ARE WILLING TO SHIP EITHER. A redaction that preserved the
 /// value's length would narrow a brute-force search, so every replacement below is a
 /// FIXED-WIDTH token — `(redacted)` regardless of what it replaced.
+///
+/// ⚠️ THE RULES LIVE IN THE PACKAGE NOW: `DiagnosticsRedaction` in
+/// Packages/ManifoldCore/Sources/PrivacyRedaction (privacy P1), where `swift test` runs each one
+/// against real log lines. This type gathers what only the running app knows — the paths this
+/// session opened, the attached displays' serial numbers, this Mac's names and the NDI senders'
+/// hosts, the NDI runtime's version — and hands it over.
+@MainActor
 enum DiagnosticsRedactor {
 
-    /// (pattern, replacement template, human label for the report's own audit line).
-    ///
-    /// ⚠️ ORDER MATTERS AND IS NOT ALPHABETICAL. Two orderings were tested against the corpus in
-    /// the note below, and the first one written here LEAKED: with a generic `streamid=` rule
-    /// running before the SRT `#!::` one, the generic rule's value class stopped at the first
-    /// comma and left `,s=<token>` — the session credential — standing in the output. The value
-    /// classes now admit commas (a streamid legitimately contains them) and `streamid=` runs
-    /// first, with `#!::` behind it as the catch-all for the syntax appearing on its own.
-    private static let rules: [(pattern: String, template: String, label: String)] = [
-        // ── Credentials in query strings, whatever produced them. ──
-        (#"(?i)\bpassphrase\s*[=:]\s*[^\s&"'<>;)\]]+"#, "passphrase=(redacted)", "passphrase="),
-        (#"(?i)\bstream\s?id\s*[=:]\s*[^\s&"'<>;)\]]+"#, "streamid=(redacted)", "streamid="),
-        // SRT's access-control syntax carries its session token as `s=`. Behind the rule above,
-        // as the catch-all for a `#!::…` that appears without a `streamid=` in front of it.
-        (#"#!::[^\s"']*"#, "#!::(redacted)", "SRT #!:: streamid"),
-        (#"(?i)\bstream[_-]?key\s*[=:]\s*[^\s&"'<>;)\]]+"#, "stream_key=(redacted)", "stream_key="),
+    static func redact(_ input: String, includeFileNames: Bool)
+        -> (text: String, hits: [(label: String, count: Int)]) {
+        DiagnosticsRedaction.redact(input, options: options(includeFileNames: includeFileNames))
+    }
 
-        // ── HTTP credential headers. SEPARATE RULES BECAUSE THE SHAPES DIFFER, and the first
-        //    version of this collapsed them into one `(auth|bearer)\s*[=:]` rule that MATCHED
-        //    NEITHER: "Authorization:" has more word after "auth" before the colon, and
-        //    "Bearer eyJ…" is separated by a space, not by "=" or ":". Both leaked the whole
-        //    JWT in testing. Header values run to end of line — they have no delimiter.
-        (#"(?i)\b((?:proxy-)?authorization)\s*[=:]\s*[^\r\n]+"#, "$1: (redacted)", "Authorization header"),
-        (#"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"#, "Bearer (redacted)", "Bearer token"),
-        (#"(?i)\b(token|secret|password|passwd|auth|api[_-]?key|access[_-]?key)\b\s*[=:]\s*[^\s&"'<>;)\]]+"#,
-         "$1=(redacted)", "token/secret/password/api key"),
+    static func options(includeFileNames: Bool) -> DiagnosticsRedaction.Options {
+        DiagnosticsRedaction.Options(includeFileNames: includeFileNames,
+                                     knownPaths: knownPaths(),
+                                     displaySerials: displaySerials(),
+                                     preserve: [NDIService.shared.runtimeVersion].compactMap { $0 },
+                                     hostNames: hostNames())
+    }
 
-        // ── URL PATHS. Host and port survive; everything after them does not. This is the
-        //    existing "path withheld" convention applied to text rather than to one call site,
-        //    and it is what stops a Cloudflare stream key reaching us in a line nobody audited.
-        (#"(?i)\b(https?|srt|rtmps?|ws{1,2}s?)://([^/\s"'<>?]+)(/[^\s"'<>]*)"#,
-         "$1://$2/(path withheld)", "URL paths"),
-        // A URL with no path but a query is the same exposure by another route.
-        (#"(?i)\b(https?|srt|rtmps?|ws{1,2}s?)://([^/\s"'<>?]+)\?[^\s"'<>]*"#,
-         "$1://$2/(query withheld)", "URL query strings"),
-
-        // ── Not a credential, but not ours to send either: the tester's account name, which
-        //    appears in any absolute path we log (still exports, opened files). ──
-        (#"/Users/[^/\s"':]+"#, "/Users/(user)", "home directory paths"),
-    ]
-
-    /// Returns the scrubbed text and the per-rule hit counts, so the export can state what it
-    /// removed instead of asserting that it removed nothing.
-    static func redact(_ input: String) -> (text: String, hits: [(label: String, count: Int)]) {
-        var text = input
-        var hits: [(String, Int)] = []
-        for rule in rules {
-            guard let re = try? NSRegularExpression(pattern: rule.pattern) else {
-                // A rule that does not compile is a rule that is not protecting anything, and
-                // shipping quietly without it is the failure mode this branch exists to prevent.
-                NSLog("[DIAG] ⚠️ redaction rule failed to compile: %@", rule.label)
-                hits.append(("\(rule.label) — RULE FAILED TO COMPILE", -1))
-                continue
-            }
-            let range = NSRange(text.startIndex..., in: text)
-            let count = re.numberOfMatches(in: text, range: range)
-            if count > 0 {
-                text = re.stringByReplacingMatches(in: text, range: range,
-                                                   withTemplate: rule.template)
-            }
-            hits.append((rule.label, count))
+    /// Every file path this session opened or wrote, the recent-documents list, the recent LUTs
+    /// and the export folder.
+    private static func knownPaths() -> [String] {
+        var paths = SessionPaths.snapshot()
+        paths += NSDocumentController.shared.recentDocumentURLs.map(\.path)
+        if let entries = UserDefaults.standard.array(forKey: "recentLUTs") as? [[String: Any]] {
+            paths += entries.compactMap { $0["path"] as? String }
         }
-        return (text, hits)
+        Preferences.shared.withExportDirectory { paths.append($0.path) }
+        return paths
+    }
+
+    /// The serial numbers of the attached displays, and of every display a calibration was ever
+    /// stored for (the `displayCalibrations` keys are vendor-model-serial).
+    private static func displaySerials() -> [String] {
+        var serials: [String] = []
+        var count: UInt32 = 0
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        if CGGetOnlineDisplayList(16, &ids, &count) == .success {
+            serials += ids.prefix(Int(count)).map { String(CGDisplaySerialNumber($0)) }
+        }
+        if let data = UserDefaults.standard.data(forKey: DisplayCalibrationStore.defaultsKey),
+           let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            serials += dict.keys.compactMap { $0.split(separator: "-").last.map(String.init) }
+        }
+        return serials
+    }
+
+    /// This Mac's computer name and host name, and the sending hosts of the NDI sources seen this
+    /// session (`MACHINE` in `MACHINE (Source)`).
+    private static func hostNames() -> [String] {
+        var names: [String] = []
+        if let computer = Host.current().localizedName { names.append(computer) }
+        let host = ProcessInfo.processInfo.hostName
+        names.append(host)
+        if let first = host.split(separator: ".").first { names.append(String(first)) }
+        let ndi = NDIService.shared
+        let ndiNames = ndi.discoveredSources.map(\.name) + [ndi.connectedSourceName].compactMap { $0 }
+        for name in ndiNames {
+            if let open = name.range(of: " (") { names.append(String(name[..<open.lowerBound])) }
+        }
+        return names
     }
 }
 
@@ -632,6 +635,12 @@ enum LicenseContext {
         for account in ["storedLicenseKey", "activationRecord", "trial.firstLaunch"] {
             out.append("    \(account.padding(toLength: 17, withPad: " ", startingAt: 0)): \(presence(account))")
         }
+        // Privacy P1: the email and machine id left the preferences plist. PRESENCE ONLY — the
+        // line that tells "migrated" from "held back because the Keychain refused".
+        let legacy = LicenseRecordSync.legacyValues(in: UserDefaults.standard)
+        out.append("  preferences plist (legacy, should be absent):")
+        out.append("    license.email    : \(legacy.email == nil ? "absent" : "PRESENT")")
+        out.append("    license.machineId: \(legacy.machineId == nil ? "absent" : "PRESENT")")
         // ⚠️ THE FIELDS ABOVE ARE INITIAL VALUES UNTIL BOOTSTRAP HAS ANSWERED, and an export can
         // reach this before it has. This is why the fourth state is worth having even with the
         // launch blocking still in place: `state` used to initialise to `.unlicensed` and `trial`
@@ -795,6 +804,9 @@ struct DiagnosticsContext {
     /// so to the tester rather than collecting something more precise and explaining later.
     var location: String = ""
     var activity: String = ""
+    /// Keep file names in the export (privacy P1). OFF by default: a file name can say whose job it
+    /// is. Folders are withheld either way.
+    var includeFileNames = false
 }
 
 @MainActor
@@ -930,14 +942,18 @@ enum DiagnosticsReport {
         // Reversing it would be a real hole: scrubbing before the envelope came off would leave
         // the redactor matching against framing it does not understand, and scrubbing before
         // partitioning would mean the second section was never scrubbed at all.
-        let (redacted, hits) = DiagnosticsRedactor.redact(out)
+        let (redacted, hits) = DiagnosticsRedactor.redact(out, includeFileNames: context.includeFileNames)
 
         var footer = "\n" + String(repeating: "=", count: 78) + "\n"
         footer += "REDACTION\n" + String(repeating: "=", count: 78) + "\n"
         footer += "Every line above was pattern-scrubbed before this file was written.\n"
-        footer += "Removed: passphrases, stream IDs, tokens, URL paths and query strings, and\n"
-        footer += "home-directory user names. Replacements are fixed-width, so no length of any\n"
-        footer += "removed value can be inferred from this file.\n\n"
+        footer += "Removed: passphrases, stream IDs, tokens, URL paths and query strings, IP\n"
+        footer += "addresses, folder paths, display serial numbers, and this Mac's and NDI\n"
+        footer += "senders' machine names. File names: "
+        footer += context.includeFileNames ? "KEPT (Include file names was on).\n"
+                                           : "removed (Include file names was off).\n"
+        footer += "Replacements are fixed-width, so no length of any removed value can be\n"
+        footer += "inferred from this file.\n\n"
         for hit in hits {
             footer += String(format: "  %-32@ %@\n", hit.label,
                              hit.count < 0 ? "RULE FAILED TO COMPILE"
@@ -972,6 +988,24 @@ final class DiagnosticsExporter: ObservableObject {
     /// Build, scrub, and offer a save panel. Called from the sheet's Export button.
     func write(context: DiagnosticsContext) {
         let text = DiagnosticsReport.build(context: context)
+
+        #if DEBUG
+        // MANIFOLD_DIAG_EXPORT_PATH (pre-ship removal, docs/BUGS.md): an unattended run writes the
+        // export HERE instead of offering a save panel, whose contents are drawn out of process and
+        // cannot be driven by accessibility. Added for privacy P1's verification. Unset, nothing
+        // changes.
+        if let path = ProcessInfo.processInfo.environment["MANIFOLD_DIAG_EXPORT_PATH"], !path.isEmpty {
+            let url = URL(fileURLWithPath: path)
+            do {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+                NSLog("[DIAG] wrote %d bytes to %@ (MANIFOLD_DIAG_EXPORT_PATH)", text.utf8.count,
+                      url.lastPathComponent)
+            } catch {
+                NSLog("[DIAG] ⚠️ could not write diagnostics: %@", String(describing: error))
+            }
+            return
+        }
+        #endif
 
         let panel = NSSavePanel()
         panel.title = "Export Diagnostics"
@@ -1059,13 +1093,22 @@ struct DiagnosticsPromptSheet: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            // Privacy P1. OFF by default; folders are withheld either way.
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle("Include file names", isOn: $context.includeFileNames)
+                Text("Helps when the problem is with a particular file. Folder names are never included.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // Said before the file is written, not after — the tester decides whether to send it,
             // and they can only decide that if they know what is in it.
             Text("""
                  The file contains your build, machine and display details, and Manifold’s log. \
-                 Stream passphrases, stream IDs and the paths of any stream URLs are removed \
-                 before it is written; the file lists what it removed, and you can read the \
-                 whole thing in any text editor before sending it.
+                 Stream passphrases, stream IDs, the paths of stream URLs, IP addresses, folder \
+                 paths, file names (unless you include them), display serial numbers and machine \
+                 names are removed before it is written; the file lists what it removed, and you \
+                 can read the whole thing in any text editor before sending it.
                  """)
                 .font(.caption)
                 .foregroundStyle(.secondary)

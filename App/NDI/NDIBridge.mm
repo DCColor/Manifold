@@ -1,4 +1,6 @@
 #import "NDIBridge.h"
+#import <AppKit/AppKit.h>          // Manifold-Swift.h declares AppKit subclasses; it needs this first
+#import "Manifold-Swift.h"         // MFPrivacyLog — the log redaction rules (privacy P1)
 
 #import <QuartzCore/QuartzCore.h>   // CACurrentMediaTime — the audio pull's own elapsed-time clock
 #import <dlfcn.h>
@@ -321,7 +323,7 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
 
     NDIlib_recv_instance_t recv = gNDI->recv_create_v3(&recvSettings);
     if (!recv) {
-        NSLog(@"[NDI] recv_create_v3 failed for \"%@\"", displayName);
+        NSLog(@"[NDI] recv_create_v3 failed for \"%@\"", [MFPrivacyLog ndiSourceName:displayName]);
         return nil;
     }
 
@@ -341,7 +343,10 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
     NDIBridge *bridge = [[NDIBridge alloc] init];
     bridge->_receiver = receiver;
     bridge->_sourceName = [displayName copy];
-    NSLog(@"[NDI] connected to \"%@\" — UYVY, highest bandwidth, FrameSync", displayName);
+    // The sending HOST is withheld from the log (privacy P1); the stream's own name is kept. The
+    // soak harness matches the "[NDI] connected to" prefix only.
+    NSLog(@"[NDI] connected to \"%@\" — UYVY, highest bandwidth, FrameSync",
+          [MFPrivacyLog ndiSourceName:displayName]);
     return bridge;
 }
 
@@ -398,10 +403,12 @@ static void NDIFrameRelease(void *refcon, const void *baseAddress) {
         const NDIlib_source_t *sources = gNDI->find_get_current_sources(finder, &count);
         if (sources && count > 0) {
             NSLog(@"[NDI] discovery found %u source(s):", count);
+            // ⚠️ NAME WITH ITS HOST WITHHELD, AND NO ADDRESS (privacy P1). This listed every
+            // source's machine name and IP:port on the LAN; neither is ours to put in a log.
             for (uint32_t i = 0; i < count; i++) {
-                NSLog(@"[NDI]   [%u] %s  (%s)", i,
-                      sources[i].p_ndi_name ?: "<unnamed>",
-                      sources[i].p_url_address ?: "<no url>");
+                NSString *n = sources[i].p_ndi_name ? @(sources[i].p_ndi_name) : @"<unnamed>";
+                NSLog(@"[NDI]   [%u] %@  (%@)", i, [MFPrivacyLog ndiSourceName:n],
+                      sources[i].p_url_address ? MFPrivacyLog.addressWithheld : @"<no url>");
             }
             // Quick-connect takes the first; the toolbar picker lists them all (refreshDiscoveredSources).
             if (sources[0].p_ndi_name) {

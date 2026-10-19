@@ -896,8 +896,9 @@ final class HLSClient: ObservableObject {
 
         // RUNG 1: ask the master playlist what cadence it declares. A SECOND fetch of a URL
         // AVFoundation is also fetching, deliberately — AVPlayer exposes no way to read the
-        // master's attributes, and the alternative is not having the answer. Small, cached by
-        // URLSession, and entirely off the critical path: the estimator runs regardless and the
+        // master's attributes, and the alternative is not having the answer. Small, NOT cached
+        // (PrivateURLSession, privacy P1 — the playlist URL can carry a token), and entirely off
+        // the critical path: the estimator runs regardless and the
         // declaration simply overrides it when it lands.
         declaredFrameRate = nil
         rateDisagreementActive = false
@@ -1114,7 +1115,7 @@ final class HLSClient: ObservableObject {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        PrivateURLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             guard let self else {
                 print("[HLS-FORMAT] rung 1: client gone before the playlist returned — no rate")
                 return

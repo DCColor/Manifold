@@ -144,6 +144,15 @@ session's log (`2026-10-10 21-41-16.txt`):
 - **Matches §6.10.** S1's results name the profile "NDI Bars (P2)" and the Image source `p2-bars.png`;
   both are right.
 
+**Used again 2026-10-19 01:07–01:12** for privacy P1's P8 (NDI sources appear and connect). Checked
+before the session against the row and, afterwards, against OBS's log (`2026-10-19 01-06-59.txt`):
+- OBS started on another profile (canvas P216 / Rec. 2100 PQ) and was switched to NDI Bars (P2) at
+  01:07:05: NV12 / Rec. 709/Partial, 1920×1080, 24000/1001, matching the row.
+- Scene "Bars", with the Image source. DistroAV **6.1.1** on NDI runtime 6.0.1; Main Output "OBS PGM"
+  started 01:07:22. Nothing streamed.
+- Manifold received UYVY 4:2:2, 1920×1080, 48 kHz stereo, as the row says. OBS logs nothing when a
+  receiver connects.
+
 ## HEVC SRT and HEVC SRT 422: verified before the S5 / Stage 6 session (2026-10-11 ~17:40)
 
 Read-only, from both profiles' `basic.ini` (secret lines excluded), `streamEncoder.json`, `recordEncoder.json`

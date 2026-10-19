@@ -55,6 +55,11 @@ bullet.
 - 4:2:2 and 4:4:4 files (ProRes, DNxHD/DNxHR, H.264/HEVC 4:2:2) now keep their full color resolution through playback, scopes, SDI and export.
 - SRT now accepts HEVC and H.264 4:2:2 and 4:4:4 at full color resolution. A stream this Mac can't decode is refused with a message saying so, never quietly converted.
 - ProRes MXF decodes through Apple's hardware-accelerated decoder: faster and identical to the same ProRes in .mov.
+- Your license email and machine ID are kept only in the macOS Keychain, no longer in Manifold's preferences file. They move there by themselves the first time this version opens.
+- Manifold no longer saves its license, update-check and stream-connection requests in a disk cache, and removes the cache earlier versions left behind.
+- NDI only starts looking for sources on your network when you open the NDI source list or connect to a source, not when Manifold opens.
+- Diagnostics reports now leave out IP addresses, folder paths, computer and NDI sender names and display serial numbers. File names are left out unless you tick "Include file names".
+- Manifold's log no longer records the network addresses of WebRTC connections or NDI sources, or SRT stream IDs.
 
 ### Fixed
 
@@ -199,6 +204,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Debug menu hidden unless opted in | `4114995` | **Unsure**: 0.8.4 was build 18 and this landed 20 minutes later, bumping to build 19. If build 19 shipped as 0.8.4, users already have it; if not, 0.8.4 users lose a visible Debug menu |
 | Diagnostics export reports EDR headroom from potential, not current | `cf18894` | **Unsure**: only visible in Export Diagnostics output |
 | User-facing strings converted to American English ("Licenses" and others; BUGS.md, pre-ship checklist) | — | **Unsure**: verified 2026-09-21, but no commit or fix date is recorded |
+| Privacy stage P1 (`docs/PRIVACY_AUDIT.md`): license email and machine id out of the preferences plist; no disk cache for the app's own requests; NDI discovery only on opening the source list; log and diagnostics redaction, with an "Include file names" option | uncommitted (2026-10-19) | **Yes** |
 
 #### Internal (build, telemetry, probes, test tooling)
 

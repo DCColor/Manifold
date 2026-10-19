@@ -40,6 +40,7 @@
 import Combine
 import Foundation
 import QuartzCore      // CACurrentMediaTime — the monotonic host clock the media watchdog measures on
+import PrivacyRedaction // LogRedaction — the selected ICE pair's addresses are withheld (privacy P1)
 
 final class WHEPClient: ObservableObject {
 
@@ -275,8 +276,10 @@ final class WHEPClient: ObservableObject {
             guard let self else { return }
             NSLog("[WHEP] ICE state → %@  (+%@)", name, self.elapsed())
             if state == .connected || state == .completed {
+                // Both candidates' addresses are withheld (privacy P1); their types, transport and
+                // ports — what this line is for — are kept.
                 let pair = self.session?.selectedCandidatePair() ?? "pair unavailable"
-                NSLog("[WHEP] ICE %@ — selected pair: %@", name, pair)
+                NSLog("[WHEP] ICE %@ — selected pair: %@", name, LogRedaction.withholdingIPAddresses(pair))
             } else if state == .failed {
                 NSLog("[WHEP] FAILED at ICE — no working candidate pair.")
                 NSLog("[WHEP]   On a NAT'd network the host candidates plus the server's answer found no route.")
@@ -547,7 +550,7 @@ final class WHEPClient: ObservableObject {
 
         let data: Data, response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await PrivateURLSession.shared.data(for: request)
         } catch {
             NSLog("[WHEP] FAILED at POST — %@", error.localizedDescription)
             let host = endpoint.host ?? "the stream server"
@@ -786,7 +789,7 @@ final class WHEPClient: ObservableObject {
             request.httpMethod = "DELETE"
             request.timeoutInterval = 5
             Task {
-                if let (_, response) = try? await URLSession.shared.data(for: request),
+                if let (_, response) = try? await PrivateURLSession.shared.data(for: request),
                    let http = response as? HTTPURLResponse {
                     NSLog("[WHEP] DELETE resource → HTTP %d", http.statusCode)
                 }

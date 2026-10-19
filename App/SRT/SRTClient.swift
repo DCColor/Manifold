@@ -42,6 +42,7 @@ import Combine
 import Foundation
 import QuartzCore      // CACurrentMediaTime — the monotonic host clock the watchdogs measure on
 import DisplayProviders // LiveCushion.ceilingSeconds — the reorder banner states the limit
+import PrivacyRedaction // LogRedaction.srtStreamId — what the log may say about a stream id (privacy P1)
 
 final class SRTClient: ObservableObject {
 
@@ -1233,36 +1234,22 @@ final class SRTClient: ObservableObject {
 
     // MARK: - Helpers
 
-    /// ── A STREAM ID, MADE AS SAFE TO LOG AS IT CAN HONESTLY BE MADE ─────────────────────────
+    /// ── A STREAM ID, AS THE LOG MAY SHOW IT ──────────────────────────────────────────────────
     ///
     /// SRT defines an access-control syntax for streamid — `#!::` followed by comma-separated
-    /// `key=value` pairs (`u` user, `r` resource, `h` host, `m` mode, `t` type, `s` session). `s`
-    /// IS A BEARER TOKEN: the server verifies the session against it, so anyone who reads it out of
-    /// a log can present it. Its value is replaced here; every other key is kept, because the whole
-    /// diagnostic point of logging a stream id is seeing which resource and user were addressed.
+    /// `key=value` pairs (`u` user, `r` resource, `h` host, `m` mode, `t` type, `s` session). `s` is
+    /// a bearer token, and on hosted ingests `r` and `u` can be the key and the account.
     ///
-    /// ⚠️ WHAT THIS CANNOT PROMISE. A FREEFORM STREAM ID IS RETURNED UNCHANGED, AND MANY HOSTED
-    /// INGESTS USE THE PUBLISH KEY ITSELF AS THE WHOLE STREAM ID. There is no syntax to detect that
-    /// — `abc123` is indistinguishable from a channel name — so this function cannot make the
-    /// freeform case safe, and does not pretend to. The log line is therefore NOT guaranteed to be
-    /// credential-free; it is guaranteed only that the one place SRT explicitly says "this is a
-    /// token" is not printed. A user pasting a key-shaped streamid is trusting the log the way they
-    /// would trust a URL in a screen share.
+    /// ⚠️ A FREEFORM STREAM ID IS WITHHELD WHOLE (privacy P1). It used to be returned unchanged —
+    /// the bypass — because `abc123` cannot be told from a channel name, and many hosted ingests use
+    /// the publish key itself as the whole stream id. Now the only values the log shows are `m` and
+    /// `t`, which are enumerations. The rule lives in `LogRedaction.srtStreamId`
+    /// (Packages/ManifoldCore/Sources/PrivacyRedaction), where `swift test` covers it.
     ///
     /// The value handed to `SRTO_STREAMID` is always the original — redaction is for the log only,
     /// and never touches what is dialled.
     static func redactedStreamId(_ streamId: String) -> String {
-        let prefix = "#!::"
-        guard streamId.hasPrefix(prefix) else { return streamId }
-        let body = String(streamId.dropFirst(prefix.count))
-        let redacted = body.split(separator: ",", omittingEmptySubsequences: false).map { pair -> String in
-            // Split on the FIRST "=" only: a value may legitimately contain one.
-            guard let eq = pair.firstIndex(of: "=") else { return String(pair) }
-            let key = pair[pair.startIndex..<eq].trimmingCharacters(in: .whitespaces).lowercased()
-            guard key == "s" else { return String(pair) }
-            return "\(pair[pair.startIndex..<eq])=(redacted)"
-        }
-        return prefix + redacted.joined(separator: ",")
+        LogRedaction.srtStreamId(streamId)
     }
 
     /// libavformat's short codec name → something worth showing a user. Falls back to the raw name

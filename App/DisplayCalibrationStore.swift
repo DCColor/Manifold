@@ -53,6 +53,11 @@ final class DisplayCalibrationStore: ObservableObject, @unchecked Sendable {
         return "\(CGDisplayVendorNumber(id))-\(CGDisplayModelNumber(id))-\(CGDisplaySerialNumber(id))"
     }
 
+    /// `vendor-model`, for the log: the key with its serial number dropped (privacy P1).
+    static func keyWithoutSerial(_ key: String) -> String {
+        key.split(separator: "-").prefix(2).joined(separator: "-") + "-(serial withheld)"
+    }
+
     static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)
             .map { CGDirectDisplayID($0.uint32Value) }
@@ -109,7 +114,8 @@ final class DisplayCalibrationStore: ObservableObject, @unchecked Sendable {
         }
         cache = current
         lock.unlock()
-        print("[REFERENCE] display \"\(screen.localizedName)\" (\(key)): "
+        // The key is vendor-model-SERIAL; the serial is not printed (privacy P1).
+        print("[REFERENCE] display \"\(screen.localizedName)\" (\(Self.keyWithoutSerial(key))): "
             + (value.calibrated ? "calibrated to Rec.709 / BT.1886" : "described by its profile")
             + String(format: ", Lw %g, Lb %g", value.whiteNits, value.blackNits))
         objectWillChange.send()

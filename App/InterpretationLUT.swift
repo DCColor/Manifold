@@ -162,6 +162,7 @@ final class InterpretationLUTModel: ObservableObject {
 
     /// Load `url`. Its output space is the one Recent LUTs remember for that file (D4), else Same as Source.
     func load(_ url: URL) {
+        SessionPaths.note(url)   // for the diagnostics redactor (privacy P1)
         generation += 1
         let gen = generation
         guard let renderer = deck?.renderer else { return }

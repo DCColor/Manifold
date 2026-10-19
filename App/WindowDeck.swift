@@ -484,6 +484,7 @@ final class WindowDeck: ObservableObject {
     /// leave this file — the whole point of the registration seam is that nothing outside it wires
     /// itself to a deck's internals.
     func load(url: URL) {
+        SessionPaths.note(url)   // for the diagnostics redactor (privacy P1)
         engine?.load(url: url, autoplay: shouldAutoplayOnLoad)
     }
 

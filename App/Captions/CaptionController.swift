@@ -38,6 +38,7 @@ final class CaptionController: ObservableObject {
     /// alert surface anywhere in this app, and silently blanking a working caption track
     /// because the user picked a bad file would be worse than doing nothing.
     func load(_ url: URL) {
+        SessionPaths.note(url)   // for the diagnostics redactor (privacy P1)
         // Two separate attempts, not `try? (utf8 ?? latin1)` — the first operand throws rather
         // than returning nil, so a coalesce there would make the fallback dead code. Latin-1
         // can't fail, which is the point: it's the last-resort decode for legacy .srt files.

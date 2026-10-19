@@ -6,6 +6,7 @@ import QuartzCore
 import ManifoldCore
 import DisplayProviders
 import ColorimetryModel   // SourceColorimetry, ColorimetryOverride
+import PrivacyRedaction   // LogRedaction.ndiSourceName — the sending host is withheld from the log (privacy P1)
 
 /// STEP A: minimal NDI receive — prove NDI integrates and that frames reach Manifold's Metal
 /// display path. Discovery, a receiver on the first source found, a FrameSync pull on the display
@@ -143,8 +144,9 @@ final class NDIService: ObservableObject {
     @Published private(set) var connectedSourceName: String?
 
     /// NDI sources currently visible on the network, for the toolbar picker. Refreshed on a light
-    /// timer while the streaming control is on screen (startDiscovery/stopDiscovery). Empty is an
-    /// honest answer — the picker shows "No NDI sources found" rather than a silent empty menu.
+    /// timer while discovery is held (startDiscovery/stopDiscovery) — which, since privacy P1, is
+    /// from the first time the NDI source list is opened, never merely while a control is on
+    /// screen. Empty reads "Searching for NDI sources…" in the picker, never a silent empty menu.
     /// Main-thread only (the refresh task hops to main to publish).
     @Published private(set) var discoveredSources: [NDISource] = []
 
@@ -430,7 +432,7 @@ final class NDIService: ObservableObject {
         }
         guard !isConnecting else { return }
         guard bridge == nil else {
-            NSLog("[NDI] already connected to \"\(bridge?.sourceName ?? "?")\" — ignoring")
+            NSLog("[NDI] already connected to \"\(LogRedaction.ndiSourceName(bridge?.sourceName ?? "?"))\" — ignoring")
             return
         }
         guard renderer != nil else {
@@ -483,19 +485,19 @@ final class NDIService: ObservableObject {
             return
         }
         guard NDIBridge.loadRuntime() else {
-            NSLog("[NDI] runtime unavailable — cannot connect to \"\(source.name)\"")
+            NSLog("[NDI] runtime unavailable — cannot connect to \"\(LogRedaction.ndiSourceName(source.name))\"")
             return
         }
 
         isConnecting = true
-        NSLog("[NDI] connecting to \"\(source.name)\"…")
+        NSLog("[NDI] connecting to \"\(LogRedaction.ndiSourceName(source.name))\"…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let connected = NDIBridge.connect(to: source)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isConnecting = false
                 guard let connected else {
-                    NSLog("[NDI] failed to connect to \"\(source.name)\"")
+                    NSLog("[NDI] failed to connect to \"\(LogRedaction.ndiSourceName(source.name))\"")
                     return
                 }
                 // Switching sources: drop the old receiver WITHOUT flipping isConnected/empty state,
@@ -590,7 +592,7 @@ final class NDIService: ObservableObject {
 
         isConnected = true
         connectedSourceName = connected.sourceName
-        NSLog("[NDI] receiving from \"\(connected.sourceName)\" — video on the display tick, audio on a dedicated pump")
+        NSLog("[NDI] receiving from \"\(LogRedaction.ndiSourceName(connected.sourceName))\" — video on the display tick, audio on a dedicated pump")
     }
 
     /// What counts as a frame rate at all. The SAME range SRT screens `av_guess_frame_rate` with

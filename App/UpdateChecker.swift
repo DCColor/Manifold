@@ -178,7 +178,7 @@ final class UpdateChecker {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await PrivateURLSession.shared.data(for: request)
         } catch {
             // Offline, DNS failure, TLS failure, timeout, cancellation.
             NSLog("[UPDATE] check failed (network): %@", error.localizedDescription)

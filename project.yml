@@ -189,6 +189,15 @@ targets:
       # can replay the traced bursts. Used by App/MetalVideoRenderer.swift only.
       - package: ManifoldCore
         product: FrameQueuePolicy
+      # Log and diagnostics redaction (docs/PRIVACY_AUDIT.md, stage P1) — a leaf target so `swift test`
+      # can run every rule against real log lines. Used by DiagnosticsExport, WHEPClient, SRTClient, NDI.
+      - package: ManifoldCore
+        product: PrivacyRedaction
+      # The licence's Keychain activation record and the move of the email and machine id out of the
+      # preferences plist (stage P1) — a leaf target so `swift test` can run the migration against a
+      # scratch Keychain service. Used by App/LicenseManager.swift only.
+      - package: ManifoldCore
+        product: LicenseRecord
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,

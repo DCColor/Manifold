@@ -45,7 +45,12 @@ let package = Package(
         // ManifoldCore uses it (frame-stepping on the AVFoundation path); a product so the tests can name it.
         .library(name: "FrameGrid", targets: ["FrameGrid"]),
         // Linked by the APP target directly (project.yml), for the renderer's paused-picture rules.
-        .library(name: "FrameQueuePolicy", targets: ["FrameQueuePolicy"])
+        .library(name: "FrameQueuePolicy", targets: ["FrameQueuePolicy"]),
+        // Linked by the APP target directly (project.yml): log and diagnostics redaction (privacy P1).
+        .library(name: "PrivacyRedaction", targets: ["PrivacyRedaction"]),
+        // Linked by the APP target directly (project.yml): the Keychain activation record and the
+        // one-way move of the licence email and machine id out of the preferences plist (privacy P1).
+        .library(name: "LicenseRecord", targets: ["LicenseRecord"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -417,6 +422,44 @@ let package = Package(
             name: "FrameQueuePolicyTests",
             dependencies: ["FrameQueuePolicy"],
             path: "Tests/FrameQueuePolicyTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // What Manifold withholds from its own log lines and from a diagnostics export: IP addresses,
+        // SRT stream ids, NDI source addresses and host names, absolute paths, file names, display
+        // serials (docs/PRIVACY_AUDIT.md, stage P1). Foundation only, so `swift test` reaches every
+        // rule with a corpus of real log lines.
+        .target(
+            name: "PrivacyRedaction",
+            path: "Sources/PrivacyRedaction",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "PrivacyRedactionTests",
+            dependencies: ["PrivacyRedaction"],
+            path: "Tests/PrivacyRedactionTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The licence's Keychain activation record and the migration that takes `license.email` and
+        // `license.machineId` out of the preferences plist (docs/PRIVACY_AUDIT.md, stage P1). Foundation
+        // only. The tests run the migration against a SCRATCH Keychain service and a SCRATCH defaults
+        // suite — never the real licence items.
+        .target(
+            name: "LicenseRecord",
+            path: "Sources/LicenseRecord",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "LicenseRecordTests",
+            dependencies: ["LicenseRecord"],
+            path: "Tests/LicenseRecordTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

@@ -984,6 +984,12 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** 
     is set and the debug URL is not, ⌃⌥H dials the saved stream of that name, of any type, as its row in
     the streaming menu would; a comma list dials the next name on each press (`DebugBookmarkCursor`). It
     reads `streamBookmarks` and writes nothing; the runs that used it put a scratch list in place first.
+  - `DiagnosticsExporter.write` reads `MANIFOLD_DIAG_EXPORT_PATH` (added 2026-10-19, privacy P1). When
+    it is set, Export… in the diagnostics sheet writes the report to that path instead of opening a
+    save panel, whose contents are drawn out of process and cannot be driven by accessibility.
+  - `NDIMenuOpenWatcher` reads `MANIFOLD_DEBUG_NDI_WATCHER_DETACHED` (added 2026-10-19, privacy P1).
+    When it is set, the watcher attaches to nothing, as if a macOS update had changed SwiftUI's menus,
+    so the fallback (discovery on the parent menu opening, with a ⚠️ FALLBACK log line) can be tested.
 - **Gating:** all `#if DEBUG`, so absent from Release (checked with `strings` on both builds) and
   present in Profile.
 - **Cost when present:** one engine call, one presented-handler and one log line per second. The
@@ -1160,6 +1166,100 @@ causes to tell apart: the CPU copy at P010/P216, the HEVC encoder, or the scene 
 
 **Not defects, and deliberately not before release.** Work that was decided on but would change
 measured behaviour, or buys nothing for users, close to a release. Each entry says what it would take.
+
+---
+
+## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2, the licensing port and Release builds to follow
+
+**The audit and the decisions are in `docs/PRIVACY_AUDIT.md`.** It is the input to the privacy
+policy, and the policy may not describe behaviour that has not shipped. Robbie split the fixes into
+stages on 2026-10-19:
+- **P1**, this entry: the licence data, the network disk cache, logs, diagnostics and NDI discovery.
+- **Later stages:** stream secrets in `streamBookmarks` (audit item 2), the licensing port to the
+  shared client's rules (item 7), and shipping Release rather than Profile (item 8).
+
+**What P1 changed:**
+- **Licence data.** `license.email` and `license.machineId` are no longer written to the
+  preferences plist. They live only in the Keychain `activationRecord`.
+  - `LicenseRecordSync` (Packages/ManifoldCore/Sources/LicenseRecord) removes each plist value only
+    after the record has been read back and holds the same value. If the Keychain read fails, it
+    leaves the plist alone and logs `legacy license values left in place …`.
+  - A mismatched machine id is kept in the plist and logged; the Keychain's is used.
+  - Activation now reserves the machine id in the Keychain before calling `/activate`.
+  - Deactivation keeps an unactivated record that holds the machine id and no email. Without it,
+    re-activating would spend a second machine slot now that the plist no longer carries the id.
+- **Network disk cache.**
+  - The licence, update-check, WHEP and HLS-playlist requests go through `PrivateURLSession`
+    (ephemeral, `urlCache = nil`).
+  - `Cache.db`, its `-wal`/`-shm` and `fsCachedData` are removed at every launch.
+  - **Decided 2026-10-19:** the process's default `URLCache.shared` is memory-only from launch
+    (`makeDefaultCacheMemoryOnly`), so AVFoundation's HLS loader writes no `Cache.db` either.
+- **Logs, redacted at the source, still through NSLog:**
+  - the WHEP selected ICE pair's IP addresses;
+  - plain SRT stream ids, withheld whole — the bypass. For `#!::` ids only `m` and `t` are kept;
+  - NDI source addresses;
+  - NDI source names: NDI names a source `MACHINE (Source)`, so every name embeds the sending
+    host. The host is withheld and the stream name is kept;
+  - libdatachannel's own log lines (IPs).
+- **Diagnostics.** The redactor moved to the package (`DiagnosticsRedaction`) and now also removes:
+  - IPv4 and IPv6 addresses;
+  - absolute paths outside `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/dev`, `/Applications`
+    and `/opt`;
+  - display serial numbers;
+  - this Mac's names and NDI senders' host names;
+  - file names, unless the new "Include file names" checkbox is ticked (off by default; folders
+    are withheld either way).
+
+  The `[REFERENCE]` line no longer prints the display serial.
+- **NDI discovery** starts only when an "NDI" submenu opens, or on connect. The list reads
+  "Searching for NDI sources…" until a source appears.
+  - The empty state and the control bar no longer start it on appearing.
+  - The menu body no longer calls `NDIBridge.loadRuntime()`. SwiftUI composes a Menu's content when
+    the window is built, so that call loaded the runtime at every launch.
+  - **Decided 2026-10-19:** the empty state's "Connect Stream…" has NDI in a submenu, as the
+    toolbar menu does, so opening it to pick a saved stream does not start discovery.
+  - **The trigger is not `.onAppear`.** SwiftUI composes submenus when the PARENT opens, so
+    `.onAppear` in the submenu fired on the parent (measured). AppKit posts
+    `didBeginTrackingNotification` for the parent only, and SwiftUI's submenu delegate
+    (`MenuHoverDelegate`) has no `menuWillOpen`. `NDIMenuOpenWatcher` wraps that delegate in a
+    forwarding proxy that adds `menuWillOpen` and notifies the key window.
+- **New debug hook:** `MANIFOLD_DIAG_EXPORT_PATH`, on the pre-ship removal list above.
+
+**Predictions and results** (unsigned Profile build in `.build-cc`; the licence Keychain prompt was
+Denied each time, so the real install only ever ran the read-failed path):
+
+| # | Prediction | Result |
+|---|---|---|
+| P1 | A licensed install stays licensed through the migration (scratch Keychain service) | **PASS**: `testLicensedInstallStaysLicensedAndLosesOnlyTheTwoPlistKeys`. The key is byte-identical; the record is activated with the same id and email; the flags are unchanged. |
+| P2 | A failed Keychain read leaves the plist alone and is logged | **PASS**. Scratch tests: failed read, failed read-back and failed write. Real install, five launches: the `license.*` values hash identical; the Keychain `cdat`/`mdat` are unchanged; the log line is present. |
+| P3 | The plist no longer holds the email or machine id | **PASS** in the scratch tests. 0 writers in `App/`. The real install keeps them until a launch that can read the Keychain (a signed build). |
+| P4 | No `Cache.db` after use | **PASS**, after the second fix. The app's own requests made none (run 2). HLS first FAILED: AVFoundation's loader runs in-process and opened the default URL cache, leaving an EMPTY `Cache.db` (0 responses after 40 s). With the memory-only default cache (decided 2026-10-19), 40 s of HLS left the folder empty, with no `Cache.db` open in the process (run 9). `HTTPStorages` still gets CFNetwork's Alt-Svc row (one host, no cookies); not in scope. |
+| P5 | Withheld values never appear (grep) | **PASS**. Diagnostics export: 0 IPv4/IPv6, `/Volumes`, `/Users/<name>`, `/private`, test-folder names, host names or display serials, including in the text typed into the sheet. Unified log: every NSLog line reads `(Foundation) <private>` (75 lines), with 0 hits. The ICE pair, SRT and NDI source lines are covered by `swift test` only; no WHEP, SRT or NDI sender was running. |
+| P6 | File names only with the checkbox | **PASS**: 0 with it off, 4 with it on. Folders were withheld in both. |
+| P7 | No NDI before NDI is opened | **PASS**. At 10/20/30 s on the empty state, and again with a file open: `libndi.dylib` not mapped, 0 UDP sockets, no local-network prompt. The first build FAILED this (runtime mapped at launch, from the menu body) — fixed as above. With the submenu (run 9), opening "Connect Stream…" alone: 0 discovery lines, `libndi` not mapped. Opening its NDI submenu: `[NDI] discovery requested`, runtime mapped, "Searching for NDI sources…". The first submenu build FAILED this (discovery on the parent); fixed by `NDIMenuOpenWatcher`. |
+| P8 | NDI sources appear and connect | **PASS** (2026-10-19 01:08–01:09, attended: OBS on **NDI Bars (P2)**, DistroAV Main Output "OBS PGM"). Opening Connect Stream… ▸ NDI listed `MAC-STUDIO (OBS PGM)` within 1.5 s — so "Searching…" was not visible this time. Picking it: `[NDI] connected to "(host withheld) (OBS PGM)"`, first frame 1920×1080 UYVY, audio 48 kHz stereo. 0 IP addresses and 0 host names in the `[NDI]` lines. OBS's log matches the row (profile switched 01:07:05; NV12 / Rec. 709/Partial, 1920×1080, 24000/1001; scene Bars; NDI Main Output started 01:07:22). |
+| P9 | Everything else unchanged | **PASS**: `swift test` 480 tests, 0 failures (29 new). The Profile build has no warnings in the touched files. The soak harness's `[NDI] connected to` / `[WHEP] connected — ICE` prefixes are intact. |
+
+**Open:**
+- P8 against a real NDI sender (2026-10-20).
+- The migration's success path on the real install, with a signed build. Back up the licence
+  Keychain items first.
+- `NDIMenuOpenWatcher` relies on SwiftUI giving the submenu a delegate that tolerates being wrapped.
+  **Safety net added 2026-10-19:** every tracking pass records whether it attached. The NDI list,
+  which SwiftUI composes when the parent opens, checks that; if it is not attached, discovery starts
+  on the parent opening with `[NDI] ⚠️ FALLBACK …` in the log. So a macOS change costs the P1
+  refinement, never NDI.
+  - Tested with `MANIFOLD_DEBUG_NDI_WATCHER_DETACHED`: nothing at launch. The parent menu alone gave
+    one FALLBACK line, discovery and the runtime loaded. The source listed, connected and delivered
+    frames.
+  - Without the hook: no FALLBACK line, nothing on the parent, discovery on the submenu, connect
+    fine.
+  - **After a major macOS update, grep a session's log for `FALLBACK`.**
+- Over-redaction is the chosen failure. A generic path runs to the last `/` on its line, and a
+  4-part version string reads as an IPv4 address unless the app names it to `preserve`, as it does
+  for the NDI runtime's.
+- **Done 2026-10-19:** `manifold.captureLiveAudioWAV` deleted from the real prefs (read first; a
+  re-read reports it absent; the other 1,498 keys are unchanged).
 
 ---
 

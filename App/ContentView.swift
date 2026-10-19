@@ -309,6 +309,10 @@ struct ContentView: View {
     private var isDocked: Bool { chrome.isDocked }
 
     @State private var isScrubbing = false
+    /// Whether THIS window holds an NDI discovery client (privacy P1). Taken when the NDI source
+    /// list is first opened, released when the control that holds it leaves the screen. See
+    /// `requestNDIDiscovery`.
+    @State private var ndiDiscoveryHeld = false
     @State private var scrubValue: Double = 0
     @State private var wasPlayingBeforeScrub = false
 
@@ -680,6 +684,7 @@ struct ContentView: View {
                     deck.window?.close()
                     return
                 }
+                SessionPaths.note(url)   // for the diagnostics redactor (privacy P1)
                 engine.load(url: url, autoplay: deck.shouldAutoplayOnLoad)
                 wakeHUD()
             }
@@ -2328,8 +2333,9 @@ struct ContentView: View {
     /// to it. The main button quick-connects to the first NDI source (or disconnects when already
     /// streaming); the chevron opens the technology → source picker. Lit green while streaming,
     /// full-brightness white when LOCAL — local is a legitimate resting mode, so it must read as
-    /// available, not as a disabled/off look. Discovery runs only while this control is on screen
-    /// (onAppear/onDisappear), so `discoveredSources` is already warm when the menu is opened.
+    /// available, not as a disabled/off look. Discovery starts the first time the NDI source list
+    /// is opened (privacy P1 — never merely because this control is on screen), and is released
+    /// when the control leaves the screen.
     private var streamingControl: some View {
         // Same rule as the DeckLink control: a non-owning deck may neither connect a stream nor
         // disconnect somebody else's. `activeLiveSource` is ownership-scoped, so the lit-green
@@ -2357,8 +2363,11 @@ struct ContentView: View {
             .help("Streaming sources")
         }
         .disabled(arbitrated)
-        .onAppear { ndi.startDiscovery() }
-        .onDisappear { ndi.stopDiscovery() }
+        .onReceive(NotificationCenter.default.publisher(for: NDIMenuOpenWatcher.ndiSubmenuWillOpen)) { _ in
+            // The menu belongs to the key window; other windows ignore it (privacy P1).
+            if deck.window?.isKeyWindow == true { requestNDIDiscovery() }
+        }
+        .onDisappear { releaseNDIDiscovery() }
     }
 
     /// Caption control — a split-button mirroring `streamingControl` / `deckLinkOutputControl`. The
@@ -2472,30 +2481,58 @@ struct ContentView: View {
     /// entry point (toolbar chevron, empty-state "Connect Stream…") shows the SAME sources and
     /// picks through the SAME `NDIService.connect(to:)`. Honest when empty (no silent menu). The
     /// active source is checkmarked; picking it again is a no-op guarded in NDIService.
+    ///
+    /// ⚠️ OPENING THE "NDI" SUBMENU THAT HOLDS THIS LIST IS WHAT STARTS NDI DISCOVERY (privacy P1).
+    /// Nothing else in the window does: not the empty state or the control bar appearing, and not
+    /// the PARENT menu opening. Before P1 both views started it on `.onAppear`, so a launch with the
+    /// NDI runtime installed put mDNS queries on the network — and, on macOS 15, raised the
+    /// local-network prompt — before anyone had touched NDI. The signal is
+    /// `NDIMenuOpenWatcher.ndiSubmenuWillOpen`, answered in `body`; NOT `.onAppear` here, which
+    /// SwiftUI fires when the parent menu opens (measured). Connecting to a source (⌃⌥N, the
+    /// streaming button) still discovers on its own.
     @ViewBuilder private var ndiSourceListItems: some View {
-        if ndi.discoveredSources.isEmpty {
-            // Distinguish "runtime absent" from "runtime present but no sources" — the former must
-            // NOT read as "no sources found". startDiscovery() (this view's .onAppear) sets the
-            // flag; NDIBridge.loadRuntime() is the same idempotent probe, used as an ordering-safe
-            // fallback should the empty state render before the flag publishes.
-            if !(ndi.runtimeAvailable || NDIBridge.loadRuntime()) {
-                Button("NDI runtime not installed — install it in Settings (⌘,) and relaunch.") {}
-                    .disabled(true)
+        Group {
+            if ndi.discoveredSources.isEmpty {
+                // Distinguish "runtime absent" from "runtime present, no sources yet" — the former
+                // must NOT read as a search in progress.
+                //
+                // ⚠️ NO `NDIBridge.loadRuntime()` IN HERE (privacy P1). SwiftUI composes a Menu's
+                // content when the window is built, NOT when the menu opens, so a load here ran at
+                // every launch: measured, `libndi.dylib` mapped and `NDIlib_initialize` called before
+                // anyone touched NDI. The launch probe (`runtimePresence`, a file stat, no dlopen)
+                // answers "not installed"; a runtime that is present but will not load is known only
+                // once discovery has tried, which `requestNDIDiscovery` does on opening.
+                if ndi.runtimePresence == .notInstalled
+                    || (ndiDiscoveryHeld && !ndi.runtimeAvailable) {
+                    Button("NDI runtime not installed — install it in Settings (⌘,) and relaunch.") {}
+                        .disabled(true)
+                } else {
+                    // SEARCHING UNTIL A SOURCE APPEARS, not "No NDI sources found": the list is
+                    // composed as it opens, and on the first opening discovery has only just been
+                    // asked for, so "none found" would be a verdict nobody has reached.
+                    Button("Searching for NDI sources…") {}.disabled(true)
+                }
             } else {
-                Button("No NDI sources found") {}.disabled(true)
+                ndiSourceRows
             }
-        } else {
-            ForEach(ndi.discoveredSources, id: \.name) { source in
-                Button {
-                    DeckRegistry.shared.connectLive(.ndi, from: deck, label: source.name) {
-                        LiveSource.connectNDI(to: source)
-                    }
-                } label: {
-                    if source.name == ndi.connectedSourceName {
-                        Label(source.name, systemImage: "checkmark")   // the live source
-                    } else {
-                        Text(source.name)
-                    }
+        }
+        // ⚠️ NOT THE TRIGGER — THE SAFETY NET. SwiftUI composes this when the PARENT menu opens, so
+        // `.onAppear` here is the moment to ask whether the submenu is being watched. If it is not,
+        // discovery starts now rather than never. See NDIMenuOpenWatcher.
+        .onAppear { checkNDISubmenuIsWatched() }
+    }
+
+    @ViewBuilder private var ndiSourceRows: some View {
+        ForEach(ndi.discoveredSources, id: \.name) { source in
+            Button {
+                DeckRegistry.shared.connectLive(.ndi, from: deck, label: source.name) {
+                    LiveSource.connectNDI(to: source)
+                }
+            } label: {
+                if source.name == ndi.connectedSourceName {
+                    Label(source.name, systemImage: "checkmark")   // the live source
+                } else {
+                    Text(source.name)
                 }
             }
         }
@@ -3116,10 +3153,17 @@ struct ContentView: View {
 
                 // Cold-start streaming entry (Stage 3a-2): a sibling pill of the same weight as Open…,
                 // opening the SAME discovered-source list the toolbar chevron uses — one click to the
-                // network sources, picking connects via the SAME NDIService.connect(to:). Discovery
-                // runs while this view is on screen (see the ndi.startDiscovery/stopDiscovery below).
+                // network sources, picking connects via the SAME NDIService.connect(to:). Opening its
+                // NDI submenu is what starts discovery (privacy P1; `ndiSourceListItems`).
                 Menu {
-                    ndiSourceListItems
+                    // NDI in a SUBMENU, as in the toolbar's menu (decided 2026-10-19, P1): opening
+                    // "Connect Stream…" to pick a saved stream must not start NDI discovery, and
+                    // the source list's own `.onAppear` is what starts it.
+                    Menu {
+                        ndiSourceListItems
+                    } label: {
+                        Label("NDI", systemImage: "antenna.radiowaves.left.and.right")
+                    }
                     streamURLMenuItems
                 } label: {
                     Label("Connect Stream…", systemImage: "antenna.radiowaves.left.and.right")
@@ -3135,12 +3179,43 @@ struct ContentView: View {
             .controlSize(.large)
             .tint(.white)
         }
-        // The empty state is the ONLY streaming entry when no source is active (the toolbar control
-        // lives in the control bar, which isn't shown here), so it drives discovery for its lifetime.
-        // Discovery is reference-counted in NDIService, so the brief overlap with the toolbar control
-        // during the connect transition doesn't stop it out from under the newly-shown control bar.
-        .onAppear { ndi.startDiscovery() }
-        .onDisappear { ndi.stopDiscovery() }
+        // Discovery is NOT started by this view appearing (privacy P1): opening "Connect Stream…"
+        // starts it (`ndiSourceListItems`), and leaving the empty state releases it. Discovery is
+        // reference-counted in NDIService, so a hand-over to the control bar's own request during
+        // the connect transition doesn't stop it out from under the newly-shown control.
+        .onReceive(NotificationCenter.default.publisher(for: NDIMenuOpenWatcher.ndiSubmenuWillOpen)) { _ in
+            // The menu belongs to the key window; other windows ignore it (privacy P1).
+            if deck.window?.isKeyWindow == true { requestNDIDiscovery() }
+        }
+        .onDisappear { releaseNDIDiscovery() }
+    }
+
+    /// Take this window's NDI discovery client, once. Called when an "NDI" submenu opens in this
+    /// window (`NDIMenuOpenWatcher.ndiSubmenuWillOpen`, key window only).
+    private func requestNDIDiscovery() {
+        guard !ndiDiscoveryHeld else { return }
+        ndiDiscoveryHeld = true
+        NSLog("[NDI] discovery requested — the NDI source list was opened")
+        ndi.startDiscovery()
+    }
+
+    /// The fallback for `NDIMenuOpenWatcher`: called as the NDI list is composed (the parent menu
+    /// opening). Checked after the current event, so the menu's tracking notification has landed.
+    private func checkNDISubmenuIsWatched() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard deck.window?.isKeyWindow == true, !ndiDiscoveryHeld else { return }
+            guard !NDIMenuOpenWatcher.attachedForCurrentMenu() else { return }
+            NSLog("[NDI] ⚠️ FALLBACK — the NDI submenu could not be watched (NDIMenuOpenWatcher did not "
+                  + "attach); starting discovery now that the menu has opened, so NDI keeps working")
+            requestNDIDiscovery()
+        }
+    }
+
+    /// Give it back, if held. Called when the empty state or the streaming control leaves the screen.
+    private func releaseNDIDiscovery() {
+        guard ndiDiscoveryHeld else { return }
+        ndiDiscoveryHeld = false
+        ndi.stopDiscovery()
     }
 
     /// Open the current file in Flip (tools.graviton.flip). If Flip isn't

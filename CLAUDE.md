@@ -57,6 +57,12 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   from `CGWindowListCopyWindowInfo` for the owner "Manifold"), never the whole desktop: other windows on
   this Mac hold private conversations and credentials. If the window cannot be found, take no screenshot.
   Delete a screenshot once what it shows is recorded in text.
+- Never send ⌘Q, or any keystroke, to quit or control an app. A keystroke (`System Events … keystroke`,
+  `key code`) goes to whatever app is in front, not to the process named in the script: a ⌘Q meant for
+  Manifold quit VS Code mid-session (2026-10-19). Quit only with a Quit event addressed to the specific
+  built app, by bundle path (`osascript -e 'tell application "<path>/Manifold.app" to quit'`) or by PID.
+  Drive Manifold through accessibility clicks on named elements, never keystrokes. Close an open menu
+  with `perform action "AXCancel"` on that menu, not Escape: a Quit event waits while a menu is open.
 
 ## Rules
 

@@ -26,6 +26,7 @@ import Foundation
 import Security
 import CryptoKit
 import SwiftUI
+import LicenseRecord
 
 // MARK: - Trial (7-day, Keychain-backed, tamper-resistant)
 
@@ -353,7 +354,7 @@ enum LicenseService {
         req.timeoutInterval = 12
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         do {
-            let (data, _) = try await URLSession.shared.data(for: req)
+            let (data, _) = try await PrivateURLSession.shared.data(for: req)
             return try JSONSerialization.jsonObject(with: data) as? [String: Any]
         } catch {
             return nil
@@ -363,61 +364,13 @@ enum LicenseService {
 
 // MARK: - Durable activation record (the Keychain half of the licence state)
 
-/// Everything about an activation that used to exist ONLY as `@AppStorage` booleans in
-/// `~/Library/Preferences/com.graviton.manifold.plist`.
-///
-/// ── WHY THIS TYPE EXISTS: THE STATE WAS SPLIT ACROSS TWO STORES OF DIFFERENT DURABILITY ─────
-///
-/// The signed licence key was in the Keychain — tamper-resistant, survives app deletion, survives
-/// reinstall. The three facts that DECIDED whether the app was licensed were in a preferences
-/// plist:
-///
-///     license.activated   ← the gate
-///     license.validated   ← the gate
-///     license.machineId   ← the thing the server's 4-machine limit counts
-///
-/// and `bootstrap` read them FIRST:
-///
-///     if licenseActivated, let key = KeychainStore.license.get(kStoredKey) {
-///
-/// so if the plist boolean was false the signed key was never even looked at. A cryptographically
-/// verifiable artifact was subordinate to a `Bool` in a file with none of its guarantees. Lose the
-/// plist and a fully licensed user is shown the trial-expired gate while their valid key sits
-/// unread in the Keychain a function call away.
-///
-/// `machineId` made it worse rather than merely equally bad: it is a random UUID minted on first
-/// access, so a lost plist did not just hide the licence, it minted a NEW machine id. Re-entering
-/// the key then claimed a SECOND of the four machine slots — the licence appeared to recover while
-/// quietly spending a slot that no amount of re-entering gets back.
-///
-/// So this record goes in the Keychain beside the key, and the plist keys become a cache.
-///
-/// ⚠️ THE KEY REMAINS THE AUTHORITY, NOT THIS RECORD. This record is unsigned — it is our own
-/// bookkeeping, and anyone who can write it can write `activated: true`. It is trusted for
-/// `machineId` and for display fields only. Whether the user is LICENSED is decided by
-/// `LicenseCrypto.verify` over the stored key, every launch. That is why restoring from this
-/// record is gated on the key verifying first (see `LicenseManager.bootstrap`).
-struct ActivationRecord: Codable {
-    var activated: Bool
-    var validated: Bool
-    var email: String
-    var type: String
-    var machineId: String
-
-    /// Schema marker. Written but not enforced on read: an older app meeting a newer record should
-    /// degrade to ignoring fields it does not know, never to discarding the record.
-    var v: Int = 1
-
-    func encoded() -> String? {
-        guard let data = try? JSONEncoder().encode(self) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    static func decode(_ json: String) -> ActivationRecord? {
-        guard let data = json.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(ActivationRecord.self, from: data)
-    }
-}
+// `ActivationRecord` lives in the LicenseRecord package (Packages/ManifoldCore/Sources/LicenseRecord)
+// since privacy stage P1, beside `LicenseRecordSync`, which keeps it current and moves the email and
+// machine id out of the preferences plist. Its history, briefly: the signed key was always in the
+// Keychain, but `license.activated`, `license.validated` and `license.machineId` lived only in
+// `~/Library/Preferences/com.graviton.manifold.plist`, so a lost plist hid a valid licence AND minted
+// a new machine id, spending a second of the four machine slots. The record put the machine id
+// beside the key; P1 makes the Keychain its ONLY home, and the email's too.
 
 /// What the licence subsystem resolved to on this launch. ONE VALUE, LOGGED EVERY LAUNCH AND
 /// EXPORTED IN DIAGNOSTICS, because the previous version's entire observable output on the subject
@@ -590,7 +543,32 @@ enum LicenseKeychain {
     static func write(_ value: String, for account: String) async -> OSStatus {
         await offMainThread { KeychainStore.license.write(value, for: account) }
     }
+
+    /// `LicenseRecordSync.run` against the real licence service, off the main thread: bring the
+    /// activation record up to date, read it back, and only then remove `license.email` /
+    /// `license.machineId` from the preferences plist (privacy P1). Its reads, its write and its
+    /// read-back are all `securityd` round trips, which is why it belongs on this queue.
+    static func syncRecord(account: String, current: LicenseRecordSync.Current) async -> LicenseRecordSync.Outcome {
+        await offMainThread {
+            LicenseRecordSync.run(
+                defaults: UserDefaults.standard,
+                current: current,
+                read: {
+                    switch KeychainStore.license.read(account) {
+                    case .found(let json):
+                        return ActivationRecord.decode(json).map(RecordRead.found) ?? .failed(errSecDecode)
+                    case .absent:
+                        return .absent
+                    case .failed(let status):
+                        return .failed(status)
+                    }
+                },
+                write: { KeychainStore.license.write($0, for: account) })
+        }
+    }
 }
+
+extension LicenseRecordSync.Outcome: @unchecked Sendable {}
 
 // MARK: - LicenseManager (orchestrator + published state)
 
@@ -603,11 +581,12 @@ final class LicenseManager: ObservableObject {
     // Refreshable: offline-verify or /validate sets it; only a DEFINITE invalid clears it.
     @AppStorage("license.validated") private var validatedStore = false
     // Display cache (not trusted — the stored key + signature are authoritative).
-    @AppStorage("license.email") private var emailStore = ""
     @AppStorage("license.type") private var typeStore = ""
-    // Persistent per-install machine id. UserDefaults is fine — it is not security-sensitive; it just
-    // needs to be stable for the install's lifetime. Generated once, lazily.
-    @AppStorage("license.machineId") private var machineIdStore = ""
+    // ⚠️ NO `license.email` AND NO `license.machineId` HERE ANY MORE (privacy P1). Both were cached
+    // in the preferences plist, unencrypted, and both now live only in the Keychain activation
+    // record. `LicenseRecordSync` removes the old plist values once the record reads back equal,
+    // and nothing writes them. The email is published from the verified key; the machine id is
+    // held in memory (`machineIdCache`) from the record.
 
     // Published mirrors for SwiftUI (AppStorage in a class doesn't drive objectWillChange reliably
     // across all consumers, so the manager owns explicit @Published snapshots).
@@ -649,17 +628,24 @@ final class LicenseManager: ObservableObject {
     private let kStoredKey = "storedLicenseKey"       // Keychain account for the raw MNFL- key
     private let kActivationRecord = "activationRecord" // Keychain account for the ActivationRecord JSON
 
+    /// The machine id this launch uses: from the Keychain record (or, until the migration has
+    /// run, the legacy plist value), set by `syncRecord`. nil until then. Never written to the plist.
+    private var machineIdCache: String?
+
     private init() {
         licenseActivated = activatedStore
         licenseValidated = validatedStore
-        email = emailStore
         licenseType = LicenseType(rawValue: typeStore)
     }
 
-    /// The stable per-install machine id (generated once on first access).
+    /// The machine id, minted in memory if nothing is known yet. ⚠️ A GETTER THAT MAY MINT — but
+    /// only into memory: what persists it is the Keychain record, written by `syncRecord`. Callers
+    /// that send it to the server go through `syncRecord` first so it is never an unrecorded id.
     var machineId: String {
-        if machineIdStore.isEmpty { machineIdStore = UUID().uuidString }
-        return machineIdStore
+        if let id = machineIdCache, !id.isEmpty { return id }
+        let minted = UUID().uuidString
+        machineIdCache = minted
+        return minted
     }
 
     /// The one gate the app reads. Licensed (both flags) OR in an active trial OR we could not
@@ -759,6 +745,7 @@ final class LicenseManager: ObservableObject {
             lastMessage = userFacingKeychainFault
             NSLog("[LICENSE] state: %@", state.summary)
             NSLog("[LICENSE] ⚠️ license read refused — holding all state; nothing written, nothing cleared")
+            logLegacyValuesLeftInPlace(reason: "the license could not be read from the Keychain")
             return
         }
         keychainFaultStatus = nil
@@ -772,6 +759,7 @@ final class LicenseManager: ObservableObject {
             state = .keychainUnreadable(errSecAuthFailed)
             lastMessage = userFacingKeychainFault
             NSLog("[LICENSE] state: %@", state.summary)
+            logLegacyValuesLeftInPlace(reason: "the trial clock could not be read from the Keychain")
             return
         }
 
@@ -780,7 +768,7 @@ final class LicenseManager: ObservableObject {
             // A stored key that verifies means this install activated at some point: nothing else
             // can put a correctly signed key in this account. So activation is restored from the
             // signature, NOT from the plist — which is exactly the recovery the old order missed.
-            email = payload.email; emailStore = payload.email
+            email = payload.email
             licenseType = payload.licenseType; typeStore = payload.licenseType.rawValue
             setActivated(true)
             setValidated(true)
@@ -796,7 +784,8 @@ final class LicenseManager: ObservableObject {
             // reconcile alone was a Keychain read, a write and a read-back — three more round trips
             // ahead of the window, for durability bookkeeping the user cannot see. Moving them here
             // is most of the win on the licensed path.
-            await reconcileActivationRecord()
+            await syncRecord(.init(licensed: true, validated: licenseValidated,
+                                   email: email, type: licenseType.rawValue))
             // Best-effort revocation check. Only a definite "revoked" clears validation.
             await refreshValidation(key: key)
             return
@@ -814,119 +803,42 @@ final class LicenseManager: ObservableObject {
         state = trial.active ? .trial(daysRemaining: trial.daysRemaining)
                              : (trial.expired ? .trialExpired : .unlicensed)
         NSLog("[LICENSE] state: %@", state.summary)
+
+        // After the publish, like the licensed tail. Makes no Keychain round trip unless the plist
+        // still holds a legacy email or machine id to move (privacy P1).
+        await syncRecord(.init(licensed: false))
     }
 
-    // MARK: - Activation record: read, and the one-way migration into it
+    // MARK: - Activation record: keep it current, and move the plist values into it (privacy P1)
 
-    private func readActivationRecord() async -> ActivationRecord? {
-        let read = await LicenseKeychain.read(kActivationRecord)
-        if let status = read.failureStatus {
-            // Not fatal and not a hold: the key already verified, so we are licensed either way.
-            // The record only carries machineId and display fields.
-            //
-            // ⚠️ AND EVERY CALLER STILL FALLS THROUGH TO THE MIGRATION on this `nil`, exactly as
-            // before. A refused read is not evidence that no record exists, but the migration is
-            // additive and its write is gated on its own status, so attempting it costs nothing —
-            // and a keychain that recovers between the two calls gets its record written rather
-            // than waiting a whole launch.
-            NSLog("[LICENSE] activation record unreadable (%@) — continuing on the key alone",
-                  keychainStatusDescription(status))
-            return nil
+    /// One `LicenseRecordSync` pass on the Keychain queue, then publish what it found. Logs what it
+    /// did by KEY NAME only — never the email, never the machine id.
+    ///
+    /// ⚠️ IT CANNOT DE-ACTIVATE ANYONE. It does not touch the stored key, the activated/validated
+    /// flags or the licence type, and deletes no Keychain item; the licensed decision was made
+    /// before it runs, from the signed key. A failed Keychain read leaves the plist exactly as it
+    /// is (see `LicenseRecordSync`).
+    @discardableResult
+    private func syncRecord(_ current: LicenseRecordSync.Current) async -> LicenseRecordSync.Outcome {
+        let outcome = await LicenseKeychain.syncRecord(account: kActivationRecord, current: current)
+        if let id = outcome.machineId, !id.isEmpty { machineIdCache = id }
+        if current.licensed, let recorded = outcome.record?.email, !recorded.isEmpty {
+            email = recorded
         }
-        return read.value.flatMap(ActivationRecord.decode)
+        for line in outcome.log { NSLog("[LICENSE] %@", line) }
+        return outcome
     }
 
-    /// The LAUNCH path's use of the record: read it, restore the machine id from it, migrate it.
-    ///
-    /// ⚠️ CALLED AFTER `state` IS PUBLISHED, NOT BEFORE, and the split into its own function is what
-    /// makes that possible. Nothing here feeds `gateDecision`: the key has already verified, so the
-    /// user is licensed and the gate is already open. This is durability bookkeeping, and it used to
-    /// sit between the Keychain and the first frame.
-    ///
-    /// ⚠️ `activate` DELIBERATELY DOES NOT CALL THIS — it calls `readActivationRecord` and the
-    /// migration directly, WITHOUT the machine-id restore below. It has just registered this
-    /// machine on the server under the CURRENT `machineId`; adopting a different id from an old
-    /// record immediately afterwards would leave the local id disagreeing with the one the server
-    /// now holds a slot for. The restore is a launch-time recovery and belongs only to launch.
-    private func reconcileActivationRecord() async {
-        let existing = await readActivationRecord()
-
-        // Machine id: the Keychain copy wins when there is one, so a lost plist stops minting
-        // a new id and burning a second machine slot.
-        //
-        // ⚠️ MAIN ACTOR, AND IT HAS TO BE. `machineIdStore` is `@AppStorage`, and `machineId` (used
-        // by the migration below) is A GETTER THAT MUTATES — it assigns a fresh UUID when the store
-        // is empty. It reads like a property and it is a write, which is exactly why nothing on the
-        // Keychain queue may touch it.
-        if let stored = existing?.machineId, !stored.isEmpty, stored != machineIdStore {
-            NSLog("[LICENSE] restored machine id from the Keychain (preferences copy was %@)",
-                  machineIdStore.isEmpty ? "missing" : "different")
-            machineIdStore = stored
-        }
-
-        await migrateActivationRecordIfNeeded(existing: existing)
-    }
-
-    /// Writes the durable activation record when it is missing or stale.
-    ///
-    /// ── ORDERING: THIS MIGRATION IS ADDITIVE, SO THERE IS NO DESTRUCTIVE STEP TO GET WRONG ──
-    ///
-    /// `StreamBookmarkStore.migratePassphrasesToKeychain` had to move a secret that existed in
-    /// exactly one place, so it is written write-then-verify-then-strip and leaves the original
-    /// byte-for-byte alone on any failure. The same discipline applies here, and this migration
-    /// takes its strongest possible form: IT NEVER DELETES THE OLD COPY AT ALL.
-    ///
-    ///   1. Read the existing record (already done by the caller).
-    ///   2. Write the new one. If the write fails — locked keychain, denied ACL, full disk —
-    ///      return. Nothing has changed.
-    ///   3. READ IT BACK and confirm it decodes to what we just wrote. A write that reports
-    ///      success and does not read back is the failure the stream migration exists to guard
-    ///      against, and it is cheap to rule out.
-    ///   4. Do nothing else. The `@AppStorage` keys stay exactly where they are, forever.
-    ///
-    /// Step 4 is the deliberate part. The plist keys cost nothing to keep, they remain a useful
-    /// redundant cache, and keeping them means a user who DOWNGRADES to 0.6.1 still launches
-    /// licensed — a build that has never heard of the activation record still finds the booleans
-    /// it expects. There is no window, at any point in this function, in which a licence exists in
-    /// neither store. A partial failure leaves the user exactly as they were.
-    private func migrateActivationRecordIfNeeded(existing: ActivationRecord?) async {
-        let desired = ActivationRecord(activated: true,
-                                       validated: licenseValidated,
-                                       email: email,
-                                       type: licenseType.rawValue,
-                                       machineId: machineId)
-
-        if let existing,
-           existing.activated == desired.activated,
-           existing.machineId == desired.machineId,
-           existing.email == desired.email,
-           existing.type == desired.type {
-            return   // already current
-        }
-
-        guard let json = desired.encoded() else {
-            NSLog("[LICENSE] ⚠️ could not encode the activation record — preferences copy retained")
-            return
-        }
-
-        let status = await LicenseKeychain.write(json, for: kActivationRecord)
-        guard status == errSecSuccess else {
-            NSLog("[LICENSE] ⚠️ activation record write failed (%@) — nothing removed, will retry next launch",
-                  keychainStatusDescription(status))
-            return
-        }
-
-        // Confirm it reads back before calling this migrated.
-        guard let echo = await LicenseKeychain.read(kActivationRecord).value,
-              let decoded = ActivationRecord.decode(echo),
-              decoded.machineId == desired.machineId else {
-            NSLog("[LICENSE] ⚠️ activation record did not read back after a successful write — "
-                  + "treating as not migrated; preferences copy retained")
-            return
-        }
-
-        NSLog("[LICENSE] activation record %@ in the Keychain (machine id now durable)",
-              existing == nil ? "created" : "updated")
+    /// The hold paths in `bootstrap` return before any record work. Say so when that leaves legacy
+    /// values in the plist, so a report can tell "not migrated yet" from "migration failed".
+    private func logLegacyValuesLeftInPlace(reason: String) {
+        let legacy = LicenseRecordSync.legacyValues(in: UserDefaults.standard)
+        var keys: [String] = []
+        if legacy.email != nil { keys.append(LicenseRecordSync.legacyEmailKey) }
+        if legacy.machineId != nil { keys.append(LicenseRecordSync.legacyMachineIdKey) }
+        guard !keys.isEmpty else { return }
+        NSLog("[LICENSE] legacy license values left in place in the preferences plist (%@): %@",
+              keys.joined(separator: ", "), reason)
     }
 
     /// Activation is inherently ONLINE (the server claims a machine slot). Offline pre-check gives a
@@ -950,6 +862,15 @@ final class LicenseManager: ObservableObject {
         isWorking = true; lastMessage = nil
         defer { isWorking = false }
 
+        // Reserve the machine id in the Keychain BEFORE it goes to the server (privacy P1: the
+        // plist no longer holds it). A lost reply after the server registered us must be retried
+        // with the same id, or it spends a second machine slot.
+        let reserved = await syncRecord(.init(licensed: false, reserveMachineId: true))
+        if reserved.keychainFailed {
+            NSLog("[LICENSE] ⚠️ machine id could not be reserved in the Keychain — activating with an "
+                  + "in-memory id for this session")
+        }
+
         switch await LicenseService.activate(key: key, machineId: machineId) {
         case .success(let s):
             // ⚠️ THE WRITE IS CHECKED. It used to be a bare `set(...)` whose @discardableResult was
@@ -965,7 +886,7 @@ final class LicenseManager: ObservableObject {
                               """
                 return
             }
-            email = s.email; emailStore = s.email
+            email = s.email
             licenseType = s.licenseType; typeStore = s.licenseType.rawValue
             setActivated(true)
             // Confirm validation: trust the successful activation, and corroborate with offline verify
@@ -982,8 +903,9 @@ final class LicenseManager: ObservableObject {
             keychainFaultStatus = nil
             state = .licensed(type: licenseType.display)
             // Write the durable record now rather than waiting for the next bootstrap, so a crash
-            // between activating and relaunching cannot leave the machine id living only in the plist.
-            await migrateActivationRecordIfNeeded(existing: await readActivationRecord())
+            // between activating and relaunching cannot leave the activation unrecorded.
+            await syncRecord(.init(licensed: true, validated: licenseValidated,
+                                   email: email, type: licenseType.rawValue))
             NSLog("[LICENSE] state: %@", state.summary)
         case .failure(let code):
             lastMessage = code.message
@@ -1011,7 +933,14 @@ final class LicenseManager: ObservableObject {
             guard let read = await LicenseKeychain.read(kStoredKey).value else { return }
             key = read
         }
-        switch await LicenseService.validate(key: key, machineId: machineId) {
+        // ⚠️ NEVER VALIDATE WITH AN ID NOBODY RECORDED. `bootstrap` syncs the record first, so this
+        // is set on every normal path; if the record and the plist were both unreadable it is not,
+        // and minting one here would ask the server about a machine it has never seen.
+        guard let knownMachineId = machineIdCache, !knownMachineId.isEmpty else {
+            NSLog("[LICENSE] revalidation skipped — no recorded machine id this launch")
+            return
+        }
+        switch await LicenseService.validate(key: key, machineId: knownMachineId) {
         case .valid:
             setValidated(true)
         case .invalid(let code):
@@ -1031,15 +960,27 @@ final class LicenseManager: ObservableObject {
     /// Clears LOCAL activation only. Per the Graviton docs the server still counts this machine until
     /// an admin deregisters it — so we surface that, and we do NOT touch the trial.
     func deactivate() {
-        // BOTH stores, or bootstrap's key-first order would restore from whichever survived.
+        // The key goes; bootstrap's key-first order then restores nothing.
         KeychainStore.license.delete(kStoredKey)
-        KeychainStore.license.delete(kActivationRecord)
+        // ⚠️ THE RECORD IS REWRITTEN, NOT DELETED, WHEN THE MACHINE ID IS KNOWN (privacy P1). The
+        // plist used to keep the machine id across a deactivation, so re-activating reused this
+        // machine's slot (the server still counts it). With the plist gone, deleting the record
+        // would mint a new id on re-activation and spend a second slot. The record kept is
+        // unactivated and carries no email.
+        if let id = machineIdCache, !id.isEmpty,
+           let json = ActivationRecord(activated: false, validated: false, email: "", type: "",
+                                       machineId: id).encoded(),
+           KeychainStore.license.write(json, for: kActivationRecord) == errSecSuccess {
+            // kept, unactivated
+        } else {
+            KeychainStore.license.delete(kActivationRecord)
+        }
         setActivated(false)
         setValidated(false)
         keychainFaultStatus = nil
         state = trial.active ? .trial(daysRemaining: trial.daysRemaining)
                              : (trial.expired ? .trialExpired : .unlicensed)
-        email = ""; emailStore = ""
+        email = ""
         typeStore = ""; licenseType = .unknown
         lastMessage = "Deactivated on this machine. Note: the server still counts this machine until an admin deregisters it."
     }

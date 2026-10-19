@@ -22,6 +22,8 @@
 //
 
 #import "DataChannelBridge.h"
+#import <AppKit/AppKit.h>          // Manifold-Swift.h declares AppKit subclasses; it needs this first
+#import "Manifold-Swift.h"         // MFPrivacyLog — the log redaction rules (privacy P1)
 
 #import "H264Depacketizer.h"
 #import "RTCPNack.h"
@@ -41,7 +43,10 @@
 #include <rtc/rtc.h>
 
 static void ManifoldRTCLog(rtcLogLevel level, const char *message) {
-    NSLog(@"[WEBRTC] (%d) %s", (int)level, message ?: "");
+    // Any address libdatachannel/libjuice names (a candidate, a binding) is withheld before it
+    // reaches the log (privacy P1).
+    NSString *text = message ? @(message) : @"";
+    NSLog(@"[WEBRTC] (%d) %@", (int)level, [MFPrivacyLog withholdingIPAddresses:text]);
 }
 
 /// One-time library init. The smoke test does this inline; the session path needs the same
