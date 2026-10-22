@@ -89,6 +89,10 @@ bullet.
 - Fixed: files tagged with the Rec. 601 or BT.470BG matrix were measured by the scopes and sent over SDI as Rec. 709, and the readout said the matrix was assumed. Picture, scopes, SDI and readout now all use the file's matrix.
 - Fixed: Rec. 2020 SDR, DCI-P3, SMPTE-C and EBU sources were shown with Rec. 709 primaries, so they looked less saturated than they are. Each is now shown with its own primaries, and the CIE scope plots it the same way. DCI-P3 is shown with its white adapted to D65, and the readout says so.
 - Fixed: the scopes could keep an earlier source's color settings (scale, gamut target and labels) after switching to a WHEP or HLS stream, after a stream ended, or when the scopes tray was opened or closed during a live stream. The scopes now always describe what is playing.
+- Fixed: some files with PCM audio played silently because their audio track's channel layout was malformed, and a 6-channel file whose layout claimed a different number of channels could make Manifold quit. Both now play with their audio.
+- Fixed: when a file's audio track can't be read, the meters said "No audio track" and the warning disappeared after a few seconds. The meters now say "Audio not read", and the inspector says why for as long as the file is open.
+- Fixed: closing a window while its file was still opening could leave the sound playing with no window.
+- Fixed: closed windows kept their memory and playback resources until Manifold quit. They are now released when the window closes.
 
 ### Known limitations
 

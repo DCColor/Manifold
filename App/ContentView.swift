@@ -658,6 +658,14 @@ struct ContentView: View {
             // first, which is what makes `deck.shouldAutoplayOnLoad` answer the question that was
             // actually being asked.
             Task { @MainActor in
+                // A window closed between the open and this turn (or before SwiftUI delivered the URL at
+                // all) must not be loaded into: its engine is stopped and nothing would ever stop it again.
+                // MEASURED 2026-10-21: a window closed 0.1 s after `open` got this callback ~1 s later and
+                // played the whole file with no window. See `WindowDeck.hasClosed`.
+                guard !deck.hasClosed else {
+                    NSLog("%@", "[OPEN] not loading \(url.lastPathComponent) — the window it was opened into has closed")
+                    return
+                }
                 // ── RE-USE AN EMPTY WINDOW RATHER THAN LEAVING A STRAY ONE ─────────────────
                 //
                 // MEASURED (docs/MULTIWINDOW_FINDINGS.md §3.2): SwiftUI creates a NEW window for

@@ -1381,6 +1381,145 @@ defect, and that title was never written into this file.
 
 ---
 
+## ✅ FIXED 2026-10-21 (uncommitted; pending a real session) — PRE-EXISTING, ALL BUILDS — a malformed channel layout silences a 1- or 2-channel file, and the meters then say "NO AUDIO TRACK"
+
+**Found in the audio audit (Robbie, 2026-10-21)**, from Joey's 0.8.4 diagnostics and the client's file
+`TCMOP_NSS_Oriental_MKE_REF.mov` (ProRes 422 Proxy, `in24` LE stereo, 48 kHz).
+
+- **What:** the file plays with no sound. `[PLAYBACK] audio reader startReading failed … -11800 … -50 paramErr`, then
+  `reading from 0.0s (audio reader: false)`. Reproduced on 0.8.4 and on HEAD `14e1ea5`.
+- **Cause (measured, on copy-on-write clones of the file):** its `chan` box carries the Stereo tag (0x00650002) with
+  zero channel descriptions but is **52 bytes long** (12 plus 40 trailing zero bytes, room for two descriptions). With
+  no `AVChannelLayoutKey` in the output settings, AVFoundation derives the output layout from that source layout and
+  fails. Removing `chan`, or the same tag at the correct 12 bytes, reads; the dangling `tref/chap → track 0` is
+  unrelated. ANY explicit output layout reads, even the malformed 52 bytes passed back verbatim.
+- **Why the ARRI fix missed it:** `audioOutputSettings` supplies a layout only above stereo. It is the same family as
+  the August ARRI case (0xFFFF0000, a 5-channel track claiming 0 channels), but a different property: here the count
+  agrees and only the size is wrong.
+- **Second defect, in the reporting:** every audio read failure sets `audioPresence = .absent`, so the meters read
+  "NO AUDIO TRACK" about a file that has one. The only true statement is the banner, which auto-dismisses after 9 s.
+  A file opened into the empty launch window does not autoplay, so a user who presses Play later hears silence with
+  nothing on screen to say why (Robbie's report).
+- **Fix (decided):** always set `AVChannelLayoutKey` (Mono or Stereo for 1 or 2 channels; the source's own layout, or
+  DiscreteInOrder, above that), and trust a source layout only when its byte size matches its description count and its
+  channel count matches the track's. "Audio not read" becomes its own persistent state: an inspector row (as
+  `pictureCaveat`) and its own meter label, cleared on the next load.
+
+**What was built (2026-10-21).**
+- `AudioOutputLayout` (new leaf target, `Packages/ManifoldCore/Sources/AudioOutputLayout/`): `validate` checks a source
+  layout's size against its description count (shorter → `truncated`; longer → `oversized`, trimmed to the declared
+  size) and its channel count against the track's (`countMismatch`), and never trusts the Unknown family. `decide`
+  ALWAYS returns a layout: the validated source layout at every count, else Mono, Stereo or DiscreteInOrder. 14 unit
+  tests (`AudioOutputLayoutTests`).
+- ⚠️ **NOT "always Mono or Stereo for 1 or 2 channels", which was the plan, because it was measured to change valid
+  files' audio.** The output layout is a mapping, not a label. On generated fixtures, forcing Stereo onto a valid
+  2-channel DiscreteInOrder track decoded SILENCE on both channels; onto Center + LFE it copied the centre to both and
+  dropped the LFE; forcing Mono onto a 1-channel track labelled Left changed the samples. Keeping a validated source
+  layout reproduced HEAD byte for byte on all 11 valid odd layouts tried (Lt/Rt, Binaural, Mid/Side, Headphones,
+  DiscreteInOrder, per-channel descriptions, none). Mono/Stereo are the fallback for an untrusted layout only.
+- `FrameEngine.beginAudioReading`: every failure on a track that exists is `AudioPresence.unreadable(channels:)`
+  (new case) plus `audioCaveat` (new, beside `pictureCaveat`), through one `audioUnreadable`; only a missing track is
+  `.absent`. The banner is unchanged and still once per file. `AudioMeterModel.Status.audioNotRead`: "AUDIO NOT READ",
+  header "· audio not read", a warning triangle. Inspector: a "Playback" row under Audio.
+
+**Results (2026-10-21; harness `pcmhash` compiles the production `AudioOutputLayout.swift` itself).**
+- TCMOP: HEAD fails -11800/-50; the fix reads 19,023,004 frames, peaks −1.4 / −1.3 dBFS, PCM SHA-256 `a1505ded…`,
+  identical to a copy-on-write clone with a correct 12-byte `chan` (under the fix and under HEAD). In the app: `audio
+  reader: true`, the tap receiving L R, the meter "2 ch dBFS" moving, no warning row. Original file unchanged (md5).
+- 1 / 2 / 6 / 8 channels × correct / oversized / Unknown, and a 6-channel track tagged Stereo: 13 / 13 read, count
+  kept, every channel its own tone, PCM identical to the correct-layout file. HEAD: the oversized stereo fails
+  -11800/-50, and the count mismatch **throws `NSInvalidArgumentException` ("AudioChannelLayout channel count does not
+  match AVNumberOfChannelsKey")** — an uncaught exception, i.e. a crash in the app. Fixed by the same check.
+- Unreadable audio (a copy whose audio sample entry is `zzzz`; -11800 / 'fmt?'): banner, meter "AUDIO NOT READ" and
+  the inspector row at ~2 s; at ~46 s, after 10 loop re-reads, the banner gone (once per file) and row and meter still
+  there; cleared when a readable file was opened into the same window. A file with no audio track still reads "NO
+  AUDIO TRACK".
+- HEAD vs fix, every audio track in the sync clips, Anthem, Space Tech and the 24-track PQ wedge (40 tracks): frames,
+  PCM SHA-256, first timestamp and gaps (0) identical.
+
+**Observations, not fixed here.**
+- A `chan` declaring more descriptions than its box holds makes AVFoundation drop the audio track altogether (0 audio
+  tracks exposed), so the meters say "NO AUDIO TRACK" about it and nothing on this path can see it.
+- A valid Mid/Side (tag 104) stereo track decodes to silence under HEAD and the fix alike. Not investigated.
+
+---
+
+## ✅ FIXED 2026-10-21 (uncommitted; pending a real session) — PRE-EXISTING, ALL BUILDS — closing a window while its file is still loading leaves the audio playing with no window
+
+**Found in the audio audit (Robbie, 2026-10-21)**; reported by Joey and the client on `Anthem 30 w GFX.mp4` and
+`Space Tech 30 w GFX.mp4`. Reproduced on HEAD `14e1ea5`, and heard (Robbie, 19:56).
+
+- **What:** the sound carries on after the window has gone, to the end of the file. CoreAudio reports the process
+  running output with no window open.
+- **Cause (measured with an injected lifecycle logger):** closing the window runs `engine.stop()` (`ContentView`
+  `.onDisappear`). `loadAsset` is still suspended in one of its `await`s; it resumes, builds both readers and calls
+  `play()` on the stopped engine. `stop()` bumps `sessionToken`, but `beginReading` mints a fresh token of its own, and
+  nothing between the awaits asks whether the engine was stopped. Logged: window closed 19:56:37.127, deck deregistered
+  37.142, readers rebuilt and `setRate:1` at 37.328 on an engine with no window. Hit on the first (cold) open of a file,
+  when the load's awaits are slow enough for the close to land inside them; 1 in 24 cycles warm.
+- **0.8.4:** the same code shape (its `loadAsset` line 1551).
+- **Fix (decided):** `loadAsset` must never start or resume playback after the engine was stopped. Check the load
+  generation after every await (`stop()` bumps it), and re-check before `beginAudioReading` and before `play()`.
+
+**What was built (2026-10-21).**
+- `stop()` bumps `loadGeneration` and a new `stopCount`. `loadAsset` checks after EVERY await, before writing: the
+  vetting phase asks only "stopped since the load was REQUESTED?" (`loadStopped`; the count is read synchronously in
+  `load(url:autoplay:)`, because the Task can start after a later stop) — not "did the generation move", which would
+  have made a newer open give up when an older one committed; the commit phase asks whether it is still the current
+  load (`loadAbandoned`).
+- `beginReading` returns on a stopped engine (`hasMedia` false) and re-checks its session token before
+  `beginAudioReading` and before `play()`. `beginAudioReading` takes its token BEFORE its first await (it used to mint
+  one after resuming, which made a stale call current) and re-checks after it.
+- A second route, found by the 50-cycle run: a window closed 0.1 s after `open` still received `.onOpenURL` about a
+  second later, and its deferred load played the file with no window. `WindowDeck.hasClosed`, set by the
+  `willCloseNotification` observer only, refuses loads in `WindowDeck.load` and in `.onOpenURL`'s deferred Task.
+
+**Results (2026-10-21).** 50 cycles each: open Anthem / Space Tech / TCMOP in the background, close after a seeded
+0.1–1.8 s, with async load completions delayed 200 ms by the test harness (a slow volume) so the close lands inside
+the load. Fix: 0 plays after a close (scored from the log over each cycle, not only the 2.5 s sample), CoreAudio
+output 0 after every close and 5 s after the last; abandoned at the video track 20, duration 10, audio tracks 19, the
+start 1. HEAD on the same run: output still running after 50 / 50 closes, 38 plays after a close in 36 cycles.
+
+---
+
+## ✅ FIXED 2026-10-21 (uncommitted; pending a real session) — PRE-EXISTING, ALL BUILDS — a closed window's FrameEngine is never released
+
+**Found in the audio audit (Robbie, 2026-10-21).**
+
+- **What:** across the audit's HEAD runs, **25** `AVSampleBufferRenderSynchronizer`s and 25 audio renderers were created
+  and **none** destroyed. Each window's engine outlives the window, including the hidden window that `[OPEN] loaded into
+  an existing empty window; closing the one this open created` builds and closes on every open. A normally closed
+  engine is stopped and silent, but the one stranded by the load race above stays at rate 1 and holds the audio device
+  open (CoreAudio `IsRunningOutput` stays 1 after its file has ended).
+- **Cause (measured with `heap` / `leaks --traceTree` on the running app): the whole closed WINDOW was kept, and the
+  engine only with it.** Two retainers, both ours:
+  1. `DeckHostView.registeredWindow` was a STRONG `NSWindow?`. The view lives inside that window — a cycle — and it was
+     cleared only in `viewDidMoveToWindow(nil)`, which a close never calls (closing does not remove views).
+  2. For a window that had been key: `DeckRegistry.deregister`, run from `willCloseNotification`, handed the delegate
+     slot back from the `WindowSizer` proxy to SwiftUI's in the middle of that same notification. The registry's
+     observer was registered at launch, so it ran first; the proxy's observation was dropped and the new delegate did
+     not receive the post, so SwiftUI's `windowWillClose:` never ran and its `AppKitWindowController` (and the window)
+     stayed in `AppWindowsController`.
+  The other paths `leaks` reports (the renderer's `CVDisplayLink` context, views' `_viewRoot`) are unretained, and the
+  last `NSEvent` holds its window only until the next event.
+- **Fix (decided):** a closed window releases its engine, renderer and audio device.
+
+**What was built (2026-10-21).** `registeredWindow` is `weak` (the close is deregistered by the willClose observer);
+`deregister` hands the delegate back on the next main-queue turn (`detach` tolerates a window already gone).
+
+**Results (2026-10-21).** One close, then one event: before, the window, controller, deck, engine, renderer,
+synchronizer and audio renderer all alive; after, none — for the launch window, a key window with the proxy installed,
+and the hidden window `[OPEN]` closes. The weak reference alone did not free a key window (measured). 50 open → play
+3 s → close cycles, no fault injection: synchronizers 51 / 51, audio renderers 51 / 51, scrub players 50 / 50, readers
+100 / 100 destroyed / created, nothing alive at the end, footprint 77 / 92 / 94 / 94 MB at cycles 1 / 10 / 25 / 50.
+HEAD on the mid-load run: 51 windows and engines alive at the end, 354 → 1,471 MB.
+
+**Not resolved.** Under the 200 ms load-delay injection only, footprint still drifted +10 MB over cycles 10–50, with
++160 suspended task stacks and +117 `MoviePerTrackInfo`: asset loads left suspended. Not reproduced without the
+injection (flat from cycle 25); whether it is the injection or the app is not established.
+
+---
+
 ## ✅ FIXED 2026-10-17 (`8e42636`) — PRE-EXISTING, ALL BUILDS — repeated frame-step presses get lost
 
 **Fixed:** the steps own the position. `FrameEngine.stepFrameIndex` is the frame the last accepted press went to;

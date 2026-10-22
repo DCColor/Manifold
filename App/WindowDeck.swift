@@ -215,6 +215,14 @@ final class WindowDeck: ObservableObject {
     /// The NSWindow hosting this deck, or nil before the view is in a window / after teardown.
     fileprivate(set) weak var window: NSWindow?
 
+    /// This deck's window has CLOSED — for good, not merely left the registry. Set by the
+    /// `NSWindow.willCloseNotification` observer and nowhere else (a view moving between windows also
+    /// deregisters, and must keep working). Nothing may load into a closed deck: its engine has been
+    /// stopped, and a load arriving after that played the file with no window (docs/BUGS.md, "closing a
+    /// window while its file is still loading" — an `.onOpenURL` delivered to a window closed 0.1 s after
+    /// it opened, measured 2026-10-21).
+    fileprivate(set) var hasClosed = false
+
     /// This window's engine and renderer. Populated by `WindowDeckRegistrar` before the window
     /// callback can run, so `DeckRegistry.register` always sees a complete deck.
     ///
@@ -484,6 +492,10 @@ final class WindowDeck: ObservableObject {
     /// leave this file — the whole point of the registration seam is that nothing outside it wires
     /// itself to a deck's internals.
     func load(url: URL) {
+        guard !hasClosed else {
+            NSLog("%@", "[OPEN] not loading \(url.lastPathComponent) — its window has closed")
+            return
+        }
         SessionPaths.note(url)   // for the diagnostics redactor (privacy P1)
         engine?.load(url: url, autoplay: shouldAutoplayOnLoad)
     }
@@ -566,7 +578,12 @@ final class DeckRegistry {
             forName: NSWindow.willCloseNotification, object: nil, queue: .main
         ) { note in
             guard let window = note.object as? NSWindow else { return }
-            MainActor.assumeIsolated { DeckRegistry.shared.deregister(window: window) }
+            MainActor.assumeIsolated {
+                // A CLOSE, not just a deregistration: mark the deck before it leaves the registry, so a load
+                // still on its way to it (a deferred `.onOpenURL`) finds it closed. See `WindowDeck.hasClosed`.
+                DeckRegistry.shared.entries[ObjectIdentifier(window)]?.deck?.hasClosed = true
+                DeckRegistry.shared.deregister(window: window)
+            }
         })
 
         // ── HOW THE APP LEARNS WHICH WINDOW IS ACTIVE ──────────────────────────────────────
@@ -955,7 +972,18 @@ final class DeckRegistry {
         // holds its `@StateObject`, and a proxy left in the chain is a delegate message going to an
         // object that no longer speaks for any window. (The deinit is still needed as well: this
         // reference to the deck is WEAK, so a deck that dies before deregistering never gets here.)
-        entry.deck?.sizer.detach()
+        //
+        // ⚠️ ON THE NEXT TURN, NOT NOW. This runs inside `NSWindow.willCloseNotification`, and this
+        // observer was registered at launch, before any window's delegate — so it runs FIRST. Handing
+        // the slot back here re-registers the delegate mid-post: AppKit drops the proxy's observation,
+        // and an observer added during a post does not receive it, so SwiftUI's own delegate never got
+        // `windowWillClose:`, never retired its window controller, and the window, its view graph and
+        // its FrameEngine all stayed alive (MEASURED 2026-10-21, a window that had been key). Deferred,
+        // the proxy is still in place for this close and forwards it to SwiftUI. `detach()` tolerates
+        // a window that has gone in the meantime (its reference is weak).
+        if let sizer = entry.deck?.sizer {
+            DispatchQueue.main.async { sizer.detach() }
+        }
 
         if let deck = entry.deck {
             let id = ObjectIdentifier(deck)
@@ -1840,7 +1868,14 @@ private final class DeckHostView: NSView {
     private let deck: WindowDeck
     /// Guards against a re-entrant callback for the SAME window (AppKit may call this more than
     /// once) and gives the nil case the identity it needs to deregister the right entry.
-    private var registeredWindow: NSWindow?
+    ///
+    /// ⚠️ WEAK, AND THAT IS THE FIX FOR A LEAK OF THE WHOLE WINDOW. This view lives inside the window,
+    /// so a strong reference back to it is a cycle, and closing a window does not remove its views:
+    /// `viewDidMoveToWindow(nil)`, the only place this was cleared, never runs on a close. MEASURED
+    /// (2026-10-21): every closed window, its view graph and its FrameEngine stayed alive, 25 created
+    /// and 0 destroyed. A close is deregistered by `NSWindow.willCloseNotification` (DeckRegistry), so
+    /// nothing here needs the window to outlive it.
+    private weak var registeredWindow: NSWindow?
 
     /// THE TITLE'S FILE-SIDE TRIGGER, AND IT LIVES HERE FOR A LIFETIME REASON.
     ///

@@ -44,6 +44,8 @@ let package = Package(
         .library(name: "PlayheadSlider", targets: ["PlayheadSlider"]),
         // ManifoldCore uses it (frame-stepping on the AVFoundation path); a product so the tests can name it.
         .library(name: "FrameGrid", targets: ["FrameGrid"]),
+        // ManifoldCore uses it (the file audio reader's output layout); a product so the tests can name it.
+        .library(name: "AudioOutputLayout", targets: ["AudioOutputLayout"]),
         // Linked by the APP target directly (project.yml), for the renderer's paused-picture rules.
         .library(name: "FrameQueuePolicy", targets: ["FrameQueuePolicy"]),
         // Linked by the APP target directly (project.yml): log and diagnostics redaction (privacy P1).
@@ -408,6 +410,24 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // The file audio reader's output channel layout, and the check a source's own layout must pass before it is
+        // trusted (docs/BUGS.md, "a malformed channel layout silences a 1- or 2-channel file"). A leaf target,
+        // CoreAudioTypes only, for the same linking reason as the others.
+        .target(
+            name: "AudioOutputLayout",
+            path: "Sources/AudioOutputLayout",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "AudioOutputLayoutTests",
+            dependencies: ["AudioOutputLayout"],
+            path: "Tests/AudioOutputLayoutTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The renderer's two paused-picture rules — which end a full queue trims, and when the paused-seek fallback
         // may draw (docs/BUGS.md, "a paused step or seek can come to rest one or two frames past its target"). A leaf
         // target, no dependencies, so `swift test` can replay the traced bursts; the renderer is app code.
@@ -468,7 +488,7 @@ let package = Package(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
-                           "ContainerRepair", "FrameGrid"],
+                           "ContainerRepair", "FrameGrid", "AudioOutputLayout"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

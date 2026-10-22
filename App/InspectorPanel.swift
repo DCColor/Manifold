@@ -133,9 +133,17 @@ struct InspectorPanel: View {
                     ContentLightSection(hdr10: m.hdr10, transferCode: m.transferFunctionCode)
                 }
 
-                if !m.audioTracks.isEmpty {
+                if !m.audioTracks.isEmpty || engine.audioCaveat != nil {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
-                    SectionHeader(m.audioTracks.count == 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
+                    SectionHeader(m.audioTracks.count <= 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
+                    // ⚠️ THE STANDING STATEMENT THAT NOTHING IS BEING HEARD, the audio twin of the "Picture" row: the
+                    // banner says it once and goes after 9 s, and this stays for as long as the file is open. Read
+                    // off the ENGINE — a fact about this decode, not about the file, which is fine. Orange for the
+                    // same reason as "Picture": attention, not an error the user made.
+                    if let caveat = engine.audioCaveat {
+                        MetadataRow(label: "Playback", value: caveat)
+                            .foregroundStyle(.orange)
+                    }
                     ForEach(Array(m.audioTracks.enumerated()), id: \.offset) { index, track in
                         // Second entry point for the SAME state the control bar's selector drives —
                         // the tracks are already described here, so making the description clickable

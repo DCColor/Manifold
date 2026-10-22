@@ -10,6 +10,8 @@ import FileAudioLookahead
 import ColorimetryModel   // SourceChroma — the chain readout's Chroma line (Stage 3b S2)
 import FileChroma
 import FrameGrid
+// The file audio reader's output layout, and the size check a source's own layout must pass first.
+import AudioOutputLayout
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -128,6 +130,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// every load, like the notice.
     @Published public private(set) var pictureCaveat: String?
 
+    /// Why THIS file's audio is not being heard, or nil when it is (or when the file has no audio track) — the
+    /// audio counterpart of `pictureCaveat`, and a standing condition for the same reason: the banner says it once
+    /// and auto-dismisses after 9 s, and a file opened into an empty window does not autoplay, so a user who presses
+    /// Play later heard silence with nothing on screen to say why (TCMOP, 2026-10-21). Shown as an inspector row;
+    /// the meters read `audioPresence == .unreadable`. Cleared on every load and on `stop()`, and by a track switch
+    /// that reads.
+    @Published public private(set) var audioCaveat: String?
+
     /// True once this file has fallen back to video-only, so the notice is raised ONCE per file
     /// rather than re-firing on every seek (beginReading runs per seek, and the fallback with it).
     private var audioFallbackAnnounced = false
@@ -137,6 +147,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// must not have their results land on the engine afterwards. Each Task captures the generation
     /// it was started for and publishes only if it is still current.
     private var loadGeneration = 0
+    /// Bumped by `stop()` only. What `loadAsset`'s vetting phase checks after each `await` — see `loadStopped`.
+    private var stopCount = 0
 
     /// The newest position a frame step has asked for, or nil when none is outstanding, plus
     /// whether the drain loop that services it is running. See `stepFrame` for why holding an arrow
@@ -607,7 +619,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // file still on screen — the inspector's "Edit in Flip", the arbiter's window name and the
         // caption sidecar's `onChange(of: currentURL)` all followed a file that never loaded. It is
         // assigned in `loadAsset`'s commit phase now, with everything else the new source owns.
-        Task { await loadAsset(url: url, autoplay: autoplay) }
+        //
+        // The stop count is read HERE, synchronously, and not at the top of `loadAsset`: the Task may not start
+        // until after a `stop()` that came later than this request, and that stop must still cancel it.
+        let stops = stopCount
+        Task { await loadAsset(url: url, autoplay: autoplay, requestedAtStops: stops) }
     }
 
     /// Re-read the current file's metadata from disk (e.g. after editing it in
@@ -1080,6 +1096,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// ⚠️ THIS UNLOADS THE FILE. For "stop playing but keep the media", use `yieldTransport()`.
     public func stop() {
         _ = sessionToken.next()
+        // ⚠️ A LOAD STILL IN FLIGHT MUST SEE THIS. `loadAsset` suspends at every `await`; without this bump it
+        // resumed after a window close, built both readers and called `play()` on a stopped engine with no window,
+        // and the audio ran to the end of the file (docs/BUGS.md, "closing a window while its file is still
+        // loading"; measured on Space Tech, 2026-10-21). `loadAsset` checks after every await and gives up when either
+        // has moved. The generation bump also retires the inspection Tasks, which belong to the departed file.
+        loadGeneration &+= 1
+        stopCount &+= 1
         stopReverseJog()
         shuttleRate = 0
         applyAudioMute()
@@ -1114,6 +1137,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // Back to "don't know", NOT to "no audio": nothing is loaded, so there is nothing to
         // assert. A meter must not report absence on the strength of a teardown.
         audioPresence = .unknown
+        audioCaveat = nil
         isPlaying = false
         currentTime = 0
         // An outstanding frame-step destination belongs to the file that just left. Left set, it
@@ -1514,7 +1538,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     ///  immediately, exactly as it did before this split — it has never had a refusal to be
     ///  non-destructive about. When it grows one, it belongs in phase 1 with the others.
     /// ══════════════════════════════════════════════════════════════════════════════════════════
-    private func loadAsset(url: URL, autoplay: Bool) async {
+    private func loadAsset(url: URL, autoplay: Bool, requestedAtStops entryStops: Int) async {
+
+        // ⚠️ EVERY `await` BELOW IS FOLLOWED BY `loadAbandoned`, BEFORE ANYTHING IS WRITTEN. The engine can be
+        // stopped while this load is suspended — the window closed, a live stream took the deck — and `stop()`
+        // bumps `loadGeneration`. A load that carried on regardless rebuilt the readers and called `play()` on an
+        // engine with no window, and the audio ran to the end of the file (docs/BUGS.md, "closing a window while
+        // its file is still loading"). Phase 1 asks only whether the engine was STOPPED (`stopCount`): another load
+        // committing meanwhile is not a reason to give up a newer open. Phase 2 asks whether this load is still the
+        // current one (`loadGeneration`, which its own commit bumps and which `stop()` bumps too).
+        // `entryStops` is the count when the load was REQUESTED (see `load(url:autoplay:)`).
+        if loadStopped(since: entryStops, url, at: "the start") { return }
 
         // ══════════ PHASE 1 — VET. NOTHING BELOW THIS LINE MAY WRITE STATE. ══════════
 
@@ -1597,12 +1631,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var containerRouteEntry: FourCharCode = 0
         if !isMXF {
             let asset = AVURLAsset(url: url)
-            if let vTrack = try? await asset.loadTracks(withMediaType: .video).first {
+            let videoTrack = try? await asset.loadTracks(withMediaType: .video).first
+            if loadStopped(since: entryStops, url, at: "the video track") { return }
+            if let vTrack = videoTrack {
                 vettedAsset = asset
                 vettedTrack = vTrack
             } else {
                 // Off the main actor: the scan reads the movie box and libav opens the file.
-                switch await Task.detached(priority: .userInitiated, operation: { ContainerSlackRoute.vet(url: url) }).value {
+                let verdict = await Task.detached(priority: .userInitiated, operation: { ContainerSlackRoute.vet(url: url) }).value
+                if loadStopped(since: entryStops, url, at: "the container vet") { return }
+                switch verdict {
                 case .route(_, _, let sampleEntry):
                     vettedAsset = asset
                     containerRoute = true
@@ -1631,6 +1669,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // the one on screen.
         playbackNotice = nil
         pictureCaveat = nil
+        audioCaveat = nil
         audioFallbackAnnounced = false
         containerSlackRoute = containerRoute
         containerRouteMetadataAsset = nil
@@ -1693,7 +1732,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             }
         }
 
-        if let dur = try? await asset.load(.duration) {
+        let loadedDuration = try? await asset.load(.duration)
+        if loadAbandoned(generation, url, at: "the duration") { return }
+        if let dur = loadedDuration {
             let seconds = CMTimeGetSeconds(dur)
             if seconds.isFinite { self.duration = seconds }
         }
@@ -1702,7 +1743,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // The track was found in phase 1, so by here the media is genuinely playable.
         self.hasMedia = true
         // ALL of them, not `.first` — see `audioTracks`. Selection resets to track 1 for a new file.
-        self.audioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+        let loadedAudioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+        if loadAbandoned(generation, url, at: "the audio tracks") { return }
+        self.audioTracks = loadedAudioTracks
         self.selectedAudioTrackIndex = 0
 
         // Range (8-bit): capture the SOURCE's signaled range (same format-
@@ -1712,7 +1755,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         rangeOverride = .auto
         useLibav = false
         libavFileFormatDescription = nil
-        if let formats = try? await vTrack.load(.formatDescriptions), let fmt = formats.first {
+        let videoFormats = try? await vTrack.load(.formatDescriptions)
+        if loadAbandoned(generation, url, at: "the video format") { return }
+        if let formats = videoFormats, let fmt = formats.first {
             sourceRange = MediaInspector.sourceColorRange(for: fmt)
             // ── THE DISPLAY'S COLOUR STATE, ESTABLISHED HERE AND NOT FROM `metadata` ─────────
             //
@@ -1757,7 +1802,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             libavFileFormatDescription = useLibav ? fmt : nil
             // The frame grid, for this path only (see `frameGrid`). Read here, before `beginReading`, so the first
             // step has it.
-            frameGrid = useLibav ? nil : await Self.makeFrameGrid(for: vTrack, url: url)
+            let grid = useLibav ? nil : await Self.makeFrameGrid(for: vTrack, url: url)
+            if loadAbandoned(generation, url, at: "the frame grid") { return }
+            frameGrid = grid
             // ── THE FILE'S CHROMA, AT THE SAME POINT AND ON THE SAME ARGUMENT (Stage 3b S2) ──────
             // Before `installScrubProducer` below and before `beginReading`: both read
             // `videoPixelFormat`, so this one answer is what both decoders are built with. libav
@@ -1787,7 +1834,26 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         installTimeObserverIfNeeded()
 
         print("FrameEngine: loaded — duration \(self.duration)s, audio tracks: \(self.audioTracks.count) (monitoring \(self.audioTracks.isEmpty ? "none" : "#\(self.selectedAudioTrackIndex + 1)"))")
+        if loadAbandoned(generation, url, at: "the first read") { return }
         await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    /// True — and logged — when the load that started at `generation` has been overtaken while it was suspended:
+    /// `stop()` bumps the generation, and so does a newer load's commit. The caller returns at once, before writing
+    /// anything, so a stopped engine is left exactly as `stop()` left it.
+    private func loadAbandoned(_ generation: Int, _ url: URL, at step: String) -> Bool {
+        guard loadGeneration != generation else { return false }
+        NSLog("[PLAYBACK] load of %@ abandoned at %@ — the engine was stopped, or a newer load took over",
+              url.lastPathComponent, step)
+        return true
+    }
+
+    /// Phase 1's question, which is narrower: was the engine STOPPED since the load began? Not "did the generation
+    /// move" — an older load committing while a newer one is still being vetted must not make the newer one give up.
+    private func loadStopped(since stops: Int, _ url: URL, at step: String) -> Bool {
+        guard stopCount != stops else { return false }
+        NSLog("[PLAYBACK] load of %@ abandoned at %@ — the engine was stopped", url.lastPathComponent, step)
+        return true
     }
 
     // MARK: - File chroma (Stage 3b S2)
@@ -3912,25 +3978,46 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func beginAudioReading(from start: CMTime) async {
         teardownAudioReading()
 
-        guard let asset, let aTrack = audioTrack,
-              let settings = await Self.audioOutputSettings(for: aTrack) else {
-            // No audio track at all, or no readable stream description. Both are POSITIVE evidence
-            // of absence for a file we have successfully opened — the meters are entitled to say
-            // "NO AUDIO TRACK" rather than sit at silence.
+        // A STOPPED ENGINE NEVER BUILDS A READER. `stop()` clears `hasMedia`; a track switch or a seek queued
+        // just before it must not bring the sound back after the window has gone (docs/BUGS.md, "closing a window
+        // while its file is still loading").
+        guard hasMedia else { return }
+
+        guard let asset, let aTrack = audioTrack else {
+            // No audio track at all: POSITIVE evidence of absence for a file we have opened, so the meters are
+            // entitled to say "NO AUDIO TRACK" rather than sit at silence. The ONLY case that may say so.
             audioPresence = .absent
+            audioCaveat = nil
             return
         }
 
+        // ⚠️ THE TOKEN IS TAKEN BEFORE THE FIRST `await`, NOT AFTER IT. Taken after, a call suspended across a
+        // `stop()` (or a newer seek or track switch) minted a fresh token on resuming, which made the stale call
+        // the CURRENT one: it built a reader and its pump fed the renderer of a stopped engine. Taken here, anything
+        // that tears the audio down meanwhile (`teardownAudioReading` bumps it) is seen, and this call bows out.
         let token = audioSessionToken.next()
+        let format = try? await aTrack.load(.formatDescriptions).first
+        guard audioSessionToken.isCurrent(token) else { return }
+
+        let settings: [String: Any]
+        let channels: Int
+        switch Self.audioOutputSetup(for: format) {
+        case .unreadable(let reason, let declared):
+            audioUnreadable(reason, channels: declared)
+            return
+        case .settings(let s, let n):
+            settings = s
+            channels = n
+        }
 
         guard let newReader = try? AVAssetReader(asset: asset) else {
-            NSLog("[PLAYBACK] could not create the audio reader"); audioPresence = .unknown; return
+            audioUnreadable("no reader", channels: channels); return
         }
         newReader.timeRange = CMTimeRange(start: start, duration: .positiveInfinity)
         let out = AVAssetReaderTrackOutput(track: aTrack, outputSettings: settings)
         out.alwaysCopiesSampleData = false
         guard newReader.canAdd(out) else {
-            NSLog("[PLAYBACK] audio reader refused the track output"); audioPresence = .absent; return
+            audioUnreadable("track refused", channels: channels); return
         }
         newReader.add(out)
 
@@ -3938,16 +4025,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // ── THE FAILURE THAT USED TO BLACK OUT THE PICTURE ────────────────────────────────
             // On the old shared reader this took the video down with it and needed a
             // retry-without-audio rebuild. Now it is contained: the video reader is already
-            // running and is not involved. We lose this file's audio and say so, once.
+            // running and is not involved. We lose this file's audio and say so — once in the
+            // banner, and for as long as the file is open in the inspector and the meters.
             NSLog("[PLAYBACK] audio reader startReading failed: %@", String(describing: newReader.error))
-            audioPresence = .absent
-            if !audioFallbackAnnounced {
-                audioFallbackAnnounced = true
-                playbackNotice = "This file’s audio track couldn’t be read — playing video only."
-            }
+            let e = newReader.error as NSError?
+            let under = (e?.userInfo[NSUnderlyingErrorKey] as? NSError)?.code
+            audioUnreadable("error \(e?.code ?? 0)" + (under.map { " / " + Self.osStatusText($0) } ?? ""),
+                            channels: channels)
             return
         }
         audioFallbackAnnounced = false
+        audioCaveat = nil
         self.audioReader = newReader
 
         let aRenderer = audioRenderer
@@ -3970,16 +4058,42 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             if outcome != .waiting { aRenderer.stopRequestingMediaData() }
         }
 
-        // The channel count the meters label, from the track's own ASBD. A count we cannot read is
-        // NOT evidence of absence — audio is demonstrably there (the reader started).
-        let descs = (try? await aTrack.load(.formatDescriptions)) ?? []
-        let ch = descs.first.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0) }
-                      .map { Int($0.pointee.mChannelsPerFrame) } ?? 0
-        audioPresence = ch > 0 ? .present(channels: ch) : .unknown
+        // The channel count the meters label, from the track's own ASBD — the same description the
+        // settings were built from, so it is already in hand (`audioOutputSetup` refused a count of 0).
+        audioPresence = .present(channels: channels)
+    }
+
+    /// The track HAS audio and this file's audio will not be heard. Says so three ways, each for its own
+    /// reader: the meters (`audioPresence`, never `.absent` here), the inspector (`audioCaveat`, standing for as
+    /// long as the file is open), and the banner (once per file — `beginReading` runs on every seek).
+    ///
+    /// `reason` is SHORT on purpose: it is the inspector row's value, and a long one is cut off at the row's width
+    /// (measured in a 640×360 window). The full error is in the `[PLAYBACK]` log line beside it.
+    private func audioUnreadable(_ reason: String, channels: Int) {
+        NSLog("[PLAYBACK] audio not read: %@", reason)
+        audioPresence = .unreadable(channels: channels)
+        audioCaveat = "Couldn’t be read (\(reason)) — video only"
+        if !audioFallbackAnnounced {
+            audioFallbackAnnounced = true
+            playbackNotice = "This file’s audio track couldn’t be read — playing video only."
+        }
+    }
+
+    /// An OSStatus as its four-character code when it is one (`'fmt?'`), else as a number.
+    private static func osStatusText(_ code: Int) -> String {
+        let v = UInt32(truncatingIfNeeded: code)
+        let bytes = [24, 16, 8, 0].map { UInt8((v >> UInt32($0)) & 0xFF) }
+        guard bytes.allSatisfy({ (0x20...0x7E).contains($0) }) else { return "\(code)" }
+        return "'" + String(decoding: bytes, as: UTF8.self) + "'"
+    }
+
+    private enum AudioOutputSetup {
+        case settings([String: Any], channels: Int)
+        case unreadable(reason: String, channels: Int)
     }
 
     /// LPCM output settings for an audio track, with the channel count taken from the track's OWN
-    /// ASBD rather than left for AVFoundation to infer.
+    /// ASBD rather than left for AVFoundation to infer, and a channel layout ALWAYS stated.
     ///
     /// 32-bit signed int (not 16): a reference tool must not downconvert. 24-bit sources reach the
     /// renderer + the D4b-1 audio tap at full precision; the tap reads the ASBD generically (int32
@@ -3991,67 +4105,52 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// derive the output channel count from the source's channel layout. MEASURED: on an ARRI
     /// ALEXA Mini ProRes whose 5-channel track advertises layout tag 0xFFFF0000 — Unknown ORed
     /// with a channel count of ZERO, contradicting its own 5-channel ASBD — that derivation
-    /// produces an invalid output format and startReading fails with paramErr (-50). Supplying the
-    /// count removes the derivation entirely. Bit depth is irrelevant to that failure: int16,
-    /// int24, int32 and float32 all failed identically without the count, and all succeeded with it.
+    /// produces an invalid output format and startReading fails with paramErr (-50). Bit depth is
+    /// irrelevant to that failure: int16, int24, int32 and float32 all failed identically.
     ///
-    /// Returns nil when the channel count cannot be established. Callers then add NO audio output
-    /// and fall back to video-only — deliberately NOT "emit the settings without a channel count",
-    /// which is precisely the configuration that fails. There is no code path left that can build
-    /// LPCM settings with no channel count.
-    private static func audioOutputSettings(for track: AVAssetTrack) async -> [String: Any]? {
-        guard let formats = try? await track.load(.formatDescriptions),
-              let fmt = formats.first,
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee else {
-            NSLog("[PLAYBACK] audio track has no readable stream description — omitting audio output")
-            return nil
+    /// WHY THE LAYOUT IS EXPLICIT TOO, AT EVERY COUNT. The count alone was not enough: with no
+    /// `AVChannelLayoutKey` AVFoundation still derives the output LAYOUT from the source's, and a
+    /// stereo track whose layout is 52 bytes for a 12-byte tag (TCMOP, 2026-10-21) failed the same
+    /// way. The old code stated a layout only above stereo. `AudioOutputLayout.decide` now always
+    /// supplies one, and trusts the source's own only after checking its size and channel count —
+    /// see that type for what it does with each malformed shape and why 1 and 2 channels keep a
+    /// valid source layout rather than being forced to Mono and Stereo.
+    ///
+    /// A track with no readable stream description, or one that reports 0 channels, is unreadable:
+    /// there is no code path left that can build LPCM settings with no channel count.
+    private static func audioOutputSetup(for fmt: CMFormatDescription?) -> AudioOutputSetup {
+        guard let fmt, let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee else {
+            return .unreadable(reason: "no stream description", channels: 0)
         }
         let channels = Int(asbd.mChannelsPerFrame)
         guard channels > 0 else {
-            NSLog("[PLAYBACK] audio track reports 0 channels — omitting audio output")
-            return nil
+            return .unreadable(reason: "0 channels", channels: 0)
         }
 
-        var settings: [String: Any] = [
+        var layoutSize = 0
+        let sourceLayout = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &layoutSize).map { UnsafeRawPointer($0) }
+        let layout = AudioOutputLayout.decide(source: sourceLayout, size: layoutSize, channels: channels)
+        if let note = layout.note {
+            NSLog("[PLAYBACK] audio track: %@", note)
+        }
+
+        return .settings([
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsBigEndianKey: false,
             AVLinearPCMIsNonInterleaved: false,
-            AVNumberOfChannelsKey: channels
-        ]
-
-        // Above stereo, AVFoundation wants an explicit layout alongside the count. PREFER THE
-        // SOURCE'S OWN — a well-formed 5.1 tag must survive, or a legitimate surround file would
-        // lose its speaker assignment to a flat discrete mapping. Only when the source's layout is
-        // the Unknown family (high 16 bits == 0xFFFF — the ARRI case) is one synthesised, and then
-        // as DiscreteInOrder: it preserves count and channel ORDER while claiming nothing about
-        // speaker roles, which is the honest answer when the file itself doesn't know.
-        if channels > 2 {
-            var sourceLayout: Data?
-            var layoutSize = 0
-            if let layoutPtr = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &layoutSize),
-               layoutSize > 0,
-               (layoutPtr.pointee.mChannelLayoutTag >> 16) != 0xFFFF {
-                sourceLayout = Data(bytes: layoutPtr, count: layoutSize)
-            }
-            if let sourceLayout {
-                settings[AVChannelLayoutKey] = sourceLayout
-            } else {
-                var synthesized = AudioChannelLayout()
-                synthesized.mChannelLayoutTag = kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)
-                settings[AVChannelLayoutKey] = Data(bytes: &synthesized,
-                                                    count: MemoryLayout<AudioChannelLayout>.size)
-                NSLog("[PLAYBACK] audio track advertises an unknown channel layout — "
-                    + "using DiscreteInOrder for its %d channels", channels)
-            }
-        }
-        return settings
+            AVNumberOfChannelsKey: channels,
+            AVChannelLayoutKey: layout.layout
+        ], channels: channels)
     }
 
     /// `exactStart`, when given, is where the reader starts instead of `time` in 600ths — a frame step's exact frame
     /// time (`drainPendingSteps`). Every other caller passes none, and reads exactly as before.
     private func beginReading(from time: Double, resumePlaying: Bool, exactStart: CMTime? = nil) async {
+        // A STOPPED ENGINE NEVER BUILDS READERS. `stop()` clears `hasMedia`; a loop wrap, a seek or a
+        // re-inspection queued just before a window closed must not start the file again behind it.
+        guard hasMedia else { return }
         if useLibav {
             await beginLibavReading(from: time, resumePlaying: resumePlaying)
             return
@@ -4172,7 +4271,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // `audioPresence` is settled before this function returns — the meters key their empty
         // states off it, and a load that returned with it still stale would flash "NO AUDIO TRACK"
         // over a file that has some.
+        //
+        // ⚠️ BOTH CHECKS BELOW ARE THE SAME QUESTION — is this still the current session? — asked at the
+        // two points where the answer can have changed. `stop()` and every newer `beginReading` bump
+        // `sessionToken`; `beginAudioReading` suspends. Without them a session overtaken during that
+        // suspension went on to call `play()` (docs/BUGS.md, "closing a window while its file is still
+        // loading").
+        guard sessionToken.isCurrent(token) else { return }
         await beginAudioReading(from: start)
+        guard sessionToken.isCurrent(token) else { return }
 
         if resumePlaying { play() }
         print("FrameEngine: reading from \(time)s (audio reader: \(audioReader != nil))")

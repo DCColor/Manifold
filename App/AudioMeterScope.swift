@@ -114,6 +114,7 @@ final class AudioMeterModel: ObservableObject {
         case noSource          // nothing loaded
         case waiting           // loaded, but the decoder has not reached the audio yet
         case noAudio           // the demuxer opened it and there is no audio stream
+        case audioNotRead      // there IS an audio track and it could not be read — not `noAudio`
         case metering          // samples flowing
         case paused            // audio present, transport stopped — see the note on `tick`
     }
@@ -327,6 +328,13 @@ final class AudioMeterModel: ObservableObject {
             status = .noAudio
             channels = []
             return
+        case .unreadable:
+            // A track exists and the reader failed on it. Its own state, never "no audio track": that
+            // sentence sends a user to check a file that is fine (TCMOP, 2026-10-21). No bars — nothing
+            // is being decoded, so there is nothing to measure.
+            status = .audioNotRead
+            channels = []
+            return
         case .present(let n):
             // Size the bars from the DECODER's channel count immediately, so the meter shows the
             // right number of (silent) bars before the first buffer lands rather than growing
@@ -530,6 +538,7 @@ struct AudioMeterScopeView: View {
         case .noSource:  return " · —"
         case .waiting:   return " · waiting for audio"
         case .noAudio:   return " · no audio track"
+        case .audioNotRead: return " · audio not read"
         case .paused:    return " · paused"
         case .metering:  return model.channels.count == 1 ? " · 1 ch dBFS" : " · \(model.channels.count) ch dBFS"
         }
@@ -540,7 +549,8 @@ struct AudioMeterScopeView: View {
     /// rather than about what we know.
     private var emptyState: some View {
         VStack(spacing: 3) {
-            Image(systemName: model.status == .noAudio ? "speaker.slash" : "waveform")
+            Image(systemName: model.status == .noAudio ? "speaker.slash"
+                            : model.status == .audioNotRead ? "exclamationmark.triangle" : "waveform")
                 .font(.system(size: 15))
                 .foregroundStyle(.white.opacity(0.25))
             Text(emptyStateText)
@@ -554,6 +564,7 @@ struct AudioMeterScopeView: View {
     private var emptyStateText: String {
         switch model.status {
         case .noAudio:  return "NO AUDIO TRACK"
+        case .audioNotRead: return "AUDIO NOT READ"
         case .waiting:  return "WAITING FOR AUDIO"
         default:        return "NO SOURCE"
         }

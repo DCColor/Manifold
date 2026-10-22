@@ -222,6 +222,13 @@ public enum AudioPresence: Equatable, Sendable {
     /// An audio stream is present, with this many channels. The count is the DECODER's, so it is
     /// correct on the libav path too, where `AudioTrackInfo` is unavailable entirely.
     case present(channels: Int)
+    /// The file HAS an audio track and the decode path could not read it, so nothing will be heard.
+    /// `channels` is what the track declares (0 when even that could not be read).
+    ///
+    /// ⚠️ NOT `absent`. Both mean silence, and that is exactly why they must not share a case: the
+    /// meters used to say "NO AUDIO TRACK" about a file that has one (TCMOP, 2026-10-21), which
+    /// sends a user to check the file instead of telling them the player failed.
+    case unreadable(channels: Int)
 
     public var channelCount: Int? {
         if case .present(let n) = self { return n }
