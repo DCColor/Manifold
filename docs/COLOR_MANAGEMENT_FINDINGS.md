@@ -5682,7 +5682,7 @@ a fresh launch afterwards (`run/pred_time.txt`).
 | S1-6 | LG, calibrated ON, macOS HDR switched on: Reference holds at 0, OS moves ~21 | **Not run.** Attended, and needs the HDR switch | — |
 | S1-7 | Sub-black and superwhite: no NaN, no black or magenta | GPU harness: 50 sub-black inputs all give **0**; 50 superwhite inputs give **1.00098 – 1.0615**, finite; **0 NaN** in both modes. Not captured on screen: no fixture in hand carries sub-black or superwhite codes | **PASS (shader)** |
 | S1-8 | Scopes, SDI (v210) and export: 0 codes between OS, Reference and Bypass | ⌃⌥E in each mode. The export PNG, the v210 dump (the DeckLink convert) and the rgba16f readback are **byte-identical across all three modes** (one md5 each). Scopes tray open, 720×591 window: every differing pixel is in **rows 0–404, the 720×405 picture**. The tray (waveform, parade) is **identical** in all three modes | **PASS** |
-| S1-9 | LG by eye: calibrated ON looks as OS; calibrated OFF clearly too dark in the shadows | **Not run.** Attended | — |
+| S1-9 | LG by eye: calibrated ON looks as OS; calibrated OFF clearly too dark in the shadows | **Run 2026-10-22** (*LG attended session*, below): ON = OS = Bypass; OFF darker, most in the midtones | **PASS** (by eye) |
 | E1 | *Added before capture:* PQ wedge, Reference vs OS: 0 codes | **0 codes, 0 pixels** | **PASS** |
 | E2 | *Added before capture:* 9-1-9 chart, ASUS declared calibrated, Reference vs Bypass. Greys ±1; 100 % primaries identical; 50 % R → 157–158, 50 % G → ≈ 134 ±1, 50 % B → ≈ 134 ±1 | Greys and all 100 % patches **identical**. 50 % R **158**, G **135**, B **134**. C, M, Y 50 % move as expected (M 156 / 133) | **PASS** |
 
@@ -6121,8 +6121,8 @@ app logs and step timings of both builds, and the first tree run's log (`tree_s4
 | U2 | ASUS, HDR off: the same | `… display is in SDR mode on "ASUS PA147"`; potential 1.0000 | **PASS** |
 | U3 | A move between displays updates the line within 1 s and logs once | 6 moves (3 round trips, System Events by position). The line named the new screen after **239–268 ms** from issuing the move, every time within the `osascript` call itself (238–268 ms), so the true latency is at most that. **Exactly one** `[EDR] headroom (display change — window moved)` line per move, each on the new screen. Idle 20 s before and 10 s after: **0** headroom lines | **PASS** |
 | U4 | Nothing else changes: tree vs HEAD, OS, Reference and Bypass, 0 codes | `wedge.mov` OS, Reference and Bypass; the 9-1-9 ProRes chart, OS; the PQ wedge, OS and Bypass: **0 codes, 0 pixels** each. The PQ wedge after the six moves against HEAD's: **0 codes** | **PASS** |
-| S4-2 (H1) | LG, HDR on: potential ≈ 8.97 ±0.5, shown within 1 s, no reload | **Not run.** Attended, in the LG session with S1 and S2; Robbie toggles HDR | — |
-| S4-3 (H2) | A grant (current > 1.0) on a PQ source | **Not run.** An open question; the readout would say `headroom 1.00 of 8.97 — none granted` if §6.7 repeats | — |
+| S4-2 (H1) | LG, HDR on: potential ≈ 8.97 ±0.5, shown within 1 s, no reload | **Run 2026-10-22** (*LG attended session*, below): 8.97, readout 0.55 s after the switch, no reopen; two `[EDR] headroom` lines, not one | **PASS** |
+| S4-3 (H2) | A grant (current > 1.0) on a PQ source | **Run 2026-10-22** (*LG attended session*, below): `current=4.4827` of 8.9654 on the PQ wedge — granted | Answered: **yes** |
 
 **The first tree run is discarded.** Its U3 measurement could not see the readout move: the `[CHAIN]` line logged only
 when the line's words changed, and both displays read the same words. It now also logs on a screen change. That run's
@@ -6807,6 +6807,49 @@ was deleted after scoring. Logs, events, `words.jsonl` and `score.txt` are in th
   reads `engine.metadata`, which is never cleared. The title then names a file that is no longer loaded, and while
   the stream plays it names the file rather than the stream (`BUGS.md`). Not changed here.
 - L4: the Resolve match, and the SDI and LG sanity looks (Robbie).
+
+#### LG attended session — S1, S2, S3, S4, S5 and the LUT, by eye: results, 2026-10-22
+
+Robbie at the Mac, ~30 min. **Sanity checks on the LG, not reference judgements** (display roles, above). Build:
+the Profile build in `.build-cc` at `a307175` (built after every Swift source's last change). Manifold driven by
+accessibility clicks and the Color menu; the two hold keys were pressed by Robbie, since no keystroke is sent
+to an app (CLAUDE.md); Robbie also navigated the Load LUT panel and pinned one window's controls. macOS HDR was toggled by
+Robbie only. No screenshots were taken. The Flip file was opened read-only: size, mtime, inode and MD5 equal
+before and after. The installed `/Applications/Manifold.app` was quit by Robbie before launch (same defaults
+domain).
+
+| # | What was looked at | Robbie's answer | Log / readout | Verdict |
+|---|---|---|---|---|
+| 1a | `wedge.mov` (untagged, assumed 709), **Reference**, LG calibrated **ON** | Darkest (top) row hard to tell apart; second row clear; the two rightmost of the top row can be made out | `[REFERENCE] calibrated display on "LG TV SSCR2": code values untouched, layer colorspace nil, identity copy` | — |
+| 1b | Same, **macOS** | About the same as Reference | `display transform → OS` | **PASS** (S1-9, first half) |
+| 1c | Same, **Bypass** | Same as Reference | — | **PASS** (S1-5, by eye only) |
+| 1d | **Reference**, calibrated **OFF**, Lw 100 · Lb 0, toggled against ON 8× at 4 s | Calibrated-off Reference **is darker, most notably in the midtones** | `BT.1886 Lw 100 · Lb 0 (= γ2.4) … encoded for declared γ1.960938` | **PASS** (S1-9). The prediction said "shadows"; the eye put it in the midtones, which matches the table's largest drive gap (V 0.5: 0.189 vs ≈ 0.26) |
+| 2 | Hold `\` (Reference ⇄ OS) and Shift-`\` (Reference ⇄ Bypass), calibrated off | Instant; release returns; amber COMPARING badge clear; macOS lighter. Shift-`\` looks the same as `\` | 28 holds (22 → OS, 6 → BYPASS), on glass **11.9–19.5 ms** after key-down at 120 Hz; every release back to REFERENCE | **PASS**. Shift = plain is expected here: OS = Bypass on the LG in SDR (§6.7) |
+| 3a | Flip file `2020_709_NoAudio.mov`, Auto (`CICP 9-1-9 — tagged`), macOS | Saturation looks fine; the grade could use work, but the shot does not look wrong or bad | — | — |
+| 3b | Same, **Custom 1·1·9** (709 primaries: the pre-S3 behaviour) | **Definitely more washed out — "more log"** | `[FILE-COLOR] override → Custom 1·1·9` | **PASS** (S3-5) |
+| 4a | Custom 1·1·9: readout, title, control | The control's gold is clear on its own. **Suggestion:** colour `overridden` on the readout's Source line the same gold | Source `… CICP 1-1-9 — overridden (Custom 1·1·9)`; title `— Color Custom 1·1·9`; control `Custom 1·1·9 · Overridden` | **PASS**, with a suggestion |
+| 4b | **Reset to File's Tags** | Obvious, because the control goes back to white. Would be more obvious in the readout with 4a's gold | `override → Auto — the file's own tags`; Source `… 9-1-9 — tagged`; title plain | **PASS** |
+| 5a | `l1-synth/swap_rb_3d_33.cube` loaded | Blue/cyan wash. The readout's LUT line stands out only because it is new; **suggestion:** highlight it | `LUT … 3D 33³ · tetrahedral · out same as source`; title `— LUT swap_rb_3d_33.cube`; control `Declared + LUT` | **PASS**, with a suggestion |
+| 5b | **Bypass LUT** | Picture back to normal. **Confusing: "bypass of what?"** The control only says `+ LUT off`, with no gold as the override had | `· BYPASSED — not applied`; title `(bypassed)`; control `Declared + LUT off`, not amber (by design, `InterpretationLUT.swift:155`) | **Finding** (wording / colour) |
+| 5c | LUT re-applied | Control **amber** | — | **PASS** |
+| 5d | **Remove LUT** | Normal; no mention of a LUT anywhere, which implies none | `LUT: none`; title and control plain | **PASS** |
+| 6a | Robbie switches macOS HDR **on** for the LG; Flip file open, readout open | — | NSScreen potential 1.0 → **8.9654**; the readout read `headroom 1.00 of 8.97 — none granted` **0.55 s** later (polled every ~0.3 s), no reopen | **PASS** (S4-2). **Two** identical `[EDR] headroom (display change — screen parameters)` lines for one switch, where one was predicted |
+| 6b | `wedge-pq-24track.mov` (`9-16-9`), HDR on | Overall the pattern looks correct; the top two patches are hard to tell apart, possibly the panel's own tone mapping | **`current=4.4827 potential=8.9654` — granted**; readout `headroom 4.48 of 8.97` | S4-3 answered: **a grant does happen** on a PQ source (§6.7 had expected 1.0) |
+| 6c | Robbie switches HDR **off**, PQ wedge in front | Picture stayed up (no blank or jump) | Back to `display is in SDR mode`, potential 1.0 | **PASS**. Held through the **on** switch: **UNKNOWN** (not observed) |
+
+**Defects and suggestions found:**
+- **LUT bypass is unclear** (5b): `+ LUT off` does not say what is bypassed, and the bypassed state has no colour cue.
+- **Suggestion** (4a, 4b, 5a): colour the readout's `overridden` (Source line) and the LUT line in the control's gold/amber,
+  so the readout marks a non-default state the way the control does.
+- **`[EDR] headroom` logged twice** for one HDR switch (6a). Minor; the predicted count was one.
+
+**Not covered:** S1-6 (Reference holds while OS moves ~21 codes with HDR on) needs pixel values, which are taken
+on the ASUS only. L4 (the Resolve match and the SDI look) is still open.
+
+**State left:** the LG's per-display setting is **Calibrated ON, Lw 100 · Lb 0** (decision 1; Robbie asked to keep
+it). Every other key the session changed was read, then restored or deleted (`NSOSPLastRootDirectory` written back;
+`recentLUTs` and one `NSWindow Frame …` key, both new, deleted). The domain is dictionary-equal to the
+pre-session export apart from `displayCalibrations`. macOS HDR is off on the LG.
 
 ---
 
