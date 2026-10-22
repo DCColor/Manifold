@@ -1349,6 +1349,38 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
+## ☐ OPEN — PRE-EXISTING, ALL BUILDS — DeckLink: any source raster that matches no output mode carries BLACK (720p, vertical, square, odd sizes)
+
+**Added 2026-10-21, from Joey's 0.8.4 diagnostics** (`Manifold-0.8.4-diagnostics-2026-10-21-160210.txt`). This entry is the
+planned "Vertical and square sources over DeckLink" item, widened: vertical and square sources are two cases of one
+defect, and that title was never written into this file.
+
+- **What:** the SDI output is black for the whole session whenever the source's pixel size is not exactly the
+  output mode's size. Every indicator reads healthy: the card is enabled and locked, the mode is valid and a
+  downstream monitor locks. The window's DeckLink warning is the only sign.
+- **Measured (Joey, 0.8.4):** a 1280×720 23.976 ProRes file (`TCMOP_NSS_Oriental_MKE_REF.mov`). The card has no
+  720p23.98 mode, so Follow source chose 1080p23.98 (`DeckLink D4a: FILE source format 1280x720 @ 23.976 fps → mode
+  1080p23.98`). Then `source 1280x720 != output 1920x1080 — native-res only, holding neutral (scaling is a later
+  stage)`, and the output stayed neutral to the end of the log.
+- **Why:** `resolveOutputMode` (`App/DeckLink/DeckLinkService.swift:577`) only picks a FAMILY (height ≥ 1620 →
+  2160p, else 1080p) and a rate. It never promises a raster match, and its own comment says so (`:569-572`). The
+  render convert then refuses any size mismatch and holds neutral (`App/MetalVideoRenderer.swift:3883-3906`). So
+  every source that is not exactly 1920×1080 or 3840×2160 is black. That includes 720p, 2K/DCI, vertical (1080×1920),
+  square (1080×1080), anamorphic, odd encoder sizes (1920×1088) and any HLS ABR rung below the top one.
+- **The fix (decided scope, not built):** scale to FIT INSIDE the chosen mode, preserving the picture's display
+  aspect (pixel aspect included, so this depends on the geometry work above for libav sources), centred, with
+  the rest of the raster at neutral black. Pillarbox for vertical and square, letterbox for wider-than-16:9, a
+  plain scale for 720p → 1080p. One filtered resample, in the same pass that already does the v210 4:2:2
+  reduction, so chroma is still reduced once at the output (`CLAUDE.md`, the chroma rule). A source that already
+  matches stays 1:1 and untouched.
+- **Also required:** the chain readout and the DeckLink warning say the output is SCALED (source size → output
+  size, fit), so a scaled SDI picture is never taken for a native one on a reference monitor. Scaling is not
+  silent, and neither is its absence.
+- **Interacts with:** scoping option (b) in the live-SDI raster entry (*Scoping the fix — the shape is a decision
+  not yet made*), which depends on this same scaling stage.
+
+---
+
 ## ✅ FIXED 2026-10-17 (`8e42636`) — PRE-EXISTING, ALL BUILDS — repeated frame-step presses get lost
 
 **Fixed:** the steps own the position. `FrameEngine.stepFrameIndex` is the frame the last accepted press went to;
