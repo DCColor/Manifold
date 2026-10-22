@@ -6979,6 +6979,28 @@ and readout on the LG, in both appearances, can join L4.
   qualifier or a sharp curve. That is why 33-pt and 65-pt land identically.
 - The prediction "65-pt closer than 33-pt" was **wrong** on this chart: they are equal to 0.01 code.
 
+**L4-C re-run: Resolve against Resolve, beside Manifold (Robbie's request, 2026-10-22).**
+- **Same scorer** (`build/colour-l4/scratch/score`), same clamping. The pixels are 1920 × 1080 = **2 073 600**, of
+  which **2 045 612** are flat.
+- **The baselines are identical:** Resolve's two bypassed renders (grade bypassed, LUT bypassed) are **0.000 codes**
+  apart. So the baseline-relative and direct comparisons are the same measurement, and they agree to the last digit.
+- **Sanity:** a render scored against itself gives 0.000.
+
+| Comparison, vs Resolve's render of the original grade | Max \|err\| | Mean \|err\| | Px > 2 codes (of 2 073 600) | Flat: max · px > 2 (of 2 045 612) |
+|---|---|---|---|---|
+| **Resolve** 33-pt LUT render | 189.396 | 0.2406 | **347 040** (16.74 %) | 2.747 · 340 816 |
+| **Manifold** 33-pt LUT | 189.440 | 0.3865 | **347 040** (16.74 %) | 2.622 · 340 816 |
+| **Resolve** 65-pt LUT render | 189.380 | 0.2395 | **347 040** (16.74 %) | 2.747 · 340 816 |
+| **Manifold** 65-pt LUT | 189.315 | 0.3862 | **347 040** (16.74 %) | 2.622 · 340 816 |
+
+- **The C divergence is entirely the LUT's limitation, not Manifold's.** The over-2 counts match Manifold's 347 040
+  exactly, for both LUT sizes and over the flat pixels too (340 816). The worst pixel is the same (x 959, y 360, red),
+  and the maxima agree within 0.13 code.
+- **Counts were compared, not pixel sets.** The over-2 sets were not matched pixel by pixel. With Manifold within 1.20
+  codes of Resolve's LUT render everywhere (L4-B), equal counts in both masks are what that predicts.
+- **Manifold's mean is ~0.15 code higher** (0.387 vs 0.241). That is consistent with its own LUT-vs-Resolve difference
+  (L4-B, mean 0.19) adding to the LUT's approximation error; it does not change the over-2 count.
+
 **Attended (paused 2026-10-22 ~17:15):**
 - SDI started at 1080p23.98 (`completed=6717 late=0 dropped=0`), but Robbie saw **no output on the DeckLink**. He
   suspects a system issue and is restarting the Mac.
