@@ -1349,6 +1349,56 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
+## ☐ OPEN — PRE-EXISTING — DeckLink: output started on a PAUSED source carries BLACK until something renders (Play, a seek)
+
+**Found 2026-10-22, L4 attended** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *L4 — attended results*).
+
+- **What:** the window shows the picture, the card is enabled, the monitor locks, and the log reads healthy
+  (`SUCCESS — real-video scheduled playback`, `completed=… late=0 dropped=0`), but SDI carries black. Pressing Play
+  brings the picture. After that, pausing holds it.
+- **Measured:** twice, with `patches-1-1-1-prores.mov` opened in a fresh window and never played. Once at 1080p23.98
+  and once at **1080p25** (17:49:39, black on the reference monitor; Play at 17:50:09, picture). So it is not the
+  output mode.
+- **Why** (read from the code, 2026-10-22):
+  - The card's frames are filled from `copyLatestDeckLinkFrame` (`App/MetalVideoRenderer.swift:4009`). It returns
+    false until `deckLinkFrameReady`, which only the v210 convert sets. The convert is pushed from the render
+    completion (`:3280`).
+  - When it returns false, `DeckLinkService`'s fill block (`App/DeckLink/DeckLinkService.swift:732-740`) writes
+    `fillNeutralV210`.
+  - `beginDeckLinkOutput` (`App/MetalVideoRenderer.swift:3823-3838`) resets `deckLinkFrameReady` and requests no
+    re-render. While paused, the render loop only renders on a one-shot refresh or seek (`:2860-2871`).
+  - So the frame on screen was rendered before output existed, and nothing renders it again.
+- **Scope, by the code (inferred, not measured):** any source that is paused when output starts, played before or not.
+  A LUT, override or display change while paused would arm `pendingRefresh` and bring the picture. That is
+  consistent with L4, where Bypass LUT toggles reached SDI while paused, after a Play.
+- **Likely fix (not built):** after `beginDeckLinkOutput`, request one render of the last frame (`setNeedsRefresh()`,
+  `:529`), so a paused source reaches the card at once.
+- **Release note:** a Known limitation until fixed.
+
+## ☐ OPEN — CAUSE UNKNOWN — DeckLink: a mode switch to 1080p25 was refused once as "NOT supported", then accepted
+
+**Found 2026-10-22, L4 attended.**
+- **What happened:** Robbie switched the running output from 1080p23.98 to 25p. The first start logged
+  `mode: 1080p25 / v210 10-bit YUV NOT supported — aborting`, then `[ARBITER] exclusive device released — every deck
+  paused; nothing auto-resumes`. The next start, seconds later, logged `supported` and `SUCCESS … @ 1080p25`.
+- **Where the check is:** `DoesSupportVideoMode` in `doesSupportMode` (`App/DeckLink/DeckLinkBridge.mm:294-300`,
+  checked at `:1376`). Its HRESULT is not logged, so an API error reads as "unsupported".
+- **A possibility, not shown:**
+  - `applyEffectiveMode` (`App/DeckLink/DeckLinkService.swift:1084-1091`) stops and restarts back to back.
+  - `stop()` (`DeckLinkBridge.mm:386-404`) disables output without waiting for `ScheduledPlaybackHasStopped`.
+  - So the check may run against a device still tearing down.
+- **Next step:** log `hr` and `actual` in `doesSupportMode`. Otherwise UNKNOWN.
+
+## ☐ UNCONFIRMED — DeckLink output started with no click on its button (17:49:01, 2026-10-22)
+
+- **What happened:** after output was stopped from one window, the chart was opened in a new window. While the test
+  driver pinned that window's controls, the log read `[ARBITER] claiming DeckLink output` and output started.
+- **The code has no automatic claim.** Only the toolbar button (`App/ContentView.swift:2233`) and the hidden ⌃⌥O
+  shortcut (`:1676-1677`) claim it (`WindowDeck.swift:1700-1710`). The once-per-launch auto-start (`:1267-1276`) does
+  not log "claiming".
+- **The driver** only clicked the button whose help is `Pin controls (Tab)` in that window.
+- **Not reproduced; cause UNKNOWN.** Watch for it. If it recurs, record which window was key and what was clicked.
+
 ## ☐ OPEN — PRE-EXISTING, ALL BUILDS — DeckLink: any source raster that matches no output mode carries BLACK (720p, vertical, square, odd sizes)
 
 **Added 2026-10-21, from Joey's 0.8.4 diagnostics** (`Manifold-0.8.4-diagnostics-2026-10-21-160210.txt`). This entry is the
