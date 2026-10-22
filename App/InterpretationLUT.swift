@@ -152,8 +152,13 @@ final class InterpretationLUTModel: ObservableObject {
     /// The window title's words: "LUT name.cube", "LUT name.cube (bypassed)". nil with no LUT.
     var titleSuffix: String? { name.map { "LUT " + $0 + (bypassed ? " (bypassed)" : "") } }
 
-    /// The Color control's face: " + LUT" while applied (amber), " + LUT off" while bypassed. Empty with no LUT.
-    var faceSuffix: String { name == nil ? "" : (bypassed ? " + LUT off" : " + LUT") }
+    /// The Color control's face: " + LUT" while applied (amber). Empty while bypassed and with no LUT; a bypassed
+    /// LUT's words are `faceBypassedWords`, drawn in their own style.
+    var faceSuffix: String { isApplied ? " + LUT" : "" }
+
+    /// "LUT bypassed" while bypassed, else nil. Drawn struck through and dimmed, so the face tells bypassed apart from
+    /// applied (amber) and from none (no words) — LG session, 2026-10-22: " + LUT off" read as "bypass of what?".
+    var faceBypassedWords: String? { name != nil && bypassed ? "LUT bypassed" : nil }
 
     /// A LUT is changing the picture: the face turns amber, as an override does.
     var isApplied: Bool { lut != nil && !bypassed }

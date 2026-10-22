@@ -88,7 +88,7 @@ final class RecentLUTsTests: XCTestCase {
                        "x.cube — 3D 2³ · trilinear · out same as source")
         XCTAssertEqual(LUTReadout.line(name: "x.cube", lut: l, interpolation: .tetrahedral,
                                        outputLabel: "Rec.2020 PQ (HDR10)", bypassed: true, sourcePresent: true),
-                       "x.cube — 3D 2³ · tetrahedral · BYPASSED — not applied")
+                       "BYPASSED — x.cube — 3D 2³ · tetrahedral — not applied")
         // No source: the stated space is not named.
         XCTAssertEqual(LUTReadout.line(name: "x.cube", lut: l, interpolation: .tetrahedral,
                                        outputLabel: "Rec.2020 PQ (HDR10)", bypassed: false, sourcePresent: false),
@@ -101,5 +101,10 @@ final class RecentLUTsTests: XCTestCase {
                                        outputLabel: nil, bypassed: false, sourcePresent: true),
                        "c.cube — 1D 2 · linear · out same as source · ignored: FOO (line 2), BAR (line 3), "
                        + "BAZ (line 4), QUX (line 5), +1 more")
+        // Bypassed: the word leads and the ignored keywords stay inside the line.
+        XCTAssertEqual(LUTReadout.line(name: "c.cube", lut: l, interpolation: .tetrahedral,
+                                       outputLabel: nil, bypassed: true, sourcePresent: true),
+                       "BYPASSED — c.cube — 1D 2 · linear · ignored: FOO (line 2), BAR (line 3), "
+                       + "BAZ (line 4), QUX (line 5), +1 more — not applied")
     }
 }

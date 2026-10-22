@@ -305,7 +305,8 @@ struct ColorInterpretationControl: View {
             } label: {
                 (Text(Image(systemName: "paintpalette")).font(.system(size: 13))
                  + Text("  ")
-                 + Text(faceLabel + lut.faceSuffix).font(.system(.caption, design: .monospaced)))
+                 + Text(faceLabel + lut.faceSuffix).font(.system(.caption, design: .monospaced))
+                 + bypassedLUTFace)
                     .foregroundColor(colorControlTint)
             }
             .menuStyle(.borderlessButton)
@@ -327,6 +328,17 @@ struct ColorInterpretationControl: View {
         .help(subject == .file
               ? "Color interpretation — Auto trusts the file’s tags; a preset or Custom asserts them (⌃⌥C cycles the presets)"
               : "Color interpretation — Auto trusts the stream; a preset or Custom asserts it (⌃⌥C cycles the presets)")
+    }
+
+    /// " + LUT bypassed" while the window's LUT is bypassed, struck through and dimmed: neither the amber of an applied
+    /// LUT nor the plain face of none. A run of the face's one `Text`, so its own colour survives the borderless menu
+    /// (see the note on `body`); the run's colour wins over the face's tint.
+    private var bypassedLUTFace: Text {
+        guard let words = lut.faceBypassedWords else { return Text("") }
+        return Text(" + ").font(.system(.caption, design: .monospaced))
+            + Text(words).font(.system(.caption, design: .monospaced))
+                .strikethrough()
+                .foregroundColor(.white.opacity(0.5))
     }
 
     // MARK: The subject
@@ -431,9 +443,8 @@ struct ColorInterpretationControl: View {
     /// missing recent file is a greyed row, never a load. The readout row is a disabled `Button`, as the File line
     /// is, so its words are readable by Accessibility.
     @ViewBuilder private var lutSection: some View {
-        Section(lut.name.map { "LUT — \($0) · \(lut.shape ?? "")"
-                               + (lut.outputSpace == .auto ? "" : " → \(lut.outputSpace.shortLabel)")
-                               + (lut.bypassed ? " · bypassed" : "") } ?? "LUT") {
+        Section(lut.name.map { (lut.bypassed ? "LUT bypassed — " : "LUT — ") + "\($0) · \(lut.shape ?? "")"
+                               + (lut.outputSpace == .auto ? "" : " → \(lut.outputSpace.shortLabel)") } ?? "LUT") {
             Button("Load LUT…") { lut.chooseFile() }
             Menu("Recent LUTs") {
                 ForEach(recentLUTs.rows) { row in

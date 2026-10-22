@@ -6841,7 +6841,80 @@ domain).
 - **LUT bypass is unclear** (5b): `+ LUT off` does not say what is bypassed, and the bypassed state has no colour cue.
 - **Suggestion** (4a, 4b, 5a): colour the readout's `overridden` (Source line) and the LUT line in the control's gold/amber,
   so the readout marks a non-default state the way the control does.
-- **`[EDR] headroom` logged twice** for one HDR switch (6a). Minor; the predicted count was one.
+- ~~**`[EDR] headroom` logged twice** for one HDR switch (6a).~~ **Corrected the same day: not a duplicate.** Each
+  window's renderer samples its own screen and logs once (`MetalVideoRenderer.swift:977-993`). Two windows were open
+  at the HDR-on switch (2 lines) and three at HDR-off (3 lines). The line does not name its window, so it read as a
+  duplicate. S4-2's "one line" was written for one window. Robbie chose to name the window in the line (below).
+
+#### UI polish from the LG session — predictions, 2026-10-22 (written before any code)
+
+Three changes, from the session above:
+
+1. **LUT bypass wording and cue.**
+   - The face's ` + LUT off` becomes ` + LUT bypassed`, with **LUT bypassed** struck through and dimmed (white at
+     reduced opacity). That is distinct from amber (applied) and from no LUT words at all (none). An override's amber
+     on the rest of the face is unchanged.
+   - The readout and the menu's LUT line become `BYPASSED — name.cube — 3D 33³ · tetrahedral — not applied`.
+   - The menu's section header becomes `LUT bypassed — name.cube · 3D 33³`.
+   - The title keeps `— LUT name.cube (bypassed)`. It already names what is bypassed.
+2. **Readout colour.**
+   - The Source line's `overridden (…)` words and the whole LUT line **while applied** are drawn in the control's
+     amber: `systemOrange` in dark appearance, and a darker amber in light appearance so caption text keeps ≥ 4.5:1
+     contrast on the popover.
+   - A **bypassed** LUT line is not amber: it is secondary grey, matching the face, since it does not change the picture.
+3. **`[EDR] headroom` names its window:** `… on "LG TV SSCR2" (window 350): current=…`, by window number, not title
+   (no file or stream names in the log). The startup line has no window and is unchanged.
+
+| # | Prediction | Pass band |
+|---|---|---|
+| U1 | **Three LUT states distinguishable** on `patches-1-1-1-prores.mov`, read through Accessibility: none / applied / bypassed give three different face strings, menu LUT header + readout rows, titles and chain-readout LUT lines | All four surfaces differ pairwise across the three states, and every bypassed surface contains `bypassed` / `BYPASSED` and the LUT's name. Any two states equal on a surface fails |
+| U2 | **Amber only where asserted**, measured on window-only captures of the face and the popover (dark appearance): pixels with r − b > 60 in the face and in the readout's text | Face and readout amber present in Custom and LUT-applied states, absent (max r − b ≤ 20 in the text) for none and for LUT-bypassed-without-override. Bypassed face shows the strike line. Any amber in a none / bypassed-only readout fails |
+| U3 | **Light appearance readable:** the readout amber's computed contrast on the popover's light background | ≥ 4.5:1 (computed from the colour constants; not changed on the Mac's appearance setting) |
+| U4 | **One `[EDR] headroom` line per window per change, naming its window** | With N windows open, N lines per HDR switch, each with a distinct `(window n)`. Needs Robbie's HDR toggle; until then, a window-move or source-load line names its window |
+| U5 | **No pixel or behaviour change:** exports (`rgba16f`, `v210`, `.v210.json`) for none, Custom 1·1·9, LUT applied and LUT bypassed | **Byte-identical** to the HEAD build (`a307175`). Window captures **0 codes** outside the control bar and the readout. Any byte difference fails |
+| U6 | Unit tests: `LUTReadout` bypassed wording; all existing tests | All pass |
+
+#### UI polish from the LG session — results, 2026-10-22 (unattended, not committed)
+
+**What changed:**
+- `LUTReadout.line` puts `BYPASSED — … — not applied` around a bypassed line.
+- `InterpretationLUTModel.faceSuffix` / `faceBypassedWords`: the face draws a bypassed LUT as a struck-through, dimmed
+  ` + LUT bypassed` run of its one `Text` (the note on `body` explains why one `Text`).
+- The menu's section header now reads `LUT bypassed — name · shape`.
+- `DisplayChain.overriddenWords` / `lutApplied`, drawn in `DisplayChainReadout.amber`: `systemOrange` in dark
+  appearance, (0.58, 0.30, 0) in light.
+- `logEDRHeadroom(…, window:)` prints `(window n)`.
+- Title unchanged.
+
+**How it was run:**
+- Base: the HEAD Profile app (`a307175`), copied before the build. Tree: the Profile build in `.build-cc`.
+- One driver, `patches-1-1-1-prores.mov`, LG (scale 1), dark appearance.
+- Clicks and Accessibility only, no keystrokes. The LUT was loaded from a seeded `recentLUTs` entry (path only).
+- Captures were window-only by the window's id, and were deleted once read. Exports went through the control bar's
+  Export button.
+
+| # | Result | Verdict |
+|---|---|---|
+| U1 | Tree, the three LUT states on each surface: **face** `709 709 · Declared` / `… + LUT` / `… + LUT bypassed`; **menu** header `LUT` / `LUT — swap_rb_3d_33.cube · 3D 33³` / `LUT bypassed — swap_rb_3d_33.cube · 3D 33³`, and row `LUT: none` / `LUT: swap_rb… · out same as source` / `LUT: BYPASSED — swap_rb_3d_33.cube — 3D 33³ · tetrahedral — not applied`; **title** plain / `— LUT swap_rb_3d_33.cube` / `… (bypassed)`; **readout** no LUT row / the applied line / the `BYPASSED …` line. All pairwise different, every bypassed surface names the LUT. HEAD's face read `+ LUT off` and its header `… · bypassed` at the end | **PASS** |
+| U2 | Pixels with r − b > 60 (amber): **face** none 0, Custom 453, LUT 480, bypassed **0**, Custom + bypassed 434 (the override words; the LUT words dim and struck, checked by eye on the crop), Custom + LUT 591. **Readout Source text** amber only with Custom (374–383), 0 otherwise. **Readout LUT text** amber when applied (921, 937), **0** when bypassed. **Transform text** (never coloured, the control) 0 in every state. The band's second half, "max r − b ≤ 20 in non-amber text", is **not met**: non-amber text reads max r − b 25–51, and the Transform row reads the same 25–48. The popover is translucent over the colour patches; that is its background, not the change. The band was set wrong; the amber count is the measure | **PASS** on amber placement; the ≤ 20 band **missed**, cause stated |
+| U3 | Light amber, computed: first (0.62, 0.32, 0) gave 5.75:1 on white, 4.87:1 on #ECECEC, **4.36:1 on #E0E0E0**, below 4.5. Darkened to **(0.58, 0.30, 0): 6.35 / 5.38 / 4.81:1**, rebuilt. Dark: systemOrange 7.2:1 on #282828. Light appearance not launched (the Mac's setting was not changed) | **PASS** (computed) after one change |
+| U4 | Tree: `[EDR] headroom (window on screen) on "LG TV SSCR2" (window 1007)` and `… (window 1016)`, and `source load … (window 1007)`. HEAD printed the same two `window on screen` lines with nothing to tell them apart. Startup line unchanged. **One line per window per HDR switch: not run** (needs Robbie's toggle) | **PASS** for naming; the HDR-switch count is open |
+| U5 | Exports, HEAD vs tree, none / Custom 9·1·1 / LUT applied / LUT bypassed: `rgba16f`, `v210`, `.v210.json` and `png` **byte-identical, 16 / 16**. Window captures above the control bar, all 7 states: 516 px differ in every state, all inside x 9–68 · y 9–22: the title bar's traffic-light buttons (key-window state). **0 codes everywhere else** | **PASS** |
+| U6 | `swift test` **494 / 494**, including the changed `testReadoutStates` and a new bypassed case with ignored keywords. Profile build succeeded twice; the warnings in the touched files are the existing ones (`CVDisplayLink*` deprecations, two non-Sendable captures in `InterpretationLUT.swift`) | **PASS** |
+
+**Defaults.**
+- Stashed (`defaults export`) before the runs, `recentLUTs` confirmed absent, then seeded with one path.
+- After the runs:
+  - `recentLUTs` and three `NSWindow Frame …` keys were new. Each was read, then deleted.
+  - `license.email` and `license.machineId` were **gone**. The tree run could read the keychain (`LICENSED (Standard)`;
+    HEAD's prompt was denied), and the privacy-P1 migration moved them into the Keychain record, as designed.
+  - Both were written back from the stash, values not printed. The next licensed launch migrates them again.
+- The domain is **dictionary-equal** to the pre-run export (1 521 keys).
+- One slip, caught: the deletion loop skipped its last key (no trailing newline). The final comparison found it, and it
+  was read, then deleted.
+
+**Open:** U4's per-switch count needs one HDR on/off on the LG with two windows open. A by-eye look at the new face
+and readout on the LG, in both appearances, can join L4.
 
 **Not covered:** S1-6 (Reference holds while OS moves ~21 codes with HDR on) needs pixel values, which are taken
 on the ASUS only. L4 (the Resolve match and the SDI look) is still open.

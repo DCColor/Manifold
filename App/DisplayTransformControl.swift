@@ -255,13 +255,13 @@ struct DisplayChainReadout: View {
             Text("Transform chain")
                 .font(.headline)
 
-            row("Source",    model.chain.source)
+            row("Source",    sourceText)
             if let tags = model.chain.tags {
                 row("Tags", tags)
             }
             row("Chroma",    model.chain.chroma)
             if let lut = model.chain.lut {
-                row("LUT", lut)
+                row("LUT", Text(lut).foregroundColor(model.chain.lutApplied ? Self.amber : .secondary))
             }
             row("Transform", model.chain.transform)
             row("Display",   model.chain.display)
@@ -301,13 +301,34 @@ struct DisplayChainReadout: View {
         .frame(width: 430, alignment: .leading)
     }
 
+    /// The Color control's amber, for the readout's text (LG session, 2026-10-22): an override's words on the Source
+    /// line and an applied LUT's line, so the readout marks what the face marks. `systemOrange` — the face's own
+    /// colour — in dark appearance. In light, a darker amber: systemOrange on the light popover is about 2:1, too faint
+    /// for caption text, and (0.58, 0.30, 0) keeps ≥ 4.5:1 on white (6.4:1) and on a popover grey as dark as #E0E0E0
+    /// (4.8:1).
+    static let amber = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? .systemOrange : NSColor(srgbRed: 0.58, green: 0.30, blue: 0, alpha: 1)
+    })
+
+    /// The Source line, its override words (when overridden) in amber.
+    private var sourceText: Text {
+        let source = model.chain.source
+        guard let words = model.chain.overriddenWords, source.hasSuffix(words) else { return Text(source) }
+        return Text(source.dropLast(words.count)) + Text(words).foregroundColor(Self.amber)
+    }
+
     private func row(_ label: String, _ value: String) -> some View {
+        row(label, Text(value))
+    }
+
+    private func row(_ label: String, _ value: Text) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .trailing)
-            Text(value)
+            value
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)

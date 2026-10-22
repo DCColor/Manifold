@@ -50,6 +50,11 @@ struct DisplayChain: Equatable {
     /// Colour S6, L3 (D7): the window's LUT — "name.cube — 3D 33³ · tetrahedral · out Rec.2020 PQ (HDR10)
     /// (stated)" — or nil with none. `InterpretationLUTModel.readoutLine`.
     var lut: String? = nil
+    /// The Source line's override words — "overridden (Custom 1·1·9)", its tail — or nil when the source is not
+    /// overridden. The view draws them in the Color control's amber (LG session, 2026-10-22).
+    var overriddenWords: String? = nil
+    /// The LUT is changing the picture (loaded, not bypassed): the view draws the LUT line in amber, as the face is.
+    var lutApplied: Bool = false
 }
 
 @MainActor
@@ -178,6 +183,7 @@ final class DisplayChainModel: ObservableObject {
         let sourceCS = renderer?.sourceDerivedColorSpace
         let mCode = renderer?.sourceMatrixCode
         let sourceLine: String
+        var overriddenWords: String?
         // Colour S6, L3: a cleared deck holds nil codes, as an untagged file does, so the codes cannot say there is
         // no source; the deck can (`hasSource`). Without it the line named the 709 defaults, and with a LUT stated
         // the scopes named the LUT's space, over no picture at all.
@@ -224,6 +230,7 @@ final class DisplayChainModel: ObservableObject {
             sourceLine = "\(p) · \(t) · \(m) · \(range)"
                        + " — CICP \(pCode ?? 1)-\(tCode ?? 1)-\(mCode ?? 1)"
                        + " — \(tier)"
+            if provenance == .overridden { overriddenWords = tier }
         }
 
         // ── TRANSFORM ───────────────────────────────────────────────────────────────────────
@@ -289,7 +296,9 @@ final class DisplayChainModel: ObservableObject {
                                 } ?? "no source",
                                 tags: renderer?.sourceColorNote,
                                 headroom: HeadroomReadout.text(renderer?.displayHeadroom),
-                                lut: deck.lut.readoutLine)
+                                lut: deck.lut.readoutLine,
+                                overriddenWords: overriddenWords,
+                                lutApplied: deck.lut.isApplied)
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
         // Colour S3: the Source and Tags lines in the log, once per change, so an unattended run reads

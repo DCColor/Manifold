@@ -898,6 +898,10 @@ final class MetalVideoRenderer {
     /// The screen this renderer's window is on.
     private var hostingScreen: NSScreen? { hostView?.window?.screen }
 
+    /// MAIN. This window's number, for the `[EDR] headroom` line: one renderer per window, so with several windows open
+    /// a display change logs one line each, and the number says which (a title would put file names in the log).
+    private var hostWindowNumber: Int? { hostView?.window?.windowNumber }
+
     /// MAIN. The host view has a window now (or a different one): read that window's headroom, and
     /// re-plan if in Reference.
     func hostViewDidMoveToWindow() {
@@ -989,7 +993,7 @@ final class MetalVideoRenderer {
         let said = (movedScreen && displayHeadroomScreenID != nil) ? "display change — window moved" : context
         displayHeadroom = reading
         displayHeadroomScreenID = id
-        Self.logEDRHeadroom(context: said, screen: screen)
+        Self.logEDRHeadroom(context: said, screen: screen, window: hostWindowNumber)
         NotificationCenter.default.post(name: Self.displayHeadroomDidChange, object: self)
     }
 
@@ -1787,7 +1791,8 @@ final class MetalVideoRenderer {
             // Colour S4: THIS window's screen (BUGS.md hazard rule 3), not the app's main window.
             Self.logEDRHeadroom(context: isFirstForSource ? "source load"
                                                           : "EDR opt-in changed mid-source",
-                                screen: Thread.isMainThread ? hostingScreen : nil)
+                                screen: Thread.isMainThread ? hostingScreen : nil,
+                                window: Thread.isMainThread ? hostWindowNumber : nil)
             lastLoggedEDROptIn = pictureWantsEDR
         }
 
@@ -1896,8 +1901,9 @@ final class MetalVideoRenderer {
     /// SDR mode the whole time. Three states, stated separately, is what stops it recurring.
     ///
     /// `screen` is the renderer's own window's screen where the caller has one (colour S4). Only the
-    /// startup line, which runs before any window exists, falls back to the app's main window.
-    private static func logEDRHeadroom(context: String, screen own: NSScreen? = nil) {
+    /// startup line, which runs before any window exists, falls back to the app's main window. `window` is that
+    /// window's number, printed as `(window n)` after the display (LG session, 2026-10-22); nil prints nothing.
+    private static func logEDRHeadroom(context: String, screen own: NSScreen? = nil, window: Int? = nil) {
         let screen = own ?? NSApp?.mainWindow?.screen ?? NSApp?.windows.first?.screen ?? NSScreen.main
         guard let s = screen else { print("[EDR] headroom (\(context)): no screen"); return }
         let cur = s.maximumExtendedDynamicRangeColorComponentValue
@@ -1914,8 +1920,8 @@ final class MetalVideoRenderer {
         } else {
             verdict = String(format: "   <<< headroom granted (current %.4f of potential %.4f)", cur, pot)
         }
-        print(String(format: "[EDR] headroom (%@) on \"%@\": current=%.4f potential=%.4f reference=%.4f%@",
-                     context, s.localizedName, cur, pot, ref, verdict))
+        print(String(format: "[EDR] headroom (%@) on \"%@\"%@: current=%.4f potential=%.4f reference=%.4f%@",
+                     context, s.localizedName, window.map { " (window \($0))" } ?? "", cur, pot, ref, verdict))
     }
 
     /// Build a CoreVideo nclc attachments dict from MediaInspector's authoritative
@@ -4517,7 +4523,8 @@ extension MetalVideoRenderer {
         logLayerState()
         // EDR headroom matters again when the opt-in flips (the same rule as a mid-source change).
         if let last = lastLoggedEDROptIn, last != pictureWantsEDR {
-            Self.logEDRHeadroom(context: "EDR opt-in changed by the LUT's output space", screen: hostingScreen)
+            Self.logEDRHeadroom(context: "EDR opt-in changed by the LUT's output space", screen: hostingScreen,
+                                window: hostWindowNumber)
             lastLoggedEDROptIn = pictureWantsEDR
         }
         sourceColorStateChanged()
