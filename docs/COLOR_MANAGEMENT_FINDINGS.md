@@ -7108,6 +7108,10 @@ daughter card.
    - **ST 2108-1, investigated 2026-10-23** (*SDI scaling — results*, below): the SDK documents say nothing about
      whether the driver puts the frame's HDR metadata into ST 2108-1 ANC on SDI. So whether D6's premise holds on
      the wire is **UNKNOWN**, pending the loopback.
+   - **RESOLVED by the loopback, 2026-10-23** (*S7-5 by loopback*, below): **D6's premise does not hold.** SDI
+     carries the static metadata too. On every PQ frame the driver inserts one ST 2108-1 packet (VANC, line 9) holding
+     exactly the mastering display and light levels Manifold set, and nothing on HLG or SDR. Manifold's behaviour
+     needs no change: it is the frame's metadata, set once, that reaches HDMI's InfoFrame and SDI's 2108-1 alike.
 7. **D7 — HDR10 metadata enters the renderer through `setSourceColorSpace`**, the one source-colour setter (the
    CLAUDE.md rule).
 
@@ -7723,6 +7727,141 @@ dumps one frame after each placement change, as handed to the card.
 - Through all seven switches (the last at frame #16586) it was `dropped=0`.
 - So the drop is outside the window this check measures. It is reported as measured and not explained: an output left
   running on a dead source for minutes is its own question.
+
+#### S7-5 by loopback — what is on the SDI wire, 2026-10-23 14:40–15:05 (attended session, not committed)
+
+**Scope:** S7-5's SDI half. One DeckLink 8K Pro SDI output is looped by Robbie into another SDI connector on the same
+card. The capture measures what actually arrives, against what Manifold's bridge handed the card. **The reference
+monitor and HDMI, S7-5's other half, are not covered by this.** Settings: Follow source, Fit to mode, HD/UHD only (all
+defaults).
+
+**Setup, read-only** (`scripts/decklink-loopback/probe`, which queries attributes, profiles, configuration `Get*` and
+status only):
+
+| Device | Sub-device | Profile | Duplex | Connectors | While Manifold outputs |
+|---|---|---|---|---|---|
+| 0, "DeckLink 8K Pro (1)" | 0 of 4 | `1dfd` one sub-device, full duplex (of `1dfd` `1dhd` `2dfd` `4dhd`) | full | in SDI+HDMI, out SDI+HDMI; input connection SDI; single link (`lcsl`) | **input locked** to the output's mode, 10-bit YCbCr 4:2:2 |
+| 1, 2, 3 | 1–3 of 4 | `1dfd` | inactive (`dxin`) | — | no signal |
+
+- **The loop:** device 0's output into device 0's own SDI input, one full-duplex sub-device. No profile, connector or
+  Desktop Video setting was changed, and none needed to be.
+- **Before Manifold ran:** the card was idling at the last mode it had been given (1080p59.94), with its input locked
+  to that, and `Busy` 0.
+- **Also read:** dual-link SDI is supported and **quad-link is not**. The PCIe link is x8 at speed 3. HANC capture needs
+  a DID/SDID input filter (a configuration write, not made); **VANC capture needs nothing**, and ST 2108-1 is defined
+  for VANC.
+- DaVinci Resolve was checked before every run and was never running.
+
+**The capture** (`scripts/decklink-loopback/capture`; built into `build/`, never in the app). It enables device 0's
+input with format detection, at 10-bit YUV. Per received frame it records:
+- the detected mode and flags;
+- the frame's colorspace, EOTF, HDR flag and all 12 static values, as the SDK reports them;
+- every ancillary packet (DID, SDID, line, data space, payload), plus a scan of the raw VANC lines for ANC headers;
+- the v210: a full FNV-1a, the sampled FNV that Manifold's `[SIGNAL-TRACE]` prints, and a byte compare against
+  Manifold's `[SDI-DUMP]` of the same frame.
+
+It prints a line whenever any of these changes.
+- *Matching frames:* paused, every frame Manifold sends is its frame #0, so each received frame is compared in full
+  against that dump. In the transitions, frames are matched through the sampled FNV and the scheduled index.
+
+**Predictions** (stated in the session before any run):
+
+| # | Prediction | Band |
+|---|---|---|
+| L1 | Received v210 byte-identical to the bridge read-back on every compared frame, all 9 files | 0 different |
+| L2a | Received colorspace and EOTF = handed, per file | Exact |
+| L2b | Expected: flag clear and no static values received on any file, PQ included (VPID has no mastering data; the SDK documents static-HDR capture for HDMI only) | As measured |
+| L3 | Transitions: signal and picture change on the same received frame, apart from the accepted transitional frame (*BUGS.md*, S7 follow-up 3); mode changes: the first locked frame carries both | Exact |
+| L4 | **ST 2108-1 expected absent** on PQ, HLG and SDR; a positive control decides whether absence means anything | As found |
+| L5 | Output `late=0 dropped=0`; capture 0 dropped input frames | Exact |
+
+**Per file** (paused, output on; about 5 s and 118–124 received frames each; tags re-read and confirmed first):
+
+| File | Output mode | Handed to the card (bridge read-back) | Received on the wire | Bytes | Match |
+|---|---|---|---|---|---|
+| HDR10 … `Meta.mov` (4K ProRes 4444; MDCV 2020, 4000 / 0.0001, 5500 / 800) | 2160p23.98 | Rec.2020 · EOTF 2 · flag set · R .708,.292 G .170,.797 B .131,.046 W .3127,.329 · 4000 / 0.0001 · 5500 / 800 | **identical**, and ST 2108-1 with the same values | 118 / 118 identical | ✅ |
+| HDR10 … `NoMeta.mov` | 2160p23.98 | Rec.2020 · EOTF 2 · flag set · defaults P3-D65, 1000 / 0.005, 0 / 0 | **identical**, 2108-1 the defaults | 118 / 118 | ✅ |
+| `hdr10-9-16-9-p3mastering-hevc.mov` (MDCV P3, 1000 / 0.005, 800 / 400) | 1080p25 | Rec.2020 · EOTF 2 · flag set · P3 mastering · 1000 / 0.005 · 800 / 400 | **identical**, 2108-1 the same | 124 / 124 | ✅ |
+| `hlg-9-18-9-prores.mov` | 1080p25 | Rec.2020 · EOTF 3 · **flag clear** | Rec.2020 · EOTF 3 · **flag set** · no static values · no packet | 123 / 123 | ⚠️ flag only |
+| `patches-9-1-9-prores.mov` | 1080p25 | Rec.2020 · EOTF 0 · flag clear | identical | 124 / 124 | ✅ |
+| `p3pq-12-16-1-prores.mov` (P3 → 2020 primaries and 2020 matrix on SDI) | 1080p25 | Rec.2020 · EOTF 2 · flag set · defaults | **identical**, 2108-1 the defaults | 123 / 123 | ✅ |
+| `patches-1-1-1-prores.mov` | 1080p25 | Rec.709 · EOTF 0 · flag clear | identical | 123 / 123 | ✅ |
+| `sdi-1280x720p23.976.mov` (Fit ×1.5) | 1080p23.98 | Rec.709 · EOTF 0 · flag clear | identical | 118 / 118 | ✅ |
+| `sdi-1080x1920p23.976.mov` (Fit ×1.125, pillarboxed) | 2160p23.98 | Rec.709 · EOTF 0 · flag clear | identical | 118 / 118 | ✅ |
+
+- **Bytes:** 1 087 / 1 087 received frames byte-identical to Manifold's frame #0 dump. SDI is lossless, 2160p included.
+- **Format detection:** every input locked YCbCr 4:2:2 10-bit, at the output's mode.
+- **Timing:** output `late=0 dropped=0` on every run. Capture: 0 dropped, 0 no-input frames.
+- **Two fixtures share pixels:** `hlg-9-18-9` and `patches-9-1-9` send byte-identical pictures (FNV `f5faa7e61330eb05`);
+  only their signal differs.
+
+**ST 2108-1, decoded field by field.**
+- *Where it appears:* on **every PQ frame, and on no HLG or SDR frame**. It is VANC, line 9, data stream 0, 36 bytes,
+  and it appears and disappears on the same received frame as the PQ tag (transitions, below).
+- *The layout, as read from the bytes:* two items, each `[index][length][type][size][payload]`, with types numbered
+  as the HEVC SEI's. The ST 2108-1 text was not available, so the index and length bytes are named from their values.
+  - Item 0, type 137 (mastering display colour volume, 24 B): G, B, R and white x / y in 0.00002 units; max and min
+    luminance in 0.0001 cd/m², big-endian.
+  - Item 1, type 144 (content light level, 4 B): MaxCLL and MaxFALL.
+
+| File | Item 0: mastering display | Item 1: CLL | = |
+|---|---|---|---|
+| Meta | G 0.17000, 0.79700 · B 0.13100, 0.04600 · R 0.70800, 0.29200 · W 0.31270, 0.32900 · max 4000.0000 · min 0.0001 | 5500 / 800 | **the file's** (MDCV and CLLI, exact) |
+| NoMeta | G 0.26500, 0.69000 · B 0.15000, 0.06000 · R 0.68000, 0.32000 · W 0.31270, 0.32900 · 1000.0000 · 0.0050 | 0 / 0 | **the stated defaults** |
+| HEVC | same P3 primaries · 1000.0000 · 0.0050 | 800 / 400 | **the file's** |
+| p3pq | the defaults | 0 / 0 | **the defaults** (the file has no MDCV) |
+
+- **Raw bytes, Meta:** `00 1a 89 18 21 34 9b aa 19 96 08 fc 8a 48 39 08 3d 13 40 42 02 62 5a 00 00 00 00 01 01 06 90 04
+  15 7c 03 20`.
+- **The positive control, and why it did not decide anything.** Before Manifold ran, a control tool
+  (`scripts/decklink-loopback/ancout`) output black 1080p25 on device 0, every frame carrying two VANC packets (0x51 /
+  0x01 user data, and 0x61 / 0x01 CEA-708). It sent them by sync display, then by scheduled playback; every call
+  returned S_OK. The input showed **none**, and no ANC header in its raw VANC lines.
+  - So my interim conclusion was that this loop cannot expose ANC.
+  - **That was wrong:** the driver's own ST 2108-1 packets, and the raw-VANC headers for them, appear on every PQ frame.
+  - Why the control's packets never reached the wire is not known. It is a limit of the control tool, not of the loop.
+
+**Transitions** (output running, paused, File ▸ Open Recent into the output window).
+- *Scheduled to received:* the bridge's scheduled index maps to the received index by a constant offset, checked on
+  every picture change (−225 in the second run, +139 in the first). There were no capture gaps between changes.
+
+| Run | Change (scheduled #, Manifold) | Picture on the wire | EOTF / flag / 2108-1 | **Colorspace on the wire** |
+|---|---|---|---|---|
+| 1 | Meta → HLG, 2160p23.98 → 1080p25 (re-established) | 9 no-input frames, then rx #150 new | rx #150 new | rx #150 new |
+| 1 | HLG → 9-1-9 (#341; identical pixels) | — | rx #480, on time | unchanged (2020) |
+| 1 | 9-1-9 → 1-1-1 (#681) | rx #820 (the accepted frame), then #821 the new picture | on time | **rx #819, one frame early** |
+| 1 | 1-1-1 → Meta, 1080p25 → 2160p23.98 (re-established) | 12 no-input frames, then rx #1169 new | rx #1169 | rx #1169 |
+| 2 | 1-1-1 → 9-1-9 (#376) | rx #151, #152 | on time | **rx #150, one early** |
+| 2 | 9-1-9 → 1-1-1 (#716) | rx #491, #492 | on time | **rx #490, one early** |
+| 2 | 1-1-1 → 9-1-9 (#1055) | rx #830, #831 | on time | **rx #829, one early** |
+| 2 | 9-1-9 → HLG (#1395) | — (identical pixels) | rx #1170, on time | unchanged |
+| 2 | HLG → 1-1-1 (#1734) | rx #1509 | rx #1509, on time | **rx #1508, one early**: one frame on the wire reads Rec.709 + EOTF 3 |
+| 2 | 1-1-1 → HEVC PQ (#2074) | rx #1849 | rx #1849: EOTF 2, flag and the 2108-1 packet arrive together | **rx #1848, one early** |
+| 2 | HEVC PQ → 1-1-1 (#2414) | rx #2189 | rx #2189: the packet stops | **rx #2188, one early** |
+
+- **The accepted transitional frame is on the wire as handed:** the outgoing picture re-rendered under the incoming
+  codes (e.g. sampled FNV `bb7f97673f21cc45`), tagged with them, on the scheduled frame the bridge logged.
+- **Every colorimetry change (7 of 7) arrives one frame before the frame Manifold tagged.** EOTF, the HDR flag, the
+  static metadata, ST 2108-1 and the picture arrive on the tagged frame.
+  - Manifold's read-back shows the right frame tagged. So the lead is downstream of Manifold: in the driver or
+    hardware output path, or in the input's reporting.
+  - One card on both ends cannot tell which (**UNKNOWN**). An external analyser or the reference monitor would.
+- **Mode changes:** the two re-establishes produced 9 and 12 no-input frames, and two stream-time gaps inside them.
+  These are the output restarting, not lost pictures. Output `late=0 dropped=0` on all runs.
+
+| # | Result | Verdict |
+|---|---|---|
+| L1 | 1 087 / 1 087 byte-identical | **PASS** |
+| L2a | Colorspace and EOTF equal on all 9 files | **PASS** |
+| L2b | **Opposite of the prediction:** on PQ the input reports the flag set and all 12 static values, equal to Manifold's (most likely decoded from the 2108-1 packet, whose values they equal exactly; not established). On SDR the flag is clear. **On HLG the flag reads set** with no values and no packet, where Manifold handed it clear | PQ and SDR **match**; HLG **mismatch** (flag only), `BUGS.md` |
+| L3 | Picture, EOTF, flag and metadata on the tagged frame every time; **colorimetry one frame early on 7 / 7 changes** | **FAIL** (colorimetry), `BUGS.md` |
+| L4 | **ST 2108-1 present on every PQ frame**, absent on HLG and SDR; payload = the file's metadata (Meta, HEVC) or the defaults (NoMeta, p3pq) exactly. The prediction was wrong | Reported; **resolves D6** |
+| L5 | `late=0 dropped=0`; capture 0 dropped outside the two re-establishes | **PASS** |
+
+**D6, resolved:** SDI carries colorimetry and transfer (VPID) **and the static metadata, via ST 2108-1**, which the
+driver inserts by itself from the frame's HDR metadata whenever `bmdFrameContainsHDRMetadata` is set. Manifold sets
+it on PQ frames only, so the packet follows PQ exactly. Nothing in Manifold changes. *SDI carries colorimetry and
+transfer only* is retired.
 
 ---
 

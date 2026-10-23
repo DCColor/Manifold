@@ -213,7 +213,8 @@ held back until after release, and the numbered defect entries follow.
        carries none. Scope: *SDI and HDMI never signal PQ or HLG*, below. **Decided 2026-10-22 (D1–D7, §6.11 *S7*);
        S7-0 to S7-4 built and run unattended 2026-10-22, committed (`aec418e`); follow-ups 1–3 built and run
        unattended the same day, committed (`982a73e`). S7-5 (the reference monitor over SDI and HDMI) is attended and still
-       to do.**
+       to do. Its SDI-wire half was measured by loopback on 2026-10-23: the wire matches what Manifold sends, ST
+       2108-1 included, apart from the two open loopback entries below. The monitor and HDMI remain.**
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
@@ -1576,6 +1577,8 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 - **Priority: low. Not to be investigated before 1.0** (Robbie, 2026-10-23).
 - **Next step:** read `BMDDeckLinkProfileID` and the link configuration on device 0, and try 2160p119.88 under a
   quad-link profile.
+- **Read 2026-10-23 (loopback probe, read-only):** device 0 is in profile `1dfd`, single link. It reports dual-link
+  SDI supported and **quad-link not supported**, and PCIe x8 at speed 3.
 - **Until then:** Follow source picks 2160p above 60 only for a UHD-sized source at that rate, or for a picture
   Fit sizes to 2160p. It is not gated, because the card reports the mode supported.
 
@@ -1612,22 +1615,55 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
-## ☐ OPEN — UNKNOWN UNTIL LOOPBACK — DeckLink: whether SDI carries ST 2108-1 HDR static metadata
+## ☐ OPEN — NEW 2026-10-23 (S7-5 loopback) — DeckLink: on SDI, a colorimetry change arrives one frame before the frame it was tagged on (cause UNKNOWN)
 
-**Added 2026-10-23** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, S7 D6, and *SDI scaling — results*).
-
-- **What is known:** for PQ, Manifold sets `bmdFrameContainsHDRMetadata` and the static metadata on every frame,
-  exactly as the SDK manual (§2.4.12.2) and the `SignalGenHDR` sample do.
-- **What is not known:** the SDK headers, manual and samples never say whether the driver turns that into ST 2108-1
-  ANC (DID 0x41 / SDID 0x0C) on SDI. They name no connector, no VANC flag and no mode for it.
-- **To confirm:** an SDI loopback into a DeckLink input. Look for `GetFirstPacketByID(0x41, 0x0C)` on captured
-  frames, on PQ, then HLG, then SDR. An analyser with a 2108 view is the stronger check.
-- **If absent:** emitting it means `bmdVideoOutputVANC` and a hand-built packet per frame. That is a scope change
-  against D6.
+**Found by the SDI loopback** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback*, transitions).
+- **What:** at a file change that changes colorimetry, the received frame's colorspace changes **one frame before** the
+  frame Manifold tagged. The picture, EOTF, HDR flag, static metadata and ST 2108-1 arrive on the tagged frame.
+  - **7 of 7** colorimetry changes, two runs: 2020 → 709, 709 → 2020, HLG 2020 → SDR 709, 709 → PQ 2020, PQ 2020 →
+    709.
+  - EOTF-only changes arrive on time (2 of 2).
+  - So for one frame the wire says, for example, **Rec.709 with EOTF 3 (HLG)**, on the outgoing picture.
+- **Manifold tags the right frame:** the bridge read-back logs the change on the frame whose pixels change, and the
+  received pictures match those frames by FNV.
+- **Cause UNKNOWN.** The driver or hardware may apply the colorimetry one frame ahead, or the input may report it one
+  frame ahead. One card on both ends cannot separate the two.
+- **To find out:** an SDI analyser on the output, or the reference monitor's behaviour (S7-5's other half).
+- **Severity:** one frame, at a file change, beside the accepted transitional frame (*at a file change, one frame of
+  the outgoing picture goes out under the incoming signal*). A monitor that switches gamut on the VPID would switch
+  one frame before the picture does.
 
 ---
 
-## ✅ FIXED 2026-10-23 (commit `________`; pending a real session) — PRE-EXISTING, ALL BUILDS — DeckLink: any source raster that matches no output mode carries BLACK (720p, vertical, square, odd sizes)
+## ☐ OPEN — NEW 2026-10-23 (S7-5 loopback) — DeckLink: the SDI input reports HLG with the HDR-metadata flag set, where Manifold sent it clear
+
+**Found by the SDI loopback** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback*).
+- **What:** for `hlg-9-18-9-prores.mov`, Manifold hands the card Rec.2020 · EOTF 3 · `bmdFrameContainsHDRMetadata`
+  **clear** (D3). The input reports Rec.2020 · EOTF 3 · flag **set**, with no static values readable and no ST 2108-1
+  packet.
+  - The same was seen on all three HLG stretches captured.
+  - SDR is reported clear and PQ set, both as sent.
+- **Reading:** the wire carries no static metadata for HLG (no packet), so the flag appears to be the input's own
+  report of an HDR transfer in the VPID, not something Manifold sent. Not established.
+- **No change to Manifold indicated.** Recorded because it differs from what was handed, and because a capture tool
+  that reads the flag as "static metadata present" would be misled on HLG.
+
+---
+
+## ✅ RESOLVED 2026-10-23 (loopback, S7-5) — DeckLink: SDI DOES carry ST 2108-1 HDR static metadata
+
+**Resolved 2026-10-23** by an SDI loopback on the DeckLink 8K Pro (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by
+loopback*).
+- **On the wire:** every PQ frame carries one ST 2108-1 packet (DID 0x41, SDID 0x0C, VANC line 9, 36 bytes). It holds
+  the mastering display (type 137) and light levels (type 144) Manifold set on the frame:
+  - the file's, for the Meta fixture (Rec.2020, 4000 / 0.0001, 5500 / 800) and the HEVC one;
+  - the stated defaults, for NoMeta and p3pq.
+- **No packet on HLG or SDR.**
+- **The driver inserts it by itself** whenever `bmdFrameContainsHDRMetadata` is set. Manifold sets it on PQ only.
+- **D6's "SDI carries colorimetry and transfer only" is retired.** Nothing in Manifold changes.
+---
+
+## ✅ FIXED 2026-10-23 (`cb39182`; pending a real session) — PRE-EXISTING, ALL BUILDS — DeckLink: any source raster that matches no output mode carries BLACK (720p, vertical, square, odd sizes)
 
 **Fixed 2026-10-23, unattended** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *SDI scaling*: rules, predictions and results).
 Robbie's D1–D9 replace the "decided scope" below where they differ:
@@ -3188,6 +3224,19 @@ Probably the Opus pre-skip trim meeting the first buffer. Not investigated.
 S7-5, is still to do**: whether the reference monitor switches EOTF by itself over SDI and over HDMI, and what it
 shows of the static metadata. Until it is done, what reaches the wire is UNKNOWN; what Manifold hands the driver
 is measured.
+
+**S7-5, SDI half, by loopback (2026-10-23; §6.11, *S7-5 by loopback*). NOT closed: two mismatches, below.**
+- **What matched:**
+  - The wire carries what Manifold handed, on all 9 files: 1 087 / 1 087 received frames byte-identical.
+  - Colorspace and EOTF equal on all 9 files.
+  - On PQ, the flag and all 12 static values are equal, and an ST 2108-1 packet carries them (D6 resolved, entry
+    above).
+  - Output `late=0 dropped=0`.
+- **Two mismatches,** each its own entry below:
+  - a colorimetry change reaches the wire one frame before its frame;
+  - the input reports HLG with the HDR flag set.
+- **Still to do:** HDMI, and the reference monitor on either connection. A loopback cannot show what a monitor does
+  with the signal.
 
 **What was wrong.** The DeckLink output tagged each frame with `bmdDeckLinkFrameMetadataColorspace` only. No EOTF,
 no static HDR metadata, no `bmdFrameContainsHDRMetadata` flag. A PQ or HLG source reached SDI tagged Rec.2020 with
