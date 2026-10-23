@@ -164,6 +164,19 @@ final class OutputSignalTests: XCTestCase {
         assertClose(g24.apply([0.7, 0.7, 0.7]), [0.7, 0.7, 0.7])
     }
 
+    /// S7 follow-up 1: a converted (P3-tagged) picture is encoded with the 2020 matrix, whatever its own matrix
+    /// code; every other picture keeps its own, a 2020-tagged one included.
+    func testConvertedPicturesUseThe2020Matrix() {
+        for (p, t, m) in [(12, 1, 1), (12, 16, 1), (11, 1, 1), (12, 1, 6), (11, 16, 9)] {
+            let s = OutputSignal.resolve(picturePrimaries: p, pictureTransfer: t, source: nil)
+            XCTAssertEqual(s.sdiMatrixCode(pictureMatrix: m), 9, "\(p)-\(t)-\(m)")
+        }
+        for (p, t, m): (Int?, Int?, Int?) in [(9, 16, 9), (9, 1, 9), (9, 16, 1), (1, 1, 1), (6, 6, 6), (5, 6, 5), (nil, nil, nil)] {
+            let s = OutputSignal.resolve(picturePrimaries: p, pictureTransfer: t, source: nil)
+            XCTAssertEqual(s.sdiMatrixCode(pictureMatrix: m), m, "\(String(describing: p))-\(String(describing: m))")
+        }
+    }
+
     /// Only 11 and 12 convert.
     func testOnlyP3PrimariesConvert() {
         for p in primariesCodes {

@@ -1636,7 +1636,8 @@ final class MetalVideoRenderer {
         pendingColorState = PendingColorState(colorSpace: installed, wantsEDR: pictureWantsEDR,
                                               reference: reference, decodeMatrix: decodeMatrix,
                                               lut: interpretationLUT,
-                                              output: FrameOutputState(signal: signal, v210MatrixCode: pictureMatrixCode))
+                                              output: FrameOutputState(signal: signal,
+                                                                       v210MatrixCode: signal.sdiMatrixCode(pictureMatrix: pictureMatrixCode)))
         pendingRefresh = true
         refreshLock.unlock()
         deckLinkLock.lock(); deckLinkCurrentSignal = signal; deckLinkLock.unlock()

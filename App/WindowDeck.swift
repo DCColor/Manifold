@@ -1050,8 +1050,8 @@ final class DeckRegistry {
         // Colour S5: through the window's file override, which makes the one `setSourceColorSpace` call —
         // the file's codes with `.fromCodes` on Auto (a file's undeclared axis arrives as nil from the
         // format description, so the codes are the resolution), the override's otherwise.
-        engine.onSourceColorTags = { [weak deck] primaries, transfer, matrix in
-            deck?.fileColor.fileTags(primaries: primaries, transfer: transfer, matrix: matrix)
+        engine.onSourceColorTags = { [weak deck] primaries, transfer, matrix, hdr10 in
+            deck?.fileColor.fileTags(primaries: primaries, transfer: transfer, matrix: matrix, hdr10: hdr10)
         }
         // A new file resets the window's file override to Auto, before its tags arrive (decided 2026-10-13).
         engine.onSourceCommitted = { [weak deck] url in

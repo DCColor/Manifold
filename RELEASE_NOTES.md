@@ -80,9 +80,10 @@ bullet.
 - Fixed: after reconnecting, an SRT stream could stop about 17 seconds in with "The stream stopped sending video" while it was still playing.
 - Fixed: after an NDI or HLS stream ended, a file played next ran its picture about 0.2 s ahead of its sound.
 - Fixed: SDI audio dropped out every few seconds during file playback.
-- Fixed: P3-D65 and DCI-P3 sources went out over SDI labelled Rec. 2020 without being converted, so they looked oversaturated on a monitor following the label. They are now converted to Rec. 2020 for SDI. The window, scopes and exported frames are unchanged, and Rec. 2020 sources whose content stays within P3 pass through untouched.
+- Fixed: P3-D65 and DCI-P3 sources went out over SDI labelled Rec. 2020 without being converted, so they looked oversaturated on a monitor following the label. They are now converted to Rec. 2020 for SDI, colors and color matrix both, so a monitor decoding Rec. 2020 shows them correctly. The window, scopes and exported frames are unchanged, and Rec. 2020 sources whose content stays within P3 pass through untouched.
 - Fixed: when a live stream's color changed during SDI output, the output kept the old color label. Every color change, from a file, a stream, an override or a LUT, now reaches the very frame it changes.
 - Fixed: SDI output could go back to an earlier source's color label when a file with sound was opened after output started.
+- Fixed: an HDR10 file's first frames over SDI and HDMI could carry default HDR metadata instead of the file's own. The file's values are now sent from the first frame.
 - Fixed: starting SDI output while the picture was paused sent black until you pressed Play. The paused frame now goes out as soon as output starts, including when the output mode changes and when output starts on launch.
 - Fixed: streams using the BT.470BG color matrix, common from European encoders, were decoded with Rec. 709 coefficients, giving a small color shift.
 - Fixed: H.264 4:2:2 streams over SRT were shown at 4:2:0 color resolution without saying so.
@@ -187,7 +188,8 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 |---|---|---|
 | File playback feeds the SDI audio tap 250 ms ahead with a 4 s ring: no dropouts every few seconds | `109cfc3` | Yes. **Unsure on status**: the attended SDI check on the Resolve workstation is still pending (BUGS.md L1652) |
 | Follow source uses SRT's declared, then measured, frame rate | `ce3d828` `a8b70fa` | Yes |
-| HDR signalling (colour S7): per-frame colorspace + EOTF, PQ static metadata (HDMI), HDR10 from file MDCV/CLLI and SRT SEI, defaults stated; P3 → 2020 on SDI only; stream and audio re-establish tag defects fixed | not committed | Yes. **Unsure on status**: S7-5, the reference monitor over SDI and HDMI, is still to do |
+| HDR signalling (colour S7): per-frame colorspace + EOTF, PQ static metadata (HDMI), HDR10 from file MDCV/CLLI and SRT SEI, defaults stated; P3 → 2020 on SDI only; stream and audio re-establish tag defects fixed | `aec418e` |
+| S7 follow-ups: P3 converted for SDI is also encoded with the BT.2020 matrix; an HDR10 file's metadata is read at load, so SDI frame #0 carries it | not committed | Yes. **Unsure on status**: S7-5, the reference monitor over SDI and HDMI, is still to do |
 | Output started while paused sends the current frame: one render primed before the preroll (paused only; playing starts unchanged), with a first-scheduled-frame log. A refused output mode is logged with the API's answer and retried once | not committed | Yes |
 
 #### Color, display and scopes

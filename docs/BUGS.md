@@ -211,8 +211,9 @@ held back until after release, and the numbered defect entries follow.
        transfer (SDR / HLG / PQ), and the HDMI HDR InfoFrame on the DeckLink's HDMI daughter card (EOTF plus static
        metadata), from the file's HDR10 metadata or the stream's `[HDR10-SEI]`, with stated defaults when a PQ source
        carries none. Scope: *SDI and HDMI never signal PQ or HLG*, below. **Decided 2026-10-22 (D1–D7, §6.11 *S7*);
-       S7-0 to S7-4 built and run unattended 2026-10-22, P1–P8 met, not committed. S7-5 (the reference monitor over
-       SDI and HDMI) is attended and still to do.**
+       S7-0 to S7-4 built and run unattended 2026-10-22, committed (`aec418e`); follow-ups 1–3 built and run
+       unattended the same day, not committed. S7-5 (the reference monitor over SDI and HDMI) is attended and still
+       to do.**
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
@@ -3032,7 +3033,7 @@ Probably the Opus pre-skip trim meeting the first buffer. Not investigated.
 
 ---
 
-## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 — PRE-EXISTING, ALL BUILDS — SDI and HDMI never signal PQ or HLG
+## ✅ FIXED 2026-10-22 (`aec418e`) — COLOUR S7 — PRE-EXISTING, ALL BUILDS — SDI and HDMI never signal PQ or HLG
 
 **Fixed, unattended part only.** S7-0 to S7-4 built and measured (§6.11, *S7 — results*). **The attended check,
 S7-5, is still to do**: whether the reference monitor switches EOTF by itself over SDI and over HDMI, and what it
@@ -3078,7 +3079,7 @@ scheduled frame; exports byte-identical to HEAD except D4's P3 v210, which match
 
 ---
 
-## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D4 — PRE-EXISTING, ALL BUILDS — P3-D65 and DCI-P3 went out over SDI as Rec.2020 without conversion
+## ✅ FIXED 2026-10-22 (`aec418e`) — COLOUR S7 D4 — PRE-EXISTING, ALL BUILDS — P3-D65 and DCI-P3 went out over SDI as Rec.2020 without conversion
 
 **What was wrong.** Primaries 11 and 12 were tagged Rec.2020 (`DeckLinkBridge.mm`, `BMDColorspaceForPrimaries`), but
 the v210 convert applied only the YCbCr matrix, so the P3 pixel values went out unchanged under a 2020 tag. A monitor
@@ -3095,11 +3096,12 @@ it converts.
 `rgba16f`: **0 codes** difference on all 4 147 200 components each (66.67 % of components moved from HEAD). The SDI
 frame's FNV-1a equals the export's. Every other file: v210 byte-identical to HEAD.
 
-**Not changed, open:** see *P3 sources go out signalled Rec.2020 but encoded with their own 709 matrix*, below.
+**Follow-up (closed):** the converted frame is now also encoded with the BT.2020 matrix; see *P3 sources went out
+signalled Rec.2020 but encoded with their own 709 matrix*, below.
 
 ---
 
-## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D1 — PRE-EXISTING, ALL BUILDS — streams never updated the SDI tag mid-session
+## ✅ FIXED 2026-10-22 (`aec418e`) — COLOUR S7 D1 — PRE-EXISTING, ALL BUILDS — streams never updated the SDI tag mid-session
 
 **What was wrong.** Only the file, file-override and LUT paths called `DeckLinkService.sourceColorChanged()`
 (`ContentView.swift`, `FileColorOverride.swift`, `InterpretationLUT.swift`). A stream whose colour changed after the
@@ -3115,7 +3117,7 @@ Robbie (the stream sheet is not reachable by Accessibility).
 
 ---
 
-## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D1 — PRE-EXISTING, ALL BUILDS — an audio re-establish put back the tag from the start of output
+## ✅ FIXED 2026-10-22 (`aec418e`) — COLOUR S7 D1 — PRE-EXISTING, ALL BUILDS — an audio re-establish put back the tag from the start of output
 
 **What was wrong.** `audioFormatChanged` re-established the output with `activeStart.primariesCode`, the primaries
 saved when output was first started. A file with audio loaded after a different-colour start went out with the
@@ -3130,7 +3132,7 @@ its own.
 
 ---
 
-## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D7 — PRE-EXISTING, ALL BUILDS — HDR10 metadata never reached the output
+## ✅ FIXED 2026-10-22 (`aec418e`) — COLOUR S7 D7 — PRE-EXISTING, ALL BUILDS — HDR10 metadata never reached the output
 
 **What was wrong.** A file's MDCV / CLLI (`VideoMetadata.hdr10`) reached only the Inspector, and SRT's SEI
 (`lastHDR10SEI`) was only logged. Found in the S7 audit.
@@ -3143,31 +3145,57 @@ SRT through `LiveDisplayRoute.updateHDR10` (passed with every colour call the ro
 
 ---
 
-## ☐ OPEN 2026-10-22 — TO DECIDE (found in colour S7) — P3 sources go out signalled Rec.2020 but encoded with their own 709 matrix
+## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 FOLLOW-UP 1 — PRE-EXISTING, ALL BUILDS — P3 sources went out signalled Rec.2020 but encoded with their own 709 matrix
 
-A P3 source whose matrix code is 1 (12-1-1, 12-16-1, and every file on the *P3-D65 PQ* preset, whose matrix is
+**Decided (Robbie, 2026-10-22):** a P3-tagged source converted to Rec.2020 primaries for SDI is also encoded with the
+BT.2020 NCL matrix, because the signal says Rec.2020 and receivers decode with that matrix. That covers every
+source signalled 2020 after conversion: 12-1-1, 12-16-1, the P3-D65 PQ preset and DCI-P3. Sources already tagged
+2020 are unchanged.
+
+**Fix.** `OutputSignal.sdiMatrixCode(pictureMatrix:)` (ColorimetryModel) gives CICP 9 when the signal converts the
+primaries, else the picture's matrix code. The renderer publishes it with the frame's output state, so the v210
+convert and the DEBUG dump use it. Unit-tested; two mutants fail the test.
+
+**Verified (§6.11, *S7 follow-ups — results*):** 11-1-1, 12-1-1 and 12-16-1 v210 against a model of 2020 primaries
++ the BT.2020 matrix: **0 codes** on 4 147 200 components each, JSON kr / kb 0.2627 / 0.0593. The *P3-D65 PQ* preset
+on the 709 chart reads 0.2627 too. The SDI frame's FNV-1a equals its export's (12-1-1, `c73449b6af027b25`). 17 other
+files byte-identical to `aec418e`.
+
+**Before the fix:** A P3 source whose matrix code is 1 (12-1-1, 12-16-1, and every file on the *P3-D65 PQ* preset, whose matrix is
 709-class) is now converted to Rec.2020 primaries on SDI (D4), but its v210 is still encoded with the picture's matrix
 code, as the CLAUDE.md rule says: the v210 dump reads `kr 0.2126, kb 0.0722` with `sdiPrimaries P3 D65 → Rec. 2020`.
 The frame is tagged Rec.2020, and a monitor decoding a 2020 signal will use the 2020 matrix. **Pre-existing**:
-HEAD sent the same matrix under the same tag. It is not a D4 question and was not changed. **To decide:** whether a
-converted frame is also encoded with the 2020 matrix. This affects S7-5's reading of the P3 files.
+HEAD sent the same matrix under the same tag. It was not a D4 question, so S7 left it for a decision.
 
 ---
 
-## ☐ OPEN 2026-10-22 — found in colour S7 — at a file change, one frame of the outgoing picture goes out under the incoming signal
+## ✅ ACCEPTED 2026-10-22 (Robbie, S7 follow-up 3; log only, no fix) — found in colour S7 — at a file change, one frame of the outgoing picture goes out under the incoming signal
 
 At a file change the new file's colour state arrives before its first frame. The renderer re-presents the frame on
 screen under the new state (`pendingRefresh`, by design), so one scheduled frame carries the old picture rendered
 under the new codes, and its tag (D1: the codes it was rendered with). Measured: hdr10 → pqnometa, the signal changed
 at frame #240 and the new picture arrived at #241; the same one-frame step at p3pq → hdr10 (#1296 / #1297) and HLG →
 sync clip (#285 / #286). The window does the same. **Pre-existing in the pixels**: HEAD rendered that frame the same
-way. **To decide:** whether the output should skip that frame.
+way. **Accepted as it is** (Robbie, 2026-10-22): the frame's tag matches the codes it was rendered with, and it lasts
+one frame. Not fixed.
 
 ---
 
-## ☐ OPEN 2026-10-22 — found in colour S7 — an HDR10 file's first frames could carry the defaults until inspection
+## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 FOLLOW-UP 2 — found in colour S7 — an HDR10 file's first frames could carry the defaults until inspection
 
-A file's colour arrives twice: the engine's load edge (codes only), then inspection (codes and HDR10). The log shows
+**Decided (Robbie, 2026-10-22):** HDR10 files must not start with the default metadata.
+
+**Fix.** `FrameEngine.loadAsset` reads the file's HDR10 static metadata off the main actor before any load route
+publishes `onSourceColorTags`. The edge now carries it as a fourth value, and `FileColorOverrideModel.fileTags`
+takes it from either edge. So the renderer's first colour state for the file, and the frame #0 it tags, already have
+the file's values. The read happens before the MOV, MXF and container routes branch. Unload publishes nil.
+
+**Verified:** `hdr10-9-16-9-p3mastering-hevc.mov` (the only file in the repo with container HDR10 metadata), opened
+with output on: one `[DeckLink] signal →` line, the file's values (P3 D65 · 1000 / 0.0050 · MaxCLL 800 ·
+MaxFALL 400). The first frame read back the same; output started on it, frame #0 the same. **0 `(defaults)` lines**
+in the run.
+
+**Before the fix:** a file's colour arrives twice: the engine's load edge (codes only), then inspection (codes and HDR10). The log shows
 both signals: `… (defaults) · MaxCLL 0 …`, then `… MaxCLL 800 · MaxFALL 400`. In the S7 run only the second reached a
 frame (#1296). A slower inspection would let frames out with the defaults first. Not seen, not measured beyond this.
 

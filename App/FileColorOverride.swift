@@ -26,9 +26,10 @@ final class FileColorOverrideModel: ObservableObject {
     @Published private(set) var override: ColorimetryOverride = .auto
     /// The file's own codes, as its container states them (nil = not stated), from the last tag edge.
     @Published private(set) var declared: (primaries: Int?, transfer: Int?, matrix: Int?) = (nil, nil, nil)
-    /// Colour S7 (D7): the file's HDR10 static metadata, from inspection (the metadata observer); nil until then, and
-    /// for a file that states none. Cleared when a new file is committed. Passed with every colour call, override
-    /// or not: it is the file's own statement about its grade, which an override of the codes does not change.
+    /// Colour S7 (D7): the file's HDR10 static metadata; nil for a file that states none. Both edges carry it: the
+    /// engine's load edge (read before the first frame, S7 follow-up 2) and the metadata observer (the same values).
+    /// Cleared when a new file is committed. Passed with every colour call, override or not: it is the file's own
+    /// statement about its grade, which an override of the codes does not change.
     private(set) var declaredHDR10: HDR10StaticMetadata?
 
     private weak var deck: WindowDeck?
@@ -52,10 +53,10 @@ final class FileColorOverrideModel: ObservableObject {
         deck?.applyWindowTitle()
     }
 
-    /// The file's own tags, from either edge. Applied under the override in force.
-    func fileTags(primaries: Int?, transfer: Int?, matrix: Int?) {
+    /// The file's own tags and HDR10 metadata, from either edge. Applied under the override in force.
+    func fileTags(primaries: Int?, transfer: Int?, matrix: Int?, hdr10: HDR10StaticMetadata?) {
         declared = (primaries, transfer, matrix)
-        if deck?.engine?.currentURL == nil { declaredHDR10 = nil }
+        declaredHDR10 = (hdr10?.hasAny == true && deck?.engine?.currentURL != nil) ? hdr10 : nil
         // Unload (`stop()` clears `currentURL` before it publishes nils): nothing to interpret.
         if deck?.engine?.currentURL == nil, override != .auto {
             override = .auto
@@ -65,13 +66,6 @@ final class FileColorOverrideModel: ObservableObject {
     }
 
     // MARK: Changes
-
-    /// The inspection edge (the metadata observer): the file's tags and its HDR10 metadata (colour S7). The engine's
-    /// load edge has no metadata yet and calls the three-code form, which keeps what this one stored.
-    func fileTags(primaries: Int?, transfer: Int?, matrix: Int?, hdr10: HDR10StaticMetadata) {
-        declaredHDR10 = hdr10.hasAny ? hdr10 : nil
-        fileTags(primaries: primaries, transfer: transfer, matrix: matrix)
-    }
 
     /// Ask for `override` on this window's file. A Custom triple outside the S3 table never gets here
     /// (`ColorimetryOverride.customIfSupported`); a stray one is refused all the same.

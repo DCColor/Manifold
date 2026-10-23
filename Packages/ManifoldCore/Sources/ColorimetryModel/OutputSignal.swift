@@ -234,6 +234,14 @@ public struct OutputSignal: Equatable, Sendable {
                                                                         pictureTransfer: pictureTransfer))
     }
 
+    /// The YCbCr matrix code SDI's v210 is encoded with: the picture's own (S6 L2), EXCEPT when D4 converts a
+    /// P3-tagged picture to Rec.2020 primaries. That frame is signalled Rec.2020 and receivers decode it with the
+    /// BT.2020 NCL matrix, so it is encoded with that matrix (CICP 9), whatever the source's matrix code (S7 follow-up
+    /// 1, Robbie, 2026-10-22). A picture already tagged 2020 is not converted and keeps its own matrix code.
+    public func sdiMatrixCode(pictureMatrix: Int?) -> Int? {
+        primariesConversion != nil ? 9 : pictureMatrix
+    }
+
     // MARK: Words (S7-3)
 
     /// The colorimetry as the Signal line says it: "Rec. 2020 (converted from P3 D65)" when D4 converts.

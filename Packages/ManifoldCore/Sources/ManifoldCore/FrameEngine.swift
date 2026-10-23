@@ -223,7 +223,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// nil codes mean "no source, or nothing declared" — the renderer resolves that to its 709
     /// default. Publishing nils on unload is what stops a failed open, or an emptied deck, from
     /// leaving the PREVIOUS file's colour space on the layer.
-    public var onSourceColorTags: ((Int?, Int?, Int?) -> Void)?
+    ///
+    /// The fourth value (colour S7 follow-up 2): the file's HDR10 static metadata, read at load before the edge
+    /// (`loadedHDR10`), or nil when the file declares none and at unload. So the first colour state the renderer
+    /// installs, and therefore SDI frame #0, carries the file's values, not the defaults.
+    public var onSourceColorTags: ((Int?, Int?, Int?, HDR10StaticMetadata?) -> Void)?
+
+    /// Colour S7 follow-up 2. The loaded file's HDR10 static metadata (nil = none declared), read off the main actor
+    /// in `loadAsset` before any route publishes `onSourceColorTags`. Cleared at unload.
+    private var loadedHDR10: HDR10StaticMetadata?
 
     /// A NEW FILE HAS BEEN COMMITTED — called on the main actor at the start of `loadAsset`'s commit
     /// phase, after `currentURL` is set and BEFORE the new file's `onSourceColorTags`. Colour S5: the
@@ -1176,7 +1184,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // value across the gap is not a harmless brief inaccuracy: the layer applies its
         // colorspace at PRESENT time, so the next source's FIRST frame would be drawn through the
         // dead file's space and would stay that way until something presented again.
-        onSourceColorTags?(nil, nil, nil)
+        loadedHDR10 = nil
+        onSourceColorTags?(nil, nil, nil, nil)
         onSourceColorNote?(nil)
         // …and the chroma, for the same reason: the readout must not describe a departed file.
         fileChroma = .undetermined
@@ -1693,6 +1702,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // frame from the outgoing file fail its delivery check instead of landing on the new one.
         installScrubProducer(for: nil, useLibav: false)
 
+        // Colour S7 follow-up 2: the file's HDR10 static metadata, BEFORE any route below publishes the colour edge,
+        // so the renderer's first colour state for this file carries it and SDI frame #0 goes out with the file's
+        // values. Off the main actor (the reader opens the file with libav); stream-level only, no decode.
+        let hdr10 = await Task.detached(priority: .userInitiated) { HDR10MetadataReader.read(url: url) }.value
+        if loadAbandoned(generation, url, at: "the HDR10 metadata") { return }
+        loadedHDR10 = hdr10.hasAny ? hdr10 : nil
+
         // MXF: AVFoundation can't demux it — route straight to libav (container-based
         // detection; not a VT-failed fallback). Its metadata comes from libav.
         if isMXF {
@@ -1774,7 +1790,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // acting). It stays because it is also where the DeckLink output and the scope
             // headers are re-derived, which genuinely do belong to the full inspection.
             let codes = MediaInspector.colorCodes(for: fmt)
-            onSourceColorTags?(codes.primaries, codes.transfer, codes.matrix)
+            onSourceColorTags?(codes.primaries, codes.transfer, codes.matrix, loadedHDR10)
             // ── THE CONTAINER AGAINST THE FILE'S OWN BITSTREAM (colour S3) ──────────────────────
             // Where the SPS reader can see into the file (H.264 / HEVC), compare and say so. Logged
             // and shown, never acted on: the codes above stay what drives the picture.
@@ -1816,7 +1832,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // NO FORMAT DESCRIPTION IS ALSO AN ANSWER, and it must be published rather than
             // skipped: leaving the previous file's codes standing is the stale-colour bug in its
             // purest form. nils resolve to the renderer's 709 default.
-            onSourceColorTags?(nil, nil, nil)
+            onSourceColorTags?(nil, nil, nil, nil)
             onSourceColorNote?(nil)
             // NO FORMAT DESCRIPTION MEANS NEITHER ATOM IS DECLARED, which is an answer and must
             // be published for the same reason the nil codes are.
@@ -2347,7 +2363,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // nothing at all, so without this the layer would keep the previous file's space
                 // for the whole of the load — and `applyLibavMetadata` (which does carry these
                 // codes) is both later and behind a SwiftUI update pass.
-                onSourceColorTags?(info.primariesCode, info.transferCode, info.matrixCode)
+                onSourceColorTags?(info.primariesCode, info.transferCode, info.matrixCode, loadedHDR10)
                 // The container drives this path's picture now (`ContainerColorPolicy`). Where the decoder's frames
                 // state something else (ffmpeg's DNxHR decoder: bt709 on every frame), the readout's Tags line says
                 // so, as it does for an H.264 / HEVC file's bitstream. The note is cleared at unload (`stop()`).

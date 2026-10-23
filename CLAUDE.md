@@ -99,7 +99,8 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   space change only through `MetalVideoRenderer.setInterpretationLUT`, and only `resolvePictureCodes`
   (called by those two setters) writes the picture codes. The picture codes drive the layer colourspace,
   EDR, the scope headers and scope maths, the SDI tag, the v210 matrix, the export ICC, Reference's plan
-  and the CIE scope. With no LUT, or at Same as Source, the two sets are identical. Code that describes
+  and the CIE scope. The one exception: a frame converted from P3-D65 or DCI-P3 to Rec.2020 primaries for SDI is
+  encoded with the BT.2020 NCL matrix, to match its Rec.2020 signal (`OutputSignal.sdiMatrixCode`, S7 follow-up 1). With no LUT, or at Same as Source, the two sets are identical. Code that describes
   the picture reads picture codes; code that describes the source reads source codes
   (`docs/COLOR_MANAGEMENT_FINDINGS.md` §6.11, S6 D3, amended in L2). Nothing writes scope colour state
   directly: the scope models' `sourceMatrixCode`, `sourceTransferCode`, `sourcePrimariesCode` and

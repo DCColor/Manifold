@@ -7152,7 +7152,7 @@ daughter card.
 **Also checked:** the defaults domain is dictionary-equal afterwards (the S5/L1 rules), and `swift test` passes in
 full.
 
-##### S7 — results, 2026-10-22 (unattended, S7-0 to S7-4, not committed)
+##### S7 — results, 2026-10-22 (unattended, S7-0 to S7-4; committed as `aec418e`)
 
 **Estimated:** about 5 h. **Actual:** about 2¾ h. Logs, events and scores are in the gitignored
 `build/colour-s7/run/`. Pixel exports were deleted after scoring. No screenshots were taken. One step was clicked by
@@ -7246,6 +7246,64 @@ D2 therefore sends **0**.
 
 **Not exercised:** WHEP, HLS and NDI with HDR (they carry no static metadata; the tag path is the same); HDMI and SDI
 on the wire (S7-5); HLG over a stream.
+
+#### S7 follow-ups — decisions and predictions, 2026-10-22
+
+**Decided (Robbie, 2026-10-22), on the S7 results:**
+1. **A P3-tagged source converted to Rec.2020 primaries for SDI is also encoded with the BT.2020 NCL YCbCr matrix**,
+   because the signal says Rec.2020 and receivers decode with that matrix. This covers every source whose SDI
+   output is signalled 2020 after conversion: 12-1-1, 12-16-1, the P3-D65 PQ preset, DCI-P3. Sources already tagged
+   2020 are unchanged.
+2. **HDR10 files must not start with the default metadata.** The file's HDR10 metadata is known at load, so it is
+   made available before the first frame is converted, and frame #0 carries the file's values.
+3. **The one transitional frame at a file change is logged only, and accepted** (`BUGS.md`).
+
+**Written after the code and before any build, launch or measurement** (the request asked for them first; the code
+came first by mistake). **Baseline:** HEAD `aec418e` (S7).
+
+**Fixtures:** S7's own files, read with ffmpeg and taken by their tags, not their names. All tags match the names.
+None was regenerated: there is no generator script, and the S7 files were made by inline ffmpeg commands.
+- **Fix 1, every P3-tagged file in the repo:**
+  - `patches-11-1-1-prores.mov` (bt709 / smpte431 / bt709);
+  - `patches-12-1-1-prores.mov` (bt709 / smpte432 / bt709);
+  - `p3pq-12-16-1-prores.mov` (bt709 / smpte432 / smpte2084);
+  - `p3-12-1-1-36s-prores.mov` (bt709 / smpte432 / bt709).
+- **Fix 2, every HDR10 file with declared metadata:** `hdr10-9-16-9-p3mastering-hevc.mov` (bt2020nc / bt2020 /
+  smpte2084, MDCV P3-D65 1000 / 0.005, CLLI 800 / 400). It is the only one. `hdr10-srt-2020-4000.ts` carries its
+  metadata in the SEI only (stream path, unchanged).
+
+| # | What | Band: pass / fail |
+|---|---|---|
+| **F1** | P3 sources' SDI v210 (the dump, which runs the SDI kernel and uniforms) against a Python model of 2020 primaries + the BT.2020 NCL matrix (kr 0.2627, kb 0.0593), computed from each export's own `rgba16f`: 11-1-1, 12-1-1, 12-16-1. The JSON's kr / kb are 2020's. The SDI first frame's FNV-1a equals its export's for 12-1-1. The *P3-D65 PQ* preset on the 709 chart reads kr 0.2627 in its dump | max \|Δ\| **≤ 1 code**, **≥ 99.9 %** exact; JSON and FNV equal |
+| **F2** | Every other file byte-identical to HEAD `aec418e`: the 2020-tagged files (HDR10 file, 9-1-9, 9-14-9 ×2, 9-18-9, PQ wedge, retagged chart, case (g), pqnometa, hlg) and the 709 / 601 / BT.470BG ones | PNG, `rgba16f`, `v210`, `v210.json` **byte-identical**; any difference fails |
+| **F3** | The HDR10 file, opened fresh with output on, and output started on it: the read-back of its first frame is the file's values (P3-D65, 1000 / 0.0050, MaxCLL 800, MaxFALL 400). **No `[DeckLink] signal → … (defaults)` line is logged for it** | **Exact**; one defaults line fails |
+| **F4** | Everything else unchanged: 12-1-1 and 12-16-1 PNG / `rgba16f` byte-identical to HEAD (the window, scopes and export untouched); `swift test` all pass, the new test failing on a mutant; the HEAD warning set; 30 s P3 playback at 1080p25 `late=0 dropped=0`; defaults dictionary-equal | as stated |
+
+##### S7 follow-ups — results, 2026-10-22 (unattended, not committed)
+
+**Estimated:** about 1½ h. **Actual:** about 1¼ h. Logs and scores are in `build/colour-s7/fu/`. Pixel exports were
+deleted after scoring, and no screenshots were taken.
+
+**What was built:**
+- **Fix 1:** `OutputSignal.sdiMatrixCode(pictureMatrix:)` gives CICP 9 when the signal converts the primaries, else
+  the picture's matrix code. The renderer publishes it as the frame's `v210MatrixCode`, so the SDI convert and the
+  DEBUG dump encode a converted frame with the BT.2020 NCL matrix.
+- **Fix 2:** `FrameEngine.loadAsset` reads HDR10 off the main actor (`HDR10MetadataReader.read`), guarded by the
+  load-abandon check, before the MOV, MXF and container routes branch. `onSourceColorTags` carries it as a fourth
+  value, and `FileColorOverrideModel.fileTags(…, hdr10:)` takes it from either edge.
+- **Fix 3:** log only (`BUGS.md`, accepted).
+
+**Results:**
+
+| # | Result | Verdict |
+|---|---|---|
+| F1 | **11-1-1, 12-1-1, 12-16-1:** `v210` against the 2020-primaries + BT.2020-matrix model: **max \|Δ\| 0, 100 % exact** of 4 147 200 components each. JSON kr / kb **0.2627 / 0.0593**; the model fixes them itself and checks the JSON against them. 61.1–62.5 % of components moved from `aec418e`. *P3-D65 PQ* preset on the 709 chart: kr 0.2627, `sdiPrimaries P3 D65 → Rec. 2020`. SDI first frame on 12-1-1: FNV-1a `c73449b6af027b25`, equal to its export, which is byte-identical to the model-scored one. `p3-12-1-1-36s` sent the same first frame | **PASS** |
+| F2 | **17 files byte-identical to `aec418e`** (PNG, `rgba16f`, `v210`, `v210.json`): every 2020-tagged file (the HDR10 file, 9-1-9, 9-14-9 ProRes and H.264, 9-18-9, the PQ wedge, the retagged chart, case (g), pqnometa, hlg) and the 709 / 601 / BT.470BG / untagged ones | **PASS** |
+| F3 | HDR10 file opened with output on: one `[DeckLink] signal →` line, P3 D65 · 1000 / 0.0050 · MaxCLL 800 · MaxFALL 400. Read-back on its first frame (#176): R 0.68000, 0.32000 · G 0.26500, 0.69000 · B 0.15000, 0.06000 · W 0.31270, 0.32900 · 1000.0000 / 0.00500 · MaxCLL 800 · MaxFALL 400. Output started on it: frame #0 the same. **0 `(defaults)` lines** in the run's log | **PASS** |
+| F4 | 12-1-1 and 12-16-1 PNG / `rgba16f` byte-identical to `aec418e`. `swift test` **505 / 505**; the new test fails on both mutants (matrix kept as the picture's; 2020 matrix for every 2020 signal). Clean Profile build, the same 12 warnings as `aec418e`. 30 s of `p3-12-1-1-36s` at 1080p25: `completed=861 late=0 dropped=0`. Defaults: 4 `NSWindow Frame …` keys added, and `license.email` / `license.machineId` migrated by the app. Deleted, or written back from the snapshot; **dictionary-equal**, 1520 keys, `streamBookmarks` `bd2383de` | **PASS** |
+
+**Note for the CLAUDE.md colour rule:** it says the picture codes drive "the v210 matrix". Since fix 1 there is one
+exception: a frame D4 converts to Rec.2020 is encoded with the BT.2020 matrix. CLAUDE.md is not changed here.
 
 ---
 
