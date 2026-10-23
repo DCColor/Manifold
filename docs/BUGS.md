@@ -1128,11 +1128,14 @@ to send Export Diagnostics for a sync problem.
     VideoToolbox route refuses its sessions, or fails its Nth decode, so the libav fallback can be tested
     (*ProRes MXF decodes in software*, above). Set by the app under `#if DEBUG` (`ProResVideoToolboxRefusal` ships
     in ManifoldCore, never set in Release).
-- **Gating:** all six `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+  - **`MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1`** (launch environment, added 2026-10-22): the first DeckLink mode check
+    of the process reads as refused, so the log-and-retry path can be run on a card that never refuses (*a mode
+    switch to 1080p25 was refused once*, below). `#ifdef DEBUG` in `App/DeckLink/DeckLinkBridge.mm`.
+- **Gating:** all seven `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
-- **Remove** all six before ship, or keep the dump and the stats line as Profile telemetry by decision.
+- **Remove** all seven before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -1349,7 +1352,7 @@ because the stsd-slack route made a `.mov` take it too.
 
 ---
 
-## ☐ OPEN — PRE-EXISTING — DeckLink: output started on a PAUSED source carries BLACK until something renders (Play, a seek)
+## ✅ FIXED 2026-10-22 (commit `________`) — PRE-EXISTING — DeckLink: output started on a PAUSED source carried BLACK until something rendered (Play, a seek)
 
 **Found 2026-10-22, L4 attended** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *L4 — attended results*).
 
@@ -1373,9 +1376,85 @@ because the stsd-slack route made a `.mov` take it too.
   consistent with L4, where Bypass LUT toggles reached SDI while paused, after a Play.
 - **Likely fix (not built):** after `beginDeckLinkOutput`, request one render of the last frame (`setNeedsRefresh()`,
   `:529`), so a paused source reaches the card at once.
-- **Release note:** a Known limitation until fixed.
+- **Release note:** was a Known limitation; now a Fixed line.
 
-## ☐ OPEN — CAUSE UNKNOWN — DeckLink: a mode switch to 1080p25 was refused once as "NOT supported", then accepted
+### The fix — design and predictions, 2026-10-22 (written before any code)
+
+**Design.**
+- **Every start goes through one place.** That covers the toolbar click, ⌃⌥O, a mode change (`applyEffectiveMode`),
+  an audio re-establish (`:865`) and the Enable output on launch preference. All of them reach `startOutputOnQueue`
+  (`App/DeckLink/DeckLinkService.swift:723`).
+- **There, after `beginDeckLinkOutput`, if the picture is PAUSED:**
+  - request one render of the current frame (`setNeedsRefresh`);
+  - wait, bounded at 250 ms, for its v210 convert to land;
+  - and only then enable and preroll the card. The first scheduled frame then carries the picture.
+- **While playing, nothing changes.** No prime, so playing starts keep today's path exactly. This is deliberate: a
+  frame already staged at the card's first audio callback is what caused the ~100 ms SDI audio resync snap (*DeckLink
+  card start: the SDI audio cursor snaps*, below, 2 of 2). Priming playing starts would make every one of them that
+  case.
+- **New log lines, once per start:**
+  - `DeckLink: primed — paused frame converted in X ms` or `… no frame within 250 ms`;
+  - `DeckLink: first scheduled frame #0 — picture (v210 FNV-1a …)` or `— neutral`, then the index of the first picture
+    frame.
+- **The hash** is of frame #0's v210 rows. It can be compared with an export's `.v210` of the same paused frame.
+
+**Item 2, the automatic start (answered from the code).**
+- Joey's `DeckLink: enable-on-launch — starting output on device 0` is the **Enable output on launch** preference:
+  - Settings → DeckLink Output, the toggle `Enable output on launch` (`App/Preferences.swift:1497`);
+  - stored as `manifold.decklink.enableOnLaunch` (`DeckLinkService.enableOnLaunchKey`, `:60`; `@AppStorage`,
+    `Preferences.swift:1294`), default off;
+  - run once per launch at the first window pass (`App/WindowDeck.swift:1267-1276` →
+    `autoStartOnLaunchIfEnabled`, `DeckLinkService.swift:657-670`).
+- It reaches `startScheduledOutput` → `startOutputOnQueue`, so the fix covers it.
+- **It is not the L4 event at 17:49:01.** The preference is absent on this Mac. The process had launched at 17:37,
+  and the launch path runs once and never logs `claiming`. That entry (below) stays UNCONFIRMED.
+
+**Item 3.**
+- `doesSupportMode` logs the HRESULT, `supported` and the `actual` mode on any refusal.
+- A refused mode is retried once after 100 ms before it is reported unsupported.
+- A DEBUG-only launch variable, `MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1`, forces the first check to read as refused, so
+  the path can be run on a card that never refuses. It follows the `MANIFOLD_PRORES_VT_REFUSE` pattern: pre-ship removal.
+
+| # | Prediction | Pass band |
+|---|---|---|
+| F1 | Click start, chart **paused and never played**, at **23.98, 25, 59.94** (manual mode) | Each start logs `primed` within **≤ 1 frame period + 10 ms** (≤ 52 / 50 / 27 ms), and `first scheduled frame #0 — picture`. Frame #0's hash equals the FNV-1a of an export's `.v210` of the same paused frame at that mode. Any `neutral` at #0 fails |
+| F2 | **Enable output on launch**, file opened at launch, paused | No neutral frame scheduled after the file's first render. If the start precedes the file (no picture yet), #0 is `neutral` by necessity, and the log shows the first picture frame once the file renders, **without Play**. Staying neutral fails |
+| F3 | **Mode change while paused** (23.98 → 25 → 59.94, output on) | Each re-establish logs `primed` and `#0 — picture`, as F1 |
+| F4 | Audio re-establish | Same function, so covered by construction. **Not run** (no way to change an SDI audio format on demand in this run) |
+| F5 | **Playing unchanged:** click start while playing, at 25 | No `primed` line. `late=0 dropped=0` for 30 s, as HEAD. #0 may be neutral, as on HEAD |
+| F6 | **Audio, paused start then Play** (`manifold-sync-25p.mov`, which has sound) | `RESYNC` count over 30 s of play **equal to HEAD's** for the same steps. More resyncs than HEAD fails. This is the risk the design names |
+| F7 | **Refusal path:** with `MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1` | The log shows the code, `supported` and `actual` for the refusal, then `retry … supported`, then `SUCCESS` |
+| F8 | `swift test` and the Profile build | All pass |
+| F9 | Attended (Robbie): click start with the chart paused | The reference monitor shows the paused frame **at once**, with no Play |
+
+### The fix — results, 2026-10-22 (unattended, then attended; not committed)
+
+**Runs.**
+- **Builds:** the tree Profile build in `.build-cc`, and HEAD `57e3823` built from a copy of the tree with the three
+  changed files reset to HEAD.
+- **Fixtures:** `patches-1-1-1-prores.mov` (chart, 25 fps, no sound) and `build/syncclips/manifold-sync-25p.mov`
+  (with sound).
+- **Driving:** DeckLink 8K Pro (1), driven by clicks and Accessibility only; output modes from the DeckLink options
+  menu.
+- **Logs and the driver** are kept in the gitignored `build/sdi-paused-fix/`.
+
+| # | Result | Verdict |
+|---|---|---|
+| F1 | Chart paused, never played, click start. **23.98:** `primed … 15.0 ms`. **25:** 15.1 ms. **59.94:** 8.8 ms. Each `first scheduled frame #0 — picture (v210 FNV-1a 4b74837be25c2215)`. That hash is **identical** to the FNV-1a of Manifold's own `.v210` export of the paused frame (5 529 600 bytes): the card's first frame is byte-for-byte the picture | **PASS** |
+| F2 | Enable output on launch, file opened at launch. The start came **before** the file loaded: `primed — no frame within 250 ms`, `#0 — neutral`, then `first picture at scheduled frame #5` once the file rendered, paused, **without Play** | **PASS** (the neutral #0 is the predicted no-picture case) |
+| F3 | Output on at 59.94, paused, mode → 23.98 → 25: `primed` in 13.8 and 6.3 ms, `#0 — picture`, same hash each time | **PASS** |
+| F4 | Audio re-establish: same function, by construction | Not run |
+| F5 | Start while playing at 25: no `primed` line (as designed). `#0 — neutral`, first picture at #4, as HEAD does. `late=0 dropped=0` at frame 816, 30 s later | **PASS** |
+| F6 | Sync clip, paused start, then Play for 30 s: **resyncs 0 on HEAD, 0 on the tree**. The band is met. **One difference, reported:** the tree logs one underrun event at Play (`ring has nothing at srcT=-0.020s`, 8 callbacks, 160 ms of silence, then a re-anchor). The first audio anchor is taken from the primed paused frame, which sits before the clip's first sample. HEAD logs none: it is silent over the same stretch with no anchor yet. Total silence scheduled: HEAD 380 069, tree 379 148 frames. Steady drift: HEAD +5.5 to +6.4 ms, tree −5.7 to −6.1 ms. Not audible as an extra gap, but a check that requires `underrunEvents=0` would now see 1 on a paused start | **PASS** (band); the underrun event is a **finding** |
+| F7 | `MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1`: `refused — hr=0x00000000 supported=0 actual='Hp25' (forced …); retrying once in 100 ms`, then `retry — hr=0x00000000 supported=1 actual='Hp25'`, then `SUCCESS`. HEAD under the same steps has no such lines | **PASS** |
+| F8 | `swift test` 494 / 494. Profile build: no new warnings in the changed files | **PASS** |
+| F9 | Attended, 19:40:13: chart paused, never played, SDI started. Robbie: **"yep came right up"** | **PASS** |
+
+**A false alarm, recorded so it is not chased again.** Two runs reported "quit timeout". The process had quit in about
+2 s. The driver had launched it as a child and never reaped it, so `ps -p` kept finding the zombie (`ZN <defunct>`).
+HEAD did the same under the same driver. After the driver was fixed, quit took 2.3 s on both.
+
+## ✅ FIXED 2026-10-22 (commit `________`) — LOGGED AND RETRIED; CAUSE STILL UNKNOWN — DeckLink: a mode switch to 1080p25 was refused once as "NOT supported", then accepted
 
 **Found 2026-10-22, L4 attended.**
 - **What happened:** Robbie switched the running output from 1080p23.98 to 25p. The first start logged
@@ -1388,6 +1467,15 @@ because the stsd-slack route made a `.mov` take it too.
   - `stop()` (`DeckLinkBridge.mm:386-404`) disables output without waiting for `ScheduledPlaybackHasStopped`.
   - So the check may run against a device still tearing down.
 - **Next step:** log `hr` and `actual` in `doesSupportMode`. Otherwise UNKNOWN.
+- **Done 2026-10-22:**
+  - `checkModeSupport` returns the HRESULT, `supported` and `actual` (`App/DeckLink/DeckLinkBridge.mm`).
+  - A refusal is logged as `mode: … refused — hr=0x… supported=… actual='…'; retrying once in 100 ms`, then
+    `retry — …`. Only a second refusal aborts.
+  - Tested with the DEBUG hook `MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1` (F7, above).
+- **The cause is still UNKNOWN.** The real refusal has not recurred, so no real code has been logged yet.
+- **One thing the hook run shows about the API:** a refusal can come back with `hr=S_OK` and `supported=0`, not only as
+  an error code. The next real refusal will say which it was. If it is `S_OK` with `supported=0` straight after a stop,
+  the teardown race above is the likely cause, and the retry covers it.
 
 ## ☐ UNCONFIRMED — DeckLink output started with no click on its button (17:49:01, 2026-10-22)
 
@@ -1398,6 +1486,18 @@ because the stsd-slack route made a `.mov` take it too.
   not log "claiming".
 - **The driver** only clicked the button whose help is `Pin controls (Tab)` in that window.
 - **Not reproduced; cause UNKNOWN.** Watch for it. If it recurs, record which window was key and what was clicked.
+- **2026-10-22: it was not Enable output on launch.**
+  - That preference is the one automatic path: Joey's 0.8.4 `DeckLink: enable-on-launch — starting output on
+    device 0`.
+  - It is the toggle `Enable output on launch` in Settings → DeckLink Output (`App/Preferences.swift:1497`), stored as
+    `manifold.decklink.enableOnLaunch` (`@AppStorage`, `:1294`; `DeckLinkService.enableOnLaunchKey`,
+    `App/DeckLink/DeckLinkService.swift:60`), default off.
+  - It runs once per launch from the first window pass (`App/WindowDeck.swift:1267-1276` →
+    `autoStartOnLaunchIfEnabled`).
+  - At 17:49:01 the preference was absent and the process had launched at 17:37. That path also never logs
+    `claiming`.
+  - With the paused-start fix, that launch path now sends the current frame as well (F2, above).
+- **Left open:** nothing in this work explains the 17:49:01 claim.
 
 ## ☐ OPEN — PRE-EXISTING, ALL BUILDS — DeckLink: any source raster that matches no output mode carries BLACK (720p, vertical, square, odd sizes)
 

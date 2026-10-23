@@ -79,6 +79,7 @@ bullet.
 - Fixed: after reconnecting, an SRT stream could stop about 17 seconds in with "The stream stopped sending video" while it was still playing.
 - Fixed: after an NDI or HLS stream ended, a file played next ran its picture about 0.2 s ahead of its sound.
 - Fixed: SDI audio dropped out every few seconds during file playback.
+- Fixed: starting SDI output while the picture was paused sent black until you pressed Play. The paused frame now goes out as soon as output starts, including when the output mode changes and when output starts on launch.
 - Fixed: streams using the BT.470BG color matrix, common from European encoders, were decoded with Rec. 709 coefficients, giving a small color shift.
 - Fixed: H.264 4:2:2 streams over SRT were shown at 4:2:0 color resolution without saying so.
 - Fixed: all-intra HEVC 4:2:0 streams over SRT (x265's "Main 10 Intra") were refused.
@@ -98,7 +99,6 @@ bullet.
 ### Known limitations
 
 - Known limitation: interlaced sources go out over SDI as progressive: a 1080i59.94 source is sent as 1080p29.97, with both fields woven into each frame. An interlaced NDI source arrives already deinterlaced by NDI.
-- Known limitation: if SDI output is started while the picture is paused, the output carries black until you press Play or move the playhead.
 - Known limitation: SDI audio goes silent for up to about a tenth of a second at each seek, scrub release and loop point during file playback.
 - Known limitation: after a network stall of a second or more, live sound can stay 10–20 ms late for up to a minute before it settles.
 - Known limitation: OBS stamps 23.976 fps WHIP video very slightly fast. MediaMTX on its default settings passes that through, so sound and picture drift apart by about a quarter of a second an hour over WHEP. Set `useAbsoluteTimestamp: true` on the MediaMTX path to fix it (passed in our tests with two different OBS sources). Cloudflare Stream corrects it automatically.
@@ -183,6 +183,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 |---|---|---|
 | File playback feeds the SDI audio tap 250 ms ahead with a 4 s ring: no dropouts every few seconds | `109cfc3` | Yes. **Unsure on status**: the attended SDI check on the Resolve workstation is still pending (BUGS.md L1652) |
 | Follow source uses SRT's declared, then measured, frame rate | `ce3d828` `a8b70fa` | Yes |
+| Output started while paused sends the current frame: one render primed before the preroll (paused only; playing starts unchanged), with a first-scheduled-frame log. A refused output mode is logged with the API's answer and retried once | not committed | Yes |
 
 #### Color, display and scopes
 

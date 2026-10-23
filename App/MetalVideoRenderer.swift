@@ -3837,6 +3837,26 @@ final class MetalVideoRenderer {
         deckLinkActive = (deckLinkStaging.count == 2)
     }
 
+    /// DeckLink queue, after `beginDeckLinkOutput`, only while PAUSED: ask for one render of the current frame and
+    /// wait, bounded, for its v210 convert to land, so the card's first scheduled frame carries the picture.
+    /// Returns the milliseconds waited, or nil if nothing converted in time (no frame on screen yet).
+    ///
+    /// ⚠️ WITHOUT THIS A PAUSED SOURCE SENDS BLACK UNTIL SOMETHING RENDERS. The convert is pushed only from a render's
+    /// completion, and the frame on screen was rendered before output existed (`deckLinkActive` false, convert a
+    /// no-op). `beginDeckLinkOutput` clears `deckLinkFrameReady`, and a paused render loop only renders on a one-shot
+    /// refresh or seek — so the card got neutral until Play (docs/BUGS.md, found in L4, 2026-10-22).
+    func primeDeckLinkFrame(timeout: TimeInterval) -> Double? {
+        setNeedsRefresh()
+        let t0 = CACurrentMediaTime()
+        while true {
+            deckLinkLock.lock(); let ready = deckLinkFrameReady; deckLinkLock.unlock()
+            let ms = (CACurrentMediaTime() - t0) * 1000
+            if ready { return ms }
+            if ms >= timeout * 1000 { return nil }
+            usleep(1000)
+        }
+    }
+
     /// Stop DeckLink output: disarm the convert and release the staging buffers.
     func stopDeckLinkOutput() {
         deckLinkLock.lock()

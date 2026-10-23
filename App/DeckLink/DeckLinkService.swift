@@ -64,6 +64,10 @@ final class DeckLinkService: ObservableObject {
     /// `signalLine`.
     static let formatDetail = "10-bit 4:2:2"
 
+    /// How long a start waits for a PAUSED frame's v210 convert before prerolling (`primeDeckLinkFrame`). A render
+    /// is one display tick plus a GPU pass, a few ms; the bound only matters when nothing is on screen to render.
+    static let primeTimeout: TimeInterval = 0.25
+
     // Observable UI state (mutated on main).
     @Published private(set) var isOutputting = false     // reflects the ACTUAL scheduled-playback state
     @Published private(set) var selectedDeviceIndex = 0  // which enumerated device output targets
@@ -727,15 +731,33 @@ final class DeckLinkService: ObservableObject {
         // resolution; the source offscreen is the same size for a native file → 1:1, no scaling).
         self.renderer?.beginDeckLinkOutput(width: mode.width, height: mode.height)
 
+        // A PAUSED picture reaches the card only if something renders it after the convert is armed: prime it here,
+        // before the preroll, so frame #0 carries it (docs/BUGS.md, L4). Every start comes through here — a click,
+        // ⌃⌥O, Enable output on launch, a mode change, an audio re-establish.
+        // ⚠️ NOT WHILE PLAYING. Frames arrive within a frame period anyway, and a frame already staged at the card's
+        // first audio callback is the case that snaps the SDI audio cursor (docs/BUGS.md, "the SDI audio cursor
+        // snaps"): priming playing starts would make every one of them that case.
+        if let r = self.renderer, r.isPausedProvider?() == true {
+            if let ms = r.primeDeckLinkFrame(timeout: Self.primeTimeout) {
+                print(String(format: "DeckLink: primed — paused frame converted in %.1f ms, before the preroll", ms))
+            } else {
+                print("DeckLink: primed — no frame within \(Int(Self.primeTimeout * 1000)) ms (nothing on screen yet); "
+                    + "neutral until one renders")
+            }
+        }
+
         // The fill block runs on the SDK callback thread → cheap: a memcpy from the renderer's front
         // staging buffer, or a neutral fallback if no converted frame is ready yet.
-        let fill: DeckLinkFillBlock = { [weak self] _, buffer, rowBytes, width, height in
+        let probe = FirstFrameProbe()
+        let fill: DeckLinkFillBlock = { [weak self] index, buffer, rowBytes, width, height in
             if let r = self?.renderer,
                r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
                                          rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+                probe.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
                 return true
             }
             Self.fillNeutralV210(buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
+            probe.note(index: index, picture: false, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
             return false
         }
 
@@ -1150,5 +1172,40 @@ final class DeckLinkService: ObservableObject {
             // would otherwise hide a card that quietly did not make it.
             for r in walk.rejected { print("DeckLink:   rejected \(r.summary)") }
         }
+    }
+}
+
+/// Once per start: says whether the card's first scheduled frame carried the picture or neutral, with an FNV-1a 64
+/// of that frame's v210 rows (comparable with an export's `.v210` of the same frame), and if it was neutral, which
+/// later frame first carried the picture. The fill block runs on the DeckLink queue for the preroll and on the SDK
+/// callback thread after; the lock covers both. Only the first frame is hashed: it is filled during the preroll,
+/// before playback starts, so the hash costs no frame time.
+final class FirstFrameProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var first: Int64?
+    private var pictureSeen = false
+
+    func note(index: Int64, picture: Bool, buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, height: Int) {
+        lock.lock(); defer { lock.unlock() }
+        if pictureSeen { return }
+        if first == nil {
+            first = index
+            if picture {
+                pictureSeen = true
+                print(String(format: "DeckLink: first scheduled frame #%lld — picture (v210 FNV-1a %016llx)",
+                             index, Self.fnv1a(buffer, count: rowBytes * height)))
+            } else {
+                print("DeckLink: first scheduled frame #\(index) — neutral (no converted frame yet)")
+            }
+        } else if picture {
+            pictureSeen = true
+            print("DeckLink: first picture at scheduled frame #\(index)")
+        }
+    }
+
+    static func fnv1a(_ p: UnsafeMutablePointer<UInt8>, count: Int) -> UInt64 {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for i in 0..<count { h = (h ^ UInt64(p[i])) &* 0x0000_0100_0000_01b3 }
+        return h
     }
 }

@@ -291,12 +291,16 @@ public:
 
     // --- Setup steps (called from the Obj-C bridge, each bool-returning so it can log per-step) ---
 
-    bool doesSupportMode() {
-        BMDDisplayMode actual = bmdModeUnknown; bool supported = false;
-        HRESULT hr = m_output->DoesSupportVideoMode(bmdVideoConnectionUnspecified, m_displayMode,
-                                                    bmdFormat10BitYUV, bmdNoVideoOutputConversion,
-                                                    bmdSupportedVideoModeDefault, &actual, &supported);
-        return (hr == S_OK && supported);
+    // The whole answer, not just yes/no: an API error and a genuine "unsupported" read the same as a bool, and a
+    // 1080p25 start was once refused and accepted seconds later with nothing to tell them apart (docs/BUGS.md, L4).
+    struct ModeSupport { HRESULT hr; bool supported; BMDDisplayMode actual; bool ok() const { return hr == S_OK && supported; } };
+
+    ModeSupport checkModeSupport() {
+        ModeSupport r = { E_FAIL, false, bmdModeUnknown };
+        r.hr = m_output->DoesSupportVideoMode(bmdVideoConnectionUnspecified, m_displayMode,
+                                              bmdFormat10BitYUV, bmdNoVideoOutputConversion,
+                                              bmdSupportedVideoModeDefault, &r.actual, &r.supported);
+        return r;
     }
 
     bool enableOutput() {
@@ -902,6 +906,15 @@ static BMDDisplayMode BMDModeForFamilyRate(bool is2160, double rate) {
 // Short human label for a resolved mode, e.g. "2160p23.98" / "1080p25" / "2160p59.94". The family
 // comes from the height; the rate token is snapped to the standard broadcast strings so 24000/1001
 // reads "23.98" (not "23.976") and 30000/1001 reads "29.97".
+// A BMDDisplayMode as its four characters ('Hp25'), for the refusal log; "none" for bmdModeUnknown or a non-printable
+// value.
+static NSString *FourCCString(BMDDisplayMode m) {
+    if (m == bmdModeUnknown) return @"none";
+    char c[5] = { (char)((m >> 24) & 0xFF), (char)((m >> 16) & 0xFF), (char)((m >> 8) & 0xFF), (char)(m & 0xFF), 0 };
+    for (int i = 0; i < 4; i++) if (c[i] < 32 || c[i] > 126) return [NSString stringWithFormat:@"0x%08X", (unsigned)m];
+    return [NSString stringWithFormat:@"'%s'", c];
+}
+
 static NSString *ModeNameForResolved(int32_t width, int32_t height, BMDTimeValue frameDuration, BMDTimeScale timeScale) {
     const char *fam = (height >= 1620) ? "2160p" : "1080p";
     const double r = (frameDuration > 0) ? (double)timeScale / (double)frameDuration : 0.0;
@@ -1373,7 +1386,28 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     [log addObject:[NSString stringWithFormat:@"tag: output colorspace = %@",
                     (colorspace == bmdColorspaceRec2020 ? @"Rec. 2020" : @"Rec. 709")]];
 
-    if (!player->doesSupportMode()) {
+    // A refusal is logged with the API's own answer and retried once after 100 ms before it is believed: the one
+    // refusal seen (L4, 1080p25) came straight after a stop that does not wait for ScheduledPlaybackHasStopped.
+    DeckLinkScheduledPlayer::ModeSupport support = player->checkModeSupport();
+    NSString *forced = @"";
+#ifdef DEBUG
+    // Test hook (pre-ship removal, docs/BUGS.md): MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1 makes the first check of the
+    // process read as refused, so the retry path can be run on a card that never refuses.
+    static bool refusedOnce = false;
+    const char *refuse = getenv("MANIFOLD_DECKLINK_REFUSE_MODE_ONCE");
+    if (!refusedOnce && refuse && strcmp(refuse, "1") == 0) {
+        refusedOnce = true; support.supported = false; forced = @" (forced by MANIFOLD_DECKLINK_REFUSE_MODE_ONCE)";
+    }
+#endif
+    if (!support.ok()) {
+        [log addObject:[NSString stringWithFormat:@"mode: %@ / v210 10-bit YUV refused — hr=0x%08X supported=%d actual=%@%@; retrying once in 100 ms",
+                        modeName, (unsigned)support.hr, support.supported ? 1 : 0, FourCCString(support.actual), forced]];
+        usleep(100000);
+        support = player->checkModeSupport();
+        [log addObject:[NSString stringWithFormat:@"mode: %@ / retry — hr=0x%08X supported=%d actual=%@",
+                        modeName, (unsigned)support.hr, support.supported ? 1 : 0, FourCCString(support.actual)]];
+    }
+    if (!support.ok()) {
         [log addObject:[NSString stringWithFormat:@"mode: %@ / v210 10-bit YUV NOT supported — aborting", modeName]];
         player->stop(); player->Release();
         return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
