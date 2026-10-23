@@ -45,6 +45,7 @@ bullet.
 - LUTs: Load LUT… in the Color control applies a .cube LUT (1D, 3D, or shaper + 3D) to the window's picture, and the scopes, SDI output and exported frames see it too. It stays on when you open another source. Interpolation is tetrahedral by default, or trilinear. LUT Output Space says what the LUT outputs: Same as Source (the default), a preset, or Custom. The picture's color tags, HDR display, scopes, SDI color tag and exported frames follow it, while the readout's Source line still describes the source. Recent LUTs remembers each LUT with its output space. Bypass LUT turns a LUT off without unloading it. While a LUT is on, the Color control reads "+ LUT" in amber, the window title names it, and the readout shows its shape, interpolation and output space in amber. While it is bypassed, the Color control reads "+ LUT bypassed", crossed out, and the readout's LUT line starts with BYPASSED and names the LUT. A file that isn't a valid .cube is refused with a message saying why, and the LUT already applied stays applied. Checked against DaVinci Resolve on a vendor LUT and Resolve-generated 33- and 65-point LUTs: within 1.2 code values at 10-bit on every pixel.
 - SDI and HDMI output now say when the picture is HDR. Each frame carries its color space and transfer (SDR, PQ or HLG), so a reference monitor that follows the signal can switch on its own. PQ also sends HDR10 static metadata over HDMI: the source's mastering display and light levels, or standard defaults (P3-D65, 1000 / 0.005 nits) when the source has none, and the DeckLink menu says which. MaxCLL and MaxFALL are sent as 0, meaning "unknown", when the source doesn't state them. HLG sends the transfer only.
 - Line playhead: the timeline's playhead is now a bold yellow line with a grab tab, centred exactly on the current frame, so you can see and click precisely where you are. It follows the pointer as you drag. Prefer the round handle? Choose Settings ▸ Interface Options ▸ Playhead ▸ Ball. The line's color can be changed there too.
+- Settings ▸ DeckLink Output ▸ SDI output modes: HD/UHD only (the default), or Include DCI to let the output follow a source into 2K DCI (2048×1080) and 4K DCI (4096×2160).
 
 ### Improved
 
@@ -65,6 +66,7 @@ bullet.
 
 ### Fixed
 
+- Fixed: SDI and HDMI output were black for any source whose size isn't an output mode, such as 720p at 23.976, vertical and square video, scope and DCI sizes. The picture now goes out at its own size with black around it, in the smallest mode at its frame rate that holds it. Only a picture bigger than every mode is scaled down, keeping its shape. The DeckLink menu says when the picture is placed or scaled, for example "SDI 1920×1080p23.98 · source 1280×720 1:1, windowboxed". 720p50, 59.94 and 60 sources now go out as 720p.
 - Fixed: SRT sound played about 200 ms behind the picture.
 - Fixed: stepping frame by frame (← / →) through 23.976, 29.97 and 59.94 fps files showed the previous frame: the first → didn't move the picture and the last frame couldn't be reached. Each step now lands on its frame.
 - Fixed: a frame step (← / →) could occasionally come to rest one to three frames past the frame stepped to, most often with 50 and 60 fps material.
@@ -190,6 +192,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Follow source uses SRT's declared, then measured, frame rate | `ce3d828` `a8b70fa` | Yes |
 | HDR signalling (colour S7): per-frame colorspace + EOTF, PQ static metadata (HDMI), HDR10 from file MDCV/CLLI and SRT SEI, defaults stated; P3 → 2020 on SDI only; stream and audio re-establish tag defects fixed | `aec418e` |
 | S7 follow-ups: P3 converted for SDI is also encoded with the BT.2020 matrix; an HDR10 file's metadata is read at load, so SDI frame #0 carries it | `982a73e` | Yes. **Unsure on status**: S7-5, the reference monitor over SDI and HDMI, is still to do |
+| SDI scaling: Follow source picks the smallest mode at the source's rate that holds it unscaled (720p, and 2K / 4K DCI with Include DCI), places it 1:1 on the v210 group with video black around it, and scales only a picture larger than every mode (Lanczos-3, 4:2:2-sited chroma); the placement is stated in the menu, tooltip, diagnostics and log | not committed | Yes. **Unsure on status**: measured on the bridge's read-back only; SDI on the wire and a reference monitor still to do |
 | Output started while paused sends the current frame: one render primed before the preroll (paused only; playing starts unchanged), with a first-scheduled-frame log. A refused output mode is logged with the API's answer and retried once | not committed | Yes |
 
 #### Color, display and scopes

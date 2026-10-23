@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import StreamBookmarkModel
 import ManifoldCore
 import PlayheadSlider
+import ColorimetryModel   // SDIOutputModeSet — which modes Follow source may choose (SDI scaling)
 
 /// How the transport controls are presented.
 /// Where **Open…** puts a file: into the window you invoked it from, or into a new one.
@@ -1292,6 +1293,8 @@ struct SettingsView: View {
     // DeckLink output: explicit "start output on launch" opt-in (NOT last-session persistence).
     // Shared key with DeckLinkService so it can't drift. Default off.
     @AppStorage(DeckLinkService.enableOnLaunchKey) private var deckLinkEnableOnLaunch = false
+    // SDI scaling (§6.11): which modes Follow source may choose. Default HD/UHD only. DeckLinkService observes the write.
+    @AppStorage(SDIOutputModeSet.defaultsKey) private var deckLinkModeSet: SDIOutputModeSet = .default
 
     // Framing-guide styling (defaults reproduce Pass 1's look).
     @AppStorage("guideDarkenOpacity") private var guideDarkenOpacity = 0.85
@@ -1496,6 +1499,13 @@ struct SettingsView: View {
             Section("DeckLink Output") {
                 Toggle("Enable output on launch", isOn: $deckLinkEnableOnLaunch)
                 Text("When on, Manifold starts DeckLink output at launch if a capable device is connected. Otherwise it does nothing. Turning output on or off during a session doesn't change this setting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("SDI output modes", selection: $deckLinkModeSet) {
+                    ForEach(SDIOutputModeSet.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text("Follow source picks the smallest mode at the source's frame rate that holds the picture without scaling, and outputs it 1:1 with black around it. A picture larger than every mode is scaled down to fit. Include DCI adds 2048×1080 and 4096×2160.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

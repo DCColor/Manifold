@@ -122,6 +122,15 @@ private struct RGBToV210Params {
     var gamutCurve: Int32 = 0
     /// Linear rendered-P3 → linear Rec.2020, row-major (`SDIPrimariesConversion.matrix`).
     var gamutMatrix: (Float, Float, Float, Float, Float, Float, Float, Float, Float) = (1, 0, 0, 0, 1, 0, 0, 0, 1)
+    /// SDI scaling (§6.11, *SDI scaling*): the picture's rectangle in the output and the resample's tap counts. Read
+    /// only by the placed kernels; the native `rgbToV210` never reads them.
+    var picX: UInt32 = 0
+    var picY: UInt32 = 0
+    var picW: UInt32 = 0
+    var picH: UInt32 = 0
+    var tapsH: UInt32 = 0
+    var tapsC: UInt32 = 0
+    var tapsV: UInt32 = 0
 }
 
 /// Colour S7 (D1): what a rendered frame goes out with — its output signal, and the YCbCr matrix code its v210 is
@@ -405,6 +414,11 @@ final class MetalVideoRenderer {
     // The DeckLink callback thread only memcpys the FRONT buffer — no GPU wait there. All fields
     // guarded by deckLinkLock except the pipeline/queue (immutable after init).
     private let deckLinkPipelineState: MTLComputePipelineState?
+    /// SDI scaling (§6.11, *SDI scaling*): a source that is not the mode's raster, placed 1:1 (`rgbToV210Placed`) or
+    /// scaled (`sdiResampleVertical` then `rgbToV210Scaled`). The native pipeline above is untouched.
+    private let deckLinkPlacedPipelineState: MTLComputePipelineState?
+    private let deckLinkVerticalPipelineState: MTLComputePipelineState?
+    private let deckLinkScaledPipelineState: MTLComputePipelineState?
     private let deckLinkCommandQueue: MTLCommandQueue
     private let deckLinkLock = NSLock()
     private var deckLinkStaging: [MTLBuffer] = []      // 2 buffers; [frontIndex] is complete, [1-front] is written
@@ -415,6 +429,17 @@ final class MetalVideoRenderer {
     private var deckLinkOutputSize: (w: Int, h: Int)?  // DeckLink output frame dims (e.g. 3840x2160)
     private var deckLinkRowBytes = 0                   // v210 row stride (128-byte aligned), matches the frame
     private var deckLinkResMismatchLogged = false      // one-time native-res-mismatch log
+    /// The source's declared pixel aspect for the SDI placement (D6), nil when undeclared. Written on main by
+    /// `setSourceGeometry`, read by the convert; guarded by `deckLinkLock`.
+    private var deckLinkPixelAspect: Double?
+    /// The placement last reported (edge-triggered, like the mismatch); guarded by `deckLinkLock`.
+    private var deckLinkLastPlacement: SDIPlacement?
+    /// The scaled path's taps and intermediate, rebuilt when the placement changes. Touched only by the convert, which
+    /// the one-in-flight gate serialises, so a frame's intermediate is never written while the previous frame reads it.
+    private var deckLinkScaler: DeckLinkScaler?
+
+    /// D8: the placement of the picture in the output, each time it changes, on MAIN. nil when output stops.
+    var onDeckLinkPlacement: ((SDIPlacement?) -> Void)?
 
     /// Set when the raster does not match the output frame and the card is therefore getting
     /// neutral, cleared when it matches again. Carries the sentence the UI shows; nil = matched.
@@ -819,6 +844,13 @@ final class MetalVideoRenderer {
         } else {
             self.deckLinkPipelineState = nil
         }
+        // SDI scaling. Non-fatal in the same way: without them a non-native source holds neutral and says so.
+        self.deckLinkPlacedPipelineState = library.makeFunction(name: "rgbToV210Placed")
+            .flatMap { try? device.makeComputePipelineState(function: $0) }
+        self.deckLinkVerticalPipelineState = library.makeFunction(name: "sdiResampleVertical")
+            .flatMap { try? device.makeComputePipelineState(function: $0) }
+        self.deckLinkScaledPipelineState = library.makeFunction(name: "rgbToV210Scaled")
+            .flatMap { try? device.makeComputePipelineState(function: $0) }
 
         self.device = device
         self.commandQueue = queue
@@ -1943,6 +1975,7 @@ final class MetalVideoRenderer {
         // observer is not the only caller and must not re-post what the load path already set.
         guard mainSourceGeometry != state else { return }
         mainSourceGeometry = state
+        deckLinkLock.lock(); deckLinkPixelAspect = pixelAspect.ratio; deckLinkLock.unlock()   // SDI placement (D6)
 
         if let crop {
             // PERMANENT, AND REGISTERED IN `LogPartitioner.manifoldTags`. One line per source
@@ -3961,7 +3994,10 @@ final class MetalVideoRenderer {
         deckLinkFrontPts = .nan
         let wasMismatched = deckLinkResMismatchLogged
         deckLinkResMismatchLogged = false
+        let hadPlacement = deckLinkLastPlacement != nil
+        deckLinkLastPlacement = nil
         deckLinkLock.unlock()
+        if hadPlacement { DispatchQueue.main.async { self.onDeckLinkPlacement?(nil) } }
         // A re-establish at a NEW mode goes stop → start, and the mismatch it is fixing would
         // otherwise still be on screen afterwards: the restart clears the latch, so the match path
         // never fires and never takes the warning down. Clear it here, where the output the warning
@@ -3998,36 +4034,27 @@ final class MetalVideoRenderer {
             deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
         }
         let src = readable.texture
-        // Native-res-only guard: never convert a mismatched size (would misalign / need scaling).
-        if src.width != outSize.w || src.height != outSize.h {
-            deckLinkLock.lock()
-            deckLinkFrameReady = false
-            deckLinkConverting = false
-            let alreadyLogged = deckLinkResMismatchLogged
-            deckLinkResMismatchLogged = true
-            deckLinkLock.unlock()
-            if !alreadyLogged {
-                print("DeckLink D-real: source \(src.width)x\(src.height) != output \(outSize.w)x\(outSize.h) — native-res only, holding neutral (scaling is a later stage)")
-            }
-            // ⚠️ AND SAY SO IN THE UI, NOT ONLY IN THE LOG. This is the branch that produces a
-            // BLACK SDI PICTURE while every indicator reads healthy: the card is enabled, the mode
-            // is valid, a downstream monitor locks cleanly, and the only symptom is that nothing is
-            // in the frame. A tester reading "output enabled, 2160p23.98, locked" calls that
-            // working. One log line at the moment of the first mismatch was not enough — it scrolls
-            // away and nothing on screen ever contradicts it.
-            //
-            // Edge-triggered on BOTH sides via `alreadyLogged`/`reportDeckLinkRasterMatch`, so this
-            // is not a per-frame main-thread hop on a steady mismatch.
-            if !alreadyLogged {
-                let message = "source \(src.width)x\(src.height) does not match output "
-                            + "\(outSize.w)x\(outSize.h) — no picture"
-                DispatchQueue.main.async { self.onDeckLinkRasterMismatch?(message) }
-            }
+        // SDI scaling (§6.11, *SDI scaling*): where this frame's picture sits in the output. A source that IS the mode
+        // is native and takes the pre-existing kernel below, untouched; anything else is placed 1:1 or scaled to fit
+        // (D3, D4), with video black around it. Placed from the frame's own size, so a raster that changes under a
+        // running mode (an ABR rung) is placed at once, not refused.
+        deckLinkLock.lock()
+        let pixelAspect = deckLinkPixelAspect
+        let placement = SDIPlacement.fit(sourceWidth: src.width, sourceHeight: src.height, pixelAspect: pixelAspect,
+                                         outputWidth: outSize.w, outputHeight: outSize.h)
+        let placementChanged = placement != deckLinkLastPlacement
+        deckLinkLastPlacement = placement
+        deckLinkLock.unlock()
+        if placementChanged {
+            print("DeckLink: SDI \(outSize.w)×\(outSize.h) · \(placement.summary)"
+                + (placement.pixelAspectDeclared ? "" : " (pixel aspect not declared — square assumed)"))
+            DispatchQueue.main.async { self.onDeckLinkPlacement?(placement) }
+        }
+        if !placement.isNative {
+            pushDeckLinkPlacedConvert(readable: readable, placement: placement, back: back, backIndex: backIndex,
+                                      outSize: outSize, sourcePts: sourcePts)
             return
         }
-        // Matched. Clear a mismatch that was being reported, edge-triggered the same way — a mode
-        // change or an ABR step that fixes the raster must take the warning down, or it would
-        // outlive the condition and become the next misleading indicator.
         reportDeckLinkRasterMatch()
 
         guard let cmd = deckLinkCommandQueue.makeCommandBuffer(),
@@ -4079,6 +4106,118 @@ final class MetalVideoRenderer {
             // say whether SDI actually swept the dragged range — "converts happened" and "the wire
             // followed the drag" are different claims, and only the second one is the behaviour
             // change Stage 1 is meant to demonstrate.
+            if sourcePts.isFinite {
+                self.v210PtsMin = self.v210PtsMin.isFinite ? min(self.v210PtsMin, sourcePts) : sourcePts
+                self.v210PtsMax = self.v210PtsMax.isFinite ? max(self.v210PtsMax, sourcePts) : sourcePts
+            }
+            #endif
+            self.deckLinkFrameReady = true
+            self.deckLinkConverting = false
+            self.deckLinkLock.unlock()
+        }
+        cmd.commit()
+    }
+
+    /// SDI scaling (§6.11, *SDI scaling*): convert a frame whose raster is not the mode's. Unscaled → one dispatch of
+    /// `rgbToV210Placed`; scaled → `sdiResampleVertical` into the intermediate, then `rgbToV210Scaled`. Every output
+    /// pixel is written (the picture, or video black around it, D5), so the staging buffer holds a whole frame. The
+    /// completion publishes the frame exactly as the native path does. Called with the one-in-flight gate held.
+    private func pushDeckLinkPlacedConvert(readable: (texture: MTLTexture, chroma: ChromaSubsampling?, output: FrameOutputState),
+                                           placement: SDIPlacement, back: MTLBuffer, backIndex: Int,
+                                           outSize: (w: Int, h: Int), sourcePts: Double) {
+        let src = readable.texture
+        func release(_ why: String) {
+            deckLinkLock.lock()
+            deckLinkFrameReady = false
+            deckLinkConverting = false
+            let alreadyLogged = deckLinkResMismatchLogged
+            deckLinkResMismatchLogged = true
+            deckLinkLock.unlock()
+            if !alreadyLogged {
+                print("DeckLink D-real: ⚠️ \(why) — holding neutral")
+                let message = "source \(src.width)x\(src.height) cannot be placed in output \(outSize.w)x\(outSize.h) — no picture"
+                DispatchQueue.main.async { self.onDeckLinkRasterMismatch?(message) }
+            }
+        }
+        guard let placedPipeline = deckLinkPlacedPipelineState, let verticalPipeline = deckLinkVerticalPipelineState,
+              let scaledPipeline = deckLinkScaledPipelineState else {
+            release("the SDI placement pipelines did not build"); return
+        }
+        var params = makeV210Params(srcWidth: src.width, srcHeight: src.height, dstWidth: outSize.w, dstHeight: outSize.h,
+                                    rowBytes: deckLinkRowBytes, chroma: readable.chroma, output: readable.output)
+        params.picX = UInt32(placement.x); params.picY = UInt32(placement.y)
+        params.picW = UInt32(placement.width); params.picH = UInt32(placement.height)
+
+        var scaler: DeckLinkScaler?
+        if !placement.isUnscaled {
+            if deckLinkScaler?.placement != placement {
+                deckLinkScaler = DeckLinkScaler(device: device, placement: placement)
+            }
+            guard let sc = deckLinkScaler else { release("the SDI scaler's buffers could not be allocated"); return }
+            scaler = sc
+            params.tapsH = UInt32(sc.tapsH); params.tapsC = UInt32(sc.tapsC); params.tapsV = UInt32(sc.tapsV)
+        }
+        reportDeckLinkRasterMatch()
+
+        guard let cmd = deckLinkCommandQueue.makeCommandBuffer() else {
+            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+        }
+        #if DEBUG
+        let v210EncodeStart = CACurrentMediaTime()
+        #endif
+        let tpg = MTLSize(width: 16, height: 16, depth: 1)
+        let groupGrid = MTLSize(width: (((outSize.w + 5) / 6) + 15) / 16, height: (outSize.h + 15) / 16, depth: 1)
+        if let sc = scaler, let vEnc = cmd.makeComputeCommandEncoder() {
+            // Two encoders: the second reads what the first wrote (Metal orders them; the texture is hazard-tracked).
+            vEnc.setComputePipelineState(verticalPipeline)
+            vEnc.setTexture(src, index: 0)
+            vEnc.setTexture(sc.intermediate, index: 1)
+            vEnc.setBytes(&params, length: MemoryLayout<RGBToV210Params>.stride, index: 0)
+            vEnc.setBuffer(sc.indicesV, offset: 0, index: 1)
+            vEnc.setBuffer(sc.weightsV, offset: 0, index: 2)
+            vEnc.dispatchThreadgroups(MTLSize(width: (src.width + 15) / 16, height: (placement.height + 15) / 16, depth: 1),
+                                      threadsPerThreadgroup: tpg)
+            vEnc.endEncoding()
+        }
+        guard let enc = cmd.makeComputeCommandEncoder() else {
+            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+        }
+        if let sc = scaler {
+            enc.setComputePipelineState(scaledPipeline)
+            enc.setTexture(sc.intermediate, index: 0)
+            enc.setBuffer(back, offset: 0, index: 0)
+            enc.setBytes(&params, length: MemoryLayout<RGBToV210Params>.stride, index: 1)
+            enc.setBuffer(sc.indicesH, offset: 0, index: 2)
+            enc.setBuffer(sc.weightsH, offset: 0, index: 3)
+            enc.setBuffer(sc.indicesC, offset: 0, index: 4)
+            enc.setBuffer(sc.weightsC, offset: 0, index: 5)
+            enc.dispatchThreadgroups(groupGrid, threadsPerThreadgroup: tpg)
+        } else {
+            enc.setComputePipelineState(placedPipeline)
+            enc.setTexture(src, index: 0)
+            enc.setBuffer(back, offset: 0, index: 0)
+            enc.setBytes(&params, length: MemoryLayout<RGBToV210Params>.stride, index: 1)
+            enc.dispatchThreadgroups(groupGrid, threadsPerThreadgroup: tpg)
+        }
+        enc.endEncoding()
+
+        let frameOutput = readable.output
+        cmd.addCompletedHandler { [weak self] cb in
+            guard let self else { return }
+            #if DEBUG
+            self.v210Lock.lock()
+            self.v210WallSum += CACurrentMediaTime() - v210EncodeStart
+            let gpu = cb.gpuEndTime - cb.gpuStartTime
+            if gpu >= 0 { self.v210GpuSum += gpu; self.v210GpuMax = max(self.v210GpuMax, gpu) }
+            self.v210Samples += 1
+            self.v210Lock.unlock()
+            #endif
+            // The same publication as the native path: pixels, source pts and signal in one critical section.
+            self.deckLinkLock.lock()
+            self.deckLinkFrontIndex = backIndex
+            self.deckLinkFrontPts = sourcePts
+            self.deckLinkFrontSignal = frameOutput.signal
+            #if DEBUG
             if sourcePts.isFinite {
                 self.v210PtsMin = self.v210PtsMin.isFinite ? min(self.v210PtsMin, sourcePts) : sourcePts
                 self.v210PtsMax = self.v210PtsMax.isFinite ? max(self.v210PtsMax, sourcePts) : sourcePts
@@ -4647,5 +4786,38 @@ extension MetalVideoRenderer {
             lastLoggedEDROptIn = pictureWantsEDR
         }
         sourceColorStateChanged()
+    }
+}
+
+/// SDI scaling (§6.11, *SDI scaling*): one placement's resample — the three tap tables (`SDIResampleTaps`, computed in
+/// double and normalised) and the vertical pass's `rgba32Float` intermediate (source width × picture height, so the
+/// horizontal pass reads unrounded sums). Rebuilt only when the placement changes.
+private final class DeckLinkScaler {
+    let placement: SDIPlacement
+    let tapsV: Int, tapsH: Int, tapsC: Int
+    let indicesV: MTLBuffer, weightsV: MTLBuffer
+    let indicesH: MTLBuffer, weightsH: MTLBuffer
+    let indicesC: MTLBuffer, weightsC: MTLBuffer
+    let intermediate: MTLTexture
+
+    init?(device: MTLDevice, placement: SDIPlacement) {
+        self.placement = placement
+        let v = SDIResampleTaps.lanczos3(sourceLength: placement.sourceHeight, pictureLength: placement.height)
+        let h = SDIResampleTaps.lanczos3(sourceLength: placement.sourceWidth, pictureLength: placement.width)
+        let c = SDIResampleTaps.lanczos3(sourceLength: placement.sourceWidth, pictureLength: placement.width, stride: 2)
+        func buffer<T>(_ a: [T]) -> MTLBuffer? {
+            a.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: max($0.count, 16), options: .storageModeShared) }
+        }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: placement.sourceWidth,
+                                                            height: placement.height, mipmapped: false)
+        desc.usage = [.shaderRead, .shaderWrite]
+        desc.storageMode = .private
+        guard let iv = buffer(v.indices), let wv = buffer(v.weights), let ih = buffer(h.indices), let wh = buffer(h.weights),
+              let ic = buffer(c.indices), let wc = buffer(c.weights), let tex = device.makeTexture(descriptor: desc) else { return nil }
+        (indicesV, weightsV, indicesH, weightsH, indicesC, weightsC) = (iv, wv, ih, wh, ic, wc)
+        (tapsV, tapsH, tapsC) = (v.tapsPerOutput, h.tapsPerOutput, c.tapsPerOutput)
+        intermediate = tex
+        print("DeckLink: SDI scaler — Lanczos-3, \(placement.sourceWidth)×\(placement.sourceHeight) → "
+            + "\(placement.width)×\(placement.height), taps V \(tapsV) · H \(tapsH) · C \(tapsC)")
     }
 }

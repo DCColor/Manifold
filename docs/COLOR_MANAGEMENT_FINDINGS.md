@@ -7105,6 +7105,9 @@ daughter card.
 5. **D5 — (a): neutral black frames** (no picture yet, or a raster mismatch) **keep the current signal**, so the
    monitor does not flip modes.
 6. **D6 — SDI carries colorimetry and transfer only. The static metadata is for HDMI. ST 2108 is out of scope.**
+   - **ST 2108-1, investigated 2026-10-23** (*SDI scaling — results*, below): the SDK documents say nothing about
+     whether the driver puts the frame's HDR metadata into ST 2108-1 ANC on SDI. So whether D6's premise holds on
+     the wire is **UNKNOWN**, pending the loopback.
 7. **D7 — HDR10 metadata enters the renderer through `setSourceColorSpace`**, the one source-colour setter (the
    CLAUDE.md rule).
 
@@ -7304,6 +7307,245 @@ deleted after scoring, and no screenshots were taken.
 
 **Note for the CLAUDE.md colour rule:** it says the picture codes drive "the v210 matrix". Since fix 1 there is one
 exception: a frame D4 converts to Rec.2020 is encoded with the BT.2020 matrix. CLAUDE.md is not changed here.
+
+#### SDI scaling — sources whose raster is not an SDI mode: rules, predictions, 2026-10-23 (written before any build of the change or any run)
+
+**Scope:** `BUGS.md`, *DeckLink: any source raster that matches no output mode carries BLACK*. Decisions D1–D9 are
+Robbie's (2026-10-23, given for an unattended night). Where they did not settle something, the most conservative option
+was taken and listed under *Decisions taken unattended*, below. **Estimated run time: 4–6 h.**
+
+**The card's own mode list** (read-only SDK probe, device 0 "DeckLink 8K Pro (1)", `GetDisplayModeIterator` +
+`DoesSupportVideoMode(10-bit YUV)`, no output enabled). It agrees with Robbie's list and is the authority where the two
+differ:
+- **720p:** 50, 59.94, 60 only.
+- **1080p, 2K DCI (2048×1080), 2160p, 4K DCI (4096×2160):** 23.98, 24, 25, 29.97, 30, 47.95, 48, 50, 59.94, 60, 95.90,
+  96, 100, 119.88, 120. Robbie's list does not include 47.95 / 48.
+- **Interlaced:** 525i, 625i, 1080i50/59.94/60.
+- **No PsF mode is listed.**
+- **4320p and 8K DCI** are listed, and are out of scope: never selected, not reported further.
+
+**The rules as built** (one function, `SDIOutputModeSelector.select`, and one placement, `SDIPlacement.fit`, in
+`ColorimetryModel`):
+1. **Rate.** The source rate is snapped to the existing eight standard rates exactly as before. That is unchanged and
+   matches the card at every rate it offers (D1).
+2. **Active set.**
+   - *HD/UHD only:* 720p (at 50 / 59.94 / 60 only), 1080p, 2160p.
+   - *Include DCI:* those three, plus 2K DCI and 4K DCI.
+3. **Native (D2).** If the source raster equals a mode in the active set, with square pixels, that mode is used 1:1, and
+   the pre-existing v210 kernel and dispatch run unchanged.
+4. **Smallest that holds it (D3).** Otherwise, of the modes that hold the picture's display size unscaled, the one with
+   the smallest area.
+5. **Too big for every mode (D3).** Fit into the largest mode: 2160p, or 4K DCI with DCI included, whichever gives the
+   larger scale. A tie goes to 2160p.
+6. **Placement (D9).**
+   - **x:** the multiple of 6 nearest to the centred offset `(W − w) / 2`, ties to the smaller. That puts the picture
+     on the v210 6-pixel group, and so on the 4:2:2 pair.
+   - **y:** `⌊(H − h) / 2⌋`. When the bars cannot be equal, the extra row goes to the bottom bar.
+   - **Scaled size:** the fitted axis is the mode's exactly; the other is `round(size × scale)`. A width is rounded to
+     the nearest even number.
+7. **Scaling (D4).** A separable windowed sinc, Lanczos-3, in R′G′B′ code space after S7's P3 → 2020 conversion, then
+   the matrix:
+   - The vertical pass goes into an `rgba32Float` intermediate.
+   - The horizontal pass and the v210 pack are one kernel.
+   - The kernel is stretched by 1 / scale for luma, and by 2 / scale for chroma, which is sampled on the even
+     (co-sited) output pixels.
+   - Weights are computed in double on the CPU, normalised, and stored as float32. The source edge is mirrored, as in
+     the 4:4:4 halfband.
+   - **Why not bicubic:** at these scales (0.625–0.94) Lanczos-3 keeps more of the passband and rejects more above
+     Nyquist. The 1-px line pairs should go to grey rather than alias.
+8. **Borders (D5).** Exactly Y 64, Cb / Cr 512, SDR and HDR alike.
+
+**Fixtures** (`build/sdi-scaling/`, `scripts/sdi-scaling/make_fixtures.sh`): all ProRes 422 HQ, SAR 1:1, tagged
+Rec.709 1-1-1 limited, 10.01 s. The existing seven are not regenerated. The nine new ones (✚) carry a colour strip, so
+that chroma is measured. Every one is 23.976 except `1280x720p59.94`.
+
+**Expected mode, placement and scale.** Computed from the rules above only, with no app. The `x, y` columns give the
+picture's top-left corner in the output. The bars are L / R / T / B, in pixels.
+
+| Source | HD/UHD only: mode | picture at x, y | bars L / R / T / B | scale | Include DCI: mode | picture at x, y | bars L / R / T / B | scale |
+|---|---|---|---|---|---|---|---|---|
+| 1280×720 p23.976 | 1080p23.98 | 1280×720 at 318, 180 | 318 / 322 / 180 / 180 | 1:1 windowbox | same | | | |
+| 1280×720 p59.94 | **720p59.94 native** | 0, 0 | none | 1:1 | same | | | |
+| 1080×1920 | 2160p23.98 | 1080×1920 at 1380, 120 | 1380 / 1380 / 120 / 120 | 1:1 windowbox | same | | | |
+| 1080×1080 | 1080p23.98 | 420, 0 | 420 / 420 / 0 / 0 | 1:1 pillarbox | same | | | |
+| 2048×858 | 2160p23.98 | 894, 651 | 894 / 898 / 651 / 651 | 1:1 windowbox | **2K DCI p23.98** | 0, 111 | 0 / 0 / 111 / 111 | 1:1 letterbox |
+| 1440×1080 | 1080p23.98 | 240, 0 | 240 / 240 / 0 / 0 | 1:1 pillarbox | same | | | |
+| 1920×1080 (control) | 1080p23.98 **native** | 0, 0 | none | 1:1 | same | | | |
+| ✚ 1920×804 (2.39 in HD) | 1080p23.98 | 0, 138 | 0 / 0 / 138 / 138 | 1:1 letterbox | same | | | |
+| ✚ 1920×1038 (1.85 in HD) | 1080p23.98 | 0, 21 | 0 / 0 / 21 / 21 | 1:1 letterbox | same | | | |
+| ✚ 1998×1080 (DCI flat) | 2160p23.98 | 918, 540 | 918 / 924 / 540 / 540 | 1:1 windowbox | **2K DCI p23.98** | 24, 0 | 24 / 26 / 0 / 0 | 1:1 pillarbox |
+| ✚ 3840×1608 (2.39 in UHD) | 2160p23.98 | 0, 276 | 0 / 0 / 276 / 276 | 1:1 letterbox | same | | | |
+| ✚ 4096×1716 (DCI scope) | 2160p23.98 | **3840×1609** at 0, 275 | 0 / 0 / 275 / 276 | **×0.9375** letterbox | **4K DCI p23.98** | 0, 222 | 0 / 0 / 222 / 222 | 1:1 letterbox |
+| ✚ 2048×1080 (2K DCI full) | 2160p23.98 | 894, 540 | 894 / 898 / 540 / 540 | 1:1 windowbox | **2K DCI p23.98 native** | 0, 0 | none | 1:1 |
+| ✚ 4096×2160 (4K DCI full) | 2160p23.98 | **3840×2025** at 0, 67 | 0 / 0 / 67 / 68 | **×0.9375** letterbox | **4K DCI p23.98 native** | 0, 0 | none | 1:1 |
+| ✚ 6144×3240 (larger than 4K DCI) | 2160p23.98 | **3840×2025** at 0, 67 | 0 / 0 / 67 / 68 | **×0.625** letterbox | **4K DCI p23.98** | 4096×2160 at 0, 0 | none | **×0.6667** fills |
+| ✚ 1920×817 (uneven letterbox) | 1080p23.98 | 0, 131 | 0 / 0 / 131 / **132** | 1:1 letterbox | same | | | |
+
+The table matches the results the request expected with DCI included:
+- 2048×858 → 2K DCI, 1:1, letterboxed;
+- 1998×1080 → 2K DCI, 1:1, pillarboxed;
+- 4096×1716 → 4K DCI, 1:1, letterboxed;
+- 2048×1080 and 4096×2160 → native.
+
+**Instruments.**
+- `swift test`.
+- A new DEBUG hook: `MANIFOLD_DECKLINK_DUMP_DIR=<dir>` writes the first picture frame of each output start, exactly as
+  handed to the card (the fill block's buffer), as `<n>.v210` with its geometry. Pre-ship removal, `BUGS.md`.
+- `[DeckLink] signal on scheduled frame` read-back lines (S7).
+- The export's `.rgba16f` and `.v210`, which are the offscreen and the source's own SDI conversion.
+- The bridge's `D3: stopped … late= dropped=` line.
+- Scoring is done by a separate program that shares no code with the app or the shader. It decodes the v210, and holds
+  its own double-precision Lanczos-3 reference, built from the export's `.rgba16f`.
+
+**Baseline:** HEAD `14677a2`, built into its own DerivedData. That build was started before this section was written; it
+builds unchanged code and measures nothing.
+
+| # | What | Band: pass / fail |
+|---|---|---|
+| **Q1** | Control 1920×1080: the SDI frame #0 dump is byte-identical to `14677a2`'s, which is HEAD's export `.v210` of the same frame, whose FNV-1a S7 showed equals HEAD's SDI frame #0. The tree's `first scheduled frame` FNV-1a equals HEAD's | **Byte-identical, FNV equal**; any difference fails |
+| **Q2** | Every border pixel, on every non-native dump under both settings, is Y 64 and every border chroma pair is Cb 512 / Cr 512 | **0 exceptions** |
+| **Q3** | The picture rectangle (the bounding box of Y ≠ 64, which the fixture's own white 1-px edge makes exact) is at the offset and size in the table, for every fixture under both settings | **Exact to the pixel**; any difference fails |
+| **Q4** | Scaled cases (4096×1716, 4096×2160 and 6144×3240 under HD/UHD; 6144×3240 under DCI): every Y, Cb and Cr inside the rectangle, against the independent double-precision Lanczos-3 computed from the export's `rgba16f` | **max \|Δ\| ≤ 1 code, ≥ 99.9 % of components exact**; outside the band fails |
+| **Q5** | Unscaled, non-native cases: every component inside the rectangle against the export's own `.v210` (the source's SDI conversion) at the same relative position | **Bit-exact, 0 differences** |
+| **Q6** | Signal per frame unchanged from S7: every fixture reads back `colorspace Rec.709 · EOTF 0 · HDR flag clear`. On 1080×1080 with the *Rec.2020 PQ (HDR10)* override, the read-back is S7's PQ defaults, with the same placement and Y 64 / C 512 borders | **Exact** |
+| **Q7** | 30 s of playback (loop on) per fixture with output on: all 16 under HD/UHD, plus the 6 whose mode changes under DCI. This includes 6144×3240 scaled into 2160p and into 4K DCI | **`late=0 dropped=0`** on every run |
+| **Q8** | `swift test` passes in full, with new tests for the selector over the full mode table and the placement, each failing on a mutant. A clean Profile build has the same warning set as `14677a2`. The defaults domain is dictionary-equal to the snapshot. The window, scopes and export are unchanged (D7): the export PNG and `rgba16f` of every fixture are byte-identical to `14677a2` | as stated |
+
+##### Decisions taken unattended
+
+1. **D3 / D4 are applied as written, so no picture that fits is ever enlarged.** 1280×720 p23.976 goes out 1:1,
+   windowboxed in 1080p23.98. The ×1.5 in D8's example, and in `scripts/sdi-scaling/README.md`'s old "expected" table,
+   is not what D3 and D4 give. Because of this, every scaled case is a reduction. *Review first.*
+2. **"Smallest" means the smallest area.** In a scaled fit, a tie between 2160p and 4K DCI goes to 2160p.
+3. **720p is in the HD/UHD set,** at the three rates the card offers. **PsF is never selected:** the SDK lists no PsF
+   mode, and every source is decoded progressive.
+4. **The rate table is unchanged: the eight standard rates.** The card also offers 47.95, 48 and the high rates up to
+   120. A source at one of those is still snapped to the nearest of the eight, which breaks D1 for those rates. That is
+   pre-existing. Adding the rates needs its own timing run, so a `BUGS.md` entry is opened instead.
+5. **The manual mode picker is unchanged:** 1080p and 2160p at the eight rates, with no 720p or DCI rows. A picture is
+   placed into whatever mode is in force by the same placement: 1:1 if it fits, otherwise fitted.
+6. **Live sources take the same selector.** An HLS ladder at 50, 59.94 or 60 can now move between 720p and 1080p.
+   Today's 2 s settle applies.
+7. **Pixel aspect (D6).** The renderer's declared `pasp` is honoured. An anamorphic picture is scaled horizontally only,
+   even when it would fit. Undeclared pasp, the libav path and live sources are treated as square, and the placement
+   log line says so. No fixture is anamorphic, so this is covered by unit tests only.
+8. **The readout (D8)** is the DeckLink menu's Signal section, the output button's tooltip, diagnostics and the log.
+   The chain readout panel has no SDI row today, and none is added.
+9. **The new fixtures carry a colour strip,** so that chroma filtering and siting are measured. The existing seven are
+   unchanged.
+10. **The uneven-letterbox fixture is 1920×817,** an odd height. The generator now allows odd heights; widths must
+    stay even for 4:2:2.
+11. **(Added during the run.) The scaled path keeps its intermediate texture until the placement next changes,** not
+    until output stops: up to 6144 × 2025 × 16 B ≈ 199 MB, held after a stop. Freeing it at stop would race the
+    in-flight convert. Logged in `BUGS.md`.
+
+##### SDI scaling — results, 2026-10-23 01:00–02:40 (unattended, not committed)
+
+**Estimated:** 4–6 h. **Actual:** about 1¾ h.
+- The scorer, the driver, the score sheets, the run logs and the SDK mode probe are in the gitignored
+  `build/sdi-scaling/run/`.
+- Frame dumps and exports stayed in the session scratchpad and were not kept.
+- No screenshots were taken.
+- DaVinci Resolve was checked before every output start and was never running, so no SDI step was skipped.
+
+**What was built:**
+- **The model** (`ColorimetryModel/SDIOutputMode.swift`):
+  - `SDIOutputModeSet`: the preference, key `manifold.decklink.outputModeSet`, default HD/UHD only.
+  - `SDIModeFamily` / `SDIStandardRate` / `SDIOutputMode.table`: the card's modes in scope.
+  - `SDIOutputModeSelector.select`: the one function, D1–D3.
+  - `SDIPlacement.fit`: D3, D4, D6 and D9, with the D8 summary words.
+  - `SDIResampleTaps.lanczos3`: D4's taps.
+  - Ten tests in `SDIOutputModeTests`.
+- **The shader** (`PassthroughShader.metal`):
+  - `rgbToV210` is untouched.
+  - New: `rgbToV210Placed` (1:1, the source's own groups, black around them), `sdiResampleVertical` and
+    `rgbToV210Scaled`.
+  - `RGBToV210Params` gains the rectangle and the tap counts, appended after the existing fields.
+- **The renderer** (`pushDeckLinkConvert`):
+  - The native-only guard that held neutral is replaced by `SDIPlacement.fit` on each frame's own size. Native runs
+    the old dispatch; anything else goes to `pushDeckLinkPlacedConvert`.
+  - The placement is logged and reported once per change (`DeckLink: SDI … · source …`).
+  - The declared `pasp` reaches it through `setSourceGeometry`.
+- **The bridge:**
+  - `BMDModeForRasterRate` replaces `BMDModeForFamilyRate`, adding 720p50/59.94/60, 2K DCI and 4K DCI.
+  - The resolved mode is named the selector's way (`720p59.94`, `2K DCI p23.98`).
+- **The service:**
+  - `resolveOutputMode` calls the selector with the pixel aspect and the mode set.
+  - A change of the Settings choice re-resolves the current source.
+  - The Signal section, the output button's tooltip and diagnostics carry the placement line (D8). It is shown
+    whenever the picture is not native.
+  - DEBUG `MANIFOLD_DECKLINK_DUMP_DIR` (pre-ship removal, `BUGS.md`).
+- **Settings ▸ DeckLink Output:** *SDI output modes: HD/UHD only | Include DCI*.
+- **Fixtures:**
+  - `make_fixtures.sh` gains a `colour` column (the strip) and accepts odd heights.
+  - Regenerated into a scratch directory, the seven existing files are byte-identical to the ones on disk
+    (SHA-256), which were not touched.
+  - Nine new files. `verify.py`: **16 / 16 pass**.
+
+**Fixtures, as read back by `verify.py`** (ffmpeg stream line and mediainfo):
+- **Every file:**
+  - ProRes 422 HQ `apch`, `yuv422p10le(tv, bt709, progressive)`, SAR 1:1.
+  - mediainfo primaries / transfer / matrix BT.709 / BT.709 / BT.709 ("Container / Stream"), 4:2:2.
+  - PCM `in24` 48 kHz stereo, 10.01 s.
+- **Rates:** `1280x720p59.94` is 60000/1001 (600 frames). The other 15 are 24000/1001 (240 frames).
+- **Rasters:** 1280×720 (×2), 1080×1920, 1080×1080, 2048×858, 1440×1080, 1920×1080, 1920×804, 1920×1038, 1998×1080,
+  3840×1608, 4096×1716, 2048×1080, 4096×2160, 6144×3240, 1920×817.
+- **Colour strip:** the nine new files carry it.
+- **Names and tags:** every file's tags match its name.
+
+| # | Result | Verdict |
+|---|---|---|
+| Q1 | Control 1920×1080, frame #0. The tree's SDI dump is **byte-identical** (5 529 600 bytes) to `14677a2`'s export `.v210` of the same frame. The FNV-1a is `388d7616aa2efe69` on the tree's SDI frame #0, on `14677a2`'s SDI frame #0 and on both exports | **PASS** |
+| Q2 | **0 exceptions** on every dump: 16 under HD/UHD and 16 under Include DCI (the native ones have no border), plus the PQ-override dump | **PASS** |
+| Q3 | **All 32 rectangles exact to the pixel**, for every fixture under both settings. Each mode was the one in the table: 13 starts at 1080p23.98, 10 at 2160p23.98, 3 at 2K DCI, 3 at 4K DCI, 2 at 720p59.94. The uneven letterbox lands at 0, 131 (bottom bar 132), and 4096×1716 → 3840×1609 at 0, 275 (bottom bar 276) | **PASS** |
+| Q4 | Against the independent double-precision Lanczos-3 (`score.swift`, built from the export's `rgba16f`):<br>• 4096×1716 → 3840×1609: **max \|Δ\| 0, 100 % exact** of 12 357 120 components.<br>• 4096×2160 → 3840×2025: **max 1, 99.9999 %** (14 at Δ1 of 15 552 000).<br>• 6144×3240 → 3840×2025: **max 1, 99.9998 %** (36).<br>• 6144×3240 → 4096×2160 (DCI): **max 1, 100.0000 %** (2 of 17 694 720) | **PASS** |
+| Q5 | Every unscaled case, inside its rectangle, against the source's own `.v210`: **0 differences**, 28 cases (13 under HD/UHD and 15 under DCI), from 1 843 200 to 12 349 440 components each. A fixture whose mode is the same under both settings sent byte-identical SDI frames under both (equal FNV) | **PASS** |
+| Q6 | All 31 frame #0 read-backs: `colorspace Rec.709 · EOTF 0 · HDR flag clear`.<br>1080×1080 with *Rec.2020 PQ (HDR10)*: `Rec.2020 · EOTF 2 · HDR flag set · R 0.68000,0.32000 … max 1000.0000 min 0.00500 · MaxCLL 0 MaxFALL 0`. That is S7's defaults, with the same pillarbox (420, 0) and 0 border exceptions. Its bytes equal the SDR run's, because an achromatic picture re-encodes to the same values under the 2020 matrix (S7 saw the same) | **PASS** |
+| Q7 | 30 s of looping playback, `D3: stopped … late=0 dropped=0` on **all 22 runs**: 16 under HD/UHD and the 6 changed modes under DCI. Among them:<br>• 6144×3240 scaled into 2160p23.98: `completed=955`.<br>• 6144×3240 into 4K DCI: `completed=954`.<br>• 4096×2160 → 2160p: `completed=956`.<br>• 1280×720p59.94 native 720p: `completed=2395` | **PASS** |
+| Q8 | `swift test` **515 / 515** (505 before, plus 10). Five mutants, each caught:<br>• smallest → largest;<br>• x off the 6-group;<br>• chroma kernel not widened;<br>• DCI under HD/UHD;<br>• the tie going to DCI. The tie was caught only after a test for it was added.<br>Clean Profile build: **the same 12 warnings as `14677a2`**. Defaults: 55 `NSWindow Frame …` keys and the mode-set key were added, and `license.email` / `license.machineId` were migrated by the app. They were read, then deleted or restored from the snapshot: **dictionary-equal**, 1521 keys. D7: PNG, `rgba16f`, `v210` and `v210.json` of all 16 fixtures are **byte-identical to `14677a2`** (64 files) | **PASS** |
+
+**D8, as the operator sees it** (read through Accessibility, 1280×720 p23.976):
+- **The Signal section:** `1080p23.98 · 10-bit 4:2:2 · Rec. 709 · SDR`, then `SDI 1920×1080p23.98 · source 1280×720 1:1,
+  windowboxed`.
+- **The tooltip:** `DeckLink output ON — SDI 1920×1080p23.98 · source 1280×720 1:1, windowboxed — click to stop`.
+- **Scaled:** `SDI 3840×2160p23.98 · source 6144×3240 scaled ×0.625 to 3840×2025, letterboxed`.
+- **DCI:** `SDI 4096×2160p23.98 (4K DCI) · source 6144×3240 scaled ×0.6667 to 4096×2160`.
+- **The log:** the file's mode line ends `(HD/UHD only, pixel aspect 1.0000)`. Every fixture declares `pasp` 1:1.
+
+**Not exercised:**
+- An anamorphic source (unit tests only).
+- A live source, including an HLS ladder crossing 720p / 1080p.
+- A manual mode pick smaller than the source.
+- A mode-set change with output running. The runs relaunched the app per setting.
+- A P3 source scaled (the S7 conversion is applied before the filter by construction, but not measured).
+- SDI on the wire.
+
+**ST 2108-1 (investigation only; recorded against S7's D6).** Read from the SDK 16.0 headers, the manual and the
+samples. No behaviour was changed.
+- **Not stated anywhere:** "2108", "VPID", "ST 352" and "InfoFrame" appear nowhere in the headers or the manual
+  text.
+- **What the manual says** (§2.4.12.2, *CEA/SMPTE Static HDR Playback*, pp. 34–35):
+  - It describes exactly what `tagFrame` does: `bmdFrameContainsHDRMetadata` plus the metadata items.
+  - It names no connector, no VANC flag, no pixel format and no mode.
+  - "SMPTE" in its title is the only hint that it might reach SDI.
+  - `BMDDeckLinkSupportsHDRMetadata` (p. 274) is "transport of HDR metadata", connector unspecified.
+- **The samples:**
+  - Blackmagic's `SignalGenHDR` does exactly what Manifold does, with `bmdVideoOutputFlagDefault` and no ancillary
+    packets.
+  - `AncillaryOutput.cpp` builds VANC by hand (DID 0x51 and 0x44 only), with `bmdVideoOutputVANC`.
+  - No sample builds a 0x41 / 0x0C (ST 2108-1) packet.
+- **Verdict:** whether the driver inserts ST 2108-1 ANC on SDI from the frame's HDR metadata is **UNKNOWN**.
+  - If it does, the condition would be the one Manifold already meets: PQ frames with the flag set. HLG and SDR
+    clear the flag.
+  - If it does not, emitting it would mean enabling `bmdVideoOutputVANC` and attaching a hand-built
+    `IDeckLinkAncillaryPacket` (DID 0x41, SDID 0x0C) to each frame. That is a scope change against D6.
+- **The morning loopback:**
+  - SDI out into a DeckLink input with `bmdVideoInputFlagDefault`.
+  - On captured frames, `IDeckLinkVideoFrameAncillaryPackets::GetFirstPacketByID(0x41, 0x0C)`, on a PQ file, then
+    HLG, then SDR. Also read `bmdDeckLinkStatusDetectedVideoInputColorspace` / `…DynamicRange`, which show what the
+    VPID said.
+  - An input that reports no packet does not prove the wire has none, because inputs may filter ANC. A waveform
+    monitor with a 2108 view is the stronger check.
 
 ---
 

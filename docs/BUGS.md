@@ -1139,7 +1139,11 @@ to send Export Diagnostics for a sync problem.
     word) and at which its output signal changes. `SignalTrace` in `App/DeckLink/DeckLinkService.swift`, `#if DEBUG`.
     The bridge's `[DeckLink] signal on scheduled frame #N: read-back …` line is NOT this hook: it ships, once per
     signal change.
-- **Gating:** all eight `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+  - **`MANIFOLD_DECKLINK_DUMP_DIR=<dir>`** (launch environment, added 2026-10-23, SDI scaling): the first picture
+    frame of each output start, exactly as the fill block hands it to the card, is written as `sdi-<n>.v210` and
+    `sdi-<n>.json`, with a `[SDI-DUMP]` line. `FrameDump` in `App/DeckLink/DeckLinkService.swift`, `#if DEBUG`.
+    The `DeckLink: SDI … · source …` placement line is NOT this hook: it ships, once per placement change.
+- **Gating:** all nine `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
@@ -1524,7 +1528,68 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
   - With the paused-start fix, that launch path now sends the current frame as well (F2, above).
 - **Left open:** nothing in this work explains the 17:49:01 claim.
 
-## ☐ OPEN — PRE-EXISTING, ALL BUILDS — DeckLink: any source raster that matches no output mode carries BLACK (720p, vertical, square, odd sizes)
+## ☐ OPEN — PRE-EXISTING, ALL BUILDS — DeckLink: Follow source snaps 47.95, 48 and high-frame-rate sources to the nearest of eight rates
+
+**Added 2026-10-23, found in the SDI scaling run** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, decision 4 taken unattended).
+
+- **What:** the card offers 1080p, 2K DCI, 2160p and 4K DCI at 47.95, 48, 95.90, 96, 100, 119.88 and 120 as well as
+  the eight standard rates. That comes from the read-only SDK probe of 2026-10-23; Robbie's list did not include
+  47.95 / 48. Follow source only knows the eight (`SDIStandardRate.all`), so a 48 fps source goes out at 50 and a
+  119.88 source at 59.94. That breaks D1 ("the frame rate is never changed") for those rates.
+- **Why not fixed with the scaling work:** adding the rates needs the bridge's mode rows, the manual picker, and a
+  timing run at 2160p119.88 (`late=0 dropped=0` has never been measured above 60).
+- **Also:** a source at a rate the card has no mode for at all (12, 15) still snaps to the nearest. That is
+  unavoidable, but it is silent today.
+
+---
+
+## ☐ OPEN — NEW 2026-10-23 — DeckLink: the SDI scaler's intermediate texture outlives the output
+
+- **What:** a scaled placement allocates an `rgba32Float` intermediate (source width × picture height) and tap
+  tables (`DeckLinkScaler`, `App/MetalVideoRenderer.swift`). It is replaced when the placement changes and is not
+  freed at output stop. That is up to about 199 MB for 6144×3240 into 2160p.
+- **Why:** only the convert touches it, serialised by the one-in-flight gate. Freeing it from `stopDeckLinkOutput`
+  would race a convert in flight.
+- **Fix when wanted:** release it from the convert's completion once `deckLinkActive` is false.
+
+---
+
+## ☐ OPEN — UNKNOWN UNTIL LOOPBACK — DeckLink: whether SDI carries ST 2108-1 HDR static metadata
+
+**Added 2026-10-23** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, S7 D6, and *SDI scaling — results*).
+
+- **What is known:** for PQ, Manifold sets `bmdFrameContainsHDRMetadata` and the static metadata on every frame,
+  exactly as the SDK manual (§2.4.12.2) and the `SignalGenHDR` sample do.
+- **What is not known:** the SDK headers, manual and samples never say whether the driver turns that into ST 2108-1
+  ANC (DID 0x41 / SDID 0x0C) on SDI. They name no connector, no VANC flag and no mode for it.
+- **To confirm:** an SDI loopback into a DeckLink input. Look for `GetFirstPacketByID(0x41, 0x0C)` on captured
+  frames, on PQ, then HLG, then SDR. An analyser with a 2108 view is the stronger check.
+- **If absent:** emitting it means `bmdVideoOutputVANC` and a hand-built packet per frame. That is a scope change
+  against D6.
+
+---
+
+## ✅ FIXED 2026-10-23 (commit `________`; pending a real session) — PRE-EXISTING, ALL BUILDS — DeckLink: any source raster that matches no output mode carries BLACK (720p, vertical, square, odd sizes)
+
+**Fixed 2026-10-23, unattended** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *SDI scaling*: rules, predictions and results).
+Robbie's D1–D9 replace the "decided scope" below where they differ:
+- **Mode selection.** A source whose raster is a mode goes out at it, native, through the unchanged kernel.
+  Otherwise Follow source picks the smallest mode at the source's rate that holds the picture **unscaled**, and the
+  picture goes out 1:1 with video black around it (Y 64, Cb/Cr 512). Only a picture larger than every mode is scaled
+  down, with Lanczos-3, to fit.
+  - 720p50/59.94/60 are now selectable.
+  - 2K DCI and 4K DCI are selectable with Settings ▸ DeckLink Output ▸ *SDI output modes: Include DCI* (default
+    *HD/UHD only*).
+- **Placement:** the picture sits on the v210 6-pixel group.
+- **Readout:** the Signal section, the output button's tooltip, diagnostics and the log say `SDI W×Hp<rate> · source
+  w×h 1:1, pillarboxed` (or `scaled ×s`) whenever the picture is not native.
+- **Measured** on 16 fixtures under both settings: every border exact, every rectangle exact, unscaled pictures
+  bit-exact, scaled ones within 1 code of an independent reference, and `late=0 dropped=0` on 22 × 30 s playbacks.
+  The 1920×1080 control is byte-identical to `14677a2`.
+- **Different from the scope below:** a source that fits is no longer enlarged. Joey's 1280×720p23.976 goes out
+  1:1, windowboxed, in 1080p23.98, not ×1.5 (decision 1 taken unattended, §6.11). Pixel aspect is honoured where
+  declared; the libav path still declares none (its own entry above).
+
 
 **Added 2026-10-21, from Joey's 0.8.4 diagnostics** (`Manifold-0.8.4-diagnostics-2026-10-21-160210.txt`). This entry is the
 planned "Vertical and square sources over DeckLink" item, widened: vertical and square sources are two cases of one

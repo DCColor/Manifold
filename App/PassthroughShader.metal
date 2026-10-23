@@ -731,6 +731,15 @@ struct RGBToV210Params {
     uint gamutConvert;  // colour S7, D4: 1 → rendered P3 → Rec.2020 before the encode (SDI only); 0 → as read
     int  gamutCurve;    // ScopeCurve: the picture's curve, decoded before gamutMatrix and re-encoded after
     float gamutMatrix[9];   // linear rendered-P3 → linear Rec.2020, row-major (SDIPrimariesConversion.matrix)
+    // SDI scaling (§6.11, *SDI scaling*): the picture's rectangle in the output, and the tap counts of the resample.
+    // Read only by the placed kernels below; rgbToV210 (native) never reads them.
+    uint picX;          // on the v210 6-pixel group (D9)
+    uint picY;
+    uint picW;
+    uint picH;
+    uint tapsH;         // horizontal luma taps per output pixel
+    uint tapsC;         // horizontal chroma taps per output chroma sample (co-sited, even pixels)
+    uint tapsV;         // vertical taps per output row
 };
 
 // ── Colour S7, D4: P3 → Rec.2020 for SDI. The arithmetic of `SDIPrimariesConversion.apply` (ColorimetryModel), which
@@ -901,4 +910,163 @@ kernel void rgbToV210(texture2d<float, access::read> offscreen [[texture(0)]],
     dst[base + 1u] = w1;
     dst[base + 2u] = w2;
     dst[base + 3u] = w3;
+}
+
+// ── SDI scaling (§6.11, *SDI scaling*; Robbie's D2–D9, 2026-10-23) ────────────────────────────────────────────────
+// A source whose raster is not the output mode's is PLACED in it, centred on the v210 6-pixel group, with video black
+// (Y 64, Cb/Cr 512) around it — and scaled only when it does not fit. rgbToV210 above is the native path and is not
+// touched: a source that IS the mode still runs it, byte for byte.
+
+// The four words of one all-black 6-pixel group (Cb 512, Y 64, Cr 512).
+static inline void v210WriteBlack(device uint *dst, uint base) {
+    dst[base + 0u] = 0x20010200u;
+    dst[base + 1u] = 0x04080040u;
+    dst[base + 2u] = 0x20010200u;
+    dst[base + 3u] = 0x04080040u;
+}
+
+// UNSCALED placement. picX is a multiple of 6, so output group g carries source group g − picX/6 exactly: every
+// component inside the picture is computed as rgbToV210 computes it for the source at its own size (the same reads,
+// the same clamps and mirrors at the SOURCE edges, the same chroma mode), and every pixel outside is black.
+kernel void rgbToV210Placed(texture2d<float, access::read> offscreen [[texture(0)]],
+                            device uint *dst               [[buffer(0)]],
+                            constant RGBToV210Params &p    [[buffer(1)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    const uint groupX = gid.x;
+    const uint y      = gid.y;
+    const uint groups = (p.dstWidth + 5u) / 6u;
+    if (groupX >= groups || y >= p.dstHeight) return;
+    const uint base = y * p.dstRowWords + groupX * 4u;
+    const uint x0 = groupX * 6u;
+    if (y < p.picY || y >= p.picY + p.picH || x0 < p.picX || x0 >= p.picX + p.picW) { v210WriteBlack(dst, base); return; }
+
+    const uint sx0 = x0 - p.picX;            // a multiple of 6: the source's own group
+    const uint sy  = min(y - p.picY, p.srcHeight - 1u);
+    const float kr = p.kr, kb = p.kb, kg = 1.0 - kr - kb;
+    const float denomB = 2.0 * (1.0 - kb);
+    const float denomR = 2.0 * (1.0 - kr);
+
+    float3 c[6];
+    float  yf[6];
+    for (uint i = 0u; i < 6u; i++) {
+        const uint sx = min(sx0 + i, p.srcWidth - 1u);
+        c[i]  = v210ReadPixel(offscreen, uint2(sx, sy), p);
+        yf[i] = kr * c[i].r + kg * c[i].g + kb * c[i].b;
+    }
+    uint Y[6];
+    for (uint i = 0u; i < 6u; i++) Y[i] = (sx0 + i < p.picW) ? v210_Y(yf[i]) : 64u;
+
+    uint Cb[3], Cr[3];
+    if (p.chromaMode == 1u) {
+        for (uint j = 0u; j < 3u; j++) {
+            Cb[j] = v210_Cn((c[2u * j].b - yf[2u * j]) / denomB); Cr[j] = v210_Cn((c[2u * j].r - yf[2u * j]) / denomR);
+        }
+    } else if (p.chromaMode == 2u) {
+        // The 4:4:4 halfband of rgbToV210, restated: mirrored about the SOURCE's edge pixel.
+        const int lastX = int(p.srcWidth) - 1;
+        float cbN[11], crN[11];
+        for (int i = 0; i < 11; i++) {
+            int sx = int(sx0) + i - 3;
+            sx = sx < 0 ? -sx : (sx > lastX ? 2 * lastX - sx : sx);
+            sx = clamp(sx, 0, lastX);
+            const float3 px = v210ReadPixel(offscreen, uint2(uint(sx), sy), p);
+            const float  py = kr * px.r + kg * px.g + kb * px.b;
+            cbN[i] = (px.b - py) / denomB;
+            crN[i] = (px.r - py) / denomR;
+        }
+        for (int j = 0; j < 3; j++) {
+            const int m = 3 + 2 * j;
+            Cb[j] = v210_Cn((16.0 * cbN[m] + 9.0 * (cbN[m - 1] + cbN[m + 1]) - (cbN[m - 3] + cbN[m + 3])) / 32.0);
+            Cr[j] = v210_Cn((16.0 * crN[m] + 9.0 * (crN[m - 1] + crN[m + 1]) - (crN[m - 3] + crN[m + 3])) / 32.0);
+        }
+    } else {
+        for (uint j = 0u; j < 3u; j++) {
+            Cb[j] = v210_C(c[2u * j].b, yf[2u * j], c[2u * j + 1u].b, yf[2u * j + 1u], denomB);
+            Cr[j] = v210_C(c[2u * j].r, yf[2u * j], c[2u * j + 1u].r, yf[2u * j + 1u], denomR);
+        }
+    }
+    for (uint j = 0u; j < 3u; j++) if (sx0 + 2u * j >= p.picW) { Cb[j] = 512u; Cr[j] = 512u; }
+
+    dst[base + 0u] = Cb[0] | (Y[0] << 10) | (Cr[0] << 20);
+    dst[base + 1u] = Y[1]  | (Cb[1] << 10) | (Y[2] << 20);
+    dst[base + 2u] = Cr[1] | (Y[3] << 10) | (Cb[2] << 20);
+    dst[base + 3u] = Y[4]  | (Cr[2] << 10) | (Y[5] << 20);
+}
+
+// SCALED placement, pass 1 of 2: the vertical Lanczos-3 (D4), source width × picture height, into an rgba32Float
+// intermediate. Each pixel is read as SDI carries it (v210ReadPixel: S7's P3 → 2020 when the frame asks), so the filter
+// runs in the output's R'G'B' code space, as the 4:4:4 halfband does. Taps and weights come from the CPU
+// (`SDIResampleTaps`, double precision, normalised; mirrored at the source edge).
+kernel void sdiResampleVertical(texture2d<float, access::read>  offscreen [[texture(0)]],
+                                texture2d<float, access::write> inter     [[texture(1)]],
+                                constant RGBToV210Params &p   [[buffer(0)]],
+                                constant int   *idxV          [[buffer(1)]],
+                                constant float *wV            [[buffer(2)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.srcWidth || gid.y >= p.picH) return;
+    float3 acc = float3(0.0);
+    const uint row = gid.y * p.tapsV;
+    for (uint k = 0u; k < p.tapsV; k++) {
+        const float w = wV[row + k];
+        if (w != 0.0) acc += w * v210ReadPixel(offscreen, uint2(gid.x, uint(idxV[row + k])), p);
+    }
+    inter.write(float4(acc, 1.0), gid);
+}
+
+// SCALED placement, pass 2 of 2: the horizontal Lanczos-3 and the v210 pack. Luma per output pixel with the luma
+// taps; chroma per output chroma sample — co-sited with the even pixels, as 4:2:2 is sited — with the chroma taps,
+// whose kernel is twice as wide (half the bandwidth). Chroma is the matrix applied to the chroma-filtered R'G'B'
+// (the matrix is linear, so this is filtering Cb and Cr). Outside the picture, black.
+kernel void rgbToV210Scaled(texture2d<float, access::read> inter [[texture(0)]],
+                            device uint *dst               [[buffer(0)]],
+                            constant RGBToV210Params &p    [[buffer(1)]],
+                            constant int   *idxH           [[buffer(2)]],
+                            constant float *wH             [[buffer(3)]],
+                            constant int   *idxC           [[buffer(4)]],
+                            constant float *wC             [[buffer(5)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    const uint groupX = gid.x;
+    const uint y      = gid.y;
+    const uint groups = (p.dstWidth + 5u) / 6u;
+    if (groupX >= groups || y >= p.dstHeight) return;
+    const uint base = y * p.dstRowWords + groupX * 4u;
+    const uint x0 = groupX * 6u;
+    if (y < p.picY || y >= p.picY + p.picH || x0 < p.picX || x0 >= p.picX + p.picW) { v210WriteBlack(dst, base); return; }
+
+    const uint r = y - p.picY;
+    const float kr = p.kr, kb = p.kb, kg = 1.0 - kr - kb;
+    const float denomB = 2.0 * (1.0 - kb);
+    const float denomR = 2.0 * (1.0 - kr);
+    const uint px0 = x0 - p.picX;            // even: picX is a multiple of 6
+
+    uint Y[6];
+    for (uint i = 0u; i < 6u; i++) {
+        const uint px = px0 + i;
+        if (px >= p.picW) { Y[i] = 64u; continue; }
+        float3 acc = float3(0.0);
+        const uint t = px * p.tapsH;
+        for (uint k = 0u; k < p.tapsH; k++) {
+            const float w = wH[t + k];
+            if (w != 0.0) acc += w * inter.read(uint2(uint(idxH[t + k]), r)).rgb;
+        }
+        Y[i] = v210_Y(kr * acc.r + kg * acc.g + kb * acc.b);
+    }
+    uint Cb[3], Cr[3];
+    for (uint j = 0u; j < 3u; j++) {
+        const uint px = px0 + 2u * j;
+        if (px >= p.picW) { Cb[j] = 512u; Cr[j] = 512u; continue; }
+        float3 acc = float3(0.0);
+        const uint t = (px / 2u) * p.tapsC;
+        for (uint k = 0u; k < p.tapsC; k++) {
+            const float w = wC[t + k];
+            if (w != 0.0) acc += w * inter.read(uint2(uint(idxC[t + k]), r)).rgb;
+        }
+        const float yc = kr * acc.r + kg * acc.g + kb * acc.b;
+        Cb[j] = v210_Cn((acc.b - yc) / denomB);
+        Cr[j] = v210_Cn((acc.r - yc) / denomR);
+    }
+    dst[base + 0u] = Cb[0] | (Y[0] << 10) | (Cr[0] << 20);
+    dst[base + 1u] = Y[1]  | (Cb[1] << 10) | (Y[2] << 20);
+    dst[base + 2u] = Cr[1] | (Y[3] << 10) | (Cb[2] << 20);
+    dst[base + 3u] = Y[4]  | (Cr[2] << 10) | (Y[5] << 20);
 }

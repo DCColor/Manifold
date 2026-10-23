@@ -51,6 +51,14 @@ final class DeckLinkService: ObservableObject {
 
     static let shared = DeckLinkService()
 
+    init() {
+        // SDI scaling: the Settings mode-set choice takes effect at once (an @AppStorage write posts this).
+        modeSetObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification,
+                                                                 object: nil, queue: .main) { [weak self] _ in
+            self?.modeSetMayHaveChanged()
+        }
+    }
+
     /// The Blackmagic Desktop Video download page — single source of truth for the Settings
     /// "Download Desktop Video…" button (state (a), driver absent). Analogous to NDIService.runtimeInstallURL.
     static let driverInstallURL = URL(string: "https://www.blackmagicdesign.com/support")!
@@ -106,6 +114,25 @@ final class DeckLinkService: ObservableObject {
 
     /// The full Signal line for the output menu: active display mode · fixed format · colorspace · EOTF.
     var signalLine: String { "\(modeLabel) · \(Self.formatDetail) · \(colorspaceLabel) · \(eotfLabel)" }
+
+    /// SDI scaling (§6.11, *SDI scaling*; D8): where the picture sits in the output, from the renderer, each time it
+    /// changes; nil while output is off. Its readout row is `placementLine`.
+    @Published private(set) var placement: SDIPlacement?
+
+    /// D8: "SDI 1920×1080p23.98 · source 1280×720 1:1, windowboxed" — whenever the output is NOT the source 1:1 at its
+    /// own raster; nil when it is (native) or output is off. Never silent about a placed or scaled picture.
+    var placementLine: String? {
+        guard let p = placement, !p.isNative else { return nil }
+        return "SDI \(p.outputWidth)×\(p.outputHeight)\(Self.rateSuffix(modeLabel)) · \(p.summary)"
+    }
+
+    /// "1080p23.98" → "p23.98", "2K DCI p23.98" → "p23.98 (2K DCI)": the rate half of a mode label, for the
+    /// placement line, which states the raster itself.
+    static func rateSuffix(_ label: String) -> String {
+        guard let i = label.lastIndex(of: "p") else { return "" }
+        let rate = String(label[i...])
+        return label.hasPrefix("2K DCI") ? rate + " (2K DCI)" : label.hasPrefix("4K DCI") ? rate + " (4K DCI)" : rate
+    }
 
     /// The Signal line, or the mismatch warning when there is one. The warning REPLACES the healthy
     /// reading rather than sitting beside it: "2160p23.98 · 10-bit 4:2:2 · Rec. 709" is not a true
@@ -307,6 +334,12 @@ final class DeckLinkService: ObservableObject {
                     self?.sourceColorChanged()
                 }
             }
+            oldValue?.onDeckLinkPlacement = nil
+            renderer?.onDeckLinkPlacement = { [weak self] placement in
+                guard let self, self.placement != placement else { return }
+                self.placement = placement
+                if let line = self.placementLine { print("DeckLink D4a: \(line)") }
+            }
             oldValue?.onDeckLinkRasterMismatch = nil
             renderer?.onDeckLinkRasterMismatch = { [weak self] message in
                 guard let self else { return }
@@ -479,8 +512,8 @@ final class DeckLinkService: ObservableObject {
     /// snapped to a standard broadcast rate. `standardRate` + `width`/`height` drive the bridge's mode
     /// selection and scheduling; `label` is the plain-speak status string.
     struct OutputMode: Equatable {
-        let width: Int          // output-family width (3840 or 1920)
-        let height: Int         // output-family height (2160 or 1080)
+        let width: Int          // output raster width (1280, 1920, 2048, 3840 or 4096 — SDI scaling)
+        let height: Int         // output raster height (720, 1080 or 2160)
         let standardRate: Double // snapped standard rate (23.976 / 24 / 25 / 29.97 / 30 / 50 / 59.94 / 60)
         let label: String       // "2160p23.98", "1080p25", …
 
@@ -491,6 +524,14 @@ final class DeckLinkService: ObservableObject {
         /// (family, rate) pair — it is built from exactly those two — so it is the id, and nothing
         /// second has to be kept in step with it.
         var id: String { label }
+
+        /// The selector's mode (`SDIOutputModeSelector`, ColorimetryModel) as the service carries it.
+        init(_ m: SDIOutputMode) {
+            self.init(width: m.width, height: m.height, standardRate: m.rate.fps, label: m.label)
+        }
+        init(width: Int, height: Int, standardRate: Double, label: String) {
+            self.width = width; self.height = height; self.standardRate = standardRate; self.label = label
+        }
     }
 
     /// Every mode the operator may pick by hand: both families × all eight standard rates, in the
@@ -500,7 +541,7 @@ final class DeckLinkService: ObservableObject {
     static let selectableModes: [OutputMode] = {
         var modes: [OutputMode] = []
         for (w, h, fam) in [(3840, 2160, "2160p"), (1920, 1080, "1080p")] {
-            for rate in standardRates {
+            for rate in SDIStandardRate.all {
                 modes.append(OutputMode(width: w, height: h, standardRate: rate.fps,
                                         label: "\(fam)\(rate.token)"))
             }
@@ -508,22 +549,9 @@ final class DeckLinkService: ObservableObject {
         return modes
     }()
 
-    /// The standard broadcast frame rates D4a targets, as EXACT fps (the fractional NTSC rates use
-    /// their true n/1001 value, NOT a rounded literal) paired with the status token. Nearest-match
-    /// against these exact values has no seam: 30000/1001 = 29.970 sits ~0 from the 29.97 entry and
-    /// ~0.03 from the 30 entry, so it can never be trapped on a boundary and fall through to a
-    /// fallback. The BMD mode is chosen from the same matched rate on the bridge side
-    /// (BMDModeForFamilyRate, exact-fraction rows), so the label and the mode always agree.
-    private static let standardRates: [(fps: Double, token: String)] = [
-        (24000.0 / 1001.0, "23.98"),   // 23.976…
-        (24.0,             "24"),
-        (25.0,             "25"),
-        (30000.0 / 1001.0, "29.97"),   // 29.970…
-        (30.0,             "30"),
-        (50.0,             "50"),
-        (60000.0 / 1001.0, "59.94"),   // 59.940…
-        (60.0,             "60"),
-    ]
+    /// The standard broadcast frame rates are `SDIStandardRate.all` (ColorimetryModel): EXACT fps (the fractional NTSC
+    /// rates at their true n/1001 value) paired with the status token, matched nearest by |Δfps| with no seam, and
+    /// matched the same way on the bridge side (`BMDModeForRasterRate`), so the label and the mode always agree.
 
     /// The output mode the card is (or would be) started at. Read on the serial queue when
     /// (re)starting; written ONLY by `applyEffectiveMode` and `restoreManualMode`, both main-thread,
@@ -598,34 +626,43 @@ final class DeckLinkService: ObservableObject {
     private var pendingLiveMode: OutputMode?
     private var liveModeSettleTimer: Timer?
 
-    /// Map a file's (width, height, frameRate) → the output display mode.
-    /// - Resolution family: nearest of the two D4a families by height (≥1620 → 2160p, else 1080p). The
-    ///   output is NATIVE (1:1) for true 3840×2160 / 1920×1080 sources; a non-standard resolution (e.g.
-    ///   DCI 4096) maps to the nearest family and outputs a valid signal at the right rate (the render
-    ///   convert holds neutral for a genuine pixel-dim mismatch — true scaling is a later stage).
-    /// - Rate: NEAREST-MATCH to a standard broadcast rate by minimum absolute fps difference — no
-    ///   ranges, no boundaries, no seams. Every input maps to exactly one closest standard rate, so a
-    ///   30000/1001 = 29.970 source resolves to 29.97 (→ p2997), never trapped on a bucket edge and
-    ///   never falling through to a fallback. Weird rates (23.9, 26, …) also map to their nearest.
-    static func resolveOutputMode(width: Int, height: Int, frameRate: Double) -> OutputMode {
-        let is2160 = height >= 1620
-        let outW = is2160 ? 3840 : 1920
-        let outH = is2160 ? 2160 : 1080
-        let famToken = is2160 ? "2160p" : "1080p"
+    /// Map a source's (width, height, pixel aspect, frameRate) → the output display mode: SDI scaling's selector
+    /// (`SDIOutputModeSelector`, §6.11). The rate is the nearest standard one (D1, as before); the raster is the mode
+    /// the picture is native at (D2), else the smallest that holds it unscaled, else the largest, fitted (D3). Which
+    /// modes it may pick is the Settings choice (`SDIOutputModeSet`: HD/UHD only, or include DCI). The renderer places
+    /// the picture in whatever mode is in force (`SDIPlacement`), so a raster that is not the mode's is no longer black.
+    static func resolveOutputMode(width: Int, height: Int, pixelAspect: Double? = nil, frameRate: Double,
+                                  set: SDIOutputModeSet = currentModeSet) -> OutputMode {
+        OutputMode(SDIOutputModeSelector.select(width: width, height: height, pixelAspect: pixelAspect,
+                                                frameRate: frameRate, set: set))
+    }
 
-        // Nearest standard rate by minimum |Δfps|. The matched entry supplies BOTH the canonical rate
-        // (passed to the bridge for mode selection) and the status token — one source of truth, so the
-        // label and the selected BMD mode can't disagree. frameRate ≤ 0 (no/unknown) → the 23.976 entry.
-        var best = standardRates[0]
-        if frameRate > 0 {
-            var bestDist = Double.greatestFiniteMagnitude
-            for cand in standardRates {
-                let d = abs(frameRate - cand.fps)
-                if d < bestDist { bestDist = d; best = cand }
-            }
+    /// Settings ▸ DeckLink Output ▸ SDI output modes (default HD/UHD only).
+    static var currentModeSet: SDIOutputModeSet {
+        SDIOutputModeSet.stored(UserDefaults.standard.string(forKey: SDIOutputModeSet.defaultsKey))
+    }
+
+    /// The last source format Follow source resolved, kept so a change of the mode set re-resolves it.
+    private enum LastFormat { case file(Int, Int, Double?, Double), live(LiveVideoFormat) }
+    private var lastFormat: LastFormat?
+    private var modeSetInForce = DeckLinkService.currentModeSet
+    private var modeSetObserver: NSObjectProtocol?
+
+    /// The Settings choice changed: re-resolve the current source under the new set. Main thread.
+    private func modeSetMayHaveChanged() {
+        let set = Self.currentModeSet
+        guard set != modeSetInForce else { return }
+        modeSetInForce = set
+        print("DeckLink D4a: SDI output modes → \(set.label)")
+        switch lastFormat {
+        case .file(let w, let h, let par, let fps)?:
+            sourceFormatChanged(width: w, height: h, pixelAspect: par, frameRate: fps)
+        case .live(let format)?:
+            sourceDerivedMode = nil   // so the new answer lands at once, not after the settle
+            liveFormatChanged(format)
+        case nil:
+            break
         }
-        return OutputMode(width: outW, height: outH, standardRate: best.fps,
-                          label: "\(famToken)\(best.token)")
     }
 
     /// Enumerate output-capable DeckLink devices. Synchronous SDK walk; returns [] if the driver
@@ -778,6 +815,7 @@ final class DeckLinkService: ObservableObject {
         let probe = FirstFrameProbe()
         #if DEBUG
         let trace = SignalTrace.enabled ? SignalTrace() : nil
+        let dump = FrameDump.directory.map { FrameDump(directory: $0, mode: mode.label) }
         #endif
         let fill: DeckLinkFillBlock = { [weak self] index, buffer, rowBytes, width, height, signal in
             if let r = self?.renderer,
@@ -787,6 +825,7 @@ final class DeckLinkService: ObservableObject {
                 probe.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
                 #if DEBUG
                 trace?.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: s)
+                dump?.note(index: index, buffer: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
                 #endif
                 return true
             }
@@ -958,8 +997,10 @@ final class DeckLinkService: ObservableObject {
     /// actually changed, cleanly SWITCH: stop the old scheduled playback then re-establish at the new
     /// mode — both hops on the serial queue so teardown finishes before re-establish (no race). If
     /// output is off, just remember the target so the next start uses it. Call after setSourceColorSpace.
-    func sourceFormatChanged(width: Int, height: Int, frameRate: Double) {
-        let mode = Self.resolveOutputMode(width: width, height: height, frameRate: frameRate)
+    func sourceFormatChanged(width: Int, height: Int, pixelAspect: Double? = nil, frameRate: Double) {
+        lastFormat = .file(width, height, pixelAspect, frameRate)
+        let mode = Self.resolveOutputMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate,
+                                          set: modeSetInForce)
         // A FILE's format change is immediate — no settle delay. A file's raster and rate are facts
         // read once at load, they do not step the way an ABR ladder does, and delaying the switch
         // would put a visible stale-mode window at the front of every file open. The hysteresis
@@ -968,7 +1009,8 @@ final class DeckLinkService: ObservableObject {
         sourceDerivedMode = mode
         followSourceUnavailableReason = nil
         print("DeckLink D4a: FILE source format \(width)x\(height) @ "
-            + String(format: "%.3f fps", frameRate) + " → mode \(mode.label)")
+            + String(format: "%.3f fps", frameRate) + " → mode \(mode.label) (\(modeSetInForce.label)"
+            + (pixelAspect.map { String(format: ", pixel aspect %.4f", $0) } ?? ", pixel aspect not declared — square") + ")")
         applyEffectiveMode(trigger: "file source format")
     }
 
@@ -1021,9 +1063,10 @@ final class DeckLinkService: ObservableObject {
             return
         }
 
+        lastFormat = .live(format)
         let mode = Self.resolveOutputMode(width: Int(format.size.width),
                                           height: Int(format.size.height),
-                                          frameRate: frameRate)
+                                          frameRate: frameRate, set: modeSetInForce)
         followSourceUnavailableReason = nil
 
         // Already there, or already waiting for exactly this: nothing to do. Re-arming the timer on
@@ -1273,6 +1316,41 @@ final class SignalTrace: @unchecked Sendable {
         if let signal, signal != lastSignal {
             print("[SIGNAL-TRACE] signal changed at scheduled frame #\(index): \(signal.logLine)")
             lastSignal = signal
+        }
+    }
+}
+
+/// SDI scaling (§6.11; DEBUG; pre-ship removal, docs/BUGS.md): `MANIFOLD_DECKLINK_DUMP_DIR=<dir>` writes the first
+/// picture frame of each output start, exactly as the fill block handed it to the card, as `sdi-<n>.v210` (rowBytes ×
+/// height bytes) and `sdi-<n>.json` (mode, width, height, rowBytes, scheduled index, FNV-1a). Written once per start:
+/// on a paused start that is the preroll, before playback, so it costs no frame time.
+final class FrameDump: @unchecked Sendable {
+    static let directory = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_DUMP_DIR"]
+    private static let counterLock = NSLock()
+    private static var counter = 0
+    private let directory: String
+    private let mode: String
+    private let lock = NSLock()
+    private var done = false
+
+    init(directory: String, mode: String) { self.directory = directory; self.mode = mode }
+
+    func note(index: Int64, buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        Self.counterLock.lock(); Self.counter += 1; let n = Self.counter; Self.counterLock.unlock()
+        let data = Data(bytes: buffer, count: rowBytes * height)
+        let fnv = FirstFrameProbe.fnv1a(buffer, count: rowBytes * height)
+        let base = (directory as NSString).appendingPathComponent(String(format: "sdi-%03d", n))
+        let json = "{\"mode\":\"\(mode)\",\"width\":\(width),\"height\":\(height),\"rowBytes\":\(rowBytes),"
+            + "\"index\":\(index),\"fnv1a\":\"\(String(format: "%016llx", fnv))\"}"
+        do {
+            try data.write(to: URL(fileURLWithPath: base + ".v210"))
+            try json.write(toFile: base + ".json", atomically: true, encoding: .utf8)
+            print("[SDI-DUMP] \(base).v210 — \(mode) \(width)x\(height) frame #\(index) FNV-1a \(String(format: "%016llx", fnv))")
+        } catch {
+            print("[SDI-DUMP] write failed: \(error)")
         }
     }
 }

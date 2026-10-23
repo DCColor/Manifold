@@ -832,6 +832,7 @@ struct ContentView: View {
                     // resolution + rate. Updates the status label; live-switches the output mode if
                     // it's running and changed.
                     DeckLinkService.shared.sourceFormatChanged(width: meta.width, height: meta.height,
+                                                               pixelAspect: meta.pixelAspect.ratio,
                                                                frameRate: meta.frameRate)
                 }
             }
@@ -2243,6 +2244,9 @@ struct ContentView: View {
                   // the green tv.fill icon is actively misleading, so it is said in the tooltip
                   // rather than only inside the menu.
                   ?? deckLink.rasterMismatch
+                  // SDI scaling (D8): a placed or scaled picture is said here too, so the green icon is never
+                  // taken for a native 1:1 output.
+                  ?? (deckLink.isOutputting ? deckLink.placementLine.map { "DeckLink output ON — \($0) — click to stop (⌃⌥⇧O)" } : nil)
                   ?? (deckLink.isOutputting ? "DeckLink output ON — click to stop (⌃⌥⇧O)"
                                             : "DeckLink output — click to start (⌃⌥O)"))
 
@@ -2308,6 +2312,11 @@ struct ContentView: View {
                     // colorspace reading is a FALSE statement while the renderer is refusing the
                     // copy and the wire is carrying black. See DeckLinkService.rasterMismatch.
                     Button(deckLink.signalLineOrWarning) {}.disabled(true)
+                    // SDI scaling (D8): the picture is not the source 1:1 at its own raster — placed with black
+                    // around it, or scaled. Stated whenever it is so, never silent.
+                    if let placed = deckLink.placementLine, deckLink.rasterMismatch == nil {
+                        Button(placed) {}.disabled(true)
+                    }
                     // Colour S7-3: the HDR static metadata a PQ signal sends, and whether it is the defaults. HDMI
                     // only: SDI carries colorimetry and transfer (D6).
                     if let hdr = deckLink.hdrMetadataLine, deckLink.rasterMismatch == nil {

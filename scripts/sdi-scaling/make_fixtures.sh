@@ -21,6 +21,11 @@
 #               1-px vertical line pairs, 1-px horizontal, 2-px vertical, 2-px horizontal, 1-px checkerboard
 #   label       two lines, top centre: raster + rate + frame counter, then format and tags; each line sized to
 #               fit 90 % of the width
+#   colour      ONLY on rows whose `colour` column is `yes` (the 2026-10-23 additions; the first seven rows are `-`
+#               and draw exactly what they drew before): seven 64 × 64 patches centred on the bottom detail row —
+#               BT.709 75 % yellow, cyan, green, magenta, red, blue (8-bit Y/Cb/Cr 168/44/136, 145/147/44, 134/63/52,
+#               63/193/204, 51/109/212, 28/212/120), then a 1-px Cr alternation (Y 126, Cb 128, Cr 64/192) — so that
+#               SDI chroma filtering and 4:2:2 siting are measured, which an achromatic picture cannot show
 # All geometric values are EXACT code values (white 235, black 16, background 48; 940 / 64 / 192 at 10 bits),
 # written by one `geq` expression on one frame that is then looped — so every frame is the same picture,
 # the label's frame counter aside.
@@ -36,10 +41,12 @@ SECONDS_LONG=10
 # One 64 × 64 patch at (x0, y0): pattern expression `pat` where it is 1 → white, 0 → black.
 patch() { echo "between(X,$1,$1+63)*between(Y,$2,$2+63)*(1+$3)"; }   # 0 outside; 1 (black) or 2 (white) inside
 
-while IFS=$'\t' read -r label w h rate why; do
+while IFS=$'\t' read -r label w h rate colour why; do
   [[ -z $label || $label == \#* ]] && continue
   (( ${#want} )) && [[ ${want[(Ie)$label]} -eq 0 ]] && continue
-  (( w % 2 == 0 && h % 2 == 0 )) || { echo "$label: odd raster — the 2-px centre lines assume an even one"; exit 2; }
+  # Width even (4:2:2). An ODD height is allowed (2026-10-23, the uneven-letterbox fixture): its centre falls on a
+  # row, so the horizontal crosshair arm is 1 px tall there instead of 2.
+  (( w % 2 == 0 )) || { echo "$label: odd width — 4:2:2 needs an even one"; exit 2; }
   num=${rate%/*}; den=${rate#*/}
   # The shortest length of at least 10 s that is whole frames AND whole samples (59.94: 600 frames, not 599).
   frames=$(( (SECONDS_LONG * num + den - 1) / den ))
@@ -62,6 +69,18 @@ while IFS=$'\t' read -r label w h rate why; do
   ring="lte(abs(hypot(X-$cx,Y-$cy)-$R),1.5)"
   # Precedence: detail (0 none, 1 black, 2 white) wins inside its patches; then border, crosshair, ring; else grey.
   lum="st(0,0$detail);if(ld(0),if(eq(ld(0),2),235,16),if(gt($border+$cross+$ring,0),235,48))"
+  cb=128; cr=128
+  if [[ $colour == yes ]]; then
+    # Seven patches, 64 px + 16 px gap, centred on the bottom detail row (y0). Values are 8-bit Y/Cb/Cr.
+    pY=(168 145 134 63 51 28 126); pB=(44 147 63 193 109 212 128); pR=(136 44 52 204 212 120 -1)
+    xs=$(( (w - 7 * 80 + 16) / 2 )); cin="0"; ysum="0"; bsum="0"; rsum="0"
+    for i in 1 2 3 4 5 6 7; do
+      xk=$(( xs + (i - 1) * 80 )); t="between(X,$xk,$xk+63)*between(Y,$y0,$y0+63)"
+      cin="$cin+$t"; ysum="$ysum+$t*${pY[$i]}"; bsum="$bsum+$t*${pB[$i]}"
+      if (( pR[$i] < 0 )); then rsum="$rsum+$t*if(mod(X,2),192,64)"; else rsum="$rsum+$t*${pR[$i]}"; fi
+    done
+    lum="if($cin,$ysum,($lum))"; cb="if($cin,$bsum,128)"; cr="if($cin,$rsum,128)"
+  fi
   # The label, two lines, each sized to fit 90 % of the width (Menlo's advance is 0.6 em) and never above
   # short/24: a single line ran off both sides of the narrow rasters and cut the raster name off.
   line1="$label   frame %{eif\\:n\\:d\\:4}"; len1=$(( ${#label} + 14 ))
@@ -69,7 +88,7 @@ while IFS=$'\t' read -r label w h rate why; do
   fit() { perl -e "my \$f = int(0.9*$w/($1*0.6)); my \$c = int($short/24); print \$f < \$c ? \$f : \$c"; }
   fs1=$(fit $len1); fs2=$(fit $len2)
   ty=$(( short / 32 ))                                  # the second line clears the circle on every raster
-  vchain="color=c=black:s=${w}x${h}:r=$rate:d=1,format=yuv444p,geq=lum='$lum':cb=128:cr=128,trim=end_frame=1,loop=loop=$((frames - 1)):size=1:start=0,setpts=N/($rate)/TB,setsar=1,drawtext=fontfile=${FONT}:text='$line1':fontcolor=white:fontsize=$fs1:x=(w-tw)/2:y=$ty,drawtext=fontfile=${FONT}:text='$line2':fontcolor=white:fontsize=$fs2:x=(w-tw)/2:y=$(( ty + fs1 * 5 / 4 )),format=yuv422p10le,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+  vchain="color=c=black:s=${w}x${h}:r=$rate:d=1,format=yuv444p,geq=lum='$lum':cb='$cb':cr='$cr',trim=end_frame=1,loop=loop=$((frames - 1)):size=1:start=0,setpts=N/($rate)/TB,setsar=1,drawtext=fontfile=${FONT}:text='$line1':fontcolor=white:fontsize=$fs1:x=(w-tw)/2:y=$ty,drawtext=fontfile=${FONT}:text='$line2':fontcolor=white:fontsize=$fs2:x=(w-tw)/2:y=$(( ty + fs1 * 5 / 4 )),format=yuv422p10le,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
   aexpr="0.1*sin(2*PI*1000*t)|0.1*sin(2*PI*2000*t)"
   dest=$OUT/sdi-$label.mov
   echo "── $label: ${w}×${h} @ $rate, $frames frames, $samples samples — $why"

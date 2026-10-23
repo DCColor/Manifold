@@ -773,6 +773,8 @@ enum MachineContext {
             ? "\(deckLink.isOutputting ? "active" : "idle") — \(deckLink.signalLine)"
             : "unavailable — \(dlStatus.headline)"))
         if dlStatus.canOutput, let hdr = deckLink.hdrMetadataLine { out.append("DeckLink HDMI    : \(hdr)") }
+        if dlStatus.canOutput, let placed = deckLink.placementLine { out.append("DeckLink picture : \(placed)") }
+        out.append("DeckLink modes   : \(DeckLinkService.currentModeSet.label)")
 
         let ndi = NDIService.shared
         out.append("NDI runtime      : \(ndi.runtimeAvailable ? "installed" : "NOT installed")"

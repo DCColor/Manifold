@@ -7,12 +7,12 @@ nothing is installed.
 
 | file | what it is |
 |---|---|
-| `recipes.tsv` | one row per file: label, width, height, exact rate, why it is in the set |
+| `recipes.tsv` | one row per file: label, width, height, exact rate, colour strip (`yes` / `-`), why it is in the set |
 | `make_fixtures.sh` | builds every file (or the labels named) into `build/sdi-scaling/` (gitignored, under `build/`) |
 | `verify.py` | reads every file back: stream tags, sample entries, length, and the decoded picture; stdlib only |
 
 ```sh
-zsh scripts/sdi-scaling/make_fixtures.sh                          # all seven, ~6 s on an M-series Mac, ~285 MB
+zsh scripts/sdi-scaling/make_fixtures.sh                          # all sixteen, ~35 s on an M-series Mac, ~920 MB
 zsh scripts/sdi-scaling/make_fixtures.sh 1080x1920p23.976         # or some
 python3 scripts/sdi-scaling/verify.py                             # exit 1 if any check fails
 ```
@@ -64,19 +64,24 @@ radius measured right / left / down / up from the centre equal within 1 px (e.g.
 a recipe of 378.0 on the 1080-short rasters; 300.5 / 300.0 / 300.5 / 300.0 against 300.3 on 2048×858 — the half-pixel
 split is the centre falling between pixels); 1-px line pairs **64–940**, full contrast after ProRes HQ.
 
-## Expected on a 1080 output once scaling exists (derived, not measured)
+## Added 2026-10-23: nine more, with a colour strip
 
-Fit inside the mode, aspect kept, centred, the rest neutral black (the decided scope in `docs/BUGS.md`). On a 1080p
-mode, before any rounding of the picture size to the 4:2:2 grid; double every number for 2160p:
+`1920x804`, `1920x1038`, `1998x1080`, `3840x1608`, `4096x1716`, `2048x1080`, `4096x2160`, `6144x3240` and `1920x817`,
+all at 23.976. Same format and picture, plus one element the first seven do not have:
 
-| file | scale | picture on SDI | bars | ring radius on SDI |
-|---|---|---|---|---|
-| 1280×720 | 1.5 | 1920 × 1080 | none | 378 |
-| 1080×1920 | 0.5625 | ≈ 607.5 × 1080 | ≈ 656 px left and right | ≈ 212.6 |
-| 1080×1080 | 1.0 | 1080 × 1080 | 420 px left and right | 378 |
-| 2048×858 | 0.9375 | 1920 × ≈ 804.4 | ≈ 138 px top and bottom | ≈ 281.6 |
-| 1440×1080 | 1.0 | 1440 × 1080 | 240 px left and right | 378 |
-| 1920×1080 (control) | 1.0 | 1920 × 1080, untouched | none | 378 — and byte-identical to today's 1:1 path |
+- **Colour strip:** seven 64 × 64 patches centred on the bottom detail row. They are BT.709 75 % yellow, cyan, green,
+  magenta, red and blue, then a 1-px Cr alternation. An achromatic picture cannot show chroma filtering or 4:2:2
+  siting, and this can.
+- **Odd height:** `1920x817` has one, so its letterbox cannot split evenly. Odd heights are allowed now; widths must
+  stay even for 4:2:2. Its centre falls on a row, so the horizontal crosshair arm is 1 px tall there.
 
-The 1:1 rows (1080×1080, 1440×1080) need placement only, no resampling, so their detail patches should arrive
-exactly; the others show the filter.
+Extending the script left the first seven byte-identical. Regenerated into a scratch directory, they match the files on
+disk (SHA-256). `verify.py`: **16 / 16 pass**, 2026-10-23.
+
+## What SDI does with them (built and measured 2026-10-23)
+
+Where each one goes, under both settings of *SDI output modes*, is the table in `docs/COLOR_MANAGEMENT_FINDINGS.md`
+§6.11, *SDI scaling*, with the measured results below it:
+- A source that fits a mode at its rate goes out **1:1**, with video black around it.
+- Only a picture larger than every mode is scaled down.
+- So 1280×720 p23.976 is windowboxed 1:1 in 1080p23.98, not scaled ×1.5 as the table this section replaces assumed.

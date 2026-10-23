@@ -933,36 +933,43 @@ public:
 
 #pragma mark - D4a: display-mode selection (video cadence from the file's resolution + rate)
 
-// Map a resolution family (2160p vs 1080p) + a broadcast rate to the matching PROGRESSIVE BMDDisplayMode.
-// `is2160` picks the family (true → 3840×2160, false → 1920×1080). The rate is matched by pure
+// Map an output raster + a broadcast rate to the matching PROGRESSIVE BMDDisplayMode. The rate is matched by pure
 // NEAREST-MATCH (minimum |Δfps|) against the 8 standard rates — NO ranges, NO boundaries, NO seams, so
 // no input can be trapped on a bucket edge. The fractional NTSC rates use their EXACT n/1001 value
 // (24000/1001 = 23.976…, 30000/1001 = 29.970…, 60000/1001 = 59.940…), so a 29.970 source lands ~0 from
 // the 29.97 row and ~0.03 from the 30 row → p2997, never p30 and never a fallback. Every rate resolves
 // to a real, card-supported progressive mode (all 8 are supported on device 0); interlaced is never
 // selected (the decode path is progressive). Actual timing is read back off the resolved mode.
-static BMDDisplayMode BMDModeForFamilyRate(bool is2160, double rate) {
-    struct Row { double rate; BMDDisplayMode hd; BMDDisplayMode uhd; };
+// SDI scaling (§6.11): the raster is now any of the five the selector chooses from (`SDIOutputMode`, ColorimetryModel):
+// 1280×720 (50 / 59.94 / 60 only), 1920×1080, 2048×1080 (2K DCI), 3840×2160, 4096×2160 (4K DCI). Unknown raster, or
+// 720p at a rate it does not offer → bmdModeUnknown, and the start falls back to 2160p23.98 as before. Never 8K.
+static BMDDisplayMode BMDModeForRasterRate(int32_t width, int32_t height, double rate) {
+    struct Row { double rate; BMDDisplayMode p720; BMDDisplayMode hd; BMDDisplayMode dci2k; BMDDisplayMode uhd; BMDDisplayMode dci4k; };
     static const Row rows[] = {
-        {24000.0 / 1001.0, bmdModeHD1080p2398, bmdMode4K2160p2398},   // 23.976…
-        {24.0,             bmdModeHD1080p24,   bmdMode4K2160p24},
-        {25.0,             bmdModeHD1080p25,   bmdMode4K2160p25},
-        {30000.0 / 1001.0, bmdModeHD1080p2997, bmdMode4K2160p2997},   // 29.970…
-        {30.0,             bmdModeHD1080p30,   bmdMode4K2160p30},
-        {50.0,             bmdModeHD1080p50,   bmdMode4K2160p50},
-        {60000.0 / 1001.0, bmdModeHD1080p5994, bmdMode4K2160p5994},   // 59.940…
-        {60.0,             bmdModeHD1080p6000, bmdMode4K2160p60},      // N.B. 1080p60 is bmdModeHD1080p6000
+        {24000.0 / 1001.0, bmdModeUnknown,    bmdModeHD1080p2398, bmdMode2kDCI2398, bmdMode4K2160p2398, bmdMode4kDCI2398},   // 23.976…
+        {24.0,             bmdModeUnknown,    bmdModeHD1080p24,   bmdMode2kDCI24,   bmdMode4K2160p24,   bmdMode4kDCI24},
+        {25.0,             bmdModeUnknown,    bmdModeHD1080p25,   bmdMode2kDCI25,   bmdMode4K2160p25,   bmdMode4kDCI25},
+        {30000.0 / 1001.0, bmdModeUnknown,    bmdModeHD1080p2997, bmdMode2kDCI2997, bmdMode4K2160p2997, bmdMode4kDCI2997},   // 29.970…
+        {30.0,             bmdModeUnknown,    bmdModeHD1080p30,   bmdMode2kDCI30,   bmdMode4K2160p30,   bmdMode4kDCI30},
+        {50.0,             bmdModeHD720p50,   bmdModeHD1080p50,   bmdMode2kDCI50,   bmdMode4K2160p50,   bmdMode4kDCI50},
+        {60000.0 / 1001.0, bmdModeHD720p5994, bmdModeHD1080p5994, bmdMode2kDCI5994, bmdMode4K2160p5994, bmdMode4kDCI5994},   // 59.940…
+        {60.0,             bmdModeHD720p60,   bmdModeHD1080p6000, bmdMode2kDCI60,   bmdMode4K2160p60,   bmdMode4kDCI60},      // N.B. 1080p60 is bmdModeHD1080p6000
     };
-    double best = 1e9; BMDDisplayMode bestMode = bmdModeUnknown;
+    double best = 1e9; const Row *row = &rows[0];
     for (const Row &r : rows) {
         const double d = fabs(rate - r.rate);
-        if (d < best) { best = d; bestMode = is2160 ? r.uhd : r.hd; }
+        if (d < best) { best = d; row = &r; }
     }
-    return bestMode;   // pure nearest-match — always a real mode, never falls through on a seam
+    if (width == 1280 && height == 720)  return row->p720;
+    if (width == 1920 && height == 1080) return row->hd;
+    if (width == 2048 && height == 1080) return row->dci2k;
+    if (width == 3840 && height == 2160) return row->uhd;
+    if (width == 4096 && height == 2160) return row->dci4k;
+    return bmdModeUnknown;
 }
 
-// Short human label for a resolved mode, e.g. "2160p23.98" / "1080p25" / "2160p59.94". The family
-// comes from the height; the rate token is snapped to the standard broadcast strings so 24000/1001
+// Short human label for a resolved mode, e.g. "2160p23.98" / "1080p25" / "720p59.94" / "2K DCI p23.98". The family
+// comes from the raster; the rate token is snapped to the standard broadcast strings so 24000/1001
 // reads "23.98" (not "23.976") and 30000/1001 reads "29.97".
 // A BMDDisplayMode as its four characters ('Hp25'), for the refusal log; "none" for bmdModeUnknown or a non-printable
 // value.
@@ -974,7 +981,11 @@ static NSString *FourCCString(BMDDisplayMode m) {
 }
 
 static NSString *ModeNameForResolved(int32_t width, int32_t height, BMDTimeValue frameDuration, BMDTimeScale timeScale) {
-    const char *fam = (height >= 1620) ? "2160p" : "1080p";
+    // The same family names as `SDIModeFamily` (ColorimetryModel), so the label the card settles on is the selector's.
+    const char *fam = (width == 1280 && height == 720) ? "720p"
+                    : (width == 2048 && height == 1080) ? "2K DCI p"
+                    : (width == 4096 && height == 2160) ? "4K DCI p"
+                    : (height >= 1620) ? "2160p" : "1080p";
     const double r = (frameDuration > 0) ? (double)timeScale / (double)frameDuration : 0.0;
     struct { double rate; const char *tok; } toks[] = {
         {24000.0 / 1001.0,"23.98"}, {24,"24"}, {25,"25"}, {30000.0 / 1001.0,"29.97"},
@@ -1588,10 +1599,9 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
                              DeckLinkOutputSignal *signal) -> bool {
         return block(frameIndex, buffer, rowBytes, width, height, signal) ? true : false;
     };
-    // D4a: derive the DISPLAY MODE from the output-family resolution + standard rate. The private
-    // start path falls back to 2160p23.98 if this resolves unknown or the card doesn't support it.
-    const bool is2160 = (outputHeight >= 1620);
-    BMDDisplayMode displayMode = BMDModeForFamilyRate(is2160, standardRate);
+    // D4a: derive the DISPLAY MODE from the output raster + standard rate (SDI scaling: 720p and DCI too). The
+    // private start path falls back to 2160p23.98 if this resolves unknown or the card doesn't support it.
+    BMDDisplayMode displayMode = BMDModeForRasterRate((int32_t)outputWidth, (int32_t)outputHeight, standardRate);
     return [self startScheduledPlaybackWithFillFn:fn
                                       deviceIndex:deviceIndex
                                     initialSignal:initialSignal
