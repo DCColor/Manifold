@@ -15,6 +15,13 @@
 //    • D4 scaled only when it does not fit; D9 placed on the v210 6-pixel group.
 //  8K is out of scope: no 4320p or 8K DCI mode is in the table.
 //
+//  Follow-ups (Robbie, 2026-10-23, §6.11 *SDI scaling follow-ups*):
+//    • F1 SDI scaling: Fit to mode (default) | 1:1 pixels. 1:1 is D1–D9 above, unchanged. Fit: a source whose raster IS
+//      a mode is still native (D2); otherwise the tier (1080p, 2160p; 2K/4K DCI with DCI included) whose fit scale is
+//      closest to 1, and the picture is scaled up or down to fill it, aspect kept, centred, video black around it.
+//    • F2 every rate the card offers up to 120: 47.95, 48, 95.90, 96, 100, 119.88 and 120 join the eight.
+//    • F4 a live source's mode is chosen once per session and held (`SDILiveModeHold`).
+//
 
 import Foundation
 
@@ -30,6 +37,20 @@ public enum SDIOutputModeSet: String, CaseIterable, Sendable {
     public static func stored(_ raw: String?) -> SDIOutputModeSet { raw.flatMap(Self.init(rawValue:)) ?? .default }
 
     public var label: String { self == .hdUHD ? "HD/UHD only" : "Include DCI" }
+}
+
+/// How a source that is not a mode fills the mode (Settings ▸ DeckLink Output ▸ SDI scaling). Default Fit to mode.
+public enum SDIScaling: String, CaseIterable, Sendable {
+    case fit = "fitToMode"
+    case oneToOne = "oneToOne"
+
+    public static let defaultsKey = "manifold.decklink.sdiScaling"
+    public static let `default`: SDIScaling = .fit
+
+    /// The stored value, or the default when absent or unrecognised.
+    public static func stored(_ raw: String?) -> SDIScaling { raw.flatMap(Self.init(rawValue:)) ?? .default }
+
+    public var label: String { self == .fit ? "Fit to mode" : "1:1 pixels" }
 }
 
 /// A raster the card can output (8K excluded). The raw value is the label's family part.
@@ -60,28 +81,39 @@ public enum SDIModeFamily: String, CaseIterable, Sendable {
 
     public func isAvailable(in set: SDIOutputModeSet) -> Bool { !isDCI || set == .includeDCI }
 
-    /// The rates of the eight standard ones the card offers this raster at (SDK probe, 2026-10-23: 720p only at 50,
-    /// 59.94 and 60; the others at all eight).
+    /// The rates the card offers this raster at (SDK probe, 2026-10-23: 720p only at 50, 59.94 and 60; the others at
+    /// all fifteen, 23.98 to 120).
     public func offers(_ rate: SDIStandardRate) -> Bool {
         self != .p720 || rate.token == "50" || rate.token == "59.94" || rate.token == "60"
     }
+
+    /// F1: the rasters Fit to mode chooses among. 720p is reached only natively (D2).
+    public var isFitTier: Bool { self != .p720 }
 }
 
-/// One of the eight standard broadcast rates, as an exact fps and the label's token.
+/// One of the card's progressive rates up to 120, as an exact fps and the label's token.
 public struct SDIStandardRate: Equatable, Sendable {
     public let fps: Double
     public let token: String
 
-    /// The rates Follow source snaps to, in order (the pre-existing D4a table, unchanged).
+    /// The rates Follow source snaps to, in ascending order: the eight of D4a, and (F2) 47.95, 48, 95.90, 96, 100,
+    /// 119.88 and 120, every progressive rate the card offers up to 120 (SDK probe, 2026-10-23).
     public static let all: [SDIStandardRate] = [
         SDIStandardRate(fps: 24000.0 / 1001.0, token: "23.98"),
         SDIStandardRate(fps: 24.0, token: "24"),
         SDIStandardRate(fps: 25.0, token: "25"),
         SDIStandardRate(fps: 30000.0 / 1001.0, token: "29.97"),
         SDIStandardRate(fps: 30.0, token: "30"),
+        SDIStandardRate(fps: 48000.0 / 1001.0, token: "47.95"),
+        SDIStandardRate(fps: 48.0, token: "48"),
         SDIStandardRate(fps: 50.0, token: "50"),
         SDIStandardRate(fps: 60000.0 / 1001.0, token: "59.94"),
         SDIStandardRate(fps: 60.0, token: "60"),
+        SDIStandardRate(fps: 96000.0 / 1001.0, token: "95.90"),
+        SDIStandardRate(fps: 96.0, token: "96"),
+        SDIStandardRate(fps: 100.0, token: "100"),
+        SDIStandardRate(fps: 120000.0 / 1001.0, token: "119.88"),
+        SDIStandardRate(fps: 120.0, token: "120"),
     ]
 
     /// Nearest by |Δfps|; an unknown rate (≤ 0) is 23.98, as before.
@@ -89,6 +121,10 @@ public struct SDIStandardRate: Equatable, Sendable {
         guard fps > 0 else { return all[0] }
         return all.min(by: { abs(fps - $0.fps) < abs(fps - $1.fps) })!
     }
+
+    /// Whether `fps` is this rate, within 0.1 % (a measured or rounded rate); otherwise the card has no mode at it and
+    /// snapping changes the cadence (12, 15, 72 fps), which the caller says.
+    public func matches(_ fps: Double) -> Bool { fps > 0 && abs(fps - self.fps) <= self.fps * 0.001 }
 }
 
 /// An output mode: a raster and a rate.
@@ -110,17 +146,25 @@ public struct SDIOutputMode: Equatable, Sendable {
 }
 
 public enum SDIOutputModeSelector {
-    /// THE one function: the mode a source goes out at under Follow source (D1–D3).
+    /// THE one function: the mode a source goes out at under Follow source (D1–D3; F1 under Fit to mode).
     /// `pixelAspect` is the declared h/v ratio, nil when undeclared (square assumed, D6).
     public static func select(width: Int, height: Int, pixelAspect: Double?, frameRate: Double,
-                              set: SDIOutputModeSet) -> SDIOutputMode {
+                              set: SDIOutputModeSet, scaling: SDIScaling = .oneToOne) -> SDIOutputMode {
         let rate = SDIStandardRate.nearest(to: frameRate)
         let modes = SDIOutputMode.table.filter { $0.rate == rate && $0.family.isAvailable(in: set) }
         let par = SDIPlacement.effectiveAspect(pixelAspect)
-        // D2: the raster is a mode, square pixels → that mode, native.
+        // D2: the raster is a mode, square pixels → that mode, native. Under either scaling.
         if par == 1, let native = modes.first(where: { $0.width == width && $0.height == height }) { return native }
-        // D3: the smallest that holds the picture's display size unscaled.
         let dw = Double(width) * par, dh = Double(height)
+        if scaling == .fit {
+            // F1: the tier whose fit scale s is closest to 1 (smallest |ln s|); a tie goes to the larger s (an
+            // upscale throws no source detail away), then to the smaller area (the 1:1 rule's tie, 2160p before 4K DCI).
+            func scale(_ m: SDIOutputMode) -> Double { min(Double(m.width) / dw, Double(m.height) / dh) }
+            func key(_ m: SDIOutputMode) -> (Double, Double, Int) { (abs(log(scale(m))), -scale(m), m.width * m.height) }
+            let tiers = modes.filter { $0.family.isFitTier }
+            return tiers.dropFirst().reduce(tiers[0]) { best, m in key(m) < key(best) ? m : best }
+        }
+        // D3: the smallest that holds the picture's display size unscaled.
         let holding = modes.filter { Double($0.width) >= dw && Double($0.height) >= dh }
         if let smallest = holding.min(by: { $0.width * $0.height < $1.width * $1.height }) { return smallest }
         // Too big for every mode: the largest, whichever scales least; the first listed (2160p) wins a tie.
@@ -173,15 +217,17 @@ public struct SDIPlacement: Equatable, Sendable {
         return (centre - Double(lo) <= Double(lo + 6) - centre) ? lo : lo + 6
     }
 
-    /// Fit a source into an output raster. Unscaled when its display size fits (D4); otherwise scaled down, aspect kept,
-    /// never cropped. x on the 6-pixel group nearest the centre (ties to the smaller); y centred, the odd row to the
-    /// bottom bar; a scaled width rounded to even, a scaled height to the nearest row.
+    /// Fit a source into an output raster. 1:1 pixels: unscaled when its display size fits (D4), otherwise scaled down.
+    /// Fit to mode (F1): scaled up or down until it meets the mode's sides, unscaled only when it already does. Aspect
+    /// kept, never cropped, either way. x on the 6-pixel group nearest the centre (ties to the smaller); y centred, the
+    /// odd row to the bottom bar; a scaled width rounded to even, a scaled height to the nearest row.
     public static func fit(sourceWidth: Int, sourceHeight: Int, pixelAspect: Double?,
-                           outputWidth: Int, outputHeight: Int) -> SDIPlacement {
+                           outputWidth: Int, outputHeight: Int, scaling: SDIScaling = .oneToOne) -> SDIPlacement {
         let par = effectiveAspect(pixelAspect)
         let dw = Double(sourceWidth) * par, dh = Double(sourceHeight)
-        let fits = dw <= Double(outputWidth) && dh <= Double(outputHeight)
-        let s = fits ? 1.0 : min(Double(outputWidth) / dw, Double(outputHeight) / dh)
+        let toSides = min(Double(outputWidth) / dw, Double(outputHeight) / dh)
+        let fits = scaling == .fit ? toSides == 1 : dw <= Double(outputWidth) && dh <= Double(outputHeight)
+        let s = fits ? 1.0 : toSides
         var w: Int, h: Int
         if fits && par == 1 {
             (w, h) = (sourceWidth, sourceHeight)
@@ -275,4 +321,62 @@ public struct SDIResampleTaps: Equatable, Sendable {
         while k < 0 || k > n - 1 { k = k < 0 ? -k : 2 * (n - 1) - k }
         return k
     }
+}
+
+/// F4: a live source's output mode is chosen once per session and held. A session runs from the first format that
+/// states a rate to the source going away (`end`). Later renditions, resolution or rate changes never move the mode:
+/// the renderer places or scales each frame within it, and the caller logs the change as absorbed. The mode is chosen
+/// from `sizingRaster` when the source states one (HLS: the largest rendition in the master playlist), else from the
+/// frame's own raster. An operator action (the mode set, the scaling, a manual pick) re-resolves from the same basis.
+public struct SDILiveModeHold: Sendable {
+    public struct Format: Equatable, Sendable {
+        public let width: Int, height: Int
+        public let frameRate: Double
+        /// The raster to choose the mode from instead of the frame's, when the source states one.
+        public let sizingWidth: Int?, sizingHeight: Int?
+        public init(width: Int, height: Int, frameRate: Double, sizingWidth: Int? = nil, sizingHeight: Int? = nil) {
+            self.width = width; self.height = height; self.frameRate = frameRate
+            self.sizingWidth = sizingWidth; self.sizingHeight = sizingHeight
+        }
+        var basisWidth: Int { sizingWidth ?? width }
+        var basisHeight: Int { sizingHeight ?? height }
+    }
+
+    public enum Decision: Equatable, Sendable {
+        /// The session's mode: apply it (the first format of a session, or an operator re-resolve).
+        case apply(SDIOutputMode)
+        /// A change after the mode was chosen. `resolved` is what a fresh choice would have been; the mode stays `held`.
+        case absorbed(held: SDIOutputMode, resolved: SDIOutputMode)
+    }
+
+    /// The format the session's mode was chosen from, and the mode. nil between sessions.
+    public private(set) var basis: Format?
+    public private(set) var held: SDIOutputMode?
+
+    public init() {}
+
+    public static func resolve(_ f: Format, set: SDIOutputModeSet, scaling: SDIScaling) -> SDIOutputMode {
+        SDIOutputModeSelector.select(width: f.basisWidth, height: f.basisHeight, pixelAspect: nil,
+                                     frameRate: f.frameRate, set: set, scaling: scaling)
+    }
+
+    /// A format with a rate arrived. The first of a session chooses the mode; every later one is absorbed.
+    public mutating func observe(_ f: Format, set: SDIOutputModeSet, scaling: SDIScaling) -> Decision {
+        let resolved = Self.resolve(f, set: set, scaling: scaling)
+        if let held { return .absorbed(held: held, resolved: resolved) }
+        basis = f
+        held = resolved
+        return .apply(resolved)
+    }
+
+    /// An operator setting changed mid-session: choose again from the session's basis. nil outside a session.
+    public mutating func reresolve(set: SDIOutputModeSet, scaling: SDIScaling) -> SDIOutputMode? {
+        guard let basis else { return nil }
+        let m = Self.resolve(basis, set: set, scaling: scaling)
+        held = m
+        return m
+    }
+
+    /// The source is gone: the next format starts a new session.
+    public mutating func end() { basis = nil; held = nil }
 }

@@ -12,7 +12,7 @@ nothing is installed.
 | `verify.py` | reads every file back: stream tags, sample entries, length, and the decoded picture; stdlib only |
 
 ```sh
-zsh scripts/sdi-scaling/make_fixtures.sh                          # all sixteen, ~35 s on an M-series Mac, ~920 MB
+zsh scripts/sdi-scaling/make_fixtures.sh                          # all twenty-six, ~70 s on an M-series Mac, ~2.2 GB
 zsh scripts/sdi-scaling/make_fixtures.sh 1080x1920p23.976         # or some
 python3 scripts/sdi-scaling/verify.py                             # exit 1 if any check fails
 ```
@@ -77,6 +77,15 @@ all at 23.976. Same format and picture, plus one element the first seven do not 
 
 Extending the script left the first seven byte-identical. Regenerated into a scratch directory, they match the files on
 disk (SHA-256). `verify.py`: **16 / 16 pass**, 2026-10-23.
+
+## Added 2026-10-23 (SDI scaling follow-ups): ten at the new rates
+
+`1920x1080` at 47.952, 48, 95.904, 96, 100, 119.88 and 120; `1280x720p119.88` (720p has no 119.88 mode);
+`2048x1080` at 48 and 119.88 (2K DCI). Same format, picture and colour strip as the nine above, whole frames and whole
+samples (1200 frames at 119.88 and 120, 10.01 s / 10.00 s). The script is unchanged; only `recipes.tsv` gained rows.
+`verify.py`: **26 / 26 pass**, 2026-10-23. One reading to know about: mediainfo leaves the frame-rate fields of
+`1920x1080p95.904` empty, while ffmpeg reads it as 95.90 fps and the length checks pass (960 frames = 480 480 samples).
+About 1.3 GB for the ten.
 
 ## What SDI does with them (built and measured 2026-10-23)
 

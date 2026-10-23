@@ -1295,6 +1295,8 @@ struct SettingsView: View {
     @AppStorage(DeckLinkService.enableOnLaunchKey) private var deckLinkEnableOnLaunch = false
     // SDI scaling (§6.11): which modes Follow source may choose. Default HD/UHD only. DeckLinkService observes the write.
     @AppStorage(SDIOutputModeSet.defaultsKey) private var deckLinkModeSet: SDIOutputModeSet = .default
+    // SDI scaling follow-up F1: how a source that is not a mode fills it. Default Fit to mode.
+    @AppStorage(SDIScaling.defaultsKey) private var deckLinkScaling: SDIScaling = .default
 
     // Framing-guide styling (defaults reproduce Pass 1's look).
     @AppStorage("guideDarkenOpacity") private var guideDarkenOpacity = 0.85
@@ -1501,11 +1503,20 @@ struct SettingsView: View {
                 Text("When on, Manifold starts DeckLink output at launch if a capable device is connected. Otherwise it does nothing. Turning output on or off during a session doesn't change this setting.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Picker("SDI scaling", selection: $deckLinkScaling) {
+                    ForEach(SDIScaling.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text(deckLinkScaling == .fit
+                     ? "Fit to mode: Follow source picks the mode at the source's frame rate whose size is closest to the source's, and scales the picture up or down to fill it, keeping its shape, with black around it. A source that is exactly a mode's size goes out unscaled."
+                     : "1:1 pixels: Follow source picks the smallest mode at the source's frame rate that holds the picture without scaling, and outputs it 1:1 with black around it. A picture larger than every mode is scaled down to fit.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker("SDI output modes", selection: $deckLinkModeSet) {
                     ForEach(SDIOutputModeSet.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                Text("Follow source picks the smallest mode at the source's frame rate that holds the picture without scaling, and outputs it 1:1 with black around it. A picture larger than every mode is scaled down to fit. Include DCI adds 2048×1080 and 4096×2160.")
+                Text("Include DCI adds 2048×1080 and 4096×2160, to Follow source and to the output mode picker.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

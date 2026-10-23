@@ -16,3 +16,13 @@
 4096x2160p23.976	4096	2160	24000/1001	yes	DCI 4K full container: scaled ×0.9375 into 2160p under HD/UHD, native with DCI
 6144x3240p23.976	6144	3240	24000/1001	yes	larger than 4096×2160: scaled ×0.625 into 2160p, ×2/3 into 4K DCI
 1920x817p23.976	1920	817	24000/1001	yes	odd height: a letterbox that cannot split evenly (131 top, 132 bottom)
+1920x1080p47.952	1920	1080	48000/1001	yes	F2: 47.95, native 1080p47.95 (snapped to 50 before the follow-ups)
+1920x1080p48	1920	1080	48/1	yes	F2: 48, native 1080p48
+1920x1080p95.904	1920	1080	96000/1001	yes	F2: 95.90, native 1080p95.90
+1920x1080p96	1920	1080	96/1	yes	F2: 96, native 1080p96
+1920x1080p100	1920	1080	100/1	yes	F2: 100, native 1080p100
+1920x1080p119.88	1920	1080	120000/1001	yes	F2: 119.88, native 1080p119.88; also the source for the manual 2160p119.88 pick (×2 under Fit)
+1920x1080p120	1920	1080	120/1	yes	F2: 120, native 1080p120
+1280x720p119.88	1280	720	120000/1001	yes	F2: 720p has no 119.88 mode: 1080p119.88, ×1.5 under Fit, windowboxed under 1:1
+2048x1080p48	2048	1080	48/1	yes	F2 + DCI: 2K DCI p48 native with DCI; 1080p48 ×0.9375 under HD/UHD Fit
+2048x1080p119.88	2048	1080	120000/1001	yes	F2 + DCI: 2K DCI p119.88 native with DCI

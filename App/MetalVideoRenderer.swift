@@ -434,9 +434,14 @@ final class MetalVideoRenderer {
     private var deckLinkPixelAspect: Double?
     /// The placement last reported (edge-triggered, like the mismatch); guarded by `deckLinkLock`.
     private var deckLinkLastPlacement: SDIPlacement?
-    /// The scaled path's taps and intermediate, rebuilt when the placement changes. Touched only by the convert, which
-    /// the one-in-flight gate serialises, so a frame's intermediate is never written while the previous frame reads it.
+    /// The scaled path's taps and intermediate, rebuilt when the placement changes. Touched by the convert, which the
+    /// one-in-flight gate serialises, so a frame's intermediate is never written while the previous frame reads it;
+    /// and released, under `deckLinkLock`, once output has stopped and no convert is in flight
+    /// (`endDeckLinkConvertLocked`, `stopDeckLinkOutput`; SDI scaling follow-up F5).
     private var deckLinkScaler: DeckLinkScaler?
+    /// SDI scaling follow-up F1: how a picture that is not the mode fills it (Settings ▸ SDI scaling). Written on main by
+    /// `setDeckLinkScaling`, read by the convert; guarded by `deckLinkLock`.
+    private var deckLinkScaling: SDIScaling = .default
 
     /// D8: the placement of the picture in the output, each time it changes, on MAIN. nil when output stops.
     var onDeckLinkPlacement: ((SDIPlacement?) -> Void)?
@@ -3983,10 +3988,43 @@ final class MetalVideoRenderer {
         }
     }
 
-    /// Stop DeckLink output: disarm the convert and release the staging buffers.
+    /// SDI scaling follow-up F1: Fit to mode or 1:1 pixels. Takes effect on the next converted frame.
+    func setDeckLinkScaling(_ scaling: SDIScaling) {
+        deckLinkLock.lock(); deckLinkScaling = scaling; deckLinkLock.unlock()
+    }
+
+    /// Clear the one-in-flight gate; if output has stopped meanwhile, release the scaler now that nothing reads it
+    /// (F5). Every path that ends a convert comes through here. Called with `deckLinkLock` held.
+    private func endDeckLinkConvertLocked() {
+        deckLinkConverting = false
+        if !deckLinkActive { releaseDeckLinkScalerLocked(when: "after the last convert") }
+    }
+
+    /// F5: drop the scaler's intermediate and taps (up to ~199 MB, 6144×3240 into 2160p) and say what the Metal device
+    /// holds before and after. A command buffer still in flight retains what it encoded, so this only ends OUR hold.
+    /// Called with `deckLinkLock` held, and only when no convert is in flight.
+    private func releaseDeckLinkScalerLocked(when: String) {
+        // No local strong reference may outlive the nil below, or `after` is read while the scaler is still alive:
+        // the one read here ends with its scope.
+        let bytes: Int, w: Int, h: Int
+        do {
+            guard let held = deckLinkScaler else { return }
+            (bytes, w, h) = (held.allocatedBytes, held.placement.sourceWidth, held.placement.height)
+        }
+        let before = device.currentAllocatedSize
+        deckLinkScaler = nil
+        let after = device.currentAllocatedSize
+        print(String(format: "DeckLink: SDI scaler released %@ — %.1f MB (%d×%d intermediate + taps); Metal device "
+                             + "allocated %.1f → %.1f MB", when, Double(bytes) / 1e6, w, h,
+                     Double(before) / 1e6, Double(after) / 1e6))
+    }
+
+    /// Stop DeckLink output: disarm the convert and release the staging buffers, and the scaler's (F5) — now, or when
+    /// the convert in flight completes.
     func stopDeckLinkOutput() {
         deckLinkLock.lock()
         deckLinkActive = false
+        if !deckLinkConverting { releaseDeckLinkScalerLocked(when: "at output stop") }
         deckLinkFrameReady = false
         deckLinkStaging = []
         deckLinkOutputSize = nil
@@ -4031,17 +4069,18 @@ final class MetalVideoRenderer {
         deckLinkLock.unlock()
 
         guard let pipeline = deckLinkPipelineState, let readable = readableOffscreen() else {
-            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+            deckLinkLock.lock(); endDeckLinkConvertLocked(); deckLinkLock.unlock(); return
         }
         let src = readable.texture
         // SDI scaling (§6.11, *SDI scaling*): where this frame's picture sits in the output. A source that IS the mode
         // is native and takes the pre-existing kernel below, untouched; anything else is placed 1:1 or scaled to fit
         // (D3, D4), with video black around it. Placed from the frame's own size, so a raster that changes under a
         // running mode (an ABR rung) is placed at once, not refused.
+        // Under Fit to mode (F1) a picture is scaled up or down to meet the mode's sides; under 1:1 pixels, as before.
         deckLinkLock.lock()
         let pixelAspect = deckLinkPixelAspect
         let placement = SDIPlacement.fit(sourceWidth: src.width, sourceHeight: src.height, pixelAspect: pixelAspect,
-                                         outputWidth: outSize.w, outputHeight: outSize.h)
+                                         outputWidth: outSize.w, outputHeight: outSize.h, scaling: deckLinkScaling)
         let placementChanged = placement != deckLinkLastPlacement
         deckLinkLastPlacement = placement
         deckLinkLock.unlock()
@@ -4059,7 +4098,7 @@ final class MetalVideoRenderer {
 
         guard let cmd = deckLinkCommandQueue.makeCommandBuffer(),
               let enc = cmd.makeComputeCommandEncoder() else {
-            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+            deckLinkLock.lock(); endDeckLinkConvertLocked(); deckLinkLock.unlock(); return
         }
         #if DEBUG
         let v210EncodeStart = CACurrentMediaTime()
@@ -4112,7 +4151,7 @@ final class MetalVideoRenderer {
             }
             #endif
             self.deckLinkFrameReady = true
-            self.deckLinkConverting = false
+            self.endDeckLinkConvertLocked()
             self.deckLinkLock.unlock()
         }
         cmd.commit()
@@ -4129,7 +4168,7 @@ final class MetalVideoRenderer {
         func release(_ why: String) {
             deckLinkLock.lock()
             deckLinkFrameReady = false
-            deckLinkConverting = false
+            endDeckLinkConvertLocked()
             let alreadyLogged = deckLinkResMismatchLogged
             deckLinkResMismatchLogged = true
             deckLinkLock.unlock()
@@ -4160,7 +4199,7 @@ final class MetalVideoRenderer {
         reportDeckLinkRasterMatch()
 
         guard let cmd = deckLinkCommandQueue.makeCommandBuffer() else {
-            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+            deckLinkLock.lock(); endDeckLinkConvertLocked(); deckLinkLock.unlock(); return
         }
         #if DEBUG
         let v210EncodeStart = CACurrentMediaTime()
@@ -4180,7 +4219,7 @@ final class MetalVideoRenderer {
             vEnc.endEncoding()
         }
         guard let enc = cmd.makeComputeCommandEncoder() else {
-            deckLinkLock.lock(); deckLinkConverting = false; deckLinkLock.unlock(); return
+            deckLinkLock.lock(); endDeckLinkConvertLocked(); deckLinkLock.unlock(); return
         }
         if let sc = scaler {
             enc.setComputePipelineState(scaledPipeline)
@@ -4224,7 +4263,7 @@ final class MetalVideoRenderer {
             }
             #endif
             self.deckLinkFrameReady = true
-            self.deckLinkConverting = false
+            self.endDeckLinkConvertLocked()
             self.deckLinkLock.unlock()
         }
         cmd.commit()
@@ -4799,6 +4838,10 @@ private final class DeckLinkScaler {
     let indicesH: MTLBuffer, weightsH: MTLBuffer
     let indicesC: MTLBuffer, weightsC: MTLBuffer
     let intermediate: MTLTexture
+    /// What this scaler holds, for the release log (F5): the intermediate plus the six tap tables.
+    var allocatedBytes: Int {
+        intermediate.allocatedSize + [indicesV, weightsV, indicesH, weightsH, indicesC, weightsC].reduce(0) { $0 + $1.length }
+    }
 
     init?(device: MTLDevice, placement: SDIPlacement) {
         self.placement = placement

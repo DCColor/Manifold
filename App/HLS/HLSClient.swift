@@ -413,7 +413,26 @@ enum HLSMasterPlaylist {
     /// absent, or when this is a MEDIA playlist rather than a master (no `EXT-X-STREAM-INF` at
     /// all) — both are ordinary and both mean "fall through to measurement".
     static func frameRates(in playlist: String) -> [Double] {
-        var out: [Double] = []
+        attributeValues("FRAME-RATE", in: playlist).compactMap { raw in
+            guard let v = Double(raw), v.isFinite, v > 0 else { return nil }
+            return v
+        }
+    }
+
+    /// SDI scaling follow-up F4: the largest `RESOLUTION` (by area) in the master, or nil when no variant states one.
+    /// A live HLS session's output mode is chosen from it, so the ladder's top rung is what the mode is sized for and
+    /// every rung below it is placed or scaled within that mode, never a mode change (`SDILiveModeHold`).
+    static func largestResolution(in playlist: String) -> (width: Int, height: Int)? {
+        attributeValues("RESOLUTION", in: playlist).compactMap { raw -> (width: Int, height: Int)? in
+            let wh = raw.lowercased().split(separator: "x")
+            guard wh.count == 2, let w = Int(wh[0]), let h = Int(wh[1]), w > 0, h > 0 else { return nil }
+            return (w, h)
+        }.max(by: { $0.width * $0.height < $1.width * $1.height })
+    }
+
+    /// Every value of the attribute `name` on the master's `EXT-X-STREAM-INF` lines, in variant order, trimmed.
+    private static func attributeValues(_ name: String, in playlist: String) -> [String] {
+        var out: [String] = []
         for line in playlist.split(whereSeparator: \.isNewline) {
             guard line.hasPrefix("#EXT-X-STREAM-INF:") else { continue }
             // Attributes are comma-separated, but quoted values may contain commas (CODECS="a,b"),
@@ -429,10 +448,8 @@ enum HLSMasterPlaylist {
             fields.append(field)
             for f in fields {
                 let kv = f.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                guard kv.count == 2, kv[0].trimmingCharacters(in: .whitespaces) == "FRAME-RATE",
-                      let v = Double(kv[1].trimmingCharacters(in: .whitespaces)),
-                      v.isFinite, v > 0 else { continue }
-                out.append(v)
+                guard kv.count == 2, kv[0].trimmingCharacters(in: .whitespaces) == name else { continue }
+                out.append(kv[1].trimmingCharacters(in: .whitespaces))
             }
         }
         return out
@@ -739,6 +756,13 @@ final class HLSClient: ObservableObject {
         get { declaredRateLock.lock(); defer { declaredRateLock.unlock() }; return declaredFrameRateStorage }
         set { declaredRateLock.lock(); declaredFrameRateStorage = newValue; declaredRateLock.unlock() }
     }
+    /// SDI scaling follow-up F4: the master playlist's largest `RESOLUTION`, or nil. Written by the same fetch, read on
+    /// every display tick beside the rate, under the same lock.
+    private var largestRenditionStorage: CGSize?
+    private var largestRendition: CGSize? {
+        get { declaredRateLock.lock(); defer { declaredRateLock.unlock() }; return largestRenditionStorage }
+        set { declaredRateLock.lock(); largestRenditionStorage = newValue; declaredRateLock.unlock() }
+    }
     /// Edge-triggered, like WHEP's: the declared-vs-measured disagreement state.
     private var rateDisagreementActive = false
     /// Relative disagreement that counts as real. Same 2% as WHEP, same reasoning.
@@ -901,6 +925,7 @@ final class HLSClient: ObservableObject {
         // the critical path: the estimator runs regardless and the
         // declaration simply overrides it when it lands.
         declaredFrameRate = nil
+        largestRendition = nil
         rateDisagreementActive = false
         // ⚠️ `token`, NOT `generation &+ 1`. This read `generation &+ 1` and the completion's
         // `guard self.generation == token` therefore compared n against n+1 and returned SILENTLY
@@ -1138,6 +1163,16 @@ final class HLSClient: ObservableObject {
                 }
                 let variantLines = text.split(whereSeparator: \.isNewline)
                     .filter { $0.hasPrefix("#EXT-X-STREAM-INF:") }.count
+                // F4: the largest rendition, BEFORE the rate below: a declared rate is what lets DeckLink Follow
+                // source choose the session's mode, and the mode must be chosen from the ladder's top rung.
+                if let top = HLSMasterPlaylist.largestResolution(in: text) {
+                    self.largestRendition = CGSize(width: top.width, height: top.height)
+                    print("[HLS-FORMAT] rung 1: largest rendition \(top.width)x\(top.height) — the DeckLink output "
+                        + "mode is chosen from it")
+                } else {
+                    print("[HLS-FORMAT] rung 1: no RESOLUTION in the master — the DeckLink output mode is chosen "
+                        + "from the first decoded frame")
+                }
                 let (declared, all) = HLSMasterPlaylist.declaredFrameRate(in: text)
                 let preamble = "rung 1: HTTP \(status), \(bytes) byte(s), "
                              + "\(variantLines) EXT-X-STREAM-INF line(s), "
@@ -1294,7 +1329,8 @@ final class HLSClient: ObservableObject {
         let declared = declaredFrameRate
         if let declared { crossCheckDeclaredRate(declared: declared, measured: frameRateEstimator.estimate) }
         LiveDisplaySize.shared.publish(width: width, height: height,
-                                       frameRate: declared ?? frameRateEstimator.estimate)
+                                       frameRate: declared ?? frameRateEstimator.estimate,
+                                       largestRendition: largestRendition)
 
         publishColorTagsIfChanged(of: pixelBuffer)
         // The 8-bit flag (see `tracksObservation`), on every frame, both ways: the output's pool
@@ -1648,6 +1684,7 @@ final class HLSClient: ObservableObject {
         frameRateEstimator.reset()
         lastPulledRaster = nil
         declaredFrameRate = nil
+        largestRendition = nil
         rateDisagreementActive = false
         DeckLinkService.shared.setSourceAdvisory(nil)
         LiveDisplaySize.shared.clear()

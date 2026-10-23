@@ -934,11 +934,12 @@ public:
 #pragma mark - D4a: display-mode selection (video cadence from the file's resolution + rate)
 
 // Map an output raster + a broadcast rate to the matching PROGRESSIVE BMDDisplayMode. The rate is matched by pure
-// NEAREST-MATCH (minimum |Δfps|) against the 8 standard rates — NO ranges, NO boundaries, NO seams, so
+// NEAREST-MATCH (minimum |Δfps|) against the card's 15 progressive rates up to 120 (`SDIStandardRate.all`, 8 until
+// the SDI scaling follow-ups) — NO ranges, NO boundaries, NO seams, so
 // no input can be trapped on a bucket edge. The fractional NTSC rates use their EXACT n/1001 value
 // (24000/1001 = 23.976…, 30000/1001 = 29.970…, 60000/1001 = 59.940…), so a 29.970 source lands ~0 from
 // the 29.97 row and ~0.03 from the 30 row → p2997, never p30 and never a fallback. Every rate resolves
-// to a real, card-supported progressive mode (all 8 are supported on device 0); interlaced is never
+// to a real, card-supported progressive mode (all 15 are supported on device 0); interlaced is never
 // selected (the decode path is progressive). Actual timing is read back off the resolved mode.
 // SDI scaling (§6.11): the raster is now any of the five the selector chooses from (`SDIOutputMode`, ColorimetryModel):
 // 1280×720 (50 / 59.94 / 60 only), 1920×1080, 2048×1080 (2K DCI), 3840×2160, 4096×2160 (4K DCI). Unknown raster, or
@@ -951,9 +952,17 @@ static BMDDisplayMode BMDModeForRasterRate(int32_t width, int32_t height, double
         {25.0,             bmdModeUnknown,    bmdModeHD1080p25,   bmdMode2kDCI25,   bmdMode4K2160p25,   bmdMode4kDCI25},
         {30000.0 / 1001.0, bmdModeUnknown,    bmdModeHD1080p2997, bmdMode2kDCI2997, bmdMode4K2160p2997, bmdMode4kDCI2997},   // 29.970…
         {30.0,             bmdModeUnknown,    bmdModeHD1080p30,   bmdMode2kDCI30,   bmdMode4K2160p30,   bmdMode4kDCI30},
+        {48000.0 / 1001.0, bmdModeUnknown,    bmdModeHD1080p4795, bmdMode2kDCI4795, bmdMode4K2160p4795, bmdMode4kDCI4795},   // 47.952…
+        {48.0,             bmdModeUnknown,    bmdModeHD1080p48,   bmdMode2kDCI48,   bmdMode4K2160p48,   bmdMode4kDCI48},
         {50.0,             bmdModeHD720p50,   bmdModeHD1080p50,   bmdMode2kDCI50,   bmdMode4K2160p50,   bmdMode4kDCI50},
         {60000.0 / 1001.0, bmdModeHD720p5994, bmdModeHD1080p5994, bmdMode2kDCI5994, bmdMode4K2160p5994, bmdMode4kDCI5994},   // 59.940…
         {60.0,             bmdModeHD720p60,   bmdModeHD1080p6000, bmdMode2kDCI60,   bmdMode4K2160p60,   bmdMode4kDCI60},      // N.B. 1080p60 is bmdModeHD1080p6000
+        // SDI scaling follow-up F2: the high rates, which the card offers at every raster but 720p (SDK probe, 2026-10-23).
+        {96000.0 / 1001.0, bmdModeUnknown,    bmdModeHD1080p9590, bmdMode2kDCI9590, bmdMode4K2160p9590, bmdMode4kDCI9590},   // 95.904…
+        {96.0,             bmdModeUnknown,    bmdModeHD1080p96,   bmdMode2kDCI96,   bmdMode4K2160p96,   bmdMode4kDCI96},
+        {100.0,            bmdModeUnknown,    bmdModeHD1080p100,  bmdMode2kDCI100,  bmdMode4K2160p100,  bmdMode4kDCI100},
+        {120000.0 / 1001.0, bmdModeUnknown,   bmdModeHD1080p11988, bmdMode2kDCI11988, bmdMode4K2160p11988, bmdMode4kDCI11988}, // 119.880…
+        {120.0,            bmdModeUnknown,    bmdModeHD1080p120,  bmdMode2kDCI120,  bmdMode4K2160p120,  bmdMode4kDCI120},
     };
     double best = 1e9; const Row *row = &rows[0];
     for (const Row &r : rows) {
@@ -989,7 +998,8 @@ static NSString *ModeNameForResolved(int32_t width, int32_t height, BMDTimeValue
     const double r = (frameDuration > 0) ? (double)timeScale / (double)frameDuration : 0.0;
     struct { double rate; const char *tok; } toks[] = {
         {24000.0 / 1001.0,"23.98"}, {24,"24"}, {25,"25"}, {30000.0 / 1001.0,"29.97"},
-        {30,"30"}, {50,"50"}, {60000.0 / 1001.0,"59.94"}, {60,"60"}
+        {30,"30"}, {48000.0 / 1001.0,"47.95"}, {48,"48"}, {50,"50"}, {60000.0 / 1001.0,"59.94"}, {60,"60"},
+        {96000.0 / 1001.0,"95.90"}, {96,"96"}, {100,"100"}, {120000.0 / 1001.0,"119.88"}, {120,"120"}
     };
     // Nearest-match (same principle as the mode selector) against EXACT n/1001 rates: the resolved
     // mode's true rate (e.g. 30000/1001 = 29.970) lands ~0 from its own token and ~0.03 from the

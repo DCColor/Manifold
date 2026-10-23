@@ -92,12 +92,17 @@ struct LiveVideoFormat: Equatable {
     /// Frames per second, or nil when the transport cannot state one. NEVER a fallback or a guess —
     /// see the header. `0` is not used for "unknown"; it would survive a `> 0` test somewhere.
     let frameRate: Double?
+    /// SDI scaling follow-up F4: the largest rendition the source offers, when it states one (HLS: the master
+    /// playlist's largest `RESOLUTION`), else nil. DeckLink Follow source chooses a live session's mode from it, so the
+    /// mode is sized for the ladder's top rung and never changes as the player moves between rungs.
+    var largestRendition: CGSize? = nil
 
     /// For the log and the menu: "1920x1080 @ 29.97 fps" / "1920x1080, rate unknown".
     var describedForLog: String {
         let raster = "\(Int(size.width))x\(Int(size.height))"
-        guard let frameRate else { return "\(raster), rate unknown" }
-        return String(format: "%@ @ %.3f fps", raster, frameRate)
+        let ladder = largestRendition.map { " (largest rendition \(Int($0.width))x\(Int($0.height)))" } ?? ""
+        guard let frameRate else { return "\(raster), rate unknown\(ladder)" }
+        return String(format: "%@ @ %.3f fps%@", raster, frameRate, ladder)
     }
 }
 
@@ -142,13 +147,14 @@ final class LiveDisplaySize {
     /// degenerate number — `SRTSession` reports 0 for "av_guess_frame_rate could not work one out",
     /// and 0 reaching `resolveOutputMode` would silently resolve to the 23.976 entry and reconfigure
     /// a broadcast output to a cadence nothing asked for.
-    func publish(width: Int, height: Int, frameRate: Double? = nil) {
+    func publish(width: Int, height: Int, frameRate: Double? = nil, largestRendition: CGSize? = nil) {
         guard width > 0, height > 0 else { return }
         let rate: Double? = {
             guard let frameRate, frameRate.isFinite, frameRate > 0 else { return nil }
             return frameRate
         }()
-        let format = LiveVideoFormat(size: CGSize(width: width, height: height), frameRate: rate)
+        let format = LiveVideoFormat(size: CGSize(width: width, height: height), frameRate: rate,
+                                     largestRendition: largestRendition)
 
         lock.lock()
         guard published != format else { lock.unlock(); return }

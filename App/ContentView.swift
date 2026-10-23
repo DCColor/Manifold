@@ -2198,7 +2198,7 @@ struct ContentView: View {
                     DeckLinkService.shared.setManualMode(
                         tag == Self.followSourceTag
                             ? nil
-                            : DeckLinkService.selectableModes.first { $0.id == tag })
+                            : DeckLinkService.shared.pickerModes.first { $0.id == tag })
                 })
     }
     /// Sentinel tag for the "Follow source" row. A `Picker` over `OutputMode?` would need the
@@ -2298,7 +2298,9 @@ struct ContentView: View {
                             Text("Follow source (\(deckLink.sourceDerivedMode?.label ?? ""))")
                                 .tag(Self.followSourceTag)
                         }
-                        ForEach(DeckLinkService.selectableModes, id: \.id) { mode in
+                        // SDI scaling follow-up F3: 2160p, 1080p and 720p at every rate the card offers each, then 2K
+                        // and 4K DCI only while Settings ▸ SDI output modes is Include DCI.
+                        ForEach(deckLink.pickerModes, id: \.id) { mode in
                             Text(mode.label).tag(mode.id)
                         }
                     }

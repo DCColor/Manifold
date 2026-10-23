@@ -7547,6 +7547,139 @@ samples. No behaviour was changed.
   - An input that reports no packet does not prove the wire has none, because inputs may filter ANC. A waveform
     monitor with a 2108 view is the stronger check.
 
+#### SDI scaling follow-ups — rules and predictions, 2026-10-23 (stated before any build or run)
+
+**Scope:** Robbie's five follow-ups to `cb39182`: F1 a *SDI scaling* setting, F2 every rate up to 120, F3 the manual
+picker's rows, F4 one mode per live session, F5 freeing the scaler at stop. **Estimated run time: 3½–5 h.** The
+estimate and every band below were stated in the session before the baseline build. They were copied here during the
+run, before any result was scored.
+
+**The rules as built** (`ColorimetryModel/SDIOutputMode.swift`):
+1. **F1 — Settings ▸ DeckLink Output ▸ SDI scaling: Fit to mode (default) | 1:1 pixels** (`SDIScaling`, key
+   `manifold.decklink.sdiScaling`).
+   - *1:1 pixels* is D1–D9 above, byte for byte. Both functions take the scaling as a parameter, and its default is
+     `.oneToOne`.
+   - *Fit to mode*, the mode: the source's rate as before. A source whose raster IS a mode in the active set goes out
+     native (D2), so 720p50 / 59.94 / 60 stay 720p and the 1920×1080 control is untouched. Otherwise the **tier** is
+     chosen from 1080p and 2160p, plus 2K DCI and 4K DCI with *Include DCI*; 720p is never a tier. The tier is the one
+     whose fit scale s = min(W / w, H / h) is closest to 1, that is, the smallest |ln s|.
+   - *Tie-break:* the larger s (an upscale throws away no source detail), then the smaller area (1080p before 2K DCI,
+     2160p before 4K DCI, as D3's tie). Between 1080p and 2160p, and between 2K and 4K DCI, an exact |ln s| tie would
+     need s = 1/√2, so the first tie-break never decides in practice. The second does, for a picture bound by height
+     in both a 16:9 tier and its DCI twin.
+   - *Fit to mode*, the placement: scaled up or down until it meets the mode's sides, aspect kept, centred, video
+     black around it. It is unscaled only when s is exactly 1. The rounding, the 6-pixel x and the extra bottom row are
+     D9's. The same Lanczos-3 kernels: for an upscale the luma kernel is not stretched (f = 1), and chroma is
+     stretched only while 2 × src / dst > 1.
+2. **F2 — rates.** `SDIStandardRate.all` grows from 8 to 15: 47.95, 48, 95.90, 96, 100, 119.88 and 120 are added,
+   exact n/1001 where fractional. 1080p, 2K DCI, 2160p and 4K DCI are offered at all 15; 720p at 50 / 59.94 / 60 only
+   (the SDK probe above). The bridge's `BMDModeForRasterRate` and `ModeNameForResolved` gain the same rows. A rate
+   with no mode at all (12, 15, 72) still snaps to the nearest, and is now logged once per resolve, with its nearest
+   (`rateWarning`).
+3. **F3 — the manual picker.** 2160p, 1080p and 720p at every rate each offers, then 2K DCI and 4K DCI only under
+   *Include DCI*. The rows come from `SDIOutputMode.table`, the selector's own. Turning *Include DCI* off while a DCI
+   mode is picked by hand clears the pick back to Follow source, and the log says so.
+4. **F4 — live sources** (SRT, WHEP, HLS, NDI; `SDILiveModeHold`).
+   - *The session:* from the first format that states a rate until the source goes away (`LiveDisplaySize.clear`).
+   - *The mode:* chosen once, from the master playlist's largest `RESOLUTION` for HLS when it has one (new:
+     `HLSMasterPlaylist.largestResolution`), else from that first decoded frame, and held. Every later rendition,
+     raster, rate change or rate loss is placed or scaled within it, and logged as `absorbed`.
+   - *What still re-resolves:* operator actions only (the mode set, the scaling, a manual pick), from the session's
+     own basis. The 2 s settle window is removed: nothing is left to settle.
+5. **F5 — the scaler.** Released under `deckLinkLock` at output stop when no convert is in flight. Otherwise the
+   in-flight convert's completion releases it (`endDeckLinkConvertLocked`, which every path that clears the gate now
+   goes through). The release logs its size and the Metal device's `currentAllocatedSize` before and after.
+
+**Expected under Fit to mode** (computed from the rules only, no app; x, y is the picture's top-left; bars L / R / T /
+B). Rows the same as 1:1 are listed once.
+
+| Source | HD/UHD only | Include DCI |
+|---|---|---|
+| 1280×720 p23.976 | 1080p23.98, **×1.5 → 1920×1080 at 0, 0**, fills | same |
+| 1280×720 p59.94 | 720p59.94 **native** | same |
+| 1080×1920 | 2160p23.98, **×1.125 → 1216×2160 at 1314, 0**, bars 1314 / 1310 / 0 / 0 | same (2160p wins the area tie against 4K DCI) |
+| 1080×1080, 1440×1080, 1920×804, 1920×1038, 1920×817, 3840×1608 | the 1:1 placement: s is already 1 | same |
+| 2048×858 | 1080p23.98, **×0.9375 → 1920×804 at 0, 138** | 2K DCI p23.98, 1:1 at 0, 111 |
+| 1998×1080 | 1080p23.98, **×0.96096 → 1920×1038 at 0, 21** | 2K DCI p23.98, 1:1 at 24, 0 |
+| 4096×1716 | 2160p23.98, ×0.9375 → 3840×1609 at 0, 275 | 4K DCI p23.98, 1:1 at 0, 222 |
+| 2048×1080 | 1080p23.98, **×0.9375 → 1920×1013 at 0, 33** (bars 33 / 34) | 2K DCI native |
+| 4096×2160 | 2160p23.98, ×0.9375 → 3840×2025 at 0, 67 | 4K DCI native |
+| 6144×3240 | 2160p23.98, ×0.625 → 3840×2025 at 0, 67 | 4K DCI, ×0.6667, fills |
+| 1920×1080 (control) | 1080p23.98 **native** | same |
+
+**Fixtures:** the 16 of the scaling run, unchanged, plus 10 at the new rates (`recipes.tsv`, colour strip):
+1920×1080 at 47.952, 48, 95.904, 96, 100, 119.88 and 120; 1280×720 at 119.88; 2048×1080 at 48 and 119.88.
+
+**Instruments:**
+- The scaling run's driver, adapted: settings go in as **launch arguments** (`-manifold.decklink.sdiScaling oneToOne`),
+  so the run writes nothing to the defaults domain.
+- Its scorer, unchanged. It already handles any scale, including an upscale.
+- A new line in the DEBUG `MANIFOLD_DECKLINK_SIGNAL_TRACE` hook: `cadence: … N distinct source frames of 120`.
+- A local HLS ladder (ffmpeg, served on 127.0.0.1) dialled with *Paste & Connect*, which saves nothing.
+
+**Baseline:** `cb39182`, built unchanged into its own DerivedData before any source file was edited.
+
+| # | What | Band: pass / fail |
+|---|---|---|
+| **P1** | 1:1 pixels: the SDI frame #0 dump is identical to `cb39182`'s for all 16 fixtures, under both mode sets (32 pairs) | **Byte-identical**; any difference fails |
+| **P2** | Control 1920×1080 under Fit to mode: FNV-1a `388d7616aa2efe69`, `cb39182`'s | **Exact** |
+| **P3** | Fit to mode: all 32 placements are the table's; 0 border exceptions (Y 64, Cb / Cr 512) | **Exact to the pixel** |
+| **P4** | Fit to mode, the 11 scaled cases (4 of them upscales: 1280×720 and 1080×1920, each under both sets; the session's statement said "3", a miscount of the same four cases), against the independent double-precision Lanczos-3 | **max \|Δ\| ≤ 1 code, ≥ 99.9 % exact** (the existing tolerance) |
+| **P5** | Fit to mode, the unscaled non-native cases, against the source's own `.v210` | **Bit-exact** |
+| **P6** | The new rates: Follow source picks the matching mode (1080p47.95 … 1080p120, 1080p119.88 for 1280×720p119.88, 2K DCI p48 / p119.88 with DCI); 30 s looping playback each | **Mode label exact; `late=0 dropped=0`** |
+| **P7** | Manual 2160p119.88 with the 1080p119.88 source (×2 under Fit), 30 s | **`late=0 dropped=0`** |
+| **P8** | Distinct source frames per 120 scheduled at 119.88 | **= min(source rate, display refresh) ± 2 %**. The LG's refresh was UNKNOWN when this was written. A cap below the source rate is recorded as a finding, not a fail |
+| **P9** | The HLS ladder: a unit test over a simulated ladder (both scalings, with and without the master's largest rendition), and the local ladder in the app | **0 mode changes after the session's first; ≥ 1 `absorbed` line**. If AVPlayer will not load plain-http localhost, the in-app half is UNKNOWN |
+| **P10** | F5: output stopped from 6144×3240 scaled into 2160p | **Metal allocation falls by ≥ 95 % of the scaler's bytes (≈ 199 MB) at the stop** |
+| **P11** | `swift test` | **All pass**: 515 plus the new tests, each failing on a mutant |
+| **P12** | A clean Profile build's warnings | **The same set as `cb39182`** |
+| **P13** | The defaults domain after the run | **Dictionary-equal to the snapshot** taken before it (1521 keys) |
+
+##### SDI scaling follow-ups — results, 2026-10-23 11:30–14:10 (attended session, not committed)
+
+**Estimated:** 3½–5 h. **Actual:** about 2¾ h.
+- No screenshots were taken. Every quit was a Quit event to the built app's path, or termination by PID after a
+  30 s quit timeout (the HLS attempts, below).
+- DaVinci Resolve was checked before every output start and was never running.
+- Runs, scorer and logs are in the session scratchpad and were not kept.
+
+| # | Result | Verdict |
+|---|---|---|
+| P1 | 1:1 pixels vs `cb39182`, frame #0 SDI dumps: **32 / 32 byte-identical** (16 fixtures × HD/UHD only and Include DCI; FNV equal pair by pair) | **PASS** |
+| P2 | Control under Fit to mode: `388d7616aa2efe69`, native | **PASS** |
+| P3 | Fit to mode: **all 32 modes and rectangles exactly as tabled**, 0 border exceptions on every dump | **PASS** |
+| P4 | 11 scaled cases against the independent double-precision Lanczos-3:<br>• the upscales: 1280×720 ×1.5 max \|Δ\| 1 (1 component of 4 147 200), both sets; 1080×1920 ×1.125 **max 0, 100 %**, both sets;<br>• the reductions: 2048×858 → 1920×804 max 0; 1998×1080 → 1920×1038 max 1 (1); 2048×1080 → 1920×1013 max 1 (2); 4096×1716 max 0; 4096×2160 max 1 (14); 6144×3240 → 2160p max 1 (36); 6144×3240 → 4K DCI max 1 (2).<br>Every case ≥ 99.9998 % exact | **PASS** |
+| P5 | Every unscaled case under Fit, inside its rectangle, against the source's own `.v210`: **0 differences** (21 cases) | **PASS** |
+| P6 | Every mode label exact: 1080p47.95, 48, 95.90, 96, 100, 119.88, 120; 1080p119.88 for 1280×720p119.88 (×1.5); 1080p48 / 1080p119.88 for 2048×1080 under HD/UHD (×0.9375); 2K DCI p48 / p119.88 under Include DCI. **`late=0 dropped=0` on all 12** 30 s playbacks | **PASS** |
+| P7 | Manual 2160p119.88: **`completed=2 late=3393`**. Found by mode, same source, paused: 2160p48, 59.94, 60 clean; 95.90, 100, 120 late from frame #3. An 8-frame pool (experiment build, reverted) changes nothing. Cause UNKNOWN, card profile or bandwidth (`BUGS.md`) | **FAIL** |
+| P8 | Distinct source frames per 120 scheduled, playing: 47.95 / 48 **120**; 95.90–100 **55–80**; 119.88 / 120 **11–12 per 1200**: the picture stalls 0.24 s in, the audio runs on. The display can carry 120 (`maximumFramesPerSecond` 120 on the LG). **Pre-existing:** with output off, `cb39182` presents 0.2–1.2 fps on the same file | **FAIL** (a player defect, `BUGS.md`, not this change) |
+| P9 | Unit test: the simulated ladder gives **1 mode per session, every later rung absorbed**, under both scalings, with and without the largest rendition (`testLiveLadderCausesNoModeChange`). **In the app: NOT RUN.** See below | **PASS (unit)**; in-app **UNKNOWN** |
+| P10 | 6144×3240 → 2160p, stopped paused and while playing: the Metal device's allocation fell **202.2 MB at each stop** (827.1 → 624.9; 2662.9 → 2460.7), 100 % of the scaler's bytes. Footprint 779 → 459 MB | **PASS** |
+| P11 | `swift test` **521 / 521**: 515 plus 6 new. Six mutants, each caught: Fit picks the largest tier; 720p as a Fit tier; the hold re-applies on a change; 95.90 dropped; Fit never upscales; the tie to the larger area | **PASS** |
+| P12 | Clean Profile build into a fresh directory: **the same 14 source warnings as `cb39182`** | **PASS** |
+| P13 | The app added 131 `NSWindow Frame …` keys, one per launch, and nothing else changed. Each was read, then deleted: **dictionary-equal**, 1521 keys | **PASS** |
+
+**Also measured:**
+- *Window and export unchanged:* PNG, `rgba16f`, `v210` and `v210.json` of all 16 fixtures are **byte-identical to
+  `cb39182`** (64 files).
+- *Fit timing:* 30 s playback of all 11 scaled Fit cases, `late=0 dropped=0`.
+- *The manual picker:* under HD/UHD only it lists 2160p and 1080p at 15 rates, then 720p50 / 59.94 / 60, and no DCI
+  rows (read through Accessibility).
+
+**The in-app HLS ladder (P9), and why it was not run.**
+- *The ladder:* local, 960×540 → 1280×720 → 1920×1080 at 59.94, with `RESOLUTION` and `FRAME-RATE`, served on
+  127.0.0.1.
+- *Dialling it:* *Paste & Connect* in Manage… was the only route that is neither a keystroke nor the clipboard.
+  - Accessibility can set the field's text, but SwiftUI never sees it, so the button stays disabled. Its label is
+    not exposed either.
+  - The remaining routes are ⌃⌥H with `MANIFOLD_STREAM_DEBUG_URL` (a keystroke), or Edit ▸ Paste over the user's
+    clipboard. Neither was used.
+- *What the attempts touched:* nothing. The open sheet blocked Quit, so those launches were terminated by PID.
+  `streamBookmarks` was read back unchanged. The sheet's keychain prompts were the licence item's (denied), not a
+  stream passphrase.
+- *Recorded as UNKNOWN.* To close it: a person pastes the URL, or a DEBUG launch-environment dial is added (a new
+  pre-ship removal).
+
 ---
 
 ## 7. Open and unverified

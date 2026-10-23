@@ -1138,7 +1138,8 @@ to send Export Diagnostics for a sync problem.
     lines with the scheduled-frame index at which the SDI frame's pixels change (an FNV-1a over every 64th v210
     word) and at which its output signal changes. `SignalTrace` in `App/DeckLink/DeckLinkService.swift`, `#if DEBUG`.
     The bridge's `[DeckLink] signal on scheduled frame #N: read-back …` line is NOT this hook: it ships, once per
-    signal change.
+    signal change. Since 2026-10-23 (SDI scaling follow-ups) it also prints `cadence: scheduled frames #a–#b: N
+    distinct source frames of 120`, from the source PTS of each picture handed to the card.
   - **`MANIFOLD_DECKLINK_DUMP_DIR=<dir>`** (launch environment, added 2026-10-23, SDI scaling): the first picture
     frame of each output start, exactly as the fill block hands it to the card, is written as `sdi-<n>.v210` and
     `sdi-<n>.json`, with a `[SDI-DUMP]` line. `FrameDump` in `App/DeckLink/DeckLinkService.swift`, `#if DEBUG`.
@@ -1528,29 +1529,69 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
   - With the paused-start fix, that launch path now sends the current frame as well (F2, above).
 - **Left open:** nothing in this work explains the 17:49:01 claim.
 
-## ☐ OPEN — PRE-EXISTING, ALL BUILDS — DeckLink: Follow source snaps 47.95, 48 and high-frame-rate sources to the nearest of eight rates
+## ✅ FIXED 2026-10-23 (commit `________`; pending a real session) — PRE-EXISTING, ALL BUILDS — DeckLink: Follow source snaps 47.95, 48 and high-frame-rate sources to the nearest of eight rates
 
-**Added 2026-10-23, found in the SDI scaling run** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, decision 4 taken unattended).
-
-- **What:** the card offers 1080p, 2K DCI, 2160p and 4K DCI at 47.95, 48, 95.90, 96, 100, 119.88 and 120 as well as
-  the eight standard rates. That comes from the read-only SDK probe of 2026-10-23; Robbie's list did not include
-  47.95 / 48. Follow source only knows the eight (`SDIStandardRate.all`), so a 48 fps source goes out at 50 and a
-  119.88 source at 59.94. That breaks D1 ("the frame rate is never changed") for those rates.
-- **Why not fixed with the scaling work:** adding the rates needs the bridge's mode rows, the manual picker, and a
-  timing run at 2160p119.88 (`late=0 dropped=0` has never been measured above 60).
-- **Also:** a source at a rate the card has no mode for at all (12, 15) still snaps to the nearest. That is
-  unavoidable, but it is silent today.
+**Fixed 2026-10-23** (SDI scaling follow-up F2; `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *SDI scaling follow-ups*).
+- **Now:** `SDIStandardRate.all` holds the card's 15 progressive rates up to 120. 47.95, 48, 95.90, 96, 100, 119.88
+  and 120 are offered at 1080p, 2K DCI, 2160p and 4K DCI; 720p stays at 50 / 59.94 / 60. The bridge's mode rows and
+  label tokens match, and the manual picker lists every rate.
+- **A rate with no mode at all** (12, 15, 72) still goes to the nearest. It is no longer silent: `DeckLink D4a: ⚠️
+  source rate … has no output mode — nearest is …`, once per resolve.
+- **Measured** (10 new fixtures, 30 s looping playback each): every mode label exact, from 1080p47.95 to 1080p120,
+  1080p119.88 for 1280×720p119.88 (×1.5 under Fit), and 2K DCI p48 / p119.88 with DCI. `late=0 dropped=0` on all 12
+  runs.
+- **Two limits found, each its own entry below:**
+  - 2160p above 60 runs late on the test card;
+  - file playback at 95.90 fps and above does not keep up, so SDI repeats frames.
+  So at those rates the MODE is right, and what goes out in it is not yet a clean picture.
 
 ---
 
-## ☐ OPEN — NEW 2026-10-23 — DeckLink: the SDI scaler's intermediate texture outlives the output
+## ☐ OPEN — NEW 2026-10-23 — DeckLink: 2160p above 60 completes every frame late on the DeckLink 8K Pro (cause UNKNOWN)
 
-- **What:** a scaled placement allocates an `rgba32Float` intermediate (source width × picture height) and tap
-  tables (`DeckLinkScaler`, `App/MetalVideoRenderer.swift`). It is replaced when the placement changes and is not
-  freed at output stop. That is up to about 199 MB for 6144×3240 into 2160p.
-- **Why:** only the convert touches it, serialised by the one-in-flight gate. Freeing it from `stopDeckLinkOutput`
-  would race a convert in flight.
-- **Fix when wanted:** release it from the convert's completion once `deckLinkActive` is false.
+**Found in the SDI scaling follow-ups** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, P7).
+- **What:** manual 2160p95.90, 2160p100, 2160p119.88 and 2160p120, 1080p119.88 source ×2: `completed=1–2, late=687–3393,
+  dropped=0` on every run, from scheduled frame #3, paused or playing.
+  - The same source at 2160p48, 2160p59.94 and 2160p60 runs `late=0 dropped=0`.
+  - 1080p and 2K DCI at 119.88 run clean.
+- **Not the pool:** an 8-frame pool (experiment build, reverted) gave the same 696 late.
+- **Cause: UNKNOWN.** Candidates: the card's connector profile (UHD above 60 needs dual- or quad-link 12G-SDI, and
+  the profile in force was not read), or transfer bandwidth (2160p119.88 v210 is ≈ 2 GB/s to the card).
+- **Next step:** read `BMDDeckLinkProfileID` and the link configuration on device 0, and try 2160p119.88 under a
+  quad-link profile.
+- **Until then:** Follow source picks 2160p above 60 only for a UHD-sized source at that rate, or for a picture
+  Fit sizes to 2160p. It is not gated, because the card reports the mode supported.
+
+---
+
+## ☐ OPEN — NEW 2026-10-23 — PRE-EXISTING, ALL BUILDS — file playback at 95.90 fps and above does not keep up
+
+**Found in the SDI scaling follow-ups** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, P8).
+- **What, at 119.88 and 120** (1920×1080 ProRes 422 HQ fixtures): the picture advances about 11 frames (0.24 s), then
+  freezes while the audio runs on. The SDI audio path then logs `RESYNC` and `UNDERRUN` against a source time stuck
+  at 0.238 s.
+  - `[Play] presented 0.1–1.2 fps`.
+  - SDI carries 11 to 12 distinct source frames per 1200 scheduled.
+- **At 95.90, 96 and 100:** about 55–80 distinct frames per 120 scheduled.
+- **At 47.95 and 48:** 120 / 120, a new picture every frame.
+- **Pre-existing:** with DeckLink output off, `cb39182` presents 0.2–1.2 fps on the same file. The display can
+  carry it: the LG reports `maximumFramesPerSecond` 120.
+- **Not investigated:** where it stalls (decode, the frame source's back-pressure, or the display tick). Start from
+  `[RENDER-PERF]` and `[PLAYBACK-STATS]`.
+
+---
+
+## ✅ FIXED 2026-10-23 (commit `________`; pending a real session) — NEW 2026-10-23 — DeckLink: the SDI scaler's intermediate texture outlives the output
+
+**Fixed 2026-10-23** (SDI scaling follow-up F5).
+- **Now:** released under `deckLinkLock` at output stop when no convert is in flight. Otherwise the convert in flight
+  releases it from its completion (`endDeckLinkConvertLocked`, which every path that clears the gate goes through).
+  The release is logged with its size and the Metal device's allocation before and after.
+- **Measured** (6144×3240 scaled ×0.625 into 2160p, stopped paused and again while playing):
+  - The Metal device's allocation falls by 202.2 MB at each stop: 827.1 → 624.9 MB, and 2662.9 → 2460.7 MB.
+  - The process footprint: 488 MB before output, 779 MB with it on, 459 MB 3 s after the stop.
+- **Not exercised:** a stop that lands with a convert in flight, so the completion's release did not run. Both
+  measured stops released at once.
 
 ---
 
@@ -1589,6 +1630,12 @@ Robbie's D1–D9 replace the "decided scope" below where they differ:
 - **Different from the scope below:** a source that fits is no longer enlarged. Joey's 1280×720p23.976 goes out
   1:1, windowboxed, in 1080p23.98, not ×1.5 (decision 1 taken unattended, §6.11). Pixel aspect is honoured where
   declared; the libav path still declares none (its own entry above).
+- **Follow-up 2026-10-23 (commit `________`; F1, F4).** Decision 1 is now a setting:
+  - *Settings ▸ DeckLink Output ▸ SDI scaling*, **Fit to mode** by default. The closest tier, scaled up or down to
+    fill it, so Joey's 1280×720p23.976 goes out ×1.5, filling 1080p23.98, as this entry's scope first said.
+  - *1:1 pixels* is the behaviour above, byte-identical to `cb39182` on all 16 fixtures under both mode sets.
+  - A live source's mode is chosen once per session and held, so an ABR rung below the top one is fitted, never a
+    mode change. Unit-tested only; the in-app HLS ladder was not run.
 
 
 **Added 2026-10-21, from Joey's 0.8.4 diagnostics** (`Manifold-0.8.4-diagnostics-2026-10-21-160210.txt`). This entry is the

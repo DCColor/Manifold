@@ -52,10 +52,10 @@ final class DeckLinkService: ObservableObject {
     static let shared = DeckLinkService()
 
     init() {
-        // SDI scaling: the Settings mode-set choice takes effect at once (an @AppStorage write posts this).
+        // SDI scaling: the Settings choices (mode set, scaling) take effect at once (an @AppStorage write posts this).
         modeSetObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification,
                                                                  object: nil, queue: .main) { [weak self] _ in
-            self?.modeSetMayHaveChanged()
+            self?.sdiSettingsMayHaveChanged()
         }
     }
 
@@ -334,6 +334,7 @@ final class DeckLinkService: ObservableObject {
                     self?.sourceColorChanged()
                 }
             }
+            renderer?.setDeckLinkScaling(scalingInForce)
             oldValue?.onDeckLinkPlacement = nil
             renderer?.onDeckLinkPlacement = { [weak self] placement in
                 guard let self, self.placement != placement else { return }
@@ -514,7 +515,7 @@ final class DeckLinkService: ObservableObject {
     struct OutputMode: Equatable {
         let width: Int          // output raster width (1280, 1920, 2048, 3840 or 4096 — SDI scaling)
         let height: Int         // output raster height (720, 1080 or 2160)
-        let standardRate: Double // snapped standard rate (23.976 / 24 / 25 / 29.97 / 30 / 50 / 59.94 / 60)
+        let standardRate: Double // snapped standard rate (`SDIStandardRate.all`: 23.976 … 120)
         let label: String       // "2160p23.98", "1080p25", …
 
         /// Default when no file is loaded / rate can't be matched — matches the pre-D4a fixed output.
@@ -534,20 +535,18 @@ final class DeckLinkService: ObservableObject {
         }
     }
 
-    /// Every mode the operator may pick by hand: both families × all eight standard rates, in the
-    /// order the rates are declared. Built from the SAME `standardRates` table `resolveOutputMode`
-    /// matches against, so a rate can never appear in the picker that the resolver cannot produce,
-    /// or vice versa.
-    static let selectableModes: [OutputMode] = {
-        var modes: [OutputMode] = []
-        for (w, h, fam) in [(3840, 2160, "2160p"), (1920, 1080, "1080p")] {
-            for rate in SDIStandardRate.all {
-                modes.append(OutputMode(width: w, height: h, standardRate: rate.fps,
-                                        label: "\(fam)\(rate.token)"))
-            }
+    /// Every mode the operator may pick by hand under a mode set (SDI scaling follow-up F3): 2160p, 1080p and 720p at
+    /// every rate the card offers each, then 2K DCI and 4K DCI only when DCI is included. Built from the SAME table
+    /// the selector chooses from (`SDIOutputMode.table`), so a mode can never appear in the picker that Follow source
+    /// cannot produce, or vice versa. The ids (labels) of the 2160p and 1080p rows are the ones stored before.
+    static func selectableModes(for set: SDIOutputModeSet) -> [OutputMode] {
+        [SDIModeFamily.p2160, .p1080, .p720, .dci2K, .dci4K].filter { $0.isAvailable(in: set) }.flatMap { family in
+            SDIOutputMode.table.filter { $0.family == family }.map(OutputMode.init)
         }
-        return modes
-    }()
+    }
+
+    /// The manual picker's rows under the mode set in force. Re-published when the set changes.
+    @Published private(set) var pickerModes = DeckLinkService.selectableModes(for: DeckLinkService.currentModeSet)
 
     /// The standard broadcast frame rates are `SDIStandardRate.all` (ColorimetryModel): EXACT fps (the fractional NTSC
     /// rates at their true n/1001 value) paired with the status token, matched nearest by |Δfps| with no seam, and
@@ -597,34 +596,29 @@ final class DeckLinkService: ObservableObject {
     /// True when a source-derived mode exists to follow.
     var followSourceAvailable: Bool { sourceDerivedMode != nil }
 
-    /// ── ABR HYSTERESIS: WHY A SETTLE DELAY AND NOT A PINNED RENDITION ──────────────────────
+    /// ── LIVE SOURCES: ONE MODE PER SESSION (SDI scaling follow-up F4, Robbie 2026-10-23) ────────
     ///
-    /// An HLS ladder moves under us — MEASURED today: 416x234 → 960x540 → 1920x1080 inside one
+    /// An HLS ladder moves under us — MEASURED: 416x234 → 960x540 → 1920x1080 inside one
     /// connection. Re-establishing the card on each rung would stop and restart scheduled playback
     /// three times in a few seconds, which drops the video output, re-prerolls the audio, and is
-    /// visibly worse on the wire than the stale mode it replaced.
+    /// visibly worse on the wire than any placement of the picture inside the mode already running.
     ///
-    /// TWO THINGS ALREADY ABSORB MOST OF IT, and they are worth stating because they decide how much
-    /// hysteresis is actually needed:
-    ///   * the output mode depends on the FAMILY (`height >= 1620`), not the raster, so 416x234,
-    ///     960x540 and 1920x1080 all resolve to the SAME 1080p mode — the ladder above causes zero
-    ///     re-establishes once the rate is known;
-    ///   * `currentMode` only re-establishes when the mode actually CHANGES.
-    /// What remains is a ladder that crosses the 2160/1080 boundary (a 4K rendition stepping down),
-    /// and the rate estimate settling from nil to a value. Those are real and this covers them.
+    /// So a live source's mode is chosen ONCE per session (`SDILiveModeHold`): from the first format
+    /// that states a rate — for HLS sized from the master playlist's largest rendition when it states
+    /// one, else from the frame — and held until the source goes away. A later rendition, raster or
+    /// rate is placed or scaled within the held mode by the renderer, and logged as absorbed. Only an
+    /// operator action (the Settings mode set or scaling, a manual pick) re-resolves. This replaces the
+    /// 2 s settle window, which let a ladder crossing a mode boundary re-establish the card mid-session.
     ///
     /// ⚠️ DELIBERATELY NOT `preferredMaximumResolution` / `preferredPeakBitRate`. Pinning the
     /// rendition would stop the raster moving, but it does so by REFUSING the quality the network is
     /// offering — on a QC tool, where the entire job is to show what the source actually looks like,
     /// capping the ladder silently degrades the thing being judged. It also cannot help the other
-    /// three transports, which have no ladder and the same rate problem. Hysteresis is local to the
+    /// three transports, which have no ladder and the same rate problem. The hold is local to the
     /// mode decision, changes nothing about the stream, and works for all four.
-    private static let liveModeSettleSeconds = 2.0
-
-    /// The live-derived mode waiting out `liveModeSettleSeconds`, and the timer doing the waiting.
+    ///
     /// Main-thread only (every writer is a main-thread delivery from `LiveDisplaySize`).
-    private var pendingLiveMode: OutputMode?
-    private var liveModeSettleTimer: Timer?
+    private var liveHold = SDILiveModeHold()
 
     /// Map a source's (width, height, pixel aspect, frameRate) → the output display mode: SDI scaling's selector
     /// (`SDIOutputModeSelector`, §6.11). The rate is the nearest standard one (D1, as before); the raster is the mode
@@ -632,9 +626,10 @@ final class DeckLinkService: ObservableObject {
     /// modes it may pick is the Settings choice (`SDIOutputModeSet`: HD/UHD only, or include DCI). The renderer places
     /// the picture in whatever mode is in force (`SDIPlacement`), so a raster that is not the mode's is no longer black.
     static func resolveOutputMode(width: Int, height: Int, pixelAspect: Double? = nil, frameRate: Double,
-                                  set: SDIOutputModeSet = currentModeSet) -> OutputMode {
+                                  set: SDIOutputModeSet = currentModeSet,
+                                  scaling: SDIScaling = currentScaling) -> OutputMode {
         OutputMode(SDIOutputModeSelector.select(width: width, height: height, pixelAspect: pixelAspect,
-                                                frameRate: frameRate, set: set))
+                                                frameRate: frameRate, set: set, scaling: scaling))
     }
 
     /// Settings ▸ DeckLink Output ▸ SDI output modes (default HD/UHD only).
@@ -642,27 +637,61 @@ final class DeckLinkService: ObservableObject {
         SDIOutputModeSet.stored(UserDefaults.standard.string(forKey: SDIOutputModeSet.defaultsKey))
     }
 
-    /// The last source format Follow source resolved, kept so a change of the mode set re-resolves it.
+    /// Settings ▸ DeckLink Output ▸ SDI scaling (default Fit to mode; F1).
+    static var currentScaling: SDIScaling {
+        SDIScaling.stored(UserDefaults.standard.string(forKey: SDIScaling.defaultsKey))
+    }
+
+    /// F2: a source rate the card has no mode at (12, 15, 72 fps) goes out at the nearest, which changes its cadence on
+    /// SDI. Said once per resolve, never silent. nil when the rate is a mode's.
+    static func rateWarning(_ fps: Double, mode: OutputMode) -> String? {
+        let r = SDIStandardRate.nearest(to: fps)
+        guard !r.matches(fps) else { return nil }
+        return String(format: "⚠️ source rate %.3f fps has no output mode — nearest is %@ (%@): SDI repeats or "
+                              + "drops frames to that cadence", fps, r.token, mode.label)
+    }
+
+    /// The last source format Follow source resolved, kept so a change of the Settings re-resolves it.
     private enum LastFormat { case file(Int, Int, Double?, Double), live(LiveVideoFormat) }
     private var lastFormat: LastFormat?
     private var modeSetInForce = DeckLinkService.currentModeSet
+    private var scalingInForce = DeckLinkService.currentScaling
     private var modeSetObserver: NSObjectProtocol?
 
-    /// The Settings choice changed: re-resolve the current source under the new set. Main thread.
-    private func modeSetMayHaveChanged() {
-        let set = Self.currentModeSet
-        guard set != modeSetInForce else { return }
-        modeSetInForce = set
-        print("DeckLink D4a: SDI output modes → \(set.label)")
+    /// A Settings choice changed (mode set or scaling): re-resolve the current source under it. Main thread.
+    /// A live session re-resolves from the format its mode was chosen from (F4), not from the latest rung.
+    private func sdiSettingsMayHaveChanged() {
+        let set = Self.currentModeSet, scaling = Self.currentScaling
+        guard set != modeSetInForce || scaling != scalingInForce else { return }
+        var clearManual = false
+        if set != modeSetInForce {
+            modeSetInForce = set
+            pickerModes = Self.selectableModes(for: set)
+            print("DeckLink D4a: SDI output modes → \(set.label)")
+            // F3: a manual DCI pick has no row once DCI is off, and the setting says DCI is not in use: back to Follow.
+            if let m = manualMode, !pickerModes.contains(m) {
+                print("DeckLink D4a: manual pick \(m.label) is not offered under \(set.label) — back to Follow source")
+                clearManual = true
+            }
+        }
+        if scaling != scalingInForce {
+            scalingInForce = scaling
+            renderer?.setDeckLinkScaling(scaling)
+            print("DeckLink D4a: SDI scaling → \(scaling.label)")
+        }
         switch lastFormat {
         case .file(let w, let h, let par, let fps)?:
-            sourceFormatChanged(width: w, height: h, pixelAspect: par, frameRate: fps)
-        case .live(let format)?:
-            sourceDerivedMode = nil   // so the new answer lands at once, not after the settle
-            liveFormatChanged(format)
+            resolveFileMode(width: w, height: h, pixelAspect: par, frameRate: fps)
+        case .live?:
+            if let m = liveHold.reresolve(set: set, scaling: scaling) {
+                sourceDerivedMode = OutputMode(m)
+                print("DeckLink D4a: live session re-resolved from its basis under \(set.label), \(scaling.label) → "
+                    + "mode \(m.label)")
+            }
         case nil:
             break
         }
+        if clearManual { setManualMode(nil) } else { applyEffectiveMode(trigger: "SDI settings changed") }
     }
 
     /// Enumerate output-capable DeckLink devices. Synchronous SDK walk; returns [] if the driver
@@ -825,6 +854,7 @@ final class DeckLinkService: ObservableObject {
                 probe.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
                 #if DEBUG
                 trace?.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: s)
+                trace?.noteCadence(index: index, sourcePts: r.currentDeckLinkSourcePts())
                 dump?.note(index: index, buffer: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
                 #endif
                 return true
@@ -998,20 +1028,25 @@ final class DeckLinkService: ObservableObject {
     /// mode — both hops on the serial queue so teardown finishes before re-establish (no race). If
     /// output is off, just remember the target so the next start uses it. Call after setSourceColorSpace.
     func sourceFormatChanged(width: Int, height: Int, pixelAspect: Double? = nil, frameRate: Double) {
+        // A FILE's format change is immediate. A file's raster and rate are facts read once at load,
+        // they do not step the way an ABR ladder does, and there is no session to hold: the live
+        // path's one-mode-per-session rule (F4) is for the live path only.
+        liveHold.end()
+        resolveFileMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate)
+        applyEffectiveMode(trigger: "file source format")
+    }
+
+    /// A file's mode under the Settings in force, into `sourceDerivedMode`; the caller applies it.
+    private func resolveFileMode(width: Int, height: Int, pixelAspect: Double?, frameRate: Double) {
         lastFormat = .file(width, height, pixelAspect, frameRate)
         let mode = Self.resolveOutputMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate,
-                                          set: modeSetInForce)
-        // A FILE's format change is immediate — no settle delay. A file's raster and rate are facts
-        // read once at load, they do not step the way an ABR ladder does, and delaying the switch
-        // would put a visible stale-mode window at the front of every file open. The hysteresis
-        // below exists for the live path and only for the live path.
-        cancelPendingLiveMode()
+                                          set: modeSetInForce, scaling: scalingInForce)
         sourceDerivedMode = mode
         followSourceUnavailableReason = nil
         print("DeckLink D4a: FILE source format \(width)x\(height) @ "
-            + String(format: "%.3f fps", frameRate) + " → mode \(mode.label) (\(modeSetInForce.label)"
+            + String(format: "%.3f fps", frameRate) + " → mode \(mode.label) (\(modeSetInForce.label), \(scalingInForce.label)"
             + (pixelAspect.map { String(format: ", pixel aspect %.4f", $0) } ?? ", pixel aspect not declared — square") + ")")
-        applyEffectiveMode(trigger: "file source format")
+        if let warning = Self.rateWarning(frameRate, mode: mode) { print("DeckLink D4a: \(warning)") }
     }
 
     // MARK: - The live path into the same decision
@@ -1039,7 +1074,9 @@ final class DeckLinkService: ObservableObject {
             // The live source is gone. Drop the derived mode but leave `currentMode` exactly where
             // it is: tearing the card back to a default on disconnect would be a second, pointless
             // re-establish at the worst possible moment, and the next source will set it anyway.
-            cancelPendingLiveMode()
+            // The session ends here (F4): the next source chooses its own mode.
+            if let held = liveHold.held { print("DeckLink D4a: live session over — mode \(held.label) released") }
+            liveHold.end()
             sourceDerivedMode = nil
             followSourceUnavailableReason = "No source is connected."
             // An advisory describes a SOURCE. With the source gone it cannot still be true, and a
@@ -1052,7 +1089,13 @@ final class DeckLinkService: ObservableObject {
         }
 
         guard let frameRate = format.frameRate else {
-            cancelPendingLiveMode()
+            // A session whose mode is already chosen keeps it: a rate that goes unknown mid-session (an estimator
+            // window reset) is a change like any other, absorbed (F4).
+            if let held = liveHold.held {
+                print("DeckLink D4a: LIVE source format \(format.describedForLog) — absorbed: mode held at "
+                    + "\(held.label) for this session")
+                return
+            }
             sourceDerivedMode = nil
             followSourceUnavailableReason =
                 "This source does not report a frame rate, so the output mode cannot follow it. "
@@ -1064,55 +1107,30 @@ final class DeckLinkService: ObservableObject {
         }
 
         lastFormat = .live(format)
-        let mode = Self.resolveOutputMode(width: Int(format.size.width),
-                                          height: Int(format.size.height),
-                                          frameRate: frameRate, set: modeSetInForce)
-        followSourceUnavailableReason = nil
-
-        // Already there, or already waiting for exactly this: nothing to do. Re-arming the timer on
-        // every frame of a steady stream would mean it never fired.
-        guard mode != sourceDerivedMode || pendingLiveMode != nil else { return }
-        guard mode != pendingLiveMode else { return }
-
-        // ── HYSTERESIS ──────────────────────────────────────────────────────────────────────
-        // First mode of a connection (nothing derived yet) lands IMMEDIATELY — the whole point is
-        // to get a picture up, and there is no flap to damp when there is no previous value. Every
-        // LATER change waits out the settle window, which is what absorbs an ABR ladder crossing
-        // the 2160/1080 boundary.
-        guard sourceDerivedMode != nil else {
-            cancelPendingLiveMode()
+        let observed = SDILiveModeHold.Format(width: Int(format.size.width), height: Int(format.size.height),
+                                              frameRate: frameRate,
+                                              sizingWidth: format.largestRendition.map { Int($0.width) },
+                                              sizingHeight: format.largestRendition.map { Int($0.height) })
+        switch liveHold.observe(observed, set: modeSetInForce, scaling: scalingInForce) {
+        case .apply(let m):
+            // The session's mode: chosen once, from the largest rendition when the source states one (HLS), else from
+            // this frame, and applied at once — the whole point is to get a picture up.
+            let mode = OutputMode(m)
             sourceDerivedMode = mode
-            print("DeckLink D4a: LIVE source format \(format.describedForLog) → mode \(mode.label) "
-                + "(first format of this connection — applying immediately)")
-            applyEffectiveMode(trigger: "live source format")
-            return
+            followSourceUnavailableReason = nil
+            let from = format.largestRendition.map { "the largest rendition \(Int($0.width))x\(Int($0.height))" }
+                ?? "this frame"
+            print("DeckLink D4a: LIVE source format \(format.describedForLog) → mode \(mode.label), chosen from "
+                + "\(from) (\(modeSetInForce.label), \(scalingInForce.label)) and held for this session")
+            if let warning = Self.rateWarning(frameRate, mode: mode) { print("DeckLink D4a: \(warning)") }
+            applyEffectiveMode(trigger: "live source format (session mode)")
+        case .absorbed(let held, let resolved):
+            // Never a mode change: the renderer places or scales this raster within the held mode.
+            print("DeckLink D4a: LIVE source format \(format.describedForLog) — absorbed: mode held at "
+                + "\(held.label) for this session"
+                + (resolved != held ? " (a fresh choice would be \(resolved.label))" : "")
+                + "; the picture is placed or scaled within it")
         }
-
-        cancelPendingLiveMode()
-        pendingLiveMode = mode
-        print("DeckLink D4a: LIVE source format \(format.describedForLog) → mode \(mode.label); "
-            + String(format: "holding %.1fs for it to settle before re-establishing output "
-                             + "(current %@)", Self.liveModeSettleSeconds, currentMode.label))
-        liveModeSettleTimer = Timer.scheduledTimer(withTimeInterval: Self.liveModeSettleSeconds,
-                                                   repeats: false) { [weak self] _ in
-            // Scheduled on the main run loop, so this fires on main — the same isolation every
-            // other writer of this state runs on.
-            guard let self, let settled = self.pendingLiveMode else { return }
-            self.pendingLiveMode = nil
-            self.liveModeSettleTimer = nil
-            self.sourceDerivedMode = settled
-            print("DeckLink D4a: live mode \(settled.label) settled — applying")
-            self.applyEffectiveMode(trigger: "live source format (settled)")
-        }
-    }
-
-    private func cancelPendingLiveMode() {
-        if let pending = pendingLiveMode {
-            print("DeckLink D4a: live mode \(pending.label) superseded before it settled")
-        }
-        liveModeSettleTimer?.invalidate()
-        liveModeSettleTimer = nil
-        pendingLiveMode = nil
     }
 
     // MARK: - The operator's pick
@@ -1140,9 +1158,9 @@ final class DeckLinkService: ObservableObject {
     /// preference is not worth an error dialog.
     func restoreManualMode() {
         guard let stored = UserDefaults.standard.string(forKey: Self.manualModeKey) else { return }
-        guard let mode = Self.selectableModes.first(where: { $0.id == stored }) else {
+        guard let mode = pickerModes.first(where: { $0.id == stored }) else {
             UserDefaults.standard.removeObject(forKey: Self.manualModeKey)
-            print("DeckLink D4a: stored output mode \"\(stored)\" is no longer offered — "
+            print("DeckLink D4a: stored output mode \"\(stored)\" is no longer offered under \(modeSetInForce.label) — "
                 + "falling back to Follow source")
             return
         }
@@ -1159,7 +1177,7 @@ final class DeckLinkService: ObservableObject {
     ///
     /// ⚠️ EVERY SDI RE-ESTABLISH FOR A MODE CHANGE GOES THROUGH HERE, and says what triggered it.
     /// Before this there was one path (a file's metadata) and it logged one line; there are now four
-    /// inputs (file format, live format, the settle timer, the manual picker) and a log that did not
+    /// inputs (file format, live format, the Settings, the manual picker) and a log that did not
     /// name which one fired would be useless for exactly the question this change has to answer.
     private func applyEffectiveMode(trigger: String) {
         let mode = manualMode ?? sourceDerivedMode ?? .default2160p2398
@@ -1299,6 +1317,20 @@ final class SignalTrace: @unchecked Sendable {
     private let lock = NSLock()
     private var lastHash: UInt64?
     private var lastSignal: OutputSignal?
+    /// SDI scaling follow-up F2: distinct source frames per 120 scheduled frames, so a high-rate run says whether the
+    /// card got a new picture each frame or repeats (the render loop runs at the display's refresh).
+    private var cadenceStart: Int64?
+    private var cadenceLastPts = Double.nan
+    private var cadenceDistinct = 0
+
+    func noteCadence(index: Int64, sourcePts: Double) {
+        lock.lock(); defer { lock.unlock() }
+        if cadenceStart == nil { cadenceStart = index }
+        if sourcePts.isFinite, sourcePts != cadenceLastPts { cadenceDistinct += 1; cadenceLastPts = sourcePts }
+        guard let start = cadenceStart, index - start + 1 >= 120 else { return }
+        print("[SIGNAL-TRACE] cadence: scheduled frames #\(start)–#\(index): \(cadenceDistinct) distinct source frames of 120")
+        cadenceStart = nil; cadenceDistinct = 0
+    }
 
     func note(index: Int64, picture: Bool, buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, height: Int,
               signal: OutputSignal?) {
