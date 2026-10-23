@@ -57,11 +57,31 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly, nullable) NSString *activeModeName;
 @end
 
+/// Colour S7: one frame's output signal — what the frame is tagged with (COLOR_MANAGEMENT_FINDINGS.md §6.11, S7).
+/// Built in Swift from the signal the frame was RENDERED under (`OutputSignal`, ColorimetryModel) and applied by the
+/// bridge to the frame it was filled into (D1), so a change of colour reaches the frame whose pixels changed.
+typedef struct {
+    /// NO → Rec.709, YES → Rec.2020 (the frame's BMDColorspace).
+    BOOL rec2020;
+    /// CTA-861.3: 0 SDR, 2 PQ, 3 HLG.
+    int32_t eotf;
+    /// PQ only: `bmdFrameContainsHDRMetadata` plus every value below. NO clears the flag (D3: HLG and SDR send none).
+    BOOL hasStaticMetadata;
+    double redX, redY, greenX, greenY, blueX, blueY, whiteX, whiteY;
+    /// cd/m².
+    double maxMasteringLuminance, minMasteringLuminance;
+    /// cd/m². 0 = CTA-861.3's "unknown" (D2; the S7-0 probe showed the SDK takes 0).
+    double maxCLL, maxFALL;
+} DeckLinkOutputSignal;
+
 /// Fill callback for D-real real-video output: fill the DeckLink v210 frame at `buffer` (row
 /// stride `rowBytes`, `width`×`height`) for output frame index `frameIndex`. Returns YES if it
-/// wrote real converted video, NO if it filled a neutral fallback (advisory). Runs on the SDK
-/// callback thread — must be cheap (a memcpy), never blocking.
-typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height);
+/// wrote real converted video and set `*signal` to that frame's signal; NO if it filled a neutral
+/// fallback, and then `*signal` is ignored: the frame keeps the signal in force (S7 D5, so the
+/// monitor does not flip modes on black). Runs on the SDK callback thread — must be cheap (a
+/// memcpy), never blocking.
+typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height,
+                                  DeckLinkOutputSignal *signal);
 
 #pragma mark - D4b-2: SDI audio output
 
@@ -172,9 +192,9 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 
 /// D-real / D5: scheduled playback on the device at `deviceIndex`, each frame filled by `fill`. The
 /// block receives the DeckLink v210 frame pointer (+ dims/rowBytes) and must fill it (returning YES
-/// for real data, NO for the neutral fallback — advisory); it runs on the SDK callback thread so it
-/// MUST be cheap (a memcpy). `primariesCode` sets the output colorspace TAG (Rec.709 / Rec.2020;
-/// P3 → Rec.2020) — SEPARATE from the encoding matrix (the renderer picks that from the matrix code).
+/// for real data with its signal, NO for the neutral fallback); it runs on the SDK callback thread so it
+/// MUST be cheap (a memcpy). `initialSignal` is what frames carry until the first picture (colour S7,
+/// D5): the renderer's current signal, read when the output starts.
 ///
 /// D4a: `outputWidth`/`outputHeight`/`standardRate` select the DISPLAY MODE (video cadence). Pass the
 /// resolved output-family resolution (3840×2160 or 1920×1080) + a standard broadcast rate (23.976 /
@@ -188,15 +208,11 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// nil for video-only.
 - (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex
                                                           fill:(DeckLinkFillBlock)fill
-                                                 primariesCode:(NSInteger)primariesCode
+                                                 initialSignal:(DeckLinkOutputSignal)initialSignal
                                                    outputWidth:(NSInteger)outputWidth
                                                   outputHeight:(NSInteger)outputHeight
                                                   standardRate:(double)standardRate
                                                          audio:(nullable DeckLinkAudioConfig *)audio;
-
-/// Re-tag the output colorspace mid-session (source primaries changed while output is running). The
-/// next scheduled frame picks it up. No-op if not currently playing.
-- (void)setOutputColorspaceForPrimaries:(NSInteger)primariesCode;
 
 /// Stop scheduled playback cleanly (StopScheduledPlayback → unset callback → DisableVideoOutput →
 /// release frame pool + callback). Safe to call when not playing; safe against an in-flight callback.

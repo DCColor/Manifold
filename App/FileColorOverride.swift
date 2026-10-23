@@ -18,6 +18,7 @@
 
 import AppKit
 import ColorimetryModel
+import ManifoldCore   // HDR10StaticMetadata (colour S7)
 
 @MainActor
 final class FileColorOverrideModel: ObservableObject {
@@ -25,6 +26,10 @@ final class FileColorOverrideModel: ObservableObject {
     @Published private(set) var override: ColorimetryOverride = .auto
     /// The file's own codes, as its container states them (nil = not stated), from the last tag edge.
     @Published private(set) var declared: (primaries: Int?, transfer: Int?, matrix: Int?) = (nil, nil, nil)
+    /// Colour S7 (D7): the file's HDR10 static metadata, from inspection (the metadata observer); nil until then, and
+    /// for a file that states none. Cleared when a new file is committed. Passed with every colour call, override
+    /// or not: it is the file's own statement about its grade, which an override of the codes does not change.
+    private(set) var declaredHDR10: HDR10StaticMetadata?
 
     private weak var deck: WindowDeck?
 
@@ -40,6 +45,7 @@ final class FileColorOverrideModel: ObservableObject {
 
     /// The engine committed a new file (`FrameEngine.onSourceCommitted`), before its tags arrive.
     func fileCommitted(_ url: URL) {
+        declaredHDR10 = nil
         guard override != .auto else { return }
         NSLog("[FILE-COLOR] override → Auto (new file: %@)", url.lastPathComponent)
         override = .auto
@@ -49,6 +55,7 @@ final class FileColorOverrideModel: ObservableObject {
     /// The file's own tags, from either edge. Applied under the override in force.
     func fileTags(primaries: Int?, transfer: Int?, matrix: Int?) {
         declared = (primaries, transfer, matrix)
+        if deck?.engine?.currentURL == nil { declaredHDR10 = nil }
         // Unload (`stop()` clears `currentURL` before it publishes nils): nothing to interpret.
         if deck?.engine?.currentURL == nil, override != .auto {
             override = .auto
@@ -58,6 +65,13 @@ final class FileColorOverrideModel: ObservableObject {
     }
 
     // MARK: Changes
+
+    /// The inspection edge (the metadata observer): the file's tags and its HDR10 metadata (colour S7). The engine's
+    /// load edge has no metadata yet and calls the three-code form, which keeps what this one stored.
+    func fileTags(primaries: Int?, transfer: Int?, matrix: Int?, hdr10: HDR10StaticMetadata) {
+        declaredHDR10 = hdr10.hasAny ? hdr10 : nil
+        fileTags(primaries: primaries, transfer: transfer, matrix: matrix)
+    }
 
     /// Ask for `override` on this window's file. A Custom triple outside the S3 table never gets here
     /// (`ColorimetryOverride.customIfSupported`); a stray one is refused all the same.
@@ -100,18 +114,19 @@ final class FileColorOverrideModel: ObservableObject {
         guard let deck, let renderer = deck.renderer else { return }
         if let p = override.preset {
             renderer.setSourceColorSpace(primaries: p.primaries, transfer: p.transfer, matrix: p.matrix,
-                                         provenance: .overridden)
+                                         provenance: .overridden, hdr10: declaredHDR10)
         } else {
             let d = declared
             renderer.setSourceColorSpace(primaries: d.primaries, transfer: d.transfer, matrix: d.matrix,
                                          provenance: .fromCodes(primaries: d.primaries, transfer: d.transfer,
-                                                                matrix: d.matrix))
+                                                                matrix: d.matrix),
+                                         hdr10: declaredHDR10)
         }
         // The readout's label can change with no code moving (Custom 9·14·9 is the Rec.2020 SDR preset's
         // triple), when `setSourceColorSpace` is a no-op; say so anyway. Cheap, main thread.
         renderer.sourceColorStateChanged()
-        // The SDI tag, from the renderer's codes, as the metadata observer does for a load. Only for the
-        // deck the card follows.
+        // The Signal line, from the renderer's codes, as the metadata observer does for a load. Only for the
+        // deck the card follows. (Colour S7: the frames carry their own tag; this is the label.)
         if deck.gate.drivesDevices { DeckLinkService.shared.sourceColorChanged() }
     }
 }

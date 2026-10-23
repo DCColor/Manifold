@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import ManifoldCore
+import ColorimetryModel   // OutputSignal — what each frame is tagged with (colour S7)
 
 /// App-side service for Blackmagic DeckLink OUTPUT. Hardware I/O lives in the App layer, decoupled
 /// from ManifoldCore's engine logic. Owns the output on/off state + selected device as observable
@@ -90,17 +91,21 @@ final class DeckLinkService: ObservableObject {
     /// Whether the installed driver satisfies the output floor. False when the driver is absent OR
     /// when the version couldn't be read (fail closed — the bridge would abort anyway).
     @Published private(set) var driverMeetsFloor = false
-    /// Plain-speak colorspace label for the current source (DISPLAY ONLY — the actual output tag is
-    /// unchanged: D5 tags both 2020 and P3 as Rec.2020). Derived from the source colorPrimariesCode,
-    /// so it can distinguish genuine 2020 from P3-in-2020 (which the collapsed tag cannot). nil → 709.
+    /// Plain-speak colorspace label for the picture (DISPLAY ONLY — each frame carries its own tag, colour S7 D1).
+    /// From the picture's primaries, so it tells genuine 2020 from P3 converted into 2020 (D4). nil → 709.
     @Published private(set) var colorspaceLabel = "Rec. 709"
+    /// Colour S7-3: the EOTF the output signals ("SDR" / "PQ" / "HLG"), from the renderer's output signal.
+    @Published private(set) var eotfLabel = OutputEOTF.sdr.name
+    /// Colour S7-3: the static metadata a PQ signal sends (HDMI's InfoFrame; SDI carries none, D6), in words, and
+    /// whether the defaults were sent; nil when none is sent (SDR, HLG).
+    @Published private(set) var hdrMetadataLine: String?
     /// Plain-speak display-mode label for the current source (D4a), e.g. "2160p23.98" / "1080p25" /
     /// "2160p59.94". Tracks the resolved output mode whether or not output is running (the signal the
     /// output produces / would produce), mirroring `colorspaceLabel`. Updated by `sourceFormatChanged`.
     @Published private(set) var modeLabel = OutputMode.default2160p2398.label
 
-    /// The full Signal line for the output menu: active display mode · fixed format · source colorspace.
-    var signalLine: String { "\(modeLabel) · \(Self.formatDetail) · \(colorspaceLabel)" }
+    /// The full Signal line for the output menu: active display mode · fixed format · colorspace · EOTF.
+    var signalLine: String { "\(modeLabel) · \(Self.formatDetail) · \(colorspaceLabel) · \(eotfLabel)" }
 
     /// The Signal line, or the mismatch warning when there is one. The warning REPLACES the healthy
     /// reading rather than sitting beside it: "2160p23.98 · 10-bit 4:2:2 · Rec. 709" is not a true
@@ -261,14 +266,24 @@ final class DeckLinkService: ObservableObject {
         return .ready(installed: version, deviceCount: usableCount)
     }
 
-    /// Map a source CICP primaries code → plain-speak label. "(P3 limited)" flags P3 content sitting
-    /// inside the Rec.2020 container (what's actually on the wire is Rec.2020, per D5's tag).
-    static func colorspaceLabel(forPrimaries code: Int?) -> String {
-        switch code {
-        case 9:       return "Rec. 2020"              // genuine Rec.2020
-        case 11, 12:  return "Rec. 2020 (P3 limited)" // DCI-P3 / P3-D65 → P3-in-2020
-        default:      return "Rec. 709"               // 1 / nil / 2 (unspecified) / unknown
+    /// One frame's signal in the bridge's terms (colour S7). The bridge applies it to the frame it was filled into.
+    static func bridgeSignal(_ s: OutputSignal) -> DeckLinkOutputSignal {
+        var out = DeckLinkOutputSignal()
+        out.rec2020 = ObjCBool(s.colorimetry == .rec2020)
+        out.eotf = Int32(s.eotf.rawValue)
+        if let m = s.staticMetadata {
+            out.hasStaticMetadata = ObjCBool(true)
+            let k = m.mastering
+            (out.redX, out.redY) = (k.red.x, k.red.y)
+            (out.greenX, out.greenY) = (k.green.x, k.green.y)
+            (out.blueX, out.blueY) = (k.blue.x, k.blue.y)
+            (out.whiteX, out.whiteY) = (k.white.x, k.white.y)
+            out.maxMasteringLuminance = k.maxLuminance
+            out.minMasteringLuminance = k.minLuminance
+            out.maxCLL = Double(m.maxCLL)
+            out.maxFALL = Double(m.maxFALL)
         }
+        return out
     }
 
     /// One bridge instance holds the output state across start/stop calls. Serial queue so
@@ -283,6 +298,15 @@ final class DeckLinkService: ObservableObject {
             // Take the renderer's raster-mismatch report and publish it. Installed HERE rather than
             // at the App's wiring site so it cannot be forgotten when a renderer is re-pointed:
             // the warning describes THIS renderer's output and must move with it.
+            // Colour S7: the Signal line follows THIS renderer's colour announcements, whatever caused them — a file, an
+            // override, a LUT, or a stream's mid-session change, which never reached the label before (BUGS.md).
+            if let o = colorObserver { NotificationCenter.default.removeObserver(o); colorObserver = nil }
+            if let r = renderer {
+                colorObserver = NotificationCenter.default.addObserver(
+                    forName: MetalVideoRenderer.sourceColorStateDidChange, object: r, queue: .main) { [weak self] _ in
+                    self?.sourceColorChanged()
+                }
+            }
             oldValue?.onDeckLinkRasterMismatch = nil
             renderer?.onDeckLinkRasterMismatch = { [weak self] message in
                 guard let self else { return }
@@ -443,7 +467,12 @@ final class DeckLinkService: ObservableObject {
     /// The parameters the CURRENT output was started with. Touched only on `queue`, so an audio-format
     /// restart (which arrives on the decode thread, not main) can re-establish the identical video
     /// output without reading main-actor state off-thread. Every start path records them.
-    private var activeStart: (deviceIndex: Int, mode: OutputMode, primariesCode: Int)?
+    ///
+    /// Colour S7: no colour here any more. It held the primaries code of the first start, and an audio re-establish
+    /// replayed it, putting back the tag of whatever was on screen when output was switched on (BUGS.md). Each start
+    /// now reads the renderer's current signal (`deckLinkStartSignal`), and each picture brings its own.
+    private var activeStart: (deviceIndex: Int, mode: OutputMode)?
+    private var colorObserver: NSObjectProtocol?
 
     /// D4a: the output DISPLAY MODE derived from the loaded file (video cadence). Resolution follows
     /// the file's family (2160p or 1080p, native 1:1 — no scaling); rate follows the file's frame rate
@@ -710,13 +739,9 @@ final class DeckLinkService: ObservableObject {
         isOutputting = true
         applyAudioRouting()   // D4b-3: ENABLE transition — with .sdi (the default), the Mac goes silent
         let deviceIndex = selectedDeviceIndex
-        // D5 output-signal TAG ← the picture's PRIMARIES code ONLY (never the matrix; the kernel picks the
-        // encoding matrix from the matrix code, independently). nil → 709. Colour S6, L2: the PICTURE codes —
-        // the wire carries the post-LUT picture, so a LUT's stated output space is what it is tagged as.
-        let primariesCode = renderer?.picturePrimariesCode ?? 1
         let mode = currentMode   // D4a: display mode derived from the current source (or default)
         queue.async {
-            self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode, primariesCode: primariesCode)
+            self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode)
         }
     }
 
@@ -724,8 +749,8 @@ final class DeckLinkService: ObservableObject {
     /// D4a mode-switch (which stops the old output on the same queue first, guaranteeing teardown
     /// completes before this re-establishes). Arms the renderer's convert at the mode's resolution
     /// (native 1:1) and drives the bridge's mode/scheduling from the mode's family + standard rate.
-    private func startOutputOnQueue(deviceIndex: Int, mode: OutputMode, primariesCode: Int) {
-        self.activeStart = (deviceIndex, mode, primariesCode)   // so an audio restart can replay it
+    private func startOutputOnQueue(deviceIndex: Int, mode: OutputMode) {
+        self.activeStart = (deviceIndex, mode)   // so an audio restart can replay it
 
         // Arm the renderer's push convert (allocate v210 staging sized to the OUTPUT frame = the mode's
         // resolution; the source offscreen is the same size for a native file → 1:1, no scaling).
@@ -748,16 +773,28 @@ final class DeckLinkService: ObservableObject {
 
         // The fill block runs on the SDK callback thread → cheap: a memcpy from the renderer's front
         // staging buffer, or a neutral fallback if no converted frame is ready yet.
+        // Colour S7 (D1): each picture hands back its own signal, which the bridge tags its frame with; a neutral fill
+        // keeps the signal in force (D5).
         let probe = FirstFrameProbe()
-        let fill: DeckLinkFillBlock = { [weak self] index, buffer, rowBytes, width, height in
+        #if DEBUG
+        let trace = SignalTrace.enabled ? SignalTrace() : nil
+        #endif
+        let fill: DeckLinkFillBlock = { [weak self] index, buffer, rowBytes, width, height, signal in
             if let r = self?.renderer,
-               r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
-                                         rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+               let s = r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
+                                                 rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+                signal.pointee = Self.bridgeSignal(s)
                 probe.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
+                #if DEBUG
+                trace?.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: s)
+                #endif
                 return true
             }
             Self.fillNeutralV210(buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
             probe.note(index: index, picture: false, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
+            #if DEBUG
+            trace?.note(index: index, picture: false, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: nil)
+            #endif
             return false
         }
 
@@ -767,8 +804,12 @@ final class DeckLinkService: ObservableObject {
         self.enabledAudioFormat = Self.isSupportedForSDI(audioFormat) ? audioFormat : nil
         let audio = self.makeAudioConfig(for: self.enabledAudioFormat)
 
+        // What frames carry until the first picture: the renderer's current signal, read now (D5). An audio
+        // re-establish or a mode change reads it again here, never a value saved at an earlier start.
+        let startSignal = self.renderer?.deckLinkStartSignal() ?? .sdr709
+        print("DeckLink: output start — signal until the first picture: \(startSignal.logLine)")
         let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill,
-                                                        primariesCode: primariesCode,
+                                                        initialSignal: Self.bridgeSignal(startSignal),
                                                         outputWidth: mode.width, outputHeight: mode.height,
                                                         standardRate: mode.standardRate,
                                                         audio: audio)
@@ -884,23 +925,20 @@ final class DeckLinkService: ObservableObject {
                 + "; re-establishing output to (re)enable the SDI audio stream")
             self.bridge.stopScheduledPlayback()
             self.renderer?.stopDeckLinkOutput()
-            self.startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode,
-                                    primariesCode: start.primariesCode)
+            self.startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode)
         }
     }
 
-    /// The source color tags changed (new file / re-inspect). Updates the DISPLAY label always
-    /// (independent of output state), and — if output is running — re-applies the colorspace TAG
-    /// from the new primaries. Both read colorPrimariesCode ONLY (the encoding matrix follows the
-    /// matrix code, separately). Call after setSourceColorSpace.
+    /// The picture's colour changed. Updates the Signal line's labels (independent of output state: the signal the
+    /// output produces, or would produce) from the renderer's output signal. Call after setSourceColorSpace; the
+    /// renderer's own colour announcement also arrives here (`renderer`'s observer), so a stream's change reaches it.
     ///
-    /// Colour S6, L2: reads the renderer's PICTURE primaries, and is also called when a LUT or its stated output
-    /// space moves them (`InterpretationLUTModel`).
+    /// Colour S7 (D1): DISPLAY ONLY. It no longer re-tags the output: each frame carries the signal it was rendered
+    /// under, so the tag changes on the first frame with the new pixels, and on no other.
     func sourceColorChanged() {
         let primariesCode = renderer?.picturePrimariesCode
-        // Display label tracks the current source whether or not output is on (it's the signal that
-        // output produces / would produce). DISPLAY ONLY — does not touch the actual tag.
-        let label = Self.colorspaceLabel(forPrimaries: primariesCode)
+        let signal = renderer?.pictureOutputSignal ?? .sdr709
+        let label = signal.colorimetryLabel
         // Colour S5: the SDI tag in the log, once per change, so an unattended run reads what the output
         // tags (or would tag) beside the picture, scopes and readout it must agree with.
         DispatchQueue.main.async {
@@ -909,10 +947,9 @@ final class DeckLinkService: ObservableObject {
                       primariesCode.map(String.init) ?? "absent", self.isOutputting ? "" : " — output off: the tag it would send")
             }
             self.colorspaceLabel = label
+            self.eotfLabel = signal.eotf.name
+            self.hdrMetadataLine = signal.staticMetadataLabel
         }
-        // Re-tag the live output signal only if currently playing.
-        guard isOutputting else { return }
-        queue.async { self.bridge.setOutputColorspaceForPrimaries(primariesCode ?? 1) }
     }
 
     /// D4a: the source video FORMAT changed (new file / re-inspect). Recompute the output display mode
@@ -1101,7 +1138,6 @@ final class DeckLinkService: ObservableObject {
         }
 
         let deviceIndex = selectedDeviceIndex
-        let primariesCode = renderer?.picturePrimariesCode ?? 1   // the picture's (L2)
         print("DeckLink D4a: RE-ESTABLISHING SDI output at \(mode.label) via \(source) [\(trigger)]")
         queue.async {
             // Race-safe stop (clear running → StopScheduledPlayback → unset callback → DisableVideoOutput
@@ -1109,7 +1145,7 @@ final class DeckLinkService: ObservableObject {
             // switch (it's a re-mode, not a user stop).
             self.bridge.stopScheduledPlayback()
             self.renderer?.stopDeckLinkOutput()
-            self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode, primariesCode: primariesCode)
+            self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode)
         }
     }
 
@@ -1209,3 +1245,35 @@ final class FirstFrameProbe: @unchecked Sendable {
         return h
     }
 }
+
+#if DEBUG
+/// Colour S7, P5 (DEBUG; pre-ship removal, docs/BUGS.md): `MANIFOLD_DECKLINK_SIGNAL_TRACE=1` logs the scheduled-frame
+/// index at which a frame's pixels change (an FNV-1a over every 64th word of the v210) and at which its signal
+/// changes, so a run can show the two move on the same frame. The bridge's `[DeckLink] signal on scheduled frame #N`
+/// line is the tag actually applied.
+final class SignalTrace: @unchecked Sendable {
+    static let enabled = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_SIGNAL_TRACE"] == "1"
+    private let lock = NSLock()
+    private var lastHash: UInt64?
+    private var lastSignal: OutputSignal?
+
+    func note(index: Int64, picture: Bool, buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, height: Int,
+              signal: OutputSignal?) {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        buffer.withMemoryRebound(to: UInt32.self, capacity: rowBytes * height / 4) { w in
+            var i = 0
+            while i < rowBytes * height / 4 { h = (h ^ UInt64(w[i])) &* 0x0000_0100_0000_01b3; i += 64 }
+        }
+        lock.lock(); defer { lock.unlock() }
+        if h != lastHash {
+            print(String(format: "[SIGNAL-TRACE] pixels changed at scheduled frame #%lld (%@, sampled FNV %016llx)",
+                         index, picture ? "picture" : "neutral", h))
+            lastHash = h
+        }
+        if let signal, signal != lastSignal {
+            print("[SIGNAL-TRACE] signal changed at scheduled frame #\(index): \(signal.logLine)")
+            lastSignal = signal
+        }
+    }
+}
+#endif

@@ -115,6 +115,40 @@ private struct RGBToV210Params {
     /// `V210ChromaMode` of the frame being converted (Stage 3b S1): pair average for 4:2:0 (as
     /// before), the co-sited sample for 4:2:2, the D3 halfband for 4:4:4.
     var chromaMode: UInt32 = V210ChromaMode.pairAverage.rawValue
+    /// Colour S7, D4: 1 → convert the picture's P3 primaries to Rec.2020 before the YCbCr encode (SDI only), 0 → the
+    /// pixels as they are (the pre-S7 kernel, by construction).
+    var gamutConvert: UInt32 = 0
+    /// The picture's curve (`ScopeCurve`), decoded before `gamutMatrix` and re-encoded after.
+    var gamutCurve: Int32 = 0
+    /// Linear rendered-P3 → linear Rec.2020, row-major (`SDIPrimariesConversion.matrix`).
+    var gamutMatrix: (Float, Float, Float, Float, Float, Float, Float, Float, Float) = (1, 0, 0, 0, 1, 0, 0, 0, 1)
+}
+
+/// Colour S7 (D1): what a rendered frame goes out with — its output signal, and the YCbCr matrix code its v210 is
+/// encoded with. Installed on the render thread with the colour state, carried with the frame through the offscreen
+/// ring and the v210 staging, and handed to the bridge with the pixels, so the tag and the pixels are one frame's.
+struct FrameOutputState: Equatable {
+    var signal: OutputSignal
+    var v210MatrixCode: Int?
+
+    static let initial = FrameOutputState(signal: .sdr709, v210MatrixCode: nil)
+}
+
+/// The v210 uniforms for a frame: its matrix, its chroma, and D4's conversion when its signal asks for one.
+private func makeV210Params(srcWidth: Int, srcHeight: Int, dstWidth: Int, dstHeight: Int, rowBytes: Int,
+                            chroma: ChromaSubsampling?, output: FrameOutputState) -> RGBToV210Params {
+    let m = ycbcrKrKb(forMatrixCode: output.v210MatrixCode)
+    var params = RGBToV210Params(srcWidth: UInt32(srcWidth), srcHeight: UInt32(srcHeight),
+                                 dstWidth: UInt32(dstWidth), dstHeight: UInt32(dstHeight),
+                                 dstRowWords: UInt32(rowBytes / 4), kr: m.kr, kb: m.kb,
+                                 chromaMode: V210ChromaMode(carrying: chroma).rawValue)
+    if let c = output.signal.primariesConversion {
+        let g = c.matrix.flatMap { $0.map(Float.init) }
+        params.gamutConvert = 1
+        params.gamutCurve = c.curve.rawValue
+        params.gamutMatrix = (g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7], g[8])
+    }
+    return params
 }
 
 /// BT YCbCr matrix (Kr, Kb) selected STRICTLY by the source CICP matrix-coefficient code (D5) —
@@ -395,6 +429,9 @@ final class MetalVideoRenderer {
     /// callback can never read a source time that belongs to a different frame than the one it's paired
     /// with. Guarded by deckLinkLock (written on a Metal completion thread, read on the SDK audio thread).
     private var deckLinkFrontPts: Double = .nan
+    /// Colour S7 (D1): the output signal of the frame in the FRONT staging buffer, published with its pixels under
+    /// `deckLinkLock`, so the fill block hands the card a frame and its own tag together.
+    private var deckLinkFrontSignal: OutputSignal = .sdr709
 
     /// v210 row stride: 128-byte aligned, 48 px per 128 bytes. Matches IDeckLinkOutput
     /// RowBytesForPixelFormat(bmdFormat10BitYUV, width) (e.g. 3840 → 10240, no padding).
@@ -422,6 +459,8 @@ final class MetalVideoRenderer {
     /// same lock (Stage 3b S1). The offscreen is RGB; this is the only record of how much chroma the
     /// picture had, and the v210 output's reduction (`V210ChromaMode`) depends on it.
     private var offscreenReadableChroma: ChromaSubsampling?
+    /// Colour S7 (D1): the output state the READABLE slot was rendered under, published with it the same way.
+    private var offscreenReadableOutput = FrameOutputState.initial
 
     /// The most-recently-COMPLETED offscreen frame — the single source of truth for export,
     /// CPU readback, and GPU scopes. Nil until the first render completes. Same name as the
@@ -429,11 +468,12 @@ final class MetalVideoRenderer {
     /// ring directly.
     private var offscreenTexture: MTLTexture? { readableOffscreen()?.texture }
 
-    /// The readable slot and the chroma rendered into it, read together so they are the same frame.
-    private func readableOffscreen() -> (texture: MTLTexture, chroma: ChromaSubsampling?)? {
+    /// The readable slot, the chroma rendered into it and the output state it was rendered under, read together so
+    /// they are the same frame.
+    private func readableOffscreen() -> (texture: MTLTexture, chroma: ChromaSubsampling?, output: FrameOutputState)? {
         offscreenIndexLock.lock(); defer { offscreenIndexLock.unlock() }
         guard offscreenReadableIndex >= 0, offscreenReadableIndex < offscreenRing.count else { return nil }
-        return (offscreenRing[offscreenReadableIndex], offscreenReadableChroma)
+        return (offscreenRing[offscreenReadableIndex], offscreenReadableChroma, offscreenReadableOutput)
     }
 
     // Frame queue: PTS (seconds) + pixel buffer, ordered by PTS. Guarded by lock.
@@ -1071,6 +1111,38 @@ final class MetalVideoRenderer {
     /// `SourceColorProvenance`. Seeded to `.assumed`, which is what a renderer with no source is.
     private(set) var sourceColorProvenance: SourceColorProvenance = .assumed
 
+    /// Colour S7 (D7): the source's HDR10 static metadata, as `setSourceColorSpace` received it — a file's MDCV / CLLI,
+    /// SRT's SEI; nil when the source states none. MAIN. Reaches the output signal only (the static metadata the
+    /// HDMI InfoFrame carries); the picture is never rendered from it (§6.2, no tone-map).
+    private(set) var sourceHDR10: HDR10StaticMetadata?
+
+    /// Colour S7. MAIN. The output signal of the colour state last published (`publishColorState`): what a frame
+    /// rendered now goes out with. The Signal line and the `[DeckLink] signal →` log read it.
+    private(set) var pictureOutputSignal: OutputSignal = .sdr709
+    /// The same value for the DeckLink queue, guarded by `deckLinkLock`: what an output START tags its frames with
+    /// until the first picture arrives (D5). Read at each start, so a re-establish never replays a stale value.
+    private var deckLinkCurrentSignal: OutputSignal = .sdr709
+
+    /// The model's view of `HDR10StaticMetadata`: each half only when the source declared it.
+    static func sourceHDRMetadata(_ m: HDR10StaticMetadata) -> SourceHDRMetadata {
+        var out = SourceHDRMetadata()
+        if let d = m.mastering {
+            if d.hasPrimaries {
+                func c(_ v: CIExy) -> Chromaticity { Chromaticity(v.x, v.y) }
+                out.primaries = MasteringPrimaries(red: c(d.red), green: c(d.green), blue: c(d.blue), white: c(d.whitePoint))
+            }
+            if d.hasLuminance { out.maxLuminance = d.maxLuminance; out.minLuminance = d.minLuminance }
+        }
+        if let l = m.contentLight { out.maxCLL = l.maxCLL; out.maxFALL = l.maxFALL }
+        return out
+    }
+
+    /// DeckLink queue. The signal an output start tags its first frames with.
+    func deckLinkStartSignal() -> OutputSignal {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        return deckLinkCurrentSignal
+    }
+
     /// ── SOURCE CODES AND PICTURE CODES (colour S6, L2; §6.11 D3) ────────────────────────────────
     ///
     /// The three `source*Code`s above say what the SOURCE is: the Source line, the override's decode matrix,
@@ -1264,6 +1336,8 @@ final class MetalVideoRenderer {
         /// Colour S6, L1. The window's Interpretation LUT, or nil. Installed with the rest, so a frame is
         /// never drawn with a LUT the colour state it was published with did not include.
         let lut: InterpretationLUTInstall?
+        /// Colour S7 (D1). What a frame drawn under this state goes out with on the DeckLink output.
+        let output: FrameOutputState
     }
     private var pendingColorState: PendingColorState?
     /// RENDER THREAD ONLY. The LUT in force (`PendingColorState.lut`), or nil: the everyday pipeline.
@@ -1273,6 +1347,8 @@ final class MetalVideoRenderer {
     private(set) var interpretationLUT: InterpretationLUTInstall?
     /// RENDER THREAD ONLY. The override's matrix in force (`PendingColorState.decodeMatrix`), or nil.
     private var activeDecodeMatrix: Int?
+    /// RENDER THREAD ONLY. The output state in force (`PendingColorState.output`), carried with each frame rendered.
+    private var activeOutput = FrameOutputState.initial
     /// RENDER THREAD ONLY. The Reference shader parameters in force, installed from
     /// `pendingColorState` at the top of the tick, exactly like the layer's colorspace.
     private var activeReference: ReferenceShaderParams?
@@ -1553,11 +1629,21 @@ final class MetalVideoRenderer {
         // and without this a file override would move the scopes, SDI and readout but not the picture.
         // Never set on Auto, so every un-overridden source decodes exactly as before.
         let decodeMatrix = sourceColorProvenance == .overridden ? (sourceMatrixCode ?? 1) : nil
+        // Colour S7: the output signal, from the picture codes and the source's HDR10 metadata — the source's only
+        // when it describes the picture: a LUT's stated output space is not the graded picture its metadata describes.
+        let signal = OutputSignal.resolve(picturePrimaries: picturePrimariesCode, pictureTransfer: pictureTransferCode,
+                                          source: pictureStatedByLUT ? nil : sourceHDR10.map(Self.sourceHDRMetadata))
         pendingColorState = PendingColorState(colorSpace: installed, wantsEDR: pictureWantsEDR,
                                               reference: reference, decodeMatrix: decodeMatrix,
-                                              lut: interpretationLUT)
+                                              lut: interpretationLUT,
+                                              output: FrameOutputState(signal: signal, v210MatrixCode: pictureMatrixCode))
         pendingRefresh = true
         refreshLock.unlock()
+        deckLinkLock.lock(); deckLinkCurrentSignal = signal; deckLinkLock.unlock()
+        if signal != pictureOutputSignal {
+            pictureOutputSignal = signal
+            print("[DeckLink] signal → \(signal.logLine)")
+        }
     }
 
     /// MAIN. Colour S6, L2 (D3): recompute the picture codes, colorspace and EDR opt-in from the source codes
@@ -1667,8 +1753,10 @@ final class MetalVideoRenderer {
         NotificationCenter.default.post(name: Self.liveSourceDidRelease, object: self)
     }
 
+    /// `hdr10` (colour S7, D7): the source's HDR10 static metadata, or nil when it states none. It describes the
+    /// output's static metadata only. Every caller that knows a source's metadata passes it on every call.
     func setSourceColorSpace(primaries: Int?, transfer: Int?, matrix: Int?,
-                             provenance: SourceColorProvenance) {
+                             provenance: SourceColorProvenance, hdr10: HDR10StaticMetadata? = nil) {
         // Colour S6, L3: any source stating its colour ends the released state (`liveSourceReleased` sets it,
         // around its own clearing call). Before the no-op guard: a new source can state the cleared codes.
         if !releasingLiveSource { liveSourceWasReleased = false }
@@ -1682,7 +1770,7 @@ final class MetalVideoRenderer {
         // "assumed" about a user assertion.
         if hasQueuedColorState, sourcePrimariesCode == primaries,
            sourceTransferCode == transfer, sourceMatrixCode == matrix,
-           sourceColorProvenance == provenance {
+           sourceColorProvenance == provenance, sourceHDR10 == hdr10 {
             return
         }
         hasQueuedColorState = true
@@ -1692,6 +1780,7 @@ final class MetalVideoRenderer {
         sourceTransferCode = transfer
         sourceMatrixCode = matrix
         sourceColorProvenance = provenance
+        sourceHDR10 = hdr10
         // ⚠️ `defer`, AND NOT A CALL HERE — MEASURED, BECAUSE THE WRONG ORDER RENDERS AS SOMETHING
         // PLAUSIBLE. Announcing at this point publishes the new CICP codes while
         // `sourceDerivedColorSpace` still holds the PREVIOUS source's colorspace, and the chain
@@ -2649,6 +2738,7 @@ final class MetalVideoRenderer {
             CATransaction.commit()
             activeReference = colorState.reference
             activeDecodeMatrix = colorState.decodeMatrix
+            activeOutput = colorState.output
             if colorState.lut !== activeLUT {
                 activeLUT = colorState.lut
                 print("[LUT] render thread: " + (activeLUT.map { "drawing with \($0.logLabel)" } ?? "no LUT — the everyday pipeline"))
@@ -3016,6 +3106,7 @@ final class MetalVideoRenderer {
         // for the v210 output's chroma reduction.
         noteCarriedPixelFormat(pixelFormat)
         let frameChroma = ChromaSubsampling(pixelFormat: pixelFormat)
+        let frameOutput = activeOutput   // colour S7 (D1): the state this frame is drawn under
         let lumaFormat: MTLPixelFormat = is10Bit ? .r16Unorm : .r8Unorm
         let chromaFormat: MTLPixelFormat = is10Bit ? .rg16Unorm : .rg8Unorm
 
@@ -3273,6 +3364,7 @@ final class MetalVideoRenderer {
             self.offscreenIndexLock.lock()
             self.offscreenReadableIndex = writeIndex
             self.offscreenReadableChroma = frameChroma
+            self.offscreenReadableOutput = frameOutput
             self.offscreenIndexLock.unlock()
             self.onFrameRendered?()
             // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
@@ -3944,15 +4036,13 @@ final class MetalVideoRenderer {
         #if DEBUG
         let v210EncodeStart = CACurrentMediaTime()
         #endif
-        // Matrix selected by the picture's matrix code ONLY (never from primaries) — read live so a
-        // mid-session source change is picked up on the next converted frame. Colour S6, L2: the
-        // PICTURE codes, so a LUT stated as 2020 is encoded with 2020's kr/kb.
-        let m = ycbcrKrKb(forMatrixCode: pictureMatrixCode)
-        var params = RGBToV210Params(srcWidth: UInt32(src.width), srcHeight: UInt32(src.height),
-                                     dstWidth: UInt32(outSize.w), dstHeight: UInt32(outSize.h),
-                                     dstRowWords: UInt32(deckLinkRowBytes / 4),
-                                     kr: m.kr, kb: m.kb,
-                                     chromaMode: V210ChromaMode(carrying: readable.chroma).rawValue)
+        // Matrix selected by the picture's matrix code ONLY (never from primaries). Colour S6, L2: the PICTURE codes,
+        // so a LUT stated as 2020 is encoded with 2020's kr/kb. Colour S7 (D1): the codes THIS frame was rendered
+        // under, carried with it from the render thread, not the main thread's current ones read here on a Metal
+        // completion thread; and D4's P3 → 2020 conversion when its signal asks for it.
+        let frameOutput = readable.output
+        var params = makeV210Params(srcWidth: src.width, srcHeight: src.height, dstWidth: outSize.w, dstHeight: outSize.h,
+                                    rowBytes: deckLinkRowBytes, chroma: readable.chroma, output: frameOutput)
         enc.setComputePipelineState(pipeline)
         enc.setTexture(src, index: 0)
         enc.setBuffer(back, offset: 0, index: 0)
@@ -3982,6 +4072,7 @@ final class MetalVideoRenderer {
             // audio callback can never pair a source time with the wrong frame (D4b-2).
             self.deckLinkFrontIndex = backIndex
             self.deckLinkFrontPts = sourcePts
+            self.deckLinkFrontSignal = frameOutput.signal
             #if DEBUG
             // The SOURCE time the card is now being fed. Tracked as a span so the `[V210]` line can
             // say whether SDI actually swept the dragged range — "converts happened" and "the wire
@@ -4026,10 +4117,13 @@ final class MetalVideoRenderer {
     /// dims don't match (caller fills neutral). The ONLY work on the callback thread — NO GPU wait.
     /// The lock is held across the memcpy so the front index can't swap mid-copy (the convert's
     /// swap + the push dispatch both take the lock), guaranteeing a tear-free complete frame.
-    func copyLatestDeckLinkFrame(into dst: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int) -> Bool {
+    ///
+    /// Colour S7 (D1): returns the frame's own output signal, read under the same lock as its pixels; nil means
+    /// nothing was copied.
+    func copyLatestDeckLinkFrame(into dst: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int) -> OutputSignal? {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
         guard deckLinkFrameReady, deckLinkStaging.count == 2,
-              let outSize = deckLinkOutputSize, outSize.w == width, outSize.h == height else { return false }
+              let outSize = deckLinkOutputSize, outSize.w == width, outSize.h == height else { return nil }
         let srcRowBytes = deckLinkRowBytes   // v210 stride (matches the frame's; equal for 48-multiple widths)
         let srcPtr = deckLinkStaging[deckLinkFrontIndex].contents()
         if rowBytes == srcRowBytes {
@@ -4039,7 +4133,7 @@ final class MetalVideoRenderer {
                 memcpy(dst.advanced(by: y * rowBytes), srcPtr.advanced(by: y * srcRowBytes), srcRowBytes)
             }
         }
-        return true
+        return deckLinkFrontSignal
     }
 
     /// Unpack an rgba16Float (4 × half) buffer to 16-bit RGBA (alpha skipped/opaque).
@@ -4104,7 +4198,7 @@ final class MetalVideoRenderer {
         }
         let (bytes, width, height, bytesPerRow) = frame
         #if DEBUG
-        let v210Dump = makeV210Dump(of: readable.texture, chroma: readable.chroma)
+        let v210Dump = makeV210Dump(of: readable.texture, chroma: readable.chroma, output: readable.output)
         #endif
 
         // CRITICAL: tag with the SOURCE-derived colorspace (CoreMedia709), NOT deviceRGB/sRGB —
@@ -4249,20 +4343,22 @@ final class MetalVideoRenderer {
         let width: Int, height: Int, rowBytes: Int
         let chromaMode: V210ChromaMode
         let kr: Float, kb: Float
+        /// Colour S7, D4: "P3 D65 → Rec. 2020" when the dump converted the primaries, else nil (and absent from the
+        /// JSON, which then reads as it did before S7).
+        let sdiPrimaries: String?
     }
 
-    private func makeV210Dump(of src: MTLTexture, chroma: ChromaSubsampling?) -> V210Dump? {
+    private func makeV210Dump(of src: MTLTexture, chroma: ChromaSubsampling?, output: FrameOutputState) -> V210Dump? {
         guard let pipeline = deckLinkPipelineState else { print("[V210-DUMP] no v210 pipeline"); return nil }
         let w = src.width, h = src.height, rowBytes = Self.v210RowBytes(width: w)
         guard let buf = device.makeBuffer(length: rowBytes * h, options: .storageModeShared),
               let cmd = commandQueue.makeCommandBuffer(), let enc = cmd.makeComputeCommandEncoder()
         else { print("[V210-DUMP] could not allocate"); return nil }
-        let m = ycbcrKrKb(forMatrixCode: pictureMatrixCode)   // as the SDI convert does (L2: the picture's)
+        // As the SDI convert does, from the slot's own output state (S7: its matrix, and D4's conversion).
         let mode = V210ChromaMode(carrying: chroma)
-        var params = RGBToV210Params(srcWidth: UInt32(w), srcHeight: UInt32(h),
-                                     dstWidth: UInt32(w), dstHeight: UInt32(h),
-                                     dstRowWords: UInt32(rowBytes / 4), kr: m.kr, kb: m.kb,
-                                     chromaMode: mode.rawValue)
+        var params = makeV210Params(srcWidth: w, srcHeight: h, dstWidth: w, dstHeight: h, rowBytes: rowBytes,
+                                    chroma: chroma, output: output)
+        let m = (kr: params.kr, kb: params.kb)
         enc.setComputePipelineState(pipeline)
         enc.setTexture(src, index: 0)
         enc.setBuffer(buf, offset: 0, index: 0)
@@ -4274,7 +4370,8 @@ final class MetalVideoRenderer {
         cmd.commit()
         cmd.waitUntilCompleted()
         return V210Dump(bytes: Data(bytes: buf.contents(), count: rowBytes * h),
-                        width: w, height: h, rowBytes: rowBytes, chromaMode: mode, kr: m.kr, kb: m.kb)
+                        width: w, height: h, rowBytes: rowBytes, chromaMode: mode, kr: m.kr, kb: m.kb,
+                        sdiPrimaries: output.signal.primariesConversion.map { "\($0.from.name) → Rec. 2020" })
     }
 
     /// Beside the PNG: `<stem>.v210` (raw, rowBytes stride), `<stem>.rgba16f` (the raw offscreen
@@ -4285,9 +4382,10 @@ final class MetalVideoRenderer {
         let stem = png.deletingPathExtension()
         let v210URL = stem.appendingPathExtension("v210")
         let rawURL = stem.appendingPathExtension("rgba16f")
-        let meta: [String: Any] = ["width": dump.width, "height": dump.height, "rowBytes": dump.rowBytes,
+        var meta: [String: Any] = ["width": dump.width, "height": dump.height, "rowBytes": dump.rowBytes,
                                    "chromaMode": Int(dump.chromaMode.rawValue), "kr": dump.kr, "kb": dump.kb,
                                    "readbackBytesPerRow": readbackBytesPerRow]
+        if let p = dump.sdiPrimaries { meta["sdiPrimaries"] = p }
         do {
             try dump.bytes.write(to: v210URL)
             try Data(readback).write(to: rawURL)

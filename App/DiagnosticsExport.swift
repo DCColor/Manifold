@@ -772,6 +772,7 @@ enum MachineContext {
         out.append("DeckLink output  : " + (dlStatus.canOutput
             ? "\(deckLink.isOutputting ? "active" : "idle") — \(deckLink.signalLine)"
             : "unavailable — \(dlStatus.headline)"))
+        if dlStatus.canOutput, let hdr = deckLink.hdrMetadataLine { out.append("DeckLink HDMI    : \(hdr)") }
 
         let ndi = NDIService.shared
         out.append("NDI runtime      : \(ndi.runtimeAvailable ? "installed" : "NOT installed")"

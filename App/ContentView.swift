@@ -813,9 +813,10 @@ struct ContentView: View {
                 // the readout does not flicker between tiers; with an override, the override stays.
                 deck.fileColor.fileTags(primaries: meta.colorPrimariesCode,
                                         transfer: meta.transferFunctionCode,
-                                        matrix: meta.colorMatrixCode)
-                // D5: if DeckLink output is running, re-tag its colorspace from the new primaries
-                // (the encoding matrix follows the matrix code automatically, per converted frame).
+                                        matrix: meta.colorMatrixCode,
+                                        hdr10: meta.hdr10)
+                // D5: the DeckLink Signal line from the new colour. Colour S7: the frames carry their own tag,
+                // so nothing is re-tagged here.
                 //
                 // ⚠️ GATED ON OWNERSHIP, AND NOT AS A TIDINESS MEASURE. `sourceFormatChanged` does
                 // not merely update a label: if output is RUNNING and the mode changed, it stops
@@ -2307,6 +2308,11 @@ struct ContentView: View {
                     // colorspace reading is a FALSE statement while the renderer is refusing the
                     // copy and the wire is carrying black. See DeckLinkService.rasterMismatch.
                     Button(deckLink.signalLineOrWarning) {}.disabled(true)
+                    // Colour S7-3: the HDR static metadata a PQ signal sends, and whether it is the defaults. HDMI
+                    // only: SDI carries colorimetry and transfer (D6).
+                    if let hdr = deckLink.hdrMetadataLine, deckLink.rasterMismatch == nil {
+                        Button("HDMI: \(hdr)") {}.disabled(true)
+                    }
                     // AN ADDITIONAL ROW, NOT A REPLACEMENT. A raster mismatch says the wire is
                     // black; an advisory says the wire is fine and the SOURCE is not what it
                     // claims. Both can be true at once and they are different problems, so the

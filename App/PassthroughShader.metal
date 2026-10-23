@@ -728,7 +728,56 @@ struct RGBToV210Params {
     float kb;           // BT YCbCr matrix luma coeff for B
     uint chromaMode;    // V210ChromaMode (ColorimetryModel): 0 pair average (4:2:0, as before),
                         // 1 co-sited sample (4:2:2), 2 the D3 halfband (4:4:4)
+    uint gamutConvert;  // colour S7, D4: 1 → rendered P3 → Rec.2020 before the encode (SDI only); 0 → as read
+    int  gamutCurve;    // ScopeCurve: the picture's curve, decoded before gamutMatrix and re-encoded after
+    float gamutMatrix[9];   // linear rendered-P3 → linear Rec.2020, row-major (SDIPrimariesConversion.matrix)
 };
+
+// ── Colour S7, D4: P3 → Rec.2020 for SDI. The arithmetic of `SDIPrimariesConversion.apply` (ColorimetryModel), which
+// is the reference P7 measures against: power curves on the magnitude with the sign kept (sub-black and superwhite
+// survive), PQ and HLG from 0, and the inverse of each after the matrix.
+static inline float v210Linearize(float e, int curve) {
+    switch (curve) {
+        case 13: {
+            const float a = fabs(e);
+            const float l = (a <= 0.04045) ? (a / 12.92) : pow((a + 0.055) / 1.055, 2.4);
+            return copysign(l, e);
+        }
+        case 16: return ciePqEOTF(e);
+        case 18: return cieHlgInvOETF(max(e, 0.0));
+        default: return copysign(pow(fabs(e), 2.4), e);
+    }
+}
+static inline float v210Encode(float l, int curve) {
+    switch (curve) {
+        case 13: {
+            const float a = fabs(l);
+            const float e = (a <= 0.0031308) ? (12.92 * a) : (1.055 * pow(a, 1.0 / 2.4) - 0.055);
+            return copysign(e, l);
+        }
+        case 16: {
+            const float m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+            const float y = pow(max(l, 0.0), m1);
+            return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+        }
+        case 18: {
+            const float a = 0.17883277, b = 0.28466892, c = 0.55991073;
+            const float x = max(l, 0.0);
+            return (x <= 1.0 / 12.0) ? sqrt(3.0 * x) : (a * log(12.0 * x - b) + c);
+        }
+        default: return copysign(pow(fabs(l), 1.0 / 2.4), l);
+    }
+}
+// One offscreen pixel as SDI carries it: read, and converted when the frame's signal asks for it.
+static inline float3 v210ReadPixel(texture2d<float, access::read> offscreen, uint2 at, constant RGBToV210Params &p) {
+    const float3 c = offscreen.read(at).rgb;
+    if (p.gamutConvert == 0u) return c;
+    const float3 l = float3(v210Linearize(c.r, p.gamutCurve), v210Linearize(c.g, p.gamutCurve), v210Linearize(c.b, p.gamutCurve));
+    const float3 o = float3(p.gamutMatrix[0] * l.r + p.gamutMatrix[1] * l.g + p.gamutMatrix[2] * l.b,
+                            p.gamutMatrix[3] * l.r + p.gamutMatrix[4] * l.g + p.gamutMatrix[5] * l.b,
+                            p.gamutMatrix[6] * l.r + p.gamutMatrix[7] * l.g + p.gamutMatrix[8] * l.b);
+    return float3(v210Encode(o.r, p.gamutCurve), v210Encode(o.g, p.gamutCurve), v210Encode(o.b, p.gamutCurve));
+}
 
 // 10-bit LIMITED-range luma (Y' 64..940). Same scale for every matrix; only the yf weights differ.
 static inline uint v210_Y(float yf) {
@@ -749,8 +798,9 @@ static inline uint v210_Cn(float cn) {
 // Convert the display offscreen (rgb10a2 normalized RGB — transfer-ENCODED, SOURCE-primaries) to
 // v210 (10-bit YUV 4:2:2), LIMITED range, for DeckLink output. The YCbCr matrix (Kr/Kb) is chosen
 // by the source's colorMatrixCode (D5) — 709 / 2020 / 601 — so wide-gamut sources encode correctly.
-// (The offscreen is source-primaries; the OUTPUT colorspace TAG is set separately on the frame by
-// the bridge, from the source primaries code.)
+// (The offscreen is in the picture's primaries; the OUTPUT tag is set separately on the frame by the
+// bridge, from the frame's own signal. Colour S7, D4: a P3-tagged picture is converted to Rec.2020 here,
+// for SDI only, because SDI has no P3 tag; see v210ReadPixel.)
 //
 // v210 packs 6 pixels into 4 little-endian 32-bit words (16 bytes), 3 components per word, each 10
 // bits low→high, top 2 bits unused. Standard Apple/FFmpeg layout (kCMPixelFormat_422YpCbCr10):
@@ -784,7 +834,7 @@ kernel void rgbToV210(texture2d<float, access::read> offscreen [[texture(0)]],
     float  yf[6];
     for (uint i = 0u; i < 6u; i++) {
         const uint sx = min(x0 + i, p.srcWidth - 1u);
-        c[i]  = offscreen.read(uint2(sx, sy)).rgb;
+        c[i]  = v210ReadPixel(offscreen, uint2(sx, sy), p);
         yf[i] = kr * c[i].r + kg * c[i].g + kb * c[i].b;
     }
 
@@ -815,7 +865,7 @@ kernel void rgbToV210(texture2d<float, access::read> offscreen [[texture(0)]],
             int sx = int(x0) + i - 3;
             sx = sx < 0 ? -sx : (sx > lastX ? 2 * lastX - sx : sx);
             sx = clamp(sx, 0, lastX);   // a raster narrower than 4 px: never read out of bounds
-            const float3 px = offscreen.read(uint2(uint(sx), sy)).rgb;
+            const float3 px = v210ReadPixel(offscreen, uint2(uint(sx), sy), p);
             const float  py = kr * px.r + kg * px.g + kb * px.b;
             cbN[i] = (px.b - py) / denomB;
             crN[i] = (px.r - py) / denomR;

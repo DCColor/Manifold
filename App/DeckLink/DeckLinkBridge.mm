@@ -170,7 +170,21 @@ struct AudioSource {
 // DeckLink — the scheduling loop calls it blind. This is the seam where the synthetic hue-walk is
 // later swapped for the Metal/decoded-frame path WITHOUT touching the scheduler. Dimensions/rowBytes
 // come from the output mode (passed in), not hardcoded.
-typedef std::function<void(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height)> FrameFillFn;
+// Colour S7: returns true when it wrote a picture, and then `signal` holds that picture's signal (D1); false is a
+// neutral fill, and the frame keeps the signal in force (D5).
+typedef std::function<bool(int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height,
+                           DeckLinkOutputSignal *signal)> FrameFillFn;
+
+// Field by field: the struct comes from Swift, and its padding bytes are not part of the signal.
+static bool SameSignal(const DeckLinkOutputSignal &a, const DeckLinkOutputSignal &b) {
+    return (a.rec2020 != NO) == (b.rec2020 != NO) && a.eotf == b.eotf
+        && (a.hasStaticMetadata != NO) == (b.hasStaticMetadata != NO)
+        && (!a.hasStaticMetadata
+            || (a.redX == b.redX && a.redY == b.redY && a.greenX == b.greenX && a.greenY == b.greenY
+                && a.blueX == b.blueX && a.blueY == b.blueY && a.whiteX == b.whiteX && a.whiteY == b.whiteY
+                && a.maxMasteringLuminance == b.maxMasteringLuminance && a.minMasteringLuminance == b.minMasteringLuminance
+                && a.maxCLL == b.maxCLL && a.maxFALL == b.maxFALL));
+}
 
 // --- Synthetic fill: a solid-color per-frame HUE WALK. Steady color change on the monitor == frames
 // advancing on the clock; a frozen color == a stall. No spatial pattern (a solid proves advance).
@@ -274,20 +288,15 @@ public:
                             BMDDisplayMode displayMode,
                             int32_t width, int32_t height, int32_t rowBytes,
                             BMDTimeValue frameDuration, BMDTimeScale timeScale,
-                            FrameFillFn fill, int64_t colorspace)
+                            FrameFillFn fill, DeckLinkOutputSignal initialSignal)
         : m_refCount(1), m_output(output), m_displayMode(displayMode),
           m_width(width), m_height(height), m_rowBytes(rowBytes),
           m_frameDuration(frameDuration), m_timeScale(timeScale),
           m_fill(std::move(fill)), m_running(false), m_nextIndex(0),
           m_completed(0), m_late(0), m_dropped(0), m_flushed(0),
-          m_colorspace(colorspace) {
+          m_signal(initialSignal) {
         m_output->AddRef();
     }
-
-    // Output colorspace TAG (BMDColorspace) — set on each scheduled frame's metadata so the monitor
-    // knows what it's receiving. Chosen upstream by the source PRIMARIES code (never the matrix).
-    // Updated live via setColorspace so a mid-session source change is picked up on the next frame.
-    void setColorspace(int64_t colorspace) { m_colorspace = colorspace; }
 
     // --- Setup steps (called from the Obj-C bridge, each bool-returning so it can log per-step) ---
 
@@ -329,7 +338,7 @@ public:
         for (size_t i = 0; i < m_pool.size(); i++) {
             const int64_t idx = m_nextIndex.fetch_add(1);
             if (!fillFrame(m_pool[i], idx)) return false;
-            tagFrame(m_pool[i]);   // colorspace metadata (source primaries → BMDColorspace)
+            tagFrame(m_pool[i], idx);   // the signal this frame's picture was rendered under (colour S7, D1)
             if (m_output->ScheduleVideoFrame(m_pool[i], idx * m_frameDuration, m_frameDuration, m_timeScale) != S_OK)
                 return false;
         }
@@ -627,7 +636,7 @@ public:
         IDeckLinkMutableVideoFrame *frame = static_cast<IDeckLinkMutableVideoFrame *>(completedFrame);
         const int64_t idx = m_nextIndex.fetch_add(1);
         fillFrame(frame, idx);
-        tagFrame(frame);   // re-tag per-schedule so a mid-session colorspace change is picked up
+        tagFrame(frame, idx);   // the signal this frame's picture was rendered under (colour S7, D1)
         m_output->ScheduleVideoFrame(frame, idx * m_frameDuration, m_frameDuration, m_timeScale);
 
         // Periodic queue-depth + completion summary (~every 48 frames ≈ 2 s).
@@ -786,20 +795,78 @@ private:
         if (buffer->GetBytes(&bytes) != S_OK || bytes == NULL) {
             buffer->EndAccess(bmdBufferAccessWrite); buffer->Release(); return false;
         }
-        m_fill(frameIndex, (uint8_t *)bytes, m_rowBytes, m_width, m_height);   // pluggable — no DeckLink knowledge
+        // Pluggable — no DeckLink knowledge. A picture brings its own signal; a neutral fill keeps the one in force
+        // (S7 D5). Preroll (start thread) and completions (SDK thread) never overlap: completions begin only after
+        // StartScheduledPlayback, so `m_signal` needs no lock.
+        DeckLinkOutputSignal signal = m_signal;
+        if (m_fill(frameIndex, (uint8_t *)bytes, m_rowBytes, m_width, m_height, &signal)) m_signal = signal;
         buffer->EndAccess(bmdBufferAccessWrite);
         buffer->Release();
         return true;
     }
 
-    // Tag the frame's colorspace metadata (BMDColorspace) so the monitor knows the signal. Set per
-    // schedule from the live m_colorspace atomic (handles source change + any per-output clearing).
-    void tagFrame(IDeckLinkMutableVideoFrame *frame) {
+    // Colour S7: tag the frame with the signal its picture was rendered under (`m_signal`, set by `fillFrame`). The
+    // colorspace and the EOTF go on every frame, as Blackmagic's SignalGenHDR does. PQ also sets
+    // `bmdFrameContainsHDRMetadata` and the static metadata, which only HDMI's InfoFrame carries (D6: SDI's VPID has
+    // colorimetry and transfer only). HLG and SDR clear the flag (D3). The S7-0 probe found that a pooled frame KEEPS
+    // its static values after the flag is cleared and that no call unsets them, so the flag is what says "none".
+    void tagFrame(IDeckLinkMutableVideoFrame *frame, int64_t frameIndex) {
+        const DeckLinkOutputSignal &s = m_signal;
+        const BMDFrameFlags flags = frame->GetFlags();
+        frame->SetFlags(s.hasStaticMetadata ? (flags | bmdFrameContainsHDRMetadata) : (flags & ~bmdFrameContainsHDRMetadata));
         IDeckLinkVideoFrameMutableMetadataExtensions *meta = NULL;
-        if (frame->QueryInterface(IID_IDeckLinkVideoFrameMutableMetadataExtensions, (void **)&meta) == S_OK && meta != NULL) {
-            meta->SetInt(bmdDeckLinkFrameMetadataColorspace, m_colorspace.load());
-            meta->Release();
+        if (frame->QueryInterface(IID_IDeckLinkVideoFrameMutableMetadataExtensions, (void **)&meta) != S_OK || meta == NULL) return;
+        HRESULT worst = S_OK;
+        auto note = [&worst](HRESULT h) { if (h != S_OK) worst = h; };
+        note(meta->SetInt(bmdDeckLinkFrameMetadataColorspace, s.rec2020 ? bmdColorspaceRec2020 : bmdColorspaceRec709));
+        note(meta->SetInt(bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc, s.eotf));
+        if (s.hasStaticMetadata) {
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRDisplayPrimariesRedX, s.redX));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRDisplayPrimariesRedY, s.redY));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRDisplayPrimariesGreenX, s.greenX));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRDisplayPrimariesGreenY, s.greenY));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRDisplayPrimariesBlueX, s.blueX));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRDisplayPrimariesBlueY, s.blueY));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRWhitePointX, s.whiteX));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRWhitePointY, s.whiteY));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRMaxDisplayMasteringLuminance, s.maxMasteringLuminance));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRMinDisplayMasteringLuminance, s.minMasteringLuminance));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRMaximumContentLightLevel, s.maxCLL));
+            note(meta->SetFloat(bmdDeckLinkFrameMetadataHDRMaximumFrameAverageLightLevel, s.maxFALL));
         }
+        // Once per change, and on the first frame: the scheduled-frame index it starts at, and what the frame now
+        // holds, read back through the same interface. That is what Manifold handed the driver, not what reached the
+        // wire. Cheap: a change is rare, and this runs on that frame only.
+        const bool changed = !m_loggedSignal || !SameSignal(s, m_lastLoggedSignal) || worst != S_OK;
+        if (changed) {
+            m_loggedSignal = true; m_lastLoggedSignal = s;
+            int64_t cs = 0, eotf = -1;
+            meta->GetInt(bmdDeckLinkFrameMetadataColorspace, &cs);
+            meta->GetInt(bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc, &eotf);
+            char extra[512] = "";
+            if (frame->GetFlags() & bmdFrameContainsHDRMetadata) {
+                double v[12] = {0};
+                const BMDDeckLinkFrameMetadataID ids[12] = {
+                    bmdDeckLinkFrameMetadataHDRDisplayPrimariesRedX, bmdDeckLinkFrameMetadataHDRDisplayPrimariesRedY,
+                    bmdDeckLinkFrameMetadataHDRDisplayPrimariesGreenX, bmdDeckLinkFrameMetadataHDRDisplayPrimariesGreenY,
+                    bmdDeckLinkFrameMetadataHDRDisplayPrimariesBlueX, bmdDeckLinkFrameMetadataHDRDisplayPrimariesBlueY,
+                    bmdDeckLinkFrameMetadataHDRWhitePointX, bmdDeckLinkFrameMetadataHDRWhitePointY,
+                    bmdDeckLinkFrameMetadataHDRMaxDisplayMasteringLuminance, bmdDeckLinkFrameMetadataHDRMinDisplayMasteringLuminance,
+                    bmdDeckLinkFrameMetadataHDRMaximumContentLightLevel, bmdDeckLinkFrameMetadataHDRMaximumFrameAverageLightLevel };
+                for (int i = 0; i < 12; i++) meta->GetFloat(ids[i], &v[i]);
+                snprintf(extra, sizeof extra, " · HDR flag set · R %.5f,%.5f G %.5f,%.5f B %.5f,%.5f W %.5f,%.5f · "
+                         "max %.4f min %.5f cd/m2 · MaxCLL %.0f MaxFALL %.0f",
+                         v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
+            } else {
+                snprintf(extra, sizeof extra, " · HDR flag clear");
+            }
+            fprintf(stdout, "[DeckLink] signal on scheduled frame #%lld: read-back colorspace %s · EOTF %lld%s%s\n",
+                    (long long)frameIndex, cs == bmdColorspaceRec2020 ? "Rec.2020" : (cs == bmdColorspaceRec709 ? "Rec.709" : "other"),
+                    (long long)eotf, extra, worst == S_OK ? "" : " · ⚠️ a Set call failed");
+            if (worst != S_OK) fprintf(stdout, "[DeckLink] ⚠️ metadata Set returned 0x%08X on frame #%lld\n", (unsigned)worst, (long long)frameIndex);
+            fflush(stdout);
+        }
+        meta->Release();
     }
 
     std::atomic<ULONG> m_refCount;
@@ -813,7 +880,9 @@ private:
     std::atomic<bool> m_running;
     std::atomic<int64_t> m_nextIndex;
     std::atomic<uint64_t> m_completed, m_late, m_dropped, m_flushed;
-    std::atomic<int64_t> m_colorspace;   // BMDColorspace tag (from source primaries), live-updatable
+    DeckLinkOutputSignal m_signal;           // the signal in force: the last picture's, else the start's (S7 D5)
+    DeckLinkOutputSignal m_lastLoggedSignal = {};
+    bool m_loggedSignal = false;
 
     // --- D4b-2 audio state ---
     // Written on the START thread before SetAudioCallback, then touched ONLY on the SDK's (serial)
@@ -861,17 +930,6 @@ public:
     uint64_t audioPcmFramesScheduled()     const { return m_pcmFramesScheduled; }
     uint64_t audioSilenceFramesScheduled() const { return m_silenceFramesScheduled; }
 };
-
-// Output colorspace TAG from the source CICP PRIMARIES code ONLY (never the matrix). P3 has no
-// native output tag, so P3-D65 / DCI-P3 are signalled as Rec.2020 (P3-in-2020 monitoring convention).
-static int64_t BMDColorspaceForPrimaries(NSInteger primariesCode) {
-    switch (primariesCode) {
-        case 9:            return bmdColorspaceRec2020;   // Rec.2020
-        case 11: case 12:  return bmdColorspaceRec2020;   // DCI-P3 / P3-D65 → P3-in-2020
-        case 1:            return bmdColorspaceRec709;    // Rec.709
-        default:           return bmdColorspaceRec709;    // nil / 2 (unspecified) / unknown → 709
-    }
-}
 
 #pragma mark - D4a: display-mode selection (video cadence from the file's resolution + rate)
 
@@ -1012,7 +1070,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 @interface DeckLinkBridge ()
 - (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill
                                                deviceIndex:(NSInteger)deviceIndex
-                                                colorspace:(int64_t)colorspace
+                                             initialSignal:(DeckLinkOutputSignal)initialSignal
                                                displayMode:(BMDDisplayMode)displayMode
                                                audioConfig:(DeckLinkAudioConfig *)audioConfig;
 @end
@@ -1293,7 +1351,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 // in the selector, so .mm-only). The public entry points wrap their fill and call this.
 - (DeckLinkOutputResult *)startScheduledPlaybackWithFillFn:(FrameFillFn)fill
                                                deviceIndex:(NSInteger)deviceIndex
-                                                colorspace:(int64_t)colorspace
+                                             initialSignal:(DeckLinkOutputSignal)initialSignal
                                                displayMode:(BMDDisplayMode)displayMode
                                                audioConfig:(DeckLinkAudioConfig *)audioConfig {
     NSMutableArray<NSString *> *log = [NSMutableArray array];
@@ -1377,14 +1435,14 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
                     modeName, width, height, (long long)timeScale, (long long)frameDuration, rowBytes]];
 
     // Build the player (SEAM: fill source is pluggable — synthetic hue-walk for D3). The player
-    // AddRefs the output; drop our local ref. `colorspace` is the output signal tag (from source
-    // primaries) applied to each scheduled frame's metadata. The resolved `wantMode` drives
-    // EnableVideoOutput + DoesSupportVideoMode.
+    // AddRefs the output; drop our local ref. `initialSignal` is what frames carry until the first picture brings
+    // its own (colour S7, D5). The resolved `wantMode` drives EnableVideoOutput + DoesSupportVideoMode.
     DeckLinkScheduledPlayer *player =
-        new DeckLinkScheduledPlayer(output, wantMode, width, height, rowBytes, frameDuration, timeScale, fill, colorspace);
+        new DeckLinkScheduledPlayer(output, wantMode, width, height, rowBytes, frameDuration, timeScale, fill, initialSignal);
     output->Release();
-    [log addObject:[NSString stringWithFormat:@"tag: output colorspace = %@",
-                    (colorspace == bmdColorspaceRec2020 ? @"Rec. 2020" : @"Rec. 709")]];
+    [log addObject:[NSString stringWithFormat:@"tag: until the first picture — colorspace %@ · EOTF %d%@",
+                    (initialSignal.rec2020 ? @"Rec. 2020" : @"Rec. 709"), (int)initialSignal.eotf,
+                    initialSignal.hasStaticMetadata ? @" · HDR static metadata" : @""]];
 
     // A refusal is logged with the API's own answer and retried once after 100 ms before it is believed: the one
     // refusal seen (L4, 1080p25) came straight after a stop that does not wait for ScheduledPlaybackHasStopped.
@@ -1500,9 +1558,15 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 // Public: synthetic hue-walk on device 0 (D3 — debug/fallback). No source → tag Rec.709, 2160p23.98,
 // and no audio (there is no source to serve).
 - (DeckLinkOutputResult *)startScheduledPlaybackOnDevice0 {
-    return [self startScheduledPlaybackWithFillFn:FrameFillFn(&SyntheticHueWalkFill)
+    FrameFillFn fn = [](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height,
+                        DeckLinkOutputSignal *) -> bool {
+        SyntheticHueWalkFill(frameIndex, buffer, rowBytes, width, height);
+        return false;   // keeps the start's signal: SDR Rec.709
+    };
+    DeckLinkOutputSignal sdr709 = {};
+    return [self startScheduledPlaybackWithFillFn:fn
                                       deviceIndex:0
-                                       colorspace:bmdColorspaceRec709
+                                    initialSignal:sdr709
                                       displayMode:bmdMode4K2160p2398
                                       audioConfig:nil];
 }
@@ -1510,18 +1574,19 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 // Public: REAL video (D-real) on a chosen device. Wrap the Obj-C fill block into the C++ FrameFillFn
 // the scheduler expects; the std::function retains the (heap-copied) block for the player's lifetime.
 // The block itself sources pixels (renderer.copyLatest…) and handles the neutral fallback — the
-// scheduler stays source-agnostic. `primariesCode` → the output colorspace TAG (SEPARATE from the
-// kernel's encoding matrix, which the renderer selects from the matrix code).
+// scheduler stays source-agnostic. Each picture brings its own signal (colour S7, D1); `initialSignal` covers the
+// frames before the first one.
 - (DeckLinkOutputResult *)startScheduledPlaybackWithDeviceIndex:(NSInteger)deviceIndex
                                                           fill:(DeckLinkFillBlock)fill
-                                                 primariesCode:(NSInteger)primariesCode
+                                                 initialSignal:(DeckLinkOutputSignal)initialSignal
                                                    outputWidth:(NSInteger)outputWidth
                                                   outputHeight:(NSInteger)outputHeight
                                                   standardRate:(double)standardRate
                                                          audio:(DeckLinkAudioConfig *)audio {
     DeckLinkFillBlock block = [fill copy];
-    FrameFillFn fn = [block](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height) {
-        (void)block(frameIndex, buffer, rowBytes, width, height);
+    FrameFillFn fn = [block](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height,
+                             DeckLinkOutputSignal *signal) -> bool {
+        return block(frameIndex, buffer, rowBytes, width, height, signal) ? true : false;
     };
     // D4a: derive the DISPLAY MODE from the output-family resolution + standard rate. The private
     // start path falls back to 2160p23.98 if this resolves unknown or the card doesn't support it.
@@ -1529,15 +1594,9 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     BMDDisplayMode displayMode = BMDModeForFamilyRate(is2160, standardRate);
     return [self startScheduledPlaybackWithFillFn:fn
                                       deviceIndex:deviceIndex
-                                       colorspace:BMDColorspaceForPrimaries(primariesCode)
+                                    initialSignal:initialSignal
                                       displayMode:displayMode
                                       audioConfig:audio];
-}
-
-// Update the output colorspace tag mid-session (source colorspace changed while output is running).
-// Per-schedule tagging means the next scheduled frame picks this up — no in-flight re-tag race.
-- (void)setOutputColorspaceForPrimaries:(NSInteger)primariesCode {
-    if (_player != NULL) { _player->setColorspace(BMDColorspaceForPrimaries(primariesCode)); }
 }
 
 - (void)stopScheduledPlayback {

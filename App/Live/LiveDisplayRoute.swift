@@ -232,7 +232,8 @@ final class LiveDisplayRoute {
         renderer.setSourceColorSpace(primaries: color.primaries,
                                      transfer: color.transfer,
                                      matrix: color.matrix,
-                                     provenance: color.provenance)
+                                     provenance: color.provenance,
+                                     hdr10: hdr10)
         renderer.isFullRangeProvider = { [isFullRange = color.isFullRange] in isFullRange }
 
         return clock
@@ -260,7 +261,26 @@ final class LiveDisplayRoute {
         host.setSourceColorSpace(primaries: colorimetry.primaries,
                                  transfer: colorimetry.transfer,
                                  matrix: colorimetry.matrix,
-                                 provenance: colorimetry.provenance)
+                                 provenance: colorimetry.provenance,
+                                 hdr10: hdr10)
+    }
+
+    // MARK: - HDR10 static metadata (colour S7, D7)
+
+    /// The stream's HDR10 static metadata (SRT's SEI), or nil. MAIN. Passed with every colour call this route
+    /// makes, so a later colour change does not drop it. Kept across `activate`, because the SEI can be read before
+    /// the route takes the display; cleared at `deactivate`, when the stream is gone.
+    private var hdr10: HDR10StaticMetadata?
+
+    /// The stream's SEI changed. Through the one colour setter (CLAUDE.md), with the codes the route last set.
+    func updateHDR10(_ metadata: HDR10StaticMetadata?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard metadata != hdr10 else { return }
+        hdr10 = metadata
+        guard saved.isHolding, let host = saved.host else { return }
+        host.setSourceColorSpace(primaries: host.sourcePrimariesCode, transfer: host.sourceTransferCode,
+                                 matrix: host.sourceMatrixCode, provenance: host.sourceColorProvenance,
+                                 hdr10: metadata)
     }
 
     /// How long until a frame at `presentationPTS` is due, for timing a colour change to it.
@@ -300,6 +320,7 @@ final class LiveDisplayRoute {
     /// active, so a stray call can no longer black out a deck showing a paused file.
     func deactivate(renderer: MetalVideoRenderer?) {
         dispatchPrecondition(condition: .onQueue(.main))
+        hdr10 = nil   // colour S7: the stream's metadata goes with the stream
 
         // Not active — nothing was taken, so there is nothing to give back and nothing to wipe.
         guard let host = saved.restore() else { return }

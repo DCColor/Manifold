@@ -434,13 +434,14 @@ final class SRTFrameRouter {
     private var admittedFormat: SPSFormat?
     private var sourceChroma: SourceChroma = .notStated
 
-    // MARK: - HDR10 SEI (SESSION THREAD only; §6.10, Stage 5, decision 6: LOG ONLY)
+    // MARK: - HDR10 SEI (SESSION THREAD only; §6.10, Stage 5, decision 6; colour S7, D7)
     //
     // The HEVC builder reads prefix SEI 137 (mastering display) and 144 (content light level) on the
     // way past and keeps the stream's latest values; every access unit carries them. They are turned
     // into `HDR10StaticMetadata` here and logged as `[HDR10-SEI]` ONCE PER CHANGE, compared per access
-    // unit, so x265's two SEI NALs (CLL, then MDCV) on one keyframe make one line. Nothing displays or
-    // renders from it (§6.2, no tone-map); `lastHDR10SEI` is held for a later readout.
+    // unit, so x265's two SEI NALs (CLL, then MDCV) on one keyframe make one line. Nothing renders from
+    // it (§6.2, no tone-map). Since S7 it is the output's static metadata: on each change it goes to the
+    // renderer through the route (`LiveDisplayRoute.updateHDR10`).
 
     /// What `[HDR10-SEI]` last said, this stream. nil until the stream carries any.
     private(set) var lastHDR10SEI: HDR10StaticMetadata?
@@ -1118,12 +1119,16 @@ final class SRTFrameRouter {
     }
 
     /// The stream's latest HDR10 SEI, once per access unit; one `[HDR10-SEI]` line when it differs from
-    /// what was last logged. SESSION THREAD. Log only.
+    /// what was last logged. SESSION THREAD.
+    ///
+    /// Colour S7 (D7): also handed to the renderer, on MAIN, through the route's one colour call, where it becomes the
+    /// output's static metadata (HDMI's InfoFrame). Still never used to render the picture.
     private func noteHDR10SEI(_ raw: ManifoldHEVCHDR10SEI) {
         let metadata = Self.hdr10Metadata(raw)
         guard metadata != lastHDR10SEI else { return }
         lastHDR10SEI = metadata
         NSLog("%@", Self.hdr10Line(metadata))
+        DispatchQueue.main.async { [route] in route.updateHDR10(metadata.hasAny ? metadata : nil) }
     }
 
     /// The SEI's raw codes as `HDR10StaticMetadata`. THE REORDER IS HERE: the SEI codes its primaries
@@ -1164,7 +1169,7 @@ final class SRTFrameRouter {
         } else {
             parts.append("content light: none")
         }
-        return "[HDR10-SEI] " + parts.joined(separator: " | ") + " — log only (not displayed, not used for rendering)"
+        return "[HDR10-SEI] " + parts.joined(separator: " | ") + " — not used for rendering; sent as the output's static metadata"
     }
 
     /// The format gate, on one new SPS. SESSION THREAD. True when the stream may be decoded.

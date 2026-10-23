@@ -210,7 +210,9 @@ held back until after release, and the numbered defect entries follow.
      - **S7** — output HDR signalling, **pre-release, after S6** (D10, decided 2026-10-13): SDI VPID colorimetry and
        transfer (SDR / HLG / PQ), and the HDMI HDR InfoFrame on the DeckLink's HDMI daughter card (EOTF plus static
        metadata), from the file's HDR10 metadata or the stream's `[HDR10-SEI]`, with stated defaults when a PQ source
-       carries none. Scope: *SDI and HDMI never signal PQ or HLG*, below.
+       carries none. Scope: *SDI and HDMI never signal PQ or HLG*, below. **Decided 2026-10-22 (D1–D7, §6.11 *S7*);
+       S7-0 to S7-4 built and run unattended 2026-10-22, P1–P8 met, not committed. S7-5 (the reference monitor over
+       SDI and HDMI) is attended and still to do.**
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
@@ -1131,11 +1133,16 @@ to send Export Diagnostics for a sync problem.
   - **`MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1`** (launch environment, added 2026-10-22): the first DeckLink mode check
     of the process reads as refused, so the log-and-retry path can be run on a card that never refuses (*a mode
     switch to 1080p25 was refused once*, below). `#ifdef DEBUG` in `App/DeckLink/DeckLinkBridge.mm`.
-- **Gating:** all seven `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+  - **`MANIFOLD_DECKLINK_SIGNAL_TRACE=1`** (launch environment, added 2026-10-22, colour S7 P5): `[SIGNAL-TRACE]`
+    lines with the scheduled-frame index at which the SDI frame's pixels change (an FNV-1a over every 64th v210
+    word) and at which its output signal changes. `SignalTrace` in `App/DeckLink/DeckLinkService.swift`, `#if DEBUG`.
+    The bridge's `[DeckLink] signal on scheduled frame #N: read-back …` line is NOT this hook: it ships, once per
+    signal change.
+- **Gating:** all eight `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
-- **Remove** all seven before ship, or keep the dump and the stats line as Profile telemetry by decision.
+- **Remove** all eight before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -3025,49 +3032,144 @@ Probably the Opus pre-skip trim meeting the first buffer. Not investigated.
 
 ---
 
-## ☐ OPEN 2026-10-13 — SCHEDULED PRE-RELEASE AS COLOUR S7 — PRE-EXISTING, ALL BUILDS — SDI and HDMI never signal PQ or HLG
+## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 — PRE-EXISTING, ALL BUILDS — SDI and HDMI never signal PQ or HLG
 
-**What is wrong.** The DeckLink output tags each frame with `bmdDeckLinkFrameMetadataColorspace` only
-(`App/DeckLink/DeckLinkBridge.mm:796`, set from the primaries code by `setOutputColorspaceForPrimaries`). No EOTF,
-no static HDR metadata, no `bmdFrameContainsHDRMetadata` flag. A PQ or HLG source reaches SDI tagged Rec.2020 with
-nothing saying it is HDR. A reference monitor that follows the signal stays in SDR, and someone sets the EOTF by hand.
-Nothing in `App/DeckLink` mentions HDMI.
+**Fixed, unattended part only.** S7-0 to S7-4 built and measured (§6.11, *S7 — results*). **The attended check,
+S7-5, is still to do**: whether the reference monitor switches EOTF by itself over SDI and over HDMI, and what it
+shows of the static metadata. Until it is done, what reaches the wire is UNKNOWN; what Manifold hands the driver
+is measured.
 
-**Why nobody reported it.** The SDI checks to date were SDR, or read the tag from the log. Found by reading the code
-during the colour S6 audit (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S6 — LUT: audit, decisions and plan*, finding 6).
+**What was wrong.** The DeckLink output tagged each frame with `bmdDeckLinkFrameMetadataColorspace` only. No EOTF,
+no static HDR metadata, no `bmdFrameContainsHDRMetadata` flag. A PQ or HLG source reached SDI tagged Rec.2020 with
+nothing saying it was HDR. Found during the colour S6 audit (§6.11, *S6 — LUT: audit, decisions and plan*,
+finding 6).
 
-**Scope of S7 (decided, Robbie, 2026-10-13; corrected the same day to include HDMI):**
-- **SDI:** the VPID's colorimetry and transfer characteristic, SDR, HLG or PQ. Through
-  `bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc` (CTA-861.3's 0–7) with `bmdFrameContainsHDRMetadata`, beside
-  the colorspace already set.
-- **HDMI:** the HDR InfoFrame on the HDMI daughter card. EOTF plus static metadata, meaning mastering primaries, white
-  point, min and max mastering luminance, MaxCLL and MaxFALL (`bmdDeckLinkFrameMetadataHDRDisplayPrimaries*`,
-  `…WhitePoint*`, `…Min/MaxDisplayMasteringLuminance`, `…MaximumContentLightLevel`,
-  `…MaximumFrameAverageLightLevel`).
-- **Two separate fields, never derived from each other (clarified, Robbie, 2026-10-13):**
-  - **Signal colorimetry** (the SDI VPID's colorimetry, the HDMI InfoFrame's colorimetry) follows the **picture's
-    primaries** (S6's D3): the source's own, or a LUT's stated output space, because the wire carries the post-LUT
-    picture. So an HDR10 source signals **Rec.2020**: the 2020 container that Netflix and Amazon deliverables require.
-  - **Mastering display primaries** (in the static metadata) come from the source's HDR10 metadata. When the source
-    carries none they default to **P3-D65**: content limited to P3 inside the 2020 container.
-  - ⚠️ A 2020 signal does not imply 2020 mastering primaries, and P3 mastering primaries do not make the signal P3.
-    Neither field is filled from the other, in the code or in a default.
-- **Values:** from the file's HDR10 metadata (`HDR10StaticMetadata`, `ManifoldCore/HDR10Metadata.swift`) or the
-  stream's `[HDR10-SEI]` values (`App/SRT/SRTFrameRouter.swift:441`). The EOTF follows the **picture** codes (S6's
-  D3), so a PQ LUT on an SDR source signals PQ.
-- **Defaults when a PQ source carries none (proposed):**
+**What changed (decisions D1–D7, Robbie, 2026-10-22, §6.11 *S7*):**
+- **Per frame (D1).** `OutputSignal` (ColorimetryModel) is resolved from the picture codes and the source's HDR10
+  metadata on every colour change. It is installed on the render thread with the colour state, carried with each
+  rendered frame through the offscreen ring and the v210 staging, and returned by `copyLatestDeckLinkFrame` with
+  the pixels. The bridge's `tagFrame` applies it to the frame it was filled into.
+- **What each frame carries.** The colorspace and the EOTF (CTA-861.3: SDR 0, PQ 2, HLG 3) on every frame. **PQ**
+  also sets the HDR flag and the static metadata. **HLG and SDR** clear the flag (D3). On SDI the VPID carries
+  colorimetry and transfer only; the static metadata is for HDMI's InfoFrame (D6).
+- **Values.** From a file's MDCV / CLLI or SRT's `[HDR10-SEI]`, through `setSourceColorSpace(…, hdr10:)` (D7).
+  - PQ with none: P3-D65 mastering primaries, D65 white, 1000 / 0.0050 cd/m², MaxCLL and MaxFALL **0**. D2: S7-0
+    showed `SetFloat` takes 0.
+  - Each half the source leaves out takes its default alone.
+  - A LUT's stated output space is not described by the source's metadata, so it takes the defaults.
+- **Neutral frames (D5)** keep the signal in force.
+- **Readout and log (S7-3).** The Signal line ends in the EOTF ("… · Rec. 2020 · PQ"). A second row, "HDMI: mastering
+  P3 D65 · 1000 / 0.0050 cd/m² (defaults) · MaxCLL 0 · MaxFALL 0 (0 = unknown)", shows the static metadata, and
+  diagnostics carry it too. The log has `[DeckLink] signal → …` per change, and
+  `[DeckLink] signal on scheduled frame #N: read-back …` from the bridge, which reads the frame's metadata back
+  through the SDK.
 
-  | Field | Default |
-  |---|---|
-  | Mastering display primaries (static metadata only; the signal colorimetry stays the picture's, above) | P3-D65 |
-  | White point | D65 (0.3127, 0.3290) |
-  | Max mastering luminance | 1000 cd/m² |
-  | Min mastering luminance | 0.0050 cd/m² |
-  | MaxCLL, MaxFALL | Not sent (CTA-861.3's "unknown") |
+**S7-0 (the SDK, on this card's own frames):**
+- `SetFloat` returns `S_OK` for MaxCLL / MaxFALL 0, and also for 70000 and −1: the API validates nothing.
+- An unset float reads `E_FAIL`.
+- The HDR flag switches on and off on a pooled frame, and the static values **persist after the flag is cleared**.
+  No call unsets them, so the flag is what says "none".
+- No `EnableVideoOutput` is needed to create frames.
 
-  ⚠️ The SDK documents those two as 1–65535, so S7 first checks that unset is accepted. HLG sends the EOTF only. The
-  readout and the log say when defaults were sent.
-- **The attended check:** on the reference monitor, which should switch EOTF on its own (SDI and HDMI each).
+**Verified (unattended):** unit tests (P1, P2, the clarification's pair); read-back of the HDR10 file and the SRT
+SEI exact; defaults exact; HLG EOTF 3 with the flag clear on a pooled frame after PQ; tag and pixels move on the same
+scheduled frame; exports byte-identical to HEAD except D4's P3 v210, which matches an independent model exactly;
+`late=0 dropped=0` at 1080p25 and 2160p25.
+
+---
+
+## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D4 — PRE-EXISTING, ALL BUILDS — P3-D65 and DCI-P3 went out over SDI as Rec.2020 without conversion
+
+**What was wrong.** Primaries 11 and 12 were tagged Rec.2020 (`DeckLinkBridge.mm`, `BMDColorspaceForPrimaries`), but
+the v210 convert applied only the YCbCr matrix, so the P3 pixel values went out unchanged under a 2020 tag. A monitor
+following the tag showed them oversaturated. Found in the S7 audit (§6.11).
+
+**Fix (D4 (a), clarified 2026-10-22).** The v210 convert (`rgbToV210`, `v210ReadPixel`) converts the picture's rendered
+primaries to Rec.2020 in linear light, with the picture's curve (γ2.4 for the 709 family, sRGB, PQ, HLG), **for SDI
+only**: the window, the scopes and the export are untouched. Only a picture whose primaries **tag** is 11 or 12 is
+converted. A picture tagged 2020 whose content is limited to P3 passes through untouched; its P3 limit is stated only
+in the mastering metadata (unit-tested pair). The v210 dump's JSON says `"sdiPrimaries": "P3 D65 → Rec. 2020"` when
+it converts.
+
+**Verified:** 11-1-1, 12-1-1 and 12-16-1 v210 against a separate Python model computed from each export's own
+`rgba16f`: **0 codes** difference on all 4 147 200 components each (66.67 % of components moved from HEAD). The SDI
+frame's FNV-1a equals the export's. Every other file: v210 byte-identical to HEAD.
+
+**Not changed, open:** see *P3 sources go out signalled Rec.2020 but encoded with their own 709 matrix*, below.
+
+---
+
+## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D1 — PRE-EXISTING, ALL BUILDS — streams never updated the SDI tag mid-session
+
+**What was wrong.** Only the file, file-override and LUT paths called `DeckLinkService.sourceColorChanged()`
+(`ContentView.swift`, `FileColorOverride.swift`, `InterpretationLUT.swift`). A stream whose colour changed after the
+output started (a later SPS, a stream override, an SRT HDR10 SEI) kept the old tag. Found in the S7 audit.
+
+**Fix.** Each frame carries the signal it was rendered under (D1), so every path that reaches the renderer reaches the
+tag. The Signal line follows the renderer's own colour announcement (`sourceColorStateDidChange`), so it follows
+streams too. `sourceColorChanged()` no longer re-tags anything.
+
+**Verified:** SRT HEVC PQ with an SEI (Rec.2020 mastering, 4000 / 0.0001, MaxCLL 1000, MaxFALL 400): the read-back
+carried exactly those values; Signal line `1080p25 · 10-bit 4:2:2 · Rec. 2020 · PQ`. The connect was clicked by
+Robbie (the stream sheet is not reachable by Accessibility).
+
+---
+
+## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D1 — PRE-EXISTING, ALL BUILDS — an audio re-establish put back the tag from the start of output
+
+**What was wrong.** `audioFormatChanged` re-established the output with `activeStart.primariesCode`, the primaries
+saved when output was first started. A file with audio loaded after a different-colour start went out with the
+earlier source's tag until the next colour change. Found in the S7 audit.
+
+**Fix.** `activeStart` holds no colour. Every start, including a mode change and an audio re-establish, reads the
+renderer's current signal (`deckLinkStartSignal`) for the frames before the first picture. Each picture then brings
+its own.
+
+**Verified:** output started on an HLG 2020 file, then the 709 sync clip (with audio) opened: the re-establish logged
+`signal until the first picture: SDR · Rec. 709`, and frame #0 read back Rec.709 / EOTF 0.
+
+---
+
+## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 D7 — PRE-EXISTING, ALL BUILDS — HDR10 metadata never reached the output
+
+**What was wrong.** A file's MDCV / CLLI (`VideoMetadata.hdr10`) reached only the Inspector, and SRT's SEI
+(`lastHDR10SEI`) was only logged. Found in the S7 audit.
+
+**Fix.** Both enter the renderer through `setSourceColorSpace(…, hdr10:)` (D7): the file through
+`FileColorOverrideModel` (stored at inspection, passed with every call, override or not; cleared on a new file),
+SRT through `LiveDisplayRoute.updateHDR10` (passed with every colour call the route makes; cleared at deactivate).
+
+**Verified:** P3 and P6 above, exact.
+
+---
+
+## ☐ OPEN 2026-10-22 — TO DECIDE (found in colour S7) — P3 sources go out signalled Rec.2020 but encoded with their own 709 matrix
+
+A P3 source whose matrix code is 1 (12-1-1, 12-16-1, and every file on the *P3-D65 PQ* preset, whose matrix is
+709-class) is now converted to Rec.2020 primaries on SDI (D4), but its v210 is still encoded with the picture's matrix
+code, as the CLAUDE.md rule says: the v210 dump reads `kr 0.2126, kb 0.0722` with `sdiPrimaries P3 D65 → Rec. 2020`.
+The frame is tagged Rec.2020, and a monitor decoding a 2020 signal will use the 2020 matrix. **Pre-existing**:
+HEAD sent the same matrix under the same tag. It is not a D4 question and was not changed. **To decide:** whether a
+converted frame is also encoded with the 2020 matrix. This affects S7-5's reading of the P3 files.
+
+---
+
+## ☐ OPEN 2026-10-22 — found in colour S7 — at a file change, one frame of the outgoing picture goes out under the incoming signal
+
+At a file change the new file's colour state arrives before its first frame. The renderer re-presents the frame on
+screen under the new state (`pendingRefresh`, by design), so one scheduled frame carries the old picture rendered
+under the new codes, and its tag (D1: the codes it was rendered with). Measured: hdr10 → pqnometa, the signal changed
+at frame #240 and the new picture arrived at #241; the same one-frame step at p3pq → hdr10 (#1296 / #1297) and HLG →
+sync clip (#285 / #286). The window does the same. **Pre-existing in the pixels**: HEAD rendered that frame the same
+way. **To decide:** whether the output should skip that frame.
+
+---
+
+## ☐ OPEN 2026-10-22 — found in colour S7 — an HDR10 file's first frames could carry the defaults until inspection
+
+A file's colour arrives twice: the engine's load edge (codes only), then inspection (codes and HDR10). The log shows
+both signals: `… (defaults) · MaxCLL 0 …`, then `… MaxCLL 800 · MaxFALL 400`. In the S7 run only the second reached a
+frame (#1296). A slower inspection would let frames out with the defaults first. Not seen, not measured beyond this.
 
 ---
 

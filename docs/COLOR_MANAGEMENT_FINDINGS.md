@@ -7050,6 +7050,203 @@ it). Every other key the session changed was read, then restored or deleted (`NS
 `recentLUTs` and one `NSWindow Frame …` key, both new, deleted). The domain is dictionary-equal to the
 pre-session export apart from `displayCalibrations`. macOS HDR is off on the LG.
 
+#### S7 — output HDR signalling: audit, decisions and plan, 2026-10-22
+
+**Scope:** D10 above. The SDI VPID's colorimetry and transfer, and the HDMI HDR InfoFrame on the DeckLink 8K Pro's HDMI
+daughter card.
+
+##### What the audit found (read-only, 2026-10-22)
+
+- **What is sent today:** one key per frame, `bmdDeckLinkFrameMetadataColorspace`, set in `tagFrame`
+  (`DeckLinkBridge.mm:797-803` at HEAD `e42932f`). No EOTF, no static metadata, no HDR flag. Frames are created with
+  `bmdFrameFlagDefault` (`:313-314`). Primaries 9, 11 and 12 map to Rec.2020, everything else to 709 (`:867-873`).
+- **When it is applied:** as each frame is scheduled, during the preroll (`:332`) and on every completion
+  (`:630`), from one shared value that `setColorspace` sets (`:290`, `:1539-1540`). Nothing links a staged frame to
+  the codes it was rendered with. The v210 matrix is read during the convert, on the Metal completion thread
+  (`MetalVideoRenderer.swift:3950`).
+- **This card** (a read-only attribute probe, no output enabled): sub-device 0, "DeckLink 8K Pro (1)", supports
+  HDR metadata and colorspace metadata. Its outputs are SDI + HDMI (`0x3`, daughter board `mzhr`, HDMI 2.1 + RS422),
+  so HDMI gets the same frames as SDI. Sub-devices 1–3 are SDI only and inactive.
+- **The SDK:** the EOTF key takes CTA-861.3's 0–7. Ten floats carry the display primaries, white point and mastering
+  luminance. MaxCLL and MaxFALL are documented as 1–65535 (`DeckLinkAPI.h:470-490`; manual §3.61). The flag is
+  `bmdFrameContainsHDRMetadata` (`:183`). Blackmagic's `SignalGenHDR` sample uses SDR 0, PQ 2 and HLG 3, sets the EOTF
+  and colorspace on every frame, and sets the flag and the static metadata **only for PQ**.
+- **SDI vs HDMI:** the manual does not say how these keys reach the SDI VPID. By the standards, ST 352 carries only
+  colorimetry and transfer. The static metadata travels only in HDMI's InfoFrame (SDI would need ST 2108, which this
+  API does not offer). **UNKNOWN until a monitor shows it** (S7-5).
+- **HDR10 data:** files read it into `VideoMetadata.hdr10` (`HDR10Metadata.swift:156`), and only the Inspector uses
+  it (`InspectorPanel.swift:129-133`). SRT HEVC parses its SEI into `lastHDR10SEI` (`SRTFrameRouter.swift:446`) and
+  only logs it. WHEP, HLS and NDI carry none.
+
+**Four pre-existing defects found (recorded in `BUGS.md`):**
+1. **P3 is sent as 2020 without conversion.** P3-D65 and DCI-P3 sources go out tagged Rec.2020 with their P3 pixel
+   values unchanged (`DeckLinkBridge.mm:867-873`). The v210 convert applies only the YCbCr matrix
+   (`PassthroughShader.metal:764`). A monitor set to 2020 shows them oversaturated.
+2. **Streams never update the SDI tag mid-session.** Only the file, file-override and LUT paths call
+   `sourceColorChanged()` (`ContentView.swift:829`, `FileColorOverride.swift:115`, `InterpretationLUT.swift:138`).
+3. **An audio re-establish puts back the tag from the start of output** (`DeckLinkService.swift:887-888`, replaying
+   `activeStart.primariesCode`).
+4. **HDR10 metadata never reaches the output.** Nothing on the output path receives it.
+
+##### Decisions (Robbie, 2026-10-22)
+
+1. **D1 — Each frame is tagged with the codes it was rendered with**, instead of one shared value. This also fixes
+   defects 2 and 3.
+2. **D2 — MaxCLL / MaxFALL when the source has none:** send **0** (CTA-861.3's "unknown") if S7-0 shows the SDK
+   accepts 0; otherwise leave them unset. **Never invent values.**
+3. **D3 — HLG sends the EOTF only, with no HDR flag** (as the SDK sample does).
+4. **D4 — (a): P3-D65 and DCI-P3 are converted to Rec.2020 primaries in the v210 convert, for SDI only.** The window,
+   the scopes and the export are untouched.
+   - **Clarified (Robbie, 2026-10-22): D4 applies only to sources whose primaries tag is P3 (12 P3-D65, 11 DCI-P3).**
+     A source tagged Rec.2020 (9) whose content is limited to P3 ("P3-limited in a 2020 container", the usual HDR
+     mastering practice) passes through untouched. Its P3 limit is expressed only in the mastering-display metadata.
+   - The tag that decides is the **picture's** primaries code (S6 D3), because the v210 convert reads the picture:
+     a LUT stating P3-D65 output is converted as a P3-D65 source is.
+5. **D5 — (a): neutral black frames** (no picture yet, or a raster mismatch) **keep the current signal**, so the
+   monitor does not flip modes.
+6. **D6 — SDI carries colorimetry and transfer only. The static metadata is for HDMI. ST 2108 is out of scope.**
+7. **D7 — HDR10 metadata enters the renderer through `setSourceColorSpace`**, the one source-colour setter (the
+   CLAUDE.md rule).
+
+##### Staged plan
+
+| Stage | What | Who |
+|---|---|---|
+| **S7-0** | Probe the SDK: does `SetFloat` take MaxCLL 0? What does an unset key read back? Can the HDR flag be switched on and off on pooled frames, and does a cleared frame keep stale values? | Unattended |
+| **S7-1** | Per-frame tag: an output-signal record (colorspace, EOTF, static metadata or none) travels with each rendered frame through the v210 convert. The fill block returns it, and `tagFrame` applies it | Unattended |
+| **S7-2** | HDR10 to the renderer through `setSourceColorSpace`: a file's `hdr10` and SRT's `[HDR10-SEI]`. PQ with no metadata takes the defaults. HLG takes the EOTF only. A PQ LUT on an SDR source takes the defaults | Unattended |
+| **S7-3** | Readout and log: the Signal line and one `[DeckLink] signal →` line per change | Unattended |
+| **S7-4** | D4: P3 → Rec.2020 primaries in the v210 convert, for SDI only | Unattended |
+| **S7-5** | The reference monitor over SDI and HDMI, with Resolve-made PQ HDR10, PQ-no-metadata, HLG and Rec.2020 SDR files | Robbie |
+
+##### S7 — predictions, written 2026-10-22 before any code or probe
+
+**Instruments:**
+- The unit tests (`swift test`).
+- The S7-0 probe: a scratch Obj-C++ tool on the SDK's own frames.
+- A DEBUG read-back in the bridge: each scheduled frame's metadata is read back through
+  `IDeckLinkVideoFrameMetadataExtensions` after `tagFrame`, and logged once per change as `[DeckLink] read-back`.
+  This proves what Manifold hands the driver, not what reaches the wire.
+- Exports (`⌃⌥E` is a keystroke and is not used: the HUD's *Export frame* button, pressed through Accessibility).
+- The DeckLink card, with output on and no one watching the monitor.
+
+**Baseline:** HEAD `e42932f`, built into its own DerivedData. **Fixtures:**
+- S5's 16 files.
+- Made here with ffmpeg, under the gitignored `build/colour-s7/`:
+  - a PQ HDR10 HEVC file, 9-16-9, with mastering metadata (P3-D65, 1000 / 0.0050 cd/m², MaxCLL 800, MaxFALL 400);
+  - a PQ HEVC file with no metadata;
+  - an HLG file;
+  - a P3-D65 PQ file (12-16-1), the chart retagged.
+
+| # | What | Band: pass / fail |
+|---|---|---|
+| **P1** | Unit tests: every (primaries, transfer) pair from {1, 5, 6, 9, 11, 12, 2, nil} × {1, 6, 13, 14, 15, 16, 18, 2, nil} gives the expected colorspace (9, 11 and 12 → Rec.2020; everything else → Rec.709, as today) and EOTF (16 → PQ 2, 18 → HLG 3, everything else → SDR 0) | **0 mismatches** |
+| **P2** | Unit tests: signal colorimetry and mastering primaries are independent. A 2020 signal carries P3 mastering primaries; P3 mastering never makes the signal P3. **The clarification's pair:** a source tagged 2020 with P3-limited content and P3 mastering metadata gets **no primaries conversion** and a 2020 signal; a source tagged P3-D65 (and one tagged DCI-P3) gets the conversion and a 2020 signal. A CPU reference of the conversion maps a 2020-tagged pixel to itself and P3 red (1, 0, 0) to the 2020-converted value | Tests pass; each new test fails on a mutant |
+| **P3** | Read-back of the first frame with picture on the HDR10 file equals the file's metadata | xy within **1e-4**; max luminance within **1 cd/m²**; min within **1e-4 cd/m²**; MaxCLL / MaxFALL **exact**; EOTF 2; the flag set |
+| **P4** | PQ with no metadata: P3-D65 primaries, D65 white, 1000 / 0.0050 cd/m², MaxCLL / MaxFALL 0 if S7-0 shows the SDK takes 0, else not set; the flag set; the readout and the log say the defaults were sent. HLG: EOTF 3, no flag. SDR: EOTF 0, no flag. A pooled frame that carried PQ and then HLG carries no flag | **Exact** |
+| **P5** | Mid-session changes with output on and the picture paused: file override Auto → Rec.2020 PQ → Auto, a LUT stated as PQ, and a file change. A DEBUG trace logs the scheduled-frame index at which a frame's pixels first change (sampled hash) and at which its applied signal changes | **0 frames** where one changes without the other |
+| **P6** | SRT HEVC PQ carrying the SEI (local ffmpeg listener, dialled through the Stream URL sheet by Accessibility) | `[DeckLink] signal → PQ`; the read-back carries the SEI's values (band as P3). A stream reaching the tag at all is defect 2's fix |
+| **P7** | Pixels unchanged except as D4 intends | **Byte-identical to HEAD:** PNG and `rgba16f` exports on all 16 files and the made fixtures; `v210` dumps on every source whose picture primaries are not 11 or 12, **including the 2020-tagged HDR10 file with P3 mastering**. **11-1-1, 12-1-1 and 12-16-1:** `v210` against the 2020-converted values a Python model computes from that export's own `rgba16f` (rendered P3 → Rec.2020 in linear light, the picture's curve: γ2.4 for the 709 family, PQ for 16); **max \|Δ\| ≤ 1 code, ≥ 99.9 % of components exact**. On SDI, the first scheduled frame's FNV-1a equals its export's `v210` FNV-1a, for one P3 file and one non-P3 file |
+| **P8** | Timing unchanged | `late=0 dropped=0` across 30 s of playback with output on, at 1080p25 on a P3 file and at 2160p on a 4K file |
+
+**Also checked:** the defaults domain is dictionary-equal afterwards (the S5/L1 rules), and `swift test` passes in
+full.
+
+##### S7 — results, 2026-10-22 (unattended, S7-0 to S7-4, not committed)
+
+**Estimated:** about 5 h. **Actual:** about 2¾ h. Logs, events and scores are in the gitignored
+`build/colour-s7/run/`. Pixel exports were deleted after scoring. No screenshots were taken. One step was clicked by
+Robbie: the SRT connect, because the stream sheet's URL field cannot be reached through Accessibility.
+
+**S7-0, the SDK on this card's own frames** (`DeckLink 8K Pro (1)`, a scratch Obj-C++ probe; no output enabled):
+
+| Question | Answer |
+|---|---|
+| Does `SetFloat` take MaxCLL / MaxFALL 0? | `S_OK`, reads back 0. It also returns `S_OK` for 70000 and −1: **the API validates nothing**, so "accepted" says nothing about the wire |
+| What does an unset key read? | Floats: `E_FAIL`. Colorspace: Rec.709; EOTF: 0 |
+| Can the HDR flag be switched on a pooled frame? | Yes, both ways, with `SetFlags` |
+| Does a cleared frame keep stale values? | **Yes.** The static values persist after the flag is cleared, and no call unsets them. The flag is what says "none" |
+| Is `EnableVideoOutput` needed to make frames? | No |
+
+D2 therefore sends **0**.
+
+**What was built:**
+- **The model** (`ColorimetryModel/OutputSignal.swift`):
+  - `OutputSignal.resolve(picturePrimaries:pictureTransfer:source:)` gives the colorimetry (9, 11, 12 → 2020, else
+    709), the EOTF (16 → PQ 2, 18 → HLG 3, else SDR 0) and, for PQ only, the static metadata, with each defaulted half
+    marked.
+  - `SDIPrimariesConversion` exists only for primaries 11 and 12. It converts rendered P3 (DCI-P3 Bradford-adapted to
+    D65, as the window draws it) to Rec.2020 in linear light, with the picture's curve, and has a double-precision
+    reference `apply`.
+  - The readout words.
+- **The renderer:**
+  - `setSourceColorSpace(…, hdr10:)` stores the source's metadata (D7).
+  - `publishColorState` resolves the signal and puts it in the pending colour state with the v210 matrix code.
+  - The render thread installs both, and each frame takes them with it (`FrameOutputState`, beside the ring slot's
+    chroma).
+  - `pushDeckLinkConvert` and the DEBUG v210 dump read the frame's own state, no longer the main thread's current
+    codes on a Metal thread. The front staging buffer publishes its signal with its pixels, and
+    `copyLatestDeckLinkFrame` returns it.
+  - `deckLinkStartSignal()` is what a start uses.
+- **The shader:** `v210ReadPixel` converts when the frame's signal asks, and is used for every pixel the kernel reads,
+  the 4:4:4 halfband included. With the conversion off, the uniform branch returns the read value, so the pre-S7
+  kernel runs by construction.
+- **The bridge:**
+  - `DeckLinkOutputSignal` (a C struct) is the fill block's out-parameter.
+  - `fillFrame` keeps the signal in force on a neutral fill (D5).
+  - `tagFrame` sets the colorspace and EOTF on every frame, sets or clears the flag, and sets the twelve values for
+    PQ.
+  - One `[DeckLink] signal on scheduled frame #N: read-back …` line per change, read back through the SDK.
+  - `setOutputColorspaceForPrimaries` is removed.
+- **The service:**
+  - Starts read the renderer's current signal; `activeStart` no longer holds a colour (defect 3).
+  - The fill block passes each picture's signal.
+  - The Signal line follows the renderer's colour announcement (defect 2 for the label) and ends in the EOTF. A
+    second row gives the HDMI static metadata, and diagnostics carry it.
+  - DEBUG `MANIFOLD_DECKLINK_SIGNAL_TRACE=1` (P5; pre-ship removal, `BUGS.md`).
+- **The sources:**
+  - Files: `FileColorOverrideModel` stores the inspected `hdr10` and passes it with every call.
+  - SRT: `noteHDR10SEI` hands each change to `LiveDisplayRoute.updateHDR10`, which passes it with every colour call
+    the route makes.
+
+**Results:**
+
+| # | Result | Verdict |
+|---|---|---|
+| P1 | 8 × 9 pairs: **0 mismatches** in colorimetry, EOTF and "static metadata on PQ only" | **PASS** |
+| P2 | Independence and the clarification's pair pass. 2020-tagged + P3 mastering: no conversion, signal 2020, mastering P3. 12 and 11: converted. The Swift matrices are within 1e-4 of the Python model's and the CPU reference within 1e-6 (P3 PQ red 0.5 → 0.47208, 0.23603, 7e-7). **Six mutants** (2020 converts too; HLG as PQ; invented MaxCLL; mastering taken from the signal; DCI-P3 as 709; 709 as the target) each fail 1–29 of the 10 tests | **PASS** |
+| P3 | HDR10 file (`hdr10-9-16-9-p3mastering-hevc.mov`), read-back of the frame where its picture arrives: R 0.68000, 0.32000 · G 0.26500, 0.69000 · B 0.15000, 0.06000 · W 0.31270, 0.32900 · 1000.0000 / 0.00500 · MaxCLL 800 · MaxFALL 400 · EOTF 2 · flag set. Every value **exact**. Restarted on it, frame #0 the same | **PASS** |
+| P4 | PQ no metadata: `R 0.68000,0.32000 … max 1000.0000 min 0.00500 · MaxCLL 0 MaxFALL 0` · EOTF 2 · flag set; readout `(defaults) · MaxCLL 0 · MaxFALL 0 (0 = unknown)`. **HLG straight after PQ** (a pooled frame that carried PQ): EOTF 3, **flag clear**. SDR (709 chart, the 709 sync clip, P3 SDR): EOTF 0, flag clear | **PASS** |
+| P5 | Nine mid-session changes with output on and the picture paused. **Where the wire bytes change** (LUT stated PQ on, LUT off, P3-D65 PQ preset on, Auto, file → p3pq): the pixel change and the signal change land on the **same scheduled frame** (#322, #540, #709, #878, #999). **No frame of a new picture carried an old tag.** But the band as written ("0 frames where one changes without the other") is **not met**, for two reasons below | **Not met as written**; the property it stood for holds |
+| P6 | SRT HEVC PQ with the SEI (Rec.2020, 4000 / 0.0001, MaxCLL 1000, MaxFALL 400), ffmpeg listener on loopback: `[DeckLink] signal → PQ · Rec. 2020 · mastering Rec. 2020 · 4000 / 0.0001 cd/m² · MaxCLL 1000 · MaxFALL 400`; read-back R 0.70800, 0.29200 · G 0.17000, 0.79700 · B 0.13100, 0.04600 · max 4000 min 0.00010 · MaxCLL 1000 MaxFALL 400, flag set. The four neutral frames before the first picture carried the same (D5) | **PASS** |
+| P7 | **17 files byte-identical to HEAD** (PNG, `rgba16f`, `v210`, `v210.json`), the 2020-tagged HDR10 file with P3 mastering among them. **11-1-1, 12-1-1, 12-16-1:** PNG and `rgba16f` identical; `v210` against the model **max \|Δ\| 0, 100 % exact** of 4 147 200 components each; 66.67 % of components moved from HEAD, so the model tells the builds apart; the JSON adds only `sdiPrimaries`. **SDI first frame = export:** HDR10 file `5719efcc1daef109`, 12-1-1 `4063a0e85918b8e5` (byte-identical to the model-scored export) | **PASS** |
+| P8 | 30 s playing, output on: 1080p25 P3 (`p3-12-1-1-36s`) `completed=1341 late=0 dropped=0`; 2160p25 (`4k-444-prores4444-62s`) `completed=861 late=0 dropped=0` | **PASS** |
+| G | `swift test` **504 / 504**. Profile clean build, **the same warning set as HEAD** | **PASS** |
+| U | Defaults: 11 keys added (`recentLUTs`, written by the run after a stash and an absence check, and 10 `NSWindow Frame …`) and 2 removed by the app's migration (`license.email`, `license.machineId`). Read, then deleted or written back from the snapshot. Domain **dictionary-equal**, 1520 keys, `streamBookmarks` `bd2383de` | **PASS** |
+
+**Why P5's band is not met as written:**
+1. **A tag can rightly change with no pixel change.** The *Rec.2020 PQ* override on the 709 chart decodes with the 2020
+   matrix and the v210 re-encodes with it, so the SDI bytes are identical while the signal goes SDR → PQ. The same
+   holds for PQ → HLG on two charts made from the same picture. There is no "frame with the new pixels" there.
+2. **At a file change, one frame of the outgoing picture goes out under the incoming state.** The renderer re-presents
+   the frame on screen under a new colour state, by design, and that frame carries the new tag because it was
+   rendered with the new codes (D1). Measured as signal #240 / new picture #241 (hdr10 → pqnometa), #1296 / #1297 and
+   #285 / #286. The pixels are what HEAD sent too. **Logged in `BUGS.md`, to decide.**
+
+**Found while running:**
+- **P3 sources keep their own YCbCr matrix under the 2020 tag.** 12-1-1 and 12-16-1 (matrix 1) are converted to 2020
+  primaries but encoded with kr 0.2126 / kb 0.0722 and signalled Rec.2020. This is pre-existing and was not changed;
+  it is not a D4 question. **Logged in `BUGS.md`, to decide before S7-5's P3 look.**
+- **An HDR10 file's colour arrives twice:** first codes only from the load edge, then with the metadata after
+  inspection. In this run only the second reached a frame. **Logged.**
+- **File ▸ Open Recent is capped.** Two steps in the first SDI run went to the wrong file, so their results were
+  discarded and the steps re-run from a fresh launch (`tree_sdi2`).
+- **The stream sheet's URL field has no Accessibility description,** and a Quit event waits behind an open sheet: two
+  attempts ended in a terminate by PID. Robbie clicked the connect.
+
+**Not exercised:** WHEP, HLS and NDI with HDR (they carry no static metadata; the tag path is the same); HDMI and SDI
+on the wire (S7-5); HLG over a stream.
+
 ---
 
 ## 7. Open and unverified
