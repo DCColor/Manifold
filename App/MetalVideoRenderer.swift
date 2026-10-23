@@ -3988,6 +3988,16 @@ final class MetalVideoRenderer {
         }
     }
 
+    #if DEBUG
+    /// The placement last converted, as "x,y w×h of sw×sh ×scale", for `FrameDump`'s DUMP_ON_PLACEMENT (pre-ship
+    /// removal with it, docs/BUGS.md). nil before the first convert and after output stops.
+    var deckLinkPlacementForDebug: String? {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        guard let p = deckLinkLastPlacement else { return nil }
+        return "\(p.x),\(p.y) \(p.width)×\(p.height) of \(p.sourceWidth)×\(p.sourceHeight) ×" + String(format: "%.4f", p.scale)
+    }
+    #endif
+
     /// SDI scaling follow-up F1: Fit to mode or 1:1 pixels. Takes effect on the next converted frame.
     func setDeckLinkScaling(_ scaling: SDIScaling) {
         deckLinkLock.lock(); deckLinkScaling = scaling; deckLinkLock.unlock()

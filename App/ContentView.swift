@@ -262,6 +262,23 @@ private final class RendererStore: ObservableObject {
     private static var index = 0
     static func next() -> Int { defer { index += 1 }; return index }
 }
+
+/// `MANIFOLD_DEBUG_DIAL_URL=<url>` (launch environment; added 2026-10-23 for the SDI scaling follow-ups' in-app HLS
+/// ladder check; pre-ship removal, docs/BUGS.md): the first window to appear dials this URL once, 2 s after it appears,
+/// through `connectToStreamURL`, the dispatch the Stream URL sheet uses (WHEP, SRT or HLS by the URL). An unattended
+/// run can then connect a stream with no keystroke, and without reading or writing `streamBookmarks`. Unset, nothing
+/// happens. Compiled out of Release.
+@MainActor enum DebugDial {
+    private static var fired = false
+    static func fireOnce(_ dial: @escaping (URL) -> Void) {
+        guard !fired, let raw = ProcessInfo.processInfo.environment["MANIFOLD_DEBUG_DIAL_URL"],
+              let url = URL(string: raw) else { return }
+        fired = true
+        // The host only: a stream URL's path or query can carry a key (the `windowTitle` rule).
+        print("[DEBUG-DIAL] MANIFOLD_DEBUG_DIAL_URL set — dialling \(url.scheme ?? "?")://\(url.host ?? "?")/… in 2 s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { dial(url) }
+    }
+}
 #endif
 
 struct ContentView: View {
@@ -711,6 +728,9 @@ struct ContentView: View {
         // WHAT LEGITIMATELY REMAINS: work that needs THIS VIEW'S state and touches nothing app-wide.
         .onAppear {
             armIdleIfNeeded()
+            #if DEBUG
+            DebugDial.fireOnce { url in connectToStreamURL(url) }
+            #endif
             // The scope headers' source colour, from this window's renderer — BEFORE the sampling
             // below, which reseeds through it. Here and not as its own modifier (§6.7).
             scopeColorFeed.bind(deck: deck, waveform: waveformModel, parade: paradeModel,

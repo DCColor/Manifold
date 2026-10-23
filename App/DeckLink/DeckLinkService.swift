@@ -855,7 +855,8 @@ final class DeckLinkService: ObservableObject {
                 #if DEBUG
                 trace?.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: s)
                 trace?.noteCadence(index: index, sourcePts: r.currentDeckLinkSourcePts())
-                dump?.note(index: index, buffer: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height))
+                dump?.note(index: index, buffer: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height),
+                           placement: FrameDump.onPlacement ? r.deckLinkPlacementForDebug : nil)
                 #endif
                 return true
             }
@@ -1364,23 +1365,41 @@ final class FrameDump: @unchecked Sendable {
     private let mode: String
     private let lock = NSLock()
     private var done = false
+    /// `MANIFOLD_DECKLINK_DUMP_ON_PLACEMENT=1` (added 2026-10-23, the in-app HLS ladder check): also dump one frame
+    /// after each change of the renderer's placement, so every rendition of a live session is read back as the card
+    /// got it. Taken `placementSettle` scheduled frames after the change is first seen, so the front buffer carries it.
+    static let onPlacement = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_DUMP_ON_PLACEMENT"] == "1"
+    private static let placementSettle: Int64 = 6
+    private var lastPlacement: String?
+    private var pendingAt: Int64?
 
     init(directory: String, mode: String) { self.directory = directory; self.mode = mode }
 
-    func note(index: Int64, buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int) {
+    /// `placement`: the renderer's current placement, described, or nil when it has none (DUMP_ON_PLACEMENT only).
+    func note(index: Int64, buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int,
+              placement: String? = nil) {
         lock.lock(); defer { lock.unlock() }
-        guard !done else { return }
+        if done {
+            guard Self.onPlacement, let placement else { return }
+            if placement != lastPlacement { lastPlacement = placement; pendingAt = index + Self.placementSettle }
+            guard let at = pendingAt, index >= at else { return }
+            pendingAt = nil
+        } else {
+            lastPlacement = placement
+        }
         done = true
         Self.counterLock.lock(); Self.counter += 1; let n = Self.counter; Self.counterLock.unlock()
         let data = Data(bytes: buffer, count: rowBytes * height)
         let fnv = FirstFrameProbe.fnv1a(buffer, count: rowBytes * height)
         let base = (directory as NSString).appendingPathComponent(String(format: "sdi-%03d", n))
         let json = "{\"mode\":\"\(mode)\",\"width\":\(width),\"height\":\(height),\"rowBytes\":\(rowBytes),"
-            + "\"index\":\(index),\"fnv1a\":\"\(String(format: "%016llx", fnv))\"}"
+            + "\"index\":\(index),\"fnv1a\":\"\(String(format: "%016llx", fnv))\""
+            + (placement.map { ",\"placement\":\"\($0)\"" } ?? "") + "}"
         do {
             try data.write(to: URL(fileURLWithPath: base + ".v210"))
             try json.write(toFile: base + ".json", atomically: true, encoding: .utf8)
-            print("[SDI-DUMP] \(base).v210 — \(mode) \(width)x\(height) frame #\(index) FNV-1a \(String(format: "%016llx", fnv))")
+            print("[SDI-DUMP] \(base).v210 — \(mode) \(width)x\(height) frame #\(index) FNV-1a \(String(format: "%016llx", fnv))"
+                + (placement.map { " · placement \($0)" } ?? ""))
         } catch {
             print("[SDI-DUMP] write failed: \(error)")
         }

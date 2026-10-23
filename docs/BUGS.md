@@ -993,6 +993,13 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** 
   - `NDIMenuOpenWatcher` reads `MANIFOLD_DEBUG_NDI_WATCHER_DETACHED` (added 2026-10-19, privacy P1).
     When it is set, the watcher attaches to nothing, as if a macOS update had changed SwiftUI's menus,
     so the fallback (discovery on the parent menu opening, with a ⚠️ FALLBACK log line) can be tested.
+  - `ContentView`'s first window reads `MANIFOLD_DEBUG_DIAL_URL` (added 2026-10-23, SDI scaling follow-ups,
+    approved by Robbie).
+    - When it is set, the window dials that URL once, 2 s after it appears, through `connectToStreamURL` (WHEP,
+      SRT or HLS by the URL). An unattended run can then connect a stream with no keystroke at all, unlike ⌃⌥H.
+    - It reads and writes no `streamBookmarks`, and logs the host only (`[DEBUG-DIAL]`).
+    - `DebugDial` in `App/ContentView.swift`.
+    - Not yet checked with `strings` on a Release build; the Profile binary carries it.
 - **Gating:** all `#if DEBUG`, so absent from Release (checked with `strings` on both builds) and
   present in Profile.
 - **Cost when present:** one engine call, one presented-handler and one log line per second. The
@@ -1144,11 +1151,16 @@ to send Export Diagnostics for a sync problem.
     frame of each output start, exactly as the fill block hands it to the card, is written as `sdi-<n>.v210` and
     `sdi-<n>.json`, with a `[SDI-DUMP]` line. `FrameDump` in `App/DeckLink/DeckLinkService.swift`, `#if DEBUG`.
     The `DeckLink: SDI … · source …` placement line is NOT this hook: it ships, once per placement change.
-- **Gating:** all nine `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+  - **`MANIFOLD_DECKLINK_DUMP_ON_PLACEMENT=1`** (launch environment, added 2026-10-23, the in-app HLS ladder check
+    of the SDI scaling follow-ups; needs `MANIFOLD_DECKLINK_DUMP_DIR`): also dumps one frame six scheduled frames
+    after each change of the renderer's placement, with the placement in the JSON and the `[SDI-DUMP]` line, so
+    every rendition of a live session is read back as the card got it. `FrameDump.onPlacement` and
+    `MetalVideoRenderer.deckLinkPlacementForDebug`, both `#if DEBUG`.
+- **Gating:** all ten `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
-- **Remove** all eight before ship, or keep the dump and the stats line as Profile telemetry by decision.
+- **Remove** all ten before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -1529,7 +1541,7 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
   - With the paused-start fix, that launch path now sends the current frame as well (F2, above).
 - **Left open:** nothing in this work explains the 17:49:01 claim.
 
-## ✅ FIXED 2026-10-23 (commit `________`; pending a real session) — PRE-EXISTING, ALL BUILDS — DeckLink: Follow source snaps 47.95, 48 and high-frame-rate sources to the nearest of eight rates
+## ✅ FIXED 2026-10-23 (`56987a4`; pending a real session) — PRE-EXISTING, ALL BUILDS — DeckLink: Follow source snaps 47.95, 48 and high-frame-rate sources to the nearest of eight rates
 
 **Fixed 2026-10-23** (SDI scaling follow-up F2; `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *SDI scaling follow-ups*).
 - **Now:** `SDIStandardRate.all` holds the card's 15 progressive rates up to 120. 47.95, 48, 95.90, 96, 100, 119.88
@@ -1557,6 +1569,11 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 - **Not the pool:** an 8-frame pool (experiment build, reverted) gave the same 696 late.
 - **Cause: UNKNOWN.** Candidates: the card's connector profile (UHD above 60 needs dual- or quad-link 12G-SDI, and
   the profile in force was not read), or transfer bandwidth (2160p119.88 v210 is ≈ 2 GB/s to the card).
+- **Candidate cause (Robbie, 2026-10-23): the Thunderbolt 3 chassis.** The 8K Pro sits in a TB3 expansion chassis,
+  so it has less than its native PCIe x8 bandwidth.
+  - 2160p120 v210 is ~20 Gb/s of frame data, close to TB3's practical PCIe throughput.
+  - 2160p60 (~10 Gb/s) runs clean, which fits.
+- **Priority: low. Not to be investigated before 1.0** (Robbie, 2026-10-23).
 - **Next step:** read `BMDDeckLinkProfileID` and the link configuration on device 0, and try 2160p119.88 under a
   quad-link profile.
 - **Until then:** Follow source picks 2160p above 60 only for a UHD-sized source at that rate, or for a picture
@@ -1581,7 +1598,7 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
-## ✅ FIXED 2026-10-23 (commit `________`; pending a real session) — NEW 2026-10-23 — DeckLink: the SDI scaler's intermediate texture outlives the output
+## ✅ FIXED 2026-10-23 (`56987a4`; pending a real session) — NEW 2026-10-23 — DeckLink: the SDI scaler's intermediate texture outlives the output
 
 **Fixed 2026-10-23** (SDI scaling follow-up F5).
 - **Now:** released under `deckLinkLock` at output stop when no convert is in flight. Otherwise the convert in flight
@@ -1630,12 +1647,15 @@ Robbie's D1–D9 replace the "decided scope" below where they differ:
 - **Different from the scope below:** a source that fits is no longer enlarged. Joey's 1280×720p23.976 goes out
   1:1, windowboxed, in 1080p23.98, not ×1.5 (decision 1 taken unattended, §6.11). Pixel aspect is honoured where
   declared; the libav path still declares none (its own entry above).
-- **Follow-up 2026-10-23 (commit `________`; F1, F4).** Decision 1 is now a setting:
+- **Follow-up 2026-10-23 (`56987a4`; F1, F4).** Decision 1 is now a setting:
   - *Settings ▸ DeckLink Output ▸ SDI scaling*, **Fit to mode** by default. The closest tier, scaled up or down to
     fill it, so Joey's 1280×720p23.976 goes out ×1.5, filling 1080p23.98, as this entry's scope first said.
   - *1:1 pixels* is the behaviour above, byte-identical to `cb39182` on all 16 fixtures under both mode sets.
   - A live source's mode is chosen once per session and held, so an ABR rung below the top one is fitted, never a
-    mode change. Unit-tested only; the in-app HLS ladder was not run.
+    mode change.
+    - Measured in the app, 2026-10-23, on a local throttled HLS ladder (§6.11, *in-app HLS ladder*): 12 rendition
+      switches over two runs, every one absorbed, 0 mode changes on the card.
+    - The frames read back exactly as placed.
 
 
 **Added 2026-10-21, from Joey's 0.8.4 diagnostics** (`Manifold-0.8.4-diagnostics-2026-10-21-160210.txt`). This entry is the

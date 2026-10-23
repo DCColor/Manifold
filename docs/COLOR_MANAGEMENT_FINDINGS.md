@@ -7680,6 +7680,50 @@ B). Rows the same as 1:1 are listed once.
 - *Recorded as UNKNOWN.* To close it: a person pastes the URL, or a DEBUG launch-environment dial is added (a new
   pre-ship removal).
 
+##### SDI scaling follow-ups — the in-app HLS ladder (P9), 2026-10-23 14:15–14:35
+
+**Approved by Robbie after `56987a4`:** a DEBUG launch-environment dial, `MANIFOLD_DEBUG_DIAL_URL` (`DebugDial`,
+`App/ContentView.swift`; pre-ship removal, `BUGS.md`). Added with it: `MANIFOLD_DECKLINK_DUMP_ON_PLACEMENT=1`, which
+dumps one frame after each placement change, as handed to the card.
+
+**The setup:**
+- *The ladder:* 960×540, 1280×720 and 1920×1080, H.264 at 59.94, 300 s, a 1-px white border on each. The master
+  states `RESOLUTION` and `FRAME-RATE=59.940`, with 960×540 listed first.
+- *The server:* a stdlib server on 127.0.0.1, in the session scratchpad. It presents each rendition as a live
+  playlist (a sliding window of 5 × 2 s segments). It throttles segment downloads to 2.2 Mb/s for 0–40, 70–100 and
+  130–160 s after the first master request, and is open between, to force switches down and up.
+- *The run:* SDI output was started by an Accessibility click once the session mode was chosen. Two runs: Fit to
+  mode (the default), and 1:1 pixels by launch argument.
+
+**Predictions** (stated in the session before the hook was built or any run):
+
+| # | Prediction | Band |
+|---|---|---|
+| H1 | Session mode **1080p59.94**, chosen from the largest rendition 1920×1080 | Exact |
+| H2 | ≥ 2 switches up and ≥ 2 down, every format change after the first logged `absorbed` | Every change absorbed; fewer switches = inconclusive |
+| H3 | **0** `RE-ESTABLISHING`, one output start per run | Any re-establish fails |
+| H4 | Per rendition, read back from the dumps. Fit: 960×540 ×2 and 1280×720 ×1.5 fill 1920×1080; 1920×1080 native. 1:1: 960×540 at 480, 270; 1280×720 at 318, 180; native. Borders Y 64 / C 512 | Rectangle exact, 0 border exceptions |
+| H5 | `late=0 dropped=0` | Exact |
+
+**Results:**
+
+| # | Result | Verdict |
+|---|---|---|
+| H1 | Both runs: `[HLS-FORMAT] rung 1: largest rendition 1920x1080`, then `LIVE source format 960x540 @ 59.940 fps (largest rendition 1920x1080) → mode 1080p59.94, chosen from the largest rendition 1920x1080 … and held for this session`. The master's one fetch gave size and rate together, so the first frame (960×540) did not set the mode | **PASS** |
+| H2 | Fit: **7 switches**, 540 → 1080 → 540 → 1080 → 540 → 1080 → 720 → 540 (4 up, 3 down). 1:1: **5**, 540 → 1080 → 540 → 1080 → 540 → 1080 (3 up, 2 down). Every one logged `— absorbed: mode held at 1080p59.94 for this session; the picture is placed or scaled within it` | **PASS** |
+| H3 | **0** `RE-ESTABLISHING` in either run. One `SUCCESS — real-video scheduled playback … @ 1080p59.94` per run. The scaler was rebuilt per placement inside the running mode | **PASS** |
+| H4 | **14 / 14 dumps exact, 0 border exceptions.**<br>• Fit: every rendition fills 0, 0 1920×1080: ×2 (four dumps), ×1.5 (one), native (three).<br>• 1:1: 960×540 at 480, 270 (three dumps, 3 110 400 border components each, 0 exceptions); native (three).<br>The 1:1 run never received 1280×720, so 318, 180 was not exercised. Scaled accuracy is not scored here (no reference frame for a live source); P4 covers the kernel | **PASS** |
+| H5 | 1:1: `scheduled=10881 … late=0 dropped=0`. Fit: `scheduled=28590 … late=0 dropped=1` | **1:1 PASS; Fit FAIL as banded** |
+
+**The Fit run's dropped frame:** at scheduled frame #25521, about 7 minutes into output.
+- That was 2½ minutes after the ladder's last segment. The driver's stop timer read the server log's ctime, which
+  every write refreshes, so the run outlived the ladder. Fixed before the 1:1 run.
+- At that point the player had been paused and stalled for minutes, and the SDI audio ring had logged 18 253
+  underruns.
+- Through all seven switches (the last at frame #16586) it was `dropped=0`.
+- So the drop is outside the window this check measures. It is reported as measured and not explained: an output left
+  running on a dead source for minutes is its own question.
+
 ---
 
 ## 7. Open and unverified
